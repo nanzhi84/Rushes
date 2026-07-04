@@ -1,0 +1,147 @@
+import pytest
+from pydantic import ValidationError
+
+from contracts import (
+    AnnotationDocument,
+    AssetRecord,
+    CandidatePack,
+    Decision,
+    TimelinePatchRequest,
+    TranscriptDocument,
+)
+
+
+def test_clip_start_must_be_less_than_end() -> None:
+    with pytest.raises(ValidationError):
+        AnnotationDocument.model_validate(
+            {
+                "schema": "AnnotationDocument.v1",
+                "annotation_id": "ann_001",
+                "asset_id": "asset_001",
+                "asset_kind": "video",
+                "status": "completed",
+                "generator": {"pipeline_version": "annotation.video.v1", "pass": "cheap"},
+                "clips": [
+                    {
+                        "clip_id": "clip_001",
+                        "source_start_frame": 10,
+                        "source_end_frame": 10,
+                        "role": "avoid",
+                        "summary": "bad interval",
+                    }
+                ],
+                "created_at": "...",
+            }
+        )
+
+
+def test_transcript_word_start_must_be_less_than_end() -> None:
+    with pytest.raises(ValidationError):
+        TranscriptDocument.model_validate(
+            {
+                "schema": "TranscriptDocument.v1",
+                "transcript_id": "tr_001",
+                "asset_id": "asset_001",
+                "language": "zh",
+                "provider_id": "p",
+                "raw_preserved": True,
+                "utterances": [
+                    {
+                        "utterance_id": "u_001",
+                        "text": "呃",
+                        "start_ms": 0,
+                        "end_ms": 100,
+                        "words": [{"w": "呃", "start_ms": 50, "end_ms": 50, "type": "filler"}],
+                    }
+                ],
+            }
+        )
+
+
+def test_candidate_slot_rejects_more_than_eight_candidates() -> None:
+    candidates = [
+        {
+            "candidate_id": f"cand_{index}",
+            "asset_id": "asset_001",
+            "clip_id": "clip_001",
+            "summary_line": "summary",
+            "score": {"bm25_rank": 1, "vector_rank": 1, "rrf": 0.1},
+        }
+        for index in range(9)
+    ]
+    with pytest.raises(ValidationError):
+        CandidatePack.model_validate(
+            {
+                "candidate_pack_id": "pack_001",
+                "case_id": "case_001",
+                "snapshot": {
+                    "generated_at": "2026-07-04T00:00:00Z",
+                    "asset_scope_hash": "hash",
+                    "annotation_versions": {},
+                },
+                "slots": [
+                    {
+                        "slot_id": "slot_001",
+                        "slot_brief": "brief",
+                        "target_duration_sec": [1.0, 2.0],
+                        "candidates": candidates,
+                    }
+                ],
+            }
+        )
+
+
+def test_copy_mode_rejects_reference_path() -> None:
+    with pytest.raises(ValidationError):
+        AssetRecord.model_validate(
+            {
+                "asset_id": "asset_001",
+                "storage_mode": "copy",
+                "workspace_object_uri": "object://source",
+                "reference_path": "/Users/me/a.mp4",
+                "kind": "video",
+                "source": "upload",
+                "filename": "a.mp4",
+                "hash": "sha256:x",
+                "mtime": 1,
+                "size": 1,
+                "probe": {"duration_sec": 1, "has_audio": False},
+                "ingest_status": "imported",
+                "annotation_status": "pending",
+                "annotation_pass": "none",
+                "index_status": "none",
+                "usable": False,
+            }
+        )
+
+
+def test_case_scope_decision_requires_case_id() -> None:
+    with pytest.raises(ValidationError):
+        Decision.model_validate(
+            {
+                "decision_id": "dec_001",
+                "scope_type": "case",
+                "project_id": "project_001",
+                "type": "generic",
+                "question": "?",
+            }
+        )
+
+
+def test_patch_request_rejects_frame_fields() -> None:
+    with pytest.raises(ValidationError):
+        TimelinePatchRequest.model_validate(
+            {
+                "schema": "TimelinePatchRequest.v1",
+                "case_id": "case_001",
+                "reference": {"timeline_version": 1, "preview_id": "prev_001"},
+                "op": {
+                    "kind": "delete_range",
+                    "time_range_sec": [1.0, 2.0],
+                    "scope": "all_tracks",
+                    "ripple": True,
+                    "start_frame": 30,
+                },
+                "reason": "illegal frame field",
+            }
+        )
