@@ -31,6 +31,7 @@ packages = [
     "packages/domain",
     "packages/events",
     "packages/storage",
+    "packages/tools",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -41,6 +42,7 @@ include = [
     "/packages/agent_harness",
     "/packages/events",
     "/packages/storage",
+    "/packages/tools",
     "/pyproject.toml",
 ]
 
