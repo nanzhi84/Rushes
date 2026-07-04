@@ -25,12 +25,20 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["packages/contracts", "packages/events", "packages/storage"]
+packages = [
+    "packages/agent_harness",
+    "packages/contracts",
+    "packages/domain",
+    "packages/events",
+    "packages/storage",
+]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "/README.md",
     "/packages/contracts",
+    "/packages/domain",
+    "/packages/agent_harness",
     "/packages/events",
     "/packages/storage",
     "/pyproject.toml",
