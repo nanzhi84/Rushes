@@ -1,0 +1,32 @@
+"""Message persistence repository."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.engine import Connection
+
+from storage import schema
+
+from ._json import decode_json_columns, encode_json_columns
+
+JSON_COLUMNS = {"content"}
+
+
+class MessagesRepository:
+    def __init__(self, connection: Connection) -> None:
+        self._connection = connection
+
+    def insert(self, values: dict[str, Any]) -> None:
+        self._connection.execute(
+            schema.messages.insert().values(**encode_json_columns(values, JSON_COLUMNS))
+        )
+
+    def list_for_case(self, case_id: str) -> list[dict[str, Any]]:
+        rows = self._connection.execute(
+            select(schema.messages)
+            .where(schema.messages.c.case_id == case_id)
+            .order_by(schema.messages.c.created_at, schema.messages.c.message_id)
+        ).all()
+        return [decode_json_columns(dict(row._mapping), JSON_COLUMNS) for row in rows]
