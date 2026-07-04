@@ -1,0 +1,43 @@
+"""Tool registry contracts."""
+
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class ToolSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    name: str
+    namespace: str
+    version: str
+    status: Literal["stable", "experimental", "deprecated"] = "stable"
+    input_model: type[BaseModel]
+    result_model: type[BaseModel] | None = None
+    handler_ref: str
+    allowed_scopes: list[str]
+    requires_artifacts: list[str]
+    requires_active_project: bool = True
+    requires_active_case: bool = False
+    requires_confirmation: bool = False
+    confirmation_decision_type: str | None = None
+    side_effects: list[
+        Literal["project", "case", "asset", "timeline", "memory", "object_store", "job"]
+    ]
+    idempotency_key_fields: list[str] = Field(default_factory=list)
+    emits_events: list[str]
+    is_long_running: bool = False
+    exposure: Literal["llm", "harness_only"] = "llm"
+    description: str
+
+
+class PatchOpSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    kind: str
+    params_model: type[BaseModel]
+    requires_confirmation: bool = False
+    confirmation_decision_type: str | None = None
+    requires_artifacts: list[str] = Field(default_factory=list)
+    ripple_semantics: Literal["ripple", "in_place", "n/a"] = "n/a"
+    description: str

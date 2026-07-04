@@ -39,6 +39,8 @@ src = ["packages", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# 项目文档/示例为中文，全角标点是正文而非笔误
+allowed-confusables = ["，", "。", "？", "！", "、", "；", "：", "（", "）"]
 
 [tool.ruff.format]
 quote-style = "double"
