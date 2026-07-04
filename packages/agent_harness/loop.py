@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -12,7 +14,7 @@ from sqlalchemy.engine import Connection, Engine
 
 from contracts.case import CaseState
 from contracts.decision import Decision, PendingToolCall
-from contracts.events import Actor, DomainEventBase
+from contracts.events import Actor, DomainEventBase, JobEnqueued
 from contracts.project import ProjectState
 from contracts.timeline import TimelineState
 from contracts.tool import PatchOpSpec, ToolSpec
@@ -244,6 +246,43 @@ async def run_turn(
             accumulator.reducer_results.append(reducer_result)
             tracer.record("events", _events_payload(verdict.events, reducer_result))
             outcome = "requires_user"
+            break
+
+        if verdict.status == "defer":
+            result = _defer_tool_call(
+                active_registry.require(tool_call.tool_name),
+                tool_call,
+                verdict.validated_arguments,
+                state=loaded,
+                turn_id=active_turn_id,
+            )
+            accumulator.tool_results.append(result)
+            tracer.record("tool_result", _tool_result_payload(result))
+            reducer_result = _apply_events(
+                result.events,
+                engine=engine,
+                base_version=loaded.case_state.state_version,
+                actor="agent",
+            )
+            accumulator.reducer_results.append(reducer_result)
+            tracer.record("events", _events_payload(result.events, reducer_result))
+            if reducer_result.status != "applied":
+                forced_reason = f"reducer_{reducer_result.status}"
+                diagnostic = _reducer_diagnostic(reducer_result)
+                forced = _force_respond(
+                    router,
+                    engine=engine,
+                    state=loaded,
+                    turn_id=active_turn_id,
+                    message=f"长任务入队被拒绝，已停止本回合。{diagnostic}",
+                    reason=forced_reason,
+                    accumulator=accumulator,
+                    tracer=tracer,
+                )
+                accumulator.tool_results.append(forced)
+                outcome = "forced_end"
+                break
+            outcome = "running"
             break
 
         result = _execute_tool(
@@ -563,6 +602,53 @@ def _execute_tool(
             )
 
 
+def _defer_tool_call(
+    registered: Any,
+    tool_call: ToolCall,
+    arguments: Mapping[str, Any],
+    *,
+    state: _LoadedState,
+    turn_id: str,
+) -> ToolResult:
+    spec = registered.spec
+    kind = _job_kind_for_tool(spec.name, spec.namespace)
+    idempotency_key = tool_call.idempotency_key or _job_idempotency_key(
+        kind=kind,
+        tool_name=spec.name,
+        case_id=state.case_state.case_id,
+        arguments=arguments,
+    )
+    job_id = _job_id(kind=kind, idempotency_key=idempotency_key)
+    job_payload = {
+        "tool_name": spec.name,
+        "arguments": dict(arguments),
+        "tool_call_id": tool_call.tool_call_id or _tool_call_id(tool_call),
+        "turn_id": turn_id,
+    }
+    event = JobEnqueued(
+        job_id=job_id,
+        project_id=state.case_state.project_id,
+        case_id=state.case_state.case_id,
+        payload={
+            "kind": kind,
+            "idempotency_key": idempotency_key,
+            "job_payload": job_payload,
+            "tool_name": spec.name,
+            "tool_call_id": job_payload["tool_call_id"],
+            "attempts": 0,
+            "max_retries": 2,
+        },
+    )
+    return ToolResult(
+        tool_call_id=str(job_payload["tool_call_id"]),
+        tool_name=spec.name,
+        status="running",
+        observation=f"job queued: {job_id}",
+        data={"job_id": job_id, "job_kind": kind, "idempotency_key": idempotency_key},
+        events=[event.model_dump(mode="json")],
+    )
+
+
 def _persist_tool_result_data(result: ToolResult, *, engine: Engine) -> None:
     row = result.data.get("message_row")
     if not isinstance(row, Mapping):
@@ -795,6 +881,51 @@ def _reducer_diagnostic(result: ReducerApplyResult) -> str:
 
 def _tool_call_id(tool_call: ToolCall) -> str:
     return f"tc_{tool_call.tool_name.replace('.', '_')}_{abs(hash(str(tool_call.arguments)))}"
+
+
+def _job_kind_for_tool(tool_name: str, namespace: str) -> str:
+    explicit = {
+        "annotation.enqueue": "annotation",
+        "asr.transcribe": "asr",
+        "tts.speech": "tts",
+        "render.preview": "render_preview",
+        "render.final_mp4": "render_final",
+        "proxy.generate": "proxy",
+        "align.transcript": "align",
+        "asset.import_url": "import_url",
+        "noop": "noop",
+    }
+    if tool_name in explicit:
+        return explicit[tool_name]
+    if namespace in {"annotation", "asr", "tts", "proxy", "align"}:
+        return namespace
+    return tool_name.replace(".", "_")
+
+
+def _job_idempotency_key(
+    *,
+    kind: str,
+    tool_name: str,
+    case_id: str,
+    arguments: Mapping[str, Any],
+) -> str:
+    encoded = json.dumps(
+        {
+            "kind": kind,
+            "tool_name": tool_name,
+            "case_id": case_id,
+            "arguments": arguments,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _job_id(*, kind: str, idempotency_key: str) -> str:
+    digest = hashlib.sha256(f"{kind}:{idempotency_key}".encode()).hexdigest()
+    return f"job_{digest[:20]}"
 
 
 def _replayed_tool_call_id(decision_id: str) -> str:

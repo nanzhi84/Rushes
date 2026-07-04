@@ -31,3 +31,6 @@ jobs:
 
       - name: Run pytest
         run: uv run pytest
+
+      - name: Check PRD contracts
+        run: uv run python scripts/check_contracts.py

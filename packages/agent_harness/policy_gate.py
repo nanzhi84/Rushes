@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, cast
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -603,7 +604,9 @@ def _decision_id(decision_type: str, tool_name: str, argument_fingerprint: str) 
 
 
 def _refusal_id(tool_call: ToolCall, reason: str) -> str:
-    payload = f"{tool_call.tool_name}:{reason}:{fingerprint(tool_call.arguments)}"
+    # 每次拒绝都是独立事件（§4.5 merge 键为"各自 id"）：加入随机分量，
+    # 避免同回合内对同一调用的多次重试被 merge 幂等键合并成一条。
+    payload = f"{tool_call.tool_name}:{reason}:{fingerprint(tool_call.arguments)}:{uuid4().hex}"
     return "pref_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 

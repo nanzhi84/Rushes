@@ -18,7 +18,12 @@ from contracts.tool_result import ToolResult
 from domain.preconditions import PreconditionContext
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
-from storage.repositories import CasesRepository, DecisionsRepository, MessagesRepository
+from storage.repositories import (
+    CasesRepository,
+    DecisionsRepository,
+    JobsRepository,
+    MessagesRepository,
+)
 from storage.repositories._json import load_json
 from storage.repositories.event_log import EventLogRepository
 from storage.repositories.projects import ProjectsRepository
@@ -231,6 +236,14 @@ async def test_running_result_ends_turn_until_observation(tmp_path: Path) -> Non
 
     assert result.outcome == "running"
     assert result.tool_results[-1].status == "running"
+    job_id = str(result.tool_results[-1].data["job_id"])
+    with begin_immediate(engine) as connection:
+        job = JobsRepository(connection).get(job_id)
+    assert job is not None
+    assert job["kind"] == "x_long"
+    assert job["status"] == "pending"
+    assert "JobEnqueued" in _event_types(engine)
+    assert _load_case(engine).running_jobs[0].job_id == job_id
 
 
 async def test_stop_token_ends_after_current_tool(tmp_path: Path) -> None:

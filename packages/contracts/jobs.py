@@ -13,6 +13,7 @@ JobKind = Literal[
     "proxy",
     "align",
     "import_url",
+    "noop",
 ]
 JobStatus = Literal["pending", "running", "succeeded", "failed", "cancelled"]
 

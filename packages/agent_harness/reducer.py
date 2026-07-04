@@ -33,6 +33,60 @@ from storage.repositories._json import dump_json, load_json
 
 from .state_validator import TimelineInvariantHook, ValidationFailed, validate_before_commit
 
+REDUCER_DISPATCH_EVENTS: frozenset[str] = frozenset(
+    {
+        "ProjectCreated",
+        "ProjectRenamed",
+        "ProjectTrashed",
+        "ProjectCopied",
+        "CaseCreated",
+        "CaseRenamed",
+        "CaseCopied",
+        "CaseMoved",
+        "CaseClosed",
+        "CaseTrashed",
+        "AssetImported",
+        "AssetProbed",
+        "ProxyGenerated",
+        "AnnotationCompleted",
+        "AnnotationFailed",
+        "AssetInvalidated",
+        "AssetLinked",
+        "AssetUnlinked",
+        "CaseAssetScopeChanged",
+        "DecisionCreated",
+        "DecisionAnswered",
+        "DecisionCancelled",
+        "BriefUpdated",
+        "ContentPlanUpdated",
+        "AudioPlanUpdated",
+        "CutPlanUpdated",
+        "PostprocessPlanUpdated",
+        "CandidatePackCreated",
+        "TimelineVersionCreated",
+        "TimelineVersionRestored",
+        "TimelineValidated",
+        "TimelineValidationFailed",
+        "PreviewRendered",
+        "PreviewViewed",
+        "ExportCompleted",
+        "MemoryCandidateExtracted",
+        "MemoryCandidateDiscarded",
+        "MemorySaved",
+        "JobEnqueued",
+        "JobProgress",
+        "JobSucceeded",
+        "JobFailed",
+        "JobCancelled",
+        "PolicyRefusal",
+        "ProviderCallRecorded",
+        "ContextCompacted",
+        "TurnEnded",
+        "CapabilityDegraded",
+        "SecurityRefusal",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class VersionConflict:
@@ -197,7 +251,7 @@ def _preflight_strict_versions(
         if case_id is None:
             raise ValueError(f"strict event requires case_id: {event.event}")
         case_state = context.load_case(case_id)
-        expected = context.base_version if context.base_version is not None else event.base_version
+        expected = event.base_version if event.base_version is not None else context.base_version
         if expected != case_state.state_version:
             raise _AbortReducer(
                 ReducerApplyResult(
@@ -727,8 +781,12 @@ def _apply_job_event(context: _ReducerContext, event: DomainEventBase) -> None:
     context.connection.execute(
         update(schema.jobs).where(schema.jobs.c.job_id == job_id).values(**values)
     )
-    if isinstance(requested_by_case_id, str):
-        _update_running_jobs(context, requested_by_case_id, event, status)
+    running_jobs_case_id = requested_by_case_id if isinstance(requested_by_case_id, str) else None
+    if running_jobs_case_id is None:
+        event_case_id = getattr(event, "case_id", None)
+        running_jobs_case_id = event_case_id if isinstance(event_case_id, str) else None
+    if running_jobs_case_id is not None:
+        _update_running_jobs(context, running_jobs_case_id, event, status)
 
 
 def _insert_job(context: _ReducerContext, event: DomainEventBase) -> None:
