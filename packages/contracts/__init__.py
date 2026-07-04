@@ -46,6 +46,7 @@ from .events import (
     EventName,
     event_registry,
 )
+from .interaction import InteractionKind, InteractionOption, StructuredInteractionEvent
 from .jobs import Job, JobError, JobKind, JobStatus
 from .memory import Memory, MemoryCandidate
 from .patch import (
@@ -135,6 +136,8 @@ __all__ = [
     "EventName",
     "GenerateSubtitlesOp",
     "InsertCandidateOp",
+    "InteractionKind",
+    "InteractionOption",
     "Job",
     "JobError",
     "JobKind",
@@ -165,6 +168,7 @@ __all__ = [
     "SetPlaybackRateOp",
     "SetSubtitleStyleOp",
     "StorageMode",
+    "StructuredInteractionEvent",
     "SubtitleBinding",
     "SubtitleClip",
     "SubtitlePostprocessPlan",

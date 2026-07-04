@@ -28,6 +28,7 @@ class ToolResult(BaseModel):
     tool_name: str
     status: Literal["succeeded", "failed", "running", "requires_user"]
     observation: str
+    data: dict[str, Any] = Field(default_factory=dict)
     artifacts: list[ToolArtifact] = Field(default_factory=list)
     events: list[dict[str, Any]] = Field(default_factory=list)
     error: ToolError | None = None
