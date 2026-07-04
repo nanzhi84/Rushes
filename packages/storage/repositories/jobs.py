@@ -44,6 +44,17 @@ class JobsRepository:
             return None
         return decode_json_columns(result, JSON_COLUMNS)
 
+    def get_by_idempotency_key(self, *, kind: str, idempotency_key: str) -> dict[str, Any] | None:
+        row = self._connection.execute(
+            select(schema.jobs)
+            .where(schema.jobs.c.kind == kind)
+            .where(schema.jobs.c.idempotency_key == idempotency_key)
+        ).first()
+        result = row_to_dict(row)
+        if result is None:
+            return None
+        return decode_json_columns(result, JSON_COLUMNS)
+
     def claim_next(self, *, worker_id: str, now: str) -> str | None:
         """Run the exact SQLite claim pattern from PRD §14.3 and check changes()."""
 
@@ -105,6 +116,7 @@ class JobsRepository:
         finished_at: str,
         result_json: dict[str, Any] | None = None,
         error_json: dict[str, Any] | None = None,
+        attempts: int | None = None,
     ) -> bool:
         result_value = (
             None
@@ -120,10 +132,58 @@ class JobsRepository:
             update(schema.jobs)
             .where(schema.jobs.c.job_id == job_id)
             .values(
-                status=status,
-                finished_at=finished_at,
-                result_json=result_value,
+                **{
+                    "status": status,
+                    "finished_at": finished_at,
+                    "result_json": result_value,
+                    "error_json": error_value,
+                    **({} if attempts is None else {"attempts": attempts}),
+                }
+            )
+        )
+        return result.rowcount == 1
+
+    def schedule_retry(
+        self,
+        job_id: str,
+        *,
+        attempts: int,
+        next_run_at: str,
+        error_json: dict[str, Any],
+    ) -> bool:
+        error_value = encode_json_columns({"error_json": error_json}, JSON_COLUMNS)["error_json"]
+        result = self._connection.execute(
+            update(schema.jobs)
+            .where(schema.jobs.c.job_id == job_id)
+            .where(schema.jobs.c.status == "running")
+            .values(
+                status="pending",
+                worker_id=None,
+                heartbeat_at=None,
+                started_at=None,
+                attempts=attempts,
+                next_run_at=next_run_at,
                 error_json=error_value,
             )
+        )
+        return result.rowcount == 1
+
+    def cancel(
+        self,
+        job_id: str,
+        *,
+        finished_at: str,
+        error_json: dict[str, Any] | None = None,
+    ) -> bool:
+        error_value = (
+            None
+            if error_json is None
+            else encode_json_columns({"error_json": error_json}, JSON_COLUMNS)["error_json"]
+        )
+        result = self._connection.execute(
+            update(schema.jobs)
+            .where(schema.jobs.c.job_id == job_id)
+            .where(schema.jobs.c.status.in_(("pending", "running")))
+            .values(status="cancelled", finished_at=finished_at, error_json=error_value)
         )
         return result.rowcount == 1

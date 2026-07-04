@@ -1,0 +1,82 @@
+"""Async job handler registry for apps.worker."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any, Protocol
+
+from contracts.jobs import Job
+
+
+@dataclass(frozen=True, slots=True)
+class JobExecutionResult:
+    """Normalized handler success payload."""
+
+    result_json: dict[str, Any] = field(default_factory=dict)
+
+
+class JobExecutionError(Exception):
+    """Structured handler failure consumed by JobRunner retry policy."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "job_handler_failed",
+        retryable: bool = True,
+        stderr_summary: str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.retryable = retryable
+        self.stderr_summary = stderr_summary
+        self.details = dict(details or {})
+
+
+class JobCancelledError(Exception):
+    """Raised by a handler when it observes cooperative cancellation."""
+
+
+class JobHandler(Protocol):
+    async def __call__(self, job: Job) -> JobExecutionResult | Mapping[str, Any]:
+        """Execute a claimed job outside the SQLite write transaction."""
+
+
+class JobHandlerRegistry:
+    """Map job kind to async handler; adding a media job only registers a handler."""
+
+    def __init__(self) -> None:
+        self._handlers: dict[str, JobHandler] = {}
+
+    def register(self, kind: str, handler: JobHandler) -> None:
+        if kind in self._handlers:
+            raise ValueError(f"job handler already registered: {kind}")
+        self._handlers[kind] = handler
+
+    def require(self, kind: str) -> JobHandler:
+        handler = self._handlers.get(kind)
+        if handler is None:
+            raise KeyError(f"job handler is not registered: {kind}")
+        return handler
+
+    def kinds(self) -> tuple[str, ...]:
+        return tuple(sorted(self._handlers))
+
+
+async def noop_handler(job: Job) -> JobExecutionResult:
+    """M0 smoke-test handler: echo payload without side effects."""
+
+    return JobExecutionResult(
+        result_json={
+            "kind": job.kind,
+            "payload": job.payload_json,
+        }
+    )
+
+
+def build_default_job_registry() -> JobHandlerRegistry:
+    registry = JobHandlerRegistry()
+    registry.register("noop", noop_handler)
+    return registry
