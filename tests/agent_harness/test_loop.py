@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, update
 from sqlalchemy.engine import Engine
 
+from agent_harness.decision_answering import ScriptedDecisionAnswerResolver
 from agent_harness.loop import (
     ScriptedPlanner,
     recover_approved_pending_tool_calls,
@@ -358,6 +359,124 @@ async def test_ask_user_creates_blocking_decision_and_narrows_tools(
     assert "interaction.confirm_action" not in names
 
 
+async def test_ask_user_audio_mode_creates_five_renderable_options(tmp_path: Path) -> None:
+    engine = _prepare_workspace(tmp_path)
+
+    result = await run_turn(
+        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "ask audio"}),
+        engine=engine,
+        planner=ScriptedPlanner(
+            [
+                {
+                    "tool_name": "interaction.ask_user",
+                    "arguments": {
+                        "question": "音频怎么处理？",
+                        "type": "audio_mode",
+                        "options": _audio_mode_options(),
+                    },
+                }
+            ]
+        ),
+        turn_id="turn_audio_mode",
+    )
+
+    case_state = _load_case(engine)
+    decision = _load_decision(engine, case_state.pending_decision_id)
+    interaction = result.tool_results[-1].data["interaction"]
+    assert result.outcome == "requires_user"
+    assert decision.type == "audio_mode"
+    assert decision.decision_id == case_state.pending_decision_id
+    assert len(decision.options) == 5
+    assert [option.option_id for option in decision.options] == [
+        "keep_original",
+        "rough_cut",
+        "uploaded_voiceover",
+        "tts",
+        "silent",
+    ]
+    assert len(interaction["options"]) == 5
+
+
+async def test_natural_language_answer_reduces_decision_and_keeps_side_intents(
+    tmp_path: Path,
+) -> None:
+    engine = _prepare_workspace(tmp_path)
+    _insert_pending_subtitle_decision(engine)
+
+    result = await run_turn(
+        TurnQueueItem(
+            case_id="case_1",
+            kind="user_message",
+            payload={"content": "不要字幕，但是加个轻快 BGM"},
+            item_id="msg_natural",
+        ),
+        engine=engine,
+        planner=ScriptedPlanner([{"tool_name": "respond", "arguments": {"message": "收到"}}]),
+        decision_answer_resolver=ScriptedDecisionAnswerResolver(
+            [{"option_id": "skip", "side_intents": ["加轻快 BGM"]}]
+        ),
+        turn_id="turn_natural_answer",
+    )
+
+    case_state = _load_case(engine)
+    decision = _load_decision(engine, "decision_subtitle")
+    assert result.tool_calls[0].tool_name == "decision.answer"
+    assert result.outcome == "finished"
+    assert case_state.pending_decision_id is None
+    assert case_state.postprocess_plan is not None
+    assert case_state.postprocess_plan.subtitle is not None
+    assert case_state.postprocess_plan.subtitle.enabled is False
+    assert case_state.scratch_memory["pending_intents"] == ["加轻快 BGM"]
+    assert decision.answer is not None
+    assert decision.answer.answered_via == "natural_language"
+    assert {"DecisionAnswered", "PostprocessPlanUpdated"} <= set(_event_types(engine))
+
+
+async def test_natural_language_resolver_unanswered_leaves_decision_for_planner(
+    tmp_path: Path,
+) -> None:
+    engine = _prepare_workspace(tmp_path)
+    _insert_pending_subtitle_decision(engine)
+
+    result = await run_turn(
+        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "先等等"}),
+        engine=engine,
+        planner=ScriptedPlanner(
+            [{"tool_name": "respond", "arguments": {"message": "还在等字幕确认。"}}]
+        ),
+        decision_answer_resolver=ScriptedDecisionAnswerResolver([{"unanswered": True}]),
+        turn_id="turn_unanswered",
+    )
+
+    case_state = _load_case(engine)
+    assert result.outcome == "finished"
+    assert [call.tool_name for call in result.tool_calls] == ["respond"]
+    assert case_state.pending_decision_id == "decision_subtitle"
+    assert "DecisionAnswered" not in _event_types(engine)
+
+
+async def test_natural_language_resolver_error_records_degradation_and_falls_back(
+    tmp_path: Path,
+) -> None:
+    engine = _prepare_workspace(tmp_path)
+    _insert_pending_subtitle_decision(engine)
+
+    result = await run_turn(
+        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "不要字幕"}),
+        engine=engine,
+        planner=ScriptedPlanner(
+            [{"tool_name": "respond", "arguments": {"message": "请用按钮确认字幕。"}}]
+        ),
+        decision_answer_resolver=ScriptedDecisionAnswerResolver([RuntimeError("llm down")]),
+        turn_id="turn_resolver_error",
+    )
+
+    assert result.outcome == "finished"
+    assert _load_case(engine).pending_decision_id == "decision_subtitle"
+    assert "CapabilityDegraded" in _event_types(engine)
+    assert "DecisionAnswered" not in _event_types(engine)
+
+
 async def test_approved_pending_tool_call_recovery_enqueues_once(
     tmp_path: Path,
 ) -> None:
@@ -490,6 +609,63 @@ def _insert_pending_generic_decision(engine: Engine) -> None:
             .where(schema.cases.c.case_id == "case_1")
             .values(pending_decision_id="decision_1")
         )
+
+
+def _insert_pending_subtitle_decision(engine: Engine) -> None:
+    with begin_immediate(engine) as connection:
+        DecisionsRepository(connection).insert(
+            {
+                "decision_id": "decision_subtitle",
+                "scope_type": "case",
+                "project_id": "project_1",
+                "case_id": "case_1",
+                "type": "subtitle",
+                "question": "要加字幕吗？",
+                "options": [
+                    {
+                        "option_id": "subtitle_default",
+                        "label": "加字幕",
+                        "payload": {"enabled": True, "style_template_id": "default"},
+                    },
+                    {
+                        "option_id": "skip",
+                        "label": "不要字幕",
+                        "payload": {"enabled": False},
+                    },
+                ],
+                "status": "pending",
+                "answer": None,
+                "pending_tool_call": None,
+                "pending_tool_call_status": None,
+                "consumed_at": None,
+                "replayed_tool_call_id": None,
+                "blocking": True,
+                "created_by_tool_call_id": None,
+            }
+        )
+        connection.execute(
+            update(schema.cases)
+            .where(schema.cases.c.case_id == "case_1")
+            .values(pending_decision_id="decision_subtitle")
+        )
+
+
+def _audio_mode_options() -> list[dict[str, object]]:
+    return [
+        {
+            "option_id": "keep_original",
+            "label": "保留原声",
+            "payload": {"mode": "keep_original"},
+        },
+        {"option_id": "rough_cut", "label": "原声粗剪", "payload": {"mode": "rough_cut"}},
+        {
+            "option_id": "uploaded_voiceover",
+            "label": "上传配音",
+            "payload": {"mode": "uploaded_voiceover"},
+        },
+        {"option_id": "tts", "label": "生成 TTS", "payload": {"mode": "tts"}},
+        {"option_id": "silent", "label": "无旁白", "payload": {"mode": "silent"}},
+    ]
 
 
 def _insert_approved_replay_decision(engine: Engine) -> None:

@@ -16,9 +16,10 @@ from typing import Any, NoReturn, cast
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.engine import Engine, Row
 
+from agent_harness.decision_answering import DecisionAnswerResolver
 from agent_harness.loop import (
     LLMPlanner,
     ScriptedPlanner,
@@ -48,6 +49,7 @@ from contracts.events import (
 )
 from contracts.tool_result import ToolResult
 from media.invalidation import revalidate_project_references
+from providers.decision_answering import build_openai_compatible_decision_answer_resolver
 from providers.gateway import ProviderCallRecord
 from providers.planner import build_openai_compatible_planner
 from storage import schema
@@ -64,6 +66,7 @@ from storage.repositories._json import load_json
 from storage.repositories.projects import ProjectsRepository
 from storage.workspace_paths import WorkspacePaths
 from tools import ToolExecutionContext
+from tools.annotation import retry as annotation_retry
 from tools.asset import (
     disable_for_case as asset_disable_for_case,
 )
@@ -83,6 +86,7 @@ from tools.asset import (
     upload_complete as asset_upload_complete,
 )
 from tools.specs import (
+    AnnotationRetryInput,
     AssetDisableForCaseInput,
     AssetImportLocalFileInput,
     AssetLinkInput,
@@ -258,6 +262,7 @@ def create_app(
     token: str | None = None,
     fs_roots: Sequence[str | Path] | None = None,
     planner: LLMPlanner | None = None,
+    decision_answer_resolver: DecisionAnswerResolver | None = None,
     turn_runner: TurnRunner | None = None,
     startup_port: int | None = None,
     sse_max_events: int | None = None,
@@ -276,6 +281,9 @@ def create_app(
     api_token = token or generate_token()
     active_port = startup_port or startup_port_from_env()
     env_planner = planner or _planner_from_env(engine)
+    env_decision_answer_resolver = decision_answer_resolver or _decision_answer_resolver_from_env(
+        engine
+    )
     queue: TurnQueue | None = None
 
     async def default_runner(item: TurnQueueItem, stop_token: StopToken) -> None:
@@ -288,6 +296,7 @@ def create_app(
             planner=active_planner,
             turn_queue=queue,
             stop_token=stop_token,
+            decision_answer_resolver=env_decision_answer_resolver,
         )
 
     queue = TurnQueue(turn_runner or default_runner)
@@ -347,6 +356,18 @@ def _planner_from_env(engine: Engine) -> LLMPlanner | None:
             model=os.environ.get("RUSHES_LLM_MODEL", DEFAULT_LLM_MODEL),
             recorder=_StorageProviderCallRecorder(engine),
         ),
+    )
+
+
+def _decision_answer_resolver_from_env(engine: Engine) -> DecisionAnswerResolver | None:
+    api_key = os.environ.get("RUSHES_DASHSCOPE_API_KEY") or os.environ.get("RUSHES_LLM_API_KEY")
+    if not api_key:
+        return None
+    return build_openai_compatible_decision_answer_resolver(
+        base_url=os.environ.get("RUSHES_LLM_BASE_URL", DEFAULT_LLM_BASE_URL),
+        api_key=api_key,
+        model=os.environ.get("RUSHES_LLM_MODEL", DEFAULT_LLM_MODEL),
+        recorder=_StorageProviderCallRecorder(engine),
     )
 
 
@@ -648,6 +669,32 @@ def _register_routes(app: FastAPI) -> None:
             event_ids.extend(_event_ids(result))
         return {"project_id": project_id, "asset_id": asset_id, "event_ids": event_ids}
 
+    @app.post(
+        "/api/projects/{project_id}/materials/{asset_id}/retry-annotation",
+        response_model=api_schemas.MaterialMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def retry_material_annotation(
+        project_id: str,
+        asset_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project_asset(state.engine, project_id, asset_id)
+        result = _run_asset_tool(
+            state,
+            tool_name="annotation.retry",
+            handler=annotation_retry,
+            input_model=AnnotationRetryInput(project_id=project_id, asset_id=asset_id),
+            actor="user",
+        )
+        return {
+            "project_id": project_id,
+            "asset_id": asset_id,
+            "job_id": result.data.get("job_id"),
+            "event_ids": result.data["event_ids"],
+        }
+
     @app.patch(
         "/api/projects/{project_id}",
         response_model=api_schemas.ProjectMutationResponse,
@@ -756,6 +803,20 @@ def _register_routes(app: FastAPI) -> None:
     async def get_case(project_id: str, case_id: str, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         return {"case": _require_case(state.engine, project_id, case_id)}
+
+    @app.get(
+        "/api/projects/{project_id}/cases/{case_id}/costs",
+        response_model=api_schemas.CaseCostsResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def case_costs(project_id: str, case_id: str, request: Request) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_case(state.engine, project_id, case_id)
+        return {
+            "project_id": project_id,
+            "case_id": case_id,
+            "costs": _case_cost_summary(state.engine, case_id),
+        }
 
     @app.patch(
         "/api/projects/{project_id}/cases/{case_id}",
@@ -960,6 +1021,19 @@ def _register_routes(app: FastAPI) -> None:
         return {
             "case": _require_case(state.engine, project_id, case_id),
             "event_ids": result.data["event_ids"],
+        }
+
+    @app.get(
+        "/api/projects/{project_id}/decisions/pending",
+        response_model=api_schemas.PendingDecisionsResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def pending_project_decisions(project_id: str, request: Request) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project(state.engine, project_id)
+        return {
+            "project_id": project_id,
+            "decisions": _pending_project_decisions(state.engine, project_id),
         }
 
     @app.get(
@@ -1333,10 +1407,85 @@ def _project_page_payload(engine: Engine, project_id: str) -> dict[str, Any]:
         "case_count": len(cases),
         "asset_count": len(asset_count),
         "memory_count": len(memory_count),
+        "costs": _project_cost_summary(engine, project_id),
         "actions": {
             "create_case": f"/api/projects/{project_id}/cases",
             "materials": f"/projects/{project_id}/materials",
         },
+    }
+
+
+def _pending_project_decisions(engine: Engine, project_id: str) -> list[Decision]:
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(schema.decisions)
+            .where(schema.decisions.c.project_id == project_id)
+            .where(schema.decisions.c.scope_type == "project")
+            .where(schema.decisions.c.case_id.is_(None))
+            .where(schema.decisions.c.status == "pending")
+            .order_by(schema.decisions.c.decision_id)
+        ).all()
+    return [Decision.model_validate(_decode_decision_values(dict(row._mapping))) for row in rows]
+
+
+def _decode_decision_values(values: dict[str, Any]) -> dict[str, Any]:
+    decoded = dict(values)
+    for key in ("options", "answer", "pending_tool_call"):
+        raw_value = decoded.get(key)
+        if isinstance(raw_value, str):
+            decoded[key] = load_json(raw_value)
+    return decoded
+
+
+def _case_cost_summary(engine: Engine, case_id: str) -> dict[str, Any]:
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(schema.provider_calls).where(schema.provider_calls.c.case_id == case_id)
+        ).all()
+    return _cost_summary([dict(row._mapping) for row in rows])
+
+
+def _project_cost_summary(engine: Engine, project_id: str) -> dict[str, Any]:
+    with engine.connect() as connection:
+        case_ids = [
+            str(row._mapping["case_id"])
+            for row in connection.execute(
+                select(schema.cases.c.case_id).where(schema.cases.c.project_id == project_id)
+            ).all()
+        ]
+        filters = [schema.jobs.c.project_id == project_id]
+        if case_ids:
+            filters.append(schema.provider_calls.c.case_id.in_(case_ids))
+        rows = connection.execute(
+            select(schema.provider_calls)
+            .select_from(
+                schema.provider_calls.outerjoin(
+                    schema.jobs,
+                    schema.jobs.c.job_id == schema.provider_calls.c.job_id,
+                )
+            )
+            .where(or_(*filters))
+        ).all()
+    return _cost_summary([dict(row._mapping) for row in rows])
+
+
+def _cost_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    by_capability: dict[str, float] = {}
+    by_provider: dict[str, float] = {}
+    total = 0.0
+    for row in rows:
+        cost = row.get("cost_estimate")
+        amount = float(cost) if isinstance(cost, int | float) else 0.0
+        total += amount
+        capability = str(row.get("capability") or "unknown")
+        provider_id = str(row.get("provider_id") or "unknown")
+        by_capability[capability] = by_capability.get(capability, 0.0) + amount
+        by_provider[provider_id] = by_provider.get(provider_id, 0.0) + amount
+    return {
+        "provider_call_count": len(rows),
+        "total_cost_estimate": total,
+        "by_capability": by_capability,
+        "by_provider": by_provider,
     }
 
 

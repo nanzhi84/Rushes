@@ -80,7 +80,8 @@ def reduce_decision_answer(
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
     validate_decision_registered(decision)
-    return decision_effects_registry[decision.type](case_state, decision, answer)
+    effect = decision_effects_registry[decision.type](case_state, decision, answer)
+    return _with_side_intents(case_state, effect, answer)
 
 
 def _audio_mode_effect(
@@ -388,6 +389,42 @@ def _model_dump(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
     raise TypeError("expected a pydantic model or dict")
+
+
+def _with_side_intents(
+    case_state: CaseState,
+    effect: DecisionEffectResult,
+    answer: DecisionAnswer,
+) -> DecisionEffectResult:
+    side_intents = _side_intents_from_answer(answer)
+    if not side_intents:
+        return effect
+    state_patch = dict(effect.state_patch)
+    scratch_memory = dict(case_state.scratch_memory)
+    existing_patch = state_patch.get("scratch_memory")
+    if isinstance(existing_patch, dict):
+        scratch_memory.update(existing_patch)
+    existing = scratch_memory.get("pending_intents")
+    pending_intents: list[str] = []
+    if isinstance(existing, Sequence) and not isinstance(existing, str | bytes):
+        pending_intents = [item for item in existing if isinstance(item, str)]
+    for intent in side_intents:
+        if intent not in pending_intents:
+            pending_intents.append(intent)
+    scratch_memory["pending_intents"] = pending_intents
+    state_patch["scratch_memory"] = scratch_memory
+    return DecisionEffectResult(
+        state_patch=state_patch,
+        followup_events=effect.followup_events,
+        followups=effect.followups,
+    )
+
+
+def _side_intents_from_answer(answer: DecisionAnswer) -> list[str]:
+    value = answer.payload.get("side_intents")
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        return []
+    return [item for item in value if isinstance(item, str) and item != ""]
 
 
 def pending_tool_call_will_replay(decision: Decision, answer: DecisionAnswer) -> bool:

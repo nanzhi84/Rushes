@@ -216,6 +216,8 @@ def _artifact_parts(context: ContextBuildInput) -> list[tuple[str, str]]:
             ),
         )
     ]
+    if case_state.scratch_memory:
+        parts.append(("scratch_memory", _section("scratch_memory", case_state.scratch_memory)))
     if case_state.content_plan is not None:
         parts.append(("content_plan", _section("content_plan", case_state.content_plan)))
     if case_state.audio_plan is not None:
