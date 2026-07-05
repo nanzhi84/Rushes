@@ -260,6 +260,19 @@ def test_confirmation_ask_stores_pending_call_and_fingerprint_mismatch_reasks() 
     )
 
 
+def test_final_export_ask_mentions_unviewed_latest_preview() -> None:
+    verdict = _gate().adjudicate(
+        {"tool_name": "render.final_mp4", "arguments": {"case_id": "case_1"}},
+        _context(allowed_tool_names=frozenset({"render.final_mp4"})),
+    )
+
+    assert verdict.status == "ask"
+    assert verdict.decision is not None
+    assert verdict.decision.type == "export"
+    assert "你还没看最新预览" in verdict.decision.question
+    assert verdict.events[0].event == "DecisionCreated"
+
+
 def test_next_replay_and_mark_replayed_consume_approved_decision() -> None:
     decision = Decision.model_validate(
         {

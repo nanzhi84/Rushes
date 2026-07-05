@@ -367,6 +367,18 @@ class TimelineRestoreVersionInput(BaseModel):
     source_version: int
 
 
+class RenderPreviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class RenderFinalMp4Input(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class RenderStatusInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 def tool_specs() -> tuple[ToolSpec, ...]:
     return (
         ToolSpec(
@@ -1055,6 +1067,57 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             emits_events=["TimelineVersionRestored"],
             description="Restore an old timeline as a new version record.",
         ),
+        ToolSpec(
+            name="render.preview",
+            namespace="render",
+            version="1",
+            input_model=RenderPreviewInput,
+            result_model=None,
+            handler_ref="tools.render_tools.preview",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=["timeline_validated"],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["job", "object_store"],
+            idempotency_key_fields=["timeline_version"],
+            emits_events=["JobEnqueued"],
+            is_long_running=True,
+            description="Queue a cached preview render for the current validated timeline.",
+        ),
+        ToolSpec(
+            name="render.final_mp4",
+            namespace="render",
+            version="1",
+            input_model=RenderFinalMp4Input,
+            result_model=None,
+            handler_ref="tools.render_tools.final_mp4",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=["timeline_validated", "preview_for_current_version_exists"],
+            requires_active_project=True,
+            requires_active_case=True,
+            requires_confirmation=True,
+            confirmation_decision_type="export",
+            side_effects=["job", "object_store"],
+            idempotency_key_fields=["timeline_version"],
+            emits_events=["JobEnqueued"],
+            is_long_running=True,
+            description="Queue a confirmed final MP4 export for the current validated timeline.",
+        ),
+        ToolSpec(
+            name="render.status",
+            namespace="render",
+            version="1",
+            input_model=RenderStatusInput,
+            result_model=None,
+            handler_ref="tools.render_tools.status",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=["timeline_exists"],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=[],
+            emits_events=[],
+            description="Read current preview/export artifacts and running render jobs.",
+        ),
     )
 
 
@@ -1194,6 +1257,9 @@ def build_default_tool_registry() -> ToolRegistry:
         move_case,
         rename,
     )
+    from .render_tools import final_mp4 as render_final_mp4
+    from .render_tools import preview as render_preview
+    from .render_tools import status as render_status
     from .retrieval import search_candidates as retrieval_search_candidates
     from .timeline_tools import inspect as timeline_inspect
     from .timeline_tools import plan_from_candidates as timeline_plan_from_candidates
@@ -1242,6 +1308,9 @@ def build_default_tool_registry() -> ToolRegistry:
         "timeline.validate": timeline_validate,
         "timeline.inspect": timeline_inspect,
         "timeline.restore_version": timeline_restore_version,
+        "render.preview": render_preview,
+        "render.final_mp4": render_final_mp4,
+        "render.status": render_status,
     }
     registry = ToolRegistry()
     for spec in tool_specs():

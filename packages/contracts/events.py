@@ -349,7 +349,7 @@ class JobProgress(DomainEventBase):
     requested_by_case_id: str | None = None
     progress: float | None = None
     version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("job_id",)
+    merge_key: ClassVar[tuple[str, ...]] = ("job_id", "progress")
 
 
 class JobSucceeded(DomainEventBase):

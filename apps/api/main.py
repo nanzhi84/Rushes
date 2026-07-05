@@ -1220,6 +1220,26 @@ def _register_routes(app: FastAPI) -> None:
         return _range_response(proxy_path, request)
 
     @app.get(
+        "/api/media/preview/{preview_id}",
+        response_class=StreamingResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def media_preview(preview_id: str, request: Request) -> StreamingResponse:
+        state = state_from_request(request)
+        preview_path = _require_preview_path(state.engine, state.workspace_paths, preview_id)
+        return _range_response(preview_path, request)
+
+    @app.get(
+        "/api/media/export/{export_id}",
+        response_class=StreamingResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def media_export(export_id: str, request: Request) -> StreamingResponse:
+        state = state_from_request(request)
+        export_path = _require_export_path(state.engine, state.workspace_paths, export_id)
+        return _range_response(export_path, request)
+
+    @app.get(
         "/api/fs/roots",
         response_model=api_schemas.FsRootsResponse,
         responses=_response_docs(),
@@ -1813,6 +1833,38 @@ def _require_proxy_path(engine: Engine, paths: WorkspacePaths, asset_id: str) ->
     if not proxy_path.exists():
         raise HTTPException(status_code=404, detail={"reason": "proxy_not_found"})
     return proxy_path
+
+
+def _require_preview_path(engine: Engine, paths: WorkspacePaths, preview_id: str) -> Path:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(schema.previews.c.object_hash).where(schema.previews.c.preview_id == preview_id)
+        ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"reason": "preview_not_found"})
+    object_hash = row._mapping["object_hash"]
+    if not isinstance(object_hash, str):
+        raise HTTPException(status_code=404, detail={"reason": "preview_not_ready"})
+    path = paths.object_path(object_hash)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail={"reason": "preview_object_not_found"})
+    return path
+
+
+def _require_export_path(engine: Engine, paths: WorkspacePaths, export_id: str) -> Path:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(schema.exports.c.object_hash).where(schema.exports.c.export_id == export_id)
+        ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"reason": "export_not_found"})
+    object_hash = row._mapping["object_hash"]
+    if not isinstance(object_hash, str):
+        raise HTTPException(status_code=404, detail={"reason": "export_not_ready"})
+    path = paths.object_path(object_hash)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail={"reason": "export_object_not_found"})
+    return path
 
 
 def _range_response(path: Path, request: Request) -> StreamingResponse:

@@ -98,6 +98,7 @@ def build_default_job_registry(
             build_proxy_handler,
             workspace_paths_from_engine,
         )
+        from .render_jobs import build_render_final_handler, build_render_preview_handler
 
         paths = workspace_paths or workspace_paths_from_engine(engine)
         registry.register("proxy", build_proxy_handler(engine, paths))
@@ -112,4 +113,6 @@ def build_default_job_registry(
             "import_url",
             build_import_url_handler(engine, paths, http_transport=http_transport),
         )
+        registry.register("render_preview", build_render_preview_handler(engine, paths))
+        registry.register("render_final", build_render_final_handler(engine, paths))
     return registry

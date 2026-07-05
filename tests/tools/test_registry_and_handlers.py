@@ -96,6 +96,9 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "timeline.validate",
         "timeline.inspect",
         "timeline.restore_version",
+        "render.preview",
+        "render.final_mp4",
+        "render.status",
     }
     assert {spec.name for spec in tool_specs()} == expected_tools
     assert {spec.name for spec in registry.list_stable()} == {spec.name for spec in tool_specs()}
@@ -171,6 +174,17 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
     assert registry.require("timeline.restore_version").spec.emits_events == [
         "TimelineVersionRestored"
     ]
+    render_preview = registry.require("render.preview").spec
+    assert render_preview.requires_artifacts == ["timeline_validated"]
+    assert render_preview.is_long_running is True
+    render_final = registry.require("render.final_mp4").spec
+    assert render_final.requires_confirmation is True
+    assert render_final.confirmation_decision_type == "export"
+    assert render_final.requires_artifacts == [
+        "timeline_validated",
+        "preview_for_current_version_exists",
+    ]
+    assert registry.require("render.status").spec.side_effects == []
     assert {spec.kind for spec in PATCH_OP_REGISTRY.list()} == {
         "delete_range",
         "replace_clip",
