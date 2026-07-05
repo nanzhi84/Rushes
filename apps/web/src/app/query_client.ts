@@ -22,6 +22,9 @@ export const queryKeys = {
   projectTree: ["project-tree"] as const,
   projects: ["projects"] as const,
   project: (projectId: string) => ["project", projectId] as const,
+  materials: (projectId: string) => ["materials", projectId] as const,
+  fsRoots: ["fs-roots"] as const,
+  fsList: (path: string) => ["fs-list", path] as const,
   case: (projectId: string, caseId: string) => ["case", projectId, caseId] as const,
   messages: (projectId: string, caseId: string) => ["messages", projectId, caseId] as const,
   currentDecision: (projectId: string, caseId: string) =>

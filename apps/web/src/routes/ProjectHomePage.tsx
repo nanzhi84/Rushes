@@ -79,7 +79,7 @@ export function ProjectHomePage(): ReactElement {
           params={{ projectId }}
         >
           <span className="text-lg font-semibold">素材管理</span>
-          <span className="mt-2 block text-sm text-[#64748b]">下一阶段接入素材池、导入和标注状态。</span>
+          <span className="mt-2 block text-sm text-[#64748b]">查看素材池、导入素材和标注状态。</span>
         </Link>
         <section className="rounded-lg border border-[#d9dee7] bg-white p-5">
           <h2 className="text-lg font-semibold">项目设置</h2>
