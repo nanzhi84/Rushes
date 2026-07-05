@@ -28,7 +28,7 @@ def test_reference_revalidation_uses_mtime_fast_path_without_hash(
 
     monkeypatch.setattr(invalidation, "_sha256", fail_hash)
 
-    result = invalidation.revalidate_project_references(engine, "project_1")
+    result = invalidation.revalidate_project_references(engine, "project_1", apply_events=apply)
 
     assert result.checked == 1
     assert result.invalidated_asset_ids == ()
@@ -42,7 +42,7 @@ def test_reference_revalidation_invalidates_when_hash_changes(tmp_path: Path) ->
     engine = _engine_with_reference(tmp_path, source, digest=old_digest, mtime=0)
     source.write_bytes(b"after!")
 
-    result = invalidation.revalidate_project_references(engine, "project_1")
+    result = invalidation.revalidate_project_references(engine, "project_1", apply_events=apply)
 
     assert result.invalidated_asset_ids == ("asset_1",)
     asset = _asset_row(engine)

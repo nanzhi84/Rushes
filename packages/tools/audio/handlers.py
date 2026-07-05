@@ -2,20 +2,41 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
+import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy import select
 
-from contracts.events import AssetProbed, CapabilityDegraded, JobEnqueued
+from contracts.decision import Decision, DecisionOption
+from contracts.events import AssetProbed, CapabilityDegraded, DecisionCreated, JobEnqueued
+from contracts.provider import ProviderResult
 from contracts.tool_result import ToolError, ToolResult
+from contracts.transcript import TranscriptDocument
+from media.rough_cut import (
+    removed_ranges_from_proposals,
+    rule_based_proposals,
+    semantic_proposals,
+    utterance_prompt_rows,
+)
+from providers import LLM_CHAT, ProviderRequest
 from storage import schema
+from storage.repositories._json import load_json
 from storage.workspace_paths import WorkspacePaths, resolve_asset_path
 from tools.context import ToolExecutionContext
-from tools.specs import AudioAsrOriginalInput, AudioInspectSourcesInput
+from tools.specs import (
+    AudioAlignUploadedVoiceoverInput,
+    AudioAsrOriginalInput,
+    AudioGenerateTtsInput,
+    AudioInspectSourcesInput,
+    AudioRoughCutSpeechInput,
+)
 
 
 def inspect_sources(
@@ -136,6 +157,449 @@ def asr_original(input_model: AudioAsrOriginalInput, context: ToolExecutionConte
         data={"case_id": case_state.case_id, "asset_id": asset_id, "job_id": event.job_id},
         events=[event.model_dump(mode="json")],
     )
+
+
+def rough_cut_speech(
+    input_model: AudioRoughCutSpeechInput,
+    context: ToolExecutionContext,
+) -> ToolResult:
+    case_state = context.case_state
+    if case_state is None:
+        return _failed("audio.rough_cut_speech", context, "missing_case", "active case required")
+    if context.readonly_connection is None:
+        return _failed(
+            "audio.rough_cut_speech",
+            context,
+            "missing_connection",
+            "audio.rough_cut_speech requires repository access",
+        )
+    transcript = _rough_cut_transcript(input_model, context)
+    if transcript is None:
+        return _failed(
+            "audio.rough_cut_speech",
+            context,
+            "transcript_missing",
+            "rough-cut speech requires a TranscriptDocument with VAD segments",
+        )
+
+    degraded_events: list[dict[str, Any]] = []
+    include_fillers = transcript.raw_preserved
+    if not transcript.raw_preserved:
+        degraded_events.append(
+            CapabilityDegraded(
+                degradation_id=f"degraded_{context.tool_call_id}_raw_transcript",
+                project_id=case_state.project_id,
+                case_id=case_state.case_id,
+                capability="audio.rough_cut_speech.filler_detection",
+                provider_id=transcript.provider_id,
+                reason="raw transcript is not preserved; filler/off-topic detection disabled",
+                payload={
+                    "transcript_id": transcript.transcript_id,
+                    "tool_call_id": context.tool_call_id,
+                },
+            ).model_dump(mode="json")
+        )
+    proposals = rule_based_proposals(
+        transcript,
+        filler_words=set(input_model.filler_words) if input_model.filler_words else None,
+        pause_threshold_ms=input_model.pause_threshold_ms,
+        repeat_similarity_threshold=input_model.repeat_similarity_threshold,
+        include_fillers=include_fillers,
+    )
+    provider_events: tuple[dict[str, Any], ...] = ()
+    if transcript.raw_preserved:
+        llm_result = _semantic_suggestions(input_model, context, transcript)
+        provider_events = llm_result.events
+        if llm_result.degraded_reason is not None:
+            degraded_events.append(
+                CapabilityDegraded(
+                    degradation_id=f"degraded_{context.tool_call_id}_rough_cut_llm",
+                    project_id=case_state.project_id,
+                    case_id=case_state.case_id,
+                    capability="audio.rough_cut_speech.semantic",
+                    provider_id=input_model.llm_provider_id,
+                    reason=llm_result.degraded_reason,
+                    payload={
+                        "transcript_id": transcript.transcript_id,
+                        "tool_call_id": context.tool_call_id,
+                    },
+                ).model_dump(mode="json")
+            )
+        else:
+            proposals.extend(semantic_proposals(transcript, llm_result.suggestions))
+
+    proposals = sorted(
+        {proposal.model_dump_json(): proposal for proposal in proposals}.values(),
+        key=lambda proposal: (proposal.range_ms.start_ms, proposal.range_ms.end_ms, proposal.kind),
+    )
+    proposal_payload = [proposal.model_dump(mode="json") for proposal in proposals]
+    removed_ranges = removed_ranges_from_proposals(proposals)
+    decision = Decision(
+        decision_id=_decision_id("speech_cut", case_state.case_id, proposal_payload),
+        scope_type="case",
+        project_id=case_state.project_id,
+        case_id=case_state.case_id,
+        type="approve_speech_cut",
+        question="这些口播粗剪候选需要确认后才会删除，是否应用？",
+        options=[
+            DecisionOption(
+                option_id="apply_all",
+                label="应用全部候选",
+                payload={
+                    "rough_cut_proposal": proposal_payload,
+                    "removed_ranges": removed_ranges,
+                    "total_target_duration_sec": _cut_plan_total_duration(case_state),
+                },
+            ),
+            DecisionOption(
+                option_id="skip",
+                label="暂不删除",
+                payload={
+                    "rough_cut_proposal": proposal_payload,
+                    "removed_ranges": [],
+                    "total_target_duration_sec": _cut_plan_total_duration(case_state),
+                },
+            ),
+        ],
+        allow_free_text=True,
+        status="pending",
+        blocking=True,
+        created_by_tool_call_id=context.tool_call_id,
+    )
+    event = DecisionCreated(
+        decision_id=decision.decision_id,
+        scope_type=decision.scope_type,
+        project_id=decision.project_id,
+        case_id=decision.case_id,
+        payload={
+            "decision": decision.model_dump(mode="json"),
+            "type": decision.type,
+            "question": decision.question,
+            "options": [option.model_dump(mode="json") for option in decision.options],
+            "blocking": decision.blocking,
+            "created_by_tool_call_id": context.tool_call_id,
+        },
+    )
+    return ToolResult(
+        tool_call_id=context.tool_call_id,
+        tool_name="audio.rough_cut_speech",
+        status="requires_user",
+        observation="rough-cut speech proposals require approval",
+        data={
+            "case_id": case_state.case_id,
+            "transcript_id": transcript.transcript_id,
+            "rough_cut_proposal": proposal_payload,
+            "decision_id": decision.decision_id,
+            "degraded": [event["payload"] for event in degraded_events],
+        },
+        events=[*provider_events, *degraded_events, event.model_dump(mode="json")],
+    )
+
+
+def generate_tts(
+    input_model: AudioGenerateTtsInput,
+    context: ToolExecutionContext,
+) -> ToolResult:
+    return _enqueue_audio_job(
+        "audio.generate_tts",
+        "tts",
+        context,
+        {
+            "provider_id": input_model.provider_id,
+            "asr_provider_id": input_model.asr_provider_id,
+            "voice_type": input_model.voice_type,
+        },
+    )
+
+
+def align_uploaded_voiceover(
+    input_model: AudioAlignUploadedVoiceoverInput,
+    context: ToolExecutionContext,
+) -> ToolResult:
+    return _enqueue_audio_job(
+        "audio.align_uploaded_voiceover",
+        "align",
+        context,
+        {
+            "script_text": input_model.script_text,
+            "asset_id": input_model.asset_id,
+            "provider_id": input_model.provider_id,
+        },
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _SemanticSuggestionResult:
+    suggestions: list[dict[str, Any]]
+    events: tuple[dict[str, Any], ...] = ()
+    degraded_reason: str | None = None
+
+
+def _rough_cut_transcript(
+    input_model: AudioRoughCutSpeechInput,
+    context: ToolExecutionContext,
+) -> TranscriptDocument | None:
+    assert context.readonly_connection is not None
+    case_state = context.case_state
+    if case_state is None:
+        return None
+    transcript_id = input_model.transcript_id
+    if transcript_id is None and case_state.audio_plan is not None:
+        transcript_id = case_state.audio_plan.transcript_id
+    row = None
+    if transcript_id is not None:
+        row = context.readonly_connection.execute(
+            select(schema.transcripts).where(schema.transcripts.c.transcript_id == transcript_id)
+        ).first()
+    if row is None:
+        asset_id = input_model.asset_id
+        if asset_id is None and case_state.audio_plan is not None:
+            source_ids = case_state.audio_plan.source_asset_ids
+            asset_id = source_ids[0] if source_ids else None
+        if asset_id is not None:
+            row = context.readonly_connection.execute(
+                select(schema.transcripts)
+                .where(schema.transcripts.c.asset_id == asset_id)
+                .order_by(schema.transcripts.c.transcript_id.desc())
+                .limit(1)
+            ).first()
+    if row is None:
+        return None
+    values = dict(row._mapping)
+    utterances = load_json(str(values["utterances"]))
+    vad_segments = load_json(str(values["vad_segments"]))
+    if not isinstance(vad_segments, list) or not vad_segments:
+        return None
+    return TranscriptDocument.model_validate(
+        {
+            "schema": "TranscriptDocument.v1",
+            "transcript_id": values["transcript_id"],
+            "asset_id": values["asset_id"],
+            "language": "und",
+            "provider_id": values["provider_id"],
+            "raw_preserved": values["raw_preserved"],
+            "utterances": utterances,
+            "vad_segments": vad_segments,
+            "warnings": [],
+        }
+    )
+
+
+def _semantic_suggestions(
+    input_model: AudioRoughCutSpeechInput,
+    context: ToolExecutionContext,
+    transcript: TranscriptDocument,
+) -> _SemanticSuggestionResult:
+    gateway = context.metadata.get("provider_gateway") or context.metadata.get("llm_gateway")
+    if gateway is None or not hasattr(gateway, "call"):
+        return _SemanticSuggestionResult(
+            suggestions=[],
+            degraded_reason="llm gateway is not configured",
+        )
+    request = ProviderRequest(
+        capability=LLM_CHAT,
+        request_id=f"rough_cut_{context.tool_call_id}",
+        case_id=context.case_state.case_id if context.case_state is not None else None,
+        payload={
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是口播粗剪审核器。只允许输出 JSON，格式为 "
+                        '{"suggestions":[{"utterance_id":"...",'
+                        '"reason":"...","confidence":0.0}]}。'
+                        "只能引用输入里的 utterance_id，不要输出毫秒。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "utterances": utterance_prompt_rows(transcript),
+                            "task": "找出废句、离题句或应删除的语义重复句。",
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "propose_speech_cuts"},
+            },
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "propose_speech_cuts",
+                        "description": "Return utterance_id level semantic deletion candidates.",
+                        "parameters": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "suggestions": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": False,
+                                        "properties": {
+                                            "utterance_id": {"type": "string"},
+                                            "reason": {"type": "string"},
+                                            "confidence": {"type": "number"},
+                                        },
+                                        "required": [
+                                            "utterance_id",
+                                            "reason",
+                                            "confidence",
+                                        ],
+                                    },
+                                }
+                            },
+                            "required": ["suggestions"],
+                        },
+                        "strict": True,
+                    },
+                }
+            ],
+        },
+    )
+    try:
+        gateway_result = _run_async_sync(
+            gateway.call(request, provider_id=input_model.llm_provider_id)
+        )
+    except Exception as exc:
+        return _SemanticSuggestionResult(
+            suggestions=[],
+            degraded_reason=f"llm call failed: {exc}",
+        )
+    events = tuple(dict(event) for event in getattr(gateway_result, "events", ()) or ())
+    result = cast(ProviderResult, gateway_result.result)
+    if result.error is not None:
+        return _SemanticSuggestionResult(
+            suggestions=[],
+            events=events,
+            degraded_reason=f"{result.error.error_code}: {result.error.message}",
+        )
+    suggestions = _parse_semantic_suggestions(result.normalized_output)
+    return _SemanticSuggestionResult(suggestions=suggestions, events=events)
+
+
+def _parse_semantic_suggestions(output: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[Any] = []
+    if isinstance(output.get("suggestions"), list):
+        candidates = cast(list[Any], output["suggestions"])
+    tool_call = output.get("tool_call")
+    if not candidates and isinstance(tool_call, dict):
+        candidates = _suggestions_from_arguments(tool_call)
+    tool_calls = output.get("tool_calls")
+    if not candidates and isinstance(tool_calls, list):
+        for item in tool_calls:
+            if isinstance(item, dict):
+                candidates = _suggestions_from_arguments(item)
+                if candidates:
+                    break
+    content = output.get("content")
+    if not candidates and isinstance(content, str):
+        candidates = _suggestions_from_arguments(content)
+    return [dict(item) for item in candidates if isinstance(item, dict)]
+
+
+def _suggestions_from_arguments(value: Any) -> list[Any]:
+    raw = value
+    if isinstance(value, dict):
+        function = value.get("function")
+        if isinstance(function, dict) and "arguments" in function:
+            raw = function["arguments"]
+        else:
+            suggestions = value.get("suggestions")
+            return suggestions if isinstance(suggestions, list) else []
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(parsed, dict):
+            suggestions = parsed.get("suggestions")
+            return suggestions if isinstance(suggestions, list) else []
+    return []
+
+
+def _run_async_sync(awaitable: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(awaitable)
+
+    result: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            result["value"] = asyncio.run(awaitable)
+        except BaseException as exc:  # pragma: no cover - defensive thread bridge
+            result["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
+
+
+def _enqueue_audio_job(
+    tool_name: str,
+    kind: str,
+    context: ToolExecutionContext,
+    arguments: dict[str, Any],
+) -> ToolResult:
+    case_state = context.case_state
+    if case_state is None:
+        return _failed(tool_name, context, "missing_case", "active case required")
+    clean_arguments = {key: value for key, value in arguments.items() if value is not None}
+    idempotency_key = (
+        f"case:{case_state.case_id}:{kind}:"
+        f"{hashlib.sha256(json.dumps(clean_arguments, sort_keys=True).encode()).hexdigest()}"
+    )
+    event = JobEnqueued(
+        job_id=_job_id(kind, idempotency_key),
+        project_id=case_state.project_id,
+        case_id=case_state.case_id,
+        requested_by_case_id=case_state.case_id,
+        payload={
+            "kind": kind,
+            "idempotency_key": idempotency_key,
+            "job_payload": {
+                "tool_name": tool_name,
+                "arguments": clean_arguments,
+                "tool_call_id": context.tool_call_id,
+                "turn_id": context.turn_id,
+            },
+            "attempts": 0,
+            "max_retries": 2,
+        },
+    )
+    return ToolResult(
+        tool_call_id=context.tool_call_id,
+        tool_name=tool_name,
+        status="running",
+        observation=f"job queued: {event.job_id}",
+        data={"case_id": case_state.case_id, "job_id": event.job_id, "job_kind": kind},
+        events=[event.model_dump(mode="json")],
+    )
+
+
+def _decision_id(prefix: str, case_id: str, payload: Any) -> str:
+    raw = json.dumps({"case_id": case_id, "payload": payload}, sort_keys=True)
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    return f"dec_{prefix}_{digest[:16]}"
+
+
+def _cut_plan_total_duration(case_state: Any) -> float:
+    cut_plan = getattr(case_state, "cut_plan", None)
+    if cut_plan is not None:
+        value = getattr(cut_plan, "total_target_duration_sec", None)
+        if isinstance(value, (int, float)):
+            return float(value)
+    return 0.0
 
 
 def _inspect_one_asset(

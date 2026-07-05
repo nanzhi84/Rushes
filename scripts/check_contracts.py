@@ -34,12 +34,26 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "domain": frozenset({"domain", "contracts"}),
     "storage": frozenset({"storage", "contracts"}),
     "events": frozenset({"events", "contracts", "storage"}),
-    "media": frozenset({"media", "contracts", "storage", "agent_harness"}),
+    "media": frozenset({"media", "contracts", "storage"}),
     "providers": frozenset({"providers", "contracts"}),
     "agent_harness": frozenset(
         {"agent_harness", "tools", "domain", "contracts", "storage", "events"}
     ),
-    "tools": frozenset({"tools", "domain", "contracts", "storage", "events"}),
+    # PRD §15：TOOLS→IMPL 边（media/providers/annotation/timeline/indexing）
+    "tools": frozenset(
+        {
+            "tools",
+            "domain",
+            "contracts",
+            "storage",
+            "events",
+            "media",
+            "providers",
+            "annotation",
+            "timeline",
+            "indexing",
+        }
+    ),
     "apps": LOCAL_GROUPS,
 }
 

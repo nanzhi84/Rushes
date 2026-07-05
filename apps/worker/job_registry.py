@@ -92,7 +92,7 @@ def build_default_job_registry(
     registry.register("noop", noop_handler)
     if engine is not None:
         from .annotation_jobs import build_annotation_handler
-        from .audio_jobs import build_asr_handler
+        from .audio_jobs import build_align_handler, build_asr_handler, build_tts_handler
         from .media_jobs import (
             build_import_url_handler,
             build_proxy_handler,
@@ -105,7 +105,9 @@ def build_default_job_registry(
             "annotation",
             build_annotation_handler(engine, paths, gateway=provider_gateway),
         )
-        registry.register("asr", build_asr_handler(engine, paths))
+        registry.register("asr", build_asr_handler(engine, paths, gateway=provider_gateway))
+        registry.register("tts", build_tts_handler(engine, paths, gateway=provider_gateway))
+        registry.register("align", build_align_handler(engine, paths, gateway=provider_gateway))
         registry.register(
             "import_url",
             build_import_url_handler(engine, paths, http_transport=http_transport),

@@ -84,6 +84,9 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "asset.list_case_scope",
         "audio.inspect_sources",
         "audio.asr_original",
+        "audio.rough_cut_speech",
+        "audio.generate_tts",
+        "audio.align_uploaded_voiceover",
         "annotation.enqueue",
         "annotation.status",
         "annotation.retry",
@@ -117,6 +120,25 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
     assert audio_asr.requires_artifacts == [
         "audio_mode_in(keep_original,rough_cut)",
         "audio_source_has_audio",
+    ]
+    audio_rough_cut = registry.require("audio.rough_cut_speech").spec
+    assert audio_rough_cut.requires_artifacts == [
+        "audio_mode_in(rough_cut)",
+        "transcript_with_vad_exists",
+    ]
+    assert audio_rough_cut.emits_events == [
+        "DecisionCreated",
+        "CapabilityDegraded",
+        "ProviderCallRecorded",
+    ]
+    audio_tts = registry.require("audio.generate_tts").spec
+    assert audio_tts.is_long_running is True
+    assert audio_tts.requires_artifacts == ["audio_mode_in(tts)", "content_plan_exists"]
+    audio_align = registry.require("audio.align_uploaded_voiceover").spec
+    assert audio_align.is_long_running is True
+    assert audio_align.requires_artifacts == [
+        "audio_mode_in(uploaded_voiceover)",
+        "voiceover_asset_exists",
     ]
     assert registry.require("annotation.enqueue").spec.emits_events == ["JobEnqueued"]
     assert registry.require("annotation.status").spec.side_effects == []

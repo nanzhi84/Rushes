@@ -304,6 +304,33 @@ class AudioAsrOriginalInput(BaseModel):
     provider_id: str | None = None
 
 
+class AudioRoughCutSpeechInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str | None = None
+    transcript_id: str | None = None
+    llm_provider_id: str | None = None
+    filler_words: list[str] = Field(default_factory=list)
+    pause_threshold_ms: int = Field(default=600, gt=0)
+    repeat_similarity_threshold: float = Field(default=0.88, ge=0.0, le=1.0)
+
+
+class AudioGenerateTtsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str | None = None
+    asr_provider_id: str | None = None
+    voice_type: str | None = None
+
+
+class AudioAlignUploadedVoiceoverInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    script_text: str
+    asset_id: str | None = None
+    provider_id: str | None = None
+
+
 def tool_specs() -> tuple[ToolSpec, ...]:
     return (
         ToolSpec(
@@ -774,6 +801,71 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             description="Queue raw-preserving ASR for the selected original audio asset.",
         ),
         ToolSpec(
+            name="audio.rough_cut_speech",
+            namespace="audio",
+            version="1",
+            input_model=AudioRoughCutSpeechInput,
+            result_model=None,
+            handler_ref="tools.audio.rough_cut_speech",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[
+                "audio_mode_in(rough_cut)",
+                "transcript_with_vad_exists",
+            ],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["case"],
+            emits_events=["DecisionCreated", "CapabilityDegraded", "ProviderCallRecorded"],
+            description=(
+                "Create an approve_speech_cut decision from rule and semantic rough-cut candidates."
+            ),
+        ),
+        ToolSpec(
+            name="audio.generate_tts",
+            namespace="audio",
+            version="1",
+            input_model=AudioGenerateTtsInput,
+            result_model=None,
+            handler_ref="tools.audio.generate_tts",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[
+                "audio_mode_in(tts)",
+                "content_plan_exists",
+            ],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["job"],
+            idempotency_key_fields=["provider_id", "asr_provider_id", "voice_type"],
+            emits_events=["JobEnqueued"],
+            is_long_running=True,
+            description=(
+                "Queue Volcengine TTS synthesis plus ASR timestamp fallback cut-plan "
+                "materialization."
+            ),
+        ),
+        ToolSpec(
+            name="audio.align_uploaded_voiceover",
+            namespace="audio",
+            version="1",
+            input_model=AudioAlignUploadedVoiceoverInput,
+            result_model=None,
+            handler_ref="tools.audio.align_uploaded_voiceover",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[
+                "audio_mode_in(uploaded_voiceover)",
+                "voiceover_asset_exists",
+            ],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["job"],
+            idempotency_key_fields=["asset_id", "provider_id", "script_text"],
+            emits_events=["JobEnqueued"],
+            is_long_running=True,
+            description=(
+                "Queue uploaded voiceover ASR and local DP alignment against the user script."
+            ),
+        ),
+        ToolSpec(
             name="annotation.enqueue",
             namespace="annotation",
             version="1",
@@ -952,8 +1044,11 @@ def build_default_tool_registry() -> ToolRegistry:
         unlink_from_project,
         upload_complete,
     )
+    from .audio import align_uploaded_voiceover as audio_align_uploaded_voiceover
     from .audio import asr_original as audio_asr_original
+    from .audio import generate_tts as audio_generate_tts
     from .audio import inspect_sources as audio_inspect_sources
+    from .audio import rough_cut_speech as audio_rough_cut_speech
     from .builtin import decision_answer, finish_turn, refuse, respond
     from .interaction import (
         ask_user,
@@ -1004,6 +1099,9 @@ def build_default_tool_registry() -> ToolRegistry:
         "asset.list_case_scope": list_case_scope,
         "audio.inspect_sources": audio_inspect_sources,
         "audio.asr_original": audio_asr_original,
+        "audio.rough_cut_speech": audio_rough_cut_speech,
+        "audio.generate_tts": audio_generate_tts,
+        "audio.align_uploaded_voiceover": audio_align_uploaded_voiceover,
         "annotation.enqueue": annotation_enqueue,
         "annotation.status": annotation_status,
         "annotation.retry": annotation_retry,
