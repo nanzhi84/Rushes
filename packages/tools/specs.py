@@ -331,6 +331,13 @@ class AudioAlignUploadedVoiceoverInput(BaseModel):
     provider_id: str | None = None
 
 
+class RetrievalSearchCandidatesInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider_id: str | None = None
+    embedding_model: str | None = "text-embedding-v4"
+
+
 def tool_specs() -> tuple[ToolSpec, ...]:
     return (
         ToolSpec(
@@ -929,6 +936,29 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             emits_events=[],
             description="Inspect usable spans, failure details, and quality events for an asset.",
         ),
+        ToolSpec(
+            name="retrieval.search_candidates",
+            namespace="retrieval",
+            version="1",
+            input_model=RetrievalSearchCandidatesInput,
+            result_model=None,
+            handler_ref="tools.retrieval.search_candidates",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[
+                "audio_plan_confirmed",
+                "cut_plan_exists",
+                "usable_asset_exists",
+            ],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["case"],
+            emits_events=[
+                "CandidatePackCreated",
+                "CapabilityDegraded",
+                "ProviderCallRecorded",
+            ],
+            description="Search ready project clips and create a CandidatePack for each cut slot.",
+        ),
     )
 
 
@@ -1068,6 +1098,7 @@ def build_default_tool_registry() -> ToolRegistry:
         move_case,
         rename,
     )
+    from .retrieval import search_candidates as retrieval_search_candidates
 
     handlers: dict[str, ToolHandler] = {
         "respond": respond,
@@ -1106,6 +1137,7 @@ def build_default_tool_registry() -> ToolRegistry:
         "annotation.status": annotation_status,
         "annotation.retry": annotation_retry,
         "annotation.inspect": annotation_inspect,
+        "retrieval.search_candidates": retrieval_search_candidates,
     }
     registry = ToolRegistry()
     for spec in tool_specs():
