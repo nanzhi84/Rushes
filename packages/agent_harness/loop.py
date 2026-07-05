@@ -530,6 +530,8 @@ async def _record_incoming_item(
     turn_id: str,
 ) -> None:
     if item.kind == "user_message":
+        if item.payload.get("message_recorded") is True:
+            return
         content = str(item.payload.get("content", ""))
         message_id = str(item.payload.get("message_id") or item.item_id or f"msg_{turn_id}_user")
         with begin_immediate(engine) as connection:
