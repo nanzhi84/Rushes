@@ -20,12 +20,15 @@ from contracts.events import (
     TimelineVersionCreated,
     TimelineVersionRestored,
 )
+from contracts.patch import TimelinePatchRequest
 from contracts.tool_result import ToolArtifact, ToolError, ToolResult
 from indexing import RevalidationResult, compute_scope_snapshot, revalidate_pack
 from storage import schema
 from storage.repositories._json import load_json
 from timeline import (
+    AnchorConflict,
     MaterializationError,
+    PatchOutcome,
     get_timeline_version,
     materialize_from_selection,
     render_timeline_summary,
@@ -33,6 +36,9 @@ from timeline import (
     store_timeline_version,
     update_timeline_validation_report,
     validate_timeline,
+)
+from timeline import (
+    apply_patch as apply_timeline_patch,
 )
 from tools.context import ToolExecutionContext
 from tools.specs import (
@@ -139,6 +145,75 @@ def plan_from_candidates(
         else ToolError(
             error_code="timeline_validation_failed",
             message="timeline materialized but failed validation",
+            details={"validation_report": report.model_dump(mode="json")},
+        ),
+    )
+
+
+def apply_patch(
+    input_model: TimelinePatchRequest,
+    context: ToolExecutionContext,
+) -> ToolResult:
+    tool_name = "timeline.apply_patch"
+    case_state = context.case_state
+    if case_state is None:
+        return _failed(tool_name, context, "missing_case", "active case required")
+    if context.readonly_connection is None:
+        return _failed(tool_name, context, "missing_connection", "repository access required")
+    if case_state.timeline_current_version is None:
+        return _failed(tool_name, context, "timeline_missing", "current timeline required")
+
+    outcome = apply_timeline_patch(
+        context.readonly_connection,
+        case_state,
+        input_model,
+        created_at=_created_at(context),
+    )
+    if outcome.status == "conflict" and outcome.conflict is not None:
+        return _requires_user_for_anchor_conflict(
+            context,
+            request=input_model,
+            conflict=outcome.conflict,
+        )
+    if outcome.error is not None and outcome.timeline is None:
+        code = outcome.error.code
+        message = str(outcome.error)
+        details = getattr(outcome.error, "details", {})
+        return _failed(tool_name, context, code, message, details=dict(details))
+    if (
+        outcome.timeline is None
+        or outcome.resolved_patch is None
+        or outcome.validation_report is None
+    ):
+        return _failed(
+            tool_name,
+            context,
+            "timeline_patch_failed",
+            "timeline patch did not produce a timeline",
+        )
+
+    report = outcome.validation_report
+    status = "succeeded" if report.valid else "failed"
+    return ToolResult(
+        tool_call_id=context.tool_call_id,
+        tool_name=tool_name,
+        status=status,
+        observation=_patch_observation(outcome.timeline.version, report.valid, outcome),
+        data={
+            "case_id": case_state.case_id,
+            "timeline_version": outcome.timeline.version,
+            "timeline": outcome.timeline.model_dump(mode="json"),
+            "validation_report": report.model_dump(mode="json"),
+            "resolved_patch": outcome.resolved_patch.model_dump(mode="json", by_alias=True),
+            "changed_track_ids": list(outcome.changed_track_ids),
+        },
+        artifacts=[ToolArtifact(artifact_id=outcome.timeline.timeline_id, kind="timeline")],
+        events=list(outcome.events),
+        error=None
+        if report.valid
+        else ToolError(
+            error_code="timeline_validation_failed",
+            message="timeline patched but failed validation",
             details={"validation_report": report.model_dump(mode="json")},
         ),
     )
@@ -457,6 +532,87 @@ def _requires_user_for_invalid_selection(
     )
 
 
+def _requires_user_for_anchor_conflict(
+    context: ToolExecutionContext,
+    *,
+    request: TimelinePatchRequest,
+    conflict: AnchorConflict,
+) -> ToolResult:
+    assert context.case_state is not None
+    assert context.readonly_connection is not None
+    case_state = context.case_state
+    version = case_state.timeline_current_version
+    current_summary = ""
+    if version is not None:
+        record = get_timeline_version(context.readonly_connection, case_state.case_id, version)
+        if record is not None:
+            current_summary = render_timeline_summary(
+                record.timeline,
+                aspect_ratio=_project_aspect_ratio(context),
+            )
+    question = "时间锚点对应的片段已被后续版本修改。请确认要改当前时间线里的哪一段。"
+    decision = Decision(
+        decision_id=_decision_id(
+            "timeline_anchor_conflict",
+            case_state.case_id,
+            {
+                "request": request.model_dump(mode="json", by_alias=True),
+                "code": conflict.code,
+                "details": conflict.details,
+                "current_version": version,
+            },
+        ),
+        scope_type="case",
+        project_id=case_state.project_id,
+        case_id=case_state.case_id,
+        type="generic",
+        question=question,
+        options=[
+            DecisionOption(
+                option_id="use_current_time",
+                label="按当前时间确认",
+                payload={"action": "retry_patch_with_current_anchor"},
+            ),
+            DecisionOption(
+                option_id="inspect_timeline",
+                label="先查看时间线",
+                payload={"action": "timeline.inspect", "version": version},
+            ),
+        ],
+        allow_free_text=True,
+        status="pending",
+        blocking=True,
+        created_by_tool_call_id=context.tool_call_id,
+    )
+    event = DecisionCreated(
+        decision_id=decision.decision_id,
+        scope_type="case",
+        project_id=case_state.project_id,
+        case_id=case_state.case_id,
+        payload={
+            "decision": decision.model_dump(mode="json"),
+            "type": decision.type,
+            "question": question,
+            "anchor_conflict": {"code": conflict.code, "details": conflict.details},
+            "timeline_summary": current_summary,
+            "request": request.model_dump(mode="json", by_alias=True),
+        },
+    )
+    return ToolResult(
+        tool_call_id=context.tool_call_id,
+        tool_name="timeline.apply_patch",
+        status="requires_user",
+        observation=question,
+        data={
+            "case_id": case_state.case_id,
+            "decision": decision.model_dump(mode="json"),
+            "anchor_conflict": {"code": conflict.code, "details": conflict.details},
+            "timeline_summary": current_summary,
+        },
+        events=[event.model_dump(mode="json")],
+    )
+
+
 def _validation_event(
     case_state: CaseState,
     version: int,
@@ -500,6 +656,17 @@ def _plan_observation(
     suffix = "" if not removed else f"; removed {len(removed)} stale candidate(s)"
     validity = "valid" if valid else "invalid"
     return f"created timeline v{version}: {validity}{suffix}"
+
+
+def _patch_observation(
+    version: int,
+    valid: bool,
+    outcome: PatchOutcome,
+) -> str:
+    changed = outcome.changed_track_ids
+    suffix = "" if not changed else f"; changed tracks: {', '.join(changed)}"
+    validity = "valid" if valid else "invalid"
+    return f"patched timeline v{version}: {validity}{suffix}"
 
 
 def _project_aspect_ratio(context: ToolExecutionContext) -> str:

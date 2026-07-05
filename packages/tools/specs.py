@@ -26,6 +26,7 @@ from contracts.patch import (
     ReplaceClipOp,
     SetPlaybackRateOp,
     SetSubtitleStyleOp,
+    TimelinePatchRequest,
     TrimClipOp,
 )
 from contracts.tool import PatchOpSpec, ToolSpec
@@ -1023,6 +1024,26 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             ),
         ),
         ToolSpec(
+            name="timeline.apply_patch",
+            namespace="timeline",
+            version="1",
+            input_model=TimelinePatchRequest,
+            result_model=None,
+            handler_ref="tools.timeline_tools.apply_patch",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=["timeline_exists"],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["timeline", "case"],
+            emits_events=[
+                "TimelineVersionCreated",
+                "TimelineValidated",
+                "TimelineValidationFailed",
+                "DecisionCreated",
+            ],
+            description="Apply a TimelinePatchRequest against the viewed timeline anchor.",
+        ),
+        ToolSpec(
             name="timeline.validate",
             namespace="timeline",
             version="1",
@@ -1261,6 +1282,7 @@ def build_default_tool_registry() -> ToolRegistry:
     from .render_tools import preview as render_preview
     from .render_tools import status as render_status
     from .retrieval import search_candidates as retrieval_search_candidates
+    from .timeline_tools import apply_patch as timeline_apply_patch
     from .timeline_tools import inspect as timeline_inspect
     from .timeline_tools import plan_from_candidates as timeline_plan_from_candidates
     from .timeline_tools import restore_version as timeline_restore_version
@@ -1305,6 +1327,7 @@ def build_default_tool_registry() -> ToolRegistry:
         "annotation.inspect": annotation_inspect,
         "retrieval.search_candidates": retrieval_search_candidates,
         "timeline.plan_from_candidates": timeline_plan_from_candidates,
+        "timeline.apply_patch": timeline_apply_patch,
         "timeline.validate": timeline_validate,
         "timeline.inspect": timeline_inspect,
         "timeline.restore_version": timeline_restore_version,

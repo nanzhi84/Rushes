@@ -93,6 +93,7 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "annotation.inspect",
         "retrieval.search_candidates",
         "timeline.plan_from_candidates",
+        "timeline.apply_patch",
         "timeline.validate",
         "timeline.inspect",
         "timeline.restore_version",
@@ -164,6 +165,14 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
     plan_from_candidates = registry.require("timeline.plan_from_candidates").spec
     assert plan_from_candidates.requires_artifacts == ["candidate_pack_exists"]
     assert plan_from_candidates.emits_events == [
+        "TimelineVersionCreated",
+        "TimelineValidated",
+        "TimelineValidationFailed",
+        "DecisionCreated",
+    ]
+    apply_patch = registry.require("timeline.apply_patch").spec
+    assert apply_patch.requires_artifacts == ["timeline_exists"]
+    assert apply_patch.emits_events == [
         "TimelineVersionCreated",
         "TimelineValidated",
         "TimelineValidationFailed",
