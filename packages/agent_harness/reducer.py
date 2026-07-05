@@ -14,6 +14,7 @@ from contracts.case import CaseState, RunningJobRef
 from contracts.decision import Decision, DecisionAnswer
 from contracts.events import (
     Actor,
+    AssetLinked,
     DecisionEventBase,
     DomainEventBase,
     VersionMode,
@@ -362,18 +363,59 @@ def _apply_project_created(context: _ReducerContext, event: DomainEventBase) -> 
 
 def _apply_project_update(context: _ReducerContext, event: DomainEventBase) -> None:
     project_id = _required_attr(event, "project_id")
+    if event.event == "ProjectCopied":
+        _apply_project_copied(context, event)
+        return
     if not _row_exists(context.connection, schema.projects, "project_id", project_id):
         _apply_project_created(context, event)
     values: dict[str, Any] = {"updated_at": context.created_at}
-    if event.event in {"ProjectRenamed", "ProjectCopied"}:
+    if event.event == "ProjectRenamed":
         values["name"] = str(
-            getattr(event, "name", None) or event.payload.get("name") or "Copied Project"
+            getattr(event, "name", None) or event.payload.get("name") or "Untitled Project"
         )
     if event.event == "ProjectTrashed":
         values["status"] = "trashed"
     context.connection.execute(
         update(schema.projects).where(schema.projects.c.project_id == project_id).values(**values)
     )
+
+
+def _apply_project_copied(context: _ReducerContext, event: DomainEventBase) -> None:
+    project_id = _required_attr(event, "project_id")
+    source_project_id = getattr(event, "source_project_id", None) or event.payload.get(
+        "source_project_id"
+    )
+    source_row = None
+    if isinstance(source_project_id, str):
+        source_row = context.connection.execute(
+            select(schema.projects).where(schema.projects.c.project_id == source_project_id)
+        ).first()
+    source_values = None if source_row is None else dict(source_row._mapping)
+    defaults = event.payload.get("defaults")
+    if defaults is None and source_values is not None:
+        defaults = load_json(source_values["defaults"])
+    if not _row_exists(context.connection, schema.projects, "project_id", project_id):
+        context.connection.execute(
+            schema.projects.insert().values(
+                project_id=project_id,
+                name=str(event.payload.get("name") or _copied_project_name(source_values)),
+                status=str(event.payload.get("status", "active")),
+                defaults=dump_json(defaults or {}),
+                created_at=str(event.payload.get("created_at", context.created_at)),
+                updated_at=str(event.payload.get("updated_at", context.created_at)),
+            )
+        )
+    else:
+        context.connection.execute(
+            update(schema.projects)
+            .where(schema.projects.c.project_id == project_id)
+            .values(
+                name=str(event.payload.get("name") or _copied_project_name(source_values)),
+                updated_at=context.created_at,
+            )
+        )
+    if isinstance(source_project_id, str):
+        _copy_project_asset_links(context, source_project_id, project_id)
 
 
 def _apply_case_created(context: _ReducerContext, event: DomainEventBase) -> None:
@@ -417,22 +459,317 @@ def _apply_case_created(context: _ReducerContext, event: DomainEventBase) -> Non
 
 def _apply_case_update(context: _ReducerContext, event: DomainEventBase) -> None:
     case_id = _required_attr(event, "case_id")
+    if event.event == "CaseCopied":
+        _apply_case_copied(context, event)
+        return
     state = context.load_case(case_id)
     patch: dict[str, Any] = {}
-    if event.event in {"CaseRenamed", "CaseCopied"}:
+    if event.event == "CaseRenamed":
         patch["name"] = str(getattr(event, "name", None) or event.payload.get("name") or state.name)
     if event.event == "CaseMoved":
-        patch["project_id"] = (
+        target_project_id = (
             getattr(event, "target_project_id", None)
             or event.payload.get("target_project_id")
             or state.project_id
         )
+        patch["project_id"] = target_project_id
+        if isinstance(target_project_id, str) and target_project_id != state.project_id:
+            _copy_case_asset_links_for_move(
+                context,
+                state,
+                source_project_id=state.project_id,
+                target_project_id=target_project_id,
+            )
     if event.event == "CaseClosed":
         patch["status"] = "closed"
     if event.event == "CaseTrashed":
         patch["status"] = "trashed"
     if patch:
         context.patch_case_state(case_id, patch)
+
+
+def _apply_case_copied(context: _ReducerContext, event: DomainEventBase) -> None:
+    case_id = _required_attr(event, "case_id")
+    if _row_exists(context.connection, schema.cases, "case_id", case_id):
+        context.load_case(case_id)
+        return
+    source_case_id = getattr(event, "source_case_id", None) or event.payload.get("source_case_id")
+    if not isinstance(source_case_id, str):
+        raise ValueError("CaseCopied requires source_case_id")
+    source = context.load_case(source_case_id)
+    project_id = event.project_id or event.payload.get("target_project_id") or source.project_id
+    if not isinstance(project_id, str):
+        raise ValueError("CaseCopied requires target project_id")
+    copied_data = source.model_dump(mode="json")
+    copied_data.update(
+        {
+            "case_id": case_id,
+            "project_id": project_id,
+            "name": str(event.payload.get("name") or f"{source.name} Copy"),
+            "state_version": 0,
+            "status": str(event.payload.get("status", source.status)),
+            "pending_decision_id": None,
+            "running_jobs": [],
+            "last_error": None,
+        }
+    )
+    copied = CaseState.model_validate(copied_data)
+    # 先建 cases 行再复制子表（timeline_versions/previews/exports 的外键指向 cases），
+    # 子表复制会重映射引用 id，最后回写 cases 行。
+    context.connection.execute(schema.cases.insert().values(**_case_insert_values(copied)))
+    copied = _copy_case_owned_rows(context, source, copied)
+    context.connection.execute(
+        schema.cases.update()
+        .where(schema.cases.c.case_id == case_id)
+        .values(**_case_insert_values(copied))
+    )
+    context.case_states[case_id] = copied
+    context.original_case_versions[case_id] = copied.state_version
+
+
+def _copied_project_name(source_values: Mapping[str, Any] | None) -> str:
+    if source_values is None:
+        return "Copied Project"
+    return f"{source_values['name']} Copy"
+
+
+def _copy_project_asset_links(
+    context: _ReducerContext,
+    source_project_id: str,
+    target_project_id: str,
+) -> None:
+    rows = context.connection.execute(
+        select(schema.project_asset_links).where(
+            schema.project_asset_links.c.project_id == source_project_id
+        )
+    ).all()
+    for row in rows:
+        values = dict(row._mapping)
+        asset_id = str(values["asset_id"])
+        if _row_exists_pair(
+            context.connection,
+            schema.project_asset_links,
+            {"project_id": target_project_id, "asset_id": asset_id},
+        ):
+            continue
+        context.connection.execute(
+            schema.project_asset_links.insert().values(
+                project_id=target_project_id,
+                asset_id=asset_id,
+                enabled=bool(values["enabled"]),
+                linked_at=context.created_at,
+                note=str(values["note"]),
+            )
+        )
+
+
+def _copy_case_asset_links_for_move(
+    context: _ReducerContext,
+    state: CaseState,
+    *,
+    source_project_id: str,
+    target_project_id: str,
+) -> None:
+    asset_ids = sorted(set(state.selected_asset_ids) | set(state.disabled_asset_ids))
+    for asset_id in asset_ids:
+        if _row_exists_pair(
+            context.connection,
+            schema.project_asset_links,
+            {"project_id": target_project_id, "asset_id": asset_id},
+        ):
+            continue
+        source_link = context.connection.execute(
+            select(schema.project_asset_links).where(
+                schema.project_asset_links.c.project_id == source_project_id,
+                schema.project_asset_links.c.asset_id == asset_id,
+            )
+        ).first()
+        payload = {
+            "enabled": True,
+            "linked_at": context.created_at,
+            "note": f"auto-linked for moved case {state.case_id}",
+        }
+        if source_link is not None:
+            source_values = dict(source_link._mapping)
+            payload["enabled"] = bool(source_values["enabled"])
+            payload["note"] = str(source_values["note"])
+        linked_event = AssetLinked(
+            project_id=target_project_id,
+            asset_id=asset_id,
+            actor=context.actor,
+            payload=payload,
+        )
+        _apply_asset_linked(context, linked_event)
+        context.events_to_log.append(validate_domain_event(linked_event))
+
+
+def _copy_case_owned_rows(
+    context: _ReducerContext,
+    source: CaseState,
+    copied: CaseState,
+) -> CaseState:
+    data = copied.model_dump(mode="json")
+    _copy_case_timeline_rows(context, source.case_id, copied.case_id)
+    if source.candidate_pack_id is not None:
+        data["candidate_pack_id"] = _copy_candidate_pack(
+            context,
+            source.candidate_pack_id,
+            copied.case_id,
+        )
+    data["preview_current_id"] = _copy_preview_ref(
+        context,
+        source.preview_current_id,
+        copied.case_id,
+    )
+    data["last_viewed_preview_id"] = _copy_preview_ref(
+        context,
+        source.last_viewed_preview_id,
+        copied.case_id,
+    )
+    data["export_current_id"] = _copy_export_ref(
+        context,
+        source.export_current_id,
+        copied.case_id,
+    )
+    return CaseState.model_validate(data)
+
+
+def _copy_candidate_pack(
+    context: _ReducerContext,
+    source_candidate_pack_id: str,
+    target_case_id: str,
+) -> str | None:
+    source_row = context.connection.execute(
+        select(schema.candidate_packs).where(
+            schema.candidate_packs.c.candidate_pack_id == source_candidate_pack_id
+        )
+    ).first()
+    if source_row is None:
+        return None
+    target_candidate_pack_id = f"{target_case_id}:{source_candidate_pack_id}"
+    if not _row_exists(
+        context.connection,
+        schema.candidate_packs,
+        "candidate_pack_id",
+        target_candidate_pack_id,
+    ):
+        source_values = dict(source_row._mapping)
+        context.connection.execute(
+            schema.candidate_packs.insert().values(
+                candidate_pack_id=target_candidate_pack_id,
+                case_id=target_case_id,
+                slots=source_values["slots"],
+                created_at=context.created_at,
+            )
+        )
+    return target_candidate_pack_id
+
+
+def _copy_case_timeline_rows(
+    context: _ReducerContext,
+    source_case_id: str,
+    target_case_id: str,
+) -> None:
+    rows = context.connection.execute(
+        select(schema.timeline_versions)
+        .where(schema.timeline_versions.c.case_id == source_case_id)
+        .order_by(schema.timeline_versions.c.version)
+    ).all()
+    for row in rows:
+        values = dict(row._mapping)
+        version = int(values["version"])
+        timeline_id = f"{target_case_id}:v{version}"
+        if _row_exists(context.connection, schema.timeline_versions, "timeline_id", timeline_id):
+            continue
+        context.connection.execute(
+            schema.timeline_versions.insert().values(
+                timeline_id=timeline_id,
+                case_id=target_case_id,
+                version=version,
+                parent_version=values["parent_version"],
+                created_by_patch_id=values["created_by_patch_id"],
+                document_json=dump_json(
+                    _remap_timeline_document(
+                        values["document_json"],
+                        case_id=target_case_id,
+                        timeline_id=timeline_id,
+                    )
+                ),
+                validation_report=values["validation_report"],
+                created_at=context.created_at,
+            )
+        )
+
+
+def _copy_preview_ref(
+    context: _ReducerContext,
+    source_preview_id: str | None,
+    target_case_id: str,
+) -> str | None:
+    if source_preview_id is None:
+        return None
+    source_row = context.connection.execute(
+        select(schema.previews).where(schema.previews.c.preview_id == source_preview_id)
+    ).first()
+    if source_row is None:
+        return None
+    target_preview_id = f"{target_case_id}:{source_preview_id}"
+    if not _row_exists(context.connection, schema.previews, "preview_id", target_preview_id):
+        values = dict(source_row._mapping)
+        context.connection.execute(
+            schema.previews.insert().values(
+                preview_id=target_preview_id,
+                case_id=target_case_id,
+                timeline_version=values["timeline_version"],
+                object_hash=values["object_hash"],
+                quality=values["quality"],
+                created_at=context.created_at,
+            )
+        )
+    return target_preview_id
+
+
+def _copy_export_ref(
+    context: _ReducerContext,
+    source_export_id: str | None,
+    target_case_id: str,
+) -> str | None:
+    if source_export_id is None:
+        return None
+    source_row = context.connection.execute(
+        select(schema.exports).where(schema.exports.c.export_id == source_export_id)
+    ).first()
+    if source_row is None:
+        return None
+    target_export_id = f"{target_case_id}:{source_export_id}"
+    if not _row_exists(context.connection, schema.exports, "export_id", target_export_id):
+        values = dict(source_row._mapping)
+        context.connection.execute(
+            schema.exports.insert().values(
+                export_id=target_export_id,
+                case_id=target_case_id,
+                timeline_version=values["timeline_version"],
+                object_hash=values["object_hash"],
+                quality=values["quality"],
+                created_at=context.created_at,
+            )
+        )
+    return target_export_id
+
+
+def _remap_timeline_document(
+    raw_document: Any,
+    *,
+    case_id: str,
+    timeline_id: str,
+) -> dict[str, Any]:
+    document = load_json(raw_document) if isinstance(raw_document, str) else raw_document
+    if not isinstance(document, Mapping):
+        raise ValueError("timeline document must be an object")
+    copied = dict(document)
+    copied["case_id"] = case_id
+    copied["timeline_id"] = timeline_id
+    return copied
 
 
 def _apply_asset_event(context: _ReducerContext, event: DomainEventBase) -> None:

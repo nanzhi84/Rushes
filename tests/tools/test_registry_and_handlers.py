@@ -54,7 +54,7 @@ def _handler(input_model: EmptyInput, context: ToolExecutionContext):
 def test_default_tool_and_patch_registries_match_m0_surface() -> None:
     registry = build_default_tool_registry()
 
-    assert {spec.name for spec in tool_specs()} == {
+    expected_tools = {
         "respond",
         "refuse",
         "finish_turn",
@@ -65,8 +65,29 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "interaction.show_preview",
         "interaction.show_timeline",
         "interaction.show_error",
+        "project.create",
+        "project.rename",
+        "project.delete",
+        "project.copy",
+        "project.create_case",
+        "project.move_case",
+        "project.close_case",
+        "project.list_tree",
     }
+    assert {spec.name for spec in tool_specs()} == expected_tools
     assert {spec.name for spec in registry.list_stable()} == {spec.name for spec in tool_specs()}
+    assert {"case.rename", "case.delete", "case.copy"}.isdisjoint(
+        {spec.name for spec in registry.list_stable()}
+    )
+    project_delete = registry.require("project.delete").spec
+    assert project_delete.requires_confirmation is True
+    assert project_delete.confirmation_decision_type == "destructive_project_action"
+    assert project_delete.emits_events == ["ProjectTrashed"]
+    project_move_case = registry.require("project.move_case").spec
+    assert project_move_case.requires_confirmation is True
+    assert project_move_case.confirmation_decision_type == "destructive_project_action"
+    assert project_move_case.emits_events == ["CaseMoved", "AssetLinked"]
+    assert registry.require("project.list_tree").spec.side_effects == []
     assert {spec.kind for spec in PATCH_OP_REGISTRY.list()} == {
         "delete_range",
         "replace_clip",

@@ -57,3 +57,22 @@ def test_stage_drafting_precedes_briefing_when_audio_plan_exists() -> None:
 def test_stage_refining_and_briefing_defaults() -> None:
     assert derive_stage(_case_state(rough_cut_approved=True, export_current_id=None)) == "refining"
     assert derive_stage(_case_state()) == "briefing"
+
+
+def test_exporting_signals_from_scratch_memory_and_running_jobs() -> None:
+    approved = {
+        "audio_plan": {"mode": "tts"},
+        "rough_cut_approved": True,
+        "rough_cut_approved_version": 1,
+    }
+    by_flag = _case_state(**approved, scratch_memory={"export_decision_answered": True})
+    assert derive_stage(by_flag) == "exporting"
+
+    by_confirm = _case_state(**approved, scratch_memory={"export_confirmed": True})
+    assert derive_stage(by_confirm) == "exporting"
+
+    by_job = _case_state(
+        **approved,
+        running_jobs=[{"job_id": "job_1", "kind": "render_final", "status": "running"}],
+    )
+    assert derive_stage(by_job) == "exporting"

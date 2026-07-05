@@ -1,8 +1,8 @@
-"""ToolSpec declarations for the M0 loop PR."""
+"""ToolSpec declarations for the Rushes tool registry."""
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -127,6 +127,64 @@ class ShowErrorInput(BaseModel):
     error_code: str
     retryable: bool = False
     metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class ProjectCreateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    name: str = "Untitled Project"
+    defaults: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectRenameInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    name: str
+
+
+class ProjectDeleteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+
+
+class ProjectCopyInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_project_id: str | None = None
+    project_id: str | None = None
+    name: str | None = None
+
+
+class ProjectCreateCaseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    case_id: str | None = None
+    name: str = "Untitled Case"
+    goal: str | None = None
+    brief: dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectMoveCaseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str | None = None
+    target_project_id: str
+
+
+class ProjectCloseCaseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str | None = None
+
+
+class ProjectListTreeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    include_trashed: bool = True
 
 
 def tool_specs() -> tuple[ToolSpec, ...]:
@@ -281,6 +339,137 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             emits_events=[],
             description="Emit a frontend-renderable structured error.",
         ),
+        ToolSpec(
+            name="project.create",
+            namespace="project",
+            version="1",
+            input_model=ProjectCreateInput,
+            result_model=None,
+            handler_ref="tools.project.create",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=False,
+            requires_active_case=False,
+            side_effects=["project"],
+            idempotency_key_fields=["project_id"],
+            emits_events=["ProjectCreated"],
+            description="Create a new Project.",
+        ),
+        ToolSpec(
+            name="project.rename",
+            namespace="project",
+            version="1",
+            input_model=ProjectRenameInput,
+            result_model=None,
+            handler_ref="tools.project.rename",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=["project"],
+            idempotency_key_fields=["project_id", "name"],
+            emits_events=["ProjectRenamed"],
+            description="Rename the active Project.",
+        ),
+        ToolSpec(
+            name="project.delete",
+            namespace="project",
+            version="1",
+            input_model=ProjectDeleteInput,
+            result_model=None,
+            handler_ref="tools.project.delete",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            requires_confirmation=True,
+            confirmation_decision_type="destructive_project_action",
+            side_effects=["project"],
+            idempotency_key_fields=["project_id"],
+            emits_events=["ProjectTrashed"],
+            description="Soft-delete the active Project after confirmation.",
+        ),
+        ToolSpec(
+            name="project.copy",
+            namespace="project",
+            version="1",
+            input_model=ProjectCopyInput,
+            result_model=None,
+            handler_ref="tools.project.copy",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=["project"],
+            idempotency_key_fields=["source_project_id", "project_id"],
+            emits_events=["ProjectCopied"],
+            description="Copy the active Project and its asset links without copying Cases.",
+        ),
+        ToolSpec(
+            name="project.create_case",
+            namespace="project",
+            version="1",
+            input_model=ProjectCreateCaseInput,
+            result_model=None,
+            handler_ref="tools.project.create_case",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=["project", "case"],
+            idempotency_key_fields=["project_id", "case_id"],
+            emits_events=["CaseCreated"],
+            description="Create a Case in the active Project.",
+        ),
+        ToolSpec(
+            name="project.move_case",
+            namespace="project",
+            version="1",
+            input_model=ProjectMoveCaseInput,
+            result_model=None,
+            handler_ref="tools.project.move_case",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            requires_confirmation=True,
+            confirmation_decision_type="destructive_project_action",
+            side_effects=["project", "case", "asset"],
+            idempotency_key_fields=["case_id", "target_project_id"],
+            emits_events=["CaseMoved", "AssetLinked"],
+            description="Move the active Case to another Project after confirmation.",
+        ),
+        ToolSpec(
+            name="project.close_case",
+            namespace="project",
+            version="1",
+            input_model=ProjectCloseCaseInput,
+            result_model=None,
+            handler_ref="tools.project.close_case",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["case"],
+            idempotency_key_fields=["case_id"],
+            emits_events=["CaseClosed"],
+            description="Close the active Case without deleting it.",
+        ),
+        ToolSpec(
+            name="project.list_tree",
+            namespace="project",
+            version="1",
+            input_model=ProjectListTreeInput,
+            result_model=None,
+            handler_ref="tools.project.list_tree",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=False,
+            requires_active_case=False,
+            side_effects=[],
+            emits_events=[],
+            description="Return the Project/Case two-level tree.",
+        ),
     )
 
 
@@ -382,6 +571,16 @@ def build_default_tool_registry() -> ToolRegistry:
         show_progress,
         show_timeline,
     )
+    from .project import (
+        close_case,
+        copy,
+        create,
+        create_case,
+        delete,
+        list_tree,
+        move_case,
+        rename,
+    )
 
     handlers: dict[str, ToolHandler] = {
         "respond": respond,
@@ -394,6 +593,14 @@ def build_default_tool_registry() -> ToolRegistry:
         "interaction.show_preview": show_preview,
         "interaction.show_timeline": show_timeline,
         "interaction.show_error": show_error,
+        "project.create": create,
+        "project.rename": rename,
+        "project.delete": delete,
+        "project.copy": copy,
+        "project.create_case": create_case,
+        "project.move_case": move_case,
+        "project.close_case": close_case,
+        "project.list_tree": list_tree,
     }
     registry = ToolRegistry()
     for spec in tool_specs():
