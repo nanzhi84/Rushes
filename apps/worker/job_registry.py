@@ -10,6 +10,7 @@ import httpx
 from sqlalchemy.engine import Engine
 
 from contracts.jobs import Job
+from providers import ProviderGateway
 from storage.workspace_paths import WorkspacePaths
 
 
@@ -85,10 +86,12 @@ def build_default_job_registry(
     engine: Engine | None = None,
     workspace_paths: WorkspacePaths | None = None,
     http_transport: httpx.AsyncBaseTransport | None = None,
+    provider_gateway: ProviderGateway | None = None,
 ) -> JobHandlerRegistry:
     registry = JobHandlerRegistry()
     registry.register("noop", noop_handler)
     if engine is not None:
+        from .annotation_jobs import build_annotation_handler
         from .media_jobs import (
             build_import_url_handler,
             build_proxy_handler,
@@ -97,6 +100,10 @@ def build_default_job_registry(
 
         paths = workspace_paths or workspace_paths_from_engine(engine)
         registry.register("proxy", build_proxy_handler(engine, paths))
+        registry.register(
+            "annotation",
+            build_annotation_handler(engine, paths, gateway=provider_gateway),
+        )
         registry.register(
             "import_url",
             build_import_url_handler(engine, paths, http_transport=http_transport),

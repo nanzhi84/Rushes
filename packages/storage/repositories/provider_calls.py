@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import Connection
 
 from storage import schema
@@ -38,3 +38,16 @@ class ProviderCallsRepository:
             select(schema.provider_calls).where(schema.provider_calls.c.case_id == case_id)
         ).all()
         return [decode_json_columns(dict(row._mapping), JSON_COLUMNS) for row in rows]
+
+    def sum_cost_for_project(self, project_id: str) -> float:
+        value = self._connection.execute(
+            select(func.coalesce(func.sum(schema.provider_calls.c.cost_estimate), 0.0))
+            .select_from(
+                schema.provider_calls.join(
+                    schema.jobs,
+                    schema.jobs.c.job_id == schema.provider_calls.c.job_id,
+                )
+            )
+            .where(schema.jobs.c.project_id == project_id)
+        ).scalar_one()
+        return float(value or 0.0)
