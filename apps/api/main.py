@@ -54,6 +54,7 @@ from storage.repositories import (
 from storage.repositories._json import load_json
 from storage.repositories.projects import ProjectsRepository
 
+from . import schemas as api_schemas
 from .deps import (
     MEDIA_EXTENSIONS,
     ApiState,
@@ -248,6 +249,40 @@ def _planner_from_env(engine: Engine) -> LLMPlanner | None:
     )
 
 
+def _response_docs(
+    *,
+    mutation: bool = False,
+    not_found: bool = False,
+    conflict: bool = False,
+    path_escape: bool = False,
+) -> dict[int | str, dict[str, Any]]:
+    responses: dict[int | str, dict[str, Any]] = {
+        401: {"model": api_schemas.SecurityRefusalResponse},
+        403: {"model": api_schemas.SecurityRefusalResponse},
+    }
+    if path_escape:
+        responses[403] = {
+            "description": "Forbidden",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "oneOf": [
+                            {"$ref": "#/components/schemas/SecurityRefusalResponse"},
+                            {"$ref": "#/components/schemas/ErrorResponse"},
+                        ]
+                    }
+                }
+            },
+        }
+    if mutation:
+        responses[415] = {"model": api_schemas.SecurityRefusalResponse}
+    if not_found:
+        responses[404] = {"model": api_schemas.ErrorResponse}
+    if conflict:
+        responses[409] = {"model": api_schemas.ErrorResponse}
+    return responses
+
+
 def _register_lifecycle(app: FastAPI) -> None:
     @app.on_event("startup")
     async def _startup() -> None:
@@ -263,7 +298,12 @@ def _register_lifecycle(app: FastAPI) -> None:
 
 
 def _register_routes(app: FastAPI) -> None:
-    @app.post("/api/projects", status_code=status.HTTP_201_CREATED)
+    @app.post(
+        "/api/projects",
+        status_code=status.HTTP_201_CREATED,
+        response_model=api_schemas.ProjectMutationResponse,
+        responses=_response_docs(mutation=True, conflict=True),
+    )
     async def create_project(payload: ProjectCreateRequest, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         project_id = payload.project_id or _new_id("project")
@@ -281,23 +321,39 @@ def _register_routes(app: FastAPI) -> None:
         project = _require_project(state.engine, project_id)
         return {"project": project, "event_ids": _event_ids(result)}
 
-    @app.get("/api/projects")
+    @app.get(
+        "/api/projects",
+        response_model=api_schemas.ProjectListResponse,
+        responses=_response_docs(),
+    )
     async def list_projects(request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         return {"projects": _list_projects(state.engine)}
 
-    @app.get("/api/project-tree")
+    @app.get(
+        "/api/project-tree",
+        response_model=api_schemas.ProjectTreeResponse,
+        responses=_response_docs(),
+    )
     async def project_tree(request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         return {"projects": _project_tree(state.engine)}
 
-    @app.get("/api/projects/{project_id}")
+    @app.get(
+        "/api/projects/{project_id}",
+        response_model=api_schemas.ProjectPageResponse,
+        responses=_response_docs(not_found=True),
+    )
     async def get_project(project_id: str, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         _require_project(state.engine, project_id)
         return _project_page_payload(state.engine, project_id)
 
-    @app.patch("/api/projects/{project_id}")
+    @app.patch(
+        "/api/projects/{project_id}",
+        response_model=api_schemas.ProjectMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
     async def rename_project(
         project_id: str,
         payload: ProjectUpdateRequest,
@@ -317,7 +373,11 @@ def _register_routes(app: FastAPI) -> None:
             "event_ids": _event_ids(result),
         }
 
-    @app.delete("/api/projects/{project_id}")
+    @app.delete(
+        "/api/projects/{project_id}",
+        response_model=api_schemas.ProjectMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
     async def delete_project(
         project_id: str,
         payload: ConfirmRequest,
@@ -334,7 +394,12 @@ def _register_routes(app: FastAPI) -> None:
             "event_ids": _event_ids(result),
         }
 
-    @app.post("/api/projects/{project_id}/copy", status_code=status.HTTP_201_CREATED)
+    @app.post(
+        "/api/projects/{project_id}/copy",
+        status_code=status.HTTP_201_CREATED,
+        response_model=api_schemas.ProjectMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
     async def copy_project(
         project_id: str,
         payload: ProjectCopyRequest,
@@ -355,7 +420,12 @@ def _register_routes(app: FastAPI) -> None:
             "event_ids": _event_ids(result),
         }
 
-    @app.post("/api/projects/{project_id}/cases", status_code=status.HTTP_201_CREATED)
+    @app.post(
+        "/api/projects/{project_id}/cases",
+        status_code=status.HTTP_201_CREATED,
+        response_model=api_schemas.CaseMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
     async def create_case(
         project_id: str,
         payload: CaseCreateRequest,
@@ -379,12 +449,20 @@ def _register_routes(app: FastAPI) -> None:
         case = _require_case(state.engine, project_id, case_id)
         return {"case": case, "event_ids": _event_ids(result)}
 
-    @app.get("/api/projects/{project_id}/cases/{case_id}")
+    @app.get(
+        "/api/projects/{project_id}/cases/{case_id}",
+        response_model=api_schemas.CaseResponse,
+        responses=_response_docs(not_found=True),
+    )
     async def get_case(project_id: str, case_id: str, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         return {"case": _require_case(state.engine, project_id, case_id)}
 
-    @app.patch("/api/projects/{project_id}/cases/{case_id}")
+    @app.patch(
+        "/api/projects/{project_id}/cases/{case_id}",
+        response_model=api_schemas.CaseMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
     async def rename_case(
         project_id: str,
         case_id: str,
@@ -406,7 +484,11 @@ def _register_routes(app: FastAPI) -> None:
             "event_ids": _event_ids(result),
         }
 
-    @app.delete("/api/projects/{project_id}/cases/{case_id}")
+    @app.delete(
+        "/api/projects/{project_id}/cases/{case_id}",
+        response_model=api_schemas.CaseMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
     async def delete_case(
         project_id: str,
         case_id: str,
@@ -427,6 +509,8 @@ def _register_routes(app: FastAPI) -> None:
     @app.post(
         "/api/projects/{project_id}/cases/{case_id}/copy",
         status_code=status.HTTP_201_CREATED,
+        response_model=api_schemas.CaseMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
     )
     async def copy_case(
         project_id: str,
@@ -450,7 +534,11 @@ def _register_routes(app: FastAPI) -> None:
             "event_ids": _event_ids(result),
         }
 
-    @app.post("/api/projects/{project_id}/cases/{case_id}/move")
+    @app.post(
+        "/api/projects/{project_id}/cases/{case_id}/move",
+        response_model=api_schemas.CaseMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
     async def move_case(
         project_id: str,
         case_id: str,
@@ -477,6 +565,8 @@ def _register_routes(app: FastAPI) -> None:
     @app.post(
         "/api/projects/{project_id}/cases/{case_id}/messages",
         status_code=status.HTTP_202_ACCEPTED,
+        response_model=api_schemas.MessageQueuedResponse,
+        responses=_response_docs(mutation=True, not_found=True),
     )
     async def enqueue_message(
         project_id: str,
@@ -519,7 +609,12 @@ def _register_routes(app: FastAPI) -> None:
             "message_id": message_id,
         }
 
-    @app.get("/api/projects/{project_id}/cases/{case_id}/decisions/current")
+    @app.get(
+        "/api/projects/{project_id}/cases/{case_id}/decisions/current",
+        response_model=api_schemas.CurrentDecisionResponse,
+        response_model_exclude_unset=True,
+        responses=_response_docs(not_found=True),
+    )
     async def current_decision(project_id: str, case_id: str, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         case = _require_case(state.engine, project_id, case_id)
@@ -532,7 +627,11 @@ def _register_routes(app: FastAPI) -> None:
             return {"decision": None}
         return {"decision": decision}
 
-    @app.post("/api/decisions/{decision_id}/answer")
+    @app.post(
+        "/api/decisions/{decision_id}/answer",
+        response_model=api_schemas.DecisionAnswerResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
     async def answer_decision(
         decision_id: str,
         payload: DecisionAnswerRequest,
@@ -562,7 +661,11 @@ def _register_routes(app: FastAPI) -> None:
             "replays_enqueued": replay_count,
         }
 
-    @app.post("/api/jobs/{job_id}/cancel")
+    @app.post(
+        "/api/jobs/{job_id}/cancel",
+        response_model=api_schemas.JobCancelResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
     async def cancel_job(
         job_id: str,
         payload: JobCancelRequest,
@@ -593,7 +696,11 @@ def _register_routes(app: FastAPI) -> None:
             )
         return {"job_id": job_id, "status": "cancelled", "event_ids": _event_ids(result)}
 
-    @app.get("/api/fs/roots")
+    @app.get(
+        "/api/fs/roots",
+        response_model=api_schemas.FsRootsResponse,
+        responses=_response_docs(),
+    )
     async def fs_roots(request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         return {
@@ -607,7 +714,12 @@ def _register_routes(app: FastAPI) -> None:
             ]
         }
 
-    @app.get("/api/fs/list")
+    @app.get(
+        "/api/fs/list",
+        response_model=api_schemas.FsListResponse,
+        response_model_exclude_none=True,
+        responses=_response_docs(not_found=True, path_escape=True),
+    )
     async def fs_list(path: str, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         try:
@@ -619,7 +731,11 @@ def _register_routes(app: FastAPI) -> None:
         entries = _list_media_entries(root)
         return {"path": str(root), "entries": entries}
 
-    @app.get("/api/projects/{project_id}/cases/{case_id}/events")
+    @app.get(
+        "/api/projects/{project_id}/cases/{case_id}/events",
+        response_class=StreamingResponse,
+        responses=_response_docs(not_found=True),
+    )
     async def case_events(
         project_id: str,
         case_id: str,
@@ -629,7 +745,11 @@ def _register_routes(app: FastAPI) -> None:
         _require_case(state.engine, project_id, case_id)
         return _sse_response(request, state.engine, route_case(case_id))
 
-    @app.get("/api/events")
+    @app.get(
+        "/api/events",
+        response_class=StreamingResponse,
+        responses=_response_docs(),
+    )
     async def workspace_events(request: Request) -> StreamingResponse:
         state = state_from_request(request)
         return _sse_response(request, state.engine, route_workspace())
