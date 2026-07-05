@@ -14,7 +14,7 @@ from sqlalchemy.engine import Connection, Engine
 
 from contracts.case import CaseState
 from contracts.decision import Decision, PendingToolCall
-from contracts.events import Actor, DomainEventBase, JobEnqueued
+from contracts.events import Actor, CapabilityDegraded, DomainEventBase, JobEnqueued
 from contracts.project import ProjectState
 from contracts.timeline import TimelineState
 from contracts.tool import PatchOpSpec, ToolSpec
@@ -33,6 +33,7 @@ from storage.repositories._json import load_json
 from tools import PATCH_OP_REGISTRY, ToolExecutionContext, ToolRegistry, build_default_tool_registry
 
 from .context_builder import ContextBuilder, ContextBuildInput, ContextBundle, ContextMessage
+from .decision_answering import DecisionAnswerResolver
 from .policy_gate import PolicyContext, PolicyGate, ToolCall, Verdict, mark_replayed, next_replay
 from .reducer import ReducerApplyResult, apply
 from .tool_router import ToolRouter
@@ -120,6 +121,7 @@ async def run_turn(
     stop_token: StopToken | None = None,
     turn_id: str | None = None,
     trace_recorder: TraceRecorder | NullTraceRecorder | None = None,
+    decision_answer_resolver: DecisionAnswerResolver | None = None,
     max_illegal_outputs: int = DEFAULT_MAX_ILLEGAL_OUTPUTS,
     max_nonblocking_tools: int = DEFAULT_MAX_NONBLOCKING_TOOLS,
     max_tool_attempts: int = DEFAULT_MAX_TOOL_ATTEMPTS,
@@ -143,6 +145,29 @@ async def run_turn(
     await _record_incoming_item(item, engine=engine, turn_id=active_turn_id)
 
     replay_call = _replay_tool_call_from_item(item)
+    if replay_call is None and decision_answer_resolver is not None:
+        preflight_forced_reason = await _maybe_answer_pending_decision_from_user_message(
+            item,
+            decision_answer_resolver,
+            router,
+            policy_gate,
+            engine=engine,
+            turn_id=active_turn_id,
+            turn_queue=turn_queue,
+            accumulator=accumulator,
+            tracer=tracer,
+        )
+        if preflight_forced_reason is not None:
+            return RunTurnResult(
+                turn_id=active_turn_id,
+                case_id=item.case_id,
+                outcome="forced_end",
+                tool_calls=tuple(accumulator.tool_calls),
+                tool_results=tuple(accumulator.tool_results),
+                reducer_results=tuple(accumulator.reducer_results),
+                replays_enqueued=tuple(accumulator.replays_enqueued),
+                forced_reason=preflight_forced_reason,
+            )
     illegal_outputs = 0
     nonblocking_tools = 0
     attempts = 0
@@ -456,6 +481,166 @@ def _build_context(policy_gate: PolicyGate, loaded: _LoadedState) -> ContextBund
             messages=loaded.messages,
         )
     )
+
+
+async def _maybe_answer_pending_decision_from_user_message(
+    item: TurnQueueItem,
+    resolver: DecisionAnswerResolver,
+    router: ToolRouter,
+    policy_gate: PolicyGate,
+    *,
+    engine: Engine,
+    turn_id: str,
+    turn_queue: TurnQueue | None,
+    accumulator: _RunAccumulator,
+    tracer: TraceRecorder | NullTraceRecorder,
+) -> str | None:
+    if item.kind != "user_message":
+        return None
+    user_message = str(item.payload.get("content", ""))
+    if user_message == "":
+        return None
+    loaded = _load_state(engine, item.case_id)
+    if loaded.pending_decision is None:
+        return None
+    try:
+        resolution = await resolver.resolve(
+            case_state=loaded.case_state,
+            decision=loaded.pending_decision,
+            user_message=user_message,
+        )
+    except Exception as exc:
+        event = CapabilityDegraded(
+            degradation_id=_degradation_id(turn_id, loaded.pending_decision.decision_id),
+            case_id=item.case_id,
+            capability="llm.chat",
+            provider_id=None,
+            reason=f"decision answer resolver failed: {exc}",
+            fallback="planner",
+            payload={"decision_id": loaded.pending_decision.decision_id},
+        )
+        reducer_result = _apply_events((event,), engine=engine, base_version=None, actor="system")
+        accumulator.reducer_results.append(reducer_result)
+        tracer.record(
+            "action",
+            {
+                "stage": "decision_answering",
+                "decision_id": loaded.pending_decision.decision_id,
+                "status": "degraded",
+                "reason": str(exc),
+            },
+        )
+        tracer.record("events", _events_payload((event,), reducer_result))
+        return None
+    if resolution.answer is None:
+        tracer.record(
+            "action",
+            {
+                "stage": "decision_answering",
+                "decision_id": loaded.pending_decision.decision_id,
+                "status": "unanswered",
+            },
+        )
+        return None
+
+    tool_call = ToolCall(
+        tool_name="decision.answer",
+        arguments={
+            "decision_id": loaded.pending_decision.decision_id,
+            "answer": resolution.answer.model_dump(mode="json"),
+        },
+        tool_call_id=f"natural_answer_{turn_id}",
+    )
+    accumulator.tool_calls.append(tool_call)
+    context_bundle = _build_context(policy_gate, loaded)
+    tracer.record(
+        "context",
+        {
+            "token_counts": context_bundle.token_counts,
+            "allowed_tools": [spec.name for spec in context_bundle.allowed_tools],
+            "turn_item": {
+                "kind": item.kind,
+                "item_id": item.item_id,
+                "payload_keys": sorted(item.payload),
+            },
+            "decision_answering": "natural_language",
+        },
+    )
+    tracer.record("action", {"tool_call": tool_call.model_dump(mode="json")})
+    verdict = policy_gate.adjudicate(
+        tool_call,
+        PolicyContext(
+            preconditions=context_bundle_input_preconditions(loaded),
+            decisions=loaded.decisions,
+            pending_decision=loaded.pending_decision,
+            allowed_tools=tuple(context_bundle.allowed_tools),
+        ),
+    )
+    tracer.record("gate", _verdict_payload(verdict))
+    if verdict.status != "allow":
+        synthetic_result = _synthetic_tool_result(tool_call, "failed", verdict.reason)
+        accumulator.tool_results.append(synthetic_result)
+        tracer.record("tool_result", _tool_result_payload(synthetic_result))
+        reducer_result = _apply_events(
+            verdict.events,
+            engine=engine,
+            base_version=loaded.case_state.state_version,
+            actor="agent",
+        )
+        accumulator.reducer_results.append(reducer_result)
+        tracer.record("events", _events_payload(verdict.events, reducer_result))
+        forced = _force_respond(
+            router,
+            engine=engine,
+            state=loaded,
+            turn_id=turn_id,
+            message=(f"自然语言回答没有通过决策归约校验，已停止本回合。卡点：{verdict.reason}"),
+            reason="natural_language_decision_answer_denied",
+            accumulator=accumulator,
+            tracer=tracer,
+        )
+        accumulator.tool_results.append(forced)
+        return "natural_language_decision_answer_denied"
+
+    result = _execute_tool(
+        router,
+        tool_call,
+        engine=engine,
+        state=loaded,
+        turn_id=turn_id,
+    )
+    accumulator.tool_results.append(result)
+    tracer.record("tool_result", _tool_result_payload(result))
+    reducer_result = _apply_events(
+        result.events,
+        engine=engine,
+        base_version=loaded.case_state.state_version,
+        actor="user",
+    )
+    accumulator.reducer_results.append(reducer_result)
+    tracer.record("events", _events_payload(result.events, reducer_result))
+    if reducer_result.status != "applied":
+        forced = _force_respond(
+            router,
+            engine=engine,
+            state=loaded,
+            turn_id=turn_id,
+            message=(
+                f"自然语言回答归约写入失败，已停止本回合。{_reducer_diagnostic(reducer_result)}"
+            ),
+            reason=f"reducer_{reducer_result.status}",
+            accumulator=accumulator,
+            tracer=tracer,
+        )
+        accumulator.tool_results.append(forced)
+        return f"reducer_{reducer_result.status}"
+    enqueued = await _handle_followups(
+        reducer_result,
+        engine=engine,
+        turn_queue=turn_queue,
+    )
+    accumulator.replays_enqueued.extend(enqueued)
+    return None
 
 
 def _load_state(engine: Engine, case_id: str) -> _LoadedState:
@@ -1003,6 +1188,11 @@ def _asset_id_for_url_import(project_id: str, arguments: Mapping[str, Any]) -> s
 
 def _replayed_tool_call_id(decision_id: str) -> str:
     return f"replay_{decision_id}"
+
+
+def _degradation_id(turn_id: str, decision_id: str) -> str:
+    digest = hashlib.sha256(f"{turn_id}:{decision_id}:decision_answering".encode()).hexdigest()
+    return f"degraded_{digest[:20]}"
 
 
 def _turn_id(item: TurnQueueItem) -> str:

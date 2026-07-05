@@ -84,7 +84,12 @@ def retry(input_model: AnnotationRetryInput, context: ToolExecutionContext) -> T
             "only failed annotations can be retried",
         )
     pass_ = input_model.pass_ or _pass_from_asset(asset)
-    event = _annotation_job_event(project_id=project_id, asset_id=input_model.asset_id, pass_=pass_)
+    event = _annotation_job_event(
+        project_id=project_id,
+        asset_id=input_model.asset_id,
+        pass_=pass_,
+        retry_key=context.tool_call_id,
+    )
     return ToolResult(
         tool_call_id=context.tool_call_id,
         tool_name="annotation.retry",
@@ -137,8 +142,12 @@ def _annotation_job_event(
     project_id: str,
     asset_id: str,
     pass_: Literal["cheap", "deep"],
+    retry_key: str | None = None,
 ) -> JobEnqueued:
     idempotency_key = f"asset:{asset_id}:annotation:{pass_}"
+    if retry_key is not None:
+        retry_digest = hashlib.sha256(retry_key.encode()).hexdigest()[:12]
+        idempotency_key = f"{idempotency_key}:retry:{retry_digest}"
     return JobEnqueued(
         job_id=_job_id("annotation", idempotency_key),
         project_id=project_id,

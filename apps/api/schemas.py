@@ -71,12 +71,20 @@ class ProjectPageActions(ApiResponseModel):
     materials: str
 
 
+class CostSummary(ApiResponseModel):
+    provider_call_count: int
+    total_cost_estimate: float
+    by_capability: dict[str, float]
+    by_provider: dict[str, float]
+
+
 class ProjectPageResponse(ApiResponseModel):
     project: ProjectRecord
     cases: list[ProjectPageCase]
     case_count: int
     asset_count: int
     memory_count: int
+    costs: CostSummary
     actions: ProjectPageActions
 
 
@@ -128,11 +136,22 @@ class CurrentDecisionResponse(ApiResponseModel):
     decision: Decision | None
 
 
+class PendingDecisionsResponse(ApiResponseModel):
+    project_id: str
+    decisions: list[Decision]
+
+
 class DecisionAnswerResponse(ApiResponseModel):
     decision_id: str
     status: Literal["answered"]
     event_ids: list[int]
     replays_enqueued: int
+
+
+class CaseCostsResponse(ApiResponseModel):
+    project_id: str
+    case_id: str
+    costs: CostSummary
 
 
 class JobCancelResponse(ApiResponseModel):

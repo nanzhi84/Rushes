@@ -17,12 +17,18 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
-from contracts.events import AssetImported, ProjectCreated
+from contracts.events import (
+    AnnotationFailed,
+    AssetImported,
+    AssetLinked,
+    CaseCreated,
+    ProjectCreated,
+)
 from storage import schema
 from storage.db import begin_immediate
 from storage.object_store import ObjectStore
 from storage.repositories import EventLogRepository, JobsRepository
-from storage.repositories._json import load_json
+from storage.repositories._json import dump_json, load_json
 from storage.workspace_paths import WorkspacePaths, resolve_asset_path
 
 TOKEN = "test-token"
@@ -120,6 +126,95 @@ def test_import_url_route_creates_project_decision_and_answer_enqueues_project_j
     assert job["kind"] == "import_url"
     assert job["project_id"] == "project_1"
     assert job["case_id"] is None
+
+
+def test_project_pending_decisions_route_lists_project_scope_decisions(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+
+    created = client.post(
+        "/api/projects/project_1/materials/import-url",
+        headers=AUTH,
+        json={"url": "https://example.test/clip.mp4", "filename": "clip.mp4"},
+    )
+    listed = client.get("/api/projects/project_1/decisions/pending", headers=AUTH)
+    missing = client.get("/api/projects/missing/decisions/pending", headers=AUTH)
+
+    assert created.status_code == 200
+    assert listed.status_code == 200
+    decisions = listed.json()["decisions"]
+    assert [decision["decision_id"] for decision in decisions] == [created.json()["decision_id"]]
+    assert decisions[0]["scope_type"] == "project"
+    assert decisions[0]["case_id"] is None
+    assert missing.status_code == 404
+
+
+def test_retry_annotation_route_requeues_failed_asset_and_resets_status(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _seed_failed_annotation_asset(_engine(app))
+
+    retried = client.post(
+        "/api/projects/project_1/materials/asset_1/retry-annotation",
+        headers=AUTH,
+        json={},
+    )
+    missing = client.post(
+        "/api/projects/project_1/materials/missing/retry-annotation",
+        headers=AUTH,
+        json={},
+    )
+
+    assert retried.status_code == 200
+    assert retried.json()["job_id"] is not None
+    assert missing.status_code == 404
+    with _engine(app).connect() as connection:
+        asset = (
+            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == "asset_1"))
+            .one()
+            ._mapping
+        )
+        job = connection.execute(select(schema.jobs)).one()._mapping
+    assert asset["annotation_status"] == "pending"
+    assert asset["failure"] is None
+    assert job["kind"] == "annotation"
+    assert "JobEnqueued" in _event_types(app)
+
+
+def test_cost_routes_and_project_page_aggregate_provider_calls(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _seed_project_case(_engine(app))
+    _apply_events(
+        _engine(app),
+        CaseCreated(
+            project_id="project_1",
+            case_id="case_2",
+            payload={"name": "Case 2", "brief": {"goal": "second"}},
+        ),
+        ProjectCreated(project_id="project_2", name="Other"),
+        CaseCreated(
+            project_id="project_2",
+            case_id="case_other",
+            payload={"name": "Other Case", "brief": {"goal": "other"}},
+        ),
+    )
+    _insert_provider_cost_rows(_engine(app))
+
+    case_costs = client.get("/api/projects/project_1/cases/case_1/costs", headers=AUTH)
+    project_page = client.get("/api/projects/project_1", headers=AUTH)
+    missing_case = client.get("/api/projects/project_1/cases/missing/costs", headers=AUTH)
+
+    assert case_costs.status_code == 200
+    assert case_costs.json()["costs"]["provider_call_count"] == 1
+    assert case_costs.json()["costs"]["total_cost_estimate"] == 0.25
+    assert project_page.status_code == 200
+    project_costs = project_page.json()["costs"]
+    assert project_costs["provider_call_count"] == 3
+    assert project_costs["total_cost_estimate"] == 2.0
+    assert project_costs["by_capability"] == {"llm.chat": 0.25, "vlm.annotation": 1.75}
+    assert missing_case.status_code == 404
 
 
 async def test_import_url_job_downloads_only_that_url_and_enqueues_proxy(tmp_path: Path) -> None:
@@ -437,6 +532,140 @@ def _create_case(client: TestClient):
         headers=AUTH,
         json={"case_id": "case_1", "name": "Case", "brief": {"goal": "test"}},
     )
+
+
+def _seed_project_case(engine: Engine) -> None:
+    _apply_events(
+        engine,
+        ProjectCreated(project_id="project_1", name="Project"),
+        CaseCreated(
+            project_id="project_1",
+            case_id="case_1",
+            payload={"name": "Case", "brief": {"goal": "test"}},
+        ),
+    )
+
+
+def _seed_failed_annotation_asset(engine: Engine) -> None:
+    _apply_events(
+        engine,
+        ProjectCreated(project_id="project_1", name="Project"),
+        AssetImported(
+            project_id="project_1",
+            asset_id="asset_1",
+            payload={
+                "storage_mode": "reference",
+                "reference_path": "/tmp/source.mp4",
+                "kind": "video",
+                "source": "local_path",
+                "filename": "source.mp4",
+                "hash": "hash",
+                "mtime": 1,
+                "size": 1,
+                "ingest_status": "failed",
+                "annotation_status": "failed",
+                "annotation_pass": "cheap",
+                "index_status": "partial",
+                "usable": False,
+                "failure": {
+                    "error_code": "annotation_failed",
+                    "message": "failed",
+                    "retryable": True,
+                },
+            },
+        ),
+        AssetLinked(project_id="project_1", asset_id="asset_1"),
+        AnnotationFailed(
+            project_id="project_1",
+            asset_id="asset_1",
+            payload={
+                "failure": {
+                    "error_code": "annotation_failed",
+                    "message": "failed",
+                    "retryable": True,
+                }
+            },
+        ),
+    )
+
+
+def _insert_provider_cost_rows(engine: Engine) -> None:
+    with begin_immediate(engine) as connection:
+        connection.execute(
+            schema.jobs.insert().values(
+                job_id="job_project",
+                kind="annotation",
+                status="succeeded",
+                project_id="project_1",
+                case_id=None,
+                requested_by_case_id=None,
+                asset_id=None,
+                idempotency_key="job_project",
+                payload_json=dump_json({}),
+                result_json=None,
+                error_json=None,
+                attempts=0,
+                max_retries=0,
+                next_run_at="2026-07-04T00:00:00+00:00",
+                progress=None,
+                worker_id=None,
+                heartbeat_at=None,
+                created_at="2026-07-04T00:00:00+00:00",
+                started_at=None,
+                finished_at="2026-07-04T00:00:01+00:00",
+            )
+        )
+        rows = [
+            {
+                "call_id": "call_case_1",
+                "provider_id": "fast",
+                "capability": "llm.chat",
+                "model": "planner",
+                "case_id": "case_1",
+                "job_id": None,
+                "latency_ms": 10,
+                "usage_json": dump_json({}),
+                "cost_estimate": 0.25,
+                "status": "succeeded",
+            },
+            {
+                "call_id": "call_case_2",
+                "provider_id": "slow",
+                "capability": "vlm.annotation",
+                "model": "vlm",
+                "case_id": "case_2",
+                "job_id": None,
+                "latency_ms": 20,
+                "usage_json": dump_json({}),
+                "cost_estimate": 0.5,
+                "status": "succeeded",
+            },
+            {
+                "call_id": "call_project_job",
+                "provider_id": "slow",
+                "capability": "vlm.annotation",
+                "model": "vlm",
+                "case_id": None,
+                "job_id": "job_project",
+                "latency_ms": 30,
+                "usage_json": dump_json({}),
+                "cost_estimate": 1.25,
+                "status": "succeeded",
+            },
+            {
+                "call_id": "call_other",
+                "provider_id": "other",
+                "capability": "llm.chat",
+                "model": "planner",
+                "case_id": "case_other",
+                "job_id": None,
+                "latency_ms": 40,
+                "usage_json": dump_json({}),
+                "cost_estimate": 9.0,
+                "status": "succeeded",
+            },
+        ]
+        connection.execute(schema.provider_calls.insert(), rows)
 
 
 def _apply_events(engine: Engine, *events: Any) -> None:
