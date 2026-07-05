@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,6 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
-from agent_harness.reducer import apply
 from contracts.events import AssetInvalidated
 from storage import schema
 from storage.object_store import CHUNK_SIZE
@@ -22,7 +22,13 @@ class InvalidationResult:
     invalidated_asset_ids: tuple[str, ...]
 
 
-def revalidate_project_references(engine: Engine, project_id: str) -> InvalidationResult:
+def revalidate_project_references(
+    engine: Engine,
+    project_id: str,
+    *,
+    apply_events: Callable[..., Any],
+) -> InvalidationResult:
+    """media 属 IMPL 层不得 import agent_harness（§15）；Reducer 的 apply 由调用方注入。"""
     rows = _reference_asset_rows(engine, project_id)
     invalidated: list[str] = []
     for row in rows:
@@ -39,7 +45,7 @@ def revalidate_project_references(engine: Engine, project_id: str) -> Invalidati
                     }
                 },
             )
-            result = apply((event,), engine=engine, base_version=None, actor="system")
+            result = apply_events((event,), engine=engine, base_version=None, actor="system")
             if result.status == "applied":
                 invalidated.append(asset_id)
     return InvalidationResult(checked=len(rows), invalidated_asset_ids=tuple(invalidated))

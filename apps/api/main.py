@@ -479,7 +479,7 @@ def _register_routes(app: FastAPI) -> None:
     async def list_materials(project_id: str, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         _require_project(state.engine, project_id)
-        invalidation = revalidate_project_references(state.engine, project_id)
+        invalidation = revalidate_project_references(state.engine, project_id, apply_events=apply)
         return _materials_payload(
             state.engine,
             project_id,
@@ -494,7 +494,7 @@ def _register_routes(app: FastAPI) -> None:
     async def revalidate_materials(project_id: str, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         _require_project(state.engine, project_id)
-        invalidation = revalidate_project_references(state.engine, project_id)
+        invalidation = revalidate_project_references(state.engine, project_id, apply_events=apply)
         return _materials_payload(
             state.engine,
             project_id,

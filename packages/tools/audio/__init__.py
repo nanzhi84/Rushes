@@ -1,5 +1,17 @@
 """Audio tool handlers."""
 
-from .handlers import asr_original, inspect_sources
+from .handlers import (
+    align_uploaded_voiceover,
+    asr_original,
+    generate_tts,
+    inspect_sources,
+    rough_cut_speech,
+)
 
-__all__ = ["asr_original", "inspect_sources"]
+__all__ = [
+    "align_uploaded_voiceover",
+    "asr_original",
+    "generate_tts",
+    "inspect_sources",
+    "rough_cut_speech",
+]
