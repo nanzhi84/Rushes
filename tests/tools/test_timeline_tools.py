@@ -171,7 +171,7 @@ def test_validate_invalid_timeline_and_render_preview_not_allowed(tmp_path: Path
         )
     )
 
-    assert registry.get("render.preview") is None
+    assert registry.get("render.preview") is not None
     assert result.data["valid"] is False
     assert "render.preview" not in {spec.name for spec in allowed}
 

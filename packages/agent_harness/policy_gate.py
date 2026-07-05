@@ -318,7 +318,7 @@ class PolicyGate:
             project_id=project_id,
             case_id=case_id,
             type=cast(DecisionType, effective_decision_type),
-            question=_confirmation_question(effective_decision_type, tool_call.tool_name),
+            question=_confirmation_question(effective_decision_type, tool_call.tool_name, context),
             options=_confirmation_options(effective_decision_type),
             allow_free_text=False,
             status="pending",
@@ -570,8 +570,19 @@ def _scope_ids(
     return None, None
 
 
-def _confirmation_question(decision_type: str, tool_name: str) -> str:
+def _confirmation_question(
+    decision_type: str,
+    tool_name: str,
+    context: PolicyContext,
+) -> str:
     if decision_type == "export":
+        case_state = context.preconditions.case_state
+        if (
+            case_state is not None
+            and case_state.preview_current_id is not None
+            and case_state.last_viewed_preview_id != case_state.preview_current_id
+        ):
+            return "你还没看最新预览。确认开始最终导出？"
         return "确认开始最终导出？"
     if decision_type == "subtitle":
         return "确认新增字幕后处理？"
