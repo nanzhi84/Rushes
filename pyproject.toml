@@ -47,6 +47,7 @@ packages = [
     "packages/media",
     "packages/providers",
     "packages/storage",
+    "packages/timeline",
     "packages/tools",
     "apps",
 ]
@@ -63,6 +64,7 @@ include = [
     "/packages/media",
     "/packages/providers",
     "/packages/storage",
+    "/packages/timeline",
     "/packages/tools",
     "/apps",
     "/scripts",

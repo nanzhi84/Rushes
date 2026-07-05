@@ -8,6 +8,7 @@ from storage.db import begin_immediate, create_workspace_engine
 from storage.repositories import CasesRepository
 from storage.repositories._json import dump_json
 from storage.repositories.projects import ProjectsRepository
+from timeline import build_timeline_invariant_hook
 
 NOW = "2026-07-04T00:00:00+00:00"
 
@@ -339,12 +340,53 @@ def test_validator_rejects_timeline_invariant_hook_failure(tmp_path: Path) -> No
         base_version=0,
         actor="agent",
         created_at=NOW,
-        timeline_invariant_hook=lambda _timeline: ["primary visual has a gap"],
+        timeline_invariant_hook=lambda _connection, _case_state, _timeline: [
+            "primary visual has a gap"
+        ],
     )
 
     assert result.status == "validation_failed"
     assert result.validation_failed is not None
     assert result.validation_failed.violations[0].code == "timeline_frame_invariant_failed"
+    _assert_rolled_back(tmp_path)
+
+
+def test_validator_can_use_timeline_validator_hook(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    _insert_project_and_case(tmp_path)
+    engine = create_workspace_engine(tmp_path)
+    with begin_immediate(engine) as connection:
+        connection.execute(
+            schema.timeline_versions.insert().values(
+                timeline_id="case_1:v1",
+                case_id="case_1",
+                version=1,
+                parent_version=None,
+                created_by_patch_id=None,
+                document_json=dump_json(_timeline_doc()),
+                validation_report=None,
+                created_at=NOW,
+            )
+        )
+        connection.execute(
+            update(schema.cases)
+            .where(schema.cases.c.case_id == "case_1")
+            .values(timeline_current_version=1)
+        )
+
+    result = apply(
+        [{"event": "BriefUpdated", "case_id": "case_1", "payload": {"brief": {"goal": "new"}}}],
+        engine=engine,
+        base_version=0,
+        actor="agent",
+        created_at=NOW,
+        timeline_invariant_hook=build_timeline_invariant_hook(),
+    )
+
+    assert result.status == "validation_failed"
+    assert result.validation_failed is not None
+    assert result.validation_failed.violations[0].code == "timeline_frame_invariant_failed"
+    assert "timeline.primary_visual.gap" in result.validation_failed.violations[0].message
     _assert_rolled_back(tmp_path)
 
 

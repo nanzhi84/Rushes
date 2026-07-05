@@ -978,13 +978,20 @@ def _apply_timeline_version_restored(context: _ReducerContext, event: DomainEven
     if not isinstance(version, int):
         raise ValueError("TimelineVersionRestored requires timeline_version")
     state = context.load_case(case_id)
+    source_version = event.payload.get("source_version")
+    restores_approved_cut = version == state.rough_cut_approved_version or (
+        isinstance(source_version, int) and source_version == state.rough_cut_approved_version
+    )
+    patch: dict[str, Any] = {
+        "timeline_current_version": version,
+        "timeline_validated": False,
+        "rough_cut_approved": restores_approved_cut,
+    }
+    if restores_approved_cut:
+        patch["rough_cut_approved_version"] = version
     context.patch_case_state(
         case_id,
-        {
-            "timeline_current_version": version,
-            "timeline_validated": False,
-            "rough_cut_approved": version == state.rough_cut_approved_version,
-        },
+        patch,
     )
 
 

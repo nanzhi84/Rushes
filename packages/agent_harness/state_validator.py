@@ -15,7 +15,7 @@ from contracts.timeline import TimelineState
 from storage import schema
 from storage.repositories._json import load_json
 
-TimelineInvariantHook = Callable[[TimelineState], Sequence[str]]
+TimelineInvariantHook = Callable[[Connection, CaseState, TimelineState], Sequence[str]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +203,7 @@ def _validate_timeline_structure(
             )
         )
     if timeline_invariant_hook is not None:
-        for message in timeline_invariant_hook(timeline):
+        for message in timeline_invariant_hook(connection, case_state, timeline):
             violations.append(
                 ValidationViolation(
                     code="timeline_frame_invariant_failed",
