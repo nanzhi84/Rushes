@@ -14,10 +14,17 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from contracts.subtitle import SubtitleClip
 from contracts.timeline import TimelineMediaClip, TimelineState
 from storage.workspace_paths import WorkspacePaths
 
 from .render_cache import DEFAULT_MAX_BYTES, SegmentRenderCache, segment_cache_key
+from .subtitles_ass import (
+    SubtitleTemplateMap,
+    resolve_subtitle_templates,
+    subtitle_cache_payload,
+    write_segment_ass,
+)
 
 type ProgressCallback = Callable[[float], Awaitable[None] | None]
 
@@ -94,6 +101,7 @@ class TimelineSegment:
     fps: int
     base: SegmentClip
     overlays: tuple[SegmentClip, ...] = ()
+    subtitles: tuple[SubtitleClip, ...] = ()
 
     @property
     def duration_frames(self) -> int:
@@ -129,6 +137,7 @@ def split_timeline_segments(timeline: TimelineState) -> tuple[TimelineSegment, .
 
     base_clips = _media_clips_for_track(timeline, "visual_base")
     overlay_clips = _media_clips_for_track(timeline, "visual_overlay")
+    subtitle_clips = _subtitle_clips_for_track(timeline)
     boundaries = {0, timeline.duration_frames}
     for clip in (*base_clips, *overlay_clips):
         boundaries.add(max(0, clip.timeline_start_frame))
@@ -157,6 +166,7 @@ def split_timeline_segments(timeline: TimelineState) -> tuple[TimelineSegment, .
                 fps=timeline.fps,
                 base=_trim_clip(base, start, end),
                 overlays=overlays,
+                subtitles=(),
             )
         )
 
@@ -182,6 +192,7 @@ def split_timeline_segments(timeline: TimelineState) -> tuple[TimelineSegment, .
                     effect_chain=previous.base.effect_chain,
                 ),
                 overlays=(),
+                subtitles=(),
             )
             continue
         merged.append(unit)
@@ -196,6 +207,11 @@ def split_timeline_segments(timeline: TimelineState) -> tuple[TimelineSegment, .
             fps=segment.fps,
             base=segment.base,
             overlays=segment.overlays,
+            subtitles=_subtitle_clips_for_segment(
+                subtitle_clips,
+                segment.timeline_start_frame,
+                segment.timeline_end_frame,
+            ),
         )
         for index, segment in enumerate(merged, start=1)
     )
@@ -207,11 +223,16 @@ def compute_segment_cache_key(
     sources: Mapping[str, MediaSource],
     profile: RenderProfile,
     ffmpeg_version: str,
+    subtitle_templates: SubtitleTemplateMap | None = None,
 ) -> str:
     return segment_cache_key(
         {
-            "schema": "rushes.render.segment.v1",
-            "segment": _segment_cache_payload(segment, sources=sources),
+            "schema": "rushes.render.segment.v2",
+            "segment": _segment_cache_payload(
+                segment,
+                sources=sources,
+                subtitle_templates=subtitle_templates,
+            ),
             "project_params": profile.cache_payload(),
             "ffmpeg_version": ffmpeg_version,
         }
@@ -229,6 +250,7 @@ async def render_timeline_to_file(
     ffmpeg_version: str | None = None,
     cache: SegmentRenderCache | None = None,
     cache_max_bytes: int = DEFAULT_MAX_BYTES,
+    subtitle_templates: SubtitleTemplateMap | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> TimelineRenderOutput:
     """Render visual segments with cache, then concat and mix into output_path."""
@@ -261,6 +283,7 @@ async def render_timeline_to_file(
                 cache=active_cache,
                 ffmpeg_bin=ffmpeg_bin,
                 ffmpeg_version=version,
+                subtitle_templates=subtitle_templates,
                 progress_callback=_segment_progress,
             )
         )
@@ -292,6 +315,7 @@ async def render_segment(
     cache: SegmentRenderCache,
     ffmpeg_bin: str,
     ffmpeg_version: str,
+    subtitle_templates: SubtitleTemplateMap | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> RenderedSegment:
     cache_key = compute_segment_cache_key(
@@ -299,6 +323,7 @@ async def render_segment(
         sources=sources,
         profile=profile,
         ffmpeg_version=ffmpeg_version,
+        subtitle_templates=subtitle_templates,
     )
     cached = cache.get(cache_key)
     if cached is not None:
@@ -307,6 +332,17 @@ async def render_segment(
 
     paths.initialize()
     tmp_path = paths.tmp_dir / f"{segment.segment_id}_{uuid4().hex}.mp4"
+    ass_path = tmp_path.with_suffix(".ass")
+    if segment.subtitles:
+        write_segment_ass(
+            ass_path,
+            segment.subtitles,
+            segment_start_frame=segment.timeline_start_frame,
+            segment_end_frame=segment.timeline_end_frame,
+            fps=segment.fps,
+            play_res=(profile.width, profile.height),
+            subtitle_templates=_require_subtitle_templates(segment, subtitle_templates),
+        )
     command = build_segment_command(
         segment,
         sources=sources,
@@ -324,6 +360,8 @@ async def render_segment(
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+    finally:
+        ass_path.unlink(missing_ok=True)
     return RenderedSegment(
         segment=segment,
         path=cached_path,
@@ -369,9 +407,21 @@ def build_segment_command(
 
     if segment.overlays:
         filtergraph, video_label = _overlay_filtergraph(segment, profile)
+        if segment.subtitles:
+            filtergraph, video_label = _append_subtitles_filtergraph(
+                filtergraph,
+                video_label,
+                output_path.with_suffix(".ass"),
+            )
         command.extend(["-filter_complex", filtergraph, "-map", video_label])
     else:
-        command.extend(["-vf", _visual_filter(segment.base, profile), "-map", "0:v:0"])
+        visual_filter = _visual_filter(segment.base, profile)
+        if segment.subtitles:
+            visual_filter = _append_subtitles_filter(
+                visual_filter,
+                output_path.with_suffix(".ass"),
+            )
+        command.extend(["-vf", visual_filter, "-map", "0:v:0"])
     command.extend(
         [
             "-an",
@@ -497,6 +547,25 @@ def _media_clips_for_track(timeline: TimelineState, track_id: str) -> tuple[Time
     return ()
 
 
+def _subtitle_clips_for_track(timeline: TimelineState) -> tuple[SubtitleClip, ...]:
+    for track in timeline.tracks:
+        if track.track_id == "subtitles":
+            return tuple(clip for clip in track.clips if isinstance(clip, SubtitleClip))
+    return ()
+
+
+def _subtitle_clips_for_segment(
+    clips: Sequence[SubtitleClip],
+    start: int,
+    end: int,
+) -> tuple[SubtitleClip, ...]:
+    return tuple(
+        clip
+        for clip in clips
+        if clip.timeline_start_frame < end and clip.timeline_end_frame > start
+    )
+
+
 def _covering_clip(
     clips: Sequence[TimelineMediaClip],
     start: int,
@@ -553,14 +622,23 @@ def _segment_cache_payload(
     segment: TimelineSegment,
     *,
     sources: Mapping[str, MediaSource],
+    subtitle_templates: SubtitleTemplateMap | None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "segment_id": segment.segment_id,
         "timeline_range": [segment.timeline_start_frame, segment.timeline_end_frame],
         "fps": segment.fps,
         "base": _clip_cache_payload(segment.base, sources=sources),
         "overlays": [_clip_cache_payload(clip, sources=sources) for clip in segment.overlays],
     }
+    if segment.subtitles:
+        payload["subtitles"] = subtitle_cache_payload(
+            segment.subtitles,
+            segment_start_frame=segment.timeline_start_frame,
+            segment_end_frame=segment.timeline_end_frame,
+            subtitle_templates=_require_subtitle_templates(segment, subtitle_templates),
+        )
+    return payload
 
 
 def _clip_cache_payload(clip: SegmentClip, *, sources: Mapping[str, MediaSource]) -> dict[str, Any]:
@@ -586,6 +664,25 @@ def _require_source(asset_id: str, sources: Mapping[str, MediaSource]) -> MediaS
     return source
 
 
+def _require_subtitle_templates(
+    segment: TimelineSegment,
+    subtitle_templates: SubtitleTemplateMap | None,
+) -> SubtitleTemplateMap:
+    if not segment.subtitles:
+        return {}
+    resolved_templates = resolve_subtitle_templates(subtitle_templates)
+    missing = sorted(
+        {
+            clip.style_template_id
+            for clip in segment.subtitles
+            if clip.style_template_id not in resolved_templates
+        }
+    )
+    if missing:
+        raise SegmentRenderError(f"missing subtitle style template: {', '.join(missing)}")
+    return resolved_templates
+
+
 def _visual_filter(clip: SegmentClip, profile: RenderProfile) -> str:
     filters = [
         f"fps={profile.fps}",
@@ -599,6 +696,10 @@ def _visual_filter(clip: SegmentClip, profile: RenderProfile) -> str:
     return ",".join(filters)
 
 
+def _append_subtitles_filter(filter_chain: str, ass_path: Path) -> str:
+    return f"{filter_chain},subtitles=filename={_escape_filter_path(ass_path)}"
+
+
 def _overlay_filtergraph(segment: TimelineSegment, profile: RenderProfile) -> tuple[str, str]:
     parts = [f"[0:v]{_visual_filter(segment.base, profile)}[v0]"]
     current = "v0"
@@ -609,6 +710,22 @@ def _overlay_filtergraph(segment: TimelineSegment, profile: RenderProfile) -> tu
         parts.append(f"[{current}][{label}]overlay=0:0:shortest=1[{output}]")
         current = output
     return ";".join(parts), f"[{current}]"
+
+
+def _append_subtitles_filtergraph(
+    filtergraph: str,
+    video_label: str,
+    ass_path: Path,
+) -> tuple[str, str]:
+    output = "[vsub]"
+    return (
+        f"{filtergraph};{video_label}subtitles=filename={_escape_filter_path(ass_path)}{output}",
+        output,
+    )
+
+
+def _escape_filter_path(path: Path) -> str:
+    return str(path).replace("\\", "\\\\").replace(":", r"\:").replace("'", r"\'")
 
 
 def _seconds_arg(frames: int, fps: int) -> str:

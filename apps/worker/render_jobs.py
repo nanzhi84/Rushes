@@ -15,7 +15,9 @@ from agent_harness.reducer import apply
 from contracts.case import CaseState
 from contracts.events import DomainEventBase, ExportCompleted, JobProgress, PreviewRendered
 from contracts.jobs import Job
+from contracts.subtitle import SubtitleStyleTemplate
 from contracts.timeline import TimelineMediaClip, TimelineState
+from domain.subtitle_templates import list_subtitle_templates
 from media.final_mp4 import FINAL_MP4_PROFILE, render_final_mp4
 from media.preview import PREVIEW_PROFILE, render_preview
 from media.render_cache import DEFAULT_MAX_BYTES, SegmentRenderCache
@@ -81,6 +83,7 @@ async def _run_render_job(
                 paths=paths,
                 output_path=output_path,
                 cache=SegmentRenderCache(paths, max_bytes=_cache_max_bytes()),
+                subtitle_templates=_subtitle_template_map(),
                 progress_callback=reporter.emit,
             )
             if final
@@ -90,6 +93,7 @@ async def _run_render_job(
                 paths=paths,
                 output_path=output_path,
                 cache=SegmentRenderCache(paths, max_bytes=_cache_max_bytes()),
+                subtitle_templates=_subtitle_template_map(),
                 progress_callback=reporter.emit,
             )
         )
@@ -275,6 +279,10 @@ def _timeline_asset_ids(timeline: TimelineState) -> set[str]:
             if isinstance(clip, TimelineMediaClip):
                 asset_ids.add(clip.asset_id)
     return asset_ids
+
+
+def _subtitle_template_map() -> dict[str, SubtitleStyleTemplate]:
+    return {template.template_id: template for template in list_subtitle_templates()}
 
 
 def _put_render_output(engine: Engine, paths: WorkspacePaths, output_path: Path) -> Any:

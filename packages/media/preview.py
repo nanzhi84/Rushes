@@ -17,6 +17,7 @@ from .segment_render import (
     TimelineRenderOutput,
     render_timeline_to_file,
 )
+from .subtitles_ass import SubtitleTemplateMap
 
 PREVIEW_PROFILE = RenderProfile(
     name="preview",
@@ -39,6 +40,7 @@ async def render_preview(
     ffmpeg_version: str | None = None,
     cache: SegmentRenderCache | None = None,
     cache_max_bytes: int = DEFAULT_MAX_BYTES,
+    subtitle_templates: SubtitleTemplateMap | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> TimelineRenderOutput:
     return await render_timeline_to_file(
@@ -51,5 +53,6 @@ async def render_preview(
         ffmpeg_version=ffmpeg_version,
         cache=cache,
         cache_max_bytes=cache_max_bytes,
+        subtitle_templates=subtitle_templates,
         progress_callback=progress_callback,
     )
