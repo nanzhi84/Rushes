@@ -32,6 +32,15 @@ class ProjectArtifactStats(BaseModel):
     candidate_pack_valid: bool = True
 
 
+class ProjectBgmAsset(BaseModel):
+    """Small immutable view of project BGM assets for Human Gate options."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    asset_id: str
+    filename: str
+
+
 class PreconditionContext(BaseModel):
     """Pure input model for all precondition predicates."""
 
@@ -40,6 +49,7 @@ class PreconditionContext(BaseModel):
     case_state: CaseState | None = None
     project_state: ProjectState | None = None
     project_artifacts: ProjectArtifactStats = Field(default_factory=ProjectArtifactStats)
+    project_bgm_assets: tuple[ProjectBgmAsset, ...] = Field(default_factory=tuple)
 
 
 def active_case(context: PreconditionContext) -> bool:

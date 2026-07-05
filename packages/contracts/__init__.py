@@ -74,7 +74,7 @@ from .patch import (
 )
 from .project import ProjectAssetLink, ProjectDefaults, ProjectState
 from .provider import ProviderCapability, ProviderDescriptor, ProviderError, ProviderResult
-from .subtitle import SubtitleBinding, SubtitleClip
+from .subtitle import SubtitleBinding, SubtitleClip, SubtitleStyleTemplate
 from .timeline import (
     TimelineMediaClip,
     TimelineState,
@@ -172,6 +172,7 @@ __all__ = [
     "SubtitleBinding",
     "SubtitleClip",
     "SubtitlePostprocessPlan",
+    "SubtitleStyleTemplate",
     "TextOcrExtension",
     "TimeRangeSec",
     "TimelineMediaClip",

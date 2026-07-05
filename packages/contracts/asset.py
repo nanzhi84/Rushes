@@ -25,6 +25,7 @@ class AssetSource(StrEnum):
     UPLOAD = "upload"
     LOCAL_PATH = "local_path"
     URL = "url"
+    DEFAULT_LIBRARY = "default_library"
 
 
 class AssetProbe(BaseModel):
