@@ -202,6 +202,7 @@ def _subtitle_effect(
                 payload={"postprocess_plan": validated},
             ),
         ),
+        followups=_replay_followups(decision, answer),
     )
 
 
@@ -210,7 +211,24 @@ def _bgm_effect(
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
+    """Reduce BGM decisions.
+
+    The upload option intentionally does not settle postprocess_plan.bgm or replay
+    the pending add_bgm patch. The reducer marks that pending call discarded via
+    pending_tool_call_status_after_answer and records a short pending intent so
+    the agent can ask the user to upload BGM before starting a fresh add_bgm flow.
+    """
+
     payload = _merged_answer_payload(decision, answer)
+    if _answer_requests_bgm_upload(answer, payload):
+        return DecisionEffectResult(
+            state_patch={
+                "scratch_memory": _scratch_memory_with_pending_intent(
+                    case_state,
+                    "请上传 BGM 素材，上传完成后重新发起添加 BGM。",
+                )
+            }
+        )
     enabled = _enabled_from_answer(answer, payload)
     bgm = {
         "enabled": enabled,
@@ -233,6 +251,7 @@ def _bgm_effect(
                 payload={"postprocess_plan": validated},
             ),
         ),
+        followups=_replay_followups(decision, answer),
     )
 
 
@@ -326,7 +345,7 @@ def _generic_effect(
 
 
 def _replay_followups(decision: Decision, answer: DecisionAnswer) -> tuple[HarnessFollowup, ...]:
-    if _answer_is_rejection(answer) or decision.pending_tool_call is None:
+    if _answer_blocks_pending_replay(decision, answer) or decision.pending_tool_call is None:
         return ()
     return (
         HarnessFollowup(
@@ -372,6 +391,27 @@ def _answer_is_rejection(answer: DecisionAnswer) -> bool:
     if answer.payload.get("enabled") is False:
         return True
     return answer.option_id in {"reject", "rejected", "deny", "denied", "no", "skip", "cancel"}
+
+
+def _answer_blocks_pending_replay(decision: Decision, answer: DecisionAnswer) -> bool:
+    payload = _merged_answer_payload(decision, answer)
+    return _answer_is_rejection(answer) or _answer_requests_bgm_upload(answer, payload)
+
+
+def _answer_requests_bgm_upload(answer: DecisionAnswer, payload: dict[str, Any]) -> bool:
+    return payload.get("action") == "upload" or answer.option_id == "upload_bgm"
+
+
+def _scratch_memory_with_pending_intent(case_state: CaseState, intent: str) -> dict[str, Any]:
+    scratch_memory = dict(case_state.scratch_memory)
+    existing = scratch_memory.get("pending_intents")
+    pending_intents: list[str] = []
+    if isinstance(existing, Sequence) and not isinstance(existing, str | bytes):
+        pending_intents = [item for item in existing if isinstance(item, str)]
+    if intent not in pending_intents:
+        pending_intents.append(intent)
+    scratch_memory["pending_intents"] = pending_intents
+    return scratch_memory
 
 
 def _expect_sequence(value: Any, field_name: str) -> Sequence[Any]:
@@ -428,16 +468,25 @@ def _side_intents_from_answer(answer: DecisionAnswer) -> list[str]:
 
 
 def pending_tool_call_will_replay(decision: Decision, answer: DecisionAnswer) -> bool:
-    return decision.pending_tool_call is not None and not _answer_is_rejection(answer)
+    return decision.pending_tool_call is not None and not _answer_blocks_pending_replay(
+        decision, answer
+    )
 
 
 def pending_tool_call_status_after_answer(
     pending_tool_call: PendingToolCall | None,
     answer: DecisionAnswer,
+    *,
+    decision: Decision | None = None,
 ) -> Literal["approved", "discarded"] | None:
     if pending_tool_call is None:
         return None
-    return "discarded" if _answer_is_rejection(answer) else "approved"
+    payload = (
+        _merged_answer_payload(decision, answer) if decision is not None else dict(answer.payload)
+    )
+    if _answer_is_rejection(answer) or _answer_requests_bgm_upload(answer, payload):
+        return "discarded"
+    return "approved"
 
 
 decision_effects_registry: dict[DecisionType, EffectFn] = {

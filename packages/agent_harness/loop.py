@@ -20,7 +20,7 @@ from contracts.project import ProjectState
 from contracts.timeline import TimelineState
 from contracts.tool import PatchOpSpec, ToolSpec
 from contracts.tool_result import ToolError, ToolResult
-from domain.preconditions import PreconditionContext, ProjectArtifactStats
+from domain.preconditions import PreconditionContext, ProjectArtifactStats, ProjectBgmAsset
 from storage import schema
 from storage.db import begin_immediate
 from storage.repositories import (
@@ -98,6 +98,7 @@ class _LoadedState:
     case_state: CaseState
     project_state: ProjectState | None
     project_artifacts: ProjectArtifactStats
+    project_bgm_assets: tuple[ProjectBgmAsset, ...]
     decisions: tuple[Decision, ...]
     pending_decision: Decision | None
     messages: tuple[ContextMessage, ...]
@@ -470,6 +471,7 @@ def context_bundle_input_preconditions(loaded: _LoadedState) -> PreconditionCont
         case_state=loaded.case_state,
         project_state=loaded.project_state,
         project_artifacts=loaded.project_artifacts,
+        project_bgm_assets=loaded.project_bgm_assets,
     )
 
 
@@ -654,6 +656,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
         case_state = CaseState.model_validate(case_row)
         project_state = _load_project_state(connection, case_state.project_id)
         project_artifacts = _load_project_artifact_stats(connection, case_state)
+        project_bgm_assets = _load_project_bgm_assets(connection, case_state)
         decisions = _load_decisions(connection)
         pending_decision = _find_pending_decision(case_state, decisions)
         messages = tuple(
@@ -670,6 +673,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
         case_state=case_state,
         project_state=project_state,
         project_artifacts=project_artifacts,
+        project_bgm_assets=project_bgm_assets,
         decisions=decisions,
         pending_decision=pending_decision,
         messages=messages,
@@ -738,6 +742,35 @@ def _load_project_artifact_stats(
         transcript_ids_with_vad=frozenset(transcript_ids_with_vad),
         voiceover_asset_ids=frozenset(voiceover_asset_ids),
         candidate_pack_valid=_candidate_pack_valid(connection, case_state),
+    )
+
+
+def _load_project_bgm_assets(
+    connection: Connection,
+    case_state: CaseState,
+) -> tuple[ProjectBgmAsset, ...]:
+    disabled = set(case_state.disabled_asset_ids)
+    rows = connection.execute(
+        select(schema.assets.c.asset_id, schema.assets.c.filename)
+        .select_from(
+            schema.assets.join(
+                schema.project_asset_links,
+                schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+            )
+        )
+        .where(schema.project_asset_links.c.project_id == case_state.project_id)
+        .where(schema.project_asset_links.c.enabled.is_(True))
+        .where(schema.assets.c.kind == "bgm")
+        .where(schema.assets.c.usable.is_(True))
+        .order_by(schema.assets.c.asset_id)
+    ).all()
+    return tuple(
+        ProjectBgmAsset(
+            asset_id=str(row._mapping["asset_id"]),
+            filename=str(row._mapping["filename"] or row._mapping["asset_id"]),
+        )
+        for row in rows
+        if str(row._mapping["asset_id"]) not in disabled
     )
 
 

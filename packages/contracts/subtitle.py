@@ -5,6 +5,20 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, model_validator
 
 
+class SubtitleStyleTemplate(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    template_id: str
+    display_name: str
+    font_family: str
+    font_size: int
+    primary_color: str
+    outline_color: str
+    outline_width: int
+    position: Literal["bottom", "top", "center"]
+    margin_v: int
+
+
 class SubtitleBinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

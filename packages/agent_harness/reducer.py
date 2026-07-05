@@ -855,7 +855,11 @@ def _apply_decision_answered(context: _ReducerContext, event: DecisionEventBase)
         raise ValueError(f"decision not found: {event.decision_id}")
     decision = Decision.model_validate(decision_row)
     answer = _answer_from_event(event)
-    pending_status = pending_tool_call_status_after_answer(decision.pending_tool_call, answer)
+    pending_status = pending_tool_call_status_after_answer(
+        decision.pending_tool_call,
+        answer,
+        decision=decision,
+    )
     update_values: dict[str, Any] = {
         "status": "answered",
         "answer": dump_json(answer.model_dump(mode="json")),

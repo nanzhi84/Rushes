@@ -26,6 +26,7 @@ from domain.preconditions import (
     PreconditionContext,
     evaluate_preconditions,
 )
+from domain.subtitle_templates import list_subtitle_templates
 
 VerdictStatus = Literal["deny", "ask", "defer", "allow"]
 
@@ -319,7 +320,7 @@ class PolicyGate:
             case_id=case_id,
             type=cast(DecisionType, effective_decision_type),
             question=_confirmation_question(effective_decision_type, tool_call.tool_name, context),
-            options=_confirmation_options(effective_decision_type),
+            options=_confirmation_options(effective_decision_type, context),
             allow_free_text=False,
             status="pending",
             answer=None,
@@ -595,34 +596,66 @@ def _confirmation_question(
     return f"确认执行 {tool_name}？"
 
 
-def _confirmation_options(decision_type: str) -> list[DecisionOption]:
+def _confirmation_options(decision_type: str, context: PolicyContext) -> list[DecisionOption]:
     if decision_type == "subtitle":
-        return [
+        options = [
             DecisionOption(
-                option_id="subtitle_default",
-                label="使用默认字幕",
-                payload={"enabled": True, "style_template_id": "subtitle_default"},
-            ),
-            DecisionOption(option_id="skip", label="跳过字幕", payload={"enabled": False}),
+                option_id=template.template_id,
+                label=template.display_name,
+                payload={"enabled": True, "style_template_id": template.template_id},
+            )
+            for template in list_subtitle_templates()
         ]
+        options.append(
+            DecisionOption(option_id="skip", label="跳过字幕", payload={"enabled": False})
+        )
+        return options
     if decision_type == "bgm":
-        return [
-            DecisionOption(
-                option_id="default_bgm",
-                label="使用默认 BGM",
-                payload={
-                    "enabled": True,
-                    "asset_id": "default_bgm",
-                    "gain_db": -12.0,
-                    "duck": True,
-                },
-            ),
-            DecisionOption(option_id="skip", label="跳过 BGM", payload={"enabled": False}),
-        ]
+        return _bgm_confirmation_options(context)
     return [
         DecisionOption(option_id="approve", label="确认", payload={"approved": True}),
         DecisionOption(option_id="reject", label="取消", payload={"approved": False}),
     ]
+
+
+def _bgm_confirmation_options(context: PolicyContext) -> list[DecisionOption]:
+    default_option = DecisionOption(
+        option_id="default_bgm",
+        label="使用默认无版权 BGM",
+        payload={
+            "enabled": True,
+            "asset_id": "default_bgm_calm",
+            "gain_db": -12.0,
+            "duck": True,
+        },
+    )
+    skip_option = DecisionOption(option_id="skip", label="跳过 BGM", payload={"enabled": False})
+    project_assets = context.preconditions.project_bgm_assets[:5]
+    if not project_assets:
+        return [
+            DecisionOption(
+                option_id="upload_bgm",
+                label="上传 BGM 素材",
+                payload={"enabled": True, "action": "upload"},
+            ),
+            default_option,
+            skip_option,
+        ]
+    options = [
+        DecisionOption(
+            option_id=asset.asset_id,
+            label=f"使用素材：{asset.filename}",
+            payload={
+                "enabled": True,
+                "asset_id": asset.asset_id,
+                "gain_db": -12.0,
+                "duck": True,
+            },
+        )
+        for asset in project_assets
+    ]
+    options.extend((default_option, skip_option))
+    return options
 
 
 def _idempotency_key(
