@@ -3,19 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import uuid
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, Row
 
 from agent_harness.loop import (
     LLMPlanner,
@@ -25,20 +27,27 @@ from agent_harness.loop import (
 )
 from agent_harness.reducer import ReducerApplyResult, apply
 from agent_harness.turn_queue import StopToken, TurnQueue, TurnQueueItem, TurnRunner
-from contracts.decision import DecisionAnswer
+from contracts.asset import AssetKind, StorageMode
+from contracts.decision import Decision, DecisionAnswer, DecisionOption, PendingToolCall
 from contracts.events import (
+    Actor,
+    AssetImported,
     CaseCopied,
     CaseCreated,
     CaseMoved,
     CaseRenamed,
     CaseTrashed,
     DecisionAnswered,
+    DecisionCreated,
     JobCancelled,
+    JobEnqueued,
     ProjectCopied,
     ProjectCreated,
     ProjectRenamed,
     ProjectTrashed,
 )
+from contracts.tool_result import ToolResult
+from media.invalidation import revalidate_project_references
 from providers.gateway import ProviderCallRecord
 from providers.planner import build_openai_compatible_planner
 from storage import schema
@@ -53,6 +62,34 @@ from storage.repositories import (
 )
 from storage.repositories._json import load_json
 from storage.repositories.projects import ProjectsRepository
+from storage.workspace_paths import WorkspacePaths
+from tools import ToolExecutionContext
+from tools.asset import (
+    disable_for_case as asset_disable_for_case,
+)
+from tools.asset import (
+    import_local_file as asset_import_local_file,
+)
+from tools.asset import (
+    link_to_project as asset_link_to_project,
+)
+from tools.asset import (
+    select_for_case as asset_select_for_case,
+)
+from tools.asset import (
+    unlink_from_project as asset_unlink_from_project,
+)
+from tools.asset import (
+    upload_complete as asset_upload_complete,
+)
+from tools.specs import (
+    AssetDisableForCaseInput,
+    AssetImportLocalFileInput,
+    AssetLinkInput,
+    AssetSelectForCaseInput,
+    AssetUnlinkInput,
+    AssetUploadCompleteInput,
+)
 
 from . import schemas as api_schemas
 from .deps import (
@@ -157,6 +194,64 @@ class JobCancelRequest(BaseModel):
     reason: str | None = None
 
 
+class MaterialImportLocalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    storage_mode: StorageMode | None = None
+    kind: AssetKind = AssetKind.VIDEO
+    asset_id: str | None = None
+
+
+class MaterialImportUrlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    url: str
+    filename: str | None = None
+    kind: AssetKind = AssetKind.VIDEO
+    max_bytes: int | None = None
+    asset_id: str | None = None
+
+
+class MaterialAssetLinkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    enabled: bool = True
+    note: str = ""
+
+
+class MaterialPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    reference_path: str | None = None
+
+
+class CaseAssetScopeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+
+
+class UploadInitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str
+    filename: str
+    size: int | None = None
+    kind: AssetKind = AssetKind.VIDEO
+    asset_id: str | None = None
+
+
+class UploadCompleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    asset_id: str | None = None
+    kind: AssetKind | None = None
+
+
 def create_app(
     workspace_path: str | Path,
     *,
@@ -169,7 +264,12 @@ def create_app(
 ) -> FastAPI:
     """Create the local API app bound to one workspace."""
 
-    engine = create_workspace_engine(workspace_path)
+    workspace_candidate = Path(workspace_path).expanduser().resolve(strict=False)
+    workspace_root = (
+        workspace_candidate.parent if workspace_candidate.suffix == ".db" else workspace_candidate
+    )
+    workspace_paths = WorkspacePaths.from_root(workspace_root).initialize()
+    engine = create_workspace_engine(workspace_paths)
     with engine.begin() as connection:
         schema.create_all(connection)
 
@@ -196,6 +296,7 @@ def create_app(
         engine=engine,
         token=api_token,
         fs_roots=configured_fs_roots(fs_roots),
+        workspace_paths=workspace_paths,
         turn_queue=queue,
         startup_port=active_port,
         sse_max_events=sse_max_events,
@@ -348,6 +449,204 @@ def _register_routes(app: FastAPI) -> None:
         state = state_from_request(request)
         _require_project(state.engine, project_id)
         return _project_page_payload(state.engine, project_id)
+
+    @app.get(
+        "/api/projects/{project_id}/materials",
+        response_model=api_schemas.MaterialsResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def list_materials(project_id: str, request: Request) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project(state.engine, project_id)
+        invalidation = revalidate_project_references(state.engine, project_id)
+        return _materials_payload(
+            state.engine,
+            project_id,
+            invalidated_asset_ids=list(invalidation.invalidated_asset_ids),
+        )
+
+    @app.post(
+        "/api/projects/{project_id}/materials/revalidate",
+        response_model=api_schemas.MaterialsResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def revalidate_materials(project_id: str, request: Request) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project(state.engine, project_id)
+        invalidation = revalidate_project_references(state.engine, project_id)
+        return _materials_payload(
+            state.engine,
+            project_id,
+            invalidated_asset_ids=list(invalidation.invalidated_asset_ids),
+        )
+
+    @app.post(
+        "/api/projects/{project_id}/materials/import-local",
+        response_model=api_schemas.MaterialMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True, path_escape=True),
+    )
+    async def import_local_material(
+        project_id: str,
+        payload: MaterialImportLocalRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project(state.engine, project_id)
+        try:
+            source = canonicalize_allowed_path(payload.path, state.fs_roots)
+        except PathEscapeError:
+            refuse_path_escape(request, payload.path)
+        result = _run_asset_tool(
+            state,
+            tool_name="asset.import_local_file",
+            handler=asset_import_local_file,
+            input_model=AssetImportLocalFileInput(
+                project_id=project_id,
+                asset_id=payload.asset_id,
+                path=str(source),
+                storage_mode=payload.storage_mode or StorageMode.REFERENCE,
+                kind=payload.kind,
+            ),
+            actor="user",
+        )
+        return {
+            "project_id": project_id,
+            "asset_id": result.data.get("asset_id"),
+            "event_ids": result.data["event_ids"],
+        }
+
+    @app.post(
+        "/api/projects/{project_id}/materials/import-url",
+        response_model=api_schemas.MaterialMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def import_url_material(
+        project_id: str,
+        payload: MaterialImportUrlRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project(state.engine, project_id)
+        decision = _url_import_decision(project_id, payload)
+        event = DecisionCreated(
+            decision_id=decision.decision_id,
+            scope_type=decision.scope_type,
+            project_id=project_id,
+            payload={
+                "decision": decision.model_dump(mode="json"),
+                "type": decision.type,
+                "question": decision.question,
+                "options": [option.model_dump(mode="json") for option in decision.options],
+                "pending_tool_call": decision.pending_tool_call.model_dump(mode="json")
+                if decision.pending_tool_call is not None
+                else None,
+                "pending_tool_call_status": decision.pending_tool_call_status,
+                "blocking": decision.blocking,
+            },
+        )
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "project_id": project_id,
+            "asset_id": payload.asset_id,
+            "decision_id": decision.decision_id,
+            "event_ids": _event_ids(result),
+        }
+
+    @app.post(
+        "/api/projects/{project_id}/materials/link",
+        response_model=api_schemas.MaterialMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def link_material(
+        project_id: str,
+        payload: MaterialAssetLinkRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project(state.engine, project_id)
+        _require_asset(state.engine, payload.asset_id)
+        result = _run_asset_tool(
+            state,
+            tool_name="asset.link_to_project",
+            handler=asset_link_to_project,
+            input_model=AssetLinkInput(
+                project_id=project_id,
+                asset_id=payload.asset_id,
+                enabled=payload.enabled,
+                note=payload.note,
+            ),
+            actor="user",
+        )
+        return {
+            "project_id": project_id,
+            "asset_id": payload.asset_id,
+            "event_ids": result.data["event_ids"],
+        }
+
+    @app.post(
+        "/api/projects/{project_id}/materials/unlink",
+        response_model=api_schemas.MaterialMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def unlink_material(
+        project_id: str,
+        payload: MaterialAssetLinkRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project(state.engine, project_id)
+        _require_project_asset(state.engine, project_id, payload.asset_id)
+        result = _run_asset_tool(
+            state,
+            tool_name="asset.unlink_from_project",
+            handler=asset_unlink_from_project,
+            input_model=AssetUnlinkInput(project_id=project_id, asset_id=payload.asset_id),
+            actor="user",
+        )
+        return {
+            "project_id": project_id,
+            "asset_id": payload.asset_id,
+            "event_ids": result.data["event_ids"],
+        }
+
+    @app.patch(
+        "/api/projects/{project_id}/materials/{asset_id}",
+        response_model=api_schemas.MaterialMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True, path_escape=True),
+    )
+    async def patch_material(
+        project_id: str,
+        asset_id: str,
+        payload: MaterialPatchRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project_asset(state.engine, project_id, asset_id)
+        event_ids: list[int] = []
+        if payload.enabled is not None:
+            link_result = _run_asset_tool(
+                state,
+                tool_name="asset.link_to_project",
+                handler=asset_link_to_project,
+                input_model=AssetLinkInput(
+                    project_id=project_id,
+                    asset_id=asset_id,
+                    enabled=payload.enabled,
+                ),
+                actor="user",
+            )
+            event_ids.extend(link_result.data["event_ids"])
+        if payload.reference_path is not None:
+            try:
+                reference_path = canonicalize_allowed_path(payload.reference_path, state.fs_roots)
+            except PathEscapeError:
+                refuse_path_escape(request, payload.reference_path)
+            event = _reference_relocated_event(state.engine, project_id, asset_id, reference_path)
+            result = apply((event,), engine=state.engine, base_version=None, actor="user")
+            _ensure_applied(result)
+            event_ids.extend(_event_ids(result))
+        return {"project_id": project_id, "asset_id": asset_id, "event_ids": event_ids}
 
     @app.patch(
         "/api/projects/{project_id}",
@@ -609,6 +908,60 @@ def _register_routes(app: FastAPI) -> None:
             "message_id": message_id,
         }
 
+    @app.post(
+        "/api/projects/{project_id}/cases/{case_id}/assets/select",
+        response_model=api_schemas.CaseMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def select_case_asset(
+        project_id: str,
+        case_id: str,
+        payload: CaseAssetScopeRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        case = _require_case(state.engine, project_id, case_id)
+        _require_project_asset(state.engine, project_id, payload.asset_id)
+        result = _run_asset_tool(
+            state,
+            tool_name="asset.select_for_case",
+            handler=asset_select_for_case,
+            input_model=AssetSelectForCaseInput(case_id=case_id, asset_id=payload.asset_id),
+            actor="user",
+            base_version=int(case["state_version"]),
+        )
+        return {
+            "case": _require_case(state.engine, project_id, case_id),
+            "event_ids": result.data["event_ids"],
+        }
+
+    @app.post(
+        "/api/projects/{project_id}/cases/{case_id}/assets/disable",
+        response_model=api_schemas.CaseMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def disable_case_asset(
+        project_id: str,
+        case_id: str,
+        payload: CaseAssetScopeRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        case = _require_case(state.engine, project_id, case_id)
+        _require_project_asset(state.engine, project_id, payload.asset_id)
+        result = _run_asset_tool(
+            state,
+            tool_name="asset.disable_for_case",
+            handler=asset_disable_for_case,
+            input_model=AssetDisableForCaseInput(case_id=case_id, asset_id=payload.asset_id),
+            actor="user",
+            base_version=int(case["state_version"]),
+        )
+        return {
+            "case": _require_case(state.engine, project_id, case_id),
+            "event_ids": result.data["event_ids"],
+        }
+
     @app.get(
         "/api/projects/{project_id}/cases/{case_id}/decisions/current",
         response_model=api_schemas.CurrentDecisionResponse,
@@ -650,6 +1003,7 @@ def _register_routes(app: FastAPI) -> None:
         )
         result = apply((event,), engine=state.engine, base_version=base_version, actor="user")
         _ensure_applied(result)
+        project_job_replays = _maybe_enqueue_url_import_job(state.engine, decision_id)
         replay_count = await recover_approved_pending_tool_calls(
             engine=state.engine,
             turn_queue=state.turn_queue,
@@ -658,7 +1012,7 @@ def _register_routes(app: FastAPI) -> None:
             "decision_id": decision_id,
             "status": "answered",
             "event_ids": _event_ids(result),
-            "replays_enqueued": replay_count,
+            "replays_enqueued": replay_count + project_job_replays,
         }
 
     @app.post(
@@ -695,6 +1049,101 @@ def _register_routes(app: FastAPI) -> None:
                 event=event.model_dump(mode="json"),
             )
         return {"job_id": job_id, "status": "cancelled", "event_ids": _event_ids(result)}
+
+    @app.post(
+        "/api/uploads/init",
+        status_code=status.HTTP_201_CREATED,
+        response_model=api_schemas.UploadInitResponse,
+        responses=_response_docs(mutation=True, not_found=True),
+    )
+    async def init_upload(payload: UploadInitRequest, request: Request) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project(state.engine, payload.project_id)
+        upload_id = _new_id("upload")
+        upload_dir = _upload_dir(state.workspace_paths, upload_id)
+        upload_dir.mkdir(parents=True, exist_ok=False)
+        _write_upload_manifest(
+            upload_dir,
+            {
+                "upload_id": upload_id,
+                "project_id": payload.project_id,
+                "filename": payload.filename,
+                "size": payload.size,
+                "kind": payload.kind.value,
+                "asset_id": payload.asset_id,
+            },
+        )
+        return {
+            "upload_id": upload_id,
+            "part_url_template": f"/api/uploads/{upload_id}/parts/{{part_number}}",
+            "complete_url": f"/api/uploads/{upload_id}/complete",
+        }
+
+    @app.put(
+        "/api/uploads/{upload_id}/parts/{part_number}",
+        response_model=api_schemas.UploadPartResponse,
+        responses=_response_docs(mutation=True, not_found=True),
+    )
+    async def put_upload_part(
+        upload_id: str,
+        part_number: int,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        upload_dir = _require_upload_dir(state.workspace_paths, upload_id)
+        body = await request.body()
+        parts_dir = upload_dir / "parts"
+        parts_dir.mkdir(parents=True, exist_ok=True)
+        part_path = parts_dir / str(part_number)
+        part_path.write_bytes(body)
+        return {"upload_id": upload_id, "part_number": part_number, "size": len(body)}
+
+    @app.post(
+        "/api/uploads/{upload_id}/complete",
+        response_model=api_schemas.UploadCompleteResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def complete_upload(
+        upload_id: str,
+        payload: UploadCompleteRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        upload_dir = _require_upload_dir(state.workspace_paths, upload_id)
+        manifest = _read_upload_manifest(upload_dir)
+        project_id = payload.project_id or str(manifest["project_id"])
+        _require_project(state.engine, project_id)
+        merged_path = _merge_upload_parts(upload_dir, str(manifest["filename"]))
+        kind = payload.kind or AssetKind(str(manifest["kind"]))
+        result = _run_asset_tool(
+            state,
+            tool_name="asset.upload_complete",
+            handler=asset_upload_complete,
+            input_model=AssetUploadCompleteInput(
+                project_id=project_id,
+                asset_id=payload.asset_id or manifest.get("asset_id"),
+                path=str(merged_path),
+                filename=str(manifest["filename"]),
+                kind=kind,
+            ),
+            actor="user",
+        )
+        return {
+            "upload_id": upload_id,
+            "project_id": project_id,
+            "asset_id": result.data["asset_id"],
+            "event_ids": result.data["event_ids"],
+        }
+
+    @app.get(
+        "/api/media/{asset_id}/proxy",
+        response_class=StreamingResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def media_proxy(asset_id: str, request: Request) -> StreamingResponse:
+        state = state_from_request(request)
+        proxy_path = _require_proxy_path(state.engine, state.workspace_paths, asset_id)
+        return _range_response(proxy_path, request)
 
     @app.get(
         "/api/fs/roots",
@@ -921,6 +1370,444 @@ def _require_job(engine: Engine, job_id: str) -> dict[str, Any]:
     if row is None:
         raise HTTPException(status_code=404, detail={"reason": "job_not_found"})
     return row
+
+
+def _require_asset(engine: Engine, asset_id: str) -> dict[str, Any]:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(schema.assets).where(schema.assets.c.asset_id == asset_id)
+        ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"reason": "asset_not_found"})
+    return dict(row._mapping)
+
+
+def _require_project_asset(engine: Engine, project_id: str, asset_id: str) -> dict[str, Any]:
+    _require_project(engine, project_id)
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(schema.assets, schema.project_asset_links.c.enabled.label("link_enabled"))
+            .select_from(
+                schema.assets.join(
+                    schema.project_asset_links,
+                    schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+                )
+            )
+            .where(schema.project_asset_links.c.project_id == project_id)
+            .where(schema.assets.c.asset_id == asset_id)
+        ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"reason": "asset_not_linked"})
+    return dict(row._mapping)
+
+
+def _materials_payload(
+    engine: Engine,
+    project_id: str,
+    *,
+    invalidated_asset_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    with engine.connect() as connection:
+        asset_rows = connection.execute(
+            select(schema.assets, schema.project_asset_links.c.enabled.label("link_enabled"))
+            .select_from(
+                schema.assets.join(
+                    schema.project_asset_links,
+                    schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+                )
+            )
+            .where(schema.project_asset_links.c.project_id == project_id)
+            .order_by(schema.assets.c.asset_id)
+        ).all()
+        asset_ids = [str(row._mapping["asset_id"]) for row in asset_rows]
+        job_rows: Sequence[Row[Any]] = []
+        if asset_ids:
+            job_rows = connection.execute(
+                select(schema.jobs)
+                .where(schema.jobs.c.asset_id.in_(asset_ids))
+                .order_by(schema.jobs.c.created_at)
+            ).all()
+    jobs_by_asset: dict[str, list[dict[str, Any]]] = {asset_id: [] for asset_id in asset_ids}
+    for row in job_rows:
+        values = _decode_job_row(dict(row._mapping))
+        asset_id = values.get("asset_id")
+        if isinstance(asset_id, str):
+            jobs_by_asset.setdefault(asset_id, []).append(
+                {
+                    "job_id": values["job_id"],
+                    "kind": values["kind"],
+                    "status": values["status"],
+                    "progress": values["progress"],
+                    "error_json": values["error_json"],
+                }
+            )
+    assets = []
+    for row in asset_rows:
+        asset_id = str(row._mapping["asset_id"])
+        assets.append(_material_asset_payload(dict(row._mapping), jobs_by_asset.get(asset_id, [])))
+    return {
+        "project_id": project_id,
+        "assets": assets,
+        "invalidated_asset_ids": invalidated_asset_ids or [],
+    }
+
+
+def _material_asset_payload(values: dict[str, Any], jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    probe = _load_json_if_str(values.get("probe"))
+    failure = _load_json_if_str(values.get("failure"))
+    proxy_object_hash = values.get("proxy_object_hash")
+    usable = bool(values["usable"])
+    return {
+        "asset_id": values["asset_id"],
+        "storage_mode": values["storage_mode"],
+        "kind": values["kind"],
+        "source": values["source"],
+        "filename": values.get("filename") or "",
+        "hash": values["hash"],
+        "size": int(values["size"]),
+        "mtime": values["mtime"],
+        "ingest_status": values["ingest_status"],
+        "annotation_status": values["annotation_status"],
+        "annotation_pass": values["annotation_pass"],
+        "index_status": values["index_status"],
+        "usable": usable,
+        "enabled": bool(values["link_enabled"]),
+        "probe": probe if isinstance(probe, dict) else None,
+        "proxy_object_hash": proxy_object_hash,
+        "proxy_ready": isinstance(proxy_object_hash, str) and proxy_object_hash != "",
+        "invalid": not usable and _failure_code(failure) == "reference_invalidated",
+        "failure": failure if isinstance(failure, dict) else None,
+        "jobs": jobs,
+    }
+
+
+def _decode_job_row(values: dict[str, Any]) -> dict[str, Any]:
+    for key in ("payload_json", "result_json", "error_json"):
+        values[key] = _load_json_if_str(values.get(key))
+    return values
+
+
+def _load_json_if_str(value: Any) -> Any:
+    return load_json(value) if isinstance(value, str) else value
+
+
+def _failure_code(value: Any) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    code = value.get("error_code")
+    return code if isinstance(code, str) else None
+
+
+def _run_asset_tool(
+    state: ApiState,
+    *,
+    tool_name: str,
+    handler: Any,
+    input_model: Any,
+    actor: Actor,
+    base_version: int | None = None,
+) -> ToolResult:
+    with state.engine.connect() as connection:
+        result = cast(
+            ToolResult,
+            handler(
+                input_model,
+                ToolExecutionContext(
+                    tool_call_id=f"api_{tool_name.replace('.', '_')}_{uuid.uuid4().hex[:8]}",
+                    turn_id="api",
+                    readonly_connection=connection,
+                    metadata={"workspace_paths": state.workspace_paths},
+                ),
+            ),
+        )
+    if result.status == "failed":
+        reason = result.error.error_code if result.error is not None else "tool_failed"
+        raise HTTPException(
+            status_code=409,
+            detail={"reason": reason},
+        )
+    reducer_result = apply(
+        result.events,
+        engine=state.engine,
+        base_version=base_version,
+        actor=actor,
+    )
+    _ensure_applied(reducer_result)
+    data = dict(result.data)
+    data["event_ids"] = _event_ids(reducer_result)
+    return result.model_copy(update={"data": data})
+
+
+def _reference_relocated_event(
+    engine: Engine,
+    project_id: str,
+    asset_id: str,
+    reference_path: Path,
+) -> AssetImported:
+    asset = _require_project_asset(engine, project_id, asset_id)
+    if asset["storage_mode"] != StorageMode.REFERENCE.value:
+        raise HTTPException(status_code=409, detail={"reason": "asset_is_not_reference"})
+    stat = reference_path.stat()
+    digest = _sha256_file(reference_path)
+    return AssetImported(
+        project_id=project_id,
+        asset_id=asset_id,
+        job_id=f"relocate_{asset_id}_{digest[:12]}",
+        payload={
+            "storage_mode": StorageMode.REFERENCE.value,
+            "object_hash": None,
+            "reference_path": str(reference_path),
+            "kind": asset["kind"],
+            "source": asset["source"],
+            "filename": reference_path.name,
+            "hash": digest,
+            "mtime": stat.st_mtime_ns,
+            "size": stat.st_size,
+            "ingest_status": "imported",
+            "annotation_status": "pending",
+            "annotation_pass": "none",
+            "index_status": "none",
+            "usable": True,
+            "failure": None,
+        },
+    )
+
+
+def _url_import_decision(project_id: str, payload: MaterialImportUrlRequest) -> Decision:
+    arguments: dict[str, Any] = {
+        "project_id": project_id,
+        "url": payload.url,
+        "filename": payload.filename,
+        "kind": payload.kind.value,
+        "max_bytes": payload.max_bytes,
+        "asset_id": payload.asset_id,
+    }
+    arguments = {key: value for key, value in arguments.items() if value is not None}
+    fingerprint = _fingerprint(arguments)
+    decision_id = f"dec_url_import_asset_import_url_{fingerprint[:16]}"
+    pending = PendingToolCall(
+        tool_name="asset.import_url",
+        arguments=arguments,
+        idempotency_key=f"asset.import_url:{project_id}:{fingerprint}:decision:{decision_id}",
+        argument_fingerprint=fingerprint,
+    )
+    return Decision(
+        decision_id=decision_id,
+        scope_type="project",
+        project_id=project_id,
+        type="url_import",
+        question="确认从 URL 导入素材？",
+        options=[
+            DecisionOption(option_id="approve", label="确认", payload={"approved": True}),
+            DecisionOption(option_id="reject", label="取消", payload={"approved": False}),
+        ],
+        allow_free_text=False,
+        status="pending",
+        pending_tool_call=pending,
+        pending_tool_call_status="pending",
+        blocking=False,
+    )
+
+
+def _maybe_enqueue_url_import_job(engine: Engine, decision_id: str) -> int:
+    with engine.connect() as connection:
+        row = DecisionsRepository(connection).get(decision_id)
+    if row is None:
+        return 0
+    decision = Decision.model_validate(row)
+    if (
+        decision.type != "url_import"
+        or decision.pending_tool_call_status != "approved"
+        or decision.pending_tool_call is None
+    ):
+        return 0
+    event = _url_import_job_from_pending(decision.pending_tool_call)
+    result = apply((event,), engine=engine, base_version=None, actor="user")
+    _ensure_applied(result)
+    with begin_immediate(engine) as connection:
+        DecisionsRepository(connection).mark_pending_tool_call_replayed(
+            decision_id,
+            consumed_at=_now_iso(),
+            replayed_tool_call_id=f"replay_{decision_id}",
+        )
+    return 1
+
+
+def _url_import_job_from_pending(pending: PendingToolCall) -> JobEnqueued:
+    project_id = pending.arguments.get("project_id")
+    url = pending.arguments.get("url")
+    if not isinstance(project_id, str) or not isinstance(url, str):
+        raise HTTPException(status_code=409, detail={"reason": "invalid_url_import_decision"})
+    asset_id = pending.arguments.get("asset_id")
+    if not isinstance(asset_id, str) or asset_id == "":
+        asset_id = "asset_" + hashlib.sha256(f"{project_id}:{url}".encode()).hexdigest()[:20]
+    return JobEnqueued(
+        job_id=_job_id("import_url", pending.idempotency_key),
+        project_id=project_id,
+        payload={
+            "kind": "import_url",
+            "asset_id": asset_id,
+            "idempotency_key": pending.idempotency_key,
+            "job_payload": {**pending.arguments, "asset_id": asset_id},
+            "attempts": 0,
+            "max_retries": 2,
+        },
+    )
+
+
+def _require_proxy_path(engine: Engine, paths: WorkspacePaths, asset_id: str) -> Path:
+    asset = _require_asset(engine, asset_id)
+    proxy_hash = asset.get("proxy_object_hash")
+    if not isinstance(proxy_hash, str):
+        raise HTTPException(status_code=404, detail={"reason": "proxy_not_ready"})
+    proxy_path = paths.object_path(proxy_hash)
+    if not proxy_path.exists():
+        raise HTTPException(status_code=404, detail={"reason": "proxy_not_found"})
+    return proxy_path
+
+
+def _range_response(path: Path, request: Request) -> StreamingResponse:
+    file_size = path.stat().st_size
+    start, end, partial = _parse_range_header(request.headers.get("range"), file_size)
+    content_length = max(0, end - start + 1)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(content_length),
+    }
+    if partial:
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+    return StreamingResponse(
+        _iter_file_range(path, start, end),
+        status_code=status.HTTP_206_PARTIAL_CONTENT if partial else status.HTTP_200_OK,
+        media_type=_media_type_for_path(path),
+        headers=headers,
+    )
+
+
+def _parse_range_header(range_header: str | None, file_size: int) -> tuple[int, int, bool]:
+    if range_header is None:
+        return 0, file_size - 1, False
+    if not range_header.startswith("bytes="):
+        _raise_invalid_range(file_size)
+    spec = range_header.removeprefix("bytes=").strip()
+    if "," in spec or "-" not in spec:
+        _raise_invalid_range(file_size)
+    raw_start, raw_end = spec.split("-", 1)
+    try:
+        if raw_start == "":
+            suffix_length = int(raw_end)
+            if suffix_length <= 0:
+                _raise_invalid_range(file_size)
+            start = max(file_size - suffix_length, 0)
+            end = file_size - 1
+        else:
+            start = int(raw_start)
+            end = file_size - 1 if raw_end == "" else int(raw_end)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+            detail={"reason": "invalid_range"},
+            headers={"Content-Range": f"bytes */{file_size}"},
+        ) from exc
+    if file_size <= 0 or start < 0 or end < start or start >= file_size:
+        _raise_invalid_range(file_size)
+    return start, min(end, file_size - 1), True
+
+
+def _raise_invalid_range(file_size: int) -> NoReturn:
+    raise HTTPException(
+        status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+        detail={"reason": "invalid_range"},
+        headers={"Content-Range": f"bytes */{file_size}"},
+    )
+
+
+def _iter_file_range(path: Path, start: int, end: int) -> Iterator[bytes]:
+    if end < start:
+        return
+    remaining = end - start + 1
+    with path.open("rb") as file:
+        file.seek(start)
+        while remaining > 0:
+            chunk = file.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+def _media_type_for_path(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix == ".mp3":
+        return "audio/mpeg"
+    if suffix in {".m4a", ".aac"}:
+        return "audio/aac"
+    return "video/mp4"
+
+
+def _upload_dir(paths: WorkspacePaths, upload_id: str) -> Path:
+    return paths.tmp_dir / "uploads" / upload_id
+
+
+def _require_upload_dir(paths: WorkspacePaths, upload_id: str) -> Path:
+    upload_dir = _upload_dir(paths, upload_id)
+    if not upload_dir.exists() or not upload_dir.is_dir():
+        raise HTTPException(status_code=404, detail={"reason": "upload_not_found"})
+    return upload_dir
+
+
+def _write_upload_manifest(upload_dir: Path, manifest: Mapping[str, Any]) -> None:
+    (upload_dir / "manifest.json").write_text(
+        json.dumps(dict(manifest), ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _read_upload_manifest(upload_dir: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads((upload_dir / "manifest.json").read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail={"reason": "upload_not_found"}) from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=409, detail={"reason": "invalid_upload_manifest"})
+    return payload
+
+
+def _merge_upload_parts(upload_dir: Path, filename: str) -> Path:
+    parts_dir = upload_dir / "parts"
+    if not parts_dir.exists():
+        raise HTTPException(status_code=409, detail={"reason": "upload_has_no_parts"})
+    part_paths = sorted(parts_dir.iterdir(), key=lambda path: int(path.name))
+    destination = upload_dir / f"complete_{Path(filename).name}"
+    with destination.open("wb") as output:
+        for part_path in part_paths:
+            with part_path.open("rb") as part:
+                for chunk in iter(lambda: part.read(1024 * 1024), b""):
+                    output.write(chunk)
+    return destination
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _fingerprint(arguments: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        arguments,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _job_id(kind: str, idempotency_key: str) -> str:
+    digest = hashlib.sha256(f"{kind}:{idempotency_key}".encode()).hexdigest()
+    return f"job_{digest[:20]}"
 
 
 def _validate_decision_ownership(

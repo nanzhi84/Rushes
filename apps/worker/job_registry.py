@@ -6,7 +6,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import httpx
+from sqlalchemy.engine import Engine
+
 from contracts.jobs import Job
+from storage.workspace_paths import WorkspacePaths
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +80,25 @@ async def noop_handler(job: Job) -> JobExecutionResult:
     )
 
 
-def build_default_job_registry() -> JobHandlerRegistry:
+def build_default_job_registry(
+    *,
+    engine: Engine | None = None,
+    workspace_paths: WorkspacePaths | None = None,
+    http_transport: httpx.AsyncBaseTransport | None = None,
+) -> JobHandlerRegistry:
     registry = JobHandlerRegistry()
     registry.register("noop", noop_handler)
+    if engine is not None:
+        from .media_jobs import (
+            build_import_url_handler,
+            build_proxy_handler,
+            workspace_paths_from_engine,
+        )
+
+        paths = workspace_paths or workspace_paths_from_engine(engine)
+        registry.register("proxy", build_proxy_handler(engine, paths))
+        registry.register(
+            "import_url",
+            build_import_url_handler(engine, paths, http_transport=http_transport),
+        )
     return registry

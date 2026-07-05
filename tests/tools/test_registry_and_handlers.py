@@ -73,6 +73,15 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "project.move_case",
         "project.close_case",
         "project.list_tree",
+        "asset.upload_complete",
+        "asset.import_local_file",
+        "asset.import_url",
+        "asset.link_to_project",
+        "asset.unlink_from_project",
+        "asset.select_for_case",
+        "asset.disable_for_case",
+        "asset.list_project_assets",
+        "asset.list_case_scope",
     }
     assert {spec.name for spec in tool_specs()} == expected_tools
     assert {spec.name for spec in registry.list_stable()} == {spec.name for spec in tool_specs()}
@@ -88,6 +97,11 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
     assert project_move_case.confirmation_decision_type == "destructive_project_action"
     assert project_move_case.emits_events == ["CaseMoved", "AssetLinked"]
     assert registry.require("project.list_tree").spec.side_effects == []
+    asset_import_url = registry.require("asset.import_url").spec
+    assert asset_import_url.requires_confirmation is True
+    assert asset_import_url.confirmation_decision_type == "url_import"
+    assert asset_import_url.is_long_running is True
+    assert registry.require("asset.list_project_assets").spec.side_effects == []
     assert {spec.kind for spec in PATCH_OP_REGISTRY.list()} == {
         "delete_range",
         "replace_clip",

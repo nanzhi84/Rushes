@@ -141,6 +141,70 @@ class JobCancelResponse(ApiResponseModel):
     event_ids: list[int]
 
 
+class AssetJobSummary(ApiResponseModel):
+    job_id: str
+    kind: str
+    status: str
+    progress: float | None = None
+    error_json: dict[str, Any] | None = None
+
+
+class MaterialAsset(ApiResponseModel):
+    asset_id: str
+    storage_mode: str
+    kind: str
+    source: str
+    filename: str
+    hash: str
+    size: int
+    mtime: int | None
+    ingest_status: str
+    annotation_status: str
+    annotation_pass: str
+    index_status: str
+    usable: bool
+    enabled: bool
+    probe: dict[str, Any] | None
+    proxy_object_hash: str | None
+    proxy_ready: bool
+    invalid: bool
+    failure: dict[str, Any] | None
+    jobs: list[AssetJobSummary]
+
+
+class MaterialsResponse(ApiResponseModel):
+    project_id: str
+    assets: list[MaterialAsset]
+    invalidated_asset_ids: list[str] = []
+
+
+class MaterialMutationResponse(ApiResponseModel):
+    project_id: str
+    asset_id: str | None = None
+    job_id: str | None = None
+    decision_id: str | None = None
+    event_ids: list[int]
+
+
+class UploadInitResponse(ApiResponseModel):
+    upload_id: str
+    part_url_template: str
+    complete_url: str
+
+
+class UploadPartResponse(ApiResponseModel):
+    upload_id: str
+    part_number: int
+    size: int
+
+
+class UploadCompleteResponse(ApiResponseModel):
+    upload_id: str
+    project_id: str
+    asset_id: str
+    event_ids: list[int]
+
+
 class FsRoot(ApiResponseModel):
     path: str
     name: str

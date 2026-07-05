@@ -626,19 +626,34 @@ def _defer_tool_call(
         arguments=arguments,
     )
     job_id = _job_id(kind=kind, idempotency_key=idempotency_key)
-    job_payload = {
-        "tool_name": spec.name,
-        "arguments": dict(arguments),
-        "tool_call_id": tool_call.tool_call_id or _tool_call_id(tool_call),
-        "turn_id": turn_id,
-    }
+    job_arguments = dict(arguments)
+    if spec.name == "asset.import_url":
+        job_arguments.setdefault(
+            "asset_id",
+            _asset_id_for_url_import(state.case_state.project_id, job_arguments),
+        )
+        job_payload = {
+            **job_arguments,
+            "tool_name": spec.name,
+            "tool_call_id": tool_call.tool_call_id or _tool_call_id(tool_call),
+            "turn_id": turn_id,
+        }
+    else:
+        job_payload = {
+            "tool_name": spec.name,
+            "arguments": job_arguments,
+            "tool_call_id": tool_call.tool_call_id or _tool_call_id(tool_call),
+            "turn_id": turn_id,
+        }
+    project_level_job = kind in {"proxy", "import_url"}
     event = JobEnqueued(
         job_id=job_id,
         project_id=state.case_state.project_id,
-        case_id=state.case_state.case_id,
+        case_id=None if project_level_job else state.case_state.case_id,
         payload={
             "kind": kind,
             "idempotency_key": idempotency_key,
+            "asset_id": job_arguments.get("asset_id"),
             "job_payload": job_payload,
             "tool_name": spec.name,
             "tool_call_id": job_payload["tool_call_id"],
@@ -975,6 +990,15 @@ def _job_idempotency_key(
 def _job_id(*, kind: str, idempotency_key: str) -> str:
     digest = hashlib.sha256(f"{kind}:{idempotency_key}".encode()).hexdigest()
     return f"job_{digest[:20]}"
+
+
+def _asset_id_for_url_import(project_id: str, arguments: Mapping[str, Any]) -> str:
+    existing = arguments.get("asset_id")
+    if isinstance(existing, str) and existing:
+        return existing
+    url = arguments.get("url")
+    digest = hashlib.sha256(f"{project_id}:{url}".encode()).hexdigest()
+    return f"asset_{digest[:20]}"
 
 
 def _replayed_tool_call_id(decision_id: str) -> str:

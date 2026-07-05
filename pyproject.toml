@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.13",
+    "av>=13",
     "fastapi>=0.115",
     "httpx>=0.27",
     "pydantic>=2.7",
@@ -37,6 +38,7 @@ packages = [
     "packages/contracts",
     "packages/domain",
     "packages/events",
+    "packages/media",
     "packages/providers",
     "packages/storage",
     "packages/tools",
@@ -50,6 +52,7 @@ include = [
     "/packages/domain",
     "/packages/agent_harness",
     "/packages/events",
+    "/packages/media",
     "/packages/providers",
     "/packages/storage",
     "/packages/tools",
@@ -101,4 +104,9 @@ addopts = [
 ]
 markers = [
     "external: tests that call external provider APIs",
+    "ffmpeg: tests that require local ffmpeg/ffprobe binaries",
 ]
+
+[tool.coverage.run]
+# CLI 入口只做 argparse+启动接线，无可测逻辑
+omit = ["apps/worker/main.py"]

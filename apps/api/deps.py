@@ -22,6 +22,7 @@ from contracts.events import DomainEventBase, SecurityRefusal
 from events.event_log import deserialize_event
 from events.routing import routes_to_case, routes_to_workspace
 from storage.repositories.event_log import EventLogRow
+from storage.workspace_paths import WorkspacePaths
 
 type SecurityReason = Literal[
     "missing_token",
@@ -62,6 +63,7 @@ class ApiState:
     engine: Engine
     token: str
     fs_roots: tuple[Path, ...]
+    workspace_paths: WorkspacePaths
     turn_queue: TurnQueue
     startup_port: int
     # 仅测试用：SSE 流发出 N 条事件后主动收尾。生产保持 None（无限流，
@@ -275,11 +277,17 @@ def _content_type_refusal_reason(request: Request) -> SecurityReason | None:
     media_type = content_type.split(";", 1)[0].strip().lower()
     if media_type == "application/json":
         return None
+    if _is_upload_part_endpoint(request.url.path) and media_type == "application/octet-stream":
+        return None
     return "bad_content_type"
 
 
 def _is_sse_endpoint(path: str) -> bool:
     return path == "/api/events" or path.endswith("/events")
+
+
+def _is_upload_part_endpoint(path: str) -> bool:
+    return path.startswith("/api/uploads/") and "/parts/" in path
 
 
 def _refusal_path(request: Request) -> str | None:

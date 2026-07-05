@@ -74,6 +74,7 @@ assets = Table(
     Column("reference_path", Text, nullable=True),
     Column("kind", Text, nullable=False),
     Column("source", Text, nullable=False),
+    Column("filename", Text, nullable=False, default="", server_default=""),
     Column("hash", Text, nullable=False),
     Column("mtime", Integer, nullable=True),
     Column("size", Integer, nullable=False),

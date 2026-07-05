@@ -27,7 +27,7 @@ async def async_main() -> None:
     engine = create_workspace_engine(args.workspace)
     runner = JobRunner(
         engine=engine,
-        registry=build_default_job_registry(),
+        registry=build_default_job_registry(engine=engine),
         worker_id=args.worker_id,
         poll_interval_seconds=args.poll_interval,
         heartbeat_interval_seconds=args.heartbeat_interval,
