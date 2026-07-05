@@ -5,23 +5,18 @@ import type { ReactElement } from "react";
 import { api, type DecisionAnswer } from "../api/client";
 import { queryKeys } from "../app/query_client";
 import { createApiEventSource } from "../auth";
-
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-  createdAt: string;
-};
-
-type SsePayload = {
-  event_id: number;
-  event: {
-    event: string;
-    project_id?: string | null;
-    case_id?: string | null;
-    requested_by_case_id?: string | null;
-  };
-};
+import { AssistantThread } from "../components/Console/AssistantThread";
+import {
+  markDecisionAnswered,
+  mergeCurrentDecisionItem,
+  reduceStructuredInteractionItems,
+  StructuredInteractionRenderer
+} from "../components/Console/StructuredInteractionRenderer";
+import type {
+  DomainSsePayload,
+  StructuredInteractionItem
+} from "../components/Console/StructuredInteractionRenderer";
+import { useConsoleExternalStoreRuntime, type ConsoleMessage } from "../components/Console/runtime";
 
 export function CaseAgentConsolePage(): ReactElement {
   const params = useParams({ strict: false }) as { projectId: string; caseId: string };
@@ -39,12 +34,13 @@ export function CaseConsoleView({
   const [draft, setDraft] = useState("");
   const [awaitingTurnEnd, setAwaitingTurnEnd] = useState(false);
   const [streamState, setStreamState] = useState<"connecting" | "open" | "closed">("connecting");
+  const [structuredItems, setStructuredItems] = useState<StructuredInteractionItem[]>([]);
 
   const messagesQuery = useQuery({
     queryKey: queryKeys.messages(projectId, caseId),
-    queryFn: async () => [] as ChatMessage[],
+    queryFn: async () => [] as ConsoleMessage[],
     enabled: false,
-    initialData: [] as ChatMessage[]
+    initialData: [] as ConsoleMessage[]
   });
 
   const decisionQuery = useQuery({
@@ -53,11 +49,28 @@ export function CaseConsoleView({
   });
 
   const currentDecision = decisionQuery.data?.decision ?? null;
-  const decisionOptions = currentDecision?.options ?? [];
   const messages = messagesQuery.data ?? [];
+  const renderedStructuredItems = useMemo(
+    () => {
+      if (
+        currentDecision &&
+        structuredItems.some(
+          (item) => item.kind === "decision" && item.decision_id === currentDecision.decision_id
+        )
+      ) {
+        return mergeCurrentDecisionItem(structuredItems, currentDecision);
+      }
+      return structuredItems;
+    },
+    [currentDecision, structuredItems]
+  );
+  const sideDecisionItem = useMemo(
+    () => mergeCurrentDecisionItem([], currentDecision)[0] ?? null,
+    [currentDecision]
+  );
 
   const invalidateCaseQueries = useCallback(
-    async (payload: SsePayload) => {
+    async (payload: DomainSsePayload) => {
       const event = payload.event;
       if (event.event === "TurnEnded") {
         setAwaitingTurnEnd(false);
@@ -78,7 +91,8 @@ export function CaseConsoleView({
     source.onerror = () => setStreamState("closed");
     const handleEvent = (event: Event) => {
       const message = event as MessageEvent<string>;
-      const payload = JSON.parse(message.data) as SsePayload;
+      const payload = JSON.parse(message.data) as DomainSsePayload;
+      setStructuredItems((current) => reduceStructuredInteractionItems(current, payload));
       void invalidateCaseQueries(payload);
     };
     for (const eventName of CASE_EVENT_TYPES) {
@@ -94,13 +108,13 @@ export function CaseConsoleView({
     onMutate: async (content) => {
       setAwaitingTurnEnd(true);
       await queryClient.cancelQueries({ queryKey: queryKeys.messages(projectId, caseId) });
-      const optimistic: ChatMessage = {
+      const optimistic: ConsoleMessage = {
         id: `local_${Date.now()}`,
         role: "user",
         content,
         createdAt: new Date().toISOString()
       };
-      queryClient.setQueryData<ChatMessage[]>(queryKeys.messages(projectId, caseId), (current) => [
+      queryClient.setQueryData<ConsoleMessage[]>(queryKeys.messages(projectId, caseId), (current) => [
         ...(current ?? []),
         optimistic
       ]);
@@ -109,17 +123,42 @@ export function CaseConsoleView({
   });
 
   const answerDecision = useMutation({
-    mutationFn: (answer: DecisionAnswer) =>
-      api.answerDecision(required(currentDecision?.decision_id), {
+    mutationFn: ({ decisionId, answer }: { decisionId: string; answer: DecisionAnswer }) =>
+      api.answerDecision(decisionId, {
         project_id: projectId,
         case_id: caseId,
         answer
       }),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(projectId, caseId) })
+    onSuccess: async (_data, variables) => {
+      setStructuredItems((current) => markDecisionAnswered(current, variables.decisionId, variables.answer));
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(projectId, caseId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.messages(projectId, caseId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.case(projectId, caseId) })
+      ]);
+    }
   });
 
   const disabled = awaitingTurnEnd || postMessage.isPending;
+  const submitMessage = useCallback(
+    (content: string) => {
+      postMessage.mutate(content);
+    },
+    [postMessage]
+  );
+  const handleAnswerDecision = useCallback(
+    (decisionId: string, answer: DecisionAnswer) => {
+      answerDecision.mutate({ decisionId, answer });
+    },
+    [answerDecision]
+  );
+  const runtime = useConsoleExternalStoreRuntime({
+    messages,
+    structuredItems: renderedStructuredItems,
+    isRunning: disabled,
+    canSubmit: !disabled,
+    submit: submitMessage
+  });
   const statusLabel = useMemo(() => {
     if (streamState === "open") {
       return "事件流已连接";
@@ -140,22 +179,13 @@ export function CaseConsoleView({
         </div>
       </header>
 
-      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 p-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 p-6 xl:grid-cols-[minmax(0,1fr)_340px]">
         <div className="flex min-h-0 flex-col rounded-lg border border-[#d9dee7] bg-white">
-          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4" aria-label="消息列表">
-            {messages.length === 0 ? (
-              <p className="rounded-md border border-dashed border-[#cbd5e1] px-4 py-6 text-sm text-[#64748b]">
-                这里会显示当前剪辑任务的消息流。
-              </p>
-            ) : (
-              messages.map((message) => (
-                <article key={message.id} className={messageClass(message.role)}>
-                  <span className="text-xs font-medium uppercase text-[#64748b]">{roleLabel(message.role)}</span>
-                  <p className="mt-1 whitespace-pre-wrap leading-7">{message.content}</p>
-                </article>
-              ))
-            )}
-          </div>
+          <AssistantThread
+            runtime={runtime}
+            onAnswerDecision={handleAnswerDecision}
+            answerPending={answerDecision.isPending}
+          />
 
           <form
             className="border-t border-[#d9dee7] p-4"
@@ -166,7 +196,7 @@ export function CaseConsoleView({
                 return;
               }
               setDraft("");
-              postMessage.mutate(content);
+              runtime.submit(content);
             }}
           >
             <label className="block text-sm font-medium text-[#334155]">
@@ -176,18 +206,18 @@ export function CaseConsoleView({
                 className="mt-2 h-24 w-full resize-none rounded-md border border-[#cbd5e1] px-3 py-2 outline-none focus:border-[#2563eb] disabled:bg-[#f1f5f9]"
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
-                disabled={disabled}
-                placeholder={disabled ? "等待本轮结束" : "输入给当前剪辑任务的剪辑指令"}
+                disabled={!runtime.canSubmit}
+                placeholder={runtime.isRunning ? "等待本轮结束" : "输入给当前剪辑任务的剪辑指令"}
               />
             </label>
             <div className="mt-3 flex items-center justify-between gap-3">
               <p className="text-sm text-[#64748b]">
-                {disabled ? "输入框会在本轮结束事件后恢复。" : "消息会进入后端任务队列。"}
+                {runtime.isRunning ? "输入框会在本轮结束事件后恢复。" : "消息会进入后端任务队列。"}
               </p>
               <button
                 className="rounded-md bg-[#17202a] px-4 py-2 text-sm font-medium text-white disabled:bg-[#94a3b8]"
                 type="submit"
-                disabled={disabled || draft.trim().length === 0}
+                disabled={!runtime.canSubmit || draft.trim().length === 0}
               >
                 发送
               </button>
@@ -198,69 +228,29 @@ export function CaseConsoleView({
         <aside className="space-y-4">
           <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
             <h2 className="font-semibold">当前确认项</h2>
-            {currentDecision ? (
-              <div className="mt-3 space-y-3">
-                <p className="text-sm leading-6 text-[#475569]">{currentDecision.question}</p>
-                {decisionOptions.map((option) => (
-                  <button
-                    key={option.option_id}
-                    className="block w-full rounded-md border border-[#cbd5e1] px-3 py-2 text-left text-sm hover:bg-[#f1f5f9]"
-                    type="button"
-                    disabled={answerDecision.isPending}
-                    onClick={() =>
-                      answerDecision.mutate({
-                        option_id: option.option_id,
-                        answered_via: "button",
-                        payload: option.payload ?? {}
-                      })
-                    }
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <p className="mt-3 text-sm text-[#64748b]">暂无待确认项。</p>
-            )}
+            <div className="mt-3">
+              {sideDecisionItem ? (
+                <StructuredInteractionRenderer
+                  item={sideDecisionItem}
+                  onAnswerDecision={handleAnswerDecision}
+                  answerPending={answerDecision.isPending}
+                />
+              ) : (
+                <p className="text-sm text-[#64748b]">暂无待确认项。</p>
+              )}
+            </div>
           </section>
 
           <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
             <h2 className="font-semibold">预览与时间线</h2>
             <p className="mt-3 text-sm leading-6 text-[#64748b]">
-              预览播放器、只读时间线和结构化交互卡片会在后续里程碑接入。
+              预览播放器和只读时间线会在 M6 接入。
             </p>
           </section>
         </aside>
       </div>
     </section>
   );
-}
-
-function messageClass(role: ChatMessage["role"]): string {
-  if (role === "user") {
-    return "ml-auto max-w-[80%] rounded-lg bg-[#17202a] px-4 py-3 text-white";
-  }
-  if (role === "assistant") {
-    return "mr-auto max-w-[80%] rounded-lg bg-[#eef2f7] px-4 py-3 text-[#17202a]";
-  }
-  return "mx-auto max-w-[80%] rounded-lg bg-[#fff7ed] px-4 py-3 text-[#7c2d12]";
-}
-
-function roleLabel(role: ChatMessage["role"]): string {
-  if (role === "user") {
-    return "用户";
-  }
-  if (role === "assistant") {
-    return "助手";
-  }
-  return "系统";
-}
-
-function required(value: string | undefined): string {
-  if (!value) {
-    throw new Error("缺少确认项 ID");
-  }
-  return value;
 }
 
 const CASE_EVENT_TYPES = [
