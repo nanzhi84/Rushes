@@ -21,6 +21,7 @@ LOCAL_GROUPS: frozenset[str] = frozenset(
         "domain",
         "storage",
         "events",
+        "indexing",
         "media",
         "providers",
         "agent_harness",
@@ -34,6 +35,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "domain": frozenset({"domain", "contracts"}),
     "storage": frozenset({"storage", "contracts"}),
     "events": frozenset({"events", "contracts", "storage"}),
+    "indexing": frozenset({"indexing", "contracts", "storage"}),
     "media": frozenset({"media", "contracts", "storage"}),
     "providers": frozenset({"providers", "contracts"}),
     "agent_harness": frozenset(

@@ -91,6 +91,7 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "annotation.status",
         "annotation.retry",
         "annotation.inspect",
+        "retrieval.search_candidates",
     }
     assert {spec.name for spec in tool_specs()} == expected_tools
     assert {spec.name for spec in registry.list_stable()} == {spec.name for spec in tool_specs()}
@@ -142,6 +143,17 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
     ]
     assert registry.require("annotation.enqueue").spec.emits_events == ["JobEnqueued"]
     assert registry.require("annotation.status").spec.side_effects == []
+    retrieval = registry.require("retrieval.search_candidates").spec
+    assert retrieval.requires_artifacts == [
+        "audio_plan_confirmed",
+        "cut_plan_exists",
+        "usable_asset_exists",
+    ]
+    assert retrieval.emits_events == [
+        "CandidatePackCreated",
+        "CapabilityDegraded",
+        "ProviderCallRecorded",
+    ]
     assert {spec.kind for spec in PATCH_OP_REGISTRY.list()} == {
         "delete_range",
         "replace_clip",
