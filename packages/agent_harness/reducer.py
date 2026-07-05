@@ -1112,6 +1112,8 @@ def _apply_job_event(context: _ReducerContext, event: DomainEventBase) -> None:
     requested_by_case_id = getattr(event, "requested_by_case_id", None)
     if not _row_exists(context.connection, schema.jobs, "job_id", job_id):
         _insert_job(context, event)
+    if event.event == "JobEnqueued":
+        _mark_asset_job_enqueued(context, event)
     status = _job_status_for_event(event)
     values: dict[str, Any] = {"status": status}
     progress = getattr(event, "progress", None)
@@ -1166,6 +1168,36 @@ def _insert_job(context: _ReducerContext, event: DomainEventBase) -> None:
             created_at=str(event.payload.get("created_at", context.created_at)),
             started_at=event.payload.get("started_at"),
             finished_at=event.payload.get("finished_at"),
+        )
+    )
+
+
+def _mark_asset_job_enqueued(context: _ReducerContext, event: DomainEventBase) -> None:
+    if str(event.payload.get("kind", "")) != "annotation":
+        return
+    asset_id = event.payload.get("asset_id")
+    if not isinstance(asset_id, str):
+        job_payload = event.payload.get("job_payload")
+        if isinstance(job_payload, Mapping):
+            payload_asset_id = job_payload.get("asset_id")
+            asset_id = payload_asset_id if isinstance(payload_asset_id, str) else None
+    if not isinstance(asset_id, str):
+        return
+    job_payload = event.payload.get("job_payload")
+    requested_pass = job_payload.get("pass") if isinstance(job_payload, Mapping) else None
+    annotation_pass = "deep" if requested_pass == "deep" else "cheap"
+    if not _row_exists(context.connection, schema.assets, "asset_id", asset_id):
+        return
+    context.connection.execute(
+        update(schema.assets)
+        .where(schema.assets.c.asset_id == asset_id)
+        .values(
+            ingest_status="annotating",
+            annotation_status="pending",
+            annotation_pass=annotation_pass,
+            index_status="partial",
+            usable=False,
+            failure=None,
         )
     )
 

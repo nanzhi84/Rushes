@@ -262,6 +262,35 @@ class AssetListCaseScopeInput(BaseModel):
     case_id: str | None = None
 
 
+class AnnotationEnqueueInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    asset_id: str
+    pass_: Literal["cheap", "deep"] = Field(default="cheap", alias="pass")
+    project_id: str | None = None
+
+
+class AnnotationStatusInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+
+
+class AnnotationRetryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    asset_id: str
+    pass_: Literal["cheap", "deep"] | None = Field(default=None, alias="pass")
+    project_id: str | None = None
+
+
+class AnnotationInspectInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    project_id: str | None = None
+
+
 def tool_specs() -> tuple[ToolSpec, ...]:
     return (
         ToolSpec(
@@ -696,6 +725,70 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             emits_events=[],
             description="List selected and disabled asset IDs for the active Case.",
         ),
+        ToolSpec(
+            name="annotation.enqueue",
+            namespace="annotation",
+            version="1",
+            input_model=AnnotationEnqueueInput,
+            result_model=None,
+            handler_ref="tools.annotation.enqueue",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=["job"],
+            idempotency_key_fields=["project_id", "asset_id", "pass"],
+            emits_events=["JobEnqueued"],
+            is_long_running=True,
+            description="Queue cheap or deep annotation for a project asset.",
+        ),
+        ToolSpec(
+            name="annotation.status",
+            namespace="annotation",
+            version="1",
+            input_model=AnnotationStatusInput,
+            result_model=None,
+            handler_ref="tools.annotation.status",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=[],
+            emits_events=[],
+            description="Read annotation status for assets in the active Project.",
+        ),
+        ToolSpec(
+            name="annotation.retry",
+            namespace="annotation",
+            version="1",
+            input_model=AnnotationRetryInput,
+            result_model=None,
+            handler_ref="tools.annotation.retry",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=["job"],
+            idempotency_key_fields=["project_id", "asset_id", "pass"],
+            emits_events=["JobEnqueued"],
+            is_long_running=True,
+            description="Requeue a failed annotation job.",
+        ),
+        ToolSpec(
+            name="annotation.inspect",
+            namespace="annotation",
+            version="1",
+            input_model=AnnotationInspectInput,
+            result_model=None,
+            handler_ref="tools.annotation.inspect",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=[],
+            emits_events=[],
+            description="Inspect usable spans, failure details, and quality events for an asset.",
+        ),
     )
 
 
@@ -788,6 +881,18 @@ PATCH_OP_REGISTRY = patch_op_registry()
 
 
 def build_default_tool_registry() -> ToolRegistry:
+    from .annotation import (
+        enqueue as annotation_enqueue,
+    )
+    from .annotation import (
+        inspect as annotation_inspect,
+    )
+    from .annotation import (
+        retry as annotation_retry,
+    )
+    from .annotation import (
+        status as annotation_status,
+    )
     from .asset import (
         disable_for_case,
         import_local_file,
@@ -847,6 +952,10 @@ def build_default_tool_registry() -> ToolRegistry:
         "asset.disable_for_case": disable_for_case,
         "asset.list_project_assets": list_project_assets,
         "asset.list_case_scope": list_case_scope,
+        "annotation.enqueue": annotation_enqueue,
+        "annotation.status": annotation_status,
+        "annotation.retry": annotation_retry,
+        "annotation.inspect": annotation_inspect,
     }
     registry = ToolRegistry()
     for spec in tool_specs():
