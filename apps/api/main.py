@@ -32,6 +32,8 @@ from contracts.events import (
     JobCancelled,
     ProjectCreated,
 )
+from providers.gateway import ProviderCallRecord
+from providers.planner import build_openai_compatible_planner
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
 from storage.repositories import (
@@ -40,6 +42,7 @@ from storage.repositories import (
     EventLogRepository,
     JobsRepository,
     MessagesRepository,
+    ProviderCallsRepository,
 )
 from storage.repositories.projects import ProjectsRepository
 
@@ -64,6 +67,8 @@ from .deps import (
 LOGGER = logging.getLogger("rushes.api")
 SSE_POLL_INTERVAL_SECONDS = 0.05
 SSE_BATCH_SIZE = 100
+DEFAULT_LLM_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DEFAULT_LLM_MODEL = "qwen-plus"
 
 
 class ProjectCreateRequest(BaseModel):
@@ -121,12 +126,13 @@ def create_app(
 
     api_token = token or generate_token()
     active_port = startup_port or startup_port_from_env()
+    env_planner = planner or _planner_from_env(engine)
     queue: TurnQueue | None = None
 
     async def default_runner(item: TurnQueueItem, stop_token: StopToken) -> None:
         if queue is None:
             raise RuntimeError("turn queue is not initialized")
-        active_planner = planner or ScriptedPlanner([])
+        active_planner = env_planner or ScriptedPlanner([])
         await run_turn(
             item,
             engine=engine,
@@ -155,6 +161,43 @@ def create_app_from_env() -> FastAPI:
     workspace = os.environ.get("RUSHES_WORKSPACE_PATH", str(Path.cwd() / ".rushes"))
     token = os.environ.get("RUSHES_API_TOKEN") or None
     return create_app(workspace, token=token, startup_port=startup_port_from_env())
+
+
+class _StorageProviderCallRecorder:
+    def __init__(self, engine: Engine) -> None:
+        self._engine = engine
+
+    def record_provider_call(self, record: ProviderCallRecord) -> None:
+        with begin_immediate(self._engine) as connection:
+            ProviderCallsRepository(connection).insert(
+                {
+                    "call_id": record.call_id,
+                    "provider_id": record.provider_id,
+                    "capability": record.capability,
+                    "model": record.model,
+                    "case_id": record.case_id,
+                    "job_id": record.job_id,
+                    "latency_ms": record.latency_ms,
+                    "usage_json": record.usage_json,
+                    "cost_estimate": record.cost_estimate,
+                    "status": record.status,
+                }
+            )
+
+
+def _planner_from_env(engine: Engine) -> LLMPlanner | None:
+    api_key = os.environ.get("RUSHES_DASHSCOPE_API_KEY") or os.environ.get("RUSHES_LLM_API_KEY")
+    if not api_key:
+        return None
+    return cast(
+        LLMPlanner,
+        build_openai_compatible_planner(
+            base_url=os.environ.get("RUSHES_LLM_BASE_URL", DEFAULT_LLM_BASE_URL),
+            api_key=api_key,
+            model=os.environ.get("RUSHES_LLM_MODEL", DEFAULT_LLM_MODEL),
+            recorder=_StorageProviderCallRecorder(engine),
+        ),
+    )
 
 
 def _register_lifecycle(app: FastAPI) -> None:
