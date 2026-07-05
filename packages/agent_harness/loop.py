@@ -7,6 +7,7 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from sqlalchemy import select
@@ -19,7 +20,7 @@ from contracts.project import ProjectState
 from contracts.timeline import TimelineState
 from contracts.tool import PatchOpSpec, ToolSpec
 from contracts.tool_result import ToolError, ToolResult
-from domain.preconditions import PreconditionContext
+from domain.preconditions import PreconditionContext, ProjectArtifactStats
 from storage import schema
 from storage.db import begin_immediate
 from storage.repositories import (
@@ -96,6 +97,7 @@ class RunTurnResult:
 class _LoadedState:
     case_state: CaseState
     project_state: ProjectState | None
+    project_artifacts: ProjectArtifactStats
     decisions: tuple[Decision, ...]
     pending_decision: Decision | None
     messages: tuple[ContextMessage, ...]
@@ -467,6 +469,7 @@ def context_bundle_input_preconditions(loaded: _LoadedState) -> PreconditionCont
     return PreconditionContext(
         case_state=loaded.case_state,
         project_state=loaded.project_state,
+        project_artifacts=loaded.project_artifacts,
     )
 
 
@@ -650,6 +653,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
             raise ValueError(f"case not found: {case_id}")
         case_state = CaseState.model_validate(case_row)
         project_state = _load_project_state(connection, case_state.project_id)
+        project_artifacts = _load_project_artifact_stats(connection, case_state)
         decisions = _load_decisions(connection)
         pending_decision = _find_pending_decision(case_state, decisions)
         messages = tuple(
@@ -665,6 +669,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
     return _LoadedState(
         case_state=case_state,
         project_state=project_state,
+        project_artifacts=project_artifacts,
         decisions=decisions,
         pending_decision=pending_decision,
         messages=messages,
@@ -675,6 +680,86 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
 def _load_project_state(connection: Connection, project_id: str) -> ProjectState | None:
     row = ProjectsRepository(connection).get(project_id)
     return None if row is None else ProjectState.model_validate(row)
+
+
+def _load_project_artifact_stats(
+    connection: Connection,
+    case_state: CaseState,
+) -> ProjectArtifactStats:
+    disabled = set(case_state.disabled_asset_ids)
+    asset_rows = connection.execute(
+        select(schema.assets)
+        .select_from(
+            schema.assets.join(
+                schema.project_asset_links,
+                schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+            )
+        )
+        .where(schema.project_asset_links.c.project_id == case_state.project_id)
+        .where(schema.project_asset_links.c.enabled.is_(True))
+    ).all()
+    usable_asset_ids: set[str] = set()
+    asset_ids_with_audio: set[str] = set()
+    voiceover_asset_ids: set[str] = set()
+    for row in asset_rows:
+        values = dict(row._mapping)
+        asset_id = str(values["asset_id"])
+        if asset_id in disabled or not bool(values.get("usable")):
+            continue
+        usable_asset_ids.add(asset_id)
+        if _asset_has_audio(values):
+            asset_ids_with_audio.add(asset_id)
+        if str(values.get("kind")) == "voiceover":
+            voiceover_asset_ids.add(asset_id)
+    transcript_rows = connection.execute(select(schema.transcripts)).all()
+    transcript_asset_ids: set[str] = set()
+    transcript_with_vad_asset_ids: set[str] = set()
+    transcript_ids: set[str] = set()
+    transcript_ids_with_vad: set[str] = set()
+    for row in transcript_rows:
+        values = dict(row._mapping)
+        transcript_id = str(values["transcript_id"])
+        asset_id = str(values["asset_id"])
+        if asset_id not in usable_asset_ids:
+            continue
+        transcript_ids.add(transcript_id)
+        transcript_asset_ids.add(asset_id)
+        vad_segments = load_json(str(values["vad_segments"]))
+        if isinstance(vad_segments, list) and vad_segments:
+            transcript_ids_with_vad.add(transcript_id)
+            transcript_with_vad_asset_ids.add(asset_id)
+    return ProjectArtifactStats(
+        usable_asset_count=len(usable_asset_ids),
+        usable_asset_ids=frozenset(usable_asset_ids),
+        asset_ids_with_audio=frozenset(asset_ids_with_audio),
+        transcript_asset_ids=frozenset(transcript_asset_ids),
+        transcript_with_vad_asset_ids=frozenset(transcript_with_vad_asset_ids),
+        transcript_ids=frozenset(transcript_ids),
+        transcript_ids_with_vad=frozenset(transcript_ids_with_vad),
+        voiceover_asset_ids=frozenset(voiceover_asset_ids),
+        candidate_pack_valid=_candidate_pack_valid(connection, case_state),
+    )
+
+
+def _asset_has_audio(asset: Mapping[str, Any]) -> bool:
+    if str(asset.get("kind")) in {"audio", "voiceover", "bgm"}:
+        return True
+    raw_probe = asset.get("probe")
+    if not isinstance(raw_probe, str) or not raw_probe:
+        return False
+    probe = load_json(raw_probe)
+    return isinstance(probe, Mapping) and probe.get("has_audio") is True
+
+
+def _candidate_pack_valid(connection: Connection, case_state: CaseState) -> bool:
+    if case_state.candidate_pack_id is None:
+        return True
+    row = connection.execute(
+        select(schema.candidate_packs.c.candidate_pack_id).where(
+            schema.candidate_packs.c.candidate_pack_id == case_state.candidate_pack_id
+        )
+    ).first()
+    return row is not None
 
 
 def _load_decisions(connection: Connection) -> tuple[Decision, ...]:
@@ -776,6 +861,7 @@ def _execute_tool(
             project_state=state.project_state,
             decisions=state.decisions,
             readonly_connection=connection,
+            metadata=_tool_context_metadata(engine),
         )
         try:
             return router.execute(tool_call, context)
@@ -804,14 +890,18 @@ def _defer_tool_call(
 ) -> ToolResult:
     spec = registered.spec
     kind = _job_kind_for_tool(spec.name, spec.namespace)
+    job_arguments = dict(arguments)
+    if spec.name == "audio.asr_original" and not job_arguments.get("asset_id"):
+        asset_id = _asset_id_for_asr(state.case_state)
+        if asset_id is not None:
+            job_arguments["asset_id"] = asset_id
     idempotency_key = tool_call.idempotency_key or _job_idempotency_key(
         kind=kind,
         tool_name=spec.name,
         case_id=state.case_state.case_id,
-        arguments=arguments,
+        arguments=job_arguments,
     )
     job_id = _job_id(kind=kind, idempotency_key=idempotency_key)
-    job_arguments = dict(arguments)
     if spec.name == "asset.import_url":
         job_arguments.setdefault(
             "asset_id",
@@ -1135,6 +1225,7 @@ def _tool_call_id(tool_call: ToolCall) -> str:
 def _job_kind_for_tool(tool_name: str, namespace: str) -> str:
     explicit = {
         "annotation.enqueue": "annotation",
+        "audio.asr_original": "asr",
         "asr.transcribe": "asr",
         "tts.speech": "tts",
         "render.preview": "render_preview",
@@ -1149,6 +1240,21 @@ def _job_kind_for_tool(tool_name: str, namespace: str) -> str:
     if namespace in {"annotation", "asr", "tts", "proxy", "align"}:
         return namespace
     return tool_name.replace(".", "_")
+
+
+def _asset_id_for_asr(case_state: CaseState) -> str | None:
+    if case_state.audio_plan is not None and case_state.audio_plan.source_asset_ids:
+        return case_state.audio_plan.source_asset_ids[0]
+    if case_state.selected_asset_ids:
+        return case_state.selected_asset_ids[0]
+    return None
+
+
+def _tool_context_metadata(engine: Engine) -> dict[str, Any]:
+    database = engine.url.database
+    if database is None or database == ":memory:":
+        return {}
+    return {"workspace_path": str(Path(database).parent)}
 
 
 def _job_idempotency_key(

@@ -71,6 +71,7 @@ def test_all_prd_preconditions_have_true_and_false_cases() -> None:
         "active_case",
         "usable_asset_exists",
         "audio_plan_confirmed",
+        "audio_source_has_audio",
         "transcript_with_vad_exists",
         "content_plan_exists",
         "cut_plan_exists",

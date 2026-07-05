@@ -75,6 +75,20 @@ def audio_mode_in(*modes: str | AudioMode) -> PreconditionFn:
     return predicate
 
 
+def audio_source_has_audio(context: PreconditionContext) -> bool:
+    case_state = context.case_state
+    if case_state is None or case_state.audio_plan is None:
+        return False
+    stats = context.project_artifacts
+    source_ids = frozenset(case_state.audio_plan.source_asset_ids)
+    if source_ids:
+        return bool(source_ids & stats.asset_ids_with_audio)
+    selected_ids = frozenset(case_state.selected_asset_ids)
+    if selected_ids:
+        return bool(selected_ids & stats.asset_ids_with_audio)
+    return bool(stats.asset_ids_with_audio)
+
+
 def transcript_with_vad_exists(context: PreconditionContext) -> bool:
     case_state = context.case_state
     if case_state is None or case_state.audio_plan is None:
@@ -145,6 +159,7 @@ PRECONDITION_REGISTRY: dict[str, PreconditionFn] = {
     "active_case": active_case,
     "usable_asset_exists": usable_asset_exists,
     "audio_plan_confirmed": audio_plan_confirmed,
+    "audio_source_has_audio": audio_source_has_audio,
     "transcript_with_vad_exists": transcript_with_vad_exists,
     "content_plan_exists": content_plan_exists,
     "cut_plan_exists": cut_plan_exists,

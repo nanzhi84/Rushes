@@ -82,6 +82,8 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "asset.disable_for_case",
         "asset.list_project_assets",
         "asset.list_case_scope",
+        "audio.inspect_sources",
+        "audio.asr_original",
         "annotation.enqueue",
         "annotation.status",
         "annotation.retry",
@@ -106,6 +108,16 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
     assert asset_import_url.confirmation_decision_type == "url_import"
     assert asset_import_url.is_long_running is True
     assert registry.require("asset.list_project_assets").spec.side_effects == []
+    assert registry.require("audio.inspect_sources").spec.emits_events == [
+        "AssetProbed",
+        "CapabilityDegraded",
+    ]
+    audio_asr = registry.require("audio.asr_original").spec
+    assert audio_asr.is_long_running is True
+    assert audio_asr.requires_artifacts == [
+        "audio_mode_in(keep_original,rough_cut)",
+        "audio_source_has_audio",
+    ]
     assert registry.require("annotation.enqueue").spec.emits_events == ["JobEnqueued"]
     assert registry.require("annotation.status").spec.side_effects == []
     assert {spec.kind for spec in PATCH_OP_REGISTRY.list()} == {

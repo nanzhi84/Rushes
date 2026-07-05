@@ -172,3 +172,79 @@ def test_context_builder_truncates_budgeted_blocks_but_not_fixed_blocks() -> Non
     assert "recent" in bundle.blocks["messages"]
     assert bundle.token_counts["system"] > 1
     assert [tool.name for tool in bundle.allowed_tools] == ["respond"]
+
+
+def test_artifact_priority_orders_by_current_action() -> None:
+    from agent_harness.context_builder import _artifact_priority
+
+    assert _artifact_priority("timeline", None) == 0
+    assert _artifact_priority("timeline", "timeline.apply_patch") == 0
+    assert _artifact_priority("candidate_pack", "retrieval.search_candidates") == 0
+    assert _artifact_priority("audio_plan", "audio.generate_tts") == 0
+    assert _artifact_priority("brief", "respond") == 0
+    assert _artifact_priority("unknown_artifact", None) == 6
+
+
+def test_candidate_pack_rendering_caps_three_candidates() -> None:
+    from agent_harness.context_builder import _render_candidate_pack
+    from contracts.candidate import CandidatePack
+
+    pack = CandidatePack.model_validate(
+        {
+            "candidate_pack_id": "cand_1",
+            "case_id": "case_1",
+            "query_context": {},
+            "snapshot": {
+                "generated_at": "2026-07-05T00:00:00+00:00",
+                "asset_scope_hash": "h",
+                "annotation_versions": {},
+            },
+            "slots": [
+                {
+                    "slot_id": "slot_hook",
+                    "slot_brief": "开头钩子",
+                    "target_duration_sec": [2.0, 4.0],
+                    "candidates": [
+                        {
+                            "candidate_id": f"c{i}",
+                            "asset_id": "a1",
+                            "clip_id": f"clip{i}",
+                            "summary_line": f"候选{i}",
+                            "score": {"bm25_rank": i, "vector_rank": i, "rrf": 0.1},
+                        }
+                        for i in range(1, 6)
+                    ],
+                }
+            ],
+        }
+    )
+    text = _render_candidate_pack(pack)
+    assert "slot_hook" in text
+    assert text.count("* c") == 3
+
+
+def test_memory_block_renders_top_five() -> None:
+    from agent_harness.context_builder import _render_memory_block
+
+    assert _render_memory_block([], 100, lambda t: len(t) // 4) == "memory: none"
+    rendered = _render_memory_block([f"记忆{i}" for i in range(8)], 1000, lambda t: len(t) // 4)
+    assert rendered.count("- 记忆") == 5
+
+
+def test_workspace_and_case_blocks_handle_missing_state() -> None:
+    from agent_harness.context_builder import (
+        ContextBuildInput,
+        _render_case_header_block,
+        _render_workspace_block,
+    )
+    from domain.preconditions import PreconditionContext, ProjectArtifactStats
+
+    assert _render_workspace_block(None) == "workspace: no active project"
+    empty = ContextBuildInput(
+        preconditions=PreconditionContext(
+            case_state=None,
+            project_state=None,
+            project_artifacts=ProjectArtifactStats(usable_asset_count=0),
+        )
+    )
+    assert _render_case_header_block(empty) == "case: none"

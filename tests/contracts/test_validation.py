@@ -145,3 +145,33 @@ def test_patch_request_rejects_frame_fields() -> None:
                 "reason": "illegal frame field",
             }
         )
+
+
+def test_memory_scope_validators() -> None:
+    import pytest as _pytest
+
+    from contracts.memory import Memory
+
+    Memory(
+        memory_id="m1",
+        scope="project",
+        project_id="p1",
+        content="c",
+        created_at="2026-07-05T00:00:00+00:00",
+    )
+    with _pytest.raises(ValueError):
+        Memory(
+            memory_id="m2",
+            scope="project",
+            project_id=None,
+            content="c",
+            created_at="2026-07-05T00:00:00+00:00",
+        )
+    with _pytest.raises(ValueError):
+        Memory(
+            memory_id="m3",
+            scope="user",
+            project_id="p1",
+            content="c",
+            created_at="2026-07-05T00:00:00+00:00",
+        )

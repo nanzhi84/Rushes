@@ -9,6 +9,7 @@ from .objects import ObjectsRepository
 from .projects import ProjectsRepository
 from .provider_calls import ProviderCallsRepository
 from .timeline_versions import TimelineVersionsRepository
+from .transcripts import TranscriptsRepository
 
 __all__ = [
     "CaseUpdateConflict",
@@ -22,4 +23,5 @@ __all__ = [
     "ProjectsRepository",
     "ProviderCallsRepository",
     "TimelineVersionsRepository",
+    "TranscriptsRepository",
 ]

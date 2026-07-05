@@ -291,6 +291,19 @@ class AnnotationInspectInput(BaseModel):
     project_id: str | None = None
 
 
+class AudioInspectSourcesInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_ids: list[str] = Field(default_factory=list)
+
+
+class AudioAsrOriginalInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str | None = None
+    provider_id: str | None = None
+
+
 def tool_specs() -> tuple[ToolSpec, ...]:
     return (
         ToolSpec(
@@ -726,6 +739,41 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             description="List selected and disabled asset IDs for the active Case.",
         ),
         ToolSpec(
+            name="audio.inspect_sources",
+            namespace="audio",
+            version="1",
+            input_model=AudioInspectSourcesInput,
+            result_model=None,
+            handler_ref="tools.audio.inspect_sources",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=["usable_asset_exists"],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["asset"],
+            emits_events=["AssetProbed", "CapabilityDegraded"],
+            description="Inspect case assets for audio tracks and local speech/silence segments.",
+        ),
+        ToolSpec(
+            name="audio.asr_original",
+            namespace="audio",
+            version="1",
+            input_model=AudioAsrOriginalInput,
+            result_model=None,
+            handler_ref="tools.audio.asr_original",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[
+                "audio_mode_in(keep_original,rough_cut)",
+                "audio_source_has_audio",
+            ],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["job"],
+            idempotency_key_fields=["asset_id", "provider_id"],
+            emits_events=["JobEnqueued"],
+            is_long_running=True,
+            description="Queue raw-preserving ASR for the selected original audio asset.",
+        ),
+        ToolSpec(
             name="annotation.enqueue",
             namespace="annotation",
             version="1",
@@ -904,6 +952,8 @@ def build_default_tool_registry() -> ToolRegistry:
         unlink_from_project,
         upload_complete,
     )
+    from .audio import asr_original as audio_asr_original
+    from .audio import inspect_sources as audio_inspect_sources
     from .builtin import decision_answer, finish_turn, refuse, respond
     from .interaction import (
         ask_user,
@@ -952,6 +1002,8 @@ def build_default_tool_registry() -> ToolRegistry:
         "asset.disable_for_case": disable_for_case,
         "asset.list_project_assets": list_project_assets,
         "asset.list_case_scope": list_case_scope,
+        "audio.inspect_sources": audio_inspect_sources,
+        "audio.asr_original": audio_asr_original,
         "annotation.enqueue": annotation_enqueue,
         "annotation.status": annotation_status,
         "annotation.retry": annotation_retry,

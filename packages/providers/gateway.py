@@ -146,7 +146,7 @@ def _normalize_result(
     request_id: str,
     latency_ms: int,
 ) -> ProviderResult:
-    data = raw.model_dump(mode="json") if isinstance(raw, ProviderResult) else dict(raw)
+    data = raw.model_dump(mode="python") if isinstance(raw, ProviderResult) else dict(raw)
     data.setdefault("provider_id", registration.descriptor.provider_id)
     data.setdefault("capability", request.capability)
     data.setdefault("request_id", request_id)
