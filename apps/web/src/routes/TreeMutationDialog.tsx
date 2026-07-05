@@ -111,8 +111,7 @@ export function TreeMutationDialog({
         return;
       }
       if ("project" in payload.result) {
-        // 同上：response model 未声明，运行时收窄
-        const projectId = (payload.result.project as { project_id: string }).project_id;
+        const projectId = payload.result.project.project_id;
         if (payload.kind === "deleteProject") {
           await navigate({ to: "/" });
         } else {
@@ -120,8 +119,7 @@ export function TreeMutationDialog({
         }
       }
       if ("case" in payload.result) {
-        // 后端该端点暂未声明 response model（openapi 里为 unknown），先做运行时收窄
-        const caseRecord = payload.result.case as { case_id: string; project_id: string };
+        const caseRecord = payload.result.case;
         if (payload.kind === "deleteCase") {
           await navigate({
             to: "/projects/$projectId",

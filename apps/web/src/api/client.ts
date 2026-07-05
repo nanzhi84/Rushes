@@ -1,58 +1,23 @@
 import { apiFetch } from "../auth";
 import type { components, paths } from "./generated/schema";
 
-// 后端这些响应暂未声明 pydantic response model（openapi 无对应 component），
-// 先以本地接口描述实际返回形状；后端补 model 后应改回 components["schemas"][...]。
-export type ProjectTreeCase = {
-  case_id: string;
-  project_id: string;
-  name: string;
-  status: string;
-};
-export type ProjectTreeProject = {
-  project_id: string;
-  name: string;
-  status: string;
-  cases: ProjectTreeCase[];
-};
-export type ProjectRecord = {
-  project_id: string;
-  name: string;
-  status: string;
-  [key: string]: unknown;
-};
-export type CaseRecord = {
-  case_id: string;
-  project_id: string;
-  name: string;
-  status: string;
-  [key: string]: unknown;
-};
-export type DecisionOption = { option_id: string; label: string; [key: string]: unknown };
-export type Decision = {
-  decision_id: string;
-  type: string;
-  question: string;
-  options: DecisionOption[];
-  status: string;
-  [key: string]: unknown;
-};
-export type DecisionAnswer = {
-  option_id?: string | null;
-  free_text?: string | null;
-  answered_via: "button" | "natural_language";
-  payload?: Record<string, unknown>;
-};
+export type ProjectTreeCase = components["schemas"]["ProjectTreeCase"];
+export type ProjectTreeProject = components["schemas"]["ProjectTreeProject"];
+export type ProjectRecord = components["schemas"]["ProjectRecord"];
+export type CaseRecord = components["schemas"]["CaseRecord"];
+export type DecisionOption = components["schemas"]["DecisionOption"];
+export type Decision = components["schemas"]["Decision"];
+export type DecisionAnswer = components["schemas"]["DecisionAnswerRequest"]["answer"];
 
-type ProjectTreeResponse = { projects: ProjectTreeProject[] };
-type ProjectListResponse = { projects: ProjectRecord[] };
+type ProjectTreeResponse = components["schemas"]["ProjectTreeResponse"];
+type ProjectListResponse = components["schemas"]["ProjectListResponse"];
 type ProjectCreateRequest =
   paths["/api/projects"]["post"]["requestBody"]["content"]["application/json"];
 type ProjectUpdateRequest =
   paths["/api/projects/{project_id}"]["patch"]["requestBody"]["content"]["application/json"];
 type ProjectCopyRequest =
   paths["/api/projects/{project_id}/copy"]["post"]["requestBody"]["content"]["application/json"];
-type ProjectMutationResponse = { project: ProjectRecord };
+type ProjectMutationResponse = components["schemas"]["ProjectMutationResponse"];
 type CaseCreateRequest =
   paths["/api/projects/{project_id}/cases"]["post"]["requestBody"]["content"]["application/json"];
 type CaseUpdateRequest =
@@ -61,14 +26,14 @@ type CaseCopyRequest =
   paths["/api/projects/{project_id}/cases/{case_id}/copy"]["post"]["requestBody"]["content"]["application/json"];
 type CaseMoveRequest =
   paths["/api/projects/{project_id}/cases/{case_id}/move"]["post"]["requestBody"]["content"]["application/json"];
-type CaseMutationResponse = { case: CaseRecord };
+type CaseMutationResponse = components["schemas"]["CaseMutationResponse"];
 type MessageCreateRequest =
   paths["/api/projects/{project_id}/cases/{case_id}/messages"]["post"]["requestBody"]["content"]["application/json"];
-type MessageQueuedResponse = { message_id: string; queued: boolean; [key: string]: unknown };
-type CurrentDecisionResponse = { decision: Decision | null };
+type MessageQueuedResponse = components["schemas"]["MessageQueuedResponse"];
+type CurrentDecisionResponse = components["schemas"]["CurrentDecisionResponse"];
 type DecisionAnswerRequest =
   paths["/api/decisions/{decision_id}/answer"]["post"]["requestBody"]["content"]["application/json"];
-type DecisionAnswerResponse = { decision_id: string; status: string; [key: string]: unknown };
+type DecisionAnswerResponse = components["schemas"]["DecisionAnswerResponse"];
 
 export const api = {
   projectTree(): Promise<ProjectTreeResponse> {

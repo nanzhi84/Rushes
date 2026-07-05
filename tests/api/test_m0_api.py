@@ -29,6 +29,43 @@ BASE_URL = "http://127.0.0.1:8000"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
+def test_openapi_components_include_api_response_models(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+
+    components = app.openapi()["components"]["schemas"]
+
+    expected = {
+        "ProjectTreeCase",
+        "ProjectTreeProject",
+        "ProjectTreeResponse",
+        "ProjectRecord",
+        "ProjectListResponse",
+        "ProjectMutationResponse",
+        "ProjectPageCase",
+        "ProjectPageActions",
+        "ProjectPageResponse",
+        "CaseRecord",
+        "CaseResponse",
+        "CaseMutationResponse",
+        "MessageQueuedResponse",
+        "CurrentDecisionResponse",
+        "Decision",
+        "DecisionOption",
+        "PendingToolCall",
+        "DecisionAnswerResponse",
+        "JobCancelResponse",
+        "FsRoot",
+        "FsRootsResponse",
+        "FsListEntry",
+        "FsListResponse",
+        "ReducerConflictDetail",
+        "ErrorDetail",
+        "ErrorResponse",
+        "SecurityRefusalResponse",
+    }
+    assert expected <= set(components)
+
+
 def test_security_baseline_refusals_emit_security_refusal_events(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)

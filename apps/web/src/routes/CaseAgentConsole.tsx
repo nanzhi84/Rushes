@@ -53,6 +53,7 @@ export function CaseConsoleView({
   });
 
   const currentDecision = decisionQuery.data?.decision ?? null;
+  const decisionOptions = currentDecision?.options ?? [];
   const messages = messagesQuery.data ?? [];
 
   const invalidateCaseQueries = useCallback(
@@ -200,7 +201,7 @@ export function CaseConsoleView({
             {currentDecision ? (
               <div className="mt-3 space-y-3">
                 <p className="text-sm leading-6 text-[#475569]">{currentDecision.question}</p>
-                {currentDecision.options.map((option) => (
+                {decisionOptions.map((option) => (
                   <button
                     key={option.option_id}
                     className="block w-full rounded-md border border-[#cbd5e1] px-3 py-2 text-left text-sm hover:bg-[#f1f5f9]"
@@ -210,7 +211,7 @@ export function CaseConsoleView({
                       answerDecision.mutate({
                         option_id: option.option_id,
                         answered_via: "button",
-                        payload: (option.payload as Record<string, unknown> | undefined) ?? {}
+                        payload: option.payload ?? {}
                       })
                     }
                   >
