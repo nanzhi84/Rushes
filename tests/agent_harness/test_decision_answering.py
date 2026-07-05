@@ -7,15 +7,15 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from agent_harness.decision_answering import (
-    DecisionAnsweringError,
-    GatewayDecisionAnswerResolver,
-    ScriptedDecisionAnswerResolver,
-)
+from agent_harness.decision_answering import ScriptedDecisionAnswerResolver
 from contracts.case import CaseState
 from contracts.decision import Decision
 from contracts.provider import ProviderDescriptor
 from providers import LLM_CHAT, ProviderGateway, ProviderRegistry
+from providers.decision_answering import (
+    DecisionAnsweringError,
+    GatewayDecisionAnswerResolver,
+)
 from providers.mock import MockProvider
 
 

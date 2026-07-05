@@ -19,10 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
 from sqlalchemy.engine import Engine, Row
 
-from agent_harness.decision_answering import (
-    DecisionAnswerResolver,
-    build_openai_compatible_decision_answer_resolver,
-)
+from agent_harness.decision_answering import DecisionAnswerResolver
 from agent_harness.loop import (
     LLMPlanner,
     ScriptedPlanner,
@@ -52,6 +49,7 @@ from contracts.events import (
 )
 from contracts.tool_result import ToolResult
 from media.invalidation import revalidate_project_references
+from providers.decision_answering import build_openai_compatible_decision_answer_resolver
 from providers.gateway import ProviderCallRecord
 from providers.planner import build_openai_compatible_planner
 from storage import schema
