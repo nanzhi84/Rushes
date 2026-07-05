@@ -92,6 +92,10 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "annotation.retry",
         "annotation.inspect",
         "retrieval.search_candidates",
+        "timeline.plan_from_candidates",
+        "timeline.validate",
+        "timeline.inspect",
+        "timeline.restore_version",
     }
     assert {spec.name for spec in tool_specs()} == expected_tools
     assert {spec.name for spec in registry.list_stable()} == {spec.name for spec in tool_specs()}
@@ -153,6 +157,19 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "CandidatePackCreated",
         "CapabilityDegraded",
         "ProviderCallRecorded",
+    ]
+    plan_from_candidates = registry.require("timeline.plan_from_candidates").spec
+    assert plan_from_candidates.requires_artifacts == ["candidate_pack_exists"]
+    assert plan_from_candidates.emits_events == [
+        "TimelineVersionCreated",
+        "TimelineValidated",
+        "TimelineValidationFailed",
+        "DecisionCreated",
+    ]
+    assert registry.require("timeline.validate").spec.requires_artifacts == ["timeline_exists"]
+    assert registry.require("timeline.inspect").spec.side_effects == []
+    assert registry.require("timeline.restore_version").spec.emits_events == [
+        "TimelineVersionRestored"
     ]
     assert {spec.kind for spec in PATCH_OP_REGISTRY.list()} == {
         "delete_range",

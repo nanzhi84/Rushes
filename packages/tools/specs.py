@@ -338,6 +338,35 @@ class RetrievalSearchCandidatesInput(BaseModel):
     embedding_model: str | None = "text-embedding-v4"
 
 
+class TimelineCandidateSelectionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    slot_id: str
+    candidate_id: str
+
+
+class TimelinePlanFromCandidatesInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    selections: list[TimelineCandidateSelectionInput]
+
+
+class TimelineValidateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class TimelineInspectInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version: int | None = None
+
+
+class TimelineRestoreVersionInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_version: int
+
+
 def tool_specs() -> tuple[ToolSpec, ...]:
     return (
         ToolSpec(
@@ -959,6 +988,73 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             ],
             description="Search ready project clips and create a CandidatePack for each cut slot.",
         ),
+        ToolSpec(
+            name="timeline.plan_from_candidates",
+            namespace="timeline",
+            version="1",
+            input_model=TimelinePlanFromCandidatesInput,
+            result_model=None,
+            handler_ref="tools.timeline_tools.plan_from_candidates",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=["candidate_pack_exists"],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["timeline", "case"],
+            emits_events=[
+                "TimelineVersionCreated",
+                "TimelineValidated",
+                "TimelineValidationFailed",
+                "DecisionCreated",
+            ],
+            description=(
+                "Materialize selected candidate_id/slot_id pairs into a validated timeline."
+            ),
+        ),
+        ToolSpec(
+            name="timeline.validate",
+            namespace="timeline",
+            version="1",
+            input_model=TimelineValidateInput,
+            result_model=None,
+            handler_ref="tools.timeline_tools.validate",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=["timeline_exists"],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["timeline", "case"],
+            emits_events=["TimelineValidated", "TimelineValidationFailed"],
+            description="Validate the current timeline version against PRD §10.2 invariants.",
+        ),
+        ToolSpec(
+            name="timeline.inspect",
+            namespace="timeline",
+            version="1",
+            input_model=TimelineInspectInput,
+            result_model=None,
+            handler_ref="tools.timeline_tools.inspect",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=["timeline_exists"],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=[],
+            emits_events=[],
+            description="Return a prompt-safe summary for the current timeline version.",
+        ),
+        ToolSpec(
+            name="timeline.restore_version",
+            namespace="timeline",
+            version="1",
+            input_model=TimelineRestoreVersionInput,
+            result_model=None,
+            handler_ref="tools.timeline_tools.restore_version",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=["timeline_exists"],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["timeline", "case"],
+            emits_events=["TimelineVersionRestored"],
+            description="Restore an old timeline as a new version record.",
+        ),
     )
 
 
@@ -1099,6 +1195,10 @@ def build_default_tool_registry() -> ToolRegistry:
         rename,
     )
     from .retrieval import search_candidates as retrieval_search_candidates
+    from .timeline_tools import inspect as timeline_inspect
+    from .timeline_tools import plan_from_candidates as timeline_plan_from_candidates
+    from .timeline_tools import restore_version as timeline_restore_version
+    from .timeline_tools import validate as timeline_validate
 
     handlers: dict[str, ToolHandler] = {
         "respond": respond,
@@ -1138,6 +1238,10 @@ def build_default_tool_registry() -> ToolRegistry:
         "annotation.retry": annotation_retry,
         "annotation.inspect": annotation_inspect,
         "retrieval.search_candidates": retrieval_search_candidates,
+        "timeline.plan_from_candidates": timeline_plan_from_candidates,
+        "timeline.validate": timeline_validate,
+        "timeline.inspect": timeline_inspect,
+        "timeline.restore_version": timeline_restore_version,
     }
     registry = ToolRegistry()
     for spec in tool_specs():
