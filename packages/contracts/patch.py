@@ -8,8 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class TimelinePatchReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    timeline_version: int
-    preview_id: str
+    timeline_version: int | None = None
+    preview_id: str | None = None
 
 
 class TimeRangeSec(BaseModel):
@@ -194,7 +194,7 @@ class TimelinePatchRequest(BaseModel):
         default="TimelinePatchRequest.v1", alias="schema"
     )
     case_id: str
-    reference: TimelinePatchReference
+    reference: TimelinePatchReference = Field(default_factory=TimelinePatchReference)
     op: TimelinePatchOp
     reason: str
 
