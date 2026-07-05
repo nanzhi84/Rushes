@@ -3,9 +3,15 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from contracts.transcript import TranscriptDocument, TranscriptUtterance, TranscriptWord, VadSegment
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
-from storage.repositories import CasesRepository, DecisionsRepository, JobsRepository
+from storage.repositories import (
+    CasesRepository,
+    DecisionsRepository,
+    JobsRepository,
+    TranscriptsRepository,
+)
 from storage.repositories.projects import ProjectsRepository
 
 NOW = "2026-07-04T00:00:00+00:00"
@@ -197,3 +203,57 @@ def test_jobs_heartbeat_and_stale_running_reset(tmp_path: Path) -> None:
     assert reset is not None
     assert reset["status"] == "pending"
     assert reset["worker_id"] is None
+
+
+def test_transcripts_repository_persists_document_json(tmp_path: Path) -> None:
+    workspace = _prepare_workspace(tmp_path)
+    _insert_project_and_case(workspace)
+    engine = create_workspace_engine(workspace)
+    with begin_immediate(engine) as connection:
+        connection.execute(
+            schema.assets.insert().values(
+                asset_id="asset_1",
+                storage_mode="reference",
+                object_hash=None,
+                reference_path="/tmp/source.mp4",
+                kind="video",
+                source="local_path",
+                filename="source.mp4",
+                hash="hash",
+                mtime=1,
+                size=1,
+                probe=None,
+                proxy_object_hash=None,
+                ingest_status="imported",
+                annotation_status="pending",
+                annotation_pass="none",
+                index_status="none",
+                usable=True,
+                failure=None,
+            )
+        )
+        repo = TranscriptsRepository(connection)
+        repo.insert_document(
+            TranscriptDocument(
+                transcript_id="tr_1",
+                asset_id="asset_1",
+                language="zh",
+                provider_id="aliyun_paraformer_v2",
+                raw_preserved=True,
+                utterances=[
+                    TranscriptUtterance(
+                        utterance_id="u_001",
+                        text="呃",
+                        start_ms=0,
+                        end_ms=100,
+                        words=[TranscriptWord(w="呃", start_ms=0, end_ms=100, type="filler")],
+                    )
+                ],
+                vad_segments=[VadSegment(start_ms=100, end_ms=800, kind="silence")],
+            )
+        )
+        row = repo.get("tr_1")
+
+    assert row is not None
+    assert row["utterances"][0]["words"][0]["type"] == "filler"
+    assert row["vad_segments"] == [{"start_ms": 100, "end_ms": 800, "kind": "silence"}]

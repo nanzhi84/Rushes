@@ -15,6 +15,8 @@ dependencies = [
     "httpx>=0.27",
     "numpy",
     "opencv-python-headless>=4.10",
+    "onnxruntime>=1.18",
+    "oss2>=2.18",
     "pydantic>=2.7",
     "scenedetect[opencv]>=0.6",
     "sqlalchemy>=2.0",
@@ -32,7 +34,6 @@ dev = [
 ]
 poc = [
     "httpx>=0.27",
-    "oss2>=2.18",
 ]
 
 [tool.hatch.build.targets.wheel]
