@@ -1,47 +1,103 @@
-"""M-1.3 MiniMax TTS timestamp-chain POC."""
+"""M-1.3 Volcengine TTS timestamp-chain POC."""
 
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
 import json
-from collections.abc import Mapping
+import re
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
-import httpx
 from _common import (
     EXIT_SKIP,
     JsonObject,
     PocError,
     PocSkip,
-    checked_response_json,
+    compact_text,
     ensure_dir,
-    first_mapping_list,
-    first_ms,
-    first_string,
-    http_get_bytes,
-    iter_json_objects,
+    ffprobe_duration_s,
+    is_punctuation,
+    lcs_ratio,
     load_dotenv,
     require_env,
     timestamp,
     write_json,
 )
-
-DEFAULT_TEXT = "呃，今天我们用一段短旁白验证 MiniMax 的字幕时间戳链路。"
-MINIMAX_ENDPOINTS = (
-    "https://api.minimax.io/v1/t2a_v2",
-    "https://api.minimaxi.com/v1/t2a_v2",
+from _volc import (
+    DEFAULT_ENCODING,
+    DEFAULT_RESOURCE_ID,
+    DEFAULT_VOICE_TYPE,
+    VolcCredentials,
+    VolcError,
+    VolcTTSClient,
 )
+
+DEFAULT_SCRIPT_PATH = Path("/Users/yoryon/MyVideo/04-protein-powder-scoop/script.md")
+FALLBACK_TEXT = "今天我们用火山引擎语音合成验证字幕时间戳链路。"
+COVERAGE_THRESHOLD = 0.98
+
+START_KEYS = (
+    "start_ms",
+    "startMs",
+    "begin_ms",
+    "beginMs",
+    "start_time",
+    "startTime",
+    "begin_time",
+    "beginTime",
+    "offset",
+    "start",
+    "begin",
+)
+END_KEYS = (
+    "end_ms",
+    "endMs",
+    "finish_ms",
+    "finishMs",
+    "end_time",
+    "endTime",
+    "finish_time",
+    "finishTime",
+    "stop_time",
+    "stopTime",
+    "end",
+    "finish",
+    "stop",
+)
+DURATION_KEYS = ("duration_ms", "durationMs", "duration", "length_ms", "lengthMs", "length")
+SENTENCE_LIST_KEYS = (
+    "sentences",
+    "sentence",
+    "segments",
+    "subtitles",
+    "utterances",
+    "utterance",
+    "lines",
+)
+WORD_LIST_KEYS = (
+    "words",
+    "word",
+    "tokens",
+    "token",
+    "characters",
+    "chars",
+    "char",
+    "phonemes",
+    "phones",
+)
+SENTENCE_TEXT_KEYS = ("text", "sentence", "content", "subtitle", "utterance")
+WORD_TEXT_KEYS = ("w", "word", "text", "char", "value", "content", "phone", "phoneme", "symbol")
+FILLERS = frozenset({"呃", "嗯", "啊", "哦", "额"})
 
 
 @dataclass(frozen=True)
-class TtsChar:
-    text: str
+class TtsWord:
+    w: str
     start_ms: int
     end_ms: int
+    type: Literal["filler", "word", "punct"]
 
 
 @dataclass(frozen=True)
@@ -49,7 +105,7 @@ class TtsSentence:
     text: str
     start_ms: int
     end_ms: int
-    chars: list[TtsChar]
+    words: list[TtsWord]
 
 
 @dataclass(frozen=True)
@@ -57,196 +113,370 @@ class TtsNormalized:
     sentences: list[TtsSentence]
 
     @property
-    def char_count(self) -> int:
-        return sum(len(sentence.chars) for sentence in self.sentences)
+    def word_count(self) -> int:
+        return sum(len(sentence.words) for sentence in self.sentences)
+
+    @property
+    def text(self) -> str:
+        return "".join(word.w for sentence in self.sentences for word in sentence.words)
+
+
+@dataclass(frozen=True)
+class TimestampAssertions:
+    coverage_ratio: float
+    reference_chars: int
+    timestamped_chars: int
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="验证 MiniMax T2A v2 subtitle_file 时间戳链路。")
-    parser.add_argument("--text", default=DEFAULT_TEXT, help="TTS 文本。")
-    parser.add_argument("--voice-id", default="male-qn-qingse", help="MiniMax voice_id。")
-    parser.add_argument("--model", default="speech-02-turbo", help="MiniMax T2A 模型。")
+    parser = argparse.ArgumentParser(description="验证火山 TTS 音频 + 字/词级时间戳链路。")
+    parser.add_argument(
+        "--script",
+        type=Path,
+        default=DEFAULT_SCRIPT_PATH,
+        help="Markdown 脚本路径；默认解析其中的 ## 口播稿 小节。",
+    )
+    parser.add_argument(
+        "--voice-type",
+        default=DEFAULT_VOICE_TYPE,
+        help="火山 audio.voice_type；默认沿用 CutFlow 实测账号里的可用音色。",
+    )
+    parser.add_argument(
+        "--resource-id",
+        default=DEFAULT_RESOURCE_ID,
+        help="火山数据面 Resource-Id。",
+    )
+    parser.add_argument("--encoding", default=DEFAULT_ENCODING, help="音频编码，默认 mp3。")
     return parser.parse_args()
 
 
-def call_minimax(api_key: str, payload: JsonObject) -> tuple[str, JsonObject]:
-    errors: list[str] = []
-    for endpoint in MINIMAX_ENDPOINTS:
-        try:
-            with httpx.Client(timeout=httpx.Timeout(120.0, connect=10.0)) as client:
-                response = client.post(
-                    endpoint,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-            return endpoint, checked_response_json(response, context=f"MiniMax T2A {endpoint}")
-        except (PocError, httpx.HTTPError) as exc:
-            errors.append(f"{endpoint}: {exc}")
-    raise PocError("MiniMax 两个 endpoint 都失败：\n" + "\n".join(errors))
+def script_text(path: Path) -> str:
+    if not path.exists():
+        return FALLBACK_TEXT
+    raw = path.read_text(encoding="utf-8")
+    section = extract_spoken_section(raw)
+    if not section:
+        return FALLBACK_TEXT
+    return section
 
 
-def build_payload(args: argparse.Namespace) -> JsonObject:
-    return {
-        "model": args.model,
-        "text": args.text,
-        "stream": False,
-        "subtitle_enable": True,
-        "voice_setting": {
-            "voice_id": args.voice_id,
-            "speed": 1.0,
-            "vol": 1.0,
-            "pitch": 0,
-        },
-        "audio_setting": {
-            "sample_rate": 32000,
-            "bitrate": 128000,
-            "format": "mp3",
-            "channel": 1,
-        },
-    }
+def extract_spoken_section(markdown: str) -> str:
+    lines = markdown.splitlines()
+    in_section = False
+    in_fence = False
+    paragraph_lines: list[str] = []
+    paragraphs: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if not in_fence and stripped.startswith("## "):
+            if in_section:
+                break
+            title = stripped.removeprefix("## ").strip()
+            in_section = title.startswith("口播稿")
+            continue
+        if not in_section or in_fence:
+            continue
+        cleaned = clean_script_line(stripped)
+        if not cleaned:
+            if paragraph_lines:
+                paragraphs.append("".join(paragraph_lines))
+                paragraph_lines = []
+            continue
+        paragraph_lines.append(cleaned)
+    if paragraph_lines:
+        paragraphs.append("".join(paragraph_lines))
+    return "\n".join(paragraphs).strip()
 
 
-def extract_subtitle_url(response: JsonObject) -> str:
-    for mapping in iter_json_objects(response):
-        value = first_string(mapping, ("subtitle_file", "subtitleFile", "subtitle_url"))
-        if value is not None:
-            return value
-    raise PocError(f"MiniMax 响应缺少 extra_info.subtitle_file：{response}")
+def clean_script_line(line: str) -> str:
+    if not line or line.startswith("#"):
+        return ""
+    cleaned = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line)
+    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    return cleaned.strip()
 
 
-def extract_audio_bytes(response: JsonObject) -> bytes | None:
-    for mapping in iter_json_objects(response):
-        audio_url = first_string(mapping, ("audio_url", "audioUrl", "url"))
-        if audio_url is not None and audio_url.startswith("http"):
-            return http_get_bytes(audio_url, context="下载 MiniMax 音频")
-        encoded = first_string(mapping, ("audio", "audio_data", "audioData"))
-        if encoded is not None:
-            decoded = decode_audio_field(encoded)
-            if decoded:
-                return decoded
-    return None
+def normalize_timestamps(raw: JsonObject, reference_text: str) -> TtsNormalized:
+    sentence_mappings = collect_list_mappings(raw, SENTENCE_LIST_KEYS)
+    sentences: list[TtsSentence] = []
+    for mapping in sentence_mappings:
+        sentence = sentence_from_mapping(mapping)
+        if sentence.words:
+            sentences.append(sentence)
+    if sentences:
+        return TtsNormalized(sentences=sentences)
 
-
-def fetch_subtitle_json(subtitle_url: str) -> JsonObject:
-    raw_bytes = http_get_bytes(subtitle_url, context="下载 MiniMax subtitle_file")
-    try:
-        data = json.loads(raw_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise PocError("MiniMax subtitle_file 不是有效 UTF-8 JSON。") from exc
-    if isinstance(data, dict):
-        return cast(JsonObject, data)
-    if isinstance(data, list):
-        return {"items": data}
-    raise PocError("MiniMax subtitle_file JSON 顶层既不是 object 也不是 array。")
-
-
-def decode_audio_field(value: str) -> bytes | None:
-    stripped = value.strip()
-    if not stripped:
-        return None
-    if len(stripped) % 2 == 0:
-        try:
-            return bytes.fromhex(stripped)
-        except ValueError:
-            pass
-    try:
-        return base64.b64decode(stripped, validate=True)
-    except (ValueError, binascii.Error):
-        return None
-
-
-def normalize_subtitle(raw: JsonObject) -> TtsNormalized:
-    sentence_mappings = collect_sentence_mappings(raw)
-    if not sentence_mappings:
-        word_mappings = collect_word_mappings(raw)
-        if not word_mappings:
-            raise PocError("字幕 JSON 中没有可识别的句级或字级时间戳字段。")
-        sentence = sentence_from_words(word_mappings, "".join(text_of_words(word_mappings)))
-        return TtsNormalized(sentences=[sentence])
-    sentences = [sentence_from_mapping(mapping) for mapping in sentence_mappings]
-    return TtsNormalized(sentences=sentences)
-
-
-def collect_sentence_mappings(raw: JsonObject) -> list[Mapping[str, object]]:
-    candidates: list[Mapping[str, object]] = []
-    for mapping in iter_json_objects(raw):
-        candidates.extend(
-            first_mapping_list(mapping, ("sentences", "sentence", "subtitles", "segments"))
-        )
-    return [candidate for candidate in candidates if first_ms(candidate, START_KEYS) is not None]
+    word_mappings = collect_word_mappings(raw)
+    if not word_mappings:
+        raise PocError("火山响应中没有可识别的字/词级时间戳结构。")
+    return TtsNormalized(sentences=[sentence_from_words(word_mappings, reference_text)])
 
 
 def collect_word_mappings(raw: JsonObject) -> list[Mapping[str, object]]:
+    candidates = collect_list_mappings(raw, WORD_LIST_KEYS)
+    if candidates:
+        return candidates
+    loose: list[Mapping[str, object]] = []
+    for mapping in iter_json_objects(raw):
+        if first_string(mapping, WORD_TEXT_KEYS) is None:
+            continue
+        if mapping_range(mapping) is None:
+            continue
+        loose.append(mapping)
+    return loose
+
+
+def collect_list_mappings(raw: JsonObject, keys: Sequence[str]) -> list[Mapping[str, object]]:
     candidates: list[Mapping[str, object]] = []
     for mapping in iter_json_objects(raw):
-        candidates.extend(first_mapping_list(mapping, ("words", "tokens", "characters", "chars")))
+        for key in keys:
+            value = mapping.get(key)
+            if isinstance(value, list):
+                candidates.extend(
+                    cast(Mapping[str, object], item) for item in value if isinstance(item, Mapping)
+                )
+            elif isinstance(value, Mapping):
+                candidates.append(cast(Mapping[str, object], value))
     return candidates
 
 
-START_KEYS = ("start_ms", "begin_time", "start_time", "startTime", "beginTime", "start", "begin")
-END_KEYS = ("end_ms", "end_time", "endTime", "finish_time", "finishTime", "end", "finish")
+def iter_json_objects(value: object) -> Iterator[Mapping[str, object]]:
+    for item in iter_json_values(value):
+        if isinstance(item, Mapping):
+            yield cast(Mapping[str, object], item)
+
+
+def iter_json_values(value: object) -> Iterator[object]:
+    yield value
+    if isinstance(value, Mapping):
+        for child in value.values():
+            yield from iter_json_values(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_json_values(child)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("{", "[")) and len(stripped) < 2_000_000:
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                return
+            yield from iter_json_values(parsed)
 
 
 def sentence_from_mapping(mapping: Mapping[str, object]) -> TtsSentence:
-    word_mappings = first_mapping_list(mapping, ("words", "tokens", "characters", "chars"))
-    text = first_string(mapping, ("text", "sentence", "content", "subtitle")) or "".join(
+    word_mappings = first_child_word_mappings(mapping)
+    fallback_text = first_string(mapping, SENTENCE_TEXT_KEYS) or "".join(
         text_of_words(word_mappings)
     )
-    if word_mappings:
-        return sentence_from_words(word_mappings, text)
-    start_ms = first_ms(mapping, START_KEYS)
-    end_ms = first_ms(mapping, END_KEYS)
-    if start_ms is None or end_ms is None or start_ms >= end_ms:
-        raise PocError(f"句级字幕时间戳非法：{mapping}")
-    return TtsSentence(text=text, start_ms=start_ms, end_ms=end_ms, chars=[])
+    if not word_mappings:
+        return TtsSentence(text=fallback_text, start_ms=0, end_ms=0, words=[])
+    return sentence_from_words(word_mappings, fallback_text)
+
+
+def first_child_word_mappings(mapping: Mapping[str, object]) -> list[Mapping[str, object]]:
+    for key in WORD_LIST_KEYS:
+        value = mapping.get(key)
+        if isinstance(value, list):
+            return [cast(Mapping[str, object], item) for item in value if isinstance(item, Mapping)]
+    return []
 
 
 def sentence_from_words(
-    word_mappings: list[Mapping[str, object]],
+    word_mappings: Sequence[Mapping[str, object]],
     fallback_text: str,
 ) -> TtsSentence:
-    chars: list[TtsChar] = []
+    words: list[TtsWord] = []
     for mapping in word_mappings:
-        text = first_string(mapping, ("w", "word", "text", "char", "value", "content"))
-        start_ms = first_ms(mapping, START_KEYS)
-        end_ms = first_ms(mapping, END_KEYS)
-        if text is None or start_ms is None or end_ms is None or start_ms >= end_ms:
-            raise PocError(f"字级字幕时间戳非法：{mapping}")
-        chars.append(TtsChar(text=text, start_ms=start_ms, end_ms=end_ms))
-    if not chars:
-        raise PocError("句子缺少字级字幕时间戳。")
+        text = first_string(mapping, WORD_TEXT_KEYS)
+        time_range = mapping_range(mapping)
+        if text is None or time_range is None:
+            raise PocError(f"字/词级时间戳字段不完整：{mapping}")
+        start_ms, end_ms = time_range
+        if start_ms >= end_ms:
+            raise PocError(f"字/词级时间戳非法：{mapping}")
+        words.append(
+            TtsWord(
+                w=text,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                type=word_type(text),
+            )
+        )
+    if not words:
+        raise PocError("火山响应缺少字/词级时间戳。")
     return TtsSentence(
-        text=fallback_text or "".join(char.text for char in chars),
-        start_ms=min(char.start_ms for char in chars),
-        end_ms=max(char.end_ms for char in chars),
-        chars=chars,
+        text=fallback_text or "".join(word.w for word in words),
+        start_ms=min(word.start_ms for word in words),
+        end_ms=max(word.end_ms for word in words),
+        words=words,
     )
 
 
-def text_of_words(word_mappings: list[Mapping[str, object]]) -> list[str]:
+def word_type(text: str) -> Literal["filler", "word", "punct"]:
+    if is_punctuation(text):
+        return "punct"
+    if text in FILLERS:
+        return "filler"
+    return "word"
+
+
+def text_of_words(word_mappings: Sequence[Mapping[str, object]]) -> list[str]:
     values: list[str] = []
     for mapping in word_mappings:
-        text = first_string(mapping, ("w", "word", "text", "char", "value", "content"))
+        text = first_string(mapping, WORD_TEXT_KEYS)
         if text is not None:
             values.append(text)
     return values
 
 
-def timestamps_are_monotonic(normalized: TtsNormalized) -> bool:
+def first_string(mapping: Mapping[str, object], keys: Sequence[str]) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            return str(value)
+    return None
+
+
+def mapping_range(mapping: Mapping[str, object]) -> tuple[int, int] | None:
+    start_ms = first_ms(mapping, START_KEYS)
+    end_ms = first_ms(mapping, END_KEYS)
+    if start_ms is None:
+        return None
+    if end_ms is None:
+        duration_ms = first_ms(mapping, DURATION_KEYS)
+        if duration_ms is None:
+            return None
+        end_ms = start_ms + duration_ms
+    return start_ms, end_ms
+
+
+def first_ms(mapping: Mapping[str, object], keys: Sequence[str]) -> int | None:
+    for key in keys:
+        if key not in mapping:
+            continue
+        parsed = parse_time_ms(key, mapping[key])
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def parse_time_ms(key: str, value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            number = float(stripped)
+        except ValueError:
+            return None
+    elif isinstance(value, int | float):
+        number = float(value)
+    else:
+        return None
+
+    lower_key = key.lower()
+    if "ms" in lower_key or "millisecond" in lower_key:
+        return round(number)
+    if "sec" in lower_key or lower_key.endswith("_s") or not number.is_integer():
+        return round(number * 1000)
+    return round(number)
+
+
+def timestamps_via_asr_fallback(audio_path: Path) -> TtsNormalized:
+    """PRD §9.5 兜底：provider 无原生时间戳时，TTS 音频回送云端 ASR 取字级时间戳。
+
+    实测背景（2026-07-05）：本账号为火山声音复刻 ICL（cluster=volcano_icl），
+    v1 /api/v1/tts 无论 with_timestamp/with_frontend 参数均只回 duration；
+    v3 unidirectional 与 megatts.default/concurr 资源均无授权（45000010）。
+    因此 timestamps_source=asr_fallback 是当前账号下的唯一时间戳通道。
+    """
+    import asr_contract
+    from _common import DashScopeClient, run_command
+
+    wav_path = audio_path.with_suffix(".16k.wav")
+    run_command(
+        ["ffmpeg", "-y", "-i", str(audio_path), "-ar", "16000", "-ac", "1", str(wav_path)],
+        description="TTS 音频转 16k 单声道 wav",
+    )
+    upload = asr_contract.upload_to_oss(wav_path, "rushes-poc/tts-fallback")
+    try:
+        api_key = require_env("RUSHES_DASHSCOPE_API_KEY")
+        with DashScopeClient(api_key) as client:
+            _, _, transcription = asr_contract.run_asr(client, upload.signed_url)
+    finally:
+        upload.delete()
+        print(f"已清理 OSS 对象：{upload.key}")
+    document = asr_contract.normalize_asr_response(transcription, asset_id="tts_asr_fallback")
+    sentences: list[TtsSentence] = []
+    for utterance in document.utterances:
+        words = [
+            TtsWord(w=word.w, start_ms=word.start_ms, end_ms=word.end_ms, type=word.type)
+            for word in utterance.words
+        ]
+        sentences.append(
+            TtsSentence(
+                text=utterance.text,
+                start_ms=utterance.start_ms,
+                end_ms=utterance.end_ms,
+                words=words,
+            )
+        )
+    if not sentences:
+        raise PocError("ASR 兜底未产出任何句级时间戳。")
+    return TtsNormalized(sentences=sentences)
+
+
+def assert_audio_decodable(path: Path) -> float:
+    if path.stat().st_size <= 0:
+        raise PocError("火山 TTS 音频为空。")
+    duration_s = ffprobe_duration_s(path)
+    if duration_s <= 0:
+        raise PocError(f"ffprobe 返回非正音频时长：{duration_s}")
+    return duration_s
+
+
+def assert_timestamp_contract(
+    normalized: TtsNormalized,
+    reference_text: str,
+) -> TimestampAssertions:
+    if not normalized.sentences or normalized.word_count == 0:
+        raise PocError("归一化结果缺少 sentences/words。")
     previous_sentence_end = -1
-    previous_char_end = -1
+    previous_word_end = -1
     for sentence in normalized.sentences:
         if sentence.start_ms < previous_sentence_end or sentence.start_ms >= sentence.end_ms:
-            return False
+            raise PocError(f"句级时间戳不单调：{sentence}")
         previous_sentence_end = sentence.end_ms
-        for char in sentence.chars:
-            if char.start_ms < previous_char_end or char.start_ms >= char.end_ms:
-                return False
-            previous_char_end = char.end_ms
-    return normalized.char_count > 0
+        for word in sentence.words:
+            if word.start_ms < previous_word_end or word.start_ms >= word.end_ms:
+                raise PocError(f"字/词级时间戳不单调：{word}")
+            previous_word_end = word.end_ms
+
+    reference_compact = compact_text(reference_text)
+    timestamped_compact = compact_text(normalized.text)
+    if not reference_compact or not timestamped_compact:
+        raise PocError("覆盖率检查文本为空。")
+    coverage = lcs_ratio(reference_compact, timestamped_compact)
+    if coverage < COVERAGE_THRESHOLD or len(timestamped_compact) < len(reference_compact):
+        raise PocError(
+            "时间戳文本未覆盖全文："
+            f"coverage={coverage:.3f}, reference={len(reference_compact)}, "
+            f"timestamped={len(timestamped_compact)}"
+        )
+    return TimestampAssertions(
+        coverage_ratio=coverage,
+        reference_chars=len(reference_compact),
+        timestamped_chars=len(timestamped_compact),
+    )
 
 
 def normalized_to_json(normalized: TtsNormalized) -> JsonObject:
@@ -256,13 +486,14 @@ def normalized_to_json(normalized: TtsNormalized) -> JsonObject:
                 "text": sentence.text,
                 "start_ms": sentence.start_ms,
                 "end_ms": sentence.end_ms,
-                "chars": [
+                "words": [
                     {
-                        "text": char.text,
-                        "start_ms": char.start_ms,
-                        "end_ms": char.end_ms,
+                        "w": word.w,
+                        "start_ms": word.start_ms,
+                        "end_ms": word.end_ms,
+                        "type": word.type,
                     }
-                    for char in sentence.chars
+                    for word in sentence.words
                 ],
             }
             for sentence in normalized.sentences
@@ -274,43 +505,74 @@ def main() -> int:
     args = parse_args()
     try:
         load_dotenv()
-        api_key = require_env("RUSHES_MINIMAX_API_KEY", label="MiniMax key")
+        credentials = VolcCredentials.from_values(
+            aksk=require_env("RUSHES_VOLC_TTS_AKSK", label="火山 TTS AK/SK"),
+            appid=require_env("RUSHES_VOLC_TTS_APPID", label="火山 TTS AppID"),
+            cluster=require_env("RUSHES_VOLC_TTS_CLUSTER", label="火山 TTS cluster"),
+        )
+        text = script_text(args.script)
         run_id = timestamp()
-        payload = build_payload(args)
-        endpoint, response = call_minimax(api_key, payload)
-        subtitle_url = extract_subtitle_url(response)
-        subtitle = fetch_subtitle_json(subtitle_url)
-        normalized = normalize_subtitle(subtitle)
-        monotonic = timestamps_are_monotonic(normalized)
         sample_dir = ensure_dir(Path("research/tts_samples"))
-        raw_path = sample_dir / f"minimax_t2a_v2_{run_id}.json"
-        subtitle_path = sample_dir / f"minimax_t2a_v2_{run_id}_subtitle.json"
-        normalized_path = sample_dir / f"minimax_t2a_v2_{run_id}_normalized.json"
-        audio_path = sample_dir / f"minimax_t2a_v2_{run_id}.mp3"
-        write_json(raw_path, {"endpoint": endpoint, "request": payload, "response": response})
-        write_json(subtitle_path, subtitle)
-        write_json(normalized_path, normalized_to_json(normalized))
-        audio_bytes = extract_audio_bytes(response)
-        if audio_bytes is not None:
-            audio_path.write_bytes(audio_bytes)
-        print("MiniMax TTS timestamp report")
-        print(f"- endpoint: {endpoint}")
-        print(f"- subtitle_file: {subtitle_url}")
+        audio_path = sample_dir / f"volcano_{run_id}.{args.encoding}"
+        raw_path = sample_dir / f"volcano_{run_id}.json"
+
+        with VolcTTSClient(credentials) as client:
+            api_key = client.ensure_api_key()
+            result = client.synthesize(
+                api_key=api_key,
+                text=text,
+                voice_type=str(args.voice_type),
+                resource_id=str(args.resource_id),
+                encoding=str(args.encoding),
+            )
+
+        audio_path.write_bytes(result.audio_bytes)
+        duration_s = assert_audio_decodable(audio_path)
+        try:
+            normalized = normalize_timestamps(result.response_json, text)
+            timestamps_source = "native"
+        except PocError as exc:
+            print(f"火山原生时间戳不可用（{exc}），走 ASR 兜底链路……")
+            normalized = timestamps_via_asr_fallback(audio_path)
+            timestamps_source = "asr_fallback"
+        assertions = assert_timestamp_contract(normalized, text)
+        write_json(
+            raw_path,
+            {
+                "provider": "volcengine.tts",
+                "endpoint": "https://openspeech.bytedance.com/api/v1/tts",
+                "script_path": str(args.script),
+                "voice_type": str(args.voice_type),
+                "resource_id": str(args.resource_id),
+                "request": result.request_payload,
+                "response": result.response_json,
+                "timestamps_source": timestamps_source,
+                "normalized": normalized_to_json(normalized),
+                "assertions": {
+                    "audio_duration_s": duration_s,
+                    "coverage_ratio": assertions.coverage_ratio,
+                    "reference_chars": assertions.reference_chars,
+                    "timestamped_chars": assertions.timestamped_chars,
+                },
+            },
+        )
+
+        print("Volcengine TTS timestamp report")
+        print(f"- script: {args.script}")
+        print(f"- voice_type: {args.voice_type}")
+        print(f"- resource_id: {args.resource_id}")
+        print(f"- audio_duration_s: {duration_s:.3f}")
+        print(f"- timestamps_source: {timestamps_source}")
         print(f"- sentences: {len(normalized.sentences)}")
-        print(f"- chars: {normalized.char_count}")
-        print(f"- timestamps: {'OK' if monotonic else 'FAIL'}")
+        print(f"- words: {normalized.word_count}")
+        print(f"- coverage: {assertions.coverage_ratio:.3f}")
+        print(f"- audio sample: {audio_path}")
         print(f"- raw sample: {raw_path}")
-        print(f"- subtitle sample: {subtitle_path}")
-        print(f"- normalized sample: {normalized_path}")
-        if audio_bytes is not None:
-            print(f"- audio sample: {audio_path}")
-        else:
-            print("- audio sample: MiniMax 响应中未找到 audio/audio_url 字段")
-        return 0 if monotonic else 1
-    except PocSkip:
-        print("SKIP: 缺 MiniMax key")
+        return 0
+    except PocSkip as exc:
+        print(f"SKIP: {exc}")
         return EXIT_SKIP
-    except PocError as exc:
+    except (PocError, VolcError) as exc:
         print(f"ERROR: {exc}")
         return 1
 

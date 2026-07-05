@@ -50,11 +50,13 @@ python scripts/poc/e2e_cut.py --footage-dir /path/to/real/footage
 - R1：VLM 标注 + 检索的候选拼不出「能看」的片子。
 - R4：filter_complex 复杂化失控；本 POC 只做单段小 filter + concat。
 
-## M-1.3 MiniMax TTS 时间戳链路
+## M-1.3 火山 TTS 时间戳链路
 
 ### 目的
 
-验证 MiniMax T2A v2 在 `subtitle_enable: true` 下能返回 `extra_info.subtitle_file`，且字幕 JSON 可被立即下载并归一化为句级 + 字级毫秒时间戳。
+验证火山引擎 TTS 在 `with_timestamp=1` 下能同时返回可解码 MP3 与可归一化到 `TranscriptDocument.v1` utterances/words 语义的句级 + 字/词级毫秒时间戳。
+
+MiniMax 已被用户决策弃用：M-1.3 只验证火山链路，不保留 MiniMax 兼容路径。
 
 ### 运行命令
 
@@ -64,8 +66,8 @@ python scripts/poc/tts_timestamps.py
 
 ### 结论
 
-【待 MiniMax API key 后运行填写】本机无 `RUSHES_MINIMAX_API_KEY`，脚本自检后 SKIP（退出码 2）。
+【待火山实跑后填写】脚本缺少 `RUSHES_VOLC_TTS_AKSK` / `RUSHES_VOLC_TTS_APPID` / `RUSHES_VOLC_TTS_CLUSTER` 任一配置时 SKIP（退出码 2）；有配置时会签发/复用数据面 API key、合成音频、ffprobe 校验 MP3、断言时间戳单调与全文覆盖，并保存样本到 `research/tts_samples/volcano_<ts>.{mp3,json}`。
 
 ### 风险对照
 
-- R3：TTS/ASR 文档字段不一致；MiniMax 作为默认 TTS provider 需真实联调确认字段。
+- R3：火山 TTS/ASR 文档字段不一致；M-1.3 以真实响应确认数据面鉴权、`with_timestamp`/frontend 类参数与返回时间戳字段。

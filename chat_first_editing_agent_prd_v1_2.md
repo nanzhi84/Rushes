@@ -1,7 +1,8 @@
 # Rushes：Chat-first 本地剪辑 Agent — PRD 与实现契约
 
-版本：v1.2（最终版，全量自含）
-日期：2026-07-04
+版本：v1.3（全量自含）
+日期：2026-07-05
+v1.3 变更：TTS provider 定稿由"MiniMax 默认、火山备选"改为**火山引擎唯一**（用户 2026-07-05 决策；影响 §3.1 架构图 / §6.6 generate_tts / §9.5 / §14.1 / §17-M-1.3 / §19.2-R3，全文 MiniMax 引用同步替换）。
 v1.2 变更：①cut_plan 生产者硬契约（§6.5 按 audio_mode 定生产工具 + CutPlan schema）；②PatchOpSpec 注册表承担 op 级 human gate（§16.1）；③TimelinePatch 拆 Request/Resolved 两阶段，消除"禁裸秒"与 schema 的冲突（§7.8）；④CandidatePack snapshot + 消费前重验 + validator 素材存活不变量（§11/§10.2）；⑤retrieval.search_candidates 前置补 cut_plan != null（§5.2，与①闭合）
 目标读者：直接执行 `/goal` 的 coding agent、人类开发者、后续维护者
 项目形态：个人本地开源项目，垂直视频剪辑 Agent
@@ -172,7 +173,7 @@ flowchart TB
   subgraph Providers["ProviderGateway（OpenAI-compatible 第一类接口）"]
     LLMP["llm.chat / vlm.annotation"]
     ASRP["asr.transcribe 云端<br/>阿里 Paraformer-v2 默认"]
-    TTSP["tts.speech<br/>MiniMax 默认"]
+    TTSP["tts.speech<br/>火山引擎唯一"]
     EMBP["embedding.text"]
   end
 
@@ -629,7 +630,7 @@ Timeline v8 · 45.0s @30fps · 9:16
 [00.0-03.2] slot_hook  A-roll asset_007/clip_002 「开箱特写」 字幕:"这瓶精华我回购三次了"
 [03.2-08.4] slot_pain  B-roll asset_012/clip_005 「揉太阳穴」 字幕:"熬夜脸真的暗沉"
 ...
-audio: voiceover(TTS minimax) 0-45s · bgm: 无 · 原声: 关
+audio: voiceover(TTS volcano) 0-45s · bgm: 无 · 原声: 关
 ```
 
 **滚动摘要与 write-before-compaction**：消息区超预算时，把最老一段对话压成要点；压缩前先把其中的**事实性结论**（用户偏好、已做决定）写入 CaseState.brief 或 scratch_memory，再压。决策一律以 Decision 记录为准，不赌摘要保真。
@@ -1061,7 +1062,7 @@ CutPlan 最小 schema：
 
 ### 6.6 audio.*（5）
 
-`inspect_sources`（本地 ffprobe + Silero VAD，不调云端）、`asr_original`（job：抽轨→云端 ASR）、`rough_cut_speech`（TranscriptDocument+VAD → 删除候选，须确认）、`generate_tts`（job：MiniMax 时间戳链路）、`align_uploaded_voiceover`（云端 ASR + 本地 DP 对齐）。原素材有声音时不得默认 TTS，必须给五路径选项。
+`inspect_sources`（本地 ffprobe + Silero VAD，不调云端）、`asr_original`（job：抽轨→云端 ASR）、`rough_cut_speech`（TranscriptDocument+VAD → 删除候选，须确认）、`generate_tts`（job：火山 TTS 时间戳链路）、`align_uploaded_voiceover`（云端 ASR + 本地 DP 对齐）。原素材有声音时不得默认 TTS，必须给五路径选项。
 
 ### 6.7 retrieval.*（1）
 
@@ -1518,29 +1519,29 @@ sequenceDiagram
 
 不引入独立 forced aligner。云端 ASR 转写配音（字级时间戳）→ 本地对 ASR 文本与用户脚本做动态规划对齐（编辑距离 + 锚定匹配段）→ 脚本句级时间戳。差异大的句子标 `alignment_confidence=low`，字幕生成时提示核对。对"照稿念"场景足够；不做音素级。
 
-### 9.5 TTS 时间戳链路（MiniMax 默认）
+### 9.5 TTS 时间戳链路（火山引擎唯一）
 
 ```mermaid
 sequenceDiagram
   autonumber
   participant T as audio.generate_tts (job)
   participant GW as ProviderGateway
-  participant MM as MiniMax TTS API
+  participant VC as 火山 TTS API
   participant OS as Object Store
 
-  T->>GW: tts.speech(text, subtitle_enable=true, subtitle_type=word)
-  GW->>MM: 合成请求（非流式）
-  MM-->>GW: 音频 + extra_info.subtitle_file (URL, 24h 有效)
-  GW->>MM: 立即二次请求下载 subtitle_file
-  MM-->>GW: 字幕 JSON（毫秒）
-  GW->>GW: 归一化: 句级+字级时间戳合并进 ProviderResult
+  T->>GW: tts.speech(text, with_timestamp=1)
+  GW->>VC: AK/SK 管理面签发 x-api-key（按 appid 复用）
+  GW->>VC: 数据面合成请求（非流式）
+  VC-->>GW: MP3 base64 + 字/词级时间戳 JSON
+  GW->>GW: 归一化: 句级+字/词级时间戳合并进 ProviderResult
   GW->>OS: 音频落 object store；原始响应落 debug
   GW-->>T: normalized_output{audio_uri, timestamps}
-  Note over GW: URL 不泄漏到工具层；<br/>下载失败 = 整次调用失败（重试）
+  Note over GW: 时间戳缺失或非单调 = 整次调用失败（重试）
 ```
 
-- 备选火山 Seed-TTS（异步长文本接口，句/字/音素级最全）：字段不统一，接入前必须真实联调。
-- 其他 provider 无原生时间戳：TTS 音频回送云端 ASR 取时间戳（标记 `timestamps_source=asr_fallback`）。
+- 火山引擎是唯一 TTS 路线：仓库根 `.env` 提供 `RUSHES_VOLC_TTS_AKSK`（`AccessKeyId:SecretAccessKey`，SK 原样使用）、`RUSHES_VOLC_TTS_APPID`、`RUSHES_VOLC_TTS_CLUSTER`（`volcano_icl`）。
+- 管理面：`speech_saas_prod` V4 签名调用 `ListAPIKeys`，不存在则 `CreateAPIKey`；数据面：`/api/v1/tts` 合成并要求返回可归一化时间戳。
+- MiniMax 已被用户决策弃用，不作为默认、备选或 fallback。
 
 ## 10. Timeline Engine 与渲染契约
 
@@ -1771,7 +1772,7 @@ Media
 Providers（全部经 ProviderGateway，OpenAI-compatible 第一类接口）
   llm.chat / vlm.annotation  OpenAI 兼容端点（任意厂商可配）
   asr.transcribe             云端: 阿里百炼 Paraformer-v2 默认；火山/腾讯备选
-  tts.speech                 MiniMax 默认（word 级时间戳）；火山备选
+  tts.speech                 火山引擎唯一（字/词级时间戳）
   embedding.text             OpenAI 兼容端点
 
 Testing
@@ -1867,7 +1868,6 @@ packages/
     openai_compatible/  llm.py vlm.py embedding.py
     aliyun/             asr_paraformer.py
     volcengine/         asr.py tts.py
-    minimax/            tts.py
     tencent/            asr.py            # 可选
   media/           # 唯一媒体实现层（无独立 packages/render）
     probe.py quality.py vad.py shot_split.py
@@ -2069,7 +2069,7 @@ flowchart LR
 
 1. **云端 ASR 契约**（`poc/asr_contract.py`）：真实口播视频（含"呃"、停顿、重复句）跑阿里 Paraformer-v2 与火山，断言：口癖保留、字级时间戳误差 < 100ms、与 Silero VAD 停顿互补可用；真实响应样本存 `research/asr_samples/`。
 2. **端到端画质假设**（`poc/e2e_cut.py`）：VLM cheap 标注一批真实素材 → 脚本拼一条 30s 竖屏 timeline → 分段渲染 + concat 导出 → 人工评估"能不能看"。**这是整个产品假设的核心，必须最早验证。**
-3. **MiniMax TTS 时间戳链路**（`poc/tts_timestamps.py`）：subtitle_file 下载解析跑通。
+3. **火山 TTS 时间戳链路**（`poc/tts_timestamps.py`）：管理面签发数据面 key、合成 MP3、解析并归一化字/词级时间戳跑通。
 
 ### M0：Contracts 与 Harness 骨架
 
@@ -2372,7 +2372,7 @@ Scenario: user memory 按相关性注入
 ### M9：端到端三主路径（Playwright + 真实 provider 手动跑）
 
 1. **原声口播粗剪**：导入带口播视频 → 检测原声 → 选粗剪 → 云端 ASR + 口癖候选 → 确认 → 粗剪预览 → "删 7 秒那段" → patch → 跳过字幕 BGM → 导出 MP4。
-2. **TTS 种草**：无声 B-roll + 图 → 内容计划 → TTS（MiniMax 时间戳）→ 检索 → timeline → 预览 → 确认字幕 + BGM → 最终导出。
+2. **TTS 种草**：无声 B-roll + 图 → 内容计划 → TTS（火山时间戳）→ 检索 → timeline → 预览 → 确认字幕 + BGM → 最终导出。
 3. **Project/Case 管理**：建 Project → 导素材 → Case A 完成导出 → Case B 复用素材与 memory → Case B 移到新 Project 后仍可打开、素材链接正确。
 
 ## 18. 非目标（MVP 明确不做）
@@ -2401,7 +2401,7 @@ M-1 POC
 |---|---|---|---|---|
 | R1 | VLM 标注 + 检索的候选拼不出"能看"的片子（产品核心假设） | 高 | M-1 端到端 POC 最早验证；标注分级迭代 prompt | M-1.2 |
 | R2 | 云端 ASR 顺滑开关实际行为与文档不符 / 口癖仍被吞 | 高 | M-1 用真实响应验证；contract test 常驻；多 provider 备选 | M-1.1 / M4 |
-| R3 | 火山 TTS/ASR 文档字段不一致 | 中 | 控制台真实联调后再写 adapter；MiniMax 为默认 | M-1.3 |
+| R3 | 火山 TTS/ASR 文档字段不一致 | 中 | M-1.3 先真实联调火山 TTS 数据面与时间戳字段；无 MiniMax fallback | M-1.3 |
 | R4 | filter_complex 复杂化失控 | 中 | 分段渲染硬规则 + filtergraph builder 单元测试 + 锁版本 | M6 |
 | R5 | patch 锚点映射实现复杂 | 中 | anchor.py 独立模块 + Hypothesis 属性测试（随机 patch 链上锚点解析不变量） | M6 |
 | R6 | LLM 遵守"只选 candidate_id"的程度 | 中 | strict schema 层面不给帧字段 + golden 回归 | M5 |
