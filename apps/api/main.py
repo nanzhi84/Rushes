@@ -27,10 +27,17 @@ from agent_harness.reducer import ReducerApplyResult, apply
 from agent_harness.turn_queue import StopToken, TurnQueue, TurnQueueItem, TurnRunner
 from contracts.decision import DecisionAnswer
 from contracts.events import (
+    CaseCopied,
     CaseCreated,
+    CaseMoved,
+    CaseRenamed,
+    CaseTrashed,
     DecisionAnswered,
     JobCancelled,
+    ProjectCopied,
     ProjectCreated,
+    ProjectRenamed,
+    ProjectTrashed,
 )
 from providers.gateway import ProviderCallRecord
 from providers.planner import build_openai_compatible_planner
@@ -44,6 +51,7 @@ from storage.repositories import (
     MessagesRepository,
     ProviderCallsRepository,
 )
+from storage.repositories._json import load_json
 from storage.repositories.projects import ProjectsRepository
 
 from .deps import (
@@ -79,12 +87,52 @@ class ProjectCreateRequest(BaseModel):
     defaults: dict[str, Any] = Field(default_factory=dict)
 
 
+class ProjectUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
+class ProjectCopyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    name: str | None = None
+
+
+class ConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: bool = False
+
+
 class CaseCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     case_id: str | None = None
     name: str = "Untitled Case"
+    goal: str | None = None
     brief: dict[str, Any] = Field(default_factory=lambda: {"goal": ""})
+
+
+class CaseUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+
+
+class CaseCopyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str | None = None
+    name: str | None = None
+
+
+class CaseMoveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_project_id: str
+    confirm: bool = False
 
 
 class MessageCreateRequest(BaseModel):
@@ -118,7 +166,7 @@ def create_app(
     startup_port: int | None = None,
     sse_max_events: int | None = None,
 ) -> FastAPI:
-    """Create the M0 local API app bound to one workspace."""
+    """Create the local API app bound to one workspace."""
 
     engine = create_workspace_engine(workspace_path)
     with engine.begin() as connection:
@@ -236,45 +284,76 @@ def _register_routes(app: FastAPI) -> None:
     @app.get("/api/projects")
     async def list_projects(request: Request) -> dict[str, Any]:
         state = state_from_request(request)
-        with state.engine.connect() as connection:
-            rows = connection.execute(
-                select(schema.projects).order_by(schema.projects.c.created_at)
-            ).all()
-            projects = [dict(row._mapping) for row in rows]
-        return {"projects": projects}
+        return {"projects": _list_projects(state.engine)}
 
     @app.get("/api/project-tree")
     async def project_tree(request: Request) -> dict[str, Any]:
         state = state_from_request(request)
-        with state.engine.connect() as connection:
-            project_rows = connection.execute(
-                select(schema.projects).order_by(schema.projects.c.created_at)
-            ).all()
-            case_rows = connection.execute(select(schema.cases).order_by(schema.cases.c.name)).all()
-        cases_by_project: dict[str, list[dict[str, Any]]] = {}
-        for row in case_rows:
-            values = dict(row._mapping)
-            cases_by_project.setdefault(str(values["project_id"]), []).append(
-                {
-                    "case_id": values["case_id"],
-                    "project_id": values["project_id"],
-                    "name": values["name"],
-                    "status": values["status"],
-                }
-            )
-        projects = []
-        for row in project_rows:
-            values = dict(row._mapping)
-            project_id = str(values["project_id"])
-            projects.append(
-                {
-                    "project_id": project_id,
-                    "name": values["name"],
-                    "status": values["status"],
-                    "cases": cases_by_project.get(project_id, []),
-                }
-            )
-        return {"projects": projects}
+        return {"projects": _project_tree(state.engine)}
+
+    @app.get("/api/projects/{project_id}")
+    async def get_project(project_id: str, request: Request) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project(state.engine, project_id)
+        return _project_page_payload(state.engine, project_id)
+
+    @app.patch("/api/projects/{project_id}")
+    async def rename_project(
+        project_id: str,
+        payload: ProjectUpdateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project(state.engine, project_id)
+        event = ProjectRenamed(
+            project_id=project_id,
+            name=payload.name,
+            payload={"name": payload.name},
+        )
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "project": _require_project(state.engine, project_id),
+            "event_ids": _event_ids(result),
+        }
+
+    @app.delete("/api/projects/{project_id}")
+    async def delete_project(
+        project_id: str,
+        payload: ConfirmRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_confirm(payload)
+        _require_project(state.engine, project_id)
+        event = ProjectTrashed(project_id=project_id)
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "project": _require_project(state.engine, project_id),
+            "event_ids": _event_ids(result),
+        }
+
+    @app.post("/api/projects/{project_id}/copy", status_code=status.HTTP_201_CREATED)
+    async def copy_project(
+        project_id: str,
+        payload: ProjectCopyRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        source_project = _require_project(state.engine, project_id)
+        new_project_id = payload.project_id or _new_id("project")
+        event = ProjectCopied(
+            project_id=new_project_id,
+            source_project_id=project_id,
+            payload={"name": payload.name or f"{source_project['name']} Copy"},
+        )
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "project": _require_project(state.engine, new_project_id),
+            "event_ids": _event_ids(result),
+        }
 
     @app.post("/api/projects/{project_id}/cases", status_code=status.HTTP_201_CREATED)
     async def create_case(
@@ -285,12 +364,13 @@ def _register_routes(app: FastAPI) -> None:
         state = state_from_request(request)
         _require_project(state.engine, project_id)
         case_id = payload.case_id or _new_id("case")
+        brief = _brief_payload(payload.brief, payload.goal)
         event = CaseCreated(
             project_id=project_id,
             case_id=case_id,
             payload={
                 "name": payload.name,
-                "brief": payload.brief,
+                "brief": brief,
                 "status": "active",
             },
         )
@@ -298,6 +378,101 @@ def _register_routes(app: FastAPI) -> None:
         _ensure_applied(result)
         case = _require_case(state.engine, project_id, case_id)
         return {"case": case, "event_ids": _event_ids(result)}
+
+    @app.get("/api/projects/{project_id}/cases/{case_id}")
+    async def get_case(project_id: str, case_id: str, request: Request) -> dict[str, Any]:
+        state = state_from_request(request)
+        return {"case": _require_case(state.engine, project_id, case_id)}
+
+    @app.patch("/api/projects/{project_id}/cases/{case_id}")
+    async def rename_case(
+        project_id: str,
+        case_id: str,
+        payload: CaseUpdateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_case(state.engine, project_id, case_id)
+        event = CaseRenamed(
+            project_id=project_id,
+            case_id=case_id,
+            name=payload.name,
+            payload={"name": payload.name},
+        )
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "case": _require_case(state.engine, project_id, case_id),
+            "event_ids": _event_ids(result),
+        }
+
+    @app.delete("/api/projects/{project_id}/cases/{case_id}")
+    async def delete_case(
+        project_id: str,
+        case_id: str,
+        payload: ConfirmRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_confirm(payload)
+        _require_case(state.engine, project_id, case_id)
+        event = CaseTrashed(project_id=project_id, case_id=case_id)
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "case": _require_case(state.engine, project_id, case_id),
+            "event_ids": _event_ids(result),
+        }
+
+    @app.post(
+        "/api/projects/{project_id}/cases/{case_id}/copy",
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def copy_case(
+        project_id: str,
+        case_id: str,
+        payload: CaseCopyRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        source_case = _require_case(state.engine, project_id, case_id)
+        new_case_id = payload.case_id or _new_id("case")
+        event = CaseCopied(
+            project_id=project_id,
+            case_id=new_case_id,
+            source_case_id=case_id,
+            payload={"name": payload.name or f"{source_case['name']} Copy"},
+        )
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "case": _require_case(state.engine, project_id, new_case_id),
+            "event_ids": _event_ids(result),
+        }
+
+    @app.post("/api/projects/{project_id}/cases/{case_id}/move")
+    async def move_case(
+        project_id: str,
+        case_id: str,
+        payload: CaseMoveRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_confirm(ConfirmRequest(confirm=payload.confirm))
+        _require_case(state.engine, project_id, case_id)
+        _require_project(state.engine, payload.target_project_id)
+        event = CaseMoved(
+            project_id=payload.target_project_id,
+            case_id=case_id,
+            source_project_id=project_id,
+            target_project_id=payload.target_project_id,
+        )
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "case": _require_case(state.engine, payload.target_project_id, case_id),
+            "event_ids": _event_ids(result),
+        }
 
     @app.post(
         "/api/projects/{project_id}/cases/{case_id}/messages",
@@ -511,6 +686,91 @@ def _last_event_id(request: Request) -> int:
         return 0
 
 
+def _list_projects(engine: Engine) -> list[dict[str, Any]]:
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(schema.projects).order_by(schema.projects.c.created_at)
+        ).all()
+    projects: list[dict[str, Any]] = []
+    for row in rows:
+        values = dict(row._mapping)
+        values["defaults"] = load_json(values["defaults"])
+        projects.append(values)
+    return projects
+
+
+def _project_tree(engine: Engine) -> list[dict[str, Any]]:
+    with engine.connect() as connection:
+        project_rows = connection.execute(
+            select(schema.projects).order_by(schema.projects.c.created_at)
+        ).all()
+        case_rows = connection.execute(select(schema.cases).order_by(schema.cases.c.name)).all()
+    cases_by_project: dict[str, list[dict[str, Any]]] = {}
+    for row in case_rows:
+        values = dict(row._mapping)
+        project_id = str(values["project_id"])
+        cases_by_project.setdefault(project_id, []).append(
+            {
+                "case_id": values["case_id"],
+                "project_id": project_id,
+                "name": values["name"],
+                "status": values["status"],
+            }
+        )
+    projects: list[dict[str, Any]] = []
+    for row in project_rows:
+        values = dict(row._mapping)
+        project_id = str(values["project_id"])
+        projects.append(
+            {
+                "project_id": project_id,
+                "name": values["name"],
+                "status": values["status"],
+                "cases": cases_by_project.get(project_id, []),
+            }
+        )
+    return projects
+
+
+def _project_page_payload(engine: Engine, project_id: str) -> dict[str, Any]:
+    project = _require_project(engine, project_id)
+    with engine.connect() as connection:
+        case_rows = connection.execute(
+            select(schema.cases)
+            .where(schema.cases.c.project_id == project_id)
+            .order_by(schema.cases.c.name)
+        ).all()
+        asset_count = connection.execute(
+            select(schema.project_asset_links.c.asset_id).where(
+                schema.project_asset_links.c.project_id == project_id
+            )
+        ).all()
+        memory_count = connection.execute(
+            select(schema.memories.c.memory_id).where(schema.memories.c.project_id == project_id)
+        ).all()
+    cases = [
+        {
+            "case_id": row._mapping["case_id"],
+            "project_id": row._mapping["project_id"],
+            "name": row._mapping["name"],
+            "status": row._mapping["status"],
+            "brief": load_json(row._mapping["brief"]),
+        }
+        for row in case_rows
+    ]
+    return {
+        "project": project,
+        "cases": cases,
+        "case_count": len(cases),
+        "asset_count": len(asset_count),
+        "memory_count": len(memory_count),
+        "actions": {
+            "create_case": f"/api/projects/{project_id}/cases",
+            "materials": f"/projects/{project_id}/materials",
+        },
+    }
+
+
 def _require_project(engine: Engine, project_id: str) -> dict[str, Any]:
     with engine.connect() as connection:
         row = ProjectsRepository(connection).get(project_id)
@@ -551,6 +811,19 @@ def _validate_decision_ownership(
         raise HTTPException(status_code=404, detail={"reason": "decision_not_found"})
     if payload.case_id is not None and payload.case_id != decision.get("case_id"):
         raise HTTPException(status_code=404, detail={"reason": "decision_not_found"})
+
+
+def _require_confirm(payload: ConfirmRequest) -> None:
+    if not payload.confirm:
+        raise HTTPException(status_code=409, detail={"reason": "confirmation_required"})
+
+
+def _brief_payload(brief: Mapping[str, Any], goal: str | None) -> dict[str, Any]:
+    payload = dict(brief)
+    if goal is not None:
+        payload["goal"] = goal
+    payload.setdefault("goal", "")
+    return payload
 
 
 def _base_version_for_decision(engine: Engine, decision: Mapping[str, Any]) -> int | None:

@@ -384,3 +384,38 @@ def test_blacklisted_llm_argument_key_denies() -> None:
 
     assert verdict.status == "deny"
     assert "prohibited" in verdict.reason
+
+
+def test_confirmation_arguments_fill_active_project_and_case_ids() -> None:
+    from agent_harness.policy_gate import _confirmation_arguments
+
+    class ScopedInput(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+
+        project_id: str | None = None
+        case_id: str | None = None
+
+    spec = _tool(
+        "project.delete_scoped",
+        input_model=ScopedInput,
+        requires_active_case=True,
+        requires_confirmation=True,
+        confirmation_decision_type="destructive_project_action",
+    )
+    preconditions = PreconditionContext(
+        case_state=_case_state(),
+        project_state=_project_state(),
+        project_artifacts=ProjectArtifactStats(usable_asset_count=1),
+    )
+
+    filled = _confirmation_arguments(spec, {"project_id": None, "case_id": None}, preconditions)
+    assert filled["project_id"] == _project_state().project_id
+    assert filled["case_id"] == _case_state().case_id
+
+    without_project = PreconditionContext(
+        case_state=_case_state(),
+        project_state=None,
+        project_artifacts=ProjectArtifactStats(usable_asset_count=1),
+    )
+    fallback = _confirmation_arguments(spec, {"project_id": None, "case_id": None}, without_project)
+    assert fallback["project_id"] == _case_state().project_id

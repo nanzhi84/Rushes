@@ -194,13 +194,18 @@ class PolicyGate:
             if op_verdict is not None:
                 return op_verdict
 
+        confirmation_arguments = _confirmation_arguments(
+            spec,
+            validated_arguments,
+            context.preconditions,
+        )
         if spec.requires_confirmation and not _answered_confirmation_exists(
             context,
             tool_name=spec.name,
             decision_type=spec.confirmation_decision_type,
-            arguments=validated_arguments,
+            arguments=confirmation_arguments,
         ):
-            return self._ask(parsed_call, spec, validated_arguments, context)
+            return self._ask(parsed_call, spec, confirmation_arguments, context)
 
         pending_decision = _pending_blocking_decision(context)
         if (
@@ -490,6 +495,33 @@ def _answered_confirmation_exists(
         ):
             return True
     return False
+
+
+def _confirmation_arguments(
+    spec: ToolSpec,
+    arguments: Mapping[str, Any],
+    context: PreconditionContext,
+) -> dict[str, Any]:
+    normalized = dict(arguments)
+    case_state = context.case_state
+    project_state = context.project_state
+    if (
+        spec.requires_active_case
+        and "case_id" in normalized
+        and normalized["case_id"] is None
+        and case_state is not None
+    ):
+        normalized["case_id"] = case_state.case_id
+    if (
+        spec.requires_active_project
+        and "project_id" in normalized
+        and normalized["project_id"] is None
+    ):
+        if project_state is not None:
+            normalized["project_id"] = project_state.project_id
+        elif case_state is not None:
+            normalized["project_id"] = case_state.project_id
+    return normalized
 
 
 def _postprocess_plan_item_exists(case_state: CaseState | None, decision_type: str | None) -> bool:

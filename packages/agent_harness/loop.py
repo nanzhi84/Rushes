@@ -387,7 +387,7 @@ async def recover_approved_pending_tool_calls(
     turn_queue: TurnQueue,
     created_at: str | None = None,
 ) -> int:
-    """Scan approved outbox decisions and enqueue case-level replays once."""
+    """Scan approved outbox decisions and enqueue their pending tool replays once."""
 
     replay_items: list[tuple[str, str, dict[str, Any], str]] = []
     now = created_at or _now_iso()
@@ -401,7 +401,12 @@ async def recover_approved_pending_tool_calls(
         for row in rows:
             decision = _decision_from_row(dict(row._mapping))
             pending = next_replay(decision)
-            if pending is None or decision.case_id is None:
+            target_case_id = decision.case_id or _case_id_for_pending_replay(
+                connection,
+                pending,
+                decision.project_id,
+            )
+            if pending is None or target_case_id is None:
                 continue
             replayed_tool_call_id = _replayed_tool_call_id(decision.decision_id)
             if not mark_replayed(
@@ -413,7 +418,7 @@ async def recover_approved_pending_tool_calls(
                 continue
             replay_items.append(
                 (
-                    decision.case_id,
+                    target_case_id,
                     decision.decision_id,
                     pending.model_dump(mode="json"),
                     replayed_tool_call_id,
@@ -720,7 +725,12 @@ def _consume_pending_replay(
             return None
         decision = Decision.model_validate(row)
         pending = next_replay(decision)
-        if pending is None or decision.case_id is None:
+        target_case_id = decision.case_id or _case_id_for_pending_replay(
+            connection,
+            pending,
+            decision.project_id,
+        )
+        if pending is None or target_case_id is None:
             return None
         replayed_tool_call_id = _replayed_tool_call_id(decision.decision_id)
         if not mark_replayed(
@@ -729,7 +739,44 @@ def _consume_pending_replay(
             replayed_tool_call_id=replayed_tool_call_id,
         ):
             return None
-        return decision.case_id, pending, replayed_tool_call_id
+        return target_case_id, pending, replayed_tool_call_id
+
+
+def _case_id_for_pending_replay(
+    connection: Connection,
+    pending: PendingToolCall | None,
+    project_id: str | None,
+) -> str | None:
+    if pending is not None:
+        case_id = pending.arguments.get("case_id")
+        if isinstance(case_id, str) and _case_exists_for_replay(connection, case_id, project_id):
+            return case_id
+    if project_id is None:
+        return None
+    row = connection.execute(
+        select(schema.cases.c.case_id)
+        .where(schema.cases.c.project_id == project_id)
+        .where(schema.cases.c.status == "active")
+        .order_by(schema.cases.c.case_id)
+        .limit(1)
+    ).first()
+    if row is None:
+        return None
+    return str(row._mapping["case_id"])
+
+
+def _case_exists_for_replay(
+    connection: Connection,
+    case_id: str,
+    project_id: str | None,
+) -> bool:
+    statement = select(schema.cases.c.case_id).where(
+        schema.cases.c.case_id == case_id,
+        schema.cases.c.status == "active",
+    )
+    if project_id is not None:
+        statement = statement.where(schema.cases.c.project_id == project_id)
+    return connection.execute(statement).first() is not None
 
 
 def _force_respond(

@@ -184,8 +184,8 @@ def test_project_and_case_merge_events_update_structural_state(tmp_path: Path) -
             {"event": "CaseRenamed", "case_id": "case_1", "name": "Renamed Case"},
             {
                 "event": "CaseCopied",
-                "case_id": "case_1",
-                "source_case_id": "case_source",
+                "case_id": "case_2",
+                "source_case_id": "case_1",
                 "payload": {"name": "Copied Case"},
             },
             {
@@ -207,6 +207,7 @@ def test_project_and_case_merge_events_update_structural_state(tmp_path: Path) -
         project_2 = ProjectsRepository(connection).get("project_2")
         project_3 = ProjectsRepository(connection).get("project_3")
         case = CasesRepository(connection).get("case_1")
+        copied_case = CasesRepository(connection).get("case_2")
 
     assert result.status == "applied"
     assert project_2 is not None
@@ -215,10 +216,135 @@ def test_project_and_case_merge_events_update_structural_state(tmp_path: Path) -
     assert project_3 is not None
     assert project_3["name"] == "Copied Project"
     assert case is not None
-    assert case["name"] == "Copied Case"
+    assert case["name"] == "Renamed Case"
     assert case["project_id"] == "project_2"
     assert case["status"] == "trashed"
     assert case["state_version"] == 1
+    assert copied_case is not None
+    assert copied_case["name"] == "Copied Case"
+    assert copied_case["project_id"] == "project_1"
+    assert copied_case["state_version"] == 0
+
+
+def test_case_copied_deep_copies_case_owned_references(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    _insert_project_and_case(tmp_path, timeline_current_version=1)
+    _insert_timeline(tmp_path, version=1)
+    engine = create_workspace_engine(tmp_path)
+    with begin_immediate(engine) as connection:
+        connection.execute(
+            schema.candidate_packs.insert().values(
+                candidate_pack_id="pack_1",
+                case_id="case_1",
+                slots=dump_json([{"slot_id": "slot_1"}]),
+                created_at=NOW,
+            )
+        )
+        connection.execute(
+            schema.objects.insert().values(
+                hash="hash_preview",
+                rel_path="objects/hash_preview",
+                size=0,
+                created_at=NOW,
+            )
+        )
+        connection.execute(
+            schema.previews.insert().values(
+                preview_id="preview_1",
+                case_id="case_1",
+                timeline_version=1,
+                object_hash="hash_preview",
+                quality=dump_json({}),
+                created_at=NOW,
+            )
+        )
+        connection.execute(
+            schema.cases.update()
+            .where(schema.cases.c.case_id == "case_1")
+            .values(candidate_pack_id="pack_1", preview_current_id="preview_1")
+        )
+
+    result = apply(
+        [
+            {
+                "event": "CaseCopied",
+                "project_id": "project_1",
+                "case_id": "case_2",
+                "source_case_id": "case_1",
+                "payload": {"name": "Copied Case"},
+            }
+        ],
+        engine=engine,
+        base_version=None,
+        actor="user",
+        created_at=NOW,
+    )
+
+    with begin_immediate(engine) as connection:
+        copied_case = CasesRepository(connection).get("case_2")
+        copied_timeline = connection.execute(
+            select(schema.timeline_versions).where(
+                schema.timeline_versions.c.case_id == "case_2",
+                schema.timeline_versions.c.version == 1,
+            )
+        ).one()
+        copied_pack = connection.execute(
+            select(schema.candidate_packs).where(
+                schema.candidate_packs.c.candidate_pack_id == "case_2:pack_1"
+            )
+        ).one()
+        copied_preview = connection.execute(
+            select(schema.previews).where(schema.previews.c.preview_id == "case_2:preview_1")
+        ).one()
+
+    assert result.status == "applied"
+    assert copied_case is not None
+    assert copied_case["candidate_pack_id"] == "case_2:pack_1"
+    assert copied_case["timeline_current_version"] == 1
+    assert copied_case["preview_current_id"] == "case_2:preview_1"
+    assert copied_timeline._mapping["case_id"] == "case_2"
+    assert load_json(copied_timeline._mapping["document_json"])["case_id"] == "case_2"
+    assert copied_pack._mapping["case_id"] == "case_2"
+    assert copied_preview._mapping["case_id"] == "case_2"
+
+
+def test_project_copied_copies_asset_links_without_cases(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    _insert_project_and_case(tmp_path)
+    engine = create_workspace_engine(tmp_path)
+    result = apply(
+        [
+            {"event": "AssetImported", "asset_id": "asset_1", "job_id": "job_import"},
+            {"event": "AssetLinked", "project_id": "project_1", "asset_id": "asset_1"},
+            {
+                "event": "ProjectCopied",
+                "project_id": "project_2",
+                "source_project_id": "project_1",
+                "payload": {"name": "Copied Project"},
+            },
+        ],
+        engine=engine,
+        base_version=None,
+        actor="user",
+        created_at=NOW,
+    )
+
+    with begin_immediate(engine) as connection:
+        copied_link_count = connection.execute(
+            select(func.count())
+            .select_from(schema.project_asset_links)
+            .where(schema.project_asset_links.c.project_id == "project_2")
+            .where(schema.project_asset_links.c.asset_id == "asset_1")
+        ).scalar_one()
+        copied_case_count = connection.execute(
+            select(func.count())
+            .select_from(schema.cases)
+            .where(schema.cases.c.project_id == "project_2")
+        ).scalar_one()
+
+    assert result.status == "applied"
+    assert copied_link_count == 1
+    assert copied_case_count == 0
 
 
 def test_asset_and_asset_link_merge_events_update_records(tmp_path: Path) -> None:
