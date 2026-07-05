@@ -69,6 +69,40 @@ export type MaterialMutationResponse = {
   event_ids: number[];
 };
 
+// M6 timeline/preview paths 尚未进入 generated/schema.d.ts，先按 apps/api/schemas.py 手写。
+export type TimelineClipJson = {
+  timeline_clip_id?: string;
+  track_id?: string;
+  timeline_start_frame?: number;
+  timeline_end_frame?: number;
+  asset_id?: string;
+  clip_id?: string | null;
+  role?: string;
+  text?: string;
+  [key: string]: unknown;
+};
+
+export type TimelineTrackJson = {
+  track_id: string;
+  clips?: TimelineClipJson[];
+  [key: string]: unknown;
+};
+
+export type TimelineJson = {
+  fps: number;
+  duration_frames: number;
+  tracks: TimelineTrackJson[];
+  [key: string]: unknown;
+};
+
+export type CaseTimelineResponse = {
+  case_id: string;
+  timeline_version: number;
+  timeline: TimelineJson;
+  summary: string;
+  preview_id: string | null;
+};
+
 type MaterialImportLocalRequest = {
   path: string;
   storage_mode?: StorageMode | null;
@@ -137,6 +171,7 @@ type ProjectUpdateRequest =
 type ProjectCopyRequest =
   paths["/api/projects/{project_id}/copy"]["post"]["requestBody"]["content"]["application/json"];
 type ProjectMutationResponse = components["schemas"]["ProjectMutationResponse"];
+type CaseResponse = components["schemas"]["CaseResponse"];
 type CaseCreateRequest =
   paths["/api/projects/{project_id}/cases"]["post"]["requestBody"]["content"]["application/json"];
 type CaseUpdateRequest =
@@ -153,6 +188,32 @@ type CurrentDecisionResponse = components["schemas"]["CurrentDecisionResponse"];
 type DecisionAnswerRequest =
   paths["/api/decisions/{decision_id}/answer"]["post"]["requestBody"]["content"]["application/json"];
 type DecisionAnswerResponse = components["schemas"]["DecisionAnswerResponse"];
+
+export function fetchCaseTimeline(
+  projectId: string,
+  caseId: string,
+  version?: number | null
+): Promise<CaseTimelineResponse> {
+  const params = new URLSearchParams();
+  if (version !== undefined && version !== null) {
+    params.set("version", String(version));
+  }
+  const query = params.toString();
+  return apiFetch<CaseTimelineResponse>(
+    `${casePath(projectId, caseId)}/timeline${query ? `?${query}` : ""}`
+  );
+}
+
+export function postPreviewViewed(
+  projectId: string,
+  caseId: string,
+  previewId: string
+): Promise<CaseMutationResponse> {
+  return apiFetch<CaseMutationResponse>(
+    `${casePath(projectId, caseId)}/previews/${encodeURIComponent(previewId)}/viewed`,
+    { method: "POST", body: {} }
+  );
+}
 
 export const api = {
   projectTree(): Promise<ProjectTreeResponse> {
@@ -196,6 +257,10 @@ export const api = {
       method: "POST",
       body: payload
     });
+  },
+
+  getCase(projectId: string, caseId: string): Promise<CaseResponse> {
+    return apiFetch<CaseResponse>(casePath(projectId, caseId));
   },
 
   renameCase(
@@ -248,6 +313,10 @@ export const api = {
   currentDecision(projectId: string, caseId: string): Promise<CurrentDecisionResponse> {
     return apiFetch<CurrentDecisionResponse>(`${casePath(projectId, caseId)}/decisions/current`);
   },
+
+  fetchCaseTimeline,
+
+  postPreviewViewed,
 
   answerDecision(decisionId: string, payload: DecisionAnswerRequest): Promise<DecisionAnswerResponse> {
     return apiFetch<DecisionAnswerResponse>(`/api/decisions/${encodeURIComponent(decisionId)}/answer`, {
@@ -353,6 +422,10 @@ export const api = {
 
   mediaProxyUrl(assetId: string): string {
     return `/api/media/${encodeURIComponent(assetId)}/proxy`;
+  },
+
+  mediaPreviewUrl(previewId: string): string {
+    return `/api/media/preview/${encodeURIComponent(previewId)}`;
   }
 };
 

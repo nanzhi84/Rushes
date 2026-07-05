@@ -124,6 +124,14 @@ class CaseMutationResponse(ApiResponseModel):
     event_ids: list[int]
 
 
+class CaseTimelineResponse(ApiResponseModel):
+    case_id: str
+    timeline_version: int
+    timeline: dict[str, Any]
+    summary: str
+    preview_id: str | None
+
+
 class MessageQueuedResponse(ApiResponseModel):
     status: Literal["queued"]
     kind: Literal["user_message"]

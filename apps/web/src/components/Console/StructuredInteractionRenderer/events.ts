@@ -91,7 +91,7 @@ export function itemFromEvent(payload: DomainSsePayload): StructuredInteractionI
         kind: "preview",
         id: `preview:${payload.event_id}`,
         title: "预览已生成",
-        description: stringValue(event.preview_id) ?? "播放器会在 M6 接入。"
+        description: stringValue(event.preview_id) ?? "可在右侧查看预览。"
       };
     case "TimelineVersionCreated":
     case "TimelineVersionRestored":
@@ -227,7 +227,7 @@ function timelineTitle(eventName: string): string {
 
 function timelineDescription(event: DomainSseEvent): string {
   const version = stringValue(event.timeline_version) ?? stringValue(event.version);
-  return version ? `版本 ${version}，M6 接入只读时间线。` : "M6 接入只读时间线。";
+  return version ? `版本 ${version}，可在右侧查看时间线。` : "可在右侧查看时间线。";
 }
 
 function stringValue(value: unknown): string | null {
