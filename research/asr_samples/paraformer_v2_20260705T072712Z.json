@@ -1,0 +1,998 @@
+{
+  "submit_response": {
+    "request_id": "11d5f3b2-6267-9a45-9aea-f50a606f721b",
+    "output": {
+      "task_id": "6698af83-70b4-483f-8507-8b233b1fd80a",
+      "task_status": "PENDING"
+    }
+  },
+  "task_response": {
+    "request_id": "006153c6-5ebe-9e3e-9669-c9ee93c0ea48",
+    "output": {
+      "task_id": "6698af83-70b4-483f-8507-8b233b1fd80a",
+      "task_status": "SUCCEEDED",
+      "submit_time": "2026-07-05 15:27:09.022",
+      "scheduled_time": "2026-07-05 15:27:09.065",
+      "end_time": "2026-07-05 15:27:11.634",
+      "results": [
+        {
+          "output": {
+            "file_url": "https://cutagent-materials.oss-cn-shanghai.aliyuncs.com/rushes-poc%2F20260705T072708Z_filler_speech.wav?OSSAccessKeyId=LTAI5tGQYPy2pZM2SG7N54gf&Expires=1783240028&Signature=iePpQ%2FUa6aDy4wYdI0SMF2m6c1I%3D",
+            "results": [
+              {
+                "file_url": "https://cutagent-materials.oss-cn-shanghai.aliyuncs.com/rushes-poc%2F20260705T072708Z_filler_speech.wav?OSSAccessKeyId=LTAI5tGQYPy2pZM2SG7N54gf&Expires=1783240028&Signature=iePpQ%2FUa6aDy4wYdI0SMF2m6c1I%3D",
+                "results": [],
+                "transcription_url": "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/prod/paraformer-v2/20260705/15%3A27/f1d0999a-ab74-4f76-8730-4816b8ea6d3d-1.json?Expires=1783322831&OSSAccessKeyId=LTAI5tGzqbGcEmE58b221XQy&Signature=%2Fyx598R93DUgTHmPBsdx6s3UUmQ%3D&response-content-disposition=attachment%3Bfilename%3Df1d0999a-ab74-4f76-8730-4816b8ea6d3d-1.json",
+                "subtask_status": "SUCCEEDED"
+              }
+            ],
+            "transcription_url": "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/prod/paraformer-v2/20260705/15%3A27/f1d0999a-ab74-4f76-8730-4816b8ea6d3d-1.json?Expires=1783322831&OSSAccessKeyId=LTAI5tGzqbGcEmE58b221XQy&Signature=%2Fyx598R93DUgTHmPBsdx6s3UUmQ%3D&response-content-disposition=attachment%3Bfilename%3Df1d0999a-ab74-4f76-8730-4816b8ea6d3d-1.json",
+            "subtask_status": "SUCCEEDED"
+          },
+          "file_url": "https://cutagent-materials.oss-cn-shanghai.aliyuncs.com/rushes-poc%2F20260705T072708Z_filler_speech.wav?OSSAccessKeyId=LTAI5tGQYPy2pZM2SG7N54gf&Expires=1783240028&Signature=iePpQ%2FUa6aDy4wYdI0SMF2m6c1I%3D",
+          "usage": {
+            "duration": 20
+          },
+          "request_id": "f1d0999a-ab74-4f76-8730-4816b8ea6d3d-1",
+          "results": [
+            {
+              "file_url": "https://cutagent-materials.oss-cn-shanghai.aliyuncs.com/rushes-poc%2F20260705T072708Z_filler_speech.wav?OSSAccessKeyId=LTAI5tGQYPy2pZM2SG7N54gf&Expires=1783240028&Signature=iePpQ%2FUa6aDy4wYdI0SMF2m6c1I%3D",
+              "results": [],
+              "transcription_url": "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/prod/paraformer-v2/20260705/15%3A27/f1d0999a-ab74-4f76-8730-4816b8ea6d3d-1.json?Expires=1783322831&OSSAccessKeyId=LTAI5tGzqbGcEmE58b221XQy&Signature=%2Fyx598R93DUgTHmPBsdx6s3UUmQ%3D&response-content-disposition=attachment%3Bfilename%3Df1d0999a-ab74-4f76-8730-4816b8ea6d3d-1.json",
+              "subtask_status": "SUCCEEDED"
+            }
+          ],
+          "transcription_url": "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/prod/paraformer-v2/20260705/15%3A27/f1d0999a-ab74-4f76-8730-4816b8ea6d3d-1.json?Expires=1783322831&OSSAccessKeyId=LTAI5tGzqbGcEmE58b221XQy&Signature=%2Fyx598R93DUgTHmPBsdx6s3UUmQ%3D&response-content-disposition=attachment%3Bfilename%3Df1d0999a-ab74-4f76-8730-4816b8ea6d3d-1.json",
+          "subtask_status": "SUCCEEDED"
+        }
+      ],
+      "task_metrics": {
+        "TOTAL": 1,
+        "SUCCEEDED": 1,
+        "FAILED": 0
+      }
+    },
+    "usage": {
+      "duration": 20
+    }
+  },
+  "transcription_response": {
+    "file_url": "https://cutagent-materials.oss-cn-shanghai.aliyuncs.com/rushes-poc%2F20260705T072708Z_filler_speech.wav?OSSAccessKeyId=LTAI5tGQYPy2pZM2SG7N54gf&Expires=1783240028&Signature=iePpQ%2FUa6aDy4wYdI0SMF2m6c1I%3D",
+    "properties": {
+      "audio_format": "pcm_s16le",
+      "channels": [
+        0
+      ],
+      "original_sampling_rate": 16000,
+      "original_duration_in_milliseconds": 21103
+    },
+    "transcripts": [
+      {
+        "channel_id": 0,
+        "content_duration_in_milliseconds": 20050,
+        "text": "呃，大家好，今天我想简单讲一下这个产品。嗯，我大概用了三周，然后然后发现它最大的好处是可以先把素材整理清楚啊，如果中间说错了也不用紧张，后面粗剪的时候可以再删。",
+        "sentences": [
+          {
+            "begin_time": 30,
+            "end_time": 4650,
+            "text": "呃，大家好，今天我想简单讲一下这个产品。",
+            "sentence_id": 1,
+            "words": [
+              {
+                "begin_time": 30,
+                "end_time": 350,
+                "text": "呃",
+                "punctuation": "，"
+              },
+              {
+                "begin_time": 510,
+                "end_time": 730,
+                "text": "大",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 730,
+                "end_time": 970,
+                "text": "家",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 970,
+                "end_time": 1450,
+                "text": "好",
+                "punctuation": "，"
+              },
+              {
+                "begin_time": 1550,
+                "end_time": 1810,
+                "text": "今",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 1810,
+                "end_time": 2070,
+                "text": "天",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 2070,
+                "end_time": 2290,
+                "text": "我",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 2290,
+                "end_time": 2550,
+                "text": "想",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 2550,
+                "end_time": 2790,
+                "text": "简",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 2790,
+                "end_time": 3010,
+                "text": "单",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 3010,
+                "end_time": 3240,
+                "text": "讲",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 3240,
+                "end_time": 3440,
+                "text": "一",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 3440,
+                "end_time": 3690,
+                "text": "下",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 3690,
+                "end_time": 3860,
+                "text": "这",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 3860,
+                "end_time": 3990,
+                "text": "个",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 3990,
+                "end_time": 4230,
+                "text": "产",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 4230,
+                "end_time": 4650,
+                "text": "品",
+                "punctuation": "。"
+              }
+            ]
+          },
+          {
+            "begin_time": 5600,
+            "end_time": 21030,
+            "text": "嗯，我大概用了三周，然后然后发现它最大的好处是可以先把素材整理清楚啊，如果中间说错了也不用紧张，后面粗剪的时候可以再删。",
+            "sentence_id": 2,
+            "words": [
+              {
+                "begin_time": 5600,
+                "end_time": 5900,
+                "text": "嗯",
+                "punctuation": "，"
+              },
+              {
+                "begin_time": 6060,
+                "end_time": 6280,
+                "text": "我",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 6280,
+                "end_time": 6480,
+                "text": "大",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 6480,
+                "end_time": 6670,
+                "text": "概",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 6670,
+                "end_time": 6910,
+                "text": "用",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 6910,
+                "end_time": 7110,
+                "text": "了",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 7110,
+                "end_time": 7350,
+                "text": "三",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 7350,
+                "end_time": 7770,
+                "text": "周",
+                "punctuation": "，"
+              },
+              {
+                "begin_time": 7890,
+                "end_time": 8160,
+                "text": "然",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 8160,
+                "end_time": 8400,
+                "text": "后",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 8400,
+                "end_time": 8650,
+                "text": "然",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 8650,
+                "end_time": 8890,
+                "text": "后",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 8890,
+                "end_time": 9140,
+                "text": "发",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 9140,
+                "end_time": 9410,
+                "text": "现",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 9410,
+                "end_time": 9660,
+                "text": "它",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 9660,
+                "end_time": 9850,
+                "text": "最",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 9850,
+                "end_time": 10040,
+                "text": "大",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 10040,
+                "end_time": 10160,
+                "text": "的",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 10160,
+                "end_time": 10400,
+                "text": "好",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 10400,
+                "end_time": 10820,
+                "text": "处",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 11000,
+                "end_time": 11280,
+                "text": "是",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 11280,
+                "end_time": 11480,
+                "text": "可",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 11480,
+                "end_time": 11690,
+                "text": "以",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 11690,
+                "end_time": 11930,
+                "text": "先",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 11930,
+                "end_time": 12150,
+                "text": "把",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 12150,
+                "end_time": 12360,
+                "text": "素",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 12360,
+                "end_time": 12630,
+                "text": "材",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 12630,
+                "end_time": 12810,
+                "text": "整",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 12810,
+                "end_time": 13070,
+                "text": "理",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 13070,
+                "end_time": 13310,
+                "text": "清",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 13310,
+                "end_time": 13960,
+                "text": "楚",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 14620,
+                "end_time": 14900,
+                "text": "啊",
+                "punctuation": "，"
+              },
+              {
+                "begin_time": 15070,
+                "end_time": 15300,
+                "text": "如",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 15300,
+                "end_time": 15540,
+                "text": "果",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 15540,
+                "end_time": 15760,
+                "text": "中",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 15760,
+                "end_time": 16020,
+                "text": "间",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 16020,
+                "end_time": 16280,
+                "text": "说",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 16280,
+                "end_time": 16560,
+                "text": "错",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 16560,
+                "end_time": 16870,
+                "text": "了",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 17010,
+                "end_time": 17260,
+                "text": "也",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 17260,
+                "end_time": 17420,
+                "text": "不",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 17420,
+                "end_time": 17620,
+                "text": "用",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 17620,
+                "end_time": 17860,
+                "text": "紧",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 17860,
+                "end_time": 18220,
+                "text": "张",
+                "punctuation": "，"
+              },
+              {
+                "begin_time": 18430,
+                "end_time": 18710,
+                "text": "后",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 18710,
+                "end_time": 18970,
+                "text": "面",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 18970,
+                "end_time": 19250,
+                "text": "粗",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 19250,
+                "end_time": 19450,
+                "text": "剪",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 19450,
+                "end_time": 19570,
+                "text": "的",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 19570,
+                "end_time": 19790,
+                "text": "时",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 19790,
+                "end_time": 20040,
+                "text": "候",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 20040,
+                "end_time": 20240,
+                "text": "可",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 20240,
+                "end_time": 20440,
+                "text": "以",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 20440,
+                "end_time": 20690,
+                "text": "再",
+                "punctuation": ""
+              },
+              {
+                "begin_time": 20690,
+                "end_time": 21030,
+                "text": "删",
+                "punctuation": "。"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "normalized_transcript": {
+    "schema": "TranscriptDocument.v1",
+    "transcript_id": "tr_paraformer_v2_20260705T072712Z",
+    "asset_id": "filler_speech",
+    "language": "zh",
+    "provider_id": "aliyun_paraformer_v2",
+    "raw_preserved": true,
+    "utterances": [
+      {
+        "utterance_id": "u_001",
+        "text": "呃，大家好，今天我想简单讲一下这个产品。",
+        "start_ms": 30,
+        "end_ms": 4650,
+        "words": [
+          {
+            "w": "呃",
+            "start_ms": 30,
+            "end_ms": 350,
+            "type": "filler"
+          },
+          {
+            "w": "大",
+            "start_ms": 510,
+            "end_ms": 730,
+            "type": "word"
+          },
+          {
+            "w": "家",
+            "start_ms": 730,
+            "end_ms": 970,
+            "type": "word"
+          },
+          {
+            "w": "好",
+            "start_ms": 970,
+            "end_ms": 1450,
+            "type": "word"
+          },
+          {
+            "w": "今",
+            "start_ms": 1550,
+            "end_ms": 1810,
+            "type": "word"
+          },
+          {
+            "w": "天",
+            "start_ms": 1810,
+            "end_ms": 2070,
+            "type": "word"
+          },
+          {
+            "w": "我",
+            "start_ms": 2070,
+            "end_ms": 2290,
+            "type": "word"
+          },
+          {
+            "w": "想",
+            "start_ms": 2290,
+            "end_ms": 2550,
+            "type": "word"
+          },
+          {
+            "w": "简",
+            "start_ms": 2550,
+            "end_ms": 2790,
+            "type": "word"
+          },
+          {
+            "w": "单",
+            "start_ms": 2790,
+            "end_ms": 3010,
+            "type": "word"
+          },
+          {
+            "w": "讲",
+            "start_ms": 3010,
+            "end_ms": 3240,
+            "type": "word"
+          },
+          {
+            "w": "一",
+            "start_ms": 3240,
+            "end_ms": 3440,
+            "type": "word"
+          },
+          {
+            "w": "下",
+            "start_ms": 3440,
+            "end_ms": 3690,
+            "type": "word"
+          },
+          {
+            "w": "这",
+            "start_ms": 3690,
+            "end_ms": 3860,
+            "type": "word"
+          },
+          {
+            "w": "个",
+            "start_ms": 3860,
+            "end_ms": 3990,
+            "type": "word"
+          },
+          {
+            "w": "产",
+            "start_ms": 3990,
+            "end_ms": 4230,
+            "type": "word"
+          },
+          {
+            "w": "品",
+            "start_ms": 4230,
+            "end_ms": 4650,
+            "type": "word"
+          }
+        ]
+      },
+      {
+        "utterance_id": "u_002",
+        "text": "嗯，我大概用了三周，然后然后发现它最大的好处是可以先把素材整理清楚啊，如果中间说错了也不用紧张，后面粗剪的时候可以再删。",
+        "start_ms": 5600,
+        "end_ms": 21030,
+        "words": [
+          {
+            "w": "嗯",
+            "start_ms": 5600,
+            "end_ms": 5900,
+            "type": "filler"
+          },
+          {
+            "w": "我",
+            "start_ms": 6060,
+            "end_ms": 6280,
+            "type": "word"
+          },
+          {
+            "w": "大",
+            "start_ms": 6280,
+            "end_ms": 6480,
+            "type": "word"
+          },
+          {
+            "w": "概",
+            "start_ms": 6480,
+            "end_ms": 6670,
+            "type": "word"
+          },
+          {
+            "w": "用",
+            "start_ms": 6670,
+            "end_ms": 6910,
+            "type": "word"
+          },
+          {
+            "w": "了",
+            "start_ms": 6910,
+            "end_ms": 7110,
+            "type": "word"
+          },
+          {
+            "w": "三",
+            "start_ms": 7110,
+            "end_ms": 7350,
+            "type": "word"
+          },
+          {
+            "w": "周",
+            "start_ms": 7350,
+            "end_ms": 7770,
+            "type": "word"
+          },
+          {
+            "w": "然",
+            "start_ms": 7890,
+            "end_ms": 8160,
+            "type": "word"
+          },
+          {
+            "w": "后",
+            "start_ms": 8160,
+            "end_ms": 8400,
+            "type": "word"
+          },
+          {
+            "w": "然",
+            "start_ms": 8400,
+            "end_ms": 8650,
+            "type": "word"
+          },
+          {
+            "w": "后",
+            "start_ms": 8650,
+            "end_ms": 8890,
+            "type": "word"
+          },
+          {
+            "w": "发",
+            "start_ms": 8890,
+            "end_ms": 9140,
+            "type": "word"
+          },
+          {
+            "w": "现",
+            "start_ms": 9140,
+            "end_ms": 9410,
+            "type": "word"
+          },
+          {
+            "w": "它",
+            "start_ms": 9410,
+            "end_ms": 9660,
+            "type": "word"
+          },
+          {
+            "w": "最",
+            "start_ms": 9660,
+            "end_ms": 9850,
+            "type": "word"
+          },
+          {
+            "w": "大",
+            "start_ms": 9850,
+            "end_ms": 10040,
+            "type": "word"
+          },
+          {
+            "w": "的",
+            "start_ms": 10040,
+            "end_ms": 10160,
+            "type": "word"
+          },
+          {
+            "w": "好",
+            "start_ms": 10160,
+            "end_ms": 10400,
+            "type": "word"
+          },
+          {
+            "w": "处",
+            "start_ms": 10400,
+            "end_ms": 10820,
+            "type": "word"
+          },
+          {
+            "w": "是",
+            "start_ms": 11000,
+            "end_ms": 11280,
+            "type": "word"
+          },
+          {
+            "w": "可",
+            "start_ms": 11280,
+            "end_ms": 11480,
+            "type": "word"
+          },
+          {
+            "w": "以",
+            "start_ms": 11480,
+            "end_ms": 11690,
+            "type": "word"
+          },
+          {
+            "w": "先",
+            "start_ms": 11690,
+            "end_ms": 11930,
+            "type": "word"
+          },
+          {
+            "w": "把",
+            "start_ms": 11930,
+            "end_ms": 12150,
+            "type": "word"
+          },
+          {
+            "w": "素",
+            "start_ms": 12150,
+            "end_ms": 12360,
+            "type": "word"
+          },
+          {
+            "w": "材",
+            "start_ms": 12360,
+            "end_ms": 12630,
+            "type": "word"
+          },
+          {
+            "w": "整",
+            "start_ms": 12630,
+            "end_ms": 12810,
+            "type": "word"
+          },
+          {
+            "w": "理",
+            "start_ms": 12810,
+            "end_ms": 13070,
+            "type": "word"
+          },
+          {
+            "w": "清",
+            "start_ms": 13070,
+            "end_ms": 13310,
+            "type": "word"
+          },
+          {
+            "w": "楚",
+            "start_ms": 13310,
+            "end_ms": 13960,
+            "type": "word"
+          },
+          {
+            "w": "啊",
+            "start_ms": 14620,
+            "end_ms": 14900,
+            "type": "filler"
+          },
+          {
+            "w": "如",
+            "start_ms": 15070,
+            "end_ms": 15300,
+            "type": "word"
+          },
+          {
+            "w": "果",
+            "start_ms": 15300,
+            "end_ms": 15540,
+            "type": "word"
+          },
+          {
+            "w": "中",
+            "start_ms": 15540,
+            "end_ms": 15760,
+            "type": "word"
+          },
+          {
+            "w": "间",
+            "start_ms": 15760,
+            "end_ms": 16020,
+            "type": "word"
+          },
+          {
+            "w": "说",
+            "start_ms": 16020,
+            "end_ms": 16280,
+            "type": "word"
+          },
+          {
+            "w": "错",
+            "start_ms": 16280,
+            "end_ms": 16560,
+            "type": "word"
+          },
+          {
+            "w": "了",
+            "start_ms": 16560,
+            "end_ms": 16870,
+            "type": "word"
+          },
+          {
+            "w": "也",
+            "start_ms": 17010,
+            "end_ms": 17260,
+            "type": "word"
+          },
+          {
+            "w": "不",
+            "start_ms": 17260,
+            "end_ms": 17420,
+            "type": "word"
+          },
+          {
+            "w": "用",
+            "start_ms": 17420,
+            "end_ms": 17620,
+            "type": "word"
+          },
+          {
+            "w": "紧",
+            "start_ms": 17620,
+            "end_ms": 17860,
+            "type": "word"
+          },
+          {
+            "w": "张",
+            "start_ms": 17860,
+            "end_ms": 18220,
+            "type": "word"
+          },
+          {
+            "w": "后",
+            "start_ms": 18430,
+            "end_ms": 18710,
+            "type": "word"
+          },
+          {
+            "w": "面",
+            "start_ms": 18710,
+            "end_ms": 18970,
+            "type": "word"
+          },
+          {
+            "w": "粗",
+            "start_ms": 18970,
+            "end_ms": 19250,
+            "type": "word"
+          },
+          {
+            "w": "剪",
+            "start_ms": 19250,
+            "end_ms": 19450,
+            "type": "word"
+          },
+          {
+            "w": "的",
+            "start_ms": 19450,
+            "end_ms": 19570,
+            "type": "word"
+          },
+          {
+            "w": "时",
+            "start_ms": 19570,
+            "end_ms": 19790,
+            "type": "word"
+          },
+          {
+            "w": "候",
+            "start_ms": 19790,
+            "end_ms": 20040,
+            "type": "word"
+          },
+          {
+            "w": "可",
+            "start_ms": 20040,
+            "end_ms": 20240,
+            "type": "word"
+          },
+          {
+            "w": "以",
+            "start_ms": 20240,
+            "end_ms": 20440,
+            "type": "word"
+          },
+          {
+            "w": "再",
+            "start_ms": 20440,
+            "end_ms": 20690,
+            "type": "word"
+          },
+          {
+            "w": "删",
+            "start_ms": 20690,
+            "end_ms": 21030,
+            "type": "word"
+          }
+        ]
+      }
+    ],
+    "vad_segments": [],
+    "warnings": []
+  },
+  "report": {
+    "filler_hits": [
+      "呃",
+      "啊",
+      "嗯"
+    ],
+    "timestamps_ok": true,
+    "alignment_ratio": 1.0,
+    "word_count": 72,
+    "warnings": []
+  }
+}
