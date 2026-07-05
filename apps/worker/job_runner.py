@@ -49,7 +49,7 @@ class JobRunner:
         heartbeat_timeout_seconds: float = 60.0,
     ) -> None:
         self._engine = engine
-        self._registry = registry or build_default_job_registry()
+        self._registry = registry or build_default_job_registry(engine=engine)
         self._turn_queue = turn_queue
         self._worker_id = worker_id or f"worker_{uuid4().hex[:12]}"
         self._poll_interval_seconds = poll_interval_seconds

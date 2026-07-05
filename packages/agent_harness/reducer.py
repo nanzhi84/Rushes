@@ -778,9 +778,13 @@ def _apply_asset_event(context: _ReducerContext, event: DomainEventBase) -> None
     object_hash = payload.get("object_hash")
     proxy_object_hash = payload.get("proxy_object_hash")
     if isinstance(object_hash, str):
-        _ensure_object(context, object_hash)
+        _ensure_object(context, object_hash, size=_optional_int(payload.get("object_size")))
     if isinstance(proxy_object_hash, str):
-        _ensure_object(context, proxy_object_hash)
+        _ensure_object(
+            context,
+            proxy_object_hash,
+            size=_optional_int(payload.get("proxy_object_size")),
+        )
     if not _row_exists(context.connection, schema.assets, "asset_id", asset_id):
         values = _asset_insert_values(asset_id, payload)
         context.connection.execute(schema.assets.insert().values(**values))
@@ -1118,6 +1122,8 @@ def _apply_job_event(context: _ReducerContext, event: DomainEventBase) -> None:
     context.connection.execute(
         update(schema.jobs).where(schema.jobs.c.job_id == job_id).values(**values)
     )
+    if event.event == "JobFailed":
+        _mark_asset_job_failed(context, event)
     running_jobs_case_id = requested_by_case_id if isinstance(requested_by_case_id, str) else None
     if running_jobs_case_id is None:
         event_case_id = getattr(event, "case_id", None)
@@ -1129,6 +1135,15 @@ def _apply_job_event(context: _ReducerContext, event: DomainEventBase) -> None:
 def _insert_job(context: _ReducerContext, event: DomainEventBase) -> None:
     job_id = _required_attr(event, "job_id")
     kind = str(event.payload.get("kind", "unknown"))
+    # import_url 这类 job 的 asset 在下载完成建档前不存在：
+    # jobs.asset_id 有外键，行不存在时置 None（asset_id 仍在 job_payload 里）。
+    raw_asset_id = event.payload.get("asset_id")
+    asset_id = (
+        raw_asset_id
+        if isinstance(raw_asset_id, str)
+        and _row_exists(context.connection, schema.assets, "asset_id", raw_asset_id)
+        else None
+    )
     context.connection.execute(
         schema.jobs.insert().values(
             job_id=job_id,
@@ -1137,7 +1152,7 @@ def _insert_job(context: _ReducerContext, event: DomainEventBase) -> None:
             project_id=event.project_id,
             case_id=event.case_id,
             requested_by_case_id=getattr(event, "requested_by_case_id", None),
-            asset_id=event.payload.get("asset_id"),
+            asset_id=asset_id,
             idempotency_key=str(event.payload.get("idempotency_key", job_id)),
             payload_json=dump_json(event.payload.get("job_payload", {})),
             result_json=None,
@@ -1390,6 +1405,7 @@ def _asset_insert_values(asset_id: str, payload: Mapping[str, Any]) -> dict[str,
         "reference_path": payload.get("reference_path"),
         "kind": str(payload.get("kind", "video")),
         "source": str(payload.get("source", "upload")),
+        "filename": str(payload.get("filename", "")),
         "hash": str(payload.get("hash", asset_id)),
         "mtime": payload.get("mtime"),
         "size": int(payload.get("size", 0)),
@@ -1407,7 +1423,34 @@ def _asset_insert_values(asset_id: str, payload: Mapping[str, Any]) -> dict[str,
 def _asset_update_values_for_event(event: DomainEventBase) -> dict[str, Any]:
     payload = event.payload
     values: dict[str, Any] = {}
-    if event.event == "AssetProbed":
+    if event.event == "AssetImported":
+        for key in (
+            "storage_mode",
+            "object_hash",
+            "reference_path",
+            "kind",
+            "source",
+            "filename",
+            "hash",
+            "mtime",
+            "size",
+            "ingest_status",
+            "annotation_status",
+            "annotation_pass",
+            "index_status",
+            "usable",
+        ):
+            if key in payload:
+                values[key] = payload[key]
+        if "probe" in payload:
+            values["probe"] = None if payload["probe"] is None else dump_json(payload["probe"])
+        if "proxy_object_hash" in payload:
+            values["proxy_object_hash"] = payload["proxy_object_hash"]
+        if "failure" in payload:
+            values["failure"] = (
+                None if payload["failure"] is None else dump_json(payload["failure"])
+            )
+    elif event.event == "AssetProbed":
         values["probe"] = dump_json(payload.get("probe", {}))
         values["ingest_status"] = str(payload.get("ingest_status", "probing"))
     elif event.event == "ProxyGenerated":
@@ -1426,6 +1469,42 @@ def _asset_update_values_for_event(event: DomainEventBase) -> dict[str, Any]:
         values["usable"] = False
         values["failure"] = dump_json(payload.get("failure", {"message": "asset invalidated"}))
     return values
+
+
+def _mark_asset_job_failed(context: _ReducerContext, event: DomainEventBase) -> None:
+    asset_id = event.payload.get("asset_id")
+    if not isinstance(asset_id, str):
+        job_row = context.connection.execute(
+            select(schema.jobs.c.asset_id).where(
+                schema.jobs.c.job_id == _required_attr(event, "job_id")
+            )
+        ).first()
+        if job_row is not None:
+            candidate = job_row._mapping["asset_id"]
+            asset_id = candidate if isinstance(candidate, str) else None
+    if not isinstance(asset_id, str):
+        return
+    error_payload = event.payload.get("error")
+    failure = (
+        error_payload
+        if isinstance(error_payload, Mapping)
+        else {
+            "error_code": "job_failed",
+            "message": "asset job failed",
+            "retryable": True,
+        }
+    )
+    if not _row_exists(context.connection, schema.assets, "asset_id", asset_id):
+        return
+    context.connection.execute(
+        update(schema.assets)
+        .where(schema.assets.c.asset_id == asset_id)
+        .values(
+            ingest_status="failed",
+            usable=False,
+            failure=dump_json(failure),
+        )
+    )
 
 
 def _timeline_document_from_event(
@@ -1485,17 +1564,29 @@ def _timeline_creation_resets_rough_cut(event: DomainEventBase) -> bool:
     )
 
 
-def _ensure_object(context: _ReducerContext, object_hash: str) -> None:
+def _ensure_object(context: _ReducerContext, object_hash: str, *, size: int | None = None) -> None:
     if _row_exists(context.connection, schema.objects, "hash", object_hash):
         return
+    rel_path = (
+        f"{object_hash[:2]}/{object_hash[2:4]}/{object_hash}"
+        if len(object_hash) == 64
+        else f"objects/{object_hash}"
+    )
     context.connection.execute(
         schema.objects.insert().values(
             hash=object_hash,
-            rel_path=f"objects/{object_hash}",
-            size=0,
+            rel_path=rel_path,
+            size=size or 0,
             created_at=context.created_at,
         )
     )
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _timeline_exists(connection: Connection, case_id: str, version: int) -> bool:

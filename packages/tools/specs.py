@@ -6,6 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from contracts.asset import AssetKind, StorageMode
 from contracts.decision import (
     DecisionAnswer,
     DecisionOption,
@@ -185,6 +186,80 @@ class ProjectListTreeInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     include_trashed: bool = True
+
+
+class AssetUploadCompleteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    asset_id: str | None = None
+    path: str
+    filename: str | None = None
+    kind: AssetKind = AssetKind.VIDEO
+
+
+class AssetImportLocalFileInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    asset_id: str | None = None
+    path: str
+    storage_mode: StorageMode = StorageMode.REFERENCE
+    kind: AssetKind = AssetKind.VIDEO
+
+
+class AssetImportUrlInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    asset_id: str | None = None
+    url: str
+    filename: str | None = None
+    kind: AssetKind = AssetKind.VIDEO
+    max_bytes: int | None = None
+
+
+class AssetLinkInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    asset_id: str
+    enabled: bool = True
+    note: str = ""
+
+
+class AssetUnlinkInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    asset_id: str
+
+
+class AssetSelectForCaseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str | None = None
+    asset_id: str
+
+
+class AssetDisableForCaseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str | None = None
+    asset_id: str
+
+
+class AssetListProjectInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str | None = None
+    include_disabled: bool = True
+
+
+class AssetListCaseScopeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_id: str | None = None
 
 
 def tool_specs() -> tuple[ToolSpec, ...]:
@@ -470,6 +545,157 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             emits_events=[],
             description="Return the Project/Case two-level tree.",
         ),
+        ToolSpec(
+            name="asset.upload_complete",
+            namespace="asset",
+            version="1",
+            input_model=AssetUploadCompleteInput,
+            result_model=None,
+            handler_ref="tools.asset.upload_complete",
+            allowed_scopes=["project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=["asset", "object_store", "job"],
+            idempotency_key_fields=["project_id", "path"],
+            emits_events=["AssetImported", "AssetLinked", "JobEnqueued"],
+            exposure="harness_only",
+            description="Complete an uploaded file into a copy-mode asset and enqueue probe/proxy.",
+        ),
+        ToolSpec(
+            name="asset.import_local_file",
+            namespace="asset",
+            version="1",
+            input_model=AssetImportLocalFileInput,
+            result_model=None,
+            handler_ref="tools.asset.import_local_file",
+            allowed_scopes=["project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=["asset", "object_store", "job"],
+            idempotency_key_fields=["project_id", "path", "storage_mode"],
+            emits_events=["AssetImported", "AssetLinked", "JobEnqueued"],
+            exposure="harness_only",
+            description="Import a local media file, defaulting to reference storage.",
+        ),
+        ToolSpec(
+            name="asset.import_url",
+            namespace="asset",
+            version="1",
+            input_model=AssetImportUrlInput,
+            result_model=None,
+            handler_ref="tools.asset.import_url",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            requires_confirmation=True,
+            confirmation_decision_type="url_import",
+            side_effects=["asset", "object_store", "job"],
+            idempotency_key_fields=["project_id", "url"],
+            emits_events=["JobEnqueued", "AssetImported"],
+            is_long_running=True,
+            description="Import one explicitly confirmed URL as a project-level job.",
+        ),
+        ToolSpec(
+            name="asset.link_to_project",
+            namespace="asset",
+            version="1",
+            input_model=AssetLinkInput,
+            result_model=None,
+            handler_ref="tools.asset.link_to_project",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=["asset"],
+            idempotency_key_fields=["project_id", "asset_id"],
+            emits_events=["AssetLinked"],
+            description="Link an existing asset into the active Project.",
+        ),
+        ToolSpec(
+            name="asset.unlink_from_project",
+            namespace="asset",
+            version="1",
+            input_model=AssetUnlinkInput,
+            result_model=None,
+            handler_ref="tools.asset.unlink_from_project",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=["asset"],
+            idempotency_key_fields=["project_id", "asset_id"],
+            emits_events=["AssetUnlinked"],
+            description="Unlink an asset from the active Project.",
+        ),
+        ToolSpec(
+            name="asset.select_for_case",
+            namespace="asset",
+            version="1",
+            input_model=AssetSelectForCaseInput,
+            result_model=None,
+            handler_ref="tools.asset.select_for_case",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["case"],
+            idempotency_key_fields=["case_id", "asset_id"],
+            emits_events=["CaseAssetScopeChanged"],
+            description=(
+                "Select a project asset for the active Case without mutating the asset pool."
+            ),
+        ),
+        ToolSpec(
+            name="asset.disable_for_case",
+            namespace="asset",
+            version="1",
+            input_model=AssetDisableForCaseInput,
+            result_model=None,
+            handler_ref="tools.asset.disable_for_case",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["case"],
+            idempotency_key_fields=["case_id", "asset_id"],
+            emits_events=["CaseAssetScopeChanged"],
+            description=(
+                "Disable a project asset for the active Case without mutating the asset pool."
+            ),
+        ),
+        ToolSpec(
+            name="asset.list_project_assets",
+            namespace="asset",
+            version="1",
+            input_model=AssetListProjectInput,
+            result_model=None,
+            handler_ref="tools.asset.list_project_assets",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=[],
+            emits_events=[],
+            description="List assets linked to the active Project.",
+        ),
+        ToolSpec(
+            name="asset.list_case_scope",
+            namespace="asset",
+            version="1",
+            input_model=AssetListCaseScopeInput,
+            result_model=None,
+            handler_ref="tools.asset.list_case_scope",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=[],
+            emits_events=[],
+            description="List selected and disabled asset IDs for the active Case.",
+        ),
     )
 
 
@@ -562,6 +788,17 @@ PATCH_OP_REGISTRY = patch_op_registry()
 
 
 def build_default_tool_registry() -> ToolRegistry:
+    from .asset import (
+        disable_for_case,
+        import_local_file,
+        import_url,
+        link_to_project,
+        list_case_scope,
+        list_project_assets,
+        select_for_case,
+        unlink_from_project,
+        upload_complete,
+    )
     from .builtin import decision_answer, finish_turn, refuse, respond
     from .interaction import (
         ask_user,
@@ -601,6 +838,15 @@ def build_default_tool_registry() -> ToolRegistry:
         "project.move_case": move_case,
         "project.close_case": close_case,
         "project.list_tree": list_tree,
+        "asset.upload_complete": upload_complete,
+        "asset.import_local_file": import_local_file,
+        "asset.import_url": import_url,
+        "asset.link_to_project": link_to_project,
+        "asset.unlink_from_project": unlink_from_project,
+        "asset.select_for_case": select_for_case,
+        "asset.disable_for_case": disable_for_case,
+        "asset.list_project_assets": list_project_assets,
+        "asset.list_case_scope": list_case_scope,
     }
     registry = ToolRegistry()
     for spec in tool_specs():

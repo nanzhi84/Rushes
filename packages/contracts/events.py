@@ -119,7 +119,7 @@ class AssetProbed(DomainEventBase):
     asset_id: str
     job_id: str | None = None
     version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("asset_id", "job_id")
+    merge_key: ClassVar[tuple[str, ...]] = ("asset_id",)
 
 
 class ProxyGenerated(DomainEventBase):
@@ -127,7 +127,7 @@ class ProxyGenerated(DomainEventBase):
     asset_id: str
     job_id: str | None = None
     version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("asset_id", "job_id")
+    merge_key: ClassVar[tuple[str, ...]] = ("asset_id",)
 
 
 class AnnotationCompleted(DomainEventBase):

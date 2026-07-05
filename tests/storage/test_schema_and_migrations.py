@@ -41,6 +41,7 @@ EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "reference_path",
         "kind",
         "source",
+        "filename",
         "hash",
         "mtime",
         "size",
