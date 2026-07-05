@@ -12,6 +12,7 @@
     "gen:types": "../../scripts/gen_web_types.sh"
   },
   "dependencies": {
+    "@assistant-ui/react": "latest",
     "@tailwindcss/vite": "^4.0.0",
     "@tanstack/react-query": "^5.0.0",
     "@tanstack/react-router": "^1.0.0",
