@@ -1,4 +1,4 @@
-import { apiFetch } from "../auth";
+import { ApiError, apiFetch, getAuthToken, handleUnauthorized } from "../auth";
 import type { components, paths } from "./generated/schema";
 
 export type ProjectTreeCase = components["schemas"]["ProjectTreeCase"];
@@ -8,6 +8,125 @@ export type CaseRecord = components["schemas"]["CaseRecord"];
 export type DecisionOption = components["schemas"]["DecisionOption"];
 export type Decision = components["schemas"]["Decision"];
 export type DecisionAnswer = components["schemas"]["DecisionAnswerRequest"]["answer"];
+export type FsRoot = components["schemas"]["FsRoot"];
+export type FsListEntry = components["schemas"]["FsListEntry"];
+export type FsListResponse = components["schemas"]["FsListResponse"];
+
+// apps/api/schemas.py 已有 M2 materials/upload response models；当前生成 schema 尚未包含这些路径。
+export type MaterialKind =
+  | "video"
+  | "image"
+  | "audio"
+  | "voiceover"
+  | "bgm"
+  | "font"
+  | "subtitle_template";
+export type StorageMode = "copy" | "reference";
+export type MaterialAnnotationStatus = "pending" | "analyzing" | "completed" | "failed" | string;
+
+export type AssetJobSummary = {
+  job_id: string;
+  kind: string;
+  status: string;
+  progress: number | null;
+  error_json: Record<string, unknown> | null;
+};
+
+export type MaterialAsset = {
+  asset_id: string;
+  storage_mode: StorageMode | string;
+  kind: MaterialKind | string;
+  source: string;
+  filename: string;
+  hash: string;
+  size: number;
+  mtime: number | null;
+  ingest_status: string;
+  annotation_status: MaterialAnnotationStatus;
+  annotation_pass: string;
+  index_status: string;
+  usable: boolean;
+  enabled: boolean;
+  probe: Record<string, unknown> | null;
+  proxy_object_hash: string | null;
+  proxy_ready: boolean;
+  invalid: boolean;
+  failure: Record<string, unknown> | null;
+  jobs: AssetJobSummary[];
+};
+
+export type MaterialsResponse = {
+  project_id: string;
+  assets: MaterialAsset[];
+  invalidated_asset_ids: string[];
+};
+
+export type MaterialMutationResponse = {
+  project_id: string;
+  asset_id?: string | null;
+  job_id?: string | null;
+  decision_id?: string | null;
+  event_ids: number[];
+};
+
+type MaterialImportLocalRequest = {
+  path: string;
+  storage_mode?: StorageMode | null;
+  kind?: MaterialKind;
+  asset_id?: string | null;
+};
+
+type MaterialImportUrlRequest = {
+  url: string;
+  filename?: string | null;
+  kind?: MaterialKind;
+  max_bytes?: number | null;
+  asset_id?: string | null;
+};
+
+type MaterialAssetLinkRequest = {
+  asset_id: string;
+  enabled?: boolean;
+  note?: string;
+};
+
+type MaterialPatchRequest = {
+  enabled?: boolean | null;
+  reference_path?: string | null;
+};
+
+type UploadInitRequest = {
+  project_id: string;
+  filename: string;
+  size?: number | null;
+  kind?: MaterialKind;
+  asset_id?: string | null;
+};
+
+type UploadInitResponse = {
+  upload_id: string;
+  part_url_template: string;
+  complete_url: string;
+};
+
+type UploadPartResponse = {
+  upload_id: string;
+  part_number: number;
+  size: number;
+};
+
+type UploadCompleteRequest = {
+  project_id?: string | null;
+  asset_id?: string | null;
+  kind?: MaterialKind | null;
+};
+
+type UploadCompleteResponse = {
+  upload_id: string;
+  project_id: string;
+  asset_id: string;
+  event_ids: number[];
+};
 
 type ProjectTreeResponse = components["schemas"]["ProjectTreeResponse"];
 type ProjectListResponse = components["schemas"]["ProjectListResponse"];
@@ -135,9 +254,144 @@ export const api = {
       method: "POST",
       body: payload
     });
+  },
+
+  listMaterials(projectId: string): Promise<MaterialsResponse> {
+    return apiFetch<MaterialsResponse>(`${projectPath(projectId)}/materials`);
+  },
+
+  revalidateMaterials(projectId: string): Promise<MaterialsResponse> {
+    return apiFetch<MaterialsResponse>(`${projectPath(projectId)}/materials/revalidate`, {
+      method: "POST"
+    });
+  },
+
+  importLocalMaterial(
+    projectId: string,
+    payload: MaterialImportLocalRequest
+  ): Promise<MaterialMutationResponse> {
+    return apiFetch<MaterialMutationResponse>(`${projectPath(projectId)}/materials/import-local`, {
+      method: "POST",
+      body: payload
+    });
+  },
+
+  importUrlMaterial(
+    projectId: string,
+    payload: MaterialImportUrlRequest
+  ): Promise<MaterialMutationResponse> {
+    return apiFetch<MaterialMutationResponse>(`${projectPath(projectId)}/materials/import-url`, {
+      method: "POST",
+      body: payload
+    });
+  },
+
+  linkMaterial(projectId: string, payload: MaterialAssetLinkRequest): Promise<MaterialMutationResponse> {
+    return apiFetch<MaterialMutationResponse>(`${projectPath(projectId)}/materials/link`, {
+      method: "POST",
+      body: payload
+    });
+  },
+
+  unlinkMaterial(
+    projectId: string,
+    payload: MaterialAssetLinkRequest
+  ): Promise<MaterialMutationResponse> {
+    return apiFetch<MaterialMutationResponse>(`${projectPath(projectId)}/materials/unlink`, {
+      method: "POST",
+      body: payload
+    });
+  },
+
+  patchMaterial(
+    projectId: string,
+    assetId: string,
+    payload: MaterialPatchRequest
+  ): Promise<MaterialMutationResponse> {
+    return apiFetch<MaterialMutationResponse>(
+      `${projectPath(projectId)}/materials/${encodeURIComponent(assetId)}`,
+      {
+        method: "PATCH",
+        body: payload
+      }
+    );
+  },
+
+  fsRoots(): Promise<components["schemas"]["FsRootsResponse"]> {
+    return apiFetch<components["schemas"]["FsRootsResponse"]>("/api/fs/roots");
+  },
+
+  fsList(path: string): Promise<FsListResponse> {
+    const params = new URLSearchParams({ path });
+    return apiFetch<FsListResponse>(`/api/fs/list?${params.toString()}`);
+  },
+
+  initUpload(payload: UploadInitRequest): Promise<UploadInitResponse> {
+    return apiFetch<UploadInitResponse>("/api/uploads/init", {
+      method: "POST",
+      body: payload
+    });
+  },
+
+  uploadPart(partUrl: string, body: Blob): Promise<UploadPartResponse> {
+    return apiBinaryFetch<UploadPartResponse>(partUrl, {
+      method: "PUT",
+      body,
+      headers: { "Content-Type": "application/octet-stream" }
+    });
+  },
+
+  completeUpload(
+    completeUrl: string,
+    payload: UploadCompleteRequest = {}
+  ): Promise<UploadCompleteResponse> {
+    return apiFetch<UploadCompleteResponse>(completeUrl, {
+      method: "POST",
+      body: payload
+    });
+  },
+
+  mediaProxyUrl(assetId: string): string {
+    return `/api/media/${encodeURIComponent(assetId)}/proxy`;
   }
 };
 
+function projectPath(projectId: string): string {
+  return `/api/projects/${encodeURIComponent(projectId)}`;
+}
+
 function casePath(projectId: string, caseId: string): string {
-  return `/api/projects/${encodeURIComponent(projectId)}/cases/${encodeURIComponent(caseId)}`;
+  return `${projectPath(projectId)}/cases/${encodeURIComponent(caseId)}`;
+}
+
+async function apiBinaryFetch<T>(path: string, options: RequestInit): Promise<T> {
+  const headers = new Headers(options.headers);
+  const token = getAuthToken();
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const response = await fetch(path, { ...options, headers });
+
+  if (response.status === 401) {
+    handleUnauthorized();
+  }
+
+  if (!response.ok) {
+    throw new ApiError(response.status, `API 请求失败：${response.status}`, await readPayload(response));
+  }
+
+  const text = await response.text();
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
+async function readPayload(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) {
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
