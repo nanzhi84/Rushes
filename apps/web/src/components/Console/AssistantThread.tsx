@@ -10,11 +10,13 @@ import type {
 export function AssistantThread({
   runtime,
   onAnswerDecision,
-  answerPending
+  answerPending,
+  highlightedMessageId = null
 }: {
   runtime: ConsoleExternalStoreRuntime;
   onAnswerDecision: AnswerDecisionHandler;
   answerPending: boolean;
+  highlightedMessageId?: string | null;
 }): ReactElement {
   return (
     <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4" aria-label="消息列表">
@@ -29,6 +31,7 @@ export function AssistantThread({
             message={message}
             onAnswerDecision={onAnswerDecision}
             answerPending={answerPending}
+            highlighted={highlightedMessageId === message.id}
           />
         ))
       )}
@@ -39,15 +42,20 @@ export function AssistantThread({
 function MessageRow({
   message,
   onAnswerDecision,
-  answerPending
+  answerPending,
+  highlighted
 }: {
   message: ConsoleAssistantMessage;
   onAnswerDecision: AnswerDecisionHandler;
   answerPending: boolean;
+  highlighted: boolean;
 }): ReactElement {
   if (message.metadata.consoleRole === "system_observation") {
     return (
-      <details className="mx-auto max-w-[84%] rounded-md bg-[#f8fafc] px-4 py-3 text-sm text-[#475569]">
+      <details
+        data-console-message-id={message.id}
+        className={`${highlightClass(highlighted)} mx-auto max-w-[84%] rounded-md bg-[#f8fafc] px-4 py-3 text-sm text-[#475569]`}
+      >
         <summary className="cursor-pointer text-xs font-medium text-[#64748b]">系统观察</summary>
         {message.content.map((part, index) =>
           part.type === "text" ? (
@@ -65,7 +73,10 @@ function MessageRow({
   );
   if (dataParts.length > 0) {
     return (
-      <div className="mr-auto max-w-[88%] space-y-3">
+      <div
+        data-console-message-id={message.id}
+        className={`${highlightClass(highlighted)} mr-auto max-w-[88%] space-y-3 rounded-md`}
+      >
         {dataParts.map((part) => (
           <StructuredInteractionRenderer
             key={part.data.id}
@@ -79,7 +90,7 @@ function MessageRow({
   }
 
   return (
-    <article className={messageClass(message)}>
+    <article data-console-message-id={message.id} className={messageClass(message, highlighted)}>
       <span className="text-xs font-medium uppercase text-[#64748b]">{roleLabel(message)}</span>
       {message.content.map((part, index) =>
         part.type === "text" ? (
@@ -92,14 +103,19 @@ function MessageRow({
   );
 }
 
-function messageClass(message: ConsoleAssistantMessage): string {
+function messageClass(message: ConsoleAssistantMessage, highlighted: boolean): string {
+  const highlight = highlightClass(highlighted);
   if (message.role === "user") {
-    return "ml-auto max-w-[80%] rounded-lg bg-[#17202a] px-4 py-3 text-white";
+    return `${highlight} ml-auto max-w-[80%] rounded-lg bg-[#17202a] px-4 py-3 text-white`;
   }
   if (message.role === "assistant") {
-    return "mr-auto max-w-[80%] rounded-lg bg-[#eef2f7] px-4 py-3 text-[#17202a]";
+    return `${highlight} mr-auto max-w-[80%] rounded-lg bg-[#eef2f7] px-4 py-3 text-[#17202a]`;
   }
-  return "mx-auto max-w-[80%] rounded-md bg-[#f8fafc] px-4 py-3 text-[#475569]";
+  return `${highlight} mx-auto max-w-[80%] rounded-md bg-[#f8fafc] px-4 py-3 text-[#475569]`;
+}
+
+function highlightClass(highlighted: boolean): string {
+  return highlighted ? "ring-2 ring-[#f97316] ring-offset-2" : "";
 }
 
 function roleLabel(message: ConsoleAssistantMessage): string {

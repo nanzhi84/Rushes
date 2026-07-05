@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactElement } from "react";
-import { api, type DecisionAnswer } from "../api/client";
+import { api, type DecisionAnswer, type TimelineClipJson, type TimelineJson } from "../api/client";
 import { queryKeys } from "../app/query_client";
 import { createApiEventSource } from "../auth";
 import { AssistantThread } from "../components/Console/AssistantThread";
@@ -17,6 +17,8 @@ import type {
   StructuredInteractionItem
 } from "../components/Console/StructuredInteractionRenderer";
 import { useConsoleExternalStoreRuntime, type ConsoleMessage } from "../components/Console/runtime";
+import { PreviewPlayer } from "../components/PreviewPlayer";
+import { TimelineViewer } from "../components/TimelineViewer";
 
 export function CaseAgentConsolePage(): ReactElement {
   const params = useParams({ strict: false }) as { projectId: string; caseId: string };
@@ -35,6 +37,9 @@ export function CaseConsoleView({
   const [awaitingTurnEnd, setAwaitingTurnEnd] = useState(false);
   const [streamState, setStreamState] = useState<"connecting" | "open" | "closed">("connecting");
   const [structuredItems, setStructuredItems] = useState<StructuredInteractionItem[]>([]);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [unmatchedClipId, setUnmatchedClipId] = useState<string | null>(null);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
 
   const messagesQuery = useQuery({
     queryKey: queryKeys.messages(projectId, caseId),
@@ -48,8 +53,24 @@ export function CaseConsoleView({
     queryFn: () => api.currentDecision(projectId, caseId)
   });
 
+  const caseQuery = useQuery({
+    queryKey: queryKeys.case(projectId, caseId),
+    queryFn: () => api.getCase(projectId, caseId)
+  });
+
+  const currentCase = caseQuery.data?.case ?? null;
+  const timelineVersion = currentCase?.timeline_current_version ?? null;
+
+  const timelineQuery = useQuery({
+    queryKey: queryKeys.timeline(projectId, caseId, timelineVersion),
+    queryFn: () => api.fetchCaseTimeline(projectId, caseId, timelineVersion),
+    enabled: timelineVersion !== null
+  });
+
   const currentDecision = decisionQuery.data?.decision ?? null;
   const messages = messagesQuery.data ?? [];
+  const timelinePayload = timelineQuery.data ?? null;
+  const previewSrc = timelinePayload?.preview_id ? api.mediaPreviewUrl(timelinePayload.preview_id) : null;
   const renderedStructuredItems = useMemo(
     () => {
       if (
@@ -78,6 +99,7 @@ export function CaseConsoleView({
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.projectTree }),
         queryClient.invalidateQueries({ queryKey: queryKeys.case(projectId, caseId) }),
+        queryClient.invalidateQueries({ queryKey: ["timeline", projectId, caseId] }),
         queryClient.invalidateQueries({ queryKey: queryKeys.messages(projectId, caseId) }),
         queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(projectId, caseId) })
       ]);
@@ -152,6 +174,37 @@ export function CaseConsoleView({
     },
     [answerDecision]
   );
+  const handlePreviewFirstPlay = useCallback(() => {
+    const previewId = timelinePayload?.preview_id;
+    if (!previewId) {
+      return;
+    }
+    void api
+      .postPreviewViewed(projectId, caseId, previewId)
+      .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.case(projectId, caseId) }))
+      .catch(() => undefined);
+  }, [caseId, projectId, queryClient, timelinePayload?.preview_id]);
+  const handleClipClick = useCallback(
+    (clipId: string) => {
+      setSelectedClipId(clipId);
+      const messageMatch = messages.find((message) => message.content.includes(clipId));
+      const structuredMatch = renderedStructuredItems.some((item) => JSON.stringify(item).includes(clipId));
+      const targetId = messageMatch?.id ?? (structuredMatch ? "structured-interactions" : null);
+      setHighlightedMessageId(targetId);
+      setUnmatchedClipId(targetId ? null : clipId);
+      if (targetId) {
+        window.requestAnimationFrame(() => scrollToMessage(targetId));
+      }
+    },
+    [messages, renderedStructuredItems]
+  );
+  const unmatchedClipDetail = useMemo(
+    () =>
+      unmatchedClipId && timelinePayload
+        ? findTimelineClip(timelinePayload.timeline, unmatchedClipId)
+        : null,
+    [timelinePayload, unmatchedClipId]
+  );
   const runtime = useConsoleExternalStoreRuntime({
     messages,
     structuredItems: renderedStructuredItems,
@@ -185,6 +238,7 @@ export function CaseConsoleView({
             runtime={runtime}
             onAnswerDecision={handleAnswerDecision}
             answerPending={answerDecision.isPending}
+            highlightedMessageId={highlightedMessageId}
           />
 
           <form
@@ -243,14 +297,113 @@ export function CaseConsoleView({
 
           <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
             <h2 className="font-semibold">预览与时间线</h2>
-            <p className="mt-3 text-sm leading-6 text-[#64748b]">
-              预览播放器和只读时间线会在 M6 接入。
-            </p>
+            <div className="mt-3 space-y-3">
+              {timelineVersion === null ? (
+                <p className="text-sm leading-6 text-[#64748b]">暂无时间线。</p>
+              ) : timelineQuery.isPending ? (
+                <p className="text-sm leading-6 text-[#64748b]">时间线加载中。</p>
+              ) : timelinePayload ? (
+                <>
+                  {previewSrc ? (
+                    <PreviewPlayer
+                      key={timelinePayload.preview_id}
+                      src={previewSrc}
+                      fps={timelinePayload.timeline.fps}
+                      onFirstPlay={handlePreviewFirstPlay}
+                    />
+                  ) : null}
+                  <TimelineViewer
+                    timeline={timelinePayload.timeline}
+                    selectedClipId={selectedClipId}
+                    onClipClick={handleClipClick}
+                    waveformSrc={previewSrc}
+                  />
+                  {unmatchedClipDetail ? <ClipDetailBar detail={unmatchedClipDetail} /> : null}
+                </>
+              ) : (
+                <p className="text-sm leading-6 text-[#64748b]">时间线暂不可用。</p>
+              )}
+            </div>
           </section>
         </aside>
       </div>
     </section>
   );
+}
+
+type ClipDetail = {
+  clipId: string;
+  trackId: string;
+  startSec: number;
+  endSec: number;
+  label: string | null;
+};
+
+function ClipDetailBar({ detail }: { detail: ClipDetail }): ReactElement {
+  return (
+    <div className="rounded-md border border-[#d9dee7] bg-[#f8fafc] px-3 py-2 text-xs leading-5 text-[#475569]">
+      <span className="font-semibold text-[#17202a]">已选片段：</span>
+      <span className="font-mono">{detail.clipId}</span>
+      <span className="mx-2 text-[#94a3b8]">|</span>
+      <span>轨道 {detail.trackId}</span>
+      <span className="mx-2 text-[#94a3b8]">|</span>
+      <span>
+        {formatSeconds(detail.startSec)} - {formatSeconds(detail.endSec)}
+      </span>
+      {detail.label ? (
+        <>
+          <span className="mx-2 text-[#94a3b8]">|</span>
+          <span>{detail.label}</span>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function findTimelineClip(timeline: TimelineJson, clipId: string): ClipDetail | null {
+  const fps = timeline.fps > 0 ? timeline.fps : 30;
+  for (const track of timeline.tracks) {
+    for (const clip of track.clips ?? []) {
+      if (
+        clip.timeline_clip_id !== clipId ||
+        typeof clip.timeline_start_frame !== "number" ||
+        typeof clip.timeline_end_frame !== "number"
+      ) {
+        continue;
+      }
+      return {
+        clipId,
+        trackId: track.track_id,
+        startSec: clip.timeline_start_frame / fps,
+        endSec: clip.timeline_end_frame / fps,
+        label: clipLabel(clip)
+      };
+    }
+  }
+  return null;
+}
+
+function clipLabel(clip: TimelineClipJson): string | null {
+  if (typeof clip.text === "string" && clip.text.trim()) {
+    return clip.text;
+  }
+  if (typeof clip.asset_id === "string" && clip.asset_id.trim()) {
+    return clip.asset_id;
+  }
+  return null;
+}
+
+function scrollToMessage(messageId: string): void {
+  const selector = `[data-console-message-id="${escapeAttributeValue(messageId)}"]`;
+  document.querySelector(selector)?.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+function escapeAttributeValue(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function formatSeconds(value: number): string {
+  return `${value.toFixed(2)}s`;
 }
 
 const CASE_EVENT_TYPES = [

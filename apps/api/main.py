@@ -42,6 +42,7 @@ from contracts.events import (
     DecisionCreated,
     JobCancelled,
     JobEnqueued,
+    PreviewViewed,
     ProjectCopied,
     ProjectCreated,
     ProjectRenamed,
@@ -65,6 +66,8 @@ from storage.repositories import (
 from storage.repositories._json import load_json
 from storage.repositories.projects import ProjectsRepository
 from storage.workspace_paths import WorkspacePaths
+from timeline import get_timeline_version
+from timeline.summary import render_timeline_summary
 from tools import ToolExecutionContext
 from tools.annotation import retry as annotation_retry
 from tools.asset import (
@@ -805,6 +808,60 @@ def _register_routes(app: FastAPI) -> None:
         return {"case": _require_case(state.engine, project_id, case_id)}
 
     @app.get(
+        "/api/projects/{project_id}/cases/{case_id}/timeline",
+        response_model=api_schemas.CaseTimelineResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def get_case_timeline(
+        project_id: str,
+        case_id: str,
+        request: Request,
+        version: int | None = None,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        case = _require_case(state.engine, project_id, case_id)
+        project = _require_project(state.engine, project_id)
+        requested_version = version if version is not None else case.get("timeline_current_version")
+        if not isinstance(requested_version, int):
+            raise HTTPException(status_code=404, detail={"reason": "not_found"})
+        record = get_timeline_version(state.engine, case_id, requested_version)
+        if record is None:
+            raise HTTPException(status_code=404, detail={"reason": "not_found"})
+        defaults = project.get("defaults")
+        aspect_ratio = "9:16"
+        if isinstance(defaults, Mapping) and isinstance(defaults.get("aspect_ratio"), str):
+            aspect_ratio = str(defaults["aspect_ratio"])
+        return {
+            "case_id": case_id,
+            "timeline_version": record.version,
+            "timeline": record.timeline.model_dump(mode="json"),
+            "summary": render_timeline_summary(record.timeline, aspect_ratio=aspect_ratio),
+            "preview_id": _latest_preview_id(state.engine, case_id, record.version),
+        }
+
+    @app.post(
+        "/api/projects/{project_id}/cases/{case_id}/previews/{preview_id}/viewed",
+        response_model=api_schemas.CaseMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def preview_viewed(
+        project_id: str,
+        case_id: str,
+        preview_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_case(state.engine, project_id, case_id)
+        _require_case_preview(state.engine, case_id, preview_id)
+        event = PreviewViewed(project_id=project_id, case_id=case_id, preview_id=preview_id)
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "case": _require_case(state.engine, project_id, case_id),
+            "event_ids": _event_ids(result),
+        }
+
+    @app.get(
         "/api/projects/{project_id}/cases/{case_id}/costs",
         response_model=api_schemas.CaseCostsResponse,
         responses=_response_docs(not_found=True),
@@ -1523,6 +1580,32 @@ def _require_case(engine: Engine, project_id: str, case_id: str) -> dict[str, An
     if row is None or row.get("project_id") != project_id:
         raise HTTPException(status_code=404, detail={"reason": "case_not_found"})
     return row
+
+
+def _latest_preview_id(engine: Engine, case_id: str, timeline_version: int) -> str | None:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(schema.previews.c.preview_id)
+            .where(schema.previews.c.case_id == case_id)
+            .where(schema.previews.c.timeline_version == timeline_version)
+            .order_by(schema.previews.c.created_at.desc(), schema.previews.c.preview_id.desc())
+        ).first()
+    if row is None:
+        return None
+    preview_id = row._mapping["preview_id"]
+    return preview_id if isinstance(preview_id, str) else None
+
+
+def _require_case_preview(engine: Engine, case_id: str, preview_id: str) -> dict[str, Any]:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(schema.previews)
+            .where(schema.previews.c.preview_id == preview_id)
+            .where(schema.previews.c.case_id == case_id)
+        ).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"reason": "preview_not_found"})
+    return dict(row._mapping)
 
 
 def _require_decision(engine: Engine, decision_id: str) -> dict[str, Any]:

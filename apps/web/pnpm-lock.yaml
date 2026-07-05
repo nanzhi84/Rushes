@@ -20,6 +20,9 @@ importers:
       '@tanstack/react-router':
         specifier: ^1.0.0
         version: 1.170.17(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      '@vidstack/react':
+        specifier: ^1.15.6
+        version: 1.15.6(@types/react@19.2.17)(react@19.2.7)
       react:
         specifier: ^19.0.0
         version: 19.2.7
@@ -29,6 +32,9 @@ importers:
       tailwindcss:
         specifier: ^4.0.0
         version: 4.3.2
+      wavesurfer.js:
+        specifier: ^7.12.8
+        version: 7.12.8
       zustand:
         specifier: ^5.0.0
         version: 5.0.14(@types/react@19.2.17)(react@19.2.7)(use-sync-external-store@1.6.0(react@19.2.7))
@@ -1429,6 +1435,13 @@ packages:
   '@types/react@19.2.17':
     resolution: {integrity: sha512-MXfmqaVPEVgkBT/aY0aGCkRWWtByiYQXo3xdQ8r5RzuFrPiRn8Gar2tQdXSUQ2GKV3bkXckek89V8wQBY2Q/Aw==}
 
+  '@vidstack/react@1.15.6':
+    resolution: {integrity: sha512-hO7cLld5yfxCdDnDCYqh5aS7JxmHfsmX43PmKBJWzDTwK40P3hh5qAdDQzl3qDtEJLYjuo3Sv+kr6tt/VRtJzQ==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@types/react': ^18.0.0 || ^19.0.0
+      react: ^18.0.0 || ^19.0.0
+
   '@vitejs/plugin-react@5.2.0':
     resolution: {integrity: sha512-YmKkfhOAi3wsB1PhJq5Scj3GXMn3WvtQ/JC0xoopuHoXSdmtdStOpFrYaT1kie2YgFBcIe64ROzMYRjCrYOdYw==}
     engines: {node: ^20.19.0 || >=22.12.0}
@@ -1802,6 +1815,10 @@ packages:
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
+
+  media-captions@1.0.4:
+    resolution: {integrity: sha512-cyDNmuZvvO4H27rcBq2Eudxo9IZRDCOX/I7VEyqbxsEiD2Ei7UYUhG/Sc5fvMZjmathgz3fEK7iAKqvpY+Ux1w==}
+    engines: {node: '>=16'}
 
   minimatch@5.1.9:
     resolution: {integrity: sha512-7o1wEA2RyMP7Iu7GNba9vc0RWWGACJOCZBJX2GJWip0ikV+wcOsgVuY9uE8CPiyQhkGFSlhuSkZPavN7u1c2Fw==}
@@ -2201,6 +2218,9 @@ packages:
   w3c-xmlserializer@5.0.0:
     resolution: {integrity: sha512-o8qghlI8NZHU1lLPrpi2+Uq7abh4GGPpYANlalzWxyWteJOCsr/P+oPBA49TOLu5FTZO4d3F9MnWJfiMo4BkmA==}
     engines: {node: '>=18'}
+
+  wavesurfer.js@7.12.8:
+    resolution: {integrity: sha512-G3nxzcC4X+ZWrLtcIV17kCWHVq3ysJCS4dS0YkGKILrQ2esAb8cScw965zKNKYxUvpiZsPK93KLWgWTYdIBQiw==}
 
   webidl-conversions@7.0.0:
     resolution: {integrity: sha512-VwddBukDzu71offAQR975unBIGqfKZpM+8ZX6ySk8nYhVoo5CYaZyzt3YBvYtRtO+aoGlqxPg/B87NGVZ/fu6g==}
@@ -3606,6 +3626,13 @@ snapshots:
     dependencies:
       csstype: 3.2.3
 
+  '@vidstack/react@1.15.6(@types/react@19.2.17)(react@19.2.7)':
+    dependencies:
+      '@floating-ui/dom': 1.7.6
+      '@types/react': 19.2.17
+      media-captions: 1.0.4
+      react: 19.2.7
+
   '@vitejs/plugin-react@5.2.0(vite@7.3.6(@types/node@24.13.2)(jiti@2.7.0)(lightningcss@1.32.0))':
     dependencies:
       '@babel/core': 7.29.7
@@ -3959,6 +3986,8 @@ snapshots:
   magic-string@0.30.21:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  media-captions@1.0.4: {}
 
   minimatch@5.1.9:
     dependencies:
@@ -4370,6 +4399,8 @@ snapshots:
   w3c-xmlserializer@5.0.0:
     dependencies:
       xml-name-validator: 5.0.0
+
+  wavesurfer.js@7.12.8: {}
 
   webidl-conversions@7.0.0: {}
 
