@@ -6,7 +6,6 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -24,10 +23,8 @@ from contracts.events import (
 from contracts.patch import AddBgmOp, TimelinePatchRequest
 from contracts.tool_result import ToolArtifact, ToolError, ToolResult
 from indexing import RevalidationResult, compute_scope_snapshot, revalidate_pack
-from media.bgm_library import DefaultBgmSynthesisError, ensure_default_bgm_asset
 from storage import schema
 from storage.repositories._json import load_json
-from storage.workspace_paths import WorkspacePaths
 from timeline import (
     AnchorConflict,
     MaterializationError,
@@ -166,14 +163,14 @@ def apply_patch(
     if case_state.timeline_current_version is None:
         return _failed(tool_name, context, "timeline_missing", "current timeline required")
 
-    prepared_input = _ensure_default_bgm_patch(input_model, context)
-    if isinstance(prepared_input, ToolResult):
-        return prepared_input
+    invalid = _validate_bgm_asset(input_model, context)
+    if invalid is not None:
+        return invalid
 
     outcome = apply_timeline_patch(
         context.readonly_connection,
         case_state,
-        prepared_input,
+        input_model,
         created_at=_created_at(context),
     )
     if outcome.status == "conflict" and outcome.conflict is not None:
@@ -226,48 +223,26 @@ def apply_patch(
     )
 
 
-def _ensure_default_bgm_patch(
+def _validate_bgm_asset(
     input_model: TimelinePatchRequest,
     context: ToolExecutionContext,
-) -> TimelinePatchRequest | ToolResult:
+) -> ToolResult | None:
     op = input_model.op
-    if not isinstance(op, AddBgmOp) or not op.asset_id.startswith("default_bgm_"):
-        return input_model
-    case_state = context.case_state
-    connection = context.readonly_connection
-    if case_state is None or connection is None:
+    if not isinstance(op, AddBgmOp):
+        return None
+    assert context.readonly_connection is not None
+    row = context.readonly_connection.execute(
+        select(schema.assets.c.kind).where(schema.assets.c.asset_id == op.asset_id)
+    ).first()
+    if row is None or str(row._mapping["kind"]) != "audio":
         return _failed(
             "timeline.apply_patch",
             context,
-            "missing_case_or_connection",
-            "active case and repository access required",
+            "asset_not_found",
+            f"BGM 素材不存在或不是音频：{op.asset_id}",
+            details={"asset_id": op.asset_id},
         )
-    try:
-        paths = _workspace_paths(context)
-        asset_id = ensure_default_bgm_asset(
-            connection,
-            paths,
-            case_state.project_id,
-            op.asset_id,
-            _created_at(context),
-        )
-    except KeyError:
-        return _failed(
-            "timeline.apply_patch",
-            context,
-            "default_bgm_not_found",
-            f"默认 BGM 不存在：{op.asset_id}",
-            details={"bgm_id": op.asset_id},
-        )
-    except (DefaultBgmSynthesisError, ValueError) as exc:
-        return _failed(
-            "timeline.apply_patch",
-            context,
-            "default_bgm_prepare_failed",
-            str(exc),
-            details={"bgm_id": op.asset_id},
-        )
-    return input_model.model_copy(update={"op": op.model_copy(update={"asset_id": asset_id})})
+    return None
 
 
 def validate(
@@ -749,16 +724,6 @@ def _project_aspect_ratio(context: ToolExecutionContext) -> str:
         if isinstance(aspect_ratio, str):
             return aspect_ratio
     return "unknown"
-
-
-def _workspace_paths(context: ToolExecutionContext) -> WorkspacePaths:
-    raw_paths = context.metadata.get("workspace_paths")
-    if isinstance(raw_paths, WorkspacePaths):
-        return raw_paths.initialize()
-    raw_root = context.metadata.get("workspace_path")
-    if isinstance(raw_root, str | Path):
-        return WorkspacePaths.from_root(raw_root).initialize()
-    raise ValueError("timeline tool requires workspace_paths metadata")
 
 
 def _failed(
