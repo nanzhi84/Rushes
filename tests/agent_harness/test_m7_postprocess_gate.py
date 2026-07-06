@@ -91,10 +91,10 @@ def test_subtitle_gate_options_reduce_and_replay_or_discard() -> None:
     )
 
 
-def test_bgm_gate_uses_upload_default_skip_or_project_assets() -> None:
+def test_bgm_gate_uses_upload_skip_or_project_assets() -> None:
     gate = _gate()
     call = _timeline_patch_call(
-        {"kind": "add_bgm", "asset_id": "default_bgm_calm", "gain_db": -12.0, "duck": True}
+        {"kind": "add_bgm", "asset_id": "asset_bgm_1", "gain_db": -12.0, "duck": True}
     )
 
     no_asset = gate.adjudicate(
@@ -112,11 +112,8 @@ def test_bgm_gate_uses_upload_default_skip_or_project_assets() -> None:
     assert no_asset.decision is not None
     assert [option.option_id for option in no_asset.decision.options] == [
         "upload_bgm",
-        "default_bgm",
         "skip",
     ]
-    assert no_asset.decision.options[1].payload["asset_id"] == "default_bgm_calm"
-    assert "默认无版权 BGM" in no_asset.decision.options[1].label
     upload_answer = DecisionAnswer.model_validate(
         {"option_id": "upload_bgm", "answered_via": "button", "payload": {}}
     )
@@ -134,6 +131,11 @@ def test_bgm_gate_uses_upload_default_skip_or_project_assets() -> None:
         == "discarded"
     )
     assert with_asset.decision is not None
+    assert [option.option_id for option in with_asset.decision.options] == [
+        "asset_bgm_1",
+        "upload_bgm",
+        "skip",
+    ]
     option_by_id = {option.option_id: option for option in with_asset.decision.options}
     assert option_by_id["asset_bgm_1"].payload == {
         "enabled": True,
@@ -141,7 +143,8 @@ def test_bgm_gate_uses_upload_default_skip_or_project_assets() -> None:
         "gain_db": -12.0,
         "duck": True,
     }
-    assert {"default_bgm", "skip"} <= set(option_by_id)
+    assert option_by_id["asset_bgm_1"].label == "使用素材：配乐.m4a"
+    assert "default_bgm" not in option_by_id
 
 
 def test_export_gate_persists_pending_replay_and_mentions_unviewed_preview() -> None:
