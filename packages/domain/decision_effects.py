@@ -168,6 +168,10 @@ def _approve_rough_cut_effect(
     payload = _merged_answer_payload(decision, answer)
     timeline_version = payload.get("timeline_version")
     if not isinstance(timeline_version, int):
+        # 决策创建方（LLM 的 confirm_action）常不带版本号：确认语义即
+        # "当前版本"，兜底取 case 当前 timeline（M9 路径 1 实测 500）
+        timeline_version = case_state.timeline_current_version
+    if not isinstance(timeline_version, int):
         raise ValueError("approve_rough_cut requires integer timeline_version")
     return DecisionEffectResult(
         state_patch={

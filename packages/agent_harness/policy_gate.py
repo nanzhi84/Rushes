@@ -24,6 +24,7 @@ from contracts.events import DecisionCreated, DomainEventBase, PolicyRefusal
 from contracts.tool import PatchOpSpec, ToolSpec
 from domain.preconditions import (
     PreconditionContext,
+    evaluate_precondition,
     evaluate_preconditions,
 )
 from domain.subtitle_templates import list_subtitle_templates
@@ -163,7 +164,16 @@ class PolicyGate:
                 allowed_spec.name for allowed_spec in self.compute_allowed_tools(context)
             )
         if parsed_call.tool_name not in allowed_tool_names:
-            return self._deny(parsed_call, context, "tool is not in this turn's allowed_tools")
+            # 报告未满足的前置：哑 deny 会让 planner 反复重试同一工具（M9 实测）
+            unmet = [
+                name
+                for name in spec.requires_artifacts
+                if not evaluate_precondition(name, context.preconditions)
+            ]
+            reason = "tool is not in this turn's allowed_tools"
+            if unmet:
+                reason += f"；未满足前置：{', '.join(unmet)}。请先完成对应步骤，不要重复调用本工具"
+            return self._deny(parsed_call, context, reason)
 
         prohibited_key = _first_prohibited_argument_key(parsed_call.arguments)
         if prohibited_key is not None:

@@ -1202,7 +1202,14 @@ def _register_routes(app: FastAPI) -> None:
             case_id=decision.get("case_id"),
             payload={"answer": payload.answer.model_dump(mode="json")},
         )
-        result = apply((event,), engine=state.engine, base_version=base_version, actor="user")
+        try:
+            result = apply((event,), engine=state.engine, base_version=base_version, actor="user")
+        except ValueError as exc:
+            # 归约层校验失败是客户端可修复错误（答案缺字段等），400 而非 500
+            raise HTTPException(
+                status_code=400,
+                detail={"reason": "invalid_answer", "message": str(exc)},
+            ) from exc
         _ensure_applied(result)
         project_job_replays = _maybe_enqueue_url_import_job(state.engine, decision_id)
         replay_count = await recover_approved_pending_tool_calls(

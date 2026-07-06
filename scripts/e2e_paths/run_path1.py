@@ -128,6 +128,7 @@ def run_workflow(
         path=voiceover_video,
         kind="video",
     )
+    client.retry_material_annotation(project_id=project_id, asset_id=asset_id)
     client.create_case(
         project_id=project_id,
         case_id=case_id,

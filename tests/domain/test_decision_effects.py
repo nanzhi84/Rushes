@@ -317,12 +317,21 @@ def test_generic_effect_uses_free_text_option_id_and_default_scratch_key() -> No
 
 
 def test_invalid_decision_answers_raise_value_errors() -> None:
+    # 无 timeline_version 且 case 也无当前版本 → 仍报错；case 有当前版本时兜底
+    no_version = _case_state().model_copy(update={"timeline_current_version": None})
     with pytest.raises(ValueError, match="timeline_version"):
         reduce_decision_answer(
-            _case_state(),
+            no_version,
             _decision("approve_rough_cut"),
             _answer(),
         )
+    with_version = _case_state().model_copy(update={"timeline_current_version": 3})
+    fallback = reduce_decision_answer(
+        with_version,
+        _decision("approve_rough_cut"),
+        _answer(),
+    )
+    assert fallback.state_patch["rough_cut_approved_version"] == 3
     with pytest.raises(ValueError, match="removed_ranges"):
         reduce_decision_answer(
             _case_state(),

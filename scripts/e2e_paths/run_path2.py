@@ -150,6 +150,7 @@ def run_workflow(
             path=fixture_dir / filename,
             kind="video",
         )
+        client.retry_material_annotation(project_id=project_id, asset_id=asset_id)
         imported_asset_ids.append(asset_id)
     image_asset_id = unique_id("asset_product_image")
     client.import_local_material(
@@ -158,6 +159,7 @@ def run_workflow(
         path=fixture_dir / IMAGE_FILENAME,
         kind="image",
     )
+    client.retry_material_annotation(project_id=project_id, asset_id=image_asset_id)
     imported_asset_ids.append(image_asset_id)
 
     client.create_case(
