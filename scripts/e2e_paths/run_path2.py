@@ -208,14 +208,14 @@ def run_workflow(
     client.enqueue_message(
         project_id=project_id,
         case_id=case_id,
-        content="预览确认，字幕选一个模板，BGM 用默认库，然后导出 MP4。",
+        content="预览确认，字幕选一个模板，BGM 从项目已上传素材中选择、无则跳过，然后导出 MP4。",
         message_id=unique_id("msg"),
     )
     final_case = driver.wait_until(
-        "字幕、默认 BGM 并完成最终导出",
+        "字幕、BGM（从已上传素材选择或跳过）并完成最终导出",
         lambda state: _string_field(state, "export_current_id") is not None,
         timeout_s=llm_timeout + render_timeout + job_timeout,
-        idle_nudge="继续确认字幕模板、默认 BGM，然后导出最终 MP4。",
+        idle_nudge="继续确认字幕模板、BGM（从已上传素材选择或跳过），然后导出最终 MP4。",
     )
     driver.require_decisions_seen(["approve_content_plan", "subtitle", "bgm", "export"])
 
