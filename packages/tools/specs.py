@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from contracts.asset import AssetKind, StorageMode
 from contracts.decision import (
@@ -290,6 +290,41 @@ class AnnotationInspectInput(BaseModel):
 
     asset_id: str
     project_id: str | None = None
+
+
+class MediaViewFramesTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str | None = None
+    timeline_version: int | None = None
+    at_sec: list[float] = Field(min_length=1)
+
+    @field_validator("at_sec")
+    @classmethod
+    def _dedupe_sort_at_sec(cls, value: list[float]) -> list[float]:
+        if any(item < 0 for item in value):
+            raise ValueError("at_sec 不能为负数")
+        return sorted(set(value))
+
+    @model_validator(mode="after")
+    def _validate_target_mode(self) -> MediaViewFramesTarget:
+        if self.asset_id is not None and self.timeline_version is not None:
+            raise ValueError("target 只能使用 asset_id 或 timeline_version 之一")
+        return self
+
+
+class MediaViewFramesInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target: MediaViewFramesTarget
+    question: str | None = None
+    max_frames: int = Field(default=8, ge=1, le=8)
+
+    @model_validator(mode="after")
+    def _validate_frame_count(self) -> MediaViewFramesInput:
+        if len(self.target.at_sec) > self.max_frames:
+            raise ValueError("at_sec 数量超过 max_frames")
+        return self
 
 
 class AudioInspectSourcesInput(BaseModel):
@@ -979,6 +1014,22 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             description="Inspect usable spans, failure details, and quality events for an asset.",
         ),
         ToolSpec(
+            name="media.view_frames",
+            namespace="media",
+            version="1",
+            input_model=MediaViewFramesInput,
+            result_model=None,
+            handler_ref="tools.media_tools.view_frames",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            requires_confirmation=False,
+            side_effects=[],
+            emits_events=[],
+            description="Extract requested video frames and ask VLM for visual confirmation.",
+        ),
+        ToolSpec(
             name="retrieval.search_candidates",
             namespace="retrieval",
             version="1",
@@ -1268,6 +1319,7 @@ def build_default_tool_registry() -> ToolRegistry:
         show_progress,
         show_timeline,
     )
+    from .media_tools import view_frames as media_view_frames
     from .project import (
         close_case,
         copy,
@@ -1325,6 +1377,7 @@ def build_default_tool_registry() -> ToolRegistry:
         "annotation.status": annotation_status,
         "annotation.retry": annotation_retry,
         "annotation.inspect": annotation_inspect,
+        "media.view_frames": media_view_frames,
         "retrieval.search_candidates": retrieval_search_candidates,
         "timeline.plan_from_candidates": timeline_plan_from_candidates,
         "timeline.apply_patch": timeline_apply_patch,
