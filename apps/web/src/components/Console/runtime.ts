@@ -8,6 +8,8 @@ export type ConsoleMessage = {
   role: ConsoleMessageRole;
   content: string;
   createdAt: string;
+  // 持久化消息的 kind（narration/reply/user...），用于叙述弱化样式；乐观消息可省略。
+  kind?: string | null;
 };
 
 export type ConsoleTextPart = {
@@ -27,6 +29,7 @@ export type ConsoleAssistantMessage = {
   createdAt: string;
   metadata: {
     consoleRole: ConsoleMessageRole;
+    messageKind?: string | null;
   };
 };
 
@@ -90,7 +93,7 @@ function toAssistantUiMessage(message: ConsoleMessage): ConsoleAssistantMessage 
     id: message.id,
     role: assistantRole(message.role),
     createdAt: message.createdAt,
-    metadata: { consoleRole: message.role },
+    metadata: { consoleRole: message.role, messageKind: message.kind ?? null },
     content: [{ type: "text", text: message.content }]
   };
 }
