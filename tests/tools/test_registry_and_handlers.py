@@ -3,13 +3,13 @@ from typing import Literal
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from contracts.case import CaseState
 from contracts.decision import Decision, DecisionAnswer
 from contracts.tool import ToolSpec
+from contracts.tool_result import ToolResult
 from tools import PATCH_OP_REGISTRY, ToolExecutionContext, build_default_tool_registry, tool_specs
-from tools.builtin import decision_answer, respond
+from tools.builtin import decision_answer
 from tools.registry import ToolRegistry
-from tools.specs import DecisionAnswerInput, RespondInput
+from tools.specs import DecisionAnswerInput
 
 
 class EmptyInput(BaseModel):
@@ -46,18 +46,20 @@ def _spec(
     )
 
 
-def _handler(input_model: EmptyInput, context: ToolExecutionContext):
+def _handler(input_model: EmptyInput, context: ToolExecutionContext) -> ToolResult:
     del input_model
-    return respond(RespondInput(message="ok"), context)
+    return ToolResult(
+        tool_call_id=context.tool_call_id,
+        tool_name="x.echo",
+        status="succeeded",
+        observation="ok",
+    )
 
 
 def test_default_tool_and_patch_registries_match_m0_surface() -> None:
     registry = build_default_tool_registry()
 
     expected_tools = {
-        "respond",
-        "refuse",
-        "finish_turn",
         "decision.answer",
         "interaction.ask_user",
         "interaction.confirm_action",
@@ -280,27 +282,6 @@ def test_registry_validates_events_preconditions_and_confirmation_mapping() -> N
             ),
             _handler,
         )
-
-
-def test_builtin_handlers_return_data_and_events_without_writing_state() -> None:
-    context = ToolExecutionContext(
-        tool_call_id="tc_1",
-        turn_id="turn_1",
-        case_state=CaseState.model_validate(
-            {
-                "case_id": "case_1",
-                "project_id": "project_1",
-                "name": "Case",
-                "brief": {"goal": "test"},
-            }
-        ),
-    )
-
-    result = respond(RespondInput(message="hello"), context)
-
-    assert result.status == "succeeded"
-    assert result.data["message_row"]["role"] == "assistant"
-    assert result.events[0]["event"] == "TurnEnded"
 
 
 def test_decision_answer_builds_decision_answered_event() -> None:

@@ -470,8 +470,6 @@ def _pending_blocking_decision(context: PolicyContext) -> Decision | None:
 def _is_pending_decision_whitelisted(spec: ToolSpec) -> bool:
     if spec.name == "decision.answer":
         return True
-    if spec.name == "respond" or spec.name.endswith(".respond"):
-        return True
     if not spec.side_effects:
         return True
     return _is_cancel_interaction_tool(spec)

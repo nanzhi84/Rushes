@@ -34,27 +34,6 @@ from contracts.tool import PatchOpSpec, ToolSpec
 from .registry import PatchOpRegistry, ToolHandler, ToolRegistry
 
 
-class RespondInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    message: str
-    message_id: str | None = None
-
-
-class RefuseInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    reason: str
-    message: str | None = None
-    message_id: str | None = None
-
-
-class FinishTurnInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    reason: str | None = None
-
-
 class DecisionAnswerInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -458,51 +437,6 @@ class MemorySearchRelevantInput(BaseModel):
 
 def tool_specs() -> tuple[ToolSpec, ...]:
     return (
-        ToolSpec(
-            name="respond",
-            namespace="builtin",
-            version="1",
-            input_model=RespondInput,
-            result_model=None,
-            handler_ref="tools.builtin.respond",
-            allowed_scopes=["case_agent_console"],
-            requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
-            side_effects=[],
-            emits_events=["TurnEnded"],
-            description="Append an assistant message and end the current turn.",
-        ),
-        ToolSpec(
-            name="refuse",
-            namespace="builtin",
-            version="1",
-            input_model=RefuseInput,
-            result_model=None,
-            handler_ref="tools.builtin.refuse",
-            allowed_scopes=["case_agent_console"],
-            requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
-            side_effects=[],
-            emits_events=["TurnEnded"],
-            description="Return an out-of-scope refusal and end the current turn.",
-        ),
-        ToolSpec(
-            name="finish_turn",
-            namespace="builtin",
-            version="1",
-            input_model=FinishTurnInput,
-            result_model=None,
-            handler_ref="tools.builtin.finish_turn",
-            allowed_scopes=["case_agent_console"],
-            requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
-            side_effects=[],
-            emits_events=["TurnEnded"],
-            description="End the current turn without adding an assistant message.",
-        ),
         ToolSpec(
             name="decision.answer",
             namespace="decision",
@@ -1448,7 +1382,7 @@ def build_default_tool_registry() -> ToolRegistry:
     from .audio import generate_tts as audio_generate_tts
     from .audio import inspect_sources as audio_inspect_sources
     from .audio import rough_cut_speech as audio_rough_cut_speech
-    from .builtin import decision_answer, finish_turn, refuse, respond
+    from .builtin import decision_answer
     from .content import create_plan as content_create_plan
     from .content import revise_plan as content_revise_plan
     from .interaction import (
@@ -1493,9 +1427,6 @@ def build_default_tool_registry() -> ToolRegistry:
     from .timeline_tools import validate as timeline_validate
 
     handlers: dict[str, ToolHandler] = {
-        "respond": respond,
-        "refuse": refuse,
-        "finish_turn": finish_turn,
         "decision.answer": decision_answer,
         "interaction.ask_user": ask_user,
         "interaction.confirm_action": confirm_action,

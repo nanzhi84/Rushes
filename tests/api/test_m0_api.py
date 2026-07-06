@@ -226,9 +226,7 @@ def test_workspace_sse_accepts_query_token_and_replays_workspace_events(tmp_path
 
 
 async def test_message_endpoint_records_and_runs_scripted_turn(tmp_path: Path) -> None:
-    planner = ScriptedPlanner(
-        [{"tool_name": "respond", "arguments": {"message": "收到，已进入队列。"}}]
-    )
+    planner = ScriptedPlanner([{"content": "收到，已进入队列。"}])
     app = _app(tmp_path, planner=planner)
 
     async with httpx.AsyncClient(

@@ -11,6 +11,7 @@ from .context_builder import (
 )
 from .loop import (
     LLMPlanner,
+    PlannerStep,
     RunTurnResult,
     ScriptedPlanner,
     recover_approved_pending_tool_calls,
@@ -37,6 +38,7 @@ __all__ = [
     "ContextBundle",
     "ContextMessage",
     "LLMPlanner",
+    "PlannerStep",
     "PolicyContext",
     "PolicyGate",
     "RunTurnResult",

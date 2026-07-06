@@ -143,8 +143,12 @@ async def test_three_illegal_outputs_force_respond(tmp_path: Path) -> None:
     )
 
     assert result.forced_reason == "illegal_output_limit"
-    assert result.tool_results[-1].tool_name == "respond"
-    assert any("连续 3 次" in str(message["content"]) for message in _messages(engine))
+    assert any(
+        message["role"] == "assistant"
+        and message["kind"] == "reply"
+        and "连续 3 次" in str(message["content"])
+        for message in _messages(engine)
+    )
 
 
 async def test_five_nonblocking_tools_force_progress_response(tmp_path: Path) -> None:
@@ -165,9 +169,11 @@ async def test_five_nonblocking_tools_force_progress_response(tmp_path: Path) ->
     )
 
     assert result.forced_reason == "nonblocking_tool_limit"
-    assert result.tool_results[-1].tool_name == "respond"
     assert any(
-        "连续完成 5 个非阻塞步骤" in str(message["content"]) for message in _messages(engine)
+        message["role"] == "assistant"
+        and message["kind"] == "reply"
+        and "连续完成 5 个非阻塞步骤" in str(message["content"])
+        for message in _messages(engine)
     )
 
 
@@ -190,8 +196,12 @@ async def test_twelve_attempt_hard_limit_forces_diagnostic(tmp_path: Path) -> No
     )
 
     assert result.forced_reason == "hard_attempt_limit"
-    assert result.tool_results[-1].tool_name == "respond"
-    assert any("12 次上限" in str(message["content"]) for message in _messages(engine))
+    assert any(
+        message["role"] == "assistant"
+        and message["kind"] == "reply"
+        and "12 次上限" in str(message["content"])
+        for message in _messages(engine)
+    )
 
 
 async def test_running_result_ends_turn_until_observation(tmp_path: Path) -> None:
@@ -262,7 +272,11 @@ async def test_stop_token_ends_after_current_tool(tmp_path: Path) -> None:
     )
 
     assert result.outcome == "stopped"
-    assert result.tool_results[-1].tool_name == "finish_turn"
+    assert result.forced_reason == "stopped_by_user"
+    assert any(
+        message["role"] == "assistant" and message["kind"] == "reply"
+        for message in _messages(engine)
+    )
 
 
 async def test_decision_answer_reduces_pending_and_restores_allowed_tools(
@@ -355,7 +369,6 @@ async def test_ask_user_creates_blocking_decision_and_narrows_tools(
     assert result.outcome == "requires_user"
     assert decision.blocking
     assert "decision.answer" in names
-    assert "respond" in names
     assert "interaction.confirm_action" not in names
 
 
@@ -411,7 +424,7 @@ async def test_natural_language_answer_reduces_decision_and_keeps_side_intents(
             item_id="msg_natural",
         ),
         engine=engine,
-        planner=ScriptedPlanner([{"tool_name": "respond", "arguments": {"message": "收到"}}]),
+        planner=ScriptedPlanner([{"content": "收到"}]),
         decision_answer_resolver=ScriptedDecisionAnswerResolver(
             [{"option_id": "skip", "side_intents": ["加轻快 BGM"]}]
         ),
@@ -441,16 +454,20 @@ async def test_natural_language_resolver_unanswered_leaves_decision_for_planner(
     result = await run_turn(
         TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "先等等"}),
         engine=engine,
-        planner=ScriptedPlanner(
-            [{"tool_name": "respond", "arguments": {"message": "还在等字幕确认。"}}]
-        ),
+        planner=ScriptedPlanner([{"content": "还在等字幕确认。"}]),
         decision_answer_resolver=ScriptedDecisionAnswerResolver([{"unanswered": True}]),
         turn_id="turn_unanswered",
     )
 
     case_state = _load_case(engine)
     assert result.outcome == "finished"
-    assert [call.tool_name for call in result.tool_calls] == ["respond"]
+    assert result.tool_calls == ()
+    assert any(
+        message["role"] == "assistant"
+        and message["kind"] == "reply"
+        and message["content"] == "还在等字幕确认。"
+        for message in _messages(engine)
+    )
     assert case_state.pending_decision_id == "decision_subtitle"
     assert "DecisionAnswered" not in _event_types(engine)
 
@@ -464,9 +481,7 @@ async def test_natural_language_resolver_error_records_degradation_and_falls_bac
     result = await run_turn(
         TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "不要字幕"}),
         engine=engine,
-        planner=ScriptedPlanner(
-            [{"tool_name": "respond", "arguments": {"message": "请用按钮确认字幕。"}}]
-        ),
+        planner=ScriptedPlanner([{"content": "请用按钮确认字幕。"}]),
         decision_answer_resolver=ScriptedDecisionAnswerResolver([RuntimeError("llm down")]),
         turn_id="turn_resolver_error",
     )
@@ -564,7 +579,18 @@ async def test_agent_trace_records_five_kinds_for_turn(tmp_path: Path) -> None:
     await run_turn(
         TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "hi"}),
         engine=engine,
-        planner=ScriptedPlanner([{"tool_name": "respond", "arguments": {"message": "hello"}}]),
+        planner=ScriptedPlanner(
+            [
+                {
+                    "content": "先展示进度。",
+                    "tool_call": {
+                        "tool_name": "interaction.show_progress",
+                        "arguments": {"title": "step"},
+                    },
+                },
+                {"content": "hello"},
+            ]
+        ),
         turn_id="turn_trace",
     )
 
@@ -575,10 +601,15 @@ async def test_agent_trace_records_five_kinds_for_turn(tmp_path: Path) -> None:
             .order_by(schema.agent_traces.c.seq)
         ).all()
     assert [row._mapping["kind"] for row in rows] == [
+        # 工具步：完整五类
         "context",
         "action",
         "gate",
         "tool_result",
+        "events",
+        # 纯 content 步：无 gate/tool_result，action 后直接 TurnEnded events
+        "context",
+        "action",
         "events",
     ]
 

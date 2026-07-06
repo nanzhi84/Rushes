@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +21,7 @@ from contracts.events import (
     DomainEventBase,
     JobEnqueued,
     MemoryCandidateDiscarded,
+    TurnEnded,
 )
 from contracts.project import ProjectState
 from contracts.timeline import TimelineState
@@ -54,39 +55,89 @@ DEFAULT_MAX_NONBLOCKING_TOOLS = 5
 DEFAULT_MAX_TOOL_ATTEMPTS = 12
 
 
+@dataclass(frozen=True, slots=True)
+class PlannerStep:
+    """One planner step: prose content and/or a native tool call.
+
+    - content only  -> assistant reply, turn ends
+    - content + tool_call -> narration persisted, tool executes, turn continues
+    - tool_call only -> silent tool step
+    - neither -> illegal output (counted toward illegal_output_limit)
+    """
+
+    content: str | None = None
+    tool_call: ToolCall | None = None
+
+    def model_dump(self, mode: str = "json") -> dict[str, Any]:
+        del mode
+        return {
+            "content": self.content,
+            "tool_call": (
+                None if self.tool_call is None else self.tool_call.model_dump(mode="json")
+            ),
+        }
+
+
 class LLMPlanner(Protocol):
     async def plan(
         self,
         context: ContextBundle,
         tools: Sequence[ToolSpec],
-    ) -> ToolCall:
-        """Return exactly one native tool call."""
+        *,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> PlannerStep:
+        """Return one planner step (prose content and/or a native tool call)."""
 
 
 class ScriptedPlanner:
     """Deterministic planner used by loop tests."""
 
-    def __init__(self, calls: Sequence[ToolCall | Mapping[str, Any]]) -> None:
-        self._calls = [ToolCall.from_input(call) for call in calls]
+    def __init__(self, steps: Sequence[PlannerStep | ToolCall | Mapping[str, Any]]) -> None:
+        self._steps = [_scripted_step(step) for step in steps]
         self._index = 0
 
-    async def plan(self, context: ContextBundle, tools: Sequence[ToolSpec]) -> ToolCall:
+    async def plan(
+        self,
+        context: ContextBundle,
+        tools: Sequence[ToolSpec],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> PlannerStep:
         del context, tools
-        if self._index >= len(self._calls):
-            return ToolCall(
-                tool_name="finish_turn",
-                arguments={"reason": "script exhausted"},
-                tool_call_id=f"scripted_{self._index}",
-            )
-        call = self._calls[self._index]
+        if self._index >= len(self._steps):
+            return PlannerStep(content="（脚本耗尽，结束本回合）")
+        step = self._steps[self._index]
         self._index += 1
-        if call.tool_call_id is not None:
-            return call
-        return call.model_copy(update={"tool_call_id": f"scripted_{self._index}"})
+        if on_delta is not None and step.content:
+            on_delta(step.content)
+        if step.tool_call is not None and step.tool_call.tool_call_id is None:
+            step = PlannerStep(
+                content=step.content,
+                tool_call=step.tool_call.model_copy(
+                    update={"tool_call_id": f"scripted_{self._index}"}
+                ),
+            )
+        return step
 
     @property
     def calls_remaining(self) -> int:
-        return max(0, len(self._calls) - self._index)
+        return max(0, len(self._steps) - self._index)
+
+
+def _scripted_step(value: PlannerStep | ToolCall | Mapping[str, Any]) -> PlannerStep:
+    if isinstance(value, PlannerStep):
+        return value
+    if isinstance(value, ToolCall):
+        return PlannerStep(tool_call=value)
+    data = dict(value)
+    if "content" in data or "tool_call" in data:
+        content = data.get("content")
+        raw_tool_call = data.get("tool_call")
+        return PlannerStep(
+            content=content if isinstance(content, str) else None,
+            tool_call=None if raw_tool_call is None else ToolCall.from_input(raw_tool_call),
+        )
+    return PlannerStep(tool_call=ToolCall.from_input(data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +171,7 @@ class _RunAccumulator:
     tool_results: list[ToolResult] = field(default_factory=list)
     reducer_results: list[ReducerApplyResult] = field(default_factory=list)
     replays_enqueued: list[str] = field(default_factory=list)
+    message_seq: int = 0
 
 
 async def run_turn(
@@ -205,8 +257,7 @@ async def run_turn(
     while True:
         if attempts >= max_tool_attempts:
             forced_reason = "hard_attempt_limit"
-            result = _force_respond(
-                router,
+            _force_reply(
                 engine=engine,
                 state=loaded,
                 turn_id=active_turn_id,
@@ -217,7 +268,6 @@ async def run_turn(
                 accumulator=accumulator,
                 tracer=tracer,
             )
-            accumulator.tool_results.append(result)
             outcome = "forced_end"
             break
 
@@ -235,11 +285,72 @@ async def run_turn(
                 },
             },
         )
-        tool_call = replay_call or await planner.plan(context_bundle, context_bundle.allowed_tools)
-        replay_call = None
+        if replay_call is not None:
+            step = PlannerStep(tool_call=replay_call)
+            replay_call = None
+        else:
+            step = await planner.plan(context_bundle, context_bundle.allowed_tools)
         attempts += 1
+        tracer.record("action", step.model_dump())
+
+        # narration 在工具执行前立刻落库：即使后续工具被拒/失败，叙述也已可见
+        if step.content:
+            message_kind = "narration" if step.tool_call is not None else "reply"
+            _persist_assistant_message(
+                engine,
+                case_id=loaded.case_state.case_id,
+                message_id=_next_message_id(active_turn_id, accumulator),
+                content=step.content,
+                kind=message_kind,
+            )
+            if message_kind == "narration":
+                turn_observations.append(f"助手叙述: {step.content}")
+
+        if step.tool_call is None:
+            if not step.content:
+                # 双空：既无 content 也无 tool_call，计入非法输出
+                illegal_outputs += 1
+                turn_observations.append(
+                    "上一步输出为空（既无内容也无工具调用），请直接给出回复或发起一个工具调用。"
+                )
+                if illegal_outputs >= max_illegal_outputs:
+                    forced_reason = "illegal_output_limit"
+                    _force_reply(
+                        engine=engine,
+                        state=loaded,
+                        turn_id=active_turn_id,
+                        message=(
+                            f"连续 {max_illegal_outputs} 次工具调用没有通过安全或 "
+                            "schema 校验，已停止本回合。卡点：planner 返回空输出"
+                            "（无 content 也无 tool_call）"
+                        ),
+                        reason=forced_reason,
+                        accumulator=accumulator,
+                        tracer=tracer,
+                    )
+                    outcome = "forced_end"
+                    break
+                continue
+            # 纯 content：即回复，回合结束
+            end_event = TurnEnded(
+                turn_id=active_turn_id,
+                case_id=loaded.case_state.case_id,
+                project_id=loaded.case_state.project_id,
+                payload={"reason": "reply"},
+            )
+            reducer_result = _apply_events(
+                (end_event,),
+                engine=engine,
+                base_version=loaded.case_state.state_version,
+                actor="agent",
+            )
+            accumulator.reducer_results.append(reducer_result)
+            tracer.record("events", _events_payload((end_event,), reducer_result))
+            outcome = "finished"
+            break
+
+        tool_call = step.tool_call
         accumulator.tool_calls.append(tool_call)
-        tracer.record("action", {"tool_call": tool_call.model_dump(mode="json")})
 
         verdict = policy_gate.adjudicate(
             tool_call,
@@ -268,8 +379,7 @@ async def run_turn(
             tracer.record("events", _events_payload(verdict.events, reducer_result))
             if illegal_outputs >= max_illegal_outputs:
                 forced_reason = "illegal_output_limit"
-                result = _force_respond(
-                    router,
+                _force_reply(
                     engine=engine,
                     state=loaded,
                     turn_id=active_turn_id,
@@ -281,7 +391,6 @@ async def run_turn(
                     accumulator=accumulator,
                     tracer=tracer,
                 )
-                accumulator.tool_results.append(result)
                 outcome = "forced_end"
                 break
             continue
@@ -325,8 +434,7 @@ async def run_turn(
             if reducer_result.status != "applied":
                 forced_reason = f"reducer_{reducer_result.status}"
                 diagnostic = _reducer_diagnostic(reducer_result)
-                forced = _force_respond(
-                    router,
+                _force_reply(
                     engine=engine,
                     state=loaded,
                     turn_id=active_turn_id,
@@ -335,7 +443,6 @@ async def run_turn(
                     accumulator=accumulator,
                     tracer=tracer,
                 )
-                accumulator.tool_results.append(forced)
                 outcome = "forced_end"
                 break
             outcome = "running"
@@ -364,8 +471,7 @@ async def run_turn(
         if reducer_result.status != "applied":
             forced_reason = f"reducer_{reducer_result.status}"
             diagnostic = _reducer_diagnostic(reducer_result)
-            forced = _force_respond(
-                router,
+            _force_reply(
                 engine=engine,
                 state=loaded,
                 turn_id=active_turn_id,
@@ -374,7 +480,6 @@ async def run_turn(
                 accumulator=accumulator,
                 tracer=tracer,
             )
-            accumulator.tool_results.append(forced)
             outcome = "forced_end"
             break
         enqueued = await _handle_followups(
@@ -394,28 +499,23 @@ async def run_turn(
         if result.status == "requires_user":
             outcome = "requires_user"
             break
-        if result.tool_name in {"respond", "refuse", "finish_turn"}:
-            outcome = "finished"
-            break
         if token.cancel_requested:
             forced_reason = "stopped_by_user"
-            forced = _force_finish(
-                router,
+            _force_reply(
                 engine=engine,
                 state=_load_state(engine, item.case_id),
                 turn_id=active_turn_id,
+                message="已按停止请求结束本回合。",
                 reason=forced_reason,
                 accumulator=accumulator,
                 tracer=tracer,
             )
-            accumulator.tool_results.append(forced)
             outcome = "stopped"
             break
         nonblocking_tools += 1
         if nonblocking_tools >= max_nonblocking_tools:
             forced_reason = "nonblocking_tool_limit"
-            forced = _force_respond(
-                router,
+            _force_reply(
                 engine=engine,
                 state=_load_state(engine, item.case_id),
                 turn_id=active_turn_id,
@@ -427,7 +527,6 @@ async def run_turn(
                 accumulator=accumulator,
                 tracer=tracer,
             )
-            accumulator.tool_results.append(forced)
             outcome = "forced_end"
             break
 
@@ -632,14 +731,18 @@ async def _maybe_answer_pending_decision_from_user_message(
         )
         return None
 
-    tool_call = ToolCall(
-        tool_name="decision.answer",
-        arguments={
-            "decision_id": loaded.pending_decision.decision_id,
-            "answer": resolution.answer.model_dump(mode="json"),
-        },
-        tool_call_id=f"natural_answer_{turn_id}",
+    step = PlannerStep(
+        tool_call=ToolCall(
+            tool_name="decision.answer",
+            arguments={
+                "decision_id": loaded.pending_decision.decision_id,
+                "answer": resolution.answer.model_dump(mode="json"),
+            },
+            tool_call_id=f"natural_answer_{turn_id}",
+        )
     )
+    tool_call = step.tool_call
+    assert tool_call is not None
     accumulator.tool_calls.append(tool_call)
     context_bundle = _build_context(policy_gate, loaded)
     tracer.record(
@@ -655,7 +758,7 @@ async def _maybe_answer_pending_decision_from_user_message(
             "decision_answering": "natural_language",
         },
     )
-    tracer.record("action", {"tool_call": tool_call.model_dump(mode="json")})
+    tracer.record("action", step.model_dump())
     verdict = policy_gate.adjudicate(
         tool_call,
         PolicyContext(
@@ -678,8 +781,7 @@ async def _maybe_answer_pending_decision_from_user_message(
         )
         accumulator.reducer_results.append(reducer_result)
         tracer.record("events", _events_payload(verdict.events, reducer_result))
-        forced = _force_respond(
-            router,
+        _force_reply(
             engine=engine,
             state=loaded,
             turn_id=turn_id,
@@ -688,7 +790,6 @@ async def _maybe_answer_pending_decision_from_user_message(
             accumulator=accumulator,
             tracer=tracer,
         )
-        accumulator.tool_results.append(forced)
         return "natural_language_decision_answer_denied"
 
     result = _execute_tool(
@@ -709,8 +810,7 @@ async def _maybe_answer_pending_decision_from_user_message(
     accumulator.reducer_results.append(reducer_result)
     tracer.record("events", _events_payload(result.events, reducer_result))
     if reducer_result.status != "applied":
-        forced = _force_respond(
-            router,
+        _force_reply(
             engine=engine,
             state=loaded,
             turn_id=turn_id,
@@ -721,7 +821,6 @@ async def _maybe_answer_pending_decision_from_user_message(
             accumulator=accumulator,
             tracer=tracer,
         )
-        accumulator.tool_results.append(forced)
         return f"reducer_{reducer_result.status}"
     enqueued = await _handle_followups(
         reducer_result,
@@ -971,6 +1070,7 @@ async def _record_incoming_item(
                     "message_id": message_id,
                     "case_id": item.case_id,
                     "role": "user",
+                    "kind": "user",
                     "content": content,
                     "created_at": item.enqueued_at,
                 }
@@ -1404,8 +1504,7 @@ def _case_exists_for_replay(
     return connection.execute(statement).first() is not None
 
 
-def _force_respond(
-    router: ToolRouter,
+def _force_reply(
     *,
     engine: Engine,
     state: _LoadedState,
@@ -1414,58 +1513,58 @@ def _force_respond(
     reason: str,
     accumulator: _RunAccumulator,
     tracer: TraceRecorder | NullTraceRecorder,
-) -> ToolResult:
-    call = ToolCall(
-        tool_name="respond",
-        arguments={"message": message},
-        tool_call_id=f"{turn_id}_{reason}",
+) -> None:
+    """Harness 兜底收尾：直接写 assistant reply 行 + TurnEnded，不经 router。"""
+
+    step = PlannerStep(content=message)
+    tracer.record("action", {**step.model_dump(), "forced": True, "reason": reason})
+    _persist_assistant_message(
+        engine,
+        case_id=state.case_state.case_id,
+        message_id=_next_message_id(turn_id, accumulator),
+        content=message,
+        kind="reply",
     )
-    accumulator.tool_calls.append(call)
-    tracer.record("action", {"tool_call": call.model_dump(mode="json"), "forced": True})
-    tracer.record("gate", {"status": "allow", "reason": reason, "forced": True})
-    result = _execute_tool(router, call, engine=engine, state=state, turn_id=turn_id)
-    tracer.record("tool_result", _tool_result_payload(result))
-    _persist_tool_result_data(result, engine=engine)
+    end_event = TurnEnded(
+        turn_id=turn_id,
+        case_id=state.case_state.case_id,
+        project_id=state.case_state.project_id,
+        payload={"reason": reason},
+    )
     reducer_result = _apply_events(
-        result.events,
+        (end_event,),
         engine=engine,
         base_version=state.case_state.state_version,
         actor="agent",
     )
     accumulator.reducer_results.append(reducer_result)
-    tracer.record("events", _events_payload(result.events, reducer_result))
-    return result
+    tracer.record("events", _events_payload((end_event,), reducer_result))
 
 
-def _force_finish(
-    router: ToolRouter,
-    *,
+def _next_message_id(turn_id: str, accumulator: _RunAccumulator) -> str:
+    accumulator.message_seq += 1
+    return f"msg_{turn_id.replace(':', '_')}_{accumulator.message_seq}"
+
+
+def _persist_assistant_message(
     engine: Engine,
-    state: _LoadedState,
-    turn_id: str,
-    reason: str,
-    accumulator: _RunAccumulator,
-    tracer: TraceRecorder | NullTraceRecorder,
-) -> ToolResult:
-    call = ToolCall(
-        tool_name="finish_turn",
-        arguments={"reason": reason},
-        tool_call_id=f"{turn_id}_{reason}",
-    )
-    accumulator.tool_calls.append(call)
-    tracer.record("action", {"tool_call": call.model_dump(mode="json"), "forced": True})
-    tracer.record("gate", {"status": "allow", "reason": reason, "forced": True})
-    result = _execute_tool(router, call, engine=engine, state=state, turn_id=turn_id)
-    tracer.record("tool_result", _tool_result_payload(result))
-    reducer_result = _apply_events(
-        result.events,
-        engine=engine,
-        base_version=state.case_state.state_version,
-        actor="agent",
-    )
-    accumulator.reducer_results.append(reducer_result)
-    tracer.record("events", _events_payload(result.events, reducer_result))
-    return result
+    *,
+    case_id: str,
+    message_id: str,
+    content: str,
+    kind: str,
+) -> None:
+    with begin_immediate(engine) as connection:
+        MessagesRepository(connection).insert(
+            {
+                "message_id": message_id,
+                "case_id": case_id,
+                "role": "assistant",
+                "kind": kind,
+                "content": content,
+                "created_at": _now_iso(),
+            }
+        )
 
 
 def _synthetic_tool_result(
