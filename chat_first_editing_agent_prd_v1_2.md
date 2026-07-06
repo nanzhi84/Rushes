@@ -150,7 +150,7 @@ flowchart TB
   subgraph Harness["Agent Harness"]
     TQ["Case Turn Queue<br/>单 Case 串行"]
     CB["Context Builder<br/>CaseState 切片 + allowed_tools"]
-    LLM["LLM Planner<br/>原生 tool calling · tool_choice 单选"]
+    LLM["LLM Planner<br/>原生 tool calling · content 和/或 tool_call"]
     PG["PolicyGate<br/>事后硬校验"]
     TR["ToolRouter → Tool Handlers"]
     RED["Reducer<br/>唯一写路径"]
@@ -792,7 +792,7 @@ flowchart LR
 
 | 场景 | 规则 |
 |---|---|
-| LLM 输出非法（deny / schema 失败） | 原因回注重试，同回合 ≤ 3 次；超限强制 respond 解释卡点并结束回合 |
+| LLM 输出非法（deny / schema 失败） | 原因回注重试，同回合 ≤ 3 次；超限强制写 reply 解释卡点 + TurnEnded 结束回合 |
 | Provider 调用失败 | adapter 内指数退避重试（默认 2 次）；仍失败 → ToolResult=failed，Agent 必须解释并给可执行下一步 |
 | Job 失败 | JobFailed 事件带结构化错误（error_code、stderr 摘要、可重试标记）；Agent 不得静默重试 > 1 次 |
 | 循环保险丝 | 单回合工具调用（含重试）≤ 12 次，触发强制结束 + 诊断 |
@@ -821,7 +821,7 @@ sequenceDiagram
   Q->>H: turn 2（消息B）— Context 已含 running_jobs 状态
   H-->>Q: turn 2 结束（记录字幕偏好到 brief）
   Q->>H: turn 3（observation）— 预览就绪
-  H-->>U: respond + show_preview
+  H-->>U: content 回复（reply）+ show_preview
 ```
 
 - 入队项：用户消息、job observation、UI 操作 observation，先入先出。
@@ -1621,16 +1621,16 @@ flowchart LR
 
 ## 12. PolicyGate 规则清单（代码硬规则）
 
-1. 用户意图不属于剪辑/素材管理/项目管理/导出/记忆沉淀 → `refuse`。
+1. 用户意图不属于剪辑/素材管理/项目管理/导出/记忆沉淀 → 散文拒绝（仅输出 content 说明越界，不带工具调用，落 reply 并结束回合）。
 2. 无 active_project 的剪辑请求 → 先创建/选择 Project；无 active_case → 先创建 Case。
 3. 必须人工确认（统一经 §4.4 ask/PendingToolCall 机制，不作为暴露条件，**没有"直接拒绝"路径**）：Project 删除、Case 移动（`project.move_case`）、URL 导入、最终导出、字幕/BGM 新增 op（generate_subtitles/add_bgm，postprocess_plan 缺失时 ask 并暂存 patch）。**Case 删除/重命名/复制仅 UI/REST 确认**，不经 Agent。长期记忆的 gate 是 memory_scope decision（§4.4 例外条款）。确认 Decision 按 scope 挂在正确对象上，Project 级确认不得写入 CaseState。
 4. 标注失败或 usable=false 素材不得进入检索与 timeline。
 5. `render.final_mp4` 只接受 validator 通过的 timeline。
 6. LLM 不得输出帧值、素材 source 定位、文件路径、ffmpeg 参数——LLM 可见 schema 中不存在这些字段，PolicyGate 对夹带做二次校验。用户时间引用（秒）仅允许出现在带 reference 锚的 TimelinePatchRequest 中（§7.8）。
 7. case 级 blocking pending decision 存在时，白名单（§4.4）之外一律 deny；project/workspace 级 pending decision 不阻塞 Case loop，只阻塞自身 pending_tool_call。
-8. 工具 failed 后，Agent 下一动作必须是解释错误（respond/show_error），同一工具静默重试 ≤ 1 次。
+8. 工具 failed 后，Agent 下一动作必须是解释错误（content 散文或 show_error），同一工具静默重试 ≤ 1 次。
 9. 任何降级（provider fallback、raw_preserved=false、锚点映射失败转询问等）必须产生 `CapabilityDegraded` 事件，用户可见。
-10. 每轮只执行一个动作（tool_choice 单选）；并行工具调用禁用。
+10. 每轮最多执行一个工具调用（tool_choice=auto，单步只取第一个 tool_call，多余的丢弃并记 trace）；并行工具调用禁用。
 
 ## 13. API 与前端接口
 
@@ -1668,6 +1668,7 @@ PATCH /api/projects/{pid}/materials/{aid}
 GET|PATCH|DELETE /api/projects/{pid}/cases/{cid}
 POST /api/projects/{pid}/cases/{cid}/copy|move
 POST /api/projects/{pid}/cases/{cid}/messages         # 入 Turn Queue
+GET  /api/projects/{pid}/cases/{cid}/messages         # 消息历史（user/reply/narration，升序，limit 分页，§7.9）
 GET  /api/projects/{pid}/cases/{cid}/timeline
 GET  /api/projects/{pid}/cases/{cid}/timeline/versions
 POST /api/projects/{pid}/cases/{cid}/timeline/restore
@@ -1695,6 +1696,7 @@ POST /api/jobs/{job_id}/cancel
 
 ```http
 GET /api/projects/{pid}/cases/{cid}/events    # Case 级 SSE
+GET /api/projects/{pid}/cases/{cid}/turn-stream    # turn 内瞬态过程 SSE（快照+实时，事件见 §2.6；不做 Last-Event-ID 续传）
 GET /api/events                                # Workspace 级（树变更、全局 job 进度）
 ```
 
@@ -2082,7 +2084,7 @@ flowchart LR
 
 ### M0：Contracts 与 Harness 骨架
 
-交付：contracts 全量；Turn Queue；Context Builder（固定预算版）；原生 tool calling + tool_choice 单选；PolicyGate 双向；ToolRouter；Reducer + Validator；EventLog + SSE 回放；AgentTrace + golden 回放框架 + 前 3 个 golden case。
+交付：contracts 全量；Turn Queue；Context Builder（固定预算版）；原生 tool calling + tool_choice=auto（content 和/或 tool_call，单步单工具）；PolicyGate 双向；ToolRouter；Reducer + Validator；EventLog + SSE 回放；AgentTrace + golden 回放框架 + 前 3 个 golden case。
 
 ```gherkin
 Scenario: 未注册工具被拒绝
@@ -2127,12 +2129,12 @@ Scenario: 安全基线（§13.0）
 
 Scenario: pending decision 收窄 allowed_tools
   Given pending_decision_id != null
-  Then 本轮 tools 只含 decision.answer / inspect / interaction 取消类 / respond
+  Then 本轮 tools 只含 decision.answer / inspect / interaction 取消类（散文回复不占工具、恒可用）
   And render.final_mp4 不在 tools 列表
 
 Scenario: 非法输出重试上限
   When LLM 连续 3 次输出被 deny 的动作
-  Then harness 强制 respond 解释卡点并结束回合
+  Then harness 强制写 reply 解释卡点并结束回合（TurnEnded）
 
 Scenario: SSE 断线回放
   Given 客户端断线期间产生事件 103、104
