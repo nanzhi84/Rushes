@@ -296,3 +296,40 @@ def _media_clip(timeline_clip_id: str, track_id: str, start: int, end: int) -> d
         "effects": [{"summary": "产品特写"}],
         "gain_db": 0.0,
     }
+
+
+def test_answer_decision_reducer_value_error_returns_400(tmp_path: Path) -> None:
+    """归约层校验失败应 400 而非 500（M9 路径 1 实测回归）。"""
+    from storage.repositories import DecisionsRepository
+
+    app = _app(tmp_path)
+    engine = _engine(app)
+    _seed_project_case(engine, timeline_current_version=None)
+    client = _client(app)
+    with engine.begin() as connection:
+        DecisionsRepository(connection).insert(
+            {
+                "decision_id": "dec_bad",
+                "scope_type": "case",
+                "project_id": "project_1",
+                "case_id": "case_1",
+                "type": "approve_speech_cut",
+                "question": "确认粗剪候选？",
+                "options": [],
+                "status": "pending",
+                "blocking": True,
+            }
+        )
+    response = client.post(
+        "/api/decisions/dec_bad/answer",
+        json={
+            "answer": {
+                "free_text": "确认",
+                "answered_via": "natural_language",
+                "payload": {"removed_ranges": "bad"},
+            }
+        },
+        headers=AUTH,
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["reason"] == "invalid_answer"
