@@ -155,6 +155,41 @@ class AssetInvalidated(DomainEventBase):
     merge_key: ClassVar[tuple[str, ...]] = ("asset_id", "job_id")
 
 
+class AssetIndexReady(DomainEventBase):
+    event: Literal["AssetIndexReady"] = "AssetIndexReady"
+    asset_id: str
+    version_mode: ClassVar[VersionMode] = "merge"
+    merge_key: ClassVar[tuple[str, ...]] = ()
+
+
+class AssetIndexFailed(DomainEventBase):
+    event: Literal["AssetIndexFailed"] = "AssetIndexFailed"
+    asset_id: str
+    version_mode: ClassVar[VersionMode] = "merge"
+    merge_key: ClassVar[tuple[str, ...]] = ()
+
+
+class MaterialUnderstandingStarted(DomainEventBase):
+    event: Literal["MaterialUnderstandingStarted"] = "MaterialUnderstandingStarted"
+    asset_id: str
+    version_mode: ClassVar[VersionMode] = "merge"
+    merge_key: ClassVar[tuple[str, ...]] = ()
+
+
+class MaterialUnderstandingCompleted(DomainEventBase):
+    event: Literal["MaterialUnderstandingCompleted"] = "MaterialUnderstandingCompleted"
+    asset_id: str
+    version_mode: ClassVar[VersionMode] = "merge"
+    merge_key: ClassVar[tuple[str, ...]] = ()
+
+
+class MaterialUnderstandingFailed(DomainEventBase):
+    event: Literal["MaterialUnderstandingFailed"] = "MaterialUnderstandingFailed"
+    asset_id: str
+    version_mode: ClassVar[VersionMode] = "merge"
+    merge_key: ClassVar[tuple[str, ...]] = ()
+
+
 class AssetLinked(DomainEventBase):
     event: Literal["AssetLinked"] = "AssetLinked"
     project_id: str
@@ -445,6 +480,11 @@ EVENT_CLASSES: tuple[type[DomainEventBase], ...] = (
     AnnotationCompleted,
     AnnotationFailed,
     AssetInvalidated,
+    AssetIndexReady,
+    AssetIndexFailed,
+    MaterialUnderstandingStarted,
+    MaterialUnderstandingCompleted,
+    MaterialUnderstandingFailed,
     AssetLinked,
     AssetUnlinked,
     CaseAssetScopeChanged,
@@ -497,6 +537,11 @@ type EventName = Literal[
     "AnnotationCompleted",
     "AnnotationFailed",
     "AssetInvalidated",
+    "AssetIndexReady",
+    "AssetIndexFailed",
+    "MaterialUnderstandingStarted",
+    "MaterialUnderstandingCompleted",
+    "MaterialUnderstandingFailed",
     "AssetLinked",
     "AssetUnlinked",
     "CaseAssetScopeChanged",
@@ -549,6 +594,11 @@ type EVENT_UNION = Annotated[
     | AnnotationCompleted
     | AnnotationFailed
     | AssetInvalidated
+    | AssetIndexReady
+    | AssetIndexFailed
+    | MaterialUnderstandingStarted
+    | MaterialUnderstandingCompleted
+    | MaterialUnderstandingFailed
     | AssetLinked
     | AssetUnlinked
     | CaseAssetScopeChanged

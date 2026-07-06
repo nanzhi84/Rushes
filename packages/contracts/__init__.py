@@ -90,6 +90,13 @@ from .transcript import (
     TranscriptWord,
     VadSegment,
 )
+from .understanding import (
+    MaterialSummary,
+    SegmentQuality,
+    SemanticRole,
+    SummarySegment,
+    SummarySpent,
+)
 from .workspace import WorkspaceConfig, WorkspaceDefaults, WorkspaceProjectRef
 
 __version__: str = "0.1.0"
@@ -143,6 +150,7 @@ __all__ = [
     "JobKind",
     "JobStatus",
     "LastError",
+    "MaterialSummary",
     "Memory",
     "MemoryCandidate",
     "PatchOpSpec",
@@ -165,6 +173,8 @@ __all__ = [
     "ResolvedRange",
     "ResolvedTimelinePatch",
     "RunningJobRef",
+    "SegmentQuality",
+    "SemanticRole",
     "SetPlaybackRateOp",
     "SetSubtitleStyleOp",
     "StorageMode",
@@ -173,6 +183,8 @@ __all__ = [
     "SubtitleClip",
     "SubtitlePostprocessPlan",
     "SubtitleStyleTemplate",
+    "SummarySegment",
+    "SummarySpent",
     "TextOcrExtension",
     "TimeRangeSec",
     "TimelineMediaClip",

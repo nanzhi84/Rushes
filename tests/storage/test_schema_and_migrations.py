@@ -53,6 +53,9 @@ EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "index_status",
         "usable",
         "failure",
+        "thumbnail_object_hash",
+        "index_json",
+        "understanding_status",
     ),
     "project_asset_links": ("project_id", "asset_id", "enabled", "linked_at", "note"),
     "annotations": (
@@ -93,6 +96,16 @@ EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "raw_preserved",
         "utterances",
         "vad_segments",
+    ),
+    "material_summaries": (
+        "summary_id",
+        "asset_id",
+        "version",
+        "focus",
+        "status",
+        "summary_json",
+        "model",
+        "created_at",
     ),
     "decisions": (
         "decision_id",

@@ -5,6 +5,7 @@ from sqlalchemy.engine import Connection
 from storage import schema
 from storage.data_migrations import apply_data_migrations
 from storage.db import create_workspace_engine
+from storage.workspace_paths import WorkspacePaths
 
 # asset_id 之间互不为子串，避免 timeline document_json LIKE 误匹配
 ASSET_BGM = "asset-legacy-bgm"
@@ -512,6 +513,98 @@ def _message_kind(connection: Connection, message_id: str) -> str:
             "SELECT kind FROM messages WHERE message_id = ?", (message_id,)
         ).scalar_one()
     )
+
+
+_OLD_ASSETS_DDL = (
+    "CREATE TABLE assets ("
+    "asset_id TEXT PRIMARY KEY, "
+    "storage_mode TEXT NOT NULL, "
+    "object_hash TEXT, "
+    "reference_path TEXT, "
+    "kind TEXT NOT NULL, "
+    "source TEXT NOT NULL, "
+    "filename TEXT NOT NULL DEFAULT '', "
+    "hash TEXT NOT NULL, "
+    "mtime INTEGER, "
+    "size INTEGER NOT NULL, "
+    "probe TEXT, "
+    "proxy_object_hash TEXT, "
+    "ingest_status TEXT NOT NULL, "
+    "annotation_status TEXT NOT NULL, "
+    "annotation_pass TEXT NOT NULL, "
+    "index_status TEXT NOT NULL, "
+    "usable BOOLEAN NOT NULL, "
+    "failure TEXT)"
+)
+
+
+def _rebuild_assets_without_understanding_columns(db_path: Path) -> None:
+    """把 assets 表换成缺 Spec C 三列的老结构，并种一条历史素材行。
+
+    assets 是众多子表的父表，用绕过 engine 的裸 sqlite3 连接关掉外键强制后再重建，
+    避免 DROP/CREATE 触发外键校验。
+    """
+
+    import sqlite3
+
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.execute("PRAGMA foreign_keys=OFF")
+        raw.execute("DROP TABLE assets")
+        raw.execute(_OLD_ASSETS_DDL)
+        raw.execute(
+            "INSERT INTO assets ("
+            "asset_id, storage_mode, kind, source, hash, size, "
+            "ingest_status, annotation_status, annotation_pass, index_status, usable) "
+            "VALUES (?, 'reference', 'video', 'upload', 'h', 0, "
+            "'ready', 'pending', 'none', 'none', 1)",
+            (ASSET_VIDEO,),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def _asset_columns(connection: Connection) -> set[str]:
+    return {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(assets)").all()}
+
+
+def test_ensure_asset_understanding_columns_adds_and_backfills(tmp_path: Path) -> None:
+    engine = create_workspace_engine(tmp_path)
+    with engine.begin() as connection:
+        schema.create_all(connection)
+    db_path = WorkspacePaths.from_root(tmp_path).db_path
+    _rebuild_assets_without_understanding_columns(db_path)
+
+    with engine.begin() as connection:
+        assert "understanding_status" not in _asset_columns(connection)
+
+        apply_data_migrations(connection)
+
+        columns = _asset_columns(connection)
+        assert {"thumbnail_object_hash", "index_json", "understanding_status"} <= columns
+        # 历史行回填默认 understanding_status='none'，索引列为空
+        row = _asset_row(connection, ASSET_VIDEO)
+        assert row is not None
+        assert row["understanding_status"] == "none"
+        assert row["index_json"] is None
+        assert row["thumbnail_object_hash"] is None
+
+
+def test_ensure_asset_understanding_columns_is_idempotent(tmp_path: Path) -> None:
+    engine = create_workspace_engine(tmp_path)
+    with engine.begin() as connection:
+        schema.create_all(connection)
+    db_path = WorkspacePaths.from_root(tmp_path).db_path
+    _rebuild_assets_without_understanding_columns(db_path)
+
+    with engine.begin() as connection:
+        apply_data_migrations(connection)
+        # 列已就位时二次运行不应抛 duplicate column
+        apply_data_migrations(connection)
+        assert {"thumbnail_object_hash", "index_json", "understanding_status"} <= _asset_columns(
+            connection
+        )
 
 
 def test_ensure_message_kind_column_adds_and_backfills(tmp_path: Path) -> None:

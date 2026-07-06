@@ -454,6 +454,120 @@ def test_asset_and_asset_link_merge_events_update_records(tmp_path: Path) -> Non
     assert link_count == 0
 
 
+def test_asset_index_and_understanding_events_update_asset_columns(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    engine = create_workspace_engine(tmp_path)
+
+    result = apply(
+        [
+            {
+                "event": "AssetImported",
+                "asset_id": "asset_1",
+                "job_id": "job_import_1",
+                "payload": {"reference_path": "/tmp/source.mp4", "size": 10},
+            },
+            {
+                "event": "AssetIndexReady",
+                "asset_id": "asset_1",
+                "payload": {
+                    "index_json": {"shots": [{"start_s": 0.0, "end_s": 2.0}]},
+                    "thumbnail_object_hash": "thumb_hash_1",
+                },
+            },
+            {
+                "event": "MaterialUnderstandingStarted",
+                "asset_id": "asset_1",
+                "payload": {"version": 1},
+            },
+            {
+                "event": "MaterialUnderstandingCompleted",
+                "asset_id": "asset_1",
+                "payload": {"summary_id": "sum_1", "version": 1},
+            },
+            {
+                "event": "AssetImported",
+                "asset_id": "asset_2",
+                "job_id": "job_import_2",
+                "payload": {"reference_path": "/tmp/bad.mp4"},
+            },
+            {
+                "event": "AssetIndexFailed",
+                "asset_id": "asset_2",
+                "payload": {"failure": {"message": "scenedetect crashed"}},
+            },
+            {
+                "event": "MaterialUnderstandingFailed",
+                "asset_id": "asset_2",
+                "payload": {"failure": {"message": "subagent timeout"}},
+            },
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+
+    with begin_immediate(engine) as connection:
+        asset_1 = (
+            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == "asset_1"))
+            .one()
+            ._mapping
+        )
+        asset_2 = (
+            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == "asset_2"))
+            .one()
+            ._mapping
+        )
+        thumbnail_object = connection.execute(
+            select(schema.objects).where(schema.objects.c.hash == "thumb_hash_1")
+        ).first()
+
+    assert result.status == "applied"
+    # AssetIndexReady：写便宜索引 JSON、缩略图哈希，并把摄入状态推到 indexed
+    assert load_json(asset_1["index_json"]) == {"shots": [{"start_s": 0.0, "end_s": 2.0}]}
+    assert asset_1["thumbnail_object_hash"] == "thumb_hash_1"
+    assert asset_1["ingest_status"] == "indexed"
+    # 缩略图哈希被登记进 objects（满足外键）
+    assert thumbnail_object is not None
+    # MaterialUnderstanding* 顺序推进 understanding_status
+    assert asset_1["understanding_status"] == "ready"
+    # asset_2：AssetIndexFailed 记录索引失败，MaterialUnderstandingFailed 只置理解状态
+    assert asset_2["understanding_status"] == "failed"
+    assert load_json(asset_2["failure"]) == {"message": "scenedetect crashed"}
+
+
+def test_asset_understanding_status_defaults_to_none(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    engine = create_workspace_engine(tmp_path)
+
+    apply(
+        [
+            {
+                "event": "AssetImported",
+                "asset_id": "asset_1",
+                "job_id": "job_import_1",
+                "payload": {"reference_path": "/tmp/source.mp4", "size": 10},
+            }
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+
+    with begin_immediate(engine) as connection:
+        asset = (
+            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == "asset_1"))
+            .one()
+            ._mapping
+        )
+
+    # server_default：新导入素材理解状态为 none，索引列为空
+    assert asset["understanding_status"] == "none"
+    assert asset["index_json"] is None
+    assert asset["thumbnail_object_hash"] is None
+
+
 def test_case_asset_scope_changed_updates_selected_and_disabled_assets(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
     _insert_project_and_case(tmp_path)

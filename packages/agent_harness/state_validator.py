@@ -73,6 +73,11 @@ PROJECT_ASSET_EVENT_NAMES = frozenset(
         "AnnotationCompleted",
         "AnnotationFailed",
         "AssetInvalidated",
+        "AssetIndexReady",
+        "AssetIndexFailed",
+        "MaterialUnderstandingStarted",
+        "MaterialUnderstandingCompleted",
+        "MaterialUnderstandingFailed",
         "AssetLinked",
         "AssetUnlinked",
     }

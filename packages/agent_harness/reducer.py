@@ -52,6 +52,11 @@ REDUCER_DISPATCH_EVENTS: frozenset[str] = frozenset(
         "AnnotationCompleted",
         "AnnotationFailed",
         "AssetInvalidated",
+        "AssetIndexReady",
+        "AssetIndexFailed",
+        "MaterialUnderstandingStarted",
+        "MaterialUnderstandingCompleted",
+        "MaterialUnderstandingFailed",
         "AssetLinked",
         "AssetUnlinked",
         "CaseAssetScopeChanged",
@@ -285,6 +290,11 @@ def _apply_event(context: _ReducerContext, event: DomainEventBase) -> None:
         "AnnotationCompleted",
         "AnnotationFailed",
         "AssetInvalidated",
+        "AssetIndexReady",
+        "AssetIndexFailed",
+        "MaterialUnderstandingStarted",
+        "MaterialUnderstandingCompleted",
+        "MaterialUnderstandingFailed",
     }:
         _apply_asset_event(context, event)
     elif name == "AssetLinked":
@@ -777,6 +787,7 @@ def _apply_asset_event(context: _ReducerContext, event: DomainEventBase) -> None
     payload = event.payload
     object_hash = payload.get("object_hash")
     proxy_object_hash = payload.get("proxy_object_hash")
+    thumbnail_object_hash = payload.get("thumbnail_object_hash")
     if isinstance(object_hash, str):
         _ensure_object(context, object_hash, size=_optional_int(payload.get("object_size")))
     if isinstance(proxy_object_hash, str):
@@ -784,6 +795,12 @@ def _apply_asset_event(context: _ReducerContext, event: DomainEventBase) -> None
             context,
             proxy_object_hash,
             size=_optional_int(payload.get("proxy_object_size")),
+        )
+    if isinstance(thumbnail_object_hash, str):
+        _ensure_object(
+            context,
+            thumbnail_object_hash,
+            size=_optional_int(payload.get("thumbnail_object_size")),
         )
     if not _row_exists(context.connection, schema.assets, "asset_id", asset_id):
         values = _asset_insert_values(asset_id, payload)
@@ -1511,6 +1528,24 @@ def _asset_update_values_for_event(event: DomainEventBase) -> dict[str, Any]:
     elif event.event == "AssetInvalidated":
         values["usable"] = False
         values["failure"] = dump_json(payload.get("failure", {"message": "asset invalidated"}))
+    elif event.event == "AssetIndexReady":
+        # 便宜本地索引就绪：写结构化索引 JSON、缩略图对象哈希，并把摄入状态推到 indexed。
+        if "index_json" in payload:
+            values["index_json"] = (
+                None if payload["index_json"] is None else dump_json(payload["index_json"])
+            )
+        if "thumbnail_object_hash" in payload:
+            values["thumbnail_object_hash"] = payload["thumbnail_object_hash"]
+        values["ingest_status"] = str(payload.get("ingest_status", "indexed"))
+    elif event.event == "AssetIndexFailed":
+        # 索引失败不阻塞任何流程，仅记录失败信息（Spec C §C1）。
+        values["failure"] = dump_json(payload.get("failure", {"message": "index failed"}))
+    elif event.event == "MaterialUnderstandingStarted":
+        values["understanding_status"] = "running"
+    elif event.event == "MaterialUnderstandingCompleted":
+        values["understanding_status"] = "ready"
+    elif event.event == "MaterialUnderstandingFailed":
+        values["understanding_status"] = "failed"
     return values
 
 

@@ -4,6 +4,7 @@ from .cases import CasesRepository, CaseUpdateConflict
 from .decisions import DecisionsRepository
 from .event_log import EventLogRepository, EventLogRow
 from .jobs import JobsRepository
+from .material_summaries import MaterialSummariesRepository
 from .messages import MessagesRepository
 from .objects import ObjectsRepository
 from .projects import ProjectsRepository
@@ -18,6 +19,7 @@ __all__ = [
     "EventLogRepository",
     "EventLogRow",
     "JobsRepository",
+    "MaterialSummariesRepository",
     "MessagesRepository",
     "ObjectsRepository",
     "ProjectsRepository",

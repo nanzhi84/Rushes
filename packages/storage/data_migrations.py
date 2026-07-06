@@ -27,6 +27,7 @@ def apply_data_migrations(connection: Connection) -> None:
 
     _collapse_asset_kinds(connection)
     _ensure_message_kind_column(connection)
+    _ensure_asset_understanding_columns(connection)
 
 
 def _table_exists(connection: Connection, name: str) -> bool:
@@ -47,6 +48,25 @@ def _ensure_message_kind_column(connection: Connection) -> None:
         return
     connection.exec_driver_sql("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'reply'")
     connection.exec_driver_sql("UPDATE messages SET kind='user' WHERE role='user'")
+
+
+def _ensure_asset_understanding_columns(connection: Connection) -> None:
+    """老库的 assets 表补 Spec C 的三列：缩略图哈希 / 便宜索引 JSON / 理解状态。
+
+    SQLite 的 ALTER TABLE ADD COLUMN 不支持带外键约束，迁移里加普通列即可；
+    schema 定义带 thumbnail_object_hash→objects.hash 的外键，供新库 create_all 使用。
+    每列都先用 PRAGMA table_info 守卫，可在每次启动重复执行。
+    """
+
+    columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(assets)").all()}
+    if "thumbnail_object_hash" not in columns:
+        connection.exec_driver_sql("ALTER TABLE assets ADD COLUMN thumbnail_object_hash TEXT")
+    if "index_json" not in columns:
+        connection.exec_driver_sql("ALTER TABLE assets ADD COLUMN index_json TEXT")
+    if "understanding_status" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE assets ADD COLUMN understanding_status TEXT NOT NULL DEFAULT 'none'"
+        )
 
 
 def _collapse_asset_kinds(connection: Connection) -> None:

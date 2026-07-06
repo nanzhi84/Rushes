@@ -41,6 +41,31 @@ EVENT_PAYLOADS: dict[str, dict[str, object]] = {
         "asset_id": "asset_001",
         "job_id": "job_001",
     },
+    "AssetIndexReady": {
+        "event": "AssetIndexReady",
+        "asset_id": "asset_001",
+        "payload": {"index_json": {"shots": []}, "thumbnail_object_hash": "thumb_001"},
+    },
+    "AssetIndexFailed": {
+        "event": "AssetIndexFailed",
+        "asset_id": "asset_001",
+        "payload": {"failure": {"message": "index failed"}},
+    },
+    "MaterialUnderstandingStarted": {
+        "event": "MaterialUnderstandingStarted",
+        "asset_id": "asset_001",
+        "payload": {"version": 1},
+    },
+    "MaterialUnderstandingCompleted": {
+        "event": "MaterialUnderstandingCompleted",
+        "asset_id": "asset_001",
+        "payload": {"summary_id": "sum_001", "version": 1},
+    },
+    "MaterialUnderstandingFailed": {
+        "event": "MaterialUnderstandingFailed",
+        "asset_id": "asset_001",
+        "payload": {"failure": {"message": "understand timeout"}},
+    },
     "AssetLinked": {"event": "AssetLinked", "project_id": "project_001", "asset_id": "asset_001"},
     "AssetUnlinked": {
         "event": "AssetUnlinked",
@@ -214,6 +239,11 @@ EXPECTED_VERSION_MODES: dict[str, str] = {
     "AnnotationCompleted": "merge",
     "AnnotationFailed": "merge",
     "AssetInvalidated": "merge",
+    "AssetIndexReady": "merge",
+    "AssetIndexFailed": "merge",
+    "MaterialUnderstandingStarted": "merge",
+    "MaterialUnderstandingCompleted": "merge",
+    "MaterialUnderstandingFailed": "merge",
     "AssetLinked": "merge",
     "AssetUnlinked": "merge",
     "CaseAssetScopeChanged": "strict",
@@ -253,8 +283,8 @@ EXPECTED_VERSION_MODES: dict[str, str] = {
 def test_event_registry_matches_prd_event_table() -> None:
     registry = event_registry()
     assert set(registry) == set(EVENT_PAYLOADS)
-    assert len(registry) == 49
-    assert len(EVENT_CLASSES) == 49
+    assert len(registry) == 54
+    assert len(EVENT_CLASSES) == 54
 
 
 def test_each_event_discriminator_parses_to_expected_class() -> None:
