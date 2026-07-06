@@ -322,7 +322,20 @@ def create_app(
 def create_app_from_env() -> FastAPI:
     workspace = os.environ.get("RUSHES_WORKSPACE_PATH", str(Path.cwd() / ".rushes"))
     token = os.environ.get("RUSHES_API_TOKEN") or None
-    return create_app(workspace, token=token, startup_port=startup_port_from_env())
+    return create_app(
+        workspace,
+        token=token,
+        fs_roots=_fs_roots_from_env(),
+        startup_port=startup_port_from_env(),
+    )
+
+
+def _fs_roots_from_env() -> list[str] | None:
+    raw = os.environ.get("RUSHES_FS_ROOTS")
+    if not raw:
+        return None
+    roots = [part for part in raw.split(os.pathsep) if part]
+    return roots or None
 
 
 class _StorageProviderCallRecorder:
