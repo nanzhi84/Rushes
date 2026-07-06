@@ -1,12 +1,9 @@
 import { useState } from "react";
 import type { FormEvent, ReactElement } from "react";
-import type { MaterialKind } from "../../api/client";
-import { MaterialKindSelect } from "./MaterialKindSelect";
 
 export type UrlImportDraft = {
   url: string;
   filename?: string | null;
-  kind: MaterialKind;
 };
 
 export type PendingUrlDecision = {
@@ -27,7 +24,6 @@ type UrlDecisionCardProps = {
 };
 
 export function UrlImportPanel({ isPending, onCreate }: UrlImportPanelProps): ReactElement {
-  const [kind, setKind] = useState<MaterialKind>("video");
   const [url, setUrl] = useState("");
   const [filename, setFilename] = useState("");
 
@@ -39,8 +35,7 @@ export function UrlImportPanel({ isPending, onCreate }: UrlImportPanelProps): Re
     }
     onCreate({
       url: trimmedUrl,
-      filename: filename.trim() || null,
-      kind
+      filename: filename.trim() || null
     });
     setUrl("");
     setFilename("");
@@ -60,7 +55,7 @@ export function UrlImportPanel({ isPending, onCreate }: UrlImportPanelProps): Re
             onChange={(event) => setUrl(event.target.value)}
           />
         </label>
-        <div className="grid gap-3 sm:grid-cols-[1fr_160px_auto] sm:items-end">
+        <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
           <label className="block text-sm font-medium text-[#334155]">
             文件名
             <input
@@ -70,7 +65,6 @@ export function UrlImportPanel({ isPending, onCreate }: UrlImportPanelProps): Re
               onChange={(event) => setFilename(event.target.value)}
             />
           </label>
-          <MaterialKindSelect value={kind} onChange={setKind} />
           <button
             className="rounded-md bg-[#17202a] px-4 py-2 text-sm font-medium text-white disabled:bg-[#94a3b8]"
             type="submit"

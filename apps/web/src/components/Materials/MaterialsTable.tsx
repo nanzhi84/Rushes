@@ -131,12 +131,9 @@ export function MaterialsTable({
 function kindLabel(kind: string): string {
   const labels: Record<string, string> = {
     video: "视频",
-    image: "图片",
     audio: "音频",
-    voiceover: "配音",
-    bgm: "BGM",
-    font: "字体",
-    subtitle_template: "字幕模板"
+    image: "图片",
+    font: "字体"
   };
   return labels[kind] ?? kind;
 }
