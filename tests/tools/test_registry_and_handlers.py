@@ -91,6 +91,7 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "annotation.status",
         "annotation.retry",
         "annotation.inspect",
+        "media.view_frames",
         "retrieval.search_candidates",
         "timeline.plan_from_candidates",
         "timeline.apply_patch",
@@ -151,6 +152,10 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
     ]
     assert registry.require("annotation.enqueue").spec.emits_events == ["JobEnqueued"]
     assert registry.require("annotation.status").spec.side_effects == []
+    media_view_frames = registry.require("media.view_frames").spec
+    assert media_view_frames.side_effects == []
+    assert media_view_frames.requires_confirmation is False
+    assert media_view_frames.emits_events == []
     retrieval = registry.require("retrieval.search_candidates").spec
     assert retrieval.requires_artifacts == [
         "audio_plan_confirmed",
