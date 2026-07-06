@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
@@ -76,6 +77,58 @@ class PlannerStep:
                 None if self.tool_call is None else self.tool_call.model_dump(mode="json")
             ),
         }
+
+
+class TurnListener(Protocol):
+    """Sink for in-process turn stream events (duck-typed, apps-side impl).
+
+    ``emit`` is synchronous and MUST NEVER raise into the loop; the concrete
+    hub implementation catches/degrades internally, and the loop additionally
+    guards every call so a buggy listener can never break a turn.
+    """
+
+    def emit(self, event: Mapping[str, Any]) -> None: ...
+
+
+def _emit_turn_event(listener: TurnListener | None, event: dict[str, Any]) -> None:
+    if listener is None:
+        return
+    # 监听器绝不能把回合搞崩：hub 内部已兜底，这里再加一层防御。
+    with contextlib.suppress(Exception):
+        listener.emit(event)
+
+
+def _emit_tool_step_finished(
+    listener: TurnListener | None,
+    step_id: str,
+    tool: str,
+    status: str,
+) -> None:
+    _emit_turn_event(
+        listener,
+        {"type": "tool_step_finished", "step_id": step_id, "tool": tool, "status": status},
+    )
+
+
+def _delta_forwarder(
+    listener: TurnListener | None,
+    message_id: str,
+) -> Callable[[str], None] | None:
+    if listener is None:
+        return None
+
+    def _forward(delta: str) -> None:
+        _emit_turn_event(
+            listener,
+            {
+                "type": "text_delta",
+                "message_id": message_id,
+                "kind": "assistant",
+                "delta": delta,
+            },
+        )
+
+    return _forward
 
 
 class LLMPlanner(Protocol):
@@ -247,6 +300,7 @@ async def run_turn(
     max_nonblocking_tools: int = DEFAULT_MAX_NONBLOCKING_TOOLS,
     max_tool_attempts: int = DEFAULT_MAX_TOOL_ATTEMPTS,
     tool_gateway: Any | None = None,
+    turn_listener: TurnListener | None = None,
 ) -> RunTurnResult:
     active_registry = registry or build_default_tool_registry()
     active_patch_ops = patch_op_specs or PATCH_OP_REGISTRY.as_mapping()
@@ -264,6 +318,54 @@ async def run_turn(
     )
     accumulator = _RunAccumulator()
     token = stop_token or StopToken()
+    _emit_turn_event(turn_listener, {"type": "turn_started", "turn_id": active_turn_id})
+    try:
+        return await _run_turn_body(
+            item,
+            engine=engine,
+            planner=planner,
+            router=router,
+            policy_gate=policy_gate,
+            active_registry=active_registry,
+            active_turn_id=active_turn_id,
+            loaded=loaded,
+            tracer=tracer,
+            accumulator=accumulator,
+            token=token,
+            turn_queue=turn_queue,
+            decision_answer_resolver=decision_answer_resolver,
+            max_illegal_outputs=max_illegal_outputs,
+            max_nonblocking_tools=max_nonblocking_tools,
+            max_tool_attempts=max_tool_attempts,
+            tool_gateway=tool_gateway,
+            turn_listener=turn_listener,
+        )
+    except Exception as exc:
+        _emit_turn_event(turn_listener, {"type": "turn_error", "message": str(exc)})
+        raise
+
+
+async def _run_turn_body(
+    item: TurnQueueItem,
+    *,
+    engine: Engine,
+    planner: LLMPlanner,
+    router: ToolRouter,
+    policy_gate: PolicyGate,
+    active_registry: ToolRegistry,
+    active_turn_id: str,
+    loaded: _LoadedState,
+    tracer: TraceRecorder | NullTraceRecorder,
+    accumulator: _RunAccumulator,
+    token: StopToken,
+    turn_queue: TurnQueue | None,
+    decision_answer_resolver: DecisionAnswerResolver | None,
+    max_illegal_outputs: int,
+    max_nonblocking_tools: int,
+    max_tool_attempts: int,
+    tool_gateway: Any | None,
+    turn_listener: TurnListener | None,
+) -> RunTurnResult:
     await _record_incoming_item(item, engine=engine, turn_id=active_turn_id)
 
     replay_call = _replay_tool_call_from_item(item)
@@ -278,8 +380,17 @@ async def run_turn(
             turn_queue=turn_queue,
             accumulator=accumulator,
             tracer=tracer,
+            turn_listener=turn_listener,
         )
         if preflight_forced_reason is not None:
+            _emit_turn_event(
+                turn_listener,
+                {
+                    "type": "turn_ended",
+                    "outcome": "forced_end",
+                    "reason": preflight_forced_reason,
+                },
+            )
             return RunTurnResult(
                 turn_id=active_turn_id,
                 case_id=item.case_id,
@@ -324,6 +435,7 @@ async def run_turn(
                 reason=forced_reason,
                 accumulator=accumulator,
                 tracer=tracer,
+                turn_listener=turn_listener,
             )
             outcome = "forced_end"
             break
@@ -346,19 +458,34 @@ async def run_turn(
             step = PlannerStep(tool_call=replay_call)
             replay_call = None
         else:
-            step = await planner.plan(context_bundle, context_bundle.allowed_tools)
+            upcoming_message_id = _peek_next_message_id(active_turn_id, accumulator)
+            step = await planner.plan(
+                context_bundle,
+                context_bundle.allowed_tools,
+                on_delta=_delta_forwarder(turn_listener, upcoming_message_id),
+            )
         attempts += 1
         tracer.record("action", step.model_dump())
 
         # narration 在工具执行前立刻落库：即使后续工具被拒/失败，叙述也已可见
         if step.content:
             message_kind = "narration" if step.tool_call is not None else "reply"
+            message_id = _next_message_id(active_turn_id, accumulator)
             _persist_assistant_message(
                 engine,
                 case_id=loaded.case_state.case_id,
-                message_id=_next_message_id(active_turn_id, accumulator),
+                message_id=message_id,
                 content=step.content,
                 kind=message_kind,
+            )
+            _emit_turn_event(
+                turn_listener,
+                {
+                    "type": "message_completed",
+                    "message_id": message_id,
+                    "kind": message_kind,
+                    "content": step.content,
+                },
             )
             if message_kind == "narration":
                 turn_observations.append(f"助手叙述: {step.content}")
@@ -384,6 +511,7 @@ async def run_turn(
                         reason=forced_reason,
                         accumulator=accumulator,
                         tracer=tracer,
+                        turn_listener=turn_listener,
                     )
                     outcome = "forced_end"
                     break
@@ -408,6 +536,11 @@ async def run_turn(
 
         tool_call = step.tool_call
         accumulator.tool_calls.append(tool_call)
+        step_id = tool_call.tool_call_id or _tool_call_id(tool_call)
+        _emit_turn_event(
+            turn_listener,
+            {"type": "tool_step_started", "step_id": step_id, "tool": tool_call.tool_name},
+        )
 
         verdict = policy_gate.adjudicate(
             tool_call,
@@ -421,6 +554,7 @@ async def run_turn(
         tracer.record("gate", _verdict_payload(verdict))
 
         if verdict.status == "deny":
+            _emit_tool_step_finished(turn_listener, step_id, tool_call.tool_name, "deny")
             illegal_outputs += 1
             synthetic_result = _synthetic_tool_result(tool_call, "failed", verdict.reason)
             accumulator.tool_results.append(synthetic_result)
@@ -447,6 +581,7 @@ async def run_turn(
                     reason=forced_reason,
                     accumulator=accumulator,
                     tracer=tracer,
+                    turn_listener=turn_listener,
                 )
                 outcome = "forced_end"
                 break
@@ -454,6 +589,7 @@ async def run_turn(
 
         illegal_outputs = 0
         if verdict.status == "ask":
+            _emit_tool_step_finished(turn_listener, step_id, tool_call.tool_name, "ask")
             result = _synthetic_tool_result(tool_call, "requires_user", verdict.reason)
             accumulator.tool_results.append(result)
             tracer.record("tool_result", _tool_result_payload(result))
@@ -477,6 +613,7 @@ async def run_turn(
                 turn_id=active_turn_id,
                 engine=engine,
             )
+            _emit_tool_step_finished(turn_listener, step_id, tool_call.tool_name, result.status)
             turn_observations.append(_turn_observation_entry(tool_call, result))
             accumulator.tool_results.append(result)
             tracer.record("tool_result", _tool_result_payload(result))
@@ -499,6 +636,7 @@ async def run_turn(
                     reason=forced_reason,
                     accumulator=accumulator,
                     tracer=tracer,
+                    turn_listener=turn_listener,
                 )
                 outcome = "forced_end"
                 break
@@ -513,6 +651,7 @@ async def run_turn(
             turn_id=active_turn_id,
             gateway=tool_gateway,
         )
+        _emit_tool_step_finished(turn_listener, step_id, tool_call.tool_name, result.status)
         accumulator.tool_results.append(result)
         turn_observations.append(_turn_observation_entry(tool_call, result))
         tracer.record("tool_result", _tool_result_payload(result))
@@ -536,6 +675,7 @@ async def run_turn(
                 reason=forced_reason,
                 accumulator=accumulator,
                 tracer=tracer,
+                turn_listener=turn_listener,
             )
             outcome = "forced_end"
             break
@@ -566,6 +706,7 @@ async def run_turn(
                 reason=forced_reason,
                 accumulator=accumulator,
                 tracer=tracer,
+                turn_listener=turn_listener,
             )
             outcome = "stopped"
             break
@@ -583,10 +724,15 @@ async def run_turn(
                 reason=forced_reason,
                 accumulator=accumulator,
                 tracer=tracer,
+                turn_listener=turn_listener,
             )
             outcome = "forced_end"
             break
 
+    _emit_turn_event(
+        turn_listener,
+        {"type": "turn_ended", "outcome": outcome, "reason": forced_reason},
+    )
     return RunTurnResult(
         turn_id=active_turn_id,
         case_id=item.case_id,
@@ -739,6 +885,7 @@ async def _maybe_answer_pending_decision_from_user_message(
     turn_queue: TurnQueue | None,
     accumulator: _RunAccumulator,
     tracer: TraceRecorder | NullTraceRecorder,
+    turn_listener: TurnListener | None = None,
 ) -> str | None:
     if item.kind != "user_message":
         return None
@@ -846,6 +993,7 @@ async def _maybe_answer_pending_decision_from_user_message(
             reason="natural_language_decision_answer_denied",
             accumulator=accumulator,
             tracer=tracer,
+            turn_listener=turn_listener,
         )
         return "natural_language_decision_answer_denied"
 
@@ -877,6 +1025,7 @@ async def _maybe_answer_pending_decision_from_user_message(
             reason=f"reducer_{reducer_result.status}",
             accumulator=accumulator,
             tracer=tracer,
+            turn_listener=turn_listener,
         )
         return f"reducer_{reducer_result.status}"
     enqueued = await _handle_followups(
@@ -1570,17 +1719,28 @@ def _force_reply(
     reason: str,
     accumulator: _RunAccumulator,
     tracer: TraceRecorder | NullTraceRecorder,
+    turn_listener: TurnListener | None = None,
 ) -> None:
     """Harness 兜底收尾：直接写 assistant reply 行 + TurnEnded，不经 router。"""
 
     step = PlannerStep(content=message)
     tracer.record("action", {**step.model_dump(), "forced": True, "reason": reason})
+    message_id = _next_message_id(turn_id, accumulator)
     _persist_assistant_message(
         engine,
         case_id=state.case_state.case_id,
-        message_id=_next_message_id(turn_id, accumulator),
+        message_id=message_id,
         content=message,
         kind="reply",
+    )
+    _emit_turn_event(
+        turn_listener,
+        {
+            "type": "message_completed",
+            "message_id": message_id,
+            "kind": "reply",
+            "content": message,
+        },
     )
     end_event = TurnEnded(
         turn_id=turn_id,
@@ -1598,9 +1758,24 @@ def _force_reply(
     tracer.record("events", _events_payload((end_event,), reducer_result))
 
 
+def _format_message_id(turn_id: str, seq: int) -> str:
+    return f"msg_{turn_id.replace(':', '_')}_{seq}"
+
+
 def _next_message_id(turn_id: str, accumulator: _RunAccumulator) -> str:
     accumulator.message_seq += 1
-    return f"msg_{turn_id.replace(':', '_')}_{accumulator.message_seq}"
+    return _format_message_id(turn_id, accumulator.message_seq)
+
+
+def _peek_next_message_id(turn_id: str, accumulator: _RunAccumulator) -> str:
+    """message_id the *next* persisted assistant message will use.
+
+    Streaming deltas are emitted before ``plan()`` returns, so the loop must
+    predict the id up front; it matches ``_next_message_id`` because persisting
+    the content increments ``message_seq`` to exactly this value.
+    """
+
+    return _format_message_id(turn_id, accumulator.message_seq + 1)
 
 
 def _persist_assistant_message(

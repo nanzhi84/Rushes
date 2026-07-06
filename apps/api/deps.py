@@ -6,7 +6,7 @@ import json
 import os
 import secrets
 from collections.abc import Awaitable, Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, NoReturn, cast
@@ -23,6 +23,8 @@ from events.event_log import deserialize_event
 from events.routing import routes_to_case, routes_to_workspace
 from storage.repositories.event_log import EventLogRow
 from storage.workspace_paths import WorkspacePaths
+
+from .turn_stream import TurnStreamHub
 
 type SecurityReason = Literal[
     "missing_token",
@@ -66,6 +68,7 @@ class ApiState:
     workspace_paths: WorkspacePaths
     turn_queue: TurnQueue
     startup_port: int
+    turn_stream_hub: TurnStreamHub = field(default_factory=TurnStreamHub)
     # 仅测试用：SSE 流发出 N 条事件后主动收尾。生产保持 None（无限流，
     # 由客户端断开终止）；同步 TestClient 无法消费无限流（会与服务端互等）。
     sse_max_events: int | None = None
@@ -283,7 +286,7 @@ def _content_type_refusal_reason(request: Request) -> SecurityReason | None:
 
 
 def _is_sse_endpoint(path: str) -> bool:
-    return path == "/api/events" or path.endswith("/events")
+    return path == "/api/events" or path.endswith("/events") or path.endswith("/turn-stream")
 
 
 def _is_upload_part_endpoint(path: str) -> bool:
