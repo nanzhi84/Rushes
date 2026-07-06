@@ -185,6 +185,21 @@ async def run_turn(
     attempts = 0
     outcome = "finished"
     forced_reason: str | None = None
+    # turn 内工具轨迹：observation 不落消息表，必须显式回灌 planner，
+    # 否则每步规划都失忆（M9 路径 1 实测无限重复只读工具）
+    turn_observations: list[str] = []
+    if item.kind == "job_observation":
+        event_payload = item.payload.get("event")
+        if isinstance(event_payload, Mapping):
+            event_name = event_payload.get("event", "JobEvent")
+            job_kind = ""
+            inner = event_payload.get("payload")
+            if isinstance(inner, Mapping) and inner.get("kind"):
+                job_kind = f" kind={inner['kind']}"
+            turn_observations.append(
+                f"后台任务事件：{event_name} job_id={item.payload.get('job_id')}{job_kind}，"
+                "请依据该结果推进下一步。"
+            )
 
     while True:
         if attempts >= max_tool_attempts:
@@ -206,7 +221,7 @@ async def run_turn(
             break
 
         loaded = _load_state(engine, item.case_id)
-        context_bundle = _build_context(policy_gate, loaded)
+        context_bundle = _build_context(policy_gate, loaded, tuple(turn_observations))
         tracer.record(
             "context",
             {
@@ -240,6 +255,7 @@ async def run_turn(
             illegal_outputs += 1
             synthetic_result = _synthetic_tool_result(tool_call, "failed", verdict.reason)
             accumulator.tool_results.append(synthetic_result)
+            turn_observations.append(_turn_observation_entry(tool_call, synthetic_result))
             tracer.record("tool_result", _tool_result_payload(synthetic_result))
             reducer_result = _apply_events(
                 verdict.events,
@@ -292,7 +308,9 @@ async def run_turn(
                 verdict.validated_arguments,
                 state=loaded,
                 turn_id=active_turn_id,
+                engine=engine,
             )
+            turn_observations.append(_turn_observation_entry(tool_call, result))
             accumulator.tool_results.append(result)
             tracer.record("tool_result", _tool_result_payload(result))
             reducer_result = _apply_events(
@@ -330,6 +348,7 @@ async def run_turn(
             turn_id=active_turn_id,
         )
         accumulator.tool_results.append(result)
+        turn_observations.append(_turn_observation_entry(tool_call, result))
         tracer.record("tool_result", _tool_result_payload(result))
         _persist_tool_result_data(result, engine=engine)
         reducer_result = _apply_events(
@@ -488,7 +507,11 @@ def context_bundle_input_preconditions(loaded: _LoadedState) -> PreconditionCont
     )
 
 
-def _build_context(policy_gate: PolicyGate, loaded: _LoadedState) -> ContextBundle:
+def _build_context(
+    policy_gate: PolicyGate,
+    loaded: _LoadedState,
+    turn_observations: tuple[str, ...] = (),
+) -> ContextBundle:
     builder = ContextBuilder(policy_gate=policy_gate)
     return builder.build(
         ContextBuildInput(
@@ -498,8 +521,53 @@ def _build_context(policy_gate: PolicyGate, loaded: _LoadedState) -> ContextBund
             timeline=loaded.timeline,
             messages=loaded.messages,
             memory_summaries=loaded.memory_summaries,
+            turn_observations=turn_observations,
         )
     )
+
+
+def _finished_job_observation(
+    engine: Engine,
+    job_id: str,
+    *,
+    tool_name: str,
+) -> tuple[Literal["succeeded", "failed"], str] | None:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(schema.jobs.c.status, schema.jobs.c.result_json, schema.jobs.c.error_json).where(
+                schema.jobs.c.job_id == job_id
+            )
+        ).first()
+    if row is None:
+        return None
+    status = str(row._mapping["status"])
+    if status == "succeeded":
+        result_raw = row._mapping["result_json"]
+        summary = ""
+        if result_raw:
+            parsed = load_json(str(result_raw))
+            if isinstance(parsed, Mapping):
+                summary = json.dumps(parsed, ensure_ascii=False)[:300]
+        return (
+            "succeeded",
+            f"该后台任务已完成（job {job_id}），无需重复发起。"
+            f"结果摘要：{summary or '无'}。请基于结果推进下一步。",
+        )
+    if status == "failed":
+        error_raw = row._mapping["error_json"]
+        detail = str(error_raw)[:200] if error_raw else "未知原因"
+        return ("failed", f"该后台任务此前已失败（job {job_id}）：{detail}")
+    return None
+
+
+def _turn_observation_entry(tool_call: ToolCall, result: ToolResult) -> str:
+    arguments = json.dumps(tool_call.arguments, ensure_ascii=False)
+    if len(arguments) > 160:
+        arguments = arguments[:160] + "…"
+    observation = result.observation or ""
+    if len(observation) > 400:
+        observation = observation[:400] + "…"
+    return f"{tool_call.tool_name}({arguments}) -> {result.status}: {observation}"
 
 
 async def _maybe_answer_pending_decision_from_user_message(
@@ -974,6 +1042,7 @@ def _defer_tool_call(
     *,
     state: _LoadedState,
     turn_id: str,
+    engine: Engine | None = None,
 ) -> ToolResult:
     spec = registered.spec
     kind = _job_kind_for_tool(spec.name, spec.namespace)
@@ -989,6 +1058,18 @@ def _defer_tool_call(
         arguments=job_arguments,
     )
     job_id = _job_id(kind=kind, idempotency_key=idempotency_key)
+    # 幂等短路：同参数 job 已有终态时直接报告结果，不再重复入队——
+    # 否则 agent 只能拿到"job queued"并反复重试（M9 路径 1 实测）
+    if engine is not None:
+        finished = _finished_job_observation(engine, job_id, tool_name=spec.name)
+        if finished is not None:
+            return ToolResult(
+                tool_call_id=tool_call.tool_call_id or _tool_call_id(tool_call),
+                tool_name=spec.name,
+                status=finished[0],
+                observation=finished[1],
+                data={"job_id": job_id, "job_kind": kind},
+            )
     if spec.name == "asset.import_url":
         job_arguments.setdefault(
             "asset_id",

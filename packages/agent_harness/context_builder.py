@@ -40,6 +40,7 @@ DEFAULT_BLOCK_BUDGETS: dict[str, int] = {
     "memory": 1500,
     "assets": 1000,
     "messages": 8000,
+    "turn_observations": 2500,
     "allowed_tools": 4000,
 }
 FIXED_BLOCKS = frozenset(
@@ -66,6 +67,7 @@ class ContextBuildInput(BaseModel):
     candidate_pack: CandidatePack | None = None
     memory_summaries: tuple[str, ...] = Field(default_factory=tuple)
     messages: tuple[ContextMessage, ...] = Field(default_factory=tuple)
+    turn_observations: tuple[str, ...] = Field(default_factory=tuple)
     rolling_summary: str | None = None
     current_action: str | None = None
     allowed_tools: tuple[ToolSpec, ...] = Field(default_factory=tuple)
@@ -125,6 +127,11 @@ class ContextBuilder:
                 self._budgets["messages"],
                 self._counter,
             ),
+            "turn_observations": _render_turn_observations_block(
+                context.turn_observations,
+                self._budgets["turn_observations"],
+                self._counter,
+            ),
             "allowed_tools": _render_allowed_tools_block(allowed_tools),
         }
         token_counts = {name: self._counter(text) for name, text in blocks.items()}
@@ -139,6 +146,24 @@ def _render_system_block(total_budget: int) -> str:
             "PolicyGate exposes only allowed tool schemas and rechecks every tool call.",
             "Human-gated actions use Decision + PendingToolCall; do not execute them directly.",
             f"Context total budget target: {total_budget} tokens.",
+            "",
+            "阶段推进指引（case_header 的 stage 字段标记当前阶段；工具列表按前置条件动态暴露，"
+            "看不到的工具说明其前置未满足，先完成当前阶段的关键动作）：",
+            "- briefing：明确目标、检查素材（audio.inspect_sources；assets 块 usable_count ≥ 1 "
+            "表示标注已完成，为 0 时才需要 annotation.enqueue）。audio_plan 未确定且素材含人声时，"
+            "必须用 interaction.ask_user 创建 audio_mode 决策（原声粗剪 / TTS 配音 / 静音），"
+            "这是解锁后续工具的唯一路径。",
+            "- drafting：按 audio_plan 推进——原声：audio.asr_original → audio.rough_cut_speech；"
+            "TTS：audio.generate_tts。cut_plan 已确定后立即 retrieval.search_candidates → "
+            "timeline.plan_from_candidates → render.preview → interaction.show_preview，"
+            "不要回头重复 annotation/asr；用户表达满意时用 interaction.confirm_action "
+            "创建 approve_rough_cut 确认。",
+            "- refining：粗剪已确认。逐项询问字幕与 BGM（timeline.apply_patch 的 "
+            "generate_subtitles / add_bgm op；postprocess_plan 缺失时 gate 会自动转决策，"
+            "属预期行为）；用户的修改指令走 timeline.apply_patch。",
+            "- exporting：render.final_mp4（导出确认由 gate 自动创建决策）；导出完成后可"
+            "建议 memory.extract_from_case → memory.ask_scope 沉淀经验。",
+            "同一只读工具同参数不要重复调用：结果不会变化，信息足够就立刻推进下一步动作。",
         )
     )
 
@@ -460,6 +485,27 @@ def _render_messages_block(
     recent_lines = [f"{message.role}: {message.content}" for message in messages]
     lines.extend(_fit_lines(recent_lines, budget, counter, from_end=True).splitlines())
     return _fit_lines(lines, budget, counter, from_end=True)
+
+
+def _render_turn_observations_block(
+    observations: tuple[str, ...],
+    budget: int,
+    counter: TokenCounter,
+) -> str:
+    """本回合已执行的工具与观察结果。
+
+    工具 observation 不落消息表，turn 内多步规划全靠这里回灌——缺了它
+    planner 每步都失忆，会无限重复同一个只读工具（M9 路径 1 实测）。
+    超预算时保留最近的条目。
+    """
+
+    if not observations:
+        return "本回合尚未执行任何工具。"
+    lines = [f"- {item}" for item in observations]
+    while lines and counter("\n".join(lines)) > budget:
+        lines.pop(0)
+    header = "本回合已执行（时间顺序，不要重复相同调用）："
+    return header + "\n" + "\n".join(lines)
 
 
 def _render_allowed_tools_block(allowed_tools: Sequence[ToolSpec]) -> str:

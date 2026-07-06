@@ -20,6 +20,9 @@ htmlcov/
 .claude/
 workspace/
 .e2e-workspace/
+.e2e-paths-fixtures/
+.e2e-paths-output/
+.e2e-paths-workspace/
 
 # secrets
 .env

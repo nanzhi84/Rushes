@@ -39,6 +39,29 @@ class VLMCompositionPayload(BaseModel):
     subject_position: str | None = None
     framing_notes: list[str] = Field(default_factory=list)
 
+    # 真实 VLM 会给出枚举外的值（如 safe_area="center"）；两次重试仍可能
+    # 违规，schema 必须自己收敛而不是让整个标注 job 失败（M9 路径 1 实测）。
+    @field_validator("safe_area", mode="before")
+    @classmethod
+    def _coerce_safe_area(cls, value: object) -> object:
+        return value if value in {"ok", "overflow", "unknown"} else "unknown"
+
+    @field_validator("subtitle_occlusion_risk", mode="before")
+    @classmethod
+    def _coerce_occlusion(cls, value: object) -> object:
+        return value if value in {"none", "low", "medium", "high", "unknown"} else "unknown"
+
+    @field_validator("framing_notes", mode="before")
+    @classmethod
+    def _coerce_notes(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
+            return [str(item) for item in value if str(item)]
+        return []
+
 
 class VLMShotAnnotation(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -66,6 +89,18 @@ class VLMShotAnnotation(BaseModel):
         if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):
             return [str(item) for item in value if str(item)]
         return []
+
+    @field_validator("avoid", mode="before")
+    @classmethod
+    def _coerce_avoid(cls, value: object) -> object:
+        # VLM 偶尔把 avoid 填成理由列表/字符串；非 bool 一律保守取 False，
+        # 不因输出噪声把素材排除掉
+        return value if isinstance(value, bool) else False
+
+    @field_validator("role", mode="before")
+    @classmethod
+    def _coerce_role(cls, value: object) -> object:
+        return value if value in {"a_roll_candidate", "b_roll_candidate", "avoid", None} else None
 
 
 @dataclass(frozen=True, slots=True)

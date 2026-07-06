@@ -298,11 +298,22 @@ def validate(
         report=report,
     )
     event = _validation_event(case_state, record.version, report.model_dump(mode="json"))
+    if report.valid:
+        observation = f"timeline v{record.version} 校验通过"
+    else:
+        # LLM 只读 observation：失败项要点名，否则模型无从修起
+        failed = [
+            str(check.get("code", "unknown"))
+            for check in report.checks
+            if check.get("severity") == "error"
+        ]
+        detail = "、".join(failed[:6]) if failed else "未知原因"
+        observation = f"timeline v{record.version} 校验失败：{detail}"
     return ToolResult(
         tool_call_id=context.tool_call_id,
         tool_name=tool_name,
         status="succeeded",
-        observation="timeline valid" if report.valid else "timeline invalid",
+        observation=observation,
         data={
             "case_id": case_state.case_id,
             "timeline_version": record.version,

@@ -32,6 +32,7 @@ CONTEXT_BLOCK_ORDER: tuple[str, ...] = (
     "memory",
     "assets",
     "messages",
+    "turn_observations",
     "allowed_tools",
 )
 

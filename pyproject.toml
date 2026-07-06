@@ -89,7 +89,7 @@ line-ending = "lf"
 [tool.mypy]
 plugins = ["pydantic.mypy"]
 python_version = "3.12"
-files = ["packages", "apps", "scripts/poc"]
+files = ["packages", "apps", "scripts/poc", "scripts/e2e_paths"]
 mypy_path = "packages"
 strict = true
 disallow_untyped_defs = true
