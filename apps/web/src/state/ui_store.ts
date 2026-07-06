@@ -34,13 +34,20 @@ type UiState = {
   closeTreeDialog: () => void;
 };
 
+const SIDEBAR_COLLAPSED_KEY = "rushes.ui.sidebarCollapsed";
+
 export const useUiStore = create<UiState>((set) => ({
-  sidebarCollapsed: false,
+  sidebarCollapsed: readSidebarCollapsed(),
   expandedProjectIds: {},
   selection: { type: "projects" },
   treeDialog: null,
   setSelection: (selection) => set({ selection }),
-  toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+  toggleSidebar: () =>
+    set((state) => {
+      const sidebarCollapsed = !state.sidebarCollapsed;
+      writeSidebarCollapsed(sidebarCollapsed);
+      return { sidebarCollapsed };
+    }),
   toggleProjectExpanded: (projectId) =>
     set((state) => ({
       expandedProjectIds: {
@@ -51,3 +58,25 @@ export const useUiStore = create<UiState>((set) => ({
   openTreeDialog: (dialog) => set({ treeDialog: dialog }),
   closeTreeDialog: () => set({ treeDialog: null })
 }));
+
+function readSidebarCollapsed(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  try {
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function writeSidebarCollapsed(value: boolean): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(value));
+  } catch {
+    return;
+  }
+}

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef } from "react";
-import type { CSSProperties, ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement } from "react";
 import WaveSurfer from "wavesurfer.js";
 
 export type TimelineJson = {
@@ -27,8 +27,10 @@ export type TimelineClipJson = {
 export type TimelineViewerProps = {
   timeline: TimelineJson;
   pxPerSec?: number;
+  playheadSec?: number | null;
   selectedClipId?: string | null;
   onClipClick?: (clipId: string) => void;
+  onSeek?: (sec: number) => void;
   waveformSrc?: string | null;
 };
 
@@ -54,8 +56,10 @@ const CLIP_HEIGHT = 24;
 export function TimelineViewer({
   timeline,
   pxPerSec = 96,
+  playheadSec = null,
   selectedClipId = null,
   onClipClick,
+  onSeek,
   waveformSrc = null
 }: TimelineViewerProps): ReactElement {
   const safeFps = timeline.fps > 0 ? timeline.fps : 30;
@@ -68,6 +72,23 @@ export function TimelineViewer({
     [durationSec]
   );
   const surfaceWidth = LABEL_WIDTH + timelineWidth;
+  const clampedPlayheadSec =
+    playheadSec === null ? null : Math.min(Math.max(playheadSec, 0), durationSec);
+  const playheadX =
+    clampedPlayheadSec === null ? null : LABEL_WIDTH + clampedPlayheadSec * pxPerSec;
+
+  const handleSeekClick = useCallback(
+    (event: ReactMouseEvent<SVGSVGElement>) => {
+      if (!onSeek) {
+        return;
+      }
+      const rect = event.currentTarget.getBoundingClientRect();
+      const localX = event.clientX - rect.left - LABEL_WIDTH;
+      const sec = Math.min(Math.max(localX / pxPerSec, 0), durationSec);
+      onSeek(sec);
+    },
+    [durationSec, onSeek, pxPerSec]
+  );
 
   return (
     <div className="rounded-lg border border-[#d9dee7] bg-white">
@@ -82,6 +103,7 @@ export function TimelineViewer({
             width={surfaceWidth}
             height={svgHeight}
             className="block"
+            onClick={handleSeekClick}
           >
             <rect x={0} y={0} width={surfaceWidth} height={svgHeight} fill="#ffffff" />
             <g transform={`translate(${LABEL_WIDTH} 0)`}>
@@ -131,7 +153,10 @@ export function TimelineViewer({
                             strokeWidth={selected ? 3 : 1}
                             role="button"
                             aria-label={`${track.track_id} ${clip.clipId}`}
-                            onClick={() => onClipClick?.(clip.clipId)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onClipClick?.(clip.clipId);
+                            }}
                           >
                             <title>{clip.label}</title>
                           </rect>
@@ -142,6 +167,18 @@ export function TimelineViewer({
                 );
               })}
             </g>
+            {playheadX !== null ? (
+              <line
+                data-testid="timeline-playhead"
+                x1={playheadX}
+                x2={playheadX}
+                y1={0}
+                y2={svgHeight}
+                stroke="#ef4444"
+                strokeWidth={2}
+                pointerEvents="none"
+              />
+            ) : null}
           </svg>
           {waveformSrc ? (
             <div

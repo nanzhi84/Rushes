@@ -11,9 +11,17 @@ export type PreviewPlayerProps = {
   src: string;
   fps: number;
   onFirstPlay?: () => void;
+  onTimeUpdate?: (sec: number) => void;
+  seekSec?: number | null;
 };
 
-export function PreviewPlayer({ src, fps, onFirstPlay }: PreviewPlayerProps): ReactElement {
+export function PreviewPlayer({
+  src,
+  fps,
+  onFirstPlay,
+  onTimeUpdate,
+  seekSec = null
+}: PreviewPlayerProps): ReactElement {
   return (
     <div className="overflow-hidden rounded-lg border border-[#d9dee7] bg-[#0f172a] text-white">
       <MediaPlayer
@@ -23,7 +31,12 @@ export function PreviewPlayer({ src, fps, onFirstPlay }: PreviewPlayerProps): Re
         aria-label="预览播放器"
       >
         <MediaProvider />
-        <PreviewPlayerControls fps={fps} onFirstPlay={onFirstPlay} />
+        <PreviewPlayerControls
+          fps={fps}
+          onFirstPlay={onFirstPlay}
+          onTimeUpdate={onTimeUpdate}
+          seekSec={seekSec}
+        />
       </MediaPlayer>
     </div>
   );
@@ -31,16 +44,23 @@ export function PreviewPlayer({ src, fps, onFirstPlay }: PreviewPlayerProps): Re
 
 function PreviewPlayerControls({
   fps,
-  onFirstPlay
+  onFirstPlay,
+  onTimeUpdate,
+  seekSec
 }: {
   fps: number;
   onFirstPlay?: () => void;
+  onTimeUpdate?: (sec: number) => void;
+  seekSec?: number | null;
 }): ReactElement {
   const currentTime = useMediaState("currentTime");
   const playing = useMediaState("playing");
   const paused = useMediaState("paused");
   const remote = useMediaRemote();
   const firstPlayReportedRef = useRef(false);
+  const lastSeekSecRef = useRef<number | null | undefined>(undefined);
+  const latestTimeRef = useRef(currentTime);
+  const timeReportFrameRef = useRef<number | null>(null);
   const safeFps = useMemo(() => (fps > 0 ? fps : 30), [fps]);
   const currentFrame = Math.round(currentTime * safeFps);
 
@@ -51,6 +71,38 @@ function PreviewPlayerControls({
     firstPlayReportedRef.current = true;
     onFirstPlay?.();
   }, [onFirstPlay, playing]);
+
+  useEffect(() => {
+    if (seekSec === null || seekSec === undefined) {
+      lastSeekSecRef.current = null;
+      return;
+    }
+    if (lastSeekSecRef.current === seekSec) {
+      return;
+    }
+    lastSeekSecRef.current = seekSec;
+    remote.seek(Math.max(0, seekSec));
+  }, [remote, seekSec]);
+
+  useEffect(() => {
+    latestTimeRef.current = currentTime;
+    if (!onTimeUpdate || timeReportFrameRef.current !== null) {
+      return;
+    }
+    timeReportFrameRef.current = scheduleFrame(() => {
+      timeReportFrameRef.current = null;
+      onTimeUpdate(latestTimeRef.current);
+    });
+  }, [currentTime, onTimeUpdate]);
+
+  useEffect(
+    () => () => {
+      if (timeReportFrameRef.current !== null) {
+        cancelFrame(timeReportFrameRef.current);
+      }
+    },
+    []
+  );
 
   const stepFrame = useCallback(
     (direction: -1 | 1, event: MouseEvent<HTMLButtonElement>) => {
@@ -99,4 +151,19 @@ function PreviewPlayerControls({
       </div>
     </div>
   );
+}
+
+function scheduleFrame(callback: () => void): number {
+  if (typeof window.requestAnimationFrame === "function") {
+    return window.requestAnimationFrame(callback);
+  }
+  return window.setTimeout(callback, 16);
+}
+
+function cancelFrame(frameId: number): void {
+  if (typeof window.cancelAnimationFrame === "function") {
+    window.cancelAnimationFrame(frameId);
+    return;
+  }
+  window.clearTimeout(frameId);
 }

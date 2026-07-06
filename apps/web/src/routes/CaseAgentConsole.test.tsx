@@ -11,6 +11,66 @@ import {
 import type { DomainSsePayload } from "../components/Console/StructuredInteractionRenderer";
 import { CaseConsoleView } from "./CaseAgentConsole";
 
+type MockPreviewProps = {
+  seekSec?: number | null;
+  onTimeUpdate?: (sec: number) => void;
+};
+
+type MockTimelineProps = {
+  playheadSec?: number | null;
+  pxPerSec?: number;
+  onSeek?: (sec: number) => void;
+};
+
+const consoleComponentMocks = vi.hoisted(() => {
+  const previewProps: MockPreviewProps[] = [];
+  const timelineProps: MockTimelineProps[] = [];
+  return {
+    previewProps,
+    timelineProps,
+    reset() {
+      previewProps.length = 0;
+      timelineProps.length = 0;
+    }
+  };
+});
+
+vi.mock("../components/PreviewPlayer", async () => {
+  const React = await import("react");
+  return {
+    PreviewPlayer(props: MockPreviewProps) {
+      consoleComponentMocks.previewProps.push(props);
+      return React.createElement(
+        "button",
+        {
+          type: "button",
+          "data-testid": "mock-preview",
+          onClick: () => props.onTimeUpdate?.(1.25)
+        },
+        "Mock Preview"
+      );
+    }
+  };
+});
+
+vi.mock("../components/TimelineViewer", async () => {
+  const React = await import("react");
+  return {
+    TimelineViewer(props: MockTimelineProps) {
+      consoleComponentMocks.timelineProps.push(props);
+      return React.createElement(
+        "button",
+        {
+          type: "button",
+          "data-testid": "mock-timeline-seek",
+          onClick: () => props.onSeek?.(2.5)
+        },
+        "Mock Timeline"
+      );
+    }
+  };
+});
+
 type Listener = (event: MessageEvent<string>) => void;
 type FetchMock = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -56,6 +116,7 @@ describe("CaseConsoleView", () => {
     vi.unstubAllGlobals();
     window.sessionStorage.clear();
     MockEventSource.instances = [];
+    consoleComponentMocks.reset();
   });
 
   it("发送消息后禁用输入框，并在 TurnEnded SSE 后恢复", async () => {
@@ -218,6 +279,18 @@ describe("CaseConsoleView", () => {
       eventName: "FutureEvent"
     });
   });
+
+  it("时间线 seek 会联动传给 PreviewPlayer", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true });
+    renderConsole(fetchMock);
+
+    fireEvent.click(await screen.findByTestId("mock-timeline-seek"));
+
+    await waitFor(() => {
+      const latestPreviewProps = consoleComponentMocks.previewProps.at(-1);
+      expect(latestPreviewProps?.seekSec).toBe(2.5);
+    });
+  });
 });
 
 function renderConsole(fetchMock: FetchMock): void {
@@ -235,13 +308,29 @@ function renderConsole(fetchMock: FetchMock): void {
 
 function mockFetch({
   decision,
+  timeline = false,
   onAnswer
 }: {
   decision: Decision | null;
+  timeline?: boolean;
   onAnswer?: (url: string, init: RequestInit | undefined) => void;
 }): FetchMock {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url === "/api/projects/project_1/cases/case_1") {
+      return jsonResponse({
+        case: {
+          case_id: "case_1",
+          project_id: "project_1",
+          name: "Case 001",
+          status: "active",
+          timeline_current_version: timeline ? 1 : null
+        }
+      });
+    }
+    if (url.startsWith("/api/projects/project_1/cases/case_1/timeline")) {
+      return jsonResponse(timelineResponseFixture());
+    }
     if (url.endsWith("/decisions/current")) {
       return jsonResponse({ decision });
     }
@@ -268,6 +357,33 @@ function mockFetch({
     }
     return jsonResponse({});
   });
+}
+
+function timelineResponseFixture() {
+  return {
+    case_id: "case_1",
+    timeline_version: 1,
+    summary: "首版粗剪",
+    preview_id: "prev_1",
+    timeline: {
+      fps: 30,
+      duration_frames: 90,
+      tracks: [
+        {
+          track_id: "visual_base",
+          clips: [
+            {
+              timeline_clip_id: "tc_a",
+              track_id: "visual_base",
+              timeline_start_frame: 0,
+              timeline_end_frame: 30,
+              asset_id: "asset_a"
+            }
+          ]
+        }
+      ]
+    }
+  };
 }
 
 function audioModeDecision(overrides: Partial<Decision> = {}): Decision {

@@ -15,9 +15,15 @@ const vidstackMock = vi.hoisted(() => {
       listener();
     }
   };
+  const seek = vi.fn((time: number) => {
+    state = { ...state, currentTime: time };
+    emit();
+  });
   return {
+    seek,
     reset() {
       state = { currentTime: 0, playing: false, paused: true };
+      seek.mockClear();
       emit();
     },
     get<T extends keyof State>(key: T): State[T] {
@@ -59,9 +65,7 @@ vi.mock("@vidstack/react", async () => {
     },
     useMediaRemote() {
       return {
-        seek(time: number) {
-          vidstackMock.set({ currentTime: time });
-        },
+        seek: vidstackMock.seek,
         play() {
           vidstackMock.set({ playing: true, paused: false });
         },
@@ -113,5 +117,39 @@ describe("PreviewPlayer", () => {
     });
 
     await waitFor(() => expect(onFirstPlay).toHaveBeenCalledTimes(1));
+  });
+
+  it("seekSec 变化时只触发一次受控 seek", async () => {
+    const { rerender } = render(
+      <PreviewPlayer src="/api/media/preview/prev_1" fps={30} seekSec={null} />
+    );
+
+    expect(vidstackMock.seek).not.toHaveBeenCalled();
+
+    rerender(<PreviewPlayer src="/api/media/preview/prev_1" fps={30} seekSec={1.25} />);
+
+    await waitFor(() => expect(vidstackMock.seek).toHaveBeenCalledTimes(1));
+    expect(vidstackMock.seek).toHaveBeenLastCalledWith(1.25);
+
+    rerender(<PreviewPlayer src="/api/media/preview/prev_1" fps={30} seekSec={1.25} />);
+
+    await waitFor(() => expect(vidstackMock.seek).toHaveBeenCalledTimes(1));
+  });
+
+  it("currentTime 变化时通过 onTimeUpdate 上报秒数", async () => {
+    const onTimeUpdate = vi.fn();
+    render(
+      <PreviewPlayer
+        src="/api/media/preview/prev_1"
+        fps={30}
+        onTimeUpdate={onTimeUpdate}
+      />
+    );
+
+    act(() => {
+      vidstackMock.set({ currentTime: 1.5 });
+    });
+
+    await waitFor(() => expect(onTimeUpdate).toHaveBeenCalledWith(1.5));
   });
 });
