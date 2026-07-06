@@ -139,8 +139,10 @@ export function UploadDropzone({ projectId, onUploaded }: UploadDropzoneProps): 
         <div className="mt-4 rounded-md bg-[#fee4e2] px-3 py-2 text-sm text-[#b42318]">
           <p className="font-medium">{`拒收 ${rejections.length} 个`}</p>
           <ul className="mt-1 space-y-1">
-            {rejections.map((item) => (
-              <li key={item.filename} className="text-xs">{`${item.filename}：${item.message}`}</li>
+            {rejections.map((item, index) => (
+              <li key={`${item.filename}-${index}`} className="text-xs">
+                {`${item.filename}：${item.message}`}
+              </li>
             ))}
           </ul>
         </div>
