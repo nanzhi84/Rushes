@@ -14,7 +14,7 @@ from contracts.patch import AddBgmOp, GenerateSubtitlesOp, TimelinePatchRequest
 from contracts.project import ProjectState
 from contracts.tool import PatchOpSpec, ToolSpec
 from domain.decision_effects import pending_tool_call_status_after_answer, reduce_decision_answer
-from domain.preconditions import PreconditionContext, ProjectArtifactStats, ProjectBgmAsset
+from domain.preconditions import PreconditionContext, ProjectArtifactStats, ProjectAudioAsset
 from domain.subtitle_templates import list_subtitle_templates
 from storage import schema
 from storage.db import create_workspace_engine
@@ -105,7 +105,7 @@ def test_bgm_gate_uses_upload_default_skip_or_project_assets() -> None:
         call,
         _context(
             allowed_tool_names=frozenset({"timeline.apply_patch"}),
-            project_bgm_assets=(ProjectBgmAsset(asset_id="asset_bgm_1", filename="配乐.m4a"),),
+            project_audio_assets=(ProjectAudioAsset(asset_id="asset_bgm_1", filename="配乐.m4a"),),
         ),
     )
 
@@ -309,14 +309,14 @@ def _context(
     case_state: CaseState | None = None,
     *,
     allowed_tool_names: frozenset[str],
-    project_bgm_assets: tuple[ProjectBgmAsset, ...] = (),
+    project_audio_assets: tuple[ProjectAudioAsset, ...] = (),
 ) -> PolicyContext:
     return PolicyContext(
         preconditions=PreconditionContext(
             case_state=case_state or _case_state(),
             project_state=_project_state(),
             project_artifacts=ProjectArtifactStats(usable_asset_count=1),
-            project_bgm_assets=project_bgm_assets,
+            project_audio_assets=project_audio_assets,
         ),
         allowed_tool_names=allowed_tool_names,
     )

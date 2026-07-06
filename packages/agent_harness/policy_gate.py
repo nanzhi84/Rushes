@@ -640,7 +640,7 @@ def _bgm_confirmation_options(context: PolicyContext) -> list[DecisionOption]:
         },
     )
     skip_option = DecisionOption(option_id="skip", label="跳过 BGM", payload={"enabled": False})
-    project_assets = context.preconditions.project_bgm_assets[:5]
+    project_assets = context.preconditions.project_audio_assets[:5]
     if not project_assets:
         return [
             DecisionOption(

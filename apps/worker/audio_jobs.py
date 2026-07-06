@@ -772,7 +772,7 @@ def _voiceover_asset_imported(
             "object_hash": object_hash,
             "object_size": object_size,
             "reference_path": None,
-            "kind": AssetKind.VOICEOVER.value,
+            "kind": AssetKind.AUDIO.value,
             "source": AssetSource.UPLOAD.value,
             "filename": filename,
             "hash": object_hash,
