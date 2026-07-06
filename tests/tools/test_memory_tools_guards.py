@@ -215,7 +215,7 @@ def test_search_relevant_scopes_and_truncates(tmp_path: Path) -> None:
         assert no_project.data["memories"] == []
 
 
-def test_memory_save_followup_rejects_invalid_payload() -> None:
+async def test_memory_save_followup_rejects_invalid_payload() -> None:
     """防御分支：payload 缺字段/类型错时记 trace 并直接返回，不触达 DB。"""
     from typing import Any, cast
 
@@ -236,7 +236,7 @@ def test_memory_save_followup_rejects_invalid_payload() -> None:
         {"candidate_id": "memcand_1", "scope": "user", "case_id": 42},
     ):
         recorder = _Recorder()
-        _execute_memory_save_followup(
+        await _execute_memory_save_followup(
             HarnessFollowup(kind="enqueue_memory_save", decision_id="dec_1", payload=payload),
             engine=cast(Any, None),
             router=cast(Any, None),

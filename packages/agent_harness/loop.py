@@ -98,6 +98,23 @@ def _emit_turn_event(listener: TurnListener | None, event: dict[str, Any]) -> No
         listener.emit(event)
 
 
+def _make_turn_progress(
+    listener: TurnListener | None,
+) -> Callable[[Mapping[str, Any]], None]:
+    """构造注入工具上下文的进度回调（``metadata["turn_progress"]``）。
+
+    有 turn_listener 时把 payload 转成 turn-stream 的 ``subagent_progress`` 事件；无
+    listener 时是纯 no-op。返回值**永远是可调用对象、绝不为 None**，且整段吞掉异常——
+    工具内部的进度上报绝不能把回合搞崩。
+    """
+
+    def _turn_progress(payload: Mapping[str, Any]) -> None:
+        with contextlib.suppress(Exception):
+            _emit_turn_event(listener, {"type": "subagent_progress", **payload})
+
+    return _turn_progress
+
+
 def _emit_tool_step_finished(
     listener: TurnListener | None,
     step_id: str,
@@ -656,13 +673,14 @@ async def _run_turn_body(
             outcome = "running"
             break
 
-        result = _execute_tool(
+        result = await _execute_tool(
             router,
             tool_call,
             engine=engine,
             state=loaded,
             turn_id=active_turn_id,
             gateway=tool_gateway,
+            turn_listener=turn_listener,
         )
         _emit_tool_step_finished(turn_listener, step_id, tool_call.tool_name, result.status)
         accumulator.tool_results.append(result)
@@ -1010,12 +1028,13 @@ async def _maybe_answer_pending_decision_from_user_message(
         )
         return "natural_language_decision_answer_denied"
 
-    result = _execute_tool(
+    result = await _execute_tool(
         router,
         tool_call,
         engine=engine,
         state=loaded,
         turn_id=turn_id,
+        turn_listener=turn_listener,
     )
     accumulator.tool_results.append(result)
     tracer.record("tool_result", _tool_result_payload(result))
@@ -1320,7 +1339,7 @@ def _replay_tool_call_from_item(item: TurnQueueItem) -> ToolCall | None:
     )
 
 
-def _execute_tool(
+async def _execute_tool(
     router: ToolRouter,
     tool_call: ToolCall,
     *,
@@ -1328,6 +1347,7 @@ def _execute_tool(
     state: _LoadedState,
     turn_id: str,
     gateway: Any | None = None,
+    turn_listener: TurnListener | None = None,
 ) -> ToolResult:
     with engine.connect() as connection:
         context = ToolExecutionContext(
@@ -1338,10 +1358,15 @@ def _execute_tool(
             decisions=state.decisions,
             readonly_connection=connection,
             created_at=_now_iso(),
-            metadata=_tool_context_metadata(engine, gateway),
+            metadata=_tool_context_metadata(engine, gateway, turn_listener=turn_listener),
         )
         try:
-            return router.execute(tool_call, context)
+            # 同步 handler 直接返回 ToolResult（行为零变化，仍在事件循环内同步跑）；
+            # async handler 返回 Awaitable，此处 await 后再入 accumulator/trace/observation。
+            outcome = router.execute(tool_call, context)
+            if isinstance(outcome, ToolResult):
+                return outcome
+            return await outcome
         except Exception as exc:  # pragma: no cover - defensive harness boundary
             return ToolResult(
                 tool_call_id=context.tool_call_id,
@@ -1498,7 +1523,7 @@ async def _handle_followups(
             )
             enqueued.append(followup.decision_id)
         elif followup.kind == "enqueue_memory_save":
-            _execute_memory_save_followup(
+            await _execute_memory_save_followup(
                 followup,
                 engine=engine,
                 router=router,
@@ -1516,7 +1541,7 @@ async def _handle_followups(
     return enqueued
 
 
-def _execute_memory_save_followup(
+async def _execute_memory_save_followup(
     followup: HarnessFollowup,
     *,
     engine: Engine,
@@ -1576,7 +1601,7 @@ def _execute_memory_save_followup(
     )
     try:
         state = _load_state(engine, case_id)
-        result = _execute_tool(router, tool_call, engine=engine, state=state, turn_id=turn_id)
+        result = await _execute_tool(router, tool_call, engine=engine, state=state, turn_id=turn_id)
     except Exception as exc:  # pragma: no cover - defensive post-commit boundary
         result = ToolResult(
             tool_call_id=tool_call.tool_call_id or "followup_memory_save",
@@ -1929,7 +1954,12 @@ def _asset_id_for_asr(case_state: CaseState) -> str | None:
     return None
 
 
-def _tool_context_metadata(engine: Engine, gateway: Any | None = None) -> dict[str, Any]:
+def _tool_context_metadata(
+    engine: Engine,
+    gateway: Any | None = None,
+    *,
+    turn_listener: TurnListener | None = None,
+) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     database = engine.url.database
     if database is not None and database != ":memory:":
@@ -1937,6 +1967,8 @@ def _tool_context_metadata(engine: Engine, gateway: Any | None = None) -> dict[s
     if gateway is not None:
         # 工具经此调 LLM/VLM/embedding；不注入则全部降级（M9 实测）
         metadata["provider_gateway"] = gateway
+    # 进度通道：永远是可调用对象、绝不为 None（无 listener 时为 no-op）。
+    metadata["turn_progress"] = _make_turn_progress(turn_listener)
     return metadata
 
 

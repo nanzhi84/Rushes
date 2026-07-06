@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,7 +16,9 @@ from domain.preconditions import assert_known_preconditions
 
 from .context import ToolExecutionContext
 
-ToolHandler = Callable[[Any, ToolExecutionContext], ToolResult]
+# 工具 handler 既可同步返回 ToolResult，也可为 async def 返回 Awaitable[ToolResult]；
+# 执行侧（agent_harness._execute_tool）统一在事件循环内 await 兼容两者。
+ToolHandler = Callable[[Any, ToolExecutionContext], ToolResult | Awaitable[ToolResult]]
 
 
 @dataclass(frozen=True, slots=True)
