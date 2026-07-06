@@ -128,7 +128,7 @@ def test_materializer_syncs_voiceover_clip_from_narration_ref(tmp_path: Path) ->
     engine = _engine(tmp_path)
     with engine.begin() as connection:
         _seed_clip(connection, "asset_1", "clip_1", end_frame=45)
-        _seed_asset(connection, "asset_vo", kind="voiceover", probe={"duration_sec": 1.5})
+        _seed_asset(connection, "asset_vo", kind="audio", probe={"duration_sec": 1.5})
     case_state = _case_state(
         audio_plan={"mode": "tts", "voiceover_asset_id": "asset_vo"},
         slot_windows=[("slot_1", [1.0, 1.5])],
@@ -160,7 +160,7 @@ def test_materializer_syncs_voiceover_clip_from_transcript_utterance_ids(
         _seed_asset(
             connection,
             "asset_vo",
-            kind="voiceover",
+            kind="audio",
             probe={"fps": 30.0, "frame_count": 120},
         )
         connection.execute(
@@ -217,7 +217,7 @@ def test_materializer_omits_voiceover_when_transcript_ref_cannot_resolve(
     engine = _engine(tmp_path)
     with engine.begin() as connection:
         _seed_clip(connection, "asset_1", "clip_1", end_frame=45)
-        _seed_asset(connection, "asset_vo", kind="voiceover", probe={"duration_sec": 1.5})
+        _seed_asset(connection, "asset_vo", kind="audio", probe={"duration_sec": 1.5})
         connection.execute(
             schema.transcripts.insert().values(
                 transcript_id="tr_vo",
@@ -249,7 +249,7 @@ def test_materializer_narration_range_rejects_invalid_transcript_refs(
 ) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_asset(connection, "asset_vo", kind="voiceover", probe={"duration_sec": 2.0})
+        _seed_asset(connection, "asset_vo", kind="audio", probe={"duration_sec": 2.0})
 
         assert _narration_ms_range(
             connection,
@@ -277,7 +277,7 @@ def test_materializer_omits_voiceover_when_narration_exceeds_asset_frames(
         _seed_asset(
             connection,
             "asset_vo",
-            kind="voiceover",
+            kind="audio",
             probe={"fps": 30.0, "frame_count": 10},
         )
     case_state = _case_state(

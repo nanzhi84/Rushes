@@ -15,17 +15,13 @@ class AssetKind(StrEnum):
     VIDEO = "video"
     IMAGE = "image"
     AUDIO = "audio"
-    VOICEOVER = "voiceover"
-    BGM = "bgm"
     FONT = "font"
-    SUBTITLE_TEMPLATE = "subtitle_template"
 
 
 class AssetSource(StrEnum):
     UPLOAD = "upload"
     LOCAL_PATH = "local_path"
     URL = "url"
-    DEFAULT_LIBRARY = "default_library"
 
 
 class AssetProbe(BaseModel):
