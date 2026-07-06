@@ -282,7 +282,7 @@ erDiagram
     text storage_mode "copy|reference"
     text object_hash FK "copy 模式"
     text reference_path "reference 模式"
-    text kind "video|image|audio|voiceover|bgm|font|subtitle_template"
+    text kind "video|image|audio|font"
     text source "upload|local_path|url"
     text hash "sha256"
     int  mtime
@@ -1117,7 +1117,7 @@ CutPlan 最小 schema：
   "storage_mode": "copy | reference",
   "workspace_object_uri": "object://ab/cd/abcd.../source.mp4",
   "reference_path": "/Users/me/Movies/raw/a.mp4",
-  "kind": "video | image | audio | voiceover | bgm | font | subtitle_template",
+  "kind": "video | image | audio | font",
   "source": "upload | local_path | url",
   "filename": "source.mp4",
   "hash": "sha256:...", "mtime": 1751600000, "size": 1048576000,
@@ -1247,7 +1247,7 @@ CutPlan 最小 schema：
 | `approve_speech_cut`（对 RoughCutProposal 的勾选确认，**timeline 之前或之后都可能发生**） | 确认的删除区间写入 `cut_plan.removed_ranges` → `CutPlanUpdated`。**不触碰 rough_cut_approved**。后续：timeline 尚不存在 → materializer 在 plan_from_candidates 时应用；timeline 已存在 → harness 事务后入队 delete_range patches |
 | `approve_rough_cut`（对**粗剪预览**的整体满意确认；由 Agent 在用户表达满意时调 confirm_action 创建，decision 绑定 preview_id/timeline_version） | `rough_cut_approved = true` 且 `rough_cut_approved_version = 该 timeline_version`——**直接作为 DecisionAnswered 的状态影响**（权威事件表），不产生 CutPlanUpdated。**状态转移（精确定义）**：`rough_cut_approved_version` 记录"最后一次被用户确认的版本号"，一经写入**永不清空**（重置只动 bool）。TimelineVersionCreated 改动 visual_base / original_audio / voiceover 轨（后处理 op 之外）→ `rough_cut_approved=false`（version 保留）；TimelineVersionRestored → `rough_cut_approved = (恢复目标版本 == rough_cut_approved_version)`——命中即**重新置 true**，未命中置 false |
 | `subtitle` | `postprocess_plan.subtitle = {enabled, style_template_id}` → `PostprocessPlanUpdated`；选跳过则 `{enabled:false}` |
-| `bgm` | `postprocess_plan.bgm = {enabled, asset_id, gain_db, duck}` → `PostprocessPlanUpdated` |
+| `bgm` | `postprocess_plan.bgm = {enabled, asset_id, gain_db, duck}`（`asset_id` 指向用户 audio 素材：已导入的音频素材或上传的新 BGM）→ `PostprocessPlanUpdated`；选跳过则 `{enabled:false}` |
 | `export` | 纯归约仅记 answered；工具执行走 pending_tool_call 重放（§4.4，harness 事务后入队） |
 | `memory_scope` | answer = {candidate_id, scope}；纯归约仅记 answered；`memory.save(candidate_id, scope)` 由 harness 事务后入队执行 → 成功后 MEMORY_CANDIDATES.status=saved、回填 saved_memory_id → `MemorySaved` |
 | `destructive_project_action` / `url_import` | 纯归约仅记 answered；pending_tool_call（project.delete / project.move_case / asset.import_url）由 harness 事务后重放 |
@@ -2320,10 +2320,15 @@ Scenario: 粗剪确认后不能自动加字幕
   Then Agent 必须 ask_user 询问字幕
   And 未回答前 subtitles track 为空
 
-Scenario: 无 BGM 素材时三选项
-  Given Project 无 BGM asset
+Scenario: 有 audio 素材时 BGM 决策列出素材供选
+  Given Project 已 link 至少一个 audio asset
   When 用户选择添加 BGM
-  Then 选项为 上传 BGM / 默认无版权 BGM / 跳过
+  Then 选项为 已导入 audio 素材（按导入时间倒序，label 用文件名）/ 上传新的 BGM / 跳过
+
+Scenario: 无 audio 素材时 BGM 决策仅两选项
+  Given Project 无 audio asset
+  When 用户选择添加 BGM
+  Then 选项为 上传新的 BGM / 跳过
 
 Scenario: 最终导出必须确认（ask 机制）
   Given final preview 已渲染
@@ -2344,7 +2349,7 @@ Scenario: 字幕写入 op 的 gate（ask 而非拒绝）
   Then pending_tool_call 置 discarded 且 postprocess_plan.subtitle = {enabled:false}
 ```
 
-默认资产约束：字幕模板 ≤ 10 种（无许可证问题）；默认 BGM ≤ 10 首（无版权风险）；不做 AI 转场；只导出 MP4。
+默认资产约束：字幕模板 ≤ 10 种（无许可证问题）；无内置 BGM 库，BGM 一律来自用户导入的 audio 素材；不做 AI 转场；只导出 MP4。
 
 ### M8：Memory Scope
 
