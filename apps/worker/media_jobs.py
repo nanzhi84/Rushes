@@ -33,6 +33,10 @@ def build_proxy_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
     async def _handler(job: Job) -> JobExecutionResult:
         asset_id = _job_asset_id(job)
         source_path, kind = _asset_source(engine, paths, asset_id)
+        if kind == AssetKind.FONT.value:
+            # 字体没有可转码的媒体代理：跳过 probe/proxy，直接进入本地索引读取元数据。
+            _enqueue_index(engine, job, asset_id)
+            return JobExecutionResult({"asset_id": asset_id, "index_enqueued": True})
         try:
             probe = probe_media(source_path)
             _apply_or_raise(
@@ -65,6 +69,7 @@ def build_proxy_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
                     },
                 ),
             )
+            _enqueue_index(engine, job, asset_id)
             return JobExecutionResult(
                 {
                     "asset_id": asset_id,
@@ -224,6 +229,29 @@ def _proxy_job_event(*, project_id: str, asset_id: str) -> JobEnqueued:
         project_id=project_id,
         payload={
             "kind": "proxy",
+            "asset_id": asset_id,
+            "idempotency_key": idempotency_key,
+            "job_payload": {"asset_id": asset_id},
+            "attempts": 0,
+            "max_retries": 2,
+        },
+    )
+
+
+def _enqueue_index(engine: Engine, job: Job, asset_id: str) -> None:
+    _apply_or_raise(engine, _index_job_event(project_id=job.project_id, asset_id=asset_id))
+
+
+def _index_job_event(*, project_id: str | None, asset_id: str) -> JobEnqueued:
+    import hashlib
+
+    idempotency_key = f"asset:{asset_id}:index"
+    digest = hashlib.sha256(f"index:{idempotency_key}".encode()).hexdigest()
+    return JobEnqueued(
+        job_id=f"job_{digest[:20]}",
+        project_id=project_id,
+        payload={
+            "kind": "index",
             "asset_id": asset_id,
             "idempotency_key": idempotency_key,
             "job_payload": {"asset_id": asset_id},

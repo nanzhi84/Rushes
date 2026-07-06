@@ -202,11 +202,14 @@ class MaterialAsset(ApiResponseModel):
     annotation_status: str
     annotation_pass: str
     index_status: str
+    understanding_status: str
     usable: bool
     enabled: bool
     probe: dict[str, Any] | None
+    duration_sec: float | None
     proxy_object_hash: str | None
     proxy_ready: bool
+    thumbnail_ready: bool
     invalid: bool
     failure: dict[str, Any] | None
     jobs: list[AssetJobSummary]

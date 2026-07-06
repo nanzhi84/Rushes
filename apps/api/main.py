@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Query, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
@@ -1388,6 +1388,16 @@ def _register_routes(app: FastAPI) -> None:
         return _range_response(proxy_path, request)
 
     @app.get(
+        "/api/media/{asset_id}/thumbnail",
+        response_class=Response,
+        responses=_response_docs(not_found=True),
+    )
+    async def media_thumbnail(asset_id: str, request: Request) -> Response:
+        state = state_from_request(request)
+        thumbnail_path = _require_thumbnail_path(state.engine, state.workspace_paths, asset_id)
+        return Response(content=thumbnail_path.read_bytes(), media_type="image/jpeg")
+
+    @app.get(
         "/api/media/preview/{preview_id}",
         response_class=StreamingResponse,
         responses=_response_docs(not_found=True),
@@ -1878,7 +1888,9 @@ def _material_asset_payload(values: dict[str, Any], jobs: list[dict[str, Any]]) 
     probe = _load_json_if_str(values.get("probe"))
     failure = _load_json_if_str(values.get("failure"))
     proxy_object_hash = values.get("proxy_object_hash")
+    thumbnail_object_hash = values.get("thumbnail_object_hash")
     usable = bool(values["usable"])
+    duration_sec = probe.get("duration_sec") if isinstance(probe, dict) else None
     return {
         "asset_id": values["asset_id"],
         "storage_mode": values["storage_mode"],
@@ -1892,11 +1904,14 @@ def _material_asset_payload(values: dict[str, Any], jobs: list[dict[str, Any]]) 
         "annotation_status": values["annotation_status"],
         "annotation_pass": values["annotation_pass"],
         "index_status": values["index_status"],
+        "understanding_status": values.get("understanding_status") or "none",
         "usable": usable,
         "enabled": bool(values["link_enabled"]),
         "probe": probe if isinstance(probe, dict) else None,
+        "duration_sec": duration_sec if isinstance(duration_sec, (int, float)) else None,
         "proxy_object_hash": proxy_object_hash,
         "proxy_ready": isinstance(proxy_object_hash, str) and proxy_object_hash != "",
+        "thumbnail_ready": isinstance(thumbnail_object_hash, str) and thumbnail_object_hash != "",
         "invalid": not usable and _failure_code(failure) == "reference_invalidated",
         "failure": failure if isinstance(failure, dict) else None,
         "jobs": jobs,
@@ -2146,6 +2161,17 @@ def _require_proxy_path(engine: Engine, paths: WorkspacePaths, asset_id: str) ->
     if not proxy_path.exists():
         raise HTTPException(status_code=404, detail={"reason": "proxy_not_found"})
     return proxy_path
+
+
+def _require_thumbnail_path(engine: Engine, paths: WorkspacePaths, asset_id: str) -> Path:
+    asset = _require_asset(engine, asset_id)
+    thumbnail_hash = asset.get("thumbnail_object_hash")
+    if not isinstance(thumbnail_hash, str) or thumbnail_hash == "":
+        raise HTTPException(status_code=404, detail={"reason": "thumbnail_not_ready"})
+    thumbnail_path = paths.object_path(thumbnail_hash)
+    if not thumbnail_path.exists():
+        raise HTTPException(status_code=404, detail={"reason": "thumbnail_not_found"})
+    return thumbnail_path
 
 
 def _require_preview_path(engine: Engine, paths: WorkspacePaths, preview_id: str) -> Path:

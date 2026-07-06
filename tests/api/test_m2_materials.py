@@ -20,8 +20,10 @@ from agent_harness.reducer import apply
 from contracts.events import (
     AnnotationFailed,
     AssetImported,
+    AssetIndexReady,
     AssetLinked,
     CaseCreated,
+    MaterialUnderstandingCompleted,
     ProjectCreated,
 )
 from storage import schema
@@ -871,3 +873,98 @@ def _insert_import_url_job(engine: Engine) -> None:
                 "finished_at": None,
             }
         )
+
+
+def _seed_indexed_asset(
+    app: FastAPI,
+    *,
+    asset_id: str,
+    thumbnail_bytes: bytes | None,
+    duration_sec: float,
+) -> str | None:
+    paths = _state(app).workspace_paths
+    object_ref = ObjectStore(paths).put_bytes(b"source-" + asset_id.encode())
+    thumbnail_hash: str | None = None
+    events: list[Any] = [
+        AssetImported(
+            project_id="project_1",
+            asset_id=asset_id,
+            payload={
+                "storage_mode": "copy",
+                "object_hash": object_ref.object_hash,
+                "object_size": object_ref.size,
+                "kind": "video",
+                "filename": f"{asset_id}.mp4",
+                "hash": object_ref.object_hash,
+                "size": object_ref.size,
+                "mtime": 1,
+                "probe": {"duration_sec": duration_sec, "has_audio": False},
+            },
+        ),
+        AssetLinked(project_id="project_1", asset_id=asset_id),
+    ]
+    if thumbnail_bytes is not None:
+        thumbnail_hash = ObjectStore(paths).put_bytes(thumbnail_bytes).object_hash
+        events.append(
+            AssetIndexReady(
+                project_id="project_1",
+                asset_id=asset_id,
+                payload={
+                    "index_json": {"duration_sec": duration_sec, "shots": []},
+                    "thumbnail_object_hash": thumbnail_hash,
+                    "ingest_status": "indexed",
+                },
+            )
+        )
+        events.append(MaterialUnderstandingCompleted(project_id="project_1", asset_id=asset_id))
+    _apply_events(_engine(app), *events)
+    return thumbnail_hash
+
+
+def test_media_thumbnail_serves_jpeg_and_404_when_missing(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    thumbnail_bytes = b"\xff\xd8\xff\xe0jpeg-body"
+    _seed_indexed_asset(
+        app,
+        asset_id="asset_thumb",
+        thumbnail_bytes=thumbnail_bytes,
+        duration_sec=12.5,
+    )
+    _seed_indexed_asset(app, asset_id="asset_bare", thumbnail_bytes=None, duration_sec=3.0)
+
+    ready = client.get("/api/media/asset_thumb/thumbnail", headers=AUTH)
+    missing = client.get("/api/media/asset_bare/thumbnail", headers=AUTH)
+
+    assert ready.status_code == 200
+    assert ready.headers["content-type"] == "image/jpeg"
+    assert ready.content == thumbnail_bytes
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["reason"] == "thumbnail_not_ready"
+
+
+def test_materials_payload_exposes_thumbnail_duration_and_understanding(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_indexed_asset(
+        app,
+        asset_id="asset_thumb",
+        thumbnail_bytes=b"\xff\xd8\xff\xe0jpeg",
+        duration_sec=8.0,
+    )
+    _seed_indexed_asset(app, asset_id="asset_bare", thumbnail_bytes=None, duration_sec=3.0)
+
+    response = client.get("/api/projects/project_1/materials", headers=AUTH)
+
+    assert response.status_code == 200
+    assets = {asset["asset_id"]: asset for asset in response.json()["assets"]}
+    indexed = assets["asset_thumb"]
+    assert indexed["thumbnail_ready"] is True
+    assert indexed["duration_sec"] == 8.0
+    assert indexed["understanding_status"] == "ready"
+    bare = assets["asset_bare"]
+    assert bare["thumbnail_ready"] is False
+    assert bare["duration_sec"] == 3.0
+    assert bare["understanding_status"] == "none"
