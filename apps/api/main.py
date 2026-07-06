@@ -57,6 +57,7 @@ from providers.gateway import ProviderCallRecord
 from providers.planner import build_openai_compatible_planner
 from providers.tool_gateway import build_default_tool_gateway
 from storage import schema
+from storage.data_migrations import apply_data_migrations
 from storage.db import begin_immediate, create_workspace_engine
 from storage.repositories import (
     CasesRepository,
@@ -279,6 +280,7 @@ def create_app(
     engine = create_workspace_engine(workspace_paths)
     with engine.begin() as connection:
         schema.create_all(connection)
+        apply_data_migrations(connection)
 
     api_token = token or generate_token()
     active_port = startup_port or startup_port_from_env()
