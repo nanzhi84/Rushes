@@ -230,9 +230,7 @@ def command_verify_memory(args: argparse.Namespace) -> None:
     engine = create_workspace_engine(args.workspace)
     loaded = _load_state(engine, args.case_id)
     matches = [
-        item
-        for item in loaded.memory_summaries
-        if args.memory_id in item and args.contains in item
+        item for item in loaded.memory_summaries if args.memory_id in item and args.contains in item
     ]
     if not matches:
         payload = json.dumps(list(loaded.memory_summaries), ensure_ascii=False, indent=2)
