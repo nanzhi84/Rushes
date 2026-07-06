@@ -90,7 +90,7 @@ async def run_image_annotation(
         ),
         clips=[
             AnnotationClip(
-                clip_id="clip_0001",
+                clip_id=f"{asset_id}_clip_0001",
                 source_start_frame=0,
                 source_end_frame=1,
                 role="image_candidate",

@@ -76,12 +76,13 @@ def retry(input_model: AnnotationRetryInput, context: ToolExecutionContext) -> T
     asset = _asset_for_project(context, project_id, input_model.asset_id)
     if asset is None:
         return _failed("annotation.retry", context, "asset_not_found", "asset is not linked")
-    if asset["annotation_status"] != "failed":
+    if asset["annotation_status"] not in {"failed", "pending"}:
+        # pending 也允许触发：素材页"重新标注"按钮对未标注素材同样有效
         return _failed(
             "annotation.retry",
             context,
-            "annotation_not_failed",
-            "only failed annotations can be retried",
+            "annotation_not_retryable",
+            "only failed or pending annotations can be (re)triggered",
         )
     pass_ = input_model.pass_ or _pass_from_asset(asset)
     event = _annotation_job_event(

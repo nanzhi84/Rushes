@@ -351,9 +351,11 @@ def _generic_effect(
         scratch_memory = dict(case_state.scratch_memory)
         scratch_memory[str(key or decision.decision_id)] = text
         return DecisionEffectResult(state_patch={"scratch_memory": scratch_memory})
-    raise ValueError(
-        "generic decisions require reduce_target brief.confirmed_facts or scratch_memory"
-    )
+    # 历史/异常数据缺 reduce_target：按 scratch_memory 兜底，不让 answer 炸掉
+    key = payload.get("key")
+    scratch_memory = dict(case_state.scratch_memory)
+    scratch_memory[str(key or decision.decision_id)] = text
+    return DecisionEffectResult(state_patch={"scratch_memory": scratch_memory})
 
 
 def _replay_followups(decision: Decision, answer: DecisionAnswer) -> tuple[HarnessFollowup, ...]:

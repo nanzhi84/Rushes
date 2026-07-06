@@ -87,7 +87,7 @@ def test_annotation_retry_fails_for_non_failed_asset(tmp_path: Path) -> None:
 
     assert result.status == "failed"
     assert result.error is not None
-    assert result.error.error_code == "annotation_not_failed"
+    assert result.error.error_code == "annotation_not_retryable"
 
 
 def _engine_with_failed_asset_and_annotation(tmp_path: Path):

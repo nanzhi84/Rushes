@@ -90,6 +90,14 @@ class VLMShotAnnotation(BaseModel):
             return [str(item) for item in value if str(item)]
         return []
 
+    @field_validator("quality_score", mode="before")
+    @classmethod
+    def _coerce_quality_score(cls, value: object) -> object:
+        # VLM 偶尔按百分制输出（如 95）；统一归一到 [0,1]（M9 实测）
+        if isinstance(value, int | float) and value > 1.0:
+            return min(1.0, float(value) / 100.0)
+        return value
+
     @field_validator("avoid", mode="before")
     @classmethod
     def _coerce_avoid(cls, value: object) -> object:
@@ -168,7 +176,7 @@ async def run_video_annotation(
             _clip_from_annotation(
                 annotation,
                 shot=shot,
-                clip_id=f"clip_{index:04d}",
+                clip_id=f"{asset_id}_clip_{index:04d}",
                 quality_events=quality_events,
                 include_composition=pass_ == "deep",
             )
@@ -323,6 +331,11 @@ def _vlm_messages(
     instruction = (
         "Return strict JSON for one video shot with keys summary, keywords, subject_type, "
         "scene_type, action, contains_face, shot_type, good_for, avoid, quality_score, role. "
+        "Field semantics: role is one of a_roll_candidate (a person speaking to camera drives "
+        "the narrative), b_roll_candidate (usable supporting footage: scenery, product, "
+        "ambience, action - most watchable shots belong here), avoid (ONLY for unusable "
+        "footage: severe corruption, violent shake, unrecognizable content). avoid is a "
+        "boolean with the same strict meaning. quality_score is a float in [0,1]. "
         "For deep pass also include composition.safe_area, composition.subtitle_occlusion_risk, "
         "composition.subject_position, composition.framing_notes."
     )

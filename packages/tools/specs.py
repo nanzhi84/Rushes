@@ -367,6 +367,20 @@ class AudioAlignUploadedVoiceoverInput(BaseModel):
     provider_id: str | None = None
 
 
+class ContentCreatePlanInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    storyline_hint: str | None = None
+    target_duration_sec: float | None = Field(default=None, gt=0)
+    slot_count: int | None = Field(default=None, ge=1)
+
+
+class ContentRevisePlanInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    revision_hint: str
+
+
 class RetrievalSearchCandidatesInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -977,6 +991,36 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             ),
         ),
         ToolSpec(
+            name="content.create_plan",
+            namespace="content",
+            version="1",
+            input_model=ContentCreatePlanInput,
+            result_model=None,
+            handler_ref="tools.content.create_plan",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["case"],
+            emits_events=["ContentPlanUpdated", "CutPlanUpdated"],
+            description="Create a content plan and, for silent mode, a visual cut plan.",
+        ),
+        ToolSpec(
+            name="content.revise_plan",
+            namespace="content",
+            version="1",
+            input_model=ContentRevisePlanInput,
+            result_model=None,
+            handler_ref="tools.content.revise_plan",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["case"],
+            emits_events=["ContentPlanUpdated", "CutPlanUpdated"],
+            description="Revise the existing content plan and matching silent-mode cut plan.",
+        ),
+        ToolSpec(
             name="annotation.enqueue",
             namespace="annotation",
             version="1",
@@ -1405,6 +1449,8 @@ def build_default_tool_registry() -> ToolRegistry:
     from .audio import inspect_sources as audio_inspect_sources
     from .audio import rough_cut_speech as audio_rough_cut_speech
     from .builtin import decision_answer, finish_turn, refuse, respond
+    from .content import create_plan as content_create_plan
+    from .content import revise_plan as content_revise_plan
     from .interaction import (
         ask_user,
         confirm_action,
@@ -1479,6 +1525,8 @@ def build_default_tool_registry() -> ToolRegistry:
         "audio.rough_cut_speech": audio_rough_cut_speech,
         "audio.generate_tts": audio_generate_tts,
         "audio.align_uploaded_voiceover": audio_align_uploaded_voiceover,
+        "content.create_plan": content_create_plan,
+        "content.revise_plan": content_revise_plan,
         "annotation.enqueue": annotation_enqueue,
         "annotation.status": annotation_status,
         "annotation.retry": annotation_retry,

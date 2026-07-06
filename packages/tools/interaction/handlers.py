@@ -53,7 +53,9 @@ def ask_user(input_model: AskUserInput, context: ToolExecutionContext) -> ToolRe
             **input_model.metadata,
             "decision_id": decision.decision_id,
             "allow_free_text": input_model.allow_free_text,
-            "reduce_target": input_model.reduce_target,
+            # generic decision 未声明归约目标时默认 scratch_memory（安全语义），
+            # 避免 answer 阶段无处归约（M9 实测 LLM 常不带该参数）
+            "reduce_target": input_model.reduce_target or "scratch_memory",
         },
     )
     return _decision_result("interaction.ask_user", decision, interaction, context)

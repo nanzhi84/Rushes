@@ -20,7 +20,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 JsonObject = dict[str, Any]
-Scenario = Literal["path1", "path2"]
+Scenario = Literal["path1", "path2", "scenery"]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PACKAGES_ROOT = REPO_ROOT / "packages"
@@ -189,7 +189,12 @@ def choose_decision_answer(
     options = _decision_options(decision)
 
     if decision_type == "audio_mode":
-        mode = "rough_cut" if scenario == "path1" else "tts"
+        if scenario == "scenery":
+            mode = "silent"
+        elif scenario == "path1":
+            mode = "rough_cut"
+        else:
+            mode = "tts"
         option = _find_option(
             options,
             preferred_ids=(mode,),
@@ -229,7 +234,7 @@ def choose_decision_answer(
         )
 
     if decision_type == "subtitle":
-        if scenario == "path1":
+        if scenario in {"path1", "scenery"}:
             return _skip_choice(options, "跳过字幕")
         option = _find_option(options, preferred_ids=("clean_bottom",))
         if option is None:
@@ -241,6 +246,16 @@ def choose_decision_answer(
     if decision_type == "bgm":
         if scenario == "path1":
             return _skip_choice(options, "跳过 BGM")
+        if scenario == "scenery":
+            # 优先选项目上传的 BGM 素材（gate 会把项目 BGM 素材列为选项）
+            option = _first_non_skip_option(
+                options,
+                extra_reject_ids=frozenset({"upload_bgm", "default_bgm"}),
+            )
+            if option is None:
+                option = _find_option(options, preferred_ids=("default_bgm",))
+            if option is not None:
+                return _choice_from_option(option, "选择上传的 BGM 素材")
         option = _find_option(options, preferred_ids=("default_bgm",))
         if option is None:
             option = _first_non_skip_option(
