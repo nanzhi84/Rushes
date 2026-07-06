@@ -584,6 +584,57 @@ async def test_invoke_stream_plain_text_without_tool_calls() -> None:
     ]
 
 
+async def test_invoke_stream_tolerates_non_data_lines_and_malformed_chunks() -> None:
+    lines = [
+        ": keep-alive comment",
+        "data: {bad json",
+        'data: "not-a-mapping-chunk"',
+        "data: " + json.dumps({"choices": [{"delta": "not-a-mapping-delta"}]}),
+        "data: " + json.dumps({"choices": [{"delta": {"content": "你好"}}]}),
+        "data: "
+        + json.dumps(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                "not-a-mapping-item",
+                                {
+                                    "id": "call_1",
+                                    "function": {"name": "echo", "arguments": '{"text":"hi"}'},
+                                },
+                            ]
+                        }
+                    }
+                ]
+            }
+        ),
+        "data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+        "data: [DONE]",
+    ]
+    body = "\n\n".join(lines) + "\n\n"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body.encode("utf-8"))
+
+    deltas: list[Mapping[str, Any]] = []
+    adapter = OpenAICompatibleLLMProvider(
+        transport=httpx.MockTransport(handler),
+        retry_base_delay_seconds=0,
+    )
+
+    result = await adapter.invoke_stream(_provider_request(), on_delta=deltas.append)
+
+    assert result.error is None
+    assert list(deltas) == [{"type": "text", "text": "你好"}]
+    assert result.normalized_output["content"] == "你好"
+    assert result.normalized_output["finish_reason"] == "tool_calls"
+    # 缺 index 的 tool_call 分片按已累积数量兜底到槽位 0；非 Mapping 分片被跳过。
+    assert result.normalized_output["tool_calls"] == [
+        {"id": "call_1", "type": "function", "name": "echo", "arguments": {"text": "hi"}}
+    ]
+
+
 async def test_invoke_stream_http_400_returns_error_without_retry() -> None:
     attempts = 0
 

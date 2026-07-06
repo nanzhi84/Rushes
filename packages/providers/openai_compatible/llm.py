@@ -160,6 +160,7 @@ class OpenAICompatibleLLMProvider:
                             continue
                         if data == "[DONE]":
                             break
+                        # on_delta 回调抛出的异常有意向上传播（不吞），由调用方自行处理。
                         accumulator.consume(data, on_delta)
             except httpx.TimeoutException as exc:
                 error = _transport_error("timeout", exc, retryable=True)
