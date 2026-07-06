@@ -256,7 +256,8 @@ def test_memory_scope_skip_and_invalid_payloads() -> None:
     )
 
     assert skipped.state_patch == {}
-    assert skipped.followups == ()
+    assert skipped.followups[0].kind == "discard_memory_candidate"
+    assert skipped.followups[0].payload["candidate_id"] == "memcand_1"
     with pytest.raises(ValueError, match="candidate_id"):
         reduce_decision_answer(
             _case_state(),

@@ -415,6 +415,33 @@ class RenderStatusInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class MemoryExtractFromCaseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    summary_hint: str | None = None
+
+
+class MemoryAskScopeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: str
+
+
+class MemorySaveInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    candidate_id: str
+    scope: Literal["user", "project"]
+
+
+class MemorySearchRelevantInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str
+    scope_filter: Literal["user", "project"] | None = None
+    limit: int = Field(default=5, ge=1, le=5)
+
+
 def tool_specs() -> tuple[ToolSpec, ...]:
     return (
         ToolSpec(
@@ -1190,6 +1217,73 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             emits_events=[],
             description="Read current preview/export artifacts and running render jobs.",
         ),
+        ToolSpec(
+            name="memory.extract_from_case",
+            namespace="memory",
+            version="1",
+            input_model=MemoryExtractFromCaseInput,
+            result_model=None,
+            handler_ref="tools.memory_tools.extract_from_case",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["memory"],
+            emits_events=[
+                "MemoryCandidateExtracted",
+                "CapabilityDegraded",
+                "ProviderCallRecorded",
+            ],
+            description="Extract one pending long-term memory candidate from the current case.",
+        ),
+        ToolSpec(
+            name="memory.ask_scope",
+            namespace="memory",
+            version="1",
+            input_model=MemoryAskScopeInput,
+            result_model=None,
+            handler_ref="tools.memory_tools.ask_scope",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["case"],
+            idempotency_key_fields=["candidate_id"],
+            emits_events=["DecisionCreated"],
+            description="Ask the user to pick a memory candidate scope.",
+        ),
+        ToolSpec(
+            name="memory.save",
+            namespace="memory",
+            version="1",
+            input_model=MemorySaveInput,
+            result_model=None,
+            handler_ref="tools.memory_tools.save",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["memory"],
+            idempotency_key_fields=["candidate_id", "scope"],
+            emits_events=["MemorySaved"],
+            exposure="harness_only",
+            description="Persist an approved memory candidate after memory_scope is answered.",
+        ),
+        ToolSpec(
+            name="memory.search_relevant",
+            namespace="memory",
+            version="1",
+            input_model=MemorySearchRelevantInput,
+            result_model=None,
+            handler_ref="tools.memory_tools.search_relevant",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=[],
+            emits_events=[],
+            description="Search user and current-project memories for relevant summaries.",
+        ),
     )
 
 
@@ -1320,6 +1414,18 @@ def build_default_tool_registry() -> ToolRegistry:
         show_timeline,
     )
     from .media_tools import view_frames as media_view_frames
+    from .memory_tools import (
+        ask_scope as memory_ask_scope,
+    )
+    from .memory_tools import (
+        extract_from_case as memory_extract_from_case,
+    )
+    from .memory_tools import (
+        save as memory_save,
+    )
+    from .memory_tools import (
+        search_relevant as memory_search_relevant,
+    )
     from .project import (
         close_case,
         copy,
@@ -1387,6 +1493,10 @@ def build_default_tool_registry() -> ToolRegistry:
         "render.preview": render_preview,
         "render.final_mp4": render_final_mp4,
         "render.status": render_status,
+        "memory.extract_from_case": memory_extract_from_case,
+        "memory.ask_scope": memory_ask_scope,
+        "memory.save": memory_save,
+        "memory.search_relevant": memory_search_relevant,
     }
     registry = ToolRegistry()
     for spec in tool_specs():

@@ -27,6 +27,7 @@ from contracts.events import (
 FollowupKind = Literal[
     "replay_pending_tool_call",
     "enqueue_memory_save",
+    "discard_memory_candidate",
     "enqueue_delete_range_patches",
 ]
 ReduceTarget = Literal["brief.confirmed_facts", "scratch_memory"]
@@ -277,7 +278,18 @@ def _memory_scope_effect(
     if scope not in {"user", "project", "skip"}:
         raise ValueError("memory_scope scope must be user, project, or skip")
     if scope == "skip":
-        return DecisionEffectResult()
+        return DecisionEffectResult(
+            followups=(
+                HarnessFollowup(
+                    kind="discard_memory_candidate",
+                    decision_id=decision.decision_id,
+                    payload={
+                        "case_id": case_state.case_id,
+                        "candidate_id": candidate_id,
+                    },
+                ),
+            )
+        )
     return DecisionEffectResult(
         followups=(
             HarnessFollowup(
