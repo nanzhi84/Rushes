@@ -24,6 +24,7 @@ from sqlalchemy.engine import Engine, Row
 from agent_harness.decision_answering import DecisionAnswerResolver
 from agent_harness.loop import (
     LLMPlanner,
+    MappingPlannerAdapter,
     ScriptedPlanner,
     recover_approved_pending_tool_calls,
     run_turn,
@@ -368,14 +369,13 @@ def _planner_from_env(engine: Engine) -> LLMPlanner | None:
     api_key = os.environ.get("RUSHES_DASHSCOPE_API_KEY") or os.environ.get("RUSHES_LLM_API_KEY")
     if not api_key:
         return None
-    return cast(
-        LLMPlanner,
+    return MappingPlannerAdapter(
         build_openai_compatible_planner(
             base_url=os.environ.get("RUSHES_LLM_BASE_URL", DEFAULT_LLM_BASE_URL),
             api_key=api_key,
             model=os.environ.get("RUSHES_LLM_MODEL", DEFAULT_LLM_MODEL),
             recorder=_StorageProviderCallRecorder(engine),
-        ),
+        )
     )
 
 

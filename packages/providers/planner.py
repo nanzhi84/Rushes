@@ -8,10 +8,9 @@ object that exposes the same fields and ``model_dump`` surface used by the loop.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import Any, Protocol
 
-from contracts.provider import ProviderError
 from contracts.tool import ToolSpec
 from providers.capabilities import LLM_CHAT, ProviderRequest
 from providers.gateway import ProviderCallRecorder, ProviderGateway
@@ -42,18 +41,25 @@ class ContextBundleLike(Protocol):
 
 
 class PlannerToolCall(Mapping[str, Any]):
+    """One planner message: prose ``content`` and/or a native tool call.
+
+    ``model_dump`` exposes exactly ``content`` / ``tool_name`` / ``arguments`` /
+    ``tool_call_id`` so the harness-side ``MappingPlannerAdapter`` can convert it
+    into a ``PlannerStep`` without importing this package.
+    """
+
     def __init__(
         self,
         *,
-        tool_name: str,
+        content: str | None = None,
+        tool_name: str | None = None,
         arguments: Mapping[str, Any] | None = None,
         tool_call_id: str | None = None,
-        idempotency_key: str | None = None,
     ) -> None:
+        self.content = content
         self.tool_name = tool_name
         self.arguments = dict(arguments or {})
         self.tool_call_id = tool_call_id
-        self.idempotency_key = idempotency_key
 
     def __getitem__(self, key: str) -> Any:
         return self.model_dump()[key]
@@ -67,10 +73,10 @@ class PlannerToolCall(Mapping[str, Any]):
     def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         del args, kwargs
         return {
+            "content": self.content,
             "tool_name": self.tool_name,
             "arguments": self.arguments,
             "tool_call_id": self.tool_call_id,
-            "idempotency_key": self.idempotency_key,
         }
 
 
@@ -81,7 +87,7 @@ class GatewayLLMPlanner:
         *,
         model: str | None = None,
         provider_id: str | None = None,
-        tool_choice: str | Mapping[str, Any] = "required",
+        tool_choice: str | Mapping[str, Any] = "auto",
         params: Mapping[str, Any] | None = None,
     ) -> None:
         self._gateway = gateway
@@ -94,7 +100,10 @@ class GatewayLLMPlanner:
         self,
         context: ContextBundleLike,
         tools: Sequence[ToolSpec],
+        *,
+        on_delta: Callable[[str], None] | None = None,
     ) -> PlannerToolCall:
+        gateway_on_delta = _text_delta_forwarder(on_delta) if on_delta is not None else None
         response = await self._gateway.call(
             ProviderRequest(
                 capability=LLM_CHAT,
@@ -107,15 +116,27 @@ class GatewayLLMPlanner:
                 },
             ),
             provider_id=self._provider_id,
+            on_delta=gateway_on_delta,
         )
         if response.result.error is not None:
-            return _provider_error_respond(response.result.error)
+            error = response.result.error
+            return PlannerToolCall(
+                content=(
+                    "LLM provider 调用失败："
+                    f"{error.error_code}: {error.message}。请检查模型配置或稍后重试。"
+                )
+            )
+        content = response.result.normalized_output.get("content")
+        content_str = content if isinstance(content, str) and content else None
         tool_call = _first_tool_call(response.result.normalized_output)
         if tool_call is not None:
-            return tool_call
-        content = response.result.normalized_output.get("content")
-        message = content if isinstance(content, str) and content else "模型没有返回工具调用。"
-        return PlannerToolCall(tool_name="respond", arguments={"message": message})
+            return PlannerToolCall(
+                content=content_str,
+                tool_name=tool_call.tool_name,
+                arguments=tool_call.arguments,
+                tool_call_id=tool_call.tool_call_id,
+            )
+        return PlannerToolCall(content=content_str)
 
 
 def build_openai_compatible_planner(
@@ -226,13 +247,16 @@ def _arguments_dict(value: object) -> dict[str, Any]:
     return {"value": parsed}
 
 
-def _provider_error_respond(error: ProviderError) -> PlannerToolCall:
-    return PlannerToolCall(
-        tool_name="respond",
-        arguments={
-            "message": (
-                "LLM provider 调用失败："
-                f"{error.error_code}: {error.message}。请检查模型配置或稍后重试。"
-            )
-        },
-    )
+def _text_delta_forwarder(
+    forward: Callable[[str], None],
+) -> Callable[[Mapping[str, Any]], None]:
+    """Adapt gateway ``{"type": "text", "text": chunk}`` deltas to plain strings."""
+
+    def _on_delta(delta: Mapping[str, Any]) -> None:
+        if delta.get("type") != "text":
+            return
+        text = delta.get("text")
+        if isinstance(text, str) and text:
+            forward(text)
+
+    return _on_delta

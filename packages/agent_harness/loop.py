@@ -89,6 +89,63 @@ class LLMPlanner(Protocol):
         """Return one planner step (prose content and/or a native tool call)."""
 
 
+class _PlannerMessage(Protocol):
+    def model_dump(self, *args: Any, **kwargs: Any) -> Mapping[str, Any]:
+        """Expose ``content``/``tool_name``/``arguments``/``tool_call_id``."""
+
+
+class _MappingPlanner(Protocol):
+    # context is typed loosely (Any): the wrapped provider planner accepts a
+    # structural ContextBundleLike, which is broader than ContextBundle and
+    # would otherwise break the structural match here.
+    async def plan(
+        self,
+        context: Any,
+        tools: Sequence[ToolSpec],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> _PlannerMessage:
+        """Return a mapping-style planner message (see providers.GatewayLLMPlanner)."""
+
+
+class MappingPlannerAdapter:
+    """Adapt a mapping-style planner into the harness ``LLMPlanner`` protocol.
+
+    The production planner lives in ``providers`` (which the harness must not
+    import), so it is duck-typed here: its ``plan`` returns an object whose
+    ``model_dump()`` carries ``content`` / ``tool_name`` / ``arguments`` /
+    ``tool_call_id``. This adapter converts that into a ``PlannerStep``.
+    """
+
+    def __init__(self, planner: _MappingPlanner) -> None:
+        self._planner = planner
+
+    async def plan(
+        self,
+        context: ContextBundle,
+        tools: Sequence[ToolSpec],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> PlannerStep:
+        message = await self._planner.plan(context, tools, on_delta=on_delta)
+        data = message.model_dump()
+        content = data.get("content")
+        tool_name = data.get("tool_name")
+        tool_call: ToolCall | None = None
+        if isinstance(tool_name, str) and tool_name:
+            tool_call = ToolCall.from_input(
+                {
+                    "tool_name": tool_name,
+                    "arguments": data.get("arguments") or {},
+                    "tool_call_id": data.get("tool_call_id"),
+                }
+            )
+        return PlannerStep(
+            content=content if isinstance(content, str) else None,
+            tool_call=tool_call,
+        )
+
+
 class ScriptedPlanner:
     """Deterministic planner used by loop tests."""
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from uuid import uuid4
@@ -58,6 +59,7 @@ class ProviderGateway:
         *,
         provider_id: str | None = None,
         require_raw_transcript: bool = False,
+        on_delta: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> ProviderGatewayResult:
         first = self._registry.find(
             request.capability,
@@ -68,7 +70,7 @@ class ProviderGateway:
         attempts = (first, *self._registry.fallback_chain(first.descriptor))
         last_result: ProviderResult | None = None
         for index, registration in enumerate(attempts):
-            result = await self._invoke_one(registration, request)
+            result = await self._invoke_one(registration, request, on_delta=on_delta)
             last_result = result
             events.append(_provider_call_event(result, request))
             if result.error is None:
@@ -86,13 +88,19 @@ class ProviderGateway:
         self,
         registration: ProviderRegistration,
         request: ProviderRequest,
+        *,
+        on_delta: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> ProviderResult:
         started = time.monotonic()
         request_id = request.request_id or f"provider_req_{uuid4().hex}"
+        adapter = registration.adapter
+        prepared = request.model_copy(update={"request_id": request_id})
         try:
-            raw = await registration.adapter.invoke(
-                request.model_copy(update={"request_id": request_id})
-            )
+            streamed = on_delta is not None and hasattr(adapter, "invoke_stream")
+            if streamed:
+                raw = await adapter.invoke_stream(prepared, on_delta=on_delta)  # type: ignore[attr-defined]
+            else:
+                raw = await adapter.invoke(prepared)
             latency_ms = _elapsed_ms(started)
             result = _normalize_result(
                 raw,
@@ -101,6 +109,10 @@ class ProviderGateway:
                 request_id=request_id,
                 latency_ms=latency_ms,
             )
+            # 降级路径：provider 无 invoke_stream 时，用整段 content 回放一次，
+            # 让上层拿到与流式一致的 delta 形态（不做增量记账）。
+            if on_delta is not None and not streamed and result.error is None:
+                _replay_content_delta(result, on_delta)
         except Exception as exc:
             latency_ms = _elapsed_ms(started)
             result = ProviderResult(
@@ -136,6 +148,15 @@ class ProviderGateway:
                 status="failed" if result.error is not None else "succeeded",
             )
         )
+
+
+def _replay_content_delta(
+    result: ProviderResult,
+    on_delta: Callable[[Mapping[str, Any]], None],
+) -> None:
+    content = result.normalized_output.get("content")
+    if isinstance(content, str) and content:
+        on_delta({"type": "text", "text": content})
 
 
 def _normalize_result(

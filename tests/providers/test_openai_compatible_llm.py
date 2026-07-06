@@ -194,7 +194,7 @@ async def test_timeout_retries_then_succeeds() -> None:
     assert result.normalized_output["tool_calls"][0]["arguments"] == {"text": "ok"}
 
 
-async def test_planner_degrades_to_respond_when_no_tool_call() -> None:
+async def test_planner_returns_content_only_when_no_tool_call() -> None:
     adapter = RecordingAdapter(
         ProviderResult(
             provider_id="mock",
@@ -209,11 +209,12 @@ async def test_planner_degrades_to_respond_when_no_tool_call() -> None:
 
     call = await planner.plan(_context_bundle(), [_echo_spec()])
 
-    assert call.tool_name == "respond"
-    assert call.arguments == {"message": "直接回复用户"}
+    assert call.tool_name is None
+    assert call.content == "直接回复用户"
+    assert call.arguments == {}
 
 
-async def test_planner_degrades_provider_error_to_respond() -> None:
+async def test_planner_provider_error_returns_content_reply() -> None:
     adapter = RecordingAdapter(
         ProviderResult(
             provider_id="mock",
@@ -232,8 +233,9 @@ async def test_planner_degrades_provider_error_to_respond() -> None:
 
     call = await planner.plan(_context_bundle(), [_echo_spec()])
 
-    assert call.tool_name == "respond"
-    assert "timeout: slow" in call.arguments["message"]
+    assert call.tool_name is None
+    assert call.content is not None
+    assert "timeout: slow" in call.content
 
 
 async def test_planner_accepts_singular_tool_call_with_json_arguments() -> None:
@@ -299,7 +301,7 @@ async def test_planner_builds_messages_and_tools_in_prd_block_order() -> None:
         "## allowed_tools",
     )
     assert block_positions == sorted(block_positions)
-    assert payload["tool_choice"] == "required"
+    assert payload["tool_choice"] == "auto"
     assert payload["tools"][0]["function"]["strict"] is True
     assert payload["tools"][0]["function"]["parameters"] == EchoInput.model_json_schema()
 
@@ -827,5 +829,6 @@ def test_planner_tool_call_supports_mapping_protocol() -> None:
     call = PlannerToolCall(tool_name="echo", arguments={"text": "hi"}, tool_call_id="c1")
 
     assert call["tool_name"] == "echo"
+    assert call["content"] is None
     assert set(iter(call)) == set(call.model_dump())
     assert len(call) == len(call.model_dump())
