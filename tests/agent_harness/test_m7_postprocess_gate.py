@@ -14,7 +14,7 @@ from contracts.patch import AddBgmOp, GenerateSubtitlesOp, TimelinePatchRequest
 from contracts.project import ProjectState
 from contracts.tool import PatchOpSpec, ToolSpec
 from domain.decision_effects import pending_tool_call_status_after_answer, reduce_decision_answer
-from domain.preconditions import PreconditionContext, ProjectArtifactStats, ProjectBgmAsset
+from domain.preconditions import PreconditionContext, ProjectArtifactStats, ProjectAudioAsset
 from domain.subtitle_templates import list_subtitle_templates
 from storage import schema
 from storage.db import create_workspace_engine
@@ -91,10 +91,10 @@ def test_subtitle_gate_options_reduce_and_replay_or_discard() -> None:
     )
 
 
-def test_bgm_gate_uses_upload_default_skip_or_project_assets() -> None:
+def test_bgm_gate_uses_upload_skip_or_project_assets() -> None:
     gate = _gate()
     call = _timeline_patch_call(
-        {"kind": "add_bgm", "asset_id": "default_bgm_calm", "gain_db": -12.0, "duck": True}
+        {"kind": "add_bgm", "asset_id": "asset_bgm_1", "gain_db": -12.0, "duck": True}
     )
 
     no_asset = gate.adjudicate(
@@ -105,18 +105,15 @@ def test_bgm_gate_uses_upload_default_skip_or_project_assets() -> None:
         call,
         _context(
             allowed_tool_names=frozenset({"timeline.apply_patch"}),
-            project_bgm_assets=(ProjectBgmAsset(asset_id="asset_bgm_1", filename="配乐.m4a"),),
+            project_audio_assets=(ProjectAudioAsset(asset_id="asset_bgm_1", filename="配乐.m4a"),),
         ),
     )
 
     assert no_asset.decision is not None
     assert [option.option_id for option in no_asset.decision.options] == [
         "upload_bgm",
-        "default_bgm",
         "skip",
     ]
-    assert no_asset.decision.options[1].payload["asset_id"] == "default_bgm_calm"
-    assert "默认无版权 BGM" in no_asset.decision.options[1].label
     upload_answer = DecisionAnswer.model_validate(
         {"option_id": "upload_bgm", "answered_via": "button", "payload": {}}
     )
@@ -134,6 +131,11 @@ def test_bgm_gate_uses_upload_default_skip_or_project_assets() -> None:
         == "discarded"
     )
     assert with_asset.decision is not None
+    assert [option.option_id for option in with_asset.decision.options] == [
+        "asset_bgm_1",
+        "upload_bgm",
+        "skip",
+    ]
     option_by_id = {option.option_id: option for option in with_asset.decision.options}
     assert option_by_id["asset_bgm_1"].payload == {
         "enabled": True,
@@ -141,7 +143,7 @@ def test_bgm_gate_uses_upload_default_skip_or_project_assets() -> None:
         "gain_db": -12.0,
         "duck": True,
     }
-    assert {"default_bgm", "skip"} <= set(option_by_id)
+    assert option_by_id["asset_bgm_1"].label == "使用素材：配乐.m4a"
 
 
 def test_export_gate_persists_pending_replay_and_mentions_unviewed_preview() -> None:
@@ -309,14 +311,14 @@ def _context(
     case_state: CaseState | None = None,
     *,
     allowed_tool_names: frozenset[str],
-    project_bgm_assets: tuple[ProjectBgmAsset, ...] = (),
+    project_audio_assets: tuple[ProjectAudioAsset, ...] = (),
 ) -> PolicyContext:
     return PolicyContext(
         preconditions=PreconditionContext(
             case_state=case_state or _case_state(),
             project_state=_project_state(),
             project_artifacts=ProjectArtifactStats(usable_asset_count=1),
-            project_bgm_assets=project_bgm_assets,
+            project_audio_assets=project_audio_assets,
         ),
         allowed_tool_names=allowed_tool_names,
     )

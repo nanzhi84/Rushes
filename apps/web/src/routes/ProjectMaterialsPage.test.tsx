@@ -180,6 +180,51 @@ describe("ProjectMaterialsView", () => {
     });
   });
 
+  it("不再渲染素材类型选择器", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ project_id: "project_1", invalidated_asset_ids: [], assets: [] })
+      )
+    );
+
+    renderMaterials();
+
+    await screen.findByText("上传文件");
+    expect(screen.queryAllByRole("combobox")).toHaveLength(0);
+    expect(screen.queryByText("类型")).toBeNull();
+  });
+
+  it("上传不支持的文件时逐文件显示拒收原因", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/materials")) {
+        return jsonResponse({ project_id: "project_1", invalidated_asset_ids: [], assets: [] });
+      }
+      if (url === "/api/uploads/init") {
+        return jsonResponse(
+          {
+            detail: {
+              error_code: "unsupported_material_type",
+              message: "不支持的素材格式：.srt。支持常见视频/音频/图片/字体格式。"
+            }
+          },
+          400
+        );
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderMaterials();
+    const input = screen.getByLabelText("选择上传文件");
+    const file = new File(["sub"], "caption.srt", { type: "application/x-subrip" });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    expect(await screen.findByText("拒收 1 个")).toBeTruthy();
+    expect(await screen.findByText(/caption\.srt：不支持的素材格式：\.srt。/)).toBeTruthy();
+  });
+
   it("失效素材显示重新定位入口", async () => {
     vi.stubGlobal(
       "fetch",

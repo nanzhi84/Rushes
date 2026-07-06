@@ -244,36 +244,11 @@ def choose_decision_answer(
         return _natural_choice("选择干净底部字幕", {"enabled": True}, "兜底选择字幕")
 
     if decision_type == "bgm":
-        if scenario == "path1":
-            return _skip_choice(options, "跳过 BGM")
-        if scenario == "scenery":
-            # 优先选项目上传的 BGM 素材（gate 会把项目 BGM 素材列为选项）
-            option = _first_non_skip_option(
-                options,
-                extra_reject_ids=frozenset({"upload_bgm", "default_bgm"}),
-            )
-            if option is None:
-                option = _find_option(options, preferred_ids=("default_bgm",))
-            if option is not None:
-                return _choice_from_option(option, "选择上传的 BGM 素材")
-        option = _find_option(options, preferred_ids=("default_bgm",))
-        if option is None:
-            option = _first_non_skip_option(
-                options,
-                extra_reject_ids=frozenset({"upload_bgm"}),
-            )
+        # gate 只把项目里的音频素材列为「使用素材：<文件名>」选项；有就选第一个，否则跳过。
+        option = _find_option_by_label_prefix(options, "使用素材：")
         if option is not None:
-            return _choice_from_option(option, "选择默认 BGM")
-        return _natural_choice(
-            "使用默认 BGM",
-            {
-                "enabled": True,
-                "asset_id": "default_bgm_calm",
-                "gain_db": -12.0,
-                "duck": True,
-            },
-            "兜底选择默认 BGM",
-        )
+            return _choice_from_option(option, "选择上传的 BGM 素材")
+        return _skip_choice(options, "跳过 BGM")
 
     if decision_type == "export":
         return _approval_choice(options, "确认最终导出")
@@ -474,14 +449,12 @@ class RushesClient:
         project_id: str,
         asset_id: str,
         path: Path,
-        kind: str,
     ) -> JsonObject:
         return self.post_json(
             f"/api/projects/{project_id}/materials/import-local",
             {
                 "asset_id": asset_id,
                 "path": str(path.resolve()),
-                "kind": kind,
                 "storage_mode": "reference",
             },
             context=f"导入素材 {path.name}",
@@ -911,6 +884,16 @@ def _find_option(
     return None
 
 
+def _find_option_by_label_prefix(
+    options: Sequence[Mapping[str, Any]],
+    prefix: str,
+) -> Mapping[str, Any] | None:
+    for option in options:
+        if str(option.get("label") or "").startswith(prefix):
+            return option
+    return None
+
+
 def _choice_from_option(option: Mapping[str, Any], reason: str) -> DecisionChoice:
     return DecisionChoice(
         option_id=_option_id(option),
@@ -964,12 +947,9 @@ def _natural_choice(free_text: str, payload: Mapping[str, Any], reason: str) -> 
 
 def _first_non_skip_option(
     options: Sequence[Mapping[str, Any]],
-    *,
-    extra_reject_ids: frozenset[str] | None = None,
 ) -> Mapping[str, Any] | None:
-    rejected = SKIP_OR_REJECT_IDS | (extra_reject_ids or frozenset())
     for option in options:
-        if _option_id(option) not in rejected:
+        if _option_id(option) not in SKIP_OR_REJECT_IDS:
             return option
     return None
 

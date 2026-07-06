@@ -27,7 +27,7 @@ from contracts.timeline import TimelineState
 from contracts.tool import PatchOpSpec, ToolSpec
 from contracts.tool_result import ToolError, ToolResult
 from domain.decision_effects import HarnessFollowup
-from domain.preconditions import PreconditionContext, ProjectArtifactStats, ProjectBgmAsset
+from domain.preconditions import PreconditionContext, ProjectArtifactStats, ProjectAudioAsset
 from storage import schema
 from storage.db import begin_immediate
 from storage.repositories import (
@@ -106,7 +106,7 @@ class _LoadedState:
     case_state: CaseState
     project_state: ProjectState | None
     project_artifacts: ProjectArtifactStats
-    project_bgm_assets: tuple[ProjectBgmAsset, ...]
+    project_audio_assets: tuple[ProjectAudioAsset, ...]
     decisions: tuple[Decision, ...]
     pending_decision: Decision | None
     messages: tuple[ContextMessage, ...]
@@ -505,7 +505,7 @@ def context_bundle_input_preconditions(loaded: _LoadedState) -> PreconditionCont
         case_state=loaded.case_state,
         project_state=loaded.project_state,
         project_artifacts=loaded.project_artifacts,
-        project_bgm_assets=loaded.project_bgm_assets,
+        project_audio_assets=loaded.project_audio_assets,
     )
 
 
@@ -744,7 +744,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
         case_state = CaseState.model_validate(case_row)
         project_state = _load_project_state(connection, case_state.project_id)
         project_artifacts = _load_project_artifact_stats(connection, case_state)
-        project_bgm_assets = _load_project_bgm_assets(connection, case_state)
+        project_audio_assets = _load_project_audio_assets(connection, case_state)
         decisions = _load_decisions(connection)
         pending_decision = _find_pending_decision(case_state, decisions)
         messages = tuple(
@@ -762,7 +762,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
         case_state=case_state,
         project_state=project_state,
         project_artifacts=project_artifacts,
-        project_bgm_assets=project_bgm_assets,
+        project_audio_assets=project_audio_assets,
         decisions=decisions,
         pending_decision=pending_decision,
         messages=messages,
@@ -803,7 +803,7 @@ def _load_project_artifact_stats(
         usable_asset_ids.add(asset_id)
         if _asset_has_audio(values):
             asset_ids_with_audio.add(asset_id)
-        if str(values.get("kind")) == "voiceover":
+        if str(values.get("kind")) == "audio":
             voiceover_asset_ids.add(asset_id)
     transcript_rows = connection.execute(select(schema.transcripts)).all()
     transcript_asset_ids: set[str] = set()
@@ -835,10 +835,10 @@ def _load_project_artifact_stats(
     )
 
 
-def _load_project_bgm_assets(
+def _load_project_audio_assets(
     connection: Connection,
     case_state: CaseState,
-) -> tuple[ProjectBgmAsset, ...]:
+) -> tuple[ProjectAudioAsset, ...]:
     disabled = set(case_state.disabled_asset_ids)
     rows = connection.execute(
         select(schema.assets.c.asset_id, schema.assets.c.filename)
@@ -850,12 +850,12 @@ def _load_project_bgm_assets(
         )
         .where(schema.project_asset_links.c.project_id == case_state.project_id)
         .where(schema.project_asset_links.c.enabled.is_(True))
-        .where(schema.assets.c.kind == "bgm")
+        .where(schema.assets.c.kind == "audio")
         .where(schema.assets.c.usable.is_(True))
-        .order_by(schema.assets.c.asset_id)
+        .order_by(schema.assets.c.mtime.desc())
     ).all()
     return tuple(
-        ProjectBgmAsset(
+        ProjectAudioAsset(
             asset_id=str(row._mapping["asset_id"]),
             filename=str(row._mapping["filename"] or row._mapping["asset_id"]),
         )
@@ -865,7 +865,7 @@ def _load_project_bgm_assets(
 
 
 def _asset_has_audio(asset: Mapping[str, Any]) -> bool:
-    if str(asset.get("kind")) in {"audio", "voiceover", "bgm"}:
+    if str(asset.get("kind")) == "audio":
         return True
     raw_probe = asset.get("probe")
     if not isinstance(raw_probe, str) or not raw_probe:

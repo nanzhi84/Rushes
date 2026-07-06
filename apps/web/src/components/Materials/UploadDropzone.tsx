@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { ChangeEvent, DragEvent, ReactElement } from "react";
-import { api, type MaterialKind } from "../../api/client";
-import { MaterialKindSelect } from "./MaterialKindSelect";
+import { api } from "../../api/client";
+import { ApiError } from "../../auth";
 
 type UploadDropzoneProps = {
   projectId: string;
@@ -14,16 +14,30 @@ type UploadItem = {
   status: "uploading" | "completed" | "failed";
 };
 
+type UploadRejection = {
+  filename: string;
+  message: string;
+};
+
 const CHUNK_SIZE = 5 * 1024 * 1024;
 
 export function UploadDropzone({ projectId, onUploaded }: UploadDropzoneProps): ReactElement {
-  const [kind, setKind] = useState<MaterialKind>("video");
   const [dragging, setDragging] = useState(false);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [rejections, setRejections] = useState<UploadRejection[]>([]);
 
   async function uploadFiles(files: FileList | File[]): Promise<void> {
+    setRejections([]);
+    const collected: UploadRejection[] = [];
     for (const file of Array.from(files)) {
-      await uploadOne(file);
+      try {
+        await uploadOne(file);
+      } catch (error) {
+        collected.push({ filename: file.name, message: rejectionMessage(error) });
+      }
+    }
+    if (collected.length > 0) {
+      setRejections(collected);
     }
   }
 
@@ -33,8 +47,7 @@ export function UploadDropzone({ projectId, onUploaded }: UploadDropzoneProps): 
       const init = await api.initUpload({
         project_id: projectId,
         filename: file.name,
-        size: file.size,
-        kind
+        size: file.size
       });
       const partCount = Math.max(1, Math.ceil(file.size / CHUNK_SIZE));
       for (let index = 0; index < partCount; index += 1) {
@@ -49,11 +62,12 @@ export function UploadDropzone({ projectId, onUploaded }: UploadDropzoneProps): 
           status: "uploading"
         });
       }
-      await api.completeUpload(init.complete_url, { project_id: projectId, kind });
+      await api.completeUpload(init.complete_url, { project_id: projectId });
       upsertUpload(file.name, { progress: 100, status: "completed" });
       await onUploaded();
-    } catch {
+    } catch (error) {
       upsertUpload(file.name, { progress: 100, status: "failed" });
+      throw error;
     }
   }
 
@@ -69,14 +83,9 @@ export function UploadDropzone({ projectId, onUploaded }: UploadDropzoneProps): 
 
   return (
     <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="font-semibold">上传文件</h2>
-          <p className="mt-1 text-sm text-[#64748b]">拖拽或选择文件，前端按分片上传。</p>
-        </div>
-        <div className="w-36">
-          <MaterialKindSelect value={kind} onChange={setKind} />
-        </div>
+      <div>
+        <h2 className="font-semibold">上传文件</h2>
+        <p className="mt-1 text-sm text-[#64748b]">拖拽或选择文件，前端按分片上传，类型由文件后缀自动识别。</p>
       </div>
 
       <label
@@ -125,6 +134,19 @@ export function UploadDropzone({ projectId, onUploaded }: UploadDropzoneProps): 
           ))}
         </div>
       ) : null}
+
+      {rejections.length > 0 ? (
+        <div className="mt-4 rounded-md bg-[#fee4e2] px-3 py-2 text-sm text-[#b42318]">
+          <p className="font-medium">{`拒收 ${rejections.length} 个`}</p>
+          <ul className="mt-1 space-y-1">
+            {rejections.map((item, index) => (
+              <li key={`${item.filename}-${index}`} className="text-xs">
+                {`${item.filename}：${item.message}`}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </section>
   );
 }
@@ -137,4 +159,20 @@ function uploadStatusLabel(item: UploadItem): string {
     return "上传失败";
   }
   return `${item.progress}%`;
+}
+
+function rejectionMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    const payload = error.payload;
+    if (payload && typeof payload === "object" && "detail" in payload) {
+      const detail = (payload as { detail?: unknown }).detail;
+      if (detail && typeof detail === "object" && "message" in detail) {
+        const message = (detail as { message?: unknown }).message;
+        if (typeof message === "string" && message.trim().length > 0) {
+          return message;
+        }
+      }
+    }
+  }
+  return "上传失败，请稍后重试。";
 }

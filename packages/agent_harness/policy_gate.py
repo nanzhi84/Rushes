@@ -629,42 +629,22 @@ def _confirmation_options(decision_type: str, context: PolicyContext) -> list[De
 
 
 def _bgm_confirmation_options(context: PolicyContext) -> list[DecisionOption]:
-    default_option = DecisionOption(
-        option_id="default_bgm",
-        label="使用默认无版权 BGM",
-        payload={
-            "enabled": True,
-            "asset_id": "default_bgm_calm",
-            "gain_db": -12.0,
-            "duck": True,
-        },
+    upload_option = DecisionOption(
+        option_id="upload_bgm",
+        label="上传 BGM 素材",
+        payload={"enabled": True, "action": "upload"},
     )
     skip_option = DecisionOption(option_id="skip", label="跳过 BGM", payload={"enabled": False})
-    project_assets = context.preconditions.project_bgm_assets[:5]
-    if not project_assets:
-        return [
-            DecisionOption(
-                option_id="upload_bgm",
-                label="上传 BGM 素材",
-                payload={"enabled": True, "action": "upload"},
-            ),
-            default_option,
-            skip_option,
-        ]
+    project_assets = context.preconditions.project_audio_assets[:5]
     options = [
         DecisionOption(
             option_id=asset.asset_id,
             label=f"使用素材：{asset.filename}",
-            payload={
-                "enabled": True,
-                "asset_id": asset.asset_id,
-                "gain_db": -12.0,
-                "duck": True,
-            },
+            payload={"enabled": True, "asset_id": asset.asset_id, "gain_db": -12.0, "duck": True},
         )
         for asset in project_assets
     ]
-    options.extend((default_option, skip_option))
+    options.extend((upload_option, skip_option))
     return options
 
 

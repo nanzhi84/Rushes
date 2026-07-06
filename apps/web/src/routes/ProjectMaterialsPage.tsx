@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import type { ReactElement } from "react";
-import { api, type DecisionAnswer, type MaterialAsset, type MaterialKind } from "../api/client";
+import { api, type DecisionAnswer, type MaterialAsset } from "../api/client";
 import { queryKeys } from "../app/query_client";
 import { FsBrowserDialog } from "../components/Materials/FsBrowserDialog";
 import { LocalImportPanel } from "../components/Materials/LocalImportPanel";
@@ -58,8 +58,8 @@ export function ProjectMaterialsView({
   };
 
   const importLocal = useMutation({
-    mutationFn: ({ path, kind }: { path: string; kind: MaterialKind }) =>
-      api.importLocalMaterial(projectId, { path, kind, storage_mode: "reference" }),
+    mutationFn: ({ path }: { path: string }) =>
+      api.importLocalMaterial(projectId, { path, storage_mode: "reference" }),
     onSuccess: invalidateMaterials
   });
 
@@ -67,8 +67,7 @@ export function ProjectMaterialsView({
     mutationFn: (draft: UrlImportDraft) =>
       api.importUrlMaterial(projectId, {
         url: draft.url,
-        filename: draft.filename,
-        kind: draft.kind
+        filename: draft.filename
       }),
     onSuccess: (response, draft) => {
       const decisionId = response.decision_id;
@@ -162,7 +161,7 @@ export function ProjectMaterialsView({
         <UploadDropzone projectId={projectId} onUploaded={invalidateMaterials} />
         <LocalImportPanel
           isPending={importLocal.isPending}
-          onImport={(path, kind) => importLocal.mutate({ path, kind })}
+          onImport={(path) => importLocal.mutate({ path })}
         />
         <UrlImportPanel
           isPending={createUrlDecision.isPending}

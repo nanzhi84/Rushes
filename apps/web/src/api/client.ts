@@ -13,14 +13,7 @@ export type FsListEntry = components["schemas"]["FsListEntry"];
 export type FsListResponse = components["schemas"]["FsListResponse"];
 
 // apps/api/schemas.py 已有 M2 materials/upload response models；当前生成 schema 尚未包含这些路径。
-export type MaterialKind =
-  | "video"
-  | "image"
-  | "audio"
-  | "voiceover"
-  | "bgm"
-  | "font"
-  | "subtitle_template";
+export type MaterialKind = "video" | "audio" | "image" | "font";
 export type StorageMode = "copy" | "reference";
 export type MaterialAnnotationStatus = "pending" | "analyzing" | "completed" | "failed" | string;
 
@@ -106,14 +99,12 @@ export type CaseTimelineResponse = {
 type MaterialImportLocalRequest = {
   path: string;
   storage_mode?: StorageMode | null;
-  kind?: MaterialKind;
   asset_id?: string | null;
 };
 
 type MaterialImportUrlRequest = {
   url: string;
   filename?: string | null;
-  kind?: MaterialKind;
   max_bytes?: number | null;
   asset_id?: string | null;
 };
@@ -133,7 +124,6 @@ type UploadInitRequest = {
   project_id: string;
   filename: string;
   size?: number | null;
-  kind?: MaterialKind;
   asset_id?: string | null;
 };
 
@@ -152,7 +142,6 @@ type UploadPartResponse = {
 type UploadCompleteRequest = {
   project_id?: string | null;
   asset_id?: string | null;
-  kind?: MaterialKind | null;
 };
 
 type UploadCompleteResponse = {

@@ -18,6 +18,9 @@ htmlcov/
 
 # Local agent/runtime workspaces
 .claude/
+.rushes/
+.models/
+.worktrees/
 workspace/
 .e2e-workspace/
 .e2e-paths-fixtures/

@@ -6,6 +6,8 @@ import argparse
 import asyncio
 from pathlib import Path
 
+from storage import schema
+from storage.data_migrations import apply_data_migrations
 from storage.db import create_workspace_engine
 
 from .job_registry import build_default_job_registry
@@ -25,6 +27,11 @@ def parse_args() -> argparse.Namespace:
 async def async_main() -> None:
     args = parse_args()
     engine = create_workspace_engine(args.workspace)
+    # worker 可能先于 API 启动到全新 workspace：先建表再跑幂等数据迁移，
+    # create_all(checkfirst=True) 与 apply_data_migrations 均可重复执行。
+    with engine.begin() as connection:
+        schema.create_all(connection)
+        apply_data_migrations(connection)
     runner = JobRunner(
         engine=engine,
         registry=build_default_job_registry(engine=engine),

@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NoReturn, cast
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -56,6 +57,7 @@ from providers.gateway import ProviderCallRecord
 from providers.planner import build_openai_compatible_planner
 from providers.tool_gateway import build_default_tool_gateway
 from storage import schema
+from storage.data_migrations import apply_data_migrations
 from storage.db import begin_immediate, create_workspace_engine
 from storage.repositories import (
     CasesRepository,
@@ -208,7 +210,6 @@ class MaterialImportLocalRequest(BaseModel):
 
     path: str
     storage_mode: StorageMode | None = None
-    kind: AssetKind = AssetKind.VIDEO
     asset_id: str | None = None
 
 
@@ -217,7 +218,6 @@ class MaterialImportUrlRequest(BaseModel):
 
     url: str
     filename: str | None = None
-    kind: AssetKind = AssetKind.VIDEO
     max_bytes: int | None = None
     asset_id: str | None = None
 
@@ -249,7 +249,6 @@ class UploadInitRequest(BaseModel):
     project_id: str
     filename: str
     size: int | None = None
-    kind: AssetKind = AssetKind.VIDEO
     asset_id: str | None = None
 
 
@@ -258,7 +257,6 @@ class UploadCompleteRequest(BaseModel):
 
     project_id: str | None = None
     asset_id: str | None = None
-    kind: AssetKind | None = None
 
 
 def create_app(
@@ -282,6 +280,7 @@ def create_app(
     engine = create_workspace_engine(workspace_paths)
     with engine.begin() as connection:
         schema.create_all(connection)
+        apply_data_migrations(connection)
 
     api_token = token or generate_token()
     active_port = startup_port or startup_port_from_env()
@@ -599,7 +598,7 @@ def _register_routes(app: FastAPI) -> None:
                 asset_id=payload.asset_id,
                 path=str(source),
                 storage_mode=payload.storage_mode or StorageMode.REFERENCE,
-                kind=payload.kind,
+                kind=_infer_material_kind(str(source)),
             ),
             actor="user",
         )
@@ -1267,6 +1266,7 @@ def _register_routes(app: FastAPI) -> None:
     async def init_upload(payload: UploadInitRequest, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
         _require_project(state.engine, payload.project_id)
+        kind = _infer_material_kind(payload.filename)
         upload_id = _new_id("upload")
         upload_dir = _upload_dir(state.workspace_paths, upload_id)
         upload_dir.mkdir(parents=True, exist_ok=False)
@@ -1277,7 +1277,7 @@ def _register_routes(app: FastAPI) -> None:
                 "project_id": payload.project_id,
                 "filename": payload.filename,
                 "size": payload.size,
-                "kind": payload.kind.value,
+                "kind": kind.value,
                 "asset_id": payload.asset_id,
             },
         )
@@ -1322,7 +1322,7 @@ def _register_routes(app: FastAPI) -> None:
         project_id = payload.project_id or str(manifest["project_id"])
         _require_project(state.engine, project_id)
         merged_path = _merge_upload_parts(upload_dir, str(manifest["filename"]))
-        kind = payload.kind or AssetKind(str(manifest["kind"]))
+        kind = AssetKind(str(manifest["kind"]))
         result = _run_asset_tool(
             state,
             tool_name="asset.upload_complete",
@@ -1867,6 +1867,64 @@ def _run_asset_tool(
     return result.model_copy(update={"data": data})
 
 
+_MATERIAL_KIND_BY_SUFFIX: dict[str, AssetKind] = {
+    # video
+    ".mp4": AssetKind.VIDEO,
+    ".mov": AssetKind.VIDEO,
+    ".mkv": AssetKind.VIDEO,
+    ".webm": AssetKind.VIDEO,
+    ".avi": AssetKind.VIDEO,
+    ".m4v": AssetKind.VIDEO,
+    ".mpg": AssetKind.VIDEO,
+    ".mpeg": AssetKind.VIDEO,
+    ".3gp": AssetKind.VIDEO,
+    ".wmv": AssetKind.VIDEO,
+    # audio
+    ".mp3": AssetKind.AUDIO,
+    ".wav": AssetKind.AUDIO,
+    ".m4a": AssetKind.AUDIO,
+    ".aac": AssetKind.AUDIO,
+    ".flac": AssetKind.AUDIO,
+    ".ogg": AssetKind.AUDIO,
+    ".opus": AssetKind.AUDIO,
+    ".aiff": AssetKind.AUDIO,
+    ".aif": AssetKind.AUDIO,
+    ".ape": AssetKind.AUDIO,
+    # image
+    ".jpg": AssetKind.IMAGE,
+    ".jpeg": AssetKind.IMAGE,
+    ".png": AssetKind.IMAGE,
+    ".gif": AssetKind.IMAGE,
+    ".webp": AssetKind.IMAGE,
+    ".bmp": AssetKind.IMAGE,
+    ".tif": AssetKind.IMAGE,
+    ".tiff": AssetKind.IMAGE,
+    ".heic": AssetKind.IMAGE,
+    ".heif": AssetKind.IMAGE,
+    ".svg": AssetKind.IMAGE,
+    # font
+    ".ttf": AssetKind.FONT,
+    ".otf": AssetKind.FONT,
+    ".woff": AssetKind.FONT,
+    ".woff2": AssetKind.FONT,
+}
+
+
+def _infer_material_kind(name_or_path: str) -> AssetKind:
+    suffix = Path(name_or_path).suffix.lower()
+    kind = _MATERIAL_KIND_BY_SUFFIX.get(suffix)
+    if kind is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "unsupported_material_type",
+                "message": f"不支持的素材格式：{suffix or '（无扩展名）'}。"
+                "支持常见视频/音频/图片/字体格式。",
+            },
+        )
+    return kind
+
+
 def _reference_relocated_event(
     engine: Engine,
     project_id: str,
@@ -1903,11 +1961,13 @@ def _reference_relocated_event(
 
 
 def _url_import_decision(project_id: str, payload: MaterialImportUrlRequest) -> Decision:
+    filename = payload.filename or Path(urlsplit(payload.url).path).name
+    kind = _infer_material_kind(filename)
     arguments: dict[str, Any] = {
         "project_id": project_id,
         "url": payload.url,
         "filename": payload.filename,
-        "kind": payload.kind.value,
+        "kind": kind.value,
         "max_bytes": payload.max_bytes,
         "asset_id": payload.asset_id,
     }

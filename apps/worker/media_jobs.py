@@ -197,11 +197,7 @@ def _asset_source(engine: Engine, paths: WorkspacePaths, asset_id: str) -> tuple
 
 
 def _is_audio_proxy_kind(kind: str) -> bool:
-    return kind in {
-        AssetKind.AUDIO.value,
-        AssetKind.BGM.value,
-        AssetKind.VOICEOVER.value,
-    }
+    return kind == AssetKind.AUDIO.value
 
 
 def _apply_or_raise(engine: Engine, event: DomainEventBase) -> None:

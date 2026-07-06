@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.engine import Connection
 
 from contracts.case import CaseState
-from contracts.patch import DeleteRangeOp, TimelinePatchRequest
+from contracts.patch import AddBgmOp, DeleteRangeOp, TimelinePatchRequest
 from contracts.project import ProjectState
 from indexing import build_candidate_pack
 from storage import schema
@@ -123,6 +123,39 @@ def _patch_request() -> TimelinePatchRequest:
             ripple=True,
         ),
         reason="test",
+    )
+
+
+def _add_bgm_request(asset_id: str) -> TimelinePatchRequest:
+    return TimelinePatchRequest(
+        case_id="case_1",
+        op=AddBgmOp(kind="add_bgm", asset_id=asset_id, gain_db=-12.0, duck=True),
+        reason="add bgm",
+    )
+
+
+def _seed_asset(connection: Connection, asset_id: str, *, kind: str) -> None:
+    connection.execute(
+        schema.assets.insert().values(
+            asset_id=asset_id,
+            storage_mode="reference",
+            object_hash=None,
+            reference_path=f"/tmp/{asset_id}",
+            kind=kind,
+            source="local_path",
+            filename=f"{asset_id}",
+            hash=f"hash_{asset_id}",
+            mtime=1,
+            size=1,
+            probe=dump_json({"duration_sec": 10.0, "fps": 30.0}),
+            proxy_object_hash=None,
+            ingest_status="indexed",
+            annotation_status="completed",
+            annotation_pass="cheap",
+            index_status="ready",
+            usable=True,
+            failure=None,
+        )
     )
 
 
@@ -329,6 +362,66 @@ def test_apply_patch_maps_engine_error_and_empty_outcome(
     assert failed.error.details == {"why": "test"}
     assert empty.error is not None
     assert empty.error.error_code == "timeline_patch_failed"
+
+
+# ---------------------------------------------------------------------------
+# apply_patch 的 add_bgm：素材必须是项目内存量音频资产
+# ---------------------------------------------------------------------------
+
+
+class _ReachedApply(Exception):
+    """标记 apply_timeline_patch 被真正调用，用于确认校验放行。"""
+
+
+def test_apply_patch_add_bgm_rejects_missing_or_non_audio_asset(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    case_state = _case_state(timeline_current_version=1)
+    with engine.begin() as connection:
+        # 素材不存在
+        missing = handlers.apply_patch(
+            _add_bgm_request("asset_ghost"),
+            _context(case_state=case_state, connection=connection),
+        )
+        # 素材存在但不是音频
+        _seed_asset(connection, "asset_video", kind="video")
+        wrong_kind = handlers.apply_patch(
+            _add_bgm_request("asset_video"),
+            _context(case_state=case_state, connection=connection),
+        )
+    for result, asset_id in ((missing, "asset_ghost"), (wrong_kind, "asset_video")):
+        assert result.status == "failed"
+        assert result.error is not None
+        assert result.error.error_code == "asset_not_found"
+        assert result.error.details == {"asset_id": asset_id}
+
+
+def test_apply_patch_add_bgm_real_audio_proceeds_into_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine(tmp_path)
+    case_state = _case_state(timeline_current_version=1)
+    captured: dict[str, str] = {}
+
+    def _capture(
+        connection: Connection,
+        cs: CaseState,
+        input_model: TimelinePatchRequest,
+        *,
+        created_at: str,
+    ) -> Any:
+        captured["asset_id"] = input_model.op.asset_id
+        raise _ReachedApply
+
+    with engine.begin() as connection:
+        _seed_asset(connection, "asset_bgm", kind="audio")
+        monkeypatch.setattr(handlers, "apply_timeline_patch", _capture)
+        with pytest.raises(_ReachedApply):
+            handlers.apply_patch(
+                _add_bgm_request("asset_bgm"),
+                _context(case_state=case_state, connection=connection),
+            )
+    # 校验放行后原样把 input_model 交给 apply_timeline_patch，未再改写 asset_id
+    assert captured["asset_id"] == "asset_bgm"
 
 
 def test_plan_from_candidates_maps_materialization_error(
