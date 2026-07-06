@@ -45,6 +45,45 @@ describe("TimelineViewer", () => {
     expect(onClipClick).toHaveBeenCalledWith("tc_a");
   });
 
+  it("按 playheadSec 渲染播放头竖线", () => {
+    render(<TimelineViewer timeline={timelineFixture()} pxPerSec={60} playheadSec={1.5} />);
+
+    const playhead = screen.getByTestId("timeline-playhead");
+
+    expect(playhead.getAttribute("x1")).toBe("202");
+    expect(playhead.getAttribute("x2")).toBe("202");
+  });
+
+  it("点击空白轨道区换算秒数并触发 onSeek", () => {
+    const onSeek = vi.fn();
+    render(<TimelineViewer timeline={timelineFixture()} pxPerSec={60} onSeek={onSeek} />);
+
+    fireEvent.click(screen.getByRole("img", { name: "时间线轨道图" }), {
+      clientX: 112 + 120
+    });
+
+    expect(onSeek).toHaveBeenCalledTimes(1);
+    expect(onSeek.mock.calls[0]?.[0]).toBeCloseTo(2);
+  });
+
+  it("点击 clip 只触发 onClipClick，不触发 onSeek", () => {
+    const onClipClick = vi.fn();
+    const onSeek = vi.fn();
+    render(
+      <TimelineViewer
+        timeline={timelineFixture()}
+        pxPerSec={60}
+        onClipClick={onClipClick}
+        onSeek={onSeek}
+      />
+    );
+
+    fireEvent.click(screen.getAllByTestId("timeline-clip")[0] as Element);
+
+    expect(onClipClick).toHaveBeenCalledWith("tc_a");
+    expect(onSeek).not.toHaveBeenCalled();
+  });
+
   it("有 waveformSrc 时创建并销毁 wavesurfer，且 minPxPerSec 与 pxPerSec 一致", () => {
     const { unmount } = render(
       <TimelineViewer

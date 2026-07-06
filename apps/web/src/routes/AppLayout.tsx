@@ -78,13 +78,6 @@ export function AppLayout({ children }: AppLayoutProps): ReactElement {
     <div className="flex min-h-screen flex-col bg-[#f6f7f9] text-[#17202a]">
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-[#d9dee7] bg-white px-4">
         <div className="flex items-center gap-3">
-          <button
-            className="rounded-md border border-[#cbd5e1] px-2 py-1 text-sm hover:bg-[#f1f5f9]"
-            type="button"
-            onClick={toggleSidebar}
-          >
-            {sidebarCollapsed ? "展开" : "收起"}
-          </button>
           <span className="text-sm font-semibold">Rushes</span>
         </div>
         <div className="flex items-center gap-4 text-sm text-[#475569]">
@@ -99,33 +92,59 @@ export function AppLayout({ children }: AppLayoutProps): ReactElement {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        {sidebarCollapsed ? null : (
-          <aside className="w-[360px] shrink-0 border-r border-[#d9dee7] bg-white p-3">
-            {treeQuery.isLoading ? (
-              <p className="text-sm text-[#64748b]">正在读取文件树</p>
-            ) : treeQuery.error ? (
-              <p className="rounded-md bg-[#fee4e2] px-3 py-2 text-sm text-[#b42318]">
-                文件树加载失败
-              </p>
-            ) : (
-              <ProjectTree
-                projects={projects}
-                expandedProjectIds={expandedProjectIds}
-                selected={selected}
-                onToggleProject={toggleProjectExpanded}
-                onSelectProjectsRoot={() => void navigate({ to: "/" })}
-                onSelectProject={(projectId) =>
-                  void navigate({ to: "/projects/$projectId", params: { projectId } })
-                }
-                onSelectCase={(projectId, caseId) =>
-                  void navigate({
-                    to: "/projects/$projectId/cases/$caseId",
-                    params: { projectId, caseId }
-                  })
-                }
-                onAction={handleAction}
-              />
-            )}
+        {sidebarCollapsed ? (
+          <aside className="flex w-12 shrink-0 justify-center border-r border-[#d9dee7] bg-white py-3">
+            <button
+              className="grid h-9 w-9 place-items-center rounded-md border border-[#cbd5e1] text-lg text-[#334155] hover:bg-[#f1f5f9]"
+              type="button"
+              aria-label="展开项目导航"
+              title="展开项目导航"
+              onClick={toggleSidebar}
+            >
+              ›
+            </button>
+          </aside>
+        ) : (
+          <aside className="flex w-[360px] shrink-0 flex-col border-r border-[#d9dee7] bg-white p-3">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <span className="text-sm font-semibold text-[#17202a]">项目导航</span>
+              <button
+                className="grid h-8 w-8 place-items-center rounded-md border border-[#cbd5e1] text-lg text-[#334155] hover:bg-[#f1f5f9]"
+                type="button"
+                aria-label="折叠项目导航"
+                title="折叠项目导航"
+                onClick={toggleSidebar}
+              >
+                ‹
+              </button>
+            </div>
+            <div className="min-h-0 flex-1">
+              {treeQuery.isLoading ? (
+                <p className="text-sm text-[#64748b]">正在读取文件树</p>
+              ) : treeQuery.error ? (
+                <p className="rounded-md bg-[#fee4e2] px-3 py-2 text-sm text-[#b42318]">
+                  文件树加载失败
+                </p>
+              ) : (
+                <ProjectTree
+                  projects={projects}
+                  expandedProjectIds={expandedProjectIds}
+                  selected={selected}
+                  onToggleProject={toggleProjectExpanded}
+                  onSelectProjectsRoot={() => void navigate({ to: "/" })}
+                  onSelectProject={(projectId) =>
+                    void navigate({ to: "/projects/$projectId", params: { projectId } })
+                  }
+                  onSelectCase={(projectId, caseId) =>
+                    void navigate({
+                      to: "/projects/$projectId/cases/$caseId",
+                      params: { projectId, caseId }
+                    })
+                  }
+                  onAction={handleAction}
+                />
+              )}
+            </div>
           </aside>
         )}
         <main className="min-w-0 flex-1 overflow-y-auto">{children}</main>
