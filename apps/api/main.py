@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
@@ -1070,6 +1070,7 @@ def _register_routes(app: FastAPI) -> None:
                     "message_id": message_id,
                     "case_id": case_id,
                     "role": "user",
+                    "kind": "user",
                     "content": payload.content,
                     "created_at": now,
                 }
@@ -1093,6 +1094,35 @@ def _register_routes(app: FastAPI) -> None:
             "project_id": project_id,
             "case_id": case_id,
             "message_id": message_id,
+        }
+
+    @app.get(
+        "/api/projects/{project_id}/cases/{case_id}/messages",
+        response_model=api_schemas.MessagesResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def list_case_messages(
+        project_id: str,
+        case_id: str,
+        request: Request,
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_case(state.engine, project_id, case_id)
+        with state.engine.connect() as connection:
+            rows = MessagesRepository(connection).list_for_case(case_id, limit=limit)
+        return {
+            "case_id": case_id,
+            "messages": [
+                {
+                    "message_id": str(row["message_id"]),
+                    "role": str(row["role"]),
+                    "kind": str(row["kind"]),
+                    "content": str(row["content"]),
+                    "created_at": str(row["created_at"]),
+                }
+                for row in rows
+            ],
         }
 
     @app.post(

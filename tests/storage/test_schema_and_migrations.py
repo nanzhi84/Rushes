@@ -149,7 +149,7 @@ EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "created_from_case_id",
         "created_at",
     ),
-    "messages": ("message_id", "case_id", "role", "content", "created_at"),
+    "messages": ("message_id", "case_id", "role", "kind", "content", "created_at"),
     "jobs": (
         "job_id",
         "kind",

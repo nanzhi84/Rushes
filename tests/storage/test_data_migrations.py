@@ -294,3 +294,90 @@ def test_apply_data_migrations_is_idempotent(tmp_path: Path) -> None:
         second = _snapshot(connection)
 
         assert first == second
+
+
+def _seed_messages_without_kind(connection: Connection) -> None:
+    """模拟老库：messages 表还没有 kind 列。"""
+
+    schema.create_all(connection)
+    connection.execute(
+        schema.projects.insert().values(
+            project_id="p1",
+            name="P1",
+            status="active",
+            defaults="{}",
+            created_at="t",
+            updated_at="t",
+        )
+    )
+    connection.execute(
+        schema.cases.insert().values(
+            case_id="c1",
+            project_id="p1",
+            name="C1",
+            status="idle",
+            running_jobs="[]",
+            brief="{}",
+            selected_asset_ids="[]",
+            disabled_asset_ids="[]",
+            scratch_memory="{}",
+        )
+    )
+    # 重建 messages 表，去掉 kind 列以复现迁移前的老结构
+    connection.exec_driver_sql("DROP TABLE messages")
+    connection.exec_driver_sql(
+        "CREATE TABLE messages ("
+        "message_id TEXT PRIMARY KEY, "
+        "case_id TEXT NOT NULL REFERENCES cases(case_id), "
+        "role TEXT NOT NULL, "
+        "content TEXT NOT NULL, "
+        "created_at TEXT NOT NULL)"
+    )
+    connection.exec_driver_sql(
+        "INSERT INTO messages (message_id, case_id, role, content, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("m-user", "c1", "user", '"hi"', "t1"),
+    )
+    connection.exec_driver_sql(
+        "INSERT INTO messages (message_id, case_id, role, content, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("m-assistant", "c1", "assistant", '"ok"', "t2"),
+    )
+
+
+def _message_columns(connection: Connection) -> set[str]:
+    return {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(messages)").all()}
+
+
+def _message_kind(connection: Connection, message_id: str) -> str:
+    return str(
+        connection.exec_driver_sql(
+            "SELECT kind FROM messages WHERE message_id = ?", (message_id,)
+        ).scalar_one()
+    )
+
+
+def test_ensure_message_kind_column_adds_and_backfills(tmp_path: Path) -> None:
+    engine = create_workspace_engine(tmp_path)
+    with engine.begin() as connection:
+        _seed_messages_without_kind(connection)
+        assert "kind" not in _message_columns(connection)
+
+        apply_data_migrations(connection)
+
+        # 迁移后 kind 列存在；user 行回填为 'user'，其余沿用默认 'reply'
+        assert "kind" in _message_columns(connection)
+        assert _message_kind(connection, "m-user") == "user"
+        assert _message_kind(connection, "m-assistant") == "reply"
+
+
+def test_message_kind_migration_is_idempotent(tmp_path: Path) -> None:
+    engine = create_workspace_engine(tmp_path)
+    with engine.begin() as connection:
+        _seed_messages_without_kind(connection)
+
+        apply_data_migrations(connection)
+        apply_data_migrations(connection)
+
+        assert _message_kind(connection, "m-user") == "user"
+        assert _message_kind(connection, "m-assistant") == "reply"

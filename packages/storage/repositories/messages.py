@@ -23,10 +23,13 @@ class MessagesRepository:
             schema.messages.insert().values(**encode_json_columns(values, JSON_COLUMNS))
         )
 
-    def list_for_case(self, case_id: str) -> list[dict[str, Any]]:
-        rows = self._connection.execute(
+    def list_for_case(self, case_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+        query = (
             select(schema.messages)
             .where(schema.messages.c.case_id == case_id)
             .order_by(schema.messages.c.created_at, schema.messages.c.message_id)
-        ).all()
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        rows = self._connection.execute(query).all()
         return [decode_json_columns(dict(row._mapping), JSON_COLUMNS) for row in rows]
