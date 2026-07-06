@@ -26,6 +26,17 @@ def apply_data_migrations(connection: Connection) -> None:
     """
 
     _collapse_asset_kinds(connection)
+    _ensure_message_kind_column(connection)
+
+
+def _ensure_message_kind_column(connection: Connection) -> None:
+    """老库的 messages 表补 kind 列，并把 user 行回填为 kind='user'。"""
+
+    columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(messages)").all()}
+    if "kind" in columns:
+        return
+    connection.exec_driver_sql("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'reply'")
+    connection.exec_driver_sql("UPDATE messages SET kind='user' WHERE role='user'")
 
 
 def _collapse_asset_kinds(connection: Connection) -> None:

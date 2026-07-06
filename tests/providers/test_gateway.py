@@ -149,6 +149,61 @@ async def test_gateway_fallback_emits_capability_degraded_and_records_both_calls
     assert calls[1]["provider_id"] == "fallback"
 
 
+async def test_streaming_failover_streams_primary_partial_then_replays_fallback_once(
+    tmp_path: Path,
+) -> None:
+    # 首个 provider 先流式吐 partial 再失败，故障转移到第二个 provider 成功：
+    # 期望的 delta 序列 = primary 的 partial 分片 + fallback 整段回放一次，
+    # 绝不出现两路 provider 交错的双重流式。
+    engine = create_workspace_engine(tmp_path)
+    with engine.begin() as connection:
+        schema.create_all(connection)
+    _seed_project_and_case(engine)
+    registry = ProviderRegistry()
+    registry.register(
+        _descriptor("primary", priority=1, fallback_provider_ids=["fallback"]),
+        MockProvider(
+            provider_id="primary",
+            scripts={
+                LLM_CHAT: [
+                    {
+                        "content": "PPPPPPPPPPPP",
+                        "error": {
+                            "error_code": "timeout",
+                            "message": "timed out mid-stream",
+                            "retryable": True,
+                        },
+                    }
+                ]
+            },
+        ),
+    )
+    registry.register(
+        _descriptor("fallback", priority=50),
+        MockProvider(
+            provider_id="fallback",
+            scripts={LLM_CHAT: [{"content": "01234567890123456789"}]},
+        ),
+    )
+    gateway = ProviderGateway(registry=registry, recorder=StorageRecorder(tmp_path))
+    chunks: list[dict[str, object]] = []
+
+    result = await gateway.call(
+        ProviderRequest(capability=LLM_CHAT, case_id="case_1"),
+        on_delta=chunks.append,
+    )
+
+    assert result.result.provider_id == "fallback"
+    texts = [chunk["text"] for chunk in chunks]
+    # primary：12 字符按 8 分片 → 两片；fallback：整段回放一次（不再分片）。
+    assert texts == ["PPPPPPPP", "PPPP", "01234567890123456789"]
+    assert [event["event"] for event in result.events] == [
+        "ProviderCallRecorded",
+        "CapabilityDegraded",
+        "ProviderCallRecorded",
+    ]
+
+
 def _descriptor(
     provider_id: str,
     *,

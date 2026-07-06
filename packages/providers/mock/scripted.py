@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 from contracts.provider import ProviderCapability, ProviderError, ProviderResult
 from providers.capabilities import ProviderRequest
+
+_STREAM_CHUNK_SIZE = 8
 
 
 class MockProvider:
@@ -43,11 +45,7 @@ class MockProvider:
         item = script.popleft()
         if "raise" in item:
             raise RuntimeError(str(item["raise"]))
-        if "tool_call" in item:
-            item = {
-                "normalized_output": {"tool_call": item["tool_call"]},
-                "usage": item.get("usage", {}),
-            }
+        item = _expand_script_item(item)
         data = {
             "provider_id": self.provider_id,
             "capability": request.capability,
@@ -63,5 +61,35 @@ class MockProvider:
         }
         return ProviderResult.model_validate(data)
 
+    async def invoke_stream(
+        self,
+        request: ProviderRequest,
+        *,
+        on_delta: Callable[[Mapping[str, Any]], None],
+    ) -> ProviderResult:
+        # 消费同一脚本项后，把 content 按固定 8 字符分片回调，再返回终值——
+        # 供 golden/流式测试对齐真实 provider 的 delta 形态。
+        result = await self.invoke(request)
+        content = result.normalized_output.get("content")
+        if isinstance(content, str) and content:
+            for start in range(0, len(content), _STREAM_CHUNK_SIZE):
+                on_delta({"type": "text", "text": content[start : start + _STREAM_CHUNK_SIZE]})
+        return result
+
     def remaining(self, capability: ProviderCapability) -> int:
         return len(self._scripts.get(capability, ()))
+
+
+def _expand_script_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Fold ``content``/``tool_call`` shorthands into ``normalized_output``."""
+
+    if "content" not in item and "tool_call" not in item:
+        return item
+    normalized = dict(item.get("normalized_output") or {})
+    if "content" in item:
+        normalized["content"] = item["content"]
+    if "tool_call" in item:
+        normalized["tool_call"] = item["tool_call"]
+    expanded = {key: value for key, value in item.items() if key not in {"content", "tool_call"}}
+    expanded["normalized_output"] = normalized
+    return expanded

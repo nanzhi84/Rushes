@@ -140,6 +140,19 @@ class MessageQueuedResponse(ApiResponseModel):
     message_id: str
 
 
+class MessageRecord(ApiResponseModel):
+    message_id: str
+    role: str
+    kind: str
+    content: str
+    created_at: str
+
+
+class MessagesResponse(ApiResponseModel):
+    case_id: str
+    messages: list[MessageRecord]
+
+
 class CurrentDecisionResponse(ApiResponseModel):
     decision: Decision | None
 

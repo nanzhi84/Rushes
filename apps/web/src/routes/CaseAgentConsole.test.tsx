@@ -146,6 +146,157 @@ describe("CaseConsoleView", () => {
     await waitFor(() => expect(input.disabled).toBe(false));
   });
 
+  it("回放历史消息并弱化 narration 叙述", async () => {
+    const fetchMock = mockFetch({
+      decision: null,
+      messages: [
+        {
+          message_id: "m1",
+          role: "user",
+          kind: "user",
+          content: "帮我把开头剪短",
+          created_at: "2026-01-01T00:00:00Z"
+        },
+        {
+          message_id: "m2",
+          role: "assistant",
+          kind: "narration",
+          content: "我先看看素材再动手",
+          created_at: "2026-01-01T00:00:01Z"
+        },
+        {
+          message_id: "m3",
+          role: "assistant",
+          kind: "reply",
+          content: "开头已经剪好了",
+          created_at: "2026-01-01T00:00:02Z"
+        }
+      ]
+    });
+    renderConsole(fetchMock);
+
+    expect(await screen.findByText("帮我把开头剪短")).toBeTruthy();
+    const narration = await screen.findByText("我先看看素材再动手");
+    const reply = await screen.findByText("开头已经剪好了");
+    expect(narration.closest("[data-message-kind]")?.getAttribute("data-message-kind")).toBe(
+      "narration"
+    );
+    expect(reply.closest("[data-message-kind]")?.getAttribute("data-message-kind")).toBe("reply");
+  });
+
+  it("text_delta 逐步增长流式气泡", async () => {
+    const fetchMock = mockFetch({ decision: null });
+    renderConsole(fetchMock);
+
+    const stream = turnStreamSource();
+    emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
+    emitTurnStream(stream, { type: "text_delta", message_id: "a1", kind: "assistant", delta: "正在" });
+
+    expect(await screen.findByText("正在")).toBeTruthy();
+
+    emitTurnStream(stream, { type: "text_delta", message_id: "a1", kind: "assistant", delta: "分析素材" });
+
+    expect(await screen.findByText("正在分析素材")).toBeTruthy();
+  });
+
+  it("message_completed 用全文整体替换流式 buffer", async () => {
+    const fetchMock = mockFetch({ decision: null });
+    renderConsole(fetchMock);
+
+    const stream = turnStreamSource();
+    emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
+    emitTurnStream(stream, { type: "text_delta", message_id: "a1", kind: "assistant", delta: "半截草稿" });
+
+    expect(await screen.findByText("半截草稿")).toBeTruthy();
+
+    emitTurnStream(stream, {
+      type: "message_completed",
+      message_id: "a1",
+      kind: "reply",
+      content: "这是与草稿完全不同的最终全文"
+    });
+
+    expect(await screen.findByText("这是与草稿完全不同的最终全文")).toBeTruthy();
+    // 全文替换而非追加：旧的流式片段不应残留
+    expect(screen.queryByText("半截草稿")).toBeNull();
+  });
+
+  it("tool_step 过程条目从进行中流转到完成/失败，未映射工具显示工具名", async () => {
+    const fetchMock = mockFetch({ decision: null });
+    renderConsole(fetchMock);
+
+    const stream = turnStreamSource();
+    emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
+    emitTurnStream(stream, { type: "tool_step_started", step_id: "s1", tool: "timeline.apply_patch" });
+    emitTurnStream(stream, { type: "tool_step_started", step_id: "s2", tool: "render.preview" });
+    emitTurnStream(stream, { type: "tool_step_started", step_id: "s3", tool: "future.mystery_tool" });
+
+    const step1 = (await screen.findByText("修改时间线")).closest(
+      "[data-tool-step-id]"
+    ) as HTMLElement;
+    expect(step1.getAttribute("data-tool-status")).toBe("running");
+    expect(screen.getByText("渲染预览")).toBeTruthy();
+    // 未映射的工具名原样展示
+    expect(screen.getByText("future.mystery_tool")).toBeTruthy();
+
+    emitTurnStream(stream, {
+      type: "tool_step_finished",
+      step_id: "s1",
+      tool: "timeline.apply_patch",
+      status: "succeeded"
+    });
+    emitTurnStream(stream, {
+      type: "tool_step_finished",
+      step_id: "s2",
+      tool: "render.preview",
+      status: "failed"
+    });
+
+    await waitFor(() => expect(step1.getAttribute("data-tool-status")).toBe("succeeded"));
+    const step2 = screen.getByText("渲染预览").closest("[data-tool-step-id]") as HTMLElement;
+    expect(step2.getAttribute("data-tool-status")).toBe("failed");
+  });
+
+  it("turn-stream turn_ended 封口流式气泡并刷新历史消息", async () => {
+    let sealed = false;
+    const fetchMock = mockFetch({
+      decision: null,
+      messages: () =>
+        sealed
+          ? [
+              {
+                message_id: "a1",
+                role: "assistant",
+                kind: "reply",
+                content: "落库后的最终回复",
+                created_at: "2026-01-01T00:00:05Z"
+              }
+            ]
+          : []
+    });
+    renderConsole(fetchMock);
+
+    const stream = turnStreamSource();
+    emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
+    emitTurnStream(stream, { type: "text_delta", message_id: "a1", kind: "assistant", delta: "流式临时文本" });
+
+    expect(await screen.findByText("流式临时文本")).toBeTruthy();
+
+    sealed = true;
+    emitTurnStream(stream, {
+      type: "message_completed",
+      message_id: "a1",
+      kind: "reply",
+      content: "落库后的最终回复"
+    });
+    emitTurnStream(stream, { type: "turn_ended", outcome: "finished", reason: null });
+
+    await waitFor(() => expect(screen.getByText("落库后的最终回复")).toBeTruthy());
+    // 封口后不再出现临时流式片段，且历史与流式 buffer 按 message_id 去重只剩一条
+    expect(screen.queryByText("流式临时文本")).toBeNull();
+    expect(screen.getAllByText("落库后的最终回复")).toHaveLength(1);
+  });
+
   it("audio_mode Decision 渲染五个选项并点击提交 button answer", async () => {
     const answerRequests: Array<{ url: string; body: unknown }> = [];
     const fetchMock = mockFetch({
@@ -306,13 +457,23 @@ function renderConsole(fetchMock: FetchMock): void {
   );
 }
 
+type CaseMessageFixture = {
+  message_id: string;
+  role: string;
+  kind: string;
+  content: string;
+  created_at: string;
+};
+
 function mockFetch({
   decision,
   timeline = false,
+  messages = [],
   onAnswer
 }: {
   decision: Decision | null;
   timeline?: boolean;
+  messages?: CaseMessageFixture[] | (() => CaseMessageFixture[]);
   onAnswer?: (url: string, init: RequestInit | undefined) => void;
 }): FetchMock {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -334,17 +495,23 @@ function mockFetch({
     if (url.endsWith("/decisions/current")) {
       return jsonResponse({ decision });
     }
-    if (url.endsWith("/messages")) {
-      return jsonResponse(
-        {
-          status: "queued",
-          kind: "user_message",
-          project_id: "project_1",
-          case_id: "case_1",
-          message_id: "msg_1"
-        },
-        202
-      );
+    if (url.includes("/messages")) {
+      if (init?.method === "POST") {
+        return jsonResponse(
+          {
+            status: "queued",
+            kind: "user_message",
+            project_id: "project_1",
+            case_id: "case_1",
+            message_id: "msg_1"
+          },
+          202
+        );
+      }
+      return jsonResponse({
+        case_id: "case_1",
+        messages: typeof messages === "function" ? messages() : messages
+      });
     }
     if (url === "/api/decisions/dec_audio/answer") {
       onAnswer?.(url, init);
@@ -356,6 +523,20 @@ function mockFetch({
       });
     }
     return jsonResponse({});
+  });
+}
+
+function turnStreamSource(): MockEventSource {
+  const source = MockEventSource.instances.find((instance) => instance.url.includes("turn-stream"));
+  if (!source) {
+    throw new Error("turn-stream EventSource 未创建");
+  }
+  return source;
+}
+
+function emitTurnStream(source: MockEventSource, data: Record<string, unknown>): void {
+  act(() => {
+    source.emit("turn_stream", data);
   });
 }
 

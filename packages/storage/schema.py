@@ -249,6 +249,7 @@ messages = Table(
     Column("message_id", Text, primary_key=True),
     Column("case_id", Text, ForeignKey("cases.case_id"), nullable=False),
     Column("role", Text, nullable=False),
+    Column("kind", Text, nullable=False, server_default="reply"),
     Column("content", Text, nullable=False),
     Column("created_at", Text, nullable=False),
 )

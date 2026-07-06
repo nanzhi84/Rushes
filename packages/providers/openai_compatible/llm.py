@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, cast
 from uuid import uuid4
 
@@ -120,6 +120,62 @@ class OpenAICompatibleLLMProvider:
                 retryable=True,
             )
         return self._error_result(request, request_id, model, started, last_error)
+
+    async def invoke_stream(
+        self,
+        request: ProviderRequest,
+        *,
+        on_delta: Callable[[Mapping[str, Any]], None],
+    ) -> ProviderResult:
+        started = time.monotonic()
+        request_id = request.request_id or f"openai_compatible_{uuid4().hex}"
+        model = request.model or self._model
+        body = self._request_body(request, model=model)
+        # 流式：让服务端逐块吐 token，并在末尾附带 usage 统计块。
+        body["stream"] = True
+        body["stream_options"] = {"include_usage": True}
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        accumulator = _StreamAccumulator()
+        # 流式不做中途重试：一旦连上就单次消费，失败即返回 error result，
+        # 重试/降级语义交给上层（loop 会退回非流式 invoke）。
+        async with httpx.AsyncClient(
+            base_url=self._base_url,
+            headers=headers,
+            timeout=self._timeout,
+            trust_env=False,
+            transport=self._transport,
+        ) as client:
+            try:
+                async with client.stream("POST", _CHAT_COMPLETIONS_PATH, json=body) as response:
+                    if response.status_code >= 400:
+                        await response.aread()
+                        error = _http_error(response)
+                        return self._error_result(request, request_id, model, started, error)
+                    async for line in response.aiter_lines():
+                        data = _decode_sse_data(line)
+                        if data is None:
+                            continue
+                        if data == "[DONE]":
+                            break
+                        # on_delta 回调抛出的异常有意向上传播（不吞），由调用方自行处理。
+                        accumulator.consume(data, on_delta)
+            except httpx.TimeoutException as exc:
+                error = _transport_error("timeout", exc, retryable=True)
+                return self._error_result(request, request_id, model, started, error)
+            except httpx.TransportError as exc:
+                error = _transport_error("network_error", exc, retryable=True)
+                return self._error_result(request, request_id, model, started, error)
+
+        return self._success_result(
+            request,
+            request_id=request_id,
+            model=model,
+            started=started,
+            payload=accumulator.as_chat_payload(fallback_id=request_id, fallback_model=model),
+        )
 
     def _request_body(self, request: ProviderRequest, *, model: str) -> dict[str, Any]:
         payload = request.payload
@@ -249,6 +305,103 @@ def _response_json(response: httpx.Response) -> Mapping[str, Any]:
     if isinstance(payload, Mapping):
         return payload
     return {}
+
+
+def _decode_sse_data(line: str) -> str | None:
+    """Extract the payload of a ``data:`` SSE line; ignore blanks/comments."""
+    stripped = line.strip()
+    if not stripped.startswith("data:"):
+        return None
+    return stripped[len("data:") :].strip()
+
+
+class _StreamAccumulator:
+    """Fold OpenAI SSE delta chunks back into a non-streaming chat payload."""
+
+    def __init__(self) -> None:
+        self._content: list[str] = []
+        self._tool_calls: dict[int, dict[str, Any]] = {}
+        self._usage: dict[str, Any] = {}
+        self._finish_reason: str | None = None
+        self._response_id: str | None = None
+        self._response_model: str | None = None
+
+    def consume(self, data: str, on_delta: Callable[[Mapping[str, Any]], None]) -> None:
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(chunk, Mapping):
+            return
+        chunk_id = chunk.get("id")
+        if isinstance(chunk_id, str) and chunk_id:
+            self._response_id = chunk_id
+        chunk_model = chunk.get("model")
+        if isinstance(chunk_model, str) and chunk_model:
+            self._response_model = chunk_model
+        usage = chunk.get("usage")
+        if isinstance(usage, Mapping):
+            self._usage = dict(usage)
+        choice = _first_choice(chunk.get("choices"))
+        if not choice:
+            return
+        finish_reason = choice.get("finish_reason")
+        if isinstance(finish_reason, str):
+            self._finish_reason = finish_reason
+        delta = choice.get("delta")
+        if not isinstance(delta, Mapping):
+            return
+        content = delta.get("content")
+        if isinstance(content, str) and content:
+            self._content.append(content)
+            on_delta({"type": "text", "text": content})
+        self._accumulate_tool_calls(delta.get("tool_calls"))
+
+    def _accumulate_tool_calls(self, value: object) -> None:
+        if not isinstance(value, Sequence) or isinstance(value, str | bytes | bytearray):
+            return
+        for item in value:
+            if not isinstance(item, Mapping):
+                continue
+            index = item.get("index")
+            if not isinstance(index, int):
+                index = len(self._tool_calls)
+            entry = self._tool_calls.setdefault(
+                index, {"id": None, "type": "function", "name": "", "arguments": ""}
+            )
+            call_id = item.get("id")
+            if isinstance(call_id, str) and call_id:
+                entry["id"] = call_id
+            call_type = item.get("type")
+            if isinstance(call_type, str) and call_type:
+                entry["type"] = call_type
+            function = item.get("function")
+            if isinstance(function, Mapping):
+                name = function.get("name")
+                if isinstance(name, str):
+                    entry["name"] += name
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    entry["arguments"] += arguments
+
+    def as_chat_payload(self, *, fallback_id: str, fallback_model: str) -> dict[str, Any]:
+        message: dict[str, Any] = {"role": "assistant", "content": "".join(self._content)}
+        tool_calls = [
+            {
+                "id": entry["id"],
+                "type": entry["type"],
+                "function": {"name": entry["name"], "arguments": entry["arguments"]},
+            }
+            for _, entry in sorted(self._tool_calls.items())
+        ]
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        return {
+            "id": self._response_id or fallback_id,
+            "model": self._response_model or fallback_model,
+            "choices": [{"message": message, "finish_reason": self._finish_reason}],
+            "usage": self._usage,
+        }
 
 
 def _normalize_chat_response(

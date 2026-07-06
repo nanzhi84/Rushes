@@ -48,6 +48,8 @@ def test_openapi_components_include_api_response_models(tmp_path: Path) -> None:
         "CaseResponse",
         "CaseMutationResponse",
         "MessageQueuedResponse",
+        "MessageRecord",
+        "MessagesResponse",
         "CurrentDecisionResponse",
         "Decision",
         "DecisionOption",
@@ -224,9 +226,7 @@ def test_workspace_sse_accepts_query_token_and_replays_workspace_events(tmp_path
 
 
 async def test_message_endpoint_records_and_runs_scripted_turn(tmp_path: Path) -> None:
-    planner = ScriptedPlanner(
-        [{"tool_name": "respond", "arguments": {"message": "收到，已进入队列。"}}]
-    )
+    planner = ScriptedPlanner([{"content": "收到，已进入队列。"}])
     app = _app(tmp_path, planner=planner)
 
     async with httpx.AsyncClient(
@@ -254,7 +254,81 @@ async def test_message_endpoint_records_and_runs_scripted_turn(tmp_path: Path) -
     messages = _messages(app, "case_1")
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert messages[0]["message_id"] == "msg_user"
+    assert messages[0]["kind"] == "user"
     assert messages[1]["content"] == "收到，已进入队列。"
+
+
+def test_list_case_messages_returns_history_ascending(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    engine = _engine(app)
+    _seed_project_case(engine)
+    with engine.begin() as connection:
+        repo = MessagesRepository(connection)
+        # 乱序落库（narration→user→reply），验证端点按 created_at 升序返回
+        repo.insert(
+            {
+                "message_id": "m3",
+                "case_id": "case_1",
+                "role": "assistant",
+                "kind": "narration",
+                "content": "旁白解说",
+                "created_at": "t3",
+            }
+        )
+        repo.insert(
+            {
+                "message_id": "m1",
+                "case_id": "case_1",
+                "role": "user",
+                "kind": "user",
+                "content": "你好",
+                "created_at": "t1",
+            }
+        )
+        repo.insert(
+            {
+                "message_id": "m2",
+                "case_id": "case_1",
+                "role": "assistant",
+                "kind": "reply",
+                "content": "收到",
+                "created_at": "t2",
+            }
+        )
+
+    response = _client(app).get(
+        "/api/projects/project_1/cases/case_1/messages",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["case_id"] == "case_1"
+    assert [message["message_id"] for message in body["messages"]] == ["m1", "m2", "m3"]
+    assert [message["kind"] for message in body["messages"]] == ["user", "reply", "narration"]
+    assert [message["role"] for message in body["messages"]] == [
+        "user",
+        "assistant",
+        "assistant",
+    ]
+    assert [message["content"] for message in body["messages"]] == ["你好", "收到", "旁白解说"]
+    assert all(
+        set(message) == {"message_id", "role", "kind", "content", "created_at"}
+        for message in body["messages"]
+    )
+
+
+def test_list_case_messages_missing_case_returns_404(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    _seed_project_case(_engine(app))
+
+    response = _client(app).get(
+        "/api/projects/project_1/cases/missing_case/messages",
+        headers=AUTH,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["reason"] == "case_not_found"
 
 
 def test_fs_list_returns_directories_and_media_files_only(tmp_path: Path) -> None:

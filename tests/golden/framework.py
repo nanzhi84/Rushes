@@ -11,7 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.engine import Engine
 
-from agent_harness.loop import LLMPlanner, run_turn
+from agent_harness.loop import LLMPlanner, PlannerStep, run_turn
 from agent_harness.policy_gate import ToolCall
 from agent_harness.turn_queue import StopToken, TurnQueue, TurnQueueItem
 from contracts.case import CaseState
@@ -76,7 +76,13 @@ class GatewayPlanner(LLMPlanner):
     def __init__(self, gateway: ProviderGateway) -> None:
         self._gateway = gateway
 
-    async def plan(self, context: Any, tools: Sequence[ToolSpec]) -> ToolCall:
+    async def plan(
+        self,
+        context: Any,
+        tools: Sequence[ToolSpec],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> PlannerStep:
         response = await self._gateway.call(
             ProviderRequest(
                 capability=LLM_CHAT,
@@ -86,10 +92,18 @@ class GatewayPlanner(LLMPlanner):
                 },
             )
         )
-        tool_call = response.result.normalized_output.get("tool_call")
-        if not isinstance(tool_call, Mapping):
-            return ToolCall(tool_name="finish_turn", arguments={"reason": "no tool_call"})
-        return ToolCall.from_input(_resolve_placeholders(dict(tool_call), context))
+        output = response.result.normalized_output
+        raw_content = output.get("content")
+        content = raw_content if isinstance(raw_content, str) and raw_content else None
+        if on_delta is not None and content:
+            on_delta(content)
+        raw_tool_call = output.get("tool_call")
+        if not isinstance(raw_tool_call, Mapping):
+            return PlannerStep(content=content or "（无工具调用，结束本回合）")
+        return PlannerStep(
+            content=content,
+            tool_call=ToolCall.from_input(_resolve_placeholders(dict(raw_tool_call), context)),
+        )
 
 
 class GoldenExecutor:

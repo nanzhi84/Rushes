@@ -1,4 +1,4 @@
-import { ApiError, apiFetch, getAuthToken, handleUnauthorized } from "../auth";
+import { ApiError, apiFetch, createApiEventSource, getAuthToken, handleUnauthorized } from "../auth";
 import type { components, paths } from "./generated/schema";
 
 export type ProjectTreeCase = components["schemas"]["ProjectTreeCase"];
@@ -94,6 +94,20 @@ export type CaseTimelineResponse = {
   timeline: TimelineJson;
   summary: string;
   preview_id: string | null;
+};
+
+// GET messages 尚未进入 generated/schema.d.ts，先按 apps/api/main.py list_case_messages 手写。
+export type CaseMessage = {
+  message_id: string;
+  role: string;
+  kind: string;
+  content: string;
+  created_at: string;
+};
+
+export type CaseMessagesResponse = {
+  case_id: string;
+  messages: CaseMessage[];
 };
 
 type MaterialImportLocalRequest = {
@@ -204,6 +218,16 @@ export function postPreviewViewed(
   );
 }
 
+// limit=最老的前 N 条，升序返回；当前规模够用。
+export function getCaseMessages(projectId: string, caseId: string): Promise<CaseMessagesResponse> {
+  return apiFetch<CaseMessagesResponse>(`${casePath(projectId, caseId)}/messages?limit=200`);
+}
+
+// turn-stream SSE 工厂：鉴权同 createApiEventSource（query token）。断线由浏览器自动重连。
+export function createCaseTurnStreamSource(projectId: string, caseId: string): EventSource {
+  return createApiEventSource(`${casePath(projectId, caseId)}/turn-stream`);
+}
+
 export const api = {
   projectTree(): Promise<ProjectTreeResponse> {
     return apiFetch<ProjectTreeResponse>("/api/project-tree");
@@ -306,6 +330,8 @@ export const api = {
   fetchCaseTimeline,
 
   postPreviewViewed,
+
+  getCaseMessages,
 
   answerDecision(decisionId: string, payload: DecisionAnswerRequest): Promise<DecisionAnswerResponse> {
     return apiFetch<DecisionAnswerResponse>(`/api/decisions/${encodeURIComponent(decisionId)}/answer`, {

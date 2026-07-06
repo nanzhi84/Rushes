@@ -2,10 +2,17 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactElement } from "react";
-import { api, type DecisionAnswer, type TimelineClipJson, type TimelineJson } from "../api/client";
+import {
+  api,
+  type CaseMessage,
+  type DecisionAnswer,
+  type TimelineClipJson,
+  type TimelineJson
+} from "../api/client";
 import { queryKeys } from "../app/query_client";
 import { createApiEventSource } from "../auth";
 import { AssistantThread } from "../components/Console/AssistantThread";
+import { useTurnStream } from "../components/Console/useTurnStream";
 import {
   markDecisionAnswered,
   mergeCurrentDecisionItem,
@@ -16,7 +23,11 @@ import type {
   DomainSsePayload,
   StructuredInteractionItem
 } from "../components/Console/StructuredInteractionRenderer";
-import { useConsoleExternalStoreRuntime, type ConsoleMessage } from "../components/Console/runtime";
+import {
+  useConsoleExternalStoreRuntime,
+  type ConsoleMessage,
+  type ConsoleMessageRole
+} from "../components/Console/runtime";
 import { PreviewPlayer } from "../components/PreviewPlayer";
 import { TimelineViewer } from "../components/TimelineViewer";
 
@@ -46,8 +57,10 @@ export function CaseConsoleView({
 
   const messagesQuery = useQuery({
     queryKey: queryKeys.messages(projectId, caseId),
-    queryFn: async () => [] as ConsoleMessage[],
-    enabled: false,
+    queryFn: async () => {
+      const response = await api.getCaseMessages(projectId, caseId);
+      return response.messages.map(toConsoleMessage);
+    },
     initialData: [] as ConsoleMessage[]
   });
 
@@ -71,7 +84,7 @@ export function CaseConsoleView({
   });
 
   const currentDecision = decisionQuery.data?.decision ?? null;
-  const messages = messagesQuery.data ?? [];
+  const historyMessages = messagesQuery.data ?? [];
   const timelinePayload = timelineQuery.data ?? null;
   const previewSrc = timelinePayload?.preview_id ? api.mediaPreviewUrl(timelinePayload.preview_id) : null;
   const renderedStructuredItems = useMemo(
@@ -127,6 +140,29 @@ export function CaseConsoleView({
       source.close();
     };
   }, [caseId, invalidateCaseQueries, projectId]);
+
+  // turn-stream 订阅置于领域 /events 订阅之后，保证 /events 是首个 EventSource。
+  const refreshMessages = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.messages(projectId, caseId) });
+  }, [caseId, projectId, queryClient]);
+  const { inProgressMessages, toolSteps } = useTurnStream(projectId, caseId, {
+    onTurnEnded: refreshMessages
+  });
+
+  // 历史消息为准，流式 buffer 按 message_id 去重后追加，避免落库后与历史重复。
+  const messages = useMemo<ConsoleMessage[]>(() => {
+    const historyIds = new Set(historyMessages.map((message) => message.id));
+    const streaming: ConsoleMessage[] = inProgressMessages
+      .filter((message) => !historyIds.has(message.message_id))
+      .map((message) => ({
+        id: message.message_id,
+        role: "assistant",
+        kind: message.kind,
+        content: message.text,
+        createdAt: ""
+      }));
+    return [...historyMessages, ...streaming];
+  }, [historyMessages, inProgressMessages]);
 
   const postMessage = useMutation({
     mutationFn: (content: string) => api.postMessage(projectId, caseId, { content }),
@@ -269,6 +305,7 @@ export function CaseConsoleView({
               onAnswerDecision={handleAnswerDecision}
               answerPending={answerDecision.isPending}
               highlightedMessageId={highlightedMessageId}
+              toolSteps={toolSteps}
             />
 
             <form
@@ -472,6 +509,28 @@ function clipLabel(clip: TimelineClipJson): string | null {
     return clip.asset_id;
   }
   return null;
+}
+
+function toConsoleMessage(message: CaseMessage): ConsoleMessage {
+  return {
+    id: message.message_id,
+    role: normalizeConsoleRole(message.role),
+    kind: message.kind,
+    content: message.content,
+    createdAt: message.created_at
+  };
+}
+
+function normalizeConsoleRole(role: string): ConsoleMessageRole {
+  if (
+    role === "user" ||
+    role === "assistant" ||
+    role === "system" ||
+    role === "system_observation"
+  ) {
+    return role;
+  }
+  return "system";
 }
 
 function scrollToMessage(messageId: string): void {

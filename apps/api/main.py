@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, NoReturn, cast
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
@@ -24,6 +24,7 @@ from sqlalchemy.engine import Engine, Row
 from agent_harness.decision_answering import DecisionAnswerResolver
 from agent_harness.loop import (
     LLMPlanner,
+    MappingPlannerAdapter,
     ScriptedPlanner,
     recover_approved_pending_tool_calls,
     run_turn,
@@ -120,6 +121,7 @@ from .deps import (
     startup_port_from_env,
     state_from_request,
 )
+from .turn_stream import TURN_STREAM_CLOSED, TurnStreamHub, encode_turn_stream_row
 
 LOGGER = logging.getLogger("rushes.api")
 SSE_POLL_INTERVAL_SECONDS = 0.05
@@ -291,6 +293,7 @@ def create_app(
     queue: TurnQueue | None = None
 
     tool_gateway = build_default_tool_gateway(recorder=_StorageProviderCallRecorder(engine))
+    turn_stream_hub = TurnStreamHub()
 
     async def default_runner(item: TurnQueueItem, stop_token: StopToken) -> None:
         if queue is None:
@@ -304,6 +307,7 @@ def create_app(
             stop_token=stop_token,
             decision_answer_resolver=env_decision_answer_resolver,
             tool_gateway=tool_gateway,
+            turn_listener=turn_stream_hub.listener_for(item.case_id),
         )
 
     queue = TurnQueue(turn_runner or default_runner)
@@ -315,6 +319,7 @@ def create_app(
         workspace_paths=workspace_paths,
         turn_queue=queue,
         startup_port=active_port,
+        turn_stream_hub=turn_stream_hub,
         sse_max_events=sse_max_events,
     )
     app.middleware("http")(security_baseline_middleware)
@@ -368,14 +373,13 @@ def _planner_from_env(engine: Engine) -> LLMPlanner | None:
     api_key = os.environ.get("RUSHES_DASHSCOPE_API_KEY") or os.environ.get("RUSHES_LLM_API_KEY")
     if not api_key:
         return None
-    return cast(
-        LLMPlanner,
+    return MappingPlannerAdapter(
         build_openai_compatible_planner(
             base_url=os.environ.get("RUSHES_LLM_BASE_URL", DEFAULT_LLM_BASE_URL),
             api_key=api_key,
             model=os.environ.get("RUSHES_LLM_MODEL", DEFAULT_LLM_MODEL),
             recorder=_StorageProviderCallRecorder(engine),
-        ),
+        )
     )
 
 
@@ -1070,6 +1074,7 @@ def _register_routes(app: FastAPI) -> None:
                     "message_id": message_id,
                     "case_id": case_id,
                     "role": "user",
+                    "kind": "user",
                     "content": payload.content,
                     "created_at": now,
                 }
@@ -1093,6 +1098,35 @@ def _register_routes(app: FastAPI) -> None:
             "project_id": project_id,
             "case_id": case_id,
             "message_id": message_id,
+        }
+
+    @app.get(
+        "/api/projects/{project_id}/cases/{case_id}/messages",
+        response_model=api_schemas.MessagesResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def list_case_messages(
+        project_id: str,
+        case_id: str,
+        request: Request,
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_case(state.engine, project_id, case_id)
+        with state.engine.connect() as connection:
+            rows = MessagesRepository(connection).list_for_case(case_id, limit=limit)
+        return {
+            "case_id": case_id,
+            "messages": [
+                {
+                    "message_id": str(row["message_id"]),
+                    "role": str(row["role"]),
+                    "kind": str(row["kind"]),
+                    "content": str(row["content"]),
+                    "created_at": str(row["created_at"]),
+                }
+                for row in rows
+            ],
         }
 
     @app.post(
@@ -1423,6 +1457,20 @@ def _register_routes(app: FastAPI) -> None:
         return _sse_response(request, state.engine, route_case(case_id))
 
     @app.get(
+        "/api/projects/{project_id}/cases/{case_id}/turn-stream",
+        response_class=StreamingResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def case_turn_stream(
+        project_id: str,
+        case_id: str,
+        request: Request,
+    ) -> StreamingResponse:
+        state = state_from_request(request)
+        _require_case(state.engine, project_id, case_id)
+        return _turn_stream_response(request, state.turn_stream_hub, case_id)
+
+    @app.get(
         "/api/events",
         response_class=StreamingResponse,
         responses=_response_docs(),
@@ -1434,6 +1482,51 @@ def _register_routes(app: FastAPI) -> None:
 
 def _state_from_app(app: FastAPI) -> ApiState:
     return cast(ApiState, app.state.api_state)
+
+
+def _turn_stream_response(
+    request: Request,
+    hub: TurnStreamHub,
+    case_id: str,
+) -> StreamingResponse:
+    max_events = state_from_request(request).sse_max_events
+    return StreamingResponse(
+        _turn_stream(request, hub, case_id, max_events=max_events),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+async def _turn_stream(
+    request: Request,
+    hub: TurnStreamHub,
+    case_id: str,
+    *,
+    max_events: int | None = None,
+) -> AsyncIterator[str]:
+    snapshot, queue = await hub.subscribe(case_id)
+    emitted_total = 0
+    try:
+        for event in snapshot:
+            yield encode_turn_stream_row(event)
+            emitted_total += 1
+            if max_events is not None and emitted_total >= max_events:
+                return
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=SSE_POLL_INTERVAL_SECONDS)
+            except TimeoutError:
+                if await request.is_disconnected():
+                    return
+                continue
+            if item is TURN_STREAM_CLOSED:
+                return
+            yield encode_turn_stream_row(item)
+            emitted_total += 1
+            if max_events is not None and emitted_total >= max_events:
+                return
+    finally:
+        hub.unsubscribe(case_id, queue)
 
 
 def _sse_response(request: Request, engine: Engine, predicate: SsePredicate) -> StreamingResponse:
