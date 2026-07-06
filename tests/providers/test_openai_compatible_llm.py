@@ -473,6 +473,188 @@ def _positions(content: str, *needles: str) -> list[int]:
     return [content.index(needle) for needle in needles]
 
 
+def _sse_response(*events: dict[str, Any] | str) -> httpx.Response:
+    blocks: list[str] = []
+    for event in events:
+        data = event if isinstance(event, str) else json.dumps(event)
+        blocks.append(f"data: {data}")
+    body = "\n\n".join(blocks) + "\n\n"
+    return httpx.Response(200, content=body.encode("utf-8"))
+
+
+async def test_invoke_stream_parses_content_tool_call_and_usage() -> None:
+    captured_body: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_body.append(json.loads(request.content.decode()))
+        return _sse_response(
+            {
+                "id": "chatcmpl_stream",
+                "model": "qwen-plus",
+                "choices": [{"delta": {"role": "assistant", "content": "你好"}}],
+            },
+            {"choices": [{"delta": {"content": "，世界"}}]},
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "echo", "arguments": '{"te'},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [{"index": 0, "function": {"arguments": 'xt":"hi"}'}}]
+                        }
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+            },
+            "[DONE]",
+        )
+
+    deltas: list[Mapping[str, Any]] = []
+    adapter = OpenAICompatibleLLMProvider(
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+        retry_base_delay_seconds=0,
+    )
+
+    result = await adapter.invoke_stream(_provider_request(), on_delta=deltas.append)
+
+    body = captured_body[0]
+    assert body["stream"] is True
+    assert body["stream_options"] == {"include_usage": True}
+
+    assert list(deltas) == [
+        {"type": "text", "text": "你好"},
+        {"type": "text", "text": "，世界"},
+    ]
+
+    assert result.error is None
+    assert result.normalized_output["content"] == "你好，世界"
+    assert result.normalized_output["finish_reason"] == "tool_calls"
+    assert result.usage == {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11}
+    assert result.normalized_output["usage"] == result.usage
+    assert result.normalized_output["tool_calls"] == [
+        {"id": "call_1", "type": "function", "name": "echo", "arguments": {"text": "hi"}}
+    ]
+    assert result.raw_ref == "chatcmpl_stream"
+    assert result.model == "qwen-plus"
+
+
+async def test_invoke_stream_plain_text_without_tool_calls() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _sse_response(
+            {"choices": [{"delta": {"content": "只"}}]},
+            {"choices": [{"delta": {"content": "回复"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            "[DONE]",
+        )
+
+    deltas: list[Mapping[str, Any]] = []
+    adapter = OpenAICompatibleLLMProvider(
+        transport=httpx.MockTransport(handler),
+        retry_base_delay_seconds=0,
+    )
+
+    result = await adapter.invoke_stream(_provider_request(), on_delta=deltas.append)
+
+    assert result.error is None
+    assert result.normalized_output["content"] == "只回复"
+    assert result.normalized_output["tool_calls"] == []
+    assert result.normalized_output["finish_reason"] == "stop"
+    assert list(deltas) == [
+        {"type": "text", "text": "只"},
+        {"type": "text", "text": "回复"},
+    ]
+
+
+async def test_invoke_stream_http_400_returns_error_without_retry() -> None:
+    attempts = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(400, json={"error": {"message": "bad stream request"}})
+
+    deltas: list[Mapping[str, Any]] = []
+    adapter = OpenAICompatibleLLMProvider(
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+        retry_base_delay_seconds=0,
+    )
+
+    result = await adapter.invoke_stream(_provider_request(), on_delta=deltas.append)
+
+    assert attempts == 1
+    assert list(deltas) == []
+    assert result.error is not None
+    assert result.error.error_code == "http_status_400"
+    assert result.error.retryable is False
+    assert result.error.message == "bad stream request"
+
+
+async def test_invoke_stream_transport_error_returns_error_without_retry() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ConnectError("connection refused", request=request)
+
+    deltas: list[Mapping[str, Any]] = []
+    adapter = OpenAICompatibleLLMProvider(
+        transport=httpx.MockTransport(handler),
+        retry_base_delay_seconds=0,
+    )
+
+    result = await adapter.invoke_stream(_provider_request(), on_delta=deltas.append)
+
+    assert attempts == 1
+    assert list(deltas) == []
+    assert result.error is not None
+    assert result.error.error_code == "network_error"
+    assert result.error.retryable is True
+
+
+async def test_invoke_stream_timeout_returns_error_without_retry() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("read timed out", request=request)
+
+    deltas: list[Mapping[str, Any]] = []
+    adapter = OpenAICompatibleLLMProvider(
+        transport=httpx.MockTransport(handler),
+        retry_base_delay_seconds=0,
+    )
+
+    result = await adapter.invoke_stream(_provider_request(), on_delta=deltas.append)
+
+    assert attempts == 1
+    assert list(deltas) == []
+    assert result.error is not None
+    assert result.error.error_code == "timeout"
+    assert result.error.retryable is True
+
+
 async def test_network_error_exhausts_retries_with_structured_error() -> None:
     calls: list[int] = []
 
