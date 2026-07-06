@@ -15,11 +15,18 @@ from sqlalchemy.engine import Connection, Engine
 
 from contracts.case import CaseState
 from contracts.decision import Decision, PendingToolCall
-from contracts.events import Actor, CapabilityDegraded, DomainEventBase, JobEnqueued
+from contracts.events import (
+    Actor,
+    CapabilityDegraded,
+    DomainEventBase,
+    JobEnqueued,
+    MemoryCandidateDiscarded,
+)
 from contracts.project import ProjectState
 from contracts.timeline import TimelineState
 from contracts.tool import PatchOpSpec, ToolSpec
 from contracts.tool_result import ToolError, ToolResult
+from domain.decision_effects import HarnessFollowup
 from domain.preconditions import PreconditionContext, ProjectArtifactStats, ProjectBgmAsset
 from storage import schema
 from storage.db import begin_immediate
@@ -32,6 +39,7 @@ from storage.repositories import (
 )
 from storage.repositories._json import load_json
 from tools import PATCH_OP_REGISTRY, ToolExecutionContext, ToolRegistry, build_default_tool_registry
+from tools.memory_tools import search_relevant_memories
 
 from .context_builder import ContextBuilder, ContextBuildInput, ContextBundle, ContextMessage
 from .decision_answering import DecisionAnswerResolver
@@ -103,6 +111,7 @@ class _LoadedState:
     pending_decision: Decision | None
     messages: tuple[ContextMessage, ...]
     timeline: TimelineState | None
+    memory_summaries: tuple[str, ...]
 
 
 @dataclass(slots=True)
@@ -350,7 +359,11 @@ async def run_turn(
         enqueued = await _handle_followups(
             reducer_result,
             engine=engine,
+            router=router,
             turn_queue=turn_queue,
+            turn_id=active_turn_id,
+            accumulator=accumulator,
+            tracer=tracer,
         )
         accumulator.replays_enqueued.extend(enqueued)
 
@@ -484,6 +497,7 @@ def _build_context(policy_gate: PolicyGate, loaded: _LoadedState) -> ContextBund
             pending_decision=loaded.pending_decision,
             timeline=loaded.timeline,
             messages=loaded.messages,
+            memory_summaries=loaded.memory_summaries,
         )
     )
 
@@ -642,7 +656,11 @@ async def _maybe_answer_pending_decision_from_user_message(
     enqueued = await _handle_followups(
         reducer_result,
         engine=engine,
+        router=router,
         turn_queue=turn_queue,
+        turn_id=turn_id,
+        accumulator=accumulator,
+        tracer=tracer,
     )
     accumulator.replays_enqueued.extend(enqueued)
     return None
@@ -669,6 +687,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
             for row in MessagesRepository(connection).list_for_case(case_id)
         )
         timeline = _load_timeline(connection, case_state)
+        memory_summaries = _load_memory_summaries(connection, case_state)
     return _LoadedState(
         case_state=case_state,
         project_state=project_state,
@@ -678,6 +697,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
         pending_decision=pending_decision,
         messages=messages,
         timeline=timeline,
+        memory_summaries=memory_summaries,
     )
 
 
@@ -831,6 +851,39 @@ def _load_timeline(connection: Connection, case_state: CaseState) -> TimelineSta
     return TimelineState.model_validate(row["document_json"])
 
 
+def _load_memory_summaries(
+    connection: Connection,
+    case_state: CaseState,
+) -> tuple[str, ...]:
+    hits = search_relevant_memories(
+        connection,
+        query=case_state.brief.goal,
+        project_id=case_state.project_id,
+        limit=5,
+    )
+    return tuple(
+        _memory_summary_line(
+            memory_id=hit.memory_id,
+            scope=hit.scope,
+            project_id=hit.project_id,
+            content=hit.content,
+        )
+        for hit in hits
+    )
+
+
+def _memory_summary_line(
+    *,
+    memory_id: str,
+    scope: str,
+    project_id: str | None,
+    content: str,
+) -> str:
+    owner = "user" if scope == "user" else f"project:{project_id}"
+    summary = content if len(content) <= 200 else f"{content[:197]}..."
+    return f"{owner} {memory_id}: {summary}"
+
+
 async def _record_incoming_item(
     item: TurnQueueItem,
     *,
@@ -894,6 +947,7 @@ def _execute_tool(
             project_state=state.project_state,
             decisions=state.decisions,
             readonly_connection=connection,
+            created_at=_now_iso(),
             metadata=_tool_context_metadata(engine),
         )
         try:
@@ -1012,30 +1066,194 @@ async def _handle_followups(
     result: ReducerApplyResult,
     *,
     engine: Engine,
+    router: ToolRouter,
     turn_queue: TurnQueue | None,
+    turn_id: str,
+    accumulator: _RunAccumulator,
+    tracer: TraceRecorder | NullTraceRecorder,
 ) -> list[str]:
-    if result.status != "applied" or turn_queue is None:
+    if result.status != "applied":
         return []
     enqueued: list[str] = []
     for followup in result.followups:
-        if followup.kind != "replay_pending_tool_call":
-            continue
-        replay = _consume_pending_replay(engine, followup.decision_id)
-        if replay is None:
-            continue
-        case_id, pending, replayed_tool_call_id = replay
-        await turn_queue.enqueue_ui_observation(
-            case_id,
-            observation_type="replay_pending_tool_call",
-            payload={
-                "decision_id": followup.decision_id,
-                "pending_tool_call": pending.model_dump(mode="json"),
-                "replayed_tool_call_id": replayed_tool_call_id,
-            },
-            item_id=followup.decision_id,
-        )
-        enqueued.append(followup.decision_id)
+        if followup.kind == "replay_pending_tool_call":
+            if turn_queue is None:
+                continue
+            replay = _consume_pending_replay(engine, followup.decision_id)
+            if replay is None:
+                continue
+            case_id, pending, replayed_tool_call_id = replay
+            await turn_queue.enqueue_ui_observation(
+                case_id,
+                observation_type="replay_pending_tool_call",
+                payload={
+                    "decision_id": followup.decision_id,
+                    "pending_tool_call": pending.model_dump(mode="json"),
+                    "replayed_tool_call_id": replayed_tool_call_id,
+                },
+                item_id=followup.decision_id,
+            )
+            enqueued.append(followup.decision_id)
+        elif followup.kind == "enqueue_memory_save":
+            _execute_memory_save_followup(
+                followup,
+                engine=engine,
+                router=router,
+                turn_id=turn_id,
+                accumulator=accumulator,
+                tracer=tracer,
+            )
+        elif followup.kind == "discard_memory_candidate":
+            _discard_memory_candidate_followup(
+                followup,
+                engine=engine,
+                accumulator=accumulator,
+                tracer=tracer,
+            )
     return enqueued
+
+
+def _execute_memory_save_followup(
+    followup: HarnessFollowup,
+    *,
+    engine: Engine,
+    router: ToolRouter,
+    turn_id: str,
+    accumulator: _RunAccumulator,
+    tracer: TraceRecorder | NullTraceRecorder,
+) -> None:
+    """Execute memory.save directly after commit.
+
+    PRD calls this an enqueue step, but memory.save is a millisecond DB event
+    generator. Keeping it in-process avoids the render/annotation job table while
+    preserving the reducer boundary: the handler emits MemorySaved, then the
+    harness applies that event in a separate transaction.
+    """
+
+    candidate_id = followup.payload.get("candidate_id")
+    scope = followup.payload.get("scope")
+    case_id = followup.payload.get("case_id")
+    if not isinstance(candidate_id, str) or scope not in {"user", "project"}:
+        tracer.record(
+            "action",
+            {
+                "stage": "followup",
+                "kind": followup.kind,
+                "decision_id": followup.decision_id,
+                "status": "failed",
+                "observation": "invalid memory save followup payload",
+            },
+        )
+        return
+    if not isinstance(case_id, str):
+        tracer.record(
+            "action",
+            {
+                "stage": "followup",
+                "kind": followup.kind,
+                "decision_id": followup.decision_id,
+                "status": "failed",
+                "observation": "memory save followup missing case_id",
+            },
+        )
+        return
+    tool_call = ToolCall(
+        tool_name="memory.save",
+        arguments={"candidate_id": candidate_id, "scope": scope},
+        tool_call_id=f"followup_{followup.decision_id}_memory_save",
+    )
+    accumulator.tool_calls.append(tool_call)
+    tracer.record(
+        "action",
+        {
+            "stage": "followup",
+            "kind": followup.kind,
+            "tool_call": tool_call.model_dump(mode="json"),
+        },
+    )
+    try:
+        state = _load_state(engine, case_id)
+        result = _execute_tool(router, tool_call, engine=engine, state=state, turn_id=turn_id)
+    except Exception as exc:  # pragma: no cover - defensive post-commit boundary
+        result = ToolResult(
+            tool_call_id=tool_call.tool_call_id or "followup_memory_save",
+            tool_name=tool_call.tool_name,
+            status="failed",
+            observation=f"memory.save followup failed: {exc}",
+            error=ToolError(
+                error_code="memory_save_followup_failed",
+                message=str(exc),
+                retryable=False,
+                details={"exception_type": type(exc).__name__},
+            ),
+        )
+    accumulator.tool_results.append(result)
+    tracer.record("tool_result", _tool_result_payload(result))
+    reducer_result = _apply_events(result.events, engine=engine, base_version=None, actor="system")
+    accumulator.reducer_results.append(reducer_result)
+    tracer.record("events", _events_payload(result.events, reducer_result))
+    if result.status != "succeeded" or reducer_result.status != "applied":
+        tracer.record(
+            "action",
+            {
+                "stage": "followup",
+                "kind": followup.kind,
+                "decision_id": followup.decision_id,
+                "status": "failed",
+                "observation": result.observation,
+                "reducer_status": reducer_result.status,
+            },
+        )
+
+
+def _discard_memory_candidate_followup(
+    followup: HarnessFollowup,
+    *,
+    engine: Engine,
+    accumulator: _RunAccumulator,
+    tracer: TraceRecorder | NullTraceRecorder,
+) -> None:
+    candidate_id = followup.payload.get("candidate_id")
+    case_id = followup.payload.get("case_id")
+    if not isinstance(candidate_id, str):
+        tracer.record(
+            "action",
+            {
+                "stage": "followup",
+                "kind": followup.kind,
+                "decision_id": followup.decision_id,
+                "status": "failed",
+                "observation": "invalid memory discard followup payload",
+            },
+        )
+        return
+    event = MemoryCandidateDiscarded(
+        candidate_id=candidate_id,
+        case_id=case_id if isinstance(case_id, str) else None,
+        payload={"candidate_id": candidate_id},
+    )
+    result = ToolResult(
+        tool_call_id=f"followup_{followup.decision_id}_memory_discard",
+        tool_name="memory.discard_candidate",
+        status="succeeded",
+        observation="经验候选已丢弃。",
+        data={"candidate_id": candidate_id},
+        events=[event.model_dump(mode="json")],
+    )
+    accumulator.tool_results.append(result)
+    tracer.record(
+        "action",
+        {
+            "stage": "followup",
+            "kind": followup.kind,
+            "decision_id": followup.decision_id,
+            "candidate_id": candidate_id,
+        },
+    )
+    tracer.record("tool_result", _tool_result_payload(result))
+    reducer_result = _apply_events(result.events, engine=engine, base_version=None, actor="system")
+    accumulator.reducer_results.append(reducer_result)
+    tracer.record("events", _events_payload(result.events, reducer_result))
 
 
 def _consume_pending_replay(

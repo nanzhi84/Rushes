@@ -101,6 +101,10 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "render.preview",
         "render.final_mp4",
         "render.status",
+        "memory.extract_from_case",
+        "memory.ask_scope",
+        "memory.save",
+        "memory.search_relevant",
     }
     assert {spec.name for spec in tool_specs()} == expected_tools
     assert {spec.name for spec in registry.list_stable()} == {spec.name for spec in tool_specs()}
@@ -199,6 +203,20 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "preview_for_current_version_exists",
     ]
     assert registry.require("render.status").spec.side_effects == []
+    memory_extract = registry.require("memory.extract_from_case").spec
+    assert memory_extract.emits_events == [
+        "MemoryCandidateExtracted",
+        "CapabilityDegraded",
+        "ProviderCallRecorded",
+    ]
+    assert registry.require("memory.ask_scope").spec.emits_events == ["DecisionCreated"]
+    memory_save = registry.require("memory.save").spec
+    assert memory_save.exposure == "harness_only"
+    assert memory_save.requires_confirmation is False
+    assert memory_save.emits_events == ["MemorySaved"]
+    llm_tools = {spec.name for spec in registry.list_stable(exposure="llm")}
+    assert "memory.save" not in llm_tools
+    assert "memory.search_relevant" in llm_tools
     assert {spec.kind for spec in PATCH_OP_REGISTRY.list()} == {
         "delete_range",
         "replace_clip",
