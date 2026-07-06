@@ -49,11 +49,18 @@ def status(input_model: RenderStatusInput, context: ToolExecutionContext) -> Too
         current_id=case_state.export_current_id,
     )
     jobs = _render_jobs(context, case_state)
+    # LLM 只读 observation：状态结论要完整写在这里，不能只留在 data
+    running = f"{len(jobs)} 个渲染任务进行中" if jobs else "无进行中的渲染任务"
+    observation = (
+        f"渲染状态：timeline v{case_state.timeline_current_version}，"
+        f"当前预览 {case_state.preview_current_id or '无'}，"
+        f"当前导出 {case_state.export_current_id or '无'}，{running}"
+    )
     return ToolResult(
         tool_call_id=context.tool_call_id,
         tool_name=tool_name,
         status="succeeded",
-        observation="loaded render status",
+        observation=observation,
         data={
             "case_id": case_state.case_id,
             "timeline_current_version": case_state.timeline_current_version,

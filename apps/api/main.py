@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -16,7 +17,7 @@ from typing import Any, NoReturn, cast
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.engine import Engine, Row
 
 from agent_harness.decision_answering import DecisionAnswerResolver
@@ -428,11 +429,63 @@ def _register_lifecycle(app: FastAPI) -> None:
         url = f"http://127.0.0.1:{state.startup_port}/#t={state.token}"
         print(url, flush=True)
         LOGGER.info("Rushes API startup URL: %s", url)
+        app.state.job_observation_bridge = asyncio.create_task(
+            _job_observation_bridge(state.engine, state.turn_queue)
+        )
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
         state = _state_from_app(app)
+        bridge = getattr(app.state, "job_observation_bridge", None)
+        if bridge is not None:
+            bridge.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await bridge
         await state.turn_queue.shutdown()
+
+
+async def _job_observation_bridge(
+    engine: Engine,
+    turn_queue: TurnQueue,
+    *,
+    poll_interval: float = 1.0,
+) -> None:
+    """独立 worker 进程完成 job 后只写 event_log；本轮询桥把
+    JobSucceeded/JobFailed 转成 job_observation turn，Agent 才能被结果唤醒
+    （M9 路径 1 实测：缺了它 agent 永远等不到 ASR 完成）。"""
+
+    def _max_event_id() -> int:
+        with engine.connect() as connection:
+            row = connection.execute(select(func.max(schema.event_log.c.event_id))).scalar()
+        return int(row or 0)
+
+    cursor = _max_event_id()
+    while True:
+        await asyncio.sleep(poll_interval)
+        try:
+            with engine.connect() as connection:
+                rows = connection.execute(
+                    select(schema.event_log)
+                    .where(schema.event_log.c.event_id > cursor)
+                    .where(schema.event_log.c.event_type.in_(("JobSucceeded", "JobFailed")))
+                    .order_by(schema.event_log.c.event_id)
+                ).all()
+                max_row = connection.execute(select(func.max(schema.event_log.c.event_id))).scalar()
+            for row in rows:
+                values = dict(row._mapping)
+                payload = load_json(str(values["payload_json"]))
+                if not isinstance(payload, dict):
+                    continue
+                case_id = payload.get("requested_by_case_id") or values.get("case_id")
+                job_id = payload.get("job_id")
+                if not isinstance(case_id, str) or not isinstance(job_id, str):
+                    continue
+                await turn_queue.enqueue_job_observation(case_id, job_id=job_id, event=payload)
+            cursor = int(max_row or cursor)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # pragma: no cover - 轮询桥绝不能死于单次故障
+            LOGGER.exception("job observation bridge iteration failed")
 
 
 def _register_routes(app: FastAPI) -> None:

@@ -69,7 +69,8 @@ def inspect_sources(
             events.append(
                 AssetProbed(
                     project_id=case_state.project_id,
-                    case_id=case_state.case_id,
+                    # 素材域事件必须 project 作用域（§4.6-5），带 case_id 会被 validator 拒
+                    case_id=None,
                     asset_id=asset_id,
                     payload={"probe": probe_payload, "ingest_status": "probed"},
                 ).model_dump(mode="json")
@@ -98,10 +99,46 @@ def inspect_sources(
         tool_call_id=context.tool_call_id,
         tool_name="audio.inspect_sources",
         status="succeeded",
-        observation="inspected audio sources",
+        observation=_inspect_sources_observation(sources, degraded),
         data={"case_id": case_state.case_id, "sources": sources, "degraded": degraded},
         events=events,
     )
+
+
+def _inspect_sources_observation(
+    sources: list[dict[str, Any]],
+    degraded: list[dict[str, Any]],
+) -> str:
+    # LLM 只读 observation 不读 data：探测结论必须完整落在这里，否则模型
+    # 拿不到"有无原声"的依据会反复重调本工具（M9 路径 1 实测卡死点）。
+    if not sources:
+        return "未找到可检查的素材。"
+    lines: list[str] = []
+    for source in sources:
+        asset_id = source.get("asset_id")
+        if source.get("error"):
+            lines.append(f"{asset_id}: 探测失败（{source['error']}）")
+            continue
+        duration = source.get("duration_sec")
+        duration_text = f"{duration:.1f}s" if isinstance(duration, int | float) else "未知时长"
+        if not source.get("has_audio"):
+            lines.append(f"{asset_id}: 无音轨，{duration_text}")
+            continue
+        speech_ratio = source.get("speech_ratio")
+        speech_text = (
+            f"语音占比 {speech_ratio:.0%}"
+            if isinstance(speech_ratio, int | float)
+            else "语音占比未知"
+        )
+        segments = source.get("vad_segments")
+        segment_count = len(segments) if isinstance(segments, list) else 0
+        lines.append(
+            f"{asset_id}: 有音轨，{duration_text}，{speech_text}，语音片段 {segment_count} 段"
+        )
+    if degraded:
+        reasons = "；".join(str(item.get("reason", "")) for item in degraded)
+        lines.append(f"能力降级：{reasons}")
+    return "音频源检查结果：" + "；".join(lines)
 
 
 def asr_original(input_model: AudioAsrOriginalInput, context: ToolExecutionContext) -> ToolResult:
@@ -130,6 +167,36 @@ def asr_original(input_model: AudioAsrOriginalInput, context: ToolExecutionConte
             "missing_audio_asset",
             "audio.asr_original requires an audio source asset",
         )
+    # 幂等短路：转写已存在时直接报告结果，不再重复排 job——否则 agent
+    # 只能拿到"job queued"这种无信息 observation，无法推进（M9 实测）
+    existing = None
+    if context.readonly_connection is not None:
+        existing = context.readonly_connection.execute(
+            select(schema.transcripts)
+            .where(schema.transcripts.c.asset_id == asset_id)
+            .order_by(schema.transcripts.c.transcript_id.desc())
+            .limit(1)
+        ).first()
+    if existing is not None:
+        values = dict(existing._mapping)
+        utterances = load_json(str(values["utterances"]))
+        count = len(utterances) if isinstance(utterances, list) else 0
+        return ToolResult(
+            tool_call_id=context.tool_call_id,
+            tool_name="audio.asr_original",
+            status="succeeded",
+            observation=(
+                f"ASR 已完成：transcript {values['transcript_id']}，共 {count} 句转写。"
+                "下一步可调用 audio.rough_cut_speech 生成粗剪提案。"
+            ),
+            data={
+                "case_id": case_state.case_id,
+                "asset_id": asset_id,
+                "transcript_id": values["transcript_id"],
+                "utterance_count": count,
+            },
+        )
+
     idempotency_key = f"case:{case_state.case_id}:asr:{asset_id}"
     event = JobEnqueued(
         job_id=_job_id("asr", idempotency_key),

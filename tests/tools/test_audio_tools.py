@@ -542,3 +542,18 @@ class _ErrorLlmGateway:
                 ),
             )
         )
+
+
+def test_audio_asr_original_short_circuits_when_transcript_exists(tmp_path: Path) -> None:
+    """转写已存在时直接报告结果并提示下一步，不再重复排 job（M9 实测回归）。"""
+    engine = _engine_with_case_and_transcript(tmp_path, _rough_cut_document())
+    with engine.connect() as connection:
+        result = asr_original(
+            AudioAsrOriginalInput(asset_id="asset_1"),
+            _context(tmp_path, connection=connection),
+        )
+    assert result.status == "succeeded"
+    assert "ASR 已完成" in result.observation
+    assert "rough_cut_speech" in result.observation
+    assert result.data["transcript_id"] == "tr_rough"
+    assert result.events == []

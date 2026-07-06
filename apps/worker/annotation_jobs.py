@@ -101,7 +101,7 @@ def build_annotation_handler(
                     *(_event_from_dict(event) for event in events),
                     AnnotationCompleted(
                         project_id=project_id,
-                        case_id=job.case_id,
+                        case_id=None,
                         asset_id=asset_id,
                         job_id=job.job_id,
                         annotation_id=document.annotation_id,
@@ -163,11 +163,18 @@ def build_default_annotation_gateway(engine: Engine) -> ProviderGateway:
     registry = ProviderRegistry()
     registry.register(
         openai_compatible_vlm_descriptor(),
-        OpenAICompatibleVLMProvider(api_key=os.environ.get("RUSHES_VLM_API_KEY")),
+        OpenAICompatibleVLMProvider(
+            # 与 API 侧 planner 一致的回退链：专用 key 缺省时用 DashScope 通用 key
+            api_key=os.environ.get("RUSHES_VLM_API_KEY")
+            or os.environ.get("RUSHES_DASHSCOPE_API_KEY"),
+        ),
     )
     registry.register(
         openai_compatible_embedding_descriptor(),
-        OpenAICompatibleEmbeddingProvider(api_key=os.environ.get("RUSHES_EMBEDDING_API_KEY")),
+        OpenAICompatibleEmbeddingProvider(
+            api_key=os.environ.get("RUSHES_EMBEDDING_API_KEY")
+            or os.environ.get("RUSHES_DASHSCOPE_API_KEY"),
+        ),
     )
     return ProviderGateway(registry=registry, recorder=StorageProviderCallRecorder(engine))
 
@@ -315,7 +322,7 @@ def _raise_if_budget_exceeded(engine: Engine, job: Job, project_id: str) -> None
             ),
             AnnotationFailed(
                 project_id=project_id,
-                case_id=job.case_id,
+                case_id=None,
                 asset_id=asset_id or "",
                 job_id=job.job_id,
                 payload={
@@ -351,7 +358,7 @@ def _mark_annotation_failed(
         (
             AnnotationFailed(
                 project_id=project_id,
-                case_id=job.case_id,
+                case_id=None,
                 asset_id=asset_id,
                 job_id=job.job_id,
                 payload={
