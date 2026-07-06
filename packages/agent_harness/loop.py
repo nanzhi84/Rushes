@@ -504,9 +504,8 @@ async def _run_turn_body(
                         state=loaded,
                         turn_id=active_turn_id,
                         message=(
-                            f"连续 {max_illegal_outputs} 次工具调用没有通过安全或 "
-                            "schema 校验，已停止本回合。卡点：planner 返回空输出"
-                            "（无 content 也无 tool_call）"
+                            f"连续 {max_illegal_outputs} 次规划输出为空"
+                            "（既无内容也无工具调用），已停止本回合。"
                         ),
                         reason=forced_reason,
                         accumulator=accumulator,
@@ -531,6 +530,20 @@ async def _run_turn_body(
             )
             accumulator.reducer_results.append(reducer_result)
             tracer.record("events", _events_payload((end_event,), reducer_result))
+            if reducer_result.status != "applied":
+                forced_reason = f"reducer_{reducer_result.status}"
+                _force_reply(
+                    engine=engine,
+                    state=loaded,
+                    turn_id=active_turn_id,
+                    message=f"回合收尾写入被拒绝，已停止本回合。{_reducer_diagnostic(reducer_result)}",
+                    reason=forced_reason,
+                    accumulator=accumulator,
+                    tracer=tracer,
+                    turn_listener=turn_listener,
+                )
+                outcome = "forced_end"
+                break
             outcome = "finished"
             break
 
