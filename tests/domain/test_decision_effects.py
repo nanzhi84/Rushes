@@ -329,9 +329,10 @@ def test_invalid_decision_answers_raise_value_errors() -> None:
             _decision("approve_speech_cut"),
             _answer(payload={"removed_ranges": "not a sequence"}),
         )
-    with pytest.raises(ValueError, match="reduce_target"):
-        reduce_decision_answer(
-            _case_state(),
-            _decision("generic"),
-            _answer(payload={"value": "text"}),
-        )
+    # generic 缺 reduce_target 时按 scratch_memory 兜底而非报错（M9 实测修复）
+    fallback = reduce_decision_answer(
+        _case_state(),
+        _decision("generic"),
+        _answer(payload={"value": "text"}),
+    )
+    assert "scratch_memory" in fallback.state_patch

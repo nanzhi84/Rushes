@@ -192,3 +192,34 @@ async def test_job_observation_bridge_enqueues_terminal_job_events(tmp_path: Pat
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+def test_build_default_tool_gateway_registers_capabilities(monkeypatch) -> None:
+    """gateway 工厂：DASHSCOPE key 单钥覆盖三能力；无 key 返回 None（M9 回归）。"""
+    from providers.tool_gateway import build_default_tool_gateway
+
+    for name in (
+        "RUSHES_DASHSCOPE_API_KEY",
+        "RUSHES_LLM_API_KEY",
+        "RUSHES_VLM_API_KEY",
+        "RUSHES_EMBEDDING_API_KEY",
+        "RUSHES_LLM_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert build_default_tool_gateway() is None
+
+    monkeypatch.setenv("RUSHES_DASHSCOPE_API_KEY", "sk-test")
+    monkeypatch.setenv("RUSHES_LLM_MODEL", "qwen-max")
+    gateway = build_default_tool_gateway()
+    assert gateway is not None
+
+
+def test_tool_context_metadata_includes_gateway(tmp_path: Path) -> None:
+    from agent_harness.loop import _tool_context_metadata
+
+    engine = _engine(tmp_path)
+    marker = object()
+    metadata = _tool_context_metadata(engine, marker)
+    assert metadata["provider_gateway"] is marker
+    assert "workspace_path" in metadata
+    assert "provider_gateway" not in _tool_context_metadata(engine, None)

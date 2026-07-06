@@ -87,6 +87,8 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "audio.rough_cut_speech",
         "audio.generate_tts",
         "audio.align_uploaded_voiceover",
+        "content.create_plan",
+        "content.revise_plan",
         "annotation.enqueue",
         "annotation.status",
         "annotation.retry",
@@ -154,6 +156,15 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "audio_mode_in(uploaded_voiceover)",
         "voiceover_asset_exists",
     ]
+    content_create = registry.require("content.create_plan").spec
+    assert content_create.exposure == "llm"
+    assert content_create.requires_active_case is True
+    assert content_create.requires_confirmation is False
+    assert content_create.emits_events == ["ContentPlanUpdated", "CutPlanUpdated"]
+    content_revise = registry.require("content.revise_plan").spec
+    assert content_revise.exposure == "llm"
+    assert content_revise.requires_active_case is True
+    assert content_revise.emits_events == ["ContentPlanUpdated", "CutPlanUpdated"]
     assert registry.require("annotation.enqueue").spec.emits_events == ["JobEnqueued"]
     assert registry.require("annotation.status").spec.side_effects == []
     media_view_frames = registry.require("media.view_frames").spec

@@ -54,6 +54,7 @@ from media.invalidation import revalidate_project_references
 from providers.decision_answering import build_openai_compatible_decision_answer_resolver
 from providers.gateway import ProviderCallRecord
 from providers.planner import build_openai_compatible_planner
+from providers.tool_gateway import build_default_tool_gateway
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
 from storage.repositories import (
@@ -290,6 +291,8 @@ def create_app(
     )
     queue: TurnQueue | None = None
 
+    tool_gateway = build_default_tool_gateway(recorder=_StorageProviderCallRecorder(engine))
+
     async def default_runner(item: TurnQueueItem, stop_token: StopToken) -> None:
         if queue is None:
             raise RuntimeError("turn queue is not initialized")
@@ -301,6 +304,7 @@ def create_app(
             turn_queue=queue,
             stop_token=stop_token,
             decision_answer_resolver=env_decision_answer_resolver,
+            tool_gateway=tool_gateway,
         )
 
     queue = TurnQueue(turn_runner or default_runner)

@@ -137,6 +137,7 @@ async def run_turn(
     max_illegal_outputs: int = DEFAULT_MAX_ILLEGAL_OUTPUTS,
     max_nonblocking_tools: int = DEFAULT_MAX_NONBLOCKING_TOOLS,
     max_tool_attempts: int = DEFAULT_MAX_TOOL_ATTEMPTS,
+    tool_gateway: Any | None = None,
 ) -> RunTurnResult:
     active_registry = registry or build_default_tool_registry()
     active_patch_ops = patch_op_specs or PATCH_OP_REGISTRY.as_mapping()
@@ -346,6 +347,7 @@ async def run_turn(
             engine=engine,
             state=loaded,
             turn_id=active_turn_id,
+            gateway=tool_gateway,
         )
         accumulator.tool_results.append(result)
         turn_observations.append(_turn_observation_entry(tool_call, result))
@@ -1006,6 +1008,7 @@ def _execute_tool(
     engine: Engine,
     state: _LoadedState,
     turn_id: str,
+    gateway: Any | None = None,
 ) -> ToolResult:
     with engine.connect() as connection:
         context = ToolExecutionContext(
@@ -1016,7 +1019,7 @@ def _execute_tool(
             decisions=state.decisions,
             readonly_connection=connection,
             created_at=_now_iso(),
-            metadata=_tool_context_metadata(engine),
+            metadata=_tool_context_metadata(engine, gateway),
         )
         try:
             return router.execute(tool_call, context)
@@ -1582,11 +1585,15 @@ def _asset_id_for_asr(case_state: CaseState) -> str | None:
     return None
 
 
-def _tool_context_metadata(engine: Engine) -> dict[str, Any]:
+def _tool_context_metadata(engine: Engine, gateway: Any | None = None) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
     database = engine.url.database
-    if database is None or database == ":memory:":
-        return {}
-    return {"workspace_path": str(Path(database).parent)}
+    if database is not None and database != ":memory:":
+        metadata["workspace_path"] = str(Path(database).parent)
+    if gateway is not None:
+        # 工具经此调 LLM/VLM/embedding；不注入则全部降级（M9 实测）
+        metadata["provider_gateway"] = gateway
+    return metadata
 
 
 def _job_idempotency_key(

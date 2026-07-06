@@ -127,6 +127,53 @@ def build_candidate_pack(
                 )
                 if len(candidates) >= slot_limit:
                     break
+            if not candidates:
+                # 关键词/向量均无命中（如中文 brief 对英文标注、embedding 降级）：
+                # 兜底返回通过结构过滤的 usable clip 按质量排序——宁给宽松候选
+                # 也不给空包让链路断头（M9 真实素材实测）
+                fallback_rows = sorted(
+                    (
+                        row
+                        for row in scope.clip_rows.values()
+                        if _passes_structured_filters(
+                            row,
+                            target_duration_sec=slot.target_duration_sec,
+                            role_filter=None,
+                            min_quality_score=min_quality_score,
+                        )
+                    ),
+                    key=lambda row: row.quality_score or 0.0,
+                    reverse=True,
+                )
+                if not fallback_rows:
+                    # 第二级兜底：时长也放宽（素材普遍短于 slot 目标时，
+                    # 宁可给短候选交 materializer 裁剪，不给空包）
+                    fallback_rows = sorted(
+                        (
+                            row
+                            for row in scope.clip_rows.values()
+                            if _passes_structured_filters(
+                                row,
+                                target_duration_sec=(0.0, float("inf")),
+                                role_filter=None,
+                                min_quality_score=min_quality_score,
+                            )
+                        ),
+                        key=lambda row: row.quality_score or 0.0,
+                        reverse=True,
+                    )
+                for row in fallback_rows[:slot_limit]:
+                    candidates.append(
+                        Candidate(
+                            candidate_id=(
+                                f"cand_{slot_index + 1}_{len(candidates) + 1}_{row.clip_id}"
+                            ),
+                            asset_id=row.asset_id,
+                            clip_id=row.clip_id,
+                            summary_line=_summary_line(row),
+                            score=CandidateScore(bm25_rank=0, vector_rank=0, rrf=0.0),
+                        )
+                    )
             slots.append(
                 CandidateSlot(
                     slot_id=slot.slot_id,
@@ -305,8 +352,10 @@ def _passes_structured_filters(
     if row.quality_score is not None and row.quality_score < min_quality_score:
         return False
     clip_duration = _clip_duration_sec(row)
-    min_duration, max_duration = target_duration_sec
-    if clip_duration < min_duration or clip_duration > max_duration:
+    min_duration, _max_duration = target_duration_sec
+    # 只过滤"太短不够截"的 clip：长 clip 由 materializer 裁剪到 slot 时长，
+    # 按完整时长落区间过滤会把所有长素材全灭（M9 真实 30s 素材实测）
+    if clip_duration < min_duration:
         return False
     return not _hard_event_overlaps_clip(row)
 

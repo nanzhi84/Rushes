@@ -23,6 +23,31 @@ from tools.context import ToolExecutionContext
 from tools.specs import RetrievalSearchCandidatesInput
 
 
+def _search_observation(pack: CandidatePack) -> str:
+    # LLM 只读 observation：候选数必须报告，0 候选时给出可执行指引，
+    # 否则模型会反复重搜（M9 风景混剪实测）
+    total = sum(len(slot.candidates) for slot in pack.slots)
+    if total == 0:
+        return (
+            f"候选包 {pack.candidate_pack_id} 已创建，但所有 slot 的候选为 0。"
+            "常见原因：素材尚未完成标注（annotation.enqueue 后等待完成）"
+            "或 slot brief 与素材内容不匹配（content.revise_plan 修订）。"
+            "不要原样重试本工具。"
+        )
+    lines: list[str] = []
+    for slot in pack.slots:
+        lines.append(f"{slot.slot_id}（{len(slot.candidates)} 个候选）：")
+        for candidate in slot.candidates[:3]:
+            summary = candidate.summary_line[:60]
+            lines.append(f"  - candidate_id={candidate.candidate_id} | {summary}")
+    detail = "\n".join(lines)
+    return (
+        f"候选包 {pack.candidate_pack_id} 已创建，共 {total} 个候选。\n{detail}\n"
+        "下一步调用 timeline.plan_from_candidates，selections 里的 candidate_id "
+        "必须使用上面列出的原文 id，不要自行构造。"
+    )
+
+
 def search_candidates(
     input_model: RetrievalSearchCandidatesInput,
     context: ToolExecutionContext,
@@ -68,7 +93,7 @@ def search_candidates(
         tool_call_id=context.tool_call_id,
         tool_name="retrieval.search_candidates",
         status="succeeded",
-        observation=f"created candidate pack {pack.candidate_pack_id}",
+        observation=_search_observation(pack),
         data={
             "case_id": case_state.case_id,
             "candidate_pack_id": pack.candidate_pack_id,
