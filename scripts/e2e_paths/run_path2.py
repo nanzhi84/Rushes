@@ -148,7 +148,6 @@ def run_workflow(
             project_id=project_id,
             asset_id=asset_id,
             path=fixture_dir / filename,
-            kind="video",
         )
         client.retry_material_annotation(project_id=project_id, asset_id=asset_id)
         imported_asset_ids.append(asset_id)
@@ -157,7 +156,6 @@ def run_workflow(
         project_id=project_id,
         asset_id=image_asset_id,
         path=fixture_dir / IMAGE_FILENAME,
-        kind="image",
     )
     client.retry_material_annotation(project_id=project_id, asset_id=image_asset_id)
     imported_asset_ids.append(image_asset_id)

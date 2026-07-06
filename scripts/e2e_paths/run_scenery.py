@@ -107,7 +107,6 @@ def _run(
             project_id=project_id,
             asset_id=asset_id,
             path=path,
-            kind="video",
         )
         imported.append(asset_id)
         client.retry_material_annotation(project_id=project_id, asset_id=asset_id)
@@ -118,7 +117,6 @@ def _run(
             project_id=project_id,
             asset_id=bgm_asset_id,
             path=bgm_path,
-            kind="bgm",
         )
         stage_log(f"已导入 BGM：{bgm_path.name}")
 

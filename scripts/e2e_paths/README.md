@@ -54,7 +54,7 @@ uv run python scripts/e2e_paths/run_path2.py \
 - 导入 3 段无声 B-roll 和 1 张图。
 - 等内容计划确认，进入 TTS。
 - 等 TTS、检索、timeline、预览。
-- 字幕选择 `clean_bottom`，BGM 选择 `default_bgm`，确认 export。
+- 字幕选择 `clean_bottom`，BGM 从项目已上传的 audio 素材中选、无音频素材则跳过，确认 export。
 - 下载最终 MP4，并用 ffprobe 检查时长在预期区间内。
 
 所有阶段日志都有本地时间戳。超时会打印当前 case 摘要和最近 SSE 事件。
@@ -85,7 +85,8 @@ uv run python scripts/e2e_paths/run_path2.py \
   `--llm-timeout`、`--job-timeout`、`--render-timeout` 放大。
 - worker 已完成 job 但 agent 没继续：外置 worker 只写 job/event，脚本在 case 空闲时
   会自动发“继续”消息推动下一轮。
-- 默认 BGM 失败：确认本机 `ffmpeg` 可用；默认 BGM 是本地合成，不依赖外部素材。
+- BGM 决策没有预期选项：BGM 只能从项目已上传的 audio 素材中选择，未上传音频素材时
+  只有「上传 BGM 素材 / 跳过 BGM」两项，脚本会按提示选择跳过。
 
 ## 替换为真实素材
 

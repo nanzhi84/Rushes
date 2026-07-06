@@ -449,14 +449,12 @@ class RushesClient:
         project_id: str,
         asset_id: str,
         path: Path,
-        kind: str,
     ) -> JsonObject:
         return self.post_json(
             f"/api/projects/{project_id}/materials/import-local",
             {
                 "asset_id": asset_id,
                 "path": str(path.resolve()),
-                "kind": kind,
                 "storage_mode": "reference",
             },
             context=f"导入素材 {path.name}",
