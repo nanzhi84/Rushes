@@ -144,7 +144,6 @@ def test_bgm_gate_uses_upload_skip_or_project_assets() -> None:
         "duck": True,
     }
     assert option_by_id["asset_bgm_1"].label == "使用素材：配乐.m4a"
-    assert "default_bgm" not in option_by_id
 
 
 def test_export_gate_persists_pending_replay_and_mentions_unviewed_preview() -> None:

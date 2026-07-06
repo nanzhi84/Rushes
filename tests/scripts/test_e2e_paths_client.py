@@ -87,8 +87,12 @@ def test_choose_path1_speech_cut_and_postprocess_decisions() -> None:
         {
             "type": "bgm",
             "options": [
-                {"option_id": "default_bgm", "label": "默认", "payload": {"enabled": True}},
-                {"option_id": "skip", "label": "跳过", "payload": {"enabled": False}},
+                {
+                    "option_id": "upload_bgm",
+                    "label": "上传 BGM 素材",
+                    "payload": {"enabled": True, "action": "upload"},
+                },
+                {"option_id": "skip", "label": "跳过 BGM", "payload": {"enabled": False}},
             ],
         },
         scenario="path1",
@@ -102,7 +106,7 @@ def test_choose_path1_speech_cut_and_postprocess_decisions() -> None:
     assert bgm.payload == {"enabled": False}
 
 
-def test_choose_path2_subtitle_and_bgm_defaults() -> None:
+def test_choose_path2_subtitle_and_bgm_uses_uploaded_asset() -> None:
     subtitle = choose_decision_answer(
         {
             "type": "subtitle",
@@ -122,13 +126,22 @@ def test_choose_path2_subtitle_and_bgm_defaults() -> None:
         {
             "type": "bgm",
             "options": [
-                {"option_id": "upload_bgm", "label": "上传", "payload": {"action": "upload"}},
                 {
-                    "option_id": "default_bgm",
-                    "label": "默认",
-                    "payload": {"enabled": True, "asset_id": "default_bgm_calm"},
+                    "option_id": "asset_bgm_1",
+                    "label": "使用素材：配乐.m4a",
+                    "payload": {
+                        "enabled": True,
+                        "asset_id": "asset_bgm_1",
+                        "gain_db": -12.0,
+                        "duck": True,
+                    },
                 },
-                {"option_id": "skip", "label": "跳过", "payload": {"enabled": False}},
+                {
+                    "option_id": "upload_bgm",
+                    "label": "上传 BGM 素材",
+                    "payload": {"enabled": True, "action": "upload"},
+                },
+                {"option_id": "skip", "label": "跳过 BGM", "payload": {"enabled": False}},
             ],
         },
         scenario="path2",
@@ -136,8 +149,13 @@ def test_choose_path2_subtitle_and_bgm_defaults() -> None:
 
     assert subtitle.option_id == "clean_bottom"
     assert subtitle.payload["style_template_id"] == "clean_bottom"
-    assert bgm.option_id == "default_bgm"
-    assert bgm.payload["asset_id"] == "default_bgm_calm"
+    assert bgm.option_id == "asset_bgm_1"
+    assert bgm.payload == {
+        "enabled": True,
+        "asset_id": "asset_bgm_1",
+        "gain_db": -12.0,
+        "duck": True,
+    }
 
 
 def test_choose_rough_cut_approval_injects_case_timeline_version() -> None:
