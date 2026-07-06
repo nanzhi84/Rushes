@@ -29,6 +29,16 @@ def apply_data_migrations(connection: Connection) -> None:
     _ensure_message_kind_column(connection)
 
 
+def _table_exists(connection: Connection, name: str) -> bool:
+    """该库是否存在名为 name 的表（含 fts5 虚拟表，均登记在 sqlite_master）。"""
+
+    row = connection.exec_driver_sql(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).first()
+    return row is not None
+
+
 def _ensure_message_kind_column(connection: Connection) -> None:
     """老库的 messages 表补 kind 列，并把 user 行回填为 kind='user'。"""
 
@@ -44,14 +54,23 @@ def _collapse_asset_kinds(connection: Connection) -> None:
     # PRAGMA foreign_keys=ON 下删资产必须先清依赖行（FK 子表 → 父表顺序）：
     # clip_fts 检索行 → signal 投影 → clip 投影 → annotations → transcripts → jobs
     # → project_asset_links → assets。clip_fts/signal 依赖 clip 投影定位，须先删。
-    connection.exec_driver_sql(f"DELETE FROM clip_fts WHERE clip_id IN ({_DOOMED_CLIP_IDS})")
-    connection.exec_driver_sql(
-        f"DELETE FROM annotation_signal_projection WHERE clip_id IN ({_DOOMED_CLIP_IDS})"
-    )
-    connection.exec_driver_sql(
-        f"DELETE FROM annotation_clip_projection WHERE asset_id IN ({_DOOMED_ASSET_IDS})"
-    )
-    connection.exec_driver_sql(f"DELETE FROM annotations WHERE asset_id IN ({_DOOMED_ASSET_IDS})")
+    # annotation 表族在后续任务里会被删除；此处按表存在性守卫，兼容删表后的新库。
+    # _DOOMED_CLIP_IDS 子查询依赖 annotation_clip_projection，该表不在则涉及它的语句一并跳过。
+    clip_projection_present = _table_exists(connection, "annotation_clip_projection")
+    if clip_projection_present and _table_exists(connection, "clip_fts"):
+        connection.exec_driver_sql(f"DELETE FROM clip_fts WHERE clip_id IN ({_DOOMED_CLIP_IDS})")
+    if clip_projection_present and _table_exists(connection, "annotation_signal_projection"):
+        connection.exec_driver_sql(
+            f"DELETE FROM annotation_signal_projection WHERE clip_id IN ({_DOOMED_CLIP_IDS})"
+        )
+    if clip_projection_present:
+        connection.exec_driver_sql(
+            f"DELETE FROM annotation_clip_projection WHERE asset_id IN ({_DOOMED_ASSET_IDS})"
+        )
+    if _table_exists(connection, "annotations"):
+        connection.exec_driver_sql(
+            f"DELETE FROM annotations WHERE asset_id IN ({_DOOMED_ASSET_IDS})"
+        )
     connection.exec_driver_sql(f"DELETE FROM transcripts WHERE asset_id IN ({_DOOMED_ASSET_IDS})")
     connection.exec_driver_sql(f"DELETE FROM jobs WHERE asset_id IN ({_DOOMED_ASSET_IDS})")
     connection.exec_driver_sql(
