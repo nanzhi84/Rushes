@@ -480,6 +480,166 @@ async def test_proxy_job_probes_and_generates_proxy_with_ffmpeg(tmp_path: Path) 
     assert {"AssetProbed", "ProxyGenerated"} <= set(_event_types(app))
 
 
+@pytest.mark.parametrize(
+    ("filename", "expected_kind"),
+    [("a.mp4", "video"), ("b.MP3", "audio"), ("c.jpeg", "image"), ("d.ttf", "font")],
+)
+def test_upload_kind_inferred_from_suffix(
+    tmp_path: Path, filename: str, expected_kind: str
+) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    init = client.post(
+        "/api/uploads/init",
+        headers=AUTH,
+        json={"project_id": "project_1", "filename": filename},
+    )
+    assert init.status_code == 201
+    upload_id = init.json()["upload_id"]
+    part_headers = {**AUTH, "Content-Type": "application/octet-stream"}
+    assert (
+        client.put(
+            f"/api/uploads/{upload_id}/parts/1", headers=part_headers, content=b"payload"
+        ).status_code
+        == 200
+    )
+    complete = client.post(f"/api/uploads/{upload_id}/complete", headers=AUTH, json={})
+
+    assert complete.status_code == 200
+    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    assert materials.status_code == 200
+    asset = materials.json()["assets"][0]
+    assert asset["kind"] == expected_kind
+
+
+@pytest.mark.parametrize("filename", ["e.srt", "f.xyz", "noext"])
+def test_upload_unsupported_suffix_rejected(tmp_path: Path, filename: str) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+
+    resp = client.post(
+        "/api/uploads/init",
+        headers=AUTH,
+        json={"project_id": "project_1", "filename": filename},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error_code"] == "unsupported_material_type"
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_kind"),
+    [("clip.mov", "video"), ("song.WAV", "audio"), ("pic.PNG", "image"), ("face.otf", "font")],
+)
+def test_import_local_kind_inferred_from_suffix(
+    tmp_path: Path, filename: str, expected_kind: str
+) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    source = tmp_path / "allowed" / filename
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"raw-media")
+
+    imported = client.post(
+        "/api/projects/project_1/materials/import-local",
+        headers=AUTH,
+        json={"path": str(source)},
+    )
+
+    assert imported.status_code == 200
+    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    asset = materials.json()["assets"][0]
+    assert asset["kind"] == expected_kind
+
+
+@pytest.mark.parametrize("filename", ["sub.srt", "weird.xyz", "noext"])
+def test_import_local_unsupported_suffix_rejected(tmp_path: Path, filename: str) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    source = tmp_path / "allowed" / filename
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"raw-media")
+
+    resp = client.post(
+        "/api/projects/project_1/materials/import-local",
+        headers=AUTH,
+        json={"path": str(source)},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error_code"] == "unsupported_material_type"
+
+
+@pytest.mark.parametrize(
+    ("url", "filename", "expected_kind"),
+    [
+        ("https://example.test/clip.mp4", None, "video"),
+        ("https://example.test/track.MP3", None, "audio"),
+        ("https://example.test/whatever", "poster.png", "image"),
+    ],
+)
+def test_import_url_kind_inferred_from_suffix(
+    tmp_path: Path, url: str, filename: str | None, expected_kind: str
+) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    body: dict[str, Any] = {"url": url}
+    if filename is not None:
+        body["filename"] = filename
+
+    created = client.post(
+        "/api/projects/project_1/materials/import-url",
+        headers=AUTH,
+        json=body,
+    )
+
+    assert created.status_code == 200
+    with _engine(app).connect() as connection:
+        row = connection.execute(select(schema.decisions)).one()._mapping
+    pending = load_json(row["pending_tool_call"])
+    assert pending["arguments"]["kind"] == expected_kind
+
+
+@pytest.mark.parametrize(
+    ("url", "filename"),
+    [
+        ("https://example.com/x.srt", None),
+        ("https://example.com/x.xyz", None),
+        ("https://example.com/", None),
+        ("https://example.com/clip", None),
+        ("https://example.com/clip.mp4", "override.srt"),
+    ],
+)
+def test_import_url_unsupported_suffix_rejected(
+    tmp_path: Path, url: str, filename: str | None
+) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    body: dict[str, Any] = {"url": url}
+    if filename is not None:
+        body["filename"] = filename
+
+    resp = client.post(
+        "/api/projects/project_1/materials/import-url",
+        headers=AUTH,
+        json=body,
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"]["error_code"] == "unsupported_material_type"
+    with _engine(app).connect() as connection:
+        decision_count = connection.execute(
+            select(func.count()).select_from(schema.decisions)
+        ).scalar_one()
+    assert decision_count == 0
+
+
 def _app(tmp_path: Path) -> FastAPI:
     return create_app(
         tmp_path / "workspace",
