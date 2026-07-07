@@ -24,16 +24,8 @@ async function globalSetup(): Promise<void> {
   mkdirSync(path.join(WORKSPACE_DIR, "logs"), { recursive: true });
 
   try {
-    seed("init", [
-      "--workspace",
-      WORKSPACE_DIR,
-      "--api-url",
-      API_URL,
-      "--token",
-      TOKEN,
-      "--fixture-dir",
-      FIXTURE_DIR
-    ], { skipApi: true });
+    // 造好导入 fixture（草稿本体改由测试内「开始创作」经真实 REST 建，不再预置项目）。
+    seed("init", ["--fixture-dir", FIXTURE_DIR]);
 
     const api = startProcess("api", "uv", [
       "run",
@@ -52,17 +44,6 @@ async function globalSetup(): Promise<void> {
     });
     started.push(api);
     await waitForApi();
-
-    seed("init", [
-      "--workspace",
-      WORKSPACE_DIR,
-      "--api-url",
-      API_URL,
-      "--token",
-      TOKEN,
-      "--fixture-dir",
-      FIXTURE_DIR
-    ]);
 
     const worker = startProcess("worker", "uv", [
       "run",
@@ -110,14 +91,10 @@ function cleanWorkspace(): void {
   mkdirSync(FIXTURE_DIR, { recursive: true });
 }
 
-function seed(command: string, args: string[], options: { skipApi?: boolean } = {}): void {
-  const env = { ...process.env };
-  if (options.skipApi) {
-    env.RUSHES_E2E_SKIP_API = "1";
-  }
-  execFileSync("uv", ["run", "python", "e2e/fixtures/seed_case_a.py", command, ...args], {
+function seed(command: string, args: string[]): void {
+  execFileSync("uv", ["run", "python", "e2e/fixtures/seed_draft.py", command, ...args], {
     cwd: REPO_ROOT,
-    env,
+    env: { ...process.env },
     stdio: "inherit"
   });
 }
@@ -140,7 +117,7 @@ function startProcess(
 }
 
 async function waitForApi(): Promise<void> {
-  await waitForHttp(`${API_URL}/api/projects`, {
+  await waitForHttp(`${API_URL}/api/drafts`, {
     headers: { Authorization: `Bearer ${TOKEN}` }
   });
 }
