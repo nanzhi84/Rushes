@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
 
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.timeline import TimelineMediaClip, TimelineState, TimelineTrack
 from storage import schema
 from storage.repositories._json import load_json
@@ -45,7 +45,7 @@ class _AssetRow:
 
 def materialize_from_clips(
     engine: Engine | Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     clips: Sequence[Mapping[str, Any]],
     *,
     voiceover_asset_id: str | None = None,
@@ -60,16 +60,16 @@ def materialize_from_clips(
 
     specs = [_parse_clip(clip) for clip in clips]
     with _connection_context(engine) as connection:
-        project_fps = _project_fps(connection, case_state.project_id)
-        version = (case_state.timeline_current_version or 0) + 1
-        timeline_id = f"{case_state.case_id}:v{version}"
+        draft_fps = _draft_fps(connection, draft_state.draft_id)
+        version = (draft_state.timeline_current_version or 0) + 1
+        timeline_id = f"{draft_state.draft_id}:v{version}"
         visual_clips: list[TimelineMediaClip] = []
         cursor = 0
         for index, spec in enumerate(specs, start=1):
             asset = _asset_row(connection, spec.asset_id)
-            source_fps = _source_fps(asset.probe, default=float(project_fps))
+            source_fps = _source_fps(asset.probe, default=float(draft_fps))
             frame_count = _asset_total_frames(asset.probe, source_fps=source_fps)
-            duration_frames = max(1, round((spec.source_end_s - spec.source_start_s) * project_fps))
+            duration_frames = max(1, round((spec.source_end_s - spec.source_start_s) * draft_fps))
             source_start, source_end = _source_frame_span(
                 spec,
                 asset,
@@ -97,17 +97,17 @@ def materialize_from_clips(
             connection,
             voiceover_asset_id,
             duration_frames=cursor,
-            project_fps=project_fps,
+            draft_fps=draft_fps,
         )
 
     return TimelineState(
         timeline_id=timeline_id,
-        case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
         version=version,
-        fps=project_fps,
+        fps=draft_fps,
         duration_frames=cursor,
         tracks=_tracks(visual_clips=visual_clips, voiceover_clips=voiceover_clips),
-        parent_version=case_state.timeline_current_version,
+        parent_version=draft_state.timeline_current_version,
         validation_report={"valid": True, "checks": []},
     )
 
@@ -161,14 +161,14 @@ def _voiceover_clips(
     voiceover_asset_id: str | None,
     *,
     duration_frames: int,
-    project_fps: int,
+    draft_fps: int,
 ) -> list[TimelineMediaClip]:
     if voiceover_asset_id is None or duration_frames <= 0:
         return []
     probe = _asset_probe(connection, voiceover_asset_id)
-    source_fps = _source_fps(probe, default=float(project_fps))
+    source_fps = _source_fps(probe, default=float(draft_fps))
     frame_count = _asset_total_frames(probe, source_fps=source_fps)
-    source_end = max(1, round(duration_frames / project_fps * source_fps))
+    source_end = max(1, round(duration_frames / draft_fps * source_fps))
     if frame_count is not None:
         source_end = min(source_end, frame_count)
     if source_end <= 0:
@@ -215,9 +215,9 @@ def _asset_row(connection: Connection, asset_id: str) -> _AssetRow:
     return _AssetRow(kind=str(row._mapping["kind"]), probe=_probe_payload(row._mapping["probe"]))
 
 
-def _project_fps(connection: Connection, project_id: str) -> int:
+def _draft_fps(connection: Connection, draft_id: str) -> int:
     row = connection.execute(
-        select(schema.projects.c.defaults).where(schema.projects.c.project_id == project_id)
+        select(schema.drafts.c.defaults).where(schema.drafts.c.draft_id == draft_id)
     ).first()
     if row is None:
         return 30

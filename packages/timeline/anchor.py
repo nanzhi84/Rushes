@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
 
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.patch import (
     AddBgmOp,
     AdjustGainOp,
@@ -74,27 +74,27 @@ class AnchorResolution:
 
 def resolve_anchor(
     engine: Engine | Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     request: TimelinePatchRequest,
 ) -> AnchorResolution:
     """Resolve request seconds against the viewed anchor, then map to current version."""
 
-    if request.case_id != case_state.case_id:
+    if request.draft_id != draft_state.draft_id:
         raise AnchorResolutionError(
-            "anchor.case_mismatch",
-            "patch request case_id does not match the active case",
-            details={"request_case_id": request.case_id, "case_id": case_state.case_id},
+            "anchor.draft_mismatch",
+            "patch request draft_id does not match the active draft",
+            details={"request_draft_id": request.draft_id, "draft_id": draft_state.draft_id},
         )
-    if case_state.timeline_current_version is None:
+    if draft_state.timeline_current_version is None:
         raise AnchorResolutionError("anchor.timeline_missing", "current timeline is required")
 
     with _connection_context(engine) as connection:
-        anchor_version, anchor_preview_id = _resolve_reference(connection, case_state, request)
-        anchor_record = get_timeline_version(connection, case_state.case_id, anchor_version)
+        anchor_version, anchor_preview_id = _resolve_reference(connection, draft_state, request)
+        anchor_record = get_timeline_version(connection, draft_state.draft_id, anchor_version)
         current_record = get_timeline_version(
             connection,
-            case_state.case_id,
-            case_state.timeline_current_version,
+            draft_state.draft_id,
+            draft_state.timeline_current_version,
         )
         if anchor_record is None:
             raise AnchorResolutionError(
@@ -105,8 +105,8 @@ def resolve_anchor(
         if current_record is None:
             raise AnchorResolutionError(
                 "anchor.current_missing",
-                f"current timeline v{case_state.timeline_current_version} was not found",
-                details={"current_version": case_state.timeline_current_version},
+                f"current timeline v{draft_state.timeline_current_version} was not found",
+                details={"current_version": draft_state.timeline_current_version},
             )
 
         anchor_range = _resolve_on_timeline(anchor_record.timeline, request)
@@ -114,7 +114,7 @@ def resolve_anchor(
         if anchor_record.version != current_record.version:
             chain = _version_chain(
                 connection,
-                case_id=case_state.case_id,
+                draft_id=draft_state.draft_id,
                 anchor_version=anchor_record.version,
                 current_version=current_record.version,
             )
@@ -141,18 +141,18 @@ def resolve_anchor(
 
 def _resolve_reference(
     connection: Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     request: TimelinePatchRequest,
 ) -> tuple[int, str | None]:
     reference = request.reference
-    preview_id = reference.preview_id or case_state.last_viewed_preview_id
+    preview_id = reference.preview_id or draft_state.last_viewed_preview_id
     preview_version: int | None = None
     if preview_id is not None:
-        preview_version = _preview_timeline_version(connection, case_state.case_id, preview_id)
+        preview_version = _preview_timeline_version(connection, draft_state.draft_id, preview_id)
         if preview_version is None and reference.preview_id is not None:
             raise AnchorResolutionError(
                 "anchor.preview_missing",
-                f"preview was not found for this case: {reference.preview_id}",
+                f"preview was not found for this draft: {reference.preview_id}",
                 details={"preview_id": reference.preview_id},
             )
     if reference.timeline_version is not None:
@@ -169,19 +169,19 @@ def _resolve_reference(
         return reference.timeline_version, preview_id
     if preview_version is not None:
         return preview_version, preview_id
-    if case_state.timeline_current_version is None:
+    if draft_state.timeline_current_version is None:
         raise AnchorResolutionError("anchor.timeline_missing", "current timeline is required")
-    return case_state.timeline_current_version, None
+    return draft_state.timeline_current_version, None
 
 
 def _preview_timeline_version(
     connection: Connection,
-    case_id: str,
+    draft_id: str,
     preview_id: str,
 ) -> int | None:
     row = connection.execute(
         select(schema.previews.c.timeline_version)
-        .where(schema.previews.c.case_id == case_id)
+        .where(schema.previews.c.draft_id == draft_id)
         .where(schema.previews.c.preview_id == preview_id)
     ).first()
     if row is None:
@@ -274,13 +274,13 @@ def _resolve_on_timeline(
 def _version_chain(
     connection: Connection,
     *,
-    case_id: str,
+    draft_id: str,
     anchor_version: int,
     current_version: int,
 ) -> list[tuple[TimelineVersionRecord, TimelineVersionRecord]]:
     if anchor_version == current_version:
         return []
-    records = {record.version: record for record in list_timeline_versions(connection, case_id)}
+    records = {record.version: record for record in list_timeline_versions(connection, draft_id)}
     if anchor_version not in records or current_version not in records:
         raise AnchorResolutionError(
             "anchor.version_chain_missing",

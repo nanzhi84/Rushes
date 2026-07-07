@@ -57,9 +57,9 @@ class FrameExtractionError(RuntimeError):
 
 def view_frames(input_model: MediaViewFramesInput, context: ToolExecutionContext) -> ToolResult:
     tool_name = "media.view_frames"
-    case_state = context.case_state
-    if case_state is None:
-        return _failed(tool_name, context, "missing_case", "需要当前 Case")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed(tool_name, context, "missing_draft", "需要当前草稿")
     if context.readonly_connection is None:
         return _failed(tool_name, context, "missing_connection", "需要只读仓库连接")
     if len(input_model.target.at_sec) > input_model.max_frames:
@@ -139,7 +139,7 @@ def view_frames(input_model: MediaViewFramesInput, context: ToolExecutionContext
                 reason="没有可抽取的画面帧。",
             ),
             data={
-                "case_id": case_state.case_id,
+                "draft_id": draft_state.draft_id,
                 "question": input_model.question,
                 "frames": frame_metadata,
                 "overall_answer": "没有可抽取的画面帧。",
@@ -149,7 +149,6 @@ def view_frames(input_model: MediaViewFramesInput, context: ToolExecutionContext
     request = ProviderRequest(
         capability=VLM_UNDERSTANDING,
         request_id=f"view_frames_{context.tool_call_id}",
-        case_id=case_state.case_id,
         payload={
             "messages": _vlm_messages(extracted, question=input_model.question),
             "params": {"temperature": 0, "response_format": {"type": "json_object"}},
@@ -189,7 +188,7 @@ def view_frames(input_model: MediaViewFramesInput, context: ToolExecutionContext
         status="succeeded",
         observation=observation,
         data={
-            "case_id": case_state.case_id,
+            "draft_id": draft_state.draft_id,
             "question": input_model.question,
             "frames": frame_metadata,
             "overall_answer": answer.overall_answer,
@@ -226,17 +225,17 @@ def _timeline_frame_targets(
     *,
     paths: WorkspacePaths,
 ) -> list[FrameTarget]:
-    case_state = context.case_state
-    assert case_state is not None
+    draft_state = context.draft_state
+    assert draft_state is not None
     assert context.readonly_connection is not None
     version = (
         input_model.target.timeline_version
         if input_model.target.timeline_version is not None
-        else case_state.timeline_current_version
+        else draft_state.timeline_current_version
     )
     if version is None:
-        raise ValueError("当前 Case 没有时间线版本")
-    record = get_timeline_version(context.readonly_connection, case_state.case_id, version)
+        raise ValueError("当前草稿没有时间线版本")
+    record = get_timeline_version(context.readonly_connection, draft_state.draft_id, version)
     if record is None:
         raise KeyError(f"找不到时间线版本：v{version}")
     clips = _visual_base_clips(record.timeline)
@@ -447,7 +446,7 @@ def _degraded_result(
     question: str | None,
     frame_metadata: list[dict[str, Any]] | None = None,
 ) -> ToolResult:
-    case_id = context.case_state.case_id if context.case_state is not None else None
+    draft_id = context.draft_state.draft_id if context.draft_state is not None else None
     frames = frame_metadata if frame_metadata is not None else [_frame_metadata(t) for t in targets]
     return ToolResult(
         tool_call_id=context.tool_call_id,
@@ -455,7 +454,7 @@ def _degraded_result(
         status="succeeded",
         observation=_observation_without_vlm(targets, reason=reason),
         data={
-            "case_id": case_id,
+            "draft_id": draft_id,
             "question": question,
             "frames": frames,
             "degraded": {"capability": VLM_UNDERSTANDING, "reason": reason},

@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from sqlalchemy.engine import Connection
 
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.timeline import TimelineMediaClip
 from storage import schema
 from storage.db import create_workspace_engine
@@ -14,8 +14,8 @@ from storage.repositories._json import dump_json
 from timeline import MaterializationError, materialize_from_clips, validate_timeline
 from timeline.materializer import (
     _asset_total_frames,
+    _draft_fps,
     _probe_payload,
-    _project_fps,
     _source_fps,
 )
 
@@ -29,7 +29,7 @@ def test_materializer_builds_contiguous_primary_track(tmp_path: Path) -> None:
         _seed_asset(connection, "asset_2", probe={"duration_sec": 10.0, "fps": 30.0})
     timeline = materialize_from_clips(
         engine,
-        _case_state(),
+        _draft_state(),
         [
             {"asset_id": "asset_1", "source_start_s": 0.0, "source_end_s": 1.5, "role": "a_roll"},
             {"asset_id": "asset_2", "source_start_s": 2.0, "source_end_s": 4.0, "role": "b_roll"},
@@ -44,7 +44,7 @@ def test_materializer_builds_contiguous_primary_track(tmp_path: Path) -> None:
     assert [clip.role for clip in visual] == ["a_roll", "b_roll"]
     assert timeline.duration_frames == 105
     with engine.connect() as connection:
-        assert validate_timeline(connection, _case_state(), timeline).valid
+        assert validate_timeline(connection, _draft_state(), timeline).valid
 
 
 def test_materializer_converts_source_fps_and_clamps_to_frame_count(tmp_path: Path) -> None:
@@ -53,7 +53,7 @@ def test_materializer_converts_source_fps_and_clamps_to_frame_count(tmp_path: Pa
         _seed_asset(connection, "asset_1", probe={"duration_sec": 2.0, "fps": 60.0})
     timeline = materialize_from_clips(
         engine,
-        _case_state(),
+        _draft_state(),
         [{"asset_id": "asset_1", "source_start_s": 0.5, "source_end_s": 3.0, "role": "b_roll"}],
     )
 
@@ -63,7 +63,7 @@ def test_materializer_converts_source_fps_and_clamps_to_frame_count(tmp_path: Pa
     # timeline duration uses project fps (30): 2.5s -> 75 frames.
     assert clip.timeline_end_frame == 75
     with engine.connect() as connection:
-        assert validate_timeline(connection, _case_state(), timeline).valid
+        assert validate_timeline(connection, _draft_state(), timeline).valid
 
 
 def test_materializer_uses_single_source_frame_for_images(tmp_path: Path) -> None:
@@ -72,7 +72,7 @@ def test_materializer_uses_single_source_frame_for_images(tmp_path: Path) -> Non
         _seed_asset(connection, "asset_img", kind="image", probe={})
     timeline = materialize_from_clips(
         engine,
-        _case_state(),
+        _draft_state(),
         [{"asset_id": "asset_img", "source_start_s": 0.0, "source_end_s": 2.0, "role": "image"}],
     )
 
@@ -89,7 +89,7 @@ def test_materializer_lays_voiceover_across_timeline(tmp_path: Path) -> None:
         _seed_asset(connection, "asset_vo", kind="audio", probe={"fps": 30.0, "frame_count": 300})
     timeline = materialize_from_clips(
         engine,
-        _case_state(audio_plan={"mode": "tts", "voiceover_asset_id": "asset_vo"}),
+        _draft_state(audio_plan={"mode": "tts", "voiceover_asset_id": "asset_vo"}),
         [{"asset_id": "asset_1", "source_start_s": 0.0, "source_end_s": 2.0, "role": "a_roll"}],
         voiceover_asset_id="asset_vo",
     )
@@ -103,7 +103,7 @@ def test_materializer_lays_voiceover_across_timeline(tmp_path: Path) -> None:
     with engine.connect() as connection:
         assert validate_timeline(
             connection,
-            _case_state(audio_plan={"mode": "tts", "voiceover_asset_id": "asset_vo"}),
+            _draft_state(audio_plan={"mode": "tts", "voiceover_asset_id": "asset_vo"}),
             timeline,
         ).valid
 
@@ -115,7 +115,7 @@ def test_materializer_clamps_voiceover_source_to_short_asset(tmp_path: Path) -> 
         _seed_asset(connection, "asset_vo", kind="audio", probe={"fps": 30.0, "frame_count": 20})
     timeline = materialize_from_clips(
         engine,
-        _case_state(),
+        _draft_state(),
         [{"asset_id": "asset_1", "source_start_s": 0.0, "source_end_s": 2.0, "role": "a_roll"}],
         voiceover_asset_id="asset_vo",
     )
@@ -131,7 +131,7 @@ def test_materializer_defaults_project_fps_to_30(tmp_path: Path) -> None:
         _seed_asset(connection, "asset_1", probe={"duration_sec": 5.0})
     timeline = materialize_from_clips(
         engine,
-        _case_state(),
+        _draft_state(),
         [{"asset_id": "asset_1", "source_start_s": 0.0, "source_end_s": 2.0, "role": "b_roll"}],
     )
     assert timeline.fps == 30
@@ -146,25 +146,25 @@ def test_materializer_rejects_invalid_clips(tmp_path: Path) -> None:
     with pytest.raises(MaterializationError, match="asset not found"):
         materialize_from_clips(
             engine,
-            _case_state(),
+            _draft_state(),
             [{"asset_id": "ghost", "source_start_s": 0.0, "source_end_s": 1.0, "role": "a_roll"}],
         )
     with pytest.raises(MaterializationError, match="unsupported clip role"):
         materialize_from_clips(
             engine,
-            _case_state(),
+            _draft_state(),
             [{"asset_id": "asset_1", "source_start_s": 0.0, "source_end_s": 1.0, "role": "hero"}],
         )
     with pytest.raises(MaterializationError, match="source_start_s < source_end_s"):
         materialize_from_clips(
             engine,
-            _case_state(),
+            _draft_state(),
             [{"asset_id": "asset_1", "source_start_s": 2.0, "source_end_s": 1.0, "role": "a_roll"}],
         )
     with pytest.raises(MaterializationError, match="requires an asset_id"):
         materialize_from_clips(
             engine,
-            _case_state(),
+            _draft_state(),
             [{"source_start_s": 0.0, "source_end_s": 1.0, "role": "a_roll"}],
         )
 
@@ -184,7 +184,7 @@ def test_materializer_helper_defaults_project_fps(tmp_path: Path) -> None:
     engine = create_workspace_engine(tmp_path)
     with engine.begin() as connection:
         schema.create_all(connection)
-        assert _project_fps(connection, "missing_project") == 30
+        assert _draft_fps(connection, "missing_draft") == 30
 
 
 def _engine(tmp_path: Path, *, fps: int = 30) -> Any:
@@ -192,11 +192,14 @@ def _engine(tmp_path: Path, *, fps: int = 30) -> Any:
     with engine.begin() as connection:
         schema.create_all(connection)
         connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
+            schema.drafts.insert().values(
+                draft_id="draft_1",
+                name="Draft",
                 status="active",
                 defaults=dump_json({"aspect_ratio": "9:16", "fps": fps}),
+                running_jobs=dump_json([]),
+                brief=dump_json({"goal": "test", "confirmed_facts": []}),
+                scratch_memory=dump_json({}),
                 created_at=NOW,
                 updated_at=NOW,
             )
@@ -204,16 +207,13 @@ def _engine(tmp_path: Path, *, fps: int = 30) -> Any:
     return engine
 
 
-def _case_state(*, audio_plan: dict[str, Any] | None = None) -> CaseState:
-    return CaseState.model_validate(
+def _draft_state(*, audio_plan: dict[str, Any] | None = None) -> DraftState:
+    return DraftState.model_validate(
         {
-            "case_id": "case_1",
-            "project_id": "project_1",
-            "name": "Case",
+            "draft_id": "draft_1",
+            "name": "Draft",
             "brief": {"goal": "test", "confirmed_facts": []},
             "audio_plan": audio_plan or {"mode": "silent"},
-            "selected_asset_ids": [],
-            "disabled_asset_ids": [],
             "scratch_memory": {},
         }
     )
@@ -246,10 +246,9 @@ def _seed_asset(
         )
     )
     connection.execute(
-        schema.project_asset_links.insert().values(
-            project_id="project_1",
+        schema.draft_asset_links.insert().values(
+            draft_id="draft_1",
             asset_id=asset_id,
-            enabled=True,
             linked_at=NOW,
             note="",
         )

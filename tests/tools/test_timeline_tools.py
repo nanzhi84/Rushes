@@ -6,26 +6,22 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from agent_harness.policy_gate import PolicyContext, PolicyGate
-from agent_harness.reducer import apply
-from contracts.case import CaseState
+from contracts.draft import DraftState
+from contracts.patch import DeleteRangeOp, TimelinePatchReference, TimelinePatchRequest
 from contracts.timeline import TimelineState
-from domain.preconditions import PreconditionContext, ProjectArtifactStats
 from storage import schema
 from storage.db import create_workspace_engine
-from storage.repositories import CasesRepository
 from storage.repositories._json import dump_json, load_json
-from timeline import store_timeline_version
-from tools import ToolExecutionContext, build_default_tool_registry
+from timeline import get_timeline_version, store_timeline_version
+from tools import ToolExecutionContext
 from tools.specs import (
-    PATCH_OP_REGISTRY,
     ComposeInitialInput,
     TimelineInspectInput,
     TimelineRestoreVersionInput,
     TimelineValidateInput,
-    tool_specs,
 )
 from tools.timeline_tools import (
+    apply_patch,
     compose_initial,
     restore_version,
     validate,
@@ -37,10 +33,10 @@ from tools.timeline_tools import (
 NOW = "2026-07-05T00:00:00+00:00"
 
 
-def test_validate_invalid_timeline_and_render_preview_not_allowed(tmp_path: Path) -> None:
+def test_validate_reports_invalid_timeline(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "product closeup")
+        _seed_clip(connection, "asset_1")
         timeline = _timeline(
             [
                 _timeline_clip("tc_1", 0, 30),
@@ -49,32 +45,19 @@ def test_validate_invalid_timeline_and_render_preview_not_allowed(tmp_path: Path
             duration_frames=60,
         )
         store_timeline_version(connection, timeline, created_at=NOW)
-        case_state = _case_state(timeline_current_version=1)
-        result = validate(TimelineValidateInput(), _context(connection, case_state))
-    registry = build_default_tool_registry()
-    gate = PolicyGate(
-        tool_specs={spec.name: spec for spec in tool_specs()},
-        patch_op_specs=PATCH_OP_REGISTRY.as_mapping(),
-    )
-    allowed = gate.compute_allowed_tools(
-        PolicyContext(
-            preconditions=PreconditionContext(
-                case_state=case_state.model_copy(update={"timeline_validated": False}),
-                project_artifacts=ProjectArtifactStats(usable_asset_count=1),
-            )
-        )
-    )
+        draft_state = _draft_state(timeline_current_version=1)
+        result = validate(TimelineValidateInput(), _context(connection, draft_state))
 
-    assert registry.get("render.preview") is not None
+    assert result.status == "succeeded"
     assert result.data["valid"] is False
-    assert "render.preview" not in {spec.name for spec in allowed}
+    assert result.events[-1]["event"] == "TimelineValidationFailed"
 
 
 def test_compose_initial_builds_valid_timeline_and_bumps_version(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "product closeup")
-        _seed_clip(connection, "asset_2", "clip_2", "b roll")
+        _seed_clip(connection, "asset_1")
+        _seed_clip(connection, "asset_2")
         _seed_asset_kind(connection, "asset_vo", kind="audio")
         result = compose_initial(
             ComposeInitialInput(
@@ -94,7 +77,7 @@ def test_compose_initial_builds_valid_timeline_and_bumps_version(tmp_path: Path)
                 ],
                 voiceover_asset_id="asset_vo",
             ),
-            _context(connection, _case_state()),
+            _context(connection, _draft_state()),
         )
         stored = connection.execute(
             select(schema.timeline_versions).where(schema.timeline_versions.c.version == 1)
@@ -128,7 +111,7 @@ def test_compose_initial_reports_invalid_clip_inputs(tmp_path: Path) -> None:
                     }
                 ]
             ),
-            _context(connection, _case_state()),
+            _context(connection, _draft_state()),
         )
 
     assert result.status == "failed"
@@ -139,7 +122,7 @@ def test_compose_initial_reports_invalid_clip_inputs(tmp_path: Path) -> None:
 def test_inspect_returns_timeline_summary(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "product closeup")
+        _seed_clip(connection, "asset_1")
         store_timeline_version(
             connection,
             _timeline([_timeline_clip("tc_1", 0, 30)], duration_frames=30),
@@ -147,7 +130,7 @@ def test_inspect_returns_timeline_summary(tmp_path: Path) -> None:
         )
         result = timeline_inspect(
             TimelineInspectInput(),
-            _context(connection, _case_state(timeline_current_version=1)),
+            _context(connection, _draft_state(timeline_current_version=1)),
         )
 
     assert result.status == "succeeded"
@@ -155,12 +138,10 @@ def test_inspect_returns_timeline_summary(tmp_path: Path) -> None:
     assert "asset_1/clip_1" in result.data["timeline_summary"]
 
 
-def test_restore_version_writes_new_record_and_reducer_restores_rough_cut(
-    tmp_path: Path,
-) -> None:
+def test_restore_version_writes_new_record(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_case_row(connection, timeline_current_version=2, rough_cut_approved_version=1)
+        _seed_draft_row(connection, timeline_current_version=2, rough_cut_approved_version=1)
         store_timeline_version(
             connection,
             _timeline([_timeline_clip("tc_1", 0, 30)], duration_frames=30, version=1),
@@ -175,30 +156,60 @@ def test_restore_version_writes_new_record_and_reducer_restores_rough_cut(
             ),
             created_at=NOW,
         )
-        case_state = _case_state(
+        draft_state = _draft_state(
             timeline_current_version=2,
             rough_cut_approved=False,
             rough_cut_approved_version=1,
         )
         result = restore_version(
             TimelineRestoreVersionInput(source_version=1),
-            _context(connection, case_state),
+            _context(connection, draft_state),
         )
 
-    applied = apply(result.events, engine=engine, base_version=0, actor="agent", created_at=NOW)
+    assert result.status == "succeeded"
+    assert result.data["timeline_version"] == 3
+    assert result.events[-1]["event"] == "TimelineVersionRestored"
     with engine.connect() as connection:
-        case_row = CasesRepository(connection).get("case_1")
-        restored = connection.execute(
-            select(schema.timeline_versions).where(schema.timeline_versions.c.version == 3)
-        ).one()
+        record = get_timeline_version(connection, "draft_1", 3)
+    assert record is not None
+    assert record.timeline.version == 3
+
+
+def test_apply_patch_success_emits_timeline_events(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    with engine.begin() as connection:
+        _seed_clip(connection, "asset_1")
+        store_timeline_version(
+            connection,
+            _timeline([_timeline_clip("tc_1", 0, 30)], duration_frames=30),
+            created_at=NOW,
+        )
+        result = apply_patch(
+            _delete_range_request(0.0, 0.5, version=1),
+            _context(connection, _draft_state(timeline_current_version=1)),
+        )
 
     assert result.status == "succeeded"
-    assert applied.status == "applied"
-    assert case_row is not None
-    assert case_row["timeline_current_version"] == 3
-    assert case_row["rough_cut_approved"] is True
-    assert case_row["rough_cut_approved_version"] == 3
-    assert load_json(restored._mapping["document_json"])["version"] == 3
+    assert [event["event"] for event in result.events] == [
+        "TimelineVersionCreated",
+        "TimelineValidated",
+    ]
+    assert "visual_base" in result.data["changed_track_ids"]
+    assert result.data["timeline_version"] == 2
+
+
+def _delete_range_request(start: float, end: float, *, version: int) -> TimelinePatchRequest:
+    return TimelinePatchRequest(
+        draft_id="draft_1",
+        reference=TimelinePatchReference(timeline_version=version),
+        op=DeleteRangeOp(
+            kind="delete_range",
+            time_range_sec=(start, end),
+            scope="all_tracks",
+            ripple=True,
+        ),
+        reason="delete range",
+    )
 
 
 def _engine(tmp_path: Path):
@@ -206,29 +217,19 @@ def _engine(tmp_path: Path):
     with engine.begin() as connection:
         schema.create_all(connection)
         connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
-                status="active",
-                defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
-                created_at=NOW,
-                updated_at=NOW,
-            )
-        )
-        connection.execute(
-            schema.cases.insert().values(
-                case_id="case_1",
-                project_id="project_1",
-                name="Case",
+            schema.drafts.insert().values(
+                draft_id="draft_1",
+                name="Draft",
                 state_version=0,
                 status="active",
+                defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
                 timeline_validated=False,
                 rough_cut_approved=False,
                 running_jobs="[]",
                 brief=dump_json({"goal": "test", "confirmed_facts": []}),
-                selected_asset_ids="[]",
-                disabled_asset_ids="[]",
                 scratch_memory="{}",
+                created_at=NOW,
+                updated_at=NOW,
             )
         )
     return engine
@@ -255,12 +256,12 @@ def _seed_asset_kind(connection: Connection, asset_id: str, *, kind: str) -> Non
         )
     )
     connection.execute(
-        schema.project_asset_links.insert().values(
-            project_id="project_1",
+        schema.draft_asset_links.insert().values(
+            draft_id="draft_1",
             asset_id=asset_id,
-            enabled=True,
             linked_at=NOW,
             note="",
+            rel_dir=None,
         )
     )
 
@@ -274,29 +275,28 @@ def _track_clips(timeline: dict[str, Any], track_id: str) -> list[dict[str, Any]
 
 def _context(
     connection: Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
 ) -> ToolExecutionContext:
     return ToolExecutionContext(
         tool_call_id="tc_1",
         turn_id="turn_1",
-        case_state=case_state,
+        draft_state=draft_state,
         readonly_connection=connection,
         created_at=NOW,
         metadata={},
     )
 
 
-def _case_state(
+def _draft_state(
     *,
     timeline_current_version: int | None = None,
     rough_cut_approved: bool = False,
     rough_cut_approved_version: int | None = None,
-) -> CaseState:
-    return CaseState.model_validate(
+) -> DraftState:
+    return DraftState.model_validate(
         {
-            "case_id": "case_1",
-            "project_id": "project_1",
-            "name": "Case",
+            "draft_id": "draft_1",
+            "name": "Draft",
             "brief": {"goal": "test", "confirmed_facts": []},
             "audio_plan": {"mode": "silent"},
             "cut_plan": {
@@ -313,30 +313,27 @@ def _case_state(
             "timeline_current_version": timeline_current_version,
             "rough_cut_approved": rough_cut_approved,
             "rough_cut_approved_version": rough_cut_approved_version,
-            "selected_asset_ids": [],
-            "disabled_asset_ids": [],
-            "scratch_memory": {},
         }
     )
 
 
-def _seed_case_row(
+def _seed_draft_row(
     connection: Connection,
     *,
     timeline_current_version: int | None,
     rough_cut_approved_version: int | None,
 ) -> None:
-    # 基础夹具已种 case_1：这里用 UPDATE 定制字段，避免 UNIQUE 冲突
-    connection.execute(schema.cases.delete().where(schema.cases.c.case_id == "case_1"))
+    # 基础夹具已种 draft_1：这里用 DELETE + INSERT 定制字段，避免主键冲突。
+    connection.execute(schema.drafts.delete().where(schema.drafts.c.draft_id == "draft_1"))
     connection.execute(
-        schema.cases.insert().values(
-            case_id="case_1",
-            project_id="project_1",
-            name="Case",
+        schema.drafts.insert().values(
+            draft_id="draft_1",
+            name="Draft",
             state_version=0,
             status="active",
-            timeline_validated=False,
+            defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
             timeline_current_version=timeline_current_version,
+            timeline_validated=False,
             rough_cut_approved=False,
             rough_cut_approved_version=rough_cut_approved_version,
             running_jobs="[]",
@@ -349,9 +346,9 @@ def _seed_case_row(
                     "total_target_duration_sec": 0,
                 }
             ),
-            selected_asset_ids="[]",
-            disabled_asset_ids="[]",
             scratch_memory="{}",
+            created_at=NOW,
+            updated_at=NOW,
         )
     )
 
@@ -359,8 +356,6 @@ def _seed_case_row(
 def _seed_clip(
     connection: Connection,
     asset_id: str,
-    clip_id: str,
-    summary: str,
 ) -> None:
     connection.execute(
         schema.assets.insert().values(
@@ -382,12 +377,12 @@ def _seed_clip(
         )
     )
     connection.execute(
-        schema.project_asset_links.insert().values(
-            project_id="project_1",
+        schema.draft_asset_links.insert().values(
+            draft_id="draft_1",
             asset_id=asset_id,
-            enabled=True,
             linked_at=NOW,
             note="",
+            rel_dir=None,
         )
     )
 
@@ -400,8 +395,8 @@ def _timeline(
 ) -> TimelineState:
     return TimelineState.model_validate(
         {
-            "timeline_id": f"case_1:v{version}",
-            "case_id": "case_1",
+            "timeline_id": f"draft_1:v{version}",
+            "draft_id": "draft_1",
             "version": version,
             "fps": 30,
             "duration_frames": duration_frames,

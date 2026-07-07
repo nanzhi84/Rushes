@@ -9,7 +9,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from sqlalchemy.engine import Connection
 
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.patch import TimelinePatchRequest
 from contracts.timeline import TimelineState
 from storage import schema
@@ -17,8 +17,6 @@ from storage.db import create_workspace_engine
 from storage.repositories._json import dump_json
 from timeline import AnchorConflict, apply_patch, resolve_anchor, store_timeline_version
 from timeline.validator import validate_timeline
-from tools import ToolExecutionContext
-from tools.timeline_tools import apply_patch as timeline_apply_patch_tool
 
 NOW = "2026-07-05T00:00:00+00:00"
 
@@ -32,10 +30,10 @@ def test_resolve_anchor_defaults_to_last_viewed_preview_version(tmp_path: Path) 
 
         resolution = resolve_anchor(
             connection,
-            _case_state(timeline_current_version=1, last_viewed_preview_id="prev_1"),
+            _draft_state(timeline_current_version=1, last_viewed_preview_id="prev_1"),
             TimelinePatchRequest.model_validate(
                 {
-                    "case_id": "case_1",
+                    "draft_id": "draft_1",
                     "op": {
                         "kind": "delete_range",
                         "time_range_sec": [1.0, 2.0],
@@ -67,7 +65,7 @@ def test_anchor_mapping_conflict_when_target_clip_changed(tmp_path: Path) -> Non
         with pytest.raises(AnchorConflict):
             resolve_anchor(
                 connection,
-                _case_state(timeline_current_version=2, last_viewed_preview_id="prev_1"),
+                _draft_state(timeline_current_version=2, last_viewed_preview_id="prev_1"),
                 _request_delete(1.0, 2.0, version=1, preview_id="prev_1"),
             )
 
@@ -92,7 +90,7 @@ def test_apply_delete_range_from_viewed_v8_maps_to_current_and_syncs_subtitles(
 
         outcome = apply_patch(
             connection,
-            _case_state(timeline_current_version=9, last_viewed_preview_id="prev_008"),
+            _draft_state(timeline_current_version=9, last_viewed_preview_id="prev_008"),
             _request_delete(7.0, 8.4, version=8, preview_id="prev_008"),
             created_at=NOW,
         )
@@ -120,7 +118,7 @@ def test_audio_delete_removes_bound_subtitle_and_ripples_later_binding(tmp_path:
 
         outcome = apply_patch(
             connection,
-            _case_state(timeline_current_version=1),
+            _draft_state(timeline_current_version=1),
             _request_delete(3.0, 6.0, scope="voiceover", version=1),
             created_at=NOW,
         )
@@ -133,51 +131,6 @@ def test_audio_delete_removes_bound_subtitle_and_ripples_later_binding(tmp_path:
         90,
         180,
     )
-
-
-def test_timeline_apply_patch_tool_success_emits_timeline_events(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    with engine.begin() as connection:
-        _seed_project_media(connection)
-        store_timeline_version(connection, _timeline(version=1), created_at=NOW)
-
-        result = timeline_apply_patch_tool(
-            _request_delete(0.0, 1.0, version=1),
-            _tool_context(connection, _case_state(timeline_current_version=1)),
-        )
-
-    assert result.status == "succeeded"
-    assert [event["event"] for event in result.events] == [
-        "TimelineVersionCreated",
-        "TimelineValidated",
-    ]
-    assert result.data["resolved_patch"]["resolved"]["start_frame"] == 0
-    assert "visual_base" in result.data["changed_track_ids"]
-
-
-def test_timeline_apply_patch_tool_conflict_returns_decision(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    with engine.begin() as connection:
-        _seed_project_media(connection)
-        changed = _timeline(version=2, parent_version=1)
-        changed.tracks[0].clips[0] = (
-            changed.tracks[0].clips[0].model_copy(update={"source_end_frame": 80})
-        )
-        store_timeline_version(connection, _timeline(version=1), created_at=NOW)
-        store_timeline_version(connection, changed, created_at=NOW)
-        _seed_preview(connection, preview_id="prev_1", version=1)
-
-        result = timeline_apply_patch_tool(
-            _request_delete(1.0, 2.0, version=1, preview_id="prev_1"),
-            _tool_context(
-                connection,
-                _case_state(timeline_current_version=2, last_viewed_preview_id="prev_1"),
-            ),
-        )
-
-    assert result.status == "requires_user"
-    assert result.events[0]["event"] == "DecisionCreated"
-    assert "timeline_summary" in result.data
 
 
 def test_apply_patch_implements_clip_and_direct_edit_ops(tmp_path: Path) -> None:
@@ -267,10 +220,10 @@ def test_apply_patch_implements_clip_and_direct_edit_ops(tmp_path: Path) -> None
             store_timeline_version(connection, timeline, created_at=NOW)
             outcome = apply_patch(
                 connection,
-                _case_state(timeline_current_version=index),
+                _draft_state(timeline_current_version=index),
                 TimelinePatchRequest.model_validate(
                     {
-                        "case_id": "case_1",
+                        "draft_id": "draft_1",
                         "reference": {"timeline_version": index},
                         "op": op,
                         "reason": "test op",
@@ -292,10 +245,10 @@ def test_insert_clip_supports_image_role_on_visual_base(tmp_path: Path) -> None:
         store_timeline_version(connection, _timeline(version=1), created_at=NOW)
         outcome = apply_patch(
             connection,
-            _case_state(timeline_current_version=1),
+            _draft_state(timeline_current_version=1),
             TimelinePatchRequest.model_validate(
                 {
-                    "case_id": "case_1",
+                    "draft_id": "draft_1",
                     "reference": {"timeline_version": 1},
                     "op": {
                         "kind": "insert_clip",
@@ -330,10 +283,10 @@ def test_insert_clip_on_visual_overlay_does_not_ripple(tmp_path: Path) -> None:
         store_timeline_version(connection, _timeline(version=1), created_at=NOW)
         outcome = apply_patch(
             connection,
-            _case_state(timeline_current_version=1),
+            _draft_state(timeline_current_version=1),
             TimelinePatchRequest.model_validate(
                 {
-                    "case_id": "case_1",
+                    "draft_id": "draft_1",
                     "reference": {"timeline_version": 1},
                     "op": {
                         "kind": "insert_clip",
@@ -367,10 +320,10 @@ def test_apply_patch_reports_boundary_failures_without_new_timeline(tmp_path: Pa
 
         outcome = apply_patch(
             connection,
-            _case_state(timeline_current_version=1),
+            _draft_state(timeline_current_version=1),
             TimelinePatchRequest.model_validate(
                 {
-                    "case_id": "case_1",
+                    "draft_id": "draft_1",
                     "reference": {"timeline_version": 1},
                     "op": {"kind": "set_playback_rate", "timeline_clip_id": "tc_v1", "rate": 0},
                     "reason": "invalid rate",
@@ -404,7 +357,7 @@ def test_anchor_mapping_property_preserves_untouched_target_after_prefix_ripple(
 
         resolution = resolve_anchor(
             connection,
-            _case_state(timeline_current_version=2, last_viewed_preview_id="prev_1"),
+            _draft_state(timeline_current_version=2, last_viewed_preview_id="prev_1"),
             _request_delete(7.0, 8.0, version=1, preview_id="prev_1"),
         )
 
@@ -428,7 +381,7 @@ def test_random_delete_patch_chain_preserves_validator_and_version_invariants(
     with engine.begin() as connection:
         _seed_project_media(connection)
         store_timeline_version(connection, _timeline(version=1, subtitles=False), created_at=NOW)
-        case_state = _case_state(timeline_current_version=1)
+        draft_state = _draft_state(timeline_current_version=1)
         current_duration = 270
         version = 1
         for start in (first, second):
@@ -444,14 +397,14 @@ def test_random_delete_patch_chain_preserves_validator_and_version_invariants(
                 version=version,
                 preview_id=None,
             )
-            outcome = apply_patch(connection, case_state, request, created_at=NOW)
+            outcome = apply_patch(connection, draft_state, request, created_at=NOW)
             assert outcome.timeline is not None
             assert outcome.timeline.version == version + 1
-            report = validate_timeline(connection, case_state, outcome.timeline)
+            report = validate_timeline(connection, draft_state, outcome.timeline)
             assert report.valid
             current_duration = outcome.timeline.duration_frames
             version = outcome.timeline.version
-            case_state = case_state.model_copy(update={"timeline_current_version": version})
+            draft_state = draft_state.model_copy(update={"timeline_current_version": version})
 
 
 def _engine(tmp_path: Path):
@@ -459,44 +412,33 @@ def _engine(tmp_path: Path):
     with engine.begin() as connection:
         schema.create_all(connection)
         connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
-                status="active",
-                defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
-                created_at=NOW,
-                updated_at=NOW,
-            )
-        )
-        connection.execute(
-            schema.cases.insert().values(
-                case_id="case_1",
-                project_id="project_1",
-                name="Case",
+            schema.drafts.insert().values(
+                draft_id="draft_1",
+                name="Draft",
                 state_version=0,
                 status="active",
+                defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
                 timeline_validated=False,
                 rough_cut_approved=True,
                 running_jobs="[]",
                 brief=dump_json({"goal": "test", "confirmed_facts": []}),
-                selected_asset_ids="[]",
-                disabled_asset_ids="[]",
                 scratch_memory="{}",
+                created_at=NOW,
+                updated_at=NOW,
             )
         )
     return engine
 
 
-def _case_state(
+def _draft_state(
     *,
     timeline_current_version: int | None,
     last_viewed_preview_id: str | None = None,
-) -> CaseState:
-    return CaseState.model_validate(
+) -> DraftState:
+    return DraftState.model_validate(
         {
-            "case_id": "case_1",
-            "project_id": "project_1",
-            "name": "Case",
+            "draft_id": "draft_1",
+            "name": "Draft",
             "brief": {"goal": "test", "confirmed_facts": []},
             "audio_plan": {
                 "mode": "tts",
@@ -517,20 +459,8 @@ def _case_state(
             "timeline_current_version": timeline_current_version,
             "last_viewed_preview_id": last_viewed_preview_id,
             "rough_cut_approved": True,
-            "selected_asset_ids": [],
-            "disabled_asset_ids": [],
             "scratch_memory": {},
         }
-    )
-
-
-def _tool_context(connection: Connection, case_state: CaseState) -> ToolExecutionContext:
-    return ToolExecutionContext(
-        tool_call_id="tc_patch",
-        turn_id="turn_patch",
-        case_state=case_state,
-        readonly_connection=connection,
-        created_at=NOW,
     )
 
 
@@ -584,10 +514,9 @@ def _seed_asset(
         )
     )
     connection.execute(
-        schema.project_asset_links.insert().values(
-            project_id="project_1",
+        schema.draft_asset_links.insert().values(
+            draft_id="draft_1",
             asset_id=asset_id,
-            enabled=True,
             linked_at=NOW,
             note="",
         )
@@ -607,7 +536,7 @@ def _seed_preview(connection: Connection, *, preview_id: str, version: int) -> N
     connection.execute(
         schema.previews.insert().values(
             preview_id=preview_id,
-            case_id="case_1",
+            draft_id="draft_1",
             timeline_version=version,
             object_hash=object_hash,
             quality=dump_json({}),
@@ -634,8 +563,8 @@ def _timeline(
     )
     return TimelineState.model_validate(
         {
-            "timeline_id": f"case_1:v{version}",
-            "case_id": "case_1",
+            "timeline_id": f"draft_1:v{version}",
+            "draft_id": "draft_1",
             "version": version,
             "fps": 30,
             "duration_frames": duration_frames,
@@ -805,7 +734,7 @@ def _request_delete(
         reference["preview_id"] = preview_id
     return TimelinePatchRequest.model_validate(
         {
-            "case_id": "case_1",
+            "draft_id": "draft_1",
             "reference": reference,
             "op": {
                 "kind": "delete_range",

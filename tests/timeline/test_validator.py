@@ -5,7 +5,7 @@ from typing import Any
 
 from sqlalchemy.engine import Connection
 
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.timeline import TimelineState
 from storage import schema
 from storage.db import create_workspace_engine
@@ -25,7 +25,7 @@ def test_validator_rejects_primary_visual_gap(tmp_path: Path) -> None:
         _seed_asset(connection, "asset_1")
     report = validate_timeline(
         engine,
-        _case_state(),
+        _draft_state(),
         _timeline(
             [
                 _clip("tc_1", 0, 30),
@@ -44,7 +44,7 @@ def test_validator_rejects_primary_visual_overlap(tmp_path: Path) -> None:
         _seed_asset(connection, "asset_1")
     report = validate_timeline(
         engine,
-        _case_state(),
+        _draft_state(),
         _timeline(
             [
                 _clip("tc_1", 0, 40),
@@ -63,27 +63,24 @@ def test_validator_rejects_source_range_out_of_asset_bounds(tmp_path: Path) -> N
         _seed_asset(connection, "asset_1", probe={"duration_sec": 1.0, "fps": 30})
     report = validate_timeline(
         engine,
-        _case_state(),
+        _draft_state(),
         _timeline([_clip("tc_1", 0, 40, source_start=0, source_end=40)], duration_frames=40),
     )
 
     assert "timeline.source_range.out_of_bounds" in _codes(report)
 
 
-def test_validator_rejects_unusable_or_disabled_asset_reference(tmp_path: Path) -> None:
+def test_validator_rejects_unusable_asset_reference(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
         _seed_asset(connection, "asset_1", usable=False)
     report = validate_timeline(
         engine,
-        _case_state(disabled_asset_ids=["asset_1"]),
+        _draft_state(),
         _timeline([_clip("tc_1", 0, 30)], duration_frames=30),
     )
 
-    assert {
-        "timeline.asset_reference.unusable",
-        "timeline.asset_reference.case_disabled",
-    } <= _codes(report)
+    assert "timeline.asset_reference.unusable" in _codes(report)
 
 
 def test_validator_rejects_fps_mismatch(tmp_path: Path) -> None:
@@ -92,7 +89,7 @@ def test_validator_rejects_fps_mismatch(tmp_path: Path) -> None:
         _seed_asset(connection, "asset_1")
     report = validate_timeline(
         engine,
-        _case_state(),
+        _draft_state(),
         _timeline([_clip("tc_1", 0, 30)], duration_frames=30, fps=30),
     )
 
@@ -107,16 +104,16 @@ def test_validator_rejects_identity_mismatch_negative_duration_and_visual_overru
         _seed_asset(connection, "asset_1")
     report = validate_timeline(
         engine,
-        _case_state(),
+        _draft_state(),
         _timeline(
             [_clip("tc_1", 0, 30)],
             duration_frames=-1,
-            case_id="other_case",
+            draft_id="other_draft",
         ),
     )
 
     assert {
-        "timeline.identity.case_mismatch",
+        "timeline.identity.draft_mismatch",
         "timeline.duration.negative",
         "timeline.primary_visual.overrun",
     } <= _codes(report)
@@ -142,7 +139,7 @@ def test_validator_rejects_dangling_subtitle_binding(tmp_path: Path) -> None:
             }
         ],
     )
-    report = validate_timeline(engine, _case_state(), timeline)
+    report = validate_timeline(engine, _draft_state(), timeline)
 
     assert "timeline.subtitle.binding_missing" in _codes(report)
 
@@ -154,7 +151,7 @@ def test_validator_rejects_audio_and_subtitle_out_of_bounds(tmp_path: Path) -> N
         _seed_asset(connection, "asset_vo")
     report = validate_timeline(
         engine,
-        _case_state(),
+        _draft_state(),
         _timeline(
             [_clip("tc_1", 0, 30)],
             duration_frames=30,
@@ -227,7 +224,7 @@ def test_validator_accepts_resolved_subtitle_binding_variants(tmp_path: Path) ->
         ],
     )
 
-    report = validate_timeline(engine, _case_state(), timeline)
+    report = validate_timeline(engine, _draft_state(), timeline)
 
     assert "timeline.subtitle.binding_missing" not in _codes(report)
 
@@ -236,7 +233,7 @@ def test_validator_rejects_missing_and_unlinked_asset_references(tmp_path: Path)
     engine = _engine(tmp_path)
     missing_report = validate_timeline(
         engine,
-        _case_state(),
+        _draft_state(),
         _timeline(
             [_clip("tc_1", 0, 30, asset_id="missing_asset")],
             duration_frames=30,
@@ -244,10 +241,10 @@ def test_validator_rejects_missing_and_unlinked_asset_references(tmp_path: Path)
     )
 
     with engine.begin() as connection:
-        _seed_asset(connection, "asset_unlinked", link_enabled=False)
+        _seed_asset(connection, "asset_unlinked", linked=False)
     unlinked_report = validate_timeline(
         engine,
-        _case_state(),
+        _draft_state(),
         _timeline(
             [_clip("tc_1", 0, 30, asset_id="asset_unlinked")],
             duration_frames=30,
@@ -255,7 +252,7 @@ def test_validator_rejects_missing_and_unlinked_asset_references(tmp_path: Path)
     )
 
     assert "timeline.asset_reference.missing_or_unlinked" in _codes(missing_report)
-    assert "timeline.asset_reference.unlinked" in _codes(unlinked_report)
+    assert "timeline.asset_reference.missing_or_unlinked" in _codes(unlinked_report)
 
 
 def test_validator_preserves_warnings_and_hook_formats_errors(tmp_path: Path) -> None:
@@ -284,10 +281,10 @@ def test_validator_preserves_warnings_and_hook_formats_errors(tmp_path: Path) ->
         },
     )
 
-    report = validate_timeline(engine, _case_state(), timeline)
+    report = validate_timeline(engine, _draft_state(), timeline)
     with engine.connect() as connection:
-        invariant_errors = validate_timeline_invariants(connection, _case_state(), timeline)
-        hook_errors = build_timeline_invariant_hook()(connection, _case_state(), timeline)
+        invariant_errors = validate_timeline_invariants(connection, _draft_state(), timeline)
+        hook_errors = build_timeline_invariant_hook()(connection, _draft_state(), timeline)
 
     assert report.valid is False
     assert report.checks[0]["code"] == "timeline.materialize.short_clean_span"
@@ -301,11 +298,14 @@ def _engine(tmp_path: Path, *, fps: int = 30):
     with engine.begin() as connection:
         schema.create_all(connection)
         connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
+            schema.drafts.insert().values(
+                draft_id="draft_1",
+                name="Draft",
                 status="active",
                 defaults=dump_json({"aspect_ratio": "9:16", "fps": fps}),
+                running_jobs=dump_json([]),
+                brief=dump_json({"goal": "test", "confirmed_facts": []}),
+                scratch_memory=dump_json({}),
                 created_at=NOW,
                 updated_at=NOW,
             )
@@ -313,15 +313,12 @@ def _engine(tmp_path: Path, *, fps: int = 30):
     return engine
 
 
-def _case_state(*, disabled_asset_ids: list[str] | None = None) -> CaseState:
-    return CaseState.model_validate(
+def _draft_state() -> DraftState:
+    return DraftState.model_validate(
         {
-            "case_id": "case_1",
-            "project_id": "project_1",
-            "name": "Case",
+            "draft_id": "draft_1",
+            "name": "Draft",
             "brief": {"goal": "test", "confirmed_facts": []},
-            "selected_asset_ids": [],
-            "disabled_asset_ids": disabled_asset_ids or [],
             "scratch_memory": {},
         }
     )
@@ -332,7 +329,7 @@ def _timeline(
     *,
     duration_frames: int,
     fps: int = 30,
-    case_id: str = "case_1",
+    draft_id: str = "draft_1",
     original_audio: list[dict[str, Any]] | None = None,
     voiceover: list[dict[str, Any]] | None = None,
     bgm: list[dict[str, Any]] | None = None,
@@ -341,8 +338,8 @@ def _timeline(
 ) -> TimelineState:
     return TimelineState.model_validate(
         {
-            "timeline_id": "case_1:v1",
-            "case_id": case_id,
+            "timeline_id": "draft_1:v1",
+            "draft_id": draft_id,
             "version": 1,
             "fps": fps,
             "duration_frames": duration_frames,
@@ -431,7 +428,7 @@ def _seed_asset(
     asset_id: str,
     *,
     usable: bool = True,
-    link_enabled: bool = True,
+    linked: bool = True,
     probe: dict[str, Any] | None = None,
 ) -> None:
     connection.execute(
@@ -453,15 +450,15 @@ def _seed_asset(
             failure=None,
         )
     )
-    connection.execute(
-        schema.project_asset_links.insert().values(
-            project_id="project_1",
-            asset_id=asset_id,
-            enabled=link_enabled,
-            linked_at=NOW,
-            note="",
+    if linked:
+        connection.execute(
+            schema.draft_asset_links.insert().values(
+                draft_id="draft_1",
+                asset_id=asset_id,
+                linked_at=NOW,
+                note="",
+            )
         )
-    )
 
 
 def _codes(report: Any) -> set[str]:

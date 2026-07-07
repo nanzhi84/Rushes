@@ -34,10 +34,9 @@ def _spec(
         input_model=EmptyInput,
         result_model=None,
         handler_ref=f"handlers.{name}",
-        allowed_scopes=["case_agent_console"],
+        allowed_scopes=["draft_editor"],
         requires_artifacts=requires_artifacts or [],
-        requires_active_project=False,
-        requires_active_case=False,
+        requires_active_draft=False,
         requires_confirmation=requires_confirmation,
         confirmation_decision_type=confirmation_decision_type,
         side_effects=[],
@@ -56,34 +55,13 @@ def _handler(input_model: EmptyInput, context: ToolExecutionContext) -> ToolResu
     )
 
 
-def test_default_tool_and_patch_registries_match_m0_surface() -> None:
+def test_default_tool_and_patch_registries_match_surface() -> None:
     registry = build_default_tool_registry()
 
     expected_tools = {
-        "decision.answer",
-        "interaction.ask_user",
-        "interaction.confirm_action",
-        "interaction.show_progress",
-        "interaction.show_preview",
-        "interaction.show_timeline",
-        "interaction.show_error",
-        "project.create",
-        "project.rename",
-        "project.delete",
-        "project.copy",
-        "project.create_case",
-        "project.move_case",
-        "project.close_case",
-        "project.list_tree",
-        "asset.upload_complete",
         "asset.import_local_file",
         "asset.import_url",
-        "asset.link_to_project",
-        "asset.unlink_from_project",
-        "asset.select_for_case",
-        "asset.disable_for_case",
-        "asset.list_project_assets",
-        "asset.list_case_scope",
+        "asset.list_assets",
         "audio.inspect_sources",
         "audio.asr_original",
         "audio.rough_cut_speech",
@@ -91,41 +69,37 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "audio.align_uploaded_voiceover",
         "content.create_plan",
         "content.revise_plan",
+        "decision.answer",
+        "interaction.ask_user",
+        "interaction.confirm_action",
+        "interaction.show_progress",
+        "interaction.show_preview",
+        "interaction.show_timeline",
+        "interaction.show_error",
         "media.view_frames",
-        "understand.materials",
-        "asset.read_summary",
+        "memory.extract_from_draft",
+        "memory.ask_scope",
+        "memory.save",
+        "memory.search_relevant",
+        "render.preview",
+        "render.final_mp4",
+        "render.status",
         "timeline.compose_initial",
         "timeline.apply_patch",
         "timeline.validate",
         "timeline.inspect",
         "timeline.restore_version",
-        "render.preview",
-        "render.final_mp4",
-        "render.status",
-        "memory.extract_from_case",
-        "memory.ask_scope",
-        "memory.save",
-        "memory.search_relevant",
+        "understand.materials",
     }
     assert {spec.name for spec in tool_specs()} == expected_tools
+    assert len(expected_tools) == 31
     assert {spec.name for spec in registry.list_stable()} == {spec.name for spec in tool_specs()}
-    assert {"case.rename", "case.delete", "case.copy"}.isdisjoint(
-        {spec.name for spec in registry.list_stable()}
-    )
-    project_delete = registry.require("project.delete").spec
-    assert project_delete.requires_confirmation is True
-    assert project_delete.confirmation_decision_type == "destructive_project_action"
-    assert project_delete.emits_events == ["ProjectTrashed"]
-    project_move_case = registry.require("project.move_case").spec
-    assert project_move_case.requires_confirmation is True
-    assert project_move_case.confirmation_decision_type == "destructive_project_action"
-    assert project_move_case.emits_events == ["CaseMoved", "AssetLinked"]
-    assert registry.require("project.list_tree").spec.side_effects == []
+
     asset_import_url = registry.require("asset.import_url").spec
     assert asset_import_url.requires_confirmation is True
     assert asset_import_url.confirmation_decision_type == "url_import"
     assert asset_import_url.is_long_running is True
-    assert registry.require("asset.list_project_assets").spec.side_effects == []
+    assert registry.require("asset.list_assets").spec.side_effects == []
     assert registry.require("audio.inspect_sources").spec.emits_events == [
         "AssetProbed",
         "CapabilityDegraded",
@@ -157,12 +131,12 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
     ]
     content_create = registry.require("content.create_plan").spec
     assert content_create.exposure == "llm"
-    assert content_create.requires_active_case is True
+    assert content_create.requires_active_draft is True
     assert content_create.requires_confirmation is False
     assert content_create.emits_events == ["ContentPlanUpdated", "CutPlanUpdated"]
     content_revise = registry.require("content.revise_plan").spec
     assert content_revise.exposure == "llm"
-    assert content_revise.requires_active_case is True
+    assert content_revise.requires_active_draft is True
     assert content_revise.emits_events == ["ContentPlanUpdated", "CutPlanUpdated"]
     media_view_frames = registry.require("media.view_frames").spec
     assert media_view_frames.side_effects == []
@@ -192,7 +166,7 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "preview_for_current_version_exists",
     ]
     assert registry.require("render.status").spec.side_effects == []
-    memory_extract = registry.require("memory.extract_from_case").spec
+    memory_extract = registry.require("memory.extract_from_draft").spec
     assert memory_extract.emits_events == [
         "MemoryCandidateExtracted",
         "CapabilityDegraded",
@@ -264,9 +238,8 @@ def test_decision_answer_builds_decision_answered_event() -> None:
     decision = Decision.model_validate(
         {
             "decision_id": "decision_1",
-            "scope_type": "case",
-            "project_id": "project_1",
-            "case_id": "case_1",
+            "scope_type": "draft",
+            "draft_id": "draft_1",
             "type": "generic",
             "question": "OK?",
             "status": "pending",

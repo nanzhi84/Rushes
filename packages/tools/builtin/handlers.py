@@ -25,8 +25,7 @@ def decision_answer(input_model: DecisionAnswerInput, context: ToolExecutionCont
     event = DecisionAnswered(
         decision_id=decision.decision_id,
         scope_type=decision.scope_type,
-        project_id=decision.project_id,
-        case_id=decision.case_id,
+        draft_id=decision.draft_id,
         payload={"answer": input_model.answer.model_dump(mode="json")},
     )
     return ToolResult(

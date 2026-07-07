@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 
-from contracts.case import CaseState
 from contracts.decision import Decision, DecisionOption
+from contracts.draft import DraftState
 from contracts.events import (
     DecisionCreated,
     TimelineValidated,
@@ -22,7 +21,6 @@ from contracts.events import (
 from contracts.patch import AddBgmOp, TimelinePatchRequest
 from contracts.tool_result import ToolArtifact, ToolError, ToolResult
 from storage import schema
-from storage.repositories._json import load_json
 from timeline import (
     AnchorConflict,
     MaterializationError,
@@ -52,31 +50,30 @@ def compose_initial(
     context: ToolExecutionContext,
 ) -> ToolResult:
     tool_name = "timeline.compose_initial"
-    case_state = context.case_state
-    if case_state is None:
-        return _failed(tool_name, context, "missing_case", "active case required")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed(tool_name, context, "missing_draft", "active draft required")
     if context.readonly_connection is None:
         return _failed(tool_name, context, "missing_connection", "repository access required")
 
     try:
         timeline = materialize_from_clips(
             context.readonly_connection,
-            case_state,
+            draft_state,
             [clip.model_dump(mode="json") for clip in input_model.clips],
             voiceover_asset_id=input_model.voiceover_asset_id,
         )
     except MaterializationError as exc:
         return _failed(tool_name, context, "timeline_materialization_failed", str(exc))
 
-    report = validate_timeline(context.readonly_connection, case_state, timeline)
+    report = validate_timeline(context.readonly_connection, draft_state, timeline)
     timeline = timeline.model_copy(update={"validation_report": report})
     store_timeline_version(context.readonly_connection, timeline, created_at=_created_at(context))
     changed_track_ids = ["visual_base"]
     if input_model.voiceover_asset_id is not None:
         changed_track_ids.append("voiceover")
     created_event = TimelineVersionCreated(
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
         timeline_version=timeline.version,
         parent_version=timeline.parent_version,
         payload={
@@ -90,7 +87,7 @@ def compose_initial(
         },
     )
     validation_event = _validation_event(
-        case_state,
+        draft_state,
         timeline.version,
         report.model_dump(mode="json"),
     )
@@ -105,7 +102,7 @@ def compose_initial(
         status=status,
         observation=observation,
         data={
-            "case_id": case_state.case_id,
+            "draft_id": draft_state.draft_id,
             "timeline_version": timeline.version,
             "timeline": timeline.model_dump(mode="json"),
             "validation_report": report.model_dump(mode="json"),
@@ -127,12 +124,12 @@ def apply_patch(
     context: ToolExecutionContext,
 ) -> ToolResult:
     tool_name = "timeline.apply_patch"
-    case_state = context.case_state
-    if case_state is None:
-        return _failed(tool_name, context, "missing_case", "active case required")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed(tool_name, context, "missing_draft", "active draft required")
     if context.readonly_connection is None:
         return _failed(tool_name, context, "missing_connection", "repository access required")
-    if case_state.timeline_current_version is None:
+    if draft_state.timeline_current_version is None:
         return _failed(tool_name, context, "timeline_missing", "current timeline required")
 
     invalid = _validate_bgm_asset(input_model, context)
@@ -141,7 +138,7 @@ def apply_patch(
 
     outcome = apply_timeline_patch(
         context.readonly_connection,
-        case_state,
+        draft_state,
         input_model,
         created_at=_created_at(context),
     )
@@ -176,7 +173,7 @@ def apply_patch(
         status=status,
         observation=_patch_observation(outcome.timeline.version, report.valid, outcome),
         data={
-            "case_id": case_state.case_id,
+            "draft_id": draft_state.draft_id,
             "timeline_version": outcome.timeline.version,
             "timeline": outcome.timeline.model_dump(mode="json"),
             "validation_report": report.model_dump(mode="json"),
@@ -223,28 +220,28 @@ def validate(
 ) -> ToolResult:
     del input_model
     tool_name = "timeline.validate"
-    case_state = context.case_state
-    if case_state is None:
-        return _failed(tool_name, context, "missing_case", "active case required")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed(tool_name, context, "missing_draft", "active draft required")
     if context.readonly_connection is None:
         return _failed(tool_name, context, "missing_connection", "repository access required")
-    if case_state.timeline_current_version is None:
+    if draft_state.timeline_current_version is None:
         return _failed(tool_name, context, "timeline_missing", "current timeline required")
     record = get_timeline_version(
         context.readonly_connection,
-        case_state.case_id,
-        case_state.timeline_current_version,
+        draft_state.draft_id,
+        draft_state.timeline_current_version,
     )
     if record is None:
         return _failed(tool_name, context, "timeline_not_found", "current timeline not found")
-    report = validate_timeline(context.readonly_connection, case_state, record.timeline)
+    report = validate_timeline(context.readonly_connection, draft_state, record.timeline)
     update_timeline_validation_report(
         context.readonly_connection,
-        case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
         version=record.version,
         report=report,
     )
-    event = _validation_event(case_state, record.version, report.model_dump(mode="json"))
+    event = _validation_event(draft_state, record.version, report.model_dump(mode="json"))
     if report.valid:
         observation = f"timeline v{record.version} 校验通过"
     else:
@@ -262,7 +259,7 @@ def validate(
         status="succeeded",
         observation=observation,
         data={
-            "case_id": case_state.case_id,
+            "draft_id": draft_state.draft_id,
             "timeline_version": record.version,
             "valid": report.valid,
             "validation_report": report.model_dump(mode="json"),
@@ -276,18 +273,18 @@ def inspect(
     context: ToolExecutionContext,
 ) -> ToolResult:
     tool_name = "timeline.inspect"
-    case_state = context.case_state
-    if case_state is None:
-        return _failed(tool_name, context, "missing_case", "active case required")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed(tool_name, context, "missing_draft", "active draft required")
     if context.readonly_connection is None:
         return _failed(tool_name, context, "missing_connection", "repository access required")
-    version = input_model.version or case_state.timeline_current_version
+    version = input_model.version or draft_state.timeline_current_version
     if version is None:
         return _failed(tool_name, context, "timeline_missing", "current timeline required")
-    record = get_timeline_version(context.readonly_connection, case_state.case_id, version)
+    record = get_timeline_version(context.readonly_connection, draft_state.draft_id, version)
     if record is None:
         return _failed(tool_name, context, "timeline_not_found", f"timeline v{version} not found")
-    aspect_ratio = _project_aspect_ratio(context)
+    aspect_ratio = _draft_aspect_ratio(context)
     summary = render_timeline_summary(record.timeline, aspect_ratio=aspect_ratio)
     return ToolResult(
         tool_call_id=context.tool_call_id,
@@ -295,7 +292,7 @@ def inspect(
         status="succeeded",
         observation=summary,
         data={
-            "case_id": case_state.case_id,
+            "draft_id": draft_state.draft_id,
             "timeline_version": version,
             "timeline_summary": summary,
         },
@@ -307,17 +304,17 @@ def restore_version(
     context: ToolExecutionContext,
 ) -> ToolResult:
     tool_name = "timeline.restore_version"
-    case_state = context.case_state
-    if case_state is None:
-        return _failed(tool_name, context, "missing_case", "active case required")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed(tool_name, context, "missing_draft", "active draft required")
     if context.readonly_connection is None:
         return _failed(tool_name, context, "missing_connection", "repository access required")
-    if case_state.timeline_current_version is None:
+    if draft_state.timeline_current_version is None:
         return _failed(tool_name, context, "timeline_missing", "current timeline required")
     try:
         restored = restore_timeline_version(
             context.readonly_connection,
-            case_state,
+            draft_state,
             source_version=input_model.source_version,
             created_at=_created_at(context),
         )
@@ -329,8 +326,7 @@ def restore_version(
             f"timeline v{input_model.source_version} not found",
         )
     event = TimelineVersionRestored(
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
         timeline_version=restored.version,
         payload={
             "timeline_version": restored.version,
@@ -346,7 +342,7 @@ def restore_version(
         status="succeeded",
         observation=f"restored timeline v{input_model.source_version} as v{restored.version}",
         data={
-            "case_id": case_state.case_id,
+            "draft_id": draft_state.draft_id,
             "source_version": input_model.source_version,
             "timeline_version": restored.version,
             "timeline": restored.model_dump(mode="json"),
@@ -362,23 +358,23 @@ def _requires_user_for_anchor_conflict(
     request: TimelinePatchRequest,
     conflict: AnchorConflict,
 ) -> ToolResult:
-    assert context.case_state is not None
+    assert context.draft_state is not None
     assert context.readonly_connection is not None
-    case_state = context.case_state
-    version = case_state.timeline_current_version
+    draft_state = context.draft_state
+    version = draft_state.timeline_current_version
     current_summary = ""
     if version is not None:
-        record = get_timeline_version(context.readonly_connection, case_state.case_id, version)
+        record = get_timeline_version(context.readonly_connection, draft_state.draft_id, version)
         if record is not None:
             current_summary = render_timeline_summary(
                 record.timeline,
-                aspect_ratio=_project_aspect_ratio(context),
+                aspect_ratio=_draft_aspect_ratio(context),
             )
     question = "时间锚点对应的片段已被后续版本修改。请确认要改当前时间线里的哪一段。"
     decision = Decision(
         decision_id=_decision_id(
             "timeline_anchor_conflict",
-            case_state.case_id,
+            draft_state.draft_id,
             {
                 "request": request.model_dump(mode="json", by_alias=True),
                 "code": conflict.code,
@@ -386,9 +382,8 @@ def _requires_user_for_anchor_conflict(
                 "current_version": version,
             },
         ),
-        scope_type="case",
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
+        scope_type="draft",
+        draft_id=draft_state.draft_id,
         type="generic",
         question=question,
         options=[
@@ -410,9 +405,8 @@ def _requires_user_for_anchor_conflict(
     )
     event = DecisionCreated(
         decision_id=decision.decision_id,
-        scope_type="case",
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
+        scope_type="draft",
+        draft_id=draft_state.draft_id,
         payload={
             "decision": decision.model_dump(mode="json"),
             "type": decision.type,
@@ -428,7 +422,7 @@ def _requires_user_for_anchor_conflict(
         status="requires_user",
         observation=question,
         data={
-            "case_id": case_state.case_id,
+            "draft_id": draft_state.draft_id,
             "decision": decision.model_dump(mode="json"),
             "anchor_conflict": {"code": conflict.code, "details": conflict.details},
             "timeline_summary": current_summary,
@@ -438,21 +432,19 @@ def _requires_user_for_anchor_conflict(
 
 
 def _validation_event(
-    case_state: CaseState,
+    draft_state: DraftState,
     version: int,
     report: dict[str, Any],
 ) -> TimelineValidated | TimelineValidationFailed:
     payload = {"timeline_version": version, "validation_report": report}
     if report.get("valid") is True:
         return TimelineValidated(
-            project_id=case_state.project_id,
-            case_id=case_state.case_id,
+            draft_id=draft_state.draft_id,
             timeline_version=version,
             payload=payload,
         )
     return TimelineValidationFailed(
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
         timeline_version=version,
         payload=payload,
     )
@@ -469,23 +461,9 @@ def _patch_observation(
     return f"patched timeline v{version}: {validity}{suffix}"
 
 
-def _project_aspect_ratio(context: ToolExecutionContext) -> str:
-    if context.project_state is not None:
-        return context.project_state.defaults.aspect_ratio
-    if context.readonly_connection is None or context.case_state is None:
-        return "unknown"
-    row = context.readonly_connection.execute(
-        select(schema.projects.c.defaults).where(
-            schema.projects.c.project_id == context.case_state.project_id
-        )
-    ).first()
-    if row is None:
-        return "unknown"
-    defaults = load_json(str(row._mapping["defaults"]))
-    if isinstance(defaults, Mapping):
-        aspect_ratio = defaults.get("aspect_ratio")
-        if isinstance(aspect_ratio, str):
-            return aspect_ratio
+def _draft_aspect_ratio(context: ToolExecutionContext) -> str:
+    if context.draft_state is not None:
+        return context.draft_state.defaults.aspect_ratio
     return "unknown"
 
 
@@ -511,8 +489,8 @@ def _failed(
     )
 
 
-def _decision_id(prefix: str, case_id: str, payload: Any) -> str:
-    raw = json.dumps({"case_id": case_id, "payload": payload}, sort_keys=True)
+def _decision_id(prefix: str, draft_id: str, payload: Any) -> str:
+    raw = json.dumps({"draft_id": draft_id, "payload": payload}, sort_keys=True)
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
     return f"dec_{prefix}_{digest}"
 

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from sqlalchemy.engine import Connection
 
-from contracts.case import CaseState, CutPlan
+from contracts.draft import CutPlan, DraftState
 from contracts.provider import ProviderResult
 from providers import LLM_CHAT
 from providers.gateway import ProviderGatewayResult
@@ -53,7 +53,7 @@ def test_create_plan_silent_emits_content_and_cut_plan_with_mock_gateway(
 ) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "溪流慢镜头", quality_score=0.9)
+        _seed_clip(connection, "asset_1", "溪流慢镜头")
         result = create_plan(
             ContentCreatePlanInput(target_duration_sec=18.0),
             _context(
@@ -74,6 +74,7 @@ def test_create_plan_silent_emits_content_and_cut_plan_with_mock_gateway(
         "ContentPlanUpdated",
         "CutPlanUpdated",
     ]
+    assert result.events[0]["draft_id"] == "draft_1"
     assert (
         result.events[0]["payload"]["content_plan"]["storyline"] == "从溪流开场，过渡到远景收束。"
     )
@@ -86,12 +87,12 @@ def test_create_plan_silent_emits_content_and_cut_plan_with_mock_gateway(
 def test_create_plan_tts_only_emits_content_plan(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "人物开场", quality_score=0.8)
+        _seed_clip(connection, "asset_1", "人物开场")
         result = create_plan(
             ContentCreatePlanInput(target_duration_sec=12.0),
             _context(
                 connection,
-                case_state=_case_state(audio_mode="tts"),
+                draft_state=_draft_state(audio_mode="tts"),
                 metadata={"provider_gateway": _LlmGateway(_llm_output())},
             ),
         )
@@ -106,8 +107,8 @@ def test_create_plan_without_gateway_falls_back_to_one_slot_per_asset(
 ) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "瀑布远景", quality_score=0.7)
-        _seed_clip(connection, "asset_2", "clip_2", "森林横移", quality_score=0.9)
+        _seed_clip(connection, "asset_1", "瀑布远景")
+        _seed_clip(connection, "asset_2", "森林横移")
         result = create_plan(
             ContentCreatePlanInput(target_duration_sec=20.0, slot_count=5),
             _context(connection),
@@ -159,7 +160,7 @@ def test_create_plan_parses_llm_content_string_and_tool_call_shapes(
 ) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "备用素材", quality_score=0.6)
+        _seed_clip(connection, "asset_1", "备用素材")
         result = create_plan(
             ContentCreatePlanInput(target_duration_sec=9.0),
             _context(connection, metadata={"provider_gateway": _LlmGateway(output)}),
@@ -174,7 +175,7 @@ def test_create_plan_parses_llm_content_string_and_tool_call_shapes(
 def test_create_plan_garbage_llm_output_falls_back(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "可用风景", quality_score=0.6)
+        _seed_clip(connection, "asset_1", "可用风景")
         result = create_plan(
             ContentCreatePlanInput(target_duration_sec=8.0),
             _context(
@@ -190,14 +191,14 @@ def test_create_plan_garbage_llm_output_falls_back(tmp_path: Path) -> None:
 
 def test_revise_plan_updates_existing_plan_and_cut_plan(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    case_state = _case_state(content_plan=_existing_content_plan(), cut_plan=_existing_cut_plan())
+    draft_state = _draft_state(content_plan=_existing_content_plan(), cut_plan=_existing_cut_plan())
     with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "旧素材", quality_score=0.5)
+        _seed_clip(connection, "asset_1", "旧素材")
         result = revise_plan(
             ContentRevisePlanInput(revision_hint="加强结尾"),
             _context(
                 connection,
-                case_state=case_state,
+                draft_state=draft_state,
                 metadata={
                     "provider_gateway": _LlmGateway(
                         _llm_output(storyline="修订后的故事线", brief="新的结尾远景")
@@ -229,7 +230,7 @@ def test_revise_plan_requires_existing_content_plan(tmp_path: Path) -> None:
     assert result.error.error_code == "missing_content_plan"
 
 
-def test_content_tools_guard_missing_case_and_connection(tmp_path: Path) -> None:
+def test_content_tools_guard_missing_draft_and_connection(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
         bare = ToolExecutionContext(
@@ -239,21 +240,21 @@ def test_content_tools_guard_missing_case_and_connection(tmp_path: Path) -> None
         )
         no_connection = _context(
             None,
-            case_state=_case_state(content_plan=_existing_content_plan()),
+            draft_state=_draft_state(content_plan=_existing_content_plan()),
         )
 
-        create_missing_case = create_plan(ContentCreatePlanInput(), bare)
-        revise_missing_case = revise_plan(ContentRevisePlanInput(revision_hint="x"), bare)
+        create_missing_draft = create_plan(ContentCreatePlanInput(), bare)
+        revise_missing_draft = revise_plan(ContentRevisePlanInput(revision_hint="x"), bare)
         create_missing_connection = create_plan(ContentCreatePlanInput(), no_connection)
         revise_missing_connection = revise_plan(
             ContentRevisePlanInput(revision_hint="x"),
             no_connection,
         )
 
-    assert create_missing_case.error is not None
-    assert create_missing_case.error.error_code == "missing_case"
-    assert revise_missing_case.error is not None
-    assert revise_missing_case.error.error_code == "missing_case"
+    assert create_missing_draft.error is not None
+    assert create_missing_draft.error.error_code == "missing_draft"
+    assert revise_missing_draft.error is not None
+    assert revise_missing_draft.error.error_code == "missing_draft"
     assert create_missing_connection.error is not None
     assert create_missing_connection.error.error_code == "missing_connection"
     assert revise_missing_connection.error is not None
@@ -265,22 +266,12 @@ def _engine(tmp_path: Path):
     with engine.begin() as connection:
         schema.create_all(connection)
         connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
-                status="active",
-                defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
-                created_at=NOW,
-                updated_at=NOW,
-            )
-        )
-        connection.execute(
-            schema.cases.insert().values(
-                case_id="case_1",
-                project_id="project_1",
-                name="Case",
+            schema.drafts.insert().values(
+                draft_id="draft_1",
+                name="Draft",
                 state_version=0,
                 status="active",
+                defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
                 timeline_validated=False,
                 rough_cut_approved=False,
                 running_jobs="[]",
@@ -292,9 +283,9 @@ def _engine(tmp_path: Path):
                         "confirmed_facts": [],
                     }
                 ),
-                selected_asset_ids="[]",
-                disabled_asset_ids="[]",
                 scratch_memory="{}",
+                created_at=NOW,
+                updated_at=NOW,
             )
         )
     return engine
@@ -303,30 +294,29 @@ def _engine(tmp_path: Path):
 def _context(
     connection: Connection | None,
     *,
-    case_state: CaseState | None = None,
+    draft_state: DraftState | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ToolExecutionContext:
     return ToolExecutionContext(
         tool_call_id="tc_1",
         turn_id="turn_1",
-        case_state=case_state or _case_state(),
+        draft_state=draft_state or _draft_state(),
         readonly_connection=connection,
         created_at=NOW,
         metadata=metadata or {},
     )
 
 
-def _case_state(
+def _draft_state(
     *,
     audio_mode: str | None = "silent",
     content_plan: dict[str, Any] | None = None,
     cut_plan: dict[str, Any] | None = None,
-) -> CaseState:
-    return CaseState.model_validate(
+) -> DraftState:
+    return DraftState.model_validate(
         {
-            "case_id": "case_1",
-            "project_id": "project_1",
-            "name": "Case",
+            "draft_id": "draft_1",
+            "name": "Draft",
             "brief": {
                 "goal": "做一条安静风景混剪",
                 "target_duration_sec": 15.0,
@@ -336,9 +326,6 @@ def _case_state(
             "content_plan": content_plan,
             "audio_plan": None if audio_mode is None else {"mode": audio_mode},
             "cut_plan": cut_plan,
-            "selected_asset_ids": [],
-            "disabled_asset_ids": [],
-            "scratch_memory": {},
         }
     )
 
@@ -346,11 +333,9 @@ def _case_state(
 def _seed_clip(
     connection: Connection,
     asset_id: str,
-    clip_id: str,
     summary: str,
-    *,
-    quality_score: float,
 ) -> None:
+    del summary
     connection.execute(
         schema.assets.insert().values(
             asset_id=asset_id,
@@ -371,12 +356,12 @@ def _seed_clip(
         )
     )
     connection.execute(
-        schema.project_asset_links.insert().values(
-            project_id="project_1",
+        schema.draft_asset_links.insert().values(
+            draft_id="draft_1",
             asset_id=asset_id,
-            enabled=True,
             linked_at=NOW,
             note="",
+            rel_dir=None,
         )
     )
 
@@ -486,7 +471,7 @@ def test_fallback_helpers_cover_edge_branches() -> None:
         _target_duration,
     )
 
-    state = _case_state(audio_mode="silent")
+    state = _draft_state(audio_mode="silent")
     assets = [
         _AssetSummary(asset_id="a1", filename="海边.mov", summary="日落海岸", quality_score=0.9),
         _AssetSummary(asset_id="a2", filename="", summary="", quality_score=None),
@@ -540,7 +525,7 @@ def test_call_llm_and_async_bridge_edge_paths(tmp_path: Path) -> None:
 
     engine = _engine(tmp_path)
     with engine.connect() as connection:
-        context = _context(connection, case_state=_case_state(audio_mode="silent"))
+        context = _context(connection, draft_state=_draft_state(audio_mode="silent"))
         context = replace_metadata(context, {"provider_gateway": _BoomGateway()})
         assert _call_llm(context, request_id="r1", payload={}) is None
 
@@ -605,12 +590,12 @@ def test_revise_plan_uses_llm_output_when_available(tmp_path: Path) -> None:
 
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        state = _case_state(
+        state = _draft_state(
             audio_mode="silent",
             content_plan={"schema": "ContentPlan.v1", "storyline": "旧", "sections": []},
         )
         context = replace_metadata(
-            _context(connection, case_state=state), {"provider_gateway": _Gateway()}
+            _context(connection, draft_state=state), {"provider_gateway": _Gateway()}
         )
         result = revise_plan(ContentRevisePlanInput(revision_hint="更明快"), context)
 
@@ -627,7 +612,7 @@ def test_ask_user_defaults_generic_reduce_target_to_scratch_memory(tmp_path: Pat
 
     engine = _engine(tmp_path)
     with engine.connect() as connection:
-        context = _context(connection, case_state=_case_state(audio_mode="silent"))
+        context = _context(connection, draft_state=_draft_state(audio_mode="silent"))
         result = ask_user(
             AskUserInput(
                 question="用哪种节奏？",
@@ -649,8 +634,8 @@ def test_create_plan_observation_hints_when_audio_plan_missing(tmp_path: Path) -
 
     engine = _engine(tmp_path)
     with engine.connect() as connection:
-        state = _case_state(audio_mode=None)
-        result = create_plan(ContentCreatePlanInput(), _context(connection, case_state=state))
+        state = _draft_state(audio_mode=None)
+        result = create_plan(ContentCreatePlanInput(), _context(connection, draft_state=state))
     assert result.status == "succeeded"
     assert [event["event"] for event in result.events] == ["ContentPlanUpdated"]
     assert "audio_plan 尚未确定" in result.observation
@@ -660,7 +645,7 @@ def test_create_plan_observation_hints_when_audio_plan_missing(tmp_path: Path) -
 def test_fallback_storyline_when_everything_empty() -> None:
     from tools.content.handlers import _fallback_sections, _fallback_storyline
 
-    state = _case_state(audio_mode="silent")
+    state = _draft_state(audio_mode="silent")
     text = _fallback_storyline(state, [], None)
     assert text  # goal 存在时用 goal 组装
     sections = _fallback_sections(text, [], None)

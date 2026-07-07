@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.timeline import TimelineState, TimelineValidationReport
 from storage import schema
 from storage.db import create_workspace_engine
@@ -27,18 +27,18 @@ def test_timeline_versions_repository_returns_empty_results(tmp_path: Path) -> N
 
     with engine.connect() as connection:
         repository = TimelineVersionsRepository(connection)
-        assert repository.get_by_case_version("case_1", 1) is None
-        assert repository.list_for_case("case_1") == []
+        assert repository.get_by_draft_version("draft_1", 1) is None
+        assert repository.list_for_draft("draft_1") == []
 
-    assert get_timeline_version(engine, "case_1", 1) is None
-    assert list_timeline_versions(engine, "case_1") == []
+    assert get_timeline_version(engine, "draft_1", 1) is None
+    assert list_timeline_versions(engine, "draft_1") == []
 
 
 def test_restore_timeline_version_raises_for_missing_source(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
 
     with pytest.raises(KeyError, match="timeline version not found: 99"):
-        restore_timeline_version(engine, _case_state(), source_version=99)
+        restore_timeline_version(engine, _draft_state(), source_version=99)
 
 
 def test_restore_timeline_version_can_start_new_chain_from_zero_version(
@@ -53,13 +53,13 @@ def test_restore_timeline_version_can_start_new_chain_from_zero_version(
         )
         restored = restore_timeline_version(
             connection,
-            _case_state(timeline_current_version=None),
+            _draft_state(timeline_current_version=None),
             source_version=0,
             created_at=NOW,
         )
-    versions = list_timeline_versions(engine, "case_1")
+    versions = list_timeline_versions(engine, "draft_1")
 
-    assert restored.timeline_id == "case_1:v1"
+    assert restored.timeline_id == "draft_1:v1"
     assert restored.version == 1
     assert restored.parent_version is None
     assert restored.created_by_patch_id is None
@@ -76,7 +76,7 @@ def test_store_timeline_version_skips_existing_case_version(tmp_path: Path) -> N
             created_at="2026-07-05T01:00:00+00:00",
         )
 
-    versions = list_timeline_versions(engine, "case_1")
+    versions = list_timeline_versions(engine, "draft_1")
 
     assert len(versions) == 1
     assert versions[0].created_at == NOW
@@ -99,11 +99,13 @@ def test_update_validation_report_handles_missing_and_existing_versions(
     )
 
     with engine.begin() as connection:
-        update_timeline_validation_report(connection, case_id="case_1", version=404, report=report)
+        update_timeline_validation_report(
+            connection, draft_id="draft_1", version=404, report=report
+        )
         store_timeline_version(connection, _timeline(version=1), created_at=NOW)
-        update_timeline_validation_report(connection, case_id="case_1", version=1, report=report)
+        update_timeline_validation_report(connection, draft_id="draft_1", version=1, report=report)
 
-    record = get_timeline_version(engine, "case_1", 1)
+    record = get_timeline_version(engine, "draft_1", 1)
 
     assert record is not None
     assert record.validation_report == report
@@ -115,22 +117,12 @@ def _engine(tmp_path: Path):
     with engine.begin() as connection:
         schema.create_all(connection)
         connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
-                status="active",
-                defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
-                created_at=NOW,
-                updated_at=NOW,
-            )
-        )
-        connection.execute(
-            schema.cases.insert().values(
-                case_id="case_1",
-                project_id="project_1",
-                name="Case",
+            schema.drafts.insert().values(
+                draft_id="draft_1",
+                name="Draft",
                 state_version=0,
                 status="active",
+                defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
                 pending_decision_id=None,
                 running_jobs=dump_json([]),
                 last_error=None,
@@ -146,24 +138,22 @@ def _engine(tmp_path: Path):
                 rough_cut_approved_version=None,
                 postprocess_plan=None,
                 export_current_id=None,
-                selected_asset_ids=dump_json([]),
-                disabled_asset_ids=dump_json([]),
                 scratch_memory=dump_json({}),
+                messages_tail_ref=None,
+                created_at=NOW,
+                updated_at=NOW,
             )
         )
     return engine
 
 
-def _case_state(*, timeline_current_version: int | None = None) -> CaseState:
-    return CaseState.model_validate(
+def _draft_state(*, timeline_current_version: int | None = None) -> DraftState:
+    return DraftState.model_validate(
         {
-            "case_id": "case_1",
-            "project_id": "project_1",
-            "name": "Case",
+            "draft_id": "draft_1",
+            "name": "Draft",
             "brief": {"goal": "test", "confirmed_facts": []},
             "timeline_current_version": timeline_current_version,
-            "selected_asset_ids": [],
-            "disabled_asset_ids": [],
             "scratch_memory": {},
         }
     )
@@ -175,8 +165,8 @@ def _timeline(
     created_by_patch_id: str | None = None,
 ) -> TimelineState:
     payload: dict[str, Any] = {
-        "timeline_id": f"case_1:v{version}",
-        "case_id": "case_1",
+        "timeline_id": f"draft_1:v{version}",
+        "draft_id": "draft_1",
         "version": version,
         "fps": 30,
         "duration_frames": 0,
