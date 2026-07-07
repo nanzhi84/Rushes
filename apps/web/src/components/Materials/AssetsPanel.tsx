@@ -292,8 +292,8 @@ function FolderTile({ folder, onOpen }: { folder: FolderNode; onOpen: () => void
         <FolderGlyph />
       </div>
       <div className="flex items-center justify-between gap-1 px-1.5 py-1">
-        <span className="truncate text-[11px] text-fg">{folder.name}</span>
-        <span className="shrink-0 text-[10px] tabular-nums text-fg-faint">{folder.count}</span>
+        <span className="truncate text-2xs text-fg">{folder.name}</span>
+        <span className="shrink-0 text-2xs tabular-nums text-fg-faint">{folder.count}</span>
       </div>
     </button>
   );
@@ -347,7 +347,7 @@ function AssetTile({
             </div>
           )}
           {asset.duration_sec !== null && asset.duration_sec > 0 ? (
-            <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-[10px] tabular-nums text-white">
+            <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-2xs tabular-nums text-white">
               {formatDuration(asset.duration_sec)}
             </span>
           ) : null}
@@ -358,7 +358,7 @@ function AssetTile({
           ) : null}
         </div>
         <div className="flex items-center justify-between gap-1 px-1.5 py-1">
-          <span className="truncate text-[11px] text-fg-muted">
+          <span className="truncate text-2xs text-fg-muted">
             {asset.filename || asset.asset_id}
           </span>
           <span

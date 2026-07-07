@@ -65,7 +65,7 @@ function MessageRow({
     return (
       <details
         data-console-message-id={message.id}
-        className={`${highlightClass(highlighted)} mx-auto max-w-[84%] rounded-md bg-raised px-4 py-3 text-sm text-fg-muted`}
+        className={`${highlightClass(highlighted)} mx-auto max-w-[84%] rounded-md bg-raised px-4 py-3 text-sm text-fg-muted shadow-raised`}
       >
         <summary className="cursor-pointer text-xs font-medium text-fg-muted">系统观察</summary>
         {message.content.map((part, index) =>
@@ -125,16 +125,17 @@ function isNarration(message: ConsoleAssistantMessage): boolean {
 function messageClass(message: ConsoleAssistantMessage, highlighted: boolean): string {
   const highlight = highlightClass(highlighted);
   if (message.role === "user") {
-    return `${highlight} ml-auto max-w-[80%] rounded-lg bg-accent px-4 py-3 text-white`;
+    // accent 减负：用户气泡改低饱和深底 + accent 描边，不再整块铺纯橙。
+    return `${highlight} ml-auto max-w-[80%] rounded-lg border border-user-bubble-border bg-user-bubble px-4 py-3 text-fg shadow-raised`;
   }
   if (message.role === "assistant") {
     // narration 叙述用弱化样式：更浅的底色与文字，和正式 reply 拉开层级。
     if (isNarration(message)) {
-      return `${highlight} mr-auto max-w-[80%] rounded-lg border border-line bg-raised px-4 py-2 text-sm text-fg-muted`;
+      return `${highlight} mr-auto max-w-[80%] rounded-lg border border-line bg-raised px-4 py-2 text-sm text-fg-muted shadow-raised`;
     }
-    return `${highlight} mr-auto max-w-[80%] rounded-lg bg-raised px-4 py-3 text-fg`;
+    return `${highlight} mr-auto max-w-[80%] rounded-lg bg-raised px-4 py-3 text-fg shadow-raised`;
   }
-  return `${highlight} mx-auto max-w-[80%] rounded-md bg-raised px-4 py-3 text-fg-muted`;
+  return `${highlight} mx-auto max-w-[80%] rounded-md bg-raised px-4 py-3 text-fg-muted shadow-raised`;
 }
 
 function highlightClass(highlighted: boolean): string {
@@ -157,7 +158,7 @@ function ToolStepRow({ step }: { step: ToolStep }): ReactElement {
     <li
       data-tool-step-id={step.step_id}
       data-tool-status={step.status}
-      className="mr-auto flex max-w-[80%] items-center gap-2 rounded-md border border-line bg-raised px-3 py-2 text-sm text-fg-muted"
+      className="mr-auto flex max-w-[80%] items-center gap-2 rounded-md border border-line bg-raised px-3 py-2 text-sm text-fg-muted shadow-raised"
     >
       <span aria-hidden className={toolStatusToneClass(step.status)}>
         {toolStatusIcon(step.status)}

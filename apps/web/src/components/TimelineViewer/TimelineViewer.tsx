@@ -254,6 +254,11 @@ function TimelineWaveform({
     if (!container) {
       return;
     }
+    // canvas 不认 CSS 变量：运行时从令牌读实际色值（line-strong / accent），
+    // 令牌缺失（如测试环境）时回落到与令牌等值的兜底色。
+    const tokens = getComputedStyle(document.documentElement);
+    const waveColor = tokens.getPropertyValue("--color-line-strong").trim() || "#3d3d47";
+    const progressColor = tokens.getPropertyValue("--color-accent").trim() || "#ff5c38";
     const wavesurfer = WaveSurfer.create({
       container,
       url: src,
@@ -261,9 +266,8 @@ function TimelineWaveform({
       height: 44,
       interact: false,
       cursorWidth: 0,
-      // canvas 不认 CSS 变量，取值对齐令牌：line-strong / accent。
-      waveColor: "#3d3d47",
-      progressColor: "#ff5c38"
+      waveColor,
+      progressColor
     });
     return () => {
       wavesurfer.destroy();
