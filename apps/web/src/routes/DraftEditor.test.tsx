@@ -154,6 +154,14 @@ describe("DraftEditorView", () => {
     expect(panel.style.width).toBe("420px");
   });
 
+  it("顶栏成本小计渲染估算金额，且编辑器隐藏设置按钮", async () => {
+    const fetchMock = mockFetch({ decision: null, costs: 1.2345 });
+    renderEditor(fetchMock);
+
+    expect(await screen.findByText("¥1.2345")).toBeTruthy();
+    expect(screen.queryByText("设置")).toBeNull();
+  });
+
   it("发送消息后禁用输入框，并在 TurnEnded SSE 后恢复", async () => {
     const fetchMock = mockFetch({ decision: null });
     renderEditor(fetchMock);
@@ -509,15 +517,27 @@ function mockFetch({
   decision,
   timeline = false,
   messages = [],
-  onAnswer
+  onAnswer,
+  costs
 }: {
   decision: Decision | null;
   timeline?: boolean;
   messages?: DraftMessageFixture[] | (() => DraftMessageFixture[]);
   onAnswer?: (url: string, init: RequestInit | undefined) => void;
+  costs?: number;
 }): FetchMock {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url.endsWith("/costs")) {
+      return jsonResponse({
+        costs: {
+          total_cost_estimate: costs ?? 0,
+          provider_call_count: 0,
+          by_provider: {},
+          by_capability: {}
+        }
+      });
+    }
     if (url === "/api/drafts/draft_1") {
       return jsonResponse({
         draft: {

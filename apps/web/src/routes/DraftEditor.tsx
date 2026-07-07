@@ -89,6 +89,12 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     queryFn: () => api.getDraft(draftId)
   });
 
+  const costsQuery = useQuery({
+    queryKey: queryKeys.costs(draftId),
+    queryFn: () => api.draftCosts(draftId)
+  });
+  const totalCost = costsQuery.data?.costs.total_cost_estimate ?? null;
+
   const currentDraft = draftQuery.data?.draft ?? null;
   const draftName = currentDraft?.name ?? draftId;
   const timelineVersion = currentDraft?.timeline_current_version ?? null;
@@ -137,7 +143,8 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
         queryClient.invalidateQueries({ queryKey: ["timeline", draftId] }),
         queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) })
+        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.costs(draftId) })
       ]);
     },
     [draftId, queryClient]
@@ -340,6 +347,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     <div className="flex h-screen min-h-0 flex-col bg-ink text-fg">
       <TopBar
         connectionState={connectionState}
+        showSettings={false}
         leading={
           <>
             <Link
@@ -361,14 +369,23 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
           </>
         }
         trailing={
-          <button
-            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-strong disabled:opacity-40"
-            type="button"
-            disabled={disabled || timelineVersion === null}
-            onClick={handleExport}
-          >
-            导出
-          </button>
+          <div className="flex items-center gap-3">
+            <span
+              className="rounded-md bg-raised px-2 py-1 text-xs tabular-nums text-fg-muted"
+              aria-label="本草稿成本小计"
+              title="本草稿累计成本估算（人民币）"
+            >
+              {formatCost(totalCost)}
+            </span>
+            <button
+              className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-strong disabled:opacity-40"
+              type="button"
+              disabled={disabled || timelineVersion === null}
+              onClick={handleExport}
+            >
+              导出
+            </button>
+          </div>
         }
       />
 
@@ -708,6 +725,14 @@ function formatTimecode(sec: number): string {
   const seconds = Math.floor(safe % 60);
   const tenths = Math.floor((safe % 1) * 10);
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${tenths}`;
+}
+
+/** 成本小计：估算金额以人民币四位小数显示；未加载时占位。 */
+function formatCost(total: number | null): string {
+  if (total === null) {
+    return "¥—";
+  }
+  return `¥${total.toFixed(4)}`;
 }
 
 function HomeGlyph(): ReactElement {

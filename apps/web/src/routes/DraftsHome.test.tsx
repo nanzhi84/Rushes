@@ -61,6 +61,19 @@ describe("DraftsHomePage", () => {
 
     expect(await screen.findByText("编辑器:draft_new")).toBeTruthy();
   });
+
+  it("点击设置打开全局设置弹窗，关闭后消失", async () => {
+    renderHome();
+
+    await screen.findByText("7月7日");
+    expect(screen.queryByRole("dialog", { name: "全局设置" })).toBeNull();
+
+    screen.getByRole("button", { name: "设置" }).click();
+    expect(await screen.findByRole("dialog", { name: "全局设置" })).toBeTruthy();
+
+    screen.getByRole("button", { name: "关闭设置" }).click();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局设置" })).toBeNull());
+  });
 });
 
 type DraftFixture = {
