@@ -2,7 +2,6 @@ import pytest
 from pydantic import ValidationError
 
 from contracts import (
-    AnnotationDocument,
     AssetRecord,
     Decision,
     SubtitleClip,
@@ -12,30 +11,6 @@ from contracts import (
     TimelineTrack,
     TranscriptDocument,
 )
-
-
-def test_clip_start_must_be_less_than_end() -> None:
-    with pytest.raises(ValidationError):
-        AnnotationDocument.model_validate(
-            {
-                "schema": "AnnotationDocument.v1",
-                "annotation_id": "ann_001",
-                "asset_id": "asset_001",
-                "asset_kind": "video",
-                "status": "completed",
-                "generator": {"pipeline_version": "annotation.video.v1", "pass": "cheap"},
-                "clips": [
-                    {
-                        "clip_id": "clip_001",
-                        "source_start_frame": 10,
-                        "source_end_frame": 10,
-                        "role": "avoid",
-                        "summary": "bad interval",
-                    }
-                ],
-                "created_at": "...",
-            }
-        )
 
 
 def test_transcript_word_start_must_be_less_than_end() -> None:
@@ -77,9 +52,6 @@ def test_copy_mode_rejects_reference_path() -> None:
                 "size": 1,
                 "probe": {"duration_sec": 1, "has_audio": False},
                 "ingest_status": "imported",
-                "annotation_status": "pending",
-                "annotation_pass": "none",
-                "index_status": "none",
                 "usable": False,
             }
         )

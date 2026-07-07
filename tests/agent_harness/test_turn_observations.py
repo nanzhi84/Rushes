@@ -195,14 +195,13 @@ def anyio_backend() -> str:
 
 
 def test_build_default_tool_gateway_registers_capabilities(monkeypatch) -> None:
-    """gateway 工厂：DASHSCOPE key 单钥覆盖三能力；无 key 返回 None（M9 回归）。"""
+    """gateway 工厂：DASHSCOPE key 单钥覆盖 LLM/VLM 能力；无 key 返回 None（M9 回归）。"""
     from providers.tool_gateway import build_default_tool_gateway
 
     for name in (
         "RUSHES_DASHSCOPE_API_KEY",
         "RUSHES_LLM_API_KEY",
         "RUSHES_VLM_API_KEY",
-        "RUSHES_EMBEDDING_API_KEY",
         "RUSHES_LLM_MODEL",
     ):
         monkeypatch.delenv(name, raising=False)

@@ -1,7 +1,6 @@
 from pydantic import BaseModel
 
 from contracts import (
-    AnnotationDocument,
     AssetRecord,
     CaseState,
     CutPlan,
@@ -133,66 +132,8 @@ def test_asset_record_prd_example_round_trips() -> None:
             },
             "proxy_object_uri": "object://...",
             "ingest_status": "imported",
-            "annotation_status": "pending",
-            "annotation_pass": "none",
-            "index_status": "none",
             "usable": False,
             "failure": None,
-        },
-    )
-
-
-def test_annotation_document_prd_example_round_trips_with_unknown_extension() -> None:
-    assert_round_trip(
-        AnnotationDocument,
-        {
-            "schema": "AnnotationDocument.v1",
-            "annotation_id": "ann_001",
-            "asset_id": "asset_001",
-            "asset_kind": "video",
-            "status": "completed",
-            "generator": {
-                "pipeline_version": "annotation.video.v1",
-                "pass": "cheap",
-                "provider_refs": ["pc_001"],
-            },
-            "clips": [
-                {
-                    "clip_id": "clip_001",
-                    "source_start_frame": 0,
-                    "source_end_frame": 120,
-                    "role": "a_roll_candidate",
-                    "summary": "产品特写，手部拿起瓶身",
-                    "keywords": ["product", "closeup"],
-                    "quality_score": 0.92,
-                    "hard_quality_event_ids": [],
-                    "soft_quality_event_ids": [],
-                    "extensions": {
-                        "vision.basic.v1": {
-                            "subject_type": "product",
-                            "scene_type": "desk",
-                            "action": "pick_up",
-                            "contains_face": False,
-                            "shot_type": "closeup",
-                        },
-                        "audio.speech.v1": {"has_speech": False},
-                        "editing.affordance.v1": {"good_for": ["opening", "product_reveal"]},
-                        "vendor.experimental.v1": {"raw": True},
-                    },
-                }
-            ],
-            "asset_level_extensions": {},
-            "quality_events": [
-                {
-                    "event_id": "q_001",
-                    "kind": "blur",
-                    "severity": "hard",
-                    "start_frame": 300,
-                    "end_frame": 360,
-                }
-            ],
-            "evidence_frames": ["object://..."],
-            "created_at": "...",
         },
     )
 

@@ -57,10 +57,7 @@ class AssetRecord(BaseModel):
     size: int
     probe: AssetProbe
     proxy_object_uri: str | None = None
-    ingest_status: Literal["imported", "probing", "proxying", "annotating", "indexed", "failed"]
-    annotation_status: Literal["pending", "analyzing", "completed", "failed"]
-    annotation_pass: Literal["none", "cheap", "deep"]
-    index_status: Literal["none", "partial", "ready"]
+    ingest_status: Literal["imported", "probing", "proxying", "indexed", "failed"]
     usable: bool
     failure: AssetFailure | None = None
 
