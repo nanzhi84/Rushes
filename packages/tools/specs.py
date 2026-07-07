@@ -186,6 +186,8 @@ class AssetImportLocalFileInput(BaseModel):
     path: str
     storage_mode: StorageMode = StorageMode.REFERENCE
     kind: AssetKind = AssetKind.VIDEO
+    # 文件夹导入时相对所选根目录的子路径（含所选目录名），素材面板按它分组展示。
+    rel_dir: str | None = None
 
 
 class AssetImportUrlInput(BaseModel):

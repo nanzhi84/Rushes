@@ -1046,6 +1046,8 @@ export interface components {
             proxy_object_hash: string | null;
             /** Proxy Ready */
             proxy_ready: boolean;
+            /** Rel Dir */
+            rel_dir?: string | null;
             /** Size */
             size: number;
             /** Source */
@@ -1079,7 +1081,9 @@ export interface components {
             /** Asset Id */
             asset_id?: string | null;
             /** Path */
-            path: string;
+            path?: string | null;
+            /** Paths */
+            paths?: string[] | null;
             storage_mode?: components["schemas"]["StorageMode"] | null;
         };
         /** MaterialImportUrlRequest */
@@ -1097,6 +1101,11 @@ export interface components {
         MaterialMutationResponse: {
             /** Asset Id */
             asset_id?: string | null;
+            /**
+             * Asset Ids
+             * @default []
+             */
+            asset_ids: string[];
             /** Decision Id */
             decision_id?: string | null;
             /** Event Ids */
@@ -1105,6 +1114,11 @@ export interface components {
             job_id?: string | null;
             /** Project Id */
             project_id: string;
+            /**
+             * Skipped
+             * @default []
+             */
+            skipped: string[];
         };
         /** MaterialPatchRequest */
         MaterialPatchRequest: {

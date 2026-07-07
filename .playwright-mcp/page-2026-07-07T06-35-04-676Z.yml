@@ -1,0 +1,25 @@
+- generic [ref=e30]:
+  - banner [ref=e31]:
+    - generic [ref=e32]:
+      - link "返回项目列表" [ref=e33] [cursor=pointer]:
+        - /url: /
+        - img [ref=e34]
+      - generic [ref=e36]: /
+      - generic [ref=e37]: IGNIS 火舞混剪
+    - generic [ref=e38]:
+      - generic [ref=e39]: 本地已连接
+      - button "设置" [ref=e41]
+  - navigation "项目页面切换" [ref=e43]:
+    - button "剪辑任务" [ref=e44]
+    - button "素材" [ref=e45]
+    - button "设置" [ref=e46]
+  - main [ref=e47]:
+    - generic [ref=e48]:
+      - generic [ref=e49]:
+        - heading "新建剪辑任务" [level=2] [ref=e50]
+        - generic [ref=e51]:
+          - text: 目标文本
+          - textbox "目标文本" [ref=e52]:
+            - /placeholder: 例如：剪一条 30 秒种草视频
+        - button "创建并进入工作台" [disabled] [ref=e54]
+      - paragraph [ref=e55]: 还没有剪辑任务。写下目标，创建第一个。

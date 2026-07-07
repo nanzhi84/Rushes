@@ -53,7 +53,7 @@ EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "index_json",
         "understanding_status",
     ),
-    "project_asset_links": ("project_id", "asset_id", "enabled", "linked_at", "note"),
+    "project_asset_links": ("project_id", "asset_id", "enabled", "linked_at", "note", "rel_dir"),
     "transcripts": (
         "transcript_id",
         "asset_id",

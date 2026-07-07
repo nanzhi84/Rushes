@@ -90,6 +90,8 @@ project_asset_links = Table(
     Column("enabled", Boolean, nullable=False),
     Column("linked_at", Text, nullable=False),
     Column("note", Text, nullable=False),
+    # 文件夹导入时相对所选根目录的子路径（含所选目录名），素材面板按它分组；直接导入的文件为 NULL。
+    Column("rel_dir", Text, nullable=True),
 )
 
 transcripts = Table(

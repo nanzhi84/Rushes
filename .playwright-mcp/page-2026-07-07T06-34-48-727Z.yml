@@ -1,0 +1,23 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - generic [ref=e6]: Rushes
+    - generic [ref=e8]:
+      - generic [ref=e9]: 连接中
+      - button "设置" [ref=e11]
+  - main [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]:
+        - heading "项目" [level=1] [ref=e15]
+        - paragraph [ref=e16]: 每个项目是一组素材和它的剪辑任务。
+      - button "＋ 新建项目" [ref=e17]
+    - button "还没有项目 新建一个项目，导入素材开始剪辑。" [ref=e20]:
+      - generic [ref=e21]: 还没有项目
+      - generic [ref=e22]: 新建一个项目，导入素材开始剪辑。
+  - generic [ref=e23]:
+    - heading "新建项目" [level=2] [ref=e24]
+    - generic [ref=e25]:
+      - text: 名称
+      - textbox "名称" [active] [ref=e26]: 未命名项目
+    - generic [ref=e27]:
+      - button "取消" [ref=e28]
+      - button "确认" [ref=e29]

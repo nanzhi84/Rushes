@@ -102,7 +102,27 @@ export function itemFromEvent(payload: DomainSsePayload): StructuredInteractionI
         title: timelineTitle(event.event),
         description: timelineDescription(event)
       };
+    case "ExportCompleted":
+      return {
+        kind: "preview",
+        id: `export:${payload.event_id}`,
+        title: "导出完成",
+        description: stringValue(event.output_path) ?? "最终 MP4 已生成。"
+      };
+    case "CapabilityDegraded":
+      return {
+        kind: "error",
+        id: `capability:${payload.event_id}`,
+        error_code: stringValue(event.capability) ?? "CAPABILITY_DEGRADED",
+        message: stringValue(event.message) ?? stringValue(event.reason) ?? "部分能力降级，请留意后续结果。",
+        retryable: false,
+        details: event
+      };
     default:
+      // 常规生命周期事件不进对话流；真正未知的事件保留 JSON 兜底防止信息丢失。
+      if (SILENT_EVENTS.has(event.event)) {
+        return null;
+      }
       return {
         kind: "unknown",
         id: `unknown:${payload.event_id}`,
@@ -111,6 +131,25 @@ export function itemFromEvent(payload: DomainSsePayload): StructuredInteractionI
       };
   }
 }
+
+const SILENT_EVENTS = new Set([
+  "CaseCreated",
+  "CaseRenamed",
+  "CaseCopied",
+  "CaseMoved",
+  "CaseClosed",
+  "CaseTrashed",
+  "CaseAssetScopeChanged",
+  "BriefUpdated",
+  "ContentPlanUpdated",
+  "AudioPlanUpdated",
+  "CutPlanUpdated",
+  "PostprocessPlanUpdated",
+  "PreviewViewed",
+  "MemoryCandidateExtracted",
+  "MemoryCandidateDiscarded",
+  "TurnEnded"
+]);
 
 function decisionEventItem(
   event: DomainSseEvent,

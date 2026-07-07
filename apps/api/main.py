@@ -209,9 +209,17 @@ class JobCancelRequest(BaseModel):
 class MaterialImportLocalRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    path: str
+    # 单路径（兼容旧调用）或批量路径；条目可为文件或目录，目录会递归导入并保留层级。
+    path: str | None = None
+    paths: list[str] | None = None
     storage_mode: StorageMode | None = None
     asset_id: str | None = None
+
+    def all_paths(self) -> list[str]:
+        merged = list(self.paths or [])
+        if self.path:
+            merged.insert(0, self.path)
+        return merged
 
 
 class MaterialImportUrlRequest(BaseModel):
@@ -606,27 +614,52 @@ def _register_routes(app: FastAPI) -> None:
     ) -> dict[str, Any]:
         state = state_from_request(request)
         _require_project(state.engine, project_id)
-        try:
-            source = canonicalize_allowed_path(payload.path, state.fs_roots)
-        except PathEscapeError:
-            refuse_path_escape(request, payload.path)
-        result = _run_asset_tool(
-            state,
-            tool_name="asset.import_local_file",
-            handler=asset_import_local_file,
-            input_model=AssetImportLocalFileInput(
-                project_id=project_id,
-                asset_id=payload.asset_id,
-                path=str(source),
-                storage_mode=payload.storage_mode or StorageMode.REFERENCE,
-                kind=_infer_material_kind(str(source)),
-            ),
-            actor="user",
-        )
+        requested_paths = payload.all_paths()
+        if not requested_paths:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "error_code": "missing_path",
+                    "message": "至少提供一个 path 或 paths 条目。",
+                },
+            )
+        sources: list[Path] = []
+        for raw_path in requested_paths:
+            try:
+                sources.append(canonicalize_allowed_path(raw_path, state.fs_roots))
+            except PathEscapeError:
+                refuse_path_escape(request, raw_path)
+        # 目录递归展开为 (文件, rel_dir)；单文件直接导入不带 rel_dir。
+        plan, skipped = _expand_import_sources(sources)
+        # 单文件 + 显式 asset_id 的旧语义保留；批量导入不接受 asset_id。
+        explicit_asset_id = payload.asset_id if len(plan) == 1 else None
+        asset_ids: list[str] = []
+        event_ids: list[int] = []
+        for file_path, rel_dir in plan:
+            result = _run_asset_tool(
+                state,
+                tool_name="asset.import_local_file",
+                handler=asset_import_local_file,
+                input_model=AssetImportLocalFileInput(
+                    project_id=project_id,
+                    asset_id=explicit_asset_id,
+                    path=str(file_path),
+                    storage_mode=payload.storage_mode or StorageMode.REFERENCE,
+                    kind=_infer_material_kind(str(file_path)),
+                    rel_dir=rel_dir,
+                ),
+                actor="user",
+            )
+            imported_asset_id = result.data.get("asset_id")
+            if isinstance(imported_asset_id, str):
+                asset_ids.append(imported_asset_id)
+            event_ids.extend(result.data["event_ids"])
         return {
             "project_id": project_id,
-            "asset_id": result.data.get("asset_id"),
-            "event_ids": result.data["event_ids"],
+            "asset_id": asset_ids[0] if asset_ids else None,
+            "asset_ids": asset_ids,
+            "skipped": skipped,
+            "event_ids": event_ids,
         }
 
     @app.post(
@@ -1832,7 +1865,11 @@ def _materials_payload(
 ) -> dict[str, Any]:
     with engine.connect() as connection:
         asset_rows = connection.execute(
-            select(schema.assets, schema.project_asset_links.c.enabled.label("link_enabled"))
+            select(
+                schema.assets,
+                schema.project_asset_links.c.enabled.label("link_enabled"),
+                schema.project_asset_links.c.rel_dir.label("link_rel_dir"),
+            )
             .select_from(
                 schema.assets.join(
                     schema.project_asset_links,
@@ -1895,6 +1932,7 @@ def _material_asset_payload(values: dict[str, Any], jobs: list[dict[str, Any]]) 
         "understanding_status": values.get("understanding_status") or "none",
         "usable": usable,
         "enabled": bool(values["link_enabled"]),
+        "rel_dir": values.get("link_rel_dir"),
         "probe": probe if isinstance(probe, dict) else None,
         "duration_sec": duration_sec if isinstance(duration_sec, (int, float)) else None,
         "proxy_object_hash": proxy_object_hash,
@@ -2004,6 +2042,45 @@ _MATERIAL_KIND_BY_SUFFIX: dict[str, AssetKind] = {
     ".woff": AssetKind.FONT,
     ".woff2": AssetKind.FONT,
 }
+
+
+def _expand_import_sources(
+    sources: list[Path],
+) -> tuple[list[tuple[Path, str | None]], list[str]]:
+    """把文件/目录混合的导入请求展开为 (文件, rel_dir) 列表。
+
+    目录递归扫描并保留层级：rel_dir = 所选目录名 + 文件相对子目录（POSIX 分隔），
+    素材面板按它分组。隐藏项直接跳过；目录里不支持的扩展名记入 skipped 而不中断
+    批量导入。直接给出的单文件 rel_dir=None，格式不支持仍走 _infer_material_kind
+    的 400（保持旧语义）。
+    """
+
+    plan: list[tuple[Path, str | None]] = []
+    skipped: list[str] = []
+    seen: set[Path] = set()
+    for source in sources:
+        if source.is_dir():
+            for file_path in sorted(source.rglob("*")):
+                if not file_path.is_file():
+                    continue
+                relative = file_path.relative_to(source)
+                if any(part.startswith(".") for part in relative.parts):
+                    continue
+                if file_path in seen:
+                    continue
+                if file_path.suffix.lower() not in _MATERIAL_KIND_BY_SUFFIX:
+                    skipped.append(relative.as_posix())
+                    continue
+                seen.add(file_path)
+                rel_parent = relative.parent.as_posix()
+                rel_dir = source.name if rel_parent == "." else f"{source.name}/{rel_parent}"
+                plan.append((file_path, rel_dir))
+        else:
+            if source in seen:
+                continue
+            seen.add(source)
+            plan.append((source, None))
+    return plan, skipped
 
 
 def _infer_material_kind(name_or_path: str) -> AssetKind:

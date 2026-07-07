@@ -1025,3 +1025,78 @@ def test_materials_payload_exposes_thumbnail_duration_and_understanding(tmp_path
     assert bare["thumbnail_ready"] is False
     assert bare["duration_sec"] == 3.0
     assert bare["understanding_status"] == "none"
+
+
+def test_import_local_directory_recurses_with_rel_dir_and_skips_unsupported(
+    tmp_path: Path,
+) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    root = tmp_path / "allowed" / "素材A"
+    (root / "视频").mkdir(parents=True)
+    (root / "音频" / "环境声").mkdir(parents=True)
+    (root / "视频" / "a.mp4").write_bytes(b"video-a")
+    (root / "音频" / "环境声" / "b.mp3").write_bytes(b"audio-b")
+    (root / "封面.png").write_bytes(b"cover")
+    (root / "notes.txt").write_bytes(b"skip-me")
+    (root / ".hidden.mp4").write_bytes(b"hidden")
+
+    imported = client.post(
+        "/api/projects/project_1/materials/import-local",
+        headers=AUTH,
+        json={"paths": [str(root)]},
+    )
+
+    assert imported.status_code == 200
+    body = imported.json()
+    assert len(body["asset_ids"]) == 3
+    assert body["skipped"] == ["notes.txt"]
+
+    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    rel_dirs = {asset["filename"]: asset["rel_dir"] for asset in materials.json()["assets"]}
+    assert rel_dirs["a.mp4"] == "素材A/视频"
+    assert rel_dirs["b.mp3"] == "素材A/音频/环境声"
+    assert rel_dirs["封面.png"] == "素材A"
+    assert ".hidden.mp4" not in rel_dirs
+
+
+def test_import_local_batch_paths_mixes_files_and_directories(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    single = _media_file(tmp_path, b"single-file")
+    folder = tmp_path / "allowed" / "b-roll"
+    folder.mkdir(parents=True)
+    (folder / "clip.mov").write_bytes(b"clip")
+
+    imported = client.post(
+        "/api/projects/project_1/materials/import-local",
+        headers=AUTH,
+        json={"paths": [str(single), str(folder)]},
+    )
+
+    assert imported.status_code == 200
+    body = imported.json()
+    assert len(body["asset_ids"]) == 2
+    assert body["asset_id"] == body["asset_ids"][0]
+
+    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    rel_dirs = {asset["filename"]: asset["rel_dir"] for asset in materials.json()["assets"]}
+    assert rel_dirs["raw.mp4"] is None
+    assert rel_dirs["clip.mov"] == "b-roll"
+
+
+def test_import_local_requires_at_least_one_path(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+
+    response = client.post(
+        "/api/projects/project_1/materials/import-local",
+        headers=AUTH,
+        json={},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "missing_path"

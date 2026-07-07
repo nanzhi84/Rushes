@@ -201,6 +201,7 @@ class MaterialAsset(ApiResponseModel):
     understanding_status: str
     usable: bool
     enabled: bool
+    rel_dir: str | None = None
     probe: dict[str, Any] | None
     duration_sec: float | None
     proxy_object_hash: str | None
@@ -225,6 +226,9 @@ class MaterialSummaryResponse(ApiResponseModel):
 class MaterialMutationResponse(ApiResponseModel):
     project_id: str
     asset_id: str | None = None
+    # 批量/文件夹导入：全部新建的 asset_id 与跳过的非媒体文件名。
+    asset_ids: list[str] = []
+    skipped: list[str] = []
     job_id: str | None = None
     decision_id: str | None = None
     event_ids: list[int]
