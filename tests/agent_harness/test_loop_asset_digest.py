@@ -3,25 +3,23 @@ from __future__ import annotations
 from pathlib import Path
 
 from agent_harness.loop import _load_asset_digest
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from storage import schema
 from storage.db import create_workspace_engine
 
 NOW = "2026-07-05T00:00:00+00:00"
 
 
-def _case_state(**overrides: object) -> CaseState:
+def _draft_state(**overrides: object) -> DraftState:
     data: dict[str, object] = {
-        "case_id": "case_1",
-        "project_id": "project_1",
-        "name": "Case",
+        "draft_id": "draft_1",
+        "name": "Draft",
         "brief": {"goal": "make a video", "confirmed_facts": []},
-        "selected_asset_ids": [],
-        "disabled_asset_ids": [],
+        "defaults": {"aspect_ratio": "9:16", "fps": 30},
         "scratch_memory": {},
     }
     data.update(overrides)
-    return CaseState.model_validate(data)
+    return DraftState.model_validate(data)
 
 
 def _insert_asset(
@@ -33,7 +31,7 @@ def _insert_asset(
     probe: str | None = None,
     understanding_status: str = "none",
     usable: bool = True,
-    enabled: bool = True,
+    linked: bool = True,
 ) -> None:
     connection.execute(  # type: ignore[attr-defined]
         schema.assets.insert().values(
@@ -55,15 +53,15 @@ def _insert_asset(
             understanding_status=understanding_status,
         )
     )
-    connection.execute(  # type: ignore[attr-defined]
-        schema.project_asset_links.insert().values(
-            project_id="project_1",
-            asset_id=asset_id,
-            enabled=enabled,
-            linked_at=NOW,
-            note="",
+    if linked:
+        connection.execute(  # type: ignore[attr-defined]
+            schema.draft_asset_links.insert().values(
+                draft_id="draft_1",
+                asset_id=asset_id,
+                linked_at=NOW,
+                note="",
+            )
         )
-    )
 
 
 def _insert_summary(
@@ -100,13 +98,19 @@ def _insert_summary(
     )
 
 
-def _seed_project(connection: object) -> None:
+def _seed_draft(connection: object) -> None:
     connection.execute(  # type: ignore[attr-defined]
-        schema.projects.insert().values(
-            project_id="project_1",
-            name="Project",
+        schema.drafts.insert().values(
+            draft_id="draft_1",
+            name="Draft",
+            state_version=0,
             status="active",
             defaults="{}",
+            running_jobs="[]",
+            brief='{"goal": "test", "confirmed_facts": []}',
+            timeline_validated=False,
+            rough_cut_approved=False,
+            scratch_memory="{}",
             created_at=NOW,
             updated_at=NOW,
         )
@@ -117,7 +121,7 @@ def test_asset_digest_joins_summary_probe_and_status(tmp_path: Path) -> None:
     engine = create_workspace_engine(tmp_path)
     with engine.begin() as connection:
         schema.create_all(connection)
-        _seed_project(connection)
+        _seed_draft(connection)
         _insert_asset(
             connection,
             asset_id="video_1",
@@ -151,7 +155,7 @@ def test_asset_digest_joins_summary_probe_and_status(tmp_path: Path) -> None:
         )
 
     with engine.connect() as connection:
-        digest = _load_asset_digest(connection, _case_state())
+        digest = _load_asset_digest(connection, _draft_state())
 
     by_id = {row.asset_id: row for row in digest}
     assert set(by_id) == {"video_1", "video_2"}
@@ -171,24 +175,23 @@ def test_asset_digest_joins_summary_probe_and_status(tmp_path: Path) -> None:
     assert row2.overall is None
 
 
-def test_asset_digest_excludes_disabled_and_unlinked(tmp_path: Path) -> None:
+def test_asset_digest_excludes_unlinked(tmp_path: Path) -> None:
     engine = create_workspace_engine(tmp_path)
     with engine.begin() as connection:
         schema.create_all(connection)
-        _seed_project(connection)
+        _seed_draft(connection)
         _insert_asset(connection, asset_id="keep_1", kind="video", filename="a.mp4")
-        _insert_asset(connection, asset_id="case_disabled", kind="video", filename="b.mp4")
+        # 未链接到本草稿的素材不进摘要索引（单级草稿模型无 enabled/disabled 维度）。
         _insert_asset(
             connection,
-            asset_id="link_disabled",
+            asset_id="unlinked",
             kind="video",
             filename="c.mp4",
-            enabled=False,
+            linked=False,
         )
 
-    case_state = _case_state(disabled_asset_ids=["case_disabled"])
     with engine.connect() as connection:
-        digest = _load_asset_digest(connection, case_state)
+        digest = _load_asset_digest(connection, _draft_state())
 
     assert {row.asset_id for row in digest} == {"keep_1"}
 
@@ -197,7 +200,7 @@ def test_asset_digest_ignores_non_ready_summary(tmp_path: Path) -> None:
     engine = create_workspace_engine(tmp_path)
     with engine.begin() as connection:
         schema.create_all(connection)
-        _seed_project(connection)
+        _seed_draft(connection)
         _insert_asset(
             connection,
             asset_id="video_1",
@@ -215,7 +218,7 @@ def test_asset_digest_ignores_non_ready_summary(tmp_path: Path) -> None:
         )
 
     with engine.connect() as connection:
-        digest = _load_asset_digest(connection, _case_state())
+        digest = _load_asset_digest(connection, _draft_state())
 
     assert len(digest) == 1
     assert digest[0].semantic_role is None

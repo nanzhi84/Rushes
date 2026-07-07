@@ -1,4 +1,4 @@
-"""Context bundle rendering from structured CaseState."""
+"""Context bundle rendering from structured DraftState."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from contracts.decision import Decision
-from contracts.project import ProjectState
+from contracts.draft import DraftState
 from contracts.subtitle import SubtitleClip
 from contracts.timeline import TimelineMediaClip, TimelineState
 from contracts.tool import ToolSpec
-from domain.case_stage import derive_stage
+from domain.draft_stage import derive_stage
 from domain.preconditions import PreconditionContext
 
 from .policy_gate import PolicyContext, PolicyGate
@@ -34,7 +34,7 @@ def heuristic_token_count(text: str) -> int:
 DEFAULT_BLOCK_BUDGETS: dict[str, int] = {
     "system": 1500,
     "workspace": 300,
-    "case_header": 500,
+    "draft_header": 500,
     "artifacts": 6000,
     "pending_decision": 1000,
     "memory": 1500,
@@ -44,7 +44,7 @@ DEFAULT_BLOCK_BUDGETS: dict[str, int] = {
     "allowed_tools": 4000,
 }
 FIXED_BLOCKS = frozenset(
-    {"system", "workspace", "case_header", "pending_decision", "allowed_tools"}
+    {"system", "workspace", "draft_header", "pending_decision", "allowed_tools"}
 )
 
 
@@ -54,7 +54,7 @@ class ContextMessage(BaseModel):
     role: str
     content: str
     created_at: str | None = None
-    case_id: str | None = None
+    draft_id: str | None = None
 
 
 class AssetDigestRow(BaseModel):
@@ -121,8 +121,8 @@ class ContextBuilder:
             )
         blocks = {
             "system": _render_system_block(self._total_budget),
-            "workspace": _render_workspace_block(context.preconditions.project_state),
-            "case_header": _render_case_header_block(context),
+            "workspace": _render_workspace_block(context.preconditions.draft_state),
+            "draft_header": _render_draft_header_block(context),
             "artifacts": _render_artifacts_block(
                 context,
                 self._budgets["artifacts"],
@@ -161,16 +161,16 @@ def _render_system_block(total_budget: int) -> str:
     return "\n".join(
         (
             "You are Rushes, a chat-first local video editing agent.",
-            "CaseState is the source of truth; do not rely on lossy chat history for artifacts.",
+            "DraftState is the source of truth; do not rely on lossy chat history for artifacts.",
             "PolicyGate exposes only allowed tool schemas and rechecks every tool call.",
             "Human-gated actions use Decision + PendingToolCall; do not execute them directly.",
             f"Context total budget target: {total_budget} tokens.",
             "",
-            "阶段推进指引（case_header 的 stage 字段标记当前阶段；工具列表按前置条件动态暴露，"
+            "阶段推进指引（draft_header 的 stage 字段标记当前阶段；工具列表按前置条件动态暴露，"
             "看不到的工具说明其前置未满足，先完成当前阶段的关键动作）：",
             "- briefing：明确目标、检查素材（audio.inspect_sources；assets 块 usable_count ≥ 1 "
-            "表示有可用素材）。需要看懂素材内容时用 understand.materials 生成带时间戳的摘要、"
-            "asset.read_summary 读取。audio_plan 未确定且素材含人声时，"
+            "表示有可用素材）。需要看懂素材内容时用 understand.materials 生成带时间戳的摘要"
+            "（再次调用同素材会命中缓存直接回摘要）。audio_plan 未确定且素材含人声时，"
             "必须用 interaction.ask_user 创建 audio_mode 决策（原声粗剪 / TTS 配音 / 静音），"
             "这是解锁后续工具的唯一路径。",
             "- drafting：按 audio_plan 推进——原声：audio.asr_original → audio.rough_cut_speech；"
@@ -181,40 +181,40 @@ def _render_system_block(total_budget: int) -> str:
             "generate_subtitles / add_bgm op；postprocess_plan 缺失时 gate 会自动转决策，"
             "属预期行为）；用户的修改指令走 timeline.apply_patch。",
             "- exporting：render.final_mp4（导出确认由 gate 自动创建决策）；导出完成后可"
-            "建议 memory.extract_from_case → memory.ask_scope 沉淀经验。",
+            "建议 memory.extract_from_draft → memory.ask_scope 沉淀经验。",
             "同一只读工具同参数不要重复调用：结果不会变化，信息足够就立刻推进下一步动作。",
         )
     )
 
 
-def _render_workspace_block(project_state: ProjectState | None) -> str:
-    if project_state is None:
-        return "workspace: no active project"
-    defaults = project_state.defaults
+def _render_workspace_block(draft_state: DraftState | None) -> str:
+    # 单级草稿模型：无上级项目实体，defaults 挂在草稿上（POST /drafts 时从 workspace 拷贝）。
+    if draft_state is None:
+        return "workspace: no active draft"
+    defaults = draft_state.defaults
     return (
-        f"project: {project_state.name} ({project_state.project_id})\n"
         f"defaults: aspect_ratio={defaults.aspect_ratio}, fps={defaults.fps}, "
         f"preview_quality={defaults.preview_quality}, export_quality={defaults.export_quality}"
     )
 
 
-def _render_case_header_block(context: ContextBuildInput) -> str:
-    case_state = context.preconditions.case_state
-    if case_state is None:
-        return "case: none"
+def _render_draft_header_block(context: ContextBuildInput) -> str:
+    draft_state = context.preconditions.draft_state
+    if draft_state is None:
+        return "draft: none"
     jobs = ", ".join(
         f"{job.kind}:{job.status}:{job.progress if job.progress is not None else '-'}"
-        for job in case_state.running_jobs
+        for job in draft_state.running_jobs
     )
     last_error = (
         "none"
-        if case_state.last_error is None
-        else f"{case_state.last_error.error_code}: {case_state.last_error.message}"
+        if draft_state.last_error is None
+        else f"{draft_state.last_error.error_code}: {draft_state.last_error.message}"
     )
     return "\n".join(
         (
-            f"case: {case_state.name} ({case_state.case_id})",
-            f"stage: {derive_stage(case_state)}",
+            f"draft: {draft_state.name} ({draft_state.draft_id})",
+            f"stage: {derive_stage(draft_state)}",
             f"last_error: {last_error}",
             f"running_jobs: {jobs or 'none'}",
         )
@@ -242,63 +242,59 @@ def _render_artifacts_block(
 
 
 def _artifact_parts(context: ContextBuildInput) -> list[tuple[str, str]]:
-    case_state = context.preconditions.case_state
-    if case_state is None:
-        return [("case", "artifacts: no active case")]
+    draft_state = context.preconditions.draft_state
+    if draft_state is None:
+        return [("draft", "artifacts: no active draft")]
     parts: list[tuple[str, str]] = [
         (
             "brief",
             _section(
                 "brief",
                 {
-                    "goal": case_state.brief.goal,
-                    "platform": case_state.brief.platform,
-                    "target_duration_sec": case_state.brief.target_duration_sec,
-                    "style_notes": case_state.brief.style_notes,
-                    "confirmed_facts": case_state.brief.confirmed_facts,
+                    "goal": draft_state.brief.goal,
+                    "platform": draft_state.brief.platform,
+                    "target_duration_sec": draft_state.brief.target_duration_sec,
+                    "style_notes": draft_state.brief.style_notes,
+                    "confirmed_facts": draft_state.brief.confirmed_facts,
                 },
             ),
         )
     ]
-    if case_state.scratch_memory:
-        parts.append(("scratch_memory", _section("scratch_memory", case_state.scratch_memory)))
-    if case_state.content_plan is not None:
-        parts.append(("content_plan", _section("content_plan", case_state.content_plan)))
-    if case_state.audio_plan is not None:
+    if draft_state.scratch_memory:
+        parts.append(("scratch_memory", _section("scratch_memory", draft_state.scratch_memory)))
+    if draft_state.content_plan is not None:
+        parts.append(("content_plan", _section("content_plan", draft_state.content_plan)))
+    if draft_state.audio_plan is not None:
         parts.append(
             (
                 "audio_plan",
-                _section("audio_plan", case_state.audio_plan.model_dump(mode="json")),
+                _section("audio_plan", draft_state.audio_plan.model_dump(mode="json")),
             )
         )
-    if case_state.cut_plan is not None:
+    if draft_state.cut_plan is not None:
         parts.append(
             (
                 "cut_plan",
                 _section(
                     "cut_plan",
                     {
-                        "slot_count": len(case_state.cut_plan.slots),
-                        "removed_range_count": len(case_state.cut_plan.removed_ranges),
-                        "total_target_duration_sec": case_state.cut_plan.total_target_duration_sec,
+                        "slot_count": len(draft_state.cut_plan.slots),
+                        "removed_range_count": len(draft_state.cut_plan.removed_ranges),
+                        "total_target_duration_sec": draft_state.cut_plan.total_target_duration_sec,
                         "slots": [
                             {
                                 "slot_id": slot.slot_id,
                                 "brief": slot.brief,
                                 "target_duration_sec": slot.target_duration_sec,
                             }
-                            for slot in case_state.cut_plan.slots
+                            for slot in draft_state.cut_plan.slots
                         ],
                     },
                 ),
             )
         )
     if context.timeline is not None:
-        aspect_ratio = (
-            context.preconditions.project_state.defaults.aspect_ratio
-            if context.preconditions.project_state is not None
-            else "unknown"
-        )
+        aspect_ratio = draft_state.defaults.aspect_ratio if draft_state is not None else "unknown"
         parts.append(
             (
                 "timeline",
@@ -415,7 +411,7 @@ def _format_sec(value: float) -> str:
 
 
 def _render_pending_decision_block(context: ContextBuildInput) -> str:
-    decision = context.pending_decision or _case_pending_decision(context)
+    decision = context.pending_decision or _draft_pending_decision(context)
     if decision is None:
         return "pending_decision: none"
     option_lines = [
@@ -434,12 +430,12 @@ def _render_pending_decision_block(context: ContextBuildInput) -> str:
     )
 
 
-def _case_pending_decision(context: ContextBuildInput) -> Decision | None:
-    case_state = context.preconditions.case_state
-    if case_state is None or case_state.pending_decision_id is None:
+def _draft_pending_decision(context: ContextBuildInput) -> Decision | None:
+    draft_state = context.preconditions.draft_state
+    if draft_state is None or draft_state.pending_decision_id is None:
         return None
     for decision in context.decisions:
-        if decision.decision_id == case_state.pending_decision_id:
+        if decision.decision_id == draft_state.pending_decision_id:
             return decision
     return None
 
@@ -468,10 +464,8 @@ def _render_assets_block(
     budget: int,
     counter: TokenCounter,
 ) -> str:
-    stats = context.project_artifacts
-    case_state = context.case_state
-    selected = case_state.selected_asset_ids if case_state is not None else []
-    disabled = case_state.disabled_asset_ids if case_state is not None else []
+    stats = context.draft_artifacts
+    # 单级草稿模型：链接存在即在册，无 selected/disabled 维度。
     header_lines = [
         "assets:",
         f"usable_count: {stats.usable_asset_count or len(stats.usable_asset_ids)}",
@@ -479,8 +473,6 @@ def _render_assets_block(
         f"transcript_assets: {', '.join(sorted(stats.transcript_asset_ids)) or 'none'}",
         "transcript_with_vad_assets: "
         f"{', '.join(sorted(stats.transcript_with_vad_asset_ids)) or 'none'}",
-        f"selected_asset_ids: {', '.join(selected) or 'none'}",
-        f"disabled_asset_ids: {', '.join(disabled) or 'none'}",
     ]
     total = len(digest)
     if total == 0:

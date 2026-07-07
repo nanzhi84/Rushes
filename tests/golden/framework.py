@@ -14,7 +14,7 @@ from sqlalchemy.engine import Engine
 from agent_harness.loop import LLMPlanner, PlannerStep, run_turn
 from agent_harness.policy_gate import ToolCall
 from agent_harness.turn_queue import StopToken, TurnQueue, TurnQueueItem
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.provider import ProviderDescriptor
 from contracts.tool import ToolSpec
 from contracts.tool_result import ToolResult
@@ -24,7 +24,7 @@ from providers.mock import MockProvider
 from providers.registry import ProviderRegistry
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
-from storage.repositories import CasesRepository, EventLogRepository, MessagesRepository
+from storage.repositories import DraftsRepository, EventLogRepository, MessagesRepository
 from tools import ToolExecutionContext, ToolRegistry, build_default_tool_registry
 
 NOW = "2026-07-04T00:00:00+00:00"
@@ -70,7 +70,7 @@ class ToolTraceEntry:
 class GoldenRunResult:
     engine: Engine
     traces: tuple[ToolTraceEntry, ...]
-    case_state: CaseState
+    draft_state: DraftState
     event_types: tuple[str, ...]
     messages: tuple[dict[str, object], ...]
 
@@ -154,17 +154,17 @@ class GoldenExecutor:
         queue = TurnQueue(runner)
         for index, message in enumerate(case.user_messages):
             await queue.enqueue_user_message(
-                "case_1",
+                "draft_1",
                 content=message,
                 message_id=f"{case.name}_msg_{index}",
             )
-            await queue.join_case("case_1")
+            await queue.join_draft("draft_1")
         await queue.shutdown()
 
         run_result = GoldenRunResult(
             engine=engine,
             traces=tuple(tool_traces),
-            case_state=_load_case(engine),
+            draft_state=_load_draft(engine),
             event_types=_event_types(engine),
             messages=tuple(_messages(engine)),
         )
@@ -174,27 +174,14 @@ class GoldenExecutor:
 
 
 def base_workspace(engine: Engine, *, state_version: int = 0) -> None:
-    from storage.repositories import CasesRepository
-    from storage.repositories.projects import ProjectsRepository
-
     with begin_immediate(engine) as connection:
-        ProjectsRepository(connection).insert(
+        DraftsRepository(connection).insert(
             {
-                "project_id": "project_1",
-                "name": "Project",
-                "status": "active",
-                "defaults": {"aspect_ratio": "9:16", "fps": 30},
-                "created_at": NOW,
-                "updated_at": NOW,
-            }
-        )
-        CasesRepository(connection).insert(
-            {
-                "case_id": "case_1",
-                "project_id": "project_1",
-                "name": "Case",
+                "draft_id": "draft_1",
+                "name": "Draft",
                 "state_version": state_version,
                 "status": "active",
+                "defaults": {"aspect_ratio": "9:16", "fps": 30},
                 "pending_decision_id": None,
                 "running_jobs": [],
                 "last_error": None,
@@ -210,9 +197,10 @@ def base_workspace(engine: Engine, *, state_version: int = 0) -> None:
                 "rough_cut_approved_version": None,
                 "postprocess_plan": None,
                 "export_current_id": None,
-                "selected_asset_ids": [],
-                "disabled_asset_ids": [],
                 "scratch_memory": {},
+                "messages_tail_ref": None,
+                "created_at": NOW,
+                "updated_at": NOW,
             }
         )
 
@@ -220,7 +208,7 @@ def base_workspace(engine: Engine, *, state_version: int = 0) -> None:
 def understand_compose_workspace(engine: Engine) -> None:
     """在 base_workspace 之上补一段可用视频素材 + 确认静音 audio_plan。
 
-    供「understand.materials → asset.read_summary → timeline.compose_initial」golden：
+    供「understand.materials → understand.materials(缓存命中) → timeline.compose_initial」golden：
     素材带便宜索引（index_json）与 usable 位，满足 compose_initial 的前置工件；
     audio_plan={"mode":"silent"} 满足 audio_plan_confirmed。
     """
@@ -230,8 +218,8 @@ def understand_compose_workspace(engine: Engine) -> None:
     base_workspace(engine)
     with begin_immediate(engine) as connection:
         connection.execute(
-            schema.cases.update()
-            .where(schema.cases.c.case_id == "case_1")
+            schema.drafts.update()
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(audio_plan=dump_json({"mode": "silent"}))
         )
         connection.execute(
@@ -256,10 +244,9 @@ def understand_compose_workspace(engine: Engine) -> None:
             )
         )
         connection.execute(
-            schema.project_asset_links.insert().values(
-                project_id="project_1",
+            schema.draft_asset_links.insert().values(
+                draft_id="draft_1",
                 asset_id="asset_1",
-                enabled=True,
                 linked_at=NOW,
                 note="",
             )
@@ -276,10 +263,9 @@ def registry_with_timeline_tools() -> ToolRegistry:
             input_model=EmptyInput,
             result_model=None,
             handler_ref="tests.golden.stale",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
+            requires_active_draft=False,
             side_effects=["timeline"],
             emits_events=["TimelineVersionCreated"],
             description="Emit a stale strict timeline event.",
@@ -294,10 +280,9 @@ def registry_with_timeline_tools() -> ToolRegistry:
             input_model=EmptyInput,
             result_model=None,
             handler_ref="tests.golden.current",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
+            requires_active_draft=False,
             side_effects=["timeline"],
             emits_events=["TimelineVersionCreated"],
             description="Emit a current strict timeline event.",
@@ -323,10 +308,10 @@ def _timeline_result(
     base_version: int | None,
     version: int,
 ) -> ToolResult:
-    assert context.case_state is not None
+    assert context.draft_state is not None
     event: dict[str, Any] = {
         "event": "TimelineVersionCreated",
-        "case_id": context.case_state.case_id,
+        "draft_id": context.draft_state.draft_id,
         "timeline_version": version,
         "payload": {"timeline_version": version},
     }
@@ -361,11 +346,13 @@ def _assert_trace(expected: Sequence[ExpectedToolTrace], actual: Sequence[ToolTr
             assert actual_entry.status == expected_entry.status
 
 
-def _load_case(engine: Engine) -> CaseState:
+def _load_draft(engine: Engine) -> DraftState:
     with begin_immediate(engine) as connection:
-        row = CasesRepository(connection).get("case_1")
+        row = DraftsRepository(connection).get("draft_1")
     assert row is not None
-    return CaseState.model_validate(row)
+    return DraftState.model_validate(
+        {key: value for key, value in row.items() if key not in {"created_at", "updated_at"}}
+    )
 
 
 def _event_types(engine: Engine) -> tuple[str, ...]:
@@ -376,7 +363,7 @@ def _event_types(engine: Engine) -> tuple[str, ...]:
 
 def _messages(engine: Engine) -> list[dict[str, object]]:
     with begin_immediate(engine) as connection:
-        return MessagesRepository(connection).list_for_case("case_1")
+        return MessagesRepository(connection).list_for_draft("draft_1")
 
 
 def _resolve_placeholders(tool_call: dict[str, Any], context: Any) -> dict[str, Any]:

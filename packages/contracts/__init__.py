@@ -1,22 +1,24 @@
 """Stable public contracts for Rushes."""
 
 from .asset import AssetFailure, AssetKind, AssetProbe, AssetRecord, AssetSource, StorageMode
-from .case import (
+from .costs import ProviderCall
+from .decision import Decision, DecisionAnswer, DecisionOption, PendingToolCall
+from .draft import (
     AudioMode,
     AudioPlan,
     BgmPostprocessPlan,
     Brief,
-    CaseState,
     CutPlan,
     CutPlanSlot,
+    DraftAssetLink,
+    DraftDefaults,
+    DraftState,
     LastError,
     PostprocessPlan,
     RemovedRange,
     RunningJobRef,
     SubtitlePostprocessPlan,
 )
-from .costs import ProviderCall
-from .decision import Decision, DecisionAnswer, DecisionOption, PendingToolCall
 from .events import (
     EVENT_CLASSES,
     EVENT_UNION,
@@ -51,7 +53,6 @@ from .patch import (
     TimeRangeSec,
     TrimClipOp,
 )
-from .project import ProjectAssetLink, ProjectDefaults, ProjectState
 from .provider import ProviderCapability, ProviderDescriptor, ProviderError, ProviderResult
 from .subtitle import SubtitleBinding, SubtitleClip, SubtitleStyleTemplate
 from .timeline import (
@@ -76,7 +77,7 @@ from .understanding import (
     SummarySegment,
     SummarySpent,
 )
-from .workspace import WorkspaceConfig, WorkspaceDefaults, WorkspaceProjectRef
+from .workspace import WorkspaceConfig, WorkspaceDefaults, WorkspaceDraftRef
 
 __version__: str = "0.1.0"
 
@@ -95,7 +96,6 @@ __all__ = [
     "AudioPlan",
     "BgmPostprocessPlan",
     "Brief",
-    "CaseState",
     "ClipIdsRange",
     "CutPlan",
     "CutPlanSlot",
@@ -105,6 +105,9 @@ __all__ = [
     "DeleteRangeOp",
     "DomainEvent",
     "DomainEventBase",
+    "DraftAssetLink",
+    "DraftDefaults",
+    "DraftState",
     "EditSubtitleTextOp",
     "EventName",
     "GenerateSubtitlesOp",
@@ -123,9 +126,6 @@ __all__ = [
     "PatchTimeRange",
     "PendingToolCall",
     "PostprocessPlan",
-    "ProjectAssetLink",
-    "ProjectDefaults",
-    "ProjectState",
     "ProviderCall",
     "ProviderCapability",
     "ProviderDescriptor",
@@ -170,7 +170,7 @@ __all__ = [
     "VadSegment",
     "WorkspaceConfig",
     "WorkspaceDefaults",
-    "WorkspaceProjectRef",
+    "WorkspaceDraftRef",
     "__version__",
     "event_registry",
 ]

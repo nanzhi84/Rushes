@@ -1,6 +1,6 @@
 """素材理解子代理与 understand 工具（Spec C §C3）。"""
 
-from .handlers import materials, read_summary
+from .handlers import materials
 from .subagent import (
     SubagentOutcome,
     SubagentSpec,
@@ -13,6 +13,5 @@ __all__ = [
     "SubagentSpec",
     "TranscribeResult",
     "materials",
-    "read_summary",
     "run_understanding_subagent",
 ]

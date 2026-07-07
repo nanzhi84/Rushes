@@ -14,7 +14,7 @@ from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
 from contracts.asset import StorageMode
-from contracts.events import AssetImported, ProjectCreated
+from contracts.events import AssetImported, DraftCreated
 from contracts.jobs import Job
 from contracts.transcript import VadSegment
 from media.vad import SileroModelMissing, VadResult
@@ -103,9 +103,9 @@ def _ingest(tmp_path: Path, *, kind: str, source: Path) -> tuple[Engine, Workspa
     ref = ObjectStore(paths).put_file(source)
     asset_id = "asset_1"
     events: list[Any] = [
-        ProjectCreated(project_id="project_1", name="Project"),
+        DraftCreated(draft_id="draft_1", payload={"name": "Draft"}),
         AssetImported(
-            project_id="project_1",
+            draft_id="draft_1",
             asset_id=asset_id,
             payload={
                 "storage_mode": StorageMode.COPY.value,
@@ -137,7 +137,7 @@ def _job(asset_id: str) -> Job:
     return Job(
         job_id="job_index_1",
         kind="index",
-        project_id="project_1",
+        draft_id="draft_1",
         asset_id=asset_id,
         idempotency_key=f"asset:{asset_id}:index",
         payload_json={"asset_id": asset_id},
@@ -222,7 +222,7 @@ async def test_index_failure_emits_index_failed(tmp_path: Path) -> None:
 
 
 def test_index_job_event_idempotency_key() -> None:
-    event = _index_job_event(project_id="project_1", asset_id="asset_9")
+    event = _index_job_event(draft_id="draft_1", asset_id="asset_9")
 
     assert event.payload["kind"] == "index"
     assert event.payload["idempotency_key"] == "asset:asset_9:index"

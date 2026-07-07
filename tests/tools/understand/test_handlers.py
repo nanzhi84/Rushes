@@ -1,7 +1,7 @@
-"""understand.materials / asset.read_summary handler 集成测试（Spec C §C3）。
+"""understand.materials handler 集成测试（Spec C §C3，单级草稿模型）。
 
 VLM 一律用脚本化 gateway（喂 provider 形态的 normalized_output，内含动作 JSON 串），
-抽帧与 ASR 打桩，不碰真实 ffmpeg/网络。落库路径复用 loop 的 ``_persist_tool_result_data``。
+抽帧与 ASR 打桩，不碰真实 ffmpeg/网络。落库改用 storage 仓储直接写，纯工具级、不跨层依赖主循环。
 """
 
 from __future__ import annotations
@@ -14,9 +14,7 @@ from typing import Any
 
 import pytest
 
-from agent_harness.loop import _persist_tool_result_data
-from contracts.case import CaseState
-from contracts.project import ProjectState
+from contracts.draft import DraftState
 from contracts.provider import ProviderResult
 from providers import VLM_UNDERSTANDING
 from providers.gateway import ProviderGatewayResult
@@ -25,9 +23,9 @@ from storage.db import create_workspace_engine
 from storage.repositories import MaterialSummariesRepository, TranscriptsRepository
 from storage.repositories._json import dump_json
 from tools import ToolExecutionContext
-from tools.specs import AssetReadSummaryInput, UnderstandMaterialsInput
+from tools.specs import UnderstandMaterialsInput
 from tools.understand import handlers as understand_handlers
-from tools.understand.handlers import materials, read_summary
+from tools.understand.handlers import materials
 from tools.understand.subagent import TranscribeResult
 
 NOW = "2026-07-06T00:00:00+00:00"
@@ -51,6 +49,17 @@ def _asset_from_messages(messages: list[dict[str, Any]]) -> str:
     text = messages[1]["content"][0]["text"]
     match = re.search(r"asset_id=([^；\s]+)", text)
     return match.group(1) if match else ""
+
+
+def _persist_rows(result: Any, engine: Any) -> None:
+    """把 ToolResult.data 里的落库行经仓储写入（原 loop._persist_tool_result_data 的等价路径）。"""
+    summary_rows = result.data.get("material_summary_rows") or []
+    transcript_rows = result.data.get("transcript_rows") or []
+    with engine.begin() as connection:
+        for row in summary_rows:
+            MaterialSummariesRepository(connection).insert(dict(row))
+        for row in transcript_rows:
+            TranscriptsRepository(connection).insert(dict(row))
 
 
 class ScriptedVlmGateway:
@@ -132,11 +141,17 @@ def _engine(tmp_path: Path, asset_specs: list[dict[str, Any]]) -> Any:
     with engine.begin() as connection:
         schema.create_all(connection)
         connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
+            schema.drafts.insert().values(
+                draft_id="draft_1",
+                name="Draft",
+                state_version=0,
                 status="active",
                 defaults="{}",
+                running_jobs="[]",
+                brief=dump_json({"goal": "test", "confirmed_facts": []}),
+                timeline_validated=False,
+                rough_cut_approved=False,
+                scratch_memory="{}",
                 created_at=NOW,
                 updated_at=NOW,
             )
@@ -167,12 +182,12 @@ def _engine(tmp_path: Path, asset_specs: list[dict[str, Any]]) -> Any:
                 )
             )
             connection.execute(
-                schema.project_asset_links.insert().values(
-                    project_id="project_1",
+                schema.draft_asset_links.insert().values(
+                    draft_id="draft_1",
                     asset_id=asset_id,
-                    enabled=True,
                     linked_at=NOW,
                     note="",
+                    rel_dir=None,
                 )
             )
     return engine
@@ -222,31 +237,18 @@ def _context(
     return ToolExecutionContext(
         tool_call_id="tc_understand",
         turn_id="turn_1",
-        case_state=_case_state(),
-        project_state=ProjectState.model_validate(
-            {
-                "project_id": "project_1",
-                "name": "Project",
-                "status": "active",
-                "created_at": NOW,
-                "updated_at": NOW,
-            }
-        ),
+        draft_state=_draft_state(),
         readonly_connection=connection,
         metadata=metadata,
     )
 
 
-def _case_state() -> CaseState:
-    return CaseState.model_validate(
+def _draft_state() -> DraftState:
+    return DraftState.model_validate(
         {
-            "case_id": "case_1",
-            "project_id": "project_1",
-            "name": "Case",
+            "draft_id": "draft_1",
+            "name": "Draft",
             "brief": {"goal": "test", "confirmed_facts": []},
-            "selected_asset_ids": [],
-            "disabled_asset_ids": [],
-            "scratch_memory": {},
         }
     )
 
@@ -270,9 +272,9 @@ async def test_ready_summary_persists_rows_and_emits_events(
     assert len(result.data["material_summary_rows"]) == 1
     event_types = [event["event"] for event in result.events]
     assert event_types == ["MaterialUnderstandingStarted", "MaterialUnderstandingCompleted"]
-    assert all(event.get("case_id") is None for event in result.events)
+    assert all(event.get("draft_id") == "draft_1" for event in result.events)
 
-    _persist_tool_result_data(result, engine=engine)
+    _persist_rows(result, engine)
     with engine.connect() as connection:
         latest = MaterialSummariesRepository(connection).latest_ready("asset_1")
     assert latest is not None
@@ -429,25 +431,8 @@ async def test_transcribe_rows_persisted(tmp_path: Path, monkeypatch: pytest.Mon
     assert result.status == "succeeded"
     assert len(result.data["transcript_rows"]) == 1
 
-    _persist_tool_result_data(result, engine=engine)
+    _persist_rows(result, engine)
     with engine.connect() as connection:
         transcripts = TranscriptsRepository(connection).list_for_asset("asset_1")
     assert len(transcripts) == 1
     assert transcripts[0]["utterances"][0]["text"] == "你好"
-
-
-async def test_read_summary_returns_latest_ready(tmp_path: Path) -> None:
-    engine = _engine(tmp_path, [{"asset_id": "asset_1"}, {"asset_id": "asset_2"}])
-    _seed_summary(engine, "asset_1", version=1, overall="第一版")
-    _seed_summary(engine, "asset_1", version=2, overall="第二版最新")
-    with engine.connect() as connection:
-        result = read_summary(
-            AssetReadSummaryInput(asset_ids=["asset_1", "asset_2"]),
-            _context(engine, connection, gateway=None, tmp_path=tmp_path),
-        )
-
-    assert result.status == "succeeded"
-    assert result.data["summaries"]["asset_1"]["overall"] == "第二版最新"
-    assert result.data["summaries"]["asset_1"]["version"] == 2
-    assert "asset_2" in result.data["missing"]
-    assert "第二版最新" in result.observation

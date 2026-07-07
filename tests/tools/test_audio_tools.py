@@ -1,15 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-import pytest
-
-from agent_harness.reducer import apply
 from contracts.asset import AssetKind, AssetProbe, AssetSource, StorageMode
-from contracts.case import CaseState
-from contracts.events import DecisionAnswered
-from contracts.project import ProjectState
+from contracts.draft import DraftState
 from contracts.provider import ProviderError, ProviderResult
 from contracts.transcript import TranscriptDocument, TranscriptUtterance, TranscriptWord, VadSegment
 from media import probe as media_probe
@@ -19,7 +15,8 @@ from providers import LLM_CHAT
 from providers.gateway import ProviderGatewayResult
 from storage import schema
 from storage.db import create_workspace_engine
-from storage.repositories import CasesRepository, TranscriptsRepository
+from storage.repositories import TranscriptsRepository
+from storage.repositories._json import dump_json
 from tools import ToolExecutionContext
 from tools.audio import (
     align_uploaded_voiceover,
@@ -41,7 +38,7 @@ NOW = "2026-07-05T00:00:00+00:00"
 
 def test_audio_inspect_sources_degrades_when_silero_model_missing(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: Any,
 ) -> None:
     engine = _engine_with_asset(tmp_path)
 
@@ -68,6 +65,8 @@ def test_audio_inspect_sources_degrades_when_silero_model_missing(
     assert result.data["sources"][0]["speech_ratio"] is None
     assert result.data["degraded"][0]["capability"] == "audio.vad"
     assert [event["event"] for event in result.events] == ["AssetProbed", "CapabilityDegraded"]
+    assert result.events[0].get("draft_id") is None
+    assert result.events[1]["draft_id"] == "draft_1"
 
 
 def test_audio_asr_original_queues_asr_job() -> None:
@@ -78,6 +77,7 @@ def test_audio_asr_original_queues_asr_job() -> None:
     assert result.events[0]["payload"]["kind"] == "asr"
     assert result.events[0]["payload"]["job_payload"]["asset_id"] == "asset_1"
     assert result.data["asset_id"] == "asset_1"
+    assert result.data["draft_id"] == "draft_1"
 
 
 def test_audio_asr_original_rejects_tts_mode() -> None:
@@ -90,8 +90,8 @@ def test_audio_asr_original_rejects_tts_mode() -> None:
     assert result.error.error_code == "audio_mode_not_supported"
 
 
-def test_rough_cut_speech_creates_decision_without_mutating_cut_plan(tmp_path: Path) -> None:
-    engine = _engine_with_case_and_transcript(tmp_path, _rough_cut_document())
+def test_rough_cut_speech_creates_decision_without_reducer(tmp_path: Path) -> None:
+    engine = _engine_with_draft_and_transcript(tmp_path, _rough_cut_document())
     with engine.connect() as connection:
         result = rough_cut_speech(
             AudioRoughCutSpeechInput(filler_words=["呃"]),
@@ -100,50 +100,17 @@ def test_rough_cut_speech_creates_decision_without_mutating_cut_plan(tmp_path: P
 
     assert result.status == "requires_user"
     assert result.events[-1]["event"] == "DecisionCreated"
+    assert result.events[-1]["draft_id"] == "draft_1"
+    assert result.events[-1]["scope_type"] == "draft"
     assert result.data["rough_cut_proposal"]
-    with engine.connect() as connection:
-        case_row = CasesRepository(connection).get("case_1")
-    assert case_row is not None
-    assert case_row["cut_plan"]["removed_ranges"] == []
-
-    created = apply([result.events[-1]], engine=engine, base_version=0, actor="agent")
-    assert created.status == "applied"
-    with engine.connect() as connection:
-        case_after_decision = CasesRepository(connection).get("case_1")
-    assert case_after_decision is not None
-    assert case_after_decision["pending_decision_id"] == result.data["decision_id"]
-    assert case_after_decision["cut_plan"]["removed_ranges"] == []
-
-    answered = apply(
-        [
-            DecisionAnswered(
-                decision_id=str(result.data["decision_id"]),
-                scope_type="case",
-                project_id="project_1",
-                case_id="case_1",
-                payload={
-                    "answer": {
-                        "option_id": "apply_all",
-                        "answered_via": "button",
-                    }
-                },
-            )
-        ],
-        engine=engine,
-        base_version=1,
-        actor="user",
-    )
-    assert answered.status == "applied"
-    with engine.connect() as connection:
-        case_after_answer = CasesRepository(connection).get("case_1")
-    assert case_after_answer is not None
-    assert case_after_answer["cut_plan"]["removed_ranges"]
+    assert result.data["draft_id"] == "draft_1"
+    assert result.data["decision_id"]
 
 
 def test_rough_cut_speech_raw_not_preserved_degrades_to_pause_and_repeat(
     tmp_path: Path,
 ) -> None:
-    engine = _engine_with_case_and_transcript(
+    engine = _engine_with_draft_and_transcript(
         tmp_path,
         _rough_cut_document(raw_preserved=False),
     )
@@ -164,7 +131,7 @@ def test_rough_cut_speech_raw_not_preserved_degrades_to_pause_and_repeat(
 
 
 def test_rough_cut_speech_uses_mocked_llm_structured_output(tmp_path: Path) -> None:
-    engine = _engine_with_case_and_transcript(tmp_path, _rough_cut_document())
+    engine = _engine_with_draft_and_transcript(tmp_path, _rough_cut_document())
     with engine.connect() as connection:
         result = rough_cut_speech(
             AudioRoughCutSpeechInput(),
@@ -186,7 +153,7 @@ def test_rough_cut_speech_uses_mocked_llm_structured_output(tmp_path: Path) -> N
 
 
 def test_rough_cut_speech_degrades_when_llm_provider_errors(tmp_path: Path) -> None:
-    engine = _engine_with_case_and_transcript(tmp_path, _rough_cut_document())
+    engine = _engine_with_draft_and_transcript(tmp_path, _rough_cut_document())
     with engine.connect() as connection:
         result = rough_cut_speech(
             AudioRoughCutSpeechInput(),
@@ -205,7 +172,7 @@ def test_rough_cut_speech_degrades_when_llm_provider_errors(tmp_path: Path) -> N
 
 
 def test_rough_cut_speech_requires_transcript_with_vad(tmp_path: Path) -> None:
-    engine = _engine_with_case_and_transcript(
+    engine = _engine_with_draft_and_transcript(
         tmp_path,
         _rough_cut_document(vad_segments=[]),
     )
@@ -236,7 +203,7 @@ def test_audio_tts_and_align_tools_enqueue_jobs() -> None:
     assert align_result.events[0]["payload"]["kind"] == "align"
 
 
-def test_audio_tts_and_align_tools_require_case() -> None:
+def test_audio_tts_and_align_tools_require_draft() -> None:
     bare = ToolExecutionContext(tool_call_id="tc_x", turn_id="turn_x")
 
     tts_result = generate_tts(AudioGenerateTtsInput(), bare)
@@ -248,9 +215,45 @@ def test_audio_tts_and_align_tools_require_case() -> None:
     assert tts_result.status == "failed"
     assert align_result.status == "failed"
     assert tts_result.error is not None
-    assert tts_result.error.error_code == "missing_case"
+    assert tts_result.error.error_code == "missing_draft"
     assert align_result.error is not None
-    assert align_result.error.error_code == "missing_case"
+    assert align_result.error.error_code == "missing_draft"
+
+
+def test_asr_original_failure_branches(tmp_path: Path) -> None:
+    bare = ToolExecutionContext(tool_call_id="tc_x", turn_id="turn_x")
+    assert asr_original(AudioAsrOriginalInput(), bare).status == "failed"
+
+    context = _context(tmp_path)
+    draft_without_plan = context.draft_state.model_copy(update={"audio_plan": None})
+    stripped = replace(context, draft_state=draft_without_plan)
+    result = asr_original(AudioAsrOriginalInput(), stripped)
+    assert result.status == "failed"
+    assert result.error is not None
+    assert "audio_plan" in str(result.error)
+
+
+def test_inspect_sources_requires_draft() -> None:
+    bare = ToolExecutionContext(tool_call_id="tc_x", turn_id="turn_x")
+    result = inspect_sources(AudioInspectSourcesInput(), bare)
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.error_code == "missing_draft"
+
+
+def test_audio_asr_original_short_circuits_when_transcript_exists(tmp_path: Path) -> None:
+    """转写已存在时直接报告结果并提示下一步，不再重复排 job（M9 实测回归）。"""
+    engine = _engine_with_draft_and_transcript(tmp_path, _rough_cut_document())
+    with engine.connect() as connection:
+        result = asr_original(
+            AudioAsrOriginalInput(asset_id="asset_1"),
+            _context(tmp_path, connection=connection),
+        )
+    assert result.status == "succeeded"
+    assert "ASR 已完成" in result.observation
+    assert "rough_cut_speech" in result.observation
+    assert result.data["transcript_id"] == "tr_rough"
+    assert result.events == []
 
 
 def _engine_with_asset(tmp_path: Path):
@@ -258,11 +261,17 @@ def _engine_with_asset(tmp_path: Path):
     with engine.begin() as connection:
         schema.create_all(connection)
         connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
+            schema.drafts.insert().values(
+                draft_id="draft_1",
+                name="Draft",
+                state_version=0,
                 status="active",
-                defaults="{}",
+                defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
+                running_jobs="[]",
+                brief=dump_json({"goal": "test", "confirmed_facts": []}),
+                timeline_validated=False,
+                rough_cut_approved=False,
+                scratch_memory="{}",
                 created_at=NOW,
                 updated_at=NOW,
             )
@@ -287,54 +296,23 @@ def _engine_with_asset(tmp_path: Path):
             )
         )
         connection.execute(
-            schema.project_asset_links.insert().values(
-                project_id="project_1",
+            schema.draft_asset_links.insert().values(
+                draft_id="draft_1",
                 asset_id="asset_1",
-                enabled=True,
                 linked_at=NOW,
                 note="",
+                rel_dir=None,
             )
         )
     return engine
 
 
-def _engine_with_case_and_transcript(
+def _engine_with_draft_and_transcript(
     tmp_path: Path,
     document: TranscriptDocument,
 ) -> Any:
     engine = _engine_with_asset(tmp_path)
     with engine.begin() as connection:
-        CasesRepository(connection).insert(
-            {
-                "case_id": "case_1",
-                "project_id": "project_1",
-                "name": "Case",
-                "state_version": 0,
-                "status": "active",
-                "pending_decision_id": None,
-                "running_jobs": [],
-                "last_error": None,
-                "brief": {"goal": "test", "confirmed_facts": []},
-                "content_plan": None,
-                "audio_plan": {
-                    "mode": "rough_cut",
-                    "source_asset_ids": ["asset_1"],
-                    "transcript_id": document.transcript_id,
-                },
-                "cut_plan": _initial_cut_plan(),
-                "timeline_current_version": None,
-                "timeline_validated": False,
-                "preview_current_id": None,
-                "last_viewed_preview_id": None,
-                "rough_cut_approved": False,
-                "rough_cut_approved_version": None,
-                "postprocess_plan": None,
-                "export_current_id": None,
-                "selected_asset_ids": ["asset_1"],
-                "disabled_asset_ids": [],
-                "scratch_memory": {},
-            }
-        )
         TranscriptsRepository(connection).insert_document(document)
     return engine
 
@@ -359,64 +337,19 @@ def _context(
     return ToolExecutionContext(
         tool_call_id="tc_1",
         turn_id="turn_1",
-        project_state=ProjectState.model_validate(
+        draft_state=DraftState.model_validate(
             {
-                "project_id": "project_1",
-                "name": "Project",
-                "status": "active",
-                "asset_links": [],
-                "case_ids": ["case_1"],
-                "memory_ids": [],
-                "created_at": NOW,
-                "updated_at": NOW,
-            }
-        ),
-        case_state=CaseState.model_validate(
-            {
-                "case_id": "case_1",
-                "project_id": "project_1",
-                "name": "Case",
+                "draft_id": "draft_1",
+                "name": "Draft",
                 "brief": {"goal": "test", "confirmed_facts": []},
                 "content_plan": content_plan,
                 "audio_plan": audio_plan,
                 "cut_plan": cut_plan,
-                "selected_asset_ids": ["asset_1"],
-                "disabled_asset_ids": [],
-                "scratch_memory": {},
             }
         ),
         readonly_connection=connection,
         metadata={"workspace_path": workspace, **(metadata or {})},
     )
-
-
-def test_asr_original_failure_branches(tmp_path: Path) -> None:
-    bare = ToolExecutionContext(tool_call_id="tc_x", turn_id="turn_x")
-    assert asr_original(AudioAsrOriginalInput(), bare).status == "failed"
-
-    from dataclasses import replace
-
-    context = _context(tmp_path)
-    case_without_plan = context.case_state.model_copy(update={"audio_plan": None})
-    try:
-        stripped = replace(context, case_state=case_without_plan)
-    except TypeError:
-        stripped = ToolExecutionContext(
-            tool_call_id="tc_1",
-            turn_id="turn_1",
-            project_state=context.project_state,
-            case_state=case_without_plan,
-        )
-    result = asr_original(AudioAsrOriginalInput(), stripped)
-    assert result.status == "failed"
-    assert result.error is not None
-    assert "audio_plan" in str(result.error)
-
-
-def test_inspect_sources_requires_case(tmp_path: Path) -> None:
-    bare = ToolExecutionContext(tool_call_id="tc_x", turn_id="turn_x")
-    result = inspect_sources(AudioInspectSourcesInput(), bare)
-    assert result.status == "failed"
 
 
 def _initial_cut_plan() -> dict[str, Any]:
@@ -538,18 +471,3 @@ class _ErrorLlmGateway:
                 ),
             )
         )
-
-
-def test_audio_asr_original_short_circuits_when_transcript_exists(tmp_path: Path) -> None:
-    """转写已存在时直接报告结果并提示下一步，不再重复排 job（M9 实测回归）。"""
-    engine = _engine_with_case_and_transcript(tmp_path, _rough_cut_document())
-    with engine.connect() as connection:
-        result = asr_original(
-            AudioAsrOriginalInput(asset_id="asset_1"),
-            _context(tmp_path, connection=connection),
-        )
-    assert result.status == "succeeded"
-    assert "ASR 已完成" in result.observation
-    assert "rough_cut_speech" in result.observation
-    assert result.data["transcript_id"] == "tr_rough"
-    assert result.events == []

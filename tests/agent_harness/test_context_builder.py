@@ -6,45 +6,26 @@ from agent_harness.context_builder import (
     ContextMessage,
     render_timeline_summary,
 )
-from contracts.case import CaseState
-from contracts.project import ProjectState
+from contracts.draft import DraftState
 from contracts.timeline import TimelineState
 from contracts.tool import ToolSpec
-from domain.preconditions import PreconditionContext, ProjectArtifactStats
+from domain.preconditions import DraftArtifactStats, PreconditionContext
 
 
 class EmptyInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-def _case_state(**overrides: object) -> CaseState:
+def _draft_state(**overrides: object) -> DraftState:
     data = {
-        "case_id": "case_1",
-        "project_id": "project_1",
-        "name": "Case",
+        "draft_id": "draft_1",
+        "name": "Draft",
         "brief": {"goal": "make a video", "confirmed_facts": []},
-        "selected_asset_ids": ["asset_1"],
-        "disabled_asset_ids": ["asset_bad"],
+        "defaults": {"aspect_ratio": "9:16", "fps": 30},
         "scratch_memory": {},
     }
     data.update(overrides)
-    return CaseState.model_validate(data)
-
-
-def _project_state() -> ProjectState:
-    return ProjectState.model_validate(
-        {
-            "project_id": "project_1",
-            "name": "Project",
-            "status": "active",
-            "asset_links": [],
-            "case_ids": ["case_1"],
-            "memory_ids": [],
-            "defaults": {"aspect_ratio": "9:16", "fps": 30},
-            "created_at": "2026-07-04T00:00:00Z",
-            "updated_at": "2026-07-04T00:00:00Z",
-        }
-    )
+    return DraftState.model_validate(data)
 
 
 def _tool_spec() -> ToolSpec:
@@ -55,10 +36,9 @@ def _tool_spec() -> ToolSpec:
         input_model=EmptyInput,
         result_model=None,
         handler_ref="handlers.respond",
-        allowed_scopes=["case_agent_console"],
+        allowed_scopes=["draft_editor"],
         requires_artifacts=[],
-        requires_active_project=True,
-        requires_active_case=False,
+        requires_active_draft=False,
         side_effects=[],
         emits_events=[],
         description="respond",
@@ -69,7 +49,7 @@ def _timeline() -> TimelineState:
     return TimelineState.model_validate(
         {
             "timeline_id": "tl_1",
-            "case_id": "case_1",
+            "draft_id": "draft_1",
             "version": 8,
             "fps": 30,
             "duration_frames": 1350,
@@ -150,9 +130,8 @@ def test_context_builder_truncates_budgeted_blocks_but_not_fixed_blocks() -> Non
     )
     context = ContextBuildInput(
         preconditions=PreconditionContext(
-            case_state=_case_state(brief={"goal": "x" * 500, "confirmed_facts": []}),
-            project_state=_project_state(),
-            project_artifacts=ProjectArtifactStats(
+            draft_state=_draft_state(brief={"goal": "x" * 500, "confirmed_facts": []}),
+            draft_artifacts=DraftArtifactStats(
                 usable_asset_count=2,
                 transcript_asset_ids=frozenset({"asset_1"}),
             ),
@@ -194,9 +173,8 @@ def test_memory_block_renders_top_five() -> None:
 
 def _assets_context() -> PreconditionContext:
     return PreconditionContext(
-        case_state=_case_state(),
-        project_state=_project_state(),
-        project_artifacts=ProjectArtifactStats(usable_asset_count=2),
+        draft_state=_draft_state(),
+        draft_artifacts=DraftArtifactStats(usable_asset_count=2),
     )
 
 
@@ -386,20 +364,19 @@ def test_assets_block_empty_digest_keeps_header() -> None:
     assert not any(line.startswith("- ") for line in rendered.splitlines())
 
 
-def test_workspace_and_case_blocks_handle_missing_state() -> None:
+def test_workspace_and_draft_blocks_handle_missing_state() -> None:
     from agent_harness.context_builder import (
         ContextBuildInput,
-        _render_case_header_block,
+        _render_draft_header_block,
         _render_workspace_block,
     )
-    from domain.preconditions import PreconditionContext, ProjectArtifactStats
+    from domain.preconditions import DraftArtifactStats, PreconditionContext
 
-    assert _render_workspace_block(None) == "workspace: no active project"
+    assert _render_workspace_block(None) == "workspace: no active draft"
     empty = ContextBuildInput(
         preconditions=PreconditionContext(
-            case_state=None,
-            project_state=None,
-            project_artifacts=ProjectArtifactStats(usable_asset_count=0),
+            draft_state=None,
+            draft_artifacts=DraftArtifactStats(usable_asset_count=0),
         )
     )
-    assert _render_case_header_block(empty) == "case: none"
+    assert _render_draft_header_block(empty) == "draft: none"

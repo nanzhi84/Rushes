@@ -11,17 +11,17 @@ from apps.api.turn_stream import (
 
 async def test_snapshot_replays_prior_events_and_streams_realtime_to_all() -> None:
     hub = TurnStreamHub()
-    listener = hub.listener_for("case_1")
+    listener = hub.listener_for("draft_1")
 
     # 早订阅者：连接在任何事件之前。
-    early_snapshot, early_queue = await hub.subscribe("case_1")
+    early_snapshot, early_queue = await hub.subscribe("draft_1")
     assert early_snapshot == []
 
     listener.emit({"type": "turn_started", "turn_id": "turn_1"})
     listener.emit({"type": "text_delta", "message_id": "m1", "kind": "assistant", "delta": "你"})
 
     # 晚订阅者：连接时已有两条事件，应当拿到全部快照。
-    late_snapshot, late_queue = await hub.subscribe("case_1")
+    late_snapshot, late_queue = await hub.subscribe("draft_1")
     assert [event["type"] for event in late_snapshot] == ["turn_started", "text_delta"]
 
     listener.emit({"type": "tool_step_started", "step_id": "s1", "tool": "x.tool"})
@@ -38,9 +38,9 @@ async def test_snapshot_replays_prior_events_and_streams_realtime_to_all() -> No
 
 async def test_turn_ended_clears_snapshot_buffer() -> None:
     hub = TurnStreamHub()
-    listener = hub.listener_for("case_1")
+    listener = hub.listener_for("draft_1")
 
-    _, queue = await hub.subscribe("case_1")
+    _, queue = await hub.subscribe("draft_1")
     listener.emit({"type": "turn_started", "turn_id": "turn_1"})
     listener.emit({"type": "turn_ended", "outcome": "finished", "reason": None})
 
@@ -48,25 +48,25 @@ async def test_turn_ended_clears_snapshot_buffer() -> None:
     assert [queue.get_nowait()["type"] for _ in range(2)] == ["turn_started", "turn_ended"]
 
     # turn_ended 后缓冲清空：新订阅者拿到空快照。
-    fresh_snapshot, _ = await hub.subscribe("case_1")
+    fresh_snapshot, _ = await hub.subscribe("draft_1")
     assert fresh_snapshot == []
 
 
 async def test_turn_error_also_clears_snapshot_buffer() -> None:
     hub = TurnStreamHub()
-    listener = hub.listener_for("case_1")
+    listener = hub.listener_for("draft_1")
 
     listener.emit({"type": "turn_started", "turn_id": "turn_1"})
     listener.emit({"type": "turn_error", "message": "boom"})
 
-    snapshot, _ = await hub.subscribe("case_1")
+    snapshot, _ = await hub.subscribe("draft_1")
     assert snapshot == []
 
 
 async def test_slow_subscriber_is_dropped_and_closed() -> None:
     hub = TurnStreamHub(queue_limit=3)
-    listener = hub.listener_for("case_1")
-    _, queue = await hub.subscribe("case_1")
+    listener = hub.listener_for("draft_1")
+    _, queue = await hub.subscribe("draft_1")
 
     # 填满到上限。
     for index in range(3):
@@ -84,10 +84,10 @@ async def test_slow_subscriber_is_dropped_and_closed() -> None:
 
 async def test_emit_never_raises_on_malformed_event() -> None:
     hub = TurnStreamHub()
-    listener = hub.listener_for("case_1")
+    listener = hub.listener_for("draft_1")
     # 非 Mapping 也不能把回合搞崩（hub 内部兜底）。
     listener.emit({"type": "turn_started", "turn_id": "turn_1"})
-    snapshot, _ = await hub.subscribe("case_1")
+    snapshot, _ = await hub.subscribe("draft_1")
     assert snapshot[0]["turn_id"] == "turn_1"
 
 

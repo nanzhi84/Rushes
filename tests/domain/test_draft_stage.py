@@ -1,34 +1,20 @@
-from contracts.case import CaseState
-from domain.case_stage import derive_stage
+from contracts.draft import DraftState
+from domain.draft_stage import derive_stage
 
 
-def _case_state(**overrides: object) -> CaseState:
+def _draft_state(**overrides: object) -> DraftState:
     data = {
-        "case_id": "case_1",
-        "project_id": "project_1",
-        "name": "Case",
+        "draft_id": "draft_1",
+        "name": "草稿",
         "brief": {"goal": "make a video", "confirmed_facts": []},
-        "selected_asset_ids": [],
-        "disabled_asset_ids": [],
         "scratch_memory": {},
     }
     data.update(overrides)
-    return CaseState.model_validate(data)
-
-
-def test_stage_fixed_order_closed_wins_over_exporting() -> None:
-    case_state = _case_state(
-        status="closed",
-        rough_cut_approved=True,
-        export_current_id=None,
-        scratch_memory={"export_decision_answered": True},
-    )
-
-    assert derive_stage(case_state) == "closed"
+    return DraftState.model_validate(data)
 
 
 def test_stage_fixed_order_exporting_wins_over_refining() -> None:
-    case_state = _case_state(
+    draft_state = _draft_state(
         rough_cut_approved=True,
         export_current_id=None,
         running_jobs=[
@@ -41,22 +27,22 @@ def test_stage_fixed_order_exporting_wins_over_refining() -> None:
         ],
     )
 
-    assert derive_stage(case_state) == "exporting"
+    assert derive_stage(draft_state) == "exporting"
 
 
 def test_stage_drafting_precedes_briefing_when_audio_plan_exists() -> None:
-    case_state = _case_state(
+    draft_state = _draft_state(
         brief={"goal": "", "confirmed_facts": []},
         audio_plan={"mode": "rough_cut", "source_asset_ids": ["asset_1"]},
         rough_cut_approved=False,
     )
 
-    assert derive_stage(case_state) == "drafting"
+    assert derive_stage(draft_state) == "drafting"
 
 
 def test_stage_refining_and_briefing_defaults() -> None:
-    assert derive_stage(_case_state(rough_cut_approved=True, export_current_id=None)) == "refining"
-    assert derive_stage(_case_state()) == "briefing"
+    assert derive_stage(_draft_state(rough_cut_approved=True, export_current_id=None)) == "refining"
+    assert derive_stage(_draft_state()) == "briefing"
 
 
 def test_exporting_signals_from_scratch_memory_and_running_jobs() -> None:
@@ -65,13 +51,13 @@ def test_exporting_signals_from_scratch_memory_and_running_jobs() -> None:
         "rough_cut_approved": True,
         "rough_cut_approved_version": 1,
     }
-    by_flag = _case_state(**approved, scratch_memory={"export_decision_answered": True})
+    by_flag = _draft_state(**approved, scratch_memory={"export_decision_answered": True})
     assert derive_stage(by_flag) == "exporting"
 
-    by_confirm = _case_state(**approved, scratch_memory={"export_confirmed": True})
+    by_confirm = _draft_state(**approved, scratch_memory={"export_confirmed": True})
     assert derive_stage(by_confirm) == "exporting"
 
-    by_job = _case_state(
+    by_job = _draft_state(
         **approved,
         running_jobs=[{"job_id": "job_1", "kind": "render_final", "status": "running"}],
     )

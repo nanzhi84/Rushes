@@ -35,9 +35,8 @@ class Job(BaseModel):
     job_id: str
     kind: JobKind
     status: JobStatus = "pending"
-    project_id: str | None = None
-    case_id: str | None = None
-    requested_by_case_id: str | None = None
+    draft_id: str | None = None
+    requested_by_draft_id: str | None = None
     asset_id: str | None = None
     idempotency_key: str
     payload_json: dict[str, Any] = Field(default_factory=dict)

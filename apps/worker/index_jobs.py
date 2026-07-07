@@ -40,7 +40,7 @@ def build_index_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
             _apply_or_raise(
                 engine,
                 AssetIndexFailed(
-                    project_id=job.project_id,
+                    draft_id=job.draft_id,
                     asset_id=asset_id,
                     payload={
                         "failure": {"error_code": "index_failed", "message": str(exc)},
@@ -51,7 +51,7 @@ def build_index_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
         _apply_or_raise(
             engine,
             AssetIndexReady(
-                project_id=job.project_id,
+                draft_id=job.draft_id,
                 asset_id=asset_id,
                 payload={
                     "index_json": index_json,

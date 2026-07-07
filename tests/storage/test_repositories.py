@@ -7,12 +7,11 @@ from contracts.transcript import TranscriptDocument, TranscriptUtterance, Transc
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
 from storage.repositories import (
-    CasesRepository,
     DecisionsRepository,
+    DraftsRepository,
     JobsRepository,
     TranscriptsRepository,
 )
-from storage.repositories.projects import ProjectsRepository
 
 NOW = "2026-07-04T00:00:00+00:00"
 
@@ -24,26 +23,16 @@ def _prepare_workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _insert_project_and_case(tmp_path: Path) -> None:
+def _insert_draft(tmp_path: Path) -> None:
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
-        ProjectsRepository(connection).insert(
+        DraftsRepository(connection).insert(
             {
-                "project_id": "project_1",
-                "name": "Project",
-                "status": "active",
-                "defaults": {"aspect_ratio": "9:16", "fps": 30},
-                "created_at": NOW,
-                "updated_at": NOW,
-            }
-        )
-        CasesRepository(connection).insert(
-            {
-                "case_id": "case_1",
-                "project_id": "project_1",
-                "name": "Case",
+                "draft_id": "draft_1",
+                "name": "Draft",
                 "state_version": 0,
                 "status": "active",
+                "defaults": {"aspect_ratio": "9:16", "fps": 30},
                 "pending_decision_id": None,
                 "running_jobs": [],
                 "last_error": None,
@@ -59,25 +48,26 @@ def _insert_project_and_case(tmp_path: Path) -> None:
                 "rough_cut_approved_version": None,
                 "postprocess_plan": None,
                 "export_current_id": None,
-                "selected_asset_ids": [],
-                "disabled_asset_ids": [],
                 "scratch_memory": {},
+                "messages_tail_ref": None,
+                "created_at": NOW,
+                "updated_at": NOW,
             }
         )
 
 
-def test_case_state_version_optimistic_lock_conflict(tmp_path: Path) -> None:
+def test_draft_state_version_optimistic_lock_conflict(tmp_path: Path) -> None:
     workspace = _prepare_workspace(tmp_path)
-    _insert_project_and_case(workspace)
+    _insert_draft(workspace)
     engine = create_workspace_engine(workspace)
 
     with begin_immediate(engine) as connection:
-        repo = CasesRepository(connection)
-        assert repo.update_with_state_version("case_1", 0, {"name": "New"}) is None
-        conflict = repo.update_with_state_version("case_1", 0, {"name": "Stale"})
+        repo = DraftsRepository(connection)
+        assert repo.update_with_state_version("draft_1", 0, {"name": "New"}) is None
+        conflict = repo.update_with_state_version("draft_1", 0, {"name": "Stale"})
 
     assert conflict is not None
-    assert conflict.case_id == "case_1"
+    assert conflict.draft_id == "draft_1"
 
 
 def test_decision_pending_tool_call_cas_replays_once(tmp_path: Path) -> None:
@@ -89,8 +79,7 @@ def test_decision_pending_tool_call_cas_replays_once(tmp_path: Path) -> None:
             {
                 "decision_id": "decision_1",
                 "scope_type": "workspace",
-                "project_id": None,
-                "case_id": None,
+                "draft_id": None,
                 "type": "generic",
                 "question": "Run?",
                 "options": [],
@@ -124,9 +113,8 @@ def test_jobs_claim_only_one_worker_and_unique_idempotency(tmp_path: Path) -> No
         "job_id": "job_1",
         "kind": "annotation",
         "status": "pending",
-        "project_id": None,
-        "case_id": None,
-        "requested_by_case_id": None,
+        "draft_id": None,
+        "requested_by_draft_id": None,
         "asset_id": None,
         "idempotency_key": "asset_1:cheap",
         "payload_json": {},
@@ -165,9 +153,8 @@ def test_jobs_heartbeat_and_stale_running_reset(tmp_path: Path) -> None:
                 "job_id": "job_1",
                 "kind": "render_preview",
                 "status": "running",
-                "project_id": None,
-                "case_id": None,
-                "requested_by_case_id": None,
+                "draft_id": None,
+                "requested_by_draft_id": None,
                 "asset_id": None,
                 "idempotency_key": "preview",
                 "payload_json": {},
@@ -206,7 +193,6 @@ def test_jobs_heartbeat_and_stale_running_reset(tmp_path: Path) -> None:
 
 def test_transcripts_repository_persists_document_json(tmp_path: Path) -> None:
     workspace = _prepare_workspace(tmp_path)
-    _insert_project_and_case(workspace)
     engine = create_workspace_engine(workspace)
     with begin_immediate(engine) as connection:
         connection.execute(

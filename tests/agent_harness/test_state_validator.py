@@ -5,18 +5,17 @@ from sqlalchemy import func, select, update
 from agent_harness.reducer import apply
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
-from storage.repositories import CasesRepository
+from storage.repositories import DraftsRepository
 from storage.repositories._json import dump_json
-from storage.repositories.projects import ProjectsRepository
 from timeline import build_timeline_invariant_hook
 
 NOW = "2026-07-04T00:00:00+00:00"
 
 
-def _timeline_doc(case_id: str = "case_1", version: int = 1) -> dict[str, object]:
+def _timeline_doc(draft_id: str = "draft_1", version: int = 1) -> dict[str, object]:
     return {
-        "timeline_id": f"{case_id}:v{version}",
-        "case_id": case_id,
+        "timeline_id": f"{draft_id}:v{version}",
+        "draft_id": draft_id,
         "version": version,
         "fps": 30,
         "duration_frames": 30,
@@ -37,27 +36,16 @@ def _prepare_workspace(tmp_path: Path) -> None:
         schema.create_all(connection)
 
 
-def _insert_project_and_case(tmp_path: Path, case_id: str = "case_1") -> None:
+def _insert_draft(tmp_path: Path, draft_id: str = "draft_1") -> None:
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
-        if case_id == "case_1":
-            ProjectsRepository(connection).insert(
-                {
-                    "project_id": "project_1",
-                    "name": "Project",
-                    "status": "active",
-                    "defaults": {"aspect_ratio": "9:16", "fps": 30},
-                    "created_at": NOW,
-                    "updated_at": NOW,
-                }
-            )
-        CasesRepository(connection).insert(
+        DraftsRepository(connection).insert(
             {
-                "case_id": case_id,
-                "project_id": "project_1",
-                "name": "Case",
+                "draft_id": draft_id,
+                "name": "Draft",
                 "state_version": 0,
                 "status": "active",
+                "defaults": {"aspect_ratio": "9:16", "fps": 30},
                 "pending_decision_id": None,
                 "running_jobs": [],
                 "last_error": None,
@@ -73,9 +61,10 @@ def _insert_project_and_case(tmp_path: Path, case_id: str = "case_1") -> None:
                 "rough_cut_approved_version": None,
                 "postprocess_plan": None,
                 "export_current_id": None,
-                "selected_asset_ids": [],
-                "disabled_asset_ids": [],
                 "scratch_memory": {},
+                "messages_tail_ref": None,
+                "created_at": NOW,
+                "updated_at": NOW,
             }
         )
 
@@ -83,7 +72,7 @@ def _insert_project_and_case(tmp_path: Path, case_id: str = "case_1") -> None:
 def _apply_brief_update(tmp_path: Path) -> object:
     engine = create_workspace_engine(tmp_path)
     return apply(
-        [{"event": "BriefUpdated", "case_id": "case_1", "payload": {"brief": {"goal": "new"}}}],
+        [{"event": "BriefUpdated", "draft_id": "draft_1", "payload": {"brief": {"goal": "new"}}}],
         engine=engine,
         base_version=0,
         actor="agent",
@@ -94,20 +83,20 @@ def _apply_brief_update(tmp_path: Path) -> object:
 def _assert_rolled_back(tmp_path: Path) -> None:
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        draft = DraftsRepository(connection).get("draft_1")
         event_count = connection.execute(
             select(func.count()).select_from(schema.event_log)
         ).scalar_one()
-    assert case is not None
-    assert case["state_version"] == 0
-    assert case["brief"]["goal"] == "test"
+    assert draft is not None
+    assert draft["state_version"] == 0
+    assert draft["brief"]["goal"] == "test"
     assert event_count == 0
 
 
-def test_validator_rejects_case_reference_to_preview_from_another_case(tmp_path: Path) -> None:
+def test_validator_rejects_draft_reference_to_preview_from_another_draft(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
-    _insert_project_and_case(tmp_path, case_id="case_2")
+    _insert_draft(tmp_path)
+    _insert_draft(tmp_path, draft_id="draft_2")
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
         connection.execute(
@@ -121,7 +110,7 @@ def test_validator_rejects_case_reference_to_preview_from_another_case(tmp_path:
         connection.execute(
             schema.previews.insert().values(
                 preview_id="preview_other",
-                case_id="case_2",
+                draft_id="draft_2",
                 timeline_version=1,
                 object_hash="hash_preview",
                 quality=dump_json({}),
@@ -129,8 +118,8 @@ def test_validator_rejects_case_reference_to_preview_from_another_case(tmp_path:
             )
         )
         connection.execute(
-            update(schema.cases)
-            .where(schema.cases.c.case_id == "case_1")
+            update(schema.drafts)
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(preview_current_id="preview_other")
         )
 
@@ -142,15 +131,14 @@ def test_validator_rejects_case_reference_to_preview_from_another_case(tmp_path:
 
 def test_validator_rejects_pending_decision_that_is_not_pending(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
         connection.execute(
             schema.decisions.insert().values(
                 decision_id="dec_answered",
-                scope_type="case",
-                project_id="project_1",
-                case_id="case_1",
+                scope_type="draft",
+                draft_id="draft_1",
                 type="generic",
                 question="?",
                 options=dump_json([]),
@@ -165,8 +153,8 @@ def test_validator_rejects_pending_decision_that_is_not_pending(tmp_path: Path) 
             )
         )
         connection.execute(
-            update(schema.cases)
-            .where(schema.cases.c.case_id == "case_1")
+            update(schema.drafts)
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(pending_decision_id="dec_answered")
         )
 
@@ -178,26 +166,26 @@ def test_validator_rejects_pending_decision_that_is_not_pending(tmp_path: Path) 
 
 def test_validator_rejects_invalid_timeline_document(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
         connection.execute(
             schema.timeline_versions.insert().values(
                 timeline_id="tl_bad",
-                case_id="case_1",
+                draft_id="draft_1",
                 version=1,
                 parent_version=None,
                 created_by_patch_id=None,
                 document_json=dump_json(
-                    {"timeline_id": "tl_bad", "case_id": "case_1", "version": 2}
+                    {"timeline_id": "tl_bad", "draft_id": "draft_1", "version": 2}
                 ),
                 validation_report=None,
                 created_at=NOW,
             )
         )
         connection.execute(
-            update(schema.cases)
-            .where(schema.cases.c.case_id == "case_1")
+            update(schema.drafts)
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(timeline_current_version=1)
         )
 
@@ -207,35 +195,17 @@ def test_validator_rejects_invalid_timeline_document(tmp_path: Path) -> None:
     _assert_rolled_back(tmp_path)
 
 
-def test_validator_rejects_selected_asset_not_linked_to_project(tmp_path: Path) -> None:
+def test_validator_rejects_missing_or_cross_draft_references(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
-    engine = create_workspace_engine(tmp_path)
-    with begin_immediate(engine) as connection:
-        connection.execute(
-            update(schema.cases)
-            .where(schema.cases.c.case_id == "case_1")
-            .values(selected_asset_ids=dump_json(["asset_missing"]))
-        )
-
-    result = _apply_brief_update(tmp_path)
-
-    assert result.status == "validation_failed"
-    _assert_rolled_back(tmp_path)
-
-
-def test_validator_rejects_missing_or_cross_case_references(tmp_path: Path) -> None:
-    _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
-    _insert_project_and_case(tmp_path, case_id="case_2")
+    _insert_draft(tmp_path)
+    _insert_draft(tmp_path, draft_id="draft_2")
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
         connection.execute(
             schema.decisions.insert().values(
                 decision_id="dec_other",
-                scope_type="case",
-                project_id="project_1",
-                case_id="case_2",
+                scope_type="draft",
+                draft_id="draft_2",
                 type="generic",
                 question="?",
                 options=dump_json([]),
@@ -250,8 +220,8 @@ def test_validator_rejects_missing_or_cross_case_references(tmp_path: Path) -> N
             )
         )
         connection.execute(
-            update(schema.cases)
-            .where(schema.cases.c.case_id == "case_1")
+            update(schema.drafts)
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(
                 timeline_current_version=99,
                 pending_decision_id="dec_other",
@@ -271,13 +241,13 @@ def test_validator_rejects_missing_or_cross_case_references(tmp_path: Path) -> N
 
 def test_validator_rejects_timeline_identity_mismatch(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
         connection.execute(
             schema.timeline_versions.insert().values(
                 timeline_id="tl_mismatch",
-                case_id="case_1",
+                draft_id="draft_1",
                 version=1,
                 parent_version=None,
                 created_by_patch_id=None,
@@ -287,8 +257,8 @@ def test_validator_rejects_timeline_identity_mismatch(tmp_path: Path) -> None:
             )
         )
         connection.execute(
-            update(schema.cases)
-            .where(schema.cases.c.case_id == "case_1")
+            update(schema.drafts)
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(timeline_current_version=1)
         )
 
@@ -302,13 +272,13 @@ def test_validator_rejects_timeline_identity_mismatch(tmp_path: Path) -> None:
 
 def test_validator_rejects_timeline_invariant_hook_failure(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
         connection.execute(
             schema.timeline_versions.insert().values(
-                timeline_id="case_1:v1",
-                case_id="case_1",
+                timeline_id="draft_1:v1",
+                draft_id="draft_1",
                 version=1,
                 parent_version=None,
                 created_by_patch_id=None,
@@ -318,18 +288,18 @@ def test_validator_rejects_timeline_invariant_hook_failure(tmp_path: Path) -> No
             )
         )
         connection.execute(
-            update(schema.cases)
-            .where(schema.cases.c.case_id == "case_1")
+            update(schema.drafts)
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(timeline_current_version=1)
         )
 
     result = apply(
-        [{"event": "BriefUpdated", "case_id": "case_1", "payload": {"brief": {"goal": "new"}}}],
+        [{"event": "BriefUpdated", "draft_id": "draft_1", "payload": {"brief": {"goal": "new"}}}],
         engine=engine,
         base_version=0,
         actor="agent",
         created_at=NOW,
-        timeline_invariant_hook=lambda _connection, _case_state, _timeline: [
+        timeline_invariant_hook=lambda _connection, _draft_state, _timeline: [
             "primary visual has a gap"
         ],
     )
@@ -342,13 +312,13 @@ def test_validator_rejects_timeline_invariant_hook_failure(tmp_path: Path) -> No
 
 def test_validator_can_use_timeline_validator_hook(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
         connection.execute(
             schema.timeline_versions.insert().values(
-                timeline_id="case_1:v1",
-                case_id="case_1",
+                timeline_id="draft_1:v1",
+                draft_id="draft_1",
                 version=1,
                 parent_version=None,
                 created_by_patch_id=None,
@@ -358,13 +328,13 @@ def test_validator_can_use_timeline_validator_hook(tmp_path: Path) -> None:
             )
         )
         connection.execute(
-            update(schema.cases)
-            .where(schema.cases.c.case_id == "case_1")
+            update(schema.drafts)
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(timeline_current_version=1)
         )
 
     result = apply(
-        [{"event": "BriefUpdated", "case_id": "case_1", "payload": {"brief": {"goal": "new"}}}],
+        [{"event": "BriefUpdated", "draft_id": "draft_1", "payload": {"brief": {"goal": "new"}}}],
         engine=engine,
         base_version=0,
         actor="agent",
@@ -377,56 +347,3 @@ def test_validator_can_use_timeline_validator_hook(tmp_path: Path) -> None:
     assert result.validation_failed.violations[0].code == "timeline_frame_invariant_failed"
     assert "timeline.primary_visual.gap" in result.validation_failed.violations[0].message
     _assert_rolled_back(tmp_path)
-
-
-def test_validator_rejects_project_asset_event_with_case_scope_and_rolls_back(
-    tmp_path: Path,
-) -> None:
-    _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
-    engine = create_workspace_engine(tmp_path)
-    with begin_immediate(engine) as connection:
-        connection.execute(
-            schema.assets.insert().values(
-                asset_id="asset_1",
-                storage_mode="reference",
-                object_hash=None,
-                reference_path="/tmp/a.mp4",
-                kind="video",
-                source="local_path",
-                hash="asset_hash",
-                mtime=1,
-                size=1,
-                probe=None,
-                proxy_object_hash=None,
-                ingest_status="imported",
-                usable=False,
-                failure=None,
-            )
-        )
-
-    result = apply(
-        [
-            {
-                "event": "AssetLinked",
-                "project_id": "project_1",
-                "case_id": "case_1",
-                "asset_id": "asset_1",
-            }
-        ],
-        engine=engine,
-        base_version=None,
-        actor="agent",
-        created_at=NOW,
-    )
-
-    with begin_immediate(engine) as connection:
-        link_count = connection.execute(
-            select(func.count()).select_from(schema.project_asset_links)
-        ).scalar_one()
-        event_count = connection.execute(
-            select(func.count()).select_from(schema.event_log)
-        ).scalar_one()
-    assert result.status == "validation_failed"
-    assert link_count == 0
-    assert event_count == 0

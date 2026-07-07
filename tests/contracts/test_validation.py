@@ -57,13 +57,12 @@ def test_copy_mode_rejects_reference_path() -> None:
         )
 
 
-def test_case_scope_decision_requires_case_id() -> None:
+def test_draft_scope_decision_requires_draft_id() -> None:
     with pytest.raises(ValidationError):
         Decision.model_validate(
             {
                 "decision_id": "dec_001",
-                "scope_type": "case",
-                "project_id": "project_001",
+                "scope_type": "draft",
                 "type": "generic",
                 "question": "?",
             }
@@ -75,7 +74,7 @@ def test_patch_request_rejects_frame_fields() -> None:
         TimelinePatchRequest.model_validate(
             {
                 "schema": "TimelinePatchRequest.v1",
-                "case_id": "case_001",
+                "draft_id": "draft_001",
                 "reference": {"timeline_version": 1, "preview_id": "prev_001"},
                 "op": {
                     "kind": "delete_range",
@@ -169,40 +168,34 @@ def test_timeline_state_defensive_clip_type_guards() -> None:
         ).validate_tracks()
 
 
-def test_memory_scope_validators() -> None:
+def test_memory_scope_is_user_only() -> None:
     import pytest as _pytest
 
     from contracts.memory import Memory
 
-    Memory(
+    memory = Memory(
         memory_id="m1",
-        scope="project",
-        project_id="p1",
+        scope="user",
         content="c",
+        created_from_draft_id="draft_001",
         created_at="2026-07-05T00:00:00+00:00",
     )
-    with _pytest.raises(ValueError):
-        Memory(
-            memory_id="m2",
-            scope="project",
-            project_id=None,
-            content="c",
-            created_at="2026-07-05T00:00:00+00:00",
-        )
-    with _pytest.raises(ValueError):
-        Memory(
-            memory_id="m3",
-            scope="user",
-            project_id="p1",
-            content="c",
-            created_at="2026-07-05T00:00:00+00:00",
+    assert memory.scope == "user"
+    with _pytest.raises(ValidationError):
+        Memory.model_validate(
+            {
+                "memory_id": "m2",
+                "scope": "project",
+                "content": "c",
+                "created_at": "2026-07-05T00:00:00+00:00",
+            }
         )
 
 
 def _timeline_payload() -> dict[str, object]:
     return {
-        "timeline_id": "case_001:v1",
-        "case_id": "case_001",
+        "timeline_id": "draft_001:v1",
+        "draft_id": "draft_001",
         "version": 1,
         "fps": 30,
         "duration_frames": 30,
@@ -253,8 +246,8 @@ def _constructed_timeline(replacement: TimelineTrack) -> TimelineState:
             tracks[index] = replacement
             break
     return TimelineState.model_construct(
-        timeline_id="case_001:v1",
-        case_id="case_001",
+        timeline_id="draft_001:v1",
+        draft_id="draft_001",
         version=1,
         fps=30,
         duration_frames=30,

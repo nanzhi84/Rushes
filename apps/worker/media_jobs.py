@@ -42,7 +42,7 @@ def build_proxy_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
             _apply_or_raise(
                 engine,
                 AssetProbed(
-                    project_id=job.project_id,
+                    draft_id=job.draft_id,
                     asset_id=asset_id,
                     job_id=job.job_id,
                     payload={
@@ -59,7 +59,7 @@ def build_proxy_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
             _apply_or_raise(
                 engine,
                 ProxyGenerated(
-                    project_id=job.project_id,
+                    draft_id=job.draft_id,
                     asset_id=asset_id,
                     job_id=job.job_id,
                     payload={
@@ -97,11 +97,11 @@ def build_import_url_handler(
     async def _handler(job: Job) -> JobExecutionResult:
         payload = job.payload_json
         asset_id = _payload_str(payload, "asset_id") or _job_asset_id(job)
-        project_id = _payload_str(payload, "project_id") or job.project_id
+        draft_id = _payload_str(payload, "draft_id") or job.draft_id
         url = _payload_str(payload, "url")
-        if project_id is None or url is None:
+        if draft_id is None or url is None:
             raise JobExecutionError(
-                "import_url job requires project_id and url",
+                "import_url job requires draft_id and url",
                 error_code="invalid_import_url_job",
                 retryable=False,
             )
@@ -124,7 +124,7 @@ def build_import_url_handler(
         object_ref = result.object_ref
         stat_mtime = Path(paths.object_path(object_ref.object_hash)).stat().st_mtime_ns
         imported = AssetImported(
-            project_id=project_id,
+            draft_id=draft_id,
             asset_id=asset_id,
             job_id=job.job_id,
             payload={
@@ -147,12 +147,12 @@ def build_import_url_handler(
                 "content_type": result.content_type,
             },
         )
-        proxy_job = _proxy_job_event(project_id=project_id, asset_id=asset_id)
+        proxy_job = _proxy_job_event(draft_id=draft_id, asset_id=asset_id)
         _apply_many_or_raise(
             engine,
             (
                 imported,
-                AssetLinked(project_id=project_id, asset_id=asset_id),
+                AssetLinked(draft_id=draft_id, asset_id=asset_id),
                 proxy_job,
             ),
         )
@@ -216,14 +216,14 @@ def _apply_many_or_raise(engine: Engine, events: tuple[DomainEventBase, ...]) ->
         )
 
 
-def _proxy_job_event(*, project_id: str, asset_id: str) -> JobEnqueued:
+def _proxy_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:
     import hashlib
 
     idempotency_key = f"asset:{asset_id}:probe_proxy"
     digest = hashlib.sha256(f"proxy:{idempotency_key}".encode()).hexdigest()
     return JobEnqueued(
         job_id=f"job_{digest[:20]}",
-        project_id=project_id,
+        draft_id=draft_id,
         payload={
             "kind": "proxy",
             "asset_id": asset_id,
@@ -236,17 +236,17 @@ def _proxy_job_event(*, project_id: str, asset_id: str) -> JobEnqueued:
 
 
 def _enqueue_index(engine: Engine, job: Job, asset_id: str) -> None:
-    _apply_or_raise(engine, _index_job_event(project_id=job.project_id, asset_id=asset_id))
+    _apply_or_raise(engine, _index_job_event(draft_id=job.draft_id, asset_id=asset_id))
 
 
-def _index_job_event(*, project_id: str | None, asset_id: str) -> JobEnqueued:
+def _index_job_event(*, draft_id: str | None, asset_id: str) -> JobEnqueued:
     import hashlib
 
     idempotency_key = f"asset:{asset_id}:index"
     digest = hashlib.sha256(f"index:{idempotency_key}".encode()).hexdigest()
     return JobEnqueued(
         job_id=f"job_{digest[:20]}",
-        project_id=project_id,
+        draft_id=draft_id,
         payload={
             "kind": "index",
             "asset_id": asset_id,

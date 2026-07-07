@@ -1,8 +1,9 @@
-"""understand.materials（理解子代理派发）与 asset.read_summary 工具（Spec C §C3）。
+"""understand.materials（理解子代理派发，Spec C §C3）。
 
 ``understand.materials`` 是 async handler：turn 内为每个 asset 起一个理解子代理，
 ``asyncio.gather`` 并发（``Semaphore`` 上限、单素材 ``wait_for`` 超时），把每个 asset 的
-摘要全文或失败原因回灌主代理。缓存命中（已有 ready 摘要且无新 focus）直接返回、不起子代理。
+摘要全文或失败原因回灌主代理。缓存命中（已有 ready 摘要且无新 focus）直接返回、不起子代理，
+承接原 ``asset.read_summary`` 的只读取用。
 
 handler 只有只读连接：产出的 material_summaries / transcripts 行通过
 ``ToolResult.data`` 的 ``material_summary_rows`` / ``transcript_rows`` 键交给 loop 的
@@ -46,7 +47,7 @@ from storage.repositories._json import load_json
 from storage.workspace_paths import WorkspacePaths, resolve_asset_path
 from tools.context import ToolExecutionContext
 from tools.media_tools import extract_frame_data_uri
-from tools.specs import AssetReadSummaryInput, UnderstandMaterialsInput
+from tools.specs import UnderstandMaterialsInput
 
 from .asr import transcribe_to_document
 from .subagent import (
@@ -79,7 +80,7 @@ async def materials(
     if connection is None:
         return _failed(tool_name, context, "missing_connection", "需要只读仓库连接")
 
-    project_id = _project_id(context)
+    draft_id = _draft_id(context)
     focus = (input_model.focus or "").strip() or None
     asset_ids = list(dict.fromkeys(input_model.asset_ids))
     gateway = _provider_gateway(context)
@@ -131,38 +132,11 @@ async def materials(
         context,
         asset_ids=asset_ids,
         asset_info=asset_info,
-        project_id=project_id,
+        draft_id=draft_id,
         focus=focus,
         cached=cached,
         missing=missing,
         outcomes=outcomes,
-    )
-
-
-def read_summary(input_model: AssetReadSummaryInput, context: ToolExecutionContext) -> ToolResult:
-    tool_name = "asset.read_summary"
-    connection = context.readonly_connection
-    if connection is None:
-        return _failed(tool_name, context, "missing_connection", "需要只读仓库连接")
-    asset_ids = list(dict.fromkeys(input_model.asset_ids))
-    latest = MaterialSummariesRepository(connection).list_latest_for_assets(asset_ids)
-    summaries: dict[str, dict[str, Any]] = {}
-    lines: list[str] = []
-    for asset_id in asset_ids:
-        row = latest.get(asset_id)
-        if row is None:
-            lines.append(f"【{asset_id}】尚无已理解摘要。")
-            continue
-        summary = dict(row["summary_json"])
-        summaries[asset_id] = summary
-        lines.append(_summary_text(asset_id, _filename_hint(summary, asset_id), summary))
-    observation = "\n".join(lines) if lines else "没有可返回的素材摘要。"
-    return ToolResult(
-        tool_call_id=context.tool_call_id,
-        tool_name=tool_name,
-        status="succeeded",
-        observation=observation,
-        data={"summaries": summaries, "missing": [a for a in asset_ids if a not in summaries]},
     )
 
 
@@ -198,7 +172,7 @@ def _assemble_result(
     *,
     asset_ids: list[str],
     asset_info: Mapping[str, _AssetInfo],
-    project_id: str | None,
+    draft_id: str | None,
     focus: str | None,
     cached: Mapping[str, dict[str, Any]],
     missing: list[str],
@@ -225,7 +199,7 @@ def _assemble_result(
             continue
         outcome = outcomes[asset_id]
         # 只对真实存在的素材派事件：给不存在的 asset 发事件会在 reducer 里插出幽灵行。
-        events.append(_event(MaterialUnderstandingStarted, asset_id, project_id))
+        events.append(_event(MaterialUnderstandingStarted, asset_id, draft_id))
         if outcome.status == "ready" and outcome.summary is not None:
             summary = outcome.summary.model_dump(mode="json")
             summary_rows.append(_summary_row(outcome.summary, focus=focus))
@@ -234,12 +208,12 @@ def _assemble_result(
                 transcript_rows.append(
                     _transcript_row(context.turn_id, asset_id, transcript_seq, result)
                 )
-            events.append(_event(MaterialUnderstandingCompleted, asset_id, project_id))
+            events.append(_event(MaterialUnderstandingCompleted, asset_id, draft_id))
             results[asset_id] = {"status": "ready", "summary": summary}
             lines.append(_summary_text(asset_id, filename, summary))
         else:
             reason = outcome.failure_reason or "未知原因"
-            events.append(_event(MaterialUnderstandingFailed, asset_id, project_id))
+            events.append(_event(MaterialUnderstandingFailed, asset_id, draft_id))
             results[asset_id] = {"status": "failed", "reason": reason}
             lines.append(f"【{asset_id}/{filename}】理解失败：{reason}。")
 
@@ -269,13 +243,10 @@ def _make_spec(
     model: str,
     progress: Any,
 ) -> SubagentSpec:
-    case_id = context.case_state.case_id if context.case_state is not None else None
-
     async def _vlm(messages: list[dict[str, Any]]) -> dict[str, Any]:
         request = ProviderRequest(
             capability=VLM_UNDERSTANDING,
             request_id=f"understand_vlm_{info.asset_id}_{uuid4().hex}",
-            case_id=case_id,
             model=model,
             payload={
                 "messages": messages,
@@ -516,9 +487,9 @@ def _summary_text(asset_id: str, filename: str, summary: Mapping[str, Any]) -> s
 def _event(
     event_class: Callable[..., DomainEventBase],
     asset_id: str,
-    project_id: str | None,
+    draft_id: str | None,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = event_class(asset_id=asset_id, project_id=project_id).model_dump(
+    payload: dict[str, Any] = event_class(asset_id=asset_id, draft_id=draft_id).model_dump(
         mode="json"
     )
     return payload
@@ -578,15 +549,9 @@ def _has_audio(kind: str, index_json: dict[str, Any] | None, probe: dict[str, An
     )
 
 
-def _filename_hint(summary: Mapping[str, Any], asset_id: str) -> str:
-    return asset_id
-
-
-def _project_id(context: ToolExecutionContext) -> str | None:
-    if context.project_state is not None:
-        return context.project_state.project_id
-    if context.case_state is not None:
-        return context.case_state.project_id
+def _draft_id(context: ToolExecutionContext) -> str | None:
+    if context.draft_state is not None:
+        return context.draft_state.draft_id
     return None
 
 

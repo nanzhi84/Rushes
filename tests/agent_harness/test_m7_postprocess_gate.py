@@ -8,13 +8,12 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Connection
 
 from agent_harness.policy_gate import PolicyContext, PolicyGate, mark_replayed, next_replay
-from contracts.case import CaseState
 from contracts.decision import DecisionAnswer
+from contracts.draft import DraftState
 from contracts.patch import AddBgmOp, GenerateSubtitlesOp, TimelinePatchRequest
-from contracts.project import ProjectState
 from contracts.tool import PatchOpSpec, ToolSpec
 from domain.decision_effects import pending_tool_call_status_after_answer, reduce_decision_answer
-from domain.preconditions import PreconditionContext, ProjectArtifactStats, ProjectAudioAsset
+from domain.preconditions import DraftArtifactStats, DraftAudioAsset, PreconditionContext
 from domain.subtitle_templates import list_subtitle_templates
 from storage import schema
 from storage.db import create_workspace_engine
@@ -30,7 +29,7 @@ class EmptyInput(BaseModel):
 class FinalMp4Input(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    case_id: str
+    draft_id: str
 
 
 def test_subtitle_gate_options_reduce_and_replay_or_discard() -> None:
@@ -60,7 +59,7 @@ def test_subtitle_gate_options_reduce_and_replay_or_discard() -> None:
     template_answer = DecisionAnswer.model_validate(
         {"option_id": "clean_bottom", "answered_via": "button", "payload": {}}
     )
-    template_result = reduce_decision_answer(_case_state(), ask.decision, template_answer)
+    template_result = reduce_decision_answer(_draft_state(), ask.decision, template_answer)
 
     assert template_result.state_patch["postprocess_plan"]["subtitle"] == {
         "enabled": True,
@@ -74,7 +73,7 @@ def test_subtitle_gate_options_reduce_and_replay_or_discard() -> None:
     skip_answer = DecisionAnswer.model_validate(
         {"option_id": "skip", "answered_via": "button", "payload": {}}
     )
-    skip_result = reduce_decision_answer(_case_state(), ask.decision, skip_answer)
+    skip_result = reduce_decision_answer(_draft_state(), ask.decision, skip_answer)
 
     assert skip_result.state_patch["postprocess_plan"]["subtitle"] == {
         "enabled": False,
@@ -91,7 +90,7 @@ def test_subtitle_gate_options_reduce_and_replay_or_discard() -> None:
     )
 
 
-def test_bgm_gate_uses_upload_skip_or_project_assets() -> None:
+def test_bgm_gate_uses_upload_skip_or_draft_assets() -> None:
     gate = _gate()
     call = _timeline_patch_call(
         {"kind": "add_bgm", "asset_id": "asset_bgm_1", "gain_db": -12.0, "duck": True}
@@ -105,7 +104,7 @@ def test_bgm_gate_uses_upload_skip_or_project_assets() -> None:
         call,
         _context(
             allowed_tool_names=frozenset({"timeline.apply_patch"}),
-            project_audio_assets=(ProjectAudioAsset(asset_id="asset_bgm_1", filename="配乐.m4a"),),
+            draft_audio_assets=(DraftAudioAsset(asset_id="asset_bgm_1", filename="配乐.m4a"),),
         ),
     )
 
@@ -117,7 +116,7 @@ def test_bgm_gate_uses_upload_skip_or_project_assets() -> None:
     upload_answer = DecisionAnswer.model_validate(
         {"option_id": "upload_bgm", "answered_via": "button", "payload": {}}
     )
-    upload_result = reduce_decision_answer(_case_state(), no_asset.decision, upload_answer)
+    upload_result = reduce_decision_answer(_draft_state(), no_asset.decision, upload_answer)
     assert "postprocess_plan" not in upload_result.state_patch
     assert upload_result.state_patch["scratch_memory"]["pending_intents"] == [
         "请上传 BGM 素材，上传完成后重新发起添加 BGM。"
@@ -148,9 +147,9 @@ def test_bgm_gate_uses_upload_skip_or_project_assets() -> None:
 
 def test_export_gate_persists_pending_replay_and_mentions_unviewed_preview() -> None:
     verdict = _gate().adjudicate(
-        {"tool_name": "render.final_mp4", "arguments": {"case_id": "case_1"}},
+        {"tool_name": "render.final_mp4", "arguments": {"draft_id": "draft_1"}},
         _context(
-            _case_state(preview_current_id="preview_new", last_viewed_preview_id="preview_old"),
+            _draft_state(preview_current_id="preview_new", last_viewed_preview_id="preview_old"),
             allowed_tool_names=frozenset({"render.final_mp4"}),
         ),
     )
@@ -198,7 +197,7 @@ def test_subtitle_patch_does_not_create_timeline_version_before_decision(
     engine = create_workspace_engine(tmp_path)
     with engine.begin() as connection:
         schema.create_all(connection)
-        _seed_project_case_and_timeline(connection)
+        _seed_draft_and_timeline(connection)
         call = _timeline_patch_call(
             {
                 "kind": "generate_subtitles",
@@ -228,7 +227,7 @@ def _tool(
     namespace: str | None = None,
     input_model: type[BaseModel] = EmptyInput,
     requires_artifacts: list[str] | None = None,
-    requires_active_case: bool = False,
+    requires_active_draft: bool = False,
     requires_confirmation: bool = False,
     confirmation_decision_type: str | None = None,
     side_effects: list[Any] | None = None,
@@ -243,10 +242,9 @@ def _tool(
         input_model=input_model,
         result_model=None,
         handler_ref=f"handlers.{name}",
-        allowed_scopes=["case_agent_console"],
+        allowed_scopes=["draft_editor"],
         requires_artifacts=requires_artifacts or [],
-        requires_active_project=True,
-        requires_active_case=requires_active_case,
+        requires_active_draft=requires_active_draft,
         requires_confirmation=requires_confirmation,
         confirmation_decision_type=confirmation_decision_type,
         side_effects=side_effects or [],
@@ -265,7 +263,7 @@ def _tool_specs() -> dict[str, ToolSpec]:
             namespace="timeline",
             input_model=TimelinePatchRequest,
             requires_artifacts=["timeline_exists"],
-            requires_active_case=True,
+            requires_active_draft=True,
             side_effects=["timeline"],
         ),
         "render.final_mp4": _tool(
@@ -273,7 +271,7 @@ def _tool_specs() -> dict[str, ToolSpec]:
             namespace="render",
             input_model=FinalMp4Input,
             requires_artifacts=["timeline_validated", "preview_for_current_version_exists"],
-            requires_active_case=True,
+            requires_active_draft=True,
             requires_confirmation=True,
             confirmation_decision_type="export",
             side_effects=["job"],
@@ -308,62 +306,44 @@ def _gate() -> PolicyGate:
 
 
 def _context(
-    case_state: CaseState | None = None,
+    draft_state: DraftState | None = None,
     *,
     allowed_tool_names: frozenset[str],
-    project_audio_assets: tuple[ProjectAudioAsset, ...] = (),
+    draft_audio_assets: tuple[DraftAudioAsset, ...] = (),
 ) -> PolicyContext:
     return PolicyContext(
         preconditions=PreconditionContext(
-            case_state=case_state or _case_state(),
-            project_state=_project_state(),
-            project_artifacts=ProjectArtifactStats(usable_asset_count=1),
-            project_audio_assets=project_audio_assets,
+            draft_state=draft_state or _draft_state(),
+            draft_artifacts=DraftArtifactStats(usable_asset_count=1),
+            draft_audio_assets=draft_audio_assets,
         ),
         allowed_tool_names=allowed_tool_names,
     )
 
 
-def _case_state(**overrides: object) -> CaseState:
+def _draft_state(**overrides: object) -> DraftState:
     data = {
-        "case_id": "case_1",
-        "project_id": "project_1",
-        "name": "Case",
+        "draft_id": "draft_1",
+        "name": "Draft",
         "brief": {"goal": "make a video", "confirmed_facts": []},
+        "defaults": {"aspect_ratio": "9:16", "fps": 30},
         "timeline_current_version": 1,
         "timeline_validated": True,
         "preview_current_id": "preview_1",
         "last_viewed_preview_id": "preview_1",
         "rough_cut_approved": True,
         "rough_cut_approved_version": 1,
-        "selected_asset_ids": [],
-        "disabled_asset_ids": [],
         "scratch_memory": {},
     }
     data.update(overrides)
-    return CaseState.model_validate(data)
-
-
-def _project_state() -> ProjectState:
-    return ProjectState.model_validate(
-        {
-            "project_id": "project_1",
-            "name": "Project",
-            "status": "active",
-            "asset_links": [],
-            "case_ids": ["case_1"],
-            "memory_ids": [],
-            "created_at": NOW,
-            "updated_at": NOW,
-        }
-    )
+    return DraftState.model_validate(data)
 
 
 def _timeline_patch_call(op: dict[str, Any]) -> dict[str, Any]:
     return {
         "tool_name": "timeline.apply_patch",
         "arguments": {
-            "case_id": "case_1",
+            "draft_id": "draft_1",
             "reference": {"timeline_version": 1, "preview_id": "preview_1"},
             "op": op,
             "reason": "postprocess",
@@ -371,39 +351,29 @@ def _timeline_patch_call(op: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _seed_project_case_and_timeline(connection: Connection) -> None:
+def _seed_draft_and_timeline(connection: Connection) -> None:
     connection.execute(
-        schema.projects.insert().values(
-            project_id="project_1",
-            name="Project",
-            status="active",
-            defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
-            created_at=NOW,
-            updated_at=NOW,
-        )
-    )
-    connection.execute(
-        schema.cases.insert().values(
-            case_id="case_1",
-            project_id="project_1",
-            name="Case",
+        schema.drafts.insert().values(
+            draft_id="draft_1",
+            name="Draft",
             state_version=0,
             status="active",
+            defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
             timeline_current_version=1,
             timeline_validated=True,
             rough_cut_approved=True,
             rough_cut_approved_version=1,
             running_jobs="[]",
             brief=dump_json({"goal": "make a video", "confirmed_facts": []}),
-            selected_asset_ids="[]",
-            disabled_asset_ids="[]",
             scratch_memory="{}",
+            created_at=NOW,
+            updated_at=NOW,
         )
     )
     connection.execute(
         schema.timeline_versions.insert().values(
-            timeline_id="case_1:v1",
-            case_id="case_1",
+            timeline_id="draft_1:v1",
+            draft_id="draft_1",
             version=1,
             parent_version=None,
             created_by_patch_id=None,
@@ -416,8 +386,8 @@ def _seed_project_case_and_timeline(connection: Connection) -> None:
 
 def _timeline_doc() -> dict[str, Any]:
     return {
-        "timeline_id": "case_1:v1",
-        "case_id": "case_1",
+        "timeline_id": "draft_1:v1",
+        "draft_id": "draft_1",
         "version": 1,
         "fps": 30,
         "duration_frames": 90,

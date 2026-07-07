@@ -143,7 +143,8 @@ async def test_golden_version_conflict_retries_on_new_state(tmp_path: Path) -> N
 
 async def test_golden_understand_summary_then_compose_initial(tmp_path: Path) -> None:
     # Spec C 主链路：主代理派理解子代理（脚本化 VLM 经 MockProvider 立即 emit_summary）
-    # → 读回摘要 → 基于摘要时间戳直接 compose_initial 组装初剪 → 纯 content 步收尾。
+    # → 再次 understand.materials 命中缓存直接读回摘要（承接原 asset.read_summary）
+    # → 基于摘要时间戳直接 compose_initial 组装初剪 → 纯 content 步收尾。
     case = GoldenCase(
         name="understand_summary_compose_initial",
         build_workspace=understand_compose_workspace,
@@ -158,7 +159,7 @@ async def test_golden_understand_summary_then_compose_initial(tmp_path: Path) ->
             },
             {
                 "tool_call": {
-                    "tool_name": "asset.read_summary",
+                    "tool_name": "understand.materials",
                     "arguments": {"asset_ids": ["asset_1"]},
                 }
             },
@@ -184,7 +185,7 @@ async def test_golden_understand_summary_then_compose_initial(tmp_path: Path) ->
         ),
         expected_tool_trace=(
             ExpectedToolTrace("understand.materials", "succeeded"),
-            ExpectedToolTrace("asset.read_summary", "succeeded"),
+            ExpectedToolTrace("understand.materials", "succeeded"),
             ExpectedToolTrace("timeline.compose_initial", "succeeded"),
         ),
         assertions=GoldenAssertions(assert_final=_assert_understand_compose_final),
@@ -202,8 +203,8 @@ def _narration_messages(result: GoldenRunResult) -> list[dict[str, object]]:
 
 
 def _assert_pending_decision_final(result: GoldenRunResult) -> None:
-    assert result.case_state.pending_decision_id is None
-    assert result.case_state.scratch_memory
+    assert result.draft_state.pending_decision_id is None
+    assert result.draft_state.scratch_memory
     assert "PolicyRefusal" in result.event_types
     assert "DecisionAnswered" in result.event_types
     # content 终止协议：恢复后靠纯 content 步收尾——reply 行落库 + TurnEnded。
@@ -221,14 +222,14 @@ def _assert_narration_then_tool_final(result: GoldenRunResult) -> None:
     # 随后纯 content 步收尾。
     replies = _reply_messages(result)
     assert [message["content"] for message in replies] == ["时间线已就绪。"]
-    assert result.case_state.timeline_current_version == 1
+    assert result.draft_state.timeline_current_version == 1
     assert result.event_types.count("TimelineVersionCreated") == 1
     assert "TurnEnded" in result.event_types
 
 
 def _assert_illegal_tool_final(result: GoldenRunResult) -> None:
     assert result.event_types.count("PolicyRefusal") == 3
-    assert result.case_state.state_version == 0
+    assert result.draft_state.state_version == 0
     # 连续非法输出触顶后由 harness 兜底：写一条 reply 行 + TurnEnded 收尾。
     assert "TurnEnded" in result.event_types
     replies = _reply_messages(result)
@@ -238,8 +239,8 @@ def _assert_illegal_tool_final(result: GoldenRunResult) -> None:
 
 
 def _assert_version_conflict_final(result: GoldenRunResult) -> None:
-    assert result.case_state.timeline_current_version == 1
-    assert result.case_state.state_version == 2
+    assert result.draft_state.timeline_current_version == 1
+    assert result.draft_state.state_version == 2
     assert result.event_types.count("TimelineVersionCreated") == 1
     # 重试成功后靠纯 content 步收尾，最后一条 reply 即成功回复。
     assert "TurnEnded" in result.event_types
@@ -254,14 +255,15 @@ def _assert_understand_compose_final(result: GoldenRunResult) -> None:
     tool_names = [trace.tool_name for trace in result.traces]
     assert tool_names == [
         "understand.materials",
-        "asset.read_summary",
+        "understand.materials",
         "timeline.compose_initial",
     ]
-    # read_summary 同 turn 命中刚落库的摘要（观察串里带 overall 正文），证明 mid-turn 持久化生效。
-    read_summary_trace = result.traces[1]
-    assert "城市天际线" in read_summary_trace.observation
+    # 第二次 understand.materials 同 turn 命中刚落库的摘要（观察串带「缓存命中」+overall 正文），
+    # 证明 mid-turn 持久化生效、缓存路径承接了原 asset.read_summary 的取用职责。
+    cached_summary_trace = result.traces[1]
+    assert "城市天际线" in cached_summary_trace.observation
     # 摘要时间戳直接组装出 v1 初剪并通过校验。
-    assert result.case_state.timeline_current_version == 1
+    assert result.draft_state.timeline_current_version == 1
     assert result.event_types.count("TimelineVersionCreated") == 1
     assert "TimelineValidated" in result.event_types
     # 纯 content 步收尾。

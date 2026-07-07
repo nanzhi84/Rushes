@@ -9,19 +9,19 @@ import { StatusBadge, understandingBadgeProps } from "./StatusBadge";
 import { useMaterialsEvents } from "./useMaterialsEvents";
 
 type AssetsPanelProps = {
-  projectId: string;
+  draftId: string;
   /** 点击素材瓦片时触发，工作台用来在预览区试看。 */
   onPreviewAsset?: (asset: MaterialAsset) => void;
   previewingAssetId?: string | null;
   enableEvents?: boolean;
-  /** 管理模式（项目详情素材 tab）：瓦片菜单 + 摘要详情 + 失效重检。 */
+  /** 管理模式：瓦片菜单 + 摘要详情 + 失效重检。 */
   management?: boolean;
   gridClassName?: string;
 };
 
 /** 素材面板：文件夹分组网格；导入只走「系统原生选择框 → reference 零拷贝索引」。 */
 export function AssetsPanel({
-  projectId,
+  draftId,
   onPreviewAsset,
   previewingAssetId = null,
   enableEvents = true,
@@ -39,14 +39,14 @@ export function AssetsPanel({
   const [relocatingAsset, setRelocatingAsset] = useState<MaterialAsset | null>(null);
 
   const materialsQuery = useQuery({
-    queryKey: queryKeys.materials(projectId),
-    queryFn: () => api.listMaterials(projectId),
+    queryKey: queryKeys.materials(draftId),
+    queryFn: () => api.listMaterials(draftId),
     refetchInterval: 5_000
   });
-  useMaterialsEvents(projectId, enableEvents);
+  useMaterialsEvents(draftId, enableEvents);
 
   const invalidateMaterials = async (): Promise<void> => {
-    await queryClient.invalidateQueries({ queryKey: queryKeys.materials(projectId) });
+    await queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) });
   };
 
   /** 后端弹 macOS 原生选择框拿绝对路径 → reference 原地索引（零拷贝，不占双份磁盘）。 */
@@ -62,7 +62,7 @@ export function AssetsPanel({
       if (picked.paths.length === 0) {
         return; // 用户取消
       }
-      const response = await api.importLocalMaterial(projectId, {
+      const response = await api.importLocalMaterial(draftId, {
         paths: picked.paths,
         storage_mode: "reference"
       });
@@ -77,30 +77,28 @@ export function AssetsPanel({
     }
   }
 
-  const unlinkMaterial = useMutation({
-    mutationFn: (asset: MaterialAsset) =>
-      api.unlinkMaterial(projectId, { asset_id: asset.asset_id }),
+  const deleteMaterial = useMutation({
+    mutationFn: (asset: MaterialAsset) => api.deleteMaterial(draftId, asset.asset_id),
     onSuccess: invalidateMaterials
   });
 
-  const patchMaterial = useMutation({
-    mutationFn: ({
-      asset,
-      payload
-    }: {
-      asset: MaterialAsset;
-      payload: { enabled?: boolean; reference_path?: string };
-    }) => api.patchMaterial(projectId, asset.asset_id, payload),
-    onSuccess: async () => {
+  // 后端已无原地改 reference 的 PATCH；失效素材「重新定位」= 从新路径重新原地索引。
+  const relocateMaterial = useMutation({
+    mutationFn: (path: string) =>
+      api.importLocalMaterial(draftId, { paths: [path], storage_mode: "reference" }),
+    onSuccess: async (response) => {
       setRelocatingAsset(null);
+      setSkippedFiles(response.skipped ?? []);
+      setFailedFiles(response.failed ?? []);
+      setDuplicateFiles(response.duplicates ?? []);
       await invalidateMaterials();
     }
   });
 
   const revalidateMaterials = useMutation({
-    mutationFn: () => api.revalidateMaterials(projectId),
+    mutationFn: () => api.revalidateMaterials(draftId),
     onSuccess: (response) => {
-      queryClient.setQueryData(queryKeys.materials(projectId), response);
+      queryClient.setQueryData(queryKeys.materials(draftId), response);
     }
   });
 
@@ -113,8 +111,8 @@ export function AssetsPanel({
     : null;
   const actionPending =
     picking ||
-    unlinkMaterial.isPending ||
-    patchMaterial.isPending ||
+    deleteMaterial.isPending ||
+    relocateMaterial.isPending ||
     revalidateMaterials.isPending;
 
   return (
@@ -219,13 +217,10 @@ export function AssetsPanel({
                       ? () => onPreviewAsset(asset)
                       : undefined
                 }
-                onToggleEnabled={() =>
-                  patchMaterial.mutate({ asset, payload: { enabled: !asset.enabled } })
-                }
                 onRelocate={() => setRelocatingAsset(asset)}
-                onUnlink={() => {
+                onDelete={() => {
                   if (window.confirm(`删除素材引用：${asset.filename || asset.asset_id}？`)) {
-                    unlinkMaterial.mutate(asset);
+                    deleteMaterial.mutate(asset);
                   }
                 }}
               />
@@ -259,7 +254,7 @@ export function AssetsPanel({
       {management && activeAsset ? (
         <div className="max-h-[45%] shrink-0 overflow-y-auto border-t border-line p-3">
           <MaterialSummaryPanel
-            projectId={projectId}
+            draftId={draftId}
             asset={activeAsset}
             onClose={() => setActiveAssetId(null)}
           />
@@ -272,14 +267,7 @@ export function AssetsPanel({
           title="重新定位失效素材"
           submitLabel="使用此路径"
           onClose={() => setRelocatingAsset(null)}
-          onSelect={(path) => {
-            if (relocatingAsset) {
-              patchMaterial.mutate({
-                asset: relocatingAsset,
-                payload: { reference_path: path }
-              });
-            }
-          }}
+          onSelect={(path) => relocateMaterial.mutate(path)}
         />
       ) : null}
     </section>
@@ -317,18 +305,16 @@ function AssetTile({
   management,
   actionPending,
   onClick,
-  onToggleEnabled,
   onRelocate,
-  onUnlink
+  onDelete
 }: {
   asset: MaterialAsset;
   active: boolean;
   management: boolean;
   actionPending: boolean;
   onClick?: () => void;
-  onToggleEnabled: () => void;
   onRelocate: () => void;
-  onUnlink: () => void;
+  onDelete: () => void;
 }): ReactElement {
   const [thumbFailed, setThumbFailed] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -337,7 +323,7 @@ function AssetTile({
     <div
       className={`group relative overflow-hidden rounded-md border transition-colors ${
         active ? "border-accent" : "border-line hover:border-line-strong"
-      } ${asset.enabled && asset.usable ? "" : "opacity-50"}`}
+      } ${asset.usable ? "" : "opacity-50"}`}
       onMouseLeave={() => setMenuOpen(false)}
     >
       <button
@@ -395,15 +381,10 @@ function AssetTile({
           </button>
           {menuOpen ? (
             <div className="absolute right-1 top-8 z-10 w-28 overflow-hidden rounded-md border border-line bg-raised py-1 text-xs">
-              <TileMenuItem
-                label={asset.enabled ? "禁用" : "启用"}
-                disabled={actionPending}
-                onClick={onToggleEnabled}
-              />
               {asset.invalid ? (
                 <TileMenuItem label="重新定位" disabled={actionPending} onClick={onRelocate} />
               ) : null}
-              <TileMenuItem label="删除引用" danger disabled={actionPending} onClick={onUnlink} />
+              <TileMenuItem label="删除引用" danger disabled={actionPending} onClick={onDelete} />
             </div>
           ) : null}
         </>

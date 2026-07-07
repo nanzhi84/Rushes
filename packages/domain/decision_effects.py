@@ -6,15 +6,15 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
-from contracts.case import (
+from contracts.decision import Decision, DecisionAnswer, DecisionType, PendingToolCall
+from contracts.draft import (
     AudioPlan,
     Brief,
-    CaseState,
     CutPlan,
+    DraftState,
     PostprocessPlan,
     RemovedRange,
 )
-from contracts.decision import Decision, DecisionAnswer, DecisionType, PendingToolCall
 from contracts.events import (
     AudioPlanUpdated,
     BriefUpdated,
@@ -51,7 +51,7 @@ class DecisionEffectResult:
     followups: tuple[HarnessFollowup, ...] = ()
 
 
-type EffectFn = Callable[[CaseState, Decision, DecisionAnswer], DecisionEffectResult]
+type EffectFn = Callable[[DraftState, Decision, DecisionAnswer], DecisionEffectResult]
 
 
 class MissingDecisionEffectError(ValueError):
@@ -76,46 +76,46 @@ def validate_all_decision_types_registered() -> None:
 
 
 def reduce_decision_answer(
-    case_state: CaseState,
+    draft_state: DraftState,
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
     validate_decision_registered(decision)
-    effect = decision_effects_registry[decision.type](case_state, decision, answer)
-    return _with_side_intents(case_state, effect, answer)
+    effect = decision_effects_registry[decision.type](draft_state, decision, answer)
+    return _with_side_intents(draft_state, effect, answer)
 
 
 def _audio_mode_effect(
-    case_state: CaseState,
+    draft_state: DraftState,
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
     del decision
     mode = str(answer.payload.get("mode") or answer.option_id or "")
-    audio_plan = _model_dump(case_state.audio_plan) if case_state.audio_plan is not None else {}
+    audio_plan = _model_dump(draft_state.audio_plan) if draft_state.audio_plan is not None else {}
     audio_plan["mode"] = mode
     validated = AudioPlan.model_validate(audio_plan).model_dump(mode="json")
     return DecisionEffectResult(
         state_patch={"audio_plan": validated},
         followup_events=(
-            AudioPlanUpdated(case_id=case_state.case_id, payload={"audio_plan": validated}),
+            AudioPlanUpdated(draft_id=draft_state.draft_id, payload={"audio_plan": validated}),
         ),
     )
 
 
 def _approve_content_plan_effect(
-    case_state: CaseState,
+    draft_state: DraftState,
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
     del decision, answer
-    content_plan = dict(case_state.content_plan or {})
+    content_plan = dict(draft_state.content_plan or {})
     content_plan["status"] = "approved"
     return DecisionEffectResult(
         state_patch={"content_plan": content_plan},
         followup_events=(
             ContentPlanUpdated(
-                case_id=case_state.case_id,
+                draft_id=draft_state.draft_id,
                 payload={"content_plan": content_plan},
             ),
         ),
@@ -123,7 +123,7 @@ def _approve_content_plan_effect(
 
 
 def _approve_speech_cut_effect(
-    case_state: CaseState,
+    draft_state: DraftState,
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
@@ -132,21 +132,21 @@ def _approve_speech_cut_effect(
     removed_ranges = [
         RemovedRange.model_validate(item).model_dump(mode="json") for item in ranges_payload
     ]
-    cut_plan = _model_dump(case_state.cut_plan) if case_state.cut_plan is not None else {}
+    cut_plan = _model_dump(draft_state.cut_plan) if draft_state.cut_plan is not None else {}
     cut_plan.setdefault("schema", "CutPlan.v1")
     cut_plan.setdefault("slots", [])
     cut_plan.setdefault("total_target_duration_sec", payload.get("total_target_duration_sec", 0.0))
     cut_plan["removed_ranges"] = removed_ranges
     validated = CutPlan.model_validate(cut_plan).model_dump(mode="json", by_alias=True)
     followups: list[HarnessFollowup] = []
-    if case_state.timeline_current_version is not None:
+    if draft_state.timeline_current_version is not None:
         followups.append(
             HarnessFollowup(
                 kind="enqueue_delete_range_patches",
                 decision_id=decision.decision_id,
                 payload={
-                    "case_id": case_state.case_id,
-                    "timeline_version": case_state.timeline_current_version,
+                    "draft_id": draft_state.draft_id,
+                    "timeline_version": draft_state.timeline_current_version,
                     "removed_ranges": removed_ranges,
                 },
             )
@@ -154,14 +154,14 @@ def _approve_speech_cut_effect(
     return DecisionEffectResult(
         state_patch={"cut_plan": validated},
         followup_events=(
-            CutPlanUpdated(case_id=case_state.case_id, payload={"cut_plan": validated}),
+            CutPlanUpdated(draft_id=draft_state.draft_id, payload={"cut_plan": validated}),
         ),
         followups=tuple(followups),
     )
 
 
 def _approve_rough_cut_effect(
-    case_state: CaseState,
+    draft_state: DraftState,
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
@@ -169,8 +169,8 @@ def _approve_rough_cut_effect(
     timeline_version = payload.get("timeline_version")
     if not isinstance(timeline_version, int):
         # 决策创建方（LLM 的 confirm_action）常不带版本号：确认语义即
-        # "当前版本"，兜底取 case 当前 timeline（M9 路径 1 实测 500）
-        timeline_version = case_state.timeline_current_version
+        # "当前版本"，兜底取草稿当前 timeline（M9 路径 1 实测 500）
+        timeline_version = draft_state.timeline_current_version
     if not isinstance(timeline_version, int):
         raise ValueError("approve_rough_cut requires integer timeline_version")
     return DecisionEffectResult(
@@ -182,7 +182,7 @@ def _approve_rough_cut_effect(
 
 
 def _subtitle_effect(
-    case_state: CaseState,
+    draft_state: DraftState,
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
@@ -195,7 +195,9 @@ def _subtitle_effect(
     if enabled and subtitle["style_template_id"] is None and answer.option_id is not None:
         subtitle["style_template_id"] = answer.option_id
     postprocess_plan = (
-        _model_dump(case_state.postprocess_plan) if case_state.postprocess_plan is not None else {}
+        _model_dump(draft_state.postprocess_plan)
+        if draft_state.postprocess_plan is not None
+        else {}
     )
     postprocess_plan["subtitle"] = subtitle
     validated = PostprocessPlan.model_validate(postprocess_plan).model_dump(mode="json")
@@ -203,7 +205,7 @@ def _subtitle_effect(
         state_patch={"postprocess_plan": validated},
         followup_events=(
             PostprocessPlanUpdated(
-                case_id=case_state.case_id,
+                draft_id=draft_state.draft_id,
                 payload={"postprocess_plan": validated},
             ),
         ),
@@ -212,7 +214,7 @@ def _subtitle_effect(
 
 
 def _bgm_effect(
-    case_state: CaseState,
+    draft_state: DraftState,
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
@@ -229,7 +231,7 @@ def _bgm_effect(
         return DecisionEffectResult(
             state_patch={
                 "scratch_memory": _scratch_memory_with_pending_intent(
-                    case_state,
+                    draft_state,
                     "请上传 BGM 素材，上传完成后重新发起添加 BGM。",
                 )
             }
@@ -244,7 +246,9 @@ def _bgm_effect(
     if enabled and bgm["asset_id"] is None and answer.option_id is not None:
         bgm["asset_id"] = answer.option_id
     postprocess_plan = (
-        _model_dump(case_state.postprocess_plan) if case_state.postprocess_plan is not None else {}
+        _model_dump(draft_state.postprocess_plan)
+        if draft_state.postprocess_plan is not None
+        else {}
     )
     postprocess_plan["bgm"] = bgm
     validated = PostprocessPlan.model_validate(postprocess_plan).model_dump(mode="json")
@@ -252,7 +256,7 @@ def _bgm_effect(
         state_patch={"postprocess_plan": validated},
         followup_events=(
             PostprocessPlanUpdated(
-                case_id=case_state.case_id,
+                draft_id=draft_state.draft_id,
                 payload={"postprocess_plan": validated},
             ),
         ),
@@ -261,16 +265,16 @@ def _bgm_effect(
 
 
 def _export_effect(
-    case_state: CaseState,
+    draft_state: DraftState,
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
-    del case_state
+    del draft_state
     return DecisionEffectResult(followups=_replay_followups(decision, answer))
 
 
 def _memory_scope_effect(
-    case_state: CaseState,
+    draft_state: DraftState,
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
@@ -279,8 +283,8 @@ def _memory_scope_effect(
     scope = payload.get("scope") or answer.option_id
     if not isinstance(candidate_id, str):
         raise ValueError("memory_scope requires candidate_id")
-    if scope not in {"user", "project", "skip"}:
-        raise ValueError("memory_scope scope must be user, project, or skip")
+    if scope not in {"user", "skip"}:
+        raise ValueError("memory_scope scope must be user or skip")
     if scope == "skip":
         return DecisionEffectResult(
             followups=(
@@ -288,7 +292,7 @@ def _memory_scope_effect(
                     kind="discard_memory_candidate",
                     decision_id=decision.decision_id,
                     payload={
-                        "case_id": case_state.case_id,
+                        "draft_id": draft_state.draft_id,
                         "candidate_id": candidate_id,
                     },
                 ),
@@ -300,7 +304,7 @@ def _memory_scope_effect(
                 kind="enqueue_memory_save",
                 decision_id=decision.decision_id,
                 payload={
-                    "case_id": case_state.case_id,
+                    "draft_id": draft_state.draft_id,
                     "candidate_id": candidate_id,
                     "scope": scope,
                 },
@@ -309,26 +313,17 @@ def _memory_scope_effect(
     )
 
 
-def _destructive_project_action_effect(
-    case_state: CaseState,
-    decision: Decision,
-    answer: DecisionAnswer,
-) -> DecisionEffectResult:
-    del case_state
-    return DecisionEffectResult(followups=_replay_followups(decision, answer))
-
-
 def _url_import_effect(
-    case_state: CaseState,
+    draft_state: DraftState,
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
-    del case_state
+    del draft_state
     return DecisionEffectResult(followups=_replay_followups(decision, answer))
 
 
 def _generic_effect(
-    case_state: CaseState,
+    draft_state: DraftState,
     decision: Decision,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
@@ -338,7 +333,7 @@ def _generic_effect(
     if not isinstance(text, str) or text == "":
         raise ValueError("generic decisions require a reducible text value")
     if reduce_target == "brief.confirmed_facts":
-        brief = _model_dump(case_state.brief)
+        brief = _model_dump(draft_state.brief)
         facts = list(brief.get("confirmed_facts", []))
         if text not in facts:
             facts.append(text)
@@ -347,17 +342,17 @@ def _generic_effect(
         return DecisionEffectResult(
             state_patch={"brief": validated},
             followup_events=(
-                BriefUpdated(case_id=case_state.case_id, payload={"brief": validated}),
+                BriefUpdated(draft_id=draft_state.draft_id, payload={"brief": validated}),
             ),
         )
     if reduce_target == "scratch_memory":
         key = payload.get("key")
-        scratch_memory = dict(case_state.scratch_memory)
+        scratch_memory = dict(draft_state.scratch_memory)
         scratch_memory[str(key or decision.decision_id)] = text
         return DecisionEffectResult(state_patch={"scratch_memory": scratch_memory})
     # 历史/异常数据缺 reduce_target：按 scratch_memory 兜底，不让 answer 炸掉
     key = payload.get("key")
-    scratch_memory = dict(case_state.scratch_memory)
+    scratch_memory = dict(draft_state.scratch_memory)
     scratch_memory[str(key or decision.decision_id)] = text
     return DecisionEffectResult(state_patch={"scratch_memory": scratch_memory})
 
@@ -372,8 +367,7 @@ def _replay_followups(decision: Decision, answer: DecisionAnswer) -> tuple[Harne
             payload={
                 "pending_tool_call": decision.pending_tool_call.model_dump(mode="json"),
                 "scope_type": decision.scope_type,
-                "project_id": decision.project_id,
-                "case_id": decision.case_id,
+                "draft_id": decision.draft_id,
             },
         ),
     )
@@ -420,8 +414,8 @@ def _answer_requests_bgm_upload(answer: DecisionAnswer, payload: dict[str, Any])
     return payload.get("action") == "upload" or answer.option_id == "upload_bgm"
 
 
-def _scratch_memory_with_pending_intent(case_state: CaseState, intent: str) -> dict[str, Any]:
-    scratch_memory = dict(case_state.scratch_memory)
+def _scratch_memory_with_pending_intent(draft_state: DraftState, intent: str) -> dict[str, Any]:
+    scratch_memory = dict(draft_state.scratch_memory)
     existing = scratch_memory.get("pending_intents")
     pending_intents: list[str] = []
     if isinstance(existing, Sequence) and not isinstance(existing, str | bytes):
@@ -450,7 +444,7 @@ def _model_dump(value: Any) -> dict[str, Any]:
 
 
 def _with_side_intents(
-    case_state: CaseState,
+    draft_state: DraftState,
     effect: DecisionEffectResult,
     answer: DecisionAnswer,
 ) -> DecisionEffectResult:
@@ -458,7 +452,7 @@ def _with_side_intents(
     if not side_intents:
         return effect
     state_patch = dict(effect.state_patch)
-    scratch_memory = dict(case_state.scratch_memory)
+    scratch_memory = dict(draft_state.scratch_memory)
     existing_patch = state_patch.get("scratch_memory")
     if isinstance(existing_patch, dict):
         scratch_memory.update(existing_patch)
@@ -516,7 +510,6 @@ decision_effects_registry: dict[DecisionType, EffectFn] = {
     "bgm": _bgm_effect,
     "export": _export_effect,
     "memory_scope": _memory_scope_effect,
-    "destructive_project_action": _destructive_project_action_effect,
     "url_import": _url_import_effect,
     "generic": _generic_effect,
 }

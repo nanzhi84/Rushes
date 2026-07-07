@@ -2,7 +2,7 @@
 
 from .handlers import (
     ask_scope,
-    extract_from_case,
+    extract_from_draft,
     save,
     search_relevant,
     search_relevant_memories,
@@ -10,7 +10,7 @@ from .handlers import (
 
 __all__ = [
     "ask_scope",
-    "extract_from_case",
+    "extract_from_draft",
     "save",
     "search_relevant",
     "search_relevant_memories",

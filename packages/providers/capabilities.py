@@ -30,7 +30,7 @@ class ProviderRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     request_id: str | None = None
     model: str | None = None
-    case_id: str | None = None
+    draft_id: str | None = None
     job_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 

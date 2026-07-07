@@ -19,8 +19,7 @@ class EventLogRow:
     event_id: int
     event_type: str
     actor: str
-    project_id: str | None
-    case_id: str | None
+    draft_id: str | None
     payload_json: dict[str, Any]
     state_version: int | None
     created_at: str
@@ -35,8 +34,7 @@ class EventLogRepository:
         *,
         event_type: str,
         actor: str,
-        project_id: str | None,
-        case_id: str | None,
+        draft_id: str | None,
         payload_json: dict[str, Any],
         state_version: int | None,
         created_at: str,
@@ -45,8 +43,7 @@ class EventLogRepository:
             schema.event_log.insert().values(
                 event_type=event_type,
                 actor=actor,
-                project_id=project_id,
-                case_id=case_id,
+                draft_id=draft_id,
                 payload_json=dump_json(payload_json),
                 state_version=state_version,
                 created_at=created_at,
@@ -84,8 +81,7 @@ class EventLogRepository:
             event_id=int(values["event_id"]),
             event_type=str(values["event_type"]),
             actor=str(values["actor"]),
-            project_id=values["project_id"],
-            case_id=values["case_id"],
+            draft_id=values["draft_id"],
             payload_json=payload,
             state_version=values["state_version"],
             created_at=str(values["created_at"]),

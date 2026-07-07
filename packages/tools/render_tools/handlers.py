@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.events import JobEnqueued
 from contracts.tool_result import ToolError, ToolResult
 from storage import schema
@@ -30,31 +30,31 @@ def final_mp4(input_model: RenderFinalMp4Input, context: ToolExecutionContext) -
 def status(input_model: RenderStatusInput, context: ToolExecutionContext) -> ToolResult:
     del input_model
     tool_name = "render.status"
-    case_state = context.case_state
-    if case_state is None:
-        return _failed(tool_name, context, "missing_case", "active case required")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed(tool_name, context, "missing_draft", "active draft required")
     if context.readonly_connection is None:
         return _failed(tool_name, context, "missing_connection", "repository access required")
 
     previews = _artifact_rows(
         context,
         table_name="previews",
-        case_state=case_state,
-        current_id=case_state.preview_current_id,
+        draft_state=draft_state,
+        current_id=draft_state.preview_current_id,
     )
     exports = _artifact_rows(
         context,
         table_name="exports",
-        case_state=case_state,
-        current_id=case_state.export_current_id,
+        draft_state=draft_state,
+        current_id=draft_state.export_current_id,
     )
-    jobs = _render_jobs(context, case_state)
+    jobs = _render_jobs(context, draft_state)
     # LLM 只读 observation：状态结论要完整写在这里，不能只留在 data
     running = f"{len(jobs)} 个渲染任务进行中" if jobs else "无进行中的渲染任务"
     observation = (
-        f"渲染状态：timeline v{case_state.timeline_current_version}，"
-        f"当前预览 {case_state.preview_current_id or '无'}，"
-        f"当前导出 {case_state.export_current_id or '无'}，{running}"
+        f"渲染状态：timeline v{draft_state.timeline_current_version}，"
+        f"当前预览 {draft_state.preview_current_id or '无'}，"
+        f"当前导出 {draft_state.export_current_id or '无'}，{running}"
     )
     return ToolResult(
         tool_call_id=context.tool_call_id,
@@ -62,10 +62,10 @@ def status(input_model: RenderStatusInput, context: ToolExecutionContext) -> Too
         status="succeeded",
         observation=observation,
         data={
-            "case_id": case_state.case_id,
-            "timeline_current_version": case_state.timeline_current_version,
-            "preview_current_id": case_state.preview_current_id,
-            "export_current_id": case_state.export_current_id,
+            "draft_id": draft_state.draft_id,
+            "timeline_current_version": draft_state.timeline_current_version,
+            "preview_current_id": draft_state.preview_current_id,
+            "export_current_id": draft_state.export_current_id,
             "previews": previews,
             "exports": exports,
             "running_jobs": jobs,
@@ -78,21 +78,20 @@ def _enqueue_render_job(
     kind: str,
     context: ToolExecutionContext,
 ) -> ToolResult:
-    case_state = context.case_state
-    if case_state is None:
-        return _failed(tool_name, context, "missing_case", "active case required")
-    if case_state.timeline_current_version is None:
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed(tool_name, context, "missing_draft", "active draft required")
+    if draft_state.timeline_current_version is None:
         return _failed(tool_name, context, "missing_timeline", "current timeline required")
-    arguments = {"timeline_version": case_state.timeline_current_version}
+    arguments = {"timeline_version": draft_state.timeline_current_version}
     idempotency_key = (
-        f"case:{case_state.case_id}:{kind}:"
+        f"draft:{draft_state.draft_id}:{kind}:"
         f"{hashlib.sha256(json.dumps(arguments, sort_keys=True).encode()).hexdigest()}"
     )
     event = JobEnqueued(
         job_id=_job_id(kind, idempotency_key),
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
-        requested_by_case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
+        requested_by_draft_id=draft_state.draft_id,
         payload={
             "kind": kind,
             "idempotency_key": idempotency_key,
@@ -113,7 +112,7 @@ def _enqueue_render_job(
         tool_name=tool_name,
         status="running",
         observation=f"job queued: {event.job_id}",
-        data={"case_id": case_state.case_id, "job_id": event.job_id, "job_kind": kind},
+        data={"draft_id": draft_state.draft_id, "job_id": event.job_id, "job_kind": kind},
         events=[event.model_dump(mode="json")],
     )
 
@@ -122,7 +121,7 @@ def _artifact_rows(
     context: ToolExecutionContext,
     *,
     table_name: str,
-    case_state: CaseState,
+    draft_state: DraftState,
     current_id: str | None,
 ) -> list[dict[str, Any]]:
     assert context.readonly_connection is not None
@@ -130,7 +129,7 @@ def _artifact_rows(
     id_column = table.c.preview_id if table_name == "previews" else table.c.export_id
     rows = context.readonly_connection.execute(
         select(table)
-        .where(table.c.case_id == case_state.case_id)
+        .where(table.c.draft_id == draft_state.draft_id)
         .order_by(table.c.created_at.desc())
     ).all()
     result: list[dict[str, Any]] = []
@@ -151,11 +150,11 @@ def _artifact_rows(
     return result
 
 
-def _render_jobs(context: ToolExecutionContext, case_state: CaseState) -> list[dict[str, Any]]:
+def _render_jobs(context: ToolExecutionContext, draft_state: DraftState) -> list[dict[str, Any]]:
     assert context.readonly_connection is not None
     rows = context.readonly_connection.execute(
         select(schema.jobs)
-        .where(schema.jobs.c.case_id == case_state.case_id)
+        .where(schema.jobs.c.draft_id == draft_state.draft_id)
         .where(schema.jobs.c.kind.in_(("render_preview", "render_final")))
         .where(schema.jobs.c.status.in_(("pending", "running")))
         .order_by(schema.jobs.c.created_at)

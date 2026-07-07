@@ -17,13 +17,10 @@ class ToolSpec(BaseModel):
     handler_ref: str
     allowed_scopes: list[str]
     requires_artifacts: list[str]
-    requires_active_project: bool = True
-    requires_active_case: bool = False
+    requires_active_draft: bool = True
     requires_confirmation: bool = False
     confirmation_decision_type: str | None = None
-    side_effects: list[
-        Literal["project", "case", "asset", "timeline", "memory", "object_store", "job"]
-    ]
+    side_effects: list[Literal["draft", "asset", "timeline", "memory", "object_store", "job"]]
     idempotency_key_fields: list[str] = Field(default_factory=list)
     emits_events: list[str]
     is_long_running: bool = False

@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
-from contracts.events import CaseCreated, ExportCompleted, PreviewRendered, ProjectCreated
+from contracts.events import DraftCreated, ExportCompleted, PreviewRendered
 from storage.object_store import ObjectStore
 
 TOKEN = "test-token"
@@ -20,12 +20,11 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 def test_preview_media_route_supports_range_206(tmp_path: Path) -> None:
     app = _app(tmp_path)
     object_ref = ObjectStore(_state(app).workspace_paths).put_bytes(b"0123456789")
-    _seed_project_case(_engine(app))
+    _seed_draft(_engine(app))
     _apply_events(
         _engine(app),
         PreviewRendered(
-            project_id="project_1",
-            case_id="case_1",
+            draft_id="draft_1",
             timeline_version=1,
             artifact_id="preview_1",
             payload={"object_hash": object_ref.object_hash},
@@ -45,12 +44,11 @@ def test_preview_media_route_supports_range_206(tmp_path: Path) -> None:
 def test_export_media_route_supports_range_206(tmp_path: Path) -> None:
     app = _app(tmp_path)
     object_ref = ObjectStore(_state(app).workspace_paths).put_bytes(b"abcdefghij")
-    _seed_project_case(_engine(app))
+    _seed_draft(_engine(app))
     _apply_events(
         _engine(app),
         ExportCompleted(
-            project_id="project_1",
-            case_id="case_1",
+            draft_id="draft_1",
             timeline_version=1,
             artifact_id="export_1",
             payload={"object_hash": object_ref.object_hash},
@@ -88,14 +86,12 @@ def _engine(app: FastAPI) -> Engine:
     return _state(app).engine
 
 
-def _seed_project_case(engine: Engine) -> None:
+def _seed_draft(engine: Engine) -> None:
     _apply_events(
         engine,
-        ProjectCreated(project_id="project_1", name="Project"),
-        CaseCreated(
-            project_id="project_1",
-            case_id="case_1",
-            payload={"name": "Case", "brief": {"goal": "test"}},
+        DraftCreated(
+            draft_id="draft_1",
+            payload={"name": "Draft", "brief": {"goal": "test"}},
         ),
     )
 

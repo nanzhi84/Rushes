@@ -1,10 +1,10 @@
 """Pure domain reducers and policy-facing helpers."""
 
-from .case_stage import CaseStage, derive_stage
+from .draft_stage import DraftStage, derive_stage
 from .preconditions import (
     PRECONDITION_REGISTRY,
+    DraftArtifactStats,
     PreconditionContext,
-    ProjectArtifactStats,
     UnknownPreconditionError,
     assert_known_preconditions,
     audio_mode_in,
@@ -17,9 +17,9 @@ from .preconditions import (
 
 __all__ = [
     "PRECONDITION_REGISTRY",
-    "CaseStage",
+    "DraftArtifactStats",
+    "DraftStage",
     "PreconditionContext",
-    "ProjectArtifactStats",
     "UnknownPreconditionError",
     "assert_known_preconditions",
     "audio_mode_in",

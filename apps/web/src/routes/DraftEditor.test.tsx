@@ -15,7 +15,7 @@ import {
   StructuredInteractionRenderer
 } from "../components/Console/StructuredInteractionRenderer";
 import type { DomainSsePayload } from "../components/Console/StructuredInteractionRenderer";
-import { CaseConsoleView } from "./CaseAgentConsole";
+import { DraftEditorView } from "./DraftEditor";
 
 type MockPreviewProps = {
   seekSec?: number | null;
@@ -117,7 +117,7 @@ class MockEventSource {
   }
 }
 
-describe("CaseConsoleView", () => {
+describe("DraftEditorView", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     window.sessionStorage.clear();
@@ -127,7 +127,7 @@ describe("CaseConsoleView", () => {
 
   it("发送消息后禁用输入框，并在 TurnEnded SSE 后恢复", async () => {
     const fetchMock = mockFetch({ decision: null });
-    renderConsole(fetchMock);
+    renderEditor(fetchMock);
 
     const input = screen.getByLabelText("消息输入") as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: "剪掉开头 3 秒" } });
@@ -135,15 +135,14 @@ describe("CaseConsoleView", () => {
 
     await waitFor(() => expect(input.disabled).toBe(true));
     expect(screen.getByText("剪掉开头 3 秒")).toBeTruthy();
-    expect(caseEventsSource().url).toContain("token=test-token");
+    expect(draftEventsSource().url).toContain("token=test-token");
 
     act(() => {
-      caseEventsSource().emit("TurnEnded", {
+      draftEventsSource().emit("TurnEnded", {
         event_id: 1,
         event: {
           event: "TurnEnded",
-          project_id: "project_1",
-          case_id: "case_1",
+          draft_id: "draft_1",
           turn_id: "turn_1"
         }
       });
@@ -179,7 +178,7 @@ describe("CaseConsoleView", () => {
         }
       ]
     });
-    renderConsole(fetchMock);
+    renderEditor(fetchMock);
 
     expect(await screen.findByText("帮我把开头剪短")).toBeTruthy();
     const narration = await screen.findByText("我先看看素材再动手");
@@ -192,7 +191,7 @@ describe("CaseConsoleView", () => {
 
   it("text_delta 逐步增长流式气泡", async () => {
     const fetchMock = mockFetch({ decision: null });
-    renderConsole(fetchMock);
+    renderEditor(fetchMock);
 
     const stream = turnStreamSource();
     emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
@@ -207,7 +206,7 @@ describe("CaseConsoleView", () => {
 
   it("message_completed 用全文整体替换流式 buffer", async () => {
     const fetchMock = mockFetch({ decision: null });
-    renderConsole(fetchMock);
+    renderEditor(fetchMock);
 
     const stream = turnStreamSource();
     emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
@@ -229,7 +228,7 @@ describe("CaseConsoleView", () => {
 
   it("tool_step 过程条目从进行中流转到完成/失败，未映射工具显示工具名", async () => {
     const fetchMock = mockFetch({ decision: null });
-    renderConsole(fetchMock);
+    renderEditor(fetchMock);
 
     const stream = turnStreamSource();
     emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
@@ -280,7 +279,7 @@ describe("CaseConsoleView", () => {
             ]
           : []
     });
-    renderConsole(fetchMock);
+    renderEditor(fetchMock);
 
     const stream = turnStreamSource();
     emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
@@ -311,7 +310,7 @@ describe("CaseConsoleView", () => {
         answerRequests.push({ url, body: JSON.parse(String(init?.body)) });
       }
     });
-    renderConsole(fetchMock);
+    renderEditor(fetchMock);
 
     await screen.findByText("原视频里有人声，这次怎么处理声音？");
     for (const label of ["保留原声", "口播粗剪", "使用上传配音", "使用 TTS", "无旁白视频"]) {
@@ -323,8 +322,7 @@ describe("CaseConsoleView", () => {
     await waitFor(() => expect(answerRequests).toHaveLength(1));
     expect(answerRequests[0]?.url).toBe("/api/decisions/dec_audio/answer");
     expect(answerRequests[0]?.body).toMatchObject({
-      project_id: "project_1",
-      case_id: "case_1",
+      draft_id: "draft_1",
       answer: {
         option_id: "rough_cut",
         answered_via: "button",
@@ -341,7 +339,7 @@ describe("CaseConsoleView", () => {
         answerRequests.push({ body: JSON.parse(String(init?.body)) });
       }
     });
-    renderConsole(fetchMock);
+    renderEditor(fetchMock);
 
     fireEvent.change(await screen.findByLabelText("自由回答"), {
       target: { value: "保留一点原声，再加轻快 BGM" }
@@ -384,17 +382,17 @@ describe("CaseConsoleView", () => {
 
   it("JobProgress SSE 更新进度条", async () => {
     const fetchMock = mockFetch({ decision: null });
-    renderConsole(fetchMock);
+    renderEditor(fetchMock);
 
     act(() => {
-      caseEventsSource().emit("JobProgress", jobProgressPayload(0.42));
+      draftEventsSource().emit("JobProgress", jobProgressPayload(0.42));
     });
 
     const progress = await screen.findByRole("progressbar", { name: "素材分析 进度" });
     expect(progress.getAttribute("aria-valuenow")).toBe("42");
 
     act(() => {
-      caseEventsSource().emit("JobProgress", jobProgressPayload(0.8));
+      draftEventsSource().emit("JobProgress", jobProgressPayload(0.8));
     });
 
     await waitFor(() => expect(progress.getAttribute("aria-valuenow")).toBe("80"));
@@ -439,7 +437,7 @@ describe("CaseConsoleView", () => {
 
   it("时间线 seek 会联动传给 PreviewPlayer", async () => {
     const fetchMock = mockFetch({ decision: null, timeline: true });
-    renderConsole(fetchMock);
+    renderEditor(fetchMock);
 
     fireEvent.click(await screen.findByTestId("mock-timeline-seek"));
 
@@ -450,7 +448,7 @@ describe("CaseConsoleView", () => {
   });
 });
 
-function renderConsole(fetchMock: FetchMock): void {
+function renderEditor(fetchMock: FetchMock): void {
   storeAuthToken("test-token");
   MockEventSource.instances = [];
   vi.stubGlobal("EventSource", MockEventSource);
@@ -464,13 +462,13 @@ function renderConsole(fetchMock: FetchMock): void {
   render(
     <RouterContextProvider router={router}>
       <QueryClientProvider client={testQueryClient()}>
-        <CaseConsoleView projectId="project_1" caseId="case_1" />
+        <DraftEditorView draftId="draft_1" />
       </QueryClientProvider>
     </RouterContextProvider>
   );
 }
 
-type CaseMessageFixture = {
+type DraftMessageFixture = {
   message_id: string;
   role: string;
   kind: string;
@@ -486,23 +484,22 @@ function mockFetch({
 }: {
   decision: Decision | null;
   timeline?: boolean;
-  messages?: CaseMessageFixture[] | (() => CaseMessageFixture[]);
+  messages?: DraftMessageFixture[] | (() => DraftMessageFixture[]);
   onAnswer?: (url: string, init: RequestInit | undefined) => void;
 }): FetchMock {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url === "/api/projects/project_1/cases/case_1") {
+    if (url === "/api/drafts/draft_1") {
       return jsonResponse({
-        case: {
-          case_id: "case_1",
-          project_id: "project_1",
-          name: "Case 001",
+        draft: {
+          draft_id: "draft_1",
+          name: "7月7日",
           status: "active",
           timeline_current_version: timeline ? 1 : null
         }
       });
     }
-    if (url.startsWith("/api/projects/project_1/cases/case_1/timeline")) {
+    if (url.startsWith("/api/drafts/draft_1/timeline")) {
       return jsonResponse(timelineResponseFixture());
     }
     if (url.endsWith("/decisions/current")) {
@@ -514,15 +511,14 @@ function mockFetch({
           {
             status: "queued",
             kind: "user_message",
-            project_id: "project_1",
-            case_id: "case_1",
+            draft_id: "draft_1",
             message_id: "msg_1"
           },
           202
         );
       }
       return jsonResponse({
-        case_id: "case_1",
+        draft_id: "draft_1",
         messages: typeof messages === "function" ? messages() : messages
       });
     }
@@ -547,13 +543,13 @@ function turnStreamSource(): MockEventSource {
   return source;
 }
 
-// 工作台还会订阅 workspace 级 /api/events（TopBar 连接态、素材面板），按 URL 定位 case 事件源。
-function caseEventsSource(): MockEventSource {
+// 编辑器还会订阅 workspace 级 /api/events（TopBar 连接态、素材面板），按 URL 定位草稿事件源。
+function draftEventsSource(): MockEventSource {
   const source = MockEventSource.instances.find((instance) =>
-    instance.url.includes("/cases/case_1/events")
+    instance.url.includes("/api/drafts/draft_1/events")
   );
   if (!source) {
-    throw new Error("case events EventSource 未创建");
+    throw new Error("draft events EventSource 未创建");
   }
   return source;
 }
@@ -566,7 +562,7 @@ function emitTurnStream(source: MockEventSource, data: Record<string, unknown>):
 
 function timelineResponseFixture() {
   return {
-    case_id: "case_1",
+    draft_id: "draft_1",
     timeline_version: 1,
     summary: "首版粗剪",
     preview_id: "prev_1",
@@ -597,10 +593,10 @@ function audioModeDecision(overrides: Partial<Decision> = {}): Decision {
     allow_free_text: true,
     answer,
     blocking: true,
-    case_id: "case_1",
     consumed_at: null,
     created_by_tool_call_id: "tc_1",
     decision_id: "dec_audio",
+    draft_id: "draft_1",
     options: [
       { option_id: "keep_original", label: "保留原声" },
       { option_id: "rough_cut", label: "口播粗剪" },
@@ -610,10 +606,9 @@ function audioModeDecision(overrides: Partial<Decision> = {}): Decision {
     ],
     pending_tool_call: null,
     pending_tool_call_status: null,
-    project_id: "project_1",
     question: "原视频里有人声，这次怎么处理声音？",
     replayed_tool_call_id: null,
-    scope_type: "case",
+    scope_type: "draft",
     status: "pending",
     type: "audio_mode",
     ...overrides
@@ -625,8 +620,8 @@ function jobProgressPayload(progress: number): DomainSsePayload {
     event_id: 10,
     event: {
       event: "JobProgress",
-      project_id: "project_1",
-      requested_by_case_id: "case_1",
+      draft_id: "draft_1",
+      requested_by_draft_id: "draft_1",
       job_id: "job_1",
       kind: "素材分析",
       progress

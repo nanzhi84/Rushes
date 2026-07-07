@@ -11,7 +11,7 @@ from typing import Any, cast
 
 from sqlalchemy import select
 
-from contracts.case import CaseState, CutPlan
+from contracts.draft import CutPlan, DraftState
 from contracts.events import ContentPlanUpdated, CutPlanUpdated
 from contracts.provider import ProviderResult
 from contracts.tool_result import ToolError, ToolResult
@@ -41,16 +41,16 @@ class _PlanResult:
 
 
 def create_plan(input_model: ContentCreatePlanInput, context: ToolExecutionContext) -> ToolResult:
-    case_state = context.case_state
-    if case_state is None:
-        return _failed(TOOL_CREATE, context, "missing_case", "active case required")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed(TOOL_CREATE, context, "missing_draft", "active draft required")
     if context.readonly_connection is None:
         return _failed(TOOL_CREATE, context, "missing_connection", "repository access required")
 
     assets = _asset_summaries(context)
-    target_duration = _target_duration(input_model.target_duration_sec, case_state)
+    target_duration = _target_duration(input_model.target_duration_sec, draft_state)
     fallback = _fallback_plan(
-        case_state,
+        draft_state,
         assets,
         target_duration=target_duration,
         storyline_hint=input_model.storyline_hint,
@@ -58,10 +58,10 @@ def create_plan(input_model: ContentCreatePlanInput, context: ToolExecutionConte
         existing_content_plan=None,
         existing_cut_plan=None,
     )
-    needs_cut = _should_emit_cut_plan(case_state)
+    needs_cut = _should_emit_cut_plan(draft_state)
     plan = _create_with_llm(
         context,
-        case_state,
+        draft_state,
         assets,
         target_duration=target_duration,
         storyline_hint=input_model.storyline_hint,
@@ -71,16 +71,16 @@ def create_plan(input_model: ContentCreatePlanInput, context: ToolExecutionConte
     )
     if plan is None:
         plan = fallback
-    return _succeeded(TOOL_CREATE, context, case_state, plan, emit_cut_plan=needs_cut)
+    return _succeeded(TOOL_CREATE, context, draft_state, plan, emit_cut_plan=needs_cut)
 
 
 def revise_plan(input_model: ContentRevisePlanInput, context: ToolExecutionContext) -> ToolResult:
-    case_state = context.case_state
-    if case_state is None:
-        return _failed(TOOL_REVISE, context, "missing_case", "active case required")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed(TOOL_REVISE, context, "missing_draft", "active draft required")
     if context.readonly_connection is None:
         return _failed(TOOL_REVISE, context, "missing_connection", "repository access required")
-    if case_state.content_plan is None:
+    if draft_state.content_plan is None:
         return _failed(
             TOOL_REVISE,
             context,
@@ -90,28 +90,28 @@ def revise_plan(input_model: ContentRevisePlanInput, context: ToolExecutionConte
 
     assets = _asset_summaries(context)
     target_duration = (
-        case_state.cut_plan.total_target_duration_sec
-        if case_state.cut_plan is not None
-        else _target_duration(None, case_state)
+        draft_state.cut_plan.total_target_duration_sec
+        if draft_state.cut_plan is not None
+        else _target_duration(None, draft_state)
     )
     existing_cut = (
-        case_state.cut_plan.model_dump(mode="json", by_alias=True)
-        if case_state.cut_plan is not None
+        draft_state.cut_plan.model_dump(mode="json", by_alias=True)
+        if draft_state.cut_plan is not None
         else None
     )
     fallback = _fallback_plan(
-        case_state,
+        draft_state,
         assets,
         target_duration=target_duration,
         storyline_hint=input_model.revision_hint,
         slot_count=None,
-        existing_content_plan=case_state.content_plan,
+        existing_content_plan=draft_state.content_plan,
         existing_cut_plan=existing_cut,
     )
-    needs_cut = _should_emit_cut_plan(case_state)
+    needs_cut = _should_emit_cut_plan(draft_state)
     plan = _revise_with_llm(
         context,
-        case_state,
+        draft_state,
         assets,
         target_duration=target_duration,
         revision_hint=input_model.revision_hint,
@@ -120,29 +120,27 @@ def revise_plan(input_model: ContentRevisePlanInput, context: ToolExecutionConte
     )
     if plan is None:
         plan = fallback
-    return _succeeded(TOOL_REVISE, context, case_state, plan, emit_cut_plan=needs_cut)
+    return _succeeded(TOOL_REVISE, context, draft_state, plan, emit_cut_plan=needs_cut)
 
 
 def _succeeded(
     tool_name: str,
     context: ToolExecutionContext,
-    case_state: CaseState,
+    draft_state: DraftState,
     plan: _PlanResult,
     *,
     emit_cut_plan: bool,
 ) -> ToolResult:
     events = [
         ContentPlanUpdated(
-            project_id=case_state.project_id,
-            case_id=case_state.case_id,
+            draft_id=draft_state.draft_id,
             payload={"content_plan": plan.content_plan},
         ).model_dump(mode="json")
     ]
     if emit_cut_plan:
         events.append(
             CutPlanUpdated(
-                project_id=case_state.project_id,
-                case_id=case_state.case_id,
+                draft_id=draft_state.draft_id,
                 payload={"cut_plan": plan.cut_plan},
             ).model_dump(mode="json")
         )
@@ -151,7 +149,7 @@ def _succeeded(
     observation = _observation(plan)
     if emit_cut_plan:
         observation += "。cut_plan 已产出，可继续推进 timeline 与预览。"
-    elif case_state.audio_plan is None:
+    elif draft_state.audio_plan is None:
         observation += (
             "。注意：audio_plan 尚未确定，本次未产出 cut_plan——请先用 "
             "interaction.ask_user 创建 audio_mode 决策（选定后若为静音模式，"
@@ -163,7 +161,7 @@ def _succeeded(
         status="succeeded",
         observation=observation,
         data={
-            "case_id": case_state.case_id,
+            "draft_id": draft_state.draft_id,
             "content_plan": plan.content_plan,
             "cut_plan": plan.cut_plan if emit_cut_plan else None,
             "source": plan.source,
@@ -174,7 +172,7 @@ def _succeeded(
 
 def _create_with_llm(
     context: ToolExecutionContext,
-    case_state: CaseState,
+    draft_state: DraftState,
     assets: list[_AssetSummary],
     *,
     target_duration: float,
@@ -188,10 +186,10 @@ def _create_with_llm(
         request_id=f"content_create_{context.tool_call_id}",
         payload={
             "mode": "create",
-            "brief": case_state.brief.model_dump(mode="json"),
+            "brief": draft_state.brief.model_dump(mode="json"),
             "audio_plan": None
-            if case_state.audio_plan is None
-            else case_state.audio_plan.model_dump(mode="json"),
+            if draft_state.audio_plan is None
+            else draft_state.audio_plan.model_dump(mode="json"),
             "assets": [_asset_payload(asset) for asset in assets],
             "storyline_hint": storyline_hint,
             "target_duration_sec": target_duration,
@@ -211,7 +209,7 @@ def _create_with_llm(
 
 def _revise_with_llm(
     context: ToolExecutionContext,
-    case_state: CaseState,
+    draft_state: DraftState,
     assets: list[_AssetSummary],
     *,
     target_duration: float,
@@ -225,11 +223,11 @@ def _revise_with_llm(
         payload={
             "mode": "revise",
             "revision_hint": revision_hint,
-            "brief": case_state.brief.model_dump(mode="json"),
+            "brief": draft_state.brief.model_dump(mode="json"),
             "audio_plan": None
-            if case_state.audio_plan is None
-            else case_state.audio_plan.model_dump(mode="json"),
-            "content_plan": case_state.content_plan,
+            if draft_state.audio_plan is None
+            else draft_state.audio_plan.model_dump(mode="json"),
+            "content_plan": draft_state.content_plan,
             "cut_plan": fallback.cut_plan if needs_cut else None,
             "assets": [_asset_payload(asset) for asset in assets],
             "target_duration_sec": target_duration,
@@ -258,7 +256,6 @@ def _call_llm(
     request = ProviderRequest(
         capability=LLM_CHAT,
         request_id=request_id,
-        case_id=context.case_state.case_id if context.case_state is not None else None,
         payload={
             "messages": [
                 {
@@ -494,7 +491,7 @@ def _slot_from_mapping(
 
 
 def _fallback_plan(
-    case_state: CaseState,
+    draft_state: DraftState,
     assets: list[_AssetSummary],
     *,
     target_duration: float,
@@ -508,7 +505,7 @@ def _fallback_plan(
         content_plan.setdefault("schema", "ContentPlan.v1")
         content_plan.setdefault("status", "draft")
     else:
-        storyline = _fallback_storyline(case_state, assets, storyline_hint)
+        storyline = _fallback_storyline(draft_state, assets, storyline_hint)
         content_plan = {
             "schema": "ContentPlan.v1",
             "storyline": storyline,
@@ -518,20 +515,20 @@ def _fallback_plan(
     if existing_cut_plan is not None:
         cut_plan = CutPlan.model_validate(existing_cut_plan).model_dump(mode="json", by_alias=True)
     else:
-        cut_plan = _fallback_cut_plan(case_state, assets, target_duration, slot_count)
+        cut_plan = _fallback_cut_plan(draft_state, assets, target_duration, slot_count)
     return _PlanResult(content_plan=content_plan, cut_plan=cut_plan, source="fallback")
 
 
 def _fallback_storyline(
-    case_state: CaseState,
+    draft_state: DraftState,
     assets: list[_AssetSummary],
     storyline_hint: str | None,
 ) -> str:
     if storyline_hint is not None and storyline_hint.strip():
         return storyline_hint.strip()
     asset_text = "，".join(_summary_text(asset) for asset in assets[:3])
-    style = "；".join(case_state.brief.style_notes[:2])
-    parts = [case_state.brief.goal, style, asset_text]
+    style = "；".join(draft_state.brief.style_notes[:2])
+    parts = [draft_state.brief.goal, style, asset_text]
     if any(parts):
         return "；".join(part for part in parts if part)
     return "根据现有素材组织一条清晰的视觉故事线。"
@@ -567,12 +564,12 @@ def _sections_from_storyline(storyline: str) -> list[dict[str, str]]:
 
 
 def _fallback_cut_plan(
-    case_state: CaseState,
+    draft_state: DraftState,
     assets: list[_AssetSummary],
     target_duration: float,
     slot_count: int | None,
 ) -> dict[str, Any]:
-    del case_state
+    del draft_state
     if assets:
         briefs = [_summary_text(asset) for asset in assets]
     else:
@@ -603,9 +600,9 @@ def _validated_cut_plan(
 
 
 def _asset_summaries(context: ToolExecutionContext) -> list[_AssetSummary]:
-    assert context.case_state is not None
+    assert context.draft_state is not None
     assert context.readonly_connection is not None
-    case_state = context.case_state
+    draft_state = context.draft_state
     # The offline annotation projection that supplied per-clip summaries is removed;
     # content planning now works from asset filenames until the understanding chain
     # feeds richer summaries (Spec C / Task 9).
@@ -616,19 +613,14 @@ def _asset_summaries(context: ToolExecutionContext) -> list[_AssetSummary]:
         )
         .select_from(
             schema.assets.join(
-                schema.project_asset_links,
-                schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+                schema.draft_asset_links,
+                schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id,
             )
         )
-        .where(schema.project_asset_links.c.project_id == case_state.project_id)
-        .where(schema.project_asset_links.c.enabled.is_(True))
+        .where(schema.draft_asset_links.c.draft_id == draft_state.draft_id)
         .where(schema.assets.c.usable.is_(True))
         .order_by(schema.assets.c.asset_id)
     )
-    if case_state.selected_asset_ids:
-        statement = statement.where(schema.assets.c.asset_id.in_(case_state.selected_asset_ids))
-    elif case_state.disabled_asset_ids:
-        statement = statement.where(schema.assets.c.asset_id.not_in(case_state.disabled_asset_ids))
     rows = context.readonly_connection.execute(statement).all()
     assets: dict[str, _AssetSummary] = {}
     for row in rows:
@@ -655,12 +647,12 @@ def _asset_payload(asset: _AssetSummary) -> dict[str, Any]:
     }
 
 
-def _target_duration(requested: float | None, case_state: CaseState) -> float:
+def _target_duration(requested: float | None, draft_state: DraftState) -> float:
     value = requested
     if value is None:
-        value = case_state.brief.target_duration_sec
-    if value is None and case_state.cut_plan is not None:
-        value = case_state.cut_plan.total_target_duration_sec
+        value = draft_state.brief.target_duration_sec
+    if value is None and draft_state.cut_plan is not None:
+        value = draft_state.cut_plan.total_target_duration_sec
     if value is None:
         value = DEFAULT_TARGET_DURATION_SEC
     return max(0.1, float(value))
@@ -687,8 +679,8 @@ def _duration_window(duration_sec: float) -> tuple[float, float]:
     return (round(low, 3), round(high, 3))
 
 
-def _should_emit_cut_plan(case_state: CaseState) -> bool:
-    return case_state.audio_plan is not None and str(case_state.audio_plan.mode) == "silent"
+def _should_emit_cut_plan(draft_state: DraftState) -> bool:
+    return draft_state.audio_plan is not None and str(draft_state.audio_plan.mode) == "silent"
 
 
 def _observation(plan: _PlanResult) -> str:

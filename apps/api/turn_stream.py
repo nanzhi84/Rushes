@@ -2,7 +2,7 @@
 
 The harness (``agent_harness.loop.run_turn``) emits synchronous ``TurnListener``
 events while a turn runs inside the API event loop. This hub records the current
-turn's events into a per-case snapshot buffer and pushes them onto each
+turn's events into a per-draft snapshot buffer and pushes them onto each
 subscriber's queue. Subscribers connect via the ``turn-stream`` SSE route, which
 first replays the snapshot and then drains the live queue.
 
@@ -31,16 +31,16 @@ TURN_STREAM_CLOSED = object()
 
 
 class _HubListener:
-    """Per-case ``TurnListener`` returned to the runner."""
+    """Per-draft ``TurnListener`` returned to the runner."""
 
-    __slots__ = ("_case_id", "_hub")
+    __slots__ = ("_draft_id", "_hub")
 
-    def __init__(self, hub: TurnStreamHub, case_id: str) -> None:
+    def __init__(self, hub: TurnStreamHub, draft_id: str) -> None:
         self._hub = hub
-        self._case_id = case_id
+        self._draft_id = draft_id
 
     def emit(self, event: Mapping[str, Any]) -> None:
-        self._hub.record(self._case_id, event)
+        self._hub.record(self._draft_id, event)
 
 
 class TurnStreamHub:
@@ -49,39 +49,39 @@ class TurnStreamHub:
         self._subscribers: dict[str, set[asyncio.Queue[Any]]] = {}
         self._queue_limit = queue_limit
 
-    def listener_for(self, case_id: str) -> TurnListener:
-        return _HubListener(self, case_id)
+    def listener_for(self, draft_id: str) -> TurnListener:
+        return _HubListener(self, draft_id)
 
-    async def subscribe(self, case_id: str) -> tuple[list[dict[str, Any]], asyncio.Queue[Any]]:
+    async def subscribe(self, draft_id: str) -> tuple[list[dict[str, Any]], asyncio.Queue[Any]]:
         """Return the current turn snapshot plus a fresh live-event queue."""
 
         queue: asyncio.Queue[Any] = asyncio.Queue()
-        self._subscribers.setdefault(case_id, set()).add(queue)
-        snapshot = [dict(event) for event in self._buffers.get(case_id, ())]
+        self._subscribers.setdefault(draft_id, set()).add(queue)
+        snapshot = [dict(event) for event in self._buffers.get(draft_id, ())]
         return snapshot, queue
 
-    def unsubscribe(self, case_id: str, queue: asyncio.Queue[Any]) -> None:
-        subscribers = self._subscribers.get(case_id)
+    def unsubscribe(self, draft_id: str, queue: asyncio.Queue[Any]) -> None:
+        subscribers = self._subscribers.get(draft_id)
         if subscribers is None:
             return
         subscribers.discard(queue)
         if not subscribers:
-            self._subscribers.pop(case_id, None)
+            self._subscribers.pop(draft_id, None)
 
-    def record(self, case_id: str, event: Mapping[str, Any]) -> None:
+    def record(self, draft_id: str, event: Mapping[str, Any]) -> None:
         """Buffer + fan out one event. Never raises into the loop."""
 
         try:
             frozen = dict(event)
-            self._buffers.setdefault(case_id, []).append(frozen)
-            self._fanout(case_id, frozen)
+            self._buffers.setdefault(draft_id, []).append(frozen)
+            self._fanout(draft_id, frozen)
             if frozen.get("type") in _TERMINAL_EVENT_TYPES:
-                self._buffers.pop(case_id, None)
+                self._buffers.pop(draft_id, None)
         except Exception:  # pragma: no cover - hub must never break the turn
             pass
 
-    def _fanout(self, case_id: str, event: dict[str, Any]) -> None:
-        subscribers = self._subscribers.get(case_id)
+    def _fanout(self, draft_id: str, event: dict[str, Any]) -> None:
+        subscribers = self._subscribers.get(draft_id)
         if not subscribers:
             return
         for queue in list(subscribers):

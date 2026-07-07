@@ -217,11 +217,11 @@ class JobRunner:
     async def _route_observation(self, job: Job, event: dict[str, Any]) -> bool:
         if self._turn_queue is None:
             return False
-        target_case_id = job.requested_by_case_id or job.case_id
-        if target_case_id is None:
+        target_draft_id = job.requested_by_draft_id or job.draft_id
+        if target_draft_id is None:
             return False
         await self._turn_queue.enqueue_job_observation(
-            target_case_id,
+            target_draft_id,
             job_id=job.job_id,
             event=event,
         )
@@ -249,24 +249,21 @@ def _terminal_event(
     if status == "succeeded":
         return JobSucceeded(
             job_id=job.job_id,
-            project_id=job.project_id,
-            case_id=job.case_id,
-            requested_by_case_id=job.requested_by_case_id,
+            draft_id=job.draft_id,
+            requested_by_draft_id=job.requested_by_draft_id,
             payload=payload,
         ).model_dump(mode="json")
     if status == "cancelled":
         return JobCancelled(
             job_id=job.job_id,
-            project_id=job.project_id,
-            case_id=job.case_id,
-            requested_by_case_id=job.requested_by_case_id,
+            draft_id=job.draft_id,
+            requested_by_draft_id=job.requested_by_draft_id,
             payload=payload,
         ).model_dump(mode="json")
     return JobFailed(
         job_id=job.job_id,
-        project_id=job.project_id,
-        case_id=job.case_id,
-        requested_by_case_id=job.requested_by_case_id,
+        draft_id=job.draft_id,
+        requested_by_draft_id=job.requested_by_draft_id,
         payload=payload,
     ).model_dump(mode="json")
 

@@ -133,13 +133,10 @@ export function itemFromEvent(payload: DomainSsePayload): StructuredInteractionI
 }
 
 const SILENT_EVENTS = new Set([
-  "CaseCreated",
-  "CaseRenamed",
-  "CaseCopied",
-  "CaseMoved",
-  "CaseClosed",
-  "CaseTrashed",
-  "CaseAssetScopeChanged",
+  "DraftCreated",
+  "DraftRenamed",
+  "DraftCopied",
+  "DraftTrashed",
   "BriefUpdated",
   "ContentPlanUpdated",
   "AudioPlanUpdated",

@@ -15,8 +15,7 @@ from contracts.tool import ToolSpec
 from contracts.tool_result import ToolResult
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
-from storage.repositories import CasesRepository, MessagesRepository
-from storage.repositories.projects import ProjectsRepository
+from storage.repositories import DraftsRepository, MessagesRepository
 from tools import ToolExecutionContext, build_default_tool_registry
 from tools.registry import ToolRegistry
 
@@ -42,23 +41,13 @@ def _prepare_workspace(tmp_path: Path) -> Engine:
     with engine.begin() as connection:
         schema.create_all(connection)
     with begin_immediate(engine) as connection:
-        ProjectsRepository(connection).insert(
+        DraftsRepository(connection).insert(
             {
-                "project_id": "project_1",
-                "name": "Project",
-                "status": "active",
-                "defaults": {"aspect_ratio": "9:16", "fps": 30},
-                "created_at": NOW,
-                "updated_at": NOW,
-            }
-        )
-        CasesRepository(connection).insert(
-            {
-                "case_id": "case_1",
-                "project_id": "project_1",
-                "name": "Case",
+                "draft_id": "draft_1",
+                "name": "Draft",
                 "state_version": 0,
                 "status": "active",
+                "defaults": {"aspect_ratio": "9:16", "fps": 30},
                 "pending_decision_id": None,
                 "running_jobs": [],
                 "last_error": None,
@@ -74,9 +63,10 @@ def _prepare_workspace(tmp_path: Path) -> Engine:
                 "rough_cut_approved_version": None,
                 "postprocess_plan": None,
                 "export_current_id": None,
-                "selected_asset_ids": [],
-                "disabled_asset_ids": [],
                 "scratch_memory": {},
+                "messages_tail_ref": None,
+                "created_at": NOW,
+                "updated_at": NOW,
             }
         )
     return engine
@@ -87,7 +77,7 @@ async def test_narration_then_reply_emits_full_ordered_stream(tmp_path: Path) ->
     listener = _RecordingListener()
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "go"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "go"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -153,7 +143,7 @@ async def test_message_id_matches_persisted_row(tmp_path: Path) -> None:
     listener = _RecordingListener()
 
     await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "hi"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "hi"}),
         engine=engine,
         planner=ScriptedPlanner([{"content": "已完成。"}]),
         turn_id="turn_stream",
@@ -161,7 +151,7 @@ async def test_message_id_matches_persisted_row(tmp_path: Path) -> None:
     )
 
     with begin_immediate(engine) as connection:
-        rows = MessagesRepository(connection).list_for_case("case_1")
+        rows = MessagesRepository(connection).list_for_draft("draft_1")
     assistant_ids = [row["message_id"] for row in rows if row["role"] == "assistant"]
     completed_ids = [event["message_id"] for event in listener.of_type("message_completed")]
     assert assistant_ids == completed_ids == ["msg_turn_stream_1"]
@@ -172,7 +162,7 @@ async def test_denied_tool_emits_started_and_finished_with_deny_status(tmp_path:
     listener = _RecordingListener()
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "?"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "?"}),
         engine=engine,
         # 未注册工具 → policy deny；脚本随后耗尽 → 兜底回复收尾。
         planner=ScriptedPlanner([{"tool_name": "shell.exec", "arguments": {}}]),
@@ -196,7 +186,7 @@ async def test_forced_reply_emits_message_completed(tmp_path: Path) -> None:
     from agent_harness.loop import PlannerStep
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "??"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "??"}),
         engine=engine,
         planner=ScriptedPlanner([PlannerStep(), PlannerStep()]),
         turn_id="turn_forced",
@@ -222,7 +212,7 @@ async def test_listener_exception_never_breaks_turn(tmp_path: Path) -> None:
             raise RuntimeError("listener blew up")
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "hi"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "hi"}),
         engine=engine,
         planner=ScriptedPlanner([{"content": "完成。"}]),
         turn_id="turn_safe",
@@ -247,10 +237,9 @@ def _async_tool_spec(name: str) -> ToolSpec:
         input_model=_EmptyInput,
         result_model=None,
         handler_ref=f"tests.{name}",
-        allowed_scopes=["case_agent_console"],
+        allowed_scopes=["draft_editor"],
         requires_artifacts=[],
-        requires_active_project=False,
-        requires_active_case=False,
+        requires_active_draft=False,
         side_effects=[],
         emits_events=[],
         description="async test tool",
@@ -276,7 +265,7 @@ async def test_async_tool_handler_is_awaited_and_result_flows(tmp_path: Path) ->
         )
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "go"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "go"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -309,7 +298,7 @@ async def test_async_tool_handler_progress_emits_subagent_progress(tmp_path: Pat
         )
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "go"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "go"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -333,7 +322,7 @@ async def test_async_and_sync_handler_exceptions_are_equivalent(tmp_path: Path) 
     async def _run(name: str, handler: Any) -> ToolResult:
         engine = _prepare_workspace(tmp_path / name)
         outcome = await run_turn(
-            TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "go"}),
+            TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "go"}),
             engine=engine,
             planner=ScriptedPlanner([{"tool_name": name, "arguments": {}}]),
             registry=_registry_with(name, handler),
@@ -376,7 +365,7 @@ async def test_turn_progress_is_noop_without_listener(tmp_path: Path) -> None:
         )
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "go"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "go"}),
         engine=engine,
         planner=ScriptedPlanner(
             [

@@ -5,20 +5,20 @@ import { queryKeys } from "../../app/query_client";
 import { StatusBadge } from "./StatusBadge";
 
 type MaterialSummaryPanelProps = {
-  projectId: string;
+  draftId: string;
   asset: MaterialAsset | null;
   onClose: () => void;
 };
 
 export function MaterialSummaryPanel({
-  projectId,
+  draftId,
   asset,
   onClose
 }: MaterialSummaryPanelProps): ReactElement | null {
   const ready = asset?.understanding_status === "ready";
   const summaryQuery = useQuery({
-    queryKey: asset ? queryKeys.materialSummary(projectId, asset.asset_id) : ["material-summary", "none"],
-    queryFn: () => api.getAssetSummary(projectId, asset!.asset_id),
+    queryKey: asset ? queryKeys.materialSummary(draftId, asset.asset_id) : ["material-summary", "none"],
+    queryFn: () => api.getAssetSummary(draftId, asset!.asset_id),
     enabled: Boolean(asset) && ready
   });
 

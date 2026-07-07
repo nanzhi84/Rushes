@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef } from "react";
-import { createCaseTurnStreamSource } from "../../api/client";
+import { createDraftTurnStreamSource } from "../../api/client";
 
 // 流式消息 kind：text_delta 阶段是 assistant（尚未定型），message_completed 后定为 narration/reply。
 export type TurnStreamMessageKind = "assistant" | "narration" | "reply";
@@ -117,8 +117,7 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
 }
 
 export function useTurnStream(
-  projectId: string,
-  caseId: string,
+  draftId: string,
   options: UseTurnStreamOptions = {}
 ): TurnStreamState {
   const [state, dispatch] = useReducer(reduceTurnStream, INITIAL_STATE);
@@ -126,7 +125,7 @@ export function useTurnStream(
   optionsRef.current = options;
 
   useEffect(() => {
-    const source = createCaseTurnStreamSource(projectId, caseId);
+    const source = createDraftTurnStreamSource(draftId);
     const handle = (raw: Event) => {
       const message = raw as MessageEvent<string>;
       let event: TurnStreamEvent;
@@ -152,7 +151,7 @@ export function useTurnStream(
       source.removeEventListener("turn_stream", handle);
       source.close();
     };
-  }, [projectId, caseId]);
+  }, [draftId]);
 
   return state;
 }

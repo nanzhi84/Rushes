@@ -1,4 +1,4 @@
-"""Long-term memory tool handlers."""
+"""Long-term memory tool handlers（单级草稿模型：记忆固定 user 域）。"""
 
 from __future__ import annotations
 
@@ -9,14 +9,14 @@ import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal, cast
+from typing import Any, cast
 from uuid import uuid4
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
-from contracts.case import CaseState
 from contracts.decision import Decision, DecisionOption
+from contracts.draft import DraftState
 from contracts.events import (
     CapabilityDegraded,
     DecisionCreated,
@@ -31,7 +31,7 @@ from storage.repositories._json import load_json
 from tools.context import ToolExecutionContext
 from tools.specs import (
     MemoryAskScopeInput,
-    MemoryExtractFromCaseInput,
+    MemoryExtractFromDraftInput,
     MemorySaveInput,
     MemorySearchRelevantInput,
 )
@@ -40,38 +40,34 @@ from tools.specs import (
 @dataclass(frozen=True, slots=True)
 class MemorySearchHit:
     memory_id: str
-    scope: Literal["user", "project"]
-    project_id: str | None
     content: str
     score: float
 
 
-def extract_from_case(
-    input_model: MemoryExtractFromCaseInput,
+def extract_from_draft(
+    input_model: MemoryExtractFromDraftInput,
     context: ToolExecutionContext,
 ) -> ToolResult:
-    tool_name = "memory.extract_from_case"
-    case_state = context.case_state
+    tool_name = "memory.extract_from_draft"
+    draft_state = context.draft_state
     connection = context.readonly_connection
-    if case_state is None:
-        return _failed(tool_name, context, "missing_case", "active case required")
+    if draft_state is None:
+        return _failed(tool_name, context, "missing_draft", "active draft required")
     if connection is None:
         return _failed(tool_name, context, "missing_connection", "memory tools require DB access")
 
-    source = _case_memory_source(connection, case_state, input_model.summary_hint)
+    source = _draft_memory_source(connection, draft_state, input_model.summary_hint)
     extraction = _extract_content_with_llm(source, context)
     content = extraction.content.strip() or _fallback_memory_text(source)
-    suggested_scope = _suggest_scope(content, input_model.summary_hint)
     candidate_id = f"memcand_{uuid4().hex}"
     created_at = _now(context)
     event = MemoryCandidateExtracted(
         candidate_id=candidate_id,
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
         payload={
-            "case_id": case_state.case_id,
+            "draft_id": draft_state.draft_id,
             "content": content,
-            "suggested_scope": suggested_scope,
+            "suggested_scope": "user",
             "status": "pending",
             "created_at": created_at,
             "source": "llm" if extraction.used_llm else "fallback",
@@ -85,7 +81,6 @@ def extract_from_case(
         observation="已提取一条待确认的经验候选。",
         data={
             "candidate_id": candidate_id,
-            "suggested_scope": suggested_scope,
             "content": content,
         },
         events=events,
@@ -94,10 +89,10 @@ def extract_from_case(
 
 def ask_scope(input_model: MemoryAskScopeInput, context: ToolExecutionContext) -> ToolResult:
     tool_name = "memory.ask_scope"
-    case_state = context.case_state
+    draft_state = context.draft_state
     connection = context.readonly_connection
-    if case_state is None:
-        return _failed(tool_name, context, "missing_case", "active case required")
+    if draft_state is None:
+        return _failed(tool_name, context, "missing_draft", "active draft required")
     if connection is None:
         return _failed(tool_name, context, "missing_connection", "memory tools require DB access")
     candidate = _memory_candidate(connection, input_model.candidate_id)
@@ -111,32 +106,25 @@ def ask_scope(input_model: MemoryAskScopeInput, context: ToolExecutionContext) -
             "memory candidate is not pending",
             details={"status": candidate["status"]},
         )
-    if str(candidate["case_id"]) != case_state.case_id:
+    if str(candidate["draft_id"]) != draft_state.draft_id:
         return _failed(
             tool_name,
             context,
-            "candidate_case_mismatch",
-            "memory candidate does not belong to active case",
+            "candidate_draft_mismatch",
+            "memory candidate does not belong to active draft",
         )
 
     decision = Decision(
         decision_id=f"decision_memory_scope_{input_model.candidate_id}",
-        scope_type="case",
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
+        scope_type="draft",
+        draft_id=draft_state.draft_id,
         type="memory_scope",
-        question="这条经验要保存到哪个作用域？",
+        question="这条经验要存为 user 记忆吗？",
         options=[
             DecisionOption(
-                option_id="project",
-                label="project 级",
-                description="只在当前 Project 的 Case 中注入。",
-                payload={"candidate_id": input_model.candidate_id, "scope": "project"},
-            ),
-            DecisionOption(
                 option_id="user",
-                label="user 级",
-                description="可在任意 Project 中按相关性注入。",
+                label="存为 user 记忆",
+                description="可在任意草稿中按相关性注入。",
                 payload={"candidate_id": input_model.candidate_id, "scope": "user"},
             ),
             DecisionOption(
@@ -154,8 +142,7 @@ def ask_scope(input_model: MemoryAskScopeInput, context: ToolExecutionContext) -
     event = DecisionCreated(
         decision_id=decision.decision_id,
         scope_type=decision.scope_type,
-        project_id=decision.project_id,
-        case_id=decision.case_id,
+        draft_id=decision.draft_id,
         payload={
             "decision": decision.model_dump(mode="json"),
             "type": decision.type,
@@ -195,24 +182,19 @@ def save(input_model: MemorySaveInput, context: ToolExecutionContext) -> ToolRes
                 "saved_memory_id": candidate.get("saved_memory_id"),
             },
         )
-    case_id = str(candidate["case_id"])
-    project_id = _project_id_for_candidate(connection, case_id)
-    if input_model.scope == "project" and project_id is None:
-        return _failed(tool_name, context, "case_not_found", "candidate case not found")
-
+    draft_id = str(candidate["draft_id"])
     memory_id = f"mem_{uuid4().hex}"
     created_at = _now(context)
     event = MemorySaved(
         memory_id=memory_id,
         candidate_id=input_model.candidate_id,
-        project_id=project_id if input_model.scope == "project" else None,
+        draft_id=draft_id,
         payload={
             "candidate_id": input_model.candidate_id,
-            "scope": input_model.scope,
-            "project_id": project_id if input_model.scope == "project" else None,
+            "scope": "user",
             "content": str(candidate["content"]),
             "tags": [],
-            "created_from_case_id": case_id,
+            "created_from_draft_id": draft_id,
             "created_at": created_at,
         },
     )
@@ -224,7 +206,7 @@ def save(input_model: MemorySaveInput, context: ToolExecutionContext) -> ToolRes
         data={
             "candidate_id": input_model.candidate_id,
             "memory_id": memory_id,
-            "scope": input_model.scope,
+            "scope": "user",
         },
         events=[event.model_dump(mode="json")],
     )
@@ -238,19 +220,15 @@ def search_relevant(
     connection = context.readonly_connection
     if connection is None:
         return _failed(tool_name, context, "missing_connection", "memory tools require DB access")
-    project_id = _active_project_id(context)
     hits = search_relevant_memories(
         connection,
         query=input_model.query,
-        project_id=project_id,
-        scope_filter=input_model.scope_filter,
         limit=input_model.limit,
     )
     payload = [
         {
             "memory_id": hit.memory_id,
-            "scope": hit.scope,
-            "project_id": hit.project_id,
+            "scope": "user",
             "summary": _truncate(hit.content, 200),
             "score": hit.score,
         }
@@ -269,40 +247,15 @@ def search_relevant_memories(
     connection: Connection,
     *,
     query: str,
-    project_id: str | None,
-    scope_filter: Literal["user", "project"] | None = None,
     limit: int = 5,
 ) -> tuple[MemorySearchHit, ...]:
-    """Return scoped memory hits using a lightweight in-process ranker.
+    """Return relevant user memories using a lightweight in-process ranker.
 
-    M8 keeps the storage change narrow: scoped SQL filtering prevents project
-    leakage, then a small row set is scored in process instead of adding an FTS
-    migration for memories.
+    单级草稿模型下记忆只有 user 一域：拉出全部 user 记忆的小行集在进程内打分，
+    避免为记忆单开 FTS 迁移。
     """
 
-    statement = select(schema.memories)
-    if scope_filter == "project":
-        if project_id is None:
-            return ()
-        statement = statement.where(
-            schema.memories.c.scope == "project",
-            schema.memories.c.project_id == project_id,
-        )
-    elif scope_filter == "user":
-        statement = statement.where(schema.memories.c.scope == "user")
-    else:
-        project_id_clause = (
-            schema.memories.c.project_id == project_id
-            if project_id is not None
-            else schema.memories.c.project_id.is_(None)
-        )
-        project_clause = and_(schema.memories.c.scope == "project", project_id_clause)
-        statement = statement.where(
-            or_(
-                schema.memories.c.scope == "user",
-                project_clause,
-            )
-        )
+    statement = select(schema.memories).where(schema.memories.c.scope == "user")
     rows = connection.execute(statement.order_by(schema.memories.c.created_at.desc())).all()
     tokens = _query_tokens(query)
     hits: list[MemorySearchHit] = []
@@ -315,8 +268,6 @@ def search_relevant_memories(
         hits.append(
             MemorySearchHit(
                 memory_id=str(values["memory_id"]),
-                scope=cast(Literal["user", "project"], values["scope"]),
-                project_id=values["project_id"],
                 content=content,
                 score=score,
             )
@@ -332,15 +283,15 @@ class _ExtractionResult:
     events: tuple[dict[str, Any], ...] = ()
 
 
-def _case_memory_source(
+def _draft_memory_source(
     connection: Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     summary_hint: str | None,
 ) -> dict[str, Any]:
     decisions = []
     decision_rows = connection.execute(
         select(schema.decisions)
-        .where(schema.decisions.c.case_id == case_state.case_id)
+        .where(schema.decisions.c.draft_id == draft_state.draft_id)
         .where(schema.decisions.c.status == "answered")
         .order_by(schema.decisions.c.decision_id)
     ).all()
@@ -355,7 +306,7 @@ def _case_memory_source(
         )
     export_rows = connection.execute(
         select(schema.exports)
-        .where(schema.exports.c.case_id == case_state.case_id)
+        .where(schema.exports.c.draft_id == draft_state.draft_id)
         .order_by(schema.exports.c.created_at.desc())
         .limit(5)
     ).all()
@@ -370,15 +321,14 @@ def _case_memory_source(
     ]
     return {
         "summary_hint": summary_hint,
-        "case_id": case_state.case_id,
-        "project_id": case_state.project_id,
-        "brief": case_state.brief.model_dump(mode="json"),
+        "draft_id": draft_state.draft_id,
+        "brief": draft_state.brief.model_dump(mode="json"),
         "cut_plan": None
-        if case_state.cut_plan is None
-        else case_state.cut_plan.model_dump(mode="json", by_alias=True),
+        if draft_state.cut_plan is None
+        else draft_state.cut_plan.model_dump(mode="json", by_alias=True),
         "decisions_answered": decisions,
         "exports": exports,
-        "scratch_memory": case_state.scratch_memory,
+        "scratch_memory": draft_state.scratch_memory,
     }
 
 
@@ -394,8 +344,7 @@ def _extract_content_with_llm(
             events=(
                 CapabilityDegraded(
                     degradation_id=f"degraded_{context.tool_call_id}_memory_llm",
-                    project_id=source["project_id"],
-                    case_id=source["case_id"],
+                    draft_id=source["draft_id"],
                     capability="llm.chat",
                     provider_id=None,
                     reason="llm gateway is not configured",
@@ -407,7 +356,6 @@ def _extract_content_with_llm(
     request = ProviderRequest(
         capability=LLM_CHAT,
         request_id=f"memory_extract_{context.tool_call_id}",
-        case_id=str(source["case_id"]),
         payload={
             "messages": [
                 {
@@ -433,8 +381,7 @@ def _extract_content_with_llm(
             events=(
                 CapabilityDegraded(
                     degradation_id=f"degraded_{context.tool_call_id}_memory_llm",
-                    project_id=source["project_id"],
-                    case_id=source["case_id"],
+                    draft_id=source["draft_id"],
                     capability="llm.chat",
                     provider_id=None,
                     reason=f"llm call failed: {exc}",
@@ -453,8 +400,7 @@ def _extract_content_with_llm(
                 *events,
                 CapabilityDegraded(
                     degradation_id=f"degraded_{context.tool_call_id}_memory_llm",
-                    project_id=source["project_id"],
-                    case_id=source["case_id"],
+                    draft_id=source["draft_id"],
                     capability="llm.chat",
                     provider_id=result.provider_id,
                     reason=f"{result.error.error_code}: {result.error.message}",
@@ -479,8 +425,8 @@ def _fallback_memory_text(source: Mapping[str, Any]) -> str:
         scratch_text = "；".join(f"{key}: {value}" for key, value in list(scratch.items())[:3])
     parts = [part for part in (str(hint or ""), goal, scratch_text) if part]
     if parts:
-        return "本 Case 经验：" + "；".join(parts)[:220]
-    return f"Case {source.get('case_id')} 已完成一次导出，可复用其剪辑决策与修改轨迹。"
+        return "本草稿经验：" + "；".join(parts)[:220]
+    return f"草稿 {source.get('draft_id')} 已完成一次导出，可复用其剪辑决策与修改轨迹。"
 
 
 def _content_from_llm_output(output: Mapping[str, Any]) -> str:
@@ -533,12 +479,6 @@ def _arguments_from_tool_call(value: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _suggest_scope(content: str, summary_hint: str | None) -> Literal["user", "project"]:
-    text = f"{summary_hint or ''}\n{content}".lower()
-    user_markers = ("个人", "偏好", "我", "用户", "每次", "以后都", "全局")
-    return "user" if any(marker in text for marker in user_markers) else "project"
-
-
 def _memory_candidate(connection: Connection, candidate_id: str) -> dict[str, Any] | None:
     row = connection.execute(
         select(schema.memory_candidates).where(
@@ -548,23 +488,8 @@ def _memory_candidate(connection: Connection, candidate_id: str) -> dict[str, An
     return None if row is None else dict(row._mapping)
 
 
-def _project_id_for_candidate(connection: Connection, case_id: str) -> str | None:
-    row = connection.execute(
-        select(schema.cases.c.project_id).where(schema.cases.c.case_id == case_id)
-    ).first()
-    return None if row is None else str(row._mapping["project_id"])
-
-
-def _active_project_id(context: ToolExecutionContext) -> str | None:
-    if context.case_state is not None:
-        return context.case_state.project_id
-    if context.project_state is not None:
-        return context.project_state.project_id
-    return None
-
-
 def _query_tokens(query: str) -> tuple[str, ...]:
-    return tuple(token for token in re.findall(r"[\w\u4e00-\u9fff]+", query.lower()) if token)
+    return tuple(token for token in re.findall(r"[\w一-鿿]+", query.lower()) if token)
 
 
 def _memory_score(content: str, tokens: Sequence[str], index: int) -> float:

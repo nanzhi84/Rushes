@@ -10,25 +10,25 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
 
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.subtitle import SubtitleClip
 from contracts.timeline import TimelineMediaClip, TimelineState, TimelineValidationReport
 from storage import schema
 from storage.repositories._json import load_json
 
-TimelineInvariantHook = Callable[[Connection, CaseState, TimelineState], Sequence[str]]
+TimelineInvariantHook = Callable[[Connection, DraftState, TimelineState], Sequence[str]]
 
 
 @dataclass(frozen=True, slots=True)
 class TimelineValidationContext:
     connection: Connection
-    case_state: CaseState
-    project_fps: int
+    draft_state: DraftState
+    draft_fps: int
 
 
 def validate_timeline(
     engine: Engine | Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     timeline: TimelineState,
 ) -> TimelineValidationReport:
     """Validate all PRD §10.2 invariants and return a structured report."""
@@ -36,8 +36,8 @@ def validate_timeline(
     with _connection_context(engine) as connection:
         context = TimelineValidationContext(
             connection=connection,
-            case_state=case_state,
-            project_fps=_project_fps(connection, case_state.project_id),
+            draft_state=draft_state,
+            draft_fps=_draft_fps(connection, draft_state.draft_id),
         )
         checks = _existing_warnings(timeline)
         checks.extend(_validate_identity(context, timeline))
@@ -54,12 +54,12 @@ def validate_timeline(
 
 def validate_timeline_invariants(
     connection: Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     timeline: TimelineState,
 ) -> Sequence[str]:
     """Reducer hook adapter that keeps agent_harness independent from timeline."""
 
-    report = validate_timeline(connection, case_state, timeline)
+    report = validate_timeline(connection, draft_state, timeline)
     return tuple(
         f"{check.get('code')}: {check.get('message')}"
         for check in report.checks
@@ -86,13 +86,13 @@ def _validate_identity(
     timeline: TimelineState,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-    if timeline.case_id != context.case_state.case_id:
+    if timeline.draft_id != context.draft_state.draft_id:
         checks.append(
             _error(
-                "timeline.identity.case_mismatch",
-                "timeline case_id must match the active case",
-                timeline_case_id=timeline.case_id,
-                case_id=context.case_state.case_id,
+                "timeline.identity.draft_mismatch",
+                "timeline draft_id must match the active draft",
+                timeline_draft_id=timeline.draft_id,
+                draft_id=context.draft_state.draft_id,
             )
         )
     if timeline.duration_frames < 0:
@@ -158,39 +158,22 @@ def _validate_asset_references(
     timeline: TimelineState,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-    disabled = set(context.case_state.disabled_asset_ids)
     for asset_id in sorted(_asset_ids(timeline)):
-        row = _asset_reference_row(context.connection, context.case_state.project_id, asset_id)
-        if row is None:
+        row = _asset_reference_row(context.connection, context.draft_state.draft_id, asset_id)
+        if row is None or row.get("linked_draft_id") is None:
             checks.append(
                 _error(
                     "timeline.asset_reference.missing_or_unlinked",
-                    "timeline references an asset that is not linked to this project",
+                    "timeline references an asset that is not linked to this draft",
                     asset_id=asset_id,
                 )
             )
             continue
-        if not bool(row.get("link_enabled")):
-            checks.append(
-                _error(
-                    "timeline.asset_reference.unlinked",
-                    "timeline references a disabled project asset link",
-                    asset_id=asset_id,
-                )
-            )
         if not bool(row.get("usable")):
             checks.append(
                 _error(
                     "timeline.asset_reference.unusable",
                     "timeline references an unusable asset",
-                    asset_id=asset_id,
-                )
-            )
-        if asset_id in disabled:
-            checks.append(
-                _error(
-                    "timeline.asset_reference.case_disabled",
-                    "timeline references an asset disabled for this case",
                     asset_id=asset_id,
                 )
             )
@@ -272,13 +255,13 @@ def _validate_fps_and_ranges(
     timeline: TimelineState,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-    if timeline.fps != context.project_fps:
+    if timeline.fps != context.draft_fps:
         checks.append(
             _error(
                 "timeline.fps.mismatch",
-                "timeline fps must match project defaults",
+                "timeline fps must match draft defaults",
                 timeline_fps=timeline.fps,
-                project_fps=context.project_fps,
+                draft_fps=context.draft_fps,
             )
         )
     for clip in _all_media_clips(timeline):
@@ -396,20 +379,20 @@ def _asset_ids(timeline: TimelineState) -> set[str]:
 
 def _asset_reference_row(
     connection: Connection,
-    project_id: str,
+    draft_id: str,
     asset_id: str,
 ) -> dict[str, Any] | None:
     row = connection.execute(
         select(
             schema.assets.c.asset_id,
             schema.assets.c.usable,
-            schema.project_asset_links.c.enabled.label("link_enabled"),
+            schema.draft_asset_links.c.draft_id.label("linked_draft_id"),
         )
         .select_from(
             schema.assets.outerjoin(
-                schema.project_asset_links,
-                (schema.project_asset_links.c.asset_id == schema.assets.c.asset_id)
-                & (schema.project_asset_links.c.project_id == project_id),
+                schema.draft_asset_links,
+                (schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id)
+                & (schema.draft_asset_links.c.draft_id == draft_id),
             )
         )
         .where(schema.assets.c.asset_id == asset_id)
@@ -431,9 +414,9 @@ def _asset_probe_rows(
     return {str(row._mapping["asset_id"]): _probe_payload(row._mapping["probe"]) for row in rows}
 
 
-def _project_fps(connection: Connection, project_id: str) -> int:
+def _draft_fps(connection: Connection, draft_id: str) -> int:
     row = connection.execute(
-        select(schema.projects.c.defaults).where(schema.projects.c.project_id == project_id)
+        select(schema.drafts.c.defaults).where(schema.drafts.c.draft_id == draft_id)
     ).first()
     if row is None:
         return 30

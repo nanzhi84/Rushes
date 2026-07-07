@@ -4,12 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import {
   api,
-  type CaseMessage,
   type DecisionAnswer,
-  type MaterialAsset,
+  type MessageRecord,
   type TimelineClipJson,
   type TimelineJson
 } from "../api/client";
+import { DRAFT_EVENT_TYPES } from "../api/event_types";
 import { queryKeys } from "../app/query_client";
 import { createApiEventSource } from "../auth";
 import { useWorkspaceEvents } from "../app/use_workspace_events";
@@ -38,18 +38,12 @@ import { TopBar } from "../components/Shell/TopBar";
 import { TimelineViewer } from "../components/TimelineViewer";
 import { useUiStore } from "../state/ui_store";
 
-export function CaseAgentConsolePage(): ReactElement {
-  const params = useParams({ strict: false }) as { projectId: string; caseId: string };
-  return <CaseConsoleView projectId={params.projectId} caseId={params.caseId} />;
+export function DraftEditorPage(): ReactElement {
+  const { draftId } = useParams({ from: "/drafts/$draftId" });
+  return <DraftEditorView draftId={draftId} />;
 }
 
-export function CaseConsoleView({
-  projectId,
-  caseId
-}: {
-  projectId: string;
-  caseId: string;
-}): ReactElement {
+export function DraftEditorView({ draftId }: { draftId: string }): ReactElement {
   const queryClient = useQueryClient();
   const connectionState = useWorkspaceEvents();
   const {
@@ -72,46 +66,37 @@ export function CaseConsoleView({
   const [seekSec, setSeekSec] = useState<number | null>(null);
   const [pxPerSec, setPxPerSec] = useState(DEFAULT_TIMELINE_PX_PER_SEC);
   const [viewedVersion, setViewedVersion] = useState<number | null>(null);
-  const [previewAsset, setPreviewAsset] = useState<MaterialAsset | null>(null);
   const timelineBodyRef = useRef<HTMLDivElement | null>(null);
 
-  const treeQuery = useQuery({
-    queryKey: queryKeys.projectTree,
-    queryFn: api.projectTree
-  });
-  const treeProjects = treeQuery.data?.projects ?? [];
-  const projectName =
-    treeProjects.find((project) => project.project_id === projectId)?.name ?? projectId;
-
   const messagesQuery = useQuery({
-    queryKey: queryKeys.messages(projectId, caseId),
+    queryKey: queryKeys.messages(draftId),
     queryFn: async () => {
-      const response = await api.getCaseMessages(projectId, caseId);
+      const response = await api.getDraftMessages(draftId);
       return response.messages.map(toConsoleMessage);
     },
     initialData: [] as ConsoleMessage[]
   });
 
   const decisionQuery = useQuery({
-    queryKey: queryKeys.currentDecision(projectId, caseId),
-    queryFn: () => api.currentDecision(projectId, caseId)
+    queryKey: queryKeys.currentDecision(draftId),
+    queryFn: () => api.currentDecision(draftId)
   });
 
-  const caseQuery = useQuery({
-    queryKey: queryKeys.case(projectId, caseId),
-    queryFn: () => api.getCase(projectId, caseId)
+  const draftQuery = useQuery({
+    queryKey: queryKeys.draft(draftId),
+    queryFn: () => api.getDraft(draftId)
   });
 
-  const currentCase = caseQuery.data?.case ?? null;
-  const caseName = currentCase?.name ?? caseId;
-  const timelineVersion = currentCase?.timeline_current_version ?? null;
+  const currentDraft = draftQuery.data?.draft ?? null;
+  const draftName = currentDraft?.name ?? draftId;
+  const timelineVersion = currentDraft?.timeline_current_version ?? null;
   const effectiveVersion = viewedVersion ?? timelineVersion;
   const viewingHistory =
     viewedVersion !== null && timelineVersion !== null && viewedVersion !== timelineVersion;
 
   const timelineQuery = useQuery({
-    queryKey: queryKeys.timeline(projectId, caseId, effectiveVersion),
-    queryFn: () => api.fetchCaseTimeline(projectId, caseId, effectiveVersion),
+    queryKey: queryKeys.timeline(draftId, effectiveVersion),
+    queryFn: () => api.fetchDraftTimeline(draftId, effectiveVersion),
     enabled: effectiveVersion !== null
   });
 
@@ -140,46 +125,45 @@ export function CaseConsoleView({
     [currentDecision]
   );
 
-  const invalidateCaseQueries = useCallback(
+  const invalidateDraftQueries = useCallback(
     async (payload: DomainSsePayload) => {
       const event = payload.event;
       if (event.event === "TurnEnded") {
         setAwaitingTurnEnd(false);
       }
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.projectTree }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.case(projectId, caseId) }),
-        queryClient.invalidateQueries({ queryKey: ["timeline", projectId, caseId] }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.messages(projectId, caseId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(projectId, caseId) })
+        queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
+        queryClient.invalidateQueries({ queryKey: ["timeline", draftId] }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) })
       ]);
     },
-    [caseId, projectId, queryClient]
+    [draftId, queryClient]
   );
 
   useEffect(() => {
-    const source = createApiEventSource(`/api/projects/${projectId}/cases/${caseId}/events`);
+    const source = createApiEventSource(`/api/drafts/${draftId}/events`);
     source.onopen = () => setStreamState("open");
     source.onerror = () => setStreamState("closed");
     const handleEvent = (event: Event) => {
       const message = event as MessageEvent<string>;
       const payload = JSON.parse(message.data) as DomainSsePayload;
       setStructuredItems((current) => reduceStructuredInteractionItems(current, payload));
-      void invalidateCaseQueries(payload);
+      void invalidateDraftQueries(payload);
     };
-    for (const eventName of CASE_EVENT_TYPES) {
+    for (const eventName of DRAFT_EVENT_TYPES) {
       source.addEventListener(eventName, handleEvent);
     }
     return () => {
       source.close();
     };
-  }, [caseId, invalidateCaseQueries, projectId]);
+  }, [draftId, invalidateDraftQueries]);
 
   // turn-stream 订阅置于领域 /events 订阅之后，保证 /events 是首个 EventSource。
   const refreshMessages = useCallback(() => {
-    void queryClient.invalidateQueries({ queryKey: queryKeys.messages(projectId, caseId) });
-  }, [caseId, projectId, queryClient]);
-  const { inProgressMessages, toolSteps } = useTurnStream(projectId, caseId, {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) });
+  }, [draftId, queryClient]);
+  const { inProgressMessages, toolSteps } = useTurnStream(draftId, {
     onTurnEnded: refreshMessages
   });
 
@@ -199,17 +183,17 @@ export function CaseConsoleView({
   }, [historyMessages, inProgressMessages]);
 
   const postMessage = useMutation({
-    mutationFn: (content: string) => api.postMessage(projectId, caseId, { content }),
+    mutationFn: (content: string) => api.postMessage(draftId, { content }),
     onMutate: async (content) => {
       setAwaitingTurnEnd(true);
-      await queryClient.cancelQueries({ queryKey: queryKeys.messages(projectId, caseId) });
+      await queryClient.cancelQueries({ queryKey: queryKeys.messages(draftId) });
       const optimistic: ConsoleMessage = {
         id: `local_${Date.now()}`,
         role: "user",
         content,
         createdAt: new Date().toISOString()
       };
-      queryClient.setQueryData<ConsoleMessage[]>(queryKeys.messages(projectId, caseId), (current) => [
+      queryClient.setQueryData<ConsoleMessage[]>(queryKeys.messages(draftId), (current) => [
         ...(current ?? []),
         optimistic
       ]);
@@ -220,16 +204,15 @@ export function CaseConsoleView({
   const answerDecision = useMutation({
     mutationFn: ({ decisionId, answer }: { decisionId: string; answer: DecisionAnswer }) =>
       api.answerDecision(decisionId, {
-        project_id: projectId,
-        case_id: caseId,
+        draft_id: draftId,
         answer
       }),
     onSuccess: async (_data, variables) => {
       setStructuredItems((current) => markDecisionAnswered(current, variables.decisionId, variables.answer));
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(projectId, caseId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.messages(projectId, caseId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.case(projectId, caseId) })
+        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) })
       ]);
     }
   });
@@ -253,10 +236,10 @@ export function CaseConsoleView({
       return;
     }
     void api
-      .postPreviewViewed(projectId, caseId, previewId)
-      .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.case(projectId, caseId) }))
+      .postPreviewViewed(draftId, previewId)
+      .then(() => queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }))
       .catch(() => undefined);
-  }, [caseId, projectId, queryClient, timelinePayload?.preview_id]);
+  }, [draftId, queryClient, timelinePayload?.preview_id]);
   const handlePreviewTimeUpdate = useCallback((sec: number) => {
     setPlayheadSec(sec);
   }, []);
@@ -358,21 +341,18 @@ export function CaseConsoleView({
         leading={
           <>
             <Link
-              aria-label="返回项目"
+              aria-label="返回草稿"
               className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-fg-muted hover:bg-hover hover:text-fg"
-              to="/projects/$projectId"
-              params={{ projectId }}
+              to="/"
             >
               <HomeGlyph />
             </Link>
-            <span className="hidden truncate text-sm text-fg-muted sm:inline">{projectName}</span>
-            <span className="text-fg-faint">/</span>
-            <span className="truncate text-sm font-semibold">{caseName}</span>
+            <span className="truncate text-sm font-semibold">{draftName}</span>
             <button
               className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-fg-muted hover:bg-hover hover:text-fg"
               type="button"
-              aria-label="重命名剪辑任务"
-              onClick={() => openEntityDialog({ kind: "renameCase", projectId, caseId })}
+              aria-label="重命名草稿"
+              onClick={() => openEntityDialog({ kind: "renameDraft", draftId })}
             >
               <PencilGlyph />
             </button>
@@ -466,25 +446,11 @@ export function CaseConsoleView({
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <div className="flex min-h-0 flex-1">
             <div className="w-[300px] shrink-0 border-r border-line bg-panel xl:w-[340px]">
-              <AssetsPanel
-                projectId={projectId}
-                onPreviewAsset={(asset) =>
-                  setPreviewAsset((current) =>
-                    current?.asset_id === asset.asset_id ? null : asset
-                  )
-                }
-                previewingAssetId={previewAsset?.asset_id ?? null}
-              />
+              <AssetsPanel draftId={draftId} management />
             </div>
 
             <section className="min-h-0 min-w-0 flex-1 p-3" aria-label="预览区">
-              {previewAsset ? (
-                <AssetMediaPreview
-                  key={previewAsset.asset_id}
-                  asset={previewAsset}
-                  onClose={() => setPreviewAsset(null)}
-                />
-              ) : timelineVersion === null ? (
+              {timelineVersion === null ? (
                 <PreviewPlaceholder text="暂无时间线。让代理开始剪辑后，这里会出现成片预览。" />
               ) : timelineQuery.isPending ? (
                 <PreviewPlaceholder text="时间线加载中…" />
@@ -605,7 +571,11 @@ export function CaseConsoleView({
         </div>
       </div>
 
-      <EntityActionDialog dialog={entityDialog} projects={treeProjects} onClose={closeEntityDialog} />
+      <EntityActionDialog
+        dialog={entityDialog}
+        drafts={currentDraft ? [currentDraft] : []}
+        onClose={closeEntityDialog}
+      />
     </div>
   );
 }
@@ -614,63 +584,6 @@ function PreviewPlaceholder({ text }: { text: string }): ReactElement {
   return (
     <div className="grid h-full place-items-center rounded-lg border border-dashed border-line-strong">
       <p className="max-w-[260px] text-center text-sm leading-6 text-fg-muted">{text}</p>
-    </div>
-  );
-}
-
-/** 素材试看：视频/音频/图片按类型渲染，媒体流走 mediaProxyUrl；代理未就绪或加载失败给出提示。 */
-function AssetMediaPreview({
-  asset,
-  onClose
-}: {
-  asset: MaterialAsset;
-  onClose: () => void;
-}): ReactElement {
-  const [mediaFailed, setMediaFailed] = useState(false);
-  const src = api.mediaProxyUrl(asset.asset_id);
-  const handleMediaError = useCallback(() => setMediaFailed(true), []);
-  return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-line bg-black">
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line bg-panel px-3 py-2">
-        <span className="truncate text-sm text-fg">{asset.filename || asset.asset_id}</span>
-        <button
-          className="shrink-0 rounded-md border border-line px-2.5 py-1 text-xs text-fg-muted hover:bg-hover"
-          type="button"
-          onClick={onClose}
-        >
-          返回成片预览
-        </button>
-      </div>
-      <div className="grid min-h-0 flex-1 place-items-center p-2">
-        {!asset.proxy_ready ? (
-          <p className="max-w-[280px] text-center text-sm leading-6 text-fg-muted">
-            素材代理尚未就绪（导入处理中或已失败），稍后再试。
-          </p>
-        ) : mediaFailed ? (
-          <p className="max-w-[280px] text-center text-sm leading-6 text-fg-muted">
-            素材加载失败，代理文件可能已失效。
-          </p>
-        ) : asset.kind === "video" ? (
-          <video
-            className="max-h-full max-w-full"
-            controls
-            src={src}
-            aria-label="素材试看"
-            onError={handleMediaError}
-          />
-        ) : asset.kind === "audio" ? (
-          <audio controls src={src} aria-label="素材试听" onError={handleMediaError} />
-        ) : asset.kind === "image" ? (
-          <img
-            className="max-h-full max-w-full object-contain"
-            src={src}
-            alt={asset.filename || asset.asset_id}
-            onError={handleMediaError}
-          />
-        ) : (
-          <p className="text-sm text-fg-muted">该素材类型暂不支持预览。</p>
-        )}
-      </div>
     </div>
   );
 }
@@ -742,7 +655,7 @@ function clipLabel(clip: TimelineClipJson): string | null {
   return null;
 }
 
-function toConsoleMessage(message: CaseMessage): ConsoleMessage {
+function toConsoleMessage(message: MessageRecord): ConsoleMessage {
   return {
     id: message.message_id,
     role: normalizeConsoleRole(message.role),
@@ -811,40 +724,6 @@ function PencilGlyph(): ReactElement {
     </svg>
   );
 }
-
-const CASE_EVENT_TYPES = [
-  "CaseCreated",
-  "CaseRenamed",
-  "CaseCopied",
-  "CaseMoved",
-  "CaseClosed",
-  "CaseTrashed",
-  "CaseAssetScopeChanged",
-  "DecisionCreated",
-  "DecisionAnswered",
-  "DecisionCancelled",
-  "BriefUpdated",
-  "ContentPlanUpdated",
-  "AudioPlanUpdated",
-  "CutPlanUpdated",
-  "PostprocessPlanUpdated",
-  "TimelineVersionCreated",
-  "TimelineVersionRestored",
-  "TimelineValidated",
-  "TimelineValidationFailed",
-  "PreviewRendered",
-  "PreviewViewed",
-  "ExportCompleted",
-  "MemoryCandidateExtracted",
-  "MemoryCandidateDiscarded",
-  "JobEnqueued",
-  "JobProgress",
-  "JobSucceeded",
-  "JobFailed",
-  "JobCancelled",
-  "TurnEnded",
-  "CapabilityDegraded"
-];
 
 const TIMELINE_ZOOM_LEVELS = [12, 24, 48, 96, 192];
 const DEFAULT_TIMELINE_PX_PER_SEC = 96;

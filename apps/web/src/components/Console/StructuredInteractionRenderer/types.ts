@@ -64,9 +64,8 @@ export type DomainSsePayload = {
 
 export type DomainSseEvent = {
   event: string;
-  project_id?: string | null;
-  case_id?: string | null;
-  requested_by_case_id?: string | null;
+  draft_id?: string | null;
+  requested_by_draft_id?: string | null;
   decision_id?: string | null;
   job_id?: string | null;
   [key: string]: unknown;

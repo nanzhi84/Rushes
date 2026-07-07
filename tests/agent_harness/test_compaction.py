@@ -6,10 +6,10 @@ def test_write_before_compaction_extracts_facts_before_summary_event() -> None:
         CompactionMessage(
             role="user",
             content="我决定使用白色字幕。以后都要快节奏。",
-            case_id="case_1",
+            draft_id="draft_1",
         ),
-        CompactionMessage(role="assistant", content="已记录。", case_id="case_1"),
-        CompactionMessage(role="user", content="最新一句保留在窗口里", case_id="case_1"),
+        CompactionMessage(role="assistant", content="已记录。", draft_id="draft_1"),
+        CompactionMessage(role="user", content="最新一句保留在窗口里", draft_id="draft_1"),
     ]
 
     result = compact_messages(messages, budget=20, counter=len)

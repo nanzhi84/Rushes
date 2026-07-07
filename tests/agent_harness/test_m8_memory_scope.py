@@ -6,19 +6,28 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 
-from agent_harness.loop import ScriptedPlanner, _load_state, run_turn
+from agent_harness.loop import (
+    ScriptedPlanner,
+    _execute_memory_save_followup,
+    _load_state,
+    _RunAccumulator,
+    run_turn,
+)
 from agent_harness.reducer import apply
+from agent_harness.tool_router import ToolRouter
+from agent_harness.trace import NullTraceRecorder
 from agent_harness.turn_queue import TurnQueueItem
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.provider import ProviderResult
+from domain.decision_effects import HarnessFollowup
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
-from storage.repositories import CasesRepository, DecisionsRepository, ProjectsRepository
+from storage.repositories import DecisionsRepository, DraftsRepository
 from storage.repositories._json import dump_json
 from storage.repositories.event_log import EventLogRepository
-from tools import ToolExecutionContext
-from tools.memory_tools import ask_scope, extract_from_case, save
-from tools.specs import MemoryAskScopeInput, MemoryExtractFromCaseInput, MemorySaveInput
+from tools import ToolExecutionContext, build_default_tool_registry
+from tools.memory_tools import ask_scope, extract_from_draft, save
+from tools.specs import MemoryAskScopeInput, MemoryExtractFromDraftInput, MemorySaveInput
 
 NOW = "2026-07-05T00:00:00+00:00"
 
@@ -50,14 +59,12 @@ def _prepare_workspace(tmp_path: Path) -> Engine:
     with engine.begin() as connection:
         schema.create_all(connection)
     with begin_immediate(engine) as connection:
-        ProjectsRepository(connection).insert(_project("project_1", "Project A"))
-        ProjectsRepository(connection).insert(_project("project_2", "Project B"))
-        CasesRepository(connection).insert(_case("case_1", "project_1", goal="护肤口播"))
-        CasesRepository(connection).insert(_case("case_2", "project_2", goal="护肤口播"))
+        DraftsRepository(connection).insert(_draft_row("draft_1", goal="护肤口播"))
+        DraftsRepository(connection).insert(_draft_row("draft_2", goal="护肤口播"))
         connection.execute(
             schema.objects.insert().values(
                 hash="hash_export",
-                rel_path="exports/case_1.mp4",
+                rel_path="exports/draft_1.mp4",
                 size=10,
                 created_at=NOW,
             )
@@ -65,7 +72,7 @@ def _prepare_workspace(tmp_path: Path) -> Engine:
         connection.execute(
             schema.exports.insert().values(
                 export_id="export_1",
-                case_id="case_1",
+                draft_id="draft_1",
                 timeline_version=1,
                 object_hash="hash_export",
                 quality=dump_json({"quality": "high"}),
@@ -75,24 +82,13 @@ def _prepare_workspace(tmp_path: Path) -> Engine:
     return engine
 
 
-def _project(project_id: str, name: str) -> dict[str, object]:
+def _draft_row(draft_id: str, *, goal: str) -> dict[str, object]:
     return {
-        "project_id": project_id,
-        "name": name,
-        "status": "active",
-        "defaults": {"aspect_ratio": "9:16", "fps": 30},
-        "created_at": NOW,
-        "updated_at": NOW,
-    }
-
-
-def _case(case_id: str, project_id: str, *, goal: str) -> dict[str, object]:
-    return {
-        "case_id": case_id,
-        "project_id": project_id,
-        "name": case_id,
+        "draft_id": draft_id,
+        "name": draft_id,
         "state_version": 0,
         "status": "active",
+        "defaults": {"aspect_ratio": "9:16", "fps": 30},
         "pending_decision_id": None,
         "running_jobs": [],
         "last_error": None,
@@ -108,9 +104,10 @@ def _case(case_id: str, project_id: str, *, goal: str) -> dict[str, object]:
         "rough_cut_approved_version": None,
         "postprocess_plan": None,
         "export_current_id": None,
-        "selected_asset_ids": [],
-        "disabled_asset_ids": [],
         "scratch_memory": {"tone": "前三秒直接给结论"},
+        "messages_tail_ref": None,
+        "created_at": NOW,
+        "updated_at": NOW,
     }
 
 
@@ -118,19 +115,21 @@ def _case(case_id: str, project_id: str, *, goal: str) -> dict[str, object]:
 def _context(
     engine: Engine,
     *,
-    case_id: str = "case_1",
+    draft_id: str = "draft_1",
     tool_call_id: str = "tool_call_1",
     gateway: object | None = None,
 ) -> Iterator[ToolExecutionContext]:
     connection = engine.connect()
     try:
-        case = CasesRepository(connection).get(case_id)
-        assert case is not None
+        draft = DraftsRepository(connection).get(draft_id)
+        assert draft is not None
         metadata = {"provider_gateway": gateway} if gateway is not None else {}
         yield ToolExecutionContext(
             tool_call_id=tool_call_id,
             turn_id="turn_1",
-            case_state=CaseState.model_validate(case),
+            draft_state=DraftState.model_validate(
+                {k: v for k, v in draft.items() if k not in {"created_at", "updated_at"}}
+            ),
             readonly_connection=connection,
             created_at=NOW,
             metadata=metadata,
@@ -173,10 +172,10 @@ def _event_types(engine: Engine) -> list[str]:
 
 async def test_memory_scope_save_and_skip_paths(tmp_path: Path) -> None:
     engine = _prepare_workspace(tmp_path)
-    gateway = _Gateway("项目内护肤口播：前三秒直接给结论，再接产品使用过程。")
+    gateway = _Gateway("护肤口播偏好：前三秒直接给结论，再接产品使用过程。")
     with _context(engine, gateway=gateway) as context:
-        extracted = extract_from_case(
-            MemoryExtractFromCaseInput(summary_hint="沉淀这次护肤口播经验"),
+        extracted = extract_from_draft(
+            MemoryExtractFromDraftInput(summary_hint="沉淀这次护肤口播经验"),
             context,
         )
     candidate_id = str(extracted.data["candidate_id"])
@@ -196,7 +195,7 @@ async def test_memory_scope_save_and_skip_paths(tmp_path: Path) -> None:
     assert decision["options"][0]["payload"]["candidate_id"] == candidate_id
 
     await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "project"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "user"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -204,12 +203,12 @@ async def test_memory_scope_save_and_skip_paths(tmp_path: Path) -> None:
                     "tool_name": "decision.answer",
                     "arguments": {
                         "decision_id": decision_id,
-                        "answer": {"option_id": "project", "answered_via": "button"},
+                        "answer": {"option_id": "user", "answered_via": "button"},
                     },
                 }
             ]
         ),
-        turn_id="turn_memory_project",
+        turn_id="turn_memory_user",
     )
 
     saved_candidate = _candidate(engine, candidate_id)
@@ -217,30 +216,30 @@ async def test_memory_scope_save_and_skip_paths(tmp_path: Path) -> None:
     assert saved_candidate["saved_memory_id"] is not None
     with begin_immediate(engine) as connection:
         memory = connection.execute(select(schema.memories)).one()
-    assert memory._mapping["scope"] == "project"
-    assert memory._mapping["project_id"] == "project_1"
+    assert memory._mapping["scope"] == "user"
+    assert memory._mapping["created_from_draft_id"] == "draft_1"
     assert "MemorySaved" in _event_types(engine)
 
     with _context(engine, tool_call_id="dup_save") as context:
-        duplicate = save(MemorySaveInput(candidate_id=candidate_id, scope="project"), context)
+        duplicate = save(MemorySaveInput(candidate_id=candidate_id), context)
     assert duplicate.status == "failed"
     assert _memory_count(engine) == 1
 
     with _context(engine, tool_call_id="extract_skip") as context:
-        skipped = extract_from_case(
-            MemoryExtractFromCaseInput(summary_hint="跳过这条候选"),
+        skipped = extract_from_draft(
+            MemoryExtractFromDraftInput(summary_hint="跳过这条候选"),
             context,
         )
     skip_candidate_id = str(skipped.data["candidate_id"])
     _apply(engine, skipped.events)
     with _context(engine, tool_call_id="ask_skip") as context:
         skip_ask = ask_scope(MemoryAskScopeInput(candidate_id=skip_candidate_id), context)
-    current_version = _load_state(engine, "case_1").case_state.state_version
+    current_version = _load_state(engine, "draft_1").draft_state.state_version
     _apply(engine, skip_ask.events, base_version=current_version)
     skip_decision_id = str(skip_ask.data["decision_id"])
 
     await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "skip"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "skip"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -261,53 +260,56 @@ async def test_memory_scope_save_and_skip_paths(tmp_path: Path) -> None:
     assert "MemoryCandidateDiscarded" in _event_types(engine)
 
 
-def test_project_memory_does_not_cross_project(tmp_path: Path) -> None:
+async def test_memory_save_followup_rejects_invalid_payload(tmp_path: Path) -> None:
     engine = _prepare_workspace(tmp_path)
-    with begin_immediate(engine) as connection:
-        connection.execute(
-            schema.memories.insert().values(
-                memory_id="mem_project_a",
-                scope="project",
-                project_id="project_1",
-                content="护肤口播开头必须先说适用肤质。",
-                tags="[]",
-                created_from_case_id="case_1",
-                created_at=NOW,
-            )
+    router = ToolRouter(build_default_tool_registry())
+
+    async def _run(payload: dict[str, Any]) -> None:
+        await _execute_memory_save_followup(
+            HarnessFollowup(kind="enqueue_memory_save", decision_id="dec", payload=payload),
+            engine=engine,
+            router=router,
+            turn_id="turn_1",
+            accumulator=_RunAccumulator(),
+            tracer=NullTraceRecorder(),
         )
 
-    loaded_b = _load_state(engine, "case_2")
+    # scope 非 user（单级草稿只有 user 域）→ 拒绝，不落库、不抛错。
+    await _run({"candidate_id": "c1", "scope": "project", "draft_id": "draft_1"})
+    # 缺 draft_id → 拒绝。
+    await _run({"candidate_id": "c1", "scope": "user"})
+    # 缺 candidate_id → 拒绝。
+    await _run({"scope": "user", "draft_id": "draft_1"})
 
-    assert all("mem_project_a" not in item for item in loaded_b.memory_summaries)
+    assert _memory_count(engine) == 0
 
 
-def test_user_memory_injects_across_projects_by_relevance(tmp_path: Path) -> None:
+def test_user_memory_injects_across_drafts_by_relevance(tmp_path: Path) -> None:
     engine = _prepare_workspace(tmp_path)
     with begin_immediate(engine) as connection:
         connection.execute(
             schema.memories.insert().values(
                 memory_id="mem_user_1",
                 scope="user",
-                project_id=None,
                 content="护肤口播用户偏好：开头直接给结论，不要铺垫太久。",
                 tags="[]",
-                created_from_case_id="case_1",
+                created_from_draft_id="draft_1",
                 created_at=NOW,
             )
         )
 
-    loaded_a = _load_state(engine, "case_1")
-    loaded_b = _load_state(engine, "case_2")
+    loaded_a = _load_state(engine, "draft_1")
+    loaded_b = _load_state(engine, "draft_2")
 
     assert any("mem_user_1" in item for item in loaded_a.memory_summaries)
     assert any("mem_user_1" in item for item in loaded_b.memory_summaries)
 
 
-def test_extract_from_case_falls_back_without_gateway(tmp_path: Path) -> None:
+def test_extract_from_draft_falls_back_without_gateway(tmp_path: Path) -> None:
     engine = _prepare_workspace(tmp_path)
     with _context(engine) as context:
-        result = extract_from_case(
-            MemoryExtractFromCaseInput(summary_hint="没有 provider gateway 也要沉淀"),
+        result = extract_from_draft(
+            MemoryExtractFromDraftInput(summary_hint="没有 provider gateway 也要沉淀"),
             context,
         )
 

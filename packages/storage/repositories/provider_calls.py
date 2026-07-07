@@ -33,13 +33,13 @@ class ProviderCallsRepository:
             return None
         return decode_json_columns(result, JSON_COLUMNS)
 
-    def list_for_case(self, case_id: str) -> list[dict[str, Any]]:
+    def list_for_draft(self, draft_id: str) -> list[dict[str, Any]]:
         rows = self._connection.execute(
-            select(schema.provider_calls).where(schema.provider_calls.c.case_id == case_id)
+            select(schema.provider_calls).where(schema.provider_calls.c.draft_id == draft_id)
         ).all()
         return [decode_json_columns(dict(row._mapping), JSON_COLUMNS) for row in rows]
 
-    def sum_cost_for_project(self, project_id: str) -> float:
+    def sum_cost_for_draft(self, draft_id: str) -> float:
         value = self._connection.execute(
             select(func.coalesce(func.sum(schema.provider_calls.c.cost_estimate), 0.0))
             .select_from(
@@ -48,6 +48,6 @@ class ProviderCallsRepository:
                     schema.jobs.c.job_id == schema.provider_calls.c.job_id,
                 )
             )
-            .where(schema.jobs.c.project_id == project_id)
+            .where(schema.jobs.c.draft_id == draft_id)
         ).scalar_one()
         return float(value or 0.0)

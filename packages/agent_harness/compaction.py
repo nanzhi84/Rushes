@@ -24,7 +24,7 @@ class CompactionMessage(BaseModel):
     role: str
     content: str
     created_at: str | None = None
-    case_id: str | None = None
+    draft_id: str | None = None
 
     @classmethod
     def from_input(
@@ -137,7 +137,7 @@ def _compaction_events(
     summary_text: str,
     extracted_facts: Sequence[str],
 ) -> tuple[DomainEventBase, ...]:
-    case_id = _first_case_id(messages)
+    draft_id = _first_draft_id(messages)
     payload = {
         "kept_message_count": len(kept),
         "compacted_message_count": max(0, len(messages) - len(kept)),
@@ -151,24 +151,24 @@ def _compaction_events(
         ]
     )
     events: list[DomainEventBase] = []
-    if case_id is not None and extracted_facts:
+    if draft_id is not None and extracted_facts:
         events.append(
             BriefUpdated(
-                case_id=case_id,
+                draft_id=draft_id,
                 payload={
                     "confirmed_facts_append": list(extracted_facts),
                     "source": "write_before_compaction",
                 },
             )
         )
-    events.append(ContextCompacted(compaction_id=compaction_id, case_id=case_id, payload=payload))
+    events.append(ContextCompacted(compaction_id=compaction_id, draft_id=draft_id, payload=payload))
     return tuple(events)
 
 
-def _first_case_id(messages: Sequence[CompactionMessage]) -> str | None:
+def _first_draft_id(messages: Sequence[CompactionMessage]) -> str | None:
     for message in messages:
-        if message.case_id is not None:
-            return message.case_id
+        if message.draft_id is not None:
+            return message.draft_id
     return None
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -45,9 +45,8 @@ class AskUserInput(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     question: str
-    scope_type: DecisionScopeType = "case"
-    project_id: str | None = None
-    case_id: str | None = None
+    scope_type: DecisionScopeType = "draft"
+    draft_id: str | None = None
     decision_id: str | None = None
     decision_type: DecisionType = Field(default="generic", alias="type")
     options: list[DecisionOption] = Field(default_factory=list)
@@ -61,9 +60,8 @@ class ConfirmActionInput(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     question: str
-    scope_type: DecisionScopeType = "case"
-    project_id: str | None = None
-    case_id: str | None = None
+    scope_type: DecisionScopeType = "draft"
+    draft_id: str | None = None
     decision_id: str | None = None
     decision_type: DecisionType = Field(default="generic", alias="type")
     options: list[DecisionOption] = Field(default_factory=list)
@@ -110,80 +108,9 @@ class ShowErrorInput(BaseModel):
     metadata: dict[str, object] = Field(default_factory=dict)
 
 
-class ProjectCreateInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project_id: str | None = None
-    name: str = "Untitled Project"
-    defaults: dict[str, Any] = Field(default_factory=dict)
-
-
-class ProjectRenameInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project_id: str | None = None
-    name: str
-
-
-class ProjectDeleteInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project_id: str | None = None
-
-
-class ProjectCopyInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source_project_id: str | None = None
-    project_id: str | None = None
-    name: str | None = None
-
-
-class ProjectCreateCaseInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project_id: str | None = None
-    case_id: str | None = None
-    name: str = "Untitled Case"
-    goal: str | None = None
-    brief: dict[str, Any] = Field(default_factory=dict)
-
-
-class ProjectMoveCaseInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    case_id: str | None = None
-    target_project_id: str
-
-
-class ProjectCloseCaseInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    case_id: str | None = None
-
-
-class ProjectListTreeInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    include_trashed: bool = True
-
-
-class AssetUploadCompleteInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project_id: str | None = None
-    asset_id: str | None = None
-    path: str
-    filename: str | None = None
-    kind: AssetKind = AssetKind.VIDEO
-    # 文件夹上传时相对所选目录的子路径（含目录名），素材面板按它分组展示。
-    rel_dir: str | None = None
-
-
 class AssetImportLocalFileInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    project_id: str | None = None
     asset_id: str | None = None
     path: str
     storage_mode: StorageMode = StorageMode.REFERENCE
@@ -195,7 +122,6 @@ class AssetImportLocalFileInput(BaseModel):
 class AssetImportUrlInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    project_id: str | None = None
     asset_id: str | None = None
     url: str
     filename: str | None = None
@@ -203,47 +129,8 @@ class AssetImportUrlInput(BaseModel):
     max_bytes: int | None = None
 
 
-class AssetLinkInput(BaseModel):
+class AssetListAssetsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-    project_id: str | None = None
-    asset_id: str
-    enabled: bool = True
-    note: str = ""
-
-
-class AssetUnlinkInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project_id: str | None = None
-    asset_id: str
-
-
-class AssetSelectForCaseInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    case_id: str | None = None
-    asset_id: str
-
-
-class AssetDisableForCaseInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    case_id: str | None = None
-    asset_id: str
-
-
-class AssetListProjectInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project_id: str | None = None
-    include_disabled: bool = True
-
-
-class AssetListCaseScopeInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    case_id: str | None = None
 
 
 class MediaViewFramesTarget(BaseModel):
@@ -387,7 +274,7 @@ class RenderStatusInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class MemoryExtractFromCaseInput(BaseModel):
+class MemoryExtractFromDraftInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     summary_hint: str | None = None
@@ -403,14 +290,12 @@ class MemorySaveInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidate_id: str
-    scope: Literal["user", "project"]
 
 
 class MemorySearchRelevantInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str
-    scope_filter: Literal["user", "project"] | None = None
     limit: int = Field(default=5, ge=1, le=5)
 
 
@@ -419,12 +304,6 @@ class UnderstandMaterialsInput(BaseModel):
 
     asset_ids: list[str] = Field(min_length=1)
     focus: str | None = None
-
-
-class AssetReadSummaryInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    asset_ids: list[str] = Field(min_length=1)
 
 
 def tool_specs() -> tuple[ToolSpec, ...]:
@@ -436,11 +315,10 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=DecisionAnswerInput,
             result_model=None,
             handler_ref="tools.builtin.decision_answer",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
-            side_effects=["case"],
+            requires_active_draft=False,
+            side_effects=["draft"],
             emits_events=["DecisionAnswered"],
             description="Convert a structured user answer into a DecisionAnswered event.",
         ),
@@ -451,11 +329,10 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=AskUserInput,
             result_model=None,
             handler_ref="tools.interaction.ask_user",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
-            side_effects=["case"],
+            requires_active_draft=False,
+            side_effects=["draft"],
             emits_events=["DecisionCreated"],
             description="Ask an open or multiple-choice question through a Decision.",
         ),
@@ -466,11 +343,10 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=ConfirmActionInput,
             result_model=None,
             handler_ref="tools.interaction.confirm_action",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
-            side_effects=["case"],
+            requires_active_draft=False,
+            side_effects=["draft"],
             emits_events=["DecisionCreated"],
             description="Create a confirmation Decision for an action.",
         ),
@@ -481,10 +357,9 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=ShowProgressInput,
             result_model=None,
             handler_ref="tools.interaction.show_progress",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
+            requires_active_draft=False,
             side_effects=[],
             emits_events=[],
             description="Emit a frontend-renderable progress interaction.",
@@ -496,10 +371,9 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=ShowPreviewInput,
             result_model=None,
             handler_ref="tools.interaction.show_preview",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
+            requires_active_draft=False,
             side_effects=[],
             emits_events=[],
             description="Emit a frontend-renderable preview interaction.",
@@ -511,10 +385,9 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=ShowTimelineInput,
             result_model=None,
             handler_ref="tools.interaction.show_timeline",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
+            requires_active_draft=False,
             side_effects=[],
             emits_events=[],
             description="Emit a frontend-renderable timeline summary.",
@@ -526,161 +399,12 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=ShowErrorInput,
             result_model=None,
             handler_ref="tools.interaction.show_error",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
+            requires_active_draft=False,
             side_effects=[],
             emits_events=[],
             description="Emit a frontend-renderable structured error.",
-        ),
-        ToolSpec(
-            name="project.create",
-            namespace="project",
-            version="1",
-            input_model=ProjectCreateInput,
-            result_model=None,
-            handler_ref="tools.project.create",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
-            side_effects=["project"],
-            idempotency_key_fields=["project_id"],
-            emits_events=["ProjectCreated"],
-            description="Create a new Project.",
-        ),
-        ToolSpec(
-            name="project.rename",
-            namespace="project",
-            version="1",
-            input_model=ProjectRenameInput,
-            result_model=None,
-            handler_ref="tools.project.rename",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            side_effects=["project"],
-            idempotency_key_fields=["project_id", "name"],
-            emits_events=["ProjectRenamed"],
-            description="Rename the active Project.",
-        ),
-        ToolSpec(
-            name="project.delete",
-            namespace="project",
-            version="1",
-            input_model=ProjectDeleteInput,
-            result_model=None,
-            handler_ref="tools.project.delete",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            requires_confirmation=True,
-            confirmation_decision_type="destructive_project_action",
-            side_effects=["project"],
-            idempotency_key_fields=["project_id"],
-            emits_events=["ProjectTrashed"],
-            description="Soft-delete the active Project after confirmation.",
-        ),
-        ToolSpec(
-            name="project.copy",
-            namespace="project",
-            version="1",
-            input_model=ProjectCopyInput,
-            result_model=None,
-            handler_ref="tools.project.copy",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            side_effects=["project"],
-            idempotency_key_fields=["source_project_id", "project_id"],
-            emits_events=["ProjectCopied"],
-            description="Copy the active Project and its asset links without copying Cases.",
-        ),
-        ToolSpec(
-            name="project.create_case",
-            namespace="project",
-            version="1",
-            input_model=ProjectCreateCaseInput,
-            result_model=None,
-            handler_ref="tools.project.create_case",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            side_effects=["project", "case"],
-            idempotency_key_fields=["project_id", "case_id"],
-            emits_events=["CaseCreated"],
-            description="Create a Case in the active Project.",
-        ),
-        ToolSpec(
-            name="project.move_case",
-            namespace="project",
-            version="1",
-            input_model=ProjectMoveCaseInput,
-            result_model=None,
-            handler_ref="tools.project.move_case",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
-            requires_confirmation=True,
-            confirmation_decision_type="destructive_project_action",
-            side_effects=["project", "case", "asset"],
-            idempotency_key_fields=["case_id", "target_project_id"],
-            emits_events=["CaseMoved", "AssetLinked"],
-            description="Move the active Case to another Project after confirmation.",
-        ),
-        ToolSpec(
-            name="project.close_case",
-            namespace="project",
-            version="1",
-            input_model=ProjectCloseCaseInput,
-            result_model=None,
-            handler_ref="tools.project.close_case",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["case"],
-            idempotency_key_fields=["case_id"],
-            emits_events=["CaseClosed"],
-            description="Close the active Case without deleting it.",
-        ),
-        ToolSpec(
-            name="project.list_tree",
-            namespace="project",
-            version="1",
-            input_model=ProjectListTreeInput,
-            result_model=None,
-            handler_ref="tools.project.list_tree",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
-            side_effects=[],
-            emits_events=[],
-            description="Return the Project/Case two-level tree.",
-        ),
-        ToolSpec(
-            name="asset.upload_complete",
-            namespace="asset",
-            version="1",
-            input_model=AssetUploadCompleteInput,
-            result_model=None,
-            handler_ref="tools.asset.upload_complete",
-            allowed_scopes=["project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            side_effects=["asset", "object_store", "job"],
-            idempotency_key_fields=["project_id", "path"],
-            emits_events=["AssetImported", "AssetLinked", "JobEnqueued"],
-            exposure="harness_only",
-            description="Complete an uploaded file into a copy-mode asset and enqueue probe/proxy.",
         ),
         ToolSpec(
             name="asset.import_local_file",
@@ -689,15 +413,14 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=AssetImportLocalFileInput,
             result_model=None,
             handler_ref="tools.asset.import_local_file",
-            allowed_scopes=["project_page"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
+            requires_active_draft=True,
             side_effects=["asset", "object_store", "job"],
-            idempotency_key_fields=["project_id", "path", "storage_mode"],
+            idempotency_key_fields=["path", "storage_mode"],
             emits_events=["AssetImported", "AssetLinked", "JobEnqueued"],
             exposure="harness_only",
-            description="Import a local media file, defaulting to reference storage.",
+            description="Import a local media file into the active draft, defaulting to reference.",
         ),
         ToolSpec(
             name="asset.import_url",
@@ -706,115 +429,30 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=AssetImportUrlInput,
             result_model=None,
             handler_ref="tools.asset.import_url",
-            allowed_scopes=["case_agent_console", "project_page"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
+            requires_active_draft=True,
             requires_confirmation=True,
             confirmation_decision_type="url_import",
             side_effects=["asset", "object_store", "job"],
-            idempotency_key_fields=["project_id", "url"],
+            idempotency_key_fields=["url"],
             emits_events=["JobEnqueued", "AssetImported"],
             is_long_running=True,
-            description="Import one explicitly confirmed URL as a project-level job.",
+            description="Import one explicitly confirmed URL and link it to the active draft.",
         ),
         ToolSpec(
-            name="asset.link_to_project",
+            name="asset.list_assets",
             namespace="asset",
             version="1",
-            input_model=AssetLinkInput,
+            input_model=AssetListAssetsInput,
             result_model=None,
-            handler_ref="tools.asset.link_to_project",
-            allowed_scopes=["case_agent_console", "project_page"],
+            handler_ref="tools.asset.list_assets",
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            side_effects=["asset"],
-            idempotency_key_fields=["project_id", "asset_id"],
-            emits_events=["AssetLinked"],
-            description="Link an existing asset into the active Project.",
-        ),
-        ToolSpec(
-            name="asset.unlink_from_project",
-            namespace="asset",
-            version="1",
-            input_model=AssetUnlinkInput,
-            result_model=None,
-            handler_ref="tools.asset.unlink_from_project",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            side_effects=["asset"],
-            idempotency_key_fields=["project_id", "asset_id"],
-            emits_events=["AssetUnlinked"],
-            description="Unlink an asset from the active Project.",
-        ),
-        ToolSpec(
-            name="asset.select_for_case",
-            namespace="asset",
-            version="1",
-            input_model=AssetSelectForCaseInput,
-            result_model=None,
-            handler_ref="tools.asset.select_for_case",
-            allowed_scopes=["case_agent_console"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["case"],
-            idempotency_key_fields=["case_id", "asset_id"],
-            emits_events=["CaseAssetScopeChanged"],
-            description=(
-                "Select a project asset for the active Case without mutating the asset pool."
-            ),
-        ),
-        ToolSpec(
-            name="asset.disable_for_case",
-            namespace="asset",
-            version="1",
-            input_model=AssetDisableForCaseInput,
-            result_model=None,
-            handler_ref="tools.asset.disable_for_case",
-            allowed_scopes=["case_agent_console"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["case"],
-            idempotency_key_fields=["case_id", "asset_id"],
-            emits_events=["CaseAssetScopeChanged"],
-            description=(
-                "Disable a project asset for the active Case without mutating the asset pool."
-            ),
-        ),
-        ToolSpec(
-            name="asset.list_project_assets",
-            namespace="asset",
-            version="1",
-            input_model=AssetListProjectInput,
-            result_model=None,
-            handler_ref="tools.asset.list_project_assets",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
+            requires_active_draft=True,
             side_effects=[],
             emits_events=[],
-            description="List assets linked to the active Project.",
-        ),
-        ToolSpec(
-            name="asset.list_case_scope",
-            namespace="asset",
-            version="1",
-            input_model=AssetListCaseScopeInput,
-            result_model=None,
-            handler_ref="tools.asset.list_case_scope",
-            allowed_scopes=["case_agent_console"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=[],
-            emits_events=[],
-            description="List selected and disabled asset IDs for the active Case.",
+            description="List every asset linked to the active draft.",
         ),
         ToolSpec(
             name="audio.inspect_sources",
@@ -823,13 +461,12 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=AudioInspectSourcesInput,
             result_model=None,
             handler_ref="tools.audio.inspect_sources",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=["usable_asset_exists"],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             side_effects=["asset"],
             emits_events=["AssetProbed", "CapabilityDegraded"],
-            description="Inspect case assets for audio tracks and local speech/silence segments.",
+            description="Inspect draft assets for audio tracks and local speech/silence segments.",
         ),
         ToolSpec(
             name="audio.asr_original",
@@ -838,13 +475,12 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=AudioAsrOriginalInput,
             result_model=None,
             handler_ref="tools.audio.asr_original",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[
                 "audio_mode_in(keep_original,rough_cut)",
                 "audio_source_has_audio",
             ],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             side_effects=["job"],
             idempotency_key_fields=["asset_id", "provider_id"],
             emits_events=["JobEnqueued"],
@@ -858,14 +494,13 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=AudioRoughCutSpeechInput,
             result_model=None,
             handler_ref="tools.audio.rough_cut_speech",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[
                 "audio_mode_in(rough_cut)",
                 "transcript_with_vad_exists",
             ],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["case"],
+            requires_active_draft=True,
+            side_effects=["draft"],
             emits_events=["DecisionCreated", "CapabilityDegraded", "ProviderCallRecorded"],
             description=(
                 "Create an approve_speech_cut decision from rule and semantic rough-cut candidates."
@@ -878,13 +513,12 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=AudioGenerateTtsInput,
             result_model=None,
             handler_ref="tools.audio.generate_tts",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[
                 "audio_mode_in(tts)",
                 "content_plan_exists",
             ],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             side_effects=["job"],
             idempotency_key_fields=["provider_id", "asr_provider_id", "voice_type"],
             emits_events=["JobEnqueued"],
@@ -901,13 +535,12 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=AudioAlignUploadedVoiceoverInput,
             result_model=None,
             handler_ref="tools.audio.align_uploaded_voiceover",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[
                 "audio_mode_in(uploaded_voiceover)",
                 "voiceover_asset_exists",
             ],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             side_effects=["job"],
             idempotency_key_fields=["asset_id", "provider_id", "script_text"],
             emits_events=["JobEnqueued"],
@@ -923,11 +556,10 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=ContentCreatePlanInput,
             result_model=None,
             handler_ref="tools.content.create_plan",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["case"],
+            requires_active_draft=True,
+            side_effects=["draft"],
             emits_events=["ContentPlanUpdated", "CutPlanUpdated"],
             description="Create a content plan and, for silent mode, a visual cut plan.",
         ),
@@ -938,11 +570,10 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=ContentRevisePlanInput,
             result_model=None,
             handler_ref="tools.content.revise_plan",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["case"],
+            requires_active_draft=True,
+            side_effects=["draft"],
             emits_events=["ContentPlanUpdated", "CutPlanUpdated"],
             description="Revise the existing content plan and matching silent-mode cut plan.",
         ),
@@ -953,10 +584,9 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=MediaViewFramesInput,
             result_model=None,
             handler_ref="tools.media_tools.view_frames",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             requires_confirmation=False,
             side_effects=[],
             emits_events=[],
@@ -969,10 +599,9 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=UnderstandMaterialsInput,
             result_model=None,
             handler_ref="tools.understand.materials",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
+            requires_active_draft=True,
             requires_confirmation=False,
             side_effects=["asset"],
             emits_events=[
@@ -985,36 +614,20 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             ),
         ),
         ToolSpec(
-            name="asset.read_summary",
-            namespace="asset",
-            version="1",
-            input_model=AssetReadSummaryInput,
-            result_model=None,
-            handler_ref="tools.understand.read_summary",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            side_effects=[],
-            emits_events=[],
-            description="Read the latest ready material summaries for the given assets.",
-        ),
-        ToolSpec(
             name="timeline.compose_initial",
             namespace="timeline",
             version="1",
             input_model=ComposeInitialInput,
             result_model=None,
             handler_ref="tools.timeline_tools.compose_initial",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[
-                "active_case",
+                "active_draft",
                 "audio_plan_confirmed",
                 "usable_asset_exists",
             ],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["timeline", "case"],
+            requires_active_draft=True,
+            side_effects=["timeline", "draft"],
             emits_events=[
                 "TimelineVersionCreated",
                 "TimelineValidated",
@@ -1029,11 +642,10 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=TimelinePatchRequest,
             result_model=None,
             handler_ref="tools.timeline_tools.apply_patch",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=["timeline_exists"],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["timeline", "case"],
+            requires_active_draft=True,
+            side_effects=["timeline", "draft"],
             emits_events=[
                 "TimelineVersionCreated",
                 "TimelineValidated",
@@ -1049,11 +661,10 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=TimelineValidateInput,
             result_model=None,
             handler_ref="tools.timeline_tools.validate",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=["timeline_exists"],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["timeline", "case"],
+            requires_active_draft=True,
+            side_effects=["timeline", "draft"],
             emits_events=["TimelineValidated", "TimelineValidationFailed"],
             description="Validate the current timeline version against PRD §10.2 invariants.",
         ),
@@ -1064,10 +675,9 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=TimelineInspectInput,
             result_model=None,
             handler_ref="tools.timeline_tools.inspect",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=["timeline_exists"],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             side_effects=[],
             emits_events=[],
             description="Return a prompt-safe summary for the current timeline version.",
@@ -1079,11 +689,10 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=TimelineRestoreVersionInput,
             result_model=None,
             handler_ref="tools.timeline_tools.restore_version",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=["timeline_exists"],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["timeline", "case"],
+            requires_active_draft=True,
+            side_effects=["timeline", "draft"],
             emits_events=["TimelineVersionRestored"],
             description="Restore an old timeline as a new version record.",
         ),
@@ -1094,10 +703,9 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=RenderPreviewInput,
             result_model=None,
             handler_ref="tools.render_tools.preview",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=["timeline_validated"],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             side_effects=["job", "object_store"],
             idempotency_key_fields=["timeline_version"],
             emits_events=["JobEnqueued"],
@@ -1111,10 +719,9 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=RenderFinalMp4Input,
             result_model=None,
             handler_ref="tools.render_tools.final_mp4",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=["timeline_validated", "preview_for_current_version_exists"],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             requires_confirmation=True,
             confirmation_decision_type="export",
             side_effects=["job", "object_store"],
@@ -1130,32 +737,30 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=RenderStatusInput,
             result_model=None,
             handler_ref="tools.render_tools.status",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=["timeline_exists"],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             side_effects=[],
             emits_events=[],
             description="Read current preview/export artifacts and running render jobs.",
         ),
         ToolSpec(
-            name="memory.extract_from_case",
+            name="memory.extract_from_draft",
             namespace="memory",
             version="1",
-            input_model=MemoryExtractFromCaseInput,
+            input_model=MemoryExtractFromDraftInput,
             result_model=None,
-            handler_ref="tools.memory_tools.extract_from_case",
-            allowed_scopes=["case_agent_console"],
+            handler_ref="tools.memory_tools.extract_from_draft",
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             side_effects=["memory"],
             emits_events=[
                 "MemoryCandidateExtracted",
                 "CapabilityDegraded",
                 "ProviderCallRecorded",
             ],
-            description="Extract one pending long-term memory candidate from the current case.",
+            description="Extract one pending long-term memory candidate from the current draft.",
         ),
         ToolSpec(
             name="memory.ask_scope",
@@ -1164,14 +769,13 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=MemoryAskScopeInput,
             result_model=None,
             handler_ref="tools.memory_tools.ask_scope",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["case"],
+            requires_active_draft=True,
+            side_effects=["draft"],
             idempotency_key_fields=["candidate_id"],
             emits_events=["DecisionCreated"],
-            description="Ask the user to pick a memory candidate scope.",
+            description="Ask the user whether to save a memory candidate as a user memory.",
         ),
         ToolSpec(
             name="memory.save",
@@ -1180,12 +784,11 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=MemorySaveInput,
             result_model=None,
             handler_ref="tools.memory_tools.save",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             side_effects=["memory"],
-            idempotency_key_fields=["candidate_id", "scope"],
+            idempotency_key_fields=["candidate_id"],
             emits_events=["MemorySaved"],
             exposure="harness_only",
             description="Persist an approved memory candidate after memory_scope is answered.",
@@ -1197,13 +800,12 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             input_model=MemorySearchRelevantInput,
             result_model=None,
             handler_ref="tools.memory_tools.search_relevant",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=True,
+            requires_active_draft=True,
             side_effects=[],
             emits_events=[],
-            description="Search user and current-project memories for relevant summaries.",
+            description="Search user memories for relevant summaries.",
         ),
     )
 
@@ -1297,17 +899,7 @@ PATCH_OP_REGISTRY = patch_op_registry()
 
 
 def build_default_tool_registry() -> ToolRegistry:
-    from .asset import (
-        disable_for_case,
-        import_local_file,
-        import_url,
-        link_to_project,
-        list_case_scope,
-        list_project_assets,
-        select_for_case,
-        unlink_from_project,
-        upload_complete,
-    )
+    from .asset import import_local_file, import_url, list_assets
     from .audio import align_uploaded_voiceover as audio_align_uploaded_voiceover
     from .audio import asr_original as audio_asr_original
     from .audio import generate_tts as audio_generate_tts
@@ -1329,23 +921,13 @@ def build_default_tool_registry() -> ToolRegistry:
         ask_scope as memory_ask_scope,
     )
     from .memory_tools import (
-        extract_from_case as memory_extract_from_case,
+        extract_from_draft as memory_extract_from_draft,
     )
     from .memory_tools import (
         save as memory_save,
     )
     from .memory_tools import (
         search_relevant as memory_search_relevant,
-    )
-    from .project import (
-        close_case,
-        copy,
-        create,
-        create_case,
-        delete,
-        list_tree,
-        move_case,
-        rename,
     )
     from .render_tools import final_mp4 as render_final_mp4
     from .render_tools import preview as render_preview
@@ -1356,7 +938,6 @@ def build_default_tool_registry() -> ToolRegistry:
     from .timeline_tools import restore_version as timeline_restore_version
     from .timeline_tools import validate as timeline_validate
     from .understand import materials as understand_materials
-    from .understand import read_summary as asset_read_summary
 
     handlers: dict[str, ToolHandler] = {
         "decision.answer": decision_answer,
@@ -1366,23 +947,9 @@ def build_default_tool_registry() -> ToolRegistry:
         "interaction.show_preview": show_preview,
         "interaction.show_timeline": show_timeline,
         "interaction.show_error": show_error,
-        "project.create": create,
-        "project.rename": rename,
-        "project.delete": delete,
-        "project.copy": copy,
-        "project.create_case": create_case,
-        "project.move_case": move_case,
-        "project.close_case": close_case,
-        "project.list_tree": list_tree,
-        "asset.upload_complete": upload_complete,
         "asset.import_local_file": import_local_file,
         "asset.import_url": import_url,
-        "asset.link_to_project": link_to_project,
-        "asset.unlink_from_project": unlink_from_project,
-        "asset.select_for_case": select_for_case,
-        "asset.disable_for_case": disable_for_case,
-        "asset.list_project_assets": list_project_assets,
-        "asset.list_case_scope": list_case_scope,
+        "asset.list_assets": list_assets,
         "audio.inspect_sources": audio_inspect_sources,
         "audio.asr_original": audio_asr_original,
         "audio.rough_cut_speech": audio_rough_cut_speech,
@@ -1392,7 +959,6 @@ def build_default_tool_registry() -> ToolRegistry:
         "content.revise_plan": content_revise_plan,
         "media.view_frames": media_view_frames,
         "understand.materials": understand_materials,
-        "asset.read_summary": asset_read_summary,
         "timeline.compose_initial": timeline_compose_initial,
         "timeline.apply_patch": timeline_apply_patch,
         "timeline.validate": timeline_validate,
@@ -1401,7 +967,7 @@ def build_default_tool_registry() -> ToolRegistry:
         "render.preview": render_preview,
         "render.final_mp4": render_final_mp4,
         "render.status": render_status,
-        "memory.extract_from_case": memory_extract_from_case,
+        "memory.extract_from_draft": memory_extract_from_draft,
         "memory.ask_scope": memory_ask_scope,
         "memory.save": memory_save,
         "memory.search_relevant": memory_search_relevant,

@@ -14,7 +14,7 @@ from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
 from contracts.asset import AssetKind, AssetSource, StorageMode
-from contracts.case import AudioPlan, CaseState, CutPlan
+from contracts.draft import AudioPlan, CutPlan, DraftState
 from contracts.events import (
     AssetImported,
     AssetLinked,
@@ -80,7 +80,7 @@ class StorageProviderCallRecorder:
                     "provider_id": record.provider_id,
                     "capability": record.capability,
                     "model": record.model,
-                    "case_id": record.case_id,
+                    "draft_id": record.draft_id,
                     "job_id": record.job_id,
                     "latency_ms": record.latency_ms,
                     "usage_json": record.usage_json,
@@ -110,7 +110,7 @@ def build_asr_handler(
 
     async def _handler(job: Job) -> JobExecutionResult:
         asset_id = _job_asset_id(job)
-        project_id = job.project_id or _project_id_for_asset(engine, asset_id)
+        draft_id = job.draft_id or _draft_id_for_asset(engine, asset_id)
         source_path = _asset_source_path(engine, paths, asset_id)
         extracted = _extract_audio(extractor, source_path, paths=paths)
         vad_segments: list[VadSegment] = []
@@ -125,8 +125,7 @@ def build_asr_handler(
                 (
                     CapabilityDegraded(
                         degradation_id=f"degraded_{job.job_id}_silero_vad",
-                        project_id=project_id,
-                        case_id=job.case_id,
+                        draft_id=draft_id,
                         capability="audio.vad",
                         provider_id="silero_onnx",
                         reason=str(exc),
@@ -143,7 +142,7 @@ def build_asr_handler(
                     capability=ASR_TRANSCRIBE,
                     request_id=f"asr_{job.job_id}",
                     payload={"audio_url": upload.signed_url, "asset_id": asset_id},
-                    case_id=job.case_id,
+                    draft_id=job.draft_id,
                     job_id=job.job_id,
                     metadata={"asset_id": asset_id},
                 ),
@@ -199,8 +198,8 @@ def build_tts_handler(
     provider_gateway = gateway or build_default_tts_gateway(engine)
 
     async def _handler(job: Job) -> JobExecutionResult:
-        case_state = _job_case_state(engine, job)
-        slots = _content_slots(case_state.content_plan)
+        draft_state = _job_draft_state(engine, job)
+        slots = _content_slots(draft_state.content_plan)
         if not slots:
             raise JobExecutionError(
                 "audio.generate_tts requires content_plan.slots with narration text",
@@ -216,7 +215,7 @@ def build_tts_handler(
                     "text": text,
                     "voice_type": _job_payload_str(job, "voice_type"),
                 },
-                case_id=case_state.case_id,
+                draft_id=draft_state.draft_id,
                 job_id=job.job_id,
             ),
             provider_id=_job_payload_str(job, "provider_id"),
@@ -271,30 +270,28 @@ def build_tts_handler(
                 object_size=object_ref.size,
                 filename=f"{job.job_id}_voiceover.mp3",
             ),
-            AssetLinked(project_id=case_state.project_id, asset_id=voiceover_asset_id),
+            AssetLinked(draft_id=draft_state.draft_id, asset_id=voiceover_asset_id),
         )
         _apply_many_or_raise(engine, asset_events)
         _replace_transcript(engine, transcript)
         cut_plan = _cut_plan_from_content_slots(slots, transcript)
         audio_plan = _audio_plan_payload(
-            case_state,
+            draft_state,
             voiceover_asset_id=voiceover_asset_id,
             transcript_id=transcript.transcript_id,
             fallback_mode="tts",
         )
         plan_events: tuple[DomainEventBase, ...] = (
             AudioPlanUpdated(
-                case_id=case_state.case_id,
-                project_id=case_state.project_id,
+                draft_id=draft_state.draft_id,
                 payload={"audio_plan": audio_plan},
             ),
             CutPlanUpdated(
-                case_id=case_state.case_id,
-                project_id=case_state.project_id,
+                draft_id=draft_state.draft_id,
                 payload={"cut_plan": cut_plan},
             ),
         )
-        _apply_many_or_raise(engine, plan_events, base_version=case_state.state_version)
+        _apply_many_or_raise(engine, plan_events, base_version=draft_state.state_version)
         return JobExecutionResult(
             {
                 "voiceover_asset_id": voiceover_asset_id,
@@ -318,7 +315,7 @@ def build_align_handler(
     provider_gateway = gateway or build_default_asr_gateway(engine)
 
     async def _handler(job: Job) -> JobExecutionResult:
-        case_state = _job_case_state(engine, job)
+        draft_state = _job_draft_state(engine, job)
         script_text = _job_payload_str(job, "script_text")
         if script_text is None:
             raise JobExecutionError(
@@ -327,8 +324,8 @@ def build_align_handler(
                 retryable=False,
             )
         asset_id = _job_payload_str(job, "asset_id")
-        if asset_id is None and case_state.audio_plan is not None:
-            asset_id = case_state.audio_plan.voiceover_asset_id
+        if asset_id is None and draft_state.audio_plan is not None:
+            asset_id = draft_state.audio_plan.voiceover_asset_id
         if asset_id is None:
             raise JobExecutionError(
                 "uploaded voiceover alignment requires a voiceover asset",
@@ -372,24 +369,22 @@ def build_align_handler(
         _replace_transcript(engine, transcript)
         cut_plan = _cut_plan_from_alignment(alignment)
         audio_plan = _audio_plan_payload(
-            case_state,
+            draft_state,
             voiceover_asset_id=asset_id,
             transcript_id=transcript.transcript_id,
             fallback_mode="uploaded_voiceover",
         )
         events = (
             AudioPlanUpdated(
-                case_id=case_state.case_id,
-                project_id=case_state.project_id,
+                draft_id=draft_state.draft_id,
                 payload={"audio_plan": audio_plan},
             ),
             CutPlanUpdated(
-                case_id=case_state.case_id,
-                project_id=case_state.project_id,
+                draft_id=draft_state.draft_id,
                 payload={"cut_plan": cut_plan},
             ),
         )
-        _apply_many_or_raise(engine, events, base_version=case_state.state_version)
+        _apply_many_or_raise(engine, events, base_version=draft_state.state_version)
         return JobExecutionResult(
             {
                 "voiceover_asset_id": asset_id,
@@ -474,7 +469,7 @@ async def _asr_fallback_transcript(
                 capability=ASR_TRANSCRIBE,
                 request_id=f"{request_prefix}_{job.job_id}",
                 payload={"audio_url": upload.signed_url, "asset_id": asset_id},
-                case_id=job.case_id,
+                draft_id=job.draft_id,
                 job_id=job.job_id,
                 metadata={"asset_id": asset_id, "timestamp_source": "asr_fallback"},
             ),
@@ -508,26 +503,27 @@ def _transcript_from_result(result: ProviderResult) -> TranscriptDocument:
         ) from exc
 
 
-def _job_case_state(engine: Engine, job: Job) -> CaseState:
-    if job.case_id is None:
+def _job_draft_state(engine: Engine, job: Job) -> DraftState:
+    if job.draft_id is None:
         raise JobExecutionError(
-            "audio job requires case_id",
+            "audio job requires draft_id",
             error_code="invalid_audio_job",
             retryable=False,
         )
     with engine.connect() as connection:
         row = connection.execute(
-            select(schema.cases).where(schema.cases.c.case_id == job.case_id)
+            select(schema.drafts).where(schema.drafts.c.draft_id == job.draft_id)
         ).first()
     if row is None:
         raise JobExecutionError(
-            "case not found for audio job",
-            error_code="case_not_found",
+            "draft not found for audio job",
+            error_code="draft_not_found",
             retryable=False,
-            details={"case_id": job.case_id},
+            details={"draft_id": job.draft_id},
         )
     values = dict(row._mapping)
     for key in (
+        "defaults",
         "running_jobs",
         "last_error",
         "brief",
@@ -535,14 +531,15 @@ def _job_case_state(engine: Engine, job: Job) -> CaseState:
         "audio_plan",
         "cut_plan",
         "postprocess_plan",
-        "selected_asset_ids",
-        "disabled_asset_ids",
         "scratch_memory",
     ):
         raw = values.get(key)
         if isinstance(raw, str):
             values[key] = load_json(raw)
-    return CaseState.model_validate(values)
+    # drafts 行多带 created_at/updated_at 两列，DraftState extra="forbid" 会拒，validate 前先剔除。
+    values.pop("created_at", None)
+    values.pop("updated_at", None)
+    return DraftState.model_validate(values)
 
 
 def _content_slots(content_plan: dict[str, Any] | None) -> list[_ContentSlot]:
@@ -736,15 +733,15 @@ def _cut_plan_from_alignment(alignment: VoiceoverAlignment) -> dict[str, Any]:
 
 
 def _audio_plan_payload(
-    case_state: CaseState,
+    draft_state: DraftState,
     *,
     voiceover_asset_id: str,
     transcript_id: str,
     fallback_mode: str,
 ) -> dict[str, Any]:
     payload = (
-        case_state.audio_plan.model_dump(mode="json")
-        if case_state.audio_plan is not None
+        draft_state.audio_plan.model_dump(mode="json")
+        if draft_state.audio_plan is not None
         else {"mode": fallback_mode}
     )
     payload["voiceover_asset_id"] = voiceover_asset_id
@@ -761,10 +758,7 @@ def _voiceover_asset_imported(
     filename: str,
 ) -> AssetImported:
     return AssetImported(
-        project_id=job.project_id,
-        # 素材池事件不得携带 case 作用域（§4.6-5，StateValidator 强制）；
-        # 该配音与 Case 的关联由 job 事件与 cut_plan 表达。
-        case_id=None,
+        draft_id=job.draft_id,
         asset_id=asset_id,
         job_id=job.job_id,
         payload={
@@ -847,17 +841,17 @@ def _asset_source_path(engine: Engine, paths: WorkspacePaths, asset_id: str) -> 
             ) from exc
 
 
-def _project_id_for_asset(engine: Engine, asset_id: str) -> str | None:
+def _draft_id_for_asset(engine: Engine, asset_id: str) -> str | None:
     with engine.connect() as connection:
         row = connection.execute(
-            select(schema.project_asset_links.c.project_id)
-            .where(schema.project_asset_links.c.asset_id == asset_id)
-            .order_by(schema.project_asset_links.c.linked_at.desc())
+            select(schema.draft_asset_links.c.draft_id)
+            .where(schema.draft_asset_links.c.asset_id == asset_id)
+            .order_by(schema.draft_asset_links.c.linked_at.desc())
             .limit(1)
         ).first()
     if row is None:
         return None
-    return str(row._mapping["project_id"])
+    return str(row._mapping["draft_id"])
 
 
 def _apply_event_dicts_or_raise(engine: Engine, events: tuple[dict[str, Any], ...]) -> None:

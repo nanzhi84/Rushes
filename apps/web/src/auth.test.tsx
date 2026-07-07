@@ -14,7 +14,7 @@ describe("auth", () => {
 
   it("client 对 401 响应执行统一跳转到引导页逻辑", async () => {
     storeAuthToken("bad-token");
-    window.history.pushState(null, document.title, "/projects/project_1");
+    window.history.pushState(null, document.title, "/drafts/draft_1");
     const authRequired = vi.fn();
     window.addEventListener(AUTH_REQUIRED_EVENT, authRequired);
     vi.stubGlobal(
@@ -22,7 +22,7 @@ describe("auth", () => {
       vi.fn(async () => new Response(JSON.stringify({ reason: "bad_token" }), { status: 401 }))
     );
 
-    await expect(api.projectTree()).rejects.toMatchObject({ status: 401 });
+    await expect(api.listDrafts()).rejects.toMatchObject({ status: 401 });
 
     await waitFor(() => expect(authRequired).toHaveBeenCalled());
     expect(getAuthToken()).toBeNull();

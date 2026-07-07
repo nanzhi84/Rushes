@@ -16,7 +16,7 @@ from client import (
     DEFAULT_API_URL,
     DEFAULT_TOKEN,
     REPO_ROOT,
-    CaseDriver,
+    DraftDriver,
     ManagedProcessGroup,
     RunError,
     RushesClient,
@@ -24,7 +24,7 @@ from client import (
     load_dotenv,
     stage_log,
     start_autostart,
-    summarize_case_state,
+    summarize_draft_state,
     unique_id,
 )
 
@@ -136,45 +136,35 @@ def run_workflow(
     min_duration: float,
     max_duration: float,
 ) -> int:
-    project_id = unique_id("m9_path2_project")
-    case_id = unique_id("m9_path2_case")
-    stage_log("路径 2：创建项目、导入 B-roll/图片、创建 Case")
-    client.create_project(project_id=project_id, name="M9 路径 2 TTS 种草")
+    draft_id = unique_id("m9_path2_draft")
+    stage_log("路径 2：创建草稿、导入 B-roll/图片")
+    client.create_draft(
+        draft_id=draft_id,
+        name="M9 路径 2 TTS 种草",
+        goal="无声 B-roll + 图，按种草文案生成 TTS、理解素材、compose_initial、字幕/BGM 并导出。",
+    )
 
-    imported_asset_ids: list[str] = []
     for index, filename in enumerate(BROLL_FILENAMES, start=1):
         asset_id = unique_id(f"asset_broll_{index}")
         client.import_local_material(
-            project_id=project_id,
+            draft_id=draft_id,
             asset_id=asset_id,
             path=fixture_dir / filename,
         )
-        imported_asset_ids.append(asset_id)
     image_asset_id = unique_id("asset_product_image")
     client.import_local_material(
-        project_id=project_id,
+        draft_id=draft_id,
         asset_id=image_asset_id,
         path=fixture_dir / IMAGE_FILENAME,
     )
-    imported_asset_ids.append(image_asset_id)
-
-    client.create_case(
-        project_id=project_id,
-        case_id=case_id,
-        name="M9 路径 2",
-        goal="无声 B-roll + 图，按种草文案生成 TTS、理解素材、compose_initial、字幕/BGM 并导出。",
-    )
-    for asset_id in imported_asset_ids:
-        client.select_case_asset(project_id=project_id, case_id=case_id, asset_id=asset_id)
 
     script_text = script_file.read_text(encoding="utf-8").strip()
     if not script_text:
         raise RunError(f"路径 2 文案为空：{script_file}")
 
-    driver = CaseDriver(client=client, project_id=project_id, case_id=case_id, scenario="path2")
+    driver = DraftDriver(client=client, draft_id=draft_id, scenario="path2")
     client.enqueue_message(
-        project_id=project_id,
-        case_id=case_id,
+        draft_id=draft_id,
         content=f"用这段文案做一条种草视频，配 TTS。\n\n{script_text}",
         message_id=unique_id("msg"),
     )
@@ -189,7 +179,7 @@ def run_workflow(
         timeout_s=llm_timeout,
         idle_nudge="继续先生成并确认内容计划。",
     )
-    case = driver.wait_until(
+    draft = driver.wait_until(
         "TTS、素材理解、timeline 与预览完成",
         lambda state: (
             _timeline_version(state) is not None
@@ -199,26 +189,25 @@ def run_workflow(
         timeout_s=llm_timeout + job_timeout + render_timeout,
         idle_nudge="继续完成 TTS、素材理解、timeline 组装与预览渲染。",
     )
-    _mark_preview_viewed(client, project_id, case_id, case)
+    _mark_preview_viewed(client, draft_id, draft)
 
     client.enqueue_message(
-        project_id=project_id,
-        case_id=case_id,
-        content="预览确认，字幕选一个模板，BGM 从项目已上传素材中选择、无则跳过，然后导出 MP4。",
+        draft_id=draft_id,
+        content="预览确认，字幕选一个模板，BGM 从草稿已导入素材中选择、无则跳过，然后导出 MP4。",
         message_id=unique_id("msg"),
     )
-    final_case = driver.wait_until(
-        "字幕、BGM（从已上传素材选择或跳过）并完成最终导出",
+    final_draft = driver.wait_until(
+        "字幕、BGM（从已导入素材选择或跳过）并完成最终导出",
         lambda state: _string_field(state, "export_current_id") is not None,
         timeout_s=llm_timeout + render_timeout + job_timeout,
-        idle_nudge="继续确认字幕模板、BGM（从已上传素材选择或跳过），然后导出最终 MP4。",
+        idle_nudge="继续确认字幕模板、BGM（从已导入素材选择或跳过），然后导出最终 MP4。",
     )
     driver.require_decisions_seen(["approve_content_plan", "subtitle", "bgm", "export"])
 
-    export_id = _string_field(final_case, "export_current_id")
+    export_id = _string_field(final_draft, "export_current_id")
     if export_id is None:
-        raise RunError(f"导出完成但缺少 export_current_id：{summarize_case_state(final_case)}")
-    output_path = out_dir / f"{case_id}_{export_id}.mp4"
+        raise RunError(f"导出完成但缺少 export_current_id：{summarize_draft_state(final_draft)}")
+    output_path = out_dir / f"{draft_id}_{export_id}.mp4"
     client.download_export(export_id=export_id, output_path=output_path)
     duration = ffprobe_duration_s(output_path)
     if not min_duration <= duration <= max_duration:
@@ -242,26 +231,26 @@ def _resolve_path(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
 
 
-def _audio_mode(case_state: JsonMap) -> str | None:
-    audio_plan = case_state.get("audio_plan")
+def _audio_mode(draft_state: JsonMap) -> str | None:
+    audio_plan = draft_state.get("audio_plan")
     if not isinstance(audio_plan, Mapping):
         return None
     value = audio_plan.get("mode")
     return str(value) if value is not None else None
 
 
-def _timeline_version(case_state: JsonMap) -> int | None:
-    value = case_state.get("timeline_current_version")
+def _timeline_version(draft_state: JsonMap) -> int | None:
+    value = draft_state.get("timeline_current_version")
     return value if type(value) is int else None
 
 
-def _string_field(case_state: JsonMap, key: str) -> str | None:
-    value = case_state.get(key)
+def _string_field(draft_state: JsonMap, key: str) -> str | None:
+    value = draft_state.get(key)
     return value if isinstance(value, str) and value else None
 
 
-def _has_running_job_kind(case_state: JsonMap, needles: tuple[str, ...]) -> bool:
-    running_jobs = case_state.get("running_jobs")
+def _has_running_job_kind(draft_state: JsonMap, needles: tuple[str, ...]) -> bool:
+    running_jobs = draft_state.get("running_jobs")
     if not isinstance(running_jobs, list):
         return False
     for job in running_jobs:
@@ -275,14 +264,13 @@ def _has_running_job_kind(case_state: JsonMap, needles: tuple[str, ...]) -> bool
 
 def _mark_preview_viewed(
     client: RushesClient,
-    project_id: str,
-    case_id: str,
-    case_state: JsonMap,
+    draft_id: str,
+    draft_state: JsonMap,
 ) -> None:
-    preview_id = _string_field(case_state, "preview_current_id")
+    preview_id = _string_field(draft_state, "preview_current_id")
     if preview_id is None:
         return
-    client.mark_preview_viewed(project_id=project_id, case_id=case_id, preview_id=preview_id)
+    client.mark_preview_viewed(draft_id=draft_id, preview_id=preview_id)
     stage_log(f"已标记预览已看：{preview_id}")
 
 

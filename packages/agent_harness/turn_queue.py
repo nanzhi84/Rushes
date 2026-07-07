@@ -1,4 +1,4 @@
-"""Per-case FIFO turn queue."""
+"""Per-draft FIFO turn queue."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ TurnQueueItemKind = Literal["user_message", "job_observation", "ui_observation"]
 
 @dataclass(frozen=True, slots=True)
 class TurnQueueItem:
-    case_id: str
+    draft_id: str
     kind: TurnQueueItemKind
     payload: dict[str, Any] = field(default_factory=dict)
     item_id: str | None = None
@@ -29,31 +29,31 @@ TurnRunner = Callable[[TurnQueueItem, StopToken], Awaitable[None]]
 
 
 class TurnQueue:
-    """Strict FIFO per case, parallel across cases."""
+    """Strict FIFO per draft, parallel across drafts."""
 
     def __init__(self, runner: TurnRunner) -> None:
         self._runner = runner
-        self._workers: dict[str, _CaseWorker] = {}
+        self._workers: dict[str, _DraftWorker] = {}
         self._lock = asyncio.Lock()
 
     async def enqueue(self, item: TurnQueueItem) -> None:
         async with self._lock:
-            worker = self._workers.get(item.case_id)
+            worker = self._workers.get(item.draft_id)
             if worker is None or worker.done:
-                worker = _CaseWorker(item.case_id, self._runner, self._remove_worker)
-                self._workers[item.case_id] = worker
+                worker = _DraftWorker(item.draft_id, self._runner, self._remove_worker)
+                self._workers[item.draft_id] = worker
             await worker.enqueue(item)
 
     async def enqueue_user_message(
         self,
-        case_id: str,
+        draft_id: str,
         *,
         content: str,
         message_id: str | None = None,
     ) -> None:
         await self.enqueue(
             TurnQueueItem(
-                case_id=case_id,
+                draft_id=draft_id,
                 kind="user_message",
                 item_id=message_id,
                 payload={"content": content, "message_id": message_id},
@@ -62,14 +62,14 @@ class TurnQueue:
 
     async def enqueue_job_observation(
         self,
-        case_id: str,
+        draft_id: str,
         *,
         job_id: str,
         event: dict[str, Any],
     ) -> None:
         await self.enqueue(
             TurnQueueItem(
-                case_id=case_id,
+                draft_id=draft_id,
                 kind="job_observation",
                 item_id=job_id,
                 payload={"job_id": job_id, "event": event},
@@ -78,7 +78,7 @@ class TurnQueue:
 
     async def enqueue_ui_observation(
         self,
-        case_id: str,
+        draft_id: str,
         *,
         observation_type: str,
         payload: dict[str, Any],
@@ -86,21 +86,21 @@ class TurnQueue:
     ) -> None:
         await self.enqueue(
             TurnQueueItem(
-                case_id=case_id,
+                draft_id=draft_id,
                 kind="ui_observation",
                 item_id=item_id,
                 payload={"observation_type": observation_type, **payload},
             )
         )
 
-    def request_stop(self, case_id: str) -> bool:
-        worker = self._workers.get(case_id)
+    def request_stop(self, draft_id: str) -> bool:
+        worker = self._workers.get(draft_id)
         if worker is None:
             return False
         return worker.request_stop()
 
-    async def join_case(self, case_id: str) -> None:
-        worker = self._workers.get(case_id)
+    async def join_draft(self, draft_id: str) -> None:
+        worker = self._workers.get(draft_id)
         if worker is None:
             return
         await worker.join()
@@ -116,19 +116,19 @@ class TurnQueue:
         await asyncio.gather(*(worker.wait_done() for worker in workers), return_exceptions=True)
         self._workers.clear()
 
-    def _remove_worker(self, case_id: str, worker: _CaseWorker) -> None:
-        if self._workers.get(case_id) is worker:
-            self._workers.pop(case_id, None)
+    def _remove_worker(self, draft_id: str, worker: _DraftWorker) -> None:
+        if self._workers.get(draft_id) is worker:
+            self._workers.pop(draft_id, None)
 
 
-class _CaseWorker:
+class _DraftWorker:
     def __init__(
         self,
-        case_id: str,
+        draft_id: str,
         runner: TurnRunner,
-        remove_callback: Callable[[str, _CaseWorker], None],
+        remove_callback: Callable[[str, _DraftWorker], None],
     ) -> None:
-        self.case_id = case_id
+        self.draft_id = draft_id
         self._runner = runner
         self._remove_callback = remove_callback
         self._queue: asyncio.Queue[TurnQueueItem] = asyncio.Queue()
@@ -176,4 +176,4 @@ class _CaseWorker:
                     self._current_stop_token = None
                     self._queue.task_done()
         finally:
-            self._remove_callback(self.case_id, self)
+            self._remove_callback(self.draft_id, self)

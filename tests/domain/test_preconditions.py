@@ -1,19 +1,18 @@
 import pytest
 
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from domain.preconditions import (
+    DraftArtifactStats,
     PreconditionContext,
-    ProjectArtifactStats,
     UnknownPreconditionError,
     evaluate_precondition,
 )
 
 
-def _case_state(**overrides: object) -> CaseState:
+def _draft_state(**overrides: object) -> DraftState:
     data = {
-        "case_id": "case_1",
-        "project_id": "project_1",
-        "name": "Case",
+        "draft_id": "draft_1",
+        "name": "草稿",
         "brief": {"goal": "make a video", "confirmed_facts": []},
         "content_plan": {"outline": ["hook"]},
         "audio_plan": {
@@ -28,18 +27,16 @@ def _case_state(**overrides: object) -> CaseState:
         "preview_current_id": "preview_3",
         "rough_cut_approved": True,
         "rough_cut_approved_version": 3,
-        "selected_asset_ids": [],
-        "disabled_asset_ids": [],
         "scratch_memory": {},
     }
     data.update(overrides)
-    return CaseState.model_validate(data)
+    return DraftState.model_validate(data)
 
 
-def test_all_prd_preconditions_have_true_and_false_cases() -> None:
+def test_all_prd_preconditions_have_true_and_false_scenarios() -> None:
     true_context = PreconditionContext(
-        case_state=_case_state(),
-        project_artifacts=ProjectArtifactStats(
+        draft_state=_draft_state(),
+        draft_artifacts=DraftArtifactStats(
             usable_asset_count=2,
             usable_asset_ids=frozenset({"asset_voice", "asset_broll"}),
             asset_ids_with_audio=frozenset({"asset_voice"}),
@@ -51,8 +48,8 @@ def test_all_prd_preconditions_have_true_and_false_cases() -> None:
         ),
     )
     false_context = PreconditionContext(
-        case_state=_case_state(
-            status="closed",
+        draft_state=_draft_state(
+            status="trashed",
             content_plan=None,
             audio_plan=None,
             cut_plan=None,
@@ -61,11 +58,11 @@ def test_all_prd_preconditions_have_true_and_false_cases() -> None:
             preview_current_id=None,
             rough_cut_approved=False,
         ),
-        project_artifacts=ProjectArtifactStats(),
+        draft_artifacts=DraftArtifactStats(),
     )
 
     names = [
-        "active_case",
+        "active_draft",
         "usable_asset_exists",
         "audio_plan_confirmed",
         "audio_source_has_audio",
@@ -84,8 +81,17 @@ def test_all_prd_preconditions_have_true_and_false_cases() -> None:
         assert not evaluate_precondition(name, false_context), name
 
 
+def test_usable_asset_exists_falls_back_to_count() -> None:
+    # usable_asset_ids 未展开时按 usable_asset_count 兜底（无 enabled/disabled 维度）。
+    only_count = PreconditionContext(
+        draft_state=_draft_state(),
+        draft_artifacts=DraftArtifactStats(usable_asset_count=1),
+    )
+    assert evaluate_precondition("usable_asset_exists", only_count)
+
+
 def test_audio_mode_in_factory_and_unknown_names() -> None:
-    context = PreconditionContext(case_state=_case_state())
+    context = PreconditionContext(draft_state=_draft_state())
 
     assert evaluate_precondition("audio_mode_in(keep_original, rough_cut)", context)
     assert not evaluate_precondition("audio_mode_in(tts)", context)

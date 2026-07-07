@@ -158,14 +158,14 @@ def test_choose_path2_subtitle_and_bgm_uses_uploaded_asset() -> None:
     }
 
 
-def test_choose_rough_cut_approval_injects_case_timeline_version() -> None:
+def test_choose_rough_cut_approval_injects_draft_timeline_version() -> None:
     choice = choose_decision_answer(
         {
             "type": "approve_rough_cut",
             "options": [{"option_id": "approve", "label": "确认", "payload": {}}],
         },
         scenario="path1",
-        case_state={"timeline_current_version": 3},
+        draft_state={"timeline_current_version": 3},
     )
 
     assert choice.option_id == "approve"

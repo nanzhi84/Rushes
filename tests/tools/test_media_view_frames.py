@@ -9,7 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from contracts.asset import AssetKind, AssetSource, StorageMode
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.provider import ProviderError, ProviderResult
 from contracts.timeline import TimelineState
 from providers import VLM_UNDERSTANDING
@@ -60,6 +60,7 @@ def test_view_frames_sends_question_and_data_uri_to_vlm(
     assert "[t=1.25s] 主体清晰，画面稳定。" in result.observation
     assert "整体回答：可用。" in result.observation
     assert result.data["frames"][0]["status"] == "sampled"
+    assert result.data["draft_id"] == "draft_1"
     assert result.events == []
 
     request = gateway.requests[0]
@@ -255,22 +256,12 @@ def _engine(
     with engine.begin() as connection:
         schema.create_all(connection)
         connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
-                status="active",
-                defaults="{}",
-                created_at=NOW,
-                updated_at=NOW,
-            )
-        )
-        connection.execute(
-            schema.cases.insert().values(
-                case_id="case_1",
-                project_id="project_1",
-                name="Case",
+            schema.drafts.insert().values(
+                draft_id="draft_1",
+                name="Draft",
                 state_version=0,
                 status="active",
+                defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
                 pending_decision_id=None,
                 running_jobs="[]",
                 last_error=None,
@@ -286,9 +277,9 @@ def _engine(
                 rough_cut_approved_version=None,
                 postprocess_plan=None,
                 export_current_id=None,
-                selected_asset_ids=dump_json(["asset_1"] if source is not None else []),
-                disabled_asset_ids="[]",
                 scratch_memory="{}",
+                created_at=NOW,
+                updated_at=NOW,
             )
         )
         if source is not None:
@@ -312,12 +303,12 @@ def _engine(
                 )
             )
             connection.execute(
-                schema.project_asset_links.insert().values(
-                    project_id="project_1",
+                schema.draft_asset_links.insert().values(
+                    draft_id="draft_1",
                     asset_id="asset_1",
-                    enabled=True,
                     linked_at=NOW,
                     note="",
+                    rel_dir=None,
                 )
             )
     return engine
@@ -336,23 +327,19 @@ def _context(
     return ToolExecutionContext(
         tool_call_id="tc_1",
         turn_id="turn_1",
-        case_state=_case_state(timeline_current_version=timeline_current_version),
+        draft_state=_draft_state(timeline_current_version=timeline_current_version),
         readonly_connection=connection,
         metadata=metadata,
     )
 
 
-def _case_state(*, timeline_current_version: int | None = None) -> CaseState:
-    return CaseState.model_validate(
+def _draft_state(*, timeline_current_version: int | None = None) -> DraftState:
+    return DraftState.model_validate(
         {
-            "case_id": "case_1",
-            "project_id": "project_1",
-            "name": "Case",
+            "draft_id": "draft_1",
+            "name": "Draft",
             "brief": {"goal": "test", "confirmed_facts": []},
             "timeline_current_version": timeline_current_version,
-            "selected_asset_ids": ["asset_1"],
-            "disabled_asset_ids": [],
-            "scratch_memory": {},
         }
     )
 
@@ -360,8 +347,8 @@ def _case_state(*, timeline_current_version: int | None = None) -> CaseState:
 def _timeline() -> TimelineState:
     return TimelineState.model_validate(
         {
-            "timeline_id": "case_1:v1",
-            "case_id": "case_1",
+            "timeline_id": "draft_1:v1",
+            "draft_id": "draft_1",
             "version": 1,
             "fps": 30,
             "duration_frames": 60,

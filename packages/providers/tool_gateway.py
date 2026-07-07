@@ -1,7 +1,7 @@
 """Default provider gateway for agent tool execution.
 
 Agent 链路里的工具（media.view_frames / understand.materials 的理解子代理 /
-memory.extract_from_case / content.create_plan）都经 ToolExecutionContext.metadata
+memory.extract_from_draft / content.create_plan）都经 ToolExecutionContext.metadata
 的 provider_gateway 调 provider；缺了它全部走降级路径（M9 实测）。
 """
 

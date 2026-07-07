@@ -12,22 +12,21 @@ from agent_harness.loop import (
 )
 from agent_harness.policy_gate import PolicyContext, PolicyGate
 from agent_harness.turn_queue import StopToken, TurnQueue, TurnQueueItem
-from contracts.case import CaseState
 from contracts.decision import Decision
+from contracts.draft import DraftState
 from contracts.tool import ToolSpec
 from contracts.tool_result import ToolResult
 from domain.preconditions import PreconditionContext
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
 from storage.repositories import (
-    CasesRepository,
     DecisionsRepository,
+    DraftsRepository,
     JobsRepository,
     MessagesRepository,
 )
 from storage.repositories._json import load_json
 from storage.repositories.event_log import EventLogRepository
-from storage.repositories.projects import ProjectsRepository
 from tools import PATCH_OP_REGISTRY, ToolExecutionContext, build_default_tool_registry
 
 NOW = "2026-07-04T00:00:00+00:00"
@@ -42,27 +41,17 @@ def _prepare_workspace(tmp_path: Path) -> Engine:
     with engine.begin() as connection:
         schema.create_all(connection)
     with begin_immediate(engine) as connection:
-        ProjectsRepository(connection).insert(
-            {
-                "project_id": "project_1",
-                "name": "Project",
-                "status": "active",
-                "defaults": {"aspect_ratio": "9:16", "fps": 30},
-                "created_at": NOW,
-                "updated_at": NOW,
-            }
-        )
-        CasesRepository(connection).insert(_case_values())
+        DraftsRepository(connection).insert(_case_values())
     return engine
 
 
 def _case_values(**overrides: object) -> dict[str, object]:
     values: dict[str, object] = {
-        "case_id": "case_1",
-        "project_id": "project_1",
-        "name": "Case",
+        "draft_id": "draft_1",
+        "name": "Draft",
         "state_version": 0,
         "status": "active",
+        "defaults": {"aspect_ratio": "9:16", "fps": 30},
         "pending_decision_id": None,
         "running_jobs": [],
         "last_error": None,
@@ -78,19 +67,22 @@ def _case_values(**overrides: object) -> dict[str, object]:
         "rough_cut_approved_version": None,
         "postprocess_plan": None,
         "export_current_id": None,
-        "selected_asset_ids": [],
-        "disabled_asset_ids": [],
         "scratch_memory": {},
+        "messages_tail_ref": None,
+        "created_at": NOW,
+        "updated_at": NOW,
     }
     values.update(overrides)
     return values
 
 
-def _load_case(engine: Engine) -> CaseState:
+def _load_case(engine: Engine) -> DraftState:
     with begin_immediate(engine) as connection:
-        row = CasesRepository(connection).get("case_1")
+        row = DraftsRepository(connection).get("draft_1")
     assert row is not None
-    return CaseState.model_validate(row)
+    return DraftState.model_validate(
+        {key: value for key, value in row.items() if key not in {"created_at", "updated_at"}}
+    )
 
 
 def _event_types(engine: Engine) -> list[str]:
@@ -100,7 +92,7 @@ def _event_types(engine: Engine) -> list[str]:
 
 def _messages(engine: Engine) -> list[dict[str, object]]:
     with begin_immediate(engine) as connection:
-        return MessagesRepository(connection).list_for_case("case_1")
+        return MessagesRepository(connection).list_for_draft("draft_1")
 
 
 async def test_unregistered_tool_denies_policy_refusal_and_state_unchanged(
@@ -110,7 +102,7 @@ async def test_unregistered_tool_denies_policy_refusal_and_state_unchanged(
 
     result = await run_turn(
         TurnQueueItem(
-            case_id="case_1",
+            draft_id="draft_1",
             kind="user_message",
             payload={"content": "run shell"},
             item_id="msg_1",
@@ -129,7 +121,7 @@ async def test_three_illegal_outputs_force_respond(tmp_path: Path) -> None:
     engine = _prepare_workspace(tmp_path)
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "bad"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "bad"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -161,7 +153,7 @@ async def test_five_nonblocking_tools_force_progress_response(tmp_path: Path) ->
     ]
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "go"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "go"}),
         engine=engine,
         planner=ScriptedPlanner(calls),
         turn_id="turn_nonblocking",
@@ -187,7 +179,7 @@ async def test_twelve_attempt_hard_limit_forces_diagnostic(tmp_path: Path) -> No
     ]
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "loop"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "loop"}),
         engine=engine,
         planner=ScriptedPlanner(calls),
         turn_id="turn_hard_limit",
@@ -224,10 +216,9 @@ async def test_running_result_ends_turn_until_observation(tmp_path: Path) -> Non
             input_model=EmptyInput,
             result_model=None,
             handler_ref="tests.long",
-            allowed_scopes=["case_agent_console"],
+            allowed_scopes=["draft_editor"],
             requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
+            requires_active_draft=False,
             side_effects=["job"],
             emits_events=[],
             is_long_running=True,
@@ -237,7 +228,7 @@ async def test_running_result_ends_turn_until_observation(tmp_path: Path) -> Non
     )
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "long"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "long"}),
         engine=engine,
         planner=ScriptedPlanner([{"tool_name": "x.long", "arguments": {}}]),
         registry=registry,
@@ -261,7 +252,7 @@ async def test_stop_token_ends_after_current_tool(tmp_path: Path) -> None:
     token = StopToken(cancel_requested=True)
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "stop"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "stop"}),
         engine=engine,
         planner=ScriptedPlanner(
             [{"tool_name": "interaction.show_progress", "arguments": {"title": "done"}}]
@@ -285,7 +276,7 @@ async def test_decision_answer_reduces_pending_and_restores_allowed_tools(
     _insert_pending_generic_decision(engine)
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "yes"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "yes"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -308,10 +299,10 @@ async def test_decision_answer_reduces_pending_and_restores_allowed_tools(
         turn_id="turn_answer",
     )
 
-    case_state = _load_case(engine)
+    draft_state = _load_case(engine)
     assert result.outcome == "finished"
-    assert case_state.pending_decision_id is None
-    assert case_state.scratch_memory["decision_1"] == "confirmed"
+    assert draft_state.pending_decision_id is None
+    assert draft_state.scratch_memory["decision_1"] == "confirmed"
 
     registry = build_default_tool_registry()
     policy_gate = PolicyGate(
@@ -320,7 +311,7 @@ async def test_decision_answer_reduces_pending_and_restores_allowed_tools(
     )
     allowed = policy_gate.compute_allowed_tools(
         PolicyContext(
-            preconditions=PreconditionContext(case_state=case_state),
+            preconditions=PreconditionContext(draft_state=draft_state),
             decisions=(),
         )
     )
@@ -333,7 +324,7 @@ async def test_ask_user_creates_blocking_decision_and_narrows_tools(
     engine = _prepare_workspace(tmp_path)
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "ask"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "ask"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -350,8 +341,8 @@ async def test_ask_user_creates_blocking_decision_and_narrows_tools(
         turn_id="turn_ask",
     )
 
-    case_state = _load_case(engine)
-    decision = _load_decision(engine, case_state.pending_decision_id)
+    draft_state = _load_case(engine)
+    decision = _load_decision(engine, draft_state.pending_decision_id)
     registry = build_default_tool_registry()
     policy_gate = PolicyGate(
         tool_specs=registry.specs_by_name(),
@@ -359,7 +350,7 @@ async def test_ask_user_creates_blocking_decision_and_narrows_tools(
     )
     allowed = policy_gate.compute_allowed_tools(
         PolicyContext(
-            preconditions=PreconditionContext(case_state=case_state),
+            preconditions=PreconditionContext(draft_state=draft_state),
             decisions=(decision,),
         )
     )
@@ -375,7 +366,7 @@ async def test_ask_user_audio_mode_creates_five_renderable_options(tmp_path: Pat
     engine = _prepare_workspace(tmp_path)
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "ask audio"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "ask audio"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -392,12 +383,12 @@ async def test_ask_user_audio_mode_creates_five_renderable_options(tmp_path: Pat
         turn_id="turn_audio_mode",
     )
 
-    case_state = _load_case(engine)
-    decision = _load_decision(engine, case_state.pending_decision_id)
+    draft_state = _load_case(engine)
+    decision = _load_decision(engine, draft_state.pending_decision_id)
     interaction = result.tool_results[-1].data["interaction"]
     assert result.outcome == "requires_user"
     assert decision.type == "audio_mode"
-    assert decision.decision_id == case_state.pending_decision_id
+    assert decision.decision_id == draft_state.pending_decision_id
     assert len(decision.options) == 5
     assert [option.option_id for option in decision.options] == [
         "keep_original",
@@ -417,7 +408,7 @@ async def test_natural_language_answer_reduces_decision_and_keeps_side_intents(
 
     result = await run_turn(
         TurnQueueItem(
-            case_id="case_1",
+            draft_id="draft_1",
             kind="user_message",
             payload={"content": "不要字幕，但是加个轻快 BGM"},
             item_id="msg_natural",
@@ -430,15 +421,15 @@ async def test_natural_language_answer_reduces_decision_and_keeps_side_intents(
         turn_id="turn_natural_answer",
     )
 
-    case_state = _load_case(engine)
+    draft_state = _load_case(engine)
     decision = _load_decision(engine, "decision_subtitle")
     assert result.tool_calls[0].tool_name == "decision.answer"
     assert result.outcome == "finished"
-    assert case_state.pending_decision_id is None
-    assert case_state.postprocess_plan is not None
-    assert case_state.postprocess_plan.subtitle is not None
-    assert case_state.postprocess_plan.subtitle.enabled is False
-    assert case_state.scratch_memory["pending_intents"] == ["加轻快 BGM"]
+    assert draft_state.pending_decision_id is None
+    assert draft_state.postprocess_plan is not None
+    assert draft_state.postprocess_plan.subtitle is not None
+    assert draft_state.postprocess_plan.subtitle.enabled is False
+    assert draft_state.scratch_memory["pending_intents"] == ["加轻快 BGM"]
     assert decision.answer is not None
     assert decision.answer.answered_via == "natural_language"
     assert {"DecisionAnswered", "PostprocessPlanUpdated"} <= set(_event_types(engine))
@@ -451,14 +442,14 @@ async def test_natural_language_resolver_unanswered_leaves_decision_for_planner(
     _insert_pending_subtitle_decision(engine)
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "先等等"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "先等等"}),
         engine=engine,
         planner=ScriptedPlanner([{"content": "还在等字幕确认。"}]),
         decision_answer_resolver=ScriptedDecisionAnswerResolver([{"unanswered": True}]),
         turn_id="turn_unanswered",
     )
 
-    case_state = _load_case(engine)
+    draft_state = _load_case(engine)
     assert result.outcome == "finished"
     assert result.tool_calls == ()
     assert any(
@@ -467,7 +458,7 @@ async def test_natural_language_resolver_unanswered_leaves_decision_for_planner(
         and message["content"] == "还在等字幕确认。"
         for message in _messages(engine)
     )
-    assert case_state.pending_decision_id == "decision_subtitle"
+    assert draft_state.pending_decision_id == "decision_subtitle"
     assert "DecisionAnswered" not in _event_types(engine)
 
 
@@ -478,7 +469,7 @@ async def test_natural_language_resolver_error_records_degradation_and_falls_bac
     _insert_pending_subtitle_decision(engine)
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "不要字幕"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "不要字幕"}),
         engine=engine,
         planner=ScriptedPlanner([{"content": "请用按钮确认字幕。"}]),
         decision_answer_resolver=ScriptedDecisionAnswerResolver([RuntimeError("llm down")]),
@@ -542,7 +533,7 @@ async def test_decision_answer_followup_enqueues_pending_tool_call_once(
 
     queue = TurnQueue(runner)
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "approve"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "approve"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -576,7 +567,7 @@ async def test_agent_trace_records_five_kinds_for_turn(tmp_path: Path) -> None:
     engine = _prepare_workspace(tmp_path)
 
     await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "hi"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "hi"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -618,9 +609,8 @@ def _insert_pending_generic_decision(engine: Engine) -> None:
         DecisionsRepository(connection).insert(
             {
                 "decision_id": "decision_1",
-                "scope_type": "case",
-                "project_id": "project_1",
-                "case_id": "case_1",
+                "scope_type": "draft",
+                "draft_id": "draft_1",
                 "type": "generic",
                 "question": "Confirm?",
                 "options": [],
@@ -635,8 +625,8 @@ def _insert_pending_generic_decision(engine: Engine) -> None:
             }
         )
         connection.execute(
-            update(schema.cases)
-            .where(schema.cases.c.case_id == "case_1")
+            update(schema.drafts)
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(pending_decision_id="decision_1")
         )
 
@@ -646,9 +636,8 @@ def _insert_pending_subtitle_decision(engine: Engine) -> None:
         DecisionsRepository(connection).insert(
             {
                 "decision_id": "decision_subtitle",
-                "scope_type": "case",
-                "project_id": "project_1",
-                "case_id": "case_1",
+                "scope_type": "draft",
+                "draft_id": "draft_1",
                 "type": "subtitle",
                 "question": "要加字幕吗？",
                 "options": [
@@ -674,8 +663,8 @@ def _insert_pending_subtitle_decision(engine: Engine) -> None:
             }
         )
         connection.execute(
-            update(schema.cases)
-            .where(schema.cases.c.case_id == "case_1")
+            update(schema.drafts)
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(pending_decision_id="decision_subtitle")
         )
 
@@ -703,9 +692,8 @@ def _insert_approved_replay_decision(engine: Engine) -> None:
         DecisionsRepository(connection).insert(
             {
                 "decision_id": "decision_replay",
-                "scope_type": "case",
-                "project_id": "project_1",
-                "case_id": "case_1",
+                "scope_type": "draft",
+                "draft_id": "draft_1",
                 "type": "export",
                 "question": "Replay?",
                 "options": [],
@@ -732,9 +720,8 @@ def _insert_pending_replay_decision(engine: Engine) -> None:
         DecisionsRepository(connection).insert(
             {
                 "decision_id": "decision_pending_replay",
-                "scope_type": "case",
-                "project_id": "project_1",
-                "case_id": "case_1",
+                "scope_type": "draft",
+                "draft_id": "draft_1",
                 "type": "export",
                 "question": "Export?",
                 "options": [],
@@ -755,8 +742,8 @@ def _insert_pending_replay_decision(engine: Engine) -> None:
             }
         )
         connection.execute(
-            update(schema.cases)
-            .where(schema.cases.c.case_id == "case_1")
+            update(schema.drafts)
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(pending_decision_id="decision_pending_replay")
         )
 
@@ -775,7 +762,7 @@ def test_message_content_is_decoded_as_text(tmp_path: Path) -> None:
         MessagesRepository(connection).insert(
             {
                 "message_id": "msg_raw",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "role": "user",
                 "content": "hello",
                 "created_at": NOW,

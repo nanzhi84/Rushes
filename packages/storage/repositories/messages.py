@@ -23,10 +23,10 @@ class MessagesRepository:
             schema.messages.insert().values(**encode_json_columns(values, JSON_COLUMNS))
         )
 
-    def list_for_case(self, case_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+    def list_for_draft(self, draft_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
         query = (
             select(schema.messages)
-            .where(schema.messages.c.case_id == case_id)
+            .where(schema.messages.c.draft_id == draft_id)
             .order_by(schema.messages.c.created_at, schema.messages.c.message_id)
         )
         if limit is not None:

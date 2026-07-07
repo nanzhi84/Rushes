@@ -43,9 +43,9 @@ def inspect_sources(
     input_model: AudioInspectSourcesInput,
     context: ToolExecutionContext,
 ) -> ToolResult:
-    case_state = context.case_state
-    if case_state is None:
-        return _failed("audio.inspect_sources", context, "missing_case", "active case required")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed("audio.inspect_sources", context, "missing_draft", "active draft required")
     if context.readonly_connection is None:
         return _failed(
             "audio.inspect_sources",
@@ -54,7 +54,7 @@ def inspect_sources(
             "audio.inspect_sources requires repository access",
         )
     paths = _workspace_paths(context)
-    asset_ids = _case_asset_ids(context, requested_ids=input_model.asset_ids)
+    asset_ids = _draft_asset_ids(context, requested_ids=input_model.asset_ids)
     rows = _asset_rows(context, asset_ids)
     sources: list[dict[str, Any]] = []
     degraded: list[dict[str, Any]] = []
@@ -68,9 +68,7 @@ def inspect_sources(
         if isinstance(probe_payload, dict):
             events.append(
                 AssetProbed(
-                    project_id=case_state.project_id,
-                    # 素材域事件必须 project 作用域（§4.6-5），带 case_id 会被 validator 拒
-                    case_id=None,
+                    # 素材是全局实体，探测事件不挂草稿作用域。
                     asset_id=asset_id,
                     payload={"probe": probe_payload, "ingest_status": "probed"},
                 ).model_dump(mode="json")
@@ -87,8 +85,7 @@ def inspect_sources(
             events.append(
                 CapabilityDegraded(
                     degradation_id=f"degraded_{context.tool_call_id}_silero_vad",
-                    project_id=case_state.project_id,
-                    case_id=case_state.case_id,
+                    draft_id=draft_state.draft_id,
                     capability="audio.vad",
                     provider_id="silero_onnx",
                     reason=degradation["reason"],
@@ -100,7 +97,7 @@ def inspect_sources(
         tool_name="audio.inspect_sources",
         status="succeeded",
         observation=_inspect_sources_observation(sources, degraded),
-        data={"case_id": case_state.case_id, "sources": sources, "degraded": degraded},
+        data={"draft_id": draft_state.draft_id, "sources": sources, "degraded": degraded},
         events=events,
     )
 
@@ -142,17 +139,17 @@ def _inspect_sources_observation(
 
 
 def asr_original(input_model: AudioAsrOriginalInput, context: ToolExecutionContext) -> ToolResult:
-    case_state = context.case_state
-    if case_state is None:
-        return _failed("audio.asr_original", context, "missing_case", "active case required")
-    if case_state.audio_plan is None:
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed("audio.asr_original", context, "missing_draft", "active draft required")
+    if draft_state.audio_plan is None:
         return _failed(
             "audio.asr_original",
             context,
             "audio_plan_missing",
             "audio.asr_original requires a confirmed audio_plan",
         )
-    if str(case_state.audio_plan.mode) not in {"keep_original", "rough_cut"}:
+    if str(draft_state.audio_plan.mode) not in {"keep_original", "rough_cut"}:
         return _failed(
             "audio.asr_original",
             context,
@@ -190,26 +187,25 @@ def asr_original(input_model: AudioAsrOriginalInput, context: ToolExecutionConte
                 "下一步可调用 audio.rough_cut_speech 生成粗剪提案。"
             ),
             data={
-                "case_id": case_state.case_id,
+                "draft_id": draft_state.draft_id,
                 "asset_id": asset_id,
                 "transcript_id": values["transcript_id"],
                 "utterance_count": count,
             },
         )
 
-    idempotency_key = f"case:{case_state.case_id}:asr:{asset_id}"
+    idempotency_key = f"draft:{draft_state.draft_id}:asr:{asset_id}"
     event = JobEnqueued(
         job_id=_job_id("asr", idempotency_key),
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
-        requested_by_case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
+        requested_by_draft_id=draft_state.draft_id,
         payload={
             "kind": "asr",
             "asset_id": asset_id,
             "idempotency_key": idempotency_key,
             "job_payload": {
                 "asset_id": asset_id,
-                "case_id": case_state.case_id,
+                "draft_id": draft_state.draft_id,
                 "provider_id": input_model.provider_id,
             },
             "attempts": 0,
@@ -221,7 +217,7 @@ def asr_original(input_model: AudioAsrOriginalInput, context: ToolExecutionConte
         tool_name="audio.asr_original",
         status="running",
         observation=f"asr job queued: {event.job_id}",
-        data={"case_id": case_state.case_id, "asset_id": asset_id, "job_id": event.job_id},
+        data={"draft_id": draft_state.draft_id, "asset_id": asset_id, "job_id": event.job_id},
         events=[event.model_dump(mode="json")],
     )
 
@@ -230,9 +226,9 @@ def rough_cut_speech(
     input_model: AudioRoughCutSpeechInput,
     context: ToolExecutionContext,
 ) -> ToolResult:
-    case_state = context.case_state
-    if case_state is None:
-        return _failed("audio.rough_cut_speech", context, "missing_case", "active case required")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed("audio.rough_cut_speech", context, "missing_draft", "active draft required")
     if context.readonly_connection is None:
         return _failed(
             "audio.rough_cut_speech",
@@ -255,8 +251,7 @@ def rough_cut_speech(
         degraded_events.append(
             CapabilityDegraded(
                 degradation_id=f"degraded_{context.tool_call_id}_raw_transcript",
-                project_id=case_state.project_id,
-                case_id=case_state.case_id,
+                draft_id=draft_state.draft_id,
                 capability="audio.rough_cut_speech.filler_detection",
                 provider_id=transcript.provider_id,
                 reason="raw transcript is not preserved; filler/off-topic detection disabled",
@@ -281,8 +276,7 @@ def rough_cut_speech(
             degraded_events.append(
                 CapabilityDegraded(
                     degradation_id=f"degraded_{context.tool_call_id}_rough_cut_llm",
-                    project_id=case_state.project_id,
-                    case_id=case_state.case_id,
+                    draft_id=draft_state.draft_id,
                     capability="audio.rough_cut_speech.semantic",
                     provider_id=input_model.llm_provider_id,
                     reason=llm_result.degraded_reason,
@@ -302,10 +296,9 @@ def rough_cut_speech(
     proposal_payload = [proposal.model_dump(mode="json") for proposal in proposals]
     removed_ranges = removed_ranges_from_proposals(proposals)
     decision = Decision(
-        decision_id=_decision_id("speech_cut", case_state.case_id, proposal_payload),
-        scope_type="case",
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
+        decision_id=_decision_id("speech_cut", draft_state.draft_id, proposal_payload),
+        scope_type="draft",
+        draft_id=draft_state.draft_id,
         type="approve_speech_cut",
         question="这些口播粗剪候选需要确认后才会删除，是否应用？",
         options=[
@@ -315,7 +308,7 @@ def rough_cut_speech(
                 payload={
                     "rough_cut_proposal": proposal_payload,
                     "removed_ranges": removed_ranges,
-                    "total_target_duration_sec": _cut_plan_total_duration(case_state),
+                    "total_target_duration_sec": _cut_plan_total_duration(draft_state),
                 },
             ),
             DecisionOption(
@@ -324,7 +317,7 @@ def rough_cut_speech(
                 payload={
                     "rough_cut_proposal": proposal_payload,
                     "removed_ranges": [],
-                    "total_target_duration_sec": _cut_plan_total_duration(case_state),
+                    "total_target_duration_sec": _cut_plan_total_duration(draft_state),
                 },
             ),
         ],
@@ -336,8 +329,7 @@ def rough_cut_speech(
     event = DecisionCreated(
         decision_id=decision.decision_id,
         scope_type=decision.scope_type,
-        project_id=decision.project_id,
-        case_id=decision.case_id,
+        draft_id=decision.draft_id,
         payload={
             "decision": decision.model_dump(mode="json"),
             "type": decision.type,
@@ -353,7 +345,7 @@ def rough_cut_speech(
         status="requires_user",
         observation="rough-cut speech proposals require approval",
         data={
-            "case_id": case_state.case_id,
+            "draft_id": draft_state.draft_id,
             "transcript_id": transcript.transcript_id,
             "rough_cut_proposal": proposal_payload,
             "decision_id": decision.decision_id,
@@ -407,12 +399,12 @@ def _rough_cut_transcript(
     context: ToolExecutionContext,
 ) -> TranscriptDocument | None:
     assert context.readonly_connection is not None
-    case_state = context.case_state
-    if case_state is None:
+    draft_state = context.draft_state
+    if draft_state is None:
         return None
     transcript_id = input_model.transcript_id
-    if transcript_id is None and case_state.audio_plan is not None:
-        transcript_id = case_state.audio_plan.transcript_id
+    if transcript_id is None and draft_state.audio_plan is not None:
+        transcript_id = draft_state.audio_plan.transcript_id
     row = None
     if transcript_id is not None:
         row = context.readonly_connection.execute(
@@ -420,8 +412,8 @@ def _rough_cut_transcript(
         ).first()
     if row is None:
         asset_id = input_model.asset_id
-        if asset_id is None and case_state.audio_plan is not None:
-            source_ids = case_state.audio_plan.source_asset_ids
+        if asset_id is None and draft_state.audio_plan is not None:
+            source_ids = draft_state.audio_plan.source_asset_ids
             asset_id = source_ids[0] if source_ids else None
         if asset_id is not None:
             row = context.readonly_connection.execute(
@@ -466,7 +458,6 @@ def _semantic_suggestions(
     request = ProviderRequest(
         capability=LLM_CHAT,
         request_id=f"rough_cut_{context.tool_call_id}",
-        case_id=context.case_state.case_id if context.case_state is not None else None,
         payload={
             "messages": [
                 {
@@ -618,19 +609,18 @@ def _enqueue_audio_job(
     context: ToolExecutionContext,
     arguments: dict[str, Any],
 ) -> ToolResult:
-    case_state = context.case_state
-    if case_state is None:
-        return _failed(tool_name, context, "missing_case", "active case required")
+    draft_state = context.draft_state
+    if draft_state is None:
+        return _failed(tool_name, context, "missing_draft", "active draft required")
     clean_arguments = {key: value for key, value in arguments.items() if value is not None}
     idempotency_key = (
-        f"case:{case_state.case_id}:{kind}:"
+        f"draft:{draft_state.draft_id}:{kind}:"
         f"{hashlib.sha256(json.dumps(clean_arguments, sort_keys=True).encode()).hexdigest()}"
     )
     event = JobEnqueued(
         job_id=_job_id(kind, idempotency_key),
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
-        requested_by_case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
+        requested_by_draft_id=draft_state.draft_id,
         payload={
             "kind": kind,
             "idempotency_key": idempotency_key,
@@ -649,19 +639,19 @@ def _enqueue_audio_job(
         tool_name=tool_name,
         status="running",
         observation=f"job queued: {event.job_id}",
-        data={"case_id": case_state.case_id, "job_id": event.job_id, "job_kind": kind},
+        data={"draft_id": draft_state.draft_id, "job_id": event.job_id, "job_kind": kind},
         events=[event.model_dump(mode="json")],
     )
 
 
-def _decision_id(prefix: str, case_id: str, payload: Any) -> str:
-    raw = json.dumps({"case_id": case_id, "payload": payload}, sort_keys=True)
+def _decision_id(prefix: str, draft_id: str, payload: Any) -> str:
+    raw = json.dumps({"draft_id": draft_id, "payload": payload}, sort_keys=True)
     digest = hashlib.sha256(raw.encode()).hexdigest()
     return f"dec_{prefix}_{digest[:16]}"
 
 
-def _cut_plan_total_duration(case_state: Any) -> float:
-    cut_plan = getattr(case_state, "cut_plan", None)
+def _cut_plan_total_duration(draft_state: Any) -> float:
+    cut_plan = getattr(draft_state, "cut_plan", None)
     if cut_plan is not None:
         value = getattr(cut_plan, "total_target_duration_sec", None)
         if isinstance(value, (int, float)):
@@ -719,30 +709,24 @@ def _inspect_one_asset(
         }
 
 
-def _case_asset_ids(
+def _draft_asset_ids(
     context: ToolExecutionContext,
     *,
     requested_ids: list[str],
 ) -> list[str]:
-    case_state = context.case_state
-    if case_state is None:
+    draft_state = context.draft_state
+    if draft_state is None:
         return []
     if requested_ids:
         return _dedupe(requested_ids)
-    if case_state.selected_asset_ids:
-        return _dedupe(case_state.selected_asset_ids)
     if context.readonly_connection is None:
         return []
     rows = context.readonly_connection.execute(
-        select(schema.project_asset_links.c.asset_id)
-        .where(schema.project_asset_links.c.project_id == case_state.project_id)
-        .where(schema.project_asset_links.c.enabled.is_(True))
-        .order_by(schema.project_asset_links.c.asset_id)
+        select(schema.draft_asset_links.c.asset_id)
+        .where(schema.draft_asset_links.c.draft_id == draft_state.draft_id)
+        .order_by(schema.draft_asset_links.c.asset_id)
     ).all()
-    disabled = set(case_state.disabled_asset_ids)
-    return [
-        str(row._mapping["asset_id"]) for row in rows if row._mapping["asset_id"] not in disabled
-    ]
+    return [str(row._mapping["asset_id"]) for row in rows]
 
 
 def _asset_rows(context: ToolExecutionContext, asset_ids: list[str]) -> list[dict[str, Any]]:
@@ -762,14 +746,13 @@ def _asset_rows(context: ToolExecutionContext, asset_ids: list[str]) -> list[dic
 def _asr_asset_id(input_model: AudioAsrOriginalInput, context: ToolExecutionContext) -> str | None:
     if input_model.asset_id:
         return input_model.asset_id
-    case_state = context.case_state
-    if case_state is None:
+    draft_state = context.draft_state
+    if draft_state is None:
         return None
-    if case_state.audio_plan is not None and case_state.audio_plan.source_asset_ids:
-        return case_state.audio_plan.source_asset_ids[0]
-    if case_state.selected_asset_ids:
-        return case_state.selected_asset_ids[0]
-    return None
+    if draft_state.audio_plan is not None and draft_state.audio_plan.source_asset_ids:
+        return draft_state.audio_plan.source_asset_ids[0]
+    linked = _draft_asset_ids(context, requested_ids=[])
+    return linked[0] if linked else None
 
 
 def _workspace_paths(context: ToolExecutionContext) -> WorkspacePaths:

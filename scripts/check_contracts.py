@@ -55,6 +55,10 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "apps": LOCAL_GROUPS,
 }
 
+# 单级草稿模型定版计数（PRD §4.5 事件表 / §6 工具契约）：偏离即视为契约漂移，必须显式改动此处。
+EXPECTED_EVENT_COUNT = 44
+EXPECTED_TOOL_COUNT = 31
+
 EXPECTED_PATCH_OPS: frozenset[str] = frozenset(
     {
         "delete_range",
@@ -159,6 +163,8 @@ def check_tool_registry() -> dict[str, Any]:
                 "confirmation": spec.confirmation_decision_type or "-",
             }
         )
+    if len(rows) != EXPECTED_TOOL_COUNT:
+        errors.append(f"registered tool count: expected {EXPECTED_TOOL_COUNT}, got {len(rows)}")
     patch_ops = {spec.kind for spec in PATCH_OP_REGISTRY.list()}
     missing_patch_ops = sorted(EXPECTED_PATCH_OPS - patch_ops)
     extra_patch_ops = sorted(patch_ops - EXPECTED_PATCH_OPS)
@@ -224,6 +230,10 @@ def main() -> int:
 
     errors = []
     errors.extend(_format_import_violation(violation) for violation in import_violations)
+    if event_report["event_count"] != EXPECTED_EVENT_COUNT:
+        errors.append(
+            f"event count: expected {EXPECTED_EVENT_COUNT}, got {event_report['event_count']}"
+        )
     errors.extend(
         f"event consistency: {key}={event_report[key]}"
         for key in ("missing_metadata", "missing_in_reducer", "extra_in_reducer")

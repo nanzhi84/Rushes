@@ -20,7 +20,7 @@ from media.segment_render import TimelineRenderOutput
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
 from storage.object_store import ObjectStore
-from storage.repositories import CasesRepository, JobsRepository
+from storage.repositories import DraftsRepository, JobsRepository
 from storage.repositories._json import dump_json, load_json
 from storage.workspace_paths import WorkspacePaths
 from timeline import store_timeline_version
@@ -37,16 +37,15 @@ async def test_render_preview_job_writes_preview_and_current_pointer(tmp_path: P
     _make_fixture(source)
     with engine.begin() as connection:
         schema.create_all(connection)
-        _seed_project_case_assets(connection, source)
+        _seed_draft_assets(connection, source)
         store_timeline_version(connection, _timeline(), created_at=NOW)
     enqueued = JobEnqueued(
         job_id="job_render_preview",
-        project_id="project_1",
-        case_id="case_1",
-        requested_by_case_id="case_1",
+        draft_id="draft_1",
+        requested_by_draft_id="draft_1",
         payload={
             "kind": "render_preview",
-            "idempotency_key": "case:case_1:render_preview:test",
+            "idempotency_key": "draft:draft_1:render_preview:test",
             "job_payload": {
                 "tool_name": "render.preview",
                 "arguments": {},
@@ -74,11 +73,11 @@ async def test_render_preview_job_writes_preview_and_current_pointer(tmp_path: P
     result = await runner.run_once()
 
     with engine.connect() as connection:
-        case_row = CasesRepository(connection).get("case_1")
+        draft_row = DraftsRepository(connection).get("draft_1")
         preview_row = connection.execute(select(schema.previews)).one()._mapping
     assert result.status == "succeeded"
-    assert case_row is not None
-    assert case_row["preview_current_id"] == preview_row["preview_id"]
+    assert draft_row is not None
+    assert draft_row["preview_current_id"] == preview_row["preview_id"]
     assert preview_row["timeline_version"] == 1
     assert paths.object_path(preview_row["object_hash"]).exists()
 
@@ -93,14 +92,13 @@ async def test_render_final_job_writes_export_and_current_pointer(
     source.write_bytes(b"fake source")
     with engine.begin() as connection:
         schema.create_all(connection)
-        _seed_project_case_assets(connection, source)
+        _seed_draft_assets(connection, source)
         store_timeline_version(connection, _timeline(), created_at=NOW)
     preview_ref = ObjectStore(paths).put_bytes(b"preview")
     preview_result = apply(
         (
             PreviewRendered(
-                project_id="project_1",
-                case_id="case_1",
+                draft_id="draft_1",
                 timeline_version=1,
                 artifact_id="preview_current",
                 payload={"object_hash": preview_ref.object_hash},
@@ -122,12 +120,11 @@ async def test_render_final_job_writes_export_and_current_pointer(
     monkeypatch.setattr(render_jobs, "render_final_mp4", fake_render_final_mp4)
     enqueued = JobEnqueued(
         job_id="job_render_final",
-        project_id="project_1",
-        case_id="case_1",
-        requested_by_case_id="case_1",
+        draft_id="draft_1",
+        requested_by_draft_id="draft_1",
         payload={
             "kind": "render_final",
-            "idempotency_key": "case:case_1:render_final:test",
+            "idempotency_key": "draft:draft_1:render_final:test",
             "job_payload": {
                 "tool_name": "render.final_mp4",
                 "arguments": {},
@@ -155,25 +152,24 @@ async def test_render_final_job_writes_export_and_current_pointer(
     result = await runner.run_once()
 
     with engine.connect() as connection:
-        case_row = CasesRepository(connection).get("case_1")
+        draft_row = DraftsRepository(connection).get("draft_1")
         export_row = connection.execute(select(schema.exports)).one()._mapping
     assert result.status == "succeeded"
-    assert case_row is not None
-    assert case_row["export_current_id"] == export_row["export_id"]
+    assert draft_row is not None
+    assert draft_row["export_current_id"] == export_row["export_id"]
     assert export_row["timeline_version"] == 1
     assert paths.object_path(export_row["object_hash"]).read_bytes() == b"final mp4"
 
 
 async def test_job_progress_reporter_throttles_non_final_updates(tmp_path: Path) -> None:
-    engine = _engine_with_project_case(tmp_path)
+    engine = _engine_with_draft(tmp_path)
     job = Job.model_validate(
         {
             "job_id": "job_progress",
             "kind": "render_preview",
             "status": "running",
-            "project_id": "project_1",
-            "case_id": "case_1",
-            "requested_by_case_id": "case_1",
+            "draft_id": "draft_1",
+            "requested_by_draft_id": "draft_1",
             "idempotency_key": "progress",
             "payload_json": {},
             "attempts": 0,
@@ -187,9 +183,8 @@ async def test_job_progress_reporter_throttles_non_final_updates(tmp_path: Path)
                 "job_id": "job_progress",
                 "kind": "render_preview",
                 "status": "running",
-                "project_id": "project_1",
-                "case_id": "case_1",
-                "requested_by_case_id": "case_1",
+                "draft_id": "draft_1",
+                "requested_by_draft_id": "draft_1",
                 "asset_id": None,
                 "idempotency_key": "progress",
                 "payload_json": {},
@@ -228,31 +223,21 @@ async def test_job_progress_reporter_throttles_non_final_updates(tmp_path: Path)
     assert job_row._mapping["progress"] == 1.0
 
 
-def _seed_project_case_assets(connection, source: Path) -> None:
+def _seed_draft_assets(connection, source: Path) -> None:
     connection.execute(
-        schema.projects.insert().values(
-            project_id="project_1",
-            name="Project",
-            status="active",
-            defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
-            created_at=NOW,
-            updated_at=NOW,
-        )
-    )
-    connection.execute(
-        schema.cases.insert().values(
-            case_id="case_1",
-            project_id="project_1",
-            name="Case",
+        schema.drafts.insert().values(
+            draft_id="draft_1",
+            name="Draft",
             state_version=0,
             status="active",
+            defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
             timeline_current_version=1,
             timeline_validated=True,
             running_jobs="[]",
             brief=dump_json({"goal": "test", "confirmed_facts": []}),
-            selected_asset_ids="[]",
-            disabled_asset_ids="[]",
             scratch_memory="{}",
+            created_at=NOW,
+            updated_at=NOW,
         )
     )
     connection.execute(
@@ -275,57 +260,46 @@ def _seed_project_case_assets(connection, source: Path) -> None:
         )
     )
     connection.execute(
-        schema.project_asset_links.insert().values(
-            project_id="project_1",
+        schema.draft_asset_links.insert().values(
+            draft_id="draft_1",
             asset_id="asset_1",
-            enabled=True,
             linked_at=NOW,
             note="",
         )
     )
 
 
-def _engine_with_project_case(tmp_path: Path):
+def _engine_with_draft(tmp_path: Path):
     engine = create_workspace_engine(tmp_path)
     with engine.begin() as connection:
         schema.create_all(connection)
         connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
+            schema.drafts.insert().values(
+                draft_id="draft_1",
+                name="Draft",
+                state_version=0,
                 status="active",
                 defaults=dump_json({"aspect_ratio": "9:16", "fps": 30}),
+                timeline_current_version=1,
+                timeline_validated=True,
+                running_jobs="[]",
+                brief=dump_json({"goal": "test", "confirmed_facts": []}),
+                scratch_memory="{}",
                 created_at=NOW,
                 updated_at=NOW,
             )
         )
         connection.execute(
-            schema.cases.insert().values(
-                case_id="case_1",
-                project_id="project_1",
-                name="Case",
-                state_version=0,
-                status="active",
-                timeline_current_version=1,
-                timeline_validated=True,
-                running_jobs="[]",
-                brief=dump_json({"goal": "test", "confirmed_facts": []}),
-                selected_asset_ids="[]",
-                disabled_asset_ids="[]",
-                scratch_memory="{}",
-            )
-        )
-        connection.execute(
             schema.timeline_versions.insert().values(
-                timeline_id="case_1:v1",
-                case_id="case_1",
+                timeline_id="draft_1:v1",
+                draft_id="draft_1",
                 version=1,
                 parent_version=None,
                 created_by_patch_id=None,
                 document_json=dump_json(
                     {
-                        "timeline_id": "case_1:v1",
-                        "case_id": "case_1",
+                        "timeline_id": "draft_1:v1",
+                        "draft_id": "draft_1",
                         "version": 1,
                         "fps": 30,
                         "duration_frames": 30,
@@ -379,8 +353,8 @@ def _make_fixture(path: Path) -> None:
 def _timeline() -> TimelineState:
     return TimelineState.model_validate(
         {
-            "timeline_id": "case_1:v1",
-            "case_id": "case_1",
+            "timeline_id": "draft_1:v1",
+            "draft_id": "draft_1",
             "version": 1,
             "fps": 30,
             "duration_frames": 30,

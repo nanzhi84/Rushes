@@ -12,7 +12,7 @@ from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
 from contracts.asset import StorageMode
-from contracts.events import AssetImported, ProjectCreated
+from contracts.events import AssetImported, DraftCreated
 from contracts.jobs import Job
 from storage import schema
 from storage.db import create_workspace_engine
@@ -30,9 +30,9 @@ def _ingest(tmp_path: Path, *, kind: str, source: Path) -> tuple[Engine, Workspa
         schema.create_all(connection)
     ref = ObjectStore(paths).put_file(source)
     events: list[Any] = [
-        ProjectCreated(project_id="project_1", name="Project"),
+        DraftCreated(draft_id="draft_1", payload={"name": "Draft"}),
         AssetImported(
-            project_id="project_1",
+            draft_id="draft_1",
             asset_id="asset_1",
             payload={
                 "storage_mode": StorageMode.COPY.value,
@@ -55,7 +55,7 @@ def _proxy_job(asset_id: str) -> Job:
     return Job(
         job_id="job_proxy_1",
         kind="proxy",
-        project_id="project_1",
+        draft_id="draft_1",
         asset_id=asset_id,
         idempotency_key=f"asset:{asset_id}:probe_proxy",
         payload_json={"asset_id": asset_id},

@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 type VersionMode = Literal["strict", "merge"]
 type Actor = Literal["user", "agent", "job", "system"]
-type DecisionScopeType = Literal["workspace", "project", "case"]
+type DecisionScopeType = Literal["workspace", "draft"]
 
 
 class DomainEventBase(BaseModel):
@@ -14,8 +14,7 @@ class DomainEventBase(BaseModel):
 
     event: str
     actor: Actor = "agent"
-    project_id: str | None = None
-    case_id: str | None = None
+    draft_id: str | None = None
     base_version: int | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: str | None = None
@@ -28,82 +27,34 @@ class DomainEventBase(BaseModel):
         return cls.version_mode
 
 
-class ProjectCreated(DomainEventBase):
-    event: Literal["ProjectCreated"] = "ProjectCreated"
-    project_id: str
-    name: str | None = None
+class DraftCreated(DomainEventBase):
+    event: Literal["DraftCreated"] = "DraftCreated"
+    draft_id: str
     version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("project_id",)
+    merge_key: ClassVar[tuple[str, ...]] = ("draft_id",)
 
 
-class ProjectRenamed(DomainEventBase):
-    event: Literal["ProjectRenamed"] = "ProjectRenamed"
-    project_id: str
+class DraftRenamed(DomainEventBase):
+    event: Literal["DraftRenamed"] = "DraftRenamed"
+    draft_id: str
     name: str
     version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("project_id",)
+    merge_key: ClassVar[tuple[str, ...]] = ("draft_id",)
 
 
-class ProjectTrashed(DomainEventBase):
-    event: Literal["ProjectTrashed"] = "ProjectTrashed"
-    project_id: str
+class DraftCopied(DomainEventBase):
+    event: Literal["DraftCopied"] = "DraftCopied"
+    draft_id: str
+    source_draft_id: str | None = None
     version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("project_id",)
+    merge_key: ClassVar[tuple[str, ...]] = ("draft_id",)
 
 
-class ProjectCopied(DomainEventBase):
-    event: Literal["ProjectCopied"] = "ProjectCopied"
-    project_id: str
-    source_project_id: str | None = None
+class DraftTrashed(DomainEventBase):
+    event: Literal["DraftTrashed"] = "DraftTrashed"
+    draft_id: str
     version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("project_id",)
-
-
-class CaseCreated(DomainEventBase):
-    event: Literal["CaseCreated"] = "CaseCreated"
-    case_id: str
-    project_id: str
-    version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("case_id",)
-
-
-class CaseRenamed(DomainEventBase):
-    event: Literal["CaseRenamed"] = "CaseRenamed"
-    case_id: str
-    name: str
-    version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("case_id",)
-
-
-class CaseCopied(DomainEventBase):
-    event: Literal["CaseCopied"] = "CaseCopied"
-    case_id: str
-    source_case_id: str | None = None
-    version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("case_id",)
-
-
-class CaseMoved(DomainEventBase):
-    event: Literal["CaseMoved"] = "CaseMoved"
-    case_id: str
-    source_project_id: str | None = None
-    target_project_id: str | None = None
-    version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("case_id",)
-
-
-class CaseClosed(DomainEventBase):
-    event: Literal["CaseClosed"] = "CaseClosed"
-    case_id: str
-    version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("case_id",)
-
-
-class CaseTrashed(DomainEventBase):
-    event: Literal["CaseTrashed"] = "CaseTrashed"
-    case_id: str
-    version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("case_id",)
+    merge_key: ClassVar[tuple[str, ...]] = ("draft_id",)
 
 
 class AssetImported(DomainEventBase):
@@ -175,25 +126,18 @@ class MaterialUnderstandingFailed(DomainEventBase):
 
 class AssetLinked(DomainEventBase):
     event: Literal["AssetLinked"] = "AssetLinked"
-    project_id: str
+    draft_id: str
     asset_id: str
     version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("project_id", "asset_id")
+    merge_key: ClassVar[tuple[str, ...]] = ("draft_id", "asset_id")
 
 
 class AssetUnlinked(DomainEventBase):
     event: Literal["AssetUnlinked"] = "AssetUnlinked"
-    project_id: str
+    draft_id: str
     asset_id: str
     version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("project_id", "asset_id")
-
-
-class CaseAssetScopeChanged(DomainEventBase):
-    event: Literal["CaseAssetScopeChanged"] = "CaseAssetScopeChanged"
-    case_id: str
-    version_mode: ClassVar[VersionMode] = "strict"
-    merge_key: ClassVar[tuple[str, ...]] = ()
+    merge_key: ClassVar[tuple[str, ...]] = ("draft_id", "asset_id")
 
 
 class DecisionEventBase(DomainEventBase):
@@ -202,8 +146,7 @@ class DecisionEventBase(DomainEventBase):
     version_mode: ClassVar[VersionMode] = "strict"
     merge_key: ClassVar[tuple[str, ...]] = ("decision_id",)
     version_mode_by_scope: ClassVar[dict[DecisionScopeType, VersionMode]] = {
-        "case": "strict",
-        "project": "merge",
+        "draft": "strict",
         "workspace": "merge",
     }
 
@@ -228,42 +171,42 @@ class DecisionCancelled(DecisionEventBase):
 
 class BriefUpdated(DomainEventBase):
     event: Literal["BriefUpdated"] = "BriefUpdated"
-    case_id: str
+    draft_id: str
     version_mode: ClassVar[VersionMode] = "strict"
     merge_key: ClassVar[tuple[str, ...]] = ()
 
 
 class ContentPlanUpdated(DomainEventBase):
     event: Literal["ContentPlanUpdated"] = "ContentPlanUpdated"
-    case_id: str
+    draft_id: str
     version_mode: ClassVar[VersionMode] = "strict"
     merge_key: ClassVar[tuple[str, ...]] = ()
 
 
 class AudioPlanUpdated(DomainEventBase):
     event: Literal["AudioPlanUpdated"] = "AudioPlanUpdated"
-    case_id: str
+    draft_id: str
     version_mode: ClassVar[VersionMode] = "strict"
     merge_key: ClassVar[tuple[str, ...]] = ()
 
 
 class CutPlanUpdated(DomainEventBase):
     event: Literal["CutPlanUpdated"] = "CutPlanUpdated"
-    case_id: str
+    draft_id: str
     version_mode: ClassVar[VersionMode] = "strict"
     merge_key: ClassVar[tuple[str, ...]] = ()
 
 
 class PostprocessPlanUpdated(DomainEventBase):
     event: Literal["PostprocessPlanUpdated"] = "PostprocessPlanUpdated"
-    case_id: str
+    draft_id: str
     version_mode: ClassVar[VersionMode] = "strict"
     merge_key: ClassVar[tuple[str, ...]] = ()
 
 
 class TimelineVersionCreated(DomainEventBase):
     event: Literal["TimelineVersionCreated"] = "TimelineVersionCreated"
-    case_id: str
+    draft_id: str
     timeline_version: int | None = None
     patch_id: str | None = None
     parent_version: int | None = None
@@ -273,7 +216,7 @@ class TimelineVersionCreated(DomainEventBase):
 
 class TimelineVersionRestored(DomainEventBase):
     event: Literal["TimelineVersionRestored"] = "TimelineVersionRestored"
-    case_id: str
+    draft_id: str
     timeline_version: int | None = None
     version_mode: ClassVar[VersionMode] = "strict"
     merge_key: ClassVar[tuple[str, ...]] = ()
@@ -281,7 +224,7 @@ class TimelineVersionRestored(DomainEventBase):
 
 class TimelineValidated(DomainEventBase):
     event: Literal["TimelineValidated"] = "TimelineValidated"
-    case_id: str
+    draft_id: str
     timeline_version: int | None = None
     version_mode: ClassVar[VersionMode] = "strict"
     merge_key: ClassVar[tuple[str, ...]] = ()
@@ -289,7 +232,7 @@ class TimelineValidated(DomainEventBase):
 
 class TimelineValidationFailed(DomainEventBase):
     event: Literal["TimelineValidationFailed"] = "TimelineValidationFailed"
-    case_id: str
+    draft_id: str
     timeline_version: int | None = None
     version_mode: ClassVar[VersionMode] = "strict"
     merge_key: ClassVar[tuple[str, ...]] = ()
@@ -297,7 +240,7 @@ class TimelineValidationFailed(DomainEventBase):
 
 class PreviewRendered(DomainEventBase):
     event: Literal["PreviewRendered"] = "PreviewRendered"
-    case_id: str
+    draft_id: str
     timeline_version: int
     artifact_id: str
     version_mode: ClassVar[VersionMode] = "merge"
@@ -306,7 +249,7 @@ class PreviewRendered(DomainEventBase):
 
 class PreviewViewed(DomainEventBase):
     event: Literal["PreviewViewed"] = "PreviewViewed"
-    case_id: str
+    draft_id: str
     preview_id: str
     version_mode: ClassVar[VersionMode] = "merge"
     merge_key: ClassVar[tuple[str, ...]] = ("preview_id",)
@@ -314,7 +257,7 @@ class PreviewViewed(DomainEventBase):
 
 class ExportCompleted(DomainEventBase):
     event: Literal["ExportCompleted"] = "ExportCompleted"
-    case_id: str
+    draft_id: str
     timeline_version: int
     artifact_id: str
     version_mode: ClassVar[VersionMode] = "merge"
@@ -324,7 +267,7 @@ class ExportCompleted(DomainEventBase):
 class MemoryCandidateExtracted(DomainEventBase):
     event: Literal["MemoryCandidateExtracted"] = "MemoryCandidateExtracted"
     candidate_id: str
-    case_id: str | None = None
+    draft_id: str | None = None
     version_mode: ClassVar[VersionMode] = "merge"
     merge_key: ClassVar[tuple[str, ...]] = ("candidate_id",)
 
@@ -332,7 +275,7 @@ class MemoryCandidateExtracted(DomainEventBase):
 class MemoryCandidateDiscarded(DomainEventBase):
     event: Literal["MemoryCandidateDiscarded"] = "MemoryCandidateDiscarded"
     candidate_id: str
-    case_id: str | None = None
+    draft_id: str | None = None
     version_mode: ClassVar[VersionMode] = "merge"
     merge_key: ClassVar[tuple[str, ...]] = ("candidate_id",)
 
@@ -348,7 +291,7 @@ class MemorySaved(DomainEventBase):
 class JobEnqueued(DomainEventBase):
     event: Literal["JobEnqueued"] = "JobEnqueued"
     job_id: str
-    requested_by_case_id: str | None = None
+    requested_by_draft_id: str | None = None
     version_mode: ClassVar[VersionMode] = "merge"
     merge_key: ClassVar[tuple[str, ...]] = ("job_id",)
 
@@ -356,7 +299,7 @@ class JobEnqueued(DomainEventBase):
 class JobProgress(DomainEventBase):
     event: Literal["JobProgress"] = "JobProgress"
     job_id: str
-    requested_by_case_id: str | None = None
+    requested_by_draft_id: str | None = None
     progress: float | None = None
     version_mode: ClassVar[VersionMode] = "merge"
     merge_key: ClassVar[tuple[str, ...]] = ("job_id", "progress")
@@ -365,7 +308,7 @@ class JobProgress(DomainEventBase):
 class JobSucceeded(DomainEventBase):
     event: Literal["JobSucceeded"] = "JobSucceeded"
     job_id: str
-    requested_by_case_id: str | None = None
+    requested_by_draft_id: str | None = None
     version_mode: ClassVar[VersionMode] = "merge"
     merge_key: ClassVar[tuple[str, ...]] = ("job_id",)
 
@@ -373,7 +316,7 @@ class JobSucceeded(DomainEventBase):
 class JobFailed(DomainEventBase):
     event: Literal["JobFailed"] = "JobFailed"
     job_id: str
-    requested_by_case_id: str | None = None
+    requested_by_draft_id: str | None = None
     version_mode: ClassVar[VersionMode] = "merge"
     merge_key: ClassVar[tuple[str, ...]] = ("job_id",)
 
@@ -381,7 +324,7 @@ class JobFailed(DomainEventBase):
 class JobCancelled(DomainEventBase):
     event: Literal["JobCancelled"] = "JobCancelled"
     job_id: str
-    requested_by_case_id: str | None = None
+    requested_by_draft_id: str | None = None
     version_mode: ClassVar[VersionMode] = "merge"
     merge_key: ClassVar[tuple[str, ...]] = ("job_id",)
 
@@ -410,7 +353,7 @@ class ContextCompacted(DomainEventBase):
 class TurnEnded(DomainEventBase):
     event: Literal["TurnEnded"] = "TurnEnded"
     turn_id: str
-    case_id: str
+    draft_id: str
     version_mode: ClassVar[VersionMode] = "merge"
     merge_key: ClassVar[tuple[str, ...]] = ("turn_id",)
 
@@ -439,16 +382,10 @@ class SecurityRefusal(DomainEventBase):
 
 
 EVENT_CLASSES: tuple[type[DomainEventBase], ...] = (
-    ProjectCreated,
-    ProjectRenamed,
-    ProjectTrashed,
-    ProjectCopied,
-    CaseCreated,
-    CaseRenamed,
-    CaseCopied,
-    CaseMoved,
-    CaseClosed,
-    CaseTrashed,
+    DraftCreated,
+    DraftRenamed,
+    DraftCopied,
+    DraftTrashed,
     AssetImported,
     AssetProbed,
     ProxyGenerated,
@@ -460,7 +397,6 @@ EVENT_CLASSES: tuple[type[DomainEventBase], ...] = (
     MaterialUnderstandingFailed,
     AssetLinked,
     AssetUnlinked,
-    CaseAssetScopeChanged,
     DecisionCreated,
     DecisionAnswered,
     DecisionCancelled,
@@ -493,16 +429,10 @@ EVENT_CLASSES: tuple[type[DomainEventBase], ...] = (
 )
 
 type EventName = Literal[
-    "ProjectCreated",
-    "ProjectRenamed",
-    "ProjectTrashed",
-    "ProjectCopied",
-    "CaseCreated",
-    "CaseRenamed",
-    "CaseCopied",
-    "CaseMoved",
-    "CaseClosed",
-    "CaseTrashed",
+    "DraftCreated",
+    "DraftRenamed",
+    "DraftCopied",
+    "DraftTrashed",
     "AssetImported",
     "AssetProbed",
     "ProxyGenerated",
@@ -514,7 +444,6 @@ type EventName = Literal[
     "MaterialUnderstandingFailed",
     "AssetLinked",
     "AssetUnlinked",
-    "CaseAssetScopeChanged",
     "DecisionCreated",
     "DecisionAnswered",
     "DecisionCancelled",
@@ -547,16 +476,10 @@ type EventName = Literal[
 ]
 
 type EVENT_UNION = Annotated[
-    ProjectCreated
-    | ProjectRenamed
-    | ProjectTrashed
-    | ProjectCopied
-    | CaseCreated
-    | CaseRenamed
-    | CaseCopied
-    | CaseMoved
-    | CaseClosed
-    | CaseTrashed
+    DraftCreated
+    | DraftRenamed
+    | DraftCopied
+    | DraftTrashed
     | AssetImported
     | AssetProbed
     | ProxyGenerated
@@ -568,7 +491,6 @@ type EVENT_UNION = Annotated[
     | MaterialUnderstandingFailed
     | AssetLinked
     | AssetUnlinked
-    | CaseAssetScopeChanged
     | DecisionCreated
     | DecisionAnswered
     | DecisionCancelled

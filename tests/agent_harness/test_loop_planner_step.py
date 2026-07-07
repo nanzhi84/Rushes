@@ -8,9 +8,8 @@ from agent_harness.loop import PlannerStep, ScriptedPlanner, run_turn
 from agent_harness.turn_queue import TurnQueueItem
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
-from storage.repositories import CasesRepository, MessagesRepository
+from storage.repositories import DraftsRepository, MessagesRepository
 from storage.repositories.event_log import EventLogRepository
-from storage.repositories.projects import ProjectsRepository
 
 NOW = "2026-07-06T00:00:00+00:00"
 
@@ -20,23 +19,13 @@ def _prepare_workspace(tmp_path: Path) -> Engine:
     with engine.begin() as connection:
         schema.create_all(connection)
     with begin_immediate(engine) as connection:
-        ProjectsRepository(connection).insert(
+        DraftsRepository(connection).insert(
             {
-                "project_id": "project_1",
-                "name": "Project",
-                "status": "active",
-                "defaults": {"aspect_ratio": "9:16", "fps": 30},
-                "created_at": NOW,
-                "updated_at": NOW,
-            }
-        )
-        CasesRepository(connection).insert(
-            {
-                "case_id": "case_1",
-                "project_id": "project_1",
-                "name": "Case",
+                "draft_id": "draft_1",
+                "name": "Draft",
                 "state_version": 0,
                 "status": "active",
+                "defaults": {"aspect_ratio": "9:16", "fps": 30},
                 "pending_decision_id": None,
                 "running_jobs": [],
                 "last_error": None,
@@ -52,9 +41,10 @@ def _prepare_workspace(tmp_path: Path) -> Engine:
                 "rough_cut_approved_version": None,
                 "postprocess_plan": None,
                 "export_current_id": None,
-                "selected_asset_ids": [],
-                "disabled_asset_ids": [],
                 "scratch_memory": {},
+                "messages_tail_ref": None,
+                "created_at": NOW,
+                "updated_at": NOW,
             }
         )
     return engine
@@ -62,7 +52,7 @@ def _prepare_workspace(tmp_path: Path) -> Engine:
 
 def _assistant_messages(engine: Engine) -> list[dict[str, object]]:
     with begin_immediate(engine) as connection:
-        rows = MessagesRepository(connection).list_for_case("case_1")
+        rows = MessagesRepository(connection).list_for_draft("draft_1")
     return [row for row in rows if row["role"] == "assistant"]
 
 
@@ -83,7 +73,7 @@ async def test_pure_content_ends_turn_and_persists_reply_row(tmp_path: Path) -> 
     engine = _prepare_workspace(tmp_path)
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "hi"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "hi"}),
         engine=engine,
         planner=ScriptedPlanner([{"content": "已完成剪辑目标确认。"}]),
         turn_id="turn_pure",
@@ -103,7 +93,7 @@ async def test_content_with_tool_call_persists_narration_and_continues(tmp_path:
     engine = _prepare_workspace(tmp_path)
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "go"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "go"}),
         engine=engine,
         planner=ScriptedPlanner(
             [
@@ -137,7 +127,7 @@ async def test_empty_steps_reach_illegal_output_limit_and_force_reply(tmp_path: 
     engine = _prepare_workspace(tmp_path)
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "??"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "??"}),
         engine=engine,
         planner=ScriptedPlanner([PlannerStep(), PlannerStep()]),
         turn_id="turn_empty",
@@ -161,7 +151,7 @@ async def test_hard_attempt_limit_forces_reply_row(tmp_path: Path) -> None:
     ]
 
     result = await run_turn(
-        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "loop"}),
+        TurnQueueItem(draft_id="draft_1", kind="user_message", payload={"content": "loop"}),
         engine=engine,
         planner=ScriptedPlanner(calls),
         turn_id="turn_hard_limit",

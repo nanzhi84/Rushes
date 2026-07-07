@@ -23,26 +23,20 @@ from ..specs import (
 
 
 def ask_user(input_model: AskUserInput, context: ToolExecutionContext) -> ToolResult:
-    resolved = _resolve_scope(
-        input_model.scope_type,
-        input_model.project_id,
-        input_model.case_id,
-        context,
-    )
+    resolved = _resolve_scope(input_model.scope_type, input_model.draft_id, context)
     if resolved.error is not None:
         return resolved.error
     decision = Decision(
         decision_id=input_model.decision_id
         or _decision_id("ask", input_model.question, input_model.model_dump(mode="json")),
         scope_type=input_model.scope_type,
-        project_id=resolved.project_id,
-        case_id=resolved.case_id,
+        draft_id=resolved.draft_id,
         type=input_model.decision_type,
         question=input_model.question,
         options=input_model.options,
         allow_free_text=input_model.allow_free_text,
         status="pending",
-        blocking=input_model.scope_type == "case" and input_model.blocking,
+        blocking=input_model.scope_type == "draft" and input_model.blocking,
         created_by_tool_call_id=context.tool_call_id,
     )
     interaction = StructuredInteractionEvent(
@@ -62,12 +56,7 @@ def ask_user(input_model: AskUserInput, context: ToolExecutionContext) -> ToolRe
 
 
 def confirm_action(input_model: ConfirmActionInput, context: ToolExecutionContext) -> ToolResult:
-    resolved = _resolve_scope(
-        input_model.scope_type,
-        input_model.project_id,
-        input_model.case_id,
-        context,
-    )
+    resolved = _resolve_scope(input_model.scope_type, input_model.draft_id, context)
     if resolved.error is not None:
         return resolved.error
     options = input_model.options or _default_confirmation_options()
@@ -75,8 +64,7 @@ def confirm_action(input_model: ConfirmActionInput, context: ToolExecutionContex
         decision_id=input_model.decision_id
         or _decision_id("confirm", input_model.question, input_model.model_dump(mode="json")),
         scope_type=input_model.scope_type,
-        project_id=resolved.project_id,
-        case_id=resolved.case_id,
+        draft_id=resolved.draft_id,
         type=input_model.decision_type,
         question=input_model.question,
         options=options,
@@ -84,7 +72,7 @@ def confirm_action(input_model: ConfirmActionInput, context: ToolExecutionContex
         status="pending",
         pending_tool_call=input_model.pending_tool_call,
         pending_tool_call_status="pending" if input_model.pending_tool_call is not None else None,
-        blocking=input_model.scope_type == "case" and input_model.blocking,
+        blocking=input_model.scope_type == "draft" and input_model.blocking,
         created_by_tool_call_id=context.tool_call_id,
     )
     interaction = StructuredInteractionEvent(
@@ -145,59 +133,34 @@ class _ResolvedScope:
     def __init__(
         self,
         *,
-        project_id: str | None,
-        case_id: str | None,
+        draft_id: str | None,
         error: ToolResult | None,
     ) -> None:
-        self.project_id = project_id
-        self.case_id = case_id
+        self.draft_id = draft_id
         self.error = error
 
 
 def _resolve_scope(
     scope_type: str,
-    project_id: str | None,
-    case_id: str | None,
+    draft_id: str | None,
     context: ToolExecutionContext,
 ) -> _ResolvedScope:
     if scope_type == "workspace":
-        return _ResolvedScope(project_id=None, case_id=None, error=None)
-    if scope_type == "project":
-        resolved_project_id = (
-            project_id
-            or (context.project_state.project_id if context.project_state is not None else None)
-            or (context.case_state.project_id if context.case_state is not None else None)
-        )
-        if resolved_project_id is None:
-            return _ResolvedScope(
-                project_id=None,
-                case_id=None,
-                error=_failed(
-                    "interaction",
-                    context,
-                    "missing_project",
-                    "project-scoped decision requires project_id",
-                ),
-            )
-        return _ResolvedScope(project_id=resolved_project_id, case_id=None, error=None)
-    resolved_case_id = case_id or (
-        context.case_state.case_id if context.case_state is not None else None
+        return _ResolvedScope(draft_id=None, error=None)
+    resolved_draft_id = draft_id or (
+        context.draft_state.draft_id if context.draft_state is not None else None
     )
-    resolved_project_id = project_id or (
-        context.case_state.project_id if context.case_state is not None else None
-    )
-    if resolved_project_id is None or resolved_case_id is None:
+    if resolved_draft_id is None:
         return _ResolvedScope(
-            project_id=None,
-            case_id=None,
+            draft_id=None,
             error=_failed(
                 "interaction",
                 context,
-                "missing_case",
-                "case-scoped decision requires project_id and case_id",
+                "missing_draft",
+                "draft-scoped decision requires draft_id",
             ),
         )
-    return _ResolvedScope(project_id=resolved_project_id, case_id=resolved_case_id, error=None)
+    return _ResolvedScope(draft_id=resolved_draft_id, error=None)
 
 
 def _decision_result(
@@ -214,8 +177,7 @@ def _decision_result(
     event = DecisionCreated(
         decision_id=decision.decision_id,
         scope_type=decision.scope_type,
-        project_id=decision.project_id,
-        case_id=decision.case_id,
+        draft_id=decision.draft_id,
         payload={
             "decision": decision.model_dump(mode="json"),
             "type": decision.type,

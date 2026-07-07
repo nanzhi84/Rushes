@@ -15,7 +15,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
 
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.events import (
     TimelineValidated,
     TimelineValidationFailed,
@@ -104,7 +104,7 @@ class _UtterancePlacement:
 
 def apply_patch(
     engine: Engine | Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     request: TimelinePatchRequest,
     *,
     created_at: str | None = None,
@@ -112,7 +112,7 @@ def apply_patch(
     """Resolve and apply one TimelinePatchRequest, storing the produced version."""
 
     try:
-        resolution = resolve_anchor(engine, case_state, request)
+        resolution = resolve_anchor(engine, draft_state, request)
     except AnchorConflict as exc:
         return PatchOutcome(
             status="conflict",
@@ -130,24 +130,24 @@ def apply_patch(
     patch_id = _patch_id(request)
     with _connection_context(engine) as connection:
         try:
-            patched = _apply_resolved_op(connection, case_state, resolution, patch_id)
+            patched = _apply_resolved_op(connection, draft_state, resolution, patch_id)
         except PatchApplyError as exc:
             return PatchOutcome(
                 status="failed",
                 error=exc,
                 metadata={"error": exc.details, "code": exc.code},
             )
-        new_version = _next_version(connection, case_state.case_id)
+        new_version = _next_version(connection, draft_state.draft_id)
         patched = patched.model_copy(
             update={
-                "timeline_id": f"{case_state.case_id}:v{new_version}",
+                "timeline_id": f"{draft_state.draft_id}:v{new_version}",
                 "version": new_version,
                 "parent_version": resolution.current_version,
                 "created_by_patch_id": patch_id,
             },
             deep=True,
         )
-        report = validate_timeline(connection, case_state, patched)
+        report = validate_timeline(connection, draft_state, patched)
         patched = patched.model_copy(update={"validation_report": report}, deep=True)
         changed_track_ids = _changed_track_ids(resolution.current_timeline, patched)
         resolved_patch = ResolvedTimelinePatch(
@@ -165,8 +165,7 @@ def apply_patch(
         store_timeline_version(connection, patched, created_at=created_at)
 
     created_event = TimelineVersionCreated(
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
         timeline_version=patched.version,
         parent_version=patched.parent_version,
         patch_id=patch_id,
@@ -182,7 +181,7 @@ def apply_patch(
             "created_at": created_at or _now_iso(),
         },
     )
-    validation_event = _validation_event(case_state, patched.version, report)
+    validation_event = _validation_event(draft_state, patched.version, report)
     return PatchOutcome(
         status="succeeded" if report.valid else "failed",
         timeline=patched,
@@ -199,7 +198,7 @@ def apply_patch(
 
 def _apply_resolved_op(
     connection: Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     resolution: AnchorResolution,
     patch_id: str,
 ) -> TimelineState:
@@ -208,7 +207,7 @@ def _apply_resolved_op(
     if isinstance(op, DeleteRangeOp):
         return _apply_delete_range(timeline, op, resolution.current_range, patch_id)
     if isinstance(op, ReplaceClipOp):
-        return _apply_replace_clip(connection, case_state, timeline, op)
+        return _apply_replace_clip(connection, draft_state, timeline, op)
     if isinstance(op, ReorderBlocksOp):
         return _apply_reorder_blocks(timeline, op)
     if isinstance(op, TrimClipOp):
@@ -216,7 +215,7 @@ def _apply_resolved_op(
     if isinstance(op, InsertClipOp):
         return _apply_insert_clip(
             connection,
-            case_state,
+            draft_state,
             timeline,
             op,
             resolution.current_range,
@@ -224,7 +223,7 @@ def _apply_resolved_op(
     if isinstance(op, GenerateSubtitlesOp):
         return _apply_generate_subtitles(
             connection,
-            case_state,
+            draft_state,
             timeline,
             op,
             resolution.current_range,
@@ -280,13 +279,13 @@ def _apply_delete_range(
 
 def _apply_replace_clip(
     connection: Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     timeline: TimelineState,
     op: ReplaceClipOp,
 ) -> TimelineState:
     material = _clip_material(
         connection,
-        case_state,
+        draft_state,
         asset_id=op.asset_id,
         source_start_s=op.source_start_s,
         source_end_s=op.source_end_s,
@@ -388,14 +387,14 @@ def _apply_trim_clip(
 
 def _apply_insert_clip(
     connection: Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     timeline: TimelineState,
     op: InsertClipOp,
     resolved: ResolvedRange,
 ) -> TimelineState:
     material = _clip_material(
         connection,
-        case_state,
+        draft_state,
         asset_id=op.asset_id,
         source_start_s=op.source_start_s,
         source_end_s=op.source_end_s,
@@ -439,12 +438,12 @@ def _apply_insert_clip(
 
 def _apply_generate_subtitles(
     connection: Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     timeline: TimelineState,
     op: GenerateSubtitlesOp,
     resolved: ResolvedRange,
 ) -> TimelineState:
-    del case_state
+    del draft_state
     tracks = _tracks_by_id(timeline)
     existing = [
         clip
@@ -883,7 +882,7 @@ def _utterances_for_audio_clip(
 
 def _clip_material(
     connection: Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
     *,
     asset_id: str,
     source_start_s: float,
@@ -891,7 +890,7 @@ def _clip_material(
     role: str,
     fps: int,
 ) -> _ClipMaterial:
-    _assert_asset_usable(connection, asset_id, case_state=case_state)
+    _assert_asset_usable(connection, asset_id, draft_state=draft_state)
     asset_kind = _asset_kind(connection, asset_id)
     if role == "image" or asset_kind == "image":
         return _ClipMaterial(
@@ -957,31 +956,25 @@ def _assert_asset_usable(
     connection: Connection,
     asset_id: str,
     *,
-    case_state: CaseState | None = None,
+    draft_state: DraftState | None = None,
 ) -> None:
     query = (
-        select(schema.assets.c.usable, schema.project_asset_links.c.enabled)
+        select(schema.assets.c.usable)
         .select_from(
             schema.assets.join(
-                schema.project_asset_links,
-                schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+                schema.draft_asset_links,
+                schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id,
             )
         )
         .where(schema.assets.c.asset_id == asset_id)
     )
-    if case_state is not None:
-        query = query.where(schema.project_asset_links.c.project_id == case_state.project_id)
+    if draft_state is not None:
+        query = query.where(schema.draft_asset_links.c.draft_id == draft_state.draft_id)
     row = connection.execute(query).first()
-    if row is None or not bool(row._mapping["usable"]) or not bool(row._mapping["enabled"]):
+    if row is None or not bool(row._mapping["usable"]):
         raise PatchApplyError(
             "patch.asset_unavailable",
-            "asset is missing, disabled, or unusable",
-            details={"asset_id": asset_id},
-        )
-    if case_state is not None and asset_id in set(case_state.disabled_asset_ids):
-        raise PatchApplyError(
-            "patch.asset_disabled_for_case",
-            "asset is disabled for this case",
+            "asset is missing, unlinked, or unusable",
             details={"asset_id": asset_id},
         )
 
@@ -1209,8 +1202,8 @@ def _seconds_delta_to_frames(delta: float, *, fps: int) -> int:
     return int(frames)
 
 
-def _next_version(connection: Connection, case_id: str) -> int:
-    versions = list_timeline_versions(connection, case_id)
+def _next_version(connection: Connection, draft_id: str) -> int:
+    versions = list_timeline_versions(connection, draft_id)
     return max((record.version for record in versions), default=0) + 1
 
 
@@ -1225,21 +1218,19 @@ def _changed_track_ids(before: TimelineState, after: TimelineState) -> tuple[str
 
 
 def _validation_event(
-    case_state: CaseState,
+    draft_state: DraftState,
     version: int,
     report: TimelineValidationReport,
 ) -> TimelineValidated | TimelineValidationFailed:
     payload = {"timeline_version": version, "validation_report": report.model_dump(mode="json")}
     if report.valid:
         return TimelineValidated(
-            project_id=case_state.project_id,
-            case_id=case_state.case_id,
+            draft_id=draft_state.draft_id,
             timeline_version=version,
             payload=payload,
         )
     return TimelineValidationFailed(
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
         timeline_version=version,
         payload=payload,
     )

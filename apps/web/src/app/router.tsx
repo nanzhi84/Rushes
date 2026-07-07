@@ -1,7 +1,6 @@
-import { createRootRoute, createRoute, createRouter, Outlet, redirect } from "@tanstack/react-router";
-import { CaseAgentConsolePage } from "../routes/CaseAgentConsole";
-import { ProjectDetailPage } from "../routes/ProjectDetailPage";
-import { ProjectsOverviewPage } from "../routes/ProjectsOverview";
+import { createRootRoute, createRoute, createRouter, Outlet } from "@tanstack/react-router";
+import { DraftEditorPage } from "../routes/DraftEditor";
+import { DraftsHomePage } from "../routes/DraftsHome";
 
 const rootRoute = createRootRoute({
   component: Outlet
@@ -10,35 +9,16 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: ProjectsOverviewPage
+  component: DraftsHomePage
 });
 
-const projectRoute = createRoute({
+const draftRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/projects/$projectId",
-  component: ProjectDetailPage
+  path: "/drafts/$draftId",
+  component: DraftEditorPage
 });
 
-// 旧素材页路由保留为重定向，指向项目详情的素材 tab。
-const materialsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/projects/$projectId/materials",
-  beforeLoad: ({ params }) => {
-    throw redirect({
-      to: "/projects/$projectId",
-      params: { projectId: params.projectId },
-      search: { tab: "materials" }
-    });
-  }
-});
-
-const caseRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/projects/$projectId/cases/$caseId",
-  component: CaseAgentConsolePage
-});
-
-const routeTree = rootRoute.addChildren([indexRoute, projectRoute, materialsRoute, caseRoute]);
+const routeTree = rootRoute.addChildren([indexRoute, draftRoute]);
 
 export const router = createRouter({ routeTree });
 

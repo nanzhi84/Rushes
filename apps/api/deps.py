@@ -21,7 +21,7 @@ from agent_harness.turn_queue import TurnQueue
 from contracts.asset import AssetKind
 from contracts.events import DomainEventBase, SecurityRefusal
 from events.event_log import deserialize_event
-from events.routing import routes_to_case, routes_to_workspace
+from events.routing import routes_to_draft, routes_to_workspace
 from storage.repositories.event_log import EventLogRow
 from storage.workspace_paths import WorkspacePaths
 
@@ -131,9 +131,9 @@ def canonicalize_allowed_path(raw_path: str, roots: Sequence[Path]) -> Path:
     return candidate
 
 
-def route_case(case_id: str) -> SsePredicate:
+def route_draft(draft_id: str) -> SsePredicate:
     def _predicate(event: DomainEventBase) -> bool:
-        return routes_to_case(event, case_id)
+        return routes_to_draft(event, draft_id)
 
     return _predicate
 
@@ -313,8 +313,6 @@ def _content_type_refusal_reason(request: Request) -> SecurityReason | None:
     media_type = content_type.split(";", 1)[0].strip().lower()
     if media_type == "application/json":
         return None
-    if _is_upload_part_endpoint(request.url.path) and media_type == "application/octet-stream":
-        return None
     return "bad_content_type"
 
 
@@ -324,10 +322,6 @@ def _is_sse_endpoint(path: str) -> bool:
 
 def _is_media_endpoint(path: str) -> bool:
     return path.startswith("/api/media/")
-
-
-def _is_upload_part_endpoint(path: str) -> bool:
-    return path.startswith("/api/uploads/") and "/parts/" in path
 
 
 def _refusal_path(request: Request) -> str | None:

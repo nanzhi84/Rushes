@@ -2,15 +2,52 @@ from pathlib import Path
 
 from sqlalchemy import func, select
 
-from agent_harness.reducer import apply
+from agent_harness.reducer import REDUCER_DISPATCH_EVENTS, apply
+from contracts.events import event_registry
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
-from storage.repositories import CasesRepository
+from storage.repositories import DraftsRepository
 from storage.repositories._json import dump_json, load_json
 from storage.repositories.event_log import EventLogRepository
-from storage.repositories.projects import ProjectsRepository
 
 NOW = "2026-07-04T00:00:00+00:00"
+
+
+def test_reducer_dispatch_covers_all_44_registered_events() -> None:
+    # 单级草稿模型定版 44 事件：reducer 归约表与 contracts 事件注册表逐一对齐。
+    assert len(REDUCER_DISPATCH_EVENTS) == 44
+    assert frozenset(event_registry()) == REDUCER_DISPATCH_EVENTS
+
+
+def _draft_row(draft_id: str, **overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "draft_id": draft_id,
+        "name": "Draft",
+        "state_version": 0,
+        "status": "active",
+        "defaults": {"aspect_ratio": "9:16", "fps": 30},
+        "pending_decision_id": None,
+        "running_jobs": [],
+        "last_error": None,
+        "brief": {"goal": "test", "confirmed_facts": []},
+        "content_plan": None,
+        "audio_plan": None,
+        "cut_plan": None,
+        "timeline_current_version": None,
+        "timeline_validated": False,
+        "preview_current_id": None,
+        "last_viewed_preview_id": None,
+        "rough_cut_approved": False,
+        "rough_cut_approved_version": None,
+        "postprocess_plan": None,
+        "export_current_id": None,
+        "scratch_memory": {},
+        "messages_tail_ref": None,
+        "created_at": NOW,
+        "updated_at": NOW,
+    }
+    row.update(overrides)
+    return row
 
 
 def _prepare_workspace(tmp_path: Path) -> None:
@@ -19,7 +56,7 @@ def _prepare_workspace(tmp_path: Path) -> None:
         schema.create_all(connection)
 
 
-def _insert_project_and_case(
+def _insert_draft(
     tmp_path: Path,
     *,
     state_version: int = 0,
@@ -29,42 +66,14 @@ def _insert_project_and_case(
 ) -> None:
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
-        ProjectsRepository(connection).insert(
-            {
-                "project_id": "project_1",
-                "name": "Project",
-                "status": "active",
-                "defaults": {"aspect_ratio": "9:16", "fps": 30},
-                "created_at": NOW,
-                "updated_at": NOW,
-            }
-        )
-        CasesRepository(connection).insert(
-            {
-                "case_id": "case_1",
-                "project_id": "project_1",
-                "name": "Case",
-                "state_version": state_version,
-                "status": "active",
-                "pending_decision_id": None,
-                "running_jobs": [],
-                "last_error": None,
-                "brief": {"goal": "test", "confirmed_facts": []},
-                "content_plan": None,
-                "audio_plan": None,
-                "cut_plan": None,
-                "timeline_current_version": timeline_current_version,
-                "timeline_validated": False,
-                "preview_current_id": None,
-                "last_viewed_preview_id": None,
-                "rough_cut_approved": rough_cut_approved,
-                "rough_cut_approved_version": rough_cut_approved_version,
-                "postprocess_plan": None,
-                "export_current_id": None,
-                "selected_asset_ids": [],
-                "disabled_asset_ids": [],
-                "scratch_memory": {},
-            }
+        DraftsRepository(connection).insert(
+            _draft_row(
+                "draft_1",
+                state_version=state_version,
+                timeline_current_version=timeline_current_version,
+                rough_cut_approved=rough_cut_approved,
+                rough_cut_approved_version=rough_cut_approved_version,
+            )
         )
 
 
@@ -73,8 +82,8 @@ def _insert_timeline(tmp_path: Path, *, version: int) -> None:
     with begin_immediate(engine) as connection:
         connection.execute(
             schema.timeline_versions.insert().values(
-                timeline_id=f"case_1:v{version}",
-                case_id="case_1",
+                timeline_id=f"draft_1:v{version}",
+                draft_id="draft_1",
                 version=version,
                 parent_version=None,
                 created_by_patch_id=None,
@@ -87,8 +96,8 @@ def _insert_timeline(tmp_path: Path, *, version: int) -> None:
 
 def _timeline_doc(version: int) -> dict[str, object]:
     return {
-        "timeline_id": f"case_1:v{version}",
-        "case_id": "case_1",
+        "timeline_id": f"draft_1:v{version}",
+        "draft_id": "draft_1",
         "version": version,
         "fps": 30,
         "duration_frames": 30,
@@ -109,45 +118,19 @@ def _event_log_count(tmp_path: Path) -> int:
         return len(EventLogRepository(connection).read_after(0))
 
 
-def _insert_case_for_existing_project(tmp_path: Path, case_id: str) -> None:
+def _insert_extra_draft(tmp_path: Path, draft_id: str) -> None:
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
-        CasesRepository(connection).insert(
-            {
-                "case_id": case_id,
-                "project_id": "project_1",
-                "name": "Case",
-                "state_version": 0,
-                "status": "active",
-                "pending_decision_id": None,
-                "running_jobs": [],
-                "last_error": None,
-                "brief": {"goal": "test", "confirmed_facts": []},
-                "content_plan": None,
-                "audio_plan": None,
-                "cut_plan": None,
-                "timeline_current_version": None,
-                "timeline_validated": False,
-                "preview_current_id": None,
-                "last_viewed_preview_id": None,
-                "rough_cut_approved": False,
-                "rough_cut_approved_version": None,
-                "postprocess_plan": None,
-                "export_current_id": None,
-                "selected_asset_ids": [],
-                "disabled_asset_ids": [],
-                "scratch_memory": {},
-            }
-        )
+        DraftsRepository(connection).insert(_draft_row(draft_id))
 
 
 def test_strict_event_stale_base_version_rejects_whole_batch(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path, state_version=2)
+    _insert_draft(tmp_path, state_version=2)
     engine = create_workspace_engine(tmp_path)
 
     result = apply(
-        [{"event": "BriefUpdated", "case_id": "case_1", "payload": {"brief": {"goal": "new"}}}],
+        [{"event": "BriefUpdated", "draft_id": "draft_1", "payload": {"brief": {"goal": "new"}}}],
         engine=engine,
         base_version=1,
         actor="agent",
@@ -157,43 +140,28 @@ def test_strict_event_stale_base_version_rejects_whole_batch(tmp_path: Path) -> 
     assert result.status == "version_conflict"
     assert _event_log_count(tmp_path) == 0
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
     assert case is not None
     assert case["state_version"] == 2
     assert case["brief"]["goal"] == "test"
 
 
-def test_project_and_case_merge_events_update_structural_state(tmp_path: Path) -> None:
+def test_draft_lifecycle_merge_events_update_structural_state(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
 
     result = apply(
         [
-            {"event": "ProjectCreated", "project_id": "project_2", "name": "New Project"},
-            {"event": "ProjectRenamed", "project_id": "project_2", "name": "Renamed Project"},
-            {"event": "ProjectTrashed", "project_id": "project_2"},
+            {"event": "DraftCreated", "draft_id": "draft_new", "payload": {"name": "New Draft"}},
+            {"event": "DraftRenamed", "draft_id": "draft_1", "name": "Renamed Draft"},
             {
-                "event": "ProjectCopied",
-                "project_id": "project_3",
-                "source_project_id": "project_1",
-                "payload": {"name": "Copied Project"},
+                "event": "DraftCopied",
+                "draft_id": "draft_2",
+                "source_draft_id": "draft_1",
+                "payload": {"name": "Copied Draft"},
             },
-            {"event": "CaseRenamed", "case_id": "case_1", "name": "Renamed Case"},
-            {
-                "event": "CaseCopied",
-                "case_id": "case_2",
-                "source_case_id": "case_1",
-                "payload": {"name": "Copied Case"},
-            },
-            {
-                "event": "CaseMoved",
-                "case_id": "case_1",
-                "source_project_id": "project_1",
-                "target_project_id": "project_2",
-            },
-            {"event": "CaseClosed", "case_id": "case_1"},
-            {"event": "CaseTrashed", "case_id": "case_1"},
+            {"event": "DraftTrashed", "draft_id": "draft_1"},
         ],
         engine=engine,
         base_version=None,
@@ -202,31 +170,59 @@ def test_project_and_case_merge_events_update_structural_state(tmp_path: Path) -
     )
 
     with begin_immediate(engine) as connection:
-        project_2 = ProjectsRepository(connection).get("project_2")
-        project_3 = ProjectsRepository(connection).get("project_3")
-        case = CasesRepository(connection).get("case_1")
-        copied_case = CasesRepository(connection).get("case_2")
+        new_draft = DraftsRepository(connection).get("draft_new")
+        renamed = DraftsRepository(connection).get("draft_1")
+        copied = DraftsRepository(connection).get("draft_2")
 
     assert result.status == "applied"
-    assert project_2 is not None
-    assert project_2["name"] == "Renamed Project"
-    assert project_2["status"] == "trashed"
-    assert project_3 is not None
-    assert project_3["name"] == "Copied Project"
-    assert case is not None
-    assert case["name"] == "Renamed Case"
-    assert case["project_id"] == "project_2"
-    assert case["status"] == "trashed"
-    assert case["state_version"] == 1
-    assert copied_case is not None
-    assert copied_case["name"] == "Copied Case"
-    assert copied_case["project_id"] == "project_1"
-    assert copied_case["state_version"] == 0
+    assert new_draft is not None
+    assert new_draft["name"] == "New Draft"
+    assert new_draft["status"] == "active"
+    assert renamed is not None
+    assert renamed["name"] == "Renamed Draft"
+    assert renamed["status"] == "trashed"
+    assert renamed["state_version"] == 1
+    assert copied is not None
+    assert copied["name"] == "Copied Draft"
+    assert copied["state_version"] == 0
 
 
-def test_case_copied_deep_copies_case_owned_references(tmp_path: Path) -> None:
+def test_draft_created_copies_defaults_from_payload(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path, timeline_current_version=1)
+    engine = create_workspace_engine(tmp_path)
+
+    result = apply(
+        [
+            {
+                "event": "DraftCreated",
+                "draft_id": "draft_1",
+                "payload": {
+                    "name": "7月7日",
+                    "defaults": {"aspect_ratio": "16:9", "fps": 24},
+                },
+            }
+        ],
+        engine=engine,
+        base_version=None,
+        actor="user",
+        created_at=NOW,
+    )
+
+    with begin_immediate(engine) as connection:
+        row = DraftsRepository(connection).get("draft_1")
+
+    assert result.status == "applied"
+    assert row is not None
+    assert row["name"] == "7月7日"
+    assert row["defaults"]["aspect_ratio"] == "16:9"
+    assert row["defaults"]["fps"] == 24
+    assert row["created_at"] == NOW
+    assert row["updated_at"] == NOW
+
+
+def test_draft_copied_deep_copies_owned_references_and_asset_links(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    _insert_draft(tmp_path, timeline_current_version=1)
     _insert_timeline(tmp_path, version=1)
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
@@ -241,7 +237,7 @@ def test_case_copied_deep_copies_case_owned_references(tmp_path: Path) -> None:
         connection.execute(
             schema.previews.insert().values(
                 preview_id="preview_1",
-                case_id="case_1",
+                draft_id="draft_1",
                 timeline_version=1,
                 object_hash="hash_preview",
                 quality=dump_json({}),
@@ -249,19 +245,46 @@ def test_case_copied_deep_copies_case_owned_references(tmp_path: Path) -> None:
             )
         )
         connection.execute(
-            schema.cases.update()
-            .where(schema.cases.c.case_id == "case_1")
+            schema.assets.insert().values(
+                asset_id="asset_1",
+                storage_mode="reference",
+                object_hash=None,
+                reference_path="/tmp/asset_1.mp4",
+                kind="video",
+                source="local_path",
+                filename="a.mp4",
+                hash="hash_a",
+                mtime=1,
+                size=1,
+                probe=None,
+                proxy_object_hash=None,
+                ingest_status="imported",
+                usable=True,
+                failure=None,
+            )
+        )
+        connection.execute(
+            schema.draft_asset_links.insert().values(
+                draft_id="draft_1",
+                asset_id="asset_1",
+                linked_at=NOW,
+                note="keep",
+                rel_dir="clips",
+            )
+        )
+        connection.execute(
+            schema.drafts.update()
+            .where(schema.drafts.c.draft_id == "draft_1")
             .values(preview_current_id="preview_1")
         )
 
     result = apply(
         [
             {
-                "event": "CaseCopied",
-                "project_id": "project_1",
-                "case_id": "case_2",
-                "source_case_id": "case_1",
-                "payload": {"name": "Copied Case"},
+                "event": "DraftCopied",
+                "draft_id": "draft_2",
+                "source_draft_id": "draft_1",
+                "payload": {"name": "Copied Draft"},
             }
         ],
         engine=engine,
@@ -271,68 +294,37 @@ def test_case_copied_deep_copies_case_owned_references(tmp_path: Path) -> None:
     )
 
     with begin_immediate(engine) as connection:
-        copied_case = CasesRepository(connection).get("case_2")
+        copied = DraftsRepository(connection).get("draft_2")
         copied_timeline = connection.execute(
             select(schema.timeline_versions).where(
-                schema.timeline_versions.c.case_id == "case_2",
+                schema.timeline_versions.c.draft_id == "draft_2",
                 schema.timeline_versions.c.version == 1,
             )
         ).one()
         copied_preview = connection.execute(
-            select(schema.previews).where(schema.previews.c.preview_id == "case_2:preview_1")
+            select(schema.previews).where(schema.previews.c.preview_id == "draft_2:preview_1")
+        ).one()
+        copied_link = connection.execute(
+            select(schema.draft_asset_links).where(
+                schema.draft_asset_links.c.draft_id == "draft_2",
+                schema.draft_asset_links.c.asset_id == "asset_1",
+            )
         ).one()
 
     assert result.status == "applied"
-    assert copied_case is not None
-    assert copied_case["timeline_current_version"] == 1
-    assert copied_case["preview_current_id"] == "case_2:preview_1"
-    assert copied_timeline._mapping["case_id"] == "case_2"
-    assert load_json(copied_timeline._mapping["document_json"])["case_id"] == "case_2"
-    assert copied_preview._mapping["case_id"] == "case_2"
-
-
-def test_project_copied_copies_asset_links_without_cases(tmp_path: Path) -> None:
-    _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
-    engine = create_workspace_engine(tmp_path)
-    result = apply(
-        [
-            {"event": "AssetImported", "asset_id": "asset_1", "job_id": "job_import"},
-            {"event": "AssetLinked", "project_id": "project_1", "asset_id": "asset_1"},
-            {
-                "event": "ProjectCopied",
-                "project_id": "project_2",
-                "source_project_id": "project_1",
-                "payload": {"name": "Copied Project"},
-            },
-        ],
-        engine=engine,
-        base_version=None,
-        actor="user",
-        created_at=NOW,
-    )
-
-    with begin_immediate(engine) as connection:
-        copied_link_count = connection.execute(
-            select(func.count())
-            .select_from(schema.project_asset_links)
-            .where(schema.project_asset_links.c.project_id == "project_2")
-            .where(schema.project_asset_links.c.asset_id == "asset_1")
-        ).scalar_one()
-        copied_case_count = connection.execute(
-            select(func.count())
-            .select_from(schema.cases)
-            .where(schema.cases.c.project_id == "project_2")
-        ).scalar_one()
-
-    assert result.status == "applied"
-    assert copied_link_count == 1
-    assert copied_case_count == 0
+    assert copied is not None
+    assert copied["timeline_current_version"] == 1
+    assert copied["preview_current_id"] == "draft_2:preview_1"
+    assert copied_timeline._mapping["draft_id"] == "draft_2"
+    assert load_json(copied_timeline._mapping["document_json"])["draft_id"] == "draft_2"
+    assert copied_preview._mapping["draft_id"] == "draft_2"
+    assert copied_link._mapping["note"] == "keep"
+    assert copied_link._mapping["rel_dir"] == "clips"
 
 
 def test_asset_and_asset_link_merge_events_update_records(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
 
     result = apply(
@@ -378,17 +370,17 @@ def test_asset_and_asset_link_merge_events_update_records(tmp_path: Path) -> Non
             },
             {
                 "event": "AssetLinked",
-                "project_id": "project_1",
+                "draft_id": "draft_1",
                 "asset_id": "asset_1",
-                "payload": {"enabled": False, "note": "first link"},
+                "payload": {"note": "first link", "rel_dir": "clips"},
             },
             {
                 "event": "AssetLinked",
-                "project_id": "project_1",
+                "draft_id": "draft_1",
                 "asset_id": "asset_1",
-                "payload": {"enabled": True},
+                "payload": {"note": "second link"},
             },
-            {"event": "AssetUnlinked", "project_id": "project_1", "asset_id": "asset_1"},
+            {"event": "AssetUnlinked", "draft_id": "draft_1", "asset_id": "asset_1"},
         ],
         engine=engine,
         base_version=None,
@@ -404,7 +396,7 @@ def test_asset_and_asset_link_merge_events_update_records(tmp_path: Path) -> Non
             select(schema.assets).where(schema.assets.c.asset_id == "asset_2")
         ).one()
         link_count = connection.execute(
-            select(func.count()).select_from(schema.project_asset_links)
+            select(func.count()).select_from(schema.draft_asset_links)
         ).scalar_one()
         object_count = connection.execute(
             select(func.count())
@@ -538,54 +530,11 @@ def test_asset_understanding_status_defaults_to_none(tmp_path: Path) -> None:
     assert asset["thumbnail_object_hash"] is None
 
 
-def test_case_asset_scope_changed_updates_selected_and_disabled_assets(tmp_path: Path) -> None:
-    _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
-    engine = create_workspace_engine(tmp_path)
-
-    link_result = apply(
-        [
-            {"event": "AssetImported", "asset_id": "asset_scope", "job_id": "job_scope"},
-            {"event": "AssetLinked", "project_id": "project_1", "asset_id": "asset_scope"},
-        ],
-        engine=engine,
-        base_version=None,
-        actor="agent",
-        created_at=NOW,
-    )
-    scope_result = apply(
-        [
-            {
-                "event": "CaseAssetScopeChanged",
-                "case_id": "case_1",
-                "payload": {
-                    "selected_asset_ids": ["asset_scope"],
-                    "disabled_asset_ids": ["asset_scope"],
-                },
-            }
-        ],
-        engine=engine,
-        base_version=0,
-        actor="agent",
-        created_at=NOW,
-    )
-
-    with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
-
-    assert link_result.status == "applied"
-    assert scope_result.status == "applied"
-    assert case is not None
-    assert case["selected_asset_ids"] == ["asset_scope"]
-    assert case["disabled_asset_ids"] == ["asset_scope"]
-    assert case["state_version"] == 1
-
-
 def test_merge_preview_result_records_artifact_without_stale_version_conflict(
     tmp_path: Path,
 ) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path, state_version=12, timeline_current_version=3)
+    _insert_draft(tmp_path, state_version=12, timeline_current_version=3)
     _insert_timeline(tmp_path, version=2)
     _insert_timeline(tmp_path, version=3)
     engine = create_workspace_engine(tmp_path)
@@ -594,7 +543,7 @@ def test_merge_preview_result_records_artifact_without_stale_version_conflict(
         [
             {
                 "event": "PreviewRendered",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "timeline_version": 2,
                 "artifact_id": "preview_old",
             }
@@ -607,7 +556,7 @@ def test_merge_preview_result_records_artifact_without_stale_version_conflict(
 
     assert result.status == "applied"
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
         preview = connection.execute(
             select(schema.previews).where(schema.previews.c.preview_id == "preview_old")
         ).first()
@@ -621,7 +570,7 @@ def test_preview_and_export_merge_events_keep_history_and_update_current_conditi
     tmp_path: Path,
 ) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path, timeline_current_version=2)
+    _insert_draft(tmp_path, timeline_current_version=2)
     _insert_timeline(tmp_path, version=1)
     _insert_timeline(tmp_path, version=2)
     engine = create_workspace_engine(tmp_path)
@@ -630,25 +579,25 @@ def test_preview_and_export_merge_events_keep_history_and_update_current_conditi
         [
             {
                 "event": "PreviewRendered",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "timeline_version": 1,
                 "artifact_id": "preview_history",
             },
             {
                 "event": "PreviewRendered",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "timeline_version": 2,
                 "artifact_id": "preview_current",
             },
             {
                 "event": "ExportCompleted",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "timeline_version": 1,
                 "artifact_id": "export_history",
             },
             {
                 "event": "ExportCompleted",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "timeline_version": 2,
                 "artifact_id": "export_current",
             },
@@ -660,7 +609,7 @@ def test_preview_and_export_merge_events_keep_history_and_update_current_conditi
     )
 
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
         preview_count = connection.execute(
             select(func.count()).select_from(schema.previews)
         ).scalar_one()
@@ -679,8 +628,8 @@ def test_preview_and_export_merge_events_keep_history_and_update_current_conditi
 
 def test_preview_viewed_only_updates_when_preview_belongs_to_case(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
-    _insert_case_for_existing_project(tmp_path, "case_2")
+    _insert_draft(tmp_path)
+    _insert_extra_draft(tmp_path, "draft_2")
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
         for object_hash in ("hash_preview_1", "hash_preview_2"):
@@ -695,7 +644,7 @@ def test_preview_viewed_only_updates_when_preview_belongs_to_case(tmp_path: Path
         connection.execute(
             schema.previews.insert().values(
                 preview_id="preview_other",
-                case_id="case_2",
+                draft_id="draft_2",
                 timeline_version=1,
                 object_hash="hash_preview_1",
                 quality=dump_json({}),
@@ -705,7 +654,7 @@ def test_preview_viewed_only_updates_when_preview_belongs_to_case(tmp_path: Path
         connection.execute(
             schema.previews.insert().values(
                 preview_id="preview_own",
-                case_id="case_1",
+                draft_id="draft_1",
                 timeline_version=1,
                 object_hash="hash_preview_2",
                 quality=dump_json({}),
@@ -715,8 +664,8 @@ def test_preview_viewed_only_updates_when_preview_belongs_to_case(tmp_path: Path
 
     result = apply(
         [
-            {"event": "PreviewViewed", "case_id": "case_1", "preview_id": "preview_other"},
-            {"event": "PreviewViewed", "case_id": "case_1", "preview_id": "preview_own"},
+            {"event": "PreviewViewed", "draft_id": "draft_1", "preview_id": "preview_other"},
+            {"event": "PreviewViewed", "draft_id": "draft_1", "preview_id": "preview_own"},
         ],
         engine=engine,
         base_version=None,
@@ -725,7 +674,7 @@ def test_preview_viewed_only_updates_when_preview_belongs_to_case(tmp_path: Path
     )
 
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
 
     assert result.status == "applied"
     assert case is not None
@@ -735,12 +684,12 @@ def test_preview_viewed_only_updates_when_preview_belongs_to_case(tmp_path: Path
 
 def test_merge_event_is_idempotent_by_merge_key(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path, timeline_current_version=2)
+    _insert_draft(tmp_path, timeline_current_version=2)
     _insert_timeline(tmp_path, version=2)
     engine = create_workspace_engine(tmp_path)
     event = {
         "event": "PreviewRendered",
-        "case_id": "case_1",
+        "draft_id": "draft_1",
         "timeline_version": 2,
         "artifact_id": "preview_1",
     }
@@ -752,7 +701,7 @@ def test_merge_event_is_idempotent_by_merge_key(tmp_path: Path) -> None:
         preview_count = connection.execute(
             select(func.count()).select_from(schema.previews)
         ).scalar_one()
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
     assert first.status == "applied"
     assert second.status == "applied"
     assert second.skipped_events == 1
@@ -765,7 +714,7 @@ def test_merge_event_is_idempotent_by_merge_key(tmp_path: Path) -> None:
 
 def test_rough_cut_approval_state_machine_across_timeline_changes(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path, timeline_current_version=1)
+    _insert_draft(tmp_path, timeline_current_version=1)
     _insert_timeline(tmp_path, version=1)
     engine = create_workspace_engine(tmp_path)
 
@@ -774,14 +723,13 @@ def test_rough_cut_approval_state_machine_across_timeline_changes(tmp_path: Path
             {
                 "event": "DecisionCreated",
                 "decision_id": "dec_rough",
-                "scope_type": "case",
-                "case_id": "case_1",
+                "scope_type": "draft",
+                "draft_id": "draft_1",
                 "payload": {
                     "decision": {
                         "decision_id": "dec_rough",
-                        "scope_type": "case",
-                        "project_id": "project_1",
-                        "case_id": "case_1",
+                        "scope_type": "draft",
+                        "draft_id": "draft_1",
                         "type": "approve_rough_cut",
                         "question": "ok?",
                         "blocking": True,
@@ -799,8 +747,8 @@ def test_rough_cut_approval_state_machine_across_timeline_changes(tmp_path: Path
             {
                 "event": "DecisionAnswered",
                 "decision_id": "dec_rough",
-                "scope_type": "case",
-                "case_id": "case_1",
+                "scope_type": "draft",
+                "draft_id": "draft_1",
                 "payload": {
                     "answer": {
                         "option_id": "approve",
@@ -819,7 +767,7 @@ def test_rough_cut_approval_state_machine_across_timeline_changes(tmp_path: Path
         [
             {
                 "event": "TimelineVersionCreated",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "timeline_version": 2,
                 "parent_version": 1,
                 "patch_id": "patch_visual",
@@ -838,7 +786,7 @@ def test_rough_cut_approval_state_machine_across_timeline_changes(tmp_path: Path
         [
             {
                 "event": "TimelineVersionRestored",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "timeline_version": 1,
             }
         ],
@@ -849,7 +797,7 @@ def test_rough_cut_approval_state_machine_across_timeline_changes(tmp_path: Path
     )
 
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
     assert created.status == answered.status == changed.status == restored.status == "applied"
     assert case is not None
     assert case["rough_cut_approved"] is True
@@ -858,11 +806,11 @@ def test_rough_cut_approval_state_machine_across_timeline_changes(tmp_path: Path
     assert case["state_version"] == 4
 
 
-def test_timeline_created_validated_failed_and_restored_update_case_state(
+def test_timeline_created_validated_failed_and_restored_update_draft_state(
     tmp_path: Path,
 ) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(
+    _insert_draft(
         tmp_path,
         timeline_current_version=1,
         rough_cut_approved=True,
@@ -875,7 +823,7 @@ def test_timeline_created_validated_failed_and_restored_update_case_state(
         [
             {
                 "event": "TimelineVersionCreated",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "timeline_version": 2,
                 "parent_version": 1,
                 "patch_id": "patch_subtitles",
@@ -891,7 +839,7 @@ def test_timeline_created_validated_failed_and_restored_update_case_state(
         [
             {
                 "event": "TimelineVersionCreated",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "timeline_version": 3,
                 "parent_version": 2,
                 "patch_id": "patch_unknown",
@@ -906,7 +854,7 @@ def test_timeline_created_validated_failed_and_restored_update_case_state(
         [
             {
                 "event": "TimelineValidated",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "timeline_version": 3,
                 "payload": {"validation_report": {"valid": True, "checks": []}},
             }
@@ -920,7 +868,7 @@ def test_timeline_created_validated_failed_and_restored_update_case_state(
         [
             {
                 "event": "TimelineValidationFailed",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "timeline_version": 3,
                 "payload": {"validation_report": {"valid": False, "checks": [{"code": "gap"}]}},
             }
@@ -931,14 +879,14 @@ def test_timeline_created_validated_failed_and_restored_update_case_state(
         created_at=NOW,
     )
     restored_hit = apply(
-        [{"event": "TimelineVersionRestored", "case_id": "case_1", "timeline_version": 1}],
+        [{"event": "TimelineVersionRestored", "draft_id": "draft_1", "timeline_version": 1}],
         engine=engine,
         base_version=4,
         actor="user",
         created_at=NOW,
     )
     restored_miss = apply(
-        [{"event": "TimelineVersionRestored", "case_id": "case_1", "timeline_version": 2}],
+        [{"event": "TimelineVersionRestored", "draft_id": "draft_1", "timeline_version": 2}],
         engine=engine,
         base_version=5,
         actor="user",
@@ -946,10 +894,10 @@ def test_timeline_created_validated_failed_and_restored_update_case_state(
     )
 
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
         timeline_3 = connection.execute(
             select(schema.timeline_versions).where(
-                schema.timeline_versions.c.case_id == "case_1",
+                schema.timeline_versions.c.draft_id == "draft_1",
                 schema.timeline_versions.c.version == 3,
             )
         ).one()
@@ -974,27 +922,26 @@ def test_timeline_created_validated_failed_and_restored_update_case_state(
 
 def test_pending_tool_call_followup_is_returned_but_not_executed(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
     create_result = apply(
         [
             {
                 "event": "DecisionCreated",
                 "decision_id": "dec_export",
-                "scope_type": "case",
-                "case_id": "case_1",
+                "scope_type": "draft",
+                "draft_id": "draft_1",
                 "payload": {
                     "decision": {
                         "decision_id": "dec_export",
-                        "scope_type": "case",
-                        "project_id": "project_1",
-                        "case_id": "case_1",
+                        "scope_type": "draft",
+                        "draft_id": "draft_1",
                         "type": "export",
                         "question": "export?",
                         "blocking": True,
                         "pending_tool_call": {
                             "tool_name": "render.final_mp4",
-                            "arguments": {"case_id": "case_1"},
+                            "arguments": {"draft_id": "draft_1"},
                             "idempotency_key": "dec_export",
                             "argument_fingerprint": "fp",
                         },
@@ -1013,8 +960,8 @@ def test_pending_tool_call_followup_is_returned_but_not_executed(tmp_path: Path)
             {
                 "event": "DecisionAnswered",
                 "decision_id": "dec_export",
-                "scope_type": "case",
-                "case_id": "case_1",
+                "scope_type": "draft",
+                "draft_id": "draft_1",
                 "payload": {
                     "answer": {
                         "option_id": "approve",
@@ -1043,31 +990,31 @@ def test_pending_tool_call_followup_is_returned_but_not_executed(tmp_path: Path)
     assert decision._mapping["pending_tool_call_status"] == "approved"
 
 
-def test_plan_updates_patch_case_state(tmp_path: Path) -> None:
+def test_plan_updates_patch_draft_state(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
 
     result = apply(
         [
             {
                 "event": "BriefUpdated",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "payload": {"brief": {"goal": "new goal", "confirmed_facts": ["fast"]}},
             },
             {
                 "event": "ContentPlanUpdated",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "payload": {"content_plan": {"outline": ["hook"]}},
             },
             {
                 "event": "AudioPlanUpdated",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "payload": {"audio_plan": {"mode": "silent"}},
             },
             {
                 "event": "CutPlanUpdated",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "payload": {
                     "cut_plan": {
                         "schema": "CutPlan.v1",
@@ -1078,7 +1025,7 @@ def test_plan_updates_patch_case_state(tmp_path: Path) -> None:
             },
             {
                 "event": "PostprocessPlanUpdated",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "payload": {
                     "postprocess_plan": {
                         "subtitle": {"enabled": True, "style_template_id": "large"}
@@ -1093,7 +1040,7 @@ def test_plan_updates_patch_case_state(tmp_path: Path) -> None:
     )
 
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
 
     assert result.status == "applied"
     assert case is not None
@@ -1107,7 +1054,7 @@ def test_plan_updates_patch_case_state(tmp_path: Path) -> None:
 
 def test_case_decision_answer_applies_effect_and_logs_followup_event(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
 
     created = apply(
@@ -1115,14 +1062,13 @@ def test_case_decision_answer_applies_effect_and_logs_followup_event(tmp_path: P
             {
                 "event": "DecisionCreated",
                 "decision_id": "dec_fact",
-                "scope_type": "case",
-                "case_id": "case_1",
+                "scope_type": "draft",
+                "draft_id": "draft_1",
                 "payload": {
                     "decision": {
                         "decision_id": "dec_fact",
-                        "scope_type": "case",
-                        "project_id": "project_1",
-                        "case_id": "case_1",
+                        "scope_type": "draft",
+                        "draft_id": "draft_1",
                         "type": "generic",
                         "question": "fact?",
                         "blocking": True,
@@ -1140,8 +1086,8 @@ def test_case_decision_answer_applies_effect_and_logs_followup_event(tmp_path: P
             {
                 "event": "DecisionAnswered",
                 "decision_id": "dec_fact",
-                "scope_type": "case",
-                "case_id": "case_1",
+                "scope_type": "draft",
+                "draft_id": "draft_1",
                 "payload": {
                     "answer": {
                         "option_id": None,
@@ -1159,7 +1105,7 @@ def test_case_decision_answer_applies_effect_and_logs_followup_event(tmp_path: P
     )
 
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
         events = EventLogRepository(connection).read_after(0)
 
     assert created.status == "applied"
@@ -1174,33 +1120,30 @@ def test_case_decision_answer_applies_effect_and_logs_followup_event(tmp_path: P
     ]
 
 
-def test_project_and_workspace_decisions_only_update_decision_rows(tmp_path: Path) -> None:
+def test_workspace_decisions_only_update_decision_rows(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
 
     result = apply(
         [
             {
                 "event": "DecisionCreated",
-                "decision_id": "dec_project",
-                "scope_type": "project",
-                "project_id": "project_1",
+                "decision_id": "dec_answered",
+                "scope_type": "workspace",
                 "payload": {
                     "decision": {
-                        "decision_id": "dec_project",
-                        "scope_type": "project",
-                        "project_id": "project_1",
+                        "decision_id": "dec_answered",
+                        "scope_type": "workspace",
                         "type": "generic",
-                        "question": "project?",
+                        "question": "answered?",
                     }
                 },
             },
             {
                 "event": "DecisionAnswered",
-                "decision_id": "dec_project",
-                "scope_type": "project",
-                "project_id": "project_1",
+                "decision_id": "dec_answered",
+                "scope_type": "workspace",
                 "payload": {
                     "answer": {
                         "option_id": "ok",
@@ -1211,20 +1154,20 @@ def test_project_and_workspace_decisions_only_update_decision_rows(tmp_path: Pat
             },
             {
                 "event": "DecisionCreated",
-                "decision_id": "dec_workspace",
+                "decision_id": "dec_cancelled",
                 "scope_type": "workspace",
                 "payload": {
                     "decision": {
-                        "decision_id": "dec_workspace",
+                        "decision_id": "dec_cancelled",
                         "scope_type": "workspace",
                         "type": "generic",
-                        "question": "workspace?",
+                        "question": "cancelled?",
                     }
                 },
             },
             {
                 "event": "DecisionCancelled",
-                "decision_id": "dec_workspace",
+                "decision_id": "dec_cancelled",
                 "scope_type": "workspace",
             },
         ],
@@ -1235,25 +1178,27 @@ def test_project_and_workspace_decisions_only_update_decision_rows(tmp_path: Pat
     )
 
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
-        project_decision = connection.execute(
-            select(schema.decisions).where(schema.decisions.c.decision_id == "dec_project")
+        draft = DraftsRepository(connection).get("draft_1")
+        answered_decision = connection.execute(
+            select(schema.decisions).where(schema.decisions.c.decision_id == "dec_answered")
         ).one()
-        workspace_decision = connection.execute(
-            select(schema.decisions).where(schema.decisions.c.decision_id == "dec_workspace")
+        cancelled_decision = connection.execute(
+            select(schema.decisions).where(schema.decisions.c.decision_id == "dec_cancelled")
         ).one()
 
     assert result.status == "applied"
-    assert case is not None
-    assert case["state_version"] == 0
-    assert case["pending_decision_id"] is None
-    assert project_decision._mapping["status"] == "answered"
-    assert workspace_decision._mapping["status"] == "cancelled"
+    assert draft is not None
+    # workspace 域决策不阻塞草稿：state_version 不动、pending_decision_id 保持空。
+    assert draft["state_version"] == 0
+    assert draft["pending_decision_id"] is None
+    assert answered_decision._mapping["status"] == "answered"
+    assert answered_decision._mapping["draft_id"] is None
+    assert cancelled_decision._mapping["status"] == "cancelled"
 
 
-def test_memory_events_update_memory_tables_without_case_state_changes(tmp_path: Path) -> None:
+def test_memory_events_update_memory_tables_without_draft_state_changes(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
 
     result = apply(
@@ -1261,24 +1206,23 @@ def test_memory_events_update_memory_tables_without_case_state_changes(tmp_path:
             {
                 "event": "MemoryCandidateExtracted",
                 "candidate_id": "mem_candidate_1",
-                "case_id": "case_1",
-                "payload": {"content": "User likes concise edits", "suggested_scope": "project"},
+                "draft_id": "draft_1",
+                "payload": {"content": "User likes concise edits", "suggested_scope": "user"},
             },
             {
                 "event": "MemoryCandidateDiscarded",
                 "candidate_id": "mem_candidate_1",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
             },
             {
                 "event": "MemorySaved",
                 "memory_id": "memory_1",
                 "candidate_id": "mem_candidate_1",
                 "payload": {
-                    "scope": "project",
-                    "project_id": "project_1",
+                    "scope": "user",
                     "content": "User likes concise edits",
                     "tags": ["style"],
-                    "created_from_case_id": "case_1",
+                    "created_from_draft_id": "draft_1",
                 },
             },
         ],
@@ -1289,7 +1233,7 @@ def test_memory_events_update_memory_tables_without_case_state_changes(tmp_path:
     )
 
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
         candidate = connection.execute(
             select(schema.memory_candidates).where(
                 schema.memory_candidates.c.candidate_id == "mem_candidate_1"
@@ -1304,13 +1248,13 @@ def test_memory_events_update_memory_tables_without_case_state_changes(tmp_path:
     assert case["state_version"] == 0
     assert candidate._mapping["status"] == "saved"
     assert candidate._mapping["saved_memory_id"] == "memory_1"
-    assert memory._mapping["scope"] == "project"
+    assert memory._mapping["scope"] == "user"
     assert load_json(memory._mapping["tags"]) == ["style"]
 
 
 def test_job_events_maintain_running_jobs_until_terminal_status(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
 
     result = apply(
@@ -1318,41 +1262,41 @@ def test_job_events_maintain_running_jobs_until_terminal_status(tmp_path: Path) 
             {
                 "event": "JobEnqueued",
                 "job_id": "job_success",
-                "requested_by_case_id": "case_1",
+                "requested_by_draft_id": "draft_1",
                 "payload": {"kind": "render.preview"},
             },
             {
                 "event": "JobProgress",
                 "job_id": "job_success",
-                "requested_by_case_id": "case_1",
+                "requested_by_draft_id": "draft_1",
                 "progress": 0.4,
             },
             {
                 "event": "JobSucceeded",
                 "job_id": "job_success",
-                "requested_by_case_id": "case_1",
+                "requested_by_draft_id": "draft_1",
             },
             {
                 "event": "JobEnqueued",
                 "job_id": "job_failed",
-                "requested_by_case_id": "case_1",
+                "requested_by_draft_id": "draft_1",
                 "payload": {"kind": "annotate.asset"},
             },
             {
                 "event": "JobFailed",
                 "job_id": "job_failed",
-                "requested_by_case_id": "case_1",
+                "requested_by_draft_id": "draft_1",
             },
             {
                 "event": "JobEnqueued",
                 "job_id": "job_cancelled",
-                "requested_by_case_id": "case_1",
+                "requested_by_draft_id": "draft_1",
                 "payload": {"kind": "import.url"},
             },
             {
                 "event": "JobCancelled",
                 "job_id": "job_cancelled",
-                "requested_by_case_id": "case_1",
+                "requested_by_draft_id": "draft_1",
             },
         ],
         engine=engine,
@@ -1362,7 +1306,7 @@ def test_job_events_maintain_running_jobs_until_terminal_status(tmp_path: Path) 
     )
 
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
         rows = connection.execute(select(schema.jobs.c.job_id, schema.jobs.c.status)).all()
 
     statuses = {row._mapping["job_id"]: row._mapping["status"] for row in rows}
@@ -1377,9 +1321,9 @@ def test_job_events_maintain_running_jobs_until_terminal_status(tmp_path: Path) 
     }
 
 
-def test_record_only_events_are_logged_without_case_state_mutation(tmp_path: Path) -> None:
+def test_record_only_events_are_logged_without_draft_state_mutation(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
-    _insert_project_and_case(tmp_path)
+    _insert_draft(tmp_path)
     engine = create_workspace_engine(tmp_path)
 
     result = apply(
@@ -1387,14 +1331,14 @@ def test_record_only_events_are_logged_without_case_state_mutation(tmp_path: Pat
             {"event": "PolicyRefusal", "refusal_id": "refusal_1"},
             {"event": "ProviderCallRecorded", "provider_call_id": "provider_call_1"},
             {"event": "ContextCompacted", "compaction_id": "compaction_1"},
-            {"event": "TurnEnded", "turn_id": "turn_1", "case_id": "case_1"},
+            {"event": "TurnEnded", "turn_id": "turn_1", "draft_id": "draft_1"},
             {
                 "event": "CapabilityDegraded",
                 "degradation_id": "degradation_1",
                 "capability": "render.preview",
                 "reason": "provider unavailable",
                 "fallback": "local",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
             },
             {
                 "event": "SecurityRefusal",
@@ -1411,11 +1355,11 @@ def test_record_only_events_are_logged_without_case_state_mutation(tmp_path: Pat
     )
 
     with begin_immediate(engine) as connection:
-        case = CasesRepository(connection).get("case_1")
+        case = DraftsRepository(connection).get("draft_1")
         events = EventLogRepository(connection).read_after(0)
 
     assert result.status == "applied"
-    assert result.case_state_versions == {}
+    assert result.draft_state_versions == {}
     assert all(event.state_version is None for event in result.applied_events)
     assert case is not None
     assert case["state_version"] == 0

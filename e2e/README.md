@@ -19,7 +19,7 @@ pnpm --dir e2e exec playwright install chromium
 brew install ffmpeg
 ```
 
-运行路径 3：
+运行全部 spec：
 
 ```bash
 pnpm --dir e2e exec playwright test
@@ -37,6 +37,9 @@ pnpm --dir e2e exec playwright test
 
 ## 覆盖范围
 
-当前只覆盖 PRD §17-M9 路径 3：Project/Case 管理、Project A 素材导入、Case A 已导出状态 seed、Case B 复用素材与 project memory、移动到 Project B 后仍可打开且素材链接保持。
+单级草稿（Draft）模型下的两条不依赖真实模型的链路：
 
-路径 1/2 需要真实 provider 与真实素材，留到后续 PR。
+- `path3-draft-materials.spec.ts`：开始创作建草稿 → 中栏素材面板导入 fixture（reference 原地索引）→ seed 时间线/导出/user 记忆 → 时间线只读展示 → 第二草稿导入同一文件走全局去重复用（asset_id 相同）→ user 记忆按 goal token 注入第二草稿。
+- `streaming-console.spec.ts`：开始创作建草稿 → 发消息 → 空 `ScriptedPlanner` 走 content 散文协议回复 → 助手气泡渲染 → TurnEnded 解锁输入框。
+
+路径 1/2 需要真实 provider 与真实素材，留到后续 PR（见 `scripts/e2e_paths/`）。

@@ -62,8 +62,8 @@ def _timeline(
 ) -> TimelineState:
     return TimelineState.model_validate(
         {
-            "timeline_id": "case_1:v1",
-            "case_id": "case_1",
+            "timeline_id": "draft_1:v1",
+            "draft_id": "draft_1",
             "version": 1,
             "fps": 30,
             "duration_frames": duration_frames,

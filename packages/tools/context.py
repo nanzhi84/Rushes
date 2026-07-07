@@ -8,9 +8,8 @@ from typing import Any
 
 from sqlalchemy.engine import Connection
 
-from contracts.case import CaseState
 from contracts.decision import Decision
-from contracts.project import ProjectState
+from contracts.draft import DraftState
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,8 +18,7 @@ class ToolExecutionContext:
 
     tool_call_id: str
     turn_id: str
-    case_state: CaseState | None = None
-    project_state: ProjectState | None = None
+    draft_state: DraftState | None = None
     decisions: tuple[Decision, ...] = ()
     readonly_connection: Connection | None = None
     created_at: str | None = None

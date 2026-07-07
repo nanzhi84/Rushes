@@ -12,8 +12,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from contracts.case import CaseState
 from contracts.decision import Decision, DecisionAnswer
+from contracts.draft import DraftState
 from providers.capabilities import LLM_CHAT, ProviderRequest
 from providers.gateway import ProviderCallRecorder, ProviderGateway
 from providers.openai_compatible import (
@@ -59,7 +59,7 @@ class GatewayDecisionAnswerResolver:
     async def resolve(
         self,
         *,
-        case_state: CaseState,
+        draft_state: DraftState,
         decision: Decision,
         user_message: str,
     ) -> DecisionAnswerResolution:
@@ -67,7 +67,7 @@ class GatewayDecisionAnswerResolver:
             ProviderRequest(
                 capability=LLM_CHAT,
                 model=self._model,
-                case_id=case_state.case_id,
+                draft_id=draft_state.draft_id,
                 payload={
                     "messages": _messages(decision, user_message),
                     "tools": [_resolve_tool_schema(decision)],

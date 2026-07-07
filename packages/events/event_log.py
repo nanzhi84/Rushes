@@ -34,8 +34,7 @@ def serialize_event(
     return {
         "event_type": parsed.event,
         "actor": parsed.actor,
-        "project_id": parsed.project_id,
-        "case_id": parsed.case_id,
+        "draft_id": parsed.draft_id,
         "payload_json": payload,
         "state_version": state_version,
         "created_at": row_created_at,
@@ -46,8 +45,7 @@ def deserialize_event(row: EventLogRow) -> DomainEventBase:
     payload = dict(row.payload_json)
     payload.setdefault("event", row.event_type)
     payload.setdefault("actor", row.actor)
-    payload.setdefault("project_id", row.project_id)
-    payload.setdefault("case_id", row.case_id)
+    payload.setdefault("draft_id", row.draft_id)
     payload.setdefault("created_at", row.created_at)
     return validate_domain_event(payload)
 
@@ -63,8 +61,7 @@ def append_domain_event(
     return repository.append(
         event_type=values["event_type"],
         actor=values["actor"],
-        project_id=values["project_id"],
-        case_id=values["case_id"],
+        draft_id=values["draft_id"],
         payload_json=values["payload_json"],
         state_version=values["state_version"],
         created_at=values["created_at"],
