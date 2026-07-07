@@ -31,11 +31,12 @@ from domain.subtitle_templates import list_subtitle_templates
 
 VerdictStatus = Literal["deny", "ask", "defer", "allow"]
 
+# 拦截 LLM 往参数里塞低层帧号/时间码/编码字段。注意不含裸 "source_start"/"source_end"：
+# 帧号变体（source_start_frame）已被 "frame" 覆盖、时间码变体被 "timecode" 覆盖，而
+# timeline.compose_initial 合法使用以秒为单位的 source_start_s/source_end_s 组装初剪（Spec C §C4）。
 _PROHIBITED_ARGUMENT_KEY_PARTS = frozenset(
     {
         "frame",
-        "source_start",
-        "source_end",
         "source_timecode",
         "timecode",
         "ffmpeg",

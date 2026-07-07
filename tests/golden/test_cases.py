@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from tests.golden.framework import (
@@ -8,7 +9,23 @@ from tests.golden.framework import (
     GoldenRunResult,
     base_workspace,
     registry_with_timeline_tools,
+    understand_compose_workspace,
 )
+
+_UNDERSTAND_SUMMARY = {
+    "semantic_role": "footage",
+    "overall": "一段稳定的城市天际线空镜，光线均匀。",
+    "language": None,
+    "segments": [
+        {
+            "start_s": 0.0,
+            "end_s": 6.0,
+            "description": "航拍城市天际线，缓慢右移",
+            "tags": ["空镜", "城市"],
+            "quality": "good",
+        }
+    ],
+}
 
 
 async def test_golden_pending_decision_blocks_and_recovers(tmp_path: Path) -> None:
@@ -124,6 +141,58 @@ async def test_golden_version_conflict_retries_on_new_state(tmp_path: Path) -> N
     await GoldenExecutor().run(case, tmp_path)
 
 
+async def test_golden_understand_summary_then_compose_initial(tmp_path: Path) -> None:
+    # Spec C 主链路：主代理派理解子代理（脚本化 VLM 经 MockProvider 立即 emit_summary）
+    # → 读回摘要 → 基于摘要时间戳直接 compose_initial 组装初剪 → 纯 content 步收尾。
+    case = GoldenCase(
+        name="understand_summary_compose_initial",
+        build_workspace=understand_compose_workspace,
+        user_messages=("把这段素材理解一下，挑好画面剪个初版",),
+        provider_script=(
+            {
+                "content": "我先派子代理理解这段素材。",
+                "tool_call": {
+                    "tool_name": "understand.materials",
+                    "arguments": {"asset_ids": ["asset_1"]},
+                },
+            },
+            {
+                "tool_call": {
+                    "tool_name": "asset.read_summary",
+                    "arguments": {"asset_ids": ["asset_1"]},
+                }
+            },
+            {
+                "tool_call": {
+                    "tool_name": "timeline.compose_initial",
+                    "arguments": {
+                        "clips": [
+                            {
+                                "asset_id": "asset_1",
+                                "source_start_s": 0.0,
+                                "source_end_s": 6.0,
+                                "role": "a_roll",
+                            }
+                        ]
+                    },
+                }
+            },
+            {"content": "初剪已就绪：用了 0-6s 那段空镜，共 1 段。"},
+        ),
+        vlm_script=(
+            {"content": json.dumps({"action": "emit_summary", "summary": _UNDERSTAND_SUMMARY})},
+        ),
+        expected_tool_trace=(
+            ExpectedToolTrace("understand.materials", "succeeded"),
+            ExpectedToolTrace("asset.read_summary", "succeeded"),
+            ExpectedToolTrace("timeline.compose_initial", "succeeded"),
+        ),
+        assertions=GoldenAssertions(assert_final=_assert_understand_compose_final),
+    )
+
+    await GoldenExecutor().run(case, tmp_path)
+
+
 def _reply_messages(result: GoldenRunResult) -> list[dict[str, object]]:
     return [message for message in result.messages if message.get("kind") == "reply"]
 
@@ -176,3 +245,27 @@ def _assert_version_conflict_final(result: GoldenRunResult) -> None:
     assert "TurnEnded" in result.event_types
     replies = _reply_messages(result)
     assert replies[-1]["content"] == "timeline ok"
+
+
+def _assert_understand_compose_final(result: GoldenRunResult) -> None:
+    # 理解落库：子代理产出摘要 → MaterialUnderstanding 事件成对出现。
+    assert "MaterialUnderstandingStarted" in result.event_types
+    assert "MaterialUnderstandingCompleted" in result.event_types
+    tool_names = [trace.tool_name for trace in result.traces]
+    assert tool_names == [
+        "understand.materials",
+        "asset.read_summary",
+        "timeline.compose_initial",
+    ]
+    # read_summary 同 turn 命中刚落库的摘要（观察串里带 overall 正文），证明 mid-turn 持久化生效。
+    read_summary_trace = result.traces[1]
+    assert "城市天际线" in read_summary_trace.observation
+    # 摘要时间戳直接组装出 v1 初剪并通过校验。
+    assert result.case_state.timeline_current_version == 1
+    assert result.event_types.count("TimelineVersionCreated") == 1
+    assert "TimelineValidated" in result.event_types
+    # 纯 content 步收尾。
+    assert "TurnEnded" in result.event_types
+    replies = _reply_messages(result)
+    assert replies[-1]["content"] == "初剪已就绪：用了 0-6s 那段空镜，共 1 段。"
+    assert replies[-1]["role"] == "assistant"
