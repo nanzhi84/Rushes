@@ -23,7 +23,7 @@ from providers import ASR_TRANSCRIBE, TTS_SPEECH
 from providers.gateway import ProviderGatewayResult
 from storage import schema
 from storage.db import create_workspace_engine
-from storage.repositories import CasesRepository, EventLogRepository, TranscriptsRepository
+from storage.repositories import DraftsRepository, EventLogRepository, TranscriptsRepository
 from storage.workspace_paths import WorkspacePaths
 
 NOW = "2026-07-05T00:00:00+00:00"
@@ -258,7 +258,7 @@ async def test_asr_job_handler_reports_unknown_provider_event(tmp_path: Path) ->
     assert deleted == ["key_1"]
 
 
-async def test_asr_job_handler_records_vad_degradation_and_project_lookup(
+async def test_asr_job_handler_records_vad_degradation_and_draft_lookup(
     tmp_path: Path,
 ) -> None:
     engine = _engine_with_asset(tmp_path)
@@ -277,7 +277,7 @@ async def test_asr_job_handler_records_vad_degradation_and_project_lookup(
         uploader=_fake_upload,
     )
 
-    result = await handler(_job(project_id=None, asset_id="asset_1"))
+    result = await handler(_job(draft_id=None, asset_id="asset_1"))
 
     assert result.result_json["vad_segment_count"] == 0
     assert "CapabilityDegraded" in _event_types(engine)
@@ -407,16 +407,16 @@ async def test_tts_job_handler_materializes_voiceover_transcript_and_cut_plan(
     assert result.result_json["cut_plan_slot_count"] == 2
     assert gateway.capabilities == [TTS_SPEECH, ASR_TRANSCRIBE]
     with engine.connect() as connection:
-        case_row = CasesRepository(connection).get("case_1")
+        draft_row = DraftsRepository(connection).get("draft_1")
         transcript_row = TranscriptsRepository(connection).get("tr_job_1_tts")
-    assert case_row is not None
+    assert draft_row is not None
     assert transcript_row is not None
-    assert case_row["audio_plan"]["voiceover_asset_id"] == "asset_job_1_tts"
-    assert case_row["audio_plan"]["transcript_id"] == "tr_job_1_tts"
-    assert case_row["cut_plan"]["slots"][0]["slot_id"] == "hook"
-    assert case_row["cut_plan"]["slots"][0]["narration_ref"]["text"] == "你好世界"
-    assert case_row["cut_plan"]["slots"][1]["narration_ref"]["transcript_id"] == "tr_job_1_tts"
-    assert case_row["cut_plan"]["total_target_duration_sec"] == 1.4
+    assert draft_row["audio_plan"]["voiceover_asset_id"] == "asset_job_1_tts"
+    assert draft_row["audio_plan"]["transcript_id"] == "tr_job_1_tts"
+    assert draft_row["cut_plan"]["slots"][0]["slot_id"] == "hook"
+    assert draft_row["cut_plan"]["slots"][0]["narration_ref"]["text"] == "你好世界"
+    assert draft_row["cut_plan"]["slots"][1]["narration_ref"]["transcript_id"] == "tr_job_1_tts"
+    assert draft_row["cut_plan"]["total_target_duration_sec"] == 1.4
     assert transcript_row["asset_id"] == "asset_job_1_tts"
 
 
@@ -494,23 +494,13 @@ def _engine_with_asset(
     engine = create_workspace_engine(tmp_path)
     with engine.begin() as connection:
         schema.create_all(connection)
-        connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
-                status="active",
-                defaults="{}",
-                created_at=NOW,
-                updated_at=NOW,
-            )
-        )
-        CasesRepository(connection).insert(
+        DraftsRepository(connection).insert(
             {
-                "case_id": "case_1",
-                "project_id": "project_1",
-                "name": "Case",
+                "draft_id": "draft_1",
+                "name": "Draft",
                 "state_version": 0,
                 "status": "active",
+                "defaults": {"aspect_ratio": "9:16", "fps": 30},
                 "pending_decision_id": None,
                 "running_jobs": [],
                 "last_error": None,
@@ -526,9 +516,9 @@ def _engine_with_asset(
                 "rough_cut_approved_version": None,
                 "postprocess_plan": None,
                 "export_current_id": None,
-                "selected_asset_ids": [],
-                "disabled_asset_ids": [],
                 "scratch_memory": {},
+                "created_at": NOW,
+                "updated_at": NOW,
             }
         )
         connection.execute(
@@ -551,10 +541,9 @@ def _engine_with_asset(
             )
         )
         connection.execute(
-            schema.project_asset_links.insert().values(
-                project_id="project_1",
+            schema.draft_asset_links.insert().values(
+                draft_id="draft_1",
                 asset_id="asset_1",
-                enabled=True,
                 linked_at=NOW,
                 note="",
             )
@@ -567,9 +556,8 @@ def _job(**overrides: Any) -> Job:
         "job_id": "job_1",
         "kind": "asr",
         "status": "running",
-        "project_id": "project_1",
-        "case_id": "case_1",
-        "requested_by_case_id": "case_1",
+        "draft_id": "draft_1",
+        "requested_by_draft_id": "draft_1",
         "asset_id": None,
         "idempotency_key": "idem",
         "payload_json": {
@@ -788,12 +776,12 @@ async def test_align_job_handler_materializes_alignment_and_cut_plan(tmp_path: P
 
     assert result.result_json["transcript_id"] == "tr_job_1_align"
     with engine.connect() as connection:
-        case_row = CasesRepository(connection).get("case_1")
+        draft_row = DraftsRepository(connection).get("draft_1")
         transcript_row = TranscriptsRepository(connection).get("tr_job_1_align")
-    assert case_row is not None and transcript_row is not None
-    assert case_row["audio_plan"]["mode"] == "uploaded_voiceover"
-    assert case_row["cut_plan"] is not None
-    assert len(case_row["cut_plan"]["slots"]) >= 1
-    slot0 = case_row["cut_plan"]["slots"][0]
+    assert draft_row is not None and transcript_row is not None
+    assert draft_row["audio_plan"]["mode"] == "uploaded_voiceover"
+    assert draft_row["cut_plan"] is not None
+    assert len(draft_row["cut_plan"]["slots"]) >= 1
+    slot0 = draft_row["cut_plan"]["slots"][0]
     assert slot0["narration_ref"]["utterance_ids"]
     assert "alignment_confidence" in slot0["narration_ref"]

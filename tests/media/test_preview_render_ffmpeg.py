@@ -88,8 +88,8 @@ def _ffprobe(path: Path) -> dict[str, object]:
 def _timeline() -> TimelineState:
     return TimelineState.model_validate(
         {
-            "timeline_id": "case_1:v1",
-            "case_id": "case_1",
+            "timeline_id": "draft_1:v1",
+            "draft_id": "draft_1",
             "version": 1,
             "fps": 30,
             "duration_frames": 60,
@@ -143,8 +143,8 @@ async def test_preview_mixes_voiceover_and_bgm_tracks(tmp_path: Path) -> None:
 
     timeline = TimelineState.model_validate(
         {
-            "timeline_id": "case_1:v2",
-            "case_id": "case_1",
+            "timeline_id": "draft_1:v2",
+            "draft_id": "draft_1",
             "version": 2,
             "fps": 30,
             "duration_frames": 60,

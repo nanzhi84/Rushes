@@ -181,7 +181,9 @@ def _load_draft_state(engine: Engine, job: Job) -> DraftState:
             error_code="render_draft_not_found",
             retryable=False,
         )
-    return DraftState.model_validate(row)
+    # drafts 行多带 created_at/updated_at 两列，DraftState extra="forbid" 会拒，validate 前先剔除。
+    data = {key: value for key, value in row.items() if key not in ("created_at", "updated_at")}
+    return DraftState.model_validate(data)
 
 
 def _payload_draft_id(payload: Mapping[str, Any]) -> str | None:

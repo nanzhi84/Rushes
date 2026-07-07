@@ -536,6 +536,9 @@ def _job_draft_state(engine: Engine, job: Job) -> DraftState:
         raw = values.get(key)
         if isinstance(raw, str):
             values[key] = load_json(raw)
+    # drafts 行多带 created_at/updated_at 两列，DraftState extra="forbid" 会拒，validate 前先剔除。
+    values.pop("created_at", None)
+    values.pop("updated_at", None)
     return DraftState.model_validate(values)
 
 

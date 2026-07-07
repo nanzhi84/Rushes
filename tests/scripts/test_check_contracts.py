@@ -24,9 +24,10 @@ def test_event_and_tool_contract_reports_are_clean() -> None:
     event_report = check_contracts.check_event_consistency()
     tool_report = check_contracts.check_tool_registry()
 
-    assert event_report["event_count"] == 51
+    assert event_report["event_count"] == 44
     assert event_report["missing_metadata"] == []
     assert event_report["missing_in_reducer"] == []
     assert event_report["extra_in_reducer"] == []
     assert tool_report["errors"] == []
+    assert len(tool_report["tool_rows"]) == 31
     assert len(tool_report["patch_ops"]) == 12

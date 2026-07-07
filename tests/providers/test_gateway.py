@@ -30,7 +30,7 @@ class StorageRecorder:
                     "provider_id": record.provider_id,
                     "capability": record.capability,
                     "model": record.model,
-                    "case_id": record.case_id,
+                    "draft_id": record.draft_id,
                     "job_id": record.job_id,
                     "latency_ms": record.latency_ms,
                     "usage_json": record.usage_json,
@@ -40,33 +40,23 @@ class StorageRecorder:
             )
 
 
-def _seed_project_and_case(engine: Engine) -> None:
+def _seed_draft(engine: Engine) -> None:
     now = "2026-07-04T00:00:00+00:00"
     with begin_immediate(engine) as connection:
         connection.execute(
-            schema.projects.insert().values(
-                project_id="project_1",
-                name="Project",
-                status="active",
-                defaults=json.dumps({"aspect_ratio": "9:16", "fps": 30}),
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        connection.execute(
-            schema.cases.insert().values(
-                case_id="case_1",
-                project_id="project_1",
-                name="Case",
+            schema.drafts.insert().values(
+                draft_id="draft_1",
+                name="Draft",
                 state_version=0,
                 status="active",
+                defaults=json.dumps({"aspect_ratio": "9:16", "fps": 30}),
                 timeline_validated=False,
                 rough_cut_approved=False,
                 running_jobs=json.dumps([]),
                 brief=json.dumps({"goal": "test", "confirmed_facts": []}),
-                selected_asset_ids=json.dumps([]),
-                disabled_asset_ids=json.dumps([]),
                 scratch_memory=json.dumps({}),
+                created_at=now,
+                updated_at=now,
             )
         )
 
@@ -93,7 +83,7 @@ async def test_gateway_selects_by_priority_and_records_provider_call(tmp_path: P
     gateway = ProviderGateway(registry=registry, recorder=StorageRecorder(tmp_path))
 
     result = await gateway.call(
-        ProviderRequest(capability=LLM_CHAT, case_id=None, payload={"message": "hi"})
+        ProviderRequest(capability=LLM_CHAT, draft_id=None, payload={"message": "hi"})
     )
 
     assert result.result.provider_id == "fast"
@@ -107,7 +97,7 @@ async def test_gateway_fallback_emits_capability_degraded_and_records_both_calls
     engine = create_workspace_engine(tmp_path)
     with engine.begin() as connection:
         schema.create_all(connection)
-    _seed_project_and_case(engine)
+    _seed_draft(engine)
     registry = ProviderRegistry()
     registry.register(
         _descriptor("primary", priority=1, fallback_provider_ids=["fallback"]),
@@ -135,7 +125,7 @@ async def test_gateway_fallback_emits_capability_degraded_and_records_both_calls
     )
     gateway = ProviderGateway(registry=registry, recorder=StorageRecorder(tmp_path))
 
-    result = await gateway.call(ProviderRequest(capability=LLM_CHAT, case_id="case_1"))
+    result = await gateway.call(ProviderRequest(capability=LLM_CHAT, draft_id="draft_1"))
     calls = _provider_calls(tmp_path)
 
     assert result.result.provider_id == "fallback"
@@ -158,7 +148,7 @@ async def test_streaming_failover_streams_primary_partial_then_replays_fallback_
     engine = create_workspace_engine(tmp_path)
     with engine.begin() as connection:
         schema.create_all(connection)
-    _seed_project_and_case(engine)
+    _seed_draft(engine)
     registry = ProviderRegistry()
     registry.register(
         _descriptor("primary", priority=1, fallback_provider_ids=["fallback"]),
@@ -189,7 +179,7 @@ async def test_streaming_failover_streams_primary_partial_then_replays_fallback_
     chunks: list[dict[str, object]] = []
 
     result = await gateway.call(
-        ProviderRequest(capability=LLM_CHAT, case_id="case_1"),
+        ProviderRequest(capability=LLM_CHAT, draft_id="draft_1"),
         on_delta=chunks.append,
     )
 

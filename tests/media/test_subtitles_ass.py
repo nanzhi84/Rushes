@@ -311,8 +311,8 @@ def _subtitle_payload(
 def _timeline(subtitles: list[dict[str, object]] | None = None) -> TimelineState:
     return TimelineState.model_validate(
         {
-            "timeline_id": "case_1:v1",
-            "case_id": "case_1",
+            "timeline_id": "draft_1:v1",
+            "draft_id": "draft_1",
             "version": 1,
             "fps": 30,
             "duration_frames": 60,
