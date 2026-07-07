@@ -1240,9 +1240,7 @@ def test_fs_pick_returns_native_paths(tmp_path: Path, monkeypatch: pytest.Monkey
     app = _app(tmp_path)
     client = _client(app)
     monkeypatch.setattr(api_main, "_native_picker_available", lambda: True)
-    monkeypatch.setattr(
-        api_main, "_run_native_picker", lambda mode: [f"/tmp/{mode}/clip.mp4"]
-    )
+    monkeypatch.setattr(api_main, "_run_native_picker", lambda mode: [f"/tmp/{mode}/clip.mp4"])
 
     response = client.post("/api/fs/pick", headers=AUTH, json={"mode": "files"})
 
