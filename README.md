@@ -95,7 +95,7 @@ cd apps/web && pnpm typecheck && pnpm test -- --run # 前端
 cd e2e && pnpm exec playwright test                 # 端到端
 ```
 
-完整设计文档见 [`chat_first_editing_agent_prd_v1_2.md`](./chat_first_editing_agent_prd_v1_2.md)，端到端演示脚本见 [`scripts/e2e_paths/`](./scripts/e2e_paths/README.md)。
+完整设计文档见 [`PRD.md`](./PRD.md)，端到端演示脚本见 [`scripts/e2e_paths/`](./scripts/e2e_paths/README.md)。
 
 ---
 

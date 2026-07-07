@@ -195,7 +195,7 @@ class TurnStreamHub:
 ### Task 8: PRD 修订 + Playwright 流式用例 + 全量收口
 
 **Files:**
-- Modify: `chat_first_editing_agent_prd_v1_2.md`（spec「PRD 修订清单」五条：§4.1/§4.2 planner 输出语义、§6.11 删三内建、§4.4 特判描述、§2.4/§2.6 过程可见性、§7.9 messages.kind）
+- Modify: `PRD.md`（spec「PRD 修订清单」五条：§4.1/§4.2 planner 输出语义、§6.11 删三内建、§4.4 特判描述、§2.4/§2.6 过程可见性、§7.9 messages.kind）
 - Modify: `e2e/tests/`（新增或扩展用例：发消息后断言对话流出现助手文本——依赖 e2e 栈的 scripted planner 输出 content）
 - Test: 全套
 
