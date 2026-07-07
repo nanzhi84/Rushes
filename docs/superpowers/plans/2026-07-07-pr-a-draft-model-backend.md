@@ -41,17 +41,18 @@
 | `ProjectDefaults`（aspect_ratio/fps/质量） | `DraftDefaults`，字段并入 `DraftState.defaults`，`POST /drafts` 时从 workspace defaults 拷贝 |
 | `CaseState.project_id / selected_asset_ids / disabled_asset_ids` | **删字段** |
 
-**事件（50 → 43，四处清单同步：`EVENT_CLASSES`/`EventName`/`EVENT_UNION`/`REDUCER_DISPATCH_EVENTS`）**
+**事件（51 → 44，四处清单同步：`EVENT_CLASSES`/`EventName`/`EVENT_UNION`/`REDUCER_DISPATCH_EVENTS`；现状 51 含 SecurityRefusal，验收已核数）**
 
 - 删除 7：`ProjectCreated / ProjectRenamed / ProjectTrashed / ProjectCopied / CaseMoved / CaseClosed / CaseAssetScopeChanged`
 - 改名 4：`CaseCreated→DraftCreated`、`CaseRenamed→DraftRenamed`、`CaseCopied→DraftCopied`、`CaseTrashed→DraftTrashed`
 - `AssetLinked / AssetUnlinked` 按 `(draft_id, asset_id)` 定键，payload `project_id→draft_id`，`AssetLinked` 携带 `rel_dir`/`note` 不变
 - 其余事件 `case_id→draft_id`、`requested_by_case_id→requested_by_draft_id` 字面改名，strict/merge 语义一律不变
 
-**工具（47 → 32，specs+handlers+`PRECONDITION_REGISTRY` 三处配对）**
+**工具（46 → 30，specs+handlers+`PRECONDITION_REGISTRY` 三处配对；现状 46 经 `tool_specs()` 实数，旧 PRD 的 47 已漂移）**
 
 - `project.*` 8 个整族删除（目录 `packages/tools/project/` 整个删）；**不新增** draft 生命周期工具（草稿建/改名/复制/删除仅 UI/REST）
-- `asset.*` 10 → 3：保留 `asset.import_local_file`、`asset.import_url`（直挂当前草稿）；新 `asset.list_assets`（列当前草稿全部链接素材：asset_id/kind/rel_dir/usable/摘要有无，合并原 list_project_assets+list_case_scope）；删除 `link_to_project / unlink_from_project / list_project_assets / select_for_case / disable_for_case / list_case_scope / upload_complete`
+- `asset.*` 10 → 3：保留 `asset.import_local_file`、`asset.import_url`（直挂当前草稿）；新 `asset.list_assets`（列当前草稿全部链接素材：asset_id/kind/rel_dir/usable/摘要有无，合并原 list_project_assets+list_case_scope）；删除 `link_to_project / unlink_from_project / list_project_assets / select_for_case / disable_for_case / list_case_scope / upload_complete / read_summary`（read_summary 由 `understand.materials` 缓存命中路径承接——该路径已存在，cached 状态直接返回摘要，不派 VLM）
+- `memory.*` 4 → 3：删除 `memory.ask_scope`（user 单域下无存在意义）；`memory.extract_from_case` → `memory.extract_from_draft`；`memory.save` 固定 user 域不再询问 scope
 - `ToolExecutionContext`：删 `project_state`，`case_state→draft_state`
 - `ToolSpec`：`allowed_scopes` 全部收敛为 `["draft_editor"]`；`requires_active_project`/`requires_active_case` 双旗合并为 `requires_active_draft`；`side_effects` 字面量 `"project"/"case"` → `"draft"`
 - 前置条件谓词：`active_case→active_draft`；`usable_asset_exists` 判定收敛为「链接存在且引用有效」（无 enabled/disabled 维度）
@@ -102,7 +103,7 @@ class DraftListItem(BaseModel):
 **Interfaces:**
 - Produces: PRD v2.0 = 后续所有代码任务的语义权威；命名映射总表与 spec §2.3 的章节清单是改写依据。
 
-- [ ] **Step 1: 按 spec §2.3 章节清单逐节改写**。全章重写：§0 优先级#2、§1 产品心智（单级草稿叙事：首页=草稿墙、开始创作=新草稿直进编辑器）、§2/§2.1–§2.5（两条路由 `/` 与 `/drafts/:draftId`；编辑器四区：左对话/中素材/右播放器/底部全宽只读时间线；素材面板合一模式）、§3.2 ER 图（DRAFTS/DRAFT_ASSET_LINKS，无 enabled）、§3.4（Draft 规则：建/改名/复制/删除仅 UI/REST；素材不用即删）、§3.6（memory user 单域+scratch）、§4.5 事件表 43 个与 SSE 路由（draft/workspace 两域，过滤逻辑只写一份）、§4.6（删 #4/#5）、§4.9/§4.10（job 的 draft_id/requested_by_draft_id）、§5.1 DraftState、§6.1 删除（工具总数 47→32）、§6.2 asset 三工具、§7.1 删除、§13.1 REST 29 条、§13.2、§14.4、§15 目录结构、§16.1、§17（M1/M2/M8/M9 验收以草稿语义重写）、§19.1、R8（预算挂 workspace）。
+- [ ] **Step 1: 按 spec §2.3 章节清单逐节改写**。全章重写：§0 优先级#2、§1 产品心智（单级草稿叙事：首页=草稿墙、开始创作=新草稿直进编辑器）、§2/§2.1–§2.5（两条路由 `/` 与 `/drafts/:draftId`；编辑器四区：左对话/中素材/右播放器/底部全宽只读时间线；素材面板合一模式）、§3.2 ER 图（DRAFTS/DRAFT_ASSET_LINKS，无 enabled）、§3.4（Draft 规则：建/改名/复制/删除仅 UI/REST；素材不用即删）、§3.6（memory user 单域+scratch）、§4.5 事件表 44 个与 SSE 路由（draft/workspace 两域，过滤逻辑只写一份）、§4.6（删 #4/#5）、§4.9/§4.10（job 的 draft_id/requested_by_draft_id）、§5.1 DraftState、§6.1 删除（工具总数 46→30）、§6.2 asset 三工具、§7.1 删除、§13.1 REST 29 条、§13.2、§14.4、§15 目录结构、§16.1、§17（M1/M2/M8/M9 验收以草稿语义重写）、§19.1、R8（预算挂 workspace）。
 - [ ] **Step 2: 局部措辞节**按 spec §2.3「局部措辞修改」列表逐条替换挂靠对象；§13.4 只改挂靠措辞、机制一字不动但**删去分片上传 API 段落**（本 PR 裁撤）；§18「剪映草稿包」改「剪映工程文件导出」。
 - [ ] **Step 3: 自检**：`grep -n "case_id\|project_id\|Case\|Project" PRD.md` 残留仅允许出现在变更历史行；全文「草稿」一词只指 Draft 实体。
 - [ ] **Step 4: Commit** `docs：PRD v2.0 单级草稿模型改版`
@@ -115,12 +116,12 @@ class DraftListItem(BaseModel):
 - Test: `tests/contracts/`（同步改名断言；删除 project 专属测试）
 
 **Interfaces:**
-- Produces: `DraftState`（原 CaseState 字段 − project_id/selected_asset_ids/disabled_asset_ids ＋ `defaults: DraftDefaults`）；`DomainEventBase.draft_id: str | None`；43 事件注册表；`DecisionScopeType = Literal["workspace","draft"]`；`Memory.scope: Literal["user"]`。后续所有层 import 这些名字。
+- Produces: `DraftState`（原 CaseState 字段 − project_id/selected_asset_ids/disabled_asset_ids ＋ `defaults: DraftDefaults`）；`DomainEventBase.draft_id: str | None`；44 事件注册表；`DecisionScopeType = Literal["workspace","draft"]`；`Memory.scope: Literal["user"]`。后续所有层 import 这些名字。
 
-- [ ] **Step 1**: 按命名映射总表改写 contracts；`EVENT_CLASSES`/`EventName`/`EVENT_UNION` 三清单收敛 43。
+- [ ] **Step 1**: 按命名映射总表改写 contracts；`EVENT_CLASSES`/`EventName`/`EVENT_UNION` 三清单收敛 44。
 - [ ] **Step 2**: 更新 `tests/contracts/` 与 `tests/test_contracts_import.py`；删除被删事件/实体的测试。
 - [ ] **Step 3**: `uv run pytest tests/contracts tests/test_contracts_import.py -q` 绿（此时其余层预期红，不跑全量）。
-- [ ] **Step 4: Commit** `refactor：contracts 单级草稿化（事件 43/DraftState/scope 收敛）`
+- [ ] **Step 4: Commit** `refactor：contracts 单级草稿化（事件 44/DraftState/scope 收敛）`
 
 ### Task 3: storage + events 包
 
@@ -153,27 +154,27 @@ class DraftListItem(BaseModel):
 
 **Files:**
 - Delete: `packages/tools/project/`（整目录）、asset 手册中 7 个被删工具的 spec+handler、`UploadCompleteRequest` 相关
-- Modify: `packages/tools/specs.py`、`registry.py`、`context.py`（draft_state）、`packages/tools/asset/handlers.py`（import_local_file/import_url 改挂 draft + `list_assets` 新实现）、audio/content/timeline_tools/render_tools/memory_tools/understand 各包字段跟随（memory_tools 停止询问 scope，固定 user）
+- Modify: `packages/tools/specs.py`、`registry.py`、`context.py`（draft_state）、`packages/tools/asset/handlers.py`（import_local_file/import_url 改挂 draft + `list_assets` 新实现；删 read_summary，摘要读取走 understand.materials 缓存命中）、`packages/tools/memory_tools/`（删 ask_scope；extract_from_case→extract_from_draft；save 固定 user 域）、audio/content/timeline_tools/render_tools/understand 各包字段跟随
 - Test: `tests/tools/`（删除被删工具测试；`asset.list_assets` 新测试）
 
 **Interfaces:**
-- Consumes: Task 2–4。Produces: 32 个 ToolSpec（`allowed_scopes=["draft_editor"]`、`requires_active_draft`）；`asset.list_assets` 返回 `[{asset_id, kind, rel_dir, usable, has_summary}]`。
+- Consumes: Task 2–4。Produces: 30 个 ToolSpec（`allowed_scopes=["draft_editor"]`、`requires_active_draft`）；`asset.list_assets` 返回 `[{asset_id, kind, rel_dir, usable, has_summary}]`。
 
 - [ ] **Step 1**: 按总表裁撤与改名；`PRECONDITION_REGISTRY` 同步。
-- [ ] **Step 2**: `uv run pytest tests/tools -q` 绿。**Commit** `refactor：工具族收敛 47→32（project 族退场，asset 三工具）`
+- [ ] **Step 2**: `uv run pytest tests/tools -q` 绿。**Commit** `refactor：工具族收敛 46→30（project 族退场，asset 三工具）`
 
 ### Task 6: agent_harness
 
 **Files:**
-- Modify: `packages/agent_harness/reducer.py`（删 project/move/close/scope apply 约 300 行；Draft 族 apply；AssetLinked 挂 draft；`REDUCER_DISPATCH_EVENTS`=43）、`state_validator.py`（删不变量 #4/#5；引用完整性锚 draft）、`loop.py`（约 25 处：memory owner 固定 user、url 导入哈希改 draft_id、decision replay 按 draft）、`policy_gate.py`（规则 2/3/7 草稿化）及包内其余文件
+- Modify: `packages/agent_harness/reducer.py`（删 project/move/close/scope apply 约 300 行；Draft 族 apply；AssetLinked 挂 draft；`REDUCER_DISPATCH_EVENTS`=44）、`state_validator.py`（删不变量 #4/#5；引用完整性锚 draft）、`loop.py`（约 25 处：memory owner 固定 user、url 导入哈希改 draft_id、decision replay 按 draft）、`policy_gate.py`（规则 2/3/7 草稿化）及包内其余文件
 - Test: `tests/agent_harness/`、`tests/golden/`（framework.py + test_cases.py 固定序列全量改名；删除 move/close/scope 用例）
 
 **Interfaces:**
-- Consumes: Task 2–5。Produces: reducer 对 43 事件的 dispatch；strict 预检按 `drafts.state_version` 不变。
+- Consumes: Task 2–5。Produces: reducer 对 44 事件的 dispatch；strict 预检按 `drafts.state_version` 不变。
 
 - [ ] **Step 1**: reducer/state_validator/loop/policy_gate 改写。
 - [ ] **Step 2**: golden 固定轨迹重铸（事件名/字段名批量替换 + 删除死场景）。
-- [ ] **Step 3**: `uv run pytest tests/agent_harness tests/golden -q` 绿。**Commit** `refactor：agent_harness 单级草稿化（reducer 43 事件）`
+- [ ] **Step 3**: `uv run pytest tests/agent_harness tests/golden -q` 绿。**Commit** `refactor：agent_harness 单级草稿化（reducer 44 事件）`
 
 ### Task 7: apps/api
 
@@ -199,12 +200,12 @@ class DraftListItem(BaseModel):
 ### Task 9: 后端收口
 
 **Files:**
-- Modify: `scripts/check_contracts.py`（事件/工具注册表断言、允许导入表中 project 相关残留、工具总数 32）、`tests/scripts/`、`tests/apps/`；删除空壳死目录 `packages/annotation`、`packages/indexing`、`packages/tools/annotation`、`packages/tools/retrieval`（确认无 import 后）
+- Modify: `scripts/check_contracts.py`（事件/工具注册表断言：事件 44、工具 30；允许导入表中 project 相关残留清理）、`tests/scripts/`、`tests/apps/`；删除空壳死目录 `packages/annotation`、`packages/indexing`、`packages/tools/annotation`、`packages/tools/retrieval`（确认无 import 后）
 - Verify: 全量后端门禁
 
 - [ ] **Step 1**: check_contracts 与残余测试修绿；全仓 `grep -rn "case_id\|project_id" packages apps tests scripts --include="*.py"` 清零（golden 数据内允许的除外——原则上也应清零）。
 - [ ] **Step 2**: `uv run pytest -q`（覆盖率≥90）+ `uv run ruff check` + `uv run ruff format --check` + `uv run mypy` + `uv run python scripts/check_contracts.py` 全绿。
-- [ ] **Step 3: Commit** `chore：后端收口（check_contracts 对齐 43 事件/32 工具，清死目录）`
+- [ ] **Step 3: Commit** `chore：后端收口（check_contracts 对齐 44 事件/30 工具，清死目录）`
 
 ### Task 10: web 机械适配
 
