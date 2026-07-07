@@ -231,5 +231,5 @@ const TOOL_STEP_LABELS: Record<string, string> = {
   "memory.search_relevant": "检索记忆",
   "memory.save": "保存记忆",
   "memory.ask_scope": "询问记忆范围",
-  "memory.extract_from_case": "提炼记忆"
+  "memory.extract_from_draft": "提炼记忆"
 };
