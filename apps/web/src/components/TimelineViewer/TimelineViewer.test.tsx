@@ -4,7 +4,12 @@ import { TimelineViewer } from "./TimelineViewer";
 import type { TimelineJson } from "./TimelineViewer";
 
 const waveSurferMock = vi.hoisted(() => ({
-  create: vi.fn((..._args: unknown[]) => ({ destroy: vi.fn() }))
+  create: vi.fn((..._args: unknown[]) => ({
+    on: vi.fn(),
+    un: vi.fn(),
+    exportPeaks: vi.fn(() => [[]]),
+    destroy: vi.fn()
+  }))
 }));
 
 vi.mock("wavesurfer.js", () => ({
@@ -35,7 +40,7 @@ describe("TimelineViewer", () => {
     expect(rects[0]?.getAttribute("width")).toBe("60");
     expect(rects[1]?.getAttribute("x")).toBe("60");
     expect(rects[1]?.getAttribute("width")).toBe("120");
-    expect(rects[1]?.getAttribute("stroke")).toBe("var(--color-accent)");
+    expect(rects[1]?.getAttribute("stroke")).toBe("var(--color-focus-ring)");
     expect(rects[1]?.getAttribute("stroke-width")).toBe("2");
     expect(rects[2]?.getAttribute("x")).toBe("30");
     expect(rects[2]?.getAttribute("width")).toBe("60");
@@ -85,7 +90,7 @@ describe("TimelineViewer", () => {
     expect(onSeek).not.toHaveBeenCalled();
   });
 
-  it("有 waveformSrc 时创建并销毁 wavesurfer，且 minPxPerSec 与 pxPerSec 一致", () => {
+  it("有 waveformSrc 时用 wavesurfer 解码 peaks（内嵌波形数据源），卸载时销毁", () => {
     const { unmount } = render(
       <TimelineViewer
         timeline={timelineFixture()}
@@ -96,8 +101,7 @@ describe("TimelineViewer", () => {
 
     expect(waveSurferMock.create).toHaveBeenCalledTimes(1);
     expect(waveSurferMock.create.mock.calls[0]?.[0]).toMatchObject({
-      url: "/api/media/preview/prev_1",
-      minPxPerSec: 72
+      url: "/api/media/preview/prev_1"
     });
 
     const instance = waveSurferMock.create.mock.results[0]?.value;
