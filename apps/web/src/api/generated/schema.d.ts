@@ -1376,6 +1376,8 @@ export interface components {
             asset_id?: string | null;
             /** Project Id */
             project_id?: string | null;
+            /** Rel Dir */
+            rel_dir?: string | null;
         };
         /** UploadCompleteResponse */
         UploadCompleteResponse: {

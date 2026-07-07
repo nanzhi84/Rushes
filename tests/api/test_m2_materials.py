@@ -1201,3 +1201,34 @@ def test_import_local_missing_file_lands_in_failed_without_aborting_batch(
     assert any("gone.mp4" in item for item in body["failed"])
     materials = client.get("/api/projects/project_1/materials", headers=AUTH)
     assert {asset["filename"] for asset in materials.json()["assets"]} == {"raw.mp4"}
+
+
+def test_upload_complete_stores_rel_dir_for_folder_upload(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    init = client.post(
+        "/api/uploads/init",
+        headers=AUTH,
+        json={"project_id": "project_1", "filename": "clip.mp4"},
+    )
+    upload_id = init.json()["upload_id"]
+    part_headers = {**AUTH, "Content-Type": "application/octet-stream"}
+    assert (
+        client.put(
+            f"/api/uploads/{upload_id}/parts/1", headers=part_headers, content=b"clip"
+        ).status_code
+        == 200
+    )
+
+    complete = client.post(
+        f"/api/uploads/{upload_id}/complete",
+        headers=AUTH,
+        json={"rel_dir": "素材A/视频"},
+    )
+
+    assert complete.status_code == 200
+    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    asset = materials.json()["assets"][0]
+    assert asset["filename"] == "clip.mp4"
+    assert asset["rel_dir"] == "素材A/视频"

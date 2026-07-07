@@ -41,37 +41,63 @@ describe("ProjectMaterialsView", () => {
     expect(await screen.findByText("root.mp4")).toBeTruthy();
   });
 
-  it("本地导入支持勾选文件夹并批量提交 paths", async () => {
+  it("文件夹选择经分片上传携带 rel_dir", async () => {
     const fetchMock = stubFetch({ assets: [] });
     renderMaterials();
 
-    fireEvent.click(await screen.findByText("＋ 本地导入"));
-    fireEvent.click(await screen.findByText("Movies"));
-    fireEvent.click(await screen.findByLabelText("选择文件夹 raws"));
-    fireEvent.click(screen.getByText("导入所选"));
+    const input = (await screen.findByLabelText("选择素材文件夹")) as HTMLInputElement;
+    const file = new File(["clip-bytes"], "a.mp4", { type: "video/mp4" });
+    Object.defineProperty(file, "webkitRelativePath", { value: "素材A/视频/a.mp4" });
+    fireEvent.change(input, { target: { files: [file] } });
 
     await waitFor(() => {
-      const call = fetchMock.mock.calls.find(([input]) =>
-        String(input).endsWith("/materials/import-local")
+      const complete = fetchMock.mock.calls.find(([url]) =>
+        String(url).endsWith("/complete")
       );
-      expect(call).toBeTruthy();
-      expect(JSON.parse(String(call?.[1]?.body))).toEqual({
-        paths: ["/Movies/raws"],
-        storage_mode: "reference"
+      expect(complete).toBeTruthy();
+      expect(JSON.parse(String(complete?.[1]?.body))).toEqual({
+        project_id: "project_1",
+        rel_dir: "素材A/视频"
+      });
+    });
+    const init = fetchMock.mock.calls.find(([url]) => String(url) === "/api/uploads/init");
+    expect(JSON.parse(String(init?.[1]?.body))).toMatchObject({ filename: "a.mp4" });
+  });
+
+  it("Finder 多选文件走上传且散文件不带 rel_dir", async () => {
+    const fetchMock = stubFetch({ assets: [] });
+    renderMaterials();
+
+    const input = (await screen.findByLabelText("选择素材文件")) as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(["x"], "b.mov", { type: "video/quicktime" })] }
+    });
+
+    await waitFor(() => {
+      const complete = fetchMock.mock.calls.find(([url]) =>
+        String(url).endsWith("/complete")
+      );
+      expect(complete).toBeTruthy();
+      expect(JSON.parse(String(complete?.[1]?.body))).toEqual({
+        project_id: "project_1",
+        rel_dir: null
       });
     });
   });
 
-  it("导入响应含 skipped 时展示跳过提示", async () => {
-    stubFetch({ assets: [], importResponse: { skipped: ["notes.txt"], asset_ids: ["a9"] } });
+  it("不支持的扩展名在前端被跳过并提示，不发起上传", async () => {
+    const fetchMock = stubFetch({ assets: [] });
     renderMaterials();
 
-    fireEvent.click(await screen.findByText("＋ 本地导入"));
-    fireEvent.click(await screen.findByText("Movies"));
-    fireEvent.click(await screen.findByLabelText("选择文件夹 raws"));
-    fireEvent.click(screen.getByText("导入所选"));
+    const input = (await screen.findByLabelText("选择素材文件")) as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [new File(["t"], "notes.txt", { type: "text/plain" })] }
+    });
 
-    expect(await screen.findByText(/已跳过 1 个不支持的文件/)).toBeTruthy();
+    expect(await screen.findByText(/已跳过 1 个不支持的文件：notes.txt/)).toBeTruthy();
+    expect(
+      fetchMock.mock.calls.find(([url]) => String(url).includes("/api/uploads/init"))
+    ).toBeFalsy();
   });
 
   it("瓦片菜单可禁用素材", async () => {
@@ -186,6 +212,28 @@ type StubOptions = {
 function stubFetch(options: StubOptions): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url === "/api/uploads/init") {
+      return jsonResponse(
+        {
+          upload_id: "upload_1",
+          part_url_template: "/api/uploads/upload_1/parts/{part_number}",
+          complete_url: "/api/uploads/upload_1/complete"
+        },
+        201
+      );
+    }
+    if (url.includes("/uploads/upload_1/parts/")) {
+      return jsonResponse({ upload_id: "upload_1", part_number: 1, size: 5 });
+    }
+    if (url.endsWith("/uploads/upload_1/complete")) {
+      return jsonResponse({
+        upload_id: "upload_1",
+        project_id: "project_1",
+        asset_id: "asset_new",
+        event_ids: [1],
+        ...(options.importResponse ?? {})
+      });
+    }
     if (url.endsWith("/materials/import-local")) {
       return jsonResponse({
         project_id: "project_1",
