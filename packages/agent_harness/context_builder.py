@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
@@ -456,6 +457,9 @@ def _render_memory_block(
 
 MAX_ASSET_INDEX_ROWS = 50
 _OVERALL_LIMIT = 80
+_FILENAME_LIMIT = 60
+# 空白（含换行）与 C0/C1 控制字符、DEL：折叠成单空格，防止外部字符串伪造多行条目。
+_INLINE_UNSAFE_RUN = re.compile(r"[\s\x00-\x1f\x7f-\x9f]+")
 
 
 def _render_assets_block(
@@ -504,21 +508,26 @@ def _render_assets_block(
 
 def _render_asset_index_line(row: AssetDigestRow) -> str:
     duration = "时长未知" if row.duration_sec is None else f"{row.duration_sec:.1f}s"
-    parts = [
-        f"- {row.asset_id} {row.filename} [{row.kind}] {duration} 理解:{row.understanding_status}"
-    ]
+    filename = _clip_inline(row.filename, _FILENAME_LIMIT)
+    parts = [f"- {row.asset_id} {filename} [{row.kind}] {duration} 理解:{row.understanding_status}"]
     if row.semantic_role:
-        parts.append(f"role={row.semantic_role}")
+        parts.append(f"role={_fold_inline(row.semantic_role)}")
     if row.overall:
-        parts.append(_truncate_overall(row.overall))
+        parts.append(_clip_inline(row.overall, _OVERALL_LIMIT))
     return " · ".join(parts)
 
 
-def _truncate_overall(text: str, limit: int = _OVERALL_LIMIT) -> str:
-    collapsed = " ".join(text.split())
-    if len(collapsed) <= limit:
-        return collapsed
-    return collapsed[:limit] + "…"
+def _fold_inline(text: str) -> str:
+    """外部来源字符串（文件名/模型输出）折叠成安全单行：控制字符与空白连跑变单空格。"""
+
+    return _INLINE_UNSAFE_RUN.sub(" ", text).strip()
+
+
+def _clip_inline(text: str, limit: int) -> str:
+    folded = _fold_inline(text)
+    if len(folded) <= limit:
+        return folded
+    return folded[:limit] + "…"
 
 
 def _render_messages_block(
