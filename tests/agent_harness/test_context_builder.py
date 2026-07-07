@@ -192,6 +192,150 @@ def test_memory_block_renders_top_five() -> None:
     assert rendered.count("- 记忆") == 5
 
 
+def _assets_context() -> PreconditionContext:
+    return PreconditionContext(
+        case_state=_case_state(),
+        project_state=_project_state(),
+        project_artifacts=ProjectArtifactStats(usable_asset_count=2),
+    )
+
+
+def _digest_row(**overrides: object):  # type: ignore[no-untyped-def]
+    from agent_harness.context_builder import AssetDigestRow
+
+    data: dict[str, object] = {
+        "asset_id": "asset_1",
+        "filename": "clip.mp4",
+        "kind": "video",
+        "duration_sec": 12.5,
+        "understanding_status": "ready",
+    }
+    data.update(overrides)
+    return AssetDigestRow.model_validate(data)
+
+
+def test_assets_block_renders_rows_with_and_without_summary() -> None:
+    from agent_harness.context_builder import _render_assets_block
+
+    digest = [
+        _digest_row(
+            asset_id="asset_1",
+            filename="口播.mp4",
+            kind="video",
+            duration_sec=12.5,
+            understanding_status="ready",
+            semantic_role="speech_footage",
+            overall="主播正面口播介绍产品卖点",
+        ),
+        _digest_row(
+            asset_id="asset_2",
+            filename="空镜.mp4",
+            kind="video",
+            duration_sec=3.0,
+            understanding_status="none",
+            semantic_role=None,
+            overall=None,
+        ),
+    ]
+
+    rendered = _render_assets_block(_assets_context(), digest, 2000, len)
+
+    # 计数头保留
+    assert "usable_count: 2" in rendered
+    # 有摘要素材：role + overall 尾巴齐全
+    line1 = next(line for line in rendered.splitlines() if line.startswith("- asset_1"))
+    assert line1 == (
+        "- asset_1 口播.mp4 [video] 12.5s 理解:ready"
+        " · role=speech_footage · 主播正面口播介绍产品卖点"
+    )
+    # 无摘要素材：仅基础信息，行末不带 role / overall
+    line2 = next(line for line in rendered.splitlines() if line.startswith("- asset_2"))
+    assert line2 == "- asset_2 空镜.mp4 [video] 3.0s 理解:none"
+
+
+def test_assets_block_renders_unknown_duration() -> None:
+    from agent_harness.context_builder import _render_assets_block
+
+    digest = [_digest_row(asset_id="asset_1", duration_sec=None)]
+    rendered = _render_assets_block(_assets_context(), digest, 2000, len)
+
+    line = next(line for line in rendered.splitlines() if line.startswith("- asset_1"))
+    assert "时长未知" in line
+
+
+def test_assets_block_truncates_overall_to_eighty_chars() -> None:
+    from agent_harness.context_builder import _render_assets_block
+
+    long_overall = "描述" * 60  # 120 个字符，超过 80 上限
+    digest = [_digest_row(semantic_role="footage", overall=long_overall)]
+
+    rendered = _render_assets_block(_assets_context(), digest, 4000, len)
+
+    line = next(line for line in rendered.splitlines() if line.startswith("- asset_1"))
+    overall_part = line.split(" · ")[-1]
+    assert overall_part.endswith("…")
+    assert len(overall_part) == 81  # 80 字 + 省略号
+
+
+def test_assets_block_caps_at_fifty_rows_with_tail() -> None:
+    from agent_harness.context_builder import _render_assets_block
+
+    digest = [
+        _digest_row(asset_id=f"asset_{i:02d}", semantic_role=None, overall=None) for i in range(51)
+    ]
+
+    rendered = _render_assets_block(_assets_context(), digest, 1_000_000, len)
+
+    index_lines = [line for line in rendered.splitlines() if line.startswith("- asset_")]
+    assert len(index_lines) == 50
+    assert "另有 1 个素材" in rendered
+
+
+def test_assets_block_shows_each_understanding_status() -> None:
+    from agent_harness.context_builder import _render_assets_block
+
+    statuses = ["none", "running", "ready", "failed"]
+    digest = [
+        _digest_row(
+            asset_id=f"a_{status}", understanding_status=status, semantic_role=None, overall=None
+        )
+        for status in statuses
+    ]
+
+    rendered = _render_assets_block(_assets_context(), digest, 4000, len)
+
+    for status in statuses:
+        assert f"理解:{status}" in rendered
+
+
+def test_assets_block_budget_truncation_drops_rows_with_tail() -> None:
+    from agent_harness.context_builder import _render_assets_block
+
+    digest = [
+        _digest_row(asset_id=f"asset_{i:02d}", semantic_role=None, overall=None) for i in range(20)
+    ]
+
+    full = _render_assets_block(_assets_context(), digest, 1_000_000, len)
+    trimmed = _render_assets_block(_assets_context(), digest, 400, len)
+
+    full_lines = [line for line in full.splitlines() if line.startswith("- asset_")]
+    trimmed_lines = [line for line in trimmed.splitlines() if line.startswith("- asset_")]
+    assert len(full_lines) == 20
+    assert 0 < len(trimmed_lines) < 20
+    assert "另有" in trimmed
+    # 计数头永远保留，哪怕预算很紧
+    assert "usable_count: 2" in trimmed
+
+
+def test_assets_block_empty_digest_keeps_header() -> None:
+    from agent_harness.context_builder import _render_assets_block
+
+    rendered = _render_assets_block(_assets_context(), [], 2000, len)
+
+    assert "usable_count: 2" in rendered
+    assert not any(line.startswith("- ") for line in rendered.splitlines())
+
+
 def test_workspace_and_case_blocks_handle_missing_state() -> None:
     from agent_harness.context_builder import (
         ContextBuildInput,

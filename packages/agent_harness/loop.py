@@ -45,7 +45,13 @@ from storage.repositories._json import load_json
 from tools import PATCH_OP_REGISTRY, ToolExecutionContext, ToolRegistry, build_default_tool_registry
 from tools.memory_tools import search_relevant_memories
 
-from .context_builder import ContextBuilder, ContextBuildInput, ContextBundle, ContextMessage
+from .context_builder import (
+    AssetDigestRow,
+    ContextBuilder,
+    ContextBuildInput,
+    ContextBundle,
+    ContextMessage,
+)
 from .decision_answering import DecisionAnswerResolver
 from .policy_gate import PolicyContext, PolicyGate, ToolCall, Verdict, mark_replayed, next_replay
 from .reducer import ReducerApplyResult, apply
@@ -292,6 +298,7 @@ class _LoadedState:
     messages: tuple[ContextMessage, ...]
     timeline: TimelineState | None
     memory_summaries: tuple[str, ...]
+    asset_digest: tuple[AssetDigestRow, ...]
 
 
 @dataclass(slots=True)
@@ -859,6 +866,7 @@ def _build_context(
             messages=loaded.messages,
             memory_summaries=loaded.memory_summaries,
             turn_observations=turn_observations,
+            asset_digest=loaded.asset_digest,
         )
     )
 
@@ -1097,6 +1105,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
         )
         timeline = _load_timeline(connection, case_state)
         memory_summaries = _load_memory_summaries(connection, case_state)
+        asset_digest = _load_asset_digest(connection, case_state)
     return _LoadedState(
         case_state=case_state,
         project_state=project_state,
@@ -1107,6 +1116,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
         messages=messages,
         timeline=timeline,
         memory_summaries=memory_summaries,
+        asset_digest=asset_digest,
     )
 
 
@@ -1210,6 +1220,85 @@ def _asset_has_audio(asset: Mapping[str, Any]) -> bool:
         return False
     probe = load_json(raw_probe)
     return isinstance(probe, Mapping) and probe.get("has_audio") is True
+
+
+def _load_asset_digest(
+    connection: Connection,
+    case_state: CaseState,
+) -> tuple[AssetDigestRow, ...]:
+    """逐素材摘要索引：join 已启用链接的 assets + 各自 latest_ready 摘要。
+
+    planner 靠这份索引看懂素材内容（Spec C §C3）。排除 case 级 disabled 与
+    link 级 disabled 素材；缺 ready 摘要的素材只带基础事实、不带 role/overall。
+    """
+
+    disabled = set(case_state.disabled_asset_ids)
+    rows = connection.execute(
+        select(
+            schema.assets.c.asset_id,
+            schema.assets.c.filename,
+            schema.assets.c.kind,
+            schema.assets.c.probe,
+            schema.assets.c.understanding_status,
+        )
+        .select_from(
+            schema.assets.join(
+                schema.project_asset_links,
+                schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+            )
+        )
+        .where(schema.project_asset_links.c.project_id == case_state.project_id)
+        .where(schema.project_asset_links.c.enabled.is_(True))
+        .order_by(schema.assets.c.asset_id)
+    ).all()
+    values_list = [
+        dict(row._mapping) for row in rows if str(row._mapping["asset_id"]) not in disabled
+    ]
+    asset_ids = [str(values["asset_id"]) for values in values_list]
+    summaries = MaterialSummariesRepository(connection).list_latest_for_assets(asset_ids)
+    digest: list[AssetDigestRow] = []
+    for values in values_list:
+        asset_id = str(values["asset_id"])
+        semantic_role, overall = _summary_role_and_overall(summaries.get(asset_id))
+        digest.append(
+            AssetDigestRow(
+                asset_id=asset_id,
+                filename=str(values.get("filename") or ""),
+                kind=str(values["kind"]),
+                duration_sec=_probe_duration_sec(values.get("probe")),
+                understanding_status=str(values.get("understanding_status") or "none"),
+                semantic_role=semantic_role,
+                overall=overall,
+            )
+        )
+    return tuple(digest)
+
+
+def _summary_role_and_overall(
+    summary: Mapping[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    if summary is None:
+        return None, None
+    summary_json = summary.get("summary_json")
+    if not isinstance(summary_json, Mapping):
+        return None, None
+    role = summary_json.get("semantic_role")
+    overall = summary_json.get("overall")
+    return (
+        str(role) if role else None,
+        str(overall) if overall else None,
+    )
+
+
+def _probe_duration_sec(raw_probe: Any) -> float | None:
+    if not isinstance(raw_probe, str) or not raw_probe:
+        return None
+    probe = load_json(raw_probe)
+    if isinstance(probe, Mapping):
+        value = probe.get("duration_sec")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
 
 
 def _load_decisions(connection: Connection) -> tuple[Decision, ...]:

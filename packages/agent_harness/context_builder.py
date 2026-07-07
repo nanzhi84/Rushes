@@ -37,7 +37,7 @@ DEFAULT_BLOCK_BUDGETS: dict[str, int] = {
     "artifacts": 6000,
     "pending_decision": 1000,
     "memory": 1500,
-    "assets": 1000,
+    "assets": 2000,
     "messages": 8000,
     "turn_observations": 2500,
     "allowed_tools": 4000,
@@ -56,6 +56,20 @@ class ContextMessage(BaseModel):
     case_id: str | None = None
 
 
+class AssetDigestRow(BaseModel):
+    """单条素材摘要索引行：join assets 基础事实 + latest_ready 摘要（Spec C §C3）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    filename: str
+    kind: str
+    duration_sec: float | None = None
+    understanding_status: str = "none"
+    semantic_role: str | None = None
+    overall: str | None = None
+
+
 class ContextBuildInput(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
@@ -69,6 +83,7 @@ class ContextBuildInput(BaseModel):
     rolling_summary: str | None = None
     current_action: str | None = None
     allowed_tools: tuple[ToolSpec, ...] = Field(default_factory=tuple)
+    asset_digest: tuple[AssetDigestRow, ...] = Field(default_factory=tuple)
 
 
 class ContextBundle(BaseModel):
@@ -118,7 +133,12 @@ class ContextBuilder:
                 self._budgets["memory"],
                 self._counter,
             ),
-            "assets": _render_assets_block(context.preconditions),
+            "assets": _render_assets_block(
+                context.preconditions,
+                context.asset_digest,
+                self._budgets["assets"],
+                self._counter,
+            ),
             "messages": _render_messages_block(
                 context.messages,
                 context.rolling_summary,
@@ -434,23 +454,71 @@ def _render_memory_block(
     return _fit_lines(lines, budget, counter)
 
 
-def _render_assets_block(context: PreconditionContext) -> str:
+MAX_ASSET_INDEX_ROWS = 50
+_OVERALL_LIMIT = 80
+
+
+def _render_assets_block(
+    context: PreconditionContext,
+    digest: Sequence[AssetDigestRow],
+    budget: int,
+    counter: TokenCounter,
+) -> str:
     stats = context.project_artifacts
     case_state = context.case_state
     selected = case_state.selected_asset_ids if case_state is not None else []
     disabled = case_state.disabled_asset_ids if case_state is not None else []
-    return "\n".join(
-        (
-            "assets:",
-            f"usable_count: {stats.usable_asset_count or len(stats.usable_asset_ids)}",
-            f"with_audio_count: {len(stats.asset_ids_with_audio)}",
-            f"transcript_assets: {', '.join(sorted(stats.transcript_asset_ids)) or 'none'}",
-            "transcript_with_vad_assets: "
-            f"{', '.join(sorted(stats.transcript_with_vad_asset_ids)) or 'none'}",
-            f"selected_asset_ids: {', '.join(selected) or 'none'}",
-            f"disabled_asset_ids: {', '.join(disabled) or 'none'}",
-        )
-    )
+    header_lines = [
+        "assets:",
+        f"usable_count: {stats.usable_asset_count or len(stats.usable_asset_ids)}",
+        f"with_audio_count: {len(stats.asset_ids_with_audio)}",
+        f"transcript_assets: {', '.join(sorted(stats.transcript_asset_ids)) or 'none'}",
+        "transcript_with_vad_assets: "
+        f"{', '.join(sorted(stats.transcript_with_vad_asset_ids)) or 'none'}",
+        f"selected_asset_ids: {', '.join(selected) or 'none'}",
+        f"disabled_asset_ids: {', '.join(disabled) or 'none'}",
+    ]
+    total = len(digest)
+    if total == 0:
+        return "\n".join(header_lines)
+
+    index_header = f"index (共 {total} 个素材):"
+    index_lines = [_render_asset_index_line(row) for row in digest]
+    cap = min(total, MAX_ASSET_INDEX_ROWS)
+    shown = 0
+    # 逐行贪心，行数上限 50 与预算双重约束，超出尾行「另有 N 个素材」。
+    while shown < cap:
+        omitted = total - (shown + 1)
+        tail = [f"另有 {omitted} 个素材"] if omitted > 0 else []
+        candidate = "\n".join((*header_lines, index_header, *index_lines[: shown + 1], *tail))
+        if counter(candidate) > budget:
+            break
+        shown += 1
+
+    omitted = total - shown
+    lines = [*header_lines, index_header, *index_lines[:shown]]
+    if omitted > 0:
+        lines.append(f"另有 {omitted} 个素材")
+    return "\n".join(lines)
+
+
+def _render_asset_index_line(row: AssetDigestRow) -> str:
+    duration = "时长未知" if row.duration_sec is None else f"{row.duration_sec:.1f}s"
+    parts = [
+        f"- {row.asset_id} {row.filename} [{row.kind}] {duration} 理解:{row.understanding_status}"
+    ]
+    if row.semantic_role:
+        parts.append(f"role={row.semantic_role}")
+    if row.overall:
+        parts.append(_truncate_overall(row.overall))
+    return " · ".join(parts)
+
+
+def _truncate_overall(text: str, limit: int = _OVERALL_LIMIT) -> str:
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[:limit] + "…"
 
 
 def _render_messages_block(
