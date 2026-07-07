@@ -24,7 +24,7 @@ def test_event_and_tool_contract_reports_are_clean() -> None:
     event_report = check_contracts.check_event_consistency()
     tool_report = check_contracts.check_tool_registry()
 
-    assert event_report["event_count"] == 54
+    assert event_report["event_count"] == 51
     assert event_report["missing_metadata"] == []
     assert event_report["missing_in_reducer"] == []
     assert event_report["extra_in_reducer"] == []

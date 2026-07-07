@@ -74,7 +74,6 @@ from storage.workspace_paths import WorkspacePaths
 from timeline import get_timeline_version
 from timeline.summary import render_timeline_summary
 from tools import ToolExecutionContext
-from tools.annotation import retry as annotation_retry
 from tools.asset import (
     disable_for_case as asset_disable_for_case,
 )
@@ -94,7 +93,6 @@ from tools.asset import (
     upload_complete as asset_upload_complete,
 )
 from tools.specs import (
-    AnnotationRetryInput,
     AssetDisableForCaseInput,
     AssetImportLocalFileInput,
     AssetLinkInput,
@@ -744,32 +742,6 @@ def _register_routes(app: FastAPI) -> None:
             _ensure_applied(result)
             event_ids.extend(_event_ids(result))
         return {"project_id": project_id, "asset_id": asset_id, "event_ids": event_ids}
-
-    @app.post(
-        "/api/projects/{project_id}/materials/{asset_id}/retry-annotation",
-        response_model=api_schemas.MaterialMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def retry_material_annotation(
-        project_id: str,
-        asset_id: str,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_project_asset(state.engine, project_id, asset_id)
-        result = _run_asset_tool(
-            state,
-            tool_name="annotation.retry",
-            handler=annotation_retry,
-            input_model=AnnotationRetryInput(project_id=project_id, asset_id=asset_id),
-            actor="user",
-        )
-        return {
-            "project_id": project_id,
-            "asset_id": asset_id,
-            "job_id": result.data.get("job_id"),
-            "event_ids": result.data["event_ids"],
-        }
 
     @app.patch(
         "/api/projects/{project_id}",
@@ -1901,9 +1873,6 @@ def _material_asset_payload(values: dict[str, Any], jobs: list[dict[str, Any]]) 
         "size": int(values["size"]),
         "mtime": values["mtime"],
         "ingest_status": values["ingest_status"],
-        "annotation_status": values["annotation_status"],
-        "annotation_pass": values["annotation_pass"],
-        "index_status": values["index_status"],
         "understanding_status": values.get("understanding_status") or "none",
         "usable": usable,
         "enabled": bool(values["link_enabled"]),
@@ -2059,9 +2028,6 @@ def _reference_relocated_event(
             "mtime": stat.st_mtime_ns,
             "size": stat.st_size,
             "ingest_status": "imported",
-            "annotation_status": "pending",
-            "annotation_pass": "none",
-            "index_status": "none",
             "usable": True,
             "failure": None,
         },

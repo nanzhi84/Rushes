@@ -46,6 +46,8 @@ cases = Table(
     Column("content_plan", Text, nullable=True),
     Column("audio_plan", Text, nullable=True),
     Column("cut_plan", Text, nullable=True),
+    # Retained for the timeline candidate materializer (Task 7); the offline
+    # retrieval write-path that populated candidate packs is removed.
     Column(
         "candidate_pack_id",
         Text,
@@ -81,9 +83,6 @@ assets = Table(
     Column("probe", Text, nullable=True),
     Column("proxy_object_hash", Text, ForeignKey("objects.hash"), nullable=True),
     Column("ingest_status", Text, nullable=False),
-    Column("annotation_status", Text, nullable=False),
-    Column("annotation_pass", Text, nullable=False),
-    Column("index_status", Text, nullable=False),
     Column("usable", Boolean, nullable=False),
     Column("failure", Text, nullable=True),
     # Spec C：便宜本地索引与 agentic 理解的冗余展示列（纯加法）。
@@ -102,6 +101,10 @@ project_asset_links = Table(
     Column("note", Text, nullable=False),
 )
 
+# NOTE(Task 7): annotations/annotation_clip_projection/candidate_packs are retained
+# only because the timeline candidate materializer (packages/timeline) still reads
+# them. The offline annotation/retrieval write-path that filled them is gone, so
+# they stay empty until Task 7 reworks timeline candidate materialization.
 annotations_table = Table(
     "annotations",
     metadata,
@@ -128,18 +131,6 @@ annotation_clip_projection = Table(
     Column("quality_score", Float, nullable=True),
     Column("usable", Boolean, nullable=False),
     Column("embedding", LargeBinary, nullable=True),
-)
-
-annotation_signal_projection = Table(
-    "annotation_signal_projection",
-    metadata,
-    Column("signal_id", Text, primary_key=True),
-    Column("clip_id", Text, ForeignKey("annotation_clip_projection.clip_id"), nullable=False),
-    Column("namespace", Text, nullable=False),
-    Column("field", Text, nullable=False),
-    Column("value_text", Text, nullable=True),
-    Column("value_number", Float, nullable=True),
-    Column("confidence", Float, nullable=True),
 )
 
 transcripts = Table(
@@ -369,7 +360,6 @@ ALL_TABLE_NAMES: tuple[str, ...] = (
     "project_asset_links",
     "annotations",
     "annotation_clip_projection",
-    "annotation_signal_projection",
     "transcripts",
     "material_summaries",
     "decisions",
@@ -387,25 +377,12 @@ ALL_TABLE_NAMES: tuple[str, ...] = (
     "objects",
 )
 
-FTS_TABLE_NAME = "clip_fts"
-CREATE_CLIP_FTS_SQL = (
-    "CREATE VIRTUAL TABLE IF NOT EXISTS clip_fts "
-    "USING fts5(clip_id, summary, keywords, retrieval_sentence, ocr_text)"
-)
-DROP_CLIP_FTS_SQL = "DROP TABLE IF EXISTS clip_fts"
-
 
 def create_all(connection: Connection) -> None:
     metadata.create_all(connection)
-    create_fts(connection)
-
-
-def create_fts(connection: Connection) -> None:
-    connection.exec_driver_sql(CREATE_CLIP_FTS_SQL)
 
 
 def drop_all(connection: Connection) -> None:
-    connection.exec_driver_sql(DROP_CLIP_FTS_SQL)
     metadata.drop_all(connection)
 
 

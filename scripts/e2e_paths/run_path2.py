@@ -149,7 +149,6 @@ def run_workflow(
             asset_id=asset_id,
             path=fixture_dir / filename,
         )
-        client.retry_material_annotation(project_id=project_id, asset_id=asset_id)
         imported_asset_ids.append(asset_id)
     image_asset_id = unique_id("asset_product_image")
     client.import_local_material(
@@ -157,7 +156,6 @@ def run_workflow(
         asset_id=image_asset_id,
         path=fixture_dir / IMAGE_FILENAME,
     )
-    client.retry_material_annotation(project_id=project_id, asset_id=image_asset_id)
     imported_asset_ids.append(image_asset_id)
 
     client.create_case(
@@ -196,7 +194,7 @@ def run_workflow(
         lambda state: (
             _timeline_version(state) is not None
             and _string_field(state, "preview_current_id") is not None
-            and (_audio_mode(state) == "tts" or state.get("candidate_pack_id") is not None)
+            and _audio_mode(state) == "tts"
         ),
         timeout_s=llm_timeout + job_timeout + render_timeout,
         idle_nudge="继续完成 TTS、检索、timeline 和预览渲染。",

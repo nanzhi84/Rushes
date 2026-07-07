@@ -132,6 +132,8 @@ class CaseState(BaseModel):
     content_plan: dict[str, Any] | None = None
     audio_plan: AudioPlan | None = None
     cut_plan: CutPlan | None = None
+    # Retained for the timeline candidate materializer (patch_apply/materializer);
+    # the offline retrieval write-path that populated it is removed. See Task 7.
     candidate_pack_id: str | None = None
     timeline_current_version: int | None = None
     timeline_validated: bool = False

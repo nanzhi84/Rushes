@@ -109,8 +109,7 @@ def _run(
             path=path,
         )
         imported.append(asset_id)
-        client.retry_material_annotation(project_id=project_id, asset_id=asset_id)
-        stage_log(f"已导入素材并触发标注 {index}/{len(footage)}：{path.name}")
+        stage_log(f"已导入素材 {index}/{len(footage)}：{path.name}")
     if bgm_path is not None:
         bgm_asset_id = unique_id("asset_bgm")
         client.import_local_material(

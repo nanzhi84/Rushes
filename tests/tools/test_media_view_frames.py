@@ -278,7 +278,6 @@ def _engine(
                 content_plan=None,
                 audio_plan=None,
                 cut_plan=None,
-                candidate_pack_id=None,
                 timeline_current_version=timeline_current_version,
                 timeline_validated=False,
                 preview_current_id=None,
@@ -308,9 +307,6 @@ def _engine(
                     probe=None,
                     proxy_object_hash=None,
                     ingest_status="imported",
-                    annotation_status="pending",
-                    annotation_pass="none",
-                    index_status="none",
                     usable=True,
                     failure=None,
                 )

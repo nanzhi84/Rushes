@@ -247,8 +247,6 @@ const MATERIAL_EVENT_TYPES = [
   "AssetImported",
   "AssetProbed",
   "ProxyGenerated",
-  "AnnotationCompleted",
-  "AnnotationFailed",
   "AssetInvalidated",
   "AssetLinked",
   "AssetUnlinked",

@@ -199,9 +199,6 @@ class MaterialAsset(ApiResponseModel):
     size: int
     mtime: int | None
     ingest_status: str
-    annotation_status: str
-    annotation_pass: str
-    index_status: str
     understanding_status: str
     usable: bool
     enabled: bool

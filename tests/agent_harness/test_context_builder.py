@@ -179,48 +179,9 @@ def test_artifact_priority_orders_by_current_action() -> None:
 
     assert _artifact_priority("timeline", None) == 0
     assert _artifact_priority("timeline", "timeline.apply_patch") == 0
-    assert _artifact_priority("candidate_pack", "retrieval.search_candidates") == 0
     assert _artifact_priority("audio_plan", "audio.generate_tts") == 0
     assert _artifact_priority("brief", "respond") == 0
-    assert _artifact_priority("unknown_artifact", None) == 6
-
-
-def test_candidate_pack_rendering_caps_three_candidates() -> None:
-    from agent_harness.context_builder import _render_candidate_pack
-    from contracts.candidate import CandidatePack
-
-    pack = CandidatePack.model_validate(
-        {
-            "candidate_pack_id": "cand_1",
-            "case_id": "case_1",
-            "query_context": {},
-            "snapshot": {
-                "generated_at": "2026-07-05T00:00:00+00:00",
-                "asset_scope_hash": "h",
-                "annotation_versions": {},
-            },
-            "slots": [
-                {
-                    "slot_id": "slot_hook",
-                    "slot_brief": "开头钩子",
-                    "target_duration_sec": [2.0, 4.0],
-                    "candidates": [
-                        {
-                            "candidate_id": f"c{i}",
-                            "asset_id": "a1",
-                            "clip_id": f"clip{i}",
-                            "summary_line": f"候选{i}",
-                            "score": {"bm25_rank": i, "vector_rank": i, "rrf": 0.1},
-                        }
-                        for i in range(1, 6)
-                    ],
-                }
-            ],
-        }
-    )
-    text = _render_candidate_pack(pack)
-    assert "slot_hook" in text
-    assert text.count("* c") == 3
+    assert _artifact_priority("unknown_artifact", None) == 5
 
 
 def test_memory_block_renders_top_five() -> None:

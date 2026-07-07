@@ -18,7 +18,6 @@ from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
 from contracts.events import (
-    AnnotationFailed,
     AssetImported,
     AssetIndexReady,
     AssetLinked,
@@ -150,38 +149,6 @@ def test_project_pending_decisions_route_lists_project_scope_decisions(tmp_path:
     assert decisions[0]["scope_type"] == "project"
     assert decisions[0]["case_id"] is None
     assert missing.status_code == 404
-
-
-def test_retry_annotation_route_requeues_failed_asset_and_resets_status(tmp_path: Path) -> None:
-    app = _app(tmp_path)
-    client = _client(app)
-    _seed_failed_annotation_asset(_engine(app))
-
-    retried = client.post(
-        "/api/projects/project_1/materials/asset_1/retry-annotation",
-        headers=AUTH,
-        json={},
-    )
-    missing = client.post(
-        "/api/projects/project_1/materials/missing/retry-annotation",
-        headers=AUTH,
-        json={},
-    )
-
-    assert retried.status_code == 200
-    assert retried.json()["job_id"] is not None
-    assert missing.status_code == 404
-    with _engine(app).connect() as connection:
-        asset = (
-            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == "asset_1"))
-            .one()
-            ._mapping
-        )
-        job = connection.execute(select(schema.jobs)).one()._mapping
-    assert asset["annotation_status"] == "pending"
-    assert asset["failure"] is None
-    assert job["kind"] == "annotation"
-    assert "JobEnqueued" in _event_types(app)
 
 
 def test_cost_routes_and_project_page_aggregate_provider_calls(tmp_path: Path) -> None:
@@ -704,49 +671,6 @@ def _seed_project_case(engine: Engine) -> None:
             project_id="project_1",
             case_id="case_1",
             payload={"name": "Case", "brief": {"goal": "test"}},
-        ),
-    )
-
-
-def _seed_failed_annotation_asset(engine: Engine) -> None:
-    _apply_events(
-        engine,
-        ProjectCreated(project_id="project_1", name="Project"),
-        AssetImported(
-            project_id="project_1",
-            asset_id="asset_1",
-            payload={
-                "storage_mode": "reference",
-                "reference_path": "/tmp/source.mp4",
-                "kind": "video",
-                "source": "local_path",
-                "filename": "source.mp4",
-                "hash": "hash",
-                "mtime": 1,
-                "size": 1,
-                "ingest_status": "failed",
-                "annotation_status": "failed",
-                "annotation_pass": "cheap",
-                "index_status": "partial",
-                "usable": False,
-                "failure": {
-                    "error_code": "annotation_failed",
-                    "message": "failed",
-                    "retryable": True,
-                },
-            },
-        ),
-        AssetLinked(project_id="project_1", asset_id="asset_1"),
-        AnnotationFailed(
-            project_id="project_1",
-            asset_id="asset_1",
-            payload={
-                "failure": {
-                    "error_code": "annotation_failed",
-                    "message": "failed",
-                    "retryable": True,
-                }
-            },
         ),
     )
 

@@ -65,7 +65,6 @@ def _insert_project_and_case(tmp_path: Path, case_id: str = "case_1") -> None:
                 "content_plan": None,
                 "audio_plan": None,
                 "cut_plan": None,
-                "candidate_pack_id": None,
                 "timeline_current_version": None,
                 "timeline_validated": False,
                 "preview_current_id": None,
@@ -232,14 +231,6 @@ def test_validator_rejects_missing_or_cross_case_references(tmp_path: Path) -> N
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
         connection.execute(
-            schema.candidate_packs.insert().values(
-                candidate_pack_id="pack_other",
-                case_id="case_2",
-                slots=dump_json([]),
-                created_at=NOW,
-            )
-        )
-        connection.execute(
             schema.decisions.insert().values(
                 decision_id="dec_other",
                 scope_type="case",
@@ -263,7 +254,6 @@ def test_validator_rejects_missing_or_cross_case_references(tmp_path: Path) -> N
             .where(schema.cases.c.case_id == "case_1")
             .values(
                 timeline_current_version=99,
-                candidate_pack_id="pack_other",
                 pending_decision_id="dec_other",
             )
         )
@@ -274,7 +264,6 @@ def test_validator_rejects_missing_or_cross_case_references(tmp_path: Path) -> N
     assert result.validation_failed is not None
     assert {violation.code for violation in result.validation_failed.violations} >= {
         "missing_timeline_current_version",
-        "invalid_candidate_pack_id",
         "invalid_pending_decision_id",
     }
     _assert_rolled_back(tmp_path)
@@ -411,9 +400,6 @@ def test_validator_rejects_project_asset_event_with_case_scope_and_rolls_back(
                 probe=None,
                 proxy_object_hash=None,
                 ingest_status="imported",
-                annotation_status="pending",
-                annotation_pass="none",
-                index_status="none",
                 usable=False,
                 failure=None,
             )

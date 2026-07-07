@@ -5,37 +5,6 @@ import type { MaterialAsset } from "../api/client";
 import { ProjectMaterialsView } from "./ProjectMaterialsPage";
 
 describe("ProjectMaterialsView", () => {
-  it("渲染素材列表里的各类标注状态徽章", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        jsonResponse({
-          project_id: "project_1",
-          invalidated_asset_ids: [],
-          assets: [
-            material({ asset_id: "asset_pending", filename: "pending.mp4", annotation_status: "pending" }),
-            material({ asset_id: "asset_analyzing", filename: "analyzing.mp4", annotation_status: "analyzing" }),
-            material({
-              asset_id: "asset_completed",
-              filename: "completed.mp4",
-              annotation_status: "completed",
-              index_status: "ready"
-            }),
-            material({ asset_id: "asset_failed", filename: "failed.mp4", annotation_status: "failed" })
-          ]
-        })
-      )
-    );
-
-    renderMaterials();
-
-    expect(await screen.findByText("待标注")).toBeTruthy();
-    expect(screen.getByText("标注中")).toBeTruthy();
-    expect(screen.getByText("已完成")).toBeTruthy();
-    expect(screen.getByText("失败")).toBeTruthy();
-    expect(screen.getByText("已索引")).toBeTruthy();
-  });
-
   it("按 init、parts、complete 顺序完成分片上传", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -280,9 +249,6 @@ function material(overrides: Partial<MaterialAsset> = {}): MaterialAsset {
     size: 1024,
     mtime: 1,
     ingest_status: "imported",
-    annotation_status: "pending",
-    annotation_pass: "none",
-    index_status: "none",
     usable: true,
     enabled: true,
     probe: { duration_sec: 12.5, width: 1920, height: 1080 },

@@ -28,6 +28,8 @@ def apply_data_migrations(connection: Connection) -> None:
     _collapse_asset_kinds(connection)
     _ensure_message_kind_column(connection)
     _ensure_asset_understanding_columns(connection)
+    _drop_removed_annotation_asset_columns(connection)
+    _drop_removed_offline_tables(connection)
 
 
 def _table_exists(connection: Connection, name: str) -> bool:
@@ -67,6 +69,32 @@ def _ensure_asset_understanding_columns(connection: Connection) -> None:
         connection.exec_driver_sql(
             "ALTER TABLE assets ADD COLUMN understanding_status TEXT NOT NULL DEFAULT 'none'"
         )
+
+
+def _drop_removed_annotation_asset_columns(connection: Connection) -> None:
+    """删除离线标注遗留的 assets 列：annotation_status/annotation_pass/index_status。
+
+    这些列在旧库里是 NOT NULL 无默认值，删列前它们会让「新代码省略该列的 INSERT」
+    直接撞 NOT NULL 约束——所以必须真删（SQLite ≥3.35 支持 DROP COLUMN）。
+    每列先用 PRAGMA table_info 守卫，可重复执行；新库本就没有这些列，直接跳过。
+    """
+
+    columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(assets)").all()}
+    for column in ("annotation_status", "annotation_pass", "index_status"):
+        if column in columns:
+            connection.exec_driver_sql(f"ALTER TABLE assets DROP COLUMN {column}")
+
+
+def _drop_removed_offline_tables(connection: Connection) -> None:
+    """删除离线检索遗留的表：annotation_signal_projection 与 clip_fts(fts5 虚拟表)。
+
+    annotations / annotation_clip_projection / candidate_packs 仍被 timeline 候选
+    materializer 引用（Task 7 收口），故此处不删；signal 投影与全文索引已无引用，安全 DROP。
+    先删 signal（其外键指向 annotation_clip_projection），再删 clip_fts。
+    """
+
+    connection.exec_driver_sql("DROP TABLE IF EXISTS annotation_signal_projection")
+    connection.exec_driver_sql("DROP TABLE IF EXISTS clip_fts")
 
 
 def _collapse_asset_kinds(connection: Connection) -> None:

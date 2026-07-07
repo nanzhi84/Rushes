@@ -282,9 +282,6 @@ def _engine_with_asset(tmp_path: Path):
                 probe=None,
                 proxy_object_hash=None,
                 ingest_status="imported",
-                annotation_status="pending",
-                annotation_pass="none",
-                index_status="none",
                 usable=True,
                 failure=None,
             )
@@ -325,7 +322,6 @@ def _engine_with_case_and_transcript(
                     "transcript_id": document.transcript_id,
                 },
                 "cut_plan": _initial_cut_plan(),
-                "candidate_pack_id": None,
                 "timeline_current_version": None,
                 "timeline_validated": False,
                 "preview_current_id": None,

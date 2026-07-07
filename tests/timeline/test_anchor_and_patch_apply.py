@@ -501,9 +501,6 @@ def _seed_asset(
             probe=dump_json(probe or {"duration_sec": 10.0, "fps": 30.0}),
             proxy_object_hash=None,
             ingest_status="indexed",
-            annotation_status="completed",
-            annotation_pass="cheap",
-            index_status="ready",
             usable=True,
             failure=None,
         )

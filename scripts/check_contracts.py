@@ -21,7 +21,6 @@ LOCAL_GROUPS: frozenset[str] = frozenset(
         "domain",
         "storage",
         "events",
-        "indexing",
         "media",
         "providers",
         "agent_harness",
@@ -35,13 +34,12 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "domain": frozenset({"domain", "contracts"}),
     "storage": frozenset({"storage", "contracts"}),
     "events": frozenset({"events", "contracts", "storage"}),
-    "indexing": frozenset({"indexing", "contracts", "storage"}),
     "media": frozenset({"media", "contracts", "storage"}),
     "providers": frozenset({"providers", "contracts"}),
     "agent_harness": frozenset(
         {"agent_harness", "tools", "domain", "contracts", "storage", "events"}
     ),
-    # PRD §15：TOOLS→IMPL 边（media/providers/annotation/timeline/indexing）
+    # PRD §15：TOOLS→IMPL 边（media/providers/timeline）
     "tools": frozenset(
         {
             "tools",
@@ -51,9 +49,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
             "events",
             "media",
             "providers",
-            "annotation",
             "timeline",
-            "indexing",
         }
     ),
     "apps": LOCAL_GROUPS,

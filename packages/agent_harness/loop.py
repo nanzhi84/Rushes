@@ -1170,7 +1170,6 @@ def _load_project_artifact_stats(
         transcript_ids=frozenset(transcript_ids),
         transcript_ids_with_vad=frozenset(transcript_ids_with_vad),
         voiceover_asset_ids=frozenset(voiceover_asset_ids),
-        candidate_pack_valid=_candidate_pack_valid(connection, case_state),
     )
 
 
@@ -1211,17 +1210,6 @@ def _asset_has_audio(asset: Mapping[str, Any]) -> bool:
         return False
     probe = load_json(raw_probe)
     return isinstance(probe, Mapping) and probe.get("has_audio") is True
-
-
-def _candidate_pack_valid(connection: Connection, case_state: CaseState) -> bool:
-    if case_state.candidate_pack_id is None:
-        return True
-    row = connection.execute(
-        select(schema.candidate_packs.c.candidate_pack_id).where(
-            schema.candidate_packs.c.candidate_pack_id == case_state.candidate_pack_id
-        )
-    ).first()
-    return row is not None
 
 
 def _load_decisions(connection: Connection) -> tuple[Decision, ...]:
@@ -1946,7 +1934,6 @@ def _tool_call_id(tool_call: ToolCall) -> str:
 
 def _job_kind_for_tool(tool_name: str, namespace: str) -> str:
     explicit = {
-        "annotation.enqueue": "annotation",
         "audio.asr_original": "asr",
         "asr.transcribe": "asr",
         "tts.speech": "tts",
@@ -1959,7 +1946,7 @@ def _job_kind_for_tool(tool_name: str, namespace: str) -> str:
     }
     if tool_name in explicit:
         return explicit[tool_name]
-    if namespace in {"annotation", "asr", "tts", "proxy", "align"}:
+    if namespace in {"asr", "tts", "proxy", "align"}:
         return namespace
     return tool_name.replace(".", "_")
 

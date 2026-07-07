@@ -15,7 +15,6 @@ export type FsListResponse = components["schemas"]["FsListResponse"];
 // apps/api/schemas.py 已有 M2 materials/upload response models；当前生成 schema 尚未包含这些路径。
 export type MaterialKind = "video" | "audio" | "image" | "font";
 export type StorageMode = "copy" | "reference";
-export type MaterialAnnotationStatus = "pending" | "analyzing" | "completed" | "failed" | string;
 
 export type AssetJobSummary = {
   job_id: string;
@@ -35,9 +34,6 @@ export type MaterialAsset = {
   size: number;
   mtime: number | null;
   ingest_status: string;
-  annotation_status: MaterialAnnotationStatus;
-  annotation_pass: string;
-  index_status: string;
   usable: boolean;
   enabled: boolean;
   probe: Record<string, unknown> | null;

@@ -48,9 +48,6 @@ EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "probe",
         "proxy_object_hash",
         "ingest_status",
-        "annotation_status",
-        "annotation_pass",
-        "index_status",
         "usable",
         "failure",
         "thumbnail_object_hash",
@@ -79,15 +76,6 @@ EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "quality_score",
         "usable",
         "embedding",
-    ),
-    "annotation_signal_projection": (
-        "signal_id",
-        "clip_id",
-        "namespace",
-        "field",
-        "value_text",
-        "value_number",
-        "confidence",
     ),
     "transcripts": (
         "transcript_id",
@@ -229,7 +217,7 @@ def test_pragmas_apply_on_each_connection(tmp_path: Path) -> None:
             assert connection.exec_driver_sql("PRAGMA synchronous").scalar_one() == 1
 
 
-def test_alembic_upgrade_head_creates_all_tables_and_fts(tmp_path: Path) -> None:
+def test_alembic_upgrade_head_creates_all_tables(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     config = Config(str(Path("packages/storage/migrations/alembic.ini").resolve()))
@@ -247,8 +235,3 @@ def test_alembic_upgrade_head_creates_all_tables_and_fts(tmp_path: Path) -> None
             ).all()
         }
         assert set(schema.ALL_TABLE_NAMES).issubset(names)
-        assert "clip_fts" in names
-        fts_columns = tuple(
-            str(row[1]) for row in connection.exec_driver_sql("PRAGMA table_info(clip_fts)").all()
-        )
-        assert fts_columns == ("clip_id", "summary", "keywords", "retrieval_sentence", "ocr_text")

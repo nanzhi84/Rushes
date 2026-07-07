@@ -70,7 +70,6 @@ def _case_values(**overrides: object) -> dict[str, object]:
         "content_plan": None,
         "audio_plan": None,
         "cut_plan": None,
-        "candidate_pack_id": None,
         "timeline_current_version": None,
         "timeline_validated": False,
         "preview_current_id": None,

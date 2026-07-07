@@ -51,7 +51,6 @@ def _insert_project_and_case(tmp_path: Path) -> None:
                 "content_plan": None,
                 "audio_plan": None,
                 "cut_plan": None,
-                "candidate_pack_id": None,
                 "timeline_current_version": None,
                 "timeline_validated": False,
                 "preview_current_id": None,
@@ -225,9 +224,6 @@ def test_transcripts_repository_persists_document_json(tmp_path: Path) -> None:
                 probe=None,
                 proxy_object_hash=None,
                 ingest_status="imported",
-                annotation_status="pending",
-                annotation_pass="none",
-                index_status="none",
                 usable=True,
                 failure=None,
             )

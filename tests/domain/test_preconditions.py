@@ -23,7 +23,6 @@ def _case_state(**overrides: object) -> CaseState:
             "transcript_id": "tr_voice",
         },
         "cut_plan": {"schema": "CutPlan.v1", "slots": [], "total_target_duration_sec": 30},
-        "candidate_pack_id": "pack_1",
         "timeline_current_version": 3,
         "timeline_validated": True,
         "preview_current_id": "preview_3",
@@ -49,7 +48,6 @@ def test_all_prd_preconditions_have_true_and_false_cases() -> None:
             transcript_ids=frozenset({"tr_voice"}),
             transcript_ids_with_vad=frozenset({"tr_voice"}),
             voiceover_asset_ids=frozenset({"asset_vo"}),
-            candidate_pack_valid=True,
         ),
     )
     false_context = PreconditionContext(
@@ -58,13 +56,12 @@ def test_all_prd_preconditions_have_true_and_false_cases() -> None:
             content_plan=None,
             audio_plan=None,
             cut_plan=None,
-            candidate_pack_id=None,
             timeline_current_version=None,
             timeline_validated=False,
             preview_current_id=None,
             rough_cut_approved=False,
         ),
-        project_artifacts=ProjectArtifactStats(candidate_pack_valid=False),
+        project_artifacts=ProjectArtifactStats(),
     )
 
     names = [
@@ -75,7 +72,6 @@ def test_all_prd_preconditions_have_true_and_false_cases() -> None:
         "transcript_with_vad_exists",
         "content_plan_exists",
         "cut_plan_exists",
-        "candidate_pack_exists",
         "timeline_exists",
         "timeline_validated",
         "rough_cut_approved",

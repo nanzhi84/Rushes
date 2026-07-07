@@ -29,7 +29,6 @@ class ProjectArtifactStats(BaseModel):
     transcript_ids: frozenset[str] = Field(default_factory=frozenset)
     transcript_ids_with_vad: frozenset[str] = Field(default_factory=frozenset)
     voiceover_asset_ids: frozenset[str] = Field(default_factory=frozenset)
-    candidate_pack_valid: bool = True
 
 
 class ProjectAudioAsset(BaseModel):
@@ -121,14 +120,6 @@ def cut_plan_exists(context: PreconditionContext) -> bool:
     return context.case_state is not None and context.case_state.cut_plan is not None
 
 
-def candidate_pack_exists(context: PreconditionContext) -> bool:
-    return (
-        context.case_state is not None
-        and context.case_state.candidate_pack_id is not None
-        and context.project_artifacts.candidate_pack_valid
-    )
-
-
 def timeline_exists(context: PreconditionContext) -> bool:
     return (
         context.case_state is not None and context.case_state.timeline_current_version is not None
@@ -173,7 +164,6 @@ PRECONDITION_REGISTRY: dict[str, PreconditionFn] = {
     "transcript_with_vad_exists": transcript_with_vad_exists,
     "content_plan_exists": content_plan_exists,
     "cut_plan_exists": cut_plan_exists,
-    "candidate_pack_exists": candidate_pack_exists,
     "timeline_exists": timeline_exists,
     "timeline_validated": timeline_validated,
     "rough_cut_approved": rough_cut_approved,

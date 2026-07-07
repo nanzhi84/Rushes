@@ -26,9 +26,6 @@ def _insert_asset(connection: Connection, asset_id: str, *, kind: str, source: s
             hash=f"hash-{asset_id}",
             size=0,
             ingest_status="ready",
-            annotation_status="pending",
-            annotation_pass="none",
-            index_status="pending",
             usable=True,
         )
     )
@@ -47,7 +44,7 @@ def _insert_link(connection: Connection, asset_id: str) -> None:
 
 
 def _insert_asset_dependencies(connection: Connection, asset_id: str) -> None:
-    """给资产种上所有 FK 指向 assets 的依赖行（含 clip_fts 检索行）。"""
+    """给资产种上仍存留的、FK 指向 assets 的依赖行。"""
 
     annotation_id = f"ann-{asset_id}"
     clip_id = f"clip-{asset_id}"
@@ -76,19 +73,6 @@ def _insert_asset_dependencies(connection: Connection, asset_id: str) -> None:
         )
     )
     connection.execute(
-        schema.annotation_signal_projection.insert().values(
-            signal_id=f"sig-{asset_id}",
-            clip_id=clip_id,
-            namespace="ns",
-            field="f",
-        )
-    )
-    connection.exec_driver_sql(
-        "INSERT INTO clip_fts (clip_id, summary, keywords, retrieval_sentence, ocr_text) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (clip_id, "s", "k", "r", "o"),
-    )
-    connection.execute(
         schema.transcripts.insert().values(
             transcript_id=f"tr-{asset_id}",
             asset_id=asset_id,
@@ -115,18 +99,12 @@ def _insert_asset_dependencies(connection: Connection, asset_id: str) -> None:
 
 
 def _dependency_counts(connection: Connection, asset_id: str) -> dict[str, int]:
-    clip_id = f"clip-{asset_id}"
     queries: dict[str, tuple[str, tuple[str, ...]]] = {
         "annotations": ("SELECT COUNT(*) FROM annotations WHERE asset_id = ?", (asset_id,)),
         "clips": (
             "SELECT COUNT(*) FROM annotation_clip_projection WHERE asset_id = ?",
             (asset_id,),
         ),
-        "signals": (
-            "SELECT COUNT(*) FROM annotation_signal_projection WHERE clip_id = ?",
-            (clip_id,),
-        ),
-        "fts": ("SELECT COUNT(*) FROM clip_fts WHERE clip_id = ?", (clip_id,)),
         "transcripts": ("SELECT COUNT(*) FROM transcripts WHERE asset_id = ?", (asset_id,)),
         "jobs": ("SELECT COUNT(*) FROM jobs WHERE asset_id = ?", (asset_id,)),
     }
@@ -208,8 +186,6 @@ _SNAPSHOT_TABLES = (
     "project_asset_links",
     "annotations",
     "annotation_clip_projection",
-    "annotation_signal_projection",
-    "clip_fts",
     "transcripts",
     "jobs",
 )
@@ -268,7 +244,7 @@ def test_deletes_dependent_rows_before_assets(tmp_path: Path) -> None:
 
         apply_data_migrations(connection)
 
-        # 被删资产：本体与全部依赖行（含 clip_fts 检索行）一并消失
+        # 被删资产：本体与全部依赖行一并消失
         for asset_id in (ASSET_SUBTITLE, ASSET_LIB_UNREFERENCED):
             assert _asset_row(connection, asset_id) is None
             counts = _dependency_counts(connection, asset_id)
@@ -631,3 +607,121 @@ def test_message_kind_migration_is_idempotent(tmp_path: Path) -> None:
 
         assert _message_kind(connection, "m-user") == "user"
         assert _message_kind(connection, "m-assistant") == "reply"
+
+
+_LEGACY_SIGNAL_DDL = (
+    "CREATE TABLE annotation_signal_projection ("
+    "signal_id TEXT PRIMARY KEY, "
+    "clip_id TEXT NOT NULL REFERENCES annotation_clip_projection(clip_id), "
+    "namespace TEXT NOT NULL, field TEXT NOT NULL, "
+    "value_text TEXT, value_number REAL, confidence REAL)"
+)
+_LEGACY_CLIP_FTS_DDL = (
+    "CREATE VIRTUAL TABLE clip_fts "
+    "USING fts5(clip_id, summary, keywords, retrieval_sentence, ocr_text)"
+)
+
+
+def _rebuild_legacy_offline_db(db_path: Path) -> None:
+    """还原「离线标注+检索」时代的老库：assets 带三个已删列，另有 signal 投影与
+
+    clip_fts 两张已删表，并种一个待删的 subtitle_template 资产（连同 annotation /
+    clip / signal / fts 依赖），用来触发 collapse 的 FK 安全删除与随后的 DROP。
+    """
+
+    import sqlite3
+
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.execute("PRAGMA foreign_keys=OFF")
+        raw.execute("DROP TABLE assets")
+        raw.execute(_OLD_ASSETS_DDL)
+        raw.execute(_LEGACY_SIGNAL_DDL)
+        raw.execute(_LEGACY_CLIP_FTS_DDL)
+        raw.execute(
+            "INSERT INTO assets ("
+            "asset_id, storage_mode, kind, source, hash, size, "
+            "ingest_status, annotation_status, annotation_pass, index_status, usable) "
+            "VALUES (?, 'reference', 'subtitle_template', 'upload', 'h', 0, "
+            "'ready', 'completed', 'cheap', 'ready', 1)",
+            (ASSET_SUBTITLE,),
+        )
+        raw.execute(
+            "INSERT INTO annotations "
+            "(annotation_id, asset_id, schema, status, document_json, created_at, updated_at) "
+            "VALUES ('ann-doomed', ?, 'v1', 'done', '{}', 't', 't')",
+            (ASSET_SUBTITLE,),
+        )
+        raw.execute(
+            "INSERT INTO annotation_clip_projection "
+            "(clip_id, annotation_id, asset_id, start_frame, end_frame, role, summary, "
+            "keywords_json, usable) "
+            "VALUES ('clip-doomed', 'ann-doomed', ?, 0, 10, 'b_roll', 's', '[]', 1)",
+            (ASSET_SUBTITLE,),
+        )
+        raw.execute(
+            "INSERT INTO annotation_signal_projection "
+            "(signal_id, clip_id, namespace, field) "
+            "VALUES ('sig-doomed', 'clip-doomed', 'vision', 'label')"
+        )
+        raw.execute(
+            "INSERT INTO clip_fts (clip_id, summary, keywords, retrieval_sentence, ocr_text) "
+            "VALUES ('clip-doomed', 's', '', 's', '')"
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_legacy_annotation_db_migration_drops_offline_columns_and_tables(tmp_path: Path) -> None:
+    engine = create_workspace_engine(tmp_path)
+    with engine.begin() as connection:
+        schema.create_all(connection)
+    db_path = WorkspacePaths.from_root(tmp_path).db_path
+    _rebuild_legacy_offline_db(db_path)
+
+    # 迁移前：老库确实带着已删列与已删表
+    with engine.begin() as connection:
+        legacy_columns = _asset_columns(connection)
+        assert {"annotation_status", "annotation_pass", "index_status"} <= legacy_columns
+        tables_before = _table_names(connection)
+        assert {"annotation_signal_projection", "clip_fts"} <= tables_before
+
+    # 启动即跑迁移，不应崩
+    with engine.begin() as connection:
+        apply_data_migrations(connection)
+
+    with engine.begin() as connection:
+        columns = _asset_columns(connection)
+        # 三个离线标注列被真删（否则新代码省略它们的 INSERT 会撞 NOT NULL）
+        assert {"annotation_status", "annotation_pass", "index_status"}.isdisjoint(columns)
+        tables_after = _table_names(connection)
+        # signal 投影与 clip_fts 已删；timeline 仍依赖的三张表保留
+        assert "annotation_signal_projection" not in tables_after
+        assert "clip_fts" not in tables_after
+        assert {"annotations", "annotation_clip_projection", "candidate_packs"} <= tables_after
+        # 待删素材连同 clip/signal/fts 依赖被清空，父行也删掉
+        assert _asset_row(connection, ASSET_SUBTITLE) is None
+        # 关键回归：删列后新代码用精简列 INSERT 素材必须成功
+        connection.execute(
+            schema.assets.insert().values(
+                asset_id="asset-post-migration",
+                storage_mode="reference",
+                kind="video",
+                source="upload",
+                hash="h2",
+                size=0,
+                ingest_status="imported",
+                usable=True,
+            )
+        )
+        assert _asset_row(connection, "asset-post-migration") is not None
+
+
+def _table_names(connection: Connection) -> set[str]:
+    return {
+        str(row[0])
+        for row in connection.exec_driver_sql(
+            "SELECT name FROM sqlite_master WHERE type IN ('table','view')"
+        ).all()
+    }

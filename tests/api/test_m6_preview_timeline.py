@@ -195,7 +195,6 @@ def _seed_project_case_rows(
             content_plan=None,
             audio_plan=None,
             cut_plan=None,
-            candidate_pack_id=None,
             timeline_current_version=timeline_current_version,
             timeline_validated=timeline_current_version is not None,
             preview_current_id=None,

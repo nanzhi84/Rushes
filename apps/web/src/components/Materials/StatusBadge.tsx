@@ -17,48 +17,6 @@ export function StatusBadge({ label, tone = "neutral" }: StatusBadgeProps): Reac
   );
 }
 
-export function annotationLabel(status: string): string {
-  const labels: Record<string, string> = {
-    pending: "待标注",
-    analyzing: "标注中",
-    completed: "已完成",
-    failed: "失败"
-  };
-  return labels[status] ?? status;
-}
-
-export function annotationTone(status: string): StatusTone {
-  if (status === "completed") {
-    return "success";
-  }
-  if (status === "failed") {
-    return "danger";
-  }
-  if (status === "analyzing") {
-    return "info";
-  }
-  return "warning";
-}
-
-export function indexLabel(status: string): string {
-  const labels: Record<string, string> = {
-    none: "未索引",
-    partial: "部分索引",
-    ready: "已索引"
-  };
-  return labels[status] ?? status;
-}
-
-export function indexTone(status: string): StatusTone {
-  if (status === "ready") {
-    return "success";
-  }
-  if (status === "partial") {
-    return "info";
-  }
-  return "neutral";
-}
-
 function toneClass(tone: StatusTone): string {
   if (tone === "success") {
     return "bg-[#dcfce7] text-[#166534]";

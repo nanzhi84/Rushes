@@ -23,9 +23,6 @@ def _insert_asset(connection: object, asset_id: str) -> None:
             hash=f"hash-{asset_id}",
             size=0,
             ingest_status="indexed",
-            annotation_status="pending",
-            annotation_pass="none",
-            index_status="none",
             usable=True,
         )
     )

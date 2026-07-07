@@ -40,11 +40,9 @@ poc = [
 [tool.hatch.build.targets.wheel]
 packages = [
     "packages/agent_harness",
-    "packages/annotation",
     "packages/contracts",
     "packages/domain",
     "packages/events",
-    "packages/indexing",
     "packages/media",
     "packages/providers",
     "packages/storage",
@@ -59,9 +57,7 @@ include = [
     "/packages/contracts",
     "/packages/domain",
     "/packages/agent_harness",
-    "/packages/annotation",
     "/packages/events",
-    "/packages/indexing",
     "/packages/media",
     "/packages/providers",
     "/packages/storage",

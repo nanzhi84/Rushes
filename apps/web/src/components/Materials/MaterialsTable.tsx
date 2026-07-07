@@ -1,12 +1,6 @@
 import type { ReactElement } from "react";
 import type { MaterialAsset } from "../../api/client";
-import {
-  annotationLabel,
-  annotationTone,
-  indexLabel,
-  indexTone,
-  StatusBadge
-} from "./StatusBadge";
+import { StatusBadge } from "./StatusBadge";
 
 type MaterialsTableProps = {
   assets: MaterialAsset[];
@@ -39,8 +33,6 @@ export function MaterialsTable({
             <th className="px-3 py-3">文件名</th>
             <th className="px-3 py-3">类型</th>
             <th className="px-3 py-3">时长/分辨率</th>
-            <th className="px-3 py-3">标注</th>
-            <th className="px-3 py-3">索引</th>
             <th className="px-3 py-3">可用</th>
             <th className="px-3 py-3">运行中任务</th>
             <th className="px-3 py-3">操作</th>
@@ -66,18 +58,6 @@ export function MaterialsTable({
               </td>
               <td className="px-3 py-3 align-top text-[#334155]">{probeSummary(asset)}</td>
               <td className="px-3 py-3 align-top">
-                <div className="flex flex-col gap-1">
-                  <StatusBadge
-                    label={annotationLabel(asset.annotation_status)}
-                    tone={annotationTone(asset.annotation_status)}
-                  />
-                  <span className="text-xs text-[#64748b]">pass: {asset.annotation_pass}</span>
-                </div>
-              </td>
-              <td className="px-3 py-3 align-top">
-                <StatusBadge label={indexLabel(asset.index_status)} tone={indexTone(asset.index_status)} />
-              </td>
-              <td className="px-3 py-3 align-top">
                 <StatusBadge label={asset.usable ? "可用" : "不可用"} tone={asset.usable ? "success" : "danger"} />
                 <div className="mt-1 text-xs text-[#64748b]">{asset.enabled ? "已启用" : "已禁用"}</div>
               </td>
@@ -99,14 +79,6 @@ export function MaterialsTable({
                     onClick={() => onUnlink(asset)}
                   >
                     删除引用
-                  </button>
-                  <button
-                    className="rounded-md border border-[#cbd5e1] px-2 py-1 text-xs hover:bg-[#f1f5f9] disabled:text-[#94a3b8]"
-                    type="button"
-                    disabled
-                    title="后端尚未暴露 annotation.retry REST 入口"
-                  >
-                    重试标注
                   </button>
                   {asset.invalid ? (
                     <button

@@ -242,35 +242,6 @@ class AssetListCaseScopeInput(BaseModel):
     case_id: str | None = None
 
 
-class AnnotationEnqueueInput(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    asset_id: str
-    pass_: Literal["cheap", "deep"] = Field(default="cheap", alias="pass")
-    project_id: str | None = None
-
-
-class AnnotationStatusInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project_id: str | None = None
-
-
-class AnnotationRetryInput(BaseModel):
-    model_config = ConfigDict(extra="forbid", populate_by_name=True)
-
-    asset_id: str
-    pass_: Literal["cheap", "deep"] | None = Field(default=None, alias="pass")
-    project_id: str | None = None
-
-
-class AnnotationInspectInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    asset_id: str
-    project_id: str | None = None
-
-
 class MediaViewFramesTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -358,26 +329,6 @@ class ContentRevisePlanInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision_hint: str
-
-
-class RetrievalSearchCandidatesInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    provider_id: str | None = None
-    embedding_model: str | None = "text-embedding-v4"
-
-
-class TimelineCandidateSelectionInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    slot_id: str
-    candidate_id: str
-
-
-class TimelinePlanFromCandidatesInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    selections: list[TimelineCandidateSelectionInput]
 
 
 class TimelineValidateInput(BaseModel):
@@ -968,70 +919,6 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             description="Revise the existing content plan and matching silent-mode cut plan.",
         ),
         ToolSpec(
-            name="annotation.enqueue",
-            namespace="annotation",
-            version="1",
-            input_model=AnnotationEnqueueInput,
-            result_model=None,
-            handler_ref="tools.annotation.enqueue",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            side_effects=["job"],
-            idempotency_key_fields=["project_id", "asset_id", "pass"],
-            emits_events=["JobEnqueued"],
-            is_long_running=True,
-            description="Queue cheap or deep annotation for a project asset.",
-        ),
-        ToolSpec(
-            name="annotation.status",
-            namespace="annotation",
-            version="1",
-            input_model=AnnotationStatusInput,
-            result_model=None,
-            handler_ref="tools.annotation.status",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            side_effects=[],
-            emits_events=[],
-            description="Read annotation status for assets in the active Project.",
-        ),
-        ToolSpec(
-            name="annotation.retry",
-            namespace="annotation",
-            version="1",
-            input_model=AnnotationRetryInput,
-            result_model=None,
-            handler_ref="tools.annotation.retry",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            side_effects=["job"],
-            idempotency_key_fields=["project_id", "asset_id", "pass"],
-            emits_events=["JobEnqueued"],
-            is_long_running=True,
-            description="Requeue a failed annotation job.",
-        ),
-        ToolSpec(
-            name="annotation.inspect",
-            namespace="annotation",
-            version="1",
-            input_model=AnnotationInspectInput,
-            result_model=None,
-            handler_ref="tools.annotation.inspect",
-            allowed_scopes=["case_agent_console", "project_page"],
-            requires_artifacts=[],
-            requires_active_project=True,
-            requires_active_case=False,
-            side_effects=[],
-            emits_events=[],
-            description="Inspect usable spans, failure details, and quality events for an asset.",
-        ),
-        ToolSpec(
             name="media.view_frames",
             namespace="media",
             version="1",
@@ -1083,51 +970,6 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             side_effects=[],
             emits_events=[],
             description="Read the latest ready material summaries for the given assets.",
-        ),
-        ToolSpec(
-            name="retrieval.search_candidates",
-            namespace="retrieval",
-            version="1",
-            input_model=RetrievalSearchCandidatesInput,
-            result_model=None,
-            handler_ref="tools.retrieval.search_candidates",
-            allowed_scopes=["case_agent_console"],
-            requires_artifacts=[
-                "audio_plan_confirmed",
-                "cut_plan_exists",
-                "usable_asset_exists",
-            ],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["case"],
-            emits_events=[
-                "CandidatePackCreated",
-                "CapabilityDegraded",
-                "ProviderCallRecorded",
-            ],
-            description="Search ready project clips and create a CandidatePack for each cut slot.",
-        ),
-        ToolSpec(
-            name="timeline.plan_from_candidates",
-            namespace="timeline",
-            version="1",
-            input_model=TimelinePlanFromCandidatesInput,
-            result_model=None,
-            handler_ref="tools.timeline_tools.plan_from_candidates",
-            allowed_scopes=["case_agent_console"],
-            requires_artifacts=["candidate_pack_exists"],
-            requires_active_project=True,
-            requires_active_case=True,
-            side_effects=["timeline", "case"],
-            emits_events=[
-                "TimelineVersionCreated",
-                "TimelineValidated",
-                "TimelineValidationFailed",
-                "DecisionCreated",
-            ],
-            description=(
-                "Materialize selected candidate_id/slot_id pairs into a validated timeline."
-            ),
         ),
         ToolSpec(
             name="timeline.apply_patch",
@@ -1404,18 +1246,6 @@ PATCH_OP_REGISTRY = patch_op_registry()
 
 
 def build_default_tool_registry() -> ToolRegistry:
-    from .annotation import (
-        enqueue as annotation_enqueue,
-    )
-    from .annotation import (
-        inspect as annotation_inspect,
-    )
-    from .annotation import (
-        retry as annotation_retry,
-    )
-    from .annotation import (
-        status as annotation_status,
-    )
     from .asset import (
         disable_for_case,
         import_local_file,
@@ -1469,10 +1299,8 @@ def build_default_tool_registry() -> ToolRegistry:
     from .render_tools import final_mp4 as render_final_mp4
     from .render_tools import preview as render_preview
     from .render_tools import status as render_status
-    from .retrieval import search_candidates as retrieval_search_candidates
     from .timeline_tools import apply_patch as timeline_apply_patch
     from .timeline_tools import inspect as timeline_inspect
-    from .timeline_tools import plan_from_candidates as timeline_plan_from_candidates
     from .timeline_tools import restore_version as timeline_restore_version
     from .timeline_tools import validate as timeline_validate
     from .understand import materials as understand_materials
@@ -1510,15 +1338,9 @@ def build_default_tool_registry() -> ToolRegistry:
         "audio.align_uploaded_voiceover": audio_align_uploaded_voiceover,
         "content.create_plan": content_create_plan,
         "content.revise_plan": content_revise_plan,
-        "annotation.enqueue": annotation_enqueue,
-        "annotation.status": annotation_status,
-        "annotation.retry": annotation_retry,
-        "annotation.inspect": annotation_inspect,
         "media.view_frames": media_view_frames,
         "understand.materials": understand_materials,
         "asset.read_summary": asset_read_summary,
-        "retrieval.search_candidates": retrieval_search_candidates,
-        "timeline.plan_from_candidates": timeline_plan_from_candidates,
         "timeline.apply_patch": timeline_apply_patch,
         "timeline.validate": timeline_validate,
         "timeline.inspect": timeline_inspect,
