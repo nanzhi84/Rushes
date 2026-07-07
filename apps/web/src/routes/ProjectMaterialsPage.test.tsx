@@ -219,6 +219,132 @@ describe("ProjectMaterialsView", () => {
     expect(await screen.findByText("源文件失效")).toBeTruthy();
     expect(screen.getByRole("button", { name: "重新定位" })).toBeTruthy();
   });
+
+  it("缩略图就绪渲染 img，未就绪显示占位并按 mm:ss 显示时长", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          project_id: "project_1",
+          invalidated_asset_ids: [],
+          assets: [
+            material({
+              asset_id: "asset_thumb",
+              filename: "clip.mp4",
+              thumbnail_ready: true,
+              duration_sec: 92
+            })
+          ]
+        })
+      )
+    );
+
+    renderMaterials();
+
+    const thumb = (await screen.findByAltText("clip.mp4 缩略图")) as HTMLImageElement;
+    expect(thumb.getAttribute("src")).toContain("/api/media/asset_thumb/thumbnail");
+    expect(screen.getByText("01:32")).toBeTruthy();
+  });
+
+  it("按理解状态渲染徽标文案", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          project_id: "project_1",
+          invalidated_asset_ids: [],
+          assets: [
+            material({ asset_id: "a_none", understanding_status: "none" }),
+            material({ asset_id: "a_running", understanding_status: "running" }),
+            material({ asset_id: "a_ready", understanding_status: "ready" }),
+            material({ asset_id: "a_failed", understanding_status: "failed" })
+          ]
+        })
+      )
+    );
+
+    renderMaterials();
+
+    expect(await screen.findByText("未理解")).toBeTruthy();
+    expect(screen.getByText("理解中")).toBeTruthy();
+    expect(screen.getByText("已理解")).toBeTruthy();
+    expect(screen.getByText("理解失败")).toBeTruthy();
+  });
+
+  it("素材表格不再出现标注相关 UI", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          project_id: "project_1",
+          invalidated_asset_ids: [],
+          assets: [material({ asset_id: "asset_1", understanding_status: "ready" })]
+        })
+      )
+    );
+
+    renderMaterials();
+
+    await screen.findByText("已理解");
+    expect(screen.queryByText(/标注/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /重试标注/ })).toBeNull();
+  });
+
+  it("点击已理解素材拉取并渲染摘要分段时间戳表", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/materials/asset_ready/summary")) {
+        return jsonResponse({
+          asset_id: "asset_ready",
+          summary: {
+            asset_id: "asset_ready",
+            version: 1,
+            semantic_role: "footage",
+            overall: "整体是一段城市夜景空镜",
+            segments: [
+              {
+                start_s: 0,
+                end_s: 3.5,
+                description: "霓虹灯特写",
+                tags: ["night", "neon"],
+                quality: "good"
+              }
+            ]
+          }
+        });
+      }
+      if (url.endsWith("/materials")) {
+        return jsonResponse({
+          project_id: "project_1",
+          invalidated_asset_ids: [],
+          assets: [
+            material({
+              asset_id: "asset_ready",
+              filename: "city.mp4",
+              understanding_status: "ready"
+            })
+          ]
+        });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderMaterials();
+
+    fireEvent.click(await screen.findByText("city.mp4"));
+
+    expect(await screen.findByText("整体是一段城市夜景空镜")).toBeTruthy();
+    expect(screen.getByText("霓虹灯特写")).toBeTruthy();
+    expect(screen.getByText("00:00.0 - 00:03.5")).toBeTruthy();
+    expect(screen.getByText("night、neon")).toBeTruthy();
+    await waitFor(() => {
+      const summaryCall = fetchMock.mock.calls.find(([input]) =>
+        String(input).endsWith("/materials/asset_ready/summary")
+      );
+      expect(summaryCall).toBeTruthy();
+    });
+  });
 });
 
 function renderMaterials(): void {
@@ -249,11 +375,14 @@ function material(overrides: Partial<MaterialAsset> = {}): MaterialAsset {
     size: 1024,
     mtime: 1,
     ingest_status: "imported",
+    understanding_status: "none",
     usable: true,
     enabled: true,
     probe: { duration_sec: 12.5, width: 1920, height: 1080 },
+    duration_sec: 12.5,
     proxy_object_hash: null,
     proxy_ready: false,
+    thumbnail_ready: false,
     invalid: false,
     failure: null,
     jobs: [],

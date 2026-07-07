@@ -217,6 +217,11 @@ class MaterialsResponse(ApiResponseModel):
     invalidated_asset_ids: list[str] = []
 
 
+class MaterialSummaryResponse(ApiResponseModel):
+    asset_id: str
+    summary: dict[str, Any]
+
+
 class MaterialMutationResponse(ApiResponseModel):
     project_id: str
     asset_id: str | None = None

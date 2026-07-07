@@ -28,7 +28,11 @@ from contracts.events import (
 from storage import schema
 from storage.db import begin_immediate
 from storage.object_store import ObjectStore
-from storage.repositories import EventLogRepository, JobsRepository
+from storage.repositories import (
+    EventLogRepository,
+    JobsRepository,
+    MaterialSummariesRepository,
+)
 from storage.repositories._json import dump_json, load_json
 from storage.workspace_paths import WorkspacePaths, resolve_asset_path
 
@@ -866,6 +870,78 @@ def test_media_thumbnail_serves_jpeg_and_404_when_missing(tmp_path: Path) -> Non
     assert ready.content == thumbnail_bytes
     assert missing.status_code == 404
     assert missing.json()["detail"]["reason"] == "thumbnail_not_ready"
+
+
+def _insert_ready_summary(
+    engine: Engine,
+    *,
+    asset_id: str,
+    version: int,
+    summary_json: dict[str, Any],
+) -> None:
+    with begin_immediate(engine) as connection:
+        MaterialSummariesRepository(connection).insert(
+            {
+                "summary_id": f"ms_{asset_id}_v{version}",
+                "asset_id": asset_id,
+                "version": version,
+                "focus": None,
+                "status": "ready",
+                "summary_json": summary_json,
+                "model": "qwen-max",
+                "created_at": "2026-07-04T00:00:00+00:00",
+            }
+        )
+
+
+def test_material_summary_route_returns_latest_ready_summary(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_indexed_asset(app, asset_id="asset_sum", thumbnail_bytes=None, duration_sec=5.0)
+    _insert_ready_summary(
+        _engine(app),
+        asset_id="asset_sum",
+        version=1,
+        summary_json={
+            "asset_id": "asset_sum",
+            "version": 1,
+            "semantic_role": "footage",
+            "overall": "整体描述",
+            "segments": [
+                {
+                    "start_s": 0.0,
+                    "end_s": 2.0,
+                    "description": "开场",
+                    "tags": ["hook"],
+                    "quality": "good",
+                }
+            ],
+            "generated_at": "2026-07-04T00:00:00+00:00",
+            "model": "qwen-max",
+        },
+    )
+
+    response = client.get("/api/projects/project_1/materials/asset_sum/summary", headers=AUTH)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["asset_id"] == "asset_sum"
+    assert body["summary"]["semantic_role"] == "footage"
+    assert body["summary"]["overall"] == "整体描述"
+    assert body["summary"]["segments"][0]["description"] == "开场"
+
+
+def test_material_summary_route_404_when_no_ready_summary(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_indexed_asset(app, asset_id="asset_none", thumbnail_bytes=None, duration_sec=5.0)
+
+    response = client.get("/api/projects/project_1/materials/asset_none/summary", headers=AUTH)
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["reason"] == "summary_not_ready"
 
 
 def test_materials_payload_exposes_thumbnail_duration_and_understanding(tmp_path: Path) -> None:

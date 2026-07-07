@@ -65,6 +65,7 @@ from storage.repositories import (
     DecisionsRepository,
     EventLogRepository,
     JobsRepository,
+    MaterialSummariesRepository,
     MessagesRepository,
     ProviderCallsRepository,
 )
@@ -559,6 +560,24 @@ def _register_routes(app: FastAPI) -> None:
             project_id,
             invalidated_asset_ids=list(invalidation.invalidated_asset_ids),
         )
+
+    @app.get(
+        "/api/projects/{project_id}/materials/{asset_id}/summary",
+        response_model=api_schemas.MaterialSummaryResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def get_material_summary(
+        project_id: str,
+        asset_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_project_asset(state.engine, project_id, asset_id)
+        with state.engine.connect() as connection:
+            summary = MaterialSummariesRepository(connection).latest_ready(asset_id)
+        if summary is None:
+            raise HTTPException(status_code=404, detail={"reason": "summary_not_ready"})
+        return {"asset_id": asset_id, "summary": summary["summary_json"]}
 
     @app.post(
         "/api/projects/{project_id}/materials/revalidate",

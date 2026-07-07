@@ -24,6 +24,8 @@ export type AssetJobSummary = {
   error_json: Record<string, unknown> | null;
 };
 
+export type UnderstandingStatus = "none" | "running" | "ready" | "failed";
+
 export type MaterialAsset = {
   asset_id: string;
   storage_mode: StorageMode | string;
@@ -34,11 +36,14 @@ export type MaterialAsset = {
   size: number;
   mtime: number | null;
   ingest_status: string;
+  understanding_status: UnderstandingStatus | string;
   usable: boolean;
   enabled: boolean;
   probe: Record<string, unknown> | null;
+  duration_sec: number | null;
   proxy_object_hash: string | null;
   proxy_ready: boolean;
+  thumbnail_ready: boolean;
   invalid: boolean;
   failure: Record<string, unknown> | null;
   jobs: AssetJobSummary[];
@@ -48,6 +53,36 @@ export type MaterialsResponse = {
   project_id: string;
   assets: MaterialAsset[];
   invalidated_asset_ids: string[];
+};
+
+// GET .../materials/{aid}/summary 尚未进入 generated/schema.d.ts，先按 apps/api/schemas.py 手写。
+// summary 字段对齐 packages/contracts/understanding.py MaterialSummary。
+export type MaterialSummarySegment = {
+  start_s: number;
+  end_s: number;
+  description: string;
+  transcript?: string | null;
+  tags?: string[];
+  quality: string;
+  notes?: string | null;
+};
+
+export type MaterialSummaryDetail = {
+  asset_id?: string;
+  version?: number;
+  focus?: string | null;
+  semantic_role?: string;
+  overall?: string;
+  language?: string | null;
+  segments?: MaterialSummarySegment[];
+  generated_at?: string;
+  model?: string;
+  [key: string]: unknown;
+};
+
+export type MaterialSummaryResponse = {
+  asset_id: string;
+  summary: MaterialSummaryDetail;
 };
 
 export type MaterialMutationResponse = {
@@ -397,6 +432,12 @@ export const api = {
     );
   },
 
+  getAssetSummary(projectId: string, assetId: string): Promise<MaterialSummaryResponse> {
+    return apiFetch<MaterialSummaryResponse>(
+      `${projectPath(projectId)}/materials/${encodeURIComponent(assetId)}/summary`
+    );
+  },
+
   fsRoots(): Promise<components["schemas"]["FsRootsResponse"]> {
     return apiFetch<components["schemas"]["FsRootsResponse"]>("/api/fs/roots");
   },
@@ -433,6 +474,13 @@ export const api = {
 
   mediaProxyUrl(assetId: string): string {
     return `/api/media/${encodeURIComponent(assetId)}/proxy`;
+  },
+
+  // 缩略图作为 <img src> 加载，走 query token 鉴权（同 SSE，见 apps/api/deps.py _request_token）。
+  mediaThumbnailUrl(assetId: string): string {
+    const token = getAuthToken();
+    const query = token ? `?token=${encodeURIComponent(token)}` : "";
+    return `/api/media/${encodeURIComponent(assetId)}/thumbnail${query}`;
   },
 
   mediaPreviewUrl(previewId: string): string {

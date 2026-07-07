@@ -6,6 +6,7 @@ import { api, type DecisionAnswer, type MaterialAsset } from "../api/client";
 import { queryKeys } from "../app/query_client";
 import { FsBrowserDialog } from "../components/Materials/FsBrowserDialog";
 import { LocalImportPanel } from "../components/Materials/LocalImportPanel";
+import { MaterialSummaryPanel } from "../components/Materials/MaterialSummaryPanel";
 import { MaterialsTable } from "../components/Materials/MaterialsTable";
 import { UploadDropzone } from "../components/Materials/UploadDropzone";
 import {
@@ -41,6 +42,7 @@ export function ProjectMaterialsView({
   const queryClient = useQueryClient();
   const [pendingUrlDecisions, setPendingUrlDecisions] = useState<PendingUrlDecision[]>([]);
   const [relocatingAsset, setRelocatingAsset] = useState<MaterialAsset | null>(null);
+  const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
 
   const materialsQuery = useQuery({
     queryKey: queryKeys.materials(projectId),
@@ -121,6 +123,10 @@ export function ProjectMaterialsView({
   });
 
   const assets = materialsQuery.data?.assets ?? [];
+  // 从最新列表按 id 反查，保证摘要面板跟随理解状态刷新。
+  const activeAsset = activeAssetId
+    ? (assets.find((asset) => asset.asset_id === activeAssetId) ?? null)
+    : null;
   const actionPending =
     importLocal.isPending ||
     answerUrlDecision.isPending ||
@@ -137,9 +143,6 @@ export function ProjectMaterialsView({
           <p className="mt-2 text-sm text-[#64748b]">Project：{projectId}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="rounded bg-[#eef2f7] px-3 py-2 text-sm text-[#475569]">
-            累计标注成本：暂无接口
-          </span>
           <button
             className="rounded-md border border-[#cbd5e1] px-3 py-2 text-sm hover:bg-[#f1f5f9] disabled:text-[#94a3b8]"
             type="button"
@@ -183,6 +186,8 @@ export function ProjectMaterialsView({
         <MaterialsTable
           assets={assets}
           actionPending={actionPending}
+          activeAssetId={activeAssetId}
+          onSelect={(asset) => setActiveAssetId(asset.asset_id)}
           onRelocate={setRelocatingAsset}
           onToggleEnabled={(asset) =>
             patchMaterial.mutate({ asset, payload: { enabled: !asset.enabled } })
@@ -194,6 +199,14 @@ export function ProjectMaterialsView({
           }}
         />
       )}
+
+      {activeAsset ? (
+        <MaterialSummaryPanel
+          projectId={projectId}
+          asset={activeAsset}
+          onClose={() => setActiveAssetId(null)}
+        />
+      ) : null}
 
       <FsBrowserDialog
         open={relocatingAsset !== null}
@@ -250,6 +263,11 @@ const MATERIAL_EVENT_TYPES = [
   "AssetInvalidated",
   "AssetLinked",
   "AssetUnlinked",
+  "AssetIndexReady",
+  "AssetIndexFailed",
+  "MaterialUnderstandingStarted",
+  "MaterialUnderstandingCompleted",
+  "MaterialUnderstandingFailed",
   "JobEnqueued",
   "JobProgress",
   "JobSucceeded",
