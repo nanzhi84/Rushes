@@ -18,7 +18,10 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        # 先移除与本仓库无关的 microsoft apt 源：packages.microsoft.com 间歇性签名故障会让 apt-get update 整体退出 100
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.sources /etc/apt/sources.list.d/azure-cli.list
+          sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Sync dependencies
         run: uv sync
@@ -93,7 +96,10 @@ jobs:
           node-version: 24
 
       - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        # 先移除与本仓库无关的 microsoft apt 源：packages.microsoft.com 间歇性签名故障会让 apt-get update 整体退出 100
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.sources /etc/apt/sources.list.d/azure-cli.list
+          sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Sync Python dependencies
         run: uv sync
