@@ -9,14 +9,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from contracts.provider import ProviderCapability, ProviderResult
 
 LLM_CHAT: ProviderCapability = "llm.chat"
-VLM_ANNOTATION: ProviderCapability = "vlm.annotation"
+VLM_UNDERSTANDING: ProviderCapability = "vlm.understanding"
 ASR_TRANSCRIBE: ProviderCapability = "asr.transcribe"
 TTS_SPEECH: ProviderCapability = "tts.speech"
 RERANK_TEXT: ProviderCapability = "rerank.text"
 
 ALL_CAPABILITIES: tuple[ProviderCapability, ...] = (
     LLM_CHAT,
-    VLM_ANNOTATION,
+    VLM_UNDERSTANDING,
     ASR_TRANSCRIBE,
     TTS_SPEECH,
     RERANK_TEXT,

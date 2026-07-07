@@ -18,7 +18,7 @@ from agent_harness.loop import _persist_tool_result_data
 from contracts.case import CaseState
 from contracts.project import ProjectState
 from contracts.provider import ProviderResult
-from providers import VLM_ANNOTATION
+from providers import VLM_UNDERSTANDING
 from providers.gateway import ProviderGatewayResult
 from storage import schema
 from storage.db import create_workspace_engine
@@ -71,7 +71,7 @@ class ScriptedVlmGateway:
         return ProviderGatewayResult(
             result=ProviderResult(
                 provider_id="mock_vlm",
-                capability=VLM_ANNOTATION,
+                capability=VLM_UNDERSTANDING,
                 request_id=request.request_id,
                 model="mock",
                 latency_ms=1,
@@ -103,7 +103,7 @@ class ConcurrencyProbeGateway:
         return ProviderGatewayResult(
             result=ProviderResult(
                 provider_id="mock_vlm",
-                capability=VLM_ANNOTATION,
+                capability=VLM_UNDERSTANDING,
                 request_id=request.request_id,
                 model="mock",
                 latency_ms=1,
@@ -118,7 +118,7 @@ class SlowGateway:
         return ProviderGatewayResult(
             result=ProviderResult(
                 provider_id="mock_vlm",
-                capability=VLM_ANNOTATION,
+                capability=VLM_UNDERSTANDING,
                 request_id=request.request_id,
                 model="mock",
                 latency_ms=1,

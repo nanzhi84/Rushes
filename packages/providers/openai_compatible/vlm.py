@@ -1,4 +1,4 @@
-"""OpenAI-compatible multimodal adapter for vlm.annotation."""
+"""OpenAI-compatible multimodal adapter for vlm.understanding."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict
 
 from contracts.provider import ProviderDescriptor
-from providers.capabilities import VLM_ANNOTATION
+from providers.capabilities import VLM_UNDERSTANDING
 
 from .llm import (
     DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
@@ -30,7 +30,7 @@ class OpenAICompatibleVLMConfig(BaseModel):
 
 
 class OpenAICompatibleVLMProvider(OpenAICompatibleLLMProvider):
-    """Same chat-completions wire protocol, registered for multimodal annotation."""
+    """Same chat-completions wire protocol, registered for multimodal understanding."""
 
     def __init__(
         self,
@@ -63,9 +63,9 @@ class OpenAICompatibleVLMProvider(OpenAICompatibleLLMProvider):
 def openai_compatible_vlm_descriptor(*, priority: int = 100) -> ProviderDescriptor:
     return ProviderDescriptor(
         provider_id=OPENAI_COMPATIBLE_VLM_PROVIDER_ID,
-        display_name="OpenAI-compatible Multimodal Annotation",
+        display_name="OpenAI-compatible Multimodal Understanding",
         version="1",
-        capabilities=[VLM_ANNOTATION],
+        capabilities=[VLM_UNDERSTANDING],
         config_model=OpenAICompatibleVLMConfig,
         client_ref="providers.openai_compatible.vlm.OpenAICompatibleVLMProvider",
         supports_json_schema=True,

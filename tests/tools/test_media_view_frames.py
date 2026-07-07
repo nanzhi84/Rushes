@@ -12,7 +12,7 @@ from contracts.asset import AssetKind, AssetSource, StorageMode
 from contracts.case import CaseState
 from contracts.provider import ProviderError, ProviderResult
 from contracts.timeline import TimelineState
-from providers import VLM_ANNOTATION
+from providers import VLM_UNDERSTANDING
 from providers.gateway import ProviderGatewayResult
 from storage import schema
 from storage.db import create_workspace_engine
@@ -63,7 +63,7 @@ def test_view_frames_sends_question_and_data_uri_to_vlm(
     assert result.events == []
 
     request = gateway.requests[0]
-    assert request.capability == VLM_ANNOTATION
+    assert request.capability == VLM_UNDERSTANDING
     content = request.payload["messages"][0]["content"]
     assert "主体是什么？" in content[0]["text"]
     image_items = [item for item in content if item["type"] == "image_url"]
@@ -97,7 +97,7 @@ def test_view_frames_degrades_when_gateway_missing(tmp_path: Path) -> None:
         )
 
     assert result.status == "succeeded"
-    assert result.data["degraded"]["capability"] == VLM_ANNOTATION
+    assert result.data["degraded"]["capability"] == VLM_UNDERSTANDING
     assert "VLM 通道不可用" in result.observation
     assert result.events == []
 
@@ -175,7 +175,7 @@ def test_view_frames_degrades_when_vlm_errors(
         )
 
     assert result.status == "succeeded"
-    assert result.data["degraded"]["capability"] == VLM_ANNOTATION
+    assert result.data["degraded"]["capability"] == VLM_UNDERSTANDING
     assert "vlm_down" in result.observation
 
 
@@ -218,7 +218,7 @@ class _RecordingVlmGateway:
         return ProviderGatewayResult(
             result=ProviderResult(
                 provider_id="mock_vlm",
-                capability=VLM_ANNOTATION,
+                capability=VLM_UNDERSTANDING,
                 request_id=request.request_id,
                 model="mock",
                 latency_ms=1,
@@ -232,7 +232,7 @@ class _ErrorVlmGateway:
         return ProviderGatewayResult(
             result=ProviderResult(
                 provider_id="mock_vlm",
-                capability=VLM_ANNOTATION,
+                capability=VLM_UNDERSTANDING,
                 request_id=request.request_id,
                 model="mock",
                 latency_ms=1,
