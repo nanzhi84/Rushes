@@ -290,12 +290,20 @@ def _resolve_existing_asset_path(
     return path
 
 
-def _extract_frame_data_uri(
+def extract_frame_data_uri(
     path: Path,
     seconds: float,
     *,
     ffmpeg_bin: str = "ffmpeg",
 ) -> str:
+    """Extract a single frame at ``seconds`` and return a JPEG ``data:`` URI.
+
+    Public so the understanding subagent (Spec C §C3) can reuse the exact ffmpeg
+    抽帧 behavior without view_frames' embedded VLM call. ``view_frames`` keeps
+    calling the ``_extract_frame_data_uri`` alias below so existing monkeypatch
+    seams stay intact.
+    """
+
     command = [
         ffmpeg_bin,
         "-hide_banner",
@@ -322,6 +330,11 @@ def _extract_frame_data_uri(
         raise FrameExtractionError("ffmpeg 没有输出帧")
     payload = base64.b64encode(result.stdout).decode("ascii")
     return f"data:image/jpeg;base64,{payload}"
+
+
+# Backward-compatible private alias: ``view_frames`` (and its tests) call this
+# name; keeping it lets monkeypatching the private name keep working unchanged.
+_extract_frame_data_uri = extract_frame_data_uri
 
 
 def _vlm_messages(

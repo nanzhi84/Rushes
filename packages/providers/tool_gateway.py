@@ -43,10 +43,13 @@ def build_default_tool_gateway(
         )
         registry.register(openai_compatible_llm_descriptor(), provider)
     if vlm_key:
-        registry.register(
-            openai_compatible_vlm_descriptor(),
-            OpenAICompatibleVLMProvider(api_key=vlm_key),
+        vlm_model = os.environ.get("RUSHES_VLM_MODEL")
+        vlm_provider = (
+            OpenAICompatibleVLMProvider(api_key=vlm_key, model=vlm_model)
+            if vlm_model
+            else OpenAICompatibleVLMProvider(api_key=vlm_key)
         )
+        registry.register(openai_compatible_vlm_descriptor(), vlm_provider)
     if embedding_key:
         registry.register(
             openai_compatible_embedding_descriptor(),

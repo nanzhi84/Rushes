@@ -35,9 +35,11 @@ from storage.db import begin_immediate
 from storage.repositories import (
     CasesRepository,
     DecisionsRepository,
+    MaterialSummariesRepository,
     MessagesRepository,
     ProjectsRepository,
     TimelineVersionsRepository,
+    TranscriptsRepository,
 )
 from storage.repositories._json import load_json
 from tools import PATCH_OP_REGISTRY, ToolExecutionContext, ToolRegistry, build_default_tool_registry
@@ -1462,11 +1464,27 @@ def _defer_tool_call(
 
 
 def _persist_tool_result_data(result: ToolResult, *, engine: Engine) -> None:
+    # handler 只有只读连接：需要落库的行经 ToolResult.data 交回 loop 这里写。
     row = result.data.get("message_row")
-    if not isinstance(row, Mapping):
+    summary_rows = result.data.get("material_summary_rows")
+    transcript_rows = result.data.get("transcript_rows")
+    has_summaries = isinstance(summary_rows, list) and summary_rows
+    has_transcripts = isinstance(transcript_rows, list) and transcript_rows
+    if not isinstance(row, Mapping) and not has_summaries and not has_transcripts:
         return
     with begin_immediate(engine) as connection:
-        MessagesRepository(connection).insert(dict(row))
+        if isinstance(row, Mapping):
+            MessagesRepository(connection).insert(dict(row))
+        if isinstance(summary_rows, list):
+            summaries_repo = MaterialSummariesRepository(connection)
+            for summary_row in summary_rows:
+                if isinstance(summary_row, Mapping):
+                    summaries_repo.insert(dict(summary_row))
+        if isinstance(transcript_rows, list):
+            transcripts_repo = TranscriptsRepository(connection)
+            for transcript_row in transcript_rows:
+                if isinstance(transcript_row, Mapping):
+                    transcripts_repo.insert(dict(transcript_row))
 
 
 def _apply_events(

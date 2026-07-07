@@ -1,5 +1,5 @@
 """Media inspection tool handlers."""
 
-from .handlers import view_frames
+from .handlers import extract_frame_data_uri, view_frames
 
-__all__ = ["view_frames"]
+__all__ = ["extract_frame_data_uri", "view_frames"]

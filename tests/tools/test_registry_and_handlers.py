@@ -96,6 +96,8 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "annotation.retry",
         "annotation.inspect",
         "media.view_frames",
+        "understand.materials",
+        "asset.read_summary",
         "retrieval.search_candidates",
         "timeline.plan_from_candidates",
         "timeline.apply_patch",

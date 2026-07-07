@@ -435,6 +435,19 @@ class MemorySearchRelevantInput(BaseModel):
     limit: int = Field(default=5, ge=1, le=5)
 
 
+class UnderstandMaterialsInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_ids: list[str] = Field(min_length=1)
+    focus: str | None = None
+
+
+class AssetReadSummaryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_ids: list[str] = Field(min_length=1)
+
+
 def tool_specs() -> tuple[ToolSpec, ...]:
     return (
         ToolSpec(
@@ -1035,6 +1048,43 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             description="Extract requested video frames and ask VLM for visual confirmation.",
         ),
         ToolSpec(
+            name="understand.materials",
+            namespace="understand",
+            version="1",
+            input_model=UnderstandMaterialsInput,
+            result_model=None,
+            handler_ref="tools.understand.materials",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            requires_confirmation=False,
+            side_effects=["asset"],
+            emits_events=[
+                "MaterialUnderstandingStarted",
+                "MaterialUnderstandingCompleted",
+                "MaterialUnderstandingFailed",
+            ],
+            description=(
+                "Dispatch understanding subagents to produce timestamped material summaries."
+            ),
+        ),
+        ToolSpec(
+            name="asset.read_summary",
+            namespace="asset",
+            version="1",
+            input_model=AssetReadSummaryInput,
+            result_model=None,
+            handler_ref="tools.understand.read_summary",
+            allowed_scopes=["case_agent_console", "project_page"],
+            requires_artifacts=[],
+            requires_active_project=True,
+            requires_active_case=False,
+            side_effects=[],
+            emits_events=[],
+            description="Read the latest ready material summaries for the given assets.",
+        ),
+        ToolSpec(
             name="retrieval.search_candidates",
             namespace="retrieval",
             version="1",
@@ -1425,6 +1475,8 @@ def build_default_tool_registry() -> ToolRegistry:
     from .timeline_tools import plan_from_candidates as timeline_plan_from_candidates
     from .timeline_tools import restore_version as timeline_restore_version
     from .timeline_tools import validate as timeline_validate
+    from .understand import materials as understand_materials
+    from .understand import read_summary as asset_read_summary
 
     handlers: dict[str, ToolHandler] = {
         "decision.answer": decision_answer,
@@ -1463,6 +1515,8 @@ def build_default_tool_registry() -> ToolRegistry:
         "annotation.retry": annotation_retry,
         "annotation.inspect": annotation_inspect,
         "media.view_frames": media_view_frames,
+        "understand.materials": understand_materials,
+        "asset.read_summary": asset_read_summary,
         "retrieval.search_candidates": retrieval_search_candidates,
         "timeline.plan_from_candidates": timeline_plan_from_candidates,
         "timeline.apply_patch": timeline_apply_patch,
