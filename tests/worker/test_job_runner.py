@@ -15,8 +15,7 @@ from agent_harness.turn_queue import StopToken, TurnQueue, TurnQueueItem
 from contracts.jobs import Job
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
-from storage.repositories import CasesRepository, EventLogRepository, JobsRepository
-from storage.repositories.projects import ProjectsRepository
+from storage.repositories import DraftsRepository, EventLogRepository, JobsRepository
 
 NOW = "2026-07-04T00:00:00+00:00"
 
@@ -26,27 +25,22 @@ def _prepare_workspace(tmp_path: Path) -> Engine:
     with engine.begin() as connection:
         schema.create_all(connection)
     with begin_immediate(engine) as connection:
-        ProjectsRepository(connection).insert(
-            {
-                "project_id": "project_1",
-                "name": "Project",
-                "status": "active",
-                "defaults": {"aspect_ratio": "9:16", "fps": 30},
-                "created_at": NOW,
-                "updated_at": NOW,
-            }
-        )
-        CasesRepository(connection).insert(_case_values())
+        DraftsRepository(connection).insert(_draft_values())
     return engine
 
 
-def _case_values() -> dict[str, object]:
+def _draft_values() -> dict[str, object]:
     return {
-        "case_id": "case_1",
-        "project_id": "project_1",
-        "name": "Case",
+        "draft_id": "draft_1",
+        "name": "Draft",
         "state_version": 0,
         "status": "active",
+        "defaults": {
+            "aspect_ratio": "9:16",
+            "fps": 30,
+            "preview_quality": "low",
+            "export_quality": "high",
+        },
         "pending_decision_id": None,
         "running_jobs": [],
         "last_error": None,
@@ -62,9 +56,9 @@ def _case_values() -> dict[str, object]:
         "rough_cut_approved_version": None,
         "postprocess_plan": None,
         "export_current_id": None,
-        "selected_asset_ids": [],
-        "disabled_asset_ids": [],
         "scratch_memory": {},
+        "created_at": NOW,
+        "updated_at": NOW,
     }
 
 
@@ -73,9 +67,8 @@ def _insert_job(engine: Engine, **overrides: Any) -> None:
         "job_id": "job_1",
         "kind": "noop",
         "status": "pending",
-        "project_id": "project_1",
-        "case_id": "case_1",
-        "requested_by_case_id": None,
+        "draft_id": "draft_1",
+        "requested_by_draft_id": None,
         "asset_id": None,
         "idempotency_key": "idem_1",
         "payload_json": {"ok": True},
@@ -102,7 +95,7 @@ def _registry(handler: Any) -> JobHandlerRegistry:
     return registry
 
 
-async def test_runner_success_emits_event_routes_case_observation(tmp_path: Path) -> None:
+async def test_runner_success_emits_event_routes_draft_observation(tmp_path: Path) -> None:
     engine = _prepare_workspace(tmp_path)
     _insert_job(engine)
     observed: list[TurnQueueItem] = []
@@ -129,7 +122,7 @@ async def test_runner_success_emits_event_routes_case_observation(tmp_path: Path
     assert result.status == "succeeded"
     assert result.observation_enqueued
     assert observed[0].kind == "job_observation"
-    assert observed[0].case_id == "case_1"
+    assert observed[0].draft_id == "draft_1"
     assert _job(engine, "job_1")["status"] == "succeeded"
     assert "JobSucceeded" in _event_types(engine)
 
@@ -234,11 +227,11 @@ def test_runner_startup_resets_stale_running_jobs(tmp_path: Path) -> None:
     assert job["worker_id"] is None
 
 
-async def test_project_job_without_requested_case_does_not_enqueue_observation(
+async def test_draft_job_without_requested_draft_does_not_enqueue_observation(
     tmp_path: Path,
 ) -> None:
     engine = _prepare_workspace(tmp_path)
-    _insert_job(engine, case_id=None)
+    _insert_job(engine, draft_id=None)
     observed: list[TurnQueueItem] = []
 
     async def handler(job: Job) -> JobExecutionResult:
@@ -261,9 +254,9 @@ async def test_project_job_without_requested_case_does_not_enqueue_observation(
     assert observed == []
 
 
-async def test_project_job_requested_by_case_routes_observation(tmp_path: Path) -> None:
+async def test_draft_job_requested_by_draft_routes_observation(tmp_path: Path) -> None:
     engine = _prepare_workspace(tmp_path)
-    _insert_job(engine, case_id=None, requested_by_case_id="case_1")
+    _insert_job(engine, draft_id=None, requested_by_draft_id="draft_1")
     observed: list[TurnQueueItem] = []
 
     async def handler(job: Job) -> JobExecutionResult:
@@ -282,7 +275,7 @@ async def test_project_job_requested_by_case_routes_observation(tmp_path: Path) 
     await queue.shutdown()
 
     assert result.observation_enqueued
-    assert observed[0].case_id == "case_1"
+    assert observed[0].draft_id == "draft_1"
 
 
 async def test_duplicate_terminal_event_does_not_enqueue_twice(tmp_path: Path) -> None:

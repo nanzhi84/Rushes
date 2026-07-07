@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
-from contracts.case import CaseState
+from contracts.draft import DraftState
 from contracts.events import DomainEventBase, ExportCompleted, JobProgress, PreviewRendered
 from contracts.jobs import Job
 from contracts.subtitle import SubtitleStyleTemplate
@@ -25,7 +25,7 @@ from media.segment_render import MediaSource, SegmentRenderError
 from storage import schema
 from storage.db import begin_immediate
 from storage.object_store import ObjectStore
-from storage.repositories import CasesRepository, ObjectsRepository
+from storage.repositories import DraftsRepository, ObjectsRepository
 from storage.workspace_paths import WorkspacePaths, resolve_asset_path
 from timeline import get_timeline_version
 
@@ -53,23 +53,23 @@ async def _run_render_job(
     *,
     final: bool,
 ) -> JobExecutionResult:
-    case_state = _load_case_state(engine, job)
-    timeline_version = _timeline_version_from_job(job, case_state)
-    if not case_state.timeline_validated:
+    draft_state = _load_draft_state(engine, job)
+    timeline_version = _timeline_version_from_job(job, draft_state)
+    if not draft_state.timeline_validated:
         raise JobExecutionError(
             "render job requires a validated timeline",
             error_code="render_precondition_failed",
             retryable=False,
         )
     if final:
-        _ensure_current_preview_exists(engine, case_state, timeline_version)
-    record = get_timeline_version(engine, case_state.case_id, timeline_version)
+        _ensure_current_preview_exists(engine, draft_state, timeline_version)
+    record = get_timeline_version(engine, draft_state.draft_id, timeline_version)
     if record is None:
         raise JobExecutionError(
             f"timeline v{timeline_version} not found",
             error_code="render_timeline_not_found",
             retryable=False,
-            details={"case_id": case_state.case_id, "timeline_version": timeline_version},
+            details={"draft_id": draft_state.draft_id, "timeline_version": timeline_version},
         )
     timeline = record.timeline
     sources = _timeline_sources(engine, paths, timeline)
@@ -100,7 +100,7 @@ async def _run_render_job(
         object_ref = _put_render_output(engine, paths, render_output.output_path)
         event = _completed_event(
             job,
-            case_state=case_state,
+            draft_state=draft_state,
             timeline=timeline,
             object_hash=object_ref.object_hash,
             object_size=object_ref.size,
@@ -110,7 +110,7 @@ async def _run_render_job(
         await reporter.emit(1.0, force=True)
         return JobExecutionResult(
             {
-                "case_id": case_state.case_id,
+                "draft_id": draft_state.draft_id,
                 "timeline_version": timeline.version,
                 "artifact_id": event.artifact_id,
                 "object_hash": object_ref.object_hash,
@@ -131,7 +131,7 @@ async def _run_render_job(
             error_code="render_failed",
             retryable=False,
             stderr_summary=exc.stderr_summary,
-            details={"case_id": case_state.case_id, "timeline_version": timeline_version},
+            details={"draft_id": draft_state.draft_id, "timeline_version": timeline_version},
         ) from exc
     finally:
         output_path.unlink(missing_ok=True)
@@ -152,9 +152,8 @@ class _JobProgressReporter:
         self._last_emit = now
         event = JobProgress(
             job_id=self._job.job_id,
-            project_id=self._job.project_id,
-            case_id=self._job.case_id,
-            requested_by_case_id=self._job.requested_by_case_id,
+            draft_id=self._job.draft_id,
+            requested_by_draft_id=self._job.requested_by_draft_id,
             progress=value,
             payload={"kind": self._job.kind, "progress": value},
         )
@@ -166,45 +165,45 @@ class _JobProgressReporter:
         )
 
 
-def _load_case_state(engine: Engine, job: Job) -> CaseState:
-    case_id = job.case_id or job.requested_by_case_id or _payload_case_id(job.payload_json)
-    if case_id is None:
+def _load_draft_state(engine: Engine, job: Job) -> DraftState:
+    draft_id = job.draft_id or job.requested_by_draft_id or _payload_draft_id(job.payload_json)
+    if draft_id is None:
         raise JobExecutionError(
-            "render job requires case_id",
+            "render job requires draft_id",
             error_code="invalid_render_job",
             retryable=False,
         )
     with engine.connect() as connection:
-        row = CasesRepository(connection).get(case_id)
+        row = DraftsRepository(connection).get(draft_id)
     if row is None:
         raise JobExecutionError(
-            f"case not found: {case_id}",
-            error_code="render_case_not_found",
+            f"draft not found: {draft_id}",
+            error_code="render_draft_not_found",
             retryable=False,
         )
-    return CaseState.model_validate(row)
+    return DraftState.model_validate(row)
 
 
-def _payload_case_id(payload: Mapping[str, Any]) -> str | None:
-    value = payload.get("case_id")
+def _payload_draft_id(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("draft_id")
     if isinstance(value, str):
         return value
     arguments = payload.get("arguments")
     if isinstance(arguments, Mapping):
-        argument_value = arguments.get("case_id")
+        argument_value = arguments.get("draft_id")
         if isinstance(argument_value, str):
             return argument_value
     return None
 
 
-def _timeline_version_from_job(job: Job, case_state: CaseState) -> int:
+def _timeline_version_from_job(job: Job, draft_state: DraftState) -> int:
     payload = job.payload_json
     arguments = payload.get("arguments")
     raw_version = payload.get("timeline_version")
     if raw_version is None and isinstance(arguments, Mapping):
         raw_version = arguments.get("timeline_version")
     if raw_version is None:
-        raw_version = case_state.timeline_current_version
+        raw_version = draft_state.timeline_current_version
     if not isinstance(raw_version, int):
         raise JobExecutionError(
             "render job requires timeline_version",
@@ -216,10 +215,10 @@ def _timeline_version_from_job(job: Job, case_state: CaseState) -> int:
 
 def _ensure_current_preview_exists(
     engine: Engine,
-    case_state: CaseState,
+    draft_state: DraftState,
     timeline_version: int,
 ) -> None:
-    preview_id = case_state.preview_current_id
+    preview_id = draft_state.preview_current_id
     if preview_id is None:
         raise JobExecutionError(
             "final export requires preview for current timeline version",
@@ -230,7 +229,7 @@ def _ensure_current_preview_exists(
         row = connection.execute(
             select(schema.previews.c.timeline_version).where(
                 schema.previews.c.preview_id == preview_id,
-                schema.previews.c.case_id == case_state.case_id,
+                schema.previews.c.draft_id == draft_state.draft_id,
             )
         ).first()
     if row is None or int(row._mapping["timeline_version"]) != timeline_version:
@@ -293,14 +292,14 @@ def _put_render_output(engine: Engine, paths: WorkspacePaths, output_path: Path)
 def _completed_event(
     job: Job,
     *,
-    case_state: CaseState,
+    draft_state: DraftState,
     timeline: TimelineState,
     object_hash: str,
     object_size: int,
     final: bool,
 ) -> PreviewRendered | ExportCompleted:
     prefix = "export" if final else "preview"
-    artifact_id = f"{prefix}_{case_state.case_id}_v{timeline.version}_{object_hash[:12]}"
+    artifact_id = f"{prefix}_{draft_state.draft_id}_v{timeline.version}_{object_hash[:12]}"
     payload = {
         "object_hash": object_hash,
         "object_size": object_size,
@@ -310,15 +309,13 @@ def _completed_event(
     }
     if final:
         return ExportCompleted(
-            project_id=case_state.project_id,
-            case_id=case_state.case_id,
+            draft_id=draft_state.draft_id,
             timeline_version=timeline.version,
             artifact_id=artifact_id,
             payload=payload,
         )
     return PreviewRendered(
-        project_id=case_state.project_id,
-        case_id=case_state.case_id,
+        draft_id=draft_state.draft_id,
         timeline_version=timeline.version,
         artifact_id=artifact_id,
         payload=payload,
