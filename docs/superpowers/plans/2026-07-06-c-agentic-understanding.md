@@ -120,7 +120,7 @@
 
 ### Task 10: golden/e2e/PRD 收口
 
-**Files:** Modify `tests/golden/`（新 golden case：understand.materials(脚本化 VLM)→asset.read_summary→timeline.compose_initial→content 收尾；删除已不存在工具的旧 case 引用）、`scripts/e2e_paths/`（run_path2/run_scenery 提示词与断言：检索/候选包措辞 → 理解/摘要/compose_initial；client.py 若有 candidate 相关应答逻辑更新）、`e2e/`（Playwright 两用例保绿；素材页断言若涉标注徽标则更新）、`chat_first_editing_agent_prd_v1_2.md`（spec「PRD 修订清单」七条：硬约束、§3.1/§3.2 图、§4.10 job 表+并发、§5.2 前置表、§6.3/§6.7 删+understand 新增+§6.8 变更、§7.4 整节替换为 MaterialSummary、子代理机制新增小节；纪律同前两轮：范围内逐处、报告行号+改前改后）
+**Files:** Modify `tests/golden/`（新 golden case：understand.materials(脚本化 VLM)→asset.read_summary→timeline.compose_initial→content 收尾；删除已不存在工具的旧 case 引用）、`scripts/e2e_paths/`（run_path2/run_scenery 提示词与断言：检索/候选包措辞 → 理解/摘要/compose_initial；client.py 若有 candidate 相关应答逻辑更新）、`e2e/`（Playwright 两用例保绿；素材页断言若涉标注徽标则更新）、`PRD.md`（spec「PRD 修订清单」七条：硬约束、§3.1/§3.2 图、§4.10 job 表+并发、§5.2 前置表、§6.3/§6.7 删+understand 新增+§6.8 变更、§7.4 整节替换为 MaterialSummary、子代理机制新增小节；纪律同前两轮：范围内逐处、报告行号+改前改后）
 
 - [ ] Step 1: golden + e2e 迁移与新用例
 - [ ] Step 2: PRD 修订

@@ -1,6 +1,6 @@
 # Rushes M0 执行计划（agent harness）
 
-依据：`chat_first_editing_agent_prd_v1_2.md`（唯一实现依据）。本文件只记录交付切分与工作纪律，不复述 PRD 内容；冲突时以 PRD 为准。
+依据：`PRD.md`（唯一实现依据）。本文件只记录交付切分与工作纪律，不复述 PRD 内容；冲突时以 PRD 为准。
 
 ## 分工
 

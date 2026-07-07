@@ -362,7 +362,7 @@ Expected: 全绿。
 ### Task 9: PRD 修订 + 全量绿
 
 **Files:**
-- Modify: `chat_first_editing_agent_prd_v1_2.md`（修订点见 spec「PRD 修订清单」；grep `默认 BGM|default_bgm|default_library|voiceover|bgm|subtitle_template` 逐处核对，只改属于 Spec A 范围的：kind 枚举、AssetSource、bgm decision 选项、默认资产约束、Gherkin 场景；**轨道角色/audio_plan/postprocess_plan 中的 voiceover/bgm 字样不属于 kind，不改**）
+- Modify: `PRD.md`（修订点见 spec「PRD 修订清单」；grep `默认 BGM|default_bgm|default_library|voiceover|bgm|subtitle_template` 逐处核对，只改属于 Spec A 范围的：kind 枚举、AssetSource、bgm decision 选项、默认资产约束、Gherkin 场景；**轨道角色/audio_plan/postprocess_plan 中的 voiceover/bgm 字样不属于 kind，不改**）
 - Modify: `.gitignore`（追加 `.rushes/`、`.models/`、`.worktrees/`）
 
 - [ ] **Step 1: PRD 逐项修订**（对照 spec 清单五条）
