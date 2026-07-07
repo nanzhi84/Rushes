@@ -202,6 +202,7 @@ class DraftListItem(BaseModel):
 
 **Files:**
 - Modify: `scripts/check_contracts.py`（事件/工具注册表断言：事件 44、注册工具 31；允许导入表中 project 相关残留清理）、`tests/scripts/`、`tests/apps/`；删除空壳死目录 `packages/annotation`、`packages/indexing`、`packages/tools/annotation`、`packages/tools/retrieval`（确认无 import 后）
+- **执行期补正**：T7 已顺手修复 `packages/media/invalidation.py`（被 T3 删表打断的 revalidate 依赖，改 draft 语义）；T9 需另修两处已知红：`tests/apps/test_render_jobs.py:278`、`tests/apps/test_audio_jobs.py:554`（仍插旧表 project_asset_links）与 `tests/media/test_subtitles_ass.py` 8 例（直接构造 TimelineState 用旧 case_id 字段）
 - Verify: 全量后端门禁
 
 - [ ] **Step 1**: check_contracts 与残余测试修绿；全仓 `grep -rn "case_id\|project_id" packages apps tests scripts --include="*.py"` 清零（golden 数据内允许的除外——原则上也应清零）。
