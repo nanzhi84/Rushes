@@ -30,16 +30,16 @@ export function MaterialSummaryPanel({
   const segments = summary?.segments ?? [];
 
   return (
-    <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
+    <section className="rounded-lg border border-line bg-panel p-4">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <p className="text-sm font-medium text-[#64748b]">素材理解摘要</p>
-          <h2 className="mt-1 text-lg font-semibold text-[#17202a]">
+          <p className="text-sm font-medium text-fg-muted">素材理解摘要</p>
+          <h2 className="mt-1 text-lg font-semibold text-fg">
             {asset.filename || asset.asset_id}
           </h2>
         </div>
         <button
-          className="rounded-md border border-[#cbd5e1] px-2 py-1 text-xs hover:bg-[#f1f5f9]"
+          className="rounded-md border border-line-strong px-2 py-1 text-xs hover:bg-hover"
           type="button"
           onClick={onClose}
         >
@@ -48,11 +48,11 @@ export function MaterialSummaryPanel({
       </header>
 
       {!ready ? (
-        <p className="mt-3 text-sm text-[#64748b]">该素材尚未完成理解，暂无摘要。</p>
+        <p className="mt-3 text-sm text-fg-muted">该素材尚未完成理解，暂无摘要。</p>
       ) : summaryQuery.isLoading ? (
-        <p className="mt-3 text-sm text-[#64748b]">正在读取摘要</p>
+        <p className="mt-3 text-sm text-fg-muted">正在读取摘要</p>
       ) : summaryQuery.error ? (
-        <p className="mt-3 rounded-md bg-[#fee4e2] px-3 py-2 text-sm text-[#b42318]">摘要加载失败</p>
+        <p className="mt-3 rounded-md bg-danger/15 px-3 py-2 text-sm text-danger">摘要加载失败</p>
       ) : summary ? (
         <div className="mt-3 space-y-4">
           <div className="flex flex-wrap items-center gap-2">
@@ -60,16 +60,16 @@ export function MaterialSummaryPanel({
               <StatusBadge label={roleLabel(summary.semantic_role)} tone="info" />
             ) : null}
             {summary.language ? (
-              <span className="text-xs text-[#64748b]">语言：{summary.language}</span>
+              <span className="text-xs text-fg-muted">语言：{summary.language}</span>
             ) : null}
           </div>
           {summary.overall ? (
-            <p className="text-sm leading-6 text-[#334155]">{summary.overall}</p>
+            <p className="text-sm leading-6 text-fg">{summary.overall}</p>
           ) : null}
           {segments.length > 0 ? (
-            <div className="overflow-x-auto rounded-lg border border-[#e2e8f0]">
+            <div className="overflow-x-auto rounded-lg border border-line">
               <table className="min-w-[640px] w-full text-left text-sm">
-                <thead className="border-b border-[#e2e8f0] bg-[#f8fafc] text-xs font-semibold text-[#475569]">
+                <thead className="border-b border-line bg-raised text-xs font-semibold text-fg-muted">
                   <tr>
                     <th className="px-3 py-2">时间段</th>
                     <th className="px-3 py-2">描述</th>
@@ -77,28 +77,28 @@ export function MaterialSummaryPanel({
                     <th className="px-3 py-2">标签</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#eef2f7]">
+                <tbody className="divide-y divide-line">
                   {segments.map((segment, index) => (
                     <tr key={`${segment.start_s}-${segment.end_s}-${index}`}>
-                      <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-[#334155]">
+                      <td className="whitespace-nowrap px-3 py-2 font-mono text-xs text-fg">
                         {formatTimecode(segment.start_s)} - {formatTimecode(segment.end_s)}
                       </td>
-                      <td className="px-3 py-2 text-[#334155]">{segment.description}</td>
+                      <td className="px-3 py-2 text-fg">{segment.description}</td>
                       <td className="px-3 py-2">
                         <StatusBadge label={qualityLabel(segment.quality)} tone={qualityTone(segment.quality)} />
                       </td>
-                      <td className="px-3 py-2 text-xs text-[#64748b]">{formatTags(segment)}</td>
+                      <td className="px-3 py-2 text-xs text-fg-muted">{formatTags(segment)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
           ) : (
-            <p className="text-sm text-[#64748b]">该摘要没有分段信息。</p>
+            <p className="text-sm text-fg-muted">该摘要没有分段信息。</p>
           )}
         </div>
       ) : (
-        <p className="mt-3 text-sm text-[#64748b]">暂无摘要内容。</p>
+        <p className="mt-3 text-sm text-fg-muted">暂无摘要内容。</p>
       )}
     </section>
   );

@@ -561,6 +561,7 @@ def _copy_project_asset_links(
                 enabled=bool(values["enabled"]),
                 linked_at=context.created_at,
                 note=str(values["note"]),
+                rel_dir=values.get("rel_dir"),
             )
         )
 
@@ -595,6 +596,8 @@ def _copy_case_asset_links_for_move(
             source_values = dict(source_link._mapping)
             payload["enabled"] = bool(source_values["enabled"])
             payload["note"] = str(source_values["note"])
+            if source_values.get("rel_dir"):
+                payload["rel_dir"] = source_values["rel_dir"]
         linked_event = AssetLinked(
             project_id=target_project_id,
             asset_id=asset_id,
@@ -782,15 +785,23 @@ def _apply_asset_linked(context: _ReducerContext, event: DomainEventBase) -> Non
                 enabled=bool(event.payload.get("enabled", True)),
                 linked_at=str(event.payload.get("linked_at", context.created_at)),
                 note=str(event.payload.get("note", "")),
+                rel_dir=_optional_str(event.payload.get("rel_dir")),
             )
         )
     else:
+        updates: dict[str, Any] = {"enabled": bool(event.payload.get("enabled", True))}
+        if "rel_dir" in event.payload:
+            updates["rel_dir"] = _optional_str(event.payload.get("rel_dir"))
         context.connection.execute(
             update(schema.project_asset_links)
             .where(schema.project_asset_links.c.project_id == project_id)
             .where(schema.project_asset_links.c.asset_id == asset_id)
-            .values(enabled=bool(event.payload.get("enabled", True)))
+            .values(**updates)
         )
+
+
+def _optional_str(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _apply_asset_unlinked(context: _ReducerContext, event: DomainEventBase) -> None:

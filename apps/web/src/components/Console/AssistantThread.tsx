@@ -25,7 +25,7 @@ export function AssistantThread({
   return (
     <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4" aria-label="消息列表">
       {isEmpty ? (
-        <p className="rounded-md border border-dashed border-[#cbd5e1] px-4 py-6 text-sm text-[#64748b]">
+        <p className="rounded-md border border-dashed border-line-strong px-4 py-6 text-sm text-fg-muted">
           这里会显示当前剪辑任务的消息流。
         </p>
       ) : (
@@ -65,9 +65,9 @@ function MessageRow({
     return (
       <details
         data-console-message-id={message.id}
-        className={`${highlightClass(highlighted)} mx-auto max-w-[84%] rounded-md bg-[#f8fafc] px-4 py-3 text-sm text-[#475569]`}
+        className={`${highlightClass(highlighted)} mx-auto max-w-[84%] rounded-md bg-raised px-4 py-3 text-sm text-fg-muted`}
       >
-        <summary className="cursor-pointer text-xs font-medium text-[#64748b]">系统观察</summary>
+        <summary className="cursor-pointer text-xs font-medium text-fg-muted">系统观察</summary>
         {message.content.map((part, index) =>
           part.type === "text" ? (
             <p key={`${message.id}:${index}`} className="mt-2 whitespace-pre-wrap leading-6">
@@ -106,7 +106,7 @@ function MessageRow({
       data-message-kind={message.metadata.messageKind ?? undefined}
       className={messageClass(message, highlighted)}
     >
-      <span className="text-xs font-medium uppercase text-[#64748b]">{roleLabel(message)}</span>
+      <span className="text-xs font-medium uppercase text-fg-muted">{roleLabel(message)}</span>
       {message.content.map((part, index) =>
         part.type === "text" ? (
           <p key={`${message.id}:${index}`} className="mt-1 whitespace-pre-wrap leading-7">
@@ -125,20 +125,20 @@ function isNarration(message: ConsoleAssistantMessage): boolean {
 function messageClass(message: ConsoleAssistantMessage, highlighted: boolean): string {
   const highlight = highlightClass(highlighted);
   if (message.role === "user") {
-    return `${highlight} ml-auto max-w-[80%] rounded-lg bg-[#17202a] px-4 py-3 text-white`;
+    return `${highlight} ml-auto max-w-[80%] rounded-lg bg-accent px-4 py-3 text-white`;
   }
   if (message.role === "assistant") {
     // narration 叙述用弱化样式：更浅的底色与文字，和正式 reply 拉开层级。
     if (isNarration(message)) {
-      return `${highlight} mr-auto max-w-[80%] rounded-lg border border-[#e2e8f0] bg-[#f8fafc] px-4 py-2 text-sm text-[#64748b]`;
+      return `${highlight} mr-auto max-w-[80%] rounded-lg border border-line bg-raised px-4 py-2 text-sm text-fg-muted`;
     }
-    return `${highlight} mr-auto max-w-[80%] rounded-lg bg-[#eef2f7] px-4 py-3 text-[#17202a]`;
+    return `${highlight} mr-auto max-w-[80%] rounded-lg bg-raised px-4 py-3 text-fg`;
   }
-  return `${highlight} mx-auto max-w-[80%] rounded-md bg-[#f8fafc] px-4 py-3 text-[#475569]`;
+  return `${highlight} mx-auto max-w-[80%] rounded-md bg-raised px-4 py-3 text-fg-muted`;
 }
 
 function highlightClass(highlighted: boolean): string {
-  return highlighted ? "ring-2 ring-[#f97316] ring-offset-2" : "";
+  return highlighted ? "ring-2 ring-accent ring-offset-2 ring-offset-ink" : "";
 }
 
 function roleLabel(message: ConsoleAssistantMessage): string {
@@ -157,13 +157,13 @@ function ToolStepRow({ step }: { step: ToolStep }): ReactElement {
     <li
       data-tool-step-id={step.step_id}
       data-tool-status={step.status}
-      className="mr-auto flex max-w-[80%] items-center gap-2 rounded-md border border-[#e2e8f0] bg-[#f8fafc] px-3 py-2 text-sm text-[#475569]"
+      className="mr-auto flex max-w-[80%] items-center gap-2 rounded-md border border-line bg-raised px-3 py-2 text-sm text-fg-muted"
     >
       <span aria-hidden className={toolStatusToneClass(step.status)}>
         {toolStatusIcon(step.status)}
       </span>
       <span className="flex-1">{label}</span>
-      <span className="text-xs text-[#94a3b8]">{toolStatusLabel(step.status)}</span>
+      <span className="text-xs text-fg-faint">{toolStatusLabel(step.status)}</span>
     </li>
   );
 }
@@ -185,12 +185,12 @@ function toolStatusIcon(status: string): string {
 function toolStatusToneClass(status: string): string {
   switch (status) {
     case "succeeded":
-      return "text-[#16a34a]";
+      return "text-ok";
     case "failed":
     case "deny":
-      return "text-[#dc2626]";
+      return "text-danger";
     default:
-      return "text-[#94a3b8]";
+      return "text-fg-faint";
   }
 }
 

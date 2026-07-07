@@ -97,6 +97,44 @@ export function createApiEventSource(path: string): EventSource {
   return new EventSource(url.toString());
 }
 
+type SharedEventSourceEntry = {
+  source: EventSource;
+  refCount: number;
+};
+
+const sharedEventSources = new Map<string, SharedEventSourceEntry>();
+
+/**
+ * 按 path 引用计数共享 EventSource：多个订阅方（顶栏连接态、素材面板）复用同一条
+ * SSE 长连接，避免打满浏览器 HTTP/1.1 同源连接池。订阅方用 addEventListener
+ * 挂监听（不要写 onopen/onerror 独占槽位），release 归零时关闭连接。
+ */
+export function acquireApiEventSource(path: string): {
+  source: EventSource;
+  release: () => void;
+} {
+  const existing = sharedEventSources.get(path);
+  if (existing) {
+    existing.refCount += 1;
+    return { source: existing.source, release: () => releaseApiEventSource(path) };
+  }
+  const source = createApiEventSource(path);
+  sharedEventSources.set(path, { source, refCount: 1 });
+  return { source, release: () => releaseApiEventSource(path) };
+}
+
+function releaseApiEventSource(path: string): void {
+  const entry = sharedEventSources.get(path);
+  if (!entry) {
+    return;
+  }
+  entry.refCount -= 1;
+  if (entry.refCount <= 0) {
+    entry.source.close();
+    sharedEventSources.delete(path);
+  }
+}
+
 export function handleUnauthorized(): void {
   clearAuthToken();
   if (window.location.pathname !== "/") {

@@ -28,6 +28,7 @@ def apply_data_migrations(connection: Connection) -> None:
     _collapse_asset_kinds(connection)
     _ensure_message_kind_column(connection)
     _ensure_asset_understanding_columns(connection)
+    _ensure_asset_link_rel_dir_column(connection)
     _drop_removed_annotation_asset_columns(connection)
     _drop_removed_case_columns(connection)
     _drop_removed_offline_tables(connection)
@@ -70,6 +71,16 @@ def _ensure_asset_understanding_columns(connection: Connection) -> None:
         connection.exec_driver_sql(
             "ALTER TABLE assets ADD COLUMN understanding_status TEXT NOT NULL DEFAULT 'none'"
         )
+
+
+def _ensure_asset_link_rel_dir_column(connection: Connection) -> None:
+    """老库的 project_asset_links 表补 rel_dir 列（文件夹导入的相对子路径分组）。"""
+
+    columns = {
+        row[1] for row in connection.exec_driver_sql("PRAGMA table_info(project_asset_links)").all()
+    }
+    if "rel_dir" not in columns:
+        connection.exec_driver_sql("ALTER TABLE project_asset_links ADD COLUMN rel_dir TEXT")
 
 
 def _drop_removed_annotation_asset_columns(connection: Connection) -> None:

@@ -33,16 +33,16 @@ export function understandingBadgeProps(status: string): { label: string; tone: 
 
 function toneClass(tone: StatusTone): string {
   if (tone === "success") {
-    return "bg-[#dcfce7] text-[#166534]";
+    return "bg-ok/15 text-ok";
   }
   if (tone === "danger") {
-    return "bg-[#fee4e2] text-[#b42318]";
+    return "bg-danger/15 text-danger";
   }
   if (tone === "warning") {
-    return "bg-[#fef3c7] text-[#92400e]";
+    return "bg-warn/15 text-warn";
   }
   if (tone === "info") {
-    return "bg-[#dbeafe] text-[#1d4ed8]";
+    return "bg-info/15 text-info";
   }
-  return "bg-[#eef2f7] text-[#475569]";
+  return "bg-raised text-fg-muted";
 }

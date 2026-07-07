@@ -48,10 +48,10 @@ type DrawableTrack = {
 };
 
 const LABEL_WIDTH = 112;
-const HEADER_HEIGHT = 32;
-const TRACK_HEIGHT = 44;
-const TRACK_GAP = 8;
-const CLIP_HEIGHT = 24;
+const HEADER_HEIGHT = 28;
+const TRACK_HEIGHT = 40;
+const TRACK_GAP = 6;
+const CLIP_HEIGHT = 30;
 
 export function TimelineViewer({
   timeline,
@@ -67,10 +67,7 @@ export function TimelineViewer({
   const timelineWidth = Math.max(1, durationSec * pxPerSec);
   const tracks = useMemo(() => normalizeTracks(timeline), [timeline]);
   const svgHeight = HEADER_HEIGHT + tracks.length * (TRACK_HEIGHT + TRACK_GAP);
-  const ticks = useMemo(
-    () => Array.from({ length: Math.ceil(durationSec) + 1 }, (_item, second) => second),
-    [durationSec]
-  );
+  const ticks = useMemo(() => buildTicks(durationSec, pxPerSec), [durationSec, pxPerSec]);
   const surfaceWidth = LABEL_WIDTH + timelineWidth;
   const clampedPlayheadSec =
     playheadSec === null ? null : Math.min(Math.max(playheadSec, 0), durationSec);
@@ -91,66 +88,92 @@ export function TimelineViewer({
   );
 
   return (
-    <div className="rounded-lg border border-[#d9dee7] bg-white">
-      <div className="border-b border-[#d9dee7] px-3 py-2">
-        <h3 className="text-sm font-semibold text-[#17202a]">时间线</h3>
-      </div>
-      <div className="overflow-x-auto">
-        <div className="min-w-full" style={{ width: surfaceWidth }}>
-          <svg
-            role="img"
-            aria-label="时间线轨道图"
-            width={surfaceWidth}
-            height={svgHeight}
-            className="block"
-            onClick={handleSeekClick}
-          >
-            <rect x={0} y={0} width={surfaceWidth} height={svgHeight} fill="#ffffff" />
-            <g transform={`translate(${LABEL_WIDTH} 0)`}>
-              {ticks.map((second) => (
-                <g key={second} transform={`translate(${second * pxPerSec} 0)`}>
-                  <line y1={0} y2={svgHeight} stroke="#e2e8f0" />
-                  <text y={18} fill="#64748b" fontSize={11}>
-                    {second}s
+    <div className="overflow-x-auto overflow-y-auto">
+      <div className="min-w-full" style={{ width: surfaceWidth }}>
+        <svg
+          role="img"
+          aria-label="时间线轨道图"
+          width={surfaceWidth}
+          height={svgHeight}
+          className="block"
+          onClick={handleSeekClick}
+        >
+          <rect x={0} y={0} width={surfaceWidth} height={svgHeight} fill="var(--color-panel)" />
+          {/* 刻度尺 */}
+          <g transform={`translate(${LABEL_WIDTH} 0)`}>
+            {ticks.map((tick) => (
+              <g key={tick.sec} transform={`translate(${tick.sec * pxPerSec} 0)`}>
+                <line
+                  y1={tick.major ? HEADER_HEIGHT - 10 : HEADER_HEIGHT - 5}
+                  y2={tick.major ? svgHeight : HEADER_HEIGHT}
+                  stroke={tick.major ? "var(--color-line)" : "var(--color-line-strong)"}
+                />
+                {tick.major ? (
+                  <text
+                    y={14}
+                    x={3}
+                    fill="var(--color-fg-faint)"
+                    fontSize={10}
+                    style={{ fontVariantNumeric: "tabular-nums" }}
+                  >
+                    {formatTick(tick.sec)}
                   </text>
-                </g>
-              ))}
-            </g>
-            <g transform={`translate(0 ${HEADER_HEIGHT})`}>
-              {tracks.map((track, index) => {
-                const y = index * (TRACK_HEIGHT + TRACK_GAP);
-                return (
-                  <g key={track.track_id} transform={`translate(0 ${y})`}>
-                    <text x={12} y={24} fill="#475569" fontSize={12} fontWeight={600}>
-                      {track.track_id}
-                    </text>
-                    <rect
-                      x={LABEL_WIDTH}
-                      y={0}
-                      width={timelineWidth}
-                      height={TRACK_HEIGHT}
-                      rx={4}
-                      fill="#f8fafc"
-                      stroke="#e2e8f0"
-                    />
-                    <g transform={`translate(${LABEL_WIDTH} 0)`}>
-                      {track.clips.map((clip) => {
-                        const x = (clip.startFrame / safeFps) * pxPerSec;
-                        const width = ((clip.endFrame - clip.startFrame) / safeFps) * pxPerSec;
-                        const selected = selectedClipId === clip.clipId;
-                        return (
+                ) : null}
+              </g>
+            ))}
+          </g>
+          {/* 轨道 */}
+          <g transform={`translate(0 ${HEADER_HEIGHT})`}>
+            {tracks.map((track, index) => {
+              const y = index * (TRACK_HEIGHT + TRACK_GAP);
+              const tone = trackTone(track.track_id);
+              return (
+                <g key={track.track_id} transform={`translate(0 ${y})`}>
+                  <rect
+                    x={8}
+                    y={(TRACK_HEIGHT - 10) / 2}
+                    width={4}
+                    height={10}
+                    rx={2}
+                    fill={tone}
+                  />
+                  <text
+                    x={20}
+                    y={TRACK_HEIGHT / 2 + 4}
+                    fill="var(--color-fg-muted)"
+                    fontSize={12}
+                    fontWeight={600}
+                  >
+                    {trackLabel(track.track_id)}
+                  </text>
+                  <rect
+                    x={LABEL_WIDTH}
+                    y={0}
+                    width={timelineWidth}
+                    height={TRACK_HEIGHT}
+                    rx={4}
+                    fill="var(--color-ink)"
+                  />
+                  <g transform={`translate(${LABEL_WIDTH} 0)`}>
+                    {track.clips.map((clip) => {
+                      const x = (clip.startFrame / safeFps) * pxPerSec;
+                      const width = ((clip.endFrame - clip.startFrame) / safeFps) * pxPerSec;
+                      const selected = selectedClipId === clip.clipId;
+                      const clipY = (TRACK_HEIGHT - CLIP_HEIGHT) / 2;
+                      return (
+                        <g key={clip.clipId}>
                           <rect
-                            key={clip.clipId}
                             data-testid="timeline-clip"
                             data-clip-id={clip.clipId}
                             x={x}
-                            y={(TRACK_HEIGHT - CLIP_HEIGHT) / 2}
-                            width={width}
+                            y={clipY}
+                            width={Math.max(width, 2)}
                             height={CLIP_HEIGHT}
                             rx={4}
-                            fill={clipFill(track.track_id, clip.isSubtitle)}
-                            stroke={selected ? "#f97316" : "#334155"}
-                            strokeWidth={selected ? 3 : 1}
+                            fill={tone}
+                            fillOpacity={selected ? 1 : 0.75}
+                            stroke={selected ? "var(--color-accent)" : "var(--color-ink)"}
+                            strokeWidth={selected ? 2 : 1}
                             role="button"
                             aria-label={`${track.track_id} ${clip.clipId}`}
                             onClick={(event) => {
@@ -160,42 +183,55 @@ export function TimelineViewer({
                           >
                             <title>{clip.label}</title>
                           </rect>
-                        );
-                      })}
-                    </g>
+                          {width > 48 ? (
+                            <text
+                              x={x + 6}
+                              y={clipY + CLIP_HEIGHT / 2 + 4}
+                              fill="rgba(0,0,0,0.75)"
+                              fontSize={10.5}
+                              fontWeight={600}
+                              pointerEvents="none"
+                            >
+                              {truncateLabel(clip.label, width - 12)}
+                            </text>
+                          ) : null}
+                        </g>
+                      );
+                    })}
                   </g>
-                );
-              })}
-            </g>
-            {playheadX !== null ? (
+                </g>
+              );
+            })}
+          </g>
+          {/* 播放头 */}
+          {playheadX !== null ? (
+            <g data-testid="timeline-playhead" pointerEvents="none">
               <line
-                data-testid="timeline-playhead"
                 x1={playheadX}
                 x2={playheadX}
                 y1={0}
                 y2={svgHeight}
-                stroke="#ef4444"
+                stroke="var(--color-accent)"
                 strokeWidth={2}
-                pointerEvents="none"
               />
-            ) : null}
-          </svg>
-          {waveformSrc ? (
-            <div
-              className="flex border-t border-[#e2e8f0] bg-[#f8fafc]"
-              style={{ width: surfaceWidth }}
-            >
-              <div className="shrink-0 px-3 py-3 text-xs font-semibold text-[#475569]" style={{ width: LABEL_WIDTH }}>
-                波形
-              </div>
-              <TimelineWaveform
-                src={waveformSrc}
-                pxPerSec={pxPerSec}
-                width={timelineWidth}
+              <path
+                d={`M ${playheadX - 5} 0 L ${playheadX + 5} 0 L ${playheadX} 8 Z`}
+                fill="var(--color-accent)"
               />
-            </div>
+            </g>
           ) : null}
-        </div>
+        </svg>
+        {waveformSrc ? (
+          <div className="flex border-t border-line bg-panel" style={{ width: surfaceWidth }}>
+            <div
+              className="shrink-0 px-3 py-3 text-xs font-semibold text-fg-muted"
+              style={{ width: LABEL_WIDTH }}
+            >
+              波形
+            </div>
+            <TimelineWaveform src={waveformSrc} pxPerSec={pxPerSec} width={timelineWidth} />
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -225,8 +261,9 @@ function TimelineWaveform({
       height: 44,
       interact: false,
       cursorWidth: 0,
-      waveColor: "#94a3b8",
-      progressColor: "#2563eb"
+      // canvas 不认 CSS 变量，取值对齐令牌：line-strong / accent。
+      waveColor: "#3d3d47",
+      progressColor: "#ff5c38"
     });
     return () => {
       wavesurfer.destroy();
@@ -234,6 +271,32 @@ function TimelineWaveform({
   }, [pxPerSec, src]);
 
   return <div ref={containerRef} data-testid="timeline-waveform" className="h-11" style={style} />;
+}
+
+type Tick = { sec: number; major: boolean };
+
+/** 按缩放挑主刻度间隔（目标 ≥72px 一格），细分次刻度。 */
+function buildTicks(durationSec: number, pxPerSec: number): Tick[] {
+  const steps = [1, 2, 5, 10, 30, 60];
+  const majorStep = steps.find((step) => step * pxPerSec >= 72) ?? 60;
+  const minorStep = majorStep / (majorStep >= 10 ? 5 : majorStep);
+  const ticks: Tick[] = [];
+  for (let sec = 0; sec <= Math.ceil(durationSec); sec += minorStep) {
+    const rounded = Number(sec.toFixed(4));
+    ticks.push({ sec: rounded, major: rounded % majorStep === 0 });
+  }
+  return ticks;
+}
+
+function formatTick(sec: number): string {
+  const minutes = Math.floor(sec / 60);
+  const rest = Math.floor(sec % 60);
+  return `${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`;
+}
+
+function truncateLabel(label: string, maxWidth: number): string {
+  const maxChars = Math.max(1, Math.floor(maxWidth / 7));
+  return label.length > maxChars ? `${label.slice(0, maxChars - 1)}…` : label;
 }
 
 function normalizeTracks(timeline: TimelineJson): DrawableTrack[] {
@@ -256,8 +319,8 @@ function normalizeClip(trackId: string, clip: TimelineClipJson): DrawableClip | 
   }
   const isSubtitle = trackId === "subtitles";
   const label = isSubtitle
-    ? `${clip.timeline_clip_id} ${clip.text ?? ""}`.trim()
-    : `${clip.timeline_clip_id} ${clip.asset_id ?? ""}`.trim();
+    ? `${clip.text ?? clip.timeline_clip_id}`.trim()
+    : `${clip.asset_id ?? clip.timeline_clip_id}`.trim();
   return {
     clipId: clip.timeline_clip_id,
     startFrame: clip.timeline_start_frame,
@@ -267,15 +330,30 @@ function normalizeClip(trackId: string, clip: TimelineClipJson): DrawableClip | 
   };
 }
 
-function clipFill(trackId: string, isSubtitle: boolean): string {
-  if (isSubtitle) {
-    return "#fde68a";
+/** 轨道 → 中文标签；未知 id 原样展示。 */
+function trackLabel(trackId: string): string {
+  const labels: Record<string, string> = {
+    visual_primary: "视频",
+    visual_overlay: "叠加",
+    voiceover: "配音",
+    original_audio: "原声",
+    bgm: "音乐",
+    sfx: "音效",
+    subtitles: "字幕"
+  };
+  return labels[trackId] ?? trackId;
+}
+
+/** 轨道 → 令牌色（CSS 变量引用，SVG 可用）。 */
+function trackTone(trackId: string): string {
+  if (trackId === "subtitles") {
+    return "var(--color-track-subtitle)";
   }
-  if (trackId === "voiceover" || trackId === "bgm" || trackId === "original_audio") {
-    return "#bfdbfe";
+  if (trackId === "bgm") {
+    return "var(--color-track-music)";
   }
-  if (trackId === "visual_overlay") {
-    return "#bbf7d0";
+  if (trackId === "voiceover" || trackId === "original_audio" || trackId === "sfx") {
+    return "var(--color-track-sfx)";
   }
-  return "#c7d2fe";
+  return "var(--color-track-video)";
 }

@@ -13,6 +13,8 @@ export type PreviewPlayerProps = {
   onFirstPlay?: () => void;
   onTimeUpdate?: (sec: number) => void;
   seekSec?: number | null;
+  /** width：按宽度撑开（侧栏卡片）；height：填满父容器高度（工作台预览区）。 */
+  fit?: "width" | "height";
 };
 
 export function PreviewPlayer({
@@ -20,25 +22,28 @@ export function PreviewPlayer({
   fps,
   onFirstPlay,
   onTimeUpdate,
-  seekSec = null
+  seekSec = null,
+  fit = "width"
 }: PreviewPlayerProps): ReactElement {
   return (
-    <div className="overflow-hidden rounded-lg border border-[#d9dee7] bg-[#0f172a] text-white">
-      <MediaPlayer
-        src={src}
-        playsInline
-        className="block aspect-[9/16] w-full bg-black"
-        aria-label="预览播放器"
-      >
+    <MediaPlayer
+      src={src}
+      playsInline
+      className={`flex w-full flex-col overflow-hidden rounded-lg border border-line bg-black text-white ${
+        fit === "height" ? "h-full min-h-0" : ""
+      }`}
+      aria-label="预览播放器"
+    >
+      <div className={fit === "height" ? "relative min-h-0 flex-1" : "relative aspect-[9/16] w-full"}>
         <MediaProvider />
-        <PreviewPlayerControls
-          fps={fps}
-          onFirstPlay={onFirstPlay}
-          onTimeUpdate={onTimeUpdate}
-          seekSec={seekSec}
-        />
-      </MediaPlayer>
-    </div>
+      </div>
+      <PreviewPlayerControls
+        fps={fps}
+        onFirstPlay={onFirstPlay}
+        onTimeUpdate={onTimeUpdate}
+        seekSec={seekSec}
+      />
+    </MediaPlayer>
   );
 }
 
@@ -113,14 +118,14 @@ function PreviewPlayerControls({
   );
 
   return (
-    <div className="flex items-center justify-between gap-3 border-t border-white/10 bg-[#17202a] px-3 py-2">
-      <div className="text-xs text-[#cbd5e1]">
-        当前帧 <span className="font-mono text-white">{currentFrame}</span>
+    <div className="flex items-center justify-between gap-3 border-t border-line bg-panel px-3 py-2">
+      <div className="text-xs text-fg-muted">
+        当前帧 <span className="font-mono tabular-nums text-fg">{currentFrame}</span>
       </div>
       <div className="flex items-center gap-2">
         <button
           type="button"
-          className="rounded-md bg-white px-3 py-1.5 text-sm font-medium text-[#17202a] hover:bg-[#e2e8f0] focus:outline-none focus:ring-2 focus:ring-white/40"
+          className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-strong focus:outline-none focus:ring-2 focus:ring-white/40"
           aria-label={paused ? "播放" : "暂停"}
           onClick={(event) => {
             if (paused) {
@@ -134,7 +139,7 @@ function PreviewPlayerControls({
         </button>
         <button
           type="button"
-          className="rounded-md border border-white/15 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40"
+          className="rounded-md border border-line px-3 py-1.5 text-sm font-medium text-fg hover:bg-hover focus:outline-none focus:ring-2 focus:ring-white/40"
           aria-label="后退一帧"
           onClick={(event) => stepFrame(-1, event)}
         >
@@ -142,7 +147,7 @@ function PreviewPlayerControls({
         </button>
         <button
           type="button"
-          className="rounded-md border border-white/15 px-3 py-1.5 text-sm font-medium text-white hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40"
+          className="rounded-md border border-line px-3 py-1.5 text-sm font-medium text-fg hover:bg-hover focus:outline-none focus:ring-2 focus:ring-white/40"
           aria-label="前进一帧"
           onClick={(event) => stepFrame(1, event)}
         >

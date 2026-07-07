@@ -7,358 +7,239 @@ import { ProjectMaterialsView } from "./ProjectMaterialsPage";
 
 describe("ProjectMaterialsView", () => {
   afterEach(() => {
+    vi.unstubAllGlobals();
     window.sessionStorage.clear();
   });
 
-  it("按 init、parts、complete 顺序完成分片上传", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith("/materials")) {
-        return jsonResponse({ project_id: "project_1", invalidated_asset_ids: [], assets: [] });
-      }
-      if (url === "/api/uploads/init") {
-        return jsonResponse(
-          {
-            upload_id: "upload_1",
-            part_url_template: "/api/uploads/upload_1/parts/{part_number}",
-            complete_url: "/api/uploads/upload_1/complete"
-          },
-          201
-        );
-      }
-      if (url === "/api/uploads/upload_1/parts/1" && init?.method === "PUT") {
-        return jsonResponse({ upload_id: "upload_1", part_number: 1, size: 5 });
-      }
-      if (url === "/api/uploads/upload_1/complete") {
-        return jsonResponse({
-          upload_id: "upload_1",
-          project_id: "project_1",
-          asset_id: "asset_upload",
-          event_ids: [1]
-        });
-      }
-      return jsonResponse({});
+  it("按 rel_dir 文件夹分组展示素材，可下钻并经面包屑返回", async () => {
+    stubFetch({
+      assets: [
+        material({ asset_id: "a1", filename: "root.mp4", rel_dir: null }),
+        material({ asset_id: "a2", filename: "clip1.mp4", rel_dir: "素材A/视频" }),
+        material({ asset_id: "a3", filename: "cover.png", kind: "image", rel_dir: "素材A" })
+      ]
     });
-    vi.stubGlobal("fetch", fetchMock);
-
     renderMaterials();
-    const input = screen.getByLabelText("选择上传文件");
-    const file = new File(["hello"], "clip.mp4", { type: "video/mp4" });
-    fireEvent.change(input, { target: { files: [file] } });
 
-    expect(await screen.findByText("上传完成")).toBeTruthy();
-    const mutationCalls = fetchMock.mock.calls
-      .map(([input, init]) => [String(input), init?.method ?? "GET"])
-      .filter(([, method]) => method !== "GET");
-    expect(mutationCalls).toEqual([
-      ["/api/uploads/init", "POST"],
-      ["/api/uploads/upload_1/parts/1", "PUT"],
-      ["/api/uploads/upload_1/complete", "POST"]
-    ]);
+    // 根层：直接导入的文件 + 「素材A」文件夹瓦片
+    expect(await screen.findByText("root.mp4")).toBeTruthy();
+    expect(screen.getByText("素材A")).toBeTruthy();
+    expect(screen.queryByText("clip1.mp4")).toBeNull();
+
+    fireEvent.click(screen.getByText("素材A"));
+
+    expect(await screen.findByText("cover.png")).toBeTruthy();
+    expect(screen.getByText("视频")).toBeTruthy();
+    expect(screen.queryByText("root.mp4")).toBeNull();
+
+    fireEvent.click(screen.getByText("视频"));
+
+    expect(await screen.findByText("clip1.mp4")).toBeTruthy();
+
+    fireEvent.click(screen.getByText("全部素材"));
+
+    expect(await screen.findByText("root.mp4")).toBeTruthy();
   });
 
-  it("支持目录浏览下钻并选择文件导入 reference 素材", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith("/materials")) {
-        return jsonResponse({ project_id: "project_1", invalidated_asset_ids: [], assets: [] });
-      }
-      if (url === "/api/fs/roots") {
-        return jsonResponse({ roots: [{ name: "Movies", path: "/Movies", exists: true }] });
-      }
-      if (url.startsWith("/api/fs/list")) {
-        const parsed = new URL(url, "http://local.test");
-        const path = parsed.searchParams.get("path");
-        if (path === "/Movies") {
-          return jsonResponse({
-            path,
-            entries: [{ name: "raws", path: "/Movies/raws", type: "directory" }]
-          });
-        }
-        return jsonResponse({
-          path,
-          entries: [{ name: "raw.mp4", path: "/Movies/raws/raw.mp4", type: "file", size: 1024 }]
-        });
-      }
-      if (url.endsWith("/materials/import-local")) {
-        return jsonResponse({ project_id: "project_1", asset_id: "asset_1", event_ids: [1] });
-      }
-      return jsonResponse({});
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
+  it("本地导入支持勾选文件夹并批量提交 paths", async () => {
+    const fetchMock = stubFetch({ assets: [] });
     renderMaterials();
-    fireEvent.click(screen.getByRole("button", { name: "本地路径导入" }));
+
+    fireEvent.click(await screen.findByText("＋ 本地导入"));
     fireEvent.click(await screen.findByText("Movies"));
-    fireEvent.click(await screen.findByText("raws"));
-    fireEvent.click(await screen.findByText("raw.mp4"));
-    fireEvent.click(screen.getByRole("button", { name: "导入此文件" }));
+    fireEvent.click(await screen.findByLabelText("选择文件夹 raws"));
+    fireEvent.click(screen.getByText("导入所选"));
 
     await waitFor(() => {
-      const importCall = fetchMock.mock.calls.find(([input]) =>
+      const call = fetchMock.mock.calls.find(([input]) =>
         String(input).endsWith("/materials/import-local")
       );
-      expect(importCall).toBeTruthy();
-      expect(JSON.parse(String(importCall?.[1]?.body))).toMatchObject({
-        path: "/Movies/raws/raw.mp4",
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+        paths: ["/Movies/raws"],
         storage_mode: "reference"
       });
     });
   });
 
-  it("URL 导入创建 decision 卡片后可直接确认", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
-      const url = String(input);
-      if (url.endsWith("/materials")) {
-        return jsonResponse({ project_id: "project_1", invalidated_asset_ids: [], assets: [] });
-      }
-      if (url.endsWith("/materials/import-url")) {
-        return jsonResponse({
-          project_id: "project_1",
-          asset_id: null,
-          decision_id: "dec_url_import",
-          event_ids: [1]
-        });
-      }
-      if (url === "/api/decisions/dec_url_import/answer") {
-        return jsonResponse({
-          decision_id: "dec_url_import",
-          status: "answered",
-          event_ids: [2],
-          replays_enqueued: 1
-        });
-      }
-      return jsonResponse({});
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
+  it("导入响应含 skipped 时展示跳过提示", async () => {
+    stubFetch({ assets: [], importResponse: { skipped: ["notes.txt"], asset_ids: ["a9"] } });
     renderMaterials();
-    fireEvent.change(screen.getByLabelText("URL"), {
-      target: { value: "https://example.test/clip.mp4" }
-    });
-    fireEvent.change(screen.getByLabelText("文件名"), { target: { value: "clip.mp4" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建确认项" }));
 
-    expect(await screen.findByText("待确认 URL 导入")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "确认导入" }));
+    fireEvent.click(await screen.findByText("＋ 本地导入"));
+    fireEvent.click(await screen.findByText("Movies"));
+    fireEvent.click(await screen.findByLabelText("选择文件夹 raws"));
+    fireEvent.click(screen.getByText("导入所选"));
+
+    expect(await screen.findByText(/已跳过 1 个不支持的文件/)).toBeTruthy();
+  });
+
+  it("瓦片菜单可禁用素材", async () => {
+    const fetchMock = stubFetch({
+      assets: [material({ asset_id: "a1", filename: "root.mp4" })]
+    });
+    renderMaterials();
+
+    await screen.findByText("root.mp4");
+    fireEvent.click(screen.getByLabelText("素材 root.mp4 更多操作"));
+    fireEvent.click(await screen.findByText("禁用"));
 
     await waitFor(() => {
-      const answerCall = fetchMock.mock.calls.find(([input]) =>
-        String(input).endsWith("/decisions/dec_url_import/answer")
+      const call = fetchMock.mock.calls.find(
+        ([input, init]) => String(input).endsWith("/materials/a1") && init?.method === "PATCH"
       );
-      expect(answerCall).toBeTruthy();
-      expect(JSON.parse(String(answerCall?.[1]?.body))).toMatchObject({
-        project_id: "project_1",
-        answer: { option_id: "approve", payload: { approved: true } }
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ enabled: false });
+    });
+  });
+
+  it("瓦片菜单删除引用需 confirm 确认", async () => {
+    const fetchMock = stubFetch({
+      assets: [material({ asset_id: "a1", filename: "root.mp4" })]
+    });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    renderMaterials();
+
+    await screen.findByText("root.mp4");
+    fireEvent.click(screen.getByLabelText("素材 root.mp4 更多操作"));
+    fireEvent.click(await screen.findByText("删除引用"));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([input]) =>
+        String(input).endsWith("/materials/unlink")
+      );
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({ asset_id: "a1" });
+    });
+  });
+
+  it("点击素材瓦片打开理解摘要面板", async () => {
+    stubFetch({
+      assets: [material({ asset_id: "a1", filename: "root.mp4", understanding_status: "ready" })],
+      summary: {
+        asset_id: "a1",
+        summary: {
+          asset_id: "a1",
+          version: 1,
+          overall: "一段海边火舞视频",
+          segments: [],
+          created_at: "2026-07-01T00:00:00Z"
+        }
+      }
+    });
+    renderMaterials();
+
+    await screen.findByText("root.mp4");
+    fireEvent.click(screen.getByTitle("root.mp4"));
+
+    expect(await screen.findByText(/一段海边火舞视频/)).toBeTruthy();
+  });
+
+  it("失效素材可经菜单重新定位到新路径", async () => {
+    const fetchMock = stubFetch({
+      assets: [
+        material({ asset_id: "a1", filename: "root.mp4", invalid: true, usable: false })
+      ]
+    });
+    renderMaterials();
+
+    await screen.findByText("root.mp4");
+    fireEvent.click(screen.getByLabelText("素材 root.mp4 更多操作"));
+    fireEvent.click(await screen.findByText("重新定位"));
+    fireEvent.click(await screen.findByText("Movies"));
+    fireEvent.click(await screen.findByText("raws"));
+    fireEvent.click(await screen.findByText("raw.mp4"));
+    fireEvent.click(screen.getByText("使用此路径"));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([input, init]) => String(input).endsWith("/materials/a1") && init?.method === "PATCH"
+      );
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+        reference_path: "/Movies/raws/raw.mp4"
       });
     });
   });
 
-  it("不再渲染素材类型选择器", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        jsonResponse({ project_id: "project_1", invalidated_asset_ids: [], assets: [] })
-      )
-    );
-
+  it("重新检测失效按钮触发 revalidate", async () => {
+    const fetchMock = stubFetch({ assets: [] });
     renderMaterials();
 
-    await screen.findByText("上传文件");
-    expect(screen.queryAllByRole("combobox")).toHaveLength(0);
-    expect(screen.queryByText("类型")).toBeNull();
-  });
+    fireEvent.click(await screen.findByText("重新检测失效"));
 
-  it("上传不支持的文件时逐文件显示拒收原因", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/materials")) {
-        return jsonResponse({ project_id: "project_1", invalidated_asset_ids: [], assets: [] });
-      }
-      if (url === "/api/uploads/init") {
-        return jsonResponse(
-          {
-            detail: {
-              error_code: "unsupported_material_type",
-              message: "不支持的素材格式：.srt。支持常见视频/音频/图片/字体格式。"
-            }
-          },
-          400
-        );
-      }
-      return jsonResponse({});
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    renderMaterials();
-    const input = screen.getByLabelText("选择上传文件");
-    const file = new File(["sub"], "caption.srt", { type: "application/x-subrip" });
-    fireEvent.change(input, { target: { files: [file] } });
-
-    expect(await screen.findByText("拒收 1 个")).toBeTruthy();
-    expect(await screen.findByText(/caption\.srt：不支持的素材格式：\.srt。/)).toBeTruthy();
-  });
-
-  it("失效素材显示重新定位入口", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        jsonResponse({
-          project_id: "project_1",
-          invalidated_asset_ids: ["asset_invalid"],
-          assets: [
-            material({
-              asset_id: "asset_invalid",
-              filename: "missing.mp4",
-              usable: false,
-              invalid: true,
-              failure: { error_code: "reference_invalidated" }
-            })
-          ]
-        })
-      )
-    );
-
-    renderMaterials();
-
-    expect(await screen.findByText("源文件失效")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "重新定位" })).toBeTruthy();
-  });
-
-  it("缩略图就绪渲染带 query token 的 img，加载失败兜底回占位，时长按 mm:ss 显示", async () => {
-    storeAuthToken("test-token");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        jsonResponse({
-          project_id: "project_1",
-          invalidated_asset_ids: [],
-          assets: [
-            material({
-              asset_id: "asset_thumb",
-              filename: "clip.mp4",
-              thumbnail_ready: true,
-              duration_sec: 92
-            })
-          ]
-        })
-      )
-    );
-
-    renderMaterials();
-
-    const thumb = (await screen.findByAltText("clip.mp4 缩略图")) as HTMLImageElement;
-    expect(thumb.getAttribute("src")).toBe("/api/media/asset_thumb/thumbnail?token=test-token");
-    expect(screen.getByText("01:32")).toBeTruthy();
-    // 类型列本身有一个「视频」。
-    expect(screen.getAllByText("视频")).toHaveLength(1);
-
-    fireEvent.error(thumb);
-    expect(screen.queryByAltText("clip.mp4 缩略图")).toBeNull();
-    // 加载失败后缩略图列兜底为 kind 占位，「视频」多出一处。
-    expect(screen.getAllByText("视频")).toHaveLength(2);
-  });
-
-  it("按理解状态渲染徽标文案", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        jsonResponse({
-          project_id: "project_1",
-          invalidated_asset_ids: [],
-          assets: [
-            material({ asset_id: "a_none", understanding_status: "none" }),
-            material({ asset_id: "a_running", understanding_status: "running" }),
-            material({ asset_id: "a_ready", understanding_status: "ready" }),
-            material({ asset_id: "a_failed", understanding_status: "failed" })
-          ]
-        })
-      )
-    );
-
-    renderMaterials();
-
-    expect(await screen.findByText("未理解")).toBeTruthy();
-    expect(screen.getByText("理解中")).toBeTruthy();
-    expect(screen.getByText("已理解")).toBeTruthy();
-    expect(screen.getByText("理解失败")).toBeTruthy();
-  });
-
-  it("素材表格不再出现标注相关 UI", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        jsonResponse({
-          project_id: "project_1",
-          invalidated_asset_ids: [],
-          assets: [material({ asset_id: "asset_1", understanding_status: "ready" })]
-        })
-      )
-    );
-
-    renderMaterials();
-
-    await screen.findByText("已理解");
-    expect(screen.queryByText(/标注/)).toBeNull();
-    expect(screen.queryByRole("button", { name: /重试标注/ })).toBeNull();
-  });
-
-  it("点击已理解素材拉取并渲染摘要分段时间戳表", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.endsWith("/materials/asset_ready/summary")) {
-        return jsonResponse({
-          asset_id: "asset_ready",
-          summary: {
-            asset_id: "asset_ready",
-            version: 1,
-            semantic_role: "footage",
-            overall: "整体是一段城市夜景空镜",
-            segments: [
-              {
-                start_s: 0,
-                end_s: 3.5,
-                description: "霓虹灯特写",
-                tags: ["night", "neon"],
-                quality: "good"
-              }
-            ]
-          }
-        });
-      }
-      if (url.endsWith("/materials")) {
-        return jsonResponse({
-          project_id: "project_1",
-          invalidated_asset_ids: [],
-          assets: [
-            material({
-              asset_id: "asset_ready",
-              filename: "city.mp4",
-              understanding_status: "ready"
-            })
-          ]
-        });
-      }
-      return jsonResponse({});
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    renderMaterials();
-
-    fireEvent.click(await screen.findByText("city.mp4"));
-
-    expect(await screen.findByText("整体是一段城市夜景空镜")).toBeTruthy();
-    expect(screen.getByText("霓虹灯特写")).toBeTruthy();
-    expect(screen.getByText("00:00.0 - 00:03.5")).toBeTruthy();
-    expect(screen.getByText("night、neon")).toBeTruthy();
     await waitFor(() => {
-      const summaryCall = fetchMock.mock.calls.find(([input]) =>
-        String(input).endsWith("/materials/asset_ready/summary")
+      const call = fetchMock.mock.calls.find(([input]) =>
+        String(input).endsWith("/materials/revalidate")
       );
-      expect(summaryCall).toBeTruthy();
+      expect(call).toBeTruthy();
     });
   });
 });
+
+type StubOptions = {
+  assets: MaterialAsset[];
+  importResponse?: Record<string, unknown>;
+  summary?: Record<string, unknown>;
+};
+
+function stubFetch(options: StubOptions): ReturnType<typeof vi.fn> {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.endsWith("/materials/import-local")) {
+      return jsonResponse({
+        project_id: "project_1",
+        asset_id: "asset_new",
+        asset_ids: ["asset_new"],
+        skipped: [],
+        event_ids: [1],
+        ...(options.importResponse ?? {})
+      });
+    }
+    if (url.endsWith("/materials/unlink") || url.endsWith("/materials/revalidate")) {
+      return jsonResponse({
+        project_id: "project_1",
+        assets: [],
+        invalidated_asset_ids: [],
+        event_ids: []
+      });
+    }
+    if (/\/materials\/[^/]+$/.test(url) && init?.method === "PATCH") {
+      return jsonResponse({ project_id: "project_1", asset_id: "a1", event_ids: [] });
+    }
+    if (url.includes("/summary")) {
+      return jsonResponse(options.summary ?? {});
+    }
+    if (url.endsWith("/materials")) {
+      return jsonResponse({
+        project_id: "project_1",
+        invalidated_asset_ids: [],
+        assets: options.assets
+      });
+    }
+    if (url === "/api/fs/roots") {
+      return jsonResponse({ roots: [{ name: "Movies", path: "/Movies", exists: true }] });
+    }
+    if (url.startsWith("/api/fs/list")) {
+      const parsed = new URL(url, "http://local.test");
+      const path = parsed.searchParams.get("path");
+      if (path === "/Movies") {
+        return jsonResponse({
+          path,
+          entries: [{ name: "raws", path: "/Movies/raws", type: "directory" }]
+        });
+      }
+      return jsonResponse({
+        path,
+        entries: [{ name: "raw.mp4", path: "/Movies/raws/raw.mp4", type: "file", size: 1024 }]
+      });
+    }
+    return jsonResponse({});
+  });
+  storeAuthToken("test-token");
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
 
 function renderMaterials(): void {
   render(
@@ -387,12 +268,13 @@ function material(overrides: Partial<MaterialAsset> = {}): MaterialAsset {
     hash: "hash",
     size: 1024,
     mtime: 1,
-    ingest_status: "imported",
+    ingest_status: "ready",
     understanding_status: "none",
     usable: true,
     enabled: true,
-    probe: { duration_sec: 12.5, width: 1920, height: 1080 },
-    duration_sec: 12.5,
+    rel_dir: null,
+    probe: { duration_sec: 12 },
+    duration_sec: 12,
     proxy_object_hash: null,
     proxy_ready: false,
     thumbnail_ready: false,

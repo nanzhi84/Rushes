@@ -1,16 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link, useParams } from "@tanstack/react-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import {
   api,
   type CaseMessage,
   type DecisionAnswer,
+  type MaterialAsset,
   type TimelineClipJson,
   type TimelineJson
 } from "../api/client";
 import { queryKeys } from "../app/query_client";
 import { createApiEventSource } from "../auth";
+import { useWorkspaceEvents } from "../app/use_workspace_events";
 import { AssistantThread } from "../components/Console/AssistantThread";
 import { useTurnStream } from "../components/Console/useTurnStream";
 import {
@@ -28,8 +30,13 @@ import {
   type ConsoleMessage,
   type ConsoleMessageRole
 } from "../components/Console/runtime";
+import { AssetsPanel } from "../components/Materials/AssetsPanel";
 import { PreviewPlayer } from "../components/PreviewPlayer";
+import { EntityActionDialog } from "../components/Shell/EntityActionDialog";
+import { ResizeHandle } from "../components/Shell/ResizeHandle";
+import { TopBar } from "../components/Shell/TopBar";
 import { TimelineViewer } from "../components/TimelineViewer";
+import { useUiStore } from "../state/ui_store";
 
 export function CaseAgentConsolePage(): ReactElement {
   const params = useParams({ strict: false }) as { projectId: string; caseId: string };
@@ -44,6 +51,16 @@ export function CaseConsoleView({
   caseId: string;
 }): ReactElement {
   const queryClient = useQueryClient();
+  const connectionState = useWorkspaceEvents();
+  const {
+    entityDialog,
+    openEntityDialog,
+    closeEntityDialog,
+    chatPanelWidth,
+    setChatPanelWidth,
+    timelinePanelHeight,
+    setTimelinePanelHeight
+  } = useUiStore();
   const [draft, setDraft] = useState("");
   const [awaitingTurnEnd, setAwaitingTurnEnd] = useState(false);
   const [streamState, setStreamState] = useState<"connecting" | "open" | "closed">("connecting");
@@ -54,6 +71,17 @@ export function CaseConsoleView({
   const [playheadSec, setPlayheadSec] = useState<number | null>(null);
   const [seekSec, setSeekSec] = useState<number | null>(null);
   const [pxPerSec, setPxPerSec] = useState(DEFAULT_TIMELINE_PX_PER_SEC);
+  const [viewedVersion, setViewedVersion] = useState<number | null>(null);
+  const [previewAsset, setPreviewAsset] = useState<MaterialAsset | null>(null);
+  const timelineBodyRef = useRef<HTMLDivElement | null>(null);
+
+  const treeQuery = useQuery({
+    queryKey: queryKeys.projectTree,
+    queryFn: api.projectTree
+  });
+  const treeProjects = treeQuery.data?.projects ?? [];
+  const projectName =
+    treeProjects.find((project) => project.project_id === projectId)?.name ?? projectId;
 
   const messagesQuery = useQuery({
     queryKey: queryKeys.messages(projectId, caseId),
@@ -75,18 +103,24 @@ export function CaseConsoleView({
   });
 
   const currentCase = caseQuery.data?.case ?? null;
+  const caseName = currentCase?.name ?? caseId;
   const timelineVersion = currentCase?.timeline_current_version ?? null;
+  const effectiveVersion = viewedVersion ?? timelineVersion;
+  const viewingHistory =
+    viewedVersion !== null && timelineVersion !== null && viewedVersion !== timelineVersion;
 
   const timelineQuery = useQuery({
-    queryKey: queryKeys.timeline(projectId, caseId, timelineVersion),
-    queryFn: () => api.fetchCaseTimeline(projectId, caseId, timelineVersion),
-    enabled: timelineVersion !== null
+    queryKey: queryKeys.timeline(projectId, caseId, effectiveVersion),
+    queryFn: () => api.fetchCaseTimeline(projectId, caseId, effectiveVersion),
+    enabled: effectiveVersion !== null
   });
 
   const currentDecision = decisionQuery.data?.decision ?? null;
   const historyMessages = messagesQuery.data ?? [];
   const timelinePayload = timelineQuery.data ?? null;
-  const previewSrc = timelinePayload?.preview_id ? api.mediaPreviewUrl(timelinePayload.preview_id) : null;
+  const previewSrc = timelinePayload?.preview_id
+    ? api.mediaPreviewUrl(timelinePayload.preview_id)
+    : null;
   const renderedStructuredItems = useMemo(
     () => {
       if (
@@ -232,17 +266,30 @@ export function CaseConsoleView({
   }, []);
   const zoomOutTimeline = useCallback(() => {
     setPxPerSec((current) => {
-      const currentIndex = TIMELINE_ZOOM_LEVELS.indexOf(current);
-      return TIMELINE_ZOOM_LEVELS[Math.max(0, currentIndex - 1)] ?? current;
+      const lower = [...TIMELINE_ZOOM_LEVELS].reverse().find((level) => level < current);
+      return lower ?? current;
     });
   }, []);
   const zoomInTimeline = useCallback(() => {
     setPxPerSec((current) => {
-      const currentIndex = TIMELINE_ZOOM_LEVELS.indexOf(current);
-      const nextIndex = currentIndex === -1 ? 0 : Math.min(TIMELINE_ZOOM_LEVELS.length - 1, currentIndex + 1);
-      return TIMELINE_ZOOM_LEVELS[nextIndex] ?? current;
+      const higher = TIMELINE_ZOOM_LEVELS.find((level) => level > current);
+      return higher ?? current;
     });
   }, []);
+  const fitTimeline = useCallback(() => {
+    const body = timelineBodyRef.current;
+    const timeline = timelineQuery.data?.timeline;
+    if (!body || !timeline) {
+      return;
+    }
+    const fps = timeline.fps > 0 ? timeline.fps : 30;
+    const durationSec = timeline.duration_frames / fps;
+    if (durationSec <= 0) {
+      return;
+    }
+    const available = body.clientWidth - TIMELINE_LABEL_WIDTH - 16;
+    setPxPerSec(Math.max(4, Math.floor(available / durationSec)));
+  }, [timelineQuery.data?.timeline]);
   const handleClipClick = useCallback(
     (clipId: string) => {
       setSelectedClipId(clipId);
@@ -257,11 +304,19 @@ export function CaseConsoleView({
     },
     [messages, renderedStructuredItems]
   );
+  const handleExport = useCallback(() => {
+    postMessage.mutate("请把当前时间线导出为最终 MP4。");
+  }, [postMessage]);
 
   useEffect(() => {
     setPlayheadSec(null);
     setSeekSec(null);
   }, [timelinePayload?.preview_id]);
+
+  // 时间线推进到新版本时回到「当前版本」视图。
+  useEffect(() => {
+    setViewedVersion(null);
+  }, [timelineVersion]);
 
   const unmatchedClipDetail = useMemo(
     () =>
@@ -287,147 +342,250 @@ export function CaseConsoleView({
     return "事件流连接中";
   }, [streamState]);
 
+  const timelineDurationSec = useMemo(() => {
+    const timeline = timelinePayload?.timeline;
+    if (!timeline) {
+      return 0;
+    }
+    const fps = timeline.fps > 0 ? timeline.fps : 30;
+    return timeline.duration_frames / fps;
+  }, [timelinePayload?.timeline]);
+
   return (
-    <section className="flex h-full min-h-[calc(100vh-3rem)] flex-col">
-      <header className="border-b border-[#d9dee7] bg-white px-6 py-4">
-        <p className="text-sm font-medium text-[#64748b]">剪辑控制台</p>
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
-          <h1 className="text-xl font-semibold">{caseId}</h1>
-          <span className="rounded bg-[#eef2f7] px-2 py-1 text-xs text-[#475569]">{statusLabel}</span>
-        </div>
-      </header>
-
-      <div className="flex min-h-0 flex-1 flex-col gap-4 p-6">
-        <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <div className="flex min-h-[420px] flex-col rounded-lg border border-[#d9dee7] bg-white xl:min-h-0">
-            <AssistantThread
-              runtime={runtime}
-              onAnswerDecision={handleAnswerDecision}
-              answerPending={answerDecision.isPending}
-              highlightedMessageId={highlightedMessageId}
-              toolSteps={toolSteps}
-            />
-
-            <form
-              className="border-t border-[#d9dee7] p-4"
-              onSubmit={(event) => {
-                event.preventDefault();
-                const content = draft.trim();
-                if (!content || disabled) {
-                  return;
-                }
-                setDraft("");
-                runtime.submit(content);
-              }}
+    <div className="flex h-screen min-h-0 flex-col bg-ink text-fg">
+      <TopBar
+        connectionState={connectionState}
+        leading={
+          <>
+            <Link
+              aria-label="返回项目"
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-fg-muted hover:bg-hover hover:text-fg"
+              to="/projects/$projectId"
+              params={{ projectId }}
             >
-              <label className="block text-sm font-medium text-[#334155]">
-                消息输入
-                <textarea
-                  aria-label="消息输入"
-                  className="mt-2 h-24 w-full resize-none rounded-md border border-[#cbd5e1] px-3 py-2 outline-none focus:border-[#2563eb] disabled:bg-[#f1f5f9]"
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  disabled={!runtime.canSubmit}
-                  placeholder={runtime.isRunning ? "等待本轮结束" : "输入给当前剪辑任务的剪辑指令"}
-                />
-              </label>
-              <div className="mt-3 flex items-center justify-between gap-3">
-                <p className="text-sm text-[#64748b]">
-                  {runtime.isRunning ? "输入框会在本轮结束事件后恢复。" : "消息会进入后端任务队列。"}
-                </p>
-                <button
-                  className="rounded-md bg-[#17202a] px-4 py-2 text-sm font-medium text-white disabled:bg-[#94a3b8]"
-                  type="submit"
-                  disabled={!runtime.canSubmit || draft.trim().length === 0}
-                >
-                  发送
-                </button>
-              </div>
-            </form>
+              <HomeGlyph />
+            </Link>
+            <span className="hidden truncate text-sm text-fg-muted sm:inline">{projectName}</span>
+            <span className="text-fg-faint">/</span>
+            <span className="truncate text-sm font-semibold">{caseName}</span>
+            <button
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-fg-muted hover:bg-hover hover:text-fg"
+              type="button"
+              aria-label="重命名剪辑任务"
+              onClick={() => openEntityDialog({ kind: "renameCase", projectId, caseId })}
+            >
+              <PencilGlyph />
+            </button>
+          </>
+        }
+        trailing={
+          <button
+            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent-strong disabled:opacity-40"
+            type="button"
+            disabled={disabled || timelineVersion === null}
+            onClick={handleExport}
+          >
+            导出
+          </button>
+        }
+      />
+
+      <div className="flex min-h-0 flex-1">
+        {/* 左：剪辑对话 */}
+        <aside
+          className="flex min-h-0 shrink-0 flex-col bg-panel"
+          style={{ width: chatPanelWidth }}
+          aria-label="剪辑对话"
+        >
+          <div className="flex shrink-0 items-center justify-between border-b border-line px-3 py-2">
+            <span className="text-sm font-semibold">剪辑对话</span>
+            <span className="text-xs text-fg-faint">{statusLabel}</span>
           </div>
 
-          <aside className="space-y-4">
-            <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
-              <h2 className="font-semibold">预览</h2>
-              <div className="mt-3">
-                {timelineVersion === null ? (
-                  <p className="text-sm leading-6 text-[#64748b]">暂无时间线。</p>
-                ) : timelineQuery.isPending ? (
-                  <p className="text-sm leading-6 text-[#64748b]">时间线加载中。</p>
-                ) : timelinePayload && previewSrc ? (
-                  <PreviewPlayer
-                    key={timelinePayload.preview_id}
-                    src={previewSrc}
-                    fps={timelinePayload.timeline.fps}
-                    onFirstPlay={handlePreviewFirstPlay}
-                    onTimeUpdate={handlePreviewTimeUpdate}
-                    seekSec={seekSec}
-                  />
-                ) : (
-                  <p className="text-sm leading-6 text-[#64748b]">时间线暂不可用。</p>
-                )}
-              </div>
-            </section>
+          <AssistantThread
+            runtime={runtime}
+            onAnswerDecision={handleAnswerDecision}
+            answerPending={answerDecision.isPending}
+            highlightedMessageId={highlightedMessageId}
+            toolSteps={toolSteps}
+          />
 
-            <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
-              <h2 className="font-semibold">当前确认项</h2>
-              <div className="mt-3">
-                {sideDecisionItem ? (
-                  <StructuredInteractionRenderer
-                    item={sideDecisionItem}
-                    onAnswerDecision={handleAnswerDecision}
-                    answerPending={answerDecision.isPending}
-                  />
-                ) : (
-                  <p className="text-sm text-[#64748b]">暂无待确认项。</p>
-                )}
-              </div>
-            </section>
-          </aside>
-        </div>
-
-        <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#d9dee7] pb-3">
-            <div>
-              <h2 className="font-semibold">时间线</h2>
-              {timelinePayload ? (
-                <p className="mt-1 text-xs text-[#64748b]">
-                  版本 {timelinePayload.timeline_version}
-                  {timelinePayload.summary ? ` | ${timelinePayload.summary}` : ""}
-                </p>
-              ) : null}
+          {sideDecisionItem ? (
+            <div className="shrink-0 border-t border-line p-3" aria-label="当前确认项">
+              <StructuredInteractionRenderer
+                item={sideDecisionItem}
+                onAnswerDecision={handleAnswerDecision}
+                answerPending={answerDecision.isPending}
+              />
             </div>
-            {timelinePayload ? (
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-[#64748b]">缩放 {pxPerSec} px/s</span>
+          ) : null}
+
+          <form
+            className="shrink-0 border-t border-line p-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const content = draft.trim();
+              if (!content || disabled) {
+                return;
+              }
+              setDraft("");
+              runtime.submit(content);
+            }}
+          >
+            <textarea
+              aria-label="消息输入"
+              className="h-20 w-full resize-none rounded-md border border-line bg-ink px-3 py-2 text-sm text-fg outline-none placeholder:text-fg-faint focus:border-accent disabled:bg-raised"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              disabled={!runtime.canSubmit}
+              placeholder={runtime.isRunning ? "等待本轮结束…" : "告诉代理要怎么剪"}
+            />
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <p className="text-xs text-fg-faint">
+                {runtime.isRunning ? "输入框会在本轮结束后恢复。" : "消息会进入后端任务队列。"}
+              </p>
+              <button
+                className="rounded-md bg-accent px-4 py-1.5 text-sm font-medium text-white hover:bg-accent-strong disabled:opacity-40"
+                type="submit"
+                disabled={!runtime.canSubmit || draft.trim().length === 0}
+              >
+                发送
+              </button>
+            </div>
+          </form>
+        </aside>
+
+        <ResizeHandle
+          orientation="vertical"
+          value={chatPanelWidth}
+          onChange={setChatPanelWidth}
+          ariaLabel="调整对话面板宽度"
+        />
+
+        {/* 右：素材 + 预览 + 时间线 */}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1">
+            <div className="w-[300px] shrink-0 border-r border-line bg-panel xl:w-[340px]">
+              <AssetsPanel
+                projectId={projectId}
+                onPreviewAsset={(asset) =>
+                  setPreviewAsset((current) =>
+                    current?.asset_id === asset.asset_id ? null : asset
+                  )
+                }
+                previewingAssetId={previewAsset?.asset_id ?? null}
+              />
+            </div>
+
+            <section className="min-h-0 min-w-0 flex-1 p-3" aria-label="预览区">
+              {previewAsset ? (
+                <AssetMediaPreview
+                  key={previewAsset.asset_id}
+                  asset={previewAsset}
+                  onClose={() => setPreviewAsset(null)}
+                />
+              ) : timelineVersion === null ? (
+                <PreviewPlaceholder text="暂无时间线。让代理开始剪辑后，这里会出现成片预览。" />
+              ) : timelineQuery.isPending ? (
+                <PreviewPlaceholder text="时间线加载中…" />
+              ) : timelinePayload && previewSrc ? (
+                <PreviewPlayer
+                  key={timelinePayload.preview_id}
+                  src={previewSrc}
+                  fps={timelinePayload.timeline.fps}
+                  fit="height"
+                  onFirstPlay={handlePreviewFirstPlay}
+                  onTimeUpdate={handlePreviewTimeUpdate}
+                  seekSec={seekSec}
+                />
+              ) : (
+                <PreviewPlaceholder text="时间线暂不可用。" />
+              )}
+            </section>
+          </div>
+
+          <ResizeHandle
+            orientation="horizontal"
+            invert
+            value={timelinePanelHeight}
+            onChange={setTimelinePanelHeight}
+            ariaLabel="调整时间线高度"
+          />
+
+          <section
+            className="flex min-h-0 shrink-0 flex-col bg-panel"
+            style={{ height: timelinePanelHeight }}
+            aria-label="时间线"
+          >
+            <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1.5">
+              <h2 className="text-sm font-semibold">时间线</h2>
+              {timelineVersion !== null ? (
+                <select
+                  aria-label="时间线版本"
+                  className="rounded-md border border-line bg-ink px-2 py-1 text-xs text-fg outline-none focus:border-accent"
+                  value={effectiveVersion ?? ""}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    setViewedVersion(next === timelineVersion ? null : next);
+                  }}
+                >
+                  {versionOptions(timelineVersion).map((version) => (
+                    <option key={version} value={version}>
+                      v{version}
+                      {version === timelineVersion ? "（当前）" : ""}
+                    </option>
+                  ))}
+                </select>
+              ) : null}
+              {viewingHistory ? (
+                <span className="rounded bg-warn/15 px-2 py-0.5 text-xs text-warn">
+                  正在查看历史版本，恢复请在对话中告诉代理
+                </span>
+              ) : null}
+              {timelinePayload?.summary ? (
+                <span className="hidden max-w-[320px] truncate text-xs text-fg-faint lg:inline">
+                  {timelinePayload.summary}
+                </span>
+              ) : null}
+              <div className="ml-auto flex items-center gap-2">
+                <span className="text-xs tabular-nums text-fg-muted">
+                  {formatTimecode(playheadSec ?? 0)} / {formatTimecode(timelineDurationSec)}
+                </span>
                 <button
                   type="button"
-                  className="grid h-8 w-8 place-items-center rounded-md border border-[#cbd5e1] text-sm font-semibold text-[#334155] hover:bg-[#f1f5f9] disabled:text-[#94a3b8]"
+                  className="grid h-6 w-6 place-items-center rounded-md border border-line text-sm text-fg-muted hover:bg-hover disabled:opacity-40"
                   aria-label="缩小时间线"
                   onClick={zoomOutTimeline}
-                  disabled={pxPerSec === TIMELINE_ZOOM_LEVELS[0]}
+                  disabled={pxPerSec <= TIMELINE_ZOOM_LEVELS[0]}
                 >
-                  -
+                  −
+                </button>
+                <span className="text-xs tabular-nums text-fg-faint">{pxPerSec}px/s</span>
+                <button
+                  type="button"
+                  className="grid h-6 w-6 place-items-center rounded-md border border-line text-sm text-fg-muted hover:bg-hover disabled:opacity-40"
+                  aria-label="放大时间线"
+                  onClick={zoomInTimeline}
+                  disabled={pxPerSec >= TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1]}
+                >
+                  ＋
                 </button>
                 <button
                   type="button"
-                  className="grid h-8 w-8 place-items-center rounded-md border border-[#cbd5e1] text-sm font-semibold text-[#334155] hover:bg-[#f1f5f9] disabled:text-[#94a3b8]"
-                  aria-label="放大时间线"
-                  onClick={zoomInTimeline}
-                  disabled={pxPerSec === TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1]}
+                  className="rounded-md border border-line px-2 py-1 text-xs text-fg-muted hover:bg-hover"
+                  onClick={fitTimeline}
                 >
-                  +
+                  适应
                 </button>
               </div>
-            ) : null}
-          </div>
-          <div className="mt-3 space-y-3">
-            {timelineVersion === null ? (
-              <p className="text-sm leading-6 text-[#64748b]">暂无时间线。</p>
-            ) : timelineQuery.isPending ? (
-              <p className="text-sm leading-6 text-[#64748b]">时间线加载中。</p>
-            ) : timelinePayload ? (
-              <>
+            </div>
+
+            <div ref={timelineBodyRef} className="min-h-0 flex-1 overflow-auto">
+              {timelineVersion === null ? (
+                <p className="p-4 text-sm text-fg-muted">暂无时间线。</p>
+              ) : timelineQuery.isPending ? (
+                <p className="p-4 text-sm text-fg-muted">时间线加载中…</p>
+              ) : timelinePayload ? (
                 <TimelineViewer
                   timeline={timelinePayload.timeline}
                   pxPerSec={pxPerSec}
@@ -437,15 +595,83 @@ export function CaseConsoleView({
                   onSeek={handleTimelineSeek}
                   waveformSrc={previewSrc}
                 />
-                {unmatchedClipDetail ? <ClipDetailBar detail={unmatchedClipDetail} /> : null}
-              </>
-            ) : (
-              <p className="text-sm leading-6 text-[#64748b]">时间线暂不可用。</p>
-            )}
-          </div>
-        </section>
+              ) : (
+                <p className="p-4 text-sm text-fg-muted">时间线暂不可用。</p>
+              )}
+            </div>
+
+            {unmatchedClipDetail ? <ClipDetailBar detail={unmatchedClipDetail} /> : null}
+          </section>
+        </div>
       </div>
-    </section>
+
+      <EntityActionDialog dialog={entityDialog} projects={treeProjects} onClose={closeEntityDialog} />
+    </div>
+  );
+}
+
+function PreviewPlaceholder({ text }: { text: string }): ReactElement {
+  return (
+    <div className="grid h-full place-items-center rounded-lg border border-dashed border-line-strong">
+      <p className="max-w-[260px] text-center text-sm leading-6 text-fg-muted">{text}</p>
+    </div>
+  );
+}
+
+/** 素材试看：视频/音频/图片按类型渲染，媒体流走 mediaProxyUrl；代理未就绪或加载失败给出提示。 */
+function AssetMediaPreview({
+  asset,
+  onClose
+}: {
+  asset: MaterialAsset;
+  onClose: () => void;
+}): ReactElement {
+  const [mediaFailed, setMediaFailed] = useState(false);
+  const src = api.mediaProxyUrl(asset.asset_id);
+  const handleMediaError = useCallback(() => setMediaFailed(true), []);
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-line bg-black">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line bg-panel px-3 py-2">
+        <span className="truncate text-sm text-fg">{asset.filename || asset.asset_id}</span>
+        <button
+          className="shrink-0 rounded-md border border-line px-2.5 py-1 text-xs text-fg-muted hover:bg-hover"
+          type="button"
+          onClick={onClose}
+        >
+          返回成片预览
+        </button>
+      </div>
+      <div className="grid min-h-0 flex-1 place-items-center p-2">
+        {!asset.proxy_ready ? (
+          <p className="max-w-[280px] text-center text-sm leading-6 text-fg-muted">
+            素材代理尚未就绪（导入处理中或已失败），稍后再试。
+          </p>
+        ) : mediaFailed ? (
+          <p className="max-w-[280px] text-center text-sm leading-6 text-fg-muted">
+            素材加载失败，代理文件可能已失效。
+          </p>
+        ) : asset.kind === "video" ? (
+          <video
+            className="max-h-full max-w-full"
+            controls
+            src={src}
+            aria-label="素材试看"
+            onError={handleMediaError}
+          />
+        ) : asset.kind === "audio" ? (
+          <audio controls src={src} aria-label="素材试听" onError={handleMediaError} />
+        ) : asset.kind === "image" ? (
+          <img
+            className="max-h-full max-w-full object-contain"
+            src={src}
+            alt={asset.filename || asset.asset_id}
+            onError={handleMediaError}
+          />
+        ) : (
+          <p className="text-sm text-fg-muted">该素材类型暂不支持预览。</p>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -459,23 +685,28 @@ type ClipDetail = {
 
 function ClipDetailBar({ detail }: { detail: ClipDetail }): ReactElement {
   return (
-    <div className="rounded-md border border-[#d9dee7] bg-[#f8fafc] px-3 py-2 text-xs leading-5 text-[#475569]">
-      <span className="font-semibold text-[#17202a]">已选片段：</span>
+    <div className="shrink-0 border-t border-line bg-raised px-3 py-2 text-xs leading-5 text-fg-muted">
+      <span className="font-semibold text-fg">已选片段：</span>
       <span className="font-mono">{detail.clipId}</span>
-      <span className="mx-2 text-[#94a3b8]">|</span>
+      <span className="mx-2 text-fg-faint">|</span>
       <span>轨道 {detail.trackId}</span>
-      <span className="mx-2 text-[#94a3b8]">|</span>
+      <span className="mx-2 text-fg-faint">|</span>
       <span>
         {formatSeconds(detail.startSec)} - {formatSeconds(detail.endSec)}
       </span>
       {detail.label ? (
         <>
-          <span className="mx-2 text-[#94a3b8]">|</span>
+          <span className="mx-2 text-fg-faint">|</span>
           <span>{detail.label}</span>
         </>
       ) : null}
     </div>
   );
+}
+
+function versionOptions(currentVersion: number): number[] {
+  const count = Math.min(currentVersion, MAX_VERSION_OPTIONS);
+  return Array.from({ length: count }, (_item, index) => currentVersion - index);
 }
 
 function findTimelineClip(timeline: TimelineJson, clipId: string): ClipDetail | null {
@@ -546,6 +777,41 @@ function formatSeconds(value: number): string {
   return `${value.toFixed(2)}s`;
 }
 
+function formatTimecode(sec: number): string {
+  const safe = Math.max(0, sec);
+  const minutes = Math.floor(safe / 60);
+  const seconds = Math.floor(safe % 60);
+  const tenths = Math.floor((safe % 1) * 10);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${tenths}`;
+}
+
+function HomeGlyph(): ReactElement {
+  return (
+    <svg aria-hidden width="16" height="16" viewBox="0 0 24 24" fill="none">
+      <path
+        d="M4 11.5 12 4l8 7.5M6 10v9h12v-9"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function PencilGlyph(): ReactElement {
+  return (
+    <svg aria-hidden width="13" height="13" viewBox="0 0 24 24" fill="none">
+      <path
+        d="m4 20 .8-4L16 4.8a2 2 0 0 1 2.8 0l.4.4a2 2 0 0 1 0 2.8L8 19.2 4 20Z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 const CASE_EVENT_TYPES = [
   "CaseCreated",
   "CaseRenamed",
@@ -580,5 +846,7 @@ const CASE_EVENT_TYPES = [
   "CapabilityDegraded"
 ];
 
-const TIMELINE_ZOOM_LEVELS = [24, 48, 96, 192];
+const TIMELINE_ZOOM_LEVELS = [12, 24, 48, 96, 192];
 const DEFAULT_TIMELINE_PX_PER_SEC = 96;
+const TIMELINE_LABEL_WIDTH = 112;
+const MAX_VERSION_OPTIONS = 50;

@@ -105,6 +105,9 @@ def import_local_file(
         object_hash = ref.object_hash
         object_size = ref.size
         reference_path = None
+    link_payload: dict[str, Any] = {}
+    if input_model.rel_dir:
+        link_payload["rel_dir"] = input_model.rel_dir
     events = [
         _asset_imported_event(
             asset_id=asset_id,
@@ -120,7 +123,7 @@ def import_local_file(
             object_size=object_size,
             reference_path=reference_path,
         ),
-        AssetLinked(project_id=project_id, asset_id=asset_id),
+        AssetLinked(project_id=project_id, asset_id=asset_id, payload=link_payload),
         _proxy_job_event(project_id=project_id, asset_id=asset_id),
     ]
     return _succeeded(

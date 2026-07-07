@@ -39,6 +39,7 @@ export type MaterialAsset = {
   understanding_status: UnderstandingStatus | string;
   usable: boolean;
   enabled: boolean;
+  rel_dir?: string | null;
   probe: Record<string, unknown> | null;
   duration_sec: number | null;
   proxy_object_hash: string | null;
@@ -88,6 +89,10 @@ export type MaterialSummaryResponse = {
 export type MaterialMutationResponse = {
   project_id: string;
   asset_id?: string | null;
+  asset_ids?: string[];
+  skipped?: string[];
+  failed?: string[];
+  duplicates?: string[];
   job_id?: string | null;
   decision_id?: string | null;
   event_ids: number[];
@@ -142,7 +147,8 @@ export type CaseMessagesResponse = {
 };
 
 type MaterialImportLocalRequest = {
-  path: string;
+  path?: string;
+  paths?: string[];
   storage_mode?: StorageMode | null;
   asset_id?: string | null;
 };

@@ -15,16 +15,18 @@ const SCRIPTED_REPLY = /脚本耗尽/;
 
 test("流式控制台：发消息后对话流出现助手回复文本", async ({ page }) => {
   await page.goto(`/#t=${TOKEN}`);
-  await expect(page.getByRole("heading", { name: "项目总览" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "项目" })).toBeVisible();
 
-  // 全程走真实 UI/API：新建项目 → 在项目页创建 Case 并进入控制台。
-  await page.getByLabel("项目名称").fill(PROJECT_NAME);
-  await page.getByRole("button", { name: "新建项目" }).click();
-  await expect(page.getByRole("heading", { name: PROJECT_NAME })).toBeVisible();
+  // 全程走真实 UI/API：首页对话框新建项目 → 项目详情创建 Case 并进入工作台。
+  await page.getByRole("button", { name: "＋ 新建项目" }).click();
+  await page.getByLabel("名称").fill(PROJECT_NAME);
+  await page.getByRole("button", { name: "确认" }).click();
+  await expect(page).toHaveURL(/\/projects\//);
+  await expect(page.getByText(PROJECT_NAME)).toBeVisible();
 
   await page.getByLabel("目标文本").fill(CASE_GOAL);
-  await page.getByRole("button", { name: "创建并进入控制台" }).click();
-  await expect(page.getByText("剪辑控制台")).toBeVisible();
+  await page.getByRole("button", { name: "创建并进入工作台" }).click();
+  await expect(page.getByText("剪辑对话")).toBeVisible();
 
   // 发送用户消息（POST /cases/{cid}/messages → 入 Turn Queue）。
   await page.getByLabel("消息输入").fill(USER_MESSAGE);
