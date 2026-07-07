@@ -22,7 +22,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.engine import Engine, Row
 
 from agent_harness.decision_answering import DecisionAnswerResolver
@@ -37,26 +37,24 @@ from agent_harness.reducer import ReducerApplyResult, apply
 from agent_harness.turn_queue import StopToken, TurnQueue, TurnQueueItem, TurnRunner
 from contracts.asset import AssetKind, StorageMode
 from contracts.decision import Decision, DecisionAnswer, DecisionOption, PendingToolCall
+from contracts.draft import DraftState
 from contracts.events import (
     Actor,
-    AssetImported,
-    CaseCopied,
-    CaseCreated,
-    CaseMoved,
-    CaseRenamed,
-    CaseTrashed,
+    AssetLinked,
+    AssetUnlinked,
     DecisionAnswered,
     DecisionCreated,
+    DraftCopied,
+    DraftCreated,
+    DraftRenamed,
+    DraftTrashed,
     JobCancelled,
     JobEnqueued,
     PreviewViewed,
-    ProjectCopied,
-    ProjectCreated,
-    ProjectRenamed,
-    ProjectTrashed,
 )
 from contracts.tool_result import ToolResult
-from media.invalidation import revalidate_project_references
+from contracts.workspace import WorkspaceDefaults
+from media.invalidation import revalidate_draft_references
 from providers.decision_answering import build_openai_compatible_decision_answer_resolver
 from providers.gateway import ProviderCallRecord
 from providers.planner import build_openai_compatible_planner
@@ -65,8 +63,8 @@ from storage import schema
 from storage.data_migrations import apply_data_migrations
 from storage.db import begin_immediate, create_workspace_engine
 from storage.repositories import (
-    CasesRepository,
     DecisionsRepository,
+    DraftsRepository,
     EventLogRepository,
     JobsRepository,
     MaterialSummariesRepository,
@@ -74,37 +72,12 @@ from storage.repositories import (
     ProviderCallsRepository,
 )
 from storage.repositories._json import load_json
-from storage.repositories.projects import ProjectsRepository
 from storage.workspace_paths import WorkspacePaths
 from timeline import get_timeline_version
 from timeline.summary import render_timeline_summary
 from tools import ToolExecutionContext
-from tools.asset import (
-    disable_for_case as asset_disable_for_case,
-)
-from tools.asset import (
-    import_local_file as asset_import_local_file,
-)
-from tools.asset import (
-    link_to_project as asset_link_to_project,
-)
-from tools.asset import (
-    select_for_case as asset_select_for_case,
-)
-from tools.asset import (
-    unlink_from_project as asset_unlink_from_project,
-)
-from tools.asset import (
-    upload_complete as asset_upload_complete,
-)
-from tools.specs import (
-    AssetDisableForCaseInput,
-    AssetImportLocalFileInput,
-    AssetLinkInput,
-    AssetSelectForCaseInput,
-    AssetUnlinkInput,
-    AssetUploadCompleteInput,
-)
+from tools.asset import import_local_file as asset_import_local_file
+from tools.specs import AssetImportLocalFileInput
 
 from . import schemas as api_schemas
 from .deps import (
@@ -119,7 +92,7 @@ from .deps import (
     event_row_matches,
     generate_token,
     refuse_path_escape,
-    route_case,
+    route_draft,
     route_workspace,
     security_baseline_middleware,
     startup_port_from_env,
@@ -132,61 +105,38 @@ SSE_POLL_INTERVAL_SECONDS = 0.05
 SSE_BATCH_SIZE = 100
 DEFAULT_LLM_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_LLM_MODEL = "qwen-plus"
+# 首页草稿墙每卡封面上限（thumbnail_ready 素材，导入时间倒序）。
+DRAFT_COVER_LIMIT = 4
 
 
-class ProjectCreateRequest(BaseModel):
+class DraftCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    project_id: str | None = None
-    name: str = "Untitled Project"
-    defaults: dict[str, Any] = Field(default_factory=dict)
+    draft_id: str | None = None
+    # 缺省时服务端生成剪映式日期名（本地时区，无前导零）；同名（不含 trashed）追加 (2)(3)…
+    name: str | None = None
+    goal: str | None = None
+    brief: dict[str, Any] = Field(default_factory=lambda: {"goal": ""})
+    # 缺省从 workspace defaults 拷贝（当前工作区无持久配置，等价于内置默认）。
+    defaults: dict[str, Any] | None = None
 
 
-class ProjectUpdateRequest(BaseModel):
+class DraftUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
 
 
-class ProjectCopyRequest(BaseModel):
+class DraftCopyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    project_id: str | None = None
+    draft_id: str | None = None
     name: str | None = None
 
 
 class ConfirmRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    confirm: bool = False
-
-
-class CaseCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    case_id: str | None = None
-    name: str = "Untitled Case"
-    goal: str | None = None
-    brief: dict[str, Any] = Field(default_factory=lambda: {"goal": ""})
-
-
-class CaseUpdateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-
-
-class CaseCopyRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    case_id: str | None = None
-    name: str | None = None
-
-
-class CaseMoveRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    target_project_id: str
     confirm: bool = False
 
 
@@ -201,8 +151,7 @@ class DecisionAnswerRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     answer: DecisionAnswer
-    project_id: str | None = None
-    case_id: str | None = None
+    draft_id: str | None = None
 
 
 class JobCancelRequest(BaseModel):
@@ -240,45 +189,6 @@ class MaterialImportUrlRequest(BaseModel):
     filename: str | None = None
     max_bytes: int | None = None
     asset_id: str | None = None
-
-
-class MaterialAssetLinkRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    asset_id: str
-    enabled: bool = True
-    note: str = ""
-
-
-class MaterialPatchRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    enabled: bool | None = None
-    reference_path: str | None = None
-
-
-class CaseAssetScopeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    asset_id: str
-
-
-class UploadInitRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project_id: str
-    filename: str
-    size: int | None = None
-    asset_id: str | None = None
-
-
-class UploadCompleteRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    project_id: str | None = None
-    asset_id: str | None = None
-    # 文件夹上传（webkitdirectory / 拖拽目录）时的相对子路径，素材面板按它分组。
-    rel_dir: str | None = None
 
 
 def create_app(
@@ -327,7 +237,7 @@ def create_app(
             stop_token=stop_token,
             decision_answer_resolver=env_decision_answer_resolver,
             tool_gateway=tool_gateway,
-            turn_listener=turn_stream_hub.listener_for(item.case_id),
+            turn_listener=turn_stream_hub.listener_for(item.draft_id),
         )
 
     queue = TurnQueue(turn_runner or default_runner)
@@ -379,7 +289,7 @@ class _StorageProviderCallRecorder:
                     "provider_id": record.provider_id,
                     "capability": record.capability,
                     "model": record.model,
-                    "case_id": record.case_id,
+                    "draft_id": record.draft_id,
                     "job_id": record.job_id,
                     "latency_ms": record.latency_ms,
                     "usage_json": record.usage_json,
@@ -503,11 +413,11 @@ async def _job_observation_bridge(
                 payload = load_json(str(values["payload_json"]))
                 if not isinstance(payload, dict):
                     continue
-                case_id = payload.get("requested_by_case_id") or values.get("case_id")
+                draft_id = payload.get("requested_by_draft_id") or values.get("draft_id")
                 job_id = payload.get("job_id")
-                if not isinstance(case_id, str) or not isinstance(job_id, str):
+                if not isinstance(draft_id, str) or not isinstance(job_id, str):
                     continue
-                await turn_queue.enqueue_job_observation(case_id, job_id=job_id, event=payload)
+                await turn_queue.enqueue_job_observation(draft_id, job_id=job_id, event=payload)
             cursor = int(max_row or cursor)
         except asyncio.CancelledError:
             raise
@@ -517,83 +427,149 @@ async def _job_observation_bridge(
 
 def _register_routes(app: FastAPI) -> None:
     @app.post(
-        "/api/projects",
+        "/api/drafts",
         status_code=status.HTTP_201_CREATED,
-        response_model=api_schemas.ProjectMutationResponse,
+        response_model=api_schemas.DraftMutationResponse,
         responses=_response_docs(mutation=True, conflict=True),
     )
-    async def create_project(payload: ProjectCreateRequest, request: Request) -> dict[str, Any]:
+    async def create_draft(payload: DraftCreateRequest, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
-        project_id = payload.project_id or _new_id("project")
-        event = ProjectCreated(
-            project_id=project_id,
-            name=payload.name,
+        draft_id = payload.draft_id or _new_id("draft")
+        name = _resolve_draft_name(state.engine, payload.name)
+        defaults = payload.defaults or WorkspaceDefaults().model_dump(mode="json")
+        brief = _brief_payload(payload.brief, payload.goal)
+        event = DraftCreated(
+            draft_id=draft_id,
             payload={
-                "name": payload.name,
-                "defaults": payload.defaults,
+                "name": name,
+                "brief": brief,
+                "defaults": defaults,
                 "status": "active",
             },
         )
         result = apply((event,), engine=state.engine, base_version=None, actor="user")
         _ensure_applied(result)
-        project = _require_project(state.engine, project_id)
-        return {"project": project, "event_ids": _event_ids(result)}
+        return {
+            "draft": _require_draft(state.engine, draft_id),
+            "event_ids": _event_ids(result),
+        }
 
     @app.get(
-        "/api/projects",
-        response_model=api_schemas.ProjectListResponse,
+        "/api/drafts",
+        response_model=api_schemas.DraftListResponse,
         responses=_response_docs(),
     )
-    async def list_projects(request: Request) -> dict[str, Any]:
+    async def list_drafts(request: Request) -> dict[str, Any]:
         state = state_from_request(request)
-        return {"projects": _list_projects(state.engine)}
+        return {"drafts": _list_drafts(state.engine)}
 
     @app.get(
-        "/api/project-tree",
-        response_model=api_schemas.ProjectTreeResponse,
-        responses=_response_docs(),
-    )
-    async def project_tree(request: Request) -> dict[str, Any]:
-        state = state_from_request(request)
-        return {"projects": _project_tree(state.engine)}
-
-    @app.get(
-        "/api/projects/{project_id}",
-        response_model=api_schemas.ProjectPageResponse,
+        "/api/drafts/{draft_id}",
+        response_model=api_schemas.DraftResponse,
         responses=_response_docs(not_found=True),
     )
-    async def get_project(project_id: str, request: Request) -> dict[str, Any]:
+    async def get_draft(draft_id: str, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
-        _require_project(state.engine, project_id)
-        return _project_page_payload(state.engine, project_id)
+        return {"draft": _require_draft(state.engine, draft_id)}
+
+    @app.patch(
+        "/api/drafts/{draft_id}",
+        response_model=api_schemas.DraftMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def rename_draft(
+        draft_id: str,
+        payload: DraftUpdateRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_draft(state.engine, draft_id)
+        event = DraftRenamed(
+            draft_id=draft_id,
+            name=payload.name,
+            payload={"name": payload.name},
+        )
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "draft": _require_draft(state.engine, draft_id),
+            "event_ids": _event_ids(result),
+        }
+
+    @app.delete(
+        "/api/drafts/{draft_id}",
+        response_model=api_schemas.DraftMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def delete_draft(
+        draft_id: str,
+        payload: ConfirmRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_confirm(payload)
+        _require_draft(state.engine, draft_id)
+        event = DraftTrashed(draft_id=draft_id)
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "draft": _require_draft(state.engine, draft_id),
+            "event_ids": _event_ids(result),
+        }
+
+    @app.post(
+        "/api/drafts/{draft_id}/copy",
+        status_code=status.HTTP_201_CREATED,
+        response_model=api_schemas.DraftMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def copy_draft(
+        draft_id: str,
+        payload: DraftCopyRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        source_draft = _require_draft(state.engine, draft_id)
+        new_draft_id = payload.draft_id or _new_id("draft")
+        event = DraftCopied(
+            draft_id=new_draft_id,
+            source_draft_id=draft_id,
+            payload={"name": payload.name or f"{source_draft['name']} Copy"},
+        )
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "draft": _require_draft(state.engine, new_draft_id),
+            "event_ids": _event_ids(result),
+        }
 
     @app.get(
-        "/api/projects/{project_id}/materials",
+        "/api/drafts/{draft_id}/materials",
         response_model=api_schemas.MaterialsResponse,
         responses=_response_docs(not_found=True),
     )
-    async def list_materials(project_id: str, request: Request) -> dict[str, Any]:
+    async def list_materials(draft_id: str, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
-        _require_project(state.engine, project_id)
-        invalidation = revalidate_project_references(state.engine, project_id, apply_events=apply)
+        _require_draft(state.engine, draft_id)
+        invalidation = revalidate_draft_references(state.engine, draft_id, apply_events=apply)
         return _materials_payload(
             state.engine,
-            project_id,
+            draft_id,
             invalidated_asset_ids=list(invalidation.invalidated_asset_ids),
         )
 
     @app.get(
-        "/api/projects/{project_id}/materials/{asset_id}/summary",
+        "/api/drafts/{draft_id}/materials/{asset_id}/summary",
         response_model=api_schemas.MaterialSummaryResponse,
         responses=_response_docs(not_found=True),
     )
     async def get_material_summary(
-        project_id: str,
+        draft_id: str,
         asset_id: str,
         request: Request,
     ) -> dict[str, Any]:
         state = state_from_request(request)
-        _require_project_asset(state.engine, project_id, asset_id)
+        _require_draft_asset(state.engine, draft_id, asset_id)
         with state.engine.connect() as connection:
             summary = MaterialSummariesRepository(connection).latest_ready(asset_id)
         if summary is None:
@@ -601,32 +577,33 @@ def _register_routes(app: FastAPI) -> None:
         return {"asset_id": asset_id, "summary": summary["summary_json"]}
 
     @app.post(
-        "/api/projects/{project_id}/materials/revalidate",
+        "/api/drafts/{draft_id}/materials/revalidate",
         response_model=api_schemas.MaterialsResponse,
         responses=_response_docs(mutation=True, not_found=True, conflict=True),
     )
-    async def revalidate_materials(project_id: str, request: Request) -> dict[str, Any]:
+    async def revalidate_materials(draft_id: str, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
-        _require_project(state.engine, project_id)
-        invalidation = revalidate_project_references(state.engine, project_id, apply_events=apply)
+        _require_draft(state.engine, draft_id)
+        invalidation = revalidate_draft_references(state.engine, draft_id, apply_events=apply)
         return _materials_payload(
             state.engine,
-            project_id,
+            draft_id,
             invalidated_asset_ids=list(invalidation.invalidated_asset_ids),
         )
 
     @app.post(
-        "/api/projects/{project_id}/materials/import-local",
+        "/api/drafts/{draft_id}/materials/import-local",
         response_model=api_schemas.MaterialMutationResponse,
         responses=_response_docs(mutation=True, not_found=True, conflict=True, path_escape=True),
     )
     async def import_local_material(
-        project_id: str,
+        draft_id: str,
         payload: MaterialImportLocalRequest,
         request: Request,
     ) -> dict[str, Any]:
         state = state_from_request(request)
-        _require_project(state.engine, project_id)
+        _require_draft(state.engine, draft_id)
+        draft_state = _load_draft_state(state.engine, draft_id)
         requested_paths = payload.all_paths()
         if not requested_paths:
             raise HTTPException(
@@ -655,41 +632,40 @@ def _register_routes(app: FastAPI) -> None:
                         "message": "asset_id 只能用于恰好一个文件的导入。",
                     },
                 )
-            # 项目内按 reference_path 去重：重选同一文件夹补充素材时，已导入文件跳过。
-            with state.engine.connect() as connection:
-                existing_rows = connection.execute(
-                    select(schema.assets.c.reference_path)
-                    .select_from(
-                        schema.assets.join(
-                            schema.project_asset_links,
-                            schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
-                        )
-                    )
-                    .where(schema.project_asset_links.c.project_id == project_id)
-                    .where(schema.assets.c.reference_path.is_not(None))
-                ).all()
-            existing_paths = {str(row[0]) for row in existing_rows}
+            candidate_paths = [str(file_path) for file_path, _ in plan]
+            linked_paths = _draft_linked_reference_paths(state.engine, draft_id)
+            global_assets = _global_assets_by_reference_path(state.engine, candidate_paths)
             asset_ids: list[str] = []
             event_ids: list[int] = []
             failed: list[str] = []
             duplicates: list[str] = []
             for file_path, rel_dir in plan:
-                if str(file_path) in existing_paths:
+                key = str(file_path)
+                # 分支①：全局命中且本草稿已链 → duplicates，跳过。
+                if key in linked_paths:
                     duplicates.append(file_path.name)
                     continue
+                hit = global_assets.get(key)
+                if hit is not None:
+                    # 分支②：全局命中但本草稿未链 → 仅发 AssetLinked 秒建链；
+                    # 缺 proxy/index 产物按现规则补队（同幂等键 merge，正常情况不入任何队）。
+                    asset_ids.append(hit["asset_id"])
+                    event_ids.extend(_link_existing_asset(state.engine, draft_id, hit, rel_dir))
+                    continue
+                # 分支③：未命中 → 现状链路 AssetImported + AssetLinked + JobEnqueued(proxy)。
                 try:
                     result = _run_asset_tool(
                         state,
                         tool_name="asset.import_local_file",
                         handler=asset_import_local_file,
                         input_model=AssetImportLocalFileInput(
-                            project_id=project_id,
                             asset_id=payload.asset_id,
                             path=str(file_path),
                             storage_mode=payload.storage_mode or StorageMode.REFERENCE,
                             kind=_infer_material_kind(str(file_path)),
                             rel_dir=rel_dir,
                         ),
+                        draft_state=draft_state,
                         actor="user",
                     )
                 except OSError as error:
@@ -701,7 +677,7 @@ def _register_routes(app: FastAPI) -> None:
                     asset_ids.append(imported_asset_id)
                 event_ids.extend(result.data["event_ids"])
             return {
-                "project_id": project_id,
+                "draft_id": draft_id,
                 "asset_id": asset_ids[0] if asset_ids else None,
                 "asset_ids": asset_ids,
                 "skipped": skipped,
@@ -714,22 +690,22 @@ def _register_routes(app: FastAPI) -> None:
         return await run_in_threadpool(_import_all)
 
     @app.post(
-        "/api/projects/{project_id}/materials/import-url",
+        "/api/drafts/{draft_id}/materials/import-url",
         response_model=api_schemas.MaterialMutationResponse,
         responses=_response_docs(mutation=True, not_found=True, conflict=True),
     )
     async def import_url_material(
-        project_id: str,
+        draft_id: str,
         payload: MaterialImportUrlRequest,
         request: Request,
     ) -> dict[str, Any]:
         state = state_from_request(request)
-        _require_project(state.engine, project_id)
-        decision = _url_import_decision(project_id, payload)
+        draft = _require_draft(state.engine, draft_id)
+        decision = _url_import_decision(draft_id, payload)
         event = DecisionCreated(
             decision_id=decision.decision_id,
             scope_type=decision.scope_type,
-            project_id=project_id,
+            draft_id=draft_id,
             payload={
                 "decision": decision.model_dump(mode="json"),
                 "type": decision.type,
@@ -742,412 +718,63 @@ def _register_routes(app: FastAPI) -> None:
                 "blocking": decision.blocking,
             },
         )
-        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        result = apply(
+            (event,),
+            engine=state.engine,
+            base_version=int(draft["state_version"]),
+            actor="user",
+        )
         _ensure_applied(result)
         return {
-            "project_id": project_id,
+            "draft_id": draft_id,
             "asset_id": payload.asset_id,
             "decision_id": decision.decision_id,
             "event_ids": _event_ids(result),
         }
 
-    @app.post(
-        "/api/projects/{project_id}/materials/link",
+    @app.delete(
+        "/api/drafts/{draft_id}/materials/{asset_id}",
         response_model=api_schemas.MaterialMutationResponse,
         responses=_response_docs(mutation=True, not_found=True, conflict=True),
     )
-    async def link_material(
-        project_id: str,
-        payload: MaterialAssetLinkRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_project(state.engine, project_id)
-        _require_asset(state.engine, payload.asset_id)
-        result = _run_asset_tool(
-            state,
-            tool_name="asset.link_to_project",
-            handler=asset_link_to_project,
-            input_model=AssetLinkInput(
-                project_id=project_id,
-                asset_id=payload.asset_id,
-                enabled=payload.enabled,
-                note=payload.note,
-            ),
-            actor="user",
-        )
-        return {
-            "project_id": project_id,
-            "asset_id": payload.asset_id,
-            "event_ids": result.data["event_ids"],
-        }
-
-    @app.post(
-        "/api/projects/{project_id}/materials/unlink",
-        response_model=api_schemas.MaterialMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def unlink_material(
-        project_id: str,
-        payload: MaterialAssetLinkRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_project(state.engine, project_id)
-        _require_project_asset(state.engine, project_id, payload.asset_id)
-        result = _run_asset_tool(
-            state,
-            tool_name="asset.unlink_from_project",
-            handler=asset_unlink_from_project,
-            input_model=AssetUnlinkInput(project_id=project_id, asset_id=payload.asset_id),
-            actor="user",
-        )
-        return {
-            "project_id": project_id,
-            "asset_id": payload.asset_id,
-            "event_ids": result.data["event_ids"],
-        }
-
-    @app.patch(
-        "/api/projects/{project_id}/materials/{asset_id}",
-        response_model=api_schemas.MaterialMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True, path_escape=True),
-    )
-    async def patch_material(
-        project_id: str,
+    async def delete_material(
+        draft_id: str,
         asset_id: str,
-        payload: MaterialPatchRequest,
         request: Request,
     ) -> dict[str, Any]:
         state = state_from_request(request)
-        _require_project_asset(state.engine, project_id, asset_id)
-        event_ids: list[int] = []
-        if payload.enabled is not None:
-            link_result = _run_asset_tool(
-                state,
-                tool_name="asset.link_to_project",
-                handler=asset_link_to_project,
-                input_model=AssetLinkInput(
-                    project_id=project_id,
-                    asset_id=asset_id,
-                    enabled=payload.enabled,
-                ),
-                actor="user",
-            )
-            event_ids.extend(link_result.data["event_ids"])
-        if payload.reference_path is not None:
-            try:
-                reference_path = canonicalize_allowed_path(payload.reference_path, state.fs_roots)
-            except PathEscapeError:
-                refuse_path_escape(request, payload.reference_path)
-            event = _reference_relocated_event(state.engine, project_id, asset_id, reference_path)
-            result = apply((event,), engine=state.engine, base_version=None, actor="user")
-            _ensure_applied(result)
-            event_ids.extend(_event_ids(result))
-        return {"project_id": project_id, "asset_id": asset_id, "event_ids": event_ids}
-
-    @app.patch(
-        "/api/projects/{project_id}",
-        response_model=api_schemas.ProjectMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def rename_project(
-        project_id: str,
-        payload: ProjectUpdateRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_project(state.engine, project_id)
-        event = ProjectRenamed(
-            project_id=project_id,
-            name=payload.name,
-            payload={"name": payload.name},
+        _require_draft_asset(state.engine, draft_id, asset_id)
+        result = _run_asset_events(
+            state,
+            (AssetUnlinked(draft_id=draft_id, asset_id=asset_id),),
+            actor="user",
         )
-        result = apply((event,), engine=state.engine, base_version=None, actor="user")
-        _ensure_applied(result)
         return {
-            "project": _require_project(state.engine, project_id),
-            "event_ids": _event_ids(result),
-        }
-
-    @app.delete(
-        "/api/projects/{project_id}",
-        response_model=api_schemas.ProjectMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def delete_project(
-        project_id: str,
-        payload: ConfirmRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_confirm(payload)
-        _require_project(state.engine, project_id)
-        event = ProjectTrashed(project_id=project_id)
-        result = apply((event,), engine=state.engine, base_version=None, actor="user")
-        _ensure_applied(result)
-        return {
-            "project": _require_project(state.engine, project_id),
+            "draft_id": draft_id,
+            "asset_id": asset_id,
             "event_ids": _event_ids(result),
         }
 
     @app.post(
-        "/api/projects/{project_id}/copy",
-        status_code=status.HTTP_201_CREATED,
-        response_model=api_schemas.ProjectMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def copy_project(
-        project_id: str,
-        payload: ProjectCopyRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        source_project = _require_project(state.engine, project_id)
-        new_project_id = payload.project_id or _new_id("project")
-        event = ProjectCopied(
-            project_id=new_project_id,
-            source_project_id=project_id,
-            payload={"name": payload.name or f"{source_project['name']} Copy"},
-        )
-        result = apply((event,), engine=state.engine, base_version=None, actor="user")
-        _ensure_applied(result)
-        return {
-            "project": _require_project(state.engine, new_project_id),
-            "event_ids": _event_ids(result),
-        }
-
-    @app.post(
-        "/api/projects/{project_id}/cases",
-        status_code=status.HTTP_201_CREATED,
-        response_model=api_schemas.CaseMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def create_case(
-        project_id: str,
-        payload: CaseCreateRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_project(state.engine, project_id)
-        case_id = payload.case_id or _new_id("case")
-        brief = _brief_payload(payload.brief, payload.goal)
-        event = CaseCreated(
-            project_id=project_id,
-            case_id=case_id,
-            payload={
-                "name": payload.name,
-                "brief": brief,
-                "status": "active",
-            },
-        )
-        result = apply((event,), engine=state.engine, base_version=None, actor="user")
-        _ensure_applied(result)
-        case = _require_case(state.engine, project_id, case_id)
-        return {"case": case, "event_ids": _event_ids(result)}
-
-    @app.get(
-        "/api/projects/{project_id}/cases/{case_id}",
-        response_model=api_schemas.CaseResponse,
-        responses=_response_docs(not_found=True),
-    )
-    async def get_case(project_id: str, case_id: str, request: Request) -> dict[str, Any]:
-        state = state_from_request(request)
-        return {"case": _require_case(state.engine, project_id, case_id)}
-
-    @app.get(
-        "/api/projects/{project_id}/cases/{case_id}/timeline",
-        response_model=api_schemas.CaseTimelineResponse,
-        responses=_response_docs(not_found=True),
-    )
-    async def get_case_timeline(
-        project_id: str,
-        case_id: str,
-        request: Request,
-        version: int | None = None,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        case = _require_case(state.engine, project_id, case_id)
-        project = _require_project(state.engine, project_id)
-        requested_version = version if version is not None else case.get("timeline_current_version")
-        if not isinstance(requested_version, int):
-            raise HTTPException(status_code=404, detail={"reason": "not_found"})
-        record = get_timeline_version(state.engine, case_id, requested_version)
-        if record is None:
-            raise HTTPException(status_code=404, detail={"reason": "not_found"})
-        defaults = project.get("defaults")
-        aspect_ratio = "9:16"
-        if isinstance(defaults, Mapping) and isinstance(defaults.get("aspect_ratio"), str):
-            aspect_ratio = str(defaults["aspect_ratio"])
-        return {
-            "case_id": case_id,
-            "timeline_version": record.version,
-            "timeline": record.timeline.model_dump(mode="json"),
-            "summary": render_timeline_summary(record.timeline, aspect_ratio=aspect_ratio),
-            "preview_id": _latest_preview_id(state.engine, case_id, record.version),
-        }
-
-    @app.post(
-        "/api/projects/{project_id}/cases/{case_id}/previews/{preview_id}/viewed",
-        response_model=api_schemas.CaseMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def preview_viewed(
-        project_id: str,
-        case_id: str,
-        preview_id: str,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_case(state.engine, project_id, case_id)
-        _require_case_preview(state.engine, case_id, preview_id)
-        event = PreviewViewed(project_id=project_id, case_id=case_id, preview_id=preview_id)
-        result = apply((event,), engine=state.engine, base_version=None, actor="user")
-        _ensure_applied(result)
-        return {
-            "case": _require_case(state.engine, project_id, case_id),
-            "event_ids": _event_ids(result),
-        }
-
-    @app.get(
-        "/api/projects/{project_id}/cases/{case_id}/costs",
-        response_model=api_schemas.CaseCostsResponse,
-        responses=_response_docs(not_found=True),
-    )
-    async def case_costs(project_id: str, case_id: str, request: Request) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_case(state.engine, project_id, case_id)
-        return {
-            "project_id": project_id,
-            "case_id": case_id,
-            "costs": _case_cost_summary(state.engine, case_id),
-        }
-
-    @app.patch(
-        "/api/projects/{project_id}/cases/{case_id}",
-        response_model=api_schemas.CaseMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def rename_case(
-        project_id: str,
-        case_id: str,
-        payload: CaseUpdateRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_case(state.engine, project_id, case_id)
-        event = CaseRenamed(
-            project_id=project_id,
-            case_id=case_id,
-            name=payload.name,
-            payload={"name": payload.name},
-        )
-        result = apply((event,), engine=state.engine, base_version=None, actor="user")
-        _ensure_applied(result)
-        return {
-            "case": _require_case(state.engine, project_id, case_id),
-            "event_ids": _event_ids(result),
-        }
-
-    @app.delete(
-        "/api/projects/{project_id}/cases/{case_id}",
-        response_model=api_schemas.CaseMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def delete_case(
-        project_id: str,
-        case_id: str,
-        payload: ConfirmRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_confirm(payload)
-        _require_case(state.engine, project_id, case_id)
-        event = CaseTrashed(project_id=project_id, case_id=case_id)
-        result = apply((event,), engine=state.engine, base_version=None, actor="user")
-        _ensure_applied(result)
-        return {
-            "case": _require_case(state.engine, project_id, case_id),
-            "event_ids": _event_ids(result),
-        }
-
-    @app.post(
-        "/api/projects/{project_id}/cases/{case_id}/copy",
-        status_code=status.HTTP_201_CREATED,
-        response_model=api_schemas.CaseMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def copy_case(
-        project_id: str,
-        case_id: str,
-        payload: CaseCopyRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        source_case = _require_case(state.engine, project_id, case_id)
-        new_case_id = payload.case_id or _new_id("case")
-        event = CaseCopied(
-            project_id=project_id,
-            case_id=new_case_id,
-            source_case_id=case_id,
-            payload={"name": payload.name or f"{source_case['name']} Copy"},
-        )
-        result = apply((event,), engine=state.engine, base_version=None, actor="user")
-        _ensure_applied(result)
-        return {
-            "case": _require_case(state.engine, project_id, new_case_id),
-            "event_ids": _event_ids(result),
-        }
-
-    @app.post(
-        "/api/projects/{project_id}/cases/{case_id}/move",
-        response_model=api_schemas.CaseMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def move_case(
-        project_id: str,
-        case_id: str,
-        payload: CaseMoveRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_confirm(ConfirmRequest(confirm=payload.confirm))
-        _require_case(state.engine, project_id, case_id)
-        _require_project(state.engine, payload.target_project_id)
-        event = CaseMoved(
-            project_id=payload.target_project_id,
-            case_id=case_id,
-            source_project_id=project_id,
-            target_project_id=payload.target_project_id,
-        )
-        result = apply((event,), engine=state.engine, base_version=None, actor="user")
-        _ensure_applied(result)
-        return {
-            "case": _require_case(state.engine, payload.target_project_id, case_id),
-            "event_ids": _event_ids(result),
-        }
-
-    @app.post(
-        "/api/projects/{project_id}/cases/{case_id}/messages",
+        "/api/drafts/{draft_id}/messages",
         status_code=status.HTTP_202_ACCEPTED,
         response_model=api_schemas.MessageQueuedResponse,
         responses=_response_docs(mutation=True, not_found=True),
     )
     async def enqueue_message(
-        project_id: str,
-        case_id: str,
+        draft_id: str,
         payload: MessageCreateRequest,
         request: Request,
     ) -> dict[str, Any]:
         state = state_from_request(request)
-        _require_case(state.engine, project_id, case_id)
+        _require_draft(state.engine, draft_id)
         message_id = payload.message_id or _new_id("msg")
         now = _now_iso()
         with begin_immediate(state.engine) as connection:
             MessagesRepository(connection).insert(
                 {
                     "message_id": message_id,
-                    "case_id": case_id,
+                    "draft_id": draft_id,
                     "role": "user",
                     "kind": "user",
                     "content": payload.content,
@@ -1156,7 +783,7 @@ def _register_routes(app: FastAPI) -> None:
             )
         await state.turn_queue.enqueue(
             TurnQueueItem(
-                case_id=case_id,
+                draft_id=draft_id,
                 kind="user_message",
                 item_id=message_id,
                 payload={
@@ -1170,28 +797,26 @@ def _register_routes(app: FastAPI) -> None:
         return {
             "status": "queued",
             "kind": "user_message",
-            "project_id": project_id,
-            "case_id": case_id,
+            "draft_id": draft_id,
             "message_id": message_id,
         }
 
     @app.get(
-        "/api/projects/{project_id}/cases/{case_id}/messages",
+        "/api/drafts/{draft_id}/messages",
         response_model=api_schemas.MessagesResponse,
         responses=_response_docs(not_found=True),
     )
-    async def list_case_messages(
-        project_id: str,
-        case_id: str,
+    async def list_draft_messages(
+        draft_id: str,
         request: Request,
         limit: int = Query(default=200, ge=1, le=1000),
     ) -> dict[str, Any]:
         state = state_from_request(request)
-        _require_case(state.engine, project_id, case_id)
+        _require_draft(state.engine, draft_id)
         with state.engine.connect() as connection:
-            rows = MessagesRepository(connection).list_for_case(case_id, limit=limit)
+            rows = MessagesRepository(connection).list_for_draft(draft_id, limit=limit)
         return {
-            "case_id": case_id,
+            "draft_id": draft_id,
             "messages": [
                 {
                     "message_id": str(row["message_id"]),
@@ -1204,83 +829,82 @@ def _register_routes(app: FastAPI) -> None:
             ],
         }
 
-    @app.post(
-        "/api/projects/{project_id}/cases/{case_id}/assets/select",
-        response_model=api_schemas.CaseMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def select_case_asset(
-        project_id: str,
-        case_id: str,
-        payload: CaseAssetScopeRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        case = _require_case(state.engine, project_id, case_id)
-        _require_project_asset(state.engine, project_id, payload.asset_id)
-        result = _run_asset_tool(
-            state,
-            tool_name="asset.select_for_case",
-            handler=asset_select_for_case,
-            input_model=AssetSelectForCaseInput(case_id=case_id, asset_id=payload.asset_id),
-            actor="user",
-            base_version=int(case["state_version"]),
-        )
-        return {
-            "case": _require_case(state.engine, project_id, case_id),
-            "event_ids": result.data["event_ids"],
-        }
-
-    @app.post(
-        "/api/projects/{project_id}/cases/{case_id}/assets/disable",
-        response_model=api_schemas.CaseMutationResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def disable_case_asset(
-        project_id: str,
-        case_id: str,
-        payload: CaseAssetScopeRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        case = _require_case(state.engine, project_id, case_id)
-        _require_project_asset(state.engine, project_id, payload.asset_id)
-        result = _run_asset_tool(
-            state,
-            tool_name="asset.disable_for_case",
-            handler=asset_disable_for_case,
-            input_model=AssetDisableForCaseInput(case_id=case_id, asset_id=payload.asset_id),
-            actor="user",
-            base_version=int(case["state_version"]),
-        )
-        return {
-            "case": _require_case(state.engine, project_id, case_id),
-            "event_ids": result.data["event_ids"],
-        }
-
     @app.get(
-        "/api/projects/{project_id}/decisions/pending",
-        response_model=api_schemas.PendingDecisionsResponse,
+        "/api/drafts/{draft_id}/timeline",
+        response_model=api_schemas.DraftTimelineResponse,
         responses=_response_docs(not_found=True),
     )
-    async def pending_project_decisions(project_id: str, request: Request) -> dict[str, Any]:
+    async def get_draft_timeline(
+        draft_id: str,
+        request: Request,
+        version: int | None = None,
+    ) -> dict[str, Any]:
         state = state_from_request(request)
-        _require_project(state.engine, project_id)
+        draft = _require_draft(state.engine, draft_id)
+        requested_version = (
+            version if version is not None else draft.get("timeline_current_version")
+        )
+        if not isinstance(requested_version, int):
+            raise HTTPException(status_code=404, detail={"reason": "not_found"})
+        record = get_timeline_version(state.engine, draft_id, requested_version)
+        if record is None:
+            raise HTTPException(status_code=404, detail={"reason": "not_found"})
+        defaults = draft.get("defaults")
+        aspect_ratio = "9:16"
+        if isinstance(defaults, Mapping) and isinstance(defaults.get("aspect_ratio"), str):
+            aspect_ratio = str(defaults["aspect_ratio"])
         return {
-            "project_id": project_id,
-            "decisions": _pending_project_decisions(state.engine, project_id),
+            "draft_id": draft_id,
+            "timeline_version": record.version,
+            "timeline": record.timeline.model_dump(mode="json"),
+            "summary": render_timeline_summary(record.timeline, aspect_ratio=aspect_ratio),
+            "preview_id": _latest_preview_id(state.engine, draft_id, record.version),
+        }
+
+    @app.post(
+        "/api/drafts/{draft_id}/previews/{preview_id}/viewed",
+        response_model=api_schemas.DraftMutationResponse,
+        responses=_response_docs(mutation=True, not_found=True, conflict=True),
+    )
+    async def preview_viewed(
+        draft_id: str,
+        preview_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_draft(state.engine, draft_id)
+        _require_draft_preview(state.engine, draft_id, preview_id)
+        event = PreviewViewed(draft_id=draft_id, preview_id=preview_id)
+        result = apply((event,), engine=state.engine, base_version=None, actor="user")
+        _ensure_applied(result)
+        return {
+            "draft": _require_draft(state.engine, draft_id),
+            "event_ids": _event_ids(result),
         }
 
     @app.get(
-        "/api/projects/{project_id}/cases/{case_id}/decisions/current",
+        "/api/drafts/{draft_id}/costs",
+        response_model=api_schemas.DraftCostsResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def draft_costs(draft_id: str, request: Request) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_draft(state.engine, draft_id)
+        return {
+            "draft_id": draft_id,
+            "costs": _draft_cost_summary(state.engine, draft_id),
+        }
+
+    @app.get(
+        "/api/drafts/{draft_id}/decisions/current",
         response_model=api_schemas.CurrentDecisionResponse,
         response_model_exclude_unset=True,
         responses=_response_docs(not_found=True),
     )
-    async def current_decision(project_id: str, case_id: str, request: Request) -> dict[str, Any]:
+    async def current_decision(draft_id: str, request: Request) -> dict[str, Any]:
         state = state_from_request(request)
-        case = _require_case(state.engine, project_id, case_id)
-        decision_id = case.get("pending_decision_id")
+        draft = _require_draft(state.engine, draft_id)
+        decision_id = draft.get("pending_decision_id")
         if not isinstance(decision_id, str):
             return {"decision": None}
         with state.engine.connect() as connection:
@@ -1288,6 +912,19 @@ def _register_routes(app: FastAPI) -> None:
         if decision is None or decision.get("status") != "pending":
             return {"decision": None}
         return {"decision": decision}
+
+    @app.get(
+        "/api/drafts/{draft_id}/decisions/pending",
+        response_model=api_schemas.PendingDecisionsResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def pending_draft_decisions(draft_id: str, request: Request) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_draft(state.engine, draft_id)
+        return {
+            "draft_id": draft_id,
+            "decisions": _pending_draft_decisions(state.engine, draft_id),
+        }
 
     @app.post(
         "/api/decisions/{decision_id}/answer",
@@ -1306,8 +943,7 @@ def _register_routes(app: FastAPI) -> None:
         event = DecisionAnswered(
             decision_id=decision_id,
             scope_type=decision["scope_type"],
-            project_id=decision.get("project_id"),
-            case_id=decision.get("case_id"),
+            draft_id=decision.get("draft_id"),
             payload={"answer": payload.answer.model_dump(mode="json")},
         )
         try:
@@ -1319,7 +955,7 @@ def _register_routes(app: FastAPI) -> None:
                 detail={"reason": "invalid_answer", "message": str(exc)},
             ) from exc
         _ensure_applied(result)
-        project_job_replays = _maybe_enqueue_url_import_job(state.engine, decision_id)
+        url_import_replays = _maybe_enqueue_url_import_job(state.engine, decision_id)
         replay_count = await recover_approved_pending_tool_calls(
             engine=state.engine,
             turn_queue=state.turn_queue,
@@ -1328,7 +964,7 @@ def _register_routes(app: FastAPI) -> None:
             "decision_id": decision_id,
             "status": "answered",
             "event_ids": _event_ids(result),
-            "replays_enqueued": replay_count + project_job_replays,
+            "replays_enqueued": replay_count + url_import_replays,
         }
 
     @app.post(
@@ -1350,108 +986,20 @@ def _register_routes(app: FastAPI) -> None:
         }
         event = JobCancelled(
             job_id=job_id,
-            project_id=job.get("project_id"),
-            case_id=job.get("case_id"),
-            requested_by_case_id=job.get("requested_by_case_id"),
+            draft_id=job.get("draft_id"),
+            requested_by_draft_id=job.get("requested_by_draft_id"),
             payload=event_payload,
         )
         result = apply((event,), engine=state.engine, base_version=None, actor="user")
         _ensure_applied(result)
-        target_case_id = _job_observation_case_id(job)
-        if target_case_id is not None:
+        target_draft_id = _job_observation_draft_id(job)
+        if target_draft_id is not None:
             await state.turn_queue.enqueue_job_observation(
-                target_case_id,
+                target_draft_id,
                 job_id=job_id,
                 event=event.model_dump(mode="json"),
             )
         return {"job_id": job_id, "status": "cancelled", "event_ids": _event_ids(result)}
-
-    @app.post(
-        "/api/uploads/init",
-        status_code=status.HTTP_201_CREATED,
-        response_model=api_schemas.UploadInitResponse,
-        responses=_response_docs(mutation=True, not_found=True),
-    )
-    async def init_upload(payload: UploadInitRequest, request: Request) -> dict[str, Any]:
-        state = state_from_request(request)
-        _require_project(state.engine, payload.project_id)
-        kind = _infer_material_kind(payload.filename)
-        upload_id = _new_id("upload")
-        upload_dir = _upload_dir(state.workspace_paths, upload_id)
-        upload_dir.mkdir(parents=True, exist_ok=False)
-        _write_upload_manifest(
-            upload_dir,
-            {
-                "upload_id": upload_id,
-                "project_id": payload.project_id,
-                "filename": payload.filename,
-                "size": payload.size,
-                "kind": kind.value,
-                "asset_id": payload.asset_id,
-            },
-        )
-        return {
-            "upload_id": upload_id,
-            "part_url_template": f"/api/uploads/{upload_id}/parts/{{part_number}}",
-            "complete_url": f"/api/uploads/{upload_id}/complete",
-        }
-
-    @app.put(
-        "/api/uploads/{upload_id}/parts/{part_number}",
-        response_model=api_schemas.UploadPartResponse,
-        responses=_response_docs(mutation=True, not_found=True),
-    )
-    async def put_upload_part(
-        upload_id: str,
-        part_number: int,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        upload_dir = _require_upload_dir(state.workspace_paths, upload_id)
-        body = await request.body()
-        parts_dir = upload_dir / "parts"
-        parts_dir.mkdir(parents=True, exist_ok=True)
-        part_path = parts_dir / str(part_number)
-        part_path.write_bytes(body)
-        return {"upload_id": upload_id, "part_number": part_number, "size": len(body)}
-
-    @app.post(
-        "/api/uploads/{upload_id}/complete",
-        response_model=api_schemas.UploadCompleteResponse,
-        responses=_response_docs(mutation=True, not_found=True, conflict=True),
-    )
-    async def complete_upload(
-        upload_id: str,
-        payload: UploadCompleteRequest,
-        request: Request,
-    ) -> dict[str, Any]:
-        state = state_from_request(request)
-        upload_dir = _require_upload_dir(state.workspace_paths, upload_id)
-        manifest = _read_upload_manifest(upload_dir)
-        project_id = payload.project_id or str(manifest["project_id"])
-        _require_project(state.engine, project_id)
-        merged_path = _merge_upload_parts(upload_dir, str(manifest["filename"]))
-        kind = AssetKind(str(manifest["kind"]))
-        result = _run_asset_tool(
-            state,
-            tool_name="asset.upload_complete",
-            handler=asset_upload_complete,
-            input_model=AssetUploadCompleteInput(
-                project_id=project_id,
-                asset_id=payload.asset_id or manifest.get("asset_id"),
-                path=str(merged_path),
-                filename=str(manifest["filename"]),
-                kind=kind,
-                rel_dir=payload.rel_dir,
-            ),
-            actor="user",
-        )
-        return {
-            "upload_id": upload_id,
-            "project_id": project_id,
-            "asset_id": result.data["asset_id"],
-            "event_ids": result.data["event_ids"],
-        }
 
     @app.get(
         "/api/media/{asset_id}/proxy",
@@ -1537,7 +1085,7 @@ def _register_routes(app: FastAPI) -> None:
         """弹出宿主机原生文件/文件夹选择对话框（macOS NSOpenPanel）并返回绝对路径。
 
         后端与用户同机，这是浏览器沙箱之外拿到磁盘路径、实现零拷贝 reference
-        导入的唯一途径；非 macOS 或无 GUI 会话时报 available=false，前端回退分片上传。
+        导入的唯一途径；非 macOS 或无 GUI 会话时报 available=false，前端提示改走对话导入。
         """
 
         state_from_request(request)
@@ -1549,32 +1097,24 @@ def _register_routes(app: FastAPI) -> None:
         return {"available": True, "paths": paths}
 
     @app.get(
-        "/api/projects/{project_id}/cases/{case_id}/events",
+        "/api/drafts/{draft_id}/events",
         response_class=StreamingResponse,
         responses=_response_docs(not_found=True),
     )
-    async def case_events(
-        project_id: str,
-        case_id: str,
-        request: Request,
-    ) -> StreamingResponse:
+    async def draft_events(draft_id: str, request: Request) -> StreamingResponse:
         state = state_from_request(request)
-        _require_case(state.engine, project_id, case_id)
-        return _sse_response(request, state.engine, route_case(case_id))
+        _require_draft(state.engine, draft_id)
+        return _sse_response(request, state.engine, route_draft(draft_id))
 
     @app.get(
-        "/api/projects/{project_id}/cases/{case_id}/turn-stream",
+        "/api/drafts/{draft_id}/turn-stream",
         response_class=StreamingResponse,
         responses=_response_docs(not_found=True),
     )
-    async def case_turn_stream(
-        project_id: str,
-        case_id: str,
-        request: Request,
-    ) -> StreamingResponse:
+    async def draft_turn_stream(draft_id: str, request: Request) -> StreamingResponse:
         state = state_from_request(request)
-        _require_case(state.engine, project_id, case_id)
-        return _turn_stream_response(request, state.turn_stream_hub, case_id)
+        _require_draft(state.engine, draft_id)
+        return _turn_stream_response(request, state.turn_stream_hub, draft_id)
 
     @app.get(
         "/api/events",
@@ -1593,11 +1133,11 @@ def _state_from_app(app: FastAPI) -> ApiState:
 def _turn_stream_response(
     request: Request,
     hub: TurnStreamHub,
-    case_id: str,
+    draft_id: str,
 ) -> StreamingResponse:
     max_events = state_from_request(request).sse_max_events
     return StreamingResponse(
-        _turn_stream(request, hub, case_id, max_events=max_events),
+        _turn_stream(request, hub, draft_id, max_events=max_events),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -1606,11 +1146,11 @@ def _turn_stream_response(
 async def _turn_stream(
     request: Request,
     hub: TurnStreamHub,
-    case_id: str,
+    draft_id: str,
     *,
     max_events: int | None = None,
 ) -> AsyncIterator[str]:
-    snapshot, queue = await hub.subscribe(case_id)
+    snapshot, queue = await hub.subscribe(draft_id)
     emitted_total = 0
     try:
         for event in snapshot:
@@ -1632,7 +1172,7 @@ async def _turn_stream(
             if max_events is not None and emitted_total >= max_events:
                 return
     finally:
-        hub.unsubscribe(case_id, queue)
+        hub.unsubscribe(draft_id, queue)
 
 
 def _sse_response(request: Request, engine: Engine, predicate: SsePredicate) -> StreamingResponse:
@@ -1682,100 +1222,104 @@ def _last_event_id(request: Request) -> int:
         return 0
 
 
-def _list_projects(engine: Engine) -> list[dict[str, Any]]:
+def _resolve_draft_name(engine: Engine, provided_name: str | None) -> str:
+    """缺省生成剪映式日期名（本地时区，无前导零）；同名（不含 trashed）追加 (2)(3)…。"""
+    if provided_name is not None and provided_name.strip():
+        base = provided_name
+    else:
+        now = datetime.now().astimezone()
+        base = f"{now.month}月{now.day}日"
     with engine.connect() as connection:
         rows = connection.execute(
-            select(schema.projects).order_by(schema.projects.c.created_at)
+            select(schema.drafts.c.name).where(schema.drafts.c.status != "trashed")
         ).all()
-    projects: list[dict[str, Any]] = []
-    for row in rows:
-        values = dict(row._mapping)
-        values["defaults"] = load_json(values["defaults"])
-        projects.append(values)
-    return projects
+    existing = {str(row._mapping["name"]) for row in rows}
+    if base not in existing:
+        return base
+    suffix = 2
+    while f"{base} ({suffix})" in existing:
+        suffix += 1
+    return f"{base} ({suffix})"
 
 
-def _project_tree(engine: Engine) -> list[dict[str, Any]]:
+def _list_drafts(engine: Engine) -> list[dict[str, Any]]:
+    """草稿墙列表：三条集合式 SQL（草稿行 + 素材计数 + 窗口函数封面），无 per-draft 循环。"""
     with engine.connect() as connection:
-        project_rows = connection.execute(
-            select(schema.projects).order_by(schema.projects.c.created_at)
-        ).all()
-        case_rows = connection.execute(select(schema.cases).order_by(schema.cases.c.name)).all()
-    cases_by_project: dict[str, list[dict[str, Any]]] = {}
-    for row in case_rows:
-        values = dict(row._mapping)
-        project_id = str(values["project_id"])
-        cases_by_project.setdefault(project_id, []).append(
-            {
-                "case_id": values["case_id"],
-                "project_id": project_id,
-                "name": values["name"],
-                "status": values["status"],
-            }
-        )
-    projects: list[dict[str, Any]] = []
-    for row in project_rows:
-        values = dict(row._mapping)
-        project_id = str(values["project_id"])
-        projects.append(
-            {
-                "project_id": project_id,
-                "name": values["name"],
-                "status": values["status"],
-                "cases": cases_by_project.get(project_id, []),
-            }
-        )
-    return projects
-
-
-def _project_page_payload(engine: Engine, project_id: str) -> dict[str, Any]:
-    project = _require_project(engine, project_id)
-    with engine.connect() as connection:
-        case_rows = connection.execute(
-            select(schema.cases)
-            .where(schema.cases.c.project_id == project_id)
-            .order_by(schema.cases.c.name)
-        ).all()
-        asset_count = connection.execute(
-            select(schema.project_asset_links.c.asset_id).where(
-                schema.project_asset_links.c.project_id == project_id
+        draft_rows = connection.execute(
+            select(
+                schema.drafts.c.draft_id,
+                schema.drafts.c.name,
+                schema.drafts.c.status,
+                schema.drafts.c.updated_at,
             )
+            .where(schema.drafts.c.status == "active")
+            .order_by(schema.drafts.c.updated_at.desc(), schema.drafts.c.draft_id)
         ).all()
-        memory_count = connection.execute(
-            select(schema.memories.c.memory_id).where(schema.memories.c.project_id == project_id)
+        count_rows = connection.execute(
+            select(
+                schema.draft_asset_links.c.draft_id,
+                func.count().label("material_count"),
+            ).group_by(schema.draft_asset_links.c.draft_id)
         ).all()
-    cases = [
-        {
-            "case_id": row._mapping["case_id"],
-            "project_id": row._mapping["project_id"],
-            "name": row._mapping["name"],
-            "status": row._mapping["status"],
-            "brief": load_json(row._mapping["brief"]),
-        }
-        for row in case_rows
-    ]
-    return {
-        "project": project,
-        "cases": cases,
-        "case_count": len(cases),
-        "asset_count": len(asset_count),
-        "memory_count": len(memory_count),
-        "costs": _project_cost_summary(engine, project_id),
-        "actions": {
-            "create_case": f"/api/projects/{project_id}/cases",
-            "materials": f"/projects/{project_id}/materials",
-        },
+        ranked = (
+            select(
+                schema.draft_asset_links.c.draft_id,
+                schema.draft_asset_links.c.asset_id,
+                func.row_number()
+                .over(
+                    partition_by=schema.draft_asset_links.c.draft_id,
+                    order_by=(
+                        schema.draft_asset_links.c.linked_at.desc(),
+                        schema.draft_asset_links.c.asset_id.desc(),
+                    ),
+                )
+                .label("rn"),
+            )
+            .select_from(
+                schema.draft_asset_links.join(
+                    schema.assets,
+                    schema.assets.c.asset_id == schema.draft_asset_links.c.asset_id,
+                )
+            )
+            .where(schema.assets.c.thumbnail_object_hash.is_not(None))
+            .where(schema.assets.c.thumbnail_object_hash != "")
+            .subquery()
+        )
+        cover_rows = connection.execute(
+            select(ranked.c.draft_id, ranked.c.asset_id)
+            .where(ranked.c.rn <= DRAFT_COVER_LIMIT)
+            .order_by(ranked.c.draft_id, ranked.c.rn)
+        ).all()
+    counts = {
+        str(row._mapping["draft_id"]): int(row._mapping["material_count"]) for row in count_rows
     }
+    covers: dict[str, list[str]] = {}
+    for row in cover_rows:
+        covers.setdefault(str(row._mapping["draft_id"]), []).append(str(row._mapping["asset_id"]))
+    drafts: list[dict[str, Any]] = []
+    for row in draft_rows:
+        draft_id = str(row._mapping["draft_id"])
+        drafts.append(
+            {
+                "draft_id": draft_id,
+                "name": row._mapping["name"],
+                "status": row._mapping["status"],
+                "updated_at": row._mapping["updated_at"],
+                "material_count": counts.get(draft_id, 0),
+                "cover_asset_ids": covers.get(draft_id, []),
+            }
+        )
+    return drafts
 
 
-def _pending_project_decisions(engine: Engine, project_id: str) -> list[Decision]:
+def _pending_draft_decisions(engine: Engine, draft_id: str) -> list[Decision]:
     with engine.connect() as connection:
         rows = connection.execute(
             select(schema.decisions)
-            .where(schema.decisions.c.project_id == project_id)
-            .where(schema.decisions.c.scope_type == "project")
-            .where(schema.decisions.c.case_id.is_(None))
+            .where(schema.decisions.c.draft_id == draft_id)
+            .where(schema.decisions.c.scope_type == "draft")
             .where(schema.decisions.c.status == "pending")
+            .where(schema.decisions.c.blocking.is_(False))
             .order_by(schema.decisions.c.decision_id)
         ).all()
     return [Decision.model_validate(_decode_decision_values(dict(row._mapping))) for row in rows]
@@ -1790,34 +1334,10 @@ def _decode_decision_values(values: dict[str, Any]) -> dict[str, Any]:
     return decoded
 
 
-def _case_cost_summary(engine: Engine, case_id: str) -> dict[str, Any]:
+def _draft_cost_summary(engine: Engine, draft_id: str) -> dict[str, Any]:
     with engine.connect() as connection:
         rows = connection.execute(
-            select(schema.provider_calls).where(schema.provider_calls.c.case_id == case_id)
-        ).all()
-    return _cost_summary([dict(row._mapping) for row in rows])
-
-
-def _project_cost_summary(engine: Engine, project_id: str) -> dict[str, Any]:
-    with engine.connect() as connection:
-        case_ids = [
-            str(row._mapping["case_id"])
-            for row in connection.execute(
-                select(schema.cases.c.case_id).where(schema.cases.c.project_id == project_id)
-            ).all()
-        ]
-        filters = [schema.jobs.c.project_id == project_id]
-        if case_ids:
-            filters.append(schema.provider_calls.c.case_id.in_(case_ids))
-        rows = connection.execute(
-            select(schema.provider_calls)
-            .select_from(
-                schema.provider_calls.outerjoin(
-                    schema.jobs,
-                    schema.jobs.c.job_id == schema.provider_calls.c.job_id,
-                )
-            )
-            .where(or_(*filters))
+            select(schema.provider_calls).where(schema.provider_calls.c.draft_id == draft_id)
         ).all()
     return _cost_summary([dict(row._mapping) for row in rows])
 
@@ -1842,27 +1362,27 @@ def _cost_summary(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _require_project(engine: Engine, project_id: str) -> dict[str, Any]:
+def _require_draft(engine: Engine, draft_id: str) -> dict[str, Any]:
     with engine.connect() as connection:
-        row = ProjectsRepository(connection).get(project_id)
+        row = DraftsRepository(connection).get(draft_id)
     if row is None:
-        raise HTTPException(status_code=404, detail={"reason": "project_not_found"})
+        raise HTTPException(status_code=404, detail={"reason": "draft_not_found"})
     return row
 
 
-def _require_case(engine: Engine, project_id: str, case_id: str) -> dict[str, Any]:
-    with engine.connect() as connection:
-        row = CasesRepository(connection).get(case_id)
-    if row is None or row.get("project_id") != project_id:
-        raise HTTPException(status_code=404, detail={"reason": "case_not_found"})
-    return row
+def _load_draft_state(engine: Engine, draft_id: str) -> DraftState:
+    # 工具执行上下文要一个 DraftState；drafts 行多带 created_at/updated_at 两列，
+    # DraftState extra="forbid" 会拒，validate 前先剔除。
+    row = _require_draft(engine, draft_id)
+    data = {key: value for key, value in row.items() if key not in ("created_at", "updated_at")}
+    return DraftState.model_validate(data)
 
 
-def _latest_preview_id(engine: Engine, case_id: str, timeline_version: int) -> str | None:
+def _latest_preview_id(engine: Engine, draft_id: str, timeline_version: int) -> str | None:
     with engine.connect() as connection:
         row = connection.execute(
             select(schema.previews.c.preview_id)
-            .where(schema.previews.c.case_id == case_id)
+            .where(schema.previews.c.draft_id == draft_id)
             .where(schema.previews.c.timeline_version == timeline_version)
             .order_by(schema.previews.c.created_at.desc(), schema.previews.c.preview_id.desc())
         ).first()
@@ -1872,12 +1392,12 @@ def _latest_preview_id(engine: Engine, case_id: str, timeline_version: int) -> s
     return preview_id if isinstance(preview_id, str) else None
 
 
-def _require_case_preview(engine: Engine, case_id: str, preview_id: str) -> dict[str, Any]:
+def _require_draft_preview(engine: Engine, draft_id: str, preview_id: str) -> dict[str, Any]:
     with engine.connect() as connection:
         row = connection.execute(
             select(schema.previews)
             .where(schema.previews.c.preview_id == preview_id)
-            .where(schema.previews.c.case_id == case_id)
+            .where(schema.previews.c.draft_id == draft_id)
         ).first()
     if row is None:
         raise HTTPException(status_code=404, detail={"reason": "preview_not_found"})
@@ -1910,18 +1430,18 @@ def _require_asset(engine: Engine, asset_id: str) -> dict[str, Any]:
     return dict(row._mapping)
 
 
-def _require_project_asset(engine: Engine, project_id: str, asset_id: str) -> dict[str, Any]:
-    _require_project(engine, project_id)
+def _require_draft_asset(engine: Engine, draft_id: str, asset_id: str) -> dict[str, Any]:
+    _require_draft(engine, draft_id)
     with engine.connect() as connection:
         row = connection.execute(
-            select(schema.assets, schema.project_asset_links.c.enabled.label("link_enabled"))
+            select(schema.assets)
             .select_from(
                 schema.assets.join(
-                    schema.project_asset_links,
-                    schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+                    schema.draft_asset_links,
+                    schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id,
                 )
             )
-            .where(schema.project_asset_links.c.project_id == project_id)
+            .where(schema.draft_asset_links.c.draft_id == draft_id)
             .where(schema.assets.c.asset_id == asset_id)
         ).first()
     if row is None:
@@ -1929,9 +1449,113 @@ def _require_project_asset(engine: Engine, project_id: str, asset_id: str) -> di
     return dict(row._mapping)
 
 
+def _draft_linked_reference_paths(engine: Engine, draft_id: str) -> set[str]:
+    """本草稿已链接素材的 reference_path 集合（分支①去重用）。"""
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(schema.assets.c.reference_path)
+            .select_from(
+                schema.assets.join(
+                    schema.draft_asset_links,
+                    schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id,
+                )
+            )
+            .where(schema.draft_asset_links.c.draft_id == draft_id)
+            .where(schema.assets.c.reference_path.is_not(None))
+        ).all()
+    return {str(row[0]) for row in rows}
+
+
+def _global_assets_by_reference_path(
+    engine: Engine,
+    candidate_paths: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    """全局按 reference_path 查已存在素材（分支②秒建链用；不限草稿）。"""
+    if not candidate_paths:
+        return {}
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(
+                schema.assets.c.asset_id,
+                schema.assets.c.reference_path,
+                schema.assets.c.proxy_object_hash,
+                schema.assets.c.index_json,
+            )
+            .where(schema.assets.c.reference_path.in_(list(set(candidate_paths))))
+            .where(schema.assets.c.reference_path.is_not(None))
+        ).all()
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        values = dict(row._mapping)
+        reference_path = values.get("reference_path")
+        if isinstance(reference_path, str):
+            result[reference_path] = {
+                "asset_id": str(values["asset_id"]),
+                "proxy_object_hash": values.get("proxy_object_hash"),
+                "index_json": values.get("index_json"),
+            }
+    return result
+
+
+def _link_existing_asset(
+    engine: Engine,
+    draft_id: str,
+    hit: Mapping[str, Any],
+    rel_dir: str | None,
+) -> list[int]:
+    """分支②：全局命中但本草稿未链——秒建链；缺 proxy/index 产物按现规则补队（同幂等键 merge）。"""
+    asset_id = str(hit["asset_id"])
+    link_payload: dict[str, Any] = {}
+    if rel_dir:
+        link_payload["rel_dir"] = rel_dir
+    events: list[Any] = [AssetLinked(draft_id=draft_id, asset_id=asset_id, payload=link_payload)]
+    proxy_hash = hit.get("proxy_object_hash")
+    if not isinstance(proxy_hash, str) or proxy_hash == "":
+        events.append(_proxy_job_event(draft_id=draft_id, asset_id=asset_id))
+    elif hit.get("index_json") is None:
+        events.append(_index_job_event(draft_id=draft_id, asset_id=asset_id))
+    result = apply(tuple(events), engine=engine, base_version=None, actor="user")
+    _ensure_applied(result)
+    return _event_ids(result)
+
+
+def _proxy_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:
+    idempotency_key = f"asset:{asset_id}:probe_proxy"
+    return JobEnqueued(
+        job_id=_job_id("proxy", idempotency_key),
+        draft_id=draft_id,
+        requested_by_draft_id=draft_id,
+        payload={
+            "kind": "proxy",
+            "asset_id": asset_id,
+            "idempotency_key": idempotency_key,
+            "job_payload": {"asset_id": asset_id},
+            "attempts": 0,
+            "max_retries": 2,
+        },
+    )
+
+
+def _index_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:
+    idempotency_key = f"asset:{asset_id}:index"
+    return JobEnqueued(
+        job_id=_job_id("index", idempotency_key),
+        draft_id=draft_id,
+        requested_by_draft_id=draft_id,
+        payload={
+            "kind": "index",
+            "asset_id": asset_id,
+            "idempotency_key": idempotency_key,
+            "job_payload": {"asset_id": asset_id},
+            "attempts": 0,
+            "max_retries": 2,
+        },
+    )
+
+
 def _materials_payload(
     engine: Engine,
-    project_id: str,
+    draft_id: str,
     *,
     invalidated_asset_ids: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -1939,17 +1563,16 @@ def _materials_payload(
         asset_rows = connection.execute(
             select(
                 schema.assets,
-                schema.project_asset_links.c.enabled.label("link_enabled"),
-                schema.project_asset_links.c.rel_dir.label("link_rel_dir"),
+                schema.draft_asset_links.c.rel_dir.label("link_rel_dir"),
             )
             .select_from(
                 schema.assets.join(
-                    schema.project_asset_links,
-                    schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+                    schema.draft_asset_links,
+                    schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id,
                 )
             )
-            .where(schema.project_asset_links.c.project_id == project_id)
-            .order_by(schema.assets.c.asset_id)
+            .where(schema.draft_asset_links.c.draft_id == draft_id)
+            .order_by(schema.draft_asset_links.c.linked_at, schema.assets.c.asset_id)
         ).all()
         asset_ids = [str(row._mapping["asset_id"]) for row in asset_rows]
         job_rows: Sequence[Row[Any]] = []
@@ -1978,7 +1601,7 @@ def _materials_payload(
         asset_id = str(row._mapping["asset_id"])
         assets.append(_material_asset_payload(dict(row._mapping), jobs_by_asset.get(asset_id, [])))
     return {
-        "project_id": project_id,
+        "draft_id": draft_id,
         "assets": assets,
         "invalidated_asset_ids": invalidated_asset_ids or [],
     }
@@ -2003,7 +1626,6 @@ def _material_asset_payload(values: dict[str, Any], jobs: list[dict[str, Any]]) 
         "ingest_status": values["ingest_status"],
         "understanding_status": values.get("understanding_status") or "none",
         "usable": usable,
-        "enabled": bool(values["link_enabled"]),
         "rel_dir": values.get("link_rel_dir"),
         "probe": probe if isinstance(probe, dict) else None,
         "duration_sec": duration_sec if isinstance(duration_sec, (int, float)) else None,
@@ -2039,6 +1661,7 @@ def _run_asset_tool(
     tool_name: str,
     handler: Any,
     input_model: Any,
+    draft_state: DraftState,
     actor: Actor,
     base_version: int | None = None,
 ) -> ToolResult:
@@ -2050,6 +1673,7 @@ def _run_asset_tool(
                 ToolExecutionContext(
                     tool_call_id=f"api_{tool_name.replace('.', '_')}_{uuid.uuid4().hex[:8]}",
                     turn_id="api",
+                    draft_state=draft_state,
                     readonly_connection=connection,
                     metadata={"workspace_paths": state.workspace_paths},
                 ),
@@ -2071,6 +1695,18 @@ def _run_asset_tool(
     data = dict(result.data)
     data["event_ids"] = _event_ids(reducer_result)
     return result.model_copy(update={"data": data})
+
+
+def _run_asset_events(
+    state: ApiState,
+    events: tuple[Any, ...],
+    *,
+    actor: Actor,
+    base_version: int | None = None,
+) -> ReducerApplyResult:
+    result = apply(events, engine=state.engine, base_version=base_version, actor=actor)
+    _ensure_applied(result)
+    return result
 
 
 # 单一定义在 apps/api/deps.py（与 fs/list 的 MEDIA_EXTENSIONS 同源）。
@@ -2189,43 +1825,11 @@ def _infer_material_kind(name_or_path: str) -> AssetKind:
     return kind
 
 
-def _reference_relocated_event(
-    engine: Engine,
-    project_id: str,
-    asset_id: str,
-    reference_path: Path,
-) -> AssetImported:
-    asset = _require_project_asset(engine, project_id, asset_id)
-    if asset["storage_mode"] != StorageMode.REFERENCE.value:
-        raise HTTPException(status_code=409, detail={"reason": "asset_is_not_reference"})
-    stat = reference_path.stat()
-    digest = _sha256_file(reference_path)
-    return AssetImported(
-        project_id=project_id,
-        asset_id=asset_id,
-        job_id=f"relocate_{asset_id}_{digest[:12]}",
-        payload={
-            "storage_mode": StorageMode.REFERENCE.value,
-            "object_hash": None,
-            "reference_path": str(reference_path),
-            "kind": asset["kind"],
-            "source": asset["source"],
-            "filename": reference_path.name,
-            "hash": digest,
-            "mtime": stat.st_mtime_ns,
-            "size": stat.st_size,
-            "ingest_status": "imported",
-            "usable": True,
-            "failure": None,
-        },
-    )
-
-
-def _url_import_decision(project_id: str, payload: MaterialImportUrlRequest) -> Decision:
+def _url_import_decision(draft_id: str, payload: MaterialImportUrlRequest) -> Decision:
     filename = payload.filename or Path(urlsplit(payload.url).path).name
     kind = _infer_material_kind(filename)
     arguments: dict[str, Any] = {
-        "project_id": project_id,
+        "draft_id": draft_id,
         "url": payload.url,
         "filename": payload.filename,
         "kind": kind.value,
@@ -2238,13 +1842,13 @@ def _url_import_decision(project_id: str, payload: MaterialImportUrlRequest) -> 
     pending = PendingToolCall(
         tool_name="asset.import_url",
         arguments=arguments,
-        idempotency_key=f"asset.import_url:{project_id}:{fingerprint}:decision:{decision_id}",
+        idempotency_key=f"asset.import_url:{draft_id}:{fingerprint}:decision:{decision_id}",
         argument_fingerprint=fingerprint,
     )
     return Decision(
         decision_id=decision_id,
-        scope_type="project",
-        project_id=project_id,
+        scope_type="draft",
+        draft_id=draft_id,
         type="url_import",
         question="确认从 URL 导入素材？",
         options=[
@@ -2284,16 +1888,17 @@ def _maybe_enqueue_url_import_job(engine: Engine, decision_id: str) -> int:
 
 
 def _url_import_job_from_pending(pending: PendingToolCall) -> JobEnqueued:
-    project_id = pending.arguments.get("project_id")
+    draft_id = pending.arguments.get("draft_id")
     url = pending.arguments.get("url")
-    if not isinstance(project_id, str) or not isinstance(url, str):
+    if not isinstance(draft_id, str) or not isinstance(url, str):
         raise HTTPException(status_code=409, detail={"reason": "invalid_url_import_decision"})
     asset_id = pending.arguments.get("asset_id")
     if not isinstance(asset_id, str) or asset_id == "":
-        asset_id = "asset_" + hashlib.sha256(f"{project_id}:{url}".encode()).hexdigest()[:20]
+        asset_id = "asset_" + hashlib.sha256(f"{draft_id}:{url}".encode()).hexdigest()[:20]
     return JobEnqueued(
         job_id=_job_id("import_url", pending.idempotency_key),
-        project_id=project_id,
+        draft_id=draft_id,
+        requested_by_draft_id=draft_id,
         payload={
             "kind": "import_url",
             "asset_id": asset_id,
@@ -2438,56 +2043,6 @@ def _media_type_for_path(path: Path) -> str:
     return "video/mp4"
 
 
-def _upload_dir(paths: WorkspacePaths, upload_id: str) -> Path:
-    return paths.tmp_dir / "uploads" / upload_id
-
-
-def _require_upload_dir(paths: WorkspacePaths, upload_id: str) -> Path:
-    upload_dir = _upload_dir(paths, upload_id)
-    if not upload_dir.exists() or not upload_dir.is_dir():
-        raise HTTPException(status_code=404, detail={"reason": "upload_not_found"})
-    return upload_dir
-
-
-def _write_upload_manifest(upload_dir: Path, manifest: Mapping[str, Any]) -> None:
-    (upload_dir / "manifest.json").write_text(
-        json.dumps(dict(manifest), ensure_ascii=False, sort_keys=True),
-        encoding="utf-8",
-    )
-
-
-def _read_upload_manifest(upload_dir: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads((upload_dir / "manifest.json").read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail={"reason": "upload_not_found"}) from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=409, detail={"reason": "invalid_upload_manifest"})
-    return payload
-
-
-def _merge_upload_parts(upload_dir: Path, filename: str) -> Path:
-    parts_dir = upload_dir / "parts"
-    if not parts_dir.exists():
-        raise HTTPException(status_code=409, detail={"reason": "upload_has_no_parts"})
-    part_paths = sorted(parts_dir.iterdir(), key=lambda path: int(path.name))
-    destination = upload_dir / f"complete_{Path(filename).name}"
-    with destination.open("wb") as output:
-        for part_path in part_paths:
-            with part_path.open("rb") as part:
-                for chunk in iter(lambda: part.read(1024 * 1024), b""):
-                    output.write(chunk)
-    return destination
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _fingerprint(arguments: Mapping[str, Any]) -> str:
     encoded = json.dumps(
         arguments,
@@ -2507,9 +2062,7 @@ def _validate_decision_ownership(
     decision: Mapping[str, Any],
     payload: DecisionAnswerRequest,
 ) -> None:
-    if payload.project_id is not None and payload.project_id != decision.get("project_id"):
-        raise HTTPException(status_code=404, detail={"reason": "decision_not_found"})
-    if payload.case_id is not None and payload.case_id != decision.get("case_id"):
+    if payload.draft_id is not None and payload.draft_id != decision.get("draft_id"):
         raise HTTPException(status_code=404, detail={"reason": "decision_not_found"})
 
 
@@ -2527,22 +2080,21 @@ def _brief_payload(brief: Mapping[str, Any], goal: str | None) -> dict[str, Any]
 
 
 def _base_version_for_decision(engine: Engine, decision: Mapping[str, Any]) -> int | None:
-    if decision.get("scope_type") != "case":
+    if decision.get("scope_type") != "draft":
         return None
-    case_id = decision.get("case_id")
-    project_id = decision.get("project_id")
-    if not isinstance(case_id, str) or not isinstance(project_id, str):
+    draft_id = decision.get("draft_id")
+    if not isinstance(draft_id, str):
         raise HTTPException(status_code=409, detail={"reason": "invalid_decision_scope"})
-    case = _require_case(engine, project_id, case_id)
-    return int(case["state_version"])
+    draft = _require_draft(engine, draft_id)
+    return int(draft["state_version"])
 
 
-def _job_observation_case_id(job: Mapping[str, Any]) -> str | None:
-    requested_by_case_id = job.get("requested_by_case_id")
-    if isinstance(requested_by_case_id, str):
-        return requested_by_case_id
-    case_id = job.get("case_id")
-    return case_id if isinstance(case_id, str) else None
+def _job_observation_draft_id(job: Mapping[str, Any]) -> str | None:
+    requested_by_draft_id = job.get("requested_by_draft_id")
+    if isinstance(requested_by_draft_id, str):
+        return requested_by_draft_id
+    draft_id = job.get("draft_id")
+    return draft_id if isinstance(draft_id, str) else None
 
 
 def _ensure_applied(result: ReducerApplyResult) -> None:
@@ -2555,7 +2107,7 @@ def _ensure_applied(result: ReducerApplyResult) -> None:
             "conflict": None
             if result.conflict is None
             else {
-                "case_id": result.conflict.case_id,
+                "draft_id": result.conflict.draft_id,
                 "expected_base_version": result.conflict.expected_base_version,
                 "actual_state_version": result.conflict.actual_state_version,
                 "event_type": result.conflict.event_type,

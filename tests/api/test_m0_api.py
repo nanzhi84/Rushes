@@ -16,9 +16,9 @@ from sqlalchemy.engine import Engine
 from agent_harness.loop import ScriptedPlanner
 from agent_harness.reducer import apply
 from agent_harness.turn_queue import StopToken, TurnQueueItem
-from contracts.events import CaseCreated, DecisionCreated, JobEnqueued, JobProgress, ProjectCreated
+from contracts.events import DecisionCreated, DraftCreated, JobEnqueued, JobProgress
 from storage.repositories import (
-    CasesRepository,
+    DraftsRepository,
     EventLogRepository,
     JobsRepository,
     MessagesRepository,
@@ -35,37 +35,45 @@ def test_openapi_components_include_api_response_models(tmp_path: Path) -> None:
     components = app.openapi()["components"]["schemas"]
 
     expected = {
-        "ProjectTreeCase",
-        "ProjectTreeProject",
-        "ProjectTreeResponse",
-        "ProjectRecord",
-        "ProjectListResponse",
-        "ProjectMutationResponse",
-        "ProjectPageCase",
-        "ProjectPageActions",
-        "ProjectPageResponse",
-        "CaseRecord",
-        "CaseResponse",
-        "CaseMutationResponse",
+        "DraftListItem",
+        "DraftListResponse",
+        "DraftRecord",
+        "DraftResponse",
+        "DraftMutationResponse",
+        "DraftTimelineResponse",
         "MessageQueuedResponse",
         "MessageRecord",
         "MessagesResponse",
         "CurrentDecisionResponse",
+        "PendingDecisionsResponse",
         "Decision",
         "DecisionOption",
         "PendingToolCall",
         "DecisionAnswerResponse",
+        "DraftCostsResponse",
+        "MaterialsResponse",
+        "MaterialAsset",
+        "MaterialSummaryResponse",
+        "MaterialMutationResponse",
         "JobCancelResponse",
         "FsRoot",
         "FsRootsResponse",
         "FsListEntry",
         "FsListResponse",
+        "FsPickResponse",
         "ReducerConflictDetail",
         "ErrorDetail",
         "ErrorResponse",
         "SecurityRefusalResponse",
     }
     assert expected <= set(components)
+    # 旧的两级模型 schema 全部退场。
+    assert not {
+        "ProjectRecord",
+        "ProjectTreeResponse",
+        "CaseRecord",
+        "UploadInitResponse",
+    } & set(components)
 
 
 def test_security_baseline_refusals_emit_security_refusal_events(tmp_path: Path) -> None:
@@ -74,13 +82,13 @@ def test_security_baseline_refusals_emit_security_refusal_events(tmp_path: Path)
 
     checks = [
         (
-            client.post("/api/projects", json={"name": "Missing"}),
+            client.post("/api/drafts", json={"name": "Missing"}),
             401,
             "missing_token",
         ),
         (
             client.post(
-                "/api/projects",
+                "/api/drafts",
                 headers={"Authorization": "Bearer wrong"},
                 json={"name": "Wrong"},
             ),
@@ -89,7 +97,7 @@ def test_security_baseline_refusals_emit_security_refusal_events(tmp_path: Path)
         ),
         (
             client.post(
-                "/api/projects",
+                "/api/drafts",
                 headers={**AUTH, "Origin": "http://evil.example"},
                 json={"name": "Origin"},
             ),
@@ -98,7 +106,7 @@ def test_security_baseline_refusals_emit_security_refusal_events(tmp_path: Path)
         ),
         (
             client.post(
-                "/api/projects",
+                "/api/drafts",
                 headers={**AUTH, "Content-Type": "text/plain"},
                 content="{}",
             ),
@@ -107,7 +115,7 @@ def test_security_baseline_refusals_emit_security_refusal_events(tmp_path: Path)
         ),
         (
             client.post(
-                "/api/projects",
+                "/api/drafts",
                 headers={**AUTH, "Host": "evil.example:8000"},
                 json={"name": "Host"},
             ),
@@ -131,25 +139,23 @@ def test_security_baseline_refusals_emit_security_refusal_events(tmp_path: Path)
         assert reason in _security_reasons(app)
 
 
-def test_case_sse_replays_then_polls_realtime_with_shared_route_predicate(tmp_path: Path) -> None:
+def test_draft_sse_replays_then_polls_realtime_with_shared_route_predicate(tmp_path: Path) -> None:
     app = _app(tmp_path, sse_max_events=2)
     engine = _engine(app)
-    _seed_project_case(engine)
+    _seed_draft(engine)
     first_id = _apply_events(
         engine,
         {
             "event": "TurnEnded",
             "turn_id": "turn_seen",
-            "project_id": "project_1",
-            "case_id": "case_1",
+            "draft_id": "draft_1",
         },
     )[0]
     replay_id = _apply_events(
         engine,
         JobProgress(
             job_id="job_replay",
-            project_id="project_1",
-            requested_by_case_id="case_1",
+            requested_by_draft_id="draft_1",
             progress=0.5,
             payload={"kind": "render_preview"},
         ),
@@ -163,8 +169,7 @@ def test_case_sse_replays_then_polls_realtime_with_shared_route_predicate(tmp_pa
                 engine,
                 JobProgress(
                     job_id="job_realtime",
-                    project_id="project_1",
-                    requested_by_case_id="case_1",
+                    requested_by_draft_id="draft_1",
                     progress=1.0,
                     payload={"kind": "render_preview"},
                 ),
@@ -177,7 +182,7 @@ def test_case_sse_replays_then_polls_realtime_with_shared_route_predicate(tmp_pa
     thread.start()
     with _client(app).stream(
         "GET",
-        "/api/projects/project_1/cases/case_1/events",
+        "/api/drafts/draft_1/events",
         headers={**AUTH, "Last-Event-ID": str(first_id)},
     ) as response:
         assert response.status_code == 200
@@ -193,11 +198,11 @@ def test_workspace_sse_accepts_query_token_and_replays_workspace_events(tmp_path
     engine = _engine(app)
     first_id = _apply_events(
         engine,
-        ProjectCreated(project_id="project_seen", name="Seen"),
+        DraftCreated(draft_id="draft_seen", payload={"name": "Seen", "brief": {"goal": ""}}),
     )[0]
     replay_id = _apply_events(
         engine,
-        ProjectCreated(project_id="project_replay", name="Replay"),
+        DraftCreated(draft_id="draft_replay", payload={"name": "Replay", "brief": {"goal": ""}}),
     )[0]
     realtime_ids: list[int] = []
 
@@ -206,7 +211,10 @@ def test_workspace_sse_accepts_query_token_and_replays_workspace_events(tmp_path
         realtime_ids.extend(
             _apply_events(
                 engine,
-                ProjectCreated(project_id="project_realtime", name="Realtime"),
+                DraftCreated(
+                    draft_id="draft_realtime",
+                    payload={"name": "Realtime", "brief": {"goal": ""}},
+                ),
             )
         )
 
@@ -222,7 +230,7 @@ def test_workspace_sse_accepts_query_token_and_replays_workspace_events(tmp_path
     thread.join(timeout=1)
 
     assert [event["id"] for event in events] == [replay_id, realtime_ids[0]]
-    assert [event["event"] for event in events] == ["ProjectCreated", "ProjectCreated"]
+    assert [event["event"] for event in events] == ["DraftCreated", "DraftCreated"]
 
 
 async def test_message_endpoint_records_and_runs_scripted_turn(tmp_path: Path) -> None:
@@ -234,41 +242,36 @@ async def test_message_endpoint_records_and_runs_scripted_turn(tmp_path: Path) -
         base_url=BASE_URL,
         headers=AUTH,
     ) as client:
-        project = await client.post(
-            "/api/projects",
-            json={"project_id": "project_1", "name": "Project"},
+        draft = await client.post(
+            "/api/drafts",
+            json={"draft_id": "draft_1", "name": "草稿"},
         )
-        assert project.status_code == 201
-        case = await client.post(
-            "/api/projects/project_1/cases",
-            json={"case_id": "case_1", "name": "Case", "brief": {"goal": "test"}},
-        )
-        assert case.status_code == 201
+        assert draft.status_code == 201
         response = await client.post(
-            "/api/projects/project_1/cases/case_1/messages",
+            "/api/drafts/draft_1/messages",
             json={"message_id": "msg_user", "content": "帮我剪一个开头"},
         )
         assert response.status_code == 202
-        await _state(app).turn_queue.join_case("case_1")
+        await _state(app).turn_queue.join_draft("draft_1")
 
-    messages = _messages(app, "case_1")
+    messages = _messages(app, "draft_1")
     assert [message["role"] for message in messages] == ["user", "assistant"]
     assert messages[0]["message_id"] == "msg_user"
     assert messages[0]["kind"] == "user"
     assert messages[1]["content"] == "收到，已进入队列。"
 
 
-def test_list_case_messages_returns_history_ascending(tmp_path: Path) -> None:
+def test_list_draft_messages_returns_history_ascending(tmp_path: Path) -> None:
     app = _app(tmp_path)
     engine = _engine(app)
-    _seed_project_case(engine)
+    _seed_draft(engine)
     with engine.begin() as connection:
         repo = MessagesRepository(connection)
         # 乱序落库（narration→user→reply），验证端点按 created_at 升序返回
         repo.insert(
             {
                 "message_id": "m3",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "role": "assistant",
                 "kind": "narration",
                 "content": "旁白解说",
@@ -278,7 +281,7 @@ def test_list_case_messages_returns_history_ascending(tmp_path: Path) -> None:
         repo.insert(
             {
                 "message_id": "m1",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "role": "user",
                 "kind": "user",
                 "content": "你好",
@@ -288,7 +291,7 @@ def test_list_case_messages_returns_history_ascending(tmp_path: Path) -> None:
         repo.insert(
             {
                 "message_id": "m2",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "role": "assistant",
                 "kind": "reply",
                 "content": "收到",
@@ -297,13 +300,13 @@ def test_list_case_messages_returns_history_ascending(tmp_path: Path) -> None:
         )
 
     response = _client(app).get(
-        "/api/projects/project_1/cases/case_1/messages",
+        "/api/drafts/draft_1/messages",
         headers=AUTH,
     )
 
     assert response.status_code == 200
     body = response.json()
-    assert body["case_id"] == "case_1"
+    assert body["draft_id"] == "draft_1"
     assert [message["message_id"] for message in body["messages"]] == ["m1", "m2", "m3"]
     assert [message["kind"] for message in body["messages"]] == ["user", "reply", "narration"]
     assert [message["role"] for message in body["messages"]] == [
@@ -318,17 +321,17 @@ def test_list_case_messages_returns_history_ascending(tmp_path: Path) -> None:
     )
 
 
-def test_list_case_messages_missing_case_returns_404(tmp_path: Path) -> None:
+def test_list_draft_messages_missing_draft_returns_404(tmp_path: Path) -> None:
     app = _app(tmp_path)
-    _seed_project_case(_engine(app))
+    _seed_draft(_engine(app))
 
     response = _client(app).get(
-        "/api/projects/project_1/cases/missing_case/messages",
+        "/api/drafts/missing_draft/messages",
         headers=AUTH,
     )
 
     assert response.status_code == 404
-    assert response.json()["detail"]["reason"] == "case_not_found"
+    assert response.json()["detail"]["reason"] == "draft_not_found"
 
 
 def test_fs_list_returns_directories_and_media_files_only(tmp_path: Path) -> None:
@@ -351,20 +354,18 @@ def test_fs_list_returns_directories_and_media_files_only(tmp_path: Path) -> Non
 def test_current_decision_and_answer_route_use_reducer(tmp_path: Path) -> None:
     app = _app(tmp_path)
     engine = _engine(app)
-    _seed_project_case(engine)
+    _seed_draft(engine)
     _apply_events(
         engine,
         DecisionCreated(
             decision_id="decision_1",
-            scope_type="case",
-            project_id="project_1",
-            case_id="case_1",
+            scope_type="draft",
+            draft_id="draft_1",
             payload={
                 "decision": {
                     "decision_id": "decision_1",
-                    "scope_type": "case",
-                    "project_id": "project_1",
-                    "case_id": "case_1",
+                    "scope_type": "draft",
+                    "draft_id": "draft_1",
                     "type": "generic",
                     "question": "继续吗？",
                     "options": [
@@ -386,7 +387,7 @@ def test_current_decision_and_answer_route_use_reducer(tmp_path: Path) -> None:
     client = _client(app)
 
     current = client.get(
-        "/api/projects/project_1/cases/case_1/decisions/current",
+        "/api/drafts/draft_1/decisions/current",
         headers=AUTH,
     )
     assert current.status_code == 200
@@ -396,32 +397,30 @@ def test_current_decision_and_answer_route_use_reducer(tmp_path: Path) -> None:
         "/api/decisions/decision_1/answer",
         headers=AUTH,
         json={
-            "project_id": "project_1",
-            "case_id": "case_1",
+            "draft_id": "draft_1",
             "answer": {"option_id": "yes", "answered_via": "button", "payload": {}},
         },
     )
     assert answered.status_code == 200
     assert "DecisionAnswered" in _event_types(app)
     with engine.connect() as connection:
-        case = CasesRepository(connection).get("case_1")
-    assert case is not None
-    assert case["pending_decision_id"] is None
+        draft = DraftsRepository(connection).get("draft_1")
+    assert draft is not None
+    assert draft["pending_decision_id"] is None
 
 
-def test_job_cancel_uses_reducer_and_enqueues_case_observation(tmp_path: Path) -> None:
+def test_job_cancel_uses_reducer_and_enqueues_draft_observation(tmp_path: Path) -> None:
     async def no_op_runner(item: TurnQueueItem, token: StopToken) -> None:
         del item, token
 
     app = _app(tmp_path, turn_runner=no_op_runner)
     engine = _engine(app)
-    _seed_project_case(engine)
+    _seed_draft(engine)
     _apply_events(
         engine,
         JobEnqueued(
             job_id="job_1",
-            project_id="project_1",
-            case_id="case_1",
+            draft_id="draft_1",
             payload={"kind": "render_preview"},
         ),
     )
@@ -467,14 +466,12 @@ def _engine(app: FastAPI) -> Engine:
     return _state(app).engine
 
 
-def _seed_project_case(engine: Engine) -> None:
+def _seed_draft(engine: Engine) -> None:
     _apply_events(
         engine,
-        ProjectCreated(project_id="project_1", name="Project"),
-        CaseCreated(
-            project_id="project_1",
-            case_id="case_1",
-            payload={"name": "Case", "brief": {"goal": "test"}},
+        DraftCreated(
+            draft_id="draft_1",
+            payload={"name": "草稿", "brief": {"goal": "test"}},
         ),
     )
 
@@ -506,9 +503,9 @@ def _event_rows(app: FastAPI) -> list[Any]:
         return EventLogRepository(connection).read_after(0, limit=500)
 
 
-def _messages(app: FastAPI, case_id: str) -> list[dict[str, Any]]:
+def _messages(app: FastAPI, draft_id: str) -> list[dict[str, Any]]:
     with _engine(app).connect() as connection:
-        return MessagesRepository(connection).list_for_case(case_id)
+        return MessagesRepository(connection).list_for_draft(draft_id)
 
 
 def _read_sse_events(response: Any, count: int) -> list[dict[str, Any]]:

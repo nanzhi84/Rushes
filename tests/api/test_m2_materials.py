@@ -21,9 +21,8 @@ from contracts.events import (
     AssetImported,
     AssetIndexReady,
     AssetLinked,
-    CaseCreated,
+    DraftCreated,
     MaterialUnderstandingCompleted,
-    ProjectCreated,
 )
 from storage import schema
 from storage.db import begin_immediate
@@ -41,19 +40,18 @@ BASE_URL = "http://127.0.0.1:8000"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
-def test_reference_import_lists_material_but_not_tree_or_object_copy(tmp_path: Path) -> None:
+def test_reference_import_lists_material_without_object_copy(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
     source = _media_file(tmp_path, b"raw-media")
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
 
     imported = client.post(
-        "/api/projects/project_1/materials/import-local",
+        "/api/drafts/draft_1/materials/import-local",
         headers=AUTH,
         json={"path": str(source)},
     )
-    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
-    tree = client.get("/api/project-tree", headers=AUTH)
+    materials = client.get("/api/drafts/draft_1/materials", headers=AUTH)
 
     assert imported.status_code == 200
     assert materials.status_code == 200
@@ -61,7 +59,6 @@ def test_reference_import_lists_material_but_not_tree_or_object_copy(tmp_path: P
     assert asset["storage_mode"] == "reference"
     assert asset["filename"] == "raw.mp4"
     assert asset["proxy_ready"] is False
-    assert asset["asset_id"] not in tree.text
     with _engine(app).connect() as connection:
         row = connection.execute(select(schema.assets)).one()._mapping
         object_count = connection.execute(
@@ -76,10 +73,10 @@ def test_reference_source_change_invalidates_on_materials_list(tmp_path: Path) -
     app = _app(tmp_path)
     client = _client(app)
     source = _media_file(tmp_path, b"before")
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     assert (
         client.post(
-            "/api/projects/project_1/materials/import-local",
+            "/api/drafts/draft_1/materials/import-local",
             headers=AUTH,
             json={"path": str(source)},
         ).status_code
@@ -87,7 +84,7 @@ def test_reference_source_change_invalidates_on_materials_list(tmp_path: Path) -
     )
     source.write_bytes(b"after-change")
 
-    response = client.get("/api/projects/project_1/materials", headers=AUTH)
+    response = client.get("/api/drafts/draft_1/materials", headers=AUTH)
 
     assert response.status_code == 200
     asset = response.json()["assets"][0]
@@ -97,15 +94,15 @@ def test_reference_source_change_invalidates_on_materials_list(tmp_path: Path) -
     assert "AssetInvalidated" in _event_types(app)
 
 
-def test_import_url_route_creates_project_decision_and_answer_enqueues_project_job(
+def test_import_url_route_creates_draft_decision_and_answer_enqueues_job(
     tmp_path: Path,
 ) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
 
     created = client.post(
-        "/api/projects/project_1/materials/import-url",
+        "/api/drafts/draft_1/materials/import-url",
         headers=AUTH,
         json={"url": "https://example.test/clip.mp4", "filename": "clip.mp4"},
     )
@@ -114,7 +111,7 @@ def test_import_url_route_creates_project_decision_and_answer_enqueues_project_j
         f"/api/decisions/{decision_id}/answer",
         headers=AUTH,
         json={
-            "project_id": "project_1",
+            "draft_id": "draft_1",
             "answer": {
                 "option_id": "approve",
                 "answered_via": "button",
@@ -129,71 +126,53 @@ def test_import_url_route_creates_project_decision_and_answer_enqueues_project_j
     with _engine(app).connect() as connection:
         job = connection.execute(select(schema.jobs)).one()._mapping
     assert job["kind"] == "import_url"
-    assert job["project_id"] == "project_1"
-    assert job["case_id"] is None
+    assert job["draft_id"] == "draft_1"
 
 
-def test_project_pending_decisions_route_lists_project_scope_decisions(tmp_path: Path) -> None:
+def test_draft_pending_decisions_route_lists_draft_scope_decisions(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
 
     created = client.post(
-        "/api/projects/project_1/materials/import-url",
+        "/api/drafts/draft_1/materials/import-url",
         headers=AUTH,
         json={"url": "https://example.test/clip.mp4", "filename": "clip.mp4"},
     )
-    listed = client.get("/api/projects/project_1/decisions/pending", headers=AUTH)
-    missing = client.get("/api/projects/missing/decisions/pending", headers=AUTH)
+    listed = client.get("/api/drafts/draft_1/decisions/pending", headers=AUTH)
+    missing = client.get("/api/drafts/missing/decisions/pending", headers=AUTH)
 
     assert created.status_code == 200
     assert listed.status_code == 200
     decisions = listed.json()["decisions"]
     assert [decision["decision_id"] for decision in decisions] == [created.json()["decision_id"]]
-    assert decisions[0]["scope_type"] == "project"
-    assert decisions[0]["case_id"] is None
+    assert decisions[0]["scope_type"] == "draft"
+    assert decisions[0]["draft_id"] == "draft_1"
     assert missing.status_code == 404
 
 
-def test_cost_routes_and_project_page_aggregate_provider_calls(tmp_path: Path) -> None:
+def test_cost_route_aggregates_provider_calls_for_draft(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    _seed_project_case(_engine(app))
-    _apply_events(
-        _engine(app),
-        CaseCreated(
-            project_id="project_1",
-            case_id="case_2",
-            payload={"name": "Case 2", "brief": {"goal": "second"}},
-        ),
-        ProjectCreated(project_id="project_2", name="Other"),
-        CaseCreated(
-            project_id="project_2",
-            case_id="case_other",
-            payload={"name": "Other Case", "brief": {"goal": "other"}},
-        ),
-    )
+    _seed_draft(_engine(app))
+    _apply_events(_engine(app), DraftCreated(draft_id="draft_2", payload={"name": "Other"}))
     _insert_provider_cost_rows(_engine(app))
 
-    case_costs = client.get("/api/projects/project_1/cases/case_1/costs", headers=AUTH)
-    project_page = client.get("/api/projects/project_1", headers=AUTH)
-    missing_case = client.get("/api/projects/project_1/cases/missing/costs", headers=AUTH)
+    draft_costs = client.get("/api/drafts/draft_1/costs", headers=AUTH)
+    missing = client.get("/api/drafts/missing/costs", headers=AUTH)
 
-    assert case_costs.status_code == 200
-    assert case_costs.json()["costs"]["provider_call_count"] == 1
-    assert case_costs.json()["costs"]["total_cost_estimate"] == 0.25
-    assert project_page.status_code == 200
-    project_costs = project_page.json()["costs"]
-    assert project_costs["provider_call_count"] == 3
-    assert project_costs["total_cost_estimate"] == 2.0
-    assert project_costs["by_capability"] == {"llm.chat": 0.25, "vlm.understanding": 1.75}
-    assert missing_case.status_code == 404
+    assert draft_costs.status_code == 200
+    costs = draft_costs.json()["costs"]
+    assert costs["provider_call_count"] == 2
+    assert costs["total_cost_estimate"] == 2.0
+    assert costs["by_capability"] == {"llm.chat": 0.25, "vlm.understanding": 1.75}
+    assert missing.status_code == 404
 
 
 async def test_import_url_job_downloads_only_that_url_and_enqueues_proxy(tmp_path: Path) -> None:
     app = _app(tmp_path)
     engine = _engine(app)
-    _apply_events(engine, ProjectCreated(project_id="project_1", name="Project"))
+    _seed_draft(engine)
     seen_paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -231,7 +210,7 @@ async def test_import_url_job_downloads_only_that_url_and_enqueues_proxy(tmp_pat
 async def test_import_url_job_rejects_html_content_type(tmp_path: Path) -> None:
     app = _app(tmp_path)
     engine = _engine(app)
-    _apply_events(engine, ProjectCreated(project_id="project_1", name="Project"))
+    _seed_draft(engine)
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, headers={"content-type": "text/html"}, text="<html></html>")
@@ -256,80 +235,6 @@ async def test_import_url_job_rejects_html_content_type(tmp_path: Path) -> None:
     assert asset_count == 0
 
 
-def test_select_and_disable_only_mutate_case_scope(tmp_path: Path) -> None:
-    app = _app(tmp_path)
-    client = _client(app)
-    source = _media_file(tmp_path, b"raw")
-    assert _create_project(client).status_code == 201
-    assert _create_case(client).status_code == 201
-    imported = client.post(
-        "/api/projects/project_1/materials/import-local",
-        headers=AUTH,
-        json={"path": str(source)},
-    )
-    asset_id = imported.json()["asset_id"]
-
-    selected = client.post(
-        "/api/projects/project_1/cases/case_1/assets/select",
-        headers=AUTH,
-        json={"asset_id": asset_id},
-    )
-    disabled = client.post(
-        "/api/projects/project_1/cases/case_1/assets/disable",
-        headers=AUTH,
-        json={"asset_id": asset_id},
-    )
-
-    assert selected.status_code == 200
-    assert disabled.status_code == 200
-    case = disabled.json()["case"]
-    assert case["selected_asset_ids"] == []
-    assert case["disabled_asset_ids"] == [asset_id]
-    with _engine(app).connect() as connection:
-        link_count = connection.execute(
-            select(func.count()).select_from(schema.project_asset_links)
-        ).scalar_one()
-    assert link_count == 1
-
-
-def test_upload_parts_complete_merges_and_records_hash(tmp_path: Path) -> None:
-    app = _app(tmp_path)
-    client = _client(app)
-    assert _create_project(client).status_code == 201
-    init = client.post(
-        "/api/uploads/init",
-        headers=AUTH,
-        json={"project_id": "project_1", "filename": "upload.mp4"},
-    )
-    upload_id = init.json()["upload_id"]
-    part_headers = {**AUTH, "Content-Type": "application/octet-stream"}
-    assert (
-        client.put(
-            f"/api/uploads/{upload_id}/parts/1", headers=part_headers, content=b"hello"
-        ).status_code
-        == 200
-    )
-    assert (
-        client.put(
-            f"/api/uploads/{upload_id}/parts/2", headers=part_headers, content=b" world"
-        ).status_code
-        == 200
-    )
-
-    complete = client.post(f"/api/uploads/{upload_id}/complete", headers=AUTH, json={})
-
-    assert complete.status_code == 200
-    expected_hash = hashlib.sha256(b"hello world").hexdigest()
-    with _engine(app).connect() as connection:
-        asset = connection.execute(select(schema.assets)).one()._mapping
-        object_row = connection.execute(
-            select(schema.objects).where(schema.objects.c.hash == expected_hash)
-        ).one_or_none()
-    assert asset["hash"] == expected_hash
-    assert asset["object_hash"] == expected_hash
-    assert object_row is not None
-
-
 def test_resolve_asset_path_supports_reference_and_copy(tmp_path: Path) -> None:
     paths = WorkspacePaths.from_root(tmp_path / "workspace").initialize()
     engine = _engine_for_paths(paths)
@@ -339,7 +244,7 @@ def test_resolve_asset_path_supports_reference_and_copy(tmp_path: Path) -> None:
     _apply_events(
         engine,
         AssetImported(
-            project_id="project_1",
+            draft_id="draft_1",
             asset_id="asset_ref",
             payload={
                 "storage_mode": "reference",
@@ -351,7 +256,7 @@ def test_resolve_asset_path_supports_reference_and_copy(tmp_path: Path) -> None:
             },
         ),
         AssetImported(
-            project_id="project_1",
+            draft_id="draft_1",
             asset_id="asset_copy",
             payload={
                 "storage_mode": "copy",
@@ -377,11 +282,11 @@ def test_media_proxy_supports_http_range_206(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
     proxy_ref = ObjectStore(_state(app).workspace_paths).put_bytes(b"0123456789")
+    _seed_draft(_engine(app))
     _apply_events(
         _engine(app),
-        ProjectCreated(project_id="project_1", name="Project"),
         AssetImported(
-            project_id="project_1",
+            draft_id="draft_1",
             asset_id="asset_proxy",
             payload={
                 "storage_mode": "copy",
@@ -431,10 +336,10 @@ async def test_proxy_job_probes_and_generates_proxy_with_ffmpeg(tmp_path: Path) 
         capture_output=True,
         text=True,
     )
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     assert (
         client.post(
-            "/api/projects/project_1/materials/import-local",
+            "/api/drafts/draft_1/materials/import-local",
             headers=AUTH,
             json={"path": str(video)},
         ).status_code
@@ -455,55 +360,6 @@ async def test_proxy_job_probes_and_generates_proxy_with_ffmpeg(tmp_path: Path) 
 
 @pytest.mark.parametrize(
     ("filename", "expected_kind"),
-    [("a.mp4", "video"), ("b.MP3", "audio"), ("c.jpeg", "image"), ("d.ttf", "font")],
-)
-def test_upload_kind_inferred_from_suffix(
-    tmp_path: Path, filename: str, expected_kind: str
-) -> None:
-    app = _app(tmp_path)
-    client = _client(app)
-    assert _create_project(client).status_code == 201
-    init = client.post(
-        "/api/uploads/init",
-        headers=AUTH,
-        json={"project_id": "project_1", "filename": filename},
-    )
-    assert init.status_code == 201
-    upload_id = init.json()["upload_id"]
-    part_headers = {**AUTH, "Content-Type": "application/octet-stream"}
-    assert (
-        client.put(
-            f"/api/uploads/{upload_id}/parts/1", headers=part_headers, content=b"payload"
-        ).status_code
-        == 200
-    )
-    complete = client.post(f"/api/uploads/{upload_id}/complete", headers=AUTH, json={})
-
-    assert complete.status_code == 200
-    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
-    assert materials.status_code == 200
-    asset = materials.json()["assets"][0]
-    assert asset["kind"] == expected_kind
-
-
-@pytest.mark.parametrize("filename", ["e.srt", "f.xyz", "noext"])
-def test_upload_unsupported_suffix_rejected(tmp_path: Path, filename: str) -> None:
-    app = _app(tmp_path)
-    client = _client(app)
-    assert _create_project(client).status_code == 201
-
-    resp = client.post(
-        "/api/uploads/init",
-        headers=AUTH,
-        json={"project_id": "project_1", "filename": filename},
-    )
-
-    assert resp.status_code == 400
-    assert resp.json()["detail"]["error_code"] == "unsupported_material_type"
-
-
-@pytest.mark.parametrize(
-    ("filename", "expected_kind"),
     [("clip.mov", "video"), ("song.WAV", "audio"), ("pic.PNG", "image"), ("face.otf", "font")],
 )
 def test_import_local_kind_inferred_from_suffix(
@@ -511,19 +367,19 @@ def test_import_local_kind_inferred_from_suffix(
 ) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     source = tmp_path / "allowed" / filename
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"raw-media")
 
     imported = client.post(
-        "/api/projects/project_1/materials/import-local",
+        "/api/drafts/draft_1/materials/import-local",
         headers=AUTH,
         json={"path": str(source)},
     )
 
     assert imported.status_code == 200
-    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    materials = client.get("/api/drafts/draft_1/materials", headers=AUTH)
     asset = materials.json()["assets"][0]
     assert asset["kind"] == expected_kind
 
@@ -532,13 +388,13 @@ def test_import_local_kind_inferred_from_suffix(
 def test_import_local_unsupported_suffix_rejected(tmp_path: Path, filename: str) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     source = tmp_path / "allowed" / filename
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(b"raw-media")
 
     resp = client.post(
-        "/api/projects/project_1/materials/import-local",
+        "/api/drafts/draft_1/materials/import-local",
         headers=AUTH,
         json={"path": str(source)},
     )
@@ -560,13 +416,13 @@ def test_import_url_kind_inferred_from_suffix(
 ) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     body: dict[str, Any] = {"url": url}
     if filename is not None:
         body["filename"] = filename
 
     created = client.post(
-        "/api/projects/project_1/materials/import-url",
+        "/api/drafts/draft_1/materials/import-url",
         headers=AUTH,
         json=body,
     )
@@ -593,13 +449,13 @@ def test_import_url_unsupported_suffix_rejected(
 ) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     body: dict[str, Any] = {"url": url}
     if filename is not None:
         body["filename"] = filename
 
     resp = client.post(
-        "/api/projects/project_1/materials/import-url",
+        "/api/drafts/draft_1/materials/import-url",
         headers=AUTH,
         json=body,
     )
@@ -640,7 +496,7 @@ def _engine_for_paths(paths: WorkspacePaths) -> Engine:
     engine = create_workspace_engine(paths)
     with engine.begin() as connection:
         schema.create_all(connection)
-    _apply_events(engine, ProjectCreated(project_id="project_1", name="Project"))
+    _seed_draft(engine)
     return engine
 
 
@@ -651,67 +507,33 @@ def _media_file(tmp_path: Path, data: bytes) -> Path:
     return path
 
 
-def _create_project(client: TestClient):
+def _create_draft(client: TestClient):
     return client.post(
-        "/api/projects",
+        "/api/drafts",
         headers=AUTH,
-        json={"project_id": "project_1", "name": "Project"},
+        json={"draft_id": "draft_1", "name": "草稿"},
     )
 
 
-def _create_case(client: TestClient):
-    return client.post(
-        "/api/projects/project_1/cases",
-        headers=AUTH,
-        json={"case_id": "case_1", "name": "Case", "brief": {"goal": "test"}},
-    )
-
-
-def _seed_project_case(engine: Engine) -> None:
+def _seed_draft(engine: Engine, draft_id: str = "draft_1") -> None:
     _apply_events(
         engine,
-        ProjectCreated(project_id="project_1", name="Project"),
-        CaseCreated(
-            project_id="project_1",
-            case_id="case_1",
-            payload={"name": "Case", "brief": {"goal": "test"}},
+        DraftCreated(
+            draft_id=draft_id,
+            payload={"name": "草稿", "brief": {"goal": "test"}},
         ),
     )
 
 
 def _insert_provider_cost_rows(engine: Engine) -> None:
     with begin_immediate(engine) as connection:
-        connection.execute(
-            schema.jobs.insert().values(
-                job_id="job_project",
-                kind="annotation",
-                status="succeeded",
-                project_id="project_1",
-                case_id=None,
-                requested_by_case_id=None,
-                asset_id=None,
-                idempotency_key="job_project",
-                payload_json=dump_json({}),
-                result_json=None,
-                error_json=None,
-                attempts=0,
-                max_retries=0,
-                next_run_at="2026-07-04T00:00:00+00:00",
-                progress=None,
-                worker_id=None,
-                heartbeat_at=None,
-                created_at="2026-07-04T00:00:00+00:00",
-                started_at=None,
-                finished_at="2026-07-04T00:00:01+00:00",
-            )
-        )
         rows = [
             {
-                "call_id": "call_case_1",
+                "call_id": "call_draft1_1",
                 "provider_id": "fast",
                 "capability": "llm.chat",
                 "model": "planner",
-                "case_id": "case_1",
+                "draft_id": "draft_1",
                 "job_id": None,
                 "latency_ms": 10,
                 "usage_json": dump_json({}),
@@ -719,35 +541,23 @@ def _insert_provider_cost_rows(engine: Engine) -> None:
                 "status": "succeeded",
             },
             {
-                "call_id": "call_case_2",
+                "call_id": "call_draft1_2",
                 "provider_id": "slow",
                 "capability": "vlm.understanding",
                 "model": "vlm",
-                "case_id": "case_2",
+                "draft_id": "draft_1",
                 "job_id": None,
                 "latency_ms": 20,
                 "usage_json": dump_json({}),
-                "cost_estimate": 0.5,
+                "cost_estimate": 1.75,
                 "status": "succeeded",
             },
             {
-                "call_id": "call_project_job",
-                "provider_id": "slow",
-                "capability": "vlm.understanding",
-                "model": "vlm",
-                "case_id": None,
-                "job_id": "job_project",
-                "latency_ms": 30,
-                "usage_json": dump_json({}),
-                "cost_estimate": 1.25,
-                "status": "succeeded",
-            },
-            {
-                "call_id": "call_other",
+                "call_id": "call_draft2",
                 "provider_id": "other",
                 "capability": "llm.chat",
                 "model": "planner",
-                "case_id": "case_other",
+                "draft_id": "draft_2",
                 "job_id": None,
                 "latency_ms": 40,
                 "usage_json": dump_json({}),
@@ -776,14 +586,13 @@ def _insert_import_url_job(engine: Engine) -> None:
                 "job_id": "job_import_url",
                 "kind": "import_url",
                 "status": "pending",
-                "project_id": "project_1",
-                "case_id": None,
-                "requested_by_case_id": None,
+                "draft_id": "draft_1",
+                "requested_by_draft_id": None,
                 "asset_id": None,
                 "idempotency_key": "url:clip",
                 "payload_json": {
                     "asset_id": "asset_url",
-                    "project_id": "project_1",
+                    "draft_id": "draft_1",
                     "url": "https://example.test/clip.mp4",
                     "filename": "clip.mp4",
                     "kind": "video",
@@ -809,13 +618,14 @@ def _seed_indexed_asset(
     asset_id: str,
     thumbnail_bytes: bytes | None,
     duration_sec: float,
+    draft_id: str = "draft_1",
 ) -> str | None:
     paths = _state(app).workspace_paths
     object_ref = ObjectStore(paths).put_bytes(b"source-" + asset_id.encode())
     thumbnail_hash: str | None = None
     events: list[Any] = [
         AssetImported(
-            project_id="project_1",
+            draft_id=draft_id,
             asset_id=asset_id,
             payload={
                 "storage_mode": "copy",
@@ -829,13 +639,13 @@ def _seed_indexed_asset(
                 "probe": {"duration_sec": duration_sec, "has_audio": False},
             },
         ),
-        AssetLinked(project_id="project_1", asset_id=asset_id),
+        AssetLinked(draft_id=draft_id, asset_id=asset_id),
     ]
     if thumbnail_bytes is not None:
         thumbnail_hash = ObjectStore(paths).put_bytes(thumbnail_bytes).object_hash
         events.append(
             AssetIndexReady(
-                project_id="project_1",
+                draft_id=draft_id,
                 asset_id=asset_id,
                 payload={
                     "index_json": {"duration_sec": duration_sec, "shots": []},
@@ -844,7 +654,7 @@ def _seed_indexed_asset(
                 },
             )
         )
-        events.append(MaterialUnderstandingCompleted(project_id="project_1", asset_id=asset_id))
+        events.append(MaterialUnderstandingCompleted(draft_id=draft_id, asset_id=asset_id))
     _apply_events(_engine(app), *events)
     return thumbnail_hash
 
@@ -852,7 +662,7 @@ def _seed_indexed_asset(
 def test_media_thumbnail_serves_jpeg_and_404_when_missing(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_draft(_engine(app))
     thumbnail_bytes = b"\xff\xd8\xff\xe0jpeg-body"
     _seed_indexed_asset(
         app,
@@ -876,7 +686,7 @@ def test_media_thumbnail_accepts_query_token_like_browser_img(tmp_path: Path) ->
     """浏览器 <img src> 设不了 Authorization header，media 族 GET 必须吃 query token。"""
     app = _app(tmp_path)
     client = _client(app)
-    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_draft(_engine(app))
     thumbnail_bytes = b"\xff\xd8\xff\xe0jpeg-body"
     _seed_indexed_asset(
         app,
@@ -904,9 +714,9 @@ def test_media_thumbnail_accepts_query_token_like_browser_img(tmp_path: Path) ->
 def test_query_token_not_accepted_outside_sse_and_media(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_draft(_engine(app))
 
-    response = client.get("/api/projects/project_1/materials", params={"token": TOKEN})
+    response = client.get("/api/drafts/draft_1/materials", params={"token": TOKEN})
 
     assert response.status_code == 401
     assert response.json()["reason"] == "missing_token"
@@ -937,7 +747,7 @@ def _insert_ready_summary(
 def test_material_summary_route_returns_latest_ready_summary(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_draft(_engine(app))
     _seed_indexed_asset(app, asset_id="asset_sum", thumbnail_bytes=None, duration_sec=5.0)
     _insert_ready_summary(
         _engine(app),
@@ -962,7 +772,7 @@ def test_material_summary_route_returns_latest_ready_summary(tmp_path: Path) -> 
         },
     )
 
-    response = client.get("/api/projects/project_1/materials/asset_sum/summary", headers=AUTH)
+    response = client.get("/api/drafts/draft_1/materials/asset_sum/summary", headers=AUTH)
 
     assert response.status_code == 200
     body = response.json()
@@ -975,27 +785,24 @@ def test_material_summary_route_returns_latest_ready_summary(tmp_path: Path) -> 
 def test_material_summary_route_404_when_no_ready_summary(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_draft(_engine(app))
     _seed_indexed_asset(app, asset_id="asset_none", thumbnail_bytes=None, duration_sec=5.0)
 
-    response = client.get("/api/projects/project_1/materials/asset_none/summary", headers=AUTH)
+    response = client.get("/api/drafts/draft_1/materials/asset_none/summary", headers=AUTH)
 
     assert response.status_code == 404
     assert response.json()["detail"]["reason"] == "summary_not_ready"
 
 
-def test_material_summary_route_404_when_asset_not_linked_to_project(tmp_path: Path) -> None:
-    """跨项目越权：asset 挂在 project_1，从 project_2 查摘要必须 asset_not_linked。"""
+def test_material_summary_route_404_when_asset_not_linked_to_draft(tmp_path: Path) -> None:
+    """跨草稿越权：asset 挂在 draft_1，从 draft_2 查摘要必须 asset_not_linked。"""
     app = _app(tmp_path)
     client = _client(app)
-    _apply_events(
-        _engine(app),
-        ProjectCreated(project_id="project_1", name="Project"),
-        ProjectCreated(project_id="project_2", name="Other"),
-    )
+    _seed_draft(_engine(app))
+    _apply_events(_engine(app), DraftCreated(draft_id="draft_2", payload={"name": "Other"}))
     _seed_indexed_asset(app, asset_id="asset_sum", thumbnail_bytes=None, duration_sec=5.0)
 
-    response = client.get("/api/projects/project_2/materials/asset_sum/summary", headers=AUTH)
+    response = client.get("/api/drafts/draft_2/materials/asset_sum/summary", headers=AUTH)
 
     assert response.status_code == 404
     assert response.json()["detail"]["reason"] == "asset_not_linked"
@@ -1004,7 +811,7 @@ def test_material_summary_route_404_when_asset_not_linked_to_project(tmp_path: P
 def test_materials_payload_exposes_thumbnail_duration_and_understanding(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_draft(_engine(app))
     _seed_indexed_asset(
         app,
         asset_id="asset_thumb",
@@ -1013,7 +820,7 @@ def test_materials_payload_exposes_thumbnail_duration_and_understanding(tmp_path
     )
     _seed_indexed_asset(app, asset_id="asset_bare", thumbnail_bytes=None, duration_sec=3.0)
 
-    response = client.get("/api/projects/project_1/materials", headers=AUTH)
+    response = client.get("/api/drafts/draft_1/materials", headers=AUTH)
 
     assert response.status_code == 200
     assets = {asset["asset_id"]: asset for asset in response.json()["assets"]}
@@ -1027,12 +834,34 @@ def test_materials_payload_exposes_thumbnail_duration_and_understanding(tmp_path
     assert bare["understanding_status"] == "none"
 
 
+def test_delete_material_unlinks_from_draft(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _seed_draft(_engine(app))
+    _seed_indexed_asset(app, asset_id="asset_del", thumbnail_bytes=None, duration_sec=4.0)
+
+    deleted = client.request(
+        "DELETE", "/api/drafts/draft_1/materials/asset_del", headers=AUTH, json={}
+    )
+
+    assert deleted.status_code == 200
+    assert "AssetUnlinked" in _event_types(app)
+    materials = client.get("/api/drafts/draft_1/materials", headers=AUTH)
+    assert materials.json()["assets"] == []
+    # 断链不删物理 asset：全局 assets 表仍保留该行。
+    with _engine(app).connect() as connection:
+        asset_count = connection.execute(
+            select(func.count()).select_from(schema.assets)
+        ).scalar_one()
+    assert asset_count == 1
+
+
 def test_import_local_directory_recurses_with_rel_dir_and_skips_unsupported(
     tmp_path: Path,
 ) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     root = tmp_path / "allowed" / "素材A"
     (root / "视频").mkdir(parents=True)
     (root / "音频" / "环境声").mkdir(parents=True)
@@ -1043,7 +872,7 @@ def test_import_local_directory_recurses_with_rel_dir_and_skips_unsupported(
     (root / ".hidden.mp4").write_bytes(b"hidden")
 
     imported = client.post(
-        "/api/projects/project_1/materials/import-local",
+        "/api/drafts/draft_1/materials/import-local",
         headers=AUTH,
         json={"paths": [str(root)]},
     )
@@ -1053,7 +882,7 @@ def test_import_local_directory_recurses_with_rel_dir_and_skips_unsupported(
     assert len(body["asset_ids"]) == 3
     assert body["skipped"] == ["notes.txt"]
 
-    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    materials = client.get("/api/drafts/draft_1/materials", headers=AUTH)
     rel_dirs = {asset["filename"]: asset["rel_dir"] for asset in materials.json()["assets"]}
     assert rel_dirs["a.mp4"] == "素材A/视频"
     assert rel_dirs["b.mp3"] == "素材A/音频/环境声"
@@ -1064,14 +893,14 @@ def test_import_local_directory_recurses_with_rel_dir_and_skips_unsupported(
 def test_import_local_batch_paths_mixes_files_and_directories(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     single = _media_file(tmp_path, b"single-file")
     folder = tmp_path / "allowed" / "b-roll"
     folder.mkdir(parents=True)
     (folder / "clip.mov").write_bytes(b"clip")
 
     imported = client.post(
-        "/api/projects/project_1/materials/import-local",
+        "/api/drafts/draft_1/materials/import-local",
         headers=AUTH,
         json={"paths": [str(single), str(folder)]},
     )
@@ -1081,7 +910,7 @@ def test_import_local_batch_paths_mixes_files_and_directories(tmp_path: Path) ->
     assert len(body["asset_ids"]) == 2
     assert body["asset_id"] == body["asset_ids"][0]
 
-    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    materials = client.get("/api/drafts/draft_1/materials", headers=AUTH)
     rel_dirs = {asset["filename"]: asset["rel_dir"] for asset in materials.json()["assets"]}
     assert rel_dirs["raw.mp4"] is None
     assert rel_dirs["clip.mov"] == "b-roll"
@@ -1090,10 +919,10 @@ def test_import_local_batch_paths_mixes_files_and_directories(tmp_path: Path) ->
 def test_import_local_requires_at_least_one_path(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
 
     response = client.post(
-        "/api/projects/project_1/materials/import-local",
+        "/api/drafts/draft_1/materials/import-local",
         headers=AUTH,
         json={},
     )
@@ -1105,7 +934,7 @@ def test_import_local_requires_at_least_one_path(tmp_path: Path) -> None:
 def test_import_local_directory_skips_symlink_escaping_fs_roots(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     outside = tmp_path / "outside" / "secret.mp4"
     outside.parent.mkdir(parents=True)
     outside.write_bytes(b"secret-bytes")
@@ -1115,7 +944,7 @@ def test_import_local_directory_skips_symlink_escaping_fs_roots(tmp_path: Path) 
     (root / "escape.mp4").symlink_to(outside)
 
     imported = client.post(
-        "/api/projects/project_1/materials/import-local",
+        "/api/drafts/draft_1/materials/import-local",
         headers=AUTH,
         json={"paths": [str(root)]},
     )
@@ -1124,7 +953,7 @@ def test_import_local_directory_skips_symlink_escaping_fs_roots(tmp_path: Path) 
     body = imported.json()
     assert len(body["asset_ids"]) == 1
     assert any("escape.mp4" in item for item in body["skipped"])
-    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    materials = client.get("/api/drafts/draft_1/materials", headers=AUTH)
     filenames = {asset["filename"] for asset in materials.json()["assets"]}
     assert filenames == {"ok.mp4"}
 
@@ -1132,21 +961,21 @@ def test_import_local_directory_skips_symlink_escaping_fs_roots(tmp_path: Path) 
 def test_import_local_rejects_asset_id_with_directory_batch(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     root = tmp_path / "allowed" / "batch"
     root.mkdir(parents=True)
     (root / "a.mp4").write_bytes(b"a")
     (root / "b.mp4").write_bytes(b"b")
 
     response = client.post(
-        "/api/projects/project_1/materials/import-local",
+        "/api/drafts/draft_1/materials/import-local",
         headers=AUTH,
         json={"paths": [str(root)], "asset_id": "asset_explicit"},
     )
 
     assert response.status_code == 400
     assert response.json()["detail"]["error_code"] == "asset_id_requires_single_file"
-    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    materials = client.get("/api/drafts/draft_1/materials", headers=AUTH)
     assert materials.json()["assets"] == []
 
 
@@ -1155,19 +984,19 @@ def test_import_local_reimport_same_directory_dedupes_by_reference_path(
 ) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     root = tmp_path / "allowed" / "footage"
     root.mkdir(parents=True)
     (root / "a.mp4").write_bytes(b"a")
 
     first = client.post(
-        "/api/projects/project_1/materials/import-local",
+        "/api/drafts/draft_1/materials/import-local",
         headers=AUTH,
         json={"paths": [str(root)]},
     )
     (root / "b.mp4").write_bytes(b"b")
     second = client.post(
-        "/api/projects/project_1/materials/import-local",
+        "/api/drafts/draft_1/materials/import-local",
         headers=AUTH,
         json={"paths": [str(root)]},
     )
@@ -1176,7 +1005,7 @@ def test_import_local_reimport_same_directory_dedupes_by_reference_path(
     assert second.status_code == 200
     assert second.json()["duplicates"] == ["a.mp4"]
     assert len(second.json()["asset_ids"]) == 1
-    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    materials = client.get("/api/drafts/draft_1/materials", headers=AUTH)
     assert len(materials.json()["assets"]) == 2
 
 
@@ -1185,12 +1014,12 @@ def test_import_local_missing_file_lands_in_failed_without_aborting_batch(
 ) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    assert _create_project(client).status_code == 201
+    assert _create_draft(client).status_code == 201
     good = _media_file(tmp_path, b"good")
     missing = tmp_path / "allowed" / "gone.mp4"
 
     response = client.post(
-        "/api/projects/project_1/materials/import-local",
+        "/api/drafts/draft_1/materials/import-local",
         headers=AUTH,
         json={"paths": [str(missing), str(good)]},
     )
@@ -1199,39 +1028,8 @@ def test_import_local_missing_file_lands_in_failed_without_aborting_batch(
     body = response.json()
     assert len(body["asset_ids"]) == 1
     assert any("gone.mp4" in item for item in body["failed"])
-    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    materials = client.get("/api/drafts/draft_1/materials", headers=AUTH)
     assert {asset["filename"] for asset in materials.json()["assets"]} == {"raw.mp4"}
-
-
-def test_upload_complete_stores_rel_dir_for_folder_upload(tmp_path: Path) -> None:
-    app = _app(tmp_path)
-    client = _client(app)
-    assert _create_project(client).status_code == 201
-    init = client.post(
-        "/api/uploads/init",
-        headers=AUTH,
-        json={"project_id": "project_1", "filename": "clip.mp4"},
-    )
-    upload_id = init.json()["upload_id"]
-    part_headers = {**AUTH, "Content-Type": "application/octet-stream"}
-    assert (
-        client.put(
-            f"/api/uploads/{upload_id}/parts/1", headers=part_headers, content=b"clip"
-        ).status_code
-        == 200
-    )
-
-    complete = client.post(
-        f"/api/uploads/{upload_id}/complete",
-        headers=AUTH,
-        json={"rel_dir": "素材A/视频"},
-    )
-
-    assert complete.status_code == 200
-    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
-    asset = materials.json()["assets"][0]
-    assert asset["filename"] == "clip.mp4"
-    assert asset["rel_dir"] == "素材A/视频"
 
 
 def test_fs_pick_returns_native_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

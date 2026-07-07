@@ -22,55 +22,6 @@ class ApiResponseModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class ProjectTreeCase(ApiResponseModel):
-    case_id: str
-    project_id: str
-    name: str
-    status: str
-
-
-class ProjectTreeProject(ApiResponseModel):
-    project_id: str
-    name: str
-    status: str
-    cases: list[ProjectTreeCase]
-
-
-class ProjectTreeResponse(ApiResponseModel):
-    projects: list[ProjectTreeProject]
-
-
-class ProjectRecord(ApiResponseModel):
-    project_id: str
-    name: str
-    status: str
-    defaults: dict[str, Any]
-    created_at: str
-    updated_at: str
-
-
-class ProjectListResponse(ApiResponseModel):
-    projects: list[ProjectRecord]
-
-
-class ProjectMutationResponse(ApiResponseModel):
-    project: ProjectRecord
-    event_ids: list[int]
-
-
-class ProjectPageCase(ApiResponseModel):
-    case_id: str
-    project_id: str
-    name: str
-    status: str
-    brief: dict[str, Any]
-
-
-class ProjectPageActions(ApiResponseModel):
-    create_case: str
-    materials: str
-
-
 class CostSummary(ApiResponseModel):
     provider_call_count: int
     total_cost_estimate: float
@@ -78,22 +29,26 @@ class CostSummary(ApiResponseModel):
     by_provider: dict[str, float]
 
 
-class ProjectPageResponse(ApiResponseModel):
-    project: ProjectRecord
-    cases: list[ProjectPageCase]
-    case_count: int
-    asset_count: int
-    memory_count: int
-    costs: CostSummary
-    actions: ProjectPageActions
+class DraftListItem(ApiResponseModel):
+    # 草稿墙列表项：聚合封面消 N+1（cover_asset_ids ≤4，thumbnail_ready，导入时间倒序）。
+    draft_id: str
+    name: str
+    status: str
+    updated_at: str
+    material_count: int
+    cover_asset_ids: list[str]
 
 
-class CaseRecord(ApiResponseModel):
-    case_id: str
-    project_id: str
+class DraftListResponse(ApiResponseModel):
+    drafts: list[DraftListItem]
+
+
+class DraftRecord(ApiResponseModel):
+    draft_id: str
     name: str
     state_version: int
     status: str
+    defaults: dict[str, Any]
     pending_decision_id: str | None
     running_jobs: list[dict[str, Any]]
     last_error: dict[str, Any] | None
@@ -109,22 +64,23 @@ class CaseRecord(ApiResponseModel):
     rough_cut_approved_version: int | None
     postprocess_plan: dict[str, Any] | None
     export_current_id: str | None
-    selected_asset_ids: list[str]
-    disabled_asset_ids: list[str]
     scratch_memory: dict[str, Any]
+    messages_tail_ref: str | None
+    created_at: str
+    updated_at: str
 
 
-class CaseResponse(ApiResponseModel):
-    case: CaseRecord
+class DraftResponse(ApiResponseModel):
+    draft: DraftRecord
 
 
-class CaseMutationResponse(ApiResponseModel):
-    case: CaseRecord
+class DraftMutationResponse(ApiResponseModel):
+    draft: DraftRecord
     event_ids: list[int]
 
 
-class CaseTimelineResponse(ApiResponseModel):
-    case_id: str
+class DraftTimelineResponse(ApiResponseModel):
+    draft_id: str
     timeline_version: int
     timeline: dict[str, Any]
     summary: str
@@ -134,8 +90,7 @@ class CaseTimelineResponse(ApiResponseModel):
 class MessageQueuedResponse(ApiResponseModel):
     status: Literal["queued"]
     kind: Literal["user_message"]
-    project_id: str
-    case_id: str
+    draft_id: str
     message_id: str
 
 
@@ -148,7 +103,7 @@ class MessageRecord(ApiResponseModel):
 
 
 class MessagesResponse(ApiResponseModel):
-    case_id: str
+    draft_id: str
     messages: list[MessageRecord]
 
 
@@ -157,7 +112,7 @@ class CurrentDecisionResponse(ApiResponseModel):
 
 
 class PendingDecisionsResponse(ApiResponseModel):
-    project_id: str
+    draft_id: str
     decisions: list[Decision]
 
 
@@ -168,9 +123,8 @@ class DecisionAnswerResponse(ApiResponseModel):
     replays_enqueued: int
 
 
-class CaseCostsResponse(ApiResponseModel):
-    project_id: str
-    case_id: str
+class DraftCostsResponse(ApiResponseModel):
+    draft_id: str
     costs: CostSummary
 
 
@@ -200,7 +154,6 @@ class MaterialAsset(ApiResponseModel):
     ingest_status: str
     understanding_status: str
     usable: bool
-    enabled: bool
     rel_dir: str | None = None
     probe: dict[str, Any] | None
     duration_sec: float | None
@@ -213,7 +166,7 @@ class MaterialAsset(ApiResponseModel):
 
 
 class MaterialsResponse(ApiResponseModel):
-    project_id: str
+    draft_id: str
     assets: list[MaterialAsset]
     invalidated_asset_ids: list[str] = []
 
@@ -224,34 +177,15 @@ class MaterialSummaryResponse(ApiResponseModel):
 
 
 class MaterialMutationResponse(ApiResponseModel):
-    project_id: str
+    draft_id: str
     asset_id: str | None = None
-    # 批量/文件夹导入：新建 asset_id、跳过的非媒体/越界文件、读取失败文件、项目内已存在的重复文件。
+    # 批量/文件夹导入：新建 asset_id、跳过的非媒体/越界文件、读取失败文件、草稿内已链接的重复文件。
     asset_ids: list[str] = []
     skipped: list[str] = []
     failed: list[str] = []
     duplicates: list[str] = []
     job_id: str | None = None
     decision_id: str | None = None
-    event_ids: list[int]
-
-
-class UploadInitResponse(ApiResponseModel):
-    upload_id: str
-    part_url_template: str
-    complete_url: str
-
-
-class UploadPartResponse(ApiResponseModel):
-    upload_id: str
-    part_number: int
-    size: int
-
-
-class UploadCompleteResponse(ApiResponseModel):
-    upload_id: str
-    project_id: str
-    asset_id: str
     event_ids: list[int]
 
 
@@ -274,8 +208,7 @@ class FsListEntry(ApiResponseModel):
 
 
 class FsPickResponse(ApiResponseModel):
-    # 宿主机原生选择对话框：非 macOS/无 GUI 时 available=false（前端回退分片上传）；
-    # 用户取消时 available=true 且 paths 为空。
+    # 宿主机原生选择对话框：非 macOS/无 GUI 时 available=false；用户取消时 paths 为空。
     available: bool
     paths: list[str] = []
 
@@ -286,7 +219,7 @@ class FsListResponse(ApiResponseModel):
 
 
 class ReducerConflictDetail(ApiResponseModel):
-    case_id: str
+    draft_id: str
     expected_base_version: int | None
     actual_state_version: int
     event_type: str

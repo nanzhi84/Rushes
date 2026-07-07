@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
-from contracts.events import AssetImported, AssetLinked, ProjectCreated
+from contracts.events import AssetImported, AssetLinked, DraftCreated
 from media import invalidation
 from storage import schema
 from storage.db import create_workspace_engine
@@ -28,7 +28,7 @@ def test_reference_revalidation_uses_mtime_fast_path_without_hash(
 
     monkeypatch.setattr(invalidation, "_sha256", fail_hash)
 
-    result = invalidation.revalidate_project_references(engine, "project_1", apply_events=apply)
+    result = invalidation.revalidate_draft_references(engine, "draft_1", apply_events=apply)
 
     assert result.checked == 1
     assert result.invalidated_asset_ids == ()
@@ -42,7 +42,7 @@ def test_reference_revalidation_invalidates_when_hash_changes(tmp_path: Path) ->
     engine = _engine_with_reference(tmp_path, source, digest=old_digest, mtime=0)
     source.write_bytes(b"after!")
 
-    result = invalidation.revalidate_project_references(engine, "project_1", apply_events=apply)
+    result = invalidation.revalidate_draft_references(engine, "draft_1", apply_events=apply)
 
     assert result.invalidated_asset_ids == ("asset_1",)
     asset = _asset_row(engine)
@@ -63,9 +63,9 @@ def _engine_with_reference(
         schema.create_all(connection)
     result = apply(
         (
-            ProjectCreated(project_id="project_1", name="Project"),
+            DraftCreated(draft_id="draft_1", payload={"name": "Draft", "brief": {"goal": ""}}),
             AssetImported(
-                project_id="project_1",
+                draft_id="draft_1",
                 asset_id="asset_1",
                 payload={
                     "storage_mode": "reference",
@@ -77,7 +77,7 @@ def _engine_with_reference(
                     "usable": True,
                 },
             ),
-            AssetLinked(project_id="project_1", asset_id="asset_1"),
+            AssetLinked(draft_id="draft_1", asset_id="asset_1"),
         ),
         engine=engine,
         base_version=None,

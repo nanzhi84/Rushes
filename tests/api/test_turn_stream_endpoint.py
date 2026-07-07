@@ -11,7 +11,7 @@ from apps.api.main import create_app
 from fastapi import FastAPI
 
 from agent_harness.reducer import apply
-from contracts.events import CaseCreated, ProjectCreated
+from contracts.events import DraftCreated
 
 TOKEN = "test-token"
 BASE_URL = "http://127.0.0.1:8000"
@@ -29,11 +29,9 @@ def _app(tmp_path: Path, *, sse_max_events: int | None = None) -> FastAPI:
     engine = app.state.api_state.engine
     result = apply(
         (
-            ProjectCreated(project_id="project_1", name="Project"),
-            CaseCreated(
-                project_id="project_1",
-                case_id="case_1",
-                payload={"name": "Case", "brief": {"goal": "test"}},
+            DraftCreated(
+                draft_id="draft_1",
+                payload={"name": "Draft", "brief": {"goal": "test"}},
             ),
         ),
         engine=engine,
@@ -65,7 +63,7 @@ def _parse_frames(text: str) -> list[dict[str, Any]]:
 async def test_turn_stream_replays_current_turn_snapshot(tmp_path: Path) -> None:
     app = _app(tmp_path, sse_max_events=5)
     hub = app.state.api_state.turn_stream_hub
-    listener = hub.listener_for("case_1")
+    listener = hub.listener_for("draft_1")
     # 预置一段"进行中"回合（不含终止事件，缓冲保留）。
     listener.emit({"type": "turn_started", "turn_id": "turn_1"})
     listener.emit({"type": "text_delta", "message_id": "m1", "kind": "assistant", "delta": "你好"})
@@ -83,7 +81,7 @@ async def test_turn_stream_replays_current_turn_snapshot(tmp_path: Path) -> None
         headers=AUTH,
     ) as client:
         response = await client.get(
-            "/api/projects/project_1/cases/case_1/turn-stream",
+            "/api/drafts/draft_1/turn-stream",
         )
 
     assert response.status_code == 200
@@ -103,7 +101,7 @@ async def test_turn_stream_replays_current_turn_snapshot(tmp_path: Path) -> None
 async def test_turn_stream_accepts_query_token(tmp_path: Path) -> None:
     app = _app(tmp_path, sse_max_events=1)
     hub = app.state.api_state.turn_stream_hub
-    hub.listener_for("case_1").emit({"type": "turn_started", "turn_id": "turn_1"})
+    hub.listener_for("draft_1").emit({"type": "turn_started", "turn_id": "turn_1"})
 
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -111,7 +109,7 @@ async def test_turn_stream_accepts_query_token(tmp_path: Path) -> None:
     ) as client:
         # 无 Authorization 头，仅 query token（EventSource 无法设置请求头）。
         response = await client.get(
-            f"/api/projects/project_1/cases/case_1/turn-stream?token={TOKEN}",
+            f"/api/drafts/draft_1/turn-stream?token={TOKEN}",
         )
 
     assert response.status_code == 200
@@ -127,13 +125,13 @@ async def test_turn_stream_rejects_missing_token(tmp_path: Path) -> None:
         base_url=BASE_URL,
     ) as client:
         response = await client.get(
-            "/api/projects/project_1/cases/case_1/turn-stream",
+            "/api/drafts/draft_1/turn-stream",
         )
 
     assert response.status_code == 401
 
 
-async def test_turn_stream_unknown_case_returns_404(tmp_path: Path) -> None:
+async def test_turn_stream_unknown_draft_returns_404(tmp_path: Path) -> None:
     app = _app(tmp_path, sse_max_events=1)
 
     async with httpx.AsyncClient(
@@ -142,7 +140,7 @@ async def test_turn_stream_unknown_case_returns_404(tmp_path: Path) -> None:
         headers=AUTH,
     ) as client:
         response = await client.get(
-            "/api/projects/project_1/cases/missing/turn-stream",
+            "/api/drafts/missing/turn-stream",
         )
 
     assert response.status_code == 404

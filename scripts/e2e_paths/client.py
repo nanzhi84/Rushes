@@ -183,7 +183,7 @@ def choose_decision_answer(
     decision: Mapping[str, Any],
     *,
     scenario: Scenario,
-    case_state: Mapping[str, Any] | None = None,
+    draft_state: Mapping[str, Any] | None = None,
 ) -> DecisionChoice:
     decision_type = str(decision.get("type") or "")
     options = _decision_options(decision)
@@ -222,7 +222,7 @@ def choose_decision_answer(
         choice = _approval_choice(options, "确认粗剪预览")
         payload = dict(choice.payload)
         if "timeline_version" not in payload:
-            timeline_version = _case_timeline_version(case_state)
+            timeline_version = _draft_timeline_version(draft_state)
             if timeline_version is not None:
                 payload["timeline_version"] = timeline_version
         return DecisionChoice(
@@ -256,9 +256,6 @@ def choose_decision_answer(
     if decision_type == "memory_scope":
         return _skip_choice(options, "跳过 memory 写入")
 
-    if decision_type == "destructive_project_action":
-        return _reject_choice(options, "拒绝项目级破坏操作")
-
     if decision_type == "url_import":
         return _approval_choice(options, "确认 URL 导入")
 
@@ -270,24 +267,24 @@ def choose_decision_answer(
     return _natural_choice("确认", {}, f"未知 decision {decision_type} 使用自然语言确认")
 
 
-def summarize_case_state(case_state: Mapping[str, Any]) -> str:
-    running = case_state.get("running_jobs")
+def summarize_draft_state(draft_state: Mapping[str, Any]) -> str:
+    running = draft_state.get("running_jobs")
     running_jobs = running if isinstance(running, list) else []
     running_text = ", ".join(
         f"{_mapping_str(job, 'kind')}:{_mapping_str(job, 'status')}:{_mapping_str(job, 'job_id')}"
         for job in running_jobs
         if isinstance(job, Mapping)
     )
-    last_error = case_state.get("last_error")
+    last_error = draft_state.get("last_error")
     error_text = (
         json.dumps(last_error, ensure_ascii=False) if isinstance(last_error, Mapping) else "无"
     )
     return (
-        f"case={case_state.get('case_id')} version={case_state.get('state_version')} "
-        f"pending={case_state.get('pending_decision_id')} "
-        f"timeline={case_state.get('timeline_current_version')} "
-        f"preview={case_state.get('preview_current_id')} "
-        f"export={case_state.get('export_current_id')} "
+        f"draft={draft_state.get('draft_id')} version={draft_state.get('state_version')} "
+        f"pending={draft_state.get('pending_decision_id')} "
+        f"timeline={draft_state.get('timeline_current_version')} "
+        f"preview={draft_state.get('preview_current_id')} "
+        f"export={draft_state.get('export_current_id')} "
         f"running=[{running_text or '无'}] last_error={error_text}"
     )
 
@@ -299,7 +296,7 @@ def summarize_event(event: SseEvent) -> str:
     for key in (
         "decision_id",
         "job_id",
-        "case_id",
+        "draft_id",
         "asset_id",
         "timeline_version",
         "artifact_id",
@@ -408,7 +405,7 @@ class RushesClient:
         last_error: BaseException | None = None
         while time.monotonic() <= deadline:
             try:
-                self.get_json("/api/projects", context="等待 API 就绪")
+                self.get_json("/api/drafts", context="等待 API 就绪")
                 return
             except (httpx.HTTPError, RunError) as exc:
                 last_error = exc
@@ -429,29 +426,25 @@ class RushesClient:
             raise RunError(f"{context} 请求失败：{exc}") from exc
         return _checked_json(response, context=context)
 
-    def create_project(self, *, project_id: str, name: str) -> JsonObject:
+    def create_draft(self, *, draft_id: str, name: str, goal: str | None = None) -> JsonObject:
+        payload: JsonObject = {"draft_id": draft_id, "name": name}
+        if goal is not None:
+            payload["goal"] = goal
         return self.post_json(
-            "/api/projects",
-            {"project_id": project_id, "name": name},
-            context="创建 Project",
-        )
-
-    def create_case(self, *, project_id: str, case_id: str, name: str, goal: str) -> JsonObject:
-        return self.post_json(
-            f"/api/projects/{project_id}/cases",
-            {"case_id": case_id, "name": name, "goal": goal},
-            context="创建 Case",
+            "/api/drafts",
+            payload,
+            context="创建 Draft",
         )
 
     def import_local_material(
         self,
         *,
-        project_id: str,
+        draft_id: str,
         asset_id: str,
         path: Path,
     ) -> JsonObject:
         return self.post_json(
-            f"/api/projects/{project_id}/materials/import-local",
+            f"/api/drafts/{draft_id}/materials/import-local",
             {
                 "asset_id": asset_id,
                 "path": str(path.resolve()),
@@ -460,18 +453,10 @@ class RushesClient:
             context=f"导入素材 {path.name}",
         )
 
-    def select_case_asset(self, *, project_id: str, case_id: str, asset_id: str) -> JsonObject:
-        return self.post_json(
-            f"/api/projects/{project_id}/cases/{case_id}/assets/select",
-            {"asset_id": asset_id},
-            context=f"选择 Case 素材 {asset_id}",
-        )
-
     def enqueue_message(
         self,
         *,
-        project_id: str,
-        case_id: str,
+        draft_id: str,
         content: str,
         message_id: str | None = None,
     ) -> JsonObject:
@@ -479,24 +464,24 @@ class RushesClient:
         if message_id is not None:
             payload["message_id"] = message_id
         return self.post_json(
-            f"/api/projects/{project_id}/cases/{case_id}/messages",
+            f"/api/drafts/{draft_id}/messages",
             payload,
             context="发送用户消息",
         )
 
-    def get_case(self, *, project_id: str, case_id: str) -> JsonObject:
+    def get_draft(self, *, draft_id: str) -> JsonObject:
         payload = self.get_json(
-            f"/api/projects/{project_id}/cases/{case_id}",
-            context="读取 Case",
+            f"/api/drafts/{draft_id}",
+            context="读取 Draft",
         )
-        case = payload.get("case")
-        if not isinstance(case, Mapping):
-            raise RunError("读取 Case 返回缺少 case object。")
-        return dict(case)
+        draft = payload.get("draft")
+        if not isinstance(draft, Mapping):
+            raise RunError("读取 Draft 返回缺少 draft object。")
+        return dict(draft)
 
-    def current_decision(self, *, project_id: str, case_id: str) -> JsonObject | None:
+    def current_decision(self, *, draft_id: str) -> JsonObject | None:
         payload = self.get_json(
-            f"/api/projects/{project_id}/cases/{case_id}/decisions/current",
+            f"/api/drafts/{draft_id}/decisions/current",
             context="读取当前 decision",
         )
         decision = payload.get("decision")
@@ -511,12 +496,9 @@ class RushesClient:
         if not decision_id:
             raise RunError("decision 缺少 decision_id。")
         payload: JsonObject = {"answer": choice.to_answer()}
-        project_id = decision.get("project_id")
-        case_id = decision.get("case_id")
-        if isinstance(project_id, str):
-            payload["project_id"] = project_id
-        if isinstance(case_id, str):
-            payload["case_id"] = case_id
+        draft_id = decision.get("draft_id")
+        if isinstance(draft_id, str):
+            payload["draft_id"] = draft_id
         return self.post_json(
             f"/api/decisions/{decision_id}/answer",
             payload,
@@ -526,12 +508,11 @@ class RushesClient:
     def mark_preview_viewed(
         self,
         *,
-        project_id: str,
-        case_id: str,
+        draft_id: str,
         preview_id: str,
     ) -> JsonObject:
         return self.post_json(
-            f"/api/projects/{project_id}/cases/{case_id}/previews/{preview_id}/viewed",
+            f"/api/drafts/{draft_id}/previews/{preview_id}/viewed",
             {},
             context=f"标记预览已看 {preview_id}",
         )
@@ -548,17 +529,16 @@ class RushesClient:
         except httpx.HTTPError as exc:
             raise RunError(f"下载导出 {export_id} 请求失败：{exc}") from exc
 
-    def poll_case_events(
+    def poll_draft_events(
         self,
         *,
-        project_id: str,
-        case_id: str,
+        draft_id: str,
         last_event_id: int,
         read_timeout_s: float = 1.0,
         max_events: int = 50,
     ) -> list[SseEvent]:
         return self._poll_sse(
-            f"/api/projects/{project_id}/cases/{case_id}/events",
+            f"/api/drafts/{draft_id}/events",
             last_event_id=last_event_id,
             read_timeout_s=read_timeout_s,
             max_events=max_events,
@@ -607,10 +587,9 @@ class RushesClient:
 
 
 @dataclass
-class CaseDriver:
+class DraftDriver:
     client: RushesClient
-    project_id: str
-    case_id: str
+    draft_id: str
     scenario: Scenario
     event_cursor: int = 0
     recent_events: list[SseEvent] = field(default_factory=list)
@@ -619,9 +598,8 @@ class CaseDriver:
     decision_rounds: int = 0
 
     def poll_events(self) -> None:
-        events = self.client.poll_case_events(
-            project_id=self.project_id,
-            case_id=self.case_id,
+        events = self.client.poll_draft_events(
+            draft_id=self.draft_id,
             last_event_id=self.event_cursor,
         )
         for event in events:
@@ -632,11 +610,11 @@ class CaseDriver:
                 self.recent_events = self.recent_events[-30:]
             stage_log(f"SSE {summarize_event(event)}")
 
-    def current_case(self) -> JsonObject:
-        return self.client.get_case(project_id=self.project_id, case_id=self.case_id)
+    def current_draft(self) -> JsonObject:
+        return self.client.get_draft(draft_id=self.draft_id)
 
-    def answer_current_decision(self, case_state: Mapping[str, Any]) -> bool:
-        decision = self.client.current_decision(project_id=self.project_id, case_id=self.case_id)
+    def answer_current_decision(self, draft_state: Mapping[str, Any]) -> bool:
+        decision = self.client.current_decision(draft_id=self.draft_id)
         if decision is None:
             return False
         self.decision_rounds += 1
@@ -644,7 +622,7 @@ class CaseDriver:
             raise RunError("decision 自动答复超过 20 轮，疑似死循环。")
         decision_type = str(decision.get("type") or "unknown")
         self.seen_decision_types.add(decision_type)
-        choice = choose_decision_answer(decision, scenario=self.scenario, case_state=case_state)
+        choice = choose_decision_answer(decision, scenario=self.scenario, draft_state=draft_state)
         decision_id = str(decision.get("decision_id") or "")
         stage_log(
             "自动回答 decision "
@@ -672,28 +650,30 @@ class CaseDriver:
         while time.monotonic() <= deadline:
             self.poll_events()
             self._raise_on_failed_job()
-            case_state = self.current_case()
-            if predicate(case_state):
-                stage_log(f"完成：{description}；{summarize_case_state(case_state)}")
-                return case_state
-            if self.answer_current_decision(case_state):
+            draft_state = self.current_draft()
+            if predicate(draft_state):
+                stage_log(f"完成：{description}；{summarize_draft_state(draft_state)}")
+                return draft_state
+            if self.answer_current_decision(draft_state):
                 last_nudge_at = time.monotonic()
                 time.sleep(0.5)
                 continue
-            if _case_last_error(case_state) is not None:
-                raise RunError(f"{description} 失败：{summarize_case_state(case_state)}")
-            if not _case_has_running_jobs(case_state) and time.monotonic() - last_nudge_at >= 20.0:
+            if _draft_last_error(draft_state) is not None:
+                raise RunError(f"{description} 失败：{summarize_draft_state(draft_state)}")
+            if (
+                not _draft_has_running_jobs(draft_state)
+                and time.monotonic() - last_nudge_at >= 20.0
+            ):
                 self.nudge(idle_nudge)
                 last_nudge_at = time.monotonic()
             time.sleep(poll_interval_s)
-        case_state = self.current_case()
-        raise RunError(self.timeout_diagnostic(description, case_state))
+        draft_state = self.current_draft()
+        raise RunError(self.timeout_diagnostic(description, draft_state))
 
     def nudge(self, content: str) -> None:
         stage_log(f"发送继续消息：{content}")
         self.client.enqueue_message(
-            project_id=self.project_id,
-            case_id=self.case_id,
+            draft_id=self.draft_id,
             content=content,
             message_id=unique_id("msg"),
         )
@@ -703,8 +683,8 @@ class CaseDriver:
         if missing:
             raise RunError(f"缺少期望 decision type：{', '.join(missing)}")
 
-    def timeout_diagnostic(self, description: str, case_state: Mapping[str, Any]) -> str:
-        lines = [f"{description} 超时。", summarize_case_state(case_state), "最近 SSE 事件："]
+    def timeout_diagnostic(self, description: str, draft_state: Mapping[str, Any]) -> str:
+        lines = [f"{description} 超时。", summarize_draft_state(draft_state), "最近 SSE 事件："]
         lines.extend(f"- {summarize_event(event)}" for event in self.recent_events[-10:])
         return "\n".join(lines)
 
@@ -920,13 +900,6 @@ def _skip_choice(options: Sequence[Mapping[str, Any]], reason: str) -> DecisionC
     return _natural_choice("跳过", {"enabled": False}, reason)
 
 
-def _reject_choice(options: Sequence[Mapping[str, Any]], reason: str) -> DecisionChoice:
-    option = _find_option(options, preferred_ids=("reject", "cancel", "no"))
-    if option is not None:
-        return _choice_from_option(option, reason)
-    return _natural_choice("取消", {"approved": False}, reason)
-
-
 def _natural_choice(free_text: str, payload: Mapping[str, Any], reason: str) -> DecisionChoice:
     return DecisionChoice(
         option_id=None,
@@ -955,20 +928,20 @@ def _option_payload(option: Mapping[str, Any]) -> JsonObject:
     return dict(payload) if isinstance(payload, Mapping) else {}
 
 
-def _case_timeline_version(case_state: Mapping[str, Any] | None) -> int | None:
-    if case_state is None:
+def _draft_timeline_version(draft_state: Mapping[str, Any] | None) -> int | None:
+    if draft_state is None:
         return None
-    value = case_state.get("timeline_current_version")
+    value = draft_state.get("timeline_current_version")
     return value if isinstance(value, int) else None
 
 
-def _case_has_running_jobs(case_state: Mapping[str, Any]) -> bool:
-    running = case_state.get("running_jobs")
+def _draft_has_running_jobs(draft_state: Mapping[str, Any]) -> bool:
+    running = draft_state.get("running_jobs")
     return isinstance(running, list) and bool(running)
 
 
-def _case_last_error(case_state: Mapping[str, Any]) -> Mapping[str, Any] | None:
-    error = case_state.get("last_error")
+def _draft_last_error(draft_state: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    error = draft_state.get("last_error")
     return error if isinstance(error, Mapping) else None
 
 

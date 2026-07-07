@@ -15,14 +15,14 @@ if __package__ in {None, ""}:
 from client import (
     DEFAULT_API_URL,
     DEFAULT_TOKEN,
-    CaseDriver,
+    DraftDriver,
     RunError,
     RushesClient,
     ffprobe_duration_s,
     load_dotenv,
     stage_log,
     start_autostart,
-    summarize_case_state,
+    summarize_draft_state,
     unique_id,
 )
 
@@ -93,45 +93,36 @@ def _run(
     out_dir: Path,
     args: argparse.Namespace,
 ) -> int:
-    project_id = unique_id("m9_scenery_project")
-    case_id = unique_id("m9_scenery_case")
+    draft_id = unique_id("m9_scenery_draft")
     stage_log(
-        f"风景混剪：创建项目、导入 {len(footage)} 段素材" + ("（含 BGM）" if bgm_path else "")
+        f"风景混剪：创建草稿、导入 {len(footage)} 段素材" + ("（含 BGM）" if bgm_path else "")
     )
-    client.create_project(project_id=project_id, name="M9 风景混剪")
+    client.create_draft(
+        draft_id=draft_id,
+        name="M9 风景混剪",
+        goal="用风景素材剪一条约 30 秒的静音混剪，配上传的 BGM，无配音无字幕。",
+    )
 
-    imported: list[str] = []
     for index, path in enumerate(footage, start=1):
         asset_id = unique_id(f"asset_scenery_{index:02d}")
         client.import_local_material(
-            project_id=project_id,
+            draft_id=draft_id,
             asset_id=asset_id,
             path=path,
         )
-        imported.append(asset_id)
         stage_log(f"已导入素材 {index}/{len(footage)}：{path.name}")
     if bgm_path is not None:
         bgm_asset_id = unique_id("asset_bgm")
         client.import_local_material(
-            project_id=project_id,
+            draft_id=draft_id,
             asset_id=bgm_asset_id,
             path=bgm_path,
         )
         stage_log(f"已导入 BGM：{bgm_path.name}")
 
-    client.create_case(
-        project_id=project_id,
-        case_id=case_id,
-        name="风景混剪",
-        goal="用风景素材剪一条约 30 秒的静音混剪，配上传的 BGM，无配音无字幕。",
-    )
-    for asset_id in imported:
-        client.select_case_asset(project_id=project_id, case_id=case_id, asset_id=asset_id)
-
-    driver = CaseDriver(client=client, project_id=project_id, case_id=case_id, scenario="scenery")
+    driver = DraftDriver(client=client, draft_id=draft_id, scenario="scenery")
     client.enqueue_message(
-        project_id=project_id,
-        case_id=case_id,
+        draft_id=draft_id,
         content=(
             "把这些风景素材剪成一条 30 秒左右的混剪。不需要配音（静音处理），"
             "挑画面质量好的片段，节奏明快一点，先给我预览。"
@@ -144,11 +135,11 @@ def _run(
         lambda state: _audio_mode(state) == "silent" or _timeline_version(state) is not None,
         timeout_s=args.llm_timeout + args.job_timeout,
         idle_nudge=(
-            "请检查当前 case 状态（素材理解摘要/audio_plan/后台任务结果），"
+            "请检查当前草稿状态（素材理解摘要/audio_plan/后台任务结果），"
             "只做尚未完成的下一步，不要重复已完成的步骤。"
         ),
     )
-    case = driver.wait_until(
+    draft = driver.wait_until(
         "素材理解、timeline 与预览完成",
         lambda state: (
             _timeline_version(state) is not None
@@ -156,34 +147,33 @@ def _run(
         ),
         timeout_s=args.llm_timeout + args.job_timeout + args.render_timeout,
         idle_nudge=(
-            "请检查当前 case 状态，素材摘要就绪后用 timeline.compose_initial 组装初剪并完成"
+            "请检查当前草稿状态，素材摘要就绪后用 timeline.compose_initial 组装初剪并完成"
             "预览渲染，不要重复已完成的步骤。"
         ),
     )
-    preview_id = _string_field(case, "preview_current_id")
+    preview_id = _string_field(draft, "preview_current_id")
     if preview_id is not None:
-        client.mark_preview_viewed(project_id=project_id, case_id=case_id, preview_id=preview_id)
+        client.mark_preview_viewed(draft_id=draft_id, preview_id=preview_id)
         stage_log(f"已标记预览已观看：{preview_id}")
 
     client.enqueue_message(
-        project_id=project_id,
-        case_id=case_id,
+        draft_id=draft_id,
         content="预览可以。跳过字幕，BGM 用我上传的那首，然后导出 MP4。",
         message_id=unique_id("msg"),
     )
-    final_case = driver.wait_until(
+    final_draft = driver.wait_until(
         "BGM 合成与最终导出",
         lambda state: _string_field(state, "export_current_id") is not None,
         timeout_s=args.llm_timeout + args.render_timeout + args.job_timeout,
         idle_nudge=(
-            "请检查当前 case 状态，按已确认结果完成 BGM patch 与最终导出，不要重复已完成的步骤。"
+            "请检查当前草稿状态，按已确认结果完成 BGM patch 与最终导出，不要重复已完成的步骤。"
         ),
     )
 
-    export_id = _string_field(final_case, "export_current_id")
+    export_id = _string_field(final_draft, "export_current_id")
     if export_id is None:
-        raise RunError(f"导出完成但缺少 export_current_id：{summarize_case_state(final_case)}")
-    output_path = out_dir / f"{case_id}_{export_id}.mp4"
+        raise RunError(f"导出完成但缺少 export_current_id：{summarize_draft_state(final_draft)}")
+    output_path = out_dir / f"{draft_id}_{export_id}.mp4"
     client.download_export(export_id=export_id, output_path=output_path)
     duration = ffprobe_duration_s(output_path)
     if duration <= 5.0:
@@ -192,21 +182,21 @@ def _run(
     return 0
 
 
-def _audio_mode(case_state: JsonMap) -> str | None:
-    audio_plan = case_state.get("audio_plan")
+def _audio_mode(draft_state: JsonMap) -> str | None:
+    audio_plan = draft_state.get("audio_plan")
     if not isinstance(audio_plan, Mapping):
         return None
     value = audio_plan.get("mode")
     return str(value) if value is not None else None
 
 
-def _timeline_version(case_state: JsonMap) -> int | None:
-    value = case_state.get("timeline_current_version")
+def _timeline_version(draft_state: JsonMap) -> int | None:
+    value = draft_state.get("timeline_current_version")
     return value if type(value) is int else None
 
 
-def _string_field(case_state: JsonMap, key: str) -> str | None:
-    value = case_state.get(key)
+def _string_field(draft_state: JsonMap, key: str) -> str | None:
+    value = draft_state.get(key)
     return value if isinstance(value, str) and value else None
 
 
