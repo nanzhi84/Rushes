@@ -41,64 +41,64 @@ describe("ProjectMaterialsView", () => {
     expect(await screen.findByText("root.mp4")).toBeTruthy();
   });
 
-  it("文件夹选择经分片上传携带 rel_dir", async () => {
-    const fetchMock = stubFetch({ assets: [] });
+  it("原生对话框可用时走 reference 原地导入而非上传", async () => {
+    const fetchMock = stubFetch({
+      assets: [],
+      pickResponse: { available: true, paths: ["/Users/me/素材A"] }
+    });
     renderMaterials();
 
-    const input = (await screen.findByLabelText("选择素材文件夹")) as HTMLInputElement;
-    const file = new File(["clip-bytes"], "a.mp4", { type: "video/mp4" });
-    Object.defineProperty(file, "webkitRelativePath", { value: "素材A/视频/a.mp4" });
-    fireEvent.change(input, { target: { files: [file] } });
+    fireEvent.click(await screen.findByText("＋ 导入素材"));
 
     await waitFor(() => {
-      const complete = fetchMock.mock.calls.find(([url]) =>
-        String(url).endsWith("/complete")
+      const call = fetchMock.mock.calls.find(([url]) =>
+        String(url).endsWith("/materials/import-local")
       );
-      expect(complete).toBeTruthy();
-      expect(JSON.parse(String(complete?.[1]?.body))).toEqual({
-        project_id: "project_1",
-        rel_dir: "素材A/视频"
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+        paths: ["/Users/me/素材A"],
+        storage_mode: "reference"
       });
     });
-    const init = fetchMock.mock.calls.find(([url]) => String(url) === "/api/uploads/init");
-    expect(JSON.parse(String(init?.[1]?.body))).toMatchObject({ filename: "a.mp4" });
-  });
-
-  it("Finder 多选文件走上传且散文件不带 rel_dir", async () => {
-    const fetchMock = stubFetch({ assets: [] });
-    renderMaterials();
-
-    const input = (await screen.findByLabelText("选择素材文件")) as HTMLInputElement;
-    fireEvent.change(input, {
-      target: { files: [new File(["x"], "b.mov", { type: "video/quicktime" })] }
-    });
-
-    await waitFor(() => {
-      const complete = fetchMock.mock.calls.find(([url]) =>
-        String(url).endsWith("/complete")
-      );
-      expect(complete).toBeTruthy();
-      expect(JSON.parse(String(complete?.[1]?.body))).toEqual({
-        project_id: "project_1",
-        rel_dir: null
-      });
-    });
-  });
-
-  it("不支持的扩展名在前端被跳过并提示，不发起上传", async () => {
-    const fetchMock = stubFetch({ assets: [] });
-    renderMaterials();
-
-    const input = (await screen.findByLabelText("选择素材文件")) as HTMLInputElement;
-    fireEvent.change(input, {
-      target: { files: [new File(["t"], "notes.txt", { type: "text/plain" })] }
-    });
-
-    expect(await screen.findByText(/已跳过 1 个不支持的文件：notes.txt/)).toBeTruthy();
     expect(
       fetchMock.mock.calls.find(([url]) => String(url).includes("/api/uploads/init"))
     ).toBeFalsy();
   });
+
+  it("原生对话框不可用时提示改走对话导入，不发起任何导入请求", async () => {
+    const fetchMock = stubFetch({
+      assets: [],
+      pickResponse: { available: false, paths: [] }
+    });
+    renderMaterials();
+
+    fireEvent.click(await screen.findByText("＋ 导入素材"));
+
+    expect(await screen.findByText(/当前环境无法弹出系统选择框/)).toBeTruthy();
+    expect(
+      fetchMock.mock.calls.find(([url]) => String(url).endsWith("/materials/import-local"))
+    ).toBeFalsy();
+    expect(
+      fetchMock.mock.calls.find(([url]) => String(url).includes("/api/uploads/init"))
+    ).toBeFalsy();
+  });
+
+  it("导入响应的 skipped/duplicates 在面板提示", async () => {
+    stubFetch({
+      assets: [],
+      pickResponse: { available: true, paths: ["/Users/me/素材A"] },
+      importResponse: { skipped: ["notes.txt"], duplicates: ["a.mp4"], asset_ids: ["a9"] }
+    });
+    renderMaterials();
+
+    fireEvent.click(await screen.findByText("＋ 导入素材"));
+
+    expect(await screen.findByText(/已跳过 1 个不支持的文件/)).toBeTruthy();
+    expect(await screen.findByText(/1 个文件已在素材库中/)).toBeTruthy();
+  });
+
+
+
 
   it("瓦片菜单可禁用素材", async () => {
     const fetchMock = stubFetch({
@@ -207,11 +207,15 @@ type StubOptions = {
   assets: MaterialAsset[];
   importResponse?: Record<string, unknown>;
   summary?: Record<string, unknown>;
+  pickResponse?: Record<string, unknown>;
 };
 
 function stubFetch(options: StubOptions): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url.endsWith("/api/fs/pick")) {
+      return jsonResponse(options.pickResponse ?? { available: false, paths: [] });
+    }
     if (url === "/api/uploads/init") {
       return jsonResponse(
         {

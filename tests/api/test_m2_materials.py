@@ -1232,3 +1232,33 @@ def test_upload_complete_stores_rel_dir_for_folder_upload(tmp_path: Path) -> Non
     asset = materials.json()["assets"][0]
     assert asset["filename"] == "clip.mp4"
     assert asset["rel_dir"] == "素材A/视频"
+
+
+def test_fs_pick_returns_native_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import apps.api.main as api_main
+
+    app = _app(tmp_path)
+    client = _client(app)
+    monkeypatch.setattr(api_main, "_native_picker_available", lambda: True)
+    monkeypatch.setattr(api_main, "_run_native_picker", lambda mode: [f"/tmp/{mode}/clip.mp4"])
+
+    response = client.post("/api/fs/pick", headers=AUTH, json={"mode": "files"})
+
+    assert response.status_code == 200
+    assert response.json() == {"available": True, "paths": ["/tmp/files/clip.mp4"]}
+
+
+def test_fs_pick_cancel_and_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import apps.api.main as api_main
+
+    app = _app(tmp_path)
+    client = _client(app)
+
+    monkeypatch.setattr(api_main, "_native_picker_available", lambda: True)
+    monkeypatch.setattr(api_main, "_run_native_picker", lambda mode: [])
+    cancelled = client.post("/api/fs/pick", headers=AUTH, json={"mode": "folder"})
+    assert cancelled.json() == {"available": True, "paths": []}
+
+    monkeypatch.setattr(api_main, "_native_picker_available", lambda: False)
+    unavailable = client.post("/api/fs/pick", headers=AUTH, json={"mode": "files"})
+    assert unavailable.json() == {"available": False, "paths": []}
