@@ -299,11 +299,15 @@ def _request_token(request: Request) -> str | None:
 
 
 def _allows_query_token(request: Request) -> bool:
-    """SSE 与只读媒体流允许 query token：浏览器原生 EventSource/<img>/<video> 设不了 header。"""
+    """SSE 与只读媒体流允许 query token：浏览器原生 EventSource/<img>/<video> 设不了 header。
+
+    HEAD 与 GET 同权：播放器（vidstack 等）加载媒体源前会先 HEAD 探测 Content-Type，
+    只放 GET 会让探测 401、播放器判定无 loader 而黑屏。
+    """
     path = request.url.path
     if _is_sse_endpoint(path):
         return True
-    return request.method.upper() == "GET" and _is_media_endpoint(path)
+    return request.method.upper() in {"GET", "HEAD"} and _is_media_endpoint(path)
 
 
 def _content_type_refusal_reason(request: Request) -> SecurityReason | None:

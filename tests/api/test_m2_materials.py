@@ -711,6 +711,27 @@ def test_media_thumbnail_accepts_query_token_like_browser_img(tmp_path: Path) ->
     assert bad_token.json()["reason"] == "bad_token"
 
 
+def test_media_head_accepts_query_token_like_player_probe(tmp_path: Path) -> None:
+    """播放器加载媒体源前先 HEAD 探测 Content-Type：HEAD 必须与 GET 同权吃
+    query token（且路由注册 HEAD），否则探测 401/405、预览黑屏。"""
+    app = _app(tmp_path)
+    client = _client(app)
+    _seed_draft(_engine(app))
+    _seed_indexed_asset(
+        app,
+        asset_id="asset_thumb",
+        thumbnail_bytes=b"\xff\xd8\xff\xe0jpeg-body",
+        duration_sec=12.5,
+    )
+
+    head_ok = client.head("/api/media/asset_thumb/thumbnail", params={"token": TOKEN})
+    head_no_token = client.head("/api/media/asset_thumb/thumbnail")
+
+    assert head_ok.status_code == 200
+    assert head_ok.content == b""
+    assert head_no_token.status_code == 401
+
+
 def test_query_token_not_accepted_outside_sse_and_media(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)

@@ -1001,8 +1001,9 @@ def _register_routes(app: FastAPI) -> None:
             )
         return {"job_id": job_id, "status": "cancelled", "event_ids": _event_ids(result)}
 
-    @app.get(
+    @app.api_route(
         "/api/media/{asset_id}/proxy",
+        methods=["GET", "HEAD"],  # 播放器加载源前会 HEAD 探测 Content-Type，与 GET 同权
         response_class=StreamingResponse,
         responses=_response_docs(not_found=True),
     )
@@ -1011,8 +1012,9 @@ def _register_routes(app: FastAPI) -> None:
         proxy_path = _require_proxy_path(state.engine, state.workspace_paths, asset_id)
         return _range_response(proxy_path, request)
 
-    @app.get(
+    @app.api_route(
         "/api/media/{asset_id}/thumbnail",
+        methods=["GET", "HEAD"],  # 播放器加载源前会 HEAD 探测 Content-Type，与 GET 同权
         response_class=Response,
         responses=_response_docs(not_found=True),
     )
@@ -1021,8 +1023,9 @@ def _register_routes(app: FastAPI) -> None:
         thumbnail_path = _require_thumbnail_path(state.engine, state.workspace_paths, asset_id)
         return Response(content=thumbnail_path.read_bytes(), media_type="image/jpeg")
 
-    @app.get(
+    @app.api_route(
         "/api/media/preview/{preview_id}",
+        methods=["GET", "HEAD"],  # 播放器加载源前会 HEAD 探测 Content-Type，与 GET 同权
         response_class=StreamingResponse,
         responses=_response_docs(not_found=True),
     )
@@ -1031,8 +1034,9 @@ def _register_routes(app: FastAPI) -> None:
         preview_path = _require_preview_path(state.engine, state.workspace_paths, preview_id)
         return _range_response(preview_path, request)
 
-    @app.get(
+    @app.api_route(
         "/api/media/export/{export_id}",
+        methods=["GET", "HEAD"],  # 播放器加载源前会 HEAD 探测 Content-Type，与 GET 同权
         response_class=StreamingResponse,
         responses=_response_docs(not_found=True),
     )

@@ -135,11 +135,11 @@ export function AssetsPanel({
         <span className="text-sm font-semibold text-fg">
           素材 <span className="font-normal text-fg-muted">{assets.length}</span>
         </span>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           {picking ? <span className="text-xs text-fg-muted">等待选择…</span> : null}
           {management ? (
             <button
-              className="flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs text-fg-muted transition-colors ease-standard hover:bg-hover disabled:opacity-40"
+              className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line px-2.5 py-1.5 text-xs text-fg-muted transition-colors ease-standard hover:bg-hover disabled:opacity-40"
               type="button"
               disabled={revalidateMaterials.isPending}
               onClick={() => revalidateMaterials.mutate()}
@@ -149,7 +149,7 @@ export function AssetsPanel({
             </button>
           ) : null}
           <button
-            className="flex items-center gap-1.5 rounded-md bg-raised px-2.5 py-1.5 text-xs font-medium text-fg transition-colors ease-standard hover:bg-hover disabled:opacity-40"
+            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-raised px-2.5 py-1.5 text-xs font-medium text-fg transition-colors ease-standard hover:bg-hover disabled:opacity-40"
             type="button"
             disabled={picking}
             onClick={() => void pickAndImport("folder")}
@@ -158,7 +158,7 @@ export function AssetsPanel({
             导入文件夹
           </button>
           <button
-            className="flex items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-white transition-colors ease-standard hover:bg-accent-strong disabled:opacity-40"
+            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-white transition-colors ease-standard hover:bg-accent-strong disabled:opacity-40"
             type="button"
             disabled={picking}
             onClick={() => void pickAndImport("files")}
