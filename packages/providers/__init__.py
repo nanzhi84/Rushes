@@ -5,7 +5,7 @@ from .capabilities import (
     LLM_CHAT,
     RERANK_TEXT,
     TTS_SPEECH,
-    VLM_ANNOTATION,
+    VLM_UNDERSTANDING,
     ProviderAdapter,
     ProviderRequest,
 )
@@ -18,7 +18,7 @@ __all__ = [
     "LLM_CHAT",
     "RERANK_TEXT",
     "TTS_SPEECH",
-    "VLM_ANNOTATION",
+    "VLM_UNDERSTANDING",
     "GatewayLLMPlanner",
     "PlannerToolCall",
     "ProviderAdapter",

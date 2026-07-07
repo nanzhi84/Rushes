@@ -33,7 +33,7 @@ from contracts.events import (
 from contracts.tool_result import ToolError, ToolResult
 from contracts.transcript import TranscriptDocument
 from providers import (
-    VLM_ANNOTATION,
+    VLM_UNDERSTANDING,
     ProviderGateway,
     ProviderRegistry,
     ProviderRequest,
@@ -273,7 +273,7 @@ def _make_spec(
 
     async def _vlm(messages: list[dict[str, Any]]) -> dict[str, Any]:
         request = ProviderRequest(
-            capability=VLM_ANNOTATION,
+            capability=VLM_UNDERSTANDING,
             request_id=f"understand_vlm_{info.asset_id}_{uuid4().hex}",
             case_id=case_id,
             model=model,

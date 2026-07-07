@@ -186,7 +186,7 @@ def test_cost_routes_and_project_page_aggregate_provider_calls(tmp_path: Path) -
     project_costs = project_page.json()["costs"]
     assert project_costs["provider_call_count"] == 3
     assert project_costs["total_cost_estimate"] == 2.0
-    assert project_costs["by_capability"] == {"llm.chat": 0.25, "vlm.annotation": 1.75}
+    assert project_costs["by_capability"] == {"llm.chat": 0.25, "vlm.understanding": 1.75}
     assert missing_case.status_code == 404
 
 
@@ -721,7 +721,7 @@ def _insert_provider_cost_rows(engine: Engine) -> None:
             {
                 "call_id": "call_case_2",
                 "provider_id": "slow",
-                "capability": "vlm.annotation",
+                "capability": "vlm.understanding",
                 "model": "vlm",
                 "case_id": "case_2",
                 "job_id": None,
@@ -733,7 +733,7 @@ def _insert_provider_cost_rows(engine: Engine) -> None:
             {
                 "call_id": "call_project_job",
                 "provider_id": "slow",
-                "capability": "vlm.annotation",
+                "capability": "vlm.understanding",
                 "model": "vlm",
                 "case_id": None,
                 "job_id": "job_project",

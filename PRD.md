@@ -90,7 +90,7 @@
 | 素材管理入口 | Project 级素材页面 | `/projects/:projectId/materials` |
 | Case 节点 | Case Agent Console | `/projects/:projectId/cases/:caseId` |
 
-树中只展示 Project 和 Case 两级；Assets、Memories、Indexes、Exports 是数据库对象，不作树节点。Case ID 数据库内全局唯一，但路由保留 Project 上下文，使文件树、面包屑和检索作用域一致。
+树中只展示 Project 和 Case 两级；Assets、Memories、Indexes、Exports 是数据库对象，不作树节点。Case ID 数据库内全局唯一，但路由保留 Project 上下文，使文件树、面包屑和数据查询作用域一致。
 
 ### 2.2 用户可见操作
 
@@ -181,7 +181,7 @@ flowchart TB
   end
 
   subgraph Providers["ProviderGateway（OpenAI-compatible 第一类接口）"]
-    LLMP["llm.chat / vlm.annotation<br/>vlm 供理解子代理看帧"]
+    LLMP["llm.chat / vlm.understanding<br/>vlm 供理解子代理看帧"]
     ASRP["asr.transcribe 云端<br/>阿里 Paraformer-v2 默认"]
     TTSP["tts.speech<br/>火山引擎唯一"]
   end
@@ -1404,7 +1404,7 @@ flowchart TB
 | **首次理解** | 主代理调 `understand.materials`（无 focus） | 子代理按需自选时间点抽帧 | 多模态 profile（qwen-vl 系） | MaterialSummary v1：semantic_role、overall、带时间戳 segments（含 quality） | 只对被用到的素材；命中缓存不重算 |
 | **focus 深挖** | 主代理带 `focus` 再调 | 针对 focus 关注点加密看帧 | 同上 | 带旧摘要增量深挖，version+1 | 只在需要更细信息时 |
 
-Project 设置页显示累计理解/ASR 成本（来自 provider_calls，capability=vlm.annotation / asr.transcribe）。
+Project 设置页显示累计理解/ASR 成本（来自 provider_calls，capability=vlm.understanding / asr.transcribe）。
 
 ## 9. 音频策略（云端 ASR 定稿）
 
@@ -1718,7 +1718,7 @@ Media
   Silero VAD v6 (ONNX)      唯一本地模型（便宜索引语音区间 + ASR 前置）
 
 Providers（全部经 ProviderGateway，OpenAI-compatible 第一类接口）
-  llm.chat / vlm.annotation  OpenAI 兼容端点（任意厂商可配；vlm 供理解子代理看帧）
+  llm.chat / vlm.understanding  OpenAI 兼容端点（任意厂商可配；vlm 供理解子代理看帧）
   asr.transcribe             云端: 阿里百炼 Paraformer-v2 默认；火山/腾讯备选
   tts.speech                 火山引擎唯一（字/词级时间戳）
 
@@ -1917,7 +1917,7 @@ class ProviderDescriptor(BaseModel):
     display_name: str
     version: str
     capabilities: list[Literal[
-        "llm.chat","vlm.annotation",
+        "llm.chat","vlm.understanding",
         "asr.transcribe","tts.speech","rerank.text",
     ]]
     config_model: type[BaseModel]

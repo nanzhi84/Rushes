@@ -14,7 +14,7 @@ from typing import Any, Literal, cast
 from contracts.provider import ProviderResult
 from contracts.timeline import TimelineMediaClip, TimelineState
 from contracts.tool_result import ToolError, ToolResult
-from providers import VLM_ANNOTATION, ProviderRequest
+from providers import VLM_UNDERSTANDING, ProviderRequest
 from storage.workspace_paths import WorkspacePaths, resolve_asset_path
 from timeline import get_timeline_version
 from tools.context import ToolExecutionContext
@@ -147,7 +147,7 @@ def view_frames(input_model: MediaViewFramesInput, context: ToolExecutionContext
         )
 
     request = ProviderRequest(
-        capability=VLM_ANNOTATION,
+        capability=VLM_UNDERSTANDING,
         request_id=f"view_frames_{context.tool_call_id}",
         case_id=case_state.case_id,
         payload={
@@ -458,7 +458,7 @@ def _degraded_result(
             "case_id": case_id,
             "question": question,
             "frames": frames,
-            "degraded": {"capability": VLM_ANNOTATION, "reason": reason},
+            "degraded": {"capability": VLM_UNDERSTANDING, "reason": reason},
             "overall_answer": reason,
         },
     )

@@ -18,7 +18,7 @@ from contracts.case import CaseState
 from contracts.provider import ProviderDescriptor
 from contracts.tool import ToolSpec
 from contracts.tool_result import ToolResult
-from providers.capabilities import LLM_CHAT, VLM_ANNOTATION, ProviderRequest
+from providers.capabilities import LLM_CHAT, VLM_UNDERSTANDING, ProviderRequest
 from providers.gateway import ProviderGateway
 from providers.mock import MockProvider
 from providers.registry import ProviderRegistry
@@ -54,8 +54,8 @@ class GoldenCase:
     expected_tool_trace: Sequence[ExpectedToolTrace]
     assertions: GoldenAssertions
     registry_factory: Callable[[], ToolRegistry] = build_default_tool_registry
-    # VLM_ANNOTATION 脚本项（形如 {"content": "<动作 JSON 串>"}），供理解子代理消费。
-    # 非空时同一 MockProvider 兼跑 LLM_CHAT + VLM_ANNOTATION，网关作为 tool_gateway 注入。
+    # VLM_UNDERSTANDING 脚本项（形如 {"content": "<动作 JSON 串>"}），供理解子代理消费。
+    # 非空时同一 MockProvider 兼跑 LLM_CHAT + VLM_UNDERSTANDING，网关作为 tool_gateway 注入。
     vlm_script: Sequence[dict[str, Any]] = ()
 
 
@@ -119,8 +119,8 @@ class GoldenExecutor:
         scripts: dict[Any, list[dict[str, Any]]] = {LLM_CHAT: list(case.provider_script)}
         capabilities = [LLM_CHAT]
         if case.vlm_script:
-            scripts[VLM_ANNOTATION] = list(case.vlm_script)
-            capabilities.append(VLM_ANNOTATION)
+            scripts[VLM_UNDERSTANDING] = list(case.vlm_script)
+            capabilities.append(VLM_UNDERSTANDING)
         provider = MockProvider(scripts=scripts)
         provider_registry = ProviderRegistry()
         provider_registry.register(
