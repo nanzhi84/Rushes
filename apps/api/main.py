@@ -268,6 +268,8 @@ class UploadCompleteRequest(BaseModel):
 
     project_id: str | None = None
     asset_id: str | None = None
+    # 文件夹上传（webkitdirectory / 拖拽目录）时的相对子路径，素材面板按它分组。
+    rel_dir: str | None = None
 
 
 def create_app(
@@ -1431,6 +1433,7 @@ def _register_routes(app: FastAPI) -> None:
                 path=str(merged_path),
                 filename=str(manifest["filename"]),
                 kind=kind,
+                rel_dir=payload.rel_dir,
             ),
             actor="user",
         )

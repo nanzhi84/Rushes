@@ -176,6 +176,8 @@ class AssetUploadCompleteInput(BaseModel):
     path: str
     filename: str | None = None
     kind: AssetKind = AssetKind.VIDEO
+    # 文件夹上传时相对所选目录的子路径（含目录名），素材面板按它分组展示。
+    rel_dir: str | None = None
 
 
 class AssetImportLocalFileInput(BaseModel):

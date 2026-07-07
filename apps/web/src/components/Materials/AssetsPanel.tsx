@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
-import type { ReactElement } from "react";
+import { useMemo, useRef, useState } from "react";
+import type { ChangeEvent, DragEvent, ReactElement } from "react";
 import { api, type MaterialAsset } from "../../api/client";
 import { queryKeys } from "../../app/query_client";
 import { FsBrowserDialog } from "./FsBrowserDialog";
@@ -19,7 +19,19 @@ type AssetsPanelProps = {
   gridClassName?: string;
 };
 
-/** 素材面板：文件夹分组网格 + 单一「本地导入」入口；工作台与项目详情共用。 */
+type ImportCandidate = {
+  file: File;
+  /** 文件夹导入时相对所选目录的子路径（含目录名）；散文件为 null。 */
+  relDir: string | null;
+};
+
+type UploadProgress = {
+  total: number;
+  done: number;
+  currentName: string;
+};
+
+/** 素材面板：文件夹分组网格 + 原生选择/拖拽导入；工作台与项目详情共用。 */
 export function AssetsPanel({
   projectId,
   onPreviewAsset,
@@ -29,13 +41,15 @@ export function AssetsPanel({
   gridClassName
 }: AssetsPanelProps): ReactElement {
   const queryClient = useQueryClient();
-  const [browserOpen, setBrowserOpen] = useState(false);
   const [currentDir, setCurrentDir] = useState("");
+  const [dragging, setDragging] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [skippedFiles, setSkippedFiles] = useState<string[]>([]);
   const [failedFiles, setFailedFiles] = useState<string[]>([]);
-  const [duplicateFiles, setDuplicateFiles] = useState<string[]>([]);
   const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
   const [relocatingAsset, setRelocatingAsset] = useState<MaterialAsset | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   const materialsQuery = useQuery({
     queryKey: queryKeys.materials(projectId),
@@ -48,16 +62,94 @@ export function AssetsPanel({
     await queryClient.invalidateQueries({ queryKey: queryKeys.materials(projectId) });
   };
 
-  const importLocal = useMutation({
-    mutationFn: (paths: string[]) =>
-      api.importLocalMaterial(projectId, { paths, storage_mode: "reference" }),
-    onSuccess: async (response) => {
-      setSkippedFiles(response.skipped ?? []);
-      setFailedFiles(response.failed ?? []);
-      setDuplicateFiles(response.duplicates ?? []);
-      await invalidateMaterials();
+  const importing = uploadProgress !== null;
+
+  /** 逐文件分片上传；单个失败不影响后续，逐个完成即时刷新列表。 */
+  async function importCandidates(candidates: ImportCandidate[]): Promise<void> {
+    const supported: ImportCandidate[] = [];
+    const skipped: string[] = [];
+    for (const candidate of candidates) {
+      if (isHiddenPath(candidate)) {
+        continue;
+      }
+      if (!SUPPORTED_SUFFIXES.has(suffixOf(candidate.file.name))) {
+        skipped.push(candidate.file.name);
+        continue;
+      }
+      supported.push(candidate);
     }
-  });
+    setSkippedFiles(skipped);
+    setFailedFiles([]);
+    if (supported.length === 0) {
+      return;
+    }
+    const failed: string[] = [];
+    for (const [index, candidate] of supported.entries()) {
+      setUploadProgress({
+        total: supported.length,
+        done: index,
+        currentName: candidate.file.name
+      });
+      try {
+        await uploadOne(candidate);
+        await invalidateMaterials();
+      } catch {
+        failed.push(candidate.file.name);
+      }
+    }
+    setUploadProgress(null);
+    setFailedFiles(failed);
+  }
+
+  async function uploadOne({ file, relDir }: ImportCandidate): Promise<void> {
+    const init = await api.initUpload({
+      project_id: projectId,
+      filename: file.name,
+      size: file.size
+    });
+    const partCount = Math.max(1, Math.ceil(file.size / UPLOAD_CHUNK_SIZE));
+    for (let index = 0; index < partCount; index += 1) {
+      const start = index * UPLOAD_CHUNK_SIZE;
+      const end = Math.min(file.size, start + UPLOAD_CHUNK_SIZE);
+      const partUrl = init.part_url_template.replace("{part_number}", String(index + 1));
+      await api.uploadPart(partUrl, file.slice(start, end));
+    }
+    await api.completeUpload(init.complete_url, {
+      project_id: projectId,
+      rel_dir: relDir
+    });
+  }
+
+  const handleFilesPicked = (event: ChangeEvent<HTMLInputElement>): void => {
+    const files = event.currentTarget.files;
+    if (files && files.length > 0) {
+      void importCandidates(Array.from(files).map((file) => ({ file, relDir: null })));
+    }
+    event.currentTarget.value = "";
+  };
+
+  const handleFolderPicked = (event: ChangeEvent<HTMLInputElement>): void => {
+    const files = event.currentTarget.files;
+    if (files && files.length > 0) {
+      void importCandidates(
+        Array.from(files).map((file) => ({ file, relDir: relDirFromRelativePath(file) }))
+      );
+    }
+    event.currentTarget.value = "";
+  };
+
+  const handleDrop = (event: DragEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    setDragging(false);
+    if (importing) {
+      return;
+    }
+    void collectDroppedCandidates(event.dataTransfer).then((candidates) => {
+      if (candidates.length > 0) {
+        void importCandidates(candidates);
+      }
+    });
+  };
 
   const unlinkMaterial = useMutation({
     mutationFn: (asset: MaterialAsset) =>
@@ -94,7 +186,7 @@ export function AssetsPanel({
     ? (assets.find((asset) => asset.asset_id === activeAssetId) ?? null)
     : null;
   const actionPending =
-    importLocal.isPending ||
+    importing ||
     unlinkMaterial.isPending ||
     patchMaterial.isPending ||
     revalidateMaterials.isPending;
@@ -106,6 +198,11 @@ export function AssetsPanel({
           素材 <span className="font-normal text-fg-muted">{assets.length}</span>
         </span>
         <div className="flex items-center gap-2">
+          {uploadProgress ? (
+            <span className="text-xs tabular-nums text-fg-muted">
+              导入中 {uploadProgress.done + 1}/{uploadProgress.total}
+            </span>
+          ) : null}
           {management ? (
             <button
               className="rounded-md border border-line px-2.5 py-1.5 text-xs text-fg-muted hover:bg-hover disabled:opacity-40"
@@ -119,13 +216,39 @@ export function AssetsPanel({
           <button
             className="rounded-md bg-raised px-2.5 py-1.5 text-xs font-medium text-fg hover:bg-hover disabled:opacity-40"
             type="button"
-            disabled={importLocal.isPending}
-            onClick={() => setBrowserOpen(true)}
+            disabled={importing}
+            onClick={() => folderInputRef.current?.click()}
           >
-            {importLocal.isPending ? "导入中…" : "＋ 本地导入"}
+            导入文件夹
+          </button>
+          <button
+            className="rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-white hover:bg-accent-strong disabled:opacity-40"
+            type="button"
+            disabled={importing}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            ＋ 导入素材
           </button>
         </div>
       </header>
+
+      <input
+        ref={fileInputRef}
+        aria-label="选择素材文件"
+        className="sr-only"
+        multiple
+        type="file"
+        accept={FILE_ACCEPT}
+        onChange={handleFilesPicked}
+      />
+      <input
+        ref={folderInputRef}
+        aria-label="选择素材文件夹"
+        className="sr-only"
+        type="file"
+        onChange={handleFolderPicked}
+        {...FOLDER_INPUT_PROPS}
+      />
 
       {currentDir !== "" ? (
         <nav
@@ -154,7 +277,17 @@ export function AssetsPanel({
         </nav>
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+      <div
+        className={`min-h-0 flex-1 overflow-y-auto p-3 transition-colors ${
+          dragging ? "bg-accent/10" : ""
+        }`}
+        onDragOver={(event) => {
+          event.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={handleDrop}
+      >
         {materialsQuery.isLoading ? (
           <p className="text-sm text-fg-muted">正在读取素材</p>
         ) : materialsQuery.error ? (
@@ -165,9 +298,9 @@ export function AssetsPanel({
           <button
             className="grid w-full place-items-center rounded-lg border border-dashed border-line-strong px-4 py-10 text-center text-sm text-fg-muted hover:border-accent"
             type="button"
-            onClick={() => setBrowserOpen(true)}
+            onClick={() => fileInputRef.current?.click()}
           >
-            还没有素材，点击本地导入。可以直接选整个素材文件夹。
+            还没有素材。点击从 Finder 选择，或直接把文件/文件夹拖进来。
           </button>
         ) : (
           <div className={gridClassName ?? "grid grid-cols-2 gap-2 xl:grid-cols-3"}>
@@ -211,20 +344,10 @@ export function AssetsPanel({
             {skippedFiles.length > 5 ? " 等" : ""}
           </p>
         ) : null}
-        {duplicateFiles.length > 0 ? (
-          <p className="mt-3 rounded-md border border-line bg-raised px-3 py-2 text-xs text-fg-muted">
-            {duplicateFiles.length} 个文件已在素材库中，未重复导入。
-          </p>
-        ) : null}
         {failedFiles.length > 0 ? (
           <p className="mt-3 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
             {failedFiles.length} 个文件导入失败：{failedFiles.slice(0, 5).join("、")}
             {failedFiles.length > 5 ? " 等" : ""}
-          </p>
-        ) : null}
-        {importLocal.error ? (
-          <p className="mt-3 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
-            导入失败，请检查路径是否可访问。
           </p>
         ) : null}
       </div>
@@ -238,19 +361,6 @@ export function AssetsPanel({
           />
         </div>
       ) : null}
-
-      <FsBrowserDialog
-        open={browserOpen}
-        title="本地导入素材"
-        submitLabel="导入所选"
-        onClose={() => setBrowserOpen(false)}
-        onSelectMany={(paths) => {
-          setBrowserOpen(false);
-          if (paths.length > 0) {
-            importLocal.mutate(paths);
-          }
-        }}
-      />
 
       {management ? (
         <FsBrowserDialog
@@ -270,6 +380,88 @@ export function AssetsPanel({
       ) : null}
     </section>
   );
+}
+
+const UPLOAD_CHUNK_SIZE = 5 * 1024 * 1024;
+
+// 与 apps/api/deps.py 的 MATERIAL_KIND_BY_SUFFIX 保持一致（video/audio/image/font）。
+const SUPPORTED_SUFFIXES = new Set([
+  ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpg", ".mpeg", ".3gp", ".wmv",
+  ".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".aiff", ".aif", ".ape",
+  ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif", ".svg",
+  ".ttf", ".otf", ".woff", ".woff2"
+]);
+const FILE_ACCEPT = [...SUPPORTED_SUFFIXES].join(",");
+
+// webkitdirectory 不在 React 的 input 类型定义里，经 spread 注入。
+const FOLDER_INPUT_PROPS = { webkitdirectory: "" } as Record<string, string>;
+
+function suffixOf(name: string): string {
+  const index = name.lastIndexOf(".");
+  return index >= 0 ? name.slice(index).toLowerCase() : "";
+}
+
+function isHiddenPath(candidate: ImportCandidate): boolean {
+  if (candidate.file.name.startsWith(".")) {
+    return true;
+  }
+  return (candidate.relDir ?? "").split("/").some((part) => part.startsWith("."));
+}
+
+/** 文件夹选择器：webkitRelativePath = "所选目录/子目录/文件名" → relDir 取目录部分。 */
+function relDirFromRelativePath(file: File): string | null {
+  const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath ?? "";
+  const index = relativePath.lastIndexOf("/");
+  return index > 0 ? relativePath.slice(0, index) : null;
+}
+
+/** 拖拽：文件直接收集；目录经 webkitGetAsEntry 递归遍历，保留相对路径。 */
+async function collectDroppedCandidates(dataTransfer: DataTransfer): Promise<ImportCandidate[]> {
+  const items = Array.from(dataTransfer.items ?? []);
+  const entries = items
+    .map((item) => (item.webkitGetAsEntry ? item.webkitGetAsEntry() : null))
+    .filter((entry): entry is FileSystemEntry => entry !== null);
+  if (entries.length === 0) {
+    // 不支持 entry API 的环境退化为平铺文件列表。
+    return Array.from(dataTransfer.files ?? []).map((file) => ({ file, relDir: null }));
+  }
+  const candidates: ImportCandidate[] = [];
+  for (const entry of entries) {
+    await collectEntry(entry, candidates);
+  }
+  return candidates;
+}
+
+async function collectEntry(entry: FileSystemEntry, out: ImportCandidate[]): Promise<void> {
+  if (entry.isFile) {
+    const file = await new Promise<File>((resolve, reject) =>
+      (entry as FileSystemFileEntry).file(resolve, reject)
+    );
+    out.push({ file, relDir: relDirFromEntryPath(entry.fullPath) });
+    return;
+  }
+  if (entry.isDirectory) {
+    const reader = (entry as FileSystemDirectoryEntry).createReader();
+    // readEntries 每批最多返回约 100 条，需循环读到空。
+    for (;;) {
+      const batch = await new Promise<FileSystemEntry[]>((resolve, reject) =>
+        reader.readEntries(resolve, reject)
+      );
+      if (batch.length === 0) {
+        break;
+      }
+      for (const child of batch) {
+        await collectEntry(child, out);
+      }
+    }
+  }
+}
+
+/** entry.fullPath = "/所拖目录/子目录/文件名" → relDir 去掉首斜杠取目录部分。 */
+function relDirFromEntryPath(fullPath: string): string | null {
+  const trimmed = fullPath.replace(/^\/+/, "");
+  const index = trimmed.lastIndexOf("/");
+  return index > 0 ? trimmed.slice(0, index) : null;
 }
 
 type FolderNode = {

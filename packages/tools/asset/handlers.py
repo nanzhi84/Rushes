@@ -55,6 +55,9 @@ def upload_complete(
     ref = ObjectStore(paths).put_file(source)
     asset_id = input_model.asset_id or _new_id("asset")
     filename = input_model.filename or source.name
+    link_payload: dict[str, Any] = {}
+    if input_model.rel_dir:
+        link_payload["rel_dir"] = input_model.rel_dir
     events = [
         _asset_imported_event(
             asset_id=asset_id,
@@ -69,7 +72,7 @@ def upload_complete(
             object_hash=ref.object_hash,
             object_size=ref.size,
         ),
-        AssetLinked(project_id=project_id, asset_id=asset_id),
+        AssetLinked(project_id=project_id, asset_id=asset_id, payload=link_payload),
         _proxy_job_event(project_id=project_id, asset_id=asset_id),
     ]
     return _succeeded(

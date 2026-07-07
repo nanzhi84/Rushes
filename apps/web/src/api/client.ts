@@ -193,6 +193,7 @@ type UploadPartResponse = {
 type UploadCompleteRequest = {
   project_id?: string | null;
   asset_id?: string | null;
+  rel_dir?: string | null;
 };
 
 type UploadCompleteResponse = {
