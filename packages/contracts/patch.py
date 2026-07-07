@@ -215,7 +215,7 @@ class TimelinePatchRequest(BaseModel):
     schema_: Literal["TimelinePatchRequest.v1"] = Field(
         default="TimelinePatchRequest.v1", alias="schema"
     )
-    case_id: str
+    draft_id: str
     reference: TimelinePatchReference = Field(default_factory=TimelinePatchReference)
     op: TimelinePatchOp
     reason: str

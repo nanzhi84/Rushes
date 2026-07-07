@@ -2,10 +2,9 @@ from pydantic import BaseModel
 
 from contracts import (
     AssetRecord,
-    CaseState,
     CutPlan,
     Decision,
-    ProjectState,
+    DraftState,
     ResolvedTimelinePatch,
     TimelinePatchRequest,
     TimelineState,
@@ -21,15 +20,20 @@ def assert_round_trip(model: type[BaseModel], payload: dict[str, object]) -> Non
     assert reparsed == parsed
 
 
-def test_case_state_prd_example_round_trips() -> None:
+def test_draft_state_prd_example_round_trips() -> None:
     assert_round_trip(
-        CaseState,
+        DraftState,
         {
-            "case_id": "case_007",
-            "project_id": "project_001",
+            "draft_id": "draft_007",
             "name": "产品种草第一版",
             "state_version": 31,
             "status": "active",
+            "defaults": {
+                "aspect_ratio": "9:16",
+                "fps": 30,
+                "preview_quality": "low",
+                "export_quality": "high",
+            },
             "pending_decision_id": None,
             "running_jobs": [],
             "last_error": None,
@@ -51,8 +55,6 @@ def test_case_state_prd_example_round_trips() -> None:
             "rough_cut_approved_version": None,
             "postprocess_plan": None,
             "export_current_id": None,
-            "selected_asset_ids": [],
-            "disabled_asset_ids": [],
             "scratch_memory": {},
             "messages_tail_ref": "msg_tail_007",
         },
@@ -81,30 +83,6 @@ def test_cut_plan_prd_example_round_trips() -> None:
                 }
             ],
             "total_target_duration_sec": 30,
-        },
-    )
-
-
-def test_project_state_prd_example_round_trips() -> None:
-    assert_round_trip(
-        ProjectState,
-        {
-            "project_id": "project_001",
-            "name": "七月产品内容",
-            "status": "active",
-            "asset_links": [
-                {"asset_id": "asset_001", "enabled": True, "linked_at": "...", "note": ""}
-            ],
-            "case_ids": ["case_001", "case_002"],
-            "memory_ids": ["mem_project_001"],
-            "defaults": {
-                "aspect_ratio": "9:16",
-                "fps": 30,
-                "preview_quality": "low",
-                "export_quality": "high",
-            },
-            "created_at": "...",
-            "updated_at": "...",
         },
     )
 
@@ -168,9 +146,8 @@ def test_decision_prd_example_round_trips() -> None:
         Decision,
         {
             "decision_id": "dec_001",
-            "scope_type": "case",
-            "project_id": "project_001",
-            "case_id": "case_007",
+            "scope_type": "draft",
+            "draft_id": "draft_007",
             "type": "audio_mode",
             "question": "原视频里有人声，这次怎么处理声音？",
             "options": [
@@ -202,7 +179,7 @@ def test_timeline_state_prd_example_round_trips() -> None:
         TimelineState,
         {
             "timeline_id": "tl_001",
-            "case_id": "case_007",
+            "draft_id": "draft_007",
             "version": 8,
             "fps": 30,
             "duration_frames": 1350,
@@ -262,7 +239,7 @@ def test_timeline_patch_request_prd_example_round_trips() -> None:
         TimelinePatchRequest,
         {
             "schema": "TimelinePatchRequest.v1",
-            "case_id": "case_007",
+            "draft_id": "draft_007",
             "reference": {"timeline_version": 8, "preview_id": "prev_008"},
             "op": {
                 "kind": "delete_range",
@@ -283,7 +260,7 @@ def test_resolved_timeline_patch_prd_example_round_trips() -> None:
             "patch_id": "patch_012",
             "request_ref": {
                 "schema": "TimelinePatchRequest.v1",
-                "case_id": "case_007",
+                "draft_id": "draft_007",
                 "reference": {"timeline_version": 8, "preview_id": "prev_008"},
                 "op": {
                     "kind": "delete_range",
@@ -315,7 +292,7 @@ def test_tool_result_prd_example_round_trips() -> None:
             "events": [
                 {
                     "event": "TimelineVersionCreated",
-                    "case_id": "case_007",
+                    "draft_id": "draft_007",
                     "base_version": 31,
                     "payload": {
                         "timeline_version": 9,

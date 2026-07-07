@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-DecisionScopeType = Literal["workspace", "project", "case"]
+DecisionScopeType = Literal["workspace", "draft"]
 DecisionType = Literal[
     "audio_mode",
     "approve_content_plan",
@@ -14,7 +14,6 @@ DecisionType = Literal[
     "bgm",
     "export",
     "memory_scope",
-    "destructive_project_action",
     "url_import",
     "generic",
 ]
@@ -53,8 +52,7 @@ class Decision(BaseModel):
 
     decision_id: str
     scope_type: DecisionScopeType
-    project_id: str | None = None
-    case_id: str | None = None
+    draft_id: str | None = None
     type: DecisionType
     question: str
     options: list[DecisionOption] = Field(default_factory=list)
@@ -70,21 +68,14 @@ class Decision(BaseModel):
 
     @model_validator(mode="after")
     def validate_scope_and_outbox(self) -> "Decision":
-        if self.scope_type == "case":
-            if self.project_id is None or self.case_id is None:
-                raise ValueError("scope_type=case requires project_id and case_id")
-        elif self.scope_type == "project":
-            if self.project_id is None:
-                raise ValueError("scope_type=project requires project_id")
-            if self.case_id is not None:
-                raise ValueError("scope_type=project requires case_id to be None")
-            if self.blocking:
-                raise ValueError("project-scoped decisions must not block a case loop")
+        if self.scope_type == "draft":
+            if self.draft_id is None:
+                raise ValueError("scope_type=draft requires draft_id")
         else:
-            if self.project_id is not None or self.case_id is not None:
-                raise ValueError("scope_type=workspace requires project_id and case_id to be None")
+            if self.draft_id is not None:
+                raise ValueError("scope_type=workspace requires draft_id to be None")
             if self.blocking:
-                raise ValueError("workspace-scoped decisions must not block a case loop")
+                raise ValueError("workspace-scoped decisions must not block a draft loop")
 
         if self.pending_tool_call is None and self.pending_tool_call_status is not None:
             raise ValueError("pending_tool_call_status requires pending_tool_call")

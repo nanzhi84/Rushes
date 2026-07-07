@@ -26,7 +26,7 @@ class InteractionOption(BaseModel):
 
 
 class StructuredInteractionEvent(BaseModel):
-    """Schema consumed by the Case Agent Console renderer."""
+    """Schema consumed by the Draft Editor renderer."""
 
     model_config = ConfigDict(extra="forbid")
 

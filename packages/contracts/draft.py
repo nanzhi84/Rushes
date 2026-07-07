@@ -1,4 +1,4 @@
-"""Case-level state contracts."""
+"""Draft-level state contracts（单级草稿模型：Case 升格为 Draft，Project 退场）。"""
 
 from enum import StrEnum
 from typing import Any, Literal
@@ -13,6 +13,29 @@ class AudioMode(StrEnum):
     TTS = "tts"
     SILENT = "silent"
     MIXED = "mixed"
+
+
+class DraftDefaults(BaseModel):
+    """草稿默认参数（原 ProjectDefaults 改名迁移；POST /drafts 时从 workspace defaults 拷贝）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    aspect_ratio: str = "9:16"
+    fps: int = 30
+    preview_quality: str = "low"
+    export_quality: str = "high"
+
+
+class DraftAssetLink(BaseModel):
+    """草稿与素材的链接（draft_asset_links 一行；无 enabled，不用即删）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    draft_id: str
+    asset_id: str
+    linked_at: str
+    note: str = ""
+    rel_dir: str | None = None
 
 
 class Brief(BaseModel):
@@ -117,14 +140,14 @@ class LastError(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
-class CaseState(BaseModel):
+class DraftState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    case_id: str
-    project_id: str
+    draft_id: str
     name: str
     state_version: int = 0
-    status: Literal["active", "closed", "trashed"] = "active"
+    status: Literal["active", "trashed"] = "active"
+    defaults: DraftDefaults = Field(default_factory=DraftDefaults)
     pending_decision_id: str | None = None
     running_jobs: list[RunningJobRef] = Field(default_factory=list)
     last_error: LastError | None = None
@@ -140,7 +163,5 @@ class CaseState(BaseModel):
     rough_cut_approved_version: int | None = None
     postprocess_plan: PostprocessPlan | None = None
     export_current_id: str | None = None
-    selected_asset_ids: list[str] = Field(default_factory=list)
-    disabled_asset_ids: list[str] = Field(default_factory=list)
     scratch_memory: dict[str, Any] = Field(default_factory=dict)
     messages_tail_ref: str | None = None

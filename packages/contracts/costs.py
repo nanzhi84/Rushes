@@ -12,7 +12,7 @@ class ProviderCall(BaseModel):
     provider_id: str
     capability: str
     model: str
-    case_id: str | None = None
+    draft_id: str | None = None
     job_id: str | None = None
     latency_ms: int
     usage_json: dict[str, Any] = Field(default_factory=dict)

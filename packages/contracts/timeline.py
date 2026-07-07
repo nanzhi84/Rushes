@@ -64,7 +64,7 @@ class TimelineState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     timeline_id: str
-    case_id: str
+    draft_id: str
     version: int
     fps: int = 30
     duration_frames: int
