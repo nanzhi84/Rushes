@@ -2,40 +2,37 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
-import { api, type ProjectTreeProject } from "../../api/client";
+import { api } from "../../api/client";
 import { queryKeys } from "../../app/query_client";
 import type { EntityDialogState } from "../../state/ui_store";
 
+/** 对话框只需要草稿的 id 与名字；DraftListItem/DraftRecord 都结构兼容。 */
+export type DraftDialogEntry = { draft_id: string; name: string };
+
 type EntityActionDialogProps = {
   dialog: EntityDialogState | null;
-  projects: ProjectTreeProject[];
+  drafts: DraftDialogEntry[];
   onClose: () => void;
 };
 
-/** Project/Case 的创建、重命名、复制、删除、移动统一对话框；两态壳共用。 */
+/** 草稿的重命名、复制、删除统一对话框；草稿墙与编辑器共用。 */
 export function EntityActionDialog({
   dialog,
-  projects,
+  drafts,
   onClose
 }: EntityActionDialogProps): ReactElement | null {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [name, setName] = useState("");
-  const [goal, setGoal] = useState("");
-  const [targetProjectId, setTargetProjectId] = useState("");
   const [confirmed, setConfirmed] = useState(false);
 
-  const sourceProject = useMemo(
-    () => projects.find((project) => project.project_id === dialog?.projectId) ?? null,
-    [dialog?.projectId, projects]
-  );
-  const sourceCase = useMemo(
-    () => sourceProject?.cases.find((caseNode) => caseNode.case_id === dialog?.caseId) ?? null,
-    [dialog?.caseId, sourceProject]
+  const sourceDraft = useMemo(
+    () => drafts.find((draft) => draft.draft_id === dialog?.draftId) ?? null,
+    [dialog?.draftId, drafts]
   );
 
-  // 用户开始编辑后不再重置：项目树查询在对话框打开期间刷新（SSE 失效重取）时，
-  // 依赖数组里的 projects 引用会变化，若无守卫会把已输入的名称/确认勾选清掉。
+  // 用户开始编辑后不再重置：草稿列表在对话框打开期间刷新（SSE 失效重取）时，
+  // 依赖数组里的 drafts 引用会变化，若无守卫会把已输入的名称/确认勾选清掉。
   const dirtyRef = useRef(false);
   const lastDialogRef = useRef<EntityDialogState | null>(null);
 
@@ -52,13 +49,9 @@ export function EntityActionDialog({
     if (dirtyRef.current) {
       return;
     }
-    setName(initialName(dialog.kind, sourceProject?.name, sourceCase?.name));
-    setGoal("");
+    setName(initialName(dialog.kind, sourceDraft?.name));
     setConfirmed(false);
-    setTargetProjectId(
-      projects.find((project) => project.project_id !== dialog.projectId)?.project_id ?? ""
-    );
-  }, [dialog, projects, sourceCase?.name, sourceProject?.name]);
+  }, [dialog, sourceDraft?.name]);
 
   const markDirty = (): void => {
     dirtyRef.current = true;
@@ -69,87 +62,31 @@ export function EntityActionDialog({
       if (!dialog) {
         return null;
       }
+      const draftId = dialog.draftId;
       switch (dialog.kind) {
-        case "createProject":
-          return { kind: dialog.kind, result: await api.createProject({ name }) };
-        case "renameProject":
-          return {
-            kind: dialog.kind,
-            result: await api.renameProject(required(dialog.projectId), { name })
-          };
-        case "copyProject":
-          return {
-            kind: dialog.kind,
-            result: await api.copyProject(required(dialog.projectId), { name })
-          };
-        case "deleteProject":
-          return {
-            kind: dialog.kind,
-            result: await api.deleteProject(required(dialog.projectId), confirmed)
-          };
-        case "createCase":
-          return {
-            kind: dialog.kind,
-            result: await api.createCase(required(dialog.projectId), {
-              name: name || "未命名剪辑任务",
-              goal: goal || null,
-              brief: { goal }
-            })
-          };
-        case "renameCase":
-          return {
-            kind: dialog.kind,
-            result: await api.renameCase(required(dialog.projectId), required(dialog.caseId), { name })
-          };
-        case "copyCase":
-          return {
-            kind: dialog.kind,
-            result: await api.copyCase(required(dialog.projectId), required(dialog.caseId), { name })
-          };
-        case "deleteCase":
-          return {
-            kind: dialog.kind,
-            result: await api.deleteCase(required(dialog.projectId), required(dialog.caseId), confirmed)
-          };
-        case "moveCase":
-          return {
-            kind: dialog.kind,
-            result: await api.moveCase(required(dialog.projectId), required(dialog.caseId), {
-              target_project_id: targetProjectId,
-              confirm: confirmed
-            })
-          };
+        case "renameDraft":
+          return { kind: dialog.kind, draftId, result: await api.renameDraft(draftId, { name }) };
+        case "copyDraft":
+          return { kind: dialog.kind, draftId, result: await api.copyDraft(draftId, { name }) };
+        case "deleteDraft":
+          return { kind: dialog.kind, draftId, result: await api.trashDraft(draftId, confirmed) };
       }
     },
     onSuccess: async (payload) => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.projectTree }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.projects })
-      ]);
       if (!payload) {
         return;
       }
-      if ("project" in payload.result) {
-        const projectId = payload.result.project.project_id;
-        if (payload.kind === "deleteProject") {
-          await navigate({ to: "/" });
-        } else {
-          await navigate({ to: "/projects/$projectId", params: { projectId } });
-        }
-      }
-      if ("case" in payload.result) {
-        const caseRecord = payload.result.case;
-        if (payload.kind === "deleteCase") {
-          await navigate({
-            to: "/projects/$projectId",
-            params: { projectId: caseRecord.project_id }
-          });
-        } else {
-          await navigate({
-            to: "/projects/$projectId/cases/$caseId",
-            params: { projectId: caseRecord.project_id, caseId: caseRecord.case_id }
-          });
-        }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.drafts }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.draft(payload.draftId) })
+      ]);
+      if (payload.kind === "deleteDraft") {
+        await navigate({ to: "/" });
+      } else {
+        await navigate({
+          to: "/drafts/$draftId",
+          params: { draftId: payload.result.draft.draft_id }
+        });
       }
       onClose();
     }
@@ -159,13 +96,9 @@ export function EntityActionDialog({
     return null;
   }
 
-  const destructive = dialog.kind === "deleteProject" || dialog.kind === "deleteCase";
-  const moving = dialog.kind === "moveCase";
-  const naming = !destructive && !moving;
-  const formReady =
-    (destructive && confirmed) ||
-    (moving && confirmed && targetProjectId.length > 0) ||
-    (naming && name.trim().length > 0);
+  const destructive = dialog.kind === "deleteDraft";
+  const naming = !destructive;
+  const formReady = (destructive && confirmed) || (naming && name.trim().length > 0);
 
   return (
     <div className="fixed inset-0 z-20 grid place-items-center bg-black/60 px-4" role="presentation">
@@ -196,20 +129,6 @@ export function EntityActionDialog({
           </label>
         ) : null}
 
-        {dialog.kind === "createCase" ? (
-          <label className="mt-4 block text-sm font-medium text-fg-muted">
-            目标文本
-            <textarea
-              className="mt-2 h-24 w-full resize-none rounded-md border border-line bg-ink px-3 py-2 text-fg outline-none focus:border-accent"
-              value={goal}
-              onChange={(event) => {
-                markDirty();
-                setGoal(event.target.value);
-              }}
-            />
-          </label>
-        ) : null}
-
         {destructive ? (
           <label className="mt-4 flex items-start gap-3 rounded-md border border-danger/40 bg-danger/10 p-3 text-sm text-fg">
             <input
@@ -221,47 +140,8 @@ export function EntityActionDialog({
                 setConfirmed(event.target.checked);
               }}
             />
-            确认执行删除。后端会走软删除和同一条归约路径。
+            确认删除这条草稿。后端会走软删除和同一条归约路径。
           </label>
-        ) : null}
-
-        {moving ? (
-          <div className="mt-4 space-y-3">
-            <label className="block text-sm font-medium text-fg-muted">
-              目标项目
-              <select
-                className="mt-2 w-full rounded-md border border-line bg-ink px-3 py-2 text-fg outline-none focus:border-accent"
-                value={targetProjectId}
-                onChange={(event) => {
-                  markDirty();
-                  setTargetProjectId(event.target.value);
-                }}
-              >
-                <option value="" disabled>
-                  选择目标项目
-                </option>
-                {projects
-                  .filter((project) => project.project_id !== dialog.projectId)
-                  .map((project) => (
-                    <option key={project.project_id} value={project.project_id}>
-                      {project.name}
-                    </option>
-                  ))}
-              </select>
-            </label>
-            <label className="flex items-start gap-3 rounded-md border border-line bg-ink p-3 text-sm text-fg">
-              <input
-                className="mt-1"
-                type="checkbox"
-                checked={confirmed}
-                onChange={(event) => {
-                  markDirty();
-                  setConfirmed(event.target.checked);
-                }}
-              />
-              确认移动剪辑任务，并让后端处理素材链接归属。
-            </label>
-          </div>
         ) : null}
 
         {mutation.error ? (
@@ -293,50 +173,21 @@ export function EntityActionDialog({
   );
 }
 
-function initialName(
-  kind: EntityDialogState["kind"],
-  projectName?: string,
-  caseName?: string
-): string {
-  if (kind === "renameProject") {
-    return projectName ?? "";
+function initialName(kind: EntityDialogState["kind"], draftName?: string): string {
+  if (kind === "renameDraft") {
+    return draftName ?? "";
   }
-  if (kind === "copyProject") {
-    return projectName ? `${projectName} 副本` : "";
-  }
-  if (kind === "renameCase") {
-    return caseName ?? "";
-  }
-  if (kind === "copyCase") {
-    return caseName ? `${caseName} 副本` : "";
-  }
-  if (kind === "createCase") {
-    return "未命名剪辑任务";
-  }
-  if (kind === "createProject") {
-    return "未命名项目";
+  if (kind === "copyDraft") {
+    return draftName ? `${draftName} 副本` : "";
   }
   return "";
 }
 
 function dialogTitle(kind: EntityDialogState["kind"]): string {
   const titles: Record<EntityDialogState["kind"], string> = {
-    createProject: "新建项目",
-    renameProject: "重命名项目",
-    copyProject: "复制项目",
-    deleteProject: "删除项目",
-    createCase: "新建剪辑任务",
-    renameCase: "重命名剪辑任务",
-    copyCase: "复制剪辑任务",
-    deleteCase: "删除剪辑任务",
-    moveCase: "移动剪辑任务"
+    renameDraft: "重命名草稿",
+    copyDraft: "复制草稿",
+    deleteDraft: "删除草稿"
   };
   return titles[kind];
-}
-
-function required(value: string | undefined): string {
-  if (!value) {
-    throw new Error("缺少必要参数");
-  }
-  return value;
 }
