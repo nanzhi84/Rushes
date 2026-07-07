@@ -52,6 +52,8 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     closeEntityDialog,
     chatPanelWidth,
     setChatPanelWidth,
+    materialsPanelWidth,
+    setMaterialsPanelWidth,
     timelinePanelHeight,
     setTimelinePanelHeight
   } = useUiStore();
@@ -370,6 +372,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         }
       />
 
+      {/* 三栏行：左对话（拖宽）| 中素材（拖宽）| 右预览（弹性）；时间线在其下全宽通栏。 */}
       <div className="flex min-h-0 flex-1">
         {/* 左：剪辑对话 */}
         <aside
@@ -442,134 +445,143 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
           ariaLabel="调整对话面板宽度"
         />
 
-        {/* 右：素材 + 预览 + 时间线 */}
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className="flex min-h-0 flex-1">
-            <div className="w-[300px] shrink-0 border-r border-line bg-panel xl:w-[340px]">
-              <AssetsPanel draftId={draftId} management />
-            </div>
-
-            <section className="min-h-0 min-w-0 flex-1 p-3" aria-label="预览区">
-              {timelineVersion === null ? (
-                <PreviewPlaceholder text="暂无时间线。让代理开始剪辑后，这里会出现成片预览。" />
-              ) : timelineQuery.isPending ? (
-                <PreviewPlaceholder text="时间线加载中…" />
-              ) : timelinePayload && previewSrc ? (
-                <PreviewPlayer
-                  key={timelinePayload.preview_id}
-                  src={previewSrc}
-                  fps={timelinePayload.timeline.fps}
-                  fit="height"
-                  onFirstPlay={handlePreviewFirstPlay}
-                  onTimeUpdate={handlePreviewTimeUpdate}
-                  seekSec={seekSec}
-                />
-              ) : (
-                <PreviewPlaceholder text="时间线暂不可用。" />
-              )}
-            </section>
-          </div>
-
-          <ResizeHandle
-            orientation="horizontal"
-            invert
-            value={timelinePanelHeight}
-            onChange={setTimelinePanelHeight}
-            ariaLabel="调整时间线高度"
-          />
-
-          <section
-            className="flex min-h-0 shrink-0 flex-col bg-panel"
-            style={{ height: timelinePanelHeight }}
-            aria-label="时间线"
-          >
-            <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1.5">
-              <h2 className="text-sm font-semibold">时间线</h2>
-              {timelineVersion !== null ? (
-                <select
-                  aria-label="时间线版本"
-                  className="rounded-md border border-line bg-ink px-2 py-1 text-xs text-fg outline-none focus:border-accent"
-                  value={effectiveVersion ?? ""}
-                  onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setViewedVersion(next === timelineVersion ? null : next);
-                  }}
-                >
-                  {versionOptions(timelineVersion).map((version) => (
-                    <option key={version} value={version}>
-                      v{version}
-                      {version === timelineVersion ? "（当前）" : ""}
-                    </option>
-                  ))}
-                </select>
-              ) : null}
-              {viewingHistory ? (
-                <span className="rounded bg-warn/15 px-2 py-0.5 text-xs text-warn">
-                  正在查看历史版本，恢复请在对话中告诉代理
-                </span>
-              ) : null}
-              {timelinePayload?.summary ? (
-                <span className="hidden max-w-[320px] truncate text-xs text-fg-faint lg:inline">
-                  {timelinePayload.summary}
-                </span>
-              ) : null}
-              <div className="ml-auto flex items-center gap-2">
-                <span className="text-xs tabular-nums text-fg-muted">
-                  {formatTimecode(playheadSec ?? 0)} / {formatTimecode(timelineDurationSec)}
-                </span>
-                <button
-                  type="button"
-                  className="grid h-6 w-6 place-items-center rounded-md border border-line text-sm text-fg-muted hover:bg-hover disabled:opacity-40"
-                  aria-label="缩小时间线"
-                  onClick={zoomOutTimeline}
-                  disabled={pxPerSec <= TIMELINE_ZOOM_LEVELS[0]}
-                >
-                  −
-                </button>
-                <span className="text-xs tabular-nums text-fg-faint">{pxPerSec}px/s</span>
-                <button
-                  type="button"
-                  className="grid h-6 w-6 place-items-center rounded-md border border-line text-sm text-fg-muted hover:bg-hover disabled:opacity-40"
-                  aria-label="放大时间线"
-                  onClick={zoomInTimeline}
-                  disabled={pxPerSec >= TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1]}
-                >
-                  ＋
-                </button>
-                <button
-                  type="button"
-                  className="rounded-md border border-line px-2 py-1 text-xs text-fg-muted hover:bg-hover"
-                  onClick={fitTimeline}
-                >
-                  适应
-                </button>
-              </div>
-            </div>
-
-            <div ref={timelineBodyRef} className="min-h-0 flex-1 overflow-auto">
-              {timelineVersion === null ? (
-                <p className="p-4 text-sm text-fg-muted">暂无时间线。</p>
-              ) : timelineQuery.isPending ? (
-                <p className="p-4 text-sm text-fg-muted">时间线加载中…</p>
-              ) : timelinePayload ? (
-                <TimelineViewer
-                  timeline={timelinePayload.timeline}
-                  pxPerSec={pxPerSec}
-                  playheadSec={playheadSec}
-                  selectedClipId={selectedClipId}
-                  onClipClick={handleClipClick}
-                  onSeek={handleTimelineSeek}
-                  waveformSrc={previewSrc}
-                />
-              ) : (
-                <p className="p-4 text-sm text-fg-muted">时间线暂不可用。</p>
-              )}
-            </div>
-
-            {unmatchedClipDetail ? <ClipDetailBar detail={unmatchedClipDetail} /> : null}
-          </section>
+        {/* 中：素材面板（可拖宽） */}
+        <div
+          data-testid="materials-panel"
+          className="min-h-0 shrink-0 border-r border-line bg-panel"
+          style={{ width: materialsPanelWidth }}
+        >
+          <AssetsPanel draftId={draftId} management />
         </div>
+
+        <ResizeHandle
+          orientation="vertical"
+          value={materialsPanelWidth}
+          onChange={setMaterialsPanelWidth}
+          ariaLabel="调整素材面板宽度"
+        />
+
+        {/* 右：预览（弹性） */}
+        <section className="min-h-0 min-w-0 flex-1 p-3" aria-label="预览区">
+          {timelineVersion === null ? (
+            <PreviewPlaceholder text="暂无时间线。让代理开始剪辑后，这里会出现成片预览。" />
+          ) : timelineQuery.isPending ? (
+            <PreviewPlaceholder text="时间线加载中…" />
+          ) : timelinePayload && previewSrc ? (
+            <PreviewPlayer
+              key={timelinePayload.preview_id}
+              src={previewSrc}
+              fps={timelinePayload.timeline.fps}
+              fit="height"
+              onFirstPlay={handlePreviewFirstPlay}
+              onTimeUpdate={handlePreviewTimeUpdate}
+              seekSec={seekSec}
+            />
+          ) : (
+            <PreviewPlaceholder text="时间线暂不可用。" />
+          )}
+        </section>
       </div>
+
+      {/* 全宽拖高手柄 + 全宽通栏时间线（三栏行下方，通栏跨越对话/素材/预览）。 */}
+      <ResizeHandle
+        orientation="horizontal"
+        invert
+        value={timelinePanelHeight}
+        onChange={setTimelinePanelHeight}
+        ariaLabel="调整时间线高度"
+      />
+
+      <section
+        className="flex min-h-0 shrink-0 flex-col bg-panel"
+        style={{ height: timelinePanelHeight }}
+        aria-label="时间线"
+      >
+        <div className="flex shrink-0 flex-wrap items-center gap-3 border-b border-line px-3 py-1.5">
+          <h2 className="text-sm font-semibold">时间线</h2>
+          {timelineVersion !== null ? (
+            <select
+              aria-label="时间线版本"
+              className="rounded-md border border-line bg-ink px-2 py-1 text-xs text-fg outline-none focus:border-accent"
+              value={effectiveVersion ?? ""}
+              onChange={(event) => {
+                const next = Number(event.target.value);
+                setViewedVersion(next === timelineVersion ? null : next);
+              }}
+            >
+              {versionOptions(timelineVersion).map((version) => (
+                <option key={version} value={version}>
+                  v{version}
+                  {version === timelineVersion ? "（当前）" : ""}
+                </option>
+              ))}
+            </select>
+          ) : null}
+          {viewingHistory ? (
+            <span className="rounded bg-warn/15 px-2 py-0.5 text-xs text-warn">
+              正在查看历史版本，恢复请在对话中告诉代理
+            </span>
+          ) : null}
+          {timelinePayload?.summary ? (
+            <span className="hidden max-w-[320px] truncate text-xs text-fg-faint lg:inline">
+              {timelinePayload.summary}
+            </span>
+          ) : null}
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs tabular-nums text-fg-muted">
+              {formatTimecode(playheadSec ?? 0)} / {formatTimecode(timelineDurationSec)}
+            </span>
+            <button
+              type="button"
+              className="grid h-6 w-6 place-items-center rounded-md border border-line text-sm text-fg-muted hover:bg-hover disabled:opacity-40"
+              aria-label="缩小时间线"
+              onClick={zoomOutTimeline}
+              disabled={pxPerSec <= TIMELINE_ZOOM_LEVELS[0]}
+            >
+              −
+            </button>
+            <span className="text-xs tabular-nums text-fg-faint">{pxPerSec}px/s</span>
+            <button
+              type="button"
+              className="grid h-6 w-6 place-items-center rounded-md border border-line text-sm text-fg-muted hover:bg-hover disabled:opacity-40"
+              aria-label="放大时间线"
+              onClick={zoomInTimeline}
+              disabled={pxPerSec >= TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1]}
+            >
+              ＋
+            </button>
+            <button
+              type="button"
+              className="rounded-md border border-line px-2 py-1 text-xs text-fg-muted hover:bg-hover"
+              onClick={fitTimeline}
+            >
+              适应
+            </button>
+          </div>
+        </div>
+
+        <div ref={timelineBodyRef} className="min-h-0 flex-1 overflow-auto">
+          {timelineVersion === null ? (
+            <p className="p-4 text-sm text-fg-muted">暂无时间线。</p>
+          ) : timelineQuery.isPending ? (
+            <p className="p-4 text-sm text-fg-muted">时间线加载中…</p>
+          ) : timelinePayload ? (
+            <TimelineViewer
+              timeline={timelinePayload.timeline}
+              pxPerSec={pxPerSec}
+              playheadSec={playheadSec}
+              selectedClipId={selectedClipId}
+              onClipClick={handleClipClick}
+              onSeek={handleTimelineSeek}
+              waveformSrc={previewSrc}
+            />
+          ) : (
+            <p className="p-4 text-sm text-fg-muted">时间线暂不可用。</p>
+          )}
+        </div>
+
+        {unmatchedClipDetail ? <ClipDetailBar detail={unmatchedClipDetail} /> : null}
+      </section>
 
       <EntityActionDialog
         dialog={entityDialog}
