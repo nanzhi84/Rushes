@@ -309,6 +309,7 @@ def _make_spec(
         vlm=_vlm,
         extract_frame=_extract,
         transcribe=_transcribe,
+        has_audio=info.has_audio,
         focus=focus,
         prior_summary=prior_summary,
         progress=progress,

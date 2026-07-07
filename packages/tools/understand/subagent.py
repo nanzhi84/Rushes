@@ -25,7 +25,6 @@ DEFAULT_STEP_BUDGET = 12
 MAX_ILLEGAL_JSON = 3
 MAX_EMIT_ATTEMPTS = 2
 MAX_FRAMES_PER_VIEW = 6
-_AUDIO_KINDS = frozenset({"video", "audio"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +72,9 @@ class SubagentSpec:
     vlm: VlmCall
     extract_frame: ExtractFrame
     transcribe: Transcribe
+    # 是否真的有音轨（probe.has_audio / 索引 vad/peaks），transcribe 动作据此门控；
+    # 与 kind 区分：无声视频 kind 仍是 video 但 has_audio=False。
+    has_audio: bool = True
     focus: str | None = None
     prior_summary: dict[str, Any] | None = None
     progress: Progress = _noop_progress
@@ -121,6 +123,8 @@ async def run_understanding_subagent(spec: SubagentSpec) -> SubagentOutcome:
 
         action = _coerce_action(raw_action)
         if action is None:
+            # 非法 JSON 与未知动作共用同一「非法输出」计数；只有动作真正被执行
+            # （下方三个已知分支）才清零，避免持续输出未知动作烧满步数预算。
             illegal_json += 1
             if illegal_json >= MAX_ILLEGAL_JSON:
                 return _failed(spec, state, "连续多次未返回合法的动作 JSON")
@@ -129,16 +133,18 @@ async def run_understanding_subagent(spec: SubagentSpec) -> SubagentOutcome:
                 '{"action":"view_frames|transcribe|emit_summary", ...}。'
             )
             continue
-        illegal_json = 0
         name = action.get("action")
 
         if name == "view_frames":
+            illegal_json = 0
             correction = await _do_view_frames(spec, state, action)
             continue
         if name == "transcribe":
+            illegal_json = 0
             correction = await _do_transcribe(spec, state, action)
             continue
         if name == "emit_summary":
+            illegal_json = 0
             emit_attempts += 1
             summary, error = _build_summary(spec, state, action.get("summary"))
             if summary is not None:
@@ -190,8 +196,8 @@ async def _do_transcribe(
     state: _RunState,
     action: Mapping[str, Any],
 ) -> str | None:
-    if spec.kind not in _AUDIO_KINDS:
-        return "该素材没有音轨，无法转写；请依据画面与索引产出摘要。"
+    if not spec.has_audio:
+        return "该素材无音轨，无法转写；请依据画面与索引产出摘要。"
     start = _coerce_float(action.get("start_s"))
     end = _coerce_float(action.get("end_s"))
     window = f"{_fmt_clock(start or 0.0)}-{_fmt_clock(end or spec.duration_sec or 0.0)}"

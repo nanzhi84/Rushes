@@ -407,7 +407,19 @@ async def test_transcribe_rows_persisted(tmp_path: Path, monkeypatch: pytest.Mon
         )
 
     monkeypatch.setattr(understand_handlers, "_transcribe_segment", _fake_transcribe)
-    engine = _engine(tmp_path, [{"asset_id": "asset_1"}])
+    # 索引里带 VAD 语音段 → has_audio=True，transcribe 动作才会放行。
+    engine = _engine(
+        tmp_path,
+        [
+            {
+                "asset_id": "asset_1",
+                "index_json": {
+                    "duration_sec": 90.0,
+                    "vad": [{"start_ms": 0, "end_ms": 800, "kind": "speech"}],
+                },
+            }
+        ],
+    )
     gateway = ScriptedVlmGateway(
         {"asset_1": [{"action": "transcribe", "start_s": 0.0, "end_s": 90.0}, _emit()]}
     )
