@@ -1,8 +1,8 @@
 import pytest
 
 import domain.decision_effects as effects
-from contracts.case import CaseState
 from contracts.decision import Decision, DecisionAnswer
+from contracts.draft import DraftState
 from domain.decision_effects import (
     decision_effects_registry,
     pending_tool_call_status_after_answer,
@@ -11,31 +11,27 @@ from domain.decision_effects import (
 )
 
 
-def _case_state(**overrides: object) -> CaseState:
+def _draft_state(**overrides: object) -> DraftState:
     data = {
-        "case_id": "case_1",
-        "project_id": "project_1",
-        "name": "Case",
+        "draft_id": "draft_1",
+        "name": "草稿",
         "state_version": 3,
         "brief": {"goal": "make a cut", "confirmed_facts": []},
         "timeline_current_version": 7,
         "timeline_validated": True,
         "rough_cut_approved": True,
         "rough_cut_approved_version": 6,
-        "selected_asset_ids": [],
-        "disabled_asset_ids": [],
         "scratch_memory": {},
     }
     data.update(overrides)
-    return CaseState.model_validate(data)
+    return DraftState.model_validate(data)
 
 
 def _decision(decision_type: str, **overrides: object) -> Decision:
     data = {
         "decision_id": f"dec_{decision_type}",
-        "scope_type": "case",
-        "project_id": "project_1",
-        "case_id": "case_1",
+        "scope_type": "draft",
+        "draft_id": "draft_1",
         "type": decision_type,
         "question": "?",
         "blocking": True,
@@ -50,7 +46,7 @@ def _answer(**overrides: object) -> DecisionAnswer:
     return DecisionAnswer.model_validate(data)
 
 
-def test_registry_covers_all_eleven_decision_types() -> None:
+def test_registry_covers_all_ten_decision_types() -> None:
     assert set(decision_effects_registry) == {
         "audio_mode",
         "approve_content_plan",
@@ -60,7 +56,6 @@ def test_registry_covers_all_eleven_decision_types() -> None:
         "bgm",
         "export",
         "memory_scope",
-        "destructive_project_action",
         "url_import",
         "generic",
     }
@@ -68,7 +63,7 @@ def test_registry_covers_all_eleven_decision_types() -> None:
 
 def test_audio_mode_reduces_to_audio_plan_and_event() -> None:
     result = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("audio_mode"),
         _answer(option_id="rough_cut"),
     )
@@ -79,7 +74,7 @@ def test_audio_mode_reduces_to_audio_plan_and_event() -> None:
 
 def test_approve_content_plan_marks_plan_approved() -> None:
     result = reduce_decision_answer(
-        _case_state(content_plan={"outline": ["a"]}),
+        _draft_state(content_plan={"outline": ["a"]}),
         _decision("approve_content_plan"),
         _answer(),
     )
@@ -90,7 +85,7 @@ def test_approve_content_plan_marks_plan_approved() -> None:
 
 def test_approve_speech_cut_writes_removed_ranges_without_rough_cut_change() -> None:
     result = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("approve_speech_cut"),
         _answer(
             payload={
@@ -109,7 +104,7 @@ def test_approve_speech_cut_writes_removed_ranges_without_rough_cut_change() -> 
 
 def test_approve_rough_cut_sets_bool_and_bound_version_without_events() -> None:
     result = reduce_decision_answer(
-        _case_state(rough_cut_approved=False),
+        _draft_state(rough_cut_approved=False),
         _decision("approve_rough_cut"),
         _answer(payload={"timeline_version": 4}),
     )
@@ -120,7 +115,7 @@ def test_approve_rough_cut_sets_bool_and_bound_version_without_events() -> None:
 
 def test_subtitle_rejection_disables_subtitle_plan() -> None:
     result = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("subtitle"),
         _answer(option_id="skip", payload={"enabled": False}),
     )
@@ -134,7 +129,7 @@ def test_subtitle_rejection_disables_subtitle_plan() -> None:
 
 def test_bgm_acceptance_reduces_to_bgm_plan() -> None:
     result = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("bgm"),
         _answer(payload={"enabled": True, "asset_id": "asset_bgm", "gain_db": -8.0, "duck": True}),
     )
@@ -147,17 +142,17 @@ def test_bgm_acceptance_reduces_to_bgm_plan() -> None:
     }
 
 
-def test_export_destructive_and_url_import_only_return_replay_followup() -> None:
+def test_export_and_url_import_only_return_replay_followup() -> None:
     pending_tool_call = {
         "tool_name": "render.final_mp4",
-        "arguments": {"case_id": "case_1"},
+        "arguments": {"draft_id": "draft_1"},
         "idempotency_key": "idem",
         "argument_fingerprint": "fp",
     }
 
-    for decision_type in ("export", "destructive_project_action", "url_import"):
+    for decision_type in ("export", "url_import"):
         result = reduce_decision_answer(
-            _case_state(),
+            _draft_state(),
             _decision(
                 decision_type,
                 pending_tool_call=pending_tool_call,
@@ -169,29 +164,30 @@ def test_export_destructive_and_url_import_only_return_replay_followup() -> None
         assert result.state_patch == {}
         assert result.followup_events == ()
         assert result.followups[0].kind == "replay_pending_tool_call"
+        assert result.followups[0].payload["draft_id"] == "draft_1"
 
 
 def test_memory_scope_returns_memory_save_followup_only() -> None:
     result = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("memory_scope"),
-        _answer(payload={"candidate_id": "memcand_1", "scope": "project"}),
+        _answer(payload={"candidate_id": "memcand_1", "scope": "user"}),
     )
 
     assert result.state_patch == {}
     assert result.followup_events == ()
     assert result.followups[0].kind == "enqueue_memory_save"
-    assert result.followups[0].payload["scope"] == "project"
+    assert result.followups[0].payload["scope"] == "user"
 
 
 def test_generic_reduces_to_confirmed_fact_or_scratch_memory() -> None:
     fact_result = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("generic"),
         _answer(payload={"reduce_target": "brief.confirmed_facts", "value": "use fast pacing"}),
     )
     scratch_result = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("generic"),
         _answer(payload={"reduce_target": "scratch_memory", "key": "tone", "value": "quiet"}),
     )
@@ -216,7 +212,7 @@ def test_missing_decision_effect_validation_raises(monkeypatch: pytest.MonkeyPat
 
 def test_option_payloads_and_option_id_fallbacks_drive_effects() -> None:
     rough_cut = reduce_decision_answer(
-        _case_state(rough_cut_approved=False),
+        _draft_state(rough_cut_approved=False),
         _decision(
             "approve_rough_cut",
             options=[
@@ -230,12 +226,12 @@ def test_option_payloads_and_option_id_fallbacks_drive_effects() -> None:
         _answer(option_id="restore_v8"),
     )
     subtitle = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("subtitle"),
         _answer(option_id="subtitle_large"),
     )
     bgm = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("bgm"),
         _answer(option_id="asset_music"),
     )
@@ -250,7 +246,7 @@ def test_option_payloads_and_option_id_fallbacks_drive_effects() -> None:
 
 def test_memory_scope_skip_and_invalid_payloads() -> None:
     skipped = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("memory_scope"),
         _answer(option_id="skip", payload={"candidate_id": "memcand_1"}),
     )
@@ -260,13 +256,13 @@ def test_memory_scope_skip_and_invalid_payloads() -> None:
     assert skipped.followups[0].payload["candidate_id"] == "memcand_1"
     with pytest.raises(ValueError, match="candidate_id"):
         reduce_decision_answer(
-            _case_state(),
+            _draft_state(),
             _decision("memory_scope"),
-            _answer(payload={"scope": "project"}),
+            _answer(payload={"scope": "user"}),
         )
     with pytest.raises(ValueError, match="scope"):
         reduce_decision_answer(
-            _case_state(),
+            _draft_state(),
             _decision("memory_scope"),
             _answer(payload={"candidate_id": "memcand_1", "scope": "team"}),
         )
@@ -275,7 +271,7 @@ def test_memory_scope_skip_and_invalid_payloads() -> None:
 def test_pending_tool_call_rejections_discard_or_skip_followups() -> None:
     pending_tool_call = {
         "tool_name": "render.final_mp4",
-        "arguments": {"case_id": "case_1"},
+        "arguments": {"draft_id": "draft_1"},
         "idempotency_key": "idem",
         "argument_fingerprint": "fp",
     }
@@ -287,7 +283,7 @@ def test_pending_tool_call_rejections_discard_or_skip_followups() -> None:
     rejection = _answer(option_id="cancel")
     no_pending = _decision("export")
 
-    result = reduce_decision_answer(_case_state(), decision, rejection)
+    result = reduce_decision_answer(_draft_state(), decision, rejection)
 
     assert result.followups == ()
     assert pending_tool_call_will_replay(decision, rejection) is False
@@ -299,7 +295,7 @@ def test_pending_tool_call_rejections_discard_or_skip_followups() -> None:
 
 def test_generic_effect_uses_free_text_option_id_and_default_scratch_key() -> None:
     duplicate_fact = reduce_decision_answer(
-        _case_state(brief={"goal": "make a cut", "confirmed_facts": ["existing"]}),
+        _draft_state(brief={"goal": "make a cut", "confirmed_facts": ["existing"]}),
         _decision("generic"),
         _answer(
             free_text="existing",
@@ -307,7 +303,7 @@ def test_generic_effect_uses_free_text_option_id_and_default_scratch_key() -> No
         ),
     )
     scratch = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("generic"),
         _answer(option_id="remember this", payload={"reduce_target": "scratch_memory"}),
     )
@@ -317,15 +313,15 @@ def test_generic_effect_uses_free_text_option_id_and_default_scratch_key() -> No
 
 
 def test_invalid_decision_answers_raise_value_errors() -> None:
-    # 无 timeline_version 且 case 也无当前版本 → 仍报错；case 有当前版本时兜底
-    no_version = _case_state().model_copy(update={"timeline_current_version": None})
+    # 无 timeline_version 且草稿也无当前版本 → 仍报错；草稿有当前版本时兜底
+    no_version = _draft_state().model_copy(update={"timeline_current_version": None})
     with pytest.raises(ValueError, match="timeline_version"):
         reduce_decision_answer(
             no_version,
             _decision("approve_rough_cut"),
             _answer(),
         )
-    with_version = _case_state().model_copy(update={"timeline_current_version": 3})
+    with_version = _draft_state().model_copy(update={"timeline_current_version": 3})
     fallback = reduce_decision_answer(
         with_version,
         _decision("approve_rough_cut"),
@@ -334,13 +330,13 @@ def test_invalid_decision_answers_raise_value_errors() -> None:
     assert fallback.state_patch["rough_cut_approved_version"] == 3
     with pytest.raises(ValueError, match="removed_ranges"):
         reduce_decision_answer(
-            _case_state(),
+            _draft_state(),
             _decision("approve_speech_cut"),
             _answer(payload={"removed_ranges": "not a sequence"}),
         )
     # generic 缺 reduce_target 时按 scratch_memory 兜底而非报错（M9 实测修复）
     fallback = reduce_decision_answer(
-        _case_state(),
+        _draft_state(),
         _decision("generic"),
         _answer(payload={"value": "text"}),
     )
