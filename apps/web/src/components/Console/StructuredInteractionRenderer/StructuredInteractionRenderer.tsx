@@ -75,12 +75,12 @@ function DecisionCard({
     <article className={decisionCardClass(isPending)} data-testid="decision-card">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <p className="text-xs font-medium text-[#64748b]">确认项</p>
-          <h3 className="mt-1 text-sm font-semibold text-[#17202a]">
+          <p className="text-xs font-medium text-fg-muted">确认项</p>
+          <h3 className="mt-1 text-sm font-semibold text-fg">
             {decision?.question ?? "确认项已创建，正在读取详情"}
           </h3>
         </div>
-        <span className="rounded border border-[#cbd5e1] px-2 py-1 text-xs text-[#475569]">
+        <span className="rounded border border-line-strong px-2 py-1 text-xs text-fg-muted">
           {decisionStatusLabel(item.status)}
         </span>
       </div>
@@ -92,14 +92,14 @@ function DecisionCard({
               {decision.options.map((option) => (
                 <button
                   key={option.option_id}
-                  className="rounded-md border border-[#cbd5e1] bg-white px-3 py-2 text-left text-sm text-[#17202a] hover:bg-[#f8fafc] disabled:bg-[#f1f5f9] disabled:text-[#94a3b8]"
+                  className="rounded-md border border-line-strong bg-panel px-3 py-2 text-left text-sm text-fg hover:bg-hover disabled:bg-raised disabled:text-fg-faint"
                   type="button"
                   disabled={disabled}
                   onClick={() => onAnswerDecision(decision.decision_id, buttonAnswer(option))}
                 >
                   <span className="font-medium">{option.label}</span>
                   {option.description ? (
-                    <span className="mt-1 block text-xs leading-5 text-[#64748b]">{option.description}</span>
+                    <span className="mt-1 block text-xs leading-5 text-fg-muted">{option.description}</span>
                   ) : null}
                 </button>
               ))}
@@ -108,10 +108,10 @@ function DecisionCard({
 
           {decision.allow_free_text ? (
             <form className="space-y-2" onSubmit={submitFreeText}>
-              <label className="block text-xs font-medium text-[#475569]">
+              <label className="block text-xs font-medium text-fg-muted">
                 自由回答
                 <input
-                  className="mt-1 w-full rounded-md border border-[#cbd5e1] px-3 py-2 text-sm outline-none focus:border-[#2563eb] disabled:bg-[#f1f5f9]"
+                  className="mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm outline-none focus:border-accent disabled:bg-raised"
                   value={freeText}
                   onChange={(event) => setFreeText(event.target.value)}
                   disabled={disabled}
@@ -119,7 +119,7 @@ function DecisionCard({
                 />
               </label>
               <button
-                className="rounded-md bg-[#17202a] px-3 py-2 text-sm font-medium text-white disabled:bg-[#94a3b8]"
+                className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
                 type="submit"
                 disabled={disabled || freeText.trim().length === 0}
               >
@@ -128,14 +128,14 @@ function DecisionCard({
             </form>
           ) : null}
 
-          <p className="text-xs leading-5 text-[#64748b]">可点选项，也可直接发消息自然语言回答。</p>
+          <p className="text-xs leading-5 text-fg-muted">可点选项，也可直接发消息自然语言回答。</p>
         </div>
       ) : (
-        <p className="mt-3 text-sm text-[#64748b]">确认项详情会随当前状态查询补齐。</p>
+        <p className="mt-3 text-sm text-fg-muted">确认项详情会随当前状态查询补齐。</p>
       )}
 
       {!isPending && answerLabel ? (
-        <p className="mt-3 rounded bg-[#f8fafc] px-3 py-2 text-sm text-[#475569]">结果：{answerLabel}</p>
+        <p className="mt-3 rounded bg-raised px-3 py-2 text-sm text-fg-muted">结果：{answerLabel}</p>
       ) : null}
     </article>
   );
@@ -144,25 +144,25 @@ function DecisionCard({
 function ProgressCard({ item }: { item: ProgressInteractionItem }): ReactElement {
   const percent = item.progress ?? 0;
   return (
-    <article className="rounded-md border border-[#bfdbfe] bg-[#eff6ff] p-4">
+    <article className="rounded-md border border-info/40 bg-raised p-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <p className="text-xs font-medium text-[#1d4ed8]">进度</p>
-          <h3 className="mt-1 text-sm font-semibold text-[#17202a]">{item.job_kind}</h3>
+          <p className="text-xs font-medium text-info">进度</p>
+          <h3 className="mt-1 text-sm font-semibold text-fg">{item.job_kind}</h3>
         </div>
-        <span className="text-sm font-medium text-[#1d4ed8]">
+        <span className="text-sm font-medium text-info">
           {item.progress === null ? "处理中" : `${item.progress}%`}
         </span>
       </div>
       <div
-        className="mt-3 h-2 overflow-hidden rounded bg-white"
+        className="mt-3 h-2 overflow-hidden rounded bg-panel"
         role="progressbar"
         aria-label={`${item.job_kind} 进度`}
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={percent}
       >
-        <div className="h-full bg-[#2563eb]" style={{ width: `${percent}%` }} />
+        <div className="h-full bg-accent" style={{ width: `${percent}%` }} />
       </div>
     </article>
   );
@@ -170,11 +170,11 @@ function ProgressCard({ item }: { item: ProgressInteractionItem }): ReactElement
 
 function ErrorCard({ item }: { item: ErrorInteractionItem }): ReactElement {
   return (
-    <article className="rounded-md border border-[#fecaca] bg-[#fef2f2] p-4">
-      <p className="text-xs font-medium text-[#b91c1c]">错误</p>
-      <h3 className="mt-1 text-sm font-semibold text-[#17202a]">{item.error_code}</h3>
-      <p className="mt-2 text-sm leading-6 text-[#7f1d1d]">{item.message}</p>
-      <p className="mt-2 text-xs text-[#991b1b]">{item.retryable ? "可重试" : "不可重试"}</p>
+    <article className="rounded-md border border-danger/40 bg-danger/10 p-4">
+      <p className="text-xs font-medium text-danger">错误</p>
+      <h3 className="mt-1 text-sm font-semibold text-fg">{item.error_code}</h3>
+      <p className="mt-2 text-sm leading-6 text-danger">{item.message}</p>
+      <p className="mt-2 text-xs text-danger">{item.retryable ? "可重试" : "不可重试"}</p>
     </article>
   );
 }
@@ -187,21 +187,21 @@ function PlaceholderCard({
   label: string;
 }): ReactElement {
   return (
-    <article className="rounded-md border border-[#d9dee7] bg-[#f8fafc] p-4">
-      <p className="text-xs font-medium text-[#64748b]">{label}</p>
-      <h3 className="mt-1 text-sm font-semibold text-[#17202a]">{item.title}</h3>
-      <p className="mt-2 text-sm leading-6 text-[#475569]">{item.description}</p>
+    <article className="rounded-md border border-line bg-raised p-4">
+      <p className="text-xs font-medium text-fg-muted">{label}</p>
+      <h3 className="mt-1 text-sm font-semibold text-fg">{item.title}</h3>
+      <p className="mt-2 text-sm leading-6 text-fg-muted">{item.description}</p>
     </article>
   );
 }
 
 function UnknownCard({ item }: { item: UnknownInteractionItem }): ReactElement {
   return (
-    <details className="rounded-md border border-[#d9dee7] bg-white p-4">
-      <summary className="cursor-pointer text-sm font-semibold text-[#17202a]">
+    <details className="rounded-md border border-line bg-panel p-4">
+      <summary className="cursor-pointer text-sm font-semibold text-fg">
         未知结构化事件：{item.eventName}
       </summary>
-      <pre className="mt-3 max-h-56 overflow-auto rounded bg-[#f8fafc] p-3 text-xs text-[#334155]">
+      <pre className="mt-3 max-h-56 overflow-auto rounded bg-raised p-3 text-xs text-fg">
         {JSON.stringify(item.raw, null, 2)}
       </pre>
     </details>
@@ -243,6 +243,6 @@ function decisionStatusLabel(status: Decision["status"]): string {
 function decisionCardClass(isPending: boolean): string {
   const base = "rounded-md border p-4";
   return isPending
-    ? `${base} border-[#d9dee7] bg-white`
-    : `${base} border-[#d9dee7] bg-[#f8fafc] opacity-75`;
+    ? `${base} border-line bg-panel`
+    : `${base} border-line bg-raised opacity-75`;
 }

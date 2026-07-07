@@ -1,4 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRouter,
+  RouterContextProvider
+} from "@tanstack/react-router";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Decision, DecisionAnswer } from "../api/client";
@@ -129,10 +135,10 @@ describe("CaseConsoleView", () => {
 
     await waitFor(() => expect(input.disabled).toBe(true));
     expect(screen.getByText("剪掉开头 3 秒")).toBeTruthy();
-    expect(MockEventSource.instances[0]?.url).toContain("token=test-token");
+    expect(caseEventsSource().url).toContain("token=test-token");
 
     act(() => {
-      MockEventSource.instances[0]?.emit("TurnEnded", {
+      caseEventsSource().emit("TurnEnded", {
         event_id: 1,
         event: {
           event: "TurnEnded",
@@ -381,14 +387,14 @@ describe("CaseConsoleView", () => {
     renderConsole(fetchMock);
 
     act(() => {
-      MockEventSource.instances[0]?.emit("JobProgress", jobProgressPayload(0.42));
+      caseEventsSource().emit("JobProgress", jobProgressPayload(0.42));
     });
 
     const progress = await screen.findByRole("progressbar", { name: "素材分析 进度" });
     expect(progress.getAttribute("aria-valuenow")).toBe("42");
 
     act(() => {
-      MockEventSource.instances[0]?.emit("JobProgress", jobProgressPayload(0.8));
+      caseEventsSource().emit("JobProgress", jobProgressPayload(0.8));
     });
 
     await waitFor(() => expect(progress.getAttribute("aria-valuenow")).toBe("80"));
@@ -450,10 +456,17 @@ function renderConsole(fetchMock: FetchMock): void {
   vi.stubGlobal("EventSource", MockEventSource);
   vi.stubGlobal("fetch", fetchMock);
 
+  // 组件里有 Link/useNavigate：用 RouterContextProvider 提供上下文，不做真实路由匹配。
+  const router = createRouter({
+    routeTree: createRootRoute(),
+    history: createMemoryHistory()
+  });
   render(
-    <QueryClientProvider client={testQueryClient()}>
-      <CaseConsoleView projectId="project_1" caseId="case_1" />
-    </QueryClientProvider>
+    <RouterContextProvider router={router}>
+      <QueryClientProvider client={testQueryClient()}>
+        <CaseConsoleView projectId="project_1" caseId="case_1" />
+      </QueryClientProvider>
+    </RouterContextProvider>
   );
 }
 
@@ -530,6 +543,17 @@ function turnStreamSource(): MockEventSource {
   const source = MockEventSource.instances.find((instance) => instance.url.includes("turn-stream"));
   if (!source) {
     throw new Error("turn-stream EventSource 未创建");
+  }
+  return source;
+}
+
+// 工作台还会订阅 workspace 级 /api/events（TopBar 连接态、素材面板），按 URL 定位 case 事件源。
+function caseEventsSource(): MockEventSource {
+  const source = MockEventSource.instances.find((instance) =>
+    instance.url.includes("/cases/case_1/events")
+  );
+  if (!source) {
+    throw new Error("case events EventSource 未创建");
   }
   return source;
 }

@@ -1,10 +1,36 @@
 @import "tailwindcss";
 
+/* 深色剪辑器设计令牌：组件一律引用令牌，不写裸色值。 */
+@theme {
+  --color-ink: #131316; /* 应用底色 */
+  --color-panel: #1c1c21; /* 面板 */
+  --color-raised: #26262c; /* 浮层/卡片提升面 */
+  --color-hover: #2c2c34; /* 悬浮态 */
+  --color-line: #2e2e36; /* 描边 */
+  --color-line-strong: #3d3d47; /* 强描边（聚焦前） */
+  --color-fg: #ececf1; /* 正文 */
+  --color-fg-muted: #8f8f9a; /* 次级文字 */
+  --color-fg-faint: #5f5f6a; /* 弱化文字 */
+  --color-accent: #ff5c38; /* 强调：主按钮/导出/播放头 */
+  --color-accent-strong: #ff7350; /* 强调悬浮 */
+  --color-track-video: #4a7dd6; /* 视频轨 */
+  --color-track-music: #3fa66a; /* 音乐轨 */
+  --color-track-sfx: #2fa8a0; /* 音效轨 */
+  --color-track-subtitle: #8b6fd6; /* 字幕轨 */
+  --color-ok: #46b578;
+  --color-info: #6f9ee8;
+  --color-warn: #f0a13c;
+  --color-danger: #e5484d;
+
+  --font-sans:
+    Inter, ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+}
+
 :root {
-  color: #17202a;
-  background: #f6f7f9;
-  font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--color-fg);
+  background: var(--color-ink);
+  font-family: var(--font-sans);
+  color-scheme: dark;
 }
 
 body {
@@ -23,4 +49,55 @@ button:disabled,
 textarea:disabled,
 input:disabled {
   cursor: not-allowed;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 40%, transparent);
+}
+
+/* 深色下的细滚动条，贴近桌面剪辑器质感。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--color-line-strong);
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* vidstack 无默认样式：让 provider 与 video 填满并按 contain 适配。 */
+[data-media-provider] {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+[data-media-provider] video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

@@ -35,8 +35,8 @@ describe("TimelineViewer", () => {
     expect(rects[0]?.getAttribute("width")).toBe("60");
     expect(rects[1]?.getAttribute("x")).toBe("60");
     expect(rects[1]?.getAttribute("width")).toBe("120");
-    expect(rects[1]?.getAttribute("stroke")).toBe("#f97316");
-    expect(rects[1]?.getAttribute("stroke-width")).toBe("3");
+    expect(rects[1]?.getAttribute("stroke")).toBe("var(--color-accent)");
+    expect(rects[1]?.getAttribute("stroke-width")).toBe("2");
     expect(rects[2]?.getAttribute("x")).toBe("30");
     expect(rects[2]?.getAttribute("width")).toBe("60");
 
@@ -49,9 +49,10 @@ describe("TimelineViewer", () => {
     render(<TimelineViewer timeline={timelineFixture()} pxPerSec={60} playheadSec={1.5} />);
 
     const playhead = screen.getByTestId("timeline-playhead");
+    const line = playhead.querySelector("line");
 
-    expect(playhead.getAttribute("x1")).toBe("202");
-    expect(playhead.getAttribute("x2")).toBe("202");
+    expect(line?.getAttribute("x1")).toBe("202");
+    expect(line?.getAttribute("x2")).toBe("202");
   });
 
   it("点击空白轨道区换算秒数并触发 onSeek", () => {

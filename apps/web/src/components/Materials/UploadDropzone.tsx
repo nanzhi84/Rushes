@@ -82,15 +82,15 @@ export function UploadDropzone({ projectId, onUploaded }: UploadDropzoneProps): 
   }
 
   return (
-    <section className="rounded-lg border border-[#d9dee7] bg-white p-4">
+    <section className="rounded-lg border border-line bg-panel p-4">
       <div>
         <h2 className="font-semibold">上传文件</h2>
-        <p className="mt-1 text-sm text-[#64748b]">拖拽或选择文件，前端按分片上传，类型由文件后缀自动识别。</p>
+        <p className="mt-1 text-sm text-fg-muted">拖拽或选择文件，前端按分片上传，类型由文件后缀自动识别。</p>
       </div>
 
       <label
         className={`mt-4 flex min-h-32 cursor-pointer flex-col items-center justify-center rounded-lg border border-dashed px-4 py-6 text-center ${
-          dragging ? "border-[#2563eb] bg-[#eff6ff]" : "border-[#cbd5e1] bg-[#f8fafc]"
+          dragging ? "border-accent bg-raised" : "border-line-strong bg-raised"
         }`}
         onDragOver={(event: DragEvent<HTMLLabelElement>) => {
           event.preventDefault();
@@ -103,8 +103,8 @@ export function UploadDropzone({ projectId, onUploaded }: UploadDropzoneProps): 
           void uploadFiles(event.dataTransfer.files);
         }}
       >
-        <span className="text-sm font-medium text-[#334155]">拖拽文件到这里</span>
-        <span className="mt-1 text-xs text-[#64748b]">或点击选择本地文件</span>
+        <span className="text-sm font-medium text-fg">拖拽文件到这里</span>
+        <span className="mt-1 text-xs text-fg-muted">或点击选择本地文件</span>
         <input
           aria-label="选择上传文件"
           className="sr-only"
@@ -123,12 +123,12 @@ export function UploadDropzone({ projectId, onUploaded }: UploadDropzoneProps): 
         <div className="mt-4 space-y-2">
           {uploads.map((item) => (
             <div key={item.name}>
-              <div className="flex items-center justify-between gap-3 text-xs text-[#475569]">
+              <div className="flex items-center justify-between gap-3 text-xs text-fg-muted">
                 <span className="truncate">{item.name}</span>
                 <span>{uploadStatusLabel(item)}</span>
               </div>
-              <div className="mt-1 h-1.5 rounded bg-[#e2e8f0]">
-                <div className="h-1.5 rounded bg-[#2563eb]" style={{ width: `${item.progress}%` }} />
+              <div className="mt-1 h-1.5 rounded bg-line">
+                <div className="h-1.5 rounded bg-accent" style={{ width: `${item.progress}%` }} />
               </div>
             </div>
           ))}
@@ -136,7 +136,7 @@ export function UploadDropzone({ projectId, onUploaded }: UploadDropzoneProps): 
       ) : null}
 
       {rejections.length > 0 ? (
-        <div className="mt-4 rounded-md bg-[#fee4e2] px-3 py-2 text-sm text-[#b42318]">
+        <div className="mt-4 rounded-md bg-danger/15 px-3 py-2 text-sm text-danger">
           <p className="font-medium">{`拒收 ${rejections.length} 个`}</p>
           <ul className="mt-1 space-y-1">
             {rejections.map((item, index) => (

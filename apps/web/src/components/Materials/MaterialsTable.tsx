@@ -24,16 +24,16 @@ export function MaterialsTable({
 }: MaterialsTableProps): ReactElement {
   if (assets.length === 0) {
     return (
-      <p className="rounded-lg border border-dashed border-[#cbd5e1] bg-white px-4 py-8 text-sm text-[#64748b]">
+      <p className="rounded-lg border border-dashed border-line-strong bg-panel px-4 py-8 text-sm text-fg-muted">
         还没有素材。可以上传文件、从本机路径 reference 导入，或从 URL 创建导入确认项。
       </p>
     );
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-[#d9dee7] bg-white">
+    <div className="overflow-x-auto rounded-lg border border-line bg-panel">
       <table className="min-w-[1120px] w-full text-left text-sm">
-        <thead className="border-b border-[#d9dee7] bg-[#f8fafc] text-xs font-semibold text-[#475569]">
+        <thead className="border-b border-line bg-raised text-xs font-semibold text-fg-muted">
           <tr>
             <th className="px-3 py-3">缩略图</th>
             <th className="px-3 py-3">文件名</th>
@@ -45,23 +45,23 @@ export function MaterialsTable({
             <th className="px-3 py-3">操作</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-[#eef2f7]">
+        <tbody className="divide-y divide-line">
           {assets.map((asset) => {
             const understanding = understandingBadgeProps(asset.understanding_status);
             const active = activeAssetId === asset.asset_id;
-            const rowTone = active ? "bg-[#eff6ff]" : asset.invalid ? "bg-[#fff7ed]" : "bg-white";
+            const rowTone = active ? "bg-raised" : asset.invalid ? "bg-warn/10" : "bg-panel";
             return (
               <tr
                 key={asset.asset_id}
-                className={`${rowTone} ${onSelect ? "cursor-pointer hover:bg-[#f8fafc]" : ""}`}
+                className={`${rowTone} ${onSelect ? "cursor-pointer hover:bg-hover" : ""}`}
                 onClick={onSelect ? () => onSelect(asset) : undefined}
               >
                 <td className="px-3 py-3 align-top">
                   <MaterialThumbnail asset={asset} />
                 </td>
                 <td className="max-w-[240px] px-3 py-3 align-top">
-                  <div className="font-medium text-[#17202a]">{asset.filename || asset.asset_id}</div>
-                  <div className="mt-1 truncate text-xs text-[#64748b]" title={asset.asset_id}>
+                  <div className="font-medium text-fg">{asset.filename || asset.asset_id}</div>
+                  <div className="mt-1 truncate text-xs text-fg-muted" title={asset.asset_id}>
                     {asset.asset_id}
                   </div>
                   {asset.invalid ? (
@@ -72,12 +72,12 @@ export function MaterialsTable({
                 </td>
                 <td className="px-3 py-3 align-top">
                   <div>{kindLabel(asset.kind)}</div>
-                  <div className="mt-1 text-xs text-[#64748b]">{storageLabel(asset.storage_mode)}</div>
+                  <div className="mt-1 text-xs text-fg-muted">{storageLabel(asset.storage_mode)}</div>
                 </td>
-                <td className="px-3 py-3 align-top text-[#334155]">
+                <td className="px-3 py-3 align-top text-fg">
                   <div>{formatDuration(asset.duration_sec)}</div>
                   {resolutionLabel(asset) ? (
-                    <div className="mt-1 text-xs text-[#64748b]">{resolutionLabel(asset)}</div>
+                    <div className="mt-1 text-xs text-fg-muted">{resolutionLabel(asset)}</div>
                   ) : null}
                 </td>
                 <td className="px-3 py-3 align-top">
@@ -85,7 +85,7 @@ export function MaterialsTable({
                 </td>
                 <td className="px-3 py-3 align-top">
                   <StatusBadge label={asset.usable ? "可用" : "不可用"} tone={asset.usable ? "success" : "danger"} />
-                  <div className="mt-1 text-xs text-[#64748b]">{asset.enabled ? "已启用" : "已禁用"}</div>
+                  <div className="mt-1 text-xs text-fg-muted">{asset.enabled ? "已启用" : "已禁用"}</div>
                 </td>
                 <td className="min-w-[150px] px-3 py-3 align-top">{jobSummary(asset)}</td>
                 <td
@@ -94,7 +94,7 @@ export function MaterialsTable({
                 >
                   <div className="flex flex-wrap gap-2">
                     <button
-                      className="rounded-md border border-[#cbd5e1] px-2 py-1 text-xs hover:bg-[#f1f5f9] disabled:text-[#94a3b8]"
+                      className="rounded-md border border-line-strong px-2 py-1 text-xs hover:bg-hover disabled:text-fg-faint"
                       type="button"
                       disabled={actionPending}
                       onClick={() => onToggleEnabled(asset)}
@@ -102,7 +102,7 @@ export function MaterialsTable({
                       {asset.enabled ? "禁用" : "启用"}
                     </button>
                     <button
-                      className="rounded-md border border-[#cbd5e1] px-2 py-1 text-xs text-[#b42318] hover:bg-[#fee4e2] disabled:text-[#94a3b8]"
+                      className="rounded-md border border-line-strong px-2 py-1 text-xs text-danger hover:bg-danger/15 disabled:text-fg-faint"
                       type="button"
                       disabled={actionPending}
                       onClick={() => onUnlink(asset)}
@@ -111,7 +111,7 @@ export function MaterialsTable({
                     </button>
                     {asset.invalid ? (
                       <button
-                        className="rounded-md bg-[#17202a] px-2 py-1 text-xs font-medium text-white disabled:bg-[#94a3b8]"
+                        className="rounded-md bg-accent px-2 py-1 text-xs font-medium text-white disabled:opacity-40"
                         type="button"
                         disabled={actionPending}
                         onClick={() => onRelocate(asset)}
@@ -138,14 +138,14 @@ function MaterialThumbnail({ asset }: { asset: MaterialAsset }): ReactElement {
       <img
         src={api.mediaThumbnailUrl(asset.asset_id)}
         alt={`${asset.filename || asset.asset_id} 缩略图`}
-        className="h-12 w-20 rounded border border-[#e2e8f0] object-cover"
+        className="h-12 w-20 rounded border border-line object-cover"
         loading="lazy"
         onError={() => setFailed(true)}
       />
     );
   }
   return (
-    <div className="flex h-12 w-20 items-center justify-center rounded border border-dashed border-[#cbd5e1] bg-[#f8fafc] text-xs text-[#94a3b8]">
+    <div className="flex h-12 w-20 items-center justify-center rounded border border-dashed border-line-strong bg-raised text-xs text-fg-faint">
       {kindLabel(asset.kind)}
     </div>
   );
@@ -195,21 +195,21 @@ function formatDuration(seconds: number | null): string {
 function jobSummary(asset: MaterialAsset): ReactElement {
   const active = asset.jobs.find((job) => ["pending", "running"].includes(job.status));
   if (!active) {
-    return <span className="text-xs text-[#94a3b8]">无运行中任务</span>;
+    return <span className="text-xs text-fg-faint">无运行中任务</span>;
   }
   const progress = typeof active.progress === "number" ? Math.max(0, Math.min(1, active.progress)) : null;
   return (
     <div className="space-y-1">
-      <div className="text-xs text-[#334155]">
+      <div className="text-xs text-fg">
         {active.kind} / {active.status}
       </div>
-      <div className="h-1.5 rounded bg-[#e2e8f0]">
+      <div className="h-1.5 rounded bg-line">
         <div
-          className="h-1.5 rounded bg-[#2563eb]"
+          className="h-1.5 rounded bg-accent"
           style={{ width: `${progress === null ? 15 : Math.round(progress * 100)}%` }}
         />
       </div>
-      <div className="text-xs text-[#64748b]">{progress === null ? "等待进度" : `${Math.round(progress * 100)}%`}</div>
+      <div className="text-xs text-fg-muted">{progress === null ? "等待进度" : `${Math.round(progress * 100)}%`}</div>
     </div>
   );
 }

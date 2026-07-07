@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { ReactElement } from "react";
 import { api, type DecisionAnswer, type MaterialAsset } from "../api/client";
 import { queryKeys } from "../app/query_client";
@@ -15,25 +14,12 @@ import {
   UrlImportPanel,
   type UrlImportDraft
 } from "../components/Materials/UrlImportPanel";
-import { createApiEventSource } from "../auth";
+import { useMaterialsEvents } from "../components/Materials/useMaterialsEvents";
 
 type ProjectMaterialsViewProps = {
   projectId: string;
   enableEvents?: boolean;
 };
-
-type MaterialsSsePayload = {
-  event_id: number;
-  event: {
-    event: string;
-    project_id?: string | null;
-  };
-};
-
-export function ProjectMaterialsPage(): ReactElement {
-  const params = useParams({ strict: false }) as { projectId: string };
-  return <ProjectMaterialsView projectId={params.projectId} />;
-}
 
 export function ProjectMaterialsView({
   projectId,
@@ -135,29 +121,17 @@ export function ProjectMaterialsView({
     revalidateMaterials.isPending;
 
   return (
-    <section className="mx-auto flex w-full max-w-7xl flex-col gap-5 p-6">
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p className="text-sm font-medium text-[#64748b]">素材管理</p>
-          <h1 className="mt-2 text-2xl font-semibold">项目级素材页</h1>
-          <p className="mt-2 text-sm text-[#64748b]">Project：{projectId}</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            className="rounded-md border border-[#cbd5e1] px-3 py-2 text-sm hover:bg-[#f1f5f9] disabled:text-[#94a3b8]"
-            type="button"
-            disabled={revalidateMaterials.isPending}
-            onClick={() => revalidateMaterials.mutate()}
-          >
-            重新检测失效
-          </button>
-          <a
-            className="rounded-md border border-[#cbd5e1] px-3 py-2 text-sm hover:bg-[#f1f5f9]"
-            href={`/projects/${encodeURIComponent(projectId)}`}
-          >
-            返回项目首页
-          </a>
-        </div>
+    <section className="flex w-full flex-col gap-5">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-fg-muted">项目素材池，导入后可在剪辑任务中使用。</p>
+        <button
+          className="rounded-md border border-line-strong px-3 py-2 text-sm hover:bg-hover disabled:text-fg-faint"
+          type="button"
+          disabled={revalidateMaterials.isPending}
+          onClick={() => revalidateMaterials.mutate()}
+        >
+          重新检测失效
+        </button>
       </header>
 
       <div className="grid gap-4 xl:grid-cols-3">
@@ -179,9 +153,9 @@ export function ProjectMaterialsView({
       />
 
       {materialsQuery.isLoading ? (
-        <p className="text-sm text-[#64748b]">正在读取素材列表</p>
+        <p className="text-sm text-fg-muted">正在读取素材列表</p>
       ) : materialsQuery.error ? (
-        <p className="rounded-md bg-[#fee4e2] px-3 py-2 text-sm text-[#b42318]">素材列表加载失败</p>
+        <p className="rounded-md bg-danger/15 px-3 py-2 text-sm text-danger">素材列表加载失败</p>
       ) : (
         <MaterialsTable
           assets={assets}
@@ -223,31 +197,6 @@ export function ProjectMaterialsView({
   );
 }
 
-function useMaterialsEvents(projectId: string, enabled: boolean): void {
-  const queryClient = useQueryClient();
-
-  useEffect(() => {
-    if (!enabled) {
-      return;
-    }
-    const source = createApiEventSource("/api/events");
-    const handleEvent = (event: Event) => {
-      const message = event as MessageEvent<string>;
-      const payload = JSON.parse(message.data) as MaterialsSsePayload;
-      const eventProjectId = payload.event.project_id;
-      if (!eventProjectId || eventProjectId === projectId) {
-        void queryClient.invalidateQueries({ queryKey: queryKeys.materials(projectId) });
-      }
-    };
-    for (const eventName of MATERIAL_EVENT_TYPES) {
-      source.addEventListener(eventName, handleEvent);
-    }
-    return () => {
-      source.close();
-    };
-  }, [enabled, projectId, queryClient]);
-}
-
 function decisionAnswer(approved: boolean): DecisionAnswer {
   return {
     option_id: approved ? "approve" : "reject",
@@ -255,23 +204,3 @@ function decisionAnswer(approved: boolean): DecisionAnswer {
     payload: { approved }
   };
 }
-
-const MATERIAL_EVENT_TYPES = [
-  "AssetImported",
-  "AssetProbed",
-  "ProxyGenerated",
-  "AssetInvalidated",
-  "AssetLinked",
-  "AssetUnlinked",
-  "AssetIndexReady",
-  "AssetIndexFailed",
-  "MaterialUnderstandingStarted",
-  "MaterialUnderstandingCompleted",
-  "MaterialUnderstandingFailed",
-  "JobEnqueued",
-  "JobProgress",
-  "JobSucceeded",
-  "JobFailed",
-  "JobCancelled",
-  "DecisionAnswered"
-];

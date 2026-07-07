@@ -41,13 +41,13 @@ export function AppRoot(): ReactElement {
 
 function LaunchGuide(): ReactElement {
   return (
-    <main className="grid min-h-screen place-items-center bg-[#f6f7f9] px-6">
-      <section className="w-full max-w-lg rounded-lg border border-[#d9dee7] bg-white p-8 shadow-sm">
-        <p className="text-sm font-medium text-[#64748b]">需要启动授权</p>
-        <h1 className="mt-3 text-2xl font-semibold text-[#17202a]">请从后端启动 URL 打开 Rushes</h1>
-        <p className="mt-4 leading-7 text-[#475569]">
+    <main className="grid min-h-screen place-items-center bg-ink px-6">
+      <section className="w-full max-w-lg rounded-lg border border-line bg-panel p-8">
+        <p className="text-sm font-medium text-fg-muted">需要启动授权</p>
+        <h1 className="mt-3 text-2xl font-semibold text-fg">请从后端启动 URL 打开 Rushes</h1>
+        <p className="mt-4 leading-7 text-fg-muted">
           当前页面没有收到启动 token。请使用后端进程打印的本地地址打开应用，地址形如
-          <code className="mx-1 rounded bg-[#eef2f7] px-1.5 py-0.5 text-sm">#t=&lt;token&gt;</code>
+          <code className="mx-1 rounded bg-raised px-1.5 py-0.5 text-sm text-fg">#t=&lt;token&gt;</code>
           ，前端会把 token 存入本次浏览器会话。
         </p>
       </section>

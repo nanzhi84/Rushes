@@ -2,21 +2,22 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactElement } from "react";
-import { api, type ProjectTreeProject } from "../api/client";
-import { queryKeys } from "../app/query_client";
-import type { TreeDialogState } from "../state/ui_store";
+import { api, type ProjectTreeProject } from "../../api/client";
+import { queryKeys } from "../../app/query_client";
+import type { EntityDialogState } from "../../state/ui_store";
 
-type TreeMutationDialogProps = {
-  dialog: TreeDialogState | null;
+type EntityActionDialogProps = {
+  dialog: EntityDialogState | null;
   projects: ProjectTreeProject[];
   onClose: () => void;
 };
 
-export function TreeMutationDialog({
+/** Project/Case 的创建、重命名、复制、删除、移动统一对话框；两态壳共用。 */
+export function EntityActionDialog({
   dialog,
   projects,
   onClose
-}: TreeMutationDialogProps): ReactElement | null {
+}: EntityActionDialogProps): ReactElement | null {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [name, setName] = useState("");
@@ -149,9 +150,9 @@ export function TreeMutationDialog({
     (naming && name.trim().length > 0);
 
   return (
-    <div className="fixed inset-0 z-20 grid place-items-center bg-black/20 px-4" role="presentation">
+    <div className="fixed inset-0 z-20 grid place-items-center bg-black/60 px-4" role="presentation">
       <form
-        className="w-full max-w-md rounded-lg border border-[#d9dee7] bg-white p-5 shadow-xl"
+        className="w-full max-w-md rounded-lg border border-line bg-raised p-5"
         onSubmit={(event) => {
           event.preventDefault();
           if (!formReady || mutation.isPending) {
@@ -160,13 +161,13 @@ export function TreeMutationDialog({
           mutation.mutate();
         }}
       >
-        <h2 className="text-lg font-semibold text-[#17202a]">{dialogTitle(dialog.kind)}</h2>
+        <h2 className="text-lg font-semibold text-fg">{dialogTitle(dialog.kind)}</h2>
 
         {naming ? (
-          <label className="mt-4 block text-sm font-medium text-[#334155]">
+          <label className="mt-4 block text-sm font-medium text-fg-muted">
             名称
             <input
-              className="mt-2 w-full rounded-md border border-[#cbd5e1] px-3 py-2 outline-none focus:border-[#2563eb]"
+              className="mt-2 w-full rounded-md border border-line bg-ink px-3 py-2 text-fg outline-none focus:border-accent"
               value={name}
               onChange={(event) => setName(event.target.value)}
               autoFocus
@@ -175,10 +176,10 @@ export function TreeMutationDialog({
         ) : null}
 
         {dialog.kind === "createCase" ? (
-          <label className="mt-4 block text-sm font-medium text-[#334155]">
+          <label className="mt-4 block text-sm font-medium text-fg-muted">
             目标文本
             <textarea
-              className="mt-2 h-24 w-full resize-none rounded-md border border-[#cbd5e1] px-3 py-2 outline-none focus:border-[#2563eb]"
+              className="mt-2 h-24 w-full resize-none rounded-md border border-line bg-ink px-3 py-2 text-fg outline-none focus:border-accent"
               value={goal}
               onChange={(event) => setGoal(event.target.value)}
             />
@@ -186,9 +187,9 @@ export function TreeMutationDialog({
         ) : null}
 
         {destructive ? (
-          <label className="mt-4 flex items-start gap-3 rounded-md bg-[#fff7ed] p-3 text-sm text-[#7c2d12]">
+          <label className="mt-4 flex items-start gap-3 rounded-md border border-danger/40 bg-danger/10 p-3 text-sm text-fg">
             <input
-              className="mt-1"
+              className="mt-1 accent-[color:var(--color-danger)]"
               type="checkbox"
               checked={confirmed}
               onChange={(event) => setConfirmed(event.target.checked)}
@@ -199,10 +200,10 @@ export function TreeMutationDialog({
 
         {moving ? (
           <div className="mt-4 space-y-3">
-            <label className="block text-sm font-medium text-[#334155]">
+            <label className="block text-sm font-medium text-fg-muted">
               目标项目
               <select
-                className="mt-2 w-full rounded-md border border-[#cbd5e1] px-3 py-2 outline-none focus:border-[#2563eb]"
+                className="mt-2 w-full rounded-md border border-line bg-ink px-3 py-2 text-fg outline-none focus:border-accent"
                 value={targetProjectId}
                 onChange={(event) => setTargetProjectId(event.target.value)}
               >
@@ -218,7 +219,7 @@ export function TreeMutationDialog({
                   ))}
               </select>
             </label>
-            <label className="flex items-start gap-3 rounded-md bg-[#eef6ff] p-3 text-sm text-[#1e3a8a]">
+            <label className="flex items-start gap-3 rounded-md border border-line bg-ink p-3 text-sm text-fg">
               <input
                 className="mt-1"
                 type="checkbox"
@@ -231,21 +232,23 @@ export function TreeMutationDialog({
         ) : null}
 
         {mutation.error ? (
-          <p className="mt-4 rounded-md bg-[#fee4e2] px-3 py-2 text-sm text-[#b42318]">
+          <p className="mt-4 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
             操作失败，请检查后端响应。
           </p>
         ) : null}
 
         <div className="mt-5 flex justify-end gap-2">
           <button
-            className="rounded-md border border-[#cbd5e1] px-3 py-2 text-sm text-[#334155] hover:bg-[#f1f5f9]"
+            className="rounded-md border border-line px-3 py-2 text-sm text-fg-muted hover:bg-hover hover:text-fg"
             type="button"
             onClick={onClose}
           >
             取消
           </button>
           <button
-            className="rounded-md bg-[#17202a] px-3 py-2 text-sm font-medium text-white disabled:bg-[#94a3b8]"
+            className={`rounded-md px-3 py-2 text-sm font-medium text-white disabled:opacity-40 ${
+              destructive ? "bg-danger hover:bg-danger/80" : "bg-accent hover:bg-accent-strong"
+            }`}
             type="submit"
             disabled={!formReady || mutation.isPending}
           >
@@ -257,7 +260,11 @@ export function TreeMutationDialog({
   );
 }
 
-function initialName(kind: TreeDialogState["kind"], projectName?: string, caseName?: string): string {
+function initialName(
+  kind: EntityDialogState["kind"],
+  projectName?: string,
+  caseName?: string
+): string {
   if (kind === "renameProject") {
     return projectName ?? "";
   }
@@ -279,8 +286,8 @@ function initialName(kind: TreeDialogState["kind"], projectName?: string, caseNa
   return "";
 }
 
-function dialogTitle(kind: TreeDialogState["kind"]): string {
-  const titles: Record<TreeDialogState["kind"], string> = {
+function dialogTitle(kind: EntityDialogState["kind"]): string {
+  const titles: Record<EntityDialogState["kind"], string> = {
     createProject: "新建项目",
     renameProject: "重命名项目",
     copyProject: "复制项目",
