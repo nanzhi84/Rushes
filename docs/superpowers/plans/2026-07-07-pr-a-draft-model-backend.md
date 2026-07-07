@@ -156,12 +156,13 @@ class DraftListItem(BaseModel):
 - Delete: `packages/tools/project/`（整目录）、asset 手册中 7 个被删工具的 spec+handler、`UploadCompleteRequest` 相关
 - Modify: `packages/tools/specs.py`、`registry.py`、`context.py`（draft_state）、`packages/tools/asset/handlers.py`（import_local_file/import_url 改挂 draft + `list_assets` 新实现；删 read_summary，摘要读取走 understand.materials 缓存命中）、`packages/tools/memory_tools/`（ask_scope 保留改问法；extract_from_case→extract_from_draft；save 固定 user 域）、audio/content/timeline_tools/render_tools/understand 各包字段跟随
 - Test: `tests/tools/`（删除被删工具测试；`asset.list_assets` 新测试）
+- **范围补正（执行期发现）**：`packages/timeline`（帧级时间线，tools 的直接依赖，原计划漏认领）+ `tests/timeline` 并入本任务——严格机械适配（CaseState→DraftState、draft_asset_links、去 enabled/selected/disabled 维度、fps 读 drafts.defaults），不做行为重构；时间线只读约束与帧级换算逻辑不动
 
 **Interfaces:**
 - Consumes: Task 2–4。Produces: 31 个注册 ToolSpec（`allowed_scopes=["draft_editor"]`、`requires_active_draft`）；`asset.list_assets` 返回 `[{asset_id, kind, rel_dir, usable, has_summary}]`。
 
 - [ ] **Step 1**: 按总表裁撤与改名；`PRECONDITION_REGISTRY` 同步。
-- [ ] **Step 2**: `uv run pytest tests/tools -q` 绿。**Commit** `refactor：工具族收敛 46→31（project 族退场，asset 三工具）`
+- [ ] **Step 2**: `uv run pytest tests/tools tests/timeline -q` 双绿。**Commit** `refactor：工具族收敛 46→31（project 族退场，asset 三工具）`
 
 ### Task 6: agent_harness
 
