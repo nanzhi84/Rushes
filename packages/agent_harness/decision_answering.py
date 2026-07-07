@@ -6,8 +6,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from contracts.case import CaseState
 from contracts.decision import Decision, DecisionAnswer
+from contracts.draft import DraftState
 
 RESOLVE_DECISION_ANSWER_TOOL = "resolve_decision_answer"
 
@@ -36,7 +36,7 @@ class DecisionAnswerResolver(Protocol):
     async def resolve(
         self,
         *,
-        case_state: CaseState,
+        draft_state: DraftState,
         decision: Decision,
         user_message: str,
     ) -> SupportsDecisionResolution:
@@ -58,11 +58,11 @@ class ScriptedDecisionAnswerResolver:
     async def resolve(
         self,
         *,
-        case_state: CaseState,
+        draft_state: DraftState,
         decision: Decision,
         user_message: str,
     ) -> DecisionAnswerResolution:
-        del case_state, decision, user_message
+        del draft_state, decision, user_message
         if self._index >= len(self._resolutions):
             return DecisionAnswerResolution.unanswered()
         resolution = self._resolutions[self._index]

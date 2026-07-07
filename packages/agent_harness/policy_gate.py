@@ -12,7 +12,6 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from contracts.case import CaseState, PostprocessPlan
 from contracts.decision import (
     Decision,
     DecisionOption,
@@ -20,6 +19,7 @@ from contracts.decision import (
     DecisionType,
     PendingToolCall,
 )
+from contracts.draft import DraftState, PostprocessPlan
 from contracts.events import DecisionCreated, DomainEventBase, PolicyRefusal
 from contracts.tool import PatchOpSpec, ToolSpec
 from domain.preconditions import (
@@ -274,7 +274,7 @@ class PolicyGate:
 
         if op_spec.requires_confirmation:
             decision_type = op_spec.confirmation_decision_type
-            if not _postprocess_plan_item_exists(context.preconditions.case_state, decision_type):
+            if not _postprocess_plan_item_exists(context.preconditions.draft_state, decision_type):
                 tool_spec = self._tool_specs[tool_call.tool_name]
                 return self._ask(
                     tool_call,
@@ -323,12 +323,11 @@ class PolicyGate:
             original_tool_call_id=tool_call.tool_call_id,
         )
         scope_type = _confirmation_scope_type(effective_decision_type, context.preconditions)
-        project_id, case_id = _scope_ids(scope_type, context.preconditions)
+        draft_id = _scope_draft_id(scope_type, context.preconditions)
         decision = Decision(
             decision_id=decision_id,
             scope_type=scope_type,
-            project_id=project_id,
-            case_id=case_id,
+            draft_id=draft_id,
             type=cast(DecisionType, effective_decision_type),
             question=_confirmation_question(effective_decision_type, tool_call.tool_name, context),
             options=_confirmation_options(effective_decision_type, context),
@@ -337,14 +336,13 @@ class PolicyGate:
             answer=None,
             pending_tool_call=pending_tool_call,
             pending_tool_call_status="pending",
-            blocking=scope_type == "case",
+            blocking=scope_type == "draft",
             created_by_tool_call_id=tool_call.tool_call_id,
         )
         event = DecisionCreated(
             decision_id=decision.decision_id,
             scope_type=decision.scope_type,
-            project_id=decision.project_id,
-            case_id=decision.case_id,
+            draft_id=decision.draft_id,
             payload={
                 "decision": decision.model_dump(mode="json"),
                 "type": decision.type,
@@ -374,11 +372,7 @@ class PolicyGate:
         *,
         details: Mapping[str, Any] | None = None,
     ) -> Verdict:
-        case_state = context.preconditions.case_state
-        project_state = context.preconditions.project_state
-        project_id = case_state.project_id if case_state is not None else None
-        if project_id is None and project_state is not None:
-            project_id = project_state.project_id
+        draft_state = context.preconditions.draft_state
         payload: dict[str, Any] = {
             "tool_name": tool_call.tool_name,
             "reason": reason,
@@ -388,8 +382,7 @@ class PolicyGate:
             payload["details"] = dict(details)
         event = PolicyRefusal(
             refusal_id=_refusal_id(tool_call, reason),
-            project_id=project_id,
-            case_id=case_state.case_id if case_state is not None else None,
+            draft_id=draft_state.draft_id if draft_state is not None else None,
             payload=payload,
         )
         return Verdict(status="deny", reason=reason, tool_call=tool_call, events=(event,))
@@ -428,13 +421,9 @@ def mark_replayed(
 
 
 def _active_requirements_pass(spec: ToolSpec, context: PreconditionContext) -> bool:
-    if spec.requires_active_project:
-        project_state = context.project_state
-        if project_state is None or project_state.status != "active":
-            return False
     return not (
-        spec.requires_active_case
-        and not (context.case_state is not None and context.case_state.status == "active")
+        spec.requires_active_draft
+        and not (context.draft_state is not None and context.draft_state.status == "active")
     )
 
 
@@ -449,18 +438,18 @@ def _allowed_tool_names(context: PolicyContext) -> frozenset[str]:
 def _pending_blocking_decision(context: PolicyContext) -> Decision | None:
     if (
         context.pending_decision is not None
-        and context.pending_decision.scope_type == "case"
+        and context.pending_decision.scope_type == "draft"
         and context.pending_decision.status == "pending"
         and context.pending_decision.blocking
     ):
         return context.pending_decision
-    case_state = context.preconditions.case_state
-    if case_state is None or case_state.pending_decision_id is None:
+    draft_state = context.preconditions.draft_state
+    if draft_state is None or draft_state.pending_decision_id is None:
         return None
     for decision in context.decisions:
         if (
-            decision.decision_id == case_state.pending_decision_id
-            and decision.scope_type == "case"
+            decision.decision_id == draft_state.pending_decision_id
+            and decision.scope_type == "draft"
             and decision.status == "pending"
             and decision.blocking
         ):
@@ -513,31 +502,23 @@ def _confirmation_arguments(
     context: PreconditionContext,
 ) -> dict[str, Any]:
     normalized = dict(arguments)
-    case_state = context.case_state
-    project_state = context.project_state
+    draft_state = context.draft_state
     if (
-        spec.requires_active_case
-        and "case_id" in normalized
-        and normalized["case_id"] is None
-        and case_state is not None
+        spec.requires_active_draft
+        and "draft_id" in normalized
+        and normalized["draft_id"] is None
+        and draft_state is not None
     ):
-        normalized["case_id"] = case_state.case_id
-    if (
-        spec.requires_active_project
-        and "project_id" in normalized
-        and normalized["project_id"] is None
-    ):
-        if project_state is not None:
-            normalized["project_id"] = project_state.project_id
-        elif case_state is not None:
-            normalized["project_id"] = case_state.project_id
+        normalized["draft_id"] = draft_state.draft_id
     return normalized
 
 
-def _postprocess_plan_item_exists(case_state: CaseState | None, decision_type: str | None) -> bool:
-    if case_state is None or case_state.postprocess_plan is None:
+def _postprocess_plan_item_exists(
+    draft_state: DraftState | None, decision_type: str | None
+) -> bool:
+    if draft_state is None or draft_state.postprocess_plan is None:
         return False
-    plan: PostprocessPlan = case_state.postprocess_plan
+    plan: PostprocessPlan = draft_state.postprocess_plan
     if decision_type == "subtitle":
         return plan.subtitle is not None
     if decision_type == "bgm":
@@ -549,35 +530,22 @@ def _confirmation_scope_type(
     decision_type: str,
     context: PreconditionContext,
 ) -> DecisionScopeType:
-    if decision_type in {"export", "subtitle", "bgm"} and context.case_state is not None:
-        return "case"
-    if decision_type in {"destructive_project_action", "url_import"} and (
-        context.project_state is not None or context.case_state is not None
-    ):
-        return "project"
-    if context.case_state is not None:
-        return "case"
-    if context.project_state is not None:
-        return "project"
+    # 单级草稿模型：有草稿即 draft 域（strict/可阻塞），否则 workspace 域（merge/非阻塞）。
+    del decision_type
+    if context.draft_state is not None:
+        return "draft"
     return "workspace"
 
 
-def _scope_ids(
+def _scope_draft_id(
     scope_type: DecisionScopeType,
     context: PreconditionContext,
-) -> tuple[str | None, str | None]:
-    case_state = context.case_state
-    project_state = context.project_state
-    if scope_type == "case":
-        if case_state is None:
-            raise ValueError("case-scoped confirmation requires case_state")
-        return case_state.project_id, case_state.case_id
-    if scope_type == "project":
-        if project_state is not None:
-            return project_state.project_id, None
-        if case_state is not None:
-            return case_state.project_id, None
-    return None, None
+) -> str | None:
+    if scope_type == "draft":
+        if context.draft_state is None:
+            raise ValueError("draft-scoped confirmation requires draft_state")
+        return context.draft_state.draft_id
+    return None
 
 
 def _confirmation_question(
@@ -586,11 +554,11 @@ def _confirmation_question(
     context: PolicyContext,
 ) -> str:
     if decision_type == "export":
-        case_state = context.preconditions.case_state
+        draft_state = context.preconditions.draft_state
         if (
-            case_state is not None
-            and case_state.preview_current_id is not None
-            and case_state.last_viewed_preview_id != case_state.preview_current_id
+            draft_state is not None
+            and draft_state.preview_current_id is not None
+            and draft_state.last_viewed_preview_id != draft_state.preview_current_id
         ):
             return "你还没看最新预览。确认开始最终导出？"
         return "确认开始最终导出？"
@@ -600,8 +568,6 @@ def _confirmation_question(
         return "确认新增 BGM 后处理？"
     if decision_type == "url_import":
         return "确认从 URL 导入素材？"
-    if decision_type == "destructive_project_action":
-        return "确认执行项目级修改？"
     return f"确认执行 {tool_name}？"
 
 
@@ -634,14 +600,14 @@ def _bgm_confirmation_options(context: PolicyContext) -> list[DecisionOption]:
         payload={"enabled": True, "action": "upload"},
     )
     skip_option = DecisionOption(option_id="skip", label="跳过 BGM", payload={"enabled": False})
-    project_assets = context.preconditions.project_audio_assets[:5]
+    draft_assets = context.preconditions.draft_audio_assets[:5]
     options = [
         DecisionOption(
             option_id=asset.asset_id,
             label=f"使用素材：{asset.filename}",
             payload={"enabled": True, "asset_id": asset.asset_id, "gain_db": -12.0, "duck": True},
         )
-        for asset in project_assets
+        for asset in draft_assets
     ]
     options.extend((upload_option, skip_option))
     return options

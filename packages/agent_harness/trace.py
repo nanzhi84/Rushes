@@ -22,12 +22,12 @@ class TraceRecorder:
         self,
         *,
         engine: Engine,
-        case_id: str,
+        draft_id: str,
         turn_id: str,
         created_at: str | None = None,
     ) -> None:
         self._engine = engine
-        self._case_id = case_id
+        self._draft_id = draft_id
         self._turn_id = turn_id
         self._created_at = created_at
         self._seq = self._load_next_seq() - 1
@@ -40,7 +40,7 @@ class TraceRecorder:
                 schema.agent_traces.insert().values(
                     trace_id=f"trace_{self._turn_id}_{self._seq}",
                     turn_id=self._turn_id,
-                    case_id=self._case_id,
+                    draft_id=self._draft_id,
                     seq=self._seq,
                     kind=kind,
                     payload_json=dump_json(payload),
@@ -53,7 +53,7 @@ class TraceRecorder:
         with self._engine.connect() as connection:
             value = connection.execute(
                 select(func.max(schema.agent_traces.c.seq))
-                .where(schema.agent_traces.c.case_id == self._case_id)
+                .where(schema.agent_traces.c.draft_id == self._draft_id)
                 .where(schema.agent_traces.c.turn_id == self._turn_id)
             ).scalar_one()
         if value is None:

@@ -10,11 +10,10 @@ from typing import Any, Literal, cast
 from sqlalchemy import delete, select, update
 from sqlalchemy.engine import Connection, Engine
 
-from contracts.case import CaseState, RunningJobRef
 from contracts.decision import Decision, DecisionAnswer
+from contracts.draft import DraftState, RunningJobRef
 from contracts.events import (
     Actor,
-    AssetLinked,
     DecisionEventBase,
     DomainEventBase,
     VersionMode,
@@ -29,23 +28,18 @@ from domain.decision_effects import (
 from events.event_log import append_domain_event, validate_domain_event
 from storage import schema
 from storage.db import begin_immediate
-from storage.repositories import CasesRepository, DecisionsRepository, EventLogRepository
-from storage.repositories._json import dump_json, load_json
+from storage.repositories import DecisionsRepository, DraftsRepository, EventLogRepository
+from storage.repositories._json import dump_json, encode_json_columns, load_json
+from storage.repositories.drafts import JSON_COLUMNS as _DRAFT_JSON_COLUMNS
 
 from .state_validator import TimelineInvariantHook, ValidationFailed, validate_before_commit
 
 REDUCER_DISPATCH_EVENTS: frozenset[str] = frozenset(
     {
-        "ProjectCreated",
-        "ProjectRenamed",
-        "ProjectTrashed",
-        "ProjectCopied",
-        "CaseCreated",
-        "CaseRenamed",
-        "CaseCopied",
-        "CaseMoved",
-        "CaseClosed",
-        "CaseTrashed",
+        "DraftCreated",
+        "DraftRenamed",
+        "DraftCopied",
+        "DraftTrashed",
         "AssetImported",
         "AssetProbed",
         "ProxyGenerated",
@@ -57,7 +51,6 @@ REDUCER_DISPATCH_EVENTS: frozenset[str] = frozenset(
         "MaterialUnderstandingFailed",
         "AssetLinked",
         "AssetUnlinked",
-        "CaseAssetScopeChanged",
         "DecisionCreated",
         "DecisionAnswered",
         "DecisionCancelled",
@@ -93,7 +86,7 @@ REDUCER_DISPATCH_EVENTS: frozenset[str] = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class VersionConflict:
-    case_id: str
+    draft_id: str
     expected_base_version: int | None
     actual_state_version: int
     event_type: str
@@ -111,7 +104,7 @@ class ReducerApplyResult:
     status: Literal["applied", "version_conflict", "validation_failed"]
     applied_events: tuple[AppliedEvent, ...] = ()
     followups: tuple[HarnessFollowup, ...] = ()
-    case_state_versions: Mapping[str, int] = field(default_factory=dict)
+    draft_state_versions: Mapping[str, int] = field(default_factory=dict)
     conflict: VersionConflict | None = None
     validation_failed: ValidationFailed | None = None
     skipped_events: int = 0
@@ -136,37 +129,39 @@ class _ReducerContext:
         self.actor = actor
         self.created_at = created_at
         self.base_version = base_version
-        self.case_states: dict[str, CaseState] = {}
-        self.original_case_versions: dict[str, int] = {}
-        self.touched_case_ids: set[str] = set()
+        self.draft_states: dict[str, DraftState] = {}
+        self.original_draft_versions: dict[str, int] = {}
+        self.touched_draft_ids: set[str] = set()
         self.events_to_log: list[DomainEventBase] = []
         self.followups: list[HarnessFollowup] = []
         self.skipped_events = 0
 
-    def load_case(self, case_id: str) -> CaseState:
-        existing = self.case_states.get(case_id)
+    def load_draft(self, draft_id: str) -> DraftState:
+        existing = self.draft_states.get(draft_id)
         if existing is not None:
             return existing
-        row = CasesRepository(self.connection).get(case_id)
+        row = DraftsRepository(self.connection).get(draft_id)
         if row is None:
-            raise ValueError(f"case not found: {case_id}")
-        state = CaseState.model_validate(row)
-        self.case_states[case_id] = state
-        self.original_case_versions[case_id] = state.state_version
+            raise ValueError(f"draft not found: {draft_id}")
+        # drafts 行比 DraftState 多 created_at/updated_at 两列，DraftState extra="forbid"
+        # 会拒——load 时先剔这两列再 validate。
+        state = DraftState.model_validate(_strip_timestamps(row))
+        self.draft_states[draft_id] = state
+        self.original_draft_versions[draft_id] = state.state_version
         return state
 
-    def set_case_state(self, case_state: CaseState, *, touch: bool = True) -> None:
-        self.case_states[case_state.case_id] = case_state
+    def set_draft_state(self, draft_state: DraftState, *, touch: bool = True) -> None:
+        self.draft_states[draft_state.draft_id] = draft_state
         if touch:
-            self.touched_case_ids.add(case_state.case_id)
-            self.original_case_versions.setdefault(case_state.case_id, case_state.state_version)
+            self.touched_draft_ids.add(draft_state.draft_id)
+            self.original_draft_versions.setdefault(draft_state.draft_id, draft_state.state_version)
 
-    def patch_case_state(self, case_id: str, patch: Mapping[str, Any]) -> CaseState:
-        state = self.load_case(case_id)
+    def patch_draft_state(self, draft_id: str, patch: Mapping[str, Any]) -> DraftState:
+        state = self.load_draft(draft_id)
         data = state.model_dump(mode="json")
         data.update(dict(patch))
-        updated = CaseState.model_validate(data)
-        self.set_case_state(updated)
+        updated = DraftState.model_validate(data)
+        self.set_draft_state(updated)
         return updated
 
 
@@ -202,8 +197,7 @@ def apply(
 
             validation = validate_before_commit(
                 connection,
-                case_states=context.case_states,
-                events=context.events_to_log,
+                draft_states=context.draft_states,
                 timeline_invariant_hook=timeline_invariant_hook,
             )
             if validation is not None:
@@ -211,14 +205,15 @@ def apply(
                     ReducerApplyResult(status="validation_failed", validation_failed=validation)
                 )
 
-            _persist_touched_case_states(context)
+            _persist_touched_draft_states(context)
             applied_events = _append_events(context)
             return ReducerApplyResult(
                 status="applied",
                 applied_events=tuple(applied_events),
                 followups=tuple(context.followups),
-                case_state_versions={
-                    case_id: state.state_version for case_id, state in context.case_states.items()
+                draft_state_versions={
+                    draft_id: state.state_version
+                    for draft_id, state in context.draft_states.items()
                 },
                 skipped_events=context.skipped_events,
             )
@@ -250,19 +245,19 @@ def _preflight_strict_versions(
     for event in events:
         if _event_version_mode(event) != "strict":
             continue
-        case_id = _event_case_id(event)
-        if case_id is None:
-            raise ValueError(f"strict event requires case_id: {event.event}")
-        case_state = context.load_case(case_id)
+        draft_id = _event_draft_id(event)
+        if draft_id is None:
+            raise ValueError(f"strict event requires draft_id: {event.event}")
+        draft_state = context.load_draft(draft_id)
         expected = event.base_version if event.base_version is not None else context.base_version
-        if expected != case_state.state_version:
+        if expected != draft_state.state_version:
             raise _AbortReducer(
                 ReducerApplyResult(
                     status="version_conflict",
                     conflict=VersionConflict(
-                        case_id=case_id,
+                        draft_id=draft_id,
                         expected_base_version=expected,
-                        actual_state_version=case_state.state_version,
+                        actual_state_version=draft_state.state_version,
                         event_type=event.event,
                     ),
                 )
@@ -272,14 +267,10 @@ def _preflight_strict_versions(
 def _apply_event(context: _ReducerContext, event: DomainEventBase) -> None:
     name = event.event
     event_log_index = len(context.events_to_log)
-    if name == "ProjectCreated":
-        _apply_project_created(context, event)
-    elif name in {"ProjectRenamed", "ProjectTrashed", "ProjectCopied"}:
-        _apply_project_update(context, event)
-    elif name == "CaseCreated":
-        _apply_case_created(context, event)
-    elif name in {"CaseRenamed", "CaseCopied", "CaseMoved", "CaseClosed", "CaseTrashed"}:
-        _apply_case_update(context, event)
+    if name == "DraftCreated":
+        _apply_draft_created(context, event)
+    elif name in {"DraftRenamed", "DraftCopied", "DraftTrashed"}:
+        _apply_draft_update(context, event)
     elif name in {
         "AssetImported",
         "AssetProbed",
@@ -296,8 +287,6 @@ def _apply_event(context: _ReducerContext, event: DomainEventBase) -> None:
         _apply_asset_linked(context, event)
     elif name == "AssetUnlinked":
         _apply_asset_unlinked(context, event)
-    elif name == "CaseAssetScopeChanged":
-        _apply_case_asset_scope_changed(context, event)
     elif name == "DecisionCreated":
         _apply_decision_created(context, cast(DecisionEventBase, event))
     elif name == "DecisionAnswered":
@@ -346,94 +335,19 @@ def _apply_event(context: _ReducerContext, event: DomainEventBase) -> None:
     context.events_to_log.insert(event_log_index, event)
 
 
-def _apply_project_created(context: _ReducerContext, event: DomainEventBase) -> None:
-    project_id = _required_attr(event, "project_id")
-    if _row_exists(context.connection, schema.projects, "project_id", project_id):
+def _apply_draft_created(context: _ReducerContext, event: DomainEventBase) -> None:
+    draft_id = _required_attr(event, "draft_id")
+    if _row_exists(context.connection, schema.drafts, "draft_id", draft_id):
+        context.load_draft(draft_id)
         return
-    context.connection.execute(
-        schema.projects.insert().values(
-            project_id=project_id,
-            name=str(
-                getattr(event, "name", None) or event.payload.get("name") or "Untitled Project"
-            ),
-            status=str(event.payload.get("status", "active")),
-            defaults=dump_json(event.payload.get("defaults", {})),
-            created_at=str(event.payload.get("created_at", context.created_at)),
-            updated_at=str(event.payload.get("updated_at", context.created_at)),
-        )
-    )
-
-
-def _apply_project_update(context: _ReducerContext, event: DomainEventBase) -> None:
-    project_id = _required_attr(event, "project_id")
-    if event.event == "ProjectCopied":
-        _apply_project_copied(context, event)
-        return
-    if not _row_exists(context.connection, schema.projects, "project_id", project_id):
-        _apply_project_created(context, event)
-    values: dict[str, Any] = {"updated_at": context.created_at}
-    if event.event == "ProjectRenamed":
-        values["name"] = str(
-            getattr(event, "name", None) or event.payload.get("name") or "Untitled Project"
-        )
-    if event.event == "ProjectTrashed":
-        values["status"] = "trashed"
-    context.connection.execute(
-        update(schema.projects).where(schema.projects.c.project_id == project_id).values(**values)
-    )
-
-
-def _apply_project_copied(context: _ReducerContext, event: DomainEventBase) -> None:
-    project_id = _required_attr(event, "project_id")
-    source_project_id = getattr(event, "source_project_id", None) or event.payload.get(
-        "source_project_id"
-    )
-    source_row = None
-    if isinstance(source_project_id, str):
-        source_row = context.connection.execute(
-            select(schema.projects).where(schema.projects.c.project_id == source_project_id)
-        ).first()
-    source_values = None if source_row is None else dict(source_row._mapping)
-    defaults = event.payload.get("defaults")
-    if defaults is None and source_values is not None:
-        defaults = load_json(source_values["defaults"])
-    if not _row_exists(context.connection, schema.projects, "project_id", project_id):
-        context.connection.execute(
-            schema.projects.insert().values(
-                project_id=project_id,
-                name=str(event.payload.get("name") or _copied_project_name(source_values)),
-                status=str(event.payload.get("status", "active")),
-                defaults=dump_json(defaults or {}),
-                created_at=str(event.payload.get("created_at", context.created_at)),
-                updated_at=str(event.payload.get("updated_at", context.created_at)),
-            )
-        )
-    else:
-        context.connection.execute(
-            update(schema.projects)
-            .where(schema.projects.c.project_id == project_id)
-            .values(
-                name=str(event.payload.get("name") or _copied_project_name(source_values)),
-                updated_at=context.created_at,
-            )
-        )
-    if isinstance(source_project_id, str):
-        _copy_project_asset_links(context, source_project_id, project_id)
-
-
-def _apply_case_created(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
-    if _row_exists(context.connection, schema.cases, "case_id", case_id):
-        context.load_case(case_id)
-        return
-    project_id = _required_attr(event, "project_id")
-    case_state = CaseState.model_validate(
+    draft_state = DraftState.model_validate(
         {
-            "case_id": case_id,
-            "project_id": project_id,
-            "name": event.payload.get("name", "Untitled Case"),
+            "draft_id": draft_id,
+            "name": event.payload.get("name", "Untitled Draft"),
             "state_version": int(event.payload.get("state_version", 0)),
             "status": event.payload.get("status", "active"),
+            # DraftCreated 时 defaults 从 workspace defaults 拷贝写入（由 REST 层带入 payload）。
+            "defaults": event.payload.get("defaults", {}),
             "pending_decision_id": None,
             "running_jobs": [],
             "last_error": None,
@@ -449,64 +363,49 @@ def _apply_case_created(context: _ReducerContext, event: DomainEventBase) -> Non
             "rough_cut_approved_version": None,
             "postprocess_plan": None,
             "export_current_id": None,
-            "selected_asset_ids": [],
-            "disabled_asset_ids": [],
             "scratch_memory": {},
+            "messages_tail_ref": None,
         }
     )
-    context.connection.execute(schema.cases.insert().values(**_case_insert_values(case_state)))
-    context.case_states[case_id] = case_state
-    context.original_case_versions[case_id] = case_state.state_version
+    created_at = str(event.payload.get("created_at", context.created_at))
+    updated_at = str(event.payload.get("updated_at", context.created_at))
+    DraftsRepository(context.connection).insert(
+        _draft_row_values(draft_state, created_at=created_at, updated_at=updated_at)
+    )
+    context.draft_states[draft_id] = draft_state
+    context.original_draft_versions[draft_id] = draft_state.state_version
 
 
-def _apply_case_update(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
-    if event.event == "CaseCopied":
-        _apply_case_copied(context, event)
+def _apply_draft_update(context: _ReducerContext, event: DomainEventBase) -> None:
+    draft_id = _required_attr(event, "draft_id")
+    if event.event == "DraftCopied":
+        _apply_draft_copied(context, event)
         return
-    state = context.load_case(case_id)
+    state = context.load_draft(draft_id)
     patch: dict[str, Any] = {}
-    if event.event == "CaseRenamed":
+    if event.event == "DraftRenamed":
         patch["name"] = str(getattr(event, "name", None) or event.payload.get("name") or state.name)
-    if event.event == "CaseMoved":
-        target_project_id = (
-            getattr(event, "target_project_id", None)
-            or event.payload.get("target_project_id")
-            or state.project_id
-        )
-        patch["project_id"] = target_project_id
-        if isinstance(target_project_id, str) and target_project_id != state.project_id:
-            _copy_case_asset_links_for_move(
-                context,
-                state,
-                source_project_id=state.project_id,
-                target_project_id=target_project_id,
-            )
-    if event.event == "CaseClosed":
-        patch["status"] = "closed"
-    if event.event == "CaseTrashed":
+    if event.event == "DraftTrashed":
         patch["status"] = "trashed"
     if patch:
-        context.patch_case_state(case_id, patch)
+        context.patch_draft_state(draft_id, patch)
 
 
-def _apply_case_copied(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
-    if _row_exists(context.connection, schema.cases, "case_id", case_id):
-        context.load_case(case_id)
+def _apply_draft_copied(context: _ReducerContext, event: DomainEventBase) -> None:
+    draft_id = _required_attr(event, "draft_id")
+    if _row_exists(context.connection, schema.drafts, "draft_id", draft_id):
+        context.load_draft(draft_id)
         return
-    source_case_id = getattr(event, "source_case_id", None) or event.payload.get("source_case_id")
-    if not isinstance(source_case_id, str):
-        raise ValueError("CaseCopied requires source_case_id")
-    source = context.load_case(source_case_id)
-    project_id = event.project_id or event.payload.get("target_project_id") or source.project_id
-    if not isinstance(project_id, str):
-        raise ValueError("CaseCopied requires target project_id")
+    source_draft_id = getattr(event, "source_draft_id", None) or event.payload.get(
+        "source_draft_id"
+    )
+    if not isinstance(source_draft_id, str):
+        raise ValueError("DraftCopied requires source_draft_id")
+    source = context.load_draft(source_draft_id)
     copied_data = source.model_dump(mode="json")
     copied_data.update(
         {
-            "case_id": case_id,
-            "project_id": project_id,
+            "draft_id": draft_id,
             "name": str(event.payload.get("name") or f"{source.name} Copy"),
             "state_version": 0,
             "status": str(event.payload.get("status", source.status)),
@@ -515,34 +414,32 @@ def _apply_case_copied(context: _ReducerContext, event: DomainEventBase) -> None
             "last_error": None,
         }
     )
-    copied = CaseState.model_validate(copied_data)
-    # 先建 cases 行再复制子表（timeline_versions/previews/exports 的外键指向 cases），
-    # 子表复制会重映射引用 id，最后回写 cases 行。
-    context.connection.execute(schema.cases.insert().values(**_case_insert_values(copied)))
-    copied = _copy_case_owned_rows(context, source, copied)
-    context.connection.execute(
-        schema.cases.update()
-        .where(schema.cases.c.case_id == case_id)
-        .values(**_case_insert_values(copied))
+    copied = DraftState.model_validate(copied_data)
+    created_at = str(event.payload.get("created_at", context.created_at))
+    # 先建 drafts 行再复制子表（timeline_versions/previews/exports 的外键指向 drafts），
+    # 子表复制会重映射引用 id，最后回写 drafts 行。
+    DraftsRepository(context.connection).insert(
+        _draft_row_values(copied, created_at=created_at, updated_at=created_at)
     )
-    context.case_states[case_id] = copied
-    context.original_case_versions[case_id] = copied.state_version
+    _copy_draft_asset_links(context, source_draft_id, draft_id)
+    copied = _copy_draft_owned_rows(context, source, copied)
+    context.connection.execute(
+        schema.drafts.update()
+        .where(schema.drafts.c.draft_id == draft_id)
+        .values(**encode_json_columns(_draft_update_values(copied), _DRAFT_JSON_COLUMNS))
+    )
+    context.draft_states[draft_id] = copied
+    context.original_draft_versions[draft_id] = copied.state_version
 
 
-def _copied_project_name(source_values: Mapping[str, Any] | None) -> str:
-    if source_values is None:
-        return "Copied Project"
-    return f"{source_values['name']} Copy"
-
-
-def _copy_project_asset_links(
+def _copy_draft_asset_links(
     context: _ReducerContext,
-    source_project_id: str,
-    target_project_id: str,
+    source_draft_id: str,
+    target_draft_id: str,
 ) -> None:
     rows = context.connection.execute(
-        select(schema.project_asset_links).where(
-            schema.project_asset_links.c.project_id == source_project_id
+        select(schema.draft_asset_links).where(
+            schema.draft_asset_links.c.draft_id == source_draft_id
         )
     ).all()
     for row in rows:
@@ -550,15 +447,14 @@ def _copy_project_asset_links(
         asset_id = str(values["asset_id"])
         if _row_exists_pair(
             context.connection,
-            schema.project_asset_links,
-            {"project_id": target_project_id, "asset_id": asset_id},
+            schema.draft_asset_links,
+            {"draft_id": target_draft_id, "asset_id": asset_id},
         ):
             continue
         context.connection.execute(
-            schema.project_asset_links.insert().values(
-                project_id=target_project_id,
+            schema.draft_asset_links.insert().values(
+                draft_id=target_draft_id,
                 asset_id=asset_id,
-                enabled=bool(values["enabled"]),
                 linked_at=context.created_at,
                 note=str(values["note"]),
                 rel_dir=values.get("rel_dir"),
@@ -566,100 +462,58 @@ def _copy_project_asset_links(
         )
 
 
-def _copy_case_asset_links_for_move(
+def _copy_draft_owned_rows(
     context: _ReducerContext,
-    state: CaseState,
-    *,
-    source_project_id: str,
-    target_project_id: str,
-) -> None:
-    asset_ids = sorted(set(state.selected_asset_ids) | set(state.disabled_asset_ids))
-    for asset_id in asset_ids:
-        if _row_exists_pair(
-            context.connection,
-            schema.project_asset_links,
-            {"project_id": target_project_id, "asset_id": asset_id},
-        ):
-            continue
-        source_link = context.connection.execute(
-            select(schema.project_asset_links).where(
-                schema.project_asset_links.c.project_id == source_project_id,
-                schema.project_asset_links.c.asset_id == asset_id,
-            )
-        ).first()
-        payload = {
-            "enabled": True,
-            "linked_at": context.created_at,
-            "note": f"auto-linked for moved case {state.case_id}",
-        }
-        if source_link is not None:
-            source_values = dict(source_link._mapping)
-            payload["enabled"] = bool(source_values["enabled"])
-            payload["note"] = str(source_values["note"])
-            if source_values.get("rel_dir"):
-                payload["rel_dir"] = source_values["rel_dir"]
-        linked_event = AssetLinked(
-            project_id=target_project_id,
-            asset_id=asset_id,
-            actor=context.actor,
-            payload=payload,
-        )
-        _apply_asset_linked(context, linked_event)
-        context.events_to_log.append(validate_domain_event(linked_event))
-
-
-def _copy_case_owned_rows(
-    context: _ReducerContext,
-    source: CaseState,
-    copied: CaseState,
-) -> CaseState:
+    source: DraftState,
+    copied: DraftState,
+) -> DraftState:
     data = copied.model_dump(mode="json")
-    _copy_case_timeline_rows(context, source.case_id, copied.case_id)
+    _copy_draft_timeline_rows(context, source.draft_id, copied.draft_id)
     data["preview_current_id"] = _copy_preview_ref(
         context,
         source.preview_current_id,
-        copied.case_id,
+        copied.draft_id,
     )
     data["last_viewed_preview_id"] = _copy_preview_ref(
         context,
         source.last_viewed_preview_id,
-        copied.case_id,
+        copied.draft_id,
     )
     data["export_current_id"] = _copy_export_ref(
         context,
         source.export_current_id,
-        copied.case_id,
+        copied.draft_id,
     )
-    return CaseState.model_validate(data)
+    return DraftState.model_validate(data)
 
 
-def _copy_case_timeline_rows(
+def _copy_draft_timeline_rows(
     context: _ReducerContext,
-    source_case_id: str,
-    target_case_id: str,
+    source_draft_id: str,
+    target_draft_id: str,
 ) -> None:
     rows = context.connection.execute(
         select(schema.timeline_versions)
-        .where(schema.timeline_versions.c.case_id == source_case_id)
+        .where(schema.timeline_versions.c.draft_id == source_draft_id)
         .order_by(schema.timeline_versions.c.version)
     ).all()
     for row in rows:
         values = dict(row._mapping)
         version = int(values["version"])
-        timeline_id = f"{target_case_id}:v{version}"
+        timeline_id = f"{target_draft_id}:v{version}"
         if _row_exists(context.connection, schema.timeline_versions, "timeline_id", timeline_id):
             continue
         context.connection.execute(
             schema.timeline_versions.insert().values(
                 timeline_id=timeline_id,
-                case_id=target_case_id,
+                draft_id=target_draft_id,
                 version=version,
                 parent_version=values["parent_version"],
                 created_by_patch_id=values["created_by_patch_id"],
                 document_json=dump_json(
                     _remap_timeline_document(
                         values["document_json"],
-                        case_id=target_case_id,
+                        draft_id=target_draft_id,
                         timeline_id=timeline_id,
                     )
                 ),
@@ -672,7 +526,7 @@ def _copy_case_timeline_rows(
 def _copy_preview_ref(
     context: _ReducerContext,
     source_preview_id: str | None,
-    target_case_id: str,
+    target_draft_id: str,
 ) -> str | None:
     if source_preview_id is None:
         return None
@@ -681,13 +535,13 @@ def _copy_preview_ref(
     ).first()
     if source_row is None:
         return None
-    target_preview_id = f"{target_case_id}:{source_preview_id}"
+    target_preview_id = f"{target_draft_id}:{source_preview_id}"
     if not _row_exists(context.connection, schema.previews, "preview_id", target_preview_id):
         values = dict(source_row._mapping)
         context.connection.execute(
             schema.previews.insert().values(
                 preview_id=target_preview_id,
-                case_id=target_case_id,
+                draft_id=target_draft_id,
                 timeline_version=values["timeline_version"],
                 object_hash=values["object_hash"],
                 quality=values["quality"],
@@ -700,7 +554,7 @@ def _copy_preview_ref(
 def _copy_export_ref(
     context: _ReducerContext,
     source_export_id: str | None,
-    target_case_id: str,
+    target_draft_id: str,
 ) -> str | None:
     if source_export_id is None:
         return None
@@ -709,13 +563,13 @@ def _copy_export_ref(
     ).first()
     if source_row is None:
         return None
-    target_export_id = f"{target_case_id}:{source_export_id}"
+    target_export_id = f"{target_draft_id}:{source_export_id}"
     if not _row_exists(context.connection, schema.exports, "export_id", target_export_id):
         values = dict(source_row._mapping)
         context.connection.execute(
             schema.exports.insert().values(
                 export_id=target_export_id,
-                case_id=target_case_id,
+                draft_id=target_draft_id,
                 timeline_version=values["timeline_version"],
                 object_hash=values["object_hash"],
                 quality=values["quality"],
@@ -728,14 +582,14 @@ def _copy_export_ref(
 def _remap_timeline_document(
     raw_document: Any,
     *,
-    case_id: str,
+    draft_id: str,
     timeline_id: str,
 ) -> dict[str, Any]:
     document = load_json(raw_document) if isinstance(raw_document, str) else raw_document
     if not isinstance(document, Mapping):
         raise ValueError("timeline document must be an object")
     copied = dict(document)
-    copied["case_id"] = case_id
+    copied["draft_id"] = draft_id
     copied["timeline_id"] = timeline_id
     return copied
 
@@ -771,33 +625,36 @@ def _apply_asset_event(context: _ReducerContext, event: DomainEventBase) -> None
 
 
 def _apply_asset_linked(context: _ReducerContext, event: DomainEventBase) -> None:
-    project_id = _required_attr(event, "project_id")
+    draft_id = _required_attr(event, "draft_id")
     asset_id = _required_attr(event, "asset_id")
     if not _row_exists_pair(
         context.connection,
-        schema.project_asset_links,
-        {"project_id": project_id, "asset_id": asset_id},
+        schema.draft_asset_links,
+        {"draft_id": draft_id, "asset_id": asset_id},
     ):
+        # 单级草稿模型下 draft_asset_links 无 enabled 列：链接存在即 usable，不用即删。
         context.connection.execute(
-            schema.project_asset_links.insert().values(
-                project_id=project_id,
+            schema.draft_asset_links.insert().values(
+                draft_id=draft_id,
                 asset_id=asset_id,
-                enabled=bool(event.payload.get("enabled", True)),
                 linked_at=str(event.payload.get("linked_at", context.created_at)),
                 note=str(event.payload.get("note", "")),
                 rel_dir=_optional_str(event.payload.get("rel_dir")),
             )
         )
     else:
-        updates: dict[str, Any] = {"enabled": bool(event.payload.get("enabled", True))}
+        updates: dict[str, Any] = {}
         if "rel_dir" in event.payload:
             updates["rel_dir"] = _optional_str(event.payload.get("rel_dir"))
-        context.connection.execute(
-            update(schema.project_asset_links)
-            .where(schema.project_asset_links.c.project_id == project_id)
-            .where(schema.project_asset_links.c.asset_id == asset_id)
-            .values(**updates)
-        )
+        if "note" in event.payload:
+            updates["note"] = str(event.payload.get("note", ""))
+        if updates:
+            context.connection.execute(
+                update(schema.draft_asset_links)
+                .where(schema.draft_asset_links.c.draft_id == draft_id)
+                .where(schema.draft_asset_links.c.asset_id == asset_id)
+                .values(**updates)
+            )
 
 
 def _optional_str(value: Any) -> str | None:
@@ -805,31 +662,21 @@ def _optional_str(value: Any) -> str | None:
 
 
 def _apply_asset_unlinked(context: _ReducerContext, event: DomainEventBase) -> None:
-    project_id = _required_attr(event, "project_id")
+    draft_id = _required_attr(event, "draft_id")
     asset_id = _required_attr(event, "asset_id")
     context.connection.execute(
-        delete(schema.project_asset_links)
-        .where(schema.project_asset_links.c.project_id == project_id)
-        .where(schema.project_asset_links.c.asset_id == asset_id)
+        delete(schema.draft_asset_links)
+        .where(schema.draft_asset_links.c.draft_id == draft_id)
+        .where(schema.draft_asset_links.c.asset_id == asset_id)
     )
-
-
-def _apply_case_asset_scope_changed(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
-    patch: dict[str, Any] = {}
-    if "selected_asset_ids" in event.payload:
-        patch["selected_asset_ids"] = event.payload["selected_asset_ids"]
-    if "disabled_asset_ids" in event.payload:
-        patch["disabled_asset_ids"] = event.payload["disabled_asset_ids"]
-    context.patch_case_state(case_id, patch)
 
 
 def _apply_decision_created(context: _ReducerContext, event: DecisionEventBase) -> None:
     decision = _decision_from_created_event(context, event)
     validate_decision_registered(decision)
     DecisionsRepository(context.connection).insert(_decision_insert_values(decision))
-    if decision.scope_type == "case" and decision.blocking and decision.case_id is not None:
-        context.patch_case_state(decision.case_id, {"pending_decision_id": decision.decision_id})
+    if decision.scope_type == "draft" and decision.blocking and decision.draft_id is not None:
+        context.patch_draft_state(decision.draft_id, {"pending_decision_id": decision.decision_id})
 
 
 def _apply_decision_answered(context: _ReducerContext, event: DecisionEventBase) -> None:
@@ -854,14 +701,14 @@ def _apply_decision_answered(context: _ReducerContext, event: DecisionEventBase)
         .where(schema.decisions.c.decision_id == decision.decision_id)
         .values(**update_values)
     )
-    if decision.scope_type != "case" or decision.case_id is None:
+    if decision.scope_type != "draft" or decision.draft_id is None:
         return
-    state = context.load_case(decision.case_id)
+    state = context.load_draft(decision.draft_id)
     effect = reduce_decision_answer(state, decision, answer)
     if effect.state_patch:
-        state = context.patch_case_state(decision.case_id, effect.state_patch)
+        state = context.patch_draft_state(decision.draft_id, effect.state_patch)
     if state.pending_decision_id == decision.decision_id:
-        context.patch_case_state(decision.case_id, {"pending_decision_id": None})
+        context.patch_draft_state(decision.draft_id, {"pending_decision_id": None})
     for followup_event in effect.followup_events:
         normalized = followup_event.model_copy(
             update={"actor": context.actor, "base_version": None}
@@ -880,14 +727,14 @@ def _apply_decision_cancelled(context: _ReducerContext, event: DecisionEventBase
         .where(schema.decisions.c.decision_id == decision.decision_id)
         .values(status="cancelled", pending_tool_call_status="discarded")
     )
-    if decision.scope_type == "case" and decision.case_id is not None:
-        state = context.load_case(decision.case_id)
+    if decision.scope_type == "draft" and decision.draft_id is not None:
+        state = context.load_draft(decision.draft_id)
         if state.pending_decision_id == decision.decision_id:
-            context.patch_case_state(decision.case_id, {"pending_decision_id": None})
+            context.patch_draft_state(decision.draft_id, {"pending_decision_id": None})
 
 
 def _apply_plan_updated(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
+    draft_id = _required_attr(event, "draft_id")
     payload_key_by_event = {
         "BriefUpdated": "brief",
         "ContentPlanUpdated": "content_plan",
@@ -898,20 +745,20 @@ def _apply_plan_updated(context: _ReducerContext, event: DomainEventBase) -> Non
     key = payload_key_by_event[event.event]
     if key not in event.payload:
         return
-    context.patch_case_state(case_id, {key: event.payload[key]})
+    context.patch_draft_state(draft_id, {key: event.payload[key]})
 
 
 def _apply_timeline_version_created(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
+    draft_id = _required_attr(event, "draft_id")
     version = getattr(event, "timeline_version", None) or event.payload.get("timeline_version")
     if not isinstance(version, int):
         raise ValueError("TimelineVersionCreated requires timeline_version")
-    document = _timeline_document_from_event(event, case_id, version)
-    if not _timeline_exists(context.connection, case_id, version):
+    document = _timeline_document_from_event(event, draft_id, version)
+    if not _timeline_exists(context.connection, draft_id, version):
         context.connection.execute(
             schema.timeline_versions.insert().values(
-                timeline_id=str(event.payload.get("timeline_id", f"{case_id}:v{version}")),
-                case_id=case_id,
+                timeline_id=str(event.payload.get("timeline_id", f"{draft_id}:v{version}")),
+                draft_id=draft_id,
                 version=version,
                 parent_version=getattr(event, "parent_version", None),
                 created_by_patch_id=getattr(event, "patch_id", None),
@@ -930,15 +777,15 @@ def _apply_timeline_version_created(context: _ReducerContext, event: DomainEvent
     }
     if _timeline_creation_resets_rough_cut(event):
         patch["rough_cut_approved"] = False
-    context.patch_case_state(case_id, patch)
+    context.patch_draft_state(draft_id, patch)
 
 
 def _apply_timeline_version_restored(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
+    draft_id = _required_attr(event, "draft_id")
     version = getattr(event, "timeline_version", None) or event.payload.get("timeline_version")
     if not isinstance(version, int):
         raise ValueError("TimelineVersionRestored requires timeline_version")
-    state = context.load_case(case_id)
+    state = context.load_draft(draft_id)
     source_version = event.payload.get("source_version")
     restores_approved_cut = version == state.rough_cut_approved_version or (
         isinstance(source_version, int) and source_version == state.rough_cut_approved_version
@@ -950,14 +797,14 @@ def _apply_timeline_version_restored(context: _ReducerContext, event: DomainEven
     }
     if restores_approved_cut:
         patch["rough_cut_approved_version"] = version
-    context.patch_case_state(
-        case_id,
+    context.patch_draft_state(
+        draft_id,
         patch,
     )
 
 
 def _apply_timeline_validation_event(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
+    draft_id = _required_attr(event, "draft_id")
     version = getattr(event, "timeline_version", None) or event.payload.get("timeline_version")
     if not isinstance(version, int):
         raise ValueError(f"{event.event} requires timeline_version")
@@ -965,17 +812,17 @@ def _apply_timeline_validation_event(context: _ReducerContext, event: DomainEven
     report = event.payload.get("validation_report", {"valid": valid, "checks": []})
     context.connection.execute(
         update(schema.timeline_versions)
-        .where(schema.timeline_versions.c.case_id == case_id)
+        .where(schema.timeline_versions.c.draft_id == draft_id)
         .where(schema.timeline_versions.c.version == version)
         .values(validation_report=dump_json(report))
     )
-    state = context.load_case(case_id)
+    state = context.load_draft(draft_id)
     if state.timeline_current_version == version:
-        context.patch_case_state(case_id, {"timeline_validated": valid})
+        context.patch_draft_state(draft_id, {"timeline_validated": valid})
 
 
 def _apply_preview_rendered(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
+    draft_id = _required_attr(event, "draft_id")
     preview_id = _required_attr(event, "artifact_id")
     timeline_version = _required_int_attr(event, "timeline_version")
     object_hash = str(event.payload.get("object_hash", preview_id))
@@ -984,27 +831,27 @@ def _apply_preview_rendered(context: _ReducerContext, event: DomainEventBase) ->
         context.connection.execute(
             schema.previews.insert().values(
                 preview_id=preview_id,
-                case_id=case_id,
+                draft_id=draft_id,
                 timeline_version=timeline_version,
                 object_hash=object_hash,
                 quality=dump_json(event.payload.get("quality", {})),
                 created_at=str(event.payload.get("created_at", context.created_at)),
             )
         )
-    state = context.load_case(case_id)
+    state = context.load_draft(draft_id)
     if state.timeline_current_version == timeline_version:
-        context.patch_case_state(case_id, {"preview_current_id": preview_id})
+        context.patch_draft_state(draft_id, {"preview_current_id": preview_id})
 
 
 def _apply_preview_viewed(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
+    draft_id = _required_attr(event, "draft_id")
     preview_id = _required_attr(event, "preview_id")
-    if _preview_belongs_to_case(context.connection, preview_id, case_id):
-        context.patch_case_state(case_id, {"last_viewed_preview_id": preview_id})
+    if _preview_belongs_to_draft(context.connection, preview_id, draft_id):
+        context.patch_draft_state(draft_id, {"last_viewed_preview_id": preview_id})
 
 
 def _apply_export_completed(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
+    draft_id = _required_attr(event, "draft_id")
     export_id = _required_attr(event, "artifact_id")
     timeline_version = _required_int_attr(event, "timeline_version")
     object_hash = str(event.payload.get("object_hash", export_id))
@@ -1013,26 +860,27 @@ def _apply_export_completed(context: _ReducerContext, event: DomainEventBase) ->
         context.connection.execute(
             schema.exports.insert().values(
                 export_id=export_id,
-                case_id=case_id,
+                draft_id=draft_id,
                 timeline_version=timeline_version,
                 object_hash=object_hash,
                 quality=dump_json(event.payload.get("quality", {})),
                 created_at=str(event.payload.get("created_at", context.created_at)),
             )
         )
-    state = context.load_case(case_id)
+    state = context.load_draft(draft_id)
     if state.timeline_current_version == timeline_version:
-        context.patch_case_state(case_id, {"export_current_id": export_id})
+        context.patch_draft_state(draft_id, {"export_current_id": export_id})
 
 
 def _apply_memory_candidate_extracted(context: _ReducerContext, event: DomainEventBase) -> None:
     candidate_id = _required_attr(event, "candidate_id")
     if _row_exists(context.connection, schema.memory_candidates, "candidate_id", candidate_id):
         return
+    draft_id = getattr(event, "draft_id", None) or str(event.payload.get("draft_id", ""))
     context.connection.execute(
         schema.memory_candidates.insert().values(
             candidate_id=candidate_id,
-            case_id=event.case_id or str(event.payload.get("case_id", "")),
+            draft_id=draft_id,
             content=str(event.payload.get("content", "")),
             suggested_scope=str(event.payload.get("suggested_scope", "user")),
             status=str(event.payload.get("status", "pending")),
@@ -1056,14 +904,14 @@ def _apply_memory_saved(context: _ReducerContext, event: DomainEventBase) -> Non
     memory_id = _required_attr(event, "memory_id")
     candidate_id = getattr(event, "candidate_id", None) or event.payload.get("candidate_id")
     if not _row_exists(context.connection, schema.memories, "memory_id", memory_id):
+        # 单级草稿模型下记忆只有 user 一域（无 project 域列）。
         context.connection.execute(
             schema.memories.insert().values(
                 memory_id=memory_id,
                 scope=str(event.payload.get("scope", "user")),
-                project_id=event.payload.get("project_id"),
                 content=str(event.payload.get("content", "")),
                 tags=dump_json(event.payload.get("tags", [])),
-                created_from_case_id=event.payload.get("created_from_case_id"),
+                created_from_draft_id=event.payload.get("created_from_draft_id"),
                 created_at=str(event.payload.get("created_at", context.created_at)),
             )
         )
@@ -1077,7 +925,7 @@ def _apply_memory_saved(context: _ReducerContext, event: DomainEventBase) -> Non
 
 def _apply_job_event(context: _ReducerContext, event: DomainEventBase) -> None:
     job_id = _required_attr(event, "job_id")
-    requested_by_case_id = getattr(event, "requested_by_case_id", None)
+    requested_by_draft_id = getattr(event, "requested_by_draft_id", None)
     if not _row_exists(context.connection, schema.jobs, "job_id", job_id):
         _insert_job(context, event)
     status = _job_status_for_event(event)
@@ -1092,12 +940,14 @@ def _apply_job_event(context: _ReducerContext, event: DomainEventBase) -> None:
     )
     if event.event == "JobFailed":
         _mark_asset_job_failed(context, event)
-    running_jobs_case_id = requested_by_case_id if isinstance(requested_by_case_id, str) else None
-    if running_jobs_case_id is None:
-        event_case_id = getattr(event, "case_id", None)
-        running_jobs_case_id = event_case_id if isinstance(event_case_id, str) else None
-    if running_jobs_case_id is not None:
-        _update_running_jobs(context, running_jobs_case_id, event, status)
+    running_jobs_draft_id = (
+        requested_by_draft_id if isinstance(requested_by_draft_id, str) else None
+    )
+    if running_jobs_draft_id is None:
+        event_draft_id = getattr(event, "draft_id", None)
+        running_jobs_draft_id = event_draft_id if isinstance(event_draft_id, str) else None
+    if running_jobs_draft_id is not None:
+        _update_running_jobs(context, running_jobs_draft_id, event, status)
 
 
 def _insert_job(context: _ReducerContext, event: DomainEventBase) -> None:
@@ -1117,9 +967,8 @@ def _insert_job(context: _ReducerContext, event: DomainEventBase) -> None:
             job_id=job_id,
             kind=kind,
             status=_job_status_for_event(event),
-            project_id=event.project_id,
-            case_id=event.case_id,
-            requested_by_case_id=getattr(event, "requested_by_case_id", None),
+            draft_id=event.draft_id,
+            requested_by_draft_id=getattr(event, "requested_by_draft_id", None),
             asset_id=asset_id,
             idempotency_key=str(event.payload.get("idempotency_key", job_id)),
             payload_json=dump_json(event.payload.get("job_payload", {})),
@@ -1140,11 +989,11 @@ def _insert_job(context: _ReducerContext, event: DomainEventBase) -> None:
 
 def _update_running_jobs(
     context: _ReducerContext,
-    case_id: str,
+    draft_id: str,
     event: DomainEventBase,
     status: str,
 ) -> None:
-    state = context.load_case(case_id)
+    state = context.load_draft(draft_id)
     existing = [job.model_dump(mode="json") for job in state.running_jobs]
     job_id = _required_attr(event, "job_id")
     if status in {"succeeded", "failed", "cancelled"}:
@@ -1163,32 +1012,34 @@ def _update_running_jobs(
             ).model_dump(mode="json")
         )
         updated = without
-    context.patch_case_state(case_id, {"running_jobs": updated})
+    context.patch_draft_state(draft_id, {"running_jobs": updated})
 
 
-def _persist_touched_case_states(context: _ReducerContext) -> None:
-    repository = CasesRepository(context.connection)
-    for case_id in sorted(context.touched_case_ids):
-        state = context.case_states[case_id]
-        expected = context.original_case_versions[case_id]
+def _persist_touched_draft_states(context: _ReducerContext) -> None:
+    repository = DraftsRepository(context.connection)
+    for draft_id in sorted(context.touched_draft_ids):
+        state = context.draft_states[draft_id]
+        expected = context.original_draft_versions[draft_id]
+        values = _draft_update_values(state)
+        values["updated_at"] = context.created_at
         conflict = repository.update_with_state_version(
-            case_id,
+            draft_id,
             expected,
-            _case_update_values(state),
+            values,
         )
         if conflict is not None:
             raise _AbortReducer(
                 ReducerApplyResult(
                     status="version_conflict",
                     conflict=VersionConflict(
-                        case_id=case_id,
+                        draft_id=draft_id,
                         expected_base_version=expected,
                         actual_state_version=state.state_version,
-                        event_type="CaseStateUpdate",
+                        event_type="DraftStateUpdate",
                     ),
                 )
             )
-        context.case_states[case_id] = state.model_copy(update={"state_version": expected + 1})
+        context.draft_states[draft_id] = state.model_copy(update={"state_version": expected + 1})
 
 
 def _append_events(context: _ReducerContext) -> list[AppliedEvent]:
@@ -1213,13 +1064,13 @@ def _append_events(context: _ReducerContext) -> list[AppliedEvent]:
 
 
 def _state_version_for_event(context: _ReducerContext, event: DomainEventBase) -> int | None:
-    case_id = _event_case_id(event)
-    if case_id is None:
-        requested_case_id = getattr(event, "requested_by_case_id", None)
-        case_id = requested_case_id if isinstance(requested_case_id, str) else None
-    if case_id is None:
+    draft_id = _event_draft_id(event)
+    if draft_id is None:
+        requested_draft_id = getattr(event, "requested_by_draft_id", None)
+        draft_id = requested_draft_id if isinstance(requested_draft_id, str) else None
+    if draft_id is None:
         return None
-    state = context.case_states.get(case_id)
+    state = context.draft_states.get(draft_id)
     return None if state is None else state.state_version
 
 
@@ -1229,9 +1080,9 @@ def _event_version_mode(event: DomainEventBase) -> VersionMode:
     return type(event).version_mode
 
 
-def _event_case_id(event: DomainEventBase) -> str | None:
-    case_id = getattr(event, "case_id", None)
-    return case_id if isinstance(case_id, str) else None
+def _event_draft_id(event: DomainEventBase) -> str | None:
+    draft_id = getattr(event, "draft_id", None)
+    return draft_id if isinstance(draft_id, str) else None
 
 
 def _is_duplicate_merge_event(connection: Connection, event: DomainEventBase) -> bool:
@@ -1253,15 +1104,11 @@ def _is_duplicate_merge_event(connection: Connection, event: DomainEventBase) ->
 
 
 def _decision_from_created_event(context: _ReducerContext, event: DecisionEventBase) -> Decision:
+    del context
     decision_data = dict(event.payload.get("decision", {}))
-    if event.scope_type == "case" and event.case_id is not None:
-        case_state = context.load_case(event.case_id)
-        decision_data.setdefault("project_id", case_state.project_id)
-        decision_data.setdefault("case_id", event.case_id)
     decision_data.setdefault("decision_id", event.decision_id)
     decision_data.setdefault("scope_type", event.scope_type)
-    decision_data.setdefault("project_id", event.project_id)
-    decision_data.setdefault("case_id", event.case_id)
+    decision_data.setdefault("draft_id", event.draft_id)
     decision_data.setdefault("type", event.payload.get("type", "generic"))
     decision_data.setdefault("question", event.payload.get("question", ""))
     decision_data.setdefault("options", event.payload.get("options", []))
@@ -1274,7 +1121,7 @@ def _decision_from_created_event(context: _ReducerContext, event: DecisionEventB
     )
     decision_data.setdefault(
         "blocking",
-        bool(event.payload.get("blocking", event.scope_type == "case")),
+        bool(event.payload.get("blocking", event.scope_type == "draft")),
     )
     decision_data.setdefault(
         "created_by_tool_call_id",
@@ -1303,65 +1150,58 @@ def _decision_insert_values(decision: Decision) -> dict[str, Any]:
     }
 
 
-def _case_insert_values(case_state: CaseState) -> dict[str, Any]:
-    values = _case_update_values(case_state)
-    values["case_id"] = case_state.case_id
-    values["state_version"] = case_state.state_version
-    return _encode_case_values(values)
+def _draft_row_values(
+    draft_state: DraftState,
+    *,
+    created_at: str,
+    updated_at: str,
+) -> dict[str, Any]:
+    values = _draft_update_values(draft_state)
+    values["draft_id"] = draft_state.draft_id
+    values["state_version"] = draft_state.state_version
+    values["created_at"] = created_at
+    values["updated_at"] = updated_at
+    return values
 
 
-def _case_update_values(case_state: CaseState) -> dict[str, Any]:
+def _draft_update_values(draft_state: DraftState) -> dict[str, Any]:
     return {
-        "project_id": case_state.project_id,
-        "name": case_state.name,
-        "status": case_state.status,
-        "pending_decision_id": case_state.pending_decision_id,
-        "running_jobs": [job.model_dump(mode="json") for job in case_state.running_jobs],
+        "name": draft_state.name,
+        "status": draft_state.status,
+        "defaults": draft_state.defaults.model_dump(mode="json"),
+        "pending_decision_id": draft_state.pending_decision_id,
+        "running_jobs": [job.model_dump(mode="json") for job in draft_state.running_jobs],
         "last_error": None
-        if case_state.last_error is None
-        else case_state.last_error.model_dump(mode="json"),
-        "brief": case_state.brief.model_dump(mode="json"),
-        "content_plan": case_state.content_plan,
+        if draft_state.last_error is None
+        else draft_state.last_error.model_dump(mode="json"),
+        "brief": draft_state.brief.model_dump(mode="json"),
+        "content_plan": draft_state.content_plan,
         "audio_plan": None
-        if case_state.audio_plan is None
-        else case_state.audio_plan.model_dump(mode="json"),
+        if draft_state.audio_plan is None
+        else draft_state.audio_plan.model_dump(mode="json"),
         "cut_plan": None
-        if case_state.cut_plan is None
-        else case_state.cut_plan.model_dump(mode="json", by_alias=True),
-        "timeline_current_version": case_state.timeline_current_version,
-        "timeline_validated": case_state.timeline_validated,
-        "preview_current_id": case_state.preview_current_id,
-        "last_viewed_preview_id": case_state.last_viewed_preview_id,
-        "rough_cut_approved": case_state.rough_cut_approved,
-        "rough_cut_approved_version": case_state.rough_cut_approved_version,
+        if draft_state.cut_plan is None
+        else draft_state.cut_plan.model_dump(mode="json", by_alias=True),
+        "timeline_current_version": draft_state.timeline_current_version,
+        "timeline_validated": draft_state.timeline_validated,
+        "preview_current_id": draft_state.preview_current_id,
+        "last_viewed_preview_id": draft_state.last_viewed_preview_id,
+        "rough_cut_approved": draft_state.rough_cut_approved,
+        "rough_cut_approved_version": draft_state.rough_cut_approved_version,
         "postprocess_plan": None
-        if case_state.postprocess_plan is None
-        else case_state.postprocess_plan.model_dump(mode="json"),
-        "export_current_id": case_state.export_current_id,
-        "selected_asset_ids": case_state.selected_asset_ids,
-        "disabled_asset_ids": case_state.disabled_asset_ids,
-        "scratch_memory": case_state.scratch_memory,
+        if draft_state.postprocess_plan is None
+        else draft_state.postprocess_plan.model_dump(mode="json"),
+        "export_current_id": draft_state.export_current_id,
+        "scratch_memory": draft_state.scratch_memory,
+        "messages_tail_ref": draft_state.messages_tail_ref,
     }
 
 
-def _encode_case_values(values: Mapping[str, Any]) -> dict[str, Any]:
-    json_columns = {
-        "running_jobs",
-        "last_error",
-        "brief",
-        "content_plan",
-        "audio_plan",
-        "cut_plan",
-        "postprocess_plan",
-        "selected_asset_ids",
-        "disabled_asset_ids",
-        "scratch_memory",
-    }
-    encoded = dict(values)
-    for column in json_columns:
-        if column in encoded:
-            encoded[column] = None if encoded[column] is None else dump_json(encoded[column])
-    return encoded
+def _strip_timestamps(row: Mapping[str, Any]) -> dict[str, Any]:
+    data = dict(row)
+    data.pop("created_at", None)
+    data.pop("updated_at", None)
+    return data
 
 
 def _asset_insert_values(asset_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -1479,14 +1319,14 @@ def _mark_asset_job_failed(context: _ReducerContext, event: DomainEventBase) -> 
 
 def _timeline_document_from_event(
     event: DomainEventBase,
-    case_id: str,
+    draft_id: str,
     version: int,
 ) -> dict[str, Any]:
     document = event.payload.get("document_json") or event.payload.get("timeline")
     if isinstance(document, dict):
         return document
     return _empty_timeline_document(
-        case_id=case_id,
+        draft_id=draft_id,
         version=version,
         parent_version=getattr(event, "parent_version", None),
         patch_id=getattr(event, "patch_id", None),
@@ -1495,14 +1335,14 @@ def _timeline_document_from_event(
 
 def _empty_timeline_document(
     *,
-    case_id: str,
+    draft_id: str,
     version: int,
     parent_version: int | None,
     patch_id: str | None,
 ) -> dict[str, Any]:
     document = {
-        "timeline_id": f"{case_id}:v{version}",
-        "case_id": case_id,
+        "timeline_id": f"{draft_id}:v{version}",
+        "draft_id": draft_id,
         "version": version,
         "fps": 30,
         "duration_frames": 1,
@@ -1559,21 +1399,21 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
-def _timeline_exists(connection: Connection, case_id: str, version: int) -> bool:
+def _timeline_exists(connection: Connection, draft_id: str, version: int) -> bool:
     row = connection.execute(
         select(schema.timeline_versions.c.timeline_id).where(
-            schema.timeline_versions.c.case_id == case_id,
+            schema.timeline_versions.c.draft_id == draft_id,
             schema.timeline_versions.c.version == version,
         )
     ).first()
     return row is not None
 
 
-def _preview_belongs_to_case(connection: Connection, preview_id: str, case_id: str) -> bool:
+def _preview_belongs_to_draft(connection: Connection, preview_id: str, draft_id: str) -> bool:
     row = connection.execute(
         select(schema.previews.c.preview_id).where(
             schema.previews.c.preview_id == preview_id,
-            schema.previews.c.case_id == case_id,
+            schema.previews.c.draft_id == draft_id,
         )
     ).first()
     return row is not None

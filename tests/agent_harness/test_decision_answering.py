@@ -8,8 +8,8 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from agent_harness.decision_answering import ScriptedDecisionAnswerResolver
-from contracts.case import CaseState
 from contracts.decision import Decision
+from contracts.draft import DraftState
 from contracts.provider import ProviderDescriptor
 from providers import LLM_CHAT, ProviderGateway, ProviderRegistry
 from providers.decision_answering import (
@@ -23,15 +23,12 @@ class EmptyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-def _case_state() -> CaseState:
-    return CaseState.model_validate(
+def _draft_state() -> DraftState:
+    return DraftState.model_validate(
         {
-            "case_id": "case_1",
-            "project_id": "project_1",
-            "name": "Case",
+            "draft_id": "draft_1",
+            "name": "Draft",
             "brief": {"goal": "demo", "confirmed_facts": []},
-            "selected_asset_ids": [],
-            "disabled_asset_ids": [],
             "scratch_memory": {},
         }
     )
@@ -41,9 +38,8 @@ def _decision() -> Decision:
     return Decision.model_validate(
         {
             "decision_id": "dec_1",
-            "scope_type": "case",
-            "project_id": "project_1",
-            "case_id": "case_1",
+            "scope_type": "draft",
+            "draft_id": "draft_1",
             "type": "subtitle",
             "question": "要字幕吗？",
             "allow_free_text": True,
@@ -104,7 +100,7 @@ async def test_gateway_resolver_parses_option_and_side_intents() -> None:
     )
 
     resolution = await resolver.resolve(
-        case_state=_case_state(), decision=_decision(), user_message="不要字幕，但是加个轻快 BGM"
+        draft_state=_draft_state(), decision=_decision(), user_message="不要字幕，但是加个轻快 BGM"
     )
 
     assert resolution.answer is not None
@@ -129,12 +125,12 @@ async def test_gateway_resolver_unanswered_and_free_text_paths() -> None:
     )
 
     first = await resolver.resolve(
-        case_state=_case_state(), decision=_decision(), user_message="进度怎么样了？"
+        draft_state=_draft_state(), decision=_decision(), user_message="进度怎么样了？"
     )
     assert first.answer is None
 
     second = await resolver.resolve(
-        case_state=_case_state(), decision=_decision(), user_message="字幕要淡黄色"
+        draft_state=_draft_state(), decision=_decision(), user_message="字幕要淡黄色"
     )
     assert second.answer is not None
     assert second.answer.free_text == "字幕要淡黄色"
@@ -156,7 +152,9 @@ async def test_gateway_resolver_provider_error_raises() -> None:
     )
 
     with pytest.raises(DecisionAnsweringError):
-        await resolver.resolve(case_state=_case_state(), decision=_decision(), user_message="跳过")
+        await resolver.resolve(
+            draft_state=_draft_state(), decision=_decision(), user_message="跳过"
+        )
 
 
 async def test_gateway_resolver_malformed_output_raises() -> None:
@@ -165,12 +163,14 @@ async def test_gateway_resolver_malformed_output_raises() -> None:
     )
 
     with pytest.raises(DecisionAnsweringError):
-        await resolver.resolve(case_state=_case_state(), decision=_decision(), user_message="跳过")
+        await resolver.resolve(
+            draft_state=_draft_state(), decision=_decision(), user_message="跳过"
+        )
 
 
 async def test_scripted_resolver_exhaustion_returns_unanswered() -> None:
     resolver = ScriptedDecisionAnswerResolver([])
     resolution = await resolver.resolve(
-        case_state=_case_state(), decision=_decision(), user_message="任何话"
+        draft_state=_draft_state(), decision=_decision(), user_message="任何话"
     )
     assert resolution.answer is None

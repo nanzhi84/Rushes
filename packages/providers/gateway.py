@@ -24,7 +24,7 @@ class ProviderCallRecord:
     provider_id: str
     capability: ProviderCapability
     model: str
-    case_id: str | None
+    draft_id: str | None
     job_id: str | None
     latency_ms: int
     usage_json: dict[str, Any]
@@ -155,7 +155,7 @@ class ProviderGateway:
                 provider_id=result.provider_id,
                 capability=result.capability,
                 model=result.model,
-                case_id=request.case_id,
+                draft_id=request.draft_id,
                 job_id=request.job_id,
                 latency_ms=result.latency_ms,
                 usage_json=result.usage,
@@ -214,8 +214,7 @@ def _normalize_result(
 def _provider_call_event(result: ProviderResult, request: ProviderRequest) -> dict[str, Any]:
     return ProviderCallRecorded(
         provider_call_id=result.request_id,
-        project_id=None,
-        case_id=request.case_id,
+        draft_id=request.draft_id,
         payload={
             "provider_id": result.provider_id,
             "capability": result.capability,
@@ -237,7 +236,7 @@ def _capability_degraded_event(
         reason = f"{result.error.error_code}: {result.error.message}"
     return CapabilityDegraded(
         degradation_id=f"degraded_{result.request_id}",
-        case_id=request.case_id,
+        draft_id=request.draft_id,
         capability=result.capability,
         provider_id=result.provider_id,
         reason=reason,

@@ -14,8 +14,8 @@ from typing import Any, Literal, Protocol
 from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
 
-from contracts.case import CaseState
 from contracts.decision import Decision, PendingToolCall
+from contracts.draft import DraftState
 from contracts.events import (
     Actor,
     CapabilityDegraded,
@@ -24,20 +24,18 @@ from contracts.events import (
     MemoryCandidateDiscarded,
     TurnEnded,
 )
-from contracts.project import ProjectState
 from contracts.timeline import TimelineState
 from contracts.tool import PatchOpSpec, ToolSpec
 from contracts.tool_result import ToolError, ToolResult
 from domain.decision_effects import HarnessFollowup
-from domain.preconditions import PreconditionContext, ProjectArtifactStats, ProjectAudioAsset
+from domain.preconditions import DraftArtifactStats, DraftAudioAsset, PreconditionContext
 from storage import schema
 from storage.db import begin_immediate
 from storage.repositories import (
-    CasesRepository,
     DecisionsRepository,
+    DraftsRepository,
     MaterialSummariesRepository,
     MessagesRepository,
-    ProjectsRepository,
     TimelineVersionsRepository,
     TranscriptsRepository,
 )
@@ -278,7 +276,7 @@ def _scripted_step(value: PlannerStep | ToolCall | Mapping[str, Any]) -> Planner
 @dataclass(frozen=True, slots=True)
 class RunTurnResult:
     turn_id: str
-    case_id: str
+    draft_id: str
     outcome: str
     tool_calls: tuple[ToolCall, ...] = ()
     tool_results: tuple[ToolResult, ...] = ()
@@ -289,10 +287,9 @@ class RunTurnResult:
 
 @dataclass(slots=True)
 class _LoadedState:
-    case_state: CaseState
-    project_state: ProjectState | None
-    project_artifacts: ProjectArtifactStats
-    project_audio_assets: tuple[ProjectAudioAsset, ...]
+    draft_state: DraftState
+    draft_artifacts: DraftArtifactStats
+    draft_audio_assets: tuple[DraftAudioAsset, ...]
     decisions: tuple[Decision, ...]
     pending_decision: Decision | None
     messages: tuple[ContextMessage, ...]
@@ -336,10 +333,10 @@ async def run_turn(
     )
     router = ToolRouter(active_registry)
     active_turn_id = turn_id or _turn_id(item)
-    loaded = _load_state(engine, item.case_id)
+    loaded = _load_state(engine, item.draft_id)
     tracer = trace_recorder or TraceRecorder(
         engine=engine,
-        case_id=item.case_id,
+        draft_id=item.draft_id,
         turn_id=active_turn_id,
     )
     accumulator = _RunAccumulator()
@@ -419,7 +416,7 @@ async def _run_turn_body(
             )
             return RunTurnResult(
                 turn_id=active_turn_id,
-                case_id=item.case_id,
+                draft_id=item.draft_id,
                 outcome="forced_end",
                 tool_calls=tuple(accumulator.tool_calls),
                 tool_results=tuple(accumulator.tool_results),
@@ -466,7 +463,7 @@ async def _run_turn_body(
             outcome = "forced_end"
             break
 
-        loaded = _load_state(engine, item.case_id)
+        loaded = _load_state(engine, item.draft_id)
         context_bundle = _build_context(policy_gate, loaded, tuple(turn_observations))
         tracer.record(
             "context",
@@ -499,7 +496,7 @@ async def _run_turn_body(
             message_id = _next_message_id(active_turn_id, accumulator)
             _persist_assistant_message(
                 engine,
-                case_id=loaded.case_state.case_id,
+                draft_id=loaded.draft_state.draft_id,
                 message_id=message_id,
                 content=step.content,
                 kind=message_kind,
@@ -544,14 +541,13 @@ async def _run_turn_body(
             # 纯 content：即回复，回合结束
             end_event = TurnEnded(
                 turn_id=active_turn_id,
-                case_id=loaded.case_state.case_id,
-                project_id=loaded.case_state.project_id,
+                draft_id=loaded.draft_state.draft_id,
                 payload={"reason": "reply"},
             )
             reducer_result = _apply_events(
                 (end_event,),
                 engine=engine,
-                base_version=loaded.case_state.state_version,
+                base_version=loaded.draft_state.state_version,
                 actor="agent",
             )
             accumulator.reducer_results.append(reducer_result)
@@ -602,7 +598,7 @@ async def _run_turn_body(
             reducer_result = _apply_events(
                 verdict.events,
                 engine=engine,
-                base_version=loaded.case_state.state_version,
+                base_version=loaded.draft_state.state_version,
                 actor="agent",
             )
             accumulator.reducer_results.append(reducer_result)
@@ -635,7 +631,7 @@ async def _run_turn_body(
             reducer_result = _apply_events(
                 verdict.events,
                 engine=engine,
-                base_version=loaded.case_state.state_version,
+                base_version=loaded.draft_state.state_version,
                 actor="agent",
             )
             accumulator.reducer_results.append(reducer_result)
@@ -659,7 +655,7 @@ async def _run_turn_body(
             reducer_result = _apply_events(
                 result.events,
                 engine=engine,
-                base_version=loaded.case_state.state_version,
+                base_version=loaded.draft_state.state_version,
                 actor="agent",
             )
             accumulator.reducer_results.append(reducer_result)
@@ -699,7 +695,7 @@ async def _run_turn_body(
         reducer_result = _apply_events(
             result.events,
             engine=engine,
-            base_version=loaded.case_state.state_version,
+            base_version=loaded.draft_state.state_version,
             actor="agent",
         )
         accumulator.reducer_results.append(reducer_result)
@@ -740,7 +736,7 @@ async def _run_turn_body(
             forced_reason = "stopped_by_user"
             _force_reply(
                 engine=engine,
-                state=_load_state(engine, item.case_id),
+                state=_load_state(engine, item.draft_id),
                 turn_id=active_turn_id,
                 message="已按停止请求结束本回合。",
                 reason=forced_reason,
@@ -755,7 +751,7 @@ async def _run_turn_body(
             forced_reason = "nonblocking_tool_limit"
             _force_reply(
                 engine=engine,
-                state=_load_state(engine, item.case_id),
+                state=_load_state(engine, item.draft_id),
                 turn_id=active_turn_id,
                 message=(
                     f"本回合已连续完成 {max_nonblocking_tools} 个非阻塞步骤，"
@@ -775,7 +771,7 @@ async def _run_turn_body(
     )
     return RunTurnResult(
         turn_id=active_turn_id,
-        case_id=item.case_id,
+        draft_id=item.draft_id,
         outcome=outcome,
         tool_calls=tuple(accumulator.tool_calls),
         tool_results=tuple(accumulator.tool_results),
@@ -805,12 +801,11 @@ async def recover_approved_pending_tool_calls(
         for row in rows:
             decision = _decision_from_row(dict(row._mapping))
             pending = next_replay(decision)
-            target_case_id = decision.case_id or _case_id_for_pending_replay(
+            target_draft_id = decision.draft_id or _draft_id_for_pending_replay(
                 connection,
                 pending,
-                decision.project_id,
             )
-            if pending is None or target_case_id is None:
+            if pending is None or target_draft_id is None:
                 continue
             replayed_tool_call_id = _replayed_tool_call_id(decision.decision_id)
             if not mark_replayed(
@@ -822,15 +817,15 @@ async def recover_approved_pending_tool_calls(
                 continue
             replay_items.append(
                 (
-                    target_case_id,
+                    target_draft_id,
                     decision.decision_id,
                     pending.model_dump(mode="json"),
                     replayed_tool_call_id,
                 )
             )
-    for case_id, decision_id, pending_payload, replayed_tool_call_id in replay_items:
+    for draft_id, decision_id, pending_payload, replayed_tool_call_id in replay_items:
         await turn_queue.enqueue_ui_observation(
-            case_id,
+            draft_id,
             observation_type="replay_pending_tool_call",
             payload={
                 "decision_id": decision_id,
@@ -844,10 +839,9 @@ async def recover_approved_pending_tool_calls(
 
 def context_bundle_input_preconditions(loaded: _LoadedState) -> PreconditionContext:
     return PreconditionContext(
-        case_state=loaded.case_state,
-        project_state=loaded.project_state,
-        project_artifacts=loaded.project_artifacts,
-        project_audio_assets=loaded.project_audio_assets,
+        draft_state=loaded.draft_state,
+        draft_artifacts=loaded.draft_artifacts,
+        draft_audio_assets=loaded.draft_audio_assets,
     )
 
 
@@ -933,19 +927,19 @@ async def _maybe_answer_pending_decision_from_user_message(
     user_message = str(item.payload.get("content", ""))
     if user_message == "":
         return None
-    loaded = _load_state(engine, item.case_id)
+    loaded = _load_state(engine, item.draft_id)
     if loaded.pending_decision is None:
         return None
     try:
         resolution = await resolver.resolve(
-            case_state=loaded.case_state,
+            draft_state=loaded.draft_state,
             decision=loaded.pending_decision,
             user_message=user_message,
         )
     except Exception as exc:
         event = CapabilityDegraded(
             degradation_id=_degradation_id(turn_id, loaded.pending_decision.decision_id),
-            case_id=item.case_id,
+            draft_id=item.draft_id,
             capability="llm.chat",
             provider_id=None,
             reason=f"decision answer resolver failed: {exc}",
@@ -1021,7 +1015,7 @@ async def _maybe_answer_pending_decision_from_user_message(
         reducer_result = _apply_events(
             verdict.events,
             engine=engine,
-            base_version=loaded.case_state.state_version,
+            base_version=loaded.draft_state.state_version,
             actor="agent",
         )
         accumulator.reducer_results.append(reducer_result)
@@ -1051,7 +1045,7 @@ async def _maybe_answer_pending_decision_from_user_message(
     reducer_result = _apply_events(
         result.events,
         engine=engine,
-        base_version=loaded.case_state.state_version,
+        base_version=loaded.draft_state.state_version,
         actor="user",
     )
     accumulator.reducer_results.append(reducer_result)
@@ -1083,34 +1077,39 @@ async def _maybe_answer_pending_decision_from_user_message(
     return None
 
 
-def _load_state(engine: Engine, case_id: str) -> _LoadedState:
+def _load_state(engine: Engine, draft_id: str) -> _LoadedState:
     with engine.connect() as connection:
-        case_row = CasesRepository(connection).get(case_id)
-        if case_row is None:
-            raise ValueError(f"case not found: {case_id}")
-        case_state = CaseState.model_validate(case_row)
-        project_state = _load_project_state(connection, case_state.project_id)
-        project_artifacts = _load_project_artifact_stats(connection, case_state)
-        project_audio_assets = _load_project_audio_assets(connection, case_state)
+        draft_row = DraftsRepository(connection).get(draft_id)
+        if draft_row is None:
+            raise ValueError(f"draft not found: {draft_id}")
+        # drafts 行多 created_at/updated_at 两列，DraftState extra="forbid"：先剔再 validate
+        draft_state = DraftState.model_validate(
+            {
+                key: value
+                for key, value in draft_row.items()
+                if key not in {"created_at", "updated_at"}
+            }
+        )
+        draft_artifacts = _load_draft_artifact_stats(connection, draft_state)
+        draft_audio_assets = _load_draft_audio_assets(connection, draft_state)
         decisions = _load_decisions(connection)
-        pending_decision = _find_pending_decision(case_state, decisions)
+        pending_decision = _find_pending_decision(draft_state, decisions)
         messages = tuple(
             ContextMessage(
                 role=str(row["role"]),
                 content=str(row["content"]),
                 created_at=str(row["created_at"]),
-                case_id=str(row["case_id"]),
+                draft_id=str(row["draft_id"]),
             )
-            for row in MessagesRepository(connection).list_for_case(case_id)
+            for row in MessagesRepository(connection).list_for_draft(draft_id)
         )
-        timeline = _load_timeline(connection, case_state)
-        memory_summaries = _load_memory_summaries(connection, case_state)
-        asset_digest = _load_asset_digest(connection, case_state)
+        timeline = _load_timeline(connection, draft_state)
+        memory_summaries = _load_memory_summaries(connection, draft_state)
+        asset_digest = _load_asset_digest(connection, draft_state)
     return _LoadedState(
-        case_state=case_state,
-        project_state=project_state,
-        project_artifacts=project_artifacts,
-        project_audio_assets=project_audio_assets,
+        draft_state=draft_state,
+        draft_artifacts=draft_artifacts,
+        draft_audio_assets=draft_audio_assets,
         decisions=decisions,
         pending_decision=pending_decision,
         messages=messages,
@@ -1120,26 +1119,20 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
     )
 
 
-def _load_project_state(connection: Connection, project_id: str) -> ProjectState | None:
-    row = ProjectsRepository(connection).get(project_id)
-    return None if row is None else ProjectState.model_validate(row)
-
-
-def _load_project_artifact_stats(
+def _load_draft_artifact_stats(
     connection: Connection,
-    case_state: CaseState,
-) -> ProjectArtifactStats:
-    disabled = set(case_state.disabled_asset_ids)
+    draft_state: DraftState,
+) -> DraftArtifactStats:
+    # 单级草稿模型：链接存在即可用，无 enabled/disabled 维度。
     asset_rows = connection.execute(
         select(schema.assets)
         .select_from(
             schema.assets.join(
-                schema.project_asset_links,
-                schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+                schema.draft_asset_links,
+                schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id,
             )
         )
-        .where(schema.project_asset_links.c.project_id == case_state.project_id)
-        .where(schema.project_asset_links.c.enabled.is_(True))
+        .where(schema.draft_asset_links.c.draft_id == draft_state.draft_id)
     ).all()
     usable_asset_ids: set[str] = set()
     asset_ids_with_audio: set[str] = set()
@@ -1147,7 +1140,7 @@ def _load_project_artifact_stats(
     for row in asset_rows:
         values = dict(row._mapping)
         asset_id = str(values["asset_id"])
-        if asset_id in disabled or not bool(values.get("usable")):
+        if not bool(values.get("usable")):
             continue
         usable_asset_ids.add(asset_id)
         if _asset_has_audio(values):
@@ -1171,7 +1164,7 @@ def _load_project_artifact_stats(
         if isinstance(vad_segments, list) and vad_segments:
             transcript_ids_with_vad.add(transcript_id)
             transcript_with_vad_asset_ids.add(asset_id)
-    return ProjectArtifactStats(
+    return DraftArtifactStats(
         usable_asset_count=len(usable_asset_ids),
         usable_asset_ids=frozenset(usable_asset_ids),
         asset_ids_with_audio=frozenset(asset_ids_with_audio),
@@ -1183,32 +1176,29 @@ def _load_project_artifact_stats(
     )
 
 
-def _load_project_audio_assets(
+def _load_draft_audio_assets(
     connection: Connection,
-    case_state: CaseState,
-) -> tuple[ProjectAudioAsset, ...]:
-    disabled = set(case_state.disabled_asset_ids)
+    draft_state: DraftState,
+) -> tuple[DraftAudioAsset, ...]:
     rows = connection.execute(
         select(schema.assets.c.asset_id, schema.assets.c.filename)
         .select_from(
             schema.assets.join(
-                schema.project_asset_links,
-                schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+                schema.draft_asset_links,
+                schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id,
             )
         )
-        .where(schema.project_asset_links.c.project_id == case_state.project_id)
-        .where(schema.project_asset_links.c.enabled.is_(True))
+        .where(schema.draft_asset_links.c.draft_id == draft_state.draft_id)
         .where(schema.assets.c.kind == "audio")
         .where(schema.assets.c.usable.is_(True))
         .order_by(schema.assets.c.mtime.desc())
     ).all()
     return tuple(
-        ProjectAudioAsset(
+        DraftAudioAsset(
             asset_id=str(row._mapping["asset_id"]),
             filename=str(row._mapping["filename"] or row._mapping["asset_id"]),
         )
         for row in rows
-        if str(row._mapping["asset_id"]) not in disabled
     )
 
 
@@ -1224,15 +1214,14 @@ def _asset_has_audio(asset: Mapping[str, Any]) -> bool:
 
 def _load_asset_digest(
     connection: Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
 ) -> tuple[AssetDigestRow, ...]:
-    """逐素材摘要索引：join 已启用链接的 assets + 各自 latest_ready 摘要。
+    """逐素材摘要索引：join 本草稿链接的 assets + 各自 latest_ready 摘要。
 
-    planner 靠这份索引看懂素材内容（Spec C §C3）。排除 case 级 disabled 与
-    link 级 disabled 素材；缺 ready 摘要的素材只带基础事实、不带 role/overall。
+    planner 靠这份索引看懂素材内容（Spec C §C3）。链接存在即在册（无 enabled/disabled 维度）；
+    缺 ready 摘要的素材只带基础事实、不带 role/overall。
     """
 
-    disabled = set(case_state.disabled_asset_ids)
     rows = connection.execute(
         select(
             schema.assets.c.asset_id,
@@ -1243,17 +1232,14 @@ def _load_asset_digest(
         )
         .select_from(
             schema.assets.join(
-                schema.project_asset_links,
-                schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+                schema.draft_asset_links,
+                schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id,
             )
         )
-        .where(schema.project_asset_links.c.project_id == case_state.project_id)
-        .where(schema.project_asset_links.c.enabled.is_(True))
+        .where(schema.draft_asset_links.c.draft_id == draft_state.draft_id)
         .order_by(schema.assets.c.asset_id)
     ).all()
-    values_list = [
-        dict(row._mapping) for row in rows if str(row._mapping["asset_id"]) not in disabled
-    ]
+    values_list = [dict(row._mapping) for row in rows]
     asset_ids = [str(values["asset_id"]) for values in values_list]
     summaries = MaterialSummariesRepository(connection).list_latest_for_assets(asset_ids)
     digest: list[AssetDigestRow] = []
@@ -1316,22 +1302,22 @@ def _decision_from_row(values: dict[str, Any]) -> Decision:
 
 
 def _find_pending_decision(
-    case_state: CaseState,
+    draft_state: DraftState,
     decisions: Sequence[Decision],
 ) -> Decision | None:
-    if case_state.pending_decision_id is None:
+    if draft_state.pending_decision_id is None:
         return None
     for decision in decisions:
-        if decision.decision_id == case_state.pending_decision_id:
+        if decision.decision_id == draft_state.pending_decision_id:
             return decision
     return None
 
 
-def _load_timeline(connection: Connection, case_state: CaseState) -> TimelineState | None:
-    version = case_state.timeline_current_version
+def _load_timeline(connection: Connection, draft_state: DraftState) -> TimelineState | None:
+    version = draft_state.timeline_current_version
     if version is None:
         return None
-    row = TimelineVersionsRepository(connection).get_by_case_version(case_state.case_id, version)
+    row = TimelineVersionsRepository(connection).get_by_draft_version(draft_state.draft_id, version)
     if row is None:
         return None
     return TimelineState.model_validate(row["document_json"])
@@ -1339,35 +1325,24 @@ def _load_timeline(connection: Connection, case_state: CaseState) -> TimelineSta
 
 def _load_memory_summaries(
     connection: Connection,
-    case_state: CaseState,
+    draft_state: DraftState,
 ) -> tuple[str, ...]:
+    # 单级草稿模型下记忆只有 user 一域。
     hits = search_relevant_memories(
         connection,
-        query=case_state.brief.goal,
-        project_id=case_state.project_id,
+        query=draft_state.brief.goal,
         limit=5,
     )
-    return tuple(
-        _memory_summary_line(
-            memory_id=hit.memory_id,
-            scope=hit.scope,
-            project_id=hit.project_id,
-            content=hit.content,
-        )
-        for hit in hits
-    )
+    return tuple(_memory_summary_line(memory_id=hit.memory_id, content=hit.content) for hit in hits)
 
 
 def _memory_summary_line(
     *,
     memory_id: str,
-    scope: str,
-    project_id: str | None,
     content: str,
 ) -> str:
-    owner = "user" if scope == "user" else f"project:{project_id}"
     summary = content if len(content) <= 200 else f"{content[:197]}..."
-    return f"{owner} {memory_id}: {summary}"
+    return f"user {memory_id}: {summary}"
 
 
 async def _record_incoming_item(
@@ -1385,7 +1360,7 @@ async def _record_incoming_item(
             MessagesRepository(connection).insert(
                 {
                     "message_id": message_id,
-                    "case_id": item.case_id,
+                    "draft_id": item.draft_id,
                     "role": "user",
                     "kind": "user",
                     "content": content,
@@ -1432,8 +1407,7 @@ async def _execute_tool(
         context = ToolExecutionContext(
             tool_call_id=tool_call.tool_call_id or _tool_call_id(tool_call),
             turn_id=turn_id,
-            case_state=state.case_state,
-            project_state=state.project_state,
+            draft_state=state.draft_state,
             decisions=state.decisions,
             readonly_connection=connection,
             created_at=_now_iso(),
@@ -1474,13 +1448,13 @@ def _defer_tool_call(
     kind = _job_kind_for_tool(spec.name, spec.namespace)
     job_arguments = dict(arguments)
     if spec.name == "audio.asr_original" and not job_arguments.get("asset_id"):
-        asset_id = _asset_id_for_asr(state.case_state)
+        asset_id = _asset_id_for_asr(state.draft_state)
         if asset_id is not None:
             job_arguments["asset_id"] = asset_id
     idempotency_key = tool_call.idempotency_key or _job_idempotency_key(
         kind=kind,
         tool_name=spec.name,
-        case_id=state.case_state.case_id,
+        draft_id=state.draft_state.draft_id,
         arguments=job_arguments,
     )
     job_id = _job_id(kind=kind, idempotency_key=idempotency_key)
@@ -1499,7 +1473,7 @@ def _defer_tool_call(
     if spec.name == "asset.import_url":
         job_arguments.setdefault(
             "asset_id",
-            _asset_id_for_url_import(state.case_state.project_id, job_arguments),
+            _asset_id_for_url_import(state.draft_state.draft_id, job_arguments),
         )
         job_payload = {
             **job_arguments,
@@ -1514,11 +1488,13 @@ def _defer_tool_call(
             "tool_call_id": tool_call.tool_call_id or _tool_call_id(tool_call),
             "turn_id": turn_id,
         }
-    project_level_job = kind in {"proxy", "import_url"}
+    # 素材级 job（proxy / import_url）由草稿内 Agent 触发：记 requested_by_draft_id 让完成
+    # observation 回本草稿（PRD §4.10）；draft 级 job（asr/tts/render/align）直接归属草稿。
+    asset_level_job = kind in {"proxy", "import_url"}
     event = JobEnqueued(
         job_id=job_id,
-        project_id=state.case_state.project_id,
-        case_id=None if project_level_job else state.case_state.case_id,
+        draft_id=None if asset_level_job else state.draft_state.draft_id,
+        requested_by_draft_id=state.draft_state.draft_id if asset_level_job else None,
         payload={
             "kind": kind,
             "idempotency_key": idempotency_key,
@@ -1605,9 +1581,9 @@ async def _handle_followups(
             replay = _consume_pending_replay(engine, followup.decision_id)
             if replay is None:
                 continue
-            case_id, pending, replayed_tool_call_id = replay
+            draft_id, pending, replayed_tool_call_id = replay
             await turn_queue.enqueue_ui_observation(
-                case_id,
+                draft_id,
                 observation_type="replay_pending_tool_call",
                 payload={
                     "decision_id": followup.decision_id,
@@ -1655,8 +1631,9 @@ async def _execute_memory_save_followup(
 
     candidate_id = followup.payload.get("candidate_id")
     scope = followup.payload.get("scope")
-    case_id = followup.payload.get("case_id")
-    if not isinstance(candidate_id, str) or scope not in {"user", "project"}:
+    draft_id = followup.payload.get("draft_id")
+    # 单级草稿模型下记忆只有 user 一域：memory.save 只吃 candidate_id，域固定为 user。
+    if not isinstance(candidate_id, str) or scope != "user":
         tracer.record(
             "action",
             {
@@ -1668,7 +1645,7 @@ async def _execute_memory_save_followup(
             },
         )
         return
-    if not isinstance(case_id, str):
+    if not isinstance(draft_id, str):
         tracer.record(
             "action",
             {
@@ -1676,13 +1653,13 @@ async def _execute_memory_save_followup(
                 "kind": followup.kind,
                 "decision_id": followup.decision_id,
                 "status": "failed",
-                "observation": "memory save followup missing case_id",
+                "observation": "memory save followup missing draft_id",
             },
         )
         return
     tool_call = ToolCall(
         tool_name="memory.save",
-        arguments={"candidate_id": candidate_id, "scope": scope},
+        arguments={"candidate_id": candidate_id},
         tool_call_id=f"followup_{followup.decision_id}_memory_save",
     )
     accumulator.tool_calls.append(tool_call)
@@ -1695,7 +1672,7 @@ async def _execute_memory_save_followup(
         },
     )
     try:
-        state = _load_state(engine, case_id)
+        state = _load_state(engine, draft_id)
         result = await _execute_tool(router, tool_call, engine=engine, state=state, turn_id=turn_id)
     except Exception as exc:  # pragma: no cover - defensive post-commit boundary
         result = ToolResult(
@@ -1737,7 +1714,7 @@ def _discard_memory_candidate_followup(
     tracer: TraceRecorder | NullTraceRecorder,
 ) -> None:
     candidate_id = followup.payload.get("candidate_id")
-    case_id = followup.payload.get("case_id")
+    draft_id = followup.payload.get("draft_id")
     if not isinstance(candidate_id, str):
         tracer.record(
             "action",
@@ -1752,7 +1729,7 @@ def _discard_memory_candidate_followup(
         return
     event = MemoryCandidateDiscarded(
         candidate_id=candidate_id,
-        case_id=case_id if isinstance(case_id, str) else None,
+        draft_id=draft_id if isinstance(draft_id, str) else None,
         payload={"candidate_id": candidate_id},
     )
     result = ToolResult(
@@ -1789,12 +1766,11 @@ def _consume_pending_replay(
             return None
         decision = Decision.model_validate(row)
         pending = next_replay(decision)
-        target_case_id = decision.case_id or _case_id_for_pending_replay(
+        target_draft_id = decision.draft_id or _draft_id_for_pending_replay(
             connection,
             pending,
-            decision.project_id,
         )
-        if pending is None or target_case_id is None:
+        if pending is None or target_draft_id is None:
             return None
         replayed_tool_call_id = _replayed_tool_call_id(decision.decision_id)
         if not mark_replayed(
@@ -1803,43 +1779,37 @@ def _consume_pending_replay(
             replayed_tool_call_id=replayed_tool_call_id,
         ):
             return None
-        return target_case_id, pending, replayed_tool_call_id
+        return target_draft_id, pending, replayed_tool_call_id
 
 
-def _case_id_for_pending_replay(
+def _draft_id_for_pending_replay(
     connection: Connection,
     pending: PendingToolCall | None,
-    project_id: str | None,
 ) -> str | None:
+    # draft 域决策自带 draft_id；此兜底仅在 draft_id 缺失时按 pending 参数或首个活跃草稿定位。
     if pending is not None:
-        case_id = pending.arguments.get("case_id")
-        if isinstance(case_id, str) and _case_exists_for_replay(connection, case_id, project_id):
-            return case_id
-    if project_id is None:
-        return None
+        draft_id = pending.arguments.get("draft_id")
+        if isinstance(draft_id, str) and _draft_exists_for_replay(connection, draft_id):
+            return draft_id
     row = connection.execute(
-        select(schema.cases.c.case_id)
-        .where(schema.cases.c.project_id == project_id)
-        .where(schema.cases.c.status == "active")
-        .order_by(schema.cases.c.case_id)
+        select(schema.drafts.c.draft_id)
+        .where(schema.drafts.c.status == "active")
+        .order_by(schema.drafts.c.draft_id)
         .limit(1)
     ).first()
     if row is None:
         return None
-    return str(row._mapping["case_id"])
+    return str(row._mapping["draft_id"])
 
 
-def _case_exists_for_replay(
+def _draft_exists_for_replay(
     connection: Connection,
-    case_id: str,
-    project_id: str | None,
+    draft_id: str,
 ) -> bool:
-    statement = select(schema.cases.c.case_id).where(
-        schema.cases.c.case_id == case_id,
-        schema.cases.c.status == "active",
+    statement = select(schema.drafts.c.draft_id).where(
+        schema.drafts.c.draft_id == draft_id,
+        schema.drafts.c.status == "active",
     )
-    if project_id is not None:
-        statement = statement.where(schema.cases.c.project_id == project_id)
     return connection.execute(statement).first() is not None
 
 
@@ -1861,7 +1831,7 @@ def _force_reply(
     message_id = _next_message_id(turn_id, accumulator)
     _persist_assistant_message(
         engine,
-        case_id=state.case_state.case_id,
+        draft_id=state.draft_state.draft_id,
         message_id=message_id,
         content=message,
         kind="reply",
@@ -1877,14 +1847,13 @@ def _force_reply(
     )
     end_event = TurnEnded(
         turn_id=turn_id,
-        case_id=state.case_state.case_id,
-        project_id=state.case_state.project_id,
+        draft_id=state.draft_state.draft_id,
         payload={"reason": reason},
     )
     reducer_result = _apply_events(
         (end_event,),
         engine=engine,
-        base_version=state.case_state.state_version,
+        base_version=state.draft_state.state_version,
         actor="agent",
     )
     accumulator.reducer_results.append(reducer_result)
@@ -1914,7 +1883,7 @@ def _peek_next_message_id(turn_id: str, accumulator: _RunAccumulator) -> str:
 def _persist_assistant_message(
     engine: Engine,
     *,
-    case_id: str,
+    draft_id: str,
     message_id: str,
     content: str,
     kind: str,
@@ -1923,7 +1892,7 @@ def _persist_assistant_message(
         MessagesRepository(connection).insert(
             {
                 "message_id": message_id,
-                "case_id": case_id,
+                "draft_id": draft_id,
                 "role": "assistant",
                 "kind": kind,
                 "content": content,
@@ -2040,11 +2009,9 @@ def _job_kind_for_tool(tool_name: str, namespace: str) -> str:
     return tool_name.replace(".", "_")
 
 
-def _asset_id_for_asr(case_state: CaseState) -> str | None:
-    if case_state.audio_plan is not None and case_state.audio_plan.source_asset_ids:
-        return case_state.audio_plan.source_asset_ids[0]
-    if case_state.selected_asset_ids:
-        return case_state.selected_asset_ids[0]
+def _asset_id_for_asr(draft_state: DraftState) -> str | None:
+    if draft_state.audio_plan is not None and draft_state.audio_plan.source_asset_ids:
+        return draft_state.audio_plan.source_asset_ids[0]
     return None
 
 
@@ -2070,14 +2037,14 @@ def _job_idempotency_key(
     *,
     kind: str,
     tool_name: str,
-    case_id: str,
+    draft_id: str,
     arguments: Mapping[str, Any],
 ) -> str:
     encoded = json.dumps(
         {
             "kind": kind,
             "tool_name": tool_name,
-            "case_id": case_id,
+            "draft_id": draft_id,
             "arguments": arguments,
         },
         sort_keys=True,
@@ -2092,12 +2059,12 @@ def _job_id(*, kind: str, idempotency_key: str) -> str:
     return f"job_{digest[:20]}"
 
 
-def _asset_id_for_url_import(project_id: str, arguments: Mapping[str, Any]) -> str:
+def _asset_id_for_url_import(draft_id: str, arguments: Mapping[str, Any]) -> str:
     existing = arguments.get("asset_id")
     if isinstance(existing, str) and existing:
         return existing
     url = arguments.get("url")
-    digest = hashlib.sha256(f"{project_id}:{url}".encode()).hexdigest()
+    digest = hashlib.sha256(f"{draft_id}:{url}".encode()).hexdigest()
     return f"asset_{digest[:20]}"
 
 
@@ -2112,7 +2079,7 @@ def _degradation_id(turn_id: str, decision_id: str) -> str:
 
 def _turn_id(item: TurnQueueItem) -> str:
     suffix = item.item_id or item.enqueued_at.replace(":", "_")
-    return f"turn_{item.case_id}_{item.kind}_{suffix}"
+    return f"turn_{item.draft_id}_{item.kind}_{suffix}"
 
 
 def _now_iso() -> str:
