@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ReactElement } from "react";
 import { api, type MaterialAsset } from "../../api/client";
 import { StatusBadge, understandingBadgeProps } from "./StatusBadge";
@@ -55,7 +56,9 @@ export function MaterialsTable({
                 className={`${rowTone} ${onSelect ? "cursor-pointer hover:bg-[#f8fafc]" : ""}`}
                 onClick={onSelect ? () => onSelect(asset) : undefined}
               >
-                <td className="px-3 py-3 align-top">{thumbnailCell(asset)}</td>
+                <td className="px-3 py-3 align-top">
+                  <MaterialThumbnail asset={asset} />
+                </td>
                 <td className="max-w-[240px] px-3 py-3 align-top">
                   <div className="font-medium text-[#17202a]">{asset.filename || asset.asset_id}</div>
                   <div className="mt-1 truncate text-xs text-[#64748b]" title={asset.asset_id}>
@@ -127,14 +130,17 @@ export function MaterialsTable({
   );
 }
 
-function thumbnailCell(asset: MaterialAsset): ReactElement {
-  if (asset.thumbnail_ready) {
+function MaterialThumbnail({ asset }: { asset: MaterialAsset }): ReactElement {
+  // 加载失败（如缩略图对象丢失）时兜底回 kind 占位，避免裂图。
+  const [failed, setFailed] = useState(false);
+  if (asset.thumbnail_ready && !failed) {
     return (
       <img
         src={api.mediaThumbnailUrl(asset.asset_id)}
         alt={`${asset.filename || asset.asset_id} 缩略图`}
         className="h-12 w-20 rounded border border-[#e2e8f0] object-cover"
         loading="lazy"
+        onError={() => setFailed(true)}
       />
     );
   }

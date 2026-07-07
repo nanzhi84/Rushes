@@ -1,10 +1,15 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MaterialAsset } from "../api/client";
+import { storeAuthToken } from "../auth";
 import { ProjectMaterialsView } from "./ProjectMaterialsPage";
 
 describe("ProjectMaterialsView", () => {
+  afterEach(() => {
+    window.sessionStorage.clear();
+  });
+
   it("按 init、parts、complete 顺序完成分片上传", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -220,7 +225,8 @@ describe("ProjectMaterialsView", () => {
     expect(screen.getByRole("button", { name: "重新定位" })).toBeTruthy();
   });
 
-  it("缩略图就绪渲染 img，未就绪显示占位并按 mm:ss 显示时长", async () => {
+  it("缩略图就绪渲染带 query token 的 img，加载失败兜底回占位，时长按 mm:ss 显示", async () => {
+    storeAuthToken("test-token");
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
@@ -242,8 +248,15 @@ describe("ProjectMaterialsView", () => {
     renderMaterials();
 
     const thumb = (await screen.findByAltText("clip.mp4 缩略图")) as HTMLImageElement;
-    expect(thumb.getAttribute("src")).toContain("/api/media/asset_thumb/thumbnail");
+    expect(thumb.getAttribute("src")).toBe("/api/media/asset_thumb/thumbnail?token=test-token");
     expect(screen.getByText("01:32")).toBeTruthy();
+    // 类型列本身有一个「视频」。
+    expect(screen.getAllByText("视频")).toHaveLength(1);
+
+    fireEvent.error(thumb);
+    expect(screen.queryByAltText("clip.mp4 缩略图")).toBeNull();
+    // 加载失败后缩略图列兜底为 kind 占位，「视频」多出一处。
+    expect(screen.getAllByText("视频")).toHaveLength(2);
   });
 
   it("按理解状态渲染徽标文案", async () => {

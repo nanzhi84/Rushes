@@ -472,21 +472,25 @@ export const api = {
     });
   },
 
+  // media 族 URL 由浏览器原生 <img>/<video>/wavesurfer 直连，设不了 Authorization header，
+  // 统一带 query token（后端 apps/api/deps.py 对 GET /api/media/ 前缀放行 query token，语义同 SSE）。
   mediaProxyUrl(assetId: string): string {
-    return `/api/media/${encodeURIComponent(assetId)}/proxy`;
+    return withQueryToken(`/api/media/${encodeURIComponent(assetId)}/proxy`);
   },
 
-  // 缩略图作为 <img src> 加载，走 query token 鉴权（同 SSE，见 apps/api/deps.py _request_token）。
   mediaThumbnailUrl(assetId: string): string {
-    const token = getAuthToken();
-    const query = token ? `?token=${encodeURIComponent(token)}` : "";
-    return `/api/media/${encodeURIComponent(assetId)}/thumbnail${query}`;
+    return withQueryToken(`/api/media/${encodeURIComponent(assetId)}/thumbnail`);
   },
 
   mediaPreviewUrl(previewId: string): string {
-    return `/api/media/preview/${encodeURIComponent(previewId)}`;
+    return withQueryToken(`/api/media/preview/${encodeURIComponent(previewId)}`);
   }
 };
+
+function withQueryToken(path: string): string {
+  const token = getAuthToken();
+  return token ? `${path}?token=${encodeURIComponent(token)}` : path;
+}
 
 function projectPath(projectId: string): string {
   return `/api/projects/${encodeURIComponent(projectId)}`;

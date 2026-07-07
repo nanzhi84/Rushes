@@ -872,6 +872,46 @@ def test_media_thumbnail_serves_jpeg_and_404_when_missing(tmp_path: Path) -> Non
     assert missing.json()["detail"]["reason"] == "thumbnail_not_ready"
 
 
+def test_media_thumbnail_accepts_query_token_like_browser_img(tmp_path: Path) -> None:
+    """浏览器 <img src> 设不了 Authorization header，media 族 GET 必须吃 query token。"""
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    thumbnail_bytes = b"\xff\xd8\xff\xe0jpeg-body"
+    _seed_indexed_asset(
+        app,
+        asset_id="asset_thumb",
+        thumbnail_bytes=thumbnail_bytes,
+        duration_sec=12.5,
+    )
+    _seed_indexed_asset(app, asset_id="asset_bare", thumbnail_bytes=None, duration_sec=3.0)
+
+    ready = client.get("/api/media/asset_thumb/thumbnail", params={"token": TOKEN})
+    missing = client.get("/api/media/asset_bare/thumbnail", params={"token": TOKEN})
+    no_token = client.get("/api/media/asset_thumb/thumbnail")
+    bad_token = client.get("/api/media/asset_thumb/thumbnail", params={"token": "wrong"})
+
+    assert ready.status_code == 200
+    assert ready.content == thumbnail_bytes
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["reason"] == "thumbnail_not_ready"
+    assert no_token.status_code == 401
+    assert no_token.json()["reason"] == "missing_token"
+    assert bad_token.status_code == 401
+    assert bad_token.json()["reason"] == "bad_token"
+
+
+def test_query_token_not_accepted_outside_sse_and_media(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+
+    response = client.get("/api/projects/project_1/materials", params={"token": TOKEN})
+
+    assert response.status_code == 401
+    assert response.json()["reason"] == "missing_token"
+
+
 def _insert_ready_summary(
     engine: Engine,
     *,
@@ -942,6 +982,23 @@ def test_material_summary_route_404_when_no_ready_summary(tmp_path: Path) -> Non
 
     assert response.status_code == 404
     assert response.json()["detail"]["reason"] == "summary_not_ready"
+
+
+def test_material_summary_route_404_when_asset_not_linked_to_project(tmp_path: Path) -> None:
+    """跨项目越权：asset 挂在 project_1，从 project_2 查摘要必须 asset_not_linked。"""
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(
+        _engine(app),
+        ProjectCreated(project_id="project_1", name="Project"),
+        ProjectCreated(project_id="project_2", name="Other"),
+    )
+    _seed_indexed_asset(app, asset_id="asset_sum", thumbnail_bytes=None, duration_sec=5.0)
+
+    response = client.get("/api/projects/project_2/materials/asset_sum/summary", headers=AUTH)
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["reason"] == "asset_not_linked"
 
 
 def test_materials_payload_exposes_thumbnail_duration_and_understanding(tmp_path: Path) -> None:
