@@ -16,6 +16,7 @@ from typing import Any, NoReturn, cast
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
@@ -104,6 +105,7 @@ from tools.specs import (
 
 from . import schemas as api_schemas
 from .deps import (
+    MATERIAL_KIND_BY_SUFFIX,
     MEDIA_EXTENSIONS,
     ApiState,
     PathEscapeError,
@@ -629,38 +631,76 @@ def _register_routes(app: FastAPI) -> None:
                 sources.append(canonicalize_allowed_path(raw_path, state.fs_roots))
             except PathEscapeError:
                 refuse_path_escape(request, raw_path)
-        # 目录递归展开为 (文件, rel_dir)；单文件直接导入不带 rel_dir。
-        plan, skipped = _expand_import_sources(sources)
-        # 单文件 + 显式 asset_id 的旧语义保留；批量导入不接受 asset_id。
-        explicit_asset_id = payload.asset_id if len(plan) == 1 else None
-        asset_ids: list[str] = []
-        event_ids: list[int] = []
-        for file_path, rel_dir in plan:
-            result = _run_asset_tool(
-                state,
-                tool_name="asset.import_local_file",
-                handler=asset_import_local_file,
-                input_model=AssetImportLocalFileInput(
-                    project_id=project_id,
-                    asset_id=explicit_asset_id,
-                    path=str(file_path),
-                    storage_mode=payload.storage_mode or StorageMode.REFERENCE,
-                    kind=_infer_material_kind(str(file_path)),
-                    rel_dir=rel_dir,
-                ),
-                actor="user",
-            )
-            imported_asset_id = result.data.get("asset_id")
-            if isinstance(imported_asset_id, str):
-                asset_ids.append(imported_asset_id)
-            event_ids.extend(result.data["event_ids"])
-        return {
-            "project_id": project_id,
-            "asset_id": asset_ids[0] if asset_ids else None,
-            "asset_ids": asset_ids,
-            "skipped": skipped,
-            "event_ids": event_ids,
-        }
+
+        def _import_all() -> dict[str, Any]:
+            # 目录递归展开为 (文件, rel_dir)；展开的每个文件重新过 fs_roots 校验（防符号链接逃逸）。
+            # 直接文件的不支持后缀在这里就 400（导入循环开始前），避免批量中途失败留下半批。
+            plan, skipped = _expand_import_sources(sources, state.fs_roots)
+            if payload.asset_id is not None and len(plan) != 1:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "error_code": "asset_id_requires_single_file",
+                        "message": "asset_id 只能用于恰好一个文件的导入。",
+                    },
+                )
+            # 项目内按 reference_path 去重：重选同一文件夹补充素材时，已导入文件跳过。
+            with state.engine.connect() as connection:
+                existing_rows = connection.execute(
+                    select(schema.assets.c.reference_path)
+                    .select_from(
+                        schema.assets.join(
+                            schema.project_asset_links,
+                            schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+                        )
+                    )
+                    .where(schema.project_asset_links.c.project_id == project_id)
+                    .where(schema.assets.c.reference_path.is_not(None))
+                ).all()
+            existing_paths = {str(row[0]) for row in existing_rows}
+            asset_ids: list[str] = []
+            event_ids: list[int] = []
+            failed: list[str] = []
+            duplicates: list[str] = []
+            for file_path, rel_dir in plan:
+                if str(file_path) in existing_paths:
+                    duplicates.append(file_path.name)
+                    continue
+                try:
+                    result = _run_asset_tool(
+                        state,
+                        tool_name="asset.import_local_file",
+                        handler=asset_import_local_file,
+                        input_model=AssetImportLocalFileInput(
+                            project_id=project_id,
+                            asset_id=payload.asset_id,
+                            path=str(file_path),
+                            storage_mode=payload.storage_mode or StorageMode.REFERENCE,
+                            kind=_infer_material_kind(str(file_path)),
+                            rel_dir=rel_dir,
+                        ),
+                        actor="user",
+                    )
+                except OSError as error:
+                    # 浏览与导入之间文件被删/改名/无权限：记入 failed，继续导剩余文件。
+                    failed.append(f"{file_path.name}（{error.__class__.__name__}）")
+                    continue
+                imported_asset_id = result.data.get("asset_id")
+                if isinstance(imported_asset_id, str):
+                    asset_ids.append(imported_asset_id)
+                event_ids.extend(result.data["event_ids"])
+            return {
+                "project_id": project_id,
+                "asset_id": asset_ids[0] if asset_ids else None,
+                "asset_ids": asset_ids,
+                "skipped": skipped,
+                "failed": failed,
+                "duplicates": duplicates,
+                "event_ids": event_ids,
+            }
+
+        # 扫描 + 哈希 + 逐文件落库都是同步阻塞操作，放线程池跑，避免冻结事件循环。
+        return await run_in_threadpool(_import_all)
 
     @app.post(
         "/api/projects/{project_id}/materials/import-url",
@@ -2001,58 +2041,21 @@ def _run_asset_tool(
     return result.model_copy(update={"data": data})
 
 
-_MATERIAL_KIND_BY_SUFFIX: dict[str, AssetKind] = {
-    # video
-    ".mp4": AssetKind.VIDEO,
-    ".mov": AssetKind.VIDEO,
-    ".mkv": AssetKind.VIDEO,
-    ".webm": AssetKind.VIDEO,
-    ".avi": AssetKind.VIDEO,
-    ".m4v": AssetKind.VIDEO,
-    ".mpg": AssetKind.VIDEO,
-    ".mpeg": AssetKind.VIDEO,
-    ".3gp": AssetKind.VIDEO,
-    ".wmv": AssetKind.VIDEO,
-    # audio
-    ".mp3": AssetKind.AUDIO,
-    ".wav": AssetKind.AUDIO,
-    ".m4a": AssetKind.AUDIO,
-    ".aac": AssetKind.AUDIO,
-    ".flac": AssetKind.AUDIO,
-    ".ogg": AssetKind.AUDIO,
-    ".opus": AssetKind.AUDIO,
-    ".aiff": AssetKind.AUDIO,
-    ".aif": AssetKind.AUDIO,
-    ".ape": AssetKind.AUDIO,
-    # image
-    ".jpg": AssetKind.IMAGE,
-    ".jpeg": AssetKind.IMAGE,
-    ".png": AssetKind.IMAGE,
-    ".gif": AssetKind.IMAGE,
-    ".webp": AssetKind.IMAGE,
-    ".bmp": AssetKind.IMAGE,
-    ".tif": AssetKind.IMAGE,
-    ".tiff": AssetKind.IMAGE,
-    ".heic": AssetKind.IMAGE,
-    ".heif": AssetKind.IMAGE,
-    ".svg": AssetKind.IMAGE,
-    # font
-    ".ttf": AssetKind.FONT,
-    ".otf": AssetKind.FONT,
-    ".woff": AssetKind.FONT,
-    ".woff2": AssetKind.FONT,
-}
+# 单一定义在 apps/api/deps.py（与 fs/list 的 MEDIA_EXTENSIONS 同源）。
+_MATERIAL_KIND_BY_SUFFIX = MATERIAL_KIND_BY_SUFFIX
 
 
 def _expand_import_sources(
     sources: list[Path],
+    fs_roots: Sequence[Path],
 ) -> tuple[list[tuple[Path, str | None]], list[str]]:
     """把文件/目录混合的导入请求展开为 (文件, rel_dir) 列表。
 
     目录递归扫描并保留层级：rel_dir = 所选目录名 + 文件相对子目录（POSIX 分隔），
     素材面板按它分组。隐藏项直接跳过；目录里不支持的扩展名记入 skipped 而不中断
-    批量导入。直接给出的单文件 rel_dir=None，格式不支持仍走 _infer_material_kind
-    的 400（保持旧语义）。
+    批量导入。**展开出的每个文件都重新做 realpath + fs_roots 包含校验**——目录里的
+    符号链接可能指向允许目录之外，越界项记入 skipped 而不是被静默导入。
+    直接给出的单文件 rel_dir=None，格式不支持在此前置 400（导入尚未开始，无半批）。
     """
 
     plan: list[tuple[Path, str | None]] = []
@@ -2066,16 +2069,23 @@ def _expand_import_sources(
                 relative = file_path.relative_to(source)
                 if any(part.startswith(".") for part in relative.parts):
                     continue
-                if file_path in seen:
-                    continue
                 if file_path.suffix.lower() not in _MATERIAL_KIND_BY_SUFFIX:
                     skipped.append(relative.as_posix())
                     continue
-                seen.add(file_path)
+                try:
+                    resolved = canonicalize_allowed_path(str(file_path), fs_roots)
+                except PathEscapeError:
+                    skipped.append(f"{relative.as_posix()}（越出允许目录）")
+                    continue
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
                 rel_parent = relative.parent.as_posix()
                 rel_dir = source.name if rel_parent == "." else f"{source.name}/{rel_parent}"
-                plan.append((file_path, rel_dir))
+                plan.append((resolved, rel_dir))
         else:
+            # 顶层条目已在路由里 canonicalize；这里只做后缀前置校验与去重。
+            _infer_material_kind(str(source))
             if source in seen:
                 continue
             seen.add(source)

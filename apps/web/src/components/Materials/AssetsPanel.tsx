@@ -32,6 +32,8 @@ export function AssetsPanel({
   const [browserOpen, setBrowserOpen] = useState(false);
   const [currentDir, setCurrentDir] = useState("");
   const [skippedFiles, setSkippedFiles] = useState<string[]>([]);
+  const [failedFiles, setFailedFiles] = useState<string[]>([]);
+  const [duplicateFiles, setDuplicateFiles] = useState<string[]>([]);
   const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
   const [relocatingAsset, setRelocatingAsset] = useState<MaterialAsset | null>(null);
 
@@ -51,6 +53,8 @@ export function AssetsPanel({
       api.importLocalMaterial(projectId, { paths, storage_mode: "reference" }),
     onSuccess: async (response) => {
       setSkippedFiles(response.skipped ?? []);
+      setFailedFiles(response.failed ?? []);
+      setDuplicateFiles(response.duplicates ?? []);
       await invalidateMaterials();
     }
   });
@@ -205,6 +209,17 @@ export function AssetsPanel({
           <p className="mt-3 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
             已跳过 {skippedFiles.length} 个不支持的文件：{skippedFiles.slice(0, 5).join("、")}
             {skippedFiles.length > 5 ? " 等" : ""}
+          </p>
+        ) : null}
+        {duplicateFiles.length > 0 ? (
+          <p className="mt-3 rounded-md border border-line bg-raised px-3 py-2 text-xs text-fg-muted">
+            {duplicateFiles.length} 个文件已在素材库中，未重复导入。
+          </p>
+        ) : null}
+        {failedFiles.length > 0 ? (
+          <p className="mt-3 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
+            {failedFiles.length} 个文件导入失败：{failedFiles.slice(0, 5).join("、")}
+            {failedFiles.length > 5 ? " 等" : ""}
           </p>
         ) : null}
         {importLocal.error ? (

@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { api, type ProjectTreeProject } from "../../api/client";
 import { queryKeys } from "../../app/query_client";
@@ -34,8 +34,22 @@ export function EntityActionDialog({
     [dialog?.caseId, sourceProject]
   );
 
+  // 用户开始编辑后不再重置：项目树查询在对话框打开期间刷新（SSE 失效重取）时，
+  // 依赖数组里的 projects 引用会变化，若无守卫会把已输入的名称/确认勾选清掉。
+  const dirtyRef = useRef(false);
+  const lastDialogRef = useRef<EntityDialogState | null>(null);
+
   useEffect(() => {
     if (!dialog) {
+      lastDialogRef.current = null;
+      dirtyRef.current = false;
+      return;
+    }
+    if (lastDialogRef.current !== dialog) {
+      lastDialogRef.current = dialog;
+      dirtyRef.current = false;
+    }
+    if (dirtyRef.current) {
       return;
     }
     setName(initialName(dialog.kind, sourceProject?.name, sourceCase?.name));
@@ -45,6 +59,10 @@ export function EntityActionDialog({
       projects.find((project) => project.project_id !== dialog.projectId)?.project_id ?? ""
     );
   }, [dialog, projects, sourceCase?.name, sourceProject?.name]);
+
+  const markDirty = (): void => {
+    dirtyRef.current = true;
+  };
 
   const mutation = useMutation({
     mutationFn: async () => {
@@ -169,7 +187,10 @@ export function EntityActionDialog({
             <input
               className="mt-2 w-full rounded-md border border-line bg-ink px-3 py-2 text-fg outline-none focus:border-accent"
               value={name}
-              onChange={(event) => setName(event.target.value)}
+              onChange={(event) => {
+                markDirty();
+                setName(event.target.value);
+              }}
               autoFocus
             />
           </label>
@@ -181,7 +202,10 @@ export function EntityActionDialog({
             <textarea
               className="mt-2 h-24 w-full resize-none rounded-md border border-line bg-ink px-3 py-2 text-fg outline-none focus:border-accent"
               value={goal}
-              onChange={(event) => setGoal(event.target.value)}
+              onChange={(event) => {
+                markDirty();
+                setGoal(event.target.value);
+              }}
             />
           </label>
         ) : null}
@@ -192,7 +216,10 @@ export function EntityActionDialog({
               className="mt-1 accent-[color:var(--color-danger)]"
               type="checkbox"
               checked={confirmed}
-              onChange={(event) => setConfirmed(event.target.checked)}
+              onChange={(event) => {
+                markDirty();
+                setConfirmed(event.target.checked);
+              }}
             />
             确认执行删除。后端会走软删除和同一条归约路径。
           </label>
@@ -205,7 +232,10 @@ export function EntityActionDialog({
               <select
                 className="mt-2 w-full rounded-md border border-line bg-ink px-3 py-2 text-fg outline-none focus:border-accent"
                 value={targetProjectId}
-                onChange={(event) => setTargetProjectId(event.target.value)}
+                onChange={(event) => {
+                  markDirty();
+                  setTargetProjectId(event.target.value);
+                }}
               >
                 <option value="" disabled>
                   选择目标项目
@@ -224,7 +254,10 @@ export function EntityActionDialog({
                 className="mt-1"
                 type="checkbox"
                 checked={confirmed}
-                onChange={(event) => setConfirmed(event.target.checked)}
+                onChange={(event) => {
+                  markDirty();
+                  setConfirmed(event.target.checked);
+                }}
               />
               确认移动剪辑任务，并让后端处理素材链接归属。
             </label>

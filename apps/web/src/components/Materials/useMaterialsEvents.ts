@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { queryKeys } from "../../app/query_client";
-import { createApiEventSource } from "../../auth";
+import { acquireApiEventSource } from "../../auth";
 
 type MaterialsSsePayload = {
   event_id: number;
@@ -11,7 +11,7 @@ type MaterialsSsePayload = {
   };
 };
 
-/** 订阅 workspace SSE 中素材相关事件，失效当前项目的素材列表查询。 */
+/** 订阅 workspace SSE（共享连接）中素材相关事件，失效当前项目的素材列表查询。 */
 export function useMaterialsEvents(projectId: string, enabled: boolean): void {
   const queryClient = useQueryClient();
 
@@ -19,7 +19,7 @@ export function useMaterialsEvents(projectId: string, enabled: boolean): void {
     if (!enabled) {
       return;
     }
-    const source = createApiEventSource("/api/events");
+    const { source, release } = acquireApiEventSource("/api/events");
     const handleEvent = (event: Event) => {
       const message = event as MessageEvent<string>;
       const payload = JSON.parse(message.data) as MaterialsSsePayload;
@@ -32,7 +32,10 @@ export function useMaterialsEvents(projectId: string, enabled: boolean): void {
       source.addEventListener(eventName, handleEvent);
     }
     return () => {
-      source.close();
+      for (const eventName of MATERIAL_EVENT_TYPES) {
+        source.removeEventListener(eventName, handleEvent);
+      }
+      release();
     };
   }, [enabled, projectId, queryClient]);
 }

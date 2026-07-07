@@ -1100,3 +1100,104 @@ def test_import_local_requires_at_least_one_path(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"]["error_code"] == "missing_path"
+
+
+def test_import_local_directory_skips_symlink_escaping_fs_roots(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    outside = tmp_path / "outside" / "secret.mp4"
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(b"secret-bytes")
+    root = tmp_path / "allowed" / "linked"
+    root.mkdir(parents=True)
+    (root / "ok.mp4").write_bytes(b"ok")
+    (root / "escape.mp4").symlink_to(outside)
+
+    imported = client.post(
+        "/api/projects/project_1/materials/import-local",
+        headers=AUTH,
+        json={"paths": [str(root)]},
+    )
+
+    assert imported.status_code == 200
+    body = imported.json()
+    assert len(body["asset_ids"]) == 1
+    assert any("escape.mp4" in item for item in body["skipped"])
+    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    filenames = {asset["filename"] for asset in materials.json()["assets"]}
+    assert filenames == {"ok.mp4"}
+
+
+def test_import_local_rejects_asset_id_with_directory_batch(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    root = tmp_path / "allowed" / "batch"
+    root.mkdir(parents=True)
+    (root / "a.mp4").write_bytes(b"a")
+    (root / "b.mp4").write_bytes(b"b")
+
+    response = client.post(
+        "/api/projects/project_1/materials/import-local",
+        headers=AUTH,
+        json={"paths": [str(root)], "asset_id": "asset_explicit"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["error_code"] == "asset_id_requires_single_file"
+    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    assert materials.json()["assets"] == []
+
+
+def test_import_local_reimport_same_directory_dedupes_by_reference_path(
+    tmp_path: Path,
+) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    root = tmp_path / "allowed" / "footage"
+    root.mkdir(parents=True)
+    (root / "a.mp4").write_bytes(b"a")
+
+    first = client.post(
+        "/api/projects/project_1/materials/import-local",
+        headers=AUTH,
+        json={"paths": [str(root)]},
+    )
+    (root / "b.mp4").write_bytes(b"b")
+    second = client.post(
+        "/api/projects/project_1/materials/import-local",
+        headers=AUTH,
+        json={"paths": [str(root)]},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["duplicates"] == ["a.mp4"]
+    assert len(second.json()["asset_ids"]) == 1
+    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    assert len(materials.json()["assets"]) == 2
+
+
+def test_import_local_missing_file_lands_in_failed_without_aborting_batch(
+    tmp_path: Path,
+) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_project(client).status_code == 201
+    good = _media_file(tmp_path, b"good")
+    missing = tmp_path / "allowed" / "gone.mp4"
+
+    response = client.post(
+        "/api/projects/project_1/materials/import-local",
+        headers=AUTH,
+        json={"paths": [str(missing), str(good)]},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["asset_ids"]) == 1
+    assert any("gone.mp4" in item for item in body["failed"])
+    materials = client.get("/api/projects/project_1/materials", headers=AUTH)
+    assert {asset["filename"] for asset in materials.json()["assets"]} == {"raw.mp4"}

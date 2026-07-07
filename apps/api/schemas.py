@@ -226,9 +226,11 @@ class MaterialSummaryResponse(ApiResponseModel):
 class MaterialMutationResponse(ApiResponseModel):
     project_id: str
     asset_id: str | None = None
-    # 批量/文件夹导入：全部新建的 asset_id 与跳过的非媒体文件名。
+    # 批量/文件夹导入：新建 asset_id、跳过的非媒体/越界文件、读取失败文件、项目内已存在的重复文件。
     asset_ids: list[str] = []
     skipped: list[str] = []
+    failed: list[str] = []
+    duplicates: list[str] = []
     job_id: str | None = None
     decision_id: str | None = None
     event_ids: list[int]

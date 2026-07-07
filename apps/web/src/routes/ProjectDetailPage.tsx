@@ -77,6 +77,7 @@ export function ProjectDetailPage(): ReactElement {
             projectId={projectId}
             cases={project?.cases ?? []}
             loading={treeQuery.isLoading}
+            loadError={Boolean(treeQuery.error)}
             onCaseAction={(kind, caseId) => openEntityDialog({ kind, projectId, caseId })}
           />
         ) : null}
@@ -99,11 +100,13 @@ function CasesTab({
   projectId,
   cases,
   loading,
+  loadError,
   onCaseAction
 }: {
   projectId: string;
   cases: ProjectTreeCase[];
   loading: boolean;
+  loadError: boolean;
   onCaseAction: (kind: CaseActionKind, caseId: string) => void;
 }): ReactElement {
   const navigate = useNavigate();
@@ -156,7 +159,11 @@ function CasesTab({
         </div>
       </form>
 
-      {loading ? (
+      {loadError ? (
+        <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
+          剪辑任务列表加载失败，请检查后端连接后刷新。
+        </p>
+      ) : loading ? (
         <p className="text-sm text-fg-muted">正在读取剪辑任务</p>
       ) : cases.length === 0 ? (
         <p className="rounded-lg border border-dashed border-line-strong px-4 py-10 text-center text-sm text-fg-muted">

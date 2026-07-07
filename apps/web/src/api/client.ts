@@ -91,6 +91,8 @@ export type MaterialMutationResponse = {
   asset_id?: string | null;
   asset_ids?: string[];
   skipped?: string[];
+  failed?: string[];
+  duplicates?: string[];
   job_id?: string | null;
   decision_id?: string | null;
   event_ids: number[];

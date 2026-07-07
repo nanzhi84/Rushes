@@ -1108,8 +1108,18 @@ export interface components {
             asset_ids: string[];
             /** Decision Id */
             decision_id?: string | null;
+            /**
+             * Duplicates
+             * @default []
+             */
+            duplicates: string[];
             /** Event Ids */
             event_ids: number[];
+            /**
+             * Failed
+             * @default []
+             */
+            failed: string[];
             /** Job Id */
             job_id?: string | null;
             /** Project Id */

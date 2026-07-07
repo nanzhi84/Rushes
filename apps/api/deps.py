@@ -18,6 +18,7 @@ from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
 from agent_harness.turn_queue import TurnQueue
+from contracts.asset import AssetKind
 from contracts.events import DomainEventBase, SecurityRefusal
 from events.event_log import deserialize_event
 from events.routing import routes_to_case, routes_to_workspace
@@ -37,27 +38,51 @@ type SecurityReason = Literal[
 type SsePredicate = Callable[[DomainEventBase], bool]
 
 MUTATION_METHODS = frozenset({"POST", "PATCH", "DELETE", "PUT"})
-MEDIA_EXTENSIONS = frozenset(
-    {
-        ".3gp",
-        ".aac",
-        ".aif",
-        ".aiff",
-        ".avi",
-        ".flac",
-        ".m4a",
-        ".m4v",
-        ".mkv",
-        ".mov",
-        ".mp3",
-        ".mp4",
-        ".mpeg",
-        ".mpg",
-        ".ogg",
-        ".wav",
-        ".webm",
-    }
-)
+# 素材后缀 → AssetKind 的单一定义：导入分流与 fs/list 过滤共用，
+# 保证「目录浏览可见」与「可导入」两个集合一致（含图片/字体）。
+MATERIAL_KIND_BY_SUFFIX: dict[str, AssetKind] = {
+    # video
+    ".mp4": AssetKind.VIDEO,
+    ".mov": AssetKind.VIDEO,
+    ".mkv": AssetKind.VIDEO,
+    ".webm": AssetKind.VIDEO,
+    ".avi": AssetKind.VIDEO,
+    ".m4v": AssetKind.VIDEO,
+    ".mpg": AssetKind.VIDEO,
+    ".mpeg": AssetKind.VIDEO,
+    ".3gp": AssetKind.VIDEO,
+    ".wmv": AssetKind.VIDEO,
+    # audio
+    ".mp3": AssetKind.AUDIO,
+    ".wav": AssetKind.AUDIO,
+    ".m4a": AssetKind.AUDIO,
+    ".aac": AssetKind.AUDIO,
+    ".flac": AssetKind.AUDIO,
+    ".ogg": AssetKind.AUDIO,
+    ".opus": AssetKind.AUDIO,
+    ".aiff": AssetKind.AUDIO,
+    ".aif": AssetKind.AUDIO,
+    ".ape": AssetKind.AUDIO,
+    # image
+    ".jpg": AssetKind.IMAGE,
+    ".jpeg": AssetKind.IMAGE,
+    ".png": AssetKind.IMAGE,
+    ".gif": AssetKind.IMAGE,
+    ".webp": AssetKind.IMAGE,
+    ".bmp": AssetKind.IMAGE,
+    ".tif": AssetKind.IMAGE,
+    ".tiff": AssetKind.IMAGE,
+    ".heic": AssetKind.IMAGE,
+    ".heif": AssetKind.IMAGE,
+    ".svg": AssetKind.IMAGE,
+    # font
+    ".ttf": AssetKind.FONT,
+    ".otf": AssetKind.FONT,
+    ".woff": AssetKind.FONT,
+    ".woff2": AssetKind.FONT,
+}
+
+MEDIA_EXTENSIONS = frozenset(MATERIAL_KIND_BY_SUFFIX)
 
 
 @dataclass(frozen=True, slots=True)

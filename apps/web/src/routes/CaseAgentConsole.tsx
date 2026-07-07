@@ -479,7 +479,11 @@ export function CaseConsoleView({
 
             <section className="min-h-0 min-w-0 flex-1 p-3" aria-label="预览区">
               {previewAsset ? (
-                <AssetMediaPreview asset={previewAsset} onClose={() => setPreviewAsset(null)} />
+                <AssetMediaPreview
+                  key={previewAsset.asset_id}
+                  asset={previewAsset}
+                  onClose={() => setPreviewAsset(null)}
+                />
               ) : timelineVersion === null ? (
                 <PreviewPlaceholder text="暂无时间线。让代理开始剪辑后，这里会出现成片预览。" />
               ) : timelineQuery.isPending ? (
@@ -614,7 +618,7 @@ function PreviewPlaceholder({ text }: { text: string }): ReactElement {
   );
 }
 
-/** 素材试看：视频/音频/图片按类型渲染，媒体流走 mediaProxyUrl。 */
+/** 素材试看：视频/音频/图片按类型渲染，媒体流走 mediaProxyUrl；代理未就绪或加载失败给出提示。 */
 function AssetMediaPreview({
   asset,
   onClose
@@ -622,7 +626,9 @@ function AssetMediaPreview({
   asset: MaterialAsset;
   onClose: () => void;
 }): ReactElement {
+  const [mediaFailed, setMediaFailed] = useState(false);
   const src = api.mediaProxyUrl(asset.asset_id);
+  const handleMediaError = useCallback(() => setMediaFailed(true), []);
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-line bg-black">
       <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line bg-panel px-3 py-2">
@@ -636,15 +642,30 @@ function AssetMediaPreview({
         </button>
       </div>
       <div className="grid min-h-0 flex-1 place-items-center p-2">
-        {asset.kind === "video" ? (
-          <video className="max-h-full max-w-full" controls src={src} aria-label="素材试看" />
+        {!asset.proxy_ready ? (
+          <p className="max-w-[280px] text-center text-sm leading-6 text-fg-muted">
+            素材代理尚未就绪（导入处理中或已失败），稍后再试。
+          </p>
+        ) : mediaFailed ? (
+          <p className="max-w-[280px] text-center text-sm leading-6 text-fg-muted">
+            素材加载失败，代理文件可能已失效。
+          </p>
+        ) : asset.kind === "video" ? (
+          <video
+            className="max-h-full max-w-full"
+            controls
+            src={src}
+            aria-label="素材试看"
+            onError={handleMediaError}
+          />
         ) : asset.kind === "audio" ? (
-          <audio controls src={src} aria-label="素材试听" />
+          <audio controls src={src} aria-label="素材试听" onError={handleMediaError} />
         ) : asset.kind === "image" ? (
           <img
             className="max-h-full max-w-full object-contain"
             src={src}
             alt={asset.filename || asset.asset_id}
+            onError={handleMediaError}
           />
         ) : (
           <p className="text-sm text-fg-muted">该素材类型暂不支持预览。</p>

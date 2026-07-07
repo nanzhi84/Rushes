@@ -1,28 +1,39 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { createApiEventSource } from "../auth";
+import { acquireApiEventSource } from "../auth";
 import { queryKeys } from "./query_client";
 
 export type ConnectionState = "connecting" | "open" | "closed";
 
-/** 订阅 workspace 级 SSE：维护连接状态，并在结构性事件到达时失效项目/树查询。 */
+/** 订阅 workspace 级 SSE（共享连接）：维护连接状态，并在结构性事件到达时失效项目/树查询。 */
 export function useWorkspaceEvents(): ConnectionState {
   const queryClient = useQueryClient();
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
 
   useEffect(() => {
-    const source = createApiEventSource("/api/events");
-    source.onopen = () => setConnectionState("open");
-    source.onerror = () => setConnectionState("closed");
+    const { source, release } = acquireApiEventSource("/api/events");
+    // 共享连接：用 addEventListener，不占用 onopen/onerror 独占槽位。
+    if (source.readyState === 1 /* OPEN */) {
+      setConnectionState("open");
+    }
+    const handleOpen = () => setConnectionState("open");
+    const handleError = () => setConnectionState("closed");
     const handleWorkspaceEvent = () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.projectTree });
       void queryClient.invalidateQueries({ queryKey: queryKeys.projects });
     };
+    source.addEventListener("open", handleOpen);
+    source.addEventListener("error", handleError);
     for (const eventName of WORKSPACE_EVENT_TYPES) {
       source.addEventListener(eventName, handleWorkspaceEvent);
     }
     return () => {
-      source.close();
+      source.removeEventListener("open", handleOpen);
+      source.removeEventListener("error", handleError);
+      for (const eventName of WORKSPACE_EVENT_TYPES) {
+        source.removeEventListener(eventName, handleWorkspaceEvent);
+      }
+      release();
     };
   }, [queryClient]);
 
