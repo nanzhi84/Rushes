@@ -48,11 +48,11 @@
 - `AssetLinked / AssetUnlinked` 按 `(draft_id, asset_id)` 定键，payload `project_id→draft_id`，`AssetLinked` 携带 `rel_dir`/`note` 不变
 - 其余事件 `case_id→draft_id`、`requested_by_case_id→requested_by_draft_id` 字面改名，strict/merge 语义一律不变
 
-**工具（46 → 30，specs+handlers+`PRECONDITION_REGISTRY` 三处配对；现状 46 经 `tool_specs()` 实数，旧 PRD 的 47 已漂移）**
+**工具（注册 46 → 31，specs+handlers+`PRECONDITION_REGISTRY` 三处配对；PRD §6 契约面为 32——含 extract_transcript_plan/insert_clip 两个规划未实现工具、不含子代理内部的 media.view_frames，此差异是既有惯例，不要在本 PR「补齐」它们）**
 
 - `project.*` 8 个整族删除（目录 `packages/tools/project/` 整个删）；**不新增** draft 生命周期工具（草稿建/改名/复制/删除仅 UI/REST）
 - `asset.*` 10 → 3：保留 `asset.import_local_file`、`asset.import_url`（直挂当前草稿）；新 `asset.list_assets`（列当前草稿全部链接素材：asset_id/kind/rel_dir/usable/摘要有无，合并原 list_project_assets+list_case_scope）；删除 `link_to_project / unlink_from_project / list_project_assets / select_for_case / disable_for_case / list_case_scope / upload_complete / read_summary`（read_summary 由 `understand.materials` 缓存命中路径承接——该路径已存在，cached 状态直接返回摘要，不派 VLM）
-- `memory.*` 4 → 3：删除 `memory.ask_scope`（user 单域下无存在意义）；`memory.extract_from_case` → `memory.extract_from_draft`；`memory.save` 固定 user 域不再询问 scope
+- `memory.*` 4 → 4：`memory.ask_scope` **保留**（对 candidate_id 创建 memory_scope decision，单域后只问「存为 user 记忆/跳过」）；`memory.extract_from_case` → `memory.extract_from_draft`；`memory.save` 固定 user 域（exposure=harness_only 不变）
 - `ToolExecutionContext`：删 `project_state`，`case_state→draft_state`
 - `ToolSpec`：`allowed_scopes` 全部收敛为 `["draft_editor"]`；`requires_active_project`/`requires_active_case` 双旗合并为 `requires_active_draft`；`side_effects` 字面量 `"project"/"case"` → `"draft"`
 - 前置条件谓词：`active_case→active_draft`；`usable_asset_exists` 判定收敛为「链接存在且引用有效」（无 enabled/disabled 维度）
@@ -154,14 +154,14 @@ class DraftListItem(BaseModel):
 
 **Files:**
 - Delete: `packages/tools/project/`（整目录）、asset 手册中 7 个被删工具的 spec+handler、`UploadCompleteRequest` 相关
-- Modify: `packages/tools/specs.py`、`registry.py`、`context.py`（draft_state）、`packages/tools/asset/handlers.py`（import_local_file/import_url 改挂 draft + `list_assets` 新实现；删 read_summary，摘要读取走 understand.materials 缓存命中）、`packages/tools/memory_tools/`（删 ask_scope；extract_from_case→extract_from_draft；save 固定 user 域）、audio/content/timeline_tools/render_tools/understand 各包字段跟随
+- Modify: `packages/tools/specs.py`、`registry.py`、`context.py`（draft_state）、`packages/tools/asset/handlers.py`（import_local_file/import_url 改挂 draft + `list_assets` 新实现；删 read_summary，摘要读取走 understand.materials 缓存命中）、`packages/tools/memory_tools/`（ask_scope 保留改问法；extract_from_case→extract_from_draft；save 固定 user 域）、audio/content/timeline_tools/render_tools/understand 各包字段跟随
 - Test: `tests/tools/`（删除被删工具测试；`asset.list_assets` 新测试）
 
 **Interfaces:**
-- Consumes: Task 2–4。Produces: 30 个 ToolSpec（`allowed_scopes=["draft_editor"]`、`requires_active_draft`）；`asset.list_assets` 返回 `[{asset_id, kind, rel_dir, usable, has_summary}]`。
+- Consumes: Task 2–4。Produces: 31 个注册 ToolSpec（`allowed_scopes=["draft_editor"]`、`requires_active_draft`）；`asset.list_assets` 返回 `[{asset_id, kind, rel_dir, usable, has_summary}]`。
 
 - [ ] **Step 1**: 按总表裁撤与改名；`PRECONDITION_REGISTRY` 同步。
-- [ ] **Step 2**: `uv run pytest tests/tools -q` 绿。**Commit** `refactor：工具族收敛 46→30（project 族退场，asset 三工具）`
+- [ ] **Step 2**: `uv run pytest tests/tools -q` 绿。**Commit** `refactor：工具族收敛 46→31（project 族退场，asset 三工具）`
 
 ### Task 6: agent_harness
 
@@ -200,12 +200,12 @@ class DraftListItem(BaseModel):
 ### Task 9: 后端收口
 
 **Files:**
-- Modify: `scripts/check_contracts.py`（事件/工具注册表断言：事件 44、工具 30；允许导入表中 project 相关残留清理）、`tests/scripts/`、`tests/apps/`；删除空壳死目录 `packages/annotation`、`packages/indexing`、`packages/tools/annotation`、`packages/tools/retrieval`（确认无 import 后）
+- Modify: `scripts/check_contracts.py`（事件/工具注册表断言：事件 44、注册工具 31；允许导入表中 project 相关残留清理）、`tests/scripts/`、`tests/apps/`；删除空壳死目录 `packages/annotation`、`packages/indexing`、`packages/tools/annotation`、`packages/tools/retrieval`（确认无 import 后）
 - Verify: 全量后端门禁
 
 - [ ] **Step 1**: check_contracts 与残余测试修绿；全仓 `grep -rn "case_id\|project_id" packages apps tests scripts --include="*.py"` 清零（golden 数据内允许的除外——原则上也应清零）。
 - [ ] **Step 2**: `uv run pytest -q`（覆盖率≥90）+ `uv run ruff check` + `uv run ruff format --check` + `uv run mypy` + `uv run python scripts/check_contracts.py` 全绿。
-- [ ] **Step 3: Commit** `chore：后端收口（check_contracts 对齐 44 事件/30 工具，清死目录）`
+- [ ] **Step 3: Commit** `chore：后端收口（check_contracts 对齐 44 事件/31 注册工具，清死目录）`
 
 ### Task 10: web 机械适配
 

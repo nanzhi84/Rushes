@@ -76,9 +76,9 @@
 - 保留不动：`/api/fs/*`（pick/roots/list）、`/api/media/*`（query-token 鉴权双通道）、`/api/events`、`/api/decisions/{id}/answer`、jobs cancel。
 - 改完重跑 `scripts/gen_web_types.sh`，并把 `api/client.ts` 中手写类型与 generated schema 同步核对。
 
-### 2.2 工具（46 → 30）
+### 2.2 工具（注册 46 → 31；PRD 契约面 47 → 32）
 
-> 修正（2026-07-07 验收核数）：现状工具实为 46 个（旧 PRD 的 47 已漂移）。目标 30 = 46 − 8（project 族）− 8（asset 七个域工具 + read_summary）− 1（memory.ask_scope）+ 1（asset.list_assets）。`asset.read_summary` 并入 `understand.materials` 的缓存命中路径（该路径已存在：cached 状态直接返回摘要全文，不派 VLM 子代理）；`memory.ask_scope` 在 user 单域下无存在意义，删除；`memory.extract_from_case` 改名 `memory.extract_from_draft`。
+> 修正（2026-07-07 验收核数，二次修订）：注册目标 31 = 46 − 8（project 族）− 8（asset 七个域工具 + read_summary）+ 1（asset.list_assets）。`asset.read_summary` 并入 `understand.materials` 的缓存命中路径（该路径已存在：cached 状态直接返回摘要全文，不派 VLM 子代理）；`memory.ask_scope` **保留**——记忆保存确认流程需要它创建 memory_scope decision，单域后只问「存为 user 记忆/跳过」；`memory.extract_from_case` 改名 `memory.extract_from_draft`。PRD §6 的「共 32」是契约面计数（含 content.extract_transcript_plan、timeline.insert_clip 两个规划未实现工具，不含子代理内部的 media.view_frames），与 v1.5「47 vs 注册 46」同构，属既有惯例非漂移。
 
 - `project.*` 8 个工具**整族删除**，不新增 draft 生命周期工具——沿用 PRD 硬规则：草稿的建/改名/复制/删除仅 UI/REST，Agent 无权（防误删）。
 - `asset.*` 10 → 2＋新 1：保留 `import_local_file`、`import_url`（直挂当前草稿）+ 新形态 `list_assets`（列本草稿链接素材）；删除 link_to_project/unlink_from_project/list_project_assets/select_for_case/disable_for_case/list_case_scope/upload_complete/**read_summary**（摘要读取由 `understand.materials` 缓存命中路径承接）。Agent 不需要排除素材的工具——不用某素材就是不在计划里引用它；用户要排除则在 UI 删除引用。
