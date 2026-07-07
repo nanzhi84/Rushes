@@ -1577,7 +1577,7 @@ GET  /api/drafts/{did}/costs
 
 GET  /api/drafts/{did}/decisions/current    # draft 级 blocking
 GET  /api/drafts/{did}/decisions/pending    # draft 级非阻塞（草稿内 URL 导入确认等）
-POST /api/decisions/{did}/answer            # 统一回答入口（任意 scope，服务端校验归属）
+POST /api/decisions/{decision_id}/answer            # 统一回答入口（任意 scope，服务端校验归属）
 
 POST /api/jobs/{job_id}/cancel
 ```
