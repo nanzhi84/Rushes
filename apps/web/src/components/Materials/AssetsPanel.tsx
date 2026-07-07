@@ -1,6 +1,19 @@
+import * as ContextMenu from "@radix-ui/react-context-menu";
+import * as Dialog from "@radix-ui/react-dialog";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  FileText,
+  Folder,
+  FolderOpen,
+  MapPin,
+  MoreHorizontal,
+  Plus,
+  RotateCw,
+  Trash2
+} from "lucide-react";
 import { useMemo, useState } from "react";
-import type { ReactElement } from "react";
+import type { ElementType, ReactElement } from "react";
 import { api, type MaterialAsset } from "../../api/client";
 import { queryKeys } from "../../app/query_client";
 import { FsBrowserDialog } from "./FsBrowserDialog";
@@ -37,6 +50,7 @@ export function AssetsPanel({
   const [duplicateFiles, setDuplicateFiles] = useState<string[]>([]);
   const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
   const [relocatingAsset, setRelocatingAsset] = useState<MaterialAsset | null>(null);
+  const [deletingAsset, setDeletingAsset] = useState<MaterialAsset | null>(null);
 
   const materialsQuery = useQuery({
     queryKey: queryKeys.materials(draftId),
@@ -125,29 +139,32 @@ export function AssetsPanel({
           {picking ? <span className="text-xs text-fg-muted">等待选择…</span> : null}
           {management ? (
             <button
-              className="rounded-md border border-line px-2.5 py-1.5 text-xs text-fg-muted hover:bg-hover disabled:opacity-40"
+              className="flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-xs text-fg-muted transition-colors ease-standard hover:bg-hover disabled:opacity-40"
               type="button"
               disabled={revalidateMaterials.isPending}
               onClick={() => revalidateMaterials.mutate()}
             >
+              <RotateCw size={14} strokeWidth={1.75} aria-hidden />
               重新检测失效
             </button>
           ) : null}
           <button
-            className="rounded-md bg-raised px-2.5 py-1.5 text-xs font-medium text-fg hover:bg-hover disabled:opacity-40"
+            className="flex items-center gap-1.5 rounded-md bg-raised px-2.5 py-1.5 text-xs font-medium text-fg transition-colors ease-standard hover:bg-hover disabled:opacity-40"
             type="button"
             disabled={picking}
             onClick={() => void pickAndImport("folder")}
           >
+            <FolderOpen size={14} strokeWidth={1.75} aria-hidden />
             导入文件夹
           </button>
           <button
-            className="rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-white hover:bg-accent-strong disabled:opacity-40"
+            className="flex items-center gap-1.5 rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-white transition-colors ease-standard hover:bg-accent-strong disabled:opacity-40"
             type="button"
             disabled={picking}
             onClick={() => void pickAndImport("files")}
           >
-            ＋ 导入素材
+            <Plus size={14} strokeWidth={2} aria-hidden />
+            导入素材
           </button>
         </div>
       </header>
@@ -217,12 +234,9 @@ export function AssetsPanel({
                       ? () => onPreviewAsset(asset)
                       : undefined
                 }
+                onViewSummary={() => setActiveAssetId(asset.asset_id)}
                 onRelocate={() => setRelocatingAsset(asset)}
-                onDelete={() => {
-                  if (window.confirm(`删除素材引用：${asset.filename || asset.asset_id}？`)) {
-                    deleteMaterial.mutate(asset);
-                  }
-                }}
+                onRequestDelete={() => setDeletingAsset(asset)}
               />
             ))}
           </div>
@@ -270,6 +284,55 @@ export function AssetsPanel({
           onSelect={(path) => relocateMaterial.mutate(path)}
         />
       ) : null}
+
+      <Dialog.Root
+        open={deletingAsset !== null}
+        onOpenChange={(next) => {
+          if (!next) {
+            setDeletingAsset(null);
+          }
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="rx-overlay fixed inset-0 z-30 bg-black/60 backdrop-blur-sm" />
+          <Dialog.Content
+            aria-describedby={undefined}
+            className="rx-content fixed left-1/2 top-1/2 z-40 w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 rounded-xl bg-raised p-5 shadow-overlay focus:outline-none"
+          >
+            <Dialog.Title className="text-base font-semibold text-fg">删除素材引用</Dialog.Title>
+            <p className="mt-3 text-sm text-fg-muted">
+              将从本草稿移除
+              <span className="mx-1 text-fg">
+                {deletingAsset?.filename || deletingAsset?.asset_id}
+              </span>
+              的引用。物理文件与全局索引保留，之后重新导入可秒级回链。
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <Dialog.Close asChild>
+                <button
+                  className="rounded-md border border-line px-3 py-2 text-sm text-fg-muted transition-colors ease-standard hover:bg-hover hover:text-fg"
+                  type="button"
+                >
+                  取消
+                </button>
+              </Dialog.Close>
+              <button
+                className="rounded-md bg-danger px-3 py-2 text-sm font-medium text-white transition-colors ease-standard hover:bg-danger/80 disabled:opacity-40"
+                type="button"
+                disabled={deleteMaterial.isPending}
+                onClick={() => {
+                  if (deletingAsset) {
+                    deleteMaterial.mutate(deletingAsset);
+                  }
+                  setDeletingAsset(null);
+                }}
+              >
+                删除引用
+              </button>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </section>
   );
 }
@@ -283,13 +346,13 @@ type FolderNode = {
 function FolderTile({ folder, onOpen }: { folder: FolderNode; onOpen: () => void }): ReactElement {
   return (
     <button
-      className="group overflow-hidden rounded-md border border-line text-left transition-colors hover:border-line-strong"
+      className="group overflow-hidden rounded-md border border-line text-left transition-colors ease-standard hover:border-line-strong"
       type="button"
       title={folder.name}
       onClick={onOpen}
     >
       <div className="grid aspect-video place-items-center bg-ink text-fg-faint">
-        <FolderGlyph />
+        <Folder size={34} strokeWidth={1.5} aria-hidden />
       </div>
       <div className="flex items-center justify-between gap-1 px-1.5 py-1">
         <span className="truncate text-2xs text-fg">{folder.name}</span>
@@ -305,116 +368,166 @@ function AssetTile({
   management,
   actionPending,
   onClick,
+  onViewSummary,
   onRelocate,
-  onDelete
+  onRequestDelete
 }: {
   asset: MaterialAsset;
   active: boolean;
   management: boolean;
   actionPending: boolean;
   onClick?: () => void;
+  onViewSummary: () => void;
   onRelocate: () => void;
-  onDelete: () => void;
+  onRequestDelete: () => void;
 }): ReactElement {
   const [thumbFailed, setThumbFailed] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
   const understanding = understandingBadgeProps(asset.understanding_status);
-  return (
-    <div
-      className={`group relative overflow-hidden rounded-md border transition-colors ${
-        active ? "border-accent" : "border-line hover:border-line-strong"
-      } ${asset.usable ? "" : "opacity-50"}`}
-      onMouseLeave={() => setMenuOpen(false)}
-    >
-      <button
-        className="block w-full text-left"
-        type="button"
-        title={asset.filename || asset.asset_id}
-        onClick={onClick}
-      >
-        <div className="relative aspect-video bg-ink">
-          {asset.thumbnail_ready && !thumbFailed ? (
-            <img
-              src={api.mediaThumbnailUrl(asset.asset_id)}
-              alt={`${asset.filename || asset.asset_id} 缩略图`}
-              className="h-full w-full object-cover"
-              loading="lazy"
-              onError={() => setThumbFailed(true)}
-            />
-          ) : (
-            <div className="grid h-full w-full place-items-center text-xs text-fg-faint">
-              {kindLabel(asset.kind)}
-            </div>
-          )}
-          {asset.duration_sec !== null && asset.duration_sec > 0 ? (
-            <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-2xs tabular-nums text-white">
-              {formatDuration(asset.duration_sec)}
-            </span>
-          ) : null}
-          {asset.invalid ? (
-            <span className="absolute left-1 top-1">
-              <StatusBadge label="失效" tone="danger" />
-            </span>
-          ) : null}
-        </div>
-        <div className="flex items-center justify-between gap-1 px-1.5 py-1">
-          <span className="truncate text-2xs text-fg-muted">
-            {asset.filename || asset.asset_id}
-          </span>
-          <span
-            aria-label={`理解状态：${understanding.label}`}
-            className={`h-1.5 w-1.5 shrink-0 rounded-full ${understandingDotClass(asset.understanding_status)}`}
-            title={understanding.label}
-          />
-        </div>
-      </button>
+  const tileClass = `group relative overflow-hidden rounded-md border transition-colors ease-standard ${
+    active ? "border-accent" : "border-line hover:border-line-strong"
+  } ${asset.usable ? "" : "opacity-50"}`;
 
-      {management ? (
-        <>
-          <button
-            className="absolute right-1 top-1 hidden h-6 w-6 place-items-center rounded-md bg-black/60 text-xs text-fg hover:bg-black/80 group-hover:grid"
-            type="button"
-            aria-label={`素材 ${asset.filename || asset.asset_id} 更多操作`}
-            onClick={() => setMenuOpen((open) => !open)}
-          >
-            ⋯
-          </button>
-          {menuOpen ? (
-            <div className="absolute right-1 top-8 z-10 w-28 overflow-hidden rounded-md border border-line bg-raised py-1 text-xs">
-              {asset.invalid ? (
-                <TileMenuItem label="重新定位" disabled={actionPending} onClick={onRelocate} />
-              ) : null}
-              <TileMenuItem label="删除引用" danger disabled={actionPending} onClick={onDelete} />
-            </div>
-          ) : null}
-        </>
-      ) : null}
-    </div>
+  const body = (
+    <button
+      className="block w-full text-left"
+      type="button"
+      title={asset.filename || asset.asset_id}
+      onClick={onClick}
+    >
+      <div className="relative aspect-video bg-ink">
+        {asset.thumbnail_ready && !thumbFailed ? (
+          <img
+            src={api.mediaThumbnailUrl(asset.asset_id)}
+            alt={`${asset.filename || asset.asset_id} 缩略图`}
+            className="h-full w-full object-cover"
+            loading="lazy"
+            onError={() => setThumbFailed(true)}
+          />
+        ) : (
+          <div className="grid h-full w-full place-items-center text-xs text-fg-faint">
+            {kindLabel(asset.kind)}
+          </div>
+        )}
+        {asset.duration_sec !== null && asset.duration_sec > 0 ? (
+          <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-2xs tabular-nums text-white">
+            {formatDuration(asset.duration_sec)}
+          </span>
+        ) : null}
+        {asset.invalid ? (
+          <span className="absolute left-1 top-1">
+            <StatusBadge label="失效" tone="danger" />
+          </span>
+        ) : null}
+      </div>
+      <div className="flex items-center justify-between gap-1 px-1.5 py-1">
+        <span className="truncate text-2xs text-fg-muted">
+          {asset.filename || asset.asset_id}
+        </span>
+        <span
+          aria-label={`理解状态：${understanding.label}`}
+          className={`h-1.5 w-1.5 shrink-0 rounded-full ${understandingDotClass(asset.understanding_status)}`}
+          title={understanding.label}
+        />
+      </div>
+    </button>
+  );
+
+  if (!management) {
+    return <div className={tileClass}>{body}</div>;
+  }
+
+  const items = (Item: ElementType): ReactElement => (
+    <AssetMenuItems
+      item={Item}
+      asset={asset}
+      actionPending={actionPending}
+      onViewSummary={onViewSummary}
+      onRelocate={onRelocate}
+      onRequestDelete={onRequestDelete}
+    />
+  );
+
+  return (
+    <ContextMenu.Root>
+      <ContextMenu.Trigger asChild>
+        <div className={tileClass}>
+          {body}
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button
+                className="absolute right-1 top-1 hidden h-6 w-6 place-items-center rounded-md bg-black/60 text-fg transition-colors ease-standard hover:bg-black/80 group-hover:grid data-[state=open]:grid"
+                type="button"
+                aria-label={`素材 ${asset.filename || asset.asset_id} 更多操作`}
+              >
+                <MoreHorizontal size={14} strokeWidth={1.75} aria-hidden />
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                className={TILE_MENU_CONTENT_CLASS}
+                align="end"
+                sideOffset={6}
+                loop
+              >
+                {items(DropdownMenu.Item)}
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
+        </div>
+      </ContextMenu.Trigger>
+      <ContextMenu.Portal>
+        <ContextMenu.Content className={TILE_MENU_CONTENT_CLASS} loop>
+          {items(ContextMenu.Item)}
+        </ContextMenu.Content>
+      </ContextMenu.Portal>
+    </ContextMenu.Root>
   );
 }
 
-function TileMenuItem({
-  label,
-  danger = false,
-  disabled,
-  onClick
+const TILE_MENU_CONTENT_CLASS =
+  "rx-menu z-40 min-w-[8.5rem] overflow-hidden rounded-lg bg-raised p-1 text-xs shadow-pop";
+const TILE_MENU_ITEM_CLASS =
+  "flex cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-1.5 text-fg outline-none data-[highlighted]:bg-hover data-[disabled]:pointer-events-none data-[disabled]:opacity-40";
+const TILE_MENU_ITEM_DANGER_CLASS =
+  "flex cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-1.5 text-danger outline-none data-[highlighted]:bg-danger/10 data-[disabled]:pointer-events-none data-[disabled]:opacity-40";
+
+/** 瓦片菜单三项（查看理解摘要/重新定位/删除引用）：DropdownMenu 与 ContextMenu 共用。 */
+function AssetMenuItems({
+  item: Item,
+  asset,
+  actionPending,
+  onViewSummary,
+  onRelocate,
+  onRequestDelete
 }: {
-  label: string;
-  danger?: boolean;
-  disabled: boolean;
-  onClick: () => void;
+  item: ElementType;
+  asset: MaterialAsset;
+  actionPending: boolean;
+  onViewSummary: () => void;
+  onRelocate: () => void;
+  onRequestDelete: () => void;
 }): ReactElement {
   return (
-    <button
-      className={`block w-full px-3 py-1.5 text-left hover:bg-hover disabled:opacity-40 ${
-        danger ? "text-danger" : "text-fg"
-      }`}
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-    >
-      {label}
-    </button>
+    <>
+      <Item className={TILE_MENU_ITEM_CLASS} onSelect={onViewSummary}>
+        <FileText size={15} strokeWidth={1.75} aria-hidden />
+        查看理解摘要
+      </Item>
+      {asset.invalid ? (
+        <Item className={TILE_MENU_ITEM_CLASS} disabled={actionPending} onSelect={onRelocate}>
+          <MapPin size={15} strokeWidth={1.75} aria-hidden />
+          重新定位
+        </Item>
+      ) : null}
+      <Item
+        className={TILE_MENU_ITEM_DANGER_CLASS}
+        disabled={actionPending}
+        onSelect={onRequestDelete}
+      >
+        <Trash2 size={15} strokeWidth={1.75} aria-hidden />
+        删除引用
+      </Item>
+    </>
   );
 }
 
@@ -490,15 +603,3 @@ function formatDuration(seconds: number): string {
   return `${minutes}:${rest}`;
 }
 
-function FolderGlyph(): ReactElement {
-  return (
-    <svg aria-hidden width="34" height="34" viewBox="0 0 24 24" fill="none">
-      <path
-        d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.5h8A1.5 1.5 0 0 1 20.5 9v8A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17V6.5Z"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}

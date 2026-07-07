@@ -132,6 +132,52 @@ input:disabled {
   object-fit: contain;
 }
 
+/* Radix 弹层（Dialog/DropdownMenu/ContextMenu）进入动效：只在 mount（open）时播放，
+   时长与缓动一律引用 @theme 令牌；reduced-motion 由下方媒体查询统一兜底关闭。 */
+@keyframes rx-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes rx-pop-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 6px)) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes rx-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.rx-overlay {
+  animation: rx-fade-in var(--duration-base) var(--ease-out-snappy);
+}
+
+.rx-content {
+  animation: rx-pop-in var(--duration-base) var(--ease-out-snappy);
+}
+
+.rx-menu {
+  transform-origin: var(--radix-popper-transform-origin, top center);
+  animation: rx-menu-in var(--duration-fast) var(--ease-out-snappy);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

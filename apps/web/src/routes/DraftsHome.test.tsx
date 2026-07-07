@@ -7,7 +7,7 @@ import {
   RouterProvider,
   useParams
 } from "@tanstack/react-router";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { storeAuthToken } from "../auth";
@@ -42,11 +42,24 @@ describe("DraftsHomePage", () => {
     expect(await screen.findByText("还没有草稿")).toBeTruthy();
   });
 
-  it("点击更多操作展开卡片菜单", async () => {
+  it("点击更多操作展开卡片下拉菜单", async () => {
     renderHome();
 
     await screen.findByText("7月7日");
-    (await screen.findByLabelText("草稿 7月7日 更多操作")).click();
+    // radix DropdownMenu 由键盘/指针打开（并非裸 click），用 Enter 键触发 Trigger。
+    const trigger = await screen.findByLabelText("草稿 7月7日 更多操作");
+    fireEvent.keyDown(trigger, { key: "Enter" });
+
+    await waitFor(() => expect(screen.getByText("重命名")).toBeTruthy());
+    expect(screen.getByText("复制")).toBeTruthy();
+    expect(screen.getByText("删除")).toBeTruthy();
+  });
+
+  it("右键卡片打开上下文菜单", async () => {
+    renderHome();
+
+    const title = await screen.findByText("7月7日");
+    fireEvent.contextMenu(title);
 
     await waitFor(() => expect(screen.getByText("重命名")).toBeTruthy());
     expect(screen.getByText("复制")).toBeTruthy();

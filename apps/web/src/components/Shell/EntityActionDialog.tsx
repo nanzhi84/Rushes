@@ -1,3 +1,4 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -101,75 +102,92 @@ export function EntityActionDialog({
   const formReady = (destructive && confirmed) || (naming && name.trim().length > 0);
 
   return (
-    <div className="fixed inset-0 z-20 grid place-items-center bg-black/60 px-4" role="presentation">
-      <form
-        className="w-full max-w-md rounded-lg border border-line bg-raised p-5"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (!formReady || mutation.isPending) {
-            return;
-          }
-          mutation.mutate();
-        }}
-      >
-        <h2 className="text-lg font-semibold text-fg">{dialogTitle(dialog.kind)}</h2>
-
-        {naming ? (
-          <label className="mt-4 block text-sm font-medium text-fg-muted">
-            名称
-            <input
-              className="mt-2 w-full rounded-md border border-line bg-ink px-3 py-2 text-fg outline-none focus:border-accent"
-              value={name}
-              onChange={(event) => {
-                markDirty();
-                setName(event.target.value);
-              }}
-              autoFocus
-            />
-          </label>
-        ) : null}
-
-        {destructive ? (
-          <label className="mt-4 flex items-start gap-3 rounded-md border border-danger/40 bg-danger/10 p-3 text-sm text-fg">
-            <input
-              className="mt-1 accent-[color:var(--color-danger)]"
-              type="checkbox"
-              checked={confirmed}
-              onChange={(event) => {
-                markDirty();
-                setConfirmed(event.target.checked);
-              }}
-            />
-            确认删除这条草稿。后端会走软删除和同一条归约路径。
-          </label>
-        ) : null}
-
-        {mutation.error ? (
-          <p className="mt-4 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
-            操作失败，请检查后端响应。
-          </p>
-        ) : null}
-
-        <div className="mt-5 flex justify-end gap-2">
-          <button
-            className="rounded-md border border-line px-3 py-2 text-sm text-fg-muted hover:bg-hover hover:text-fg"
-            type="button"
-            onClick={onClose}
+    <Dialog.Root
+      open
+      onOpenChange={(next) => {
+        if (!next) {
+          onClose();
+        }
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay className="rx-overlay fixed inset-0 z-30 bg-black/60 backdrop-blur-sm" />
+        <Dialog.Content
+          aria-describedby={undefined}
+          className="rx-content fixed left-1/2 top-1/2 z-40 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-xl bg-raised p-5 shadow-overlay focus:outline-none"
+        >
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!formReady || mutation.isPending) {
+                return;
+              }
+              mutation.mutate();
+            }}
           >
-            取消
-          </button>
-          <button
-            className={`rounded-md px-3 py-2 text-sm font-medium text-white disabled:opacity-40 ${
-              destructive ? "bg-danger hover:bg-danger/80" : "bg-accent hover:bg-accent-strong"
-            }`}
-            type="submit"
-            disabled={!formReady || mutation.isPending}
-          >
-            {mutation.isPending ? "处理中" : "确认"}
-          </button>
-        </div>
-      </form>
-    </div>
+            <Dialog.Title className="text-lg font-semibold text-fg">
+              {dialogTitle(dialog.kind)}
+            </Dialog.Title>
+
+            {naming ? (
+              <label className="mt-4 block text-sm font-medium text-fg-muted">
+                名称
+                <input
+                  className="mt-2 w-full rounded-md border border-line bg-ink px-3 py-2 text-fg outline-none focus:border-accent"
+                  value={name}
+                  onChange={(event) => {
+                    markDirty();
+                    setName(event.target.value);
+                  }}
+                  autoFocus
+                />
+              </label>
+            ) : null}
+
+            {destructive ? (
+              <label className="mt-4 flex items-start gap-3 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-fg">
+                <input
+                  className="mt-1 accent-[color:var(--color-danger)]"
+                  type="checkbox"
+                  checked={confirmed}
+                  onChange={(event) => {
+                    markDirty();
+                    setConfirmed(event.target.checked);
+                  }}
+                />
+                确认删除这条草稿。后端会走软删除和同一条归约路径。
+              </label>
+            ) : null}
+
+            {mutation.error ? (
+              <p className="mt-4 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
+                操作失败，请检查后端响应。
+              </p>
+            ) : null}
+
+            <div className="mt-5 flex justify-end gap-2">
+              <Dialog.Close asChild>
+                <button
+                  className="rounded-md border border-line px-3 py-2 text-sm text-fg-muted transition-colors ease-standard hover:bg-hover hover:text-fg"
+                  type="button"
+                >
+                  取消
+                </button>
+              </Dialog.Close>
+              <button
+                className={`rounded-md px-3 py-2 text-sm font-medium text-white transition-colors ease-standard disabled:opacity-40 ${
+                  destructive ? "bg-danger hover:bg-danger/80" : "bg-accent hover:bg-accent-strong"
+                }`}
+                type="submit"
+                disabled={!formReady || mutation.isPending}
+              >
+                {mutation.isPending ? "处理中" : "确认"}
+              </button>
+            </div>
+          </form>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
