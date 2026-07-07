@@ -1,18 +1,27 @@
 @import "tailwindcss";
 
-/* 深色剪辑器设计令牌：组件一律引用令牌，不写裸色值。 */
-@theme {
+/* 深色剪辑器设计令牌：组件一律引用令牌，不写裸色值。
+   用 `static` 强制全部令牌恒定输出到 :root——本层是下游组件（含 canvas 经
+   getComputedStyle 取值、以及尚未消费的 elevation/动效档）的地基，不能被按需摇树掉。 */
+@theme static {
   --color-ink: #131316; /* 应用底色 */
   --color-panel: #1c1c21; /* 面板 */
   --color-raised: #26262c; /* 浮层/卡片提升面 */
   --color-hover: #2c2c34; /* 悬浮态 */
+  --color-active: #33333d; /* 按下态（比 hover 再亮一档） */
   --color-line: #2e2e36; /* 描边 */
   --color-line-strong: #3d3d47; /* 强描边（聚焦前） */
   --color-fg: #ececf1; /* 正文 */
   --color-fg-muted: #8f8f9a; /* 次级文字 */
   --color-fg-faint: #5f5f6a; /* 弱化文字 */
-  --color-accent: #ff5c38; /* 强调：主按钮/导出/播放头 */
+  --color-accent: #ff5c38; /* 强调纯色：主按钮/播放头/选中/focus ring */
   --color-accent-strong: #ff7350; /* 强调悬浮 */
+  /* accent 减负：需要「强调底」的大面积容器（如用户气泡）用低饱和深底，
+     不再整块铺纯 accent。 */
+  --color-user-bubble: color-mix(in srgb, var(--color-accent) 12%, var(--color-raised)); /* 用户气泡底 */
+  --color-user-bubble-border: color-mix(in srgb, var(--color-accent) 26%, transparent); /* 用户气泡描边 */
+  --color-selected: color-mix(in srgb, var(--color-accent) 16%, var(--color-raised)); /* 选中面 */
+  --color-focus-ring: var(--color-accent); /* 语义 focus ring（值同 accent） */
   --color-track-video: #4a7dd6; /* 视频轨 */
   --color-track-music: #3fa66a; /* 音乐轨 */
   --color-track-sfx: #2fa8a0; /* 音效轨 */
@@ -21,6 +30,36 @@
   --color-info: #6f9ee8;
   --color-warn: #f0a13c;
   --color-danger: #e5484d;
+
+  /* Radius 语义档：小控件 → 卡片 → 弹层 逐级放大，给界面补层次。 */
+  --radius-sm: 5px; /* chip / 小按钮 / 徽标 */
+  --radius-md: 8px; /* 按钮 / 输入 / 瓦片 */
+  --radius-lg: 12px; /* 卡片 / 气泡 / 面板块 */
+  --radius-xl: 16px; /* 弹窗 / 大浮层 */
+
+  /* Elevation：深色下用「黑色半透明柔影 + 内嵌 1px 亮描边」双层次，
+     替代单一 1px 平色描边。三档对应 卡片/弹层/浮出菜单。 */
+  --shadow-raised:
+    0 1px 2px 0 rgb(0 0 0 / 0.3), 0 2px 6px -1px rgb(0 0 0 / 0.25),
+    inset 0 0 0 1px rgb(255 255 255 / 0.04);
+  --shadow-overlay:
+    0 8px 24px -4px rgb(0 0 0 / 0.5), 0 4px 12px -2px rgb(0 0 0 / 0.35),
+    inset 0 0 0 1px rgb(255 255 255 / 0.06);
+  --shadow-pop:
+    0 12px 32px -6px rgb(0 0 0 / 0.55), 0 6px 16px -4px rgb(0 0 0 / 0.4),
+    inset 0 0 0 1px rgb(255 255 255 / 0.08);
+
+  /* 字号：补 2xs 档，收敛散落的 text-[10px]/[11px] 任意值。 */
+  --text-2xs: 0.6875rem; /* 11px */
+  --text-2xs--line-height: 1rem;
+
+  /* 动效：时长 + 缓动令牌（组件过渡统一引用，勿写裸值）。 */
+  --duration-fast: 120ms; /* hover/press 态切换 */
+  --duration-base: 180ms; /* 常规入场/展开 */
+  --duration-slow: 260ms; /* 弹层/抽屉 */
+  --ease-out-snappy: cubic-bezier(0.2, 0, 0, 1); /* 干脆的减速 */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1); /* 通用平滑 */
+  --ease-spring: cubic-bezier(0.34, 1.3, 0.64, 1); /* 轻微回弹（浮出菜单） */
 
   --font-sans:
     Inter, ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Segoe UI", sans-serif;
@@ -76,7 +115,7 @@ input:disabled {
 }
 
 :focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--color-focus-ring);
   outline-offset: 1px;
 }
 
@@ -91,6 +130,52 @@ input:disabled {
   width: 100%;
   height: 100%;
   object-fit: contain;
+}
+
+/* Radix 弹层（Dialog/DropdownMenu/ContextMenu）进入动效：只在 mount（open）时播放，
+   时长与缓动一律引用 @theme 令牌；reduced-motion 由下方媒体查询统一兜底关闭。 */
+@keyframes rx-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes rx-pop-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 6px)) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes rx-menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.rx-overlay {
+  animation: rx-fade-in var(--duration-base) var(--ease-out-snappy);
+}
+
+.rx-content {
+  animation: rx-pop-in var(--duration-base) var(--ease-out-snappy);
+}
+
+.rx-menu {
+  transform-origin: var(--radix-popper-transform-origin, top center);
+  animation: rx-menu-in var(--duration-fast) var(--ease-out-snappy);
 }
 
 @media (prefers-reduced-motion: reduce) {

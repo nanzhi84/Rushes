@@ -1,7 +1,10 @@
+import * as ContextMenu from "@radix-ui/react-context-menu";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
+import { Copy, Film, MoreHorizontal, PencilLine, Trash2 } from "lucide-react";
 import { useState } from "react";
-import type { ReactElement } from "react";
+import type { ElementType, ReactElement } from "react";
 import { api, type DraftListItem } from "../api/client";
 import { queryKeys } from "../app/query_client";
 import { useWorkspaceEvents } from "../app/use_workspace_events";
@@ -106,78 +109,100 @@ type DraftCardProps = {
 };
 
 function DraftCard({ draft, onOpen, onAction }: DraftCardProps): ReactElement {
-  const [menuOpen, setMenuOpen] = useState(false);
   const coverAssetIds = draft.cover_asset_ids.slice(0, 4);
 
   return (
-    <div
-      className="group relative rounded-lg border border-line bg-panel transition-colors hover:border-line-strong"
-      onMouseLeave={() => setMenuOpen(false)}
-    >
-      <button className="block w-full text-left" type="button" onClick={onOpen}>
-        <div className="grid aspect-video grid-cols-2 grid-rows-2 gap-px overflow-hidden rounded-t-lg bg-ink">
-          {coverAssetIds.length === 0 ? (
-            <div className="col-span-2 row-span-2 grid place-items-center text-fg-faint">
-              <FilmGlyph />
+    <ContextMenu.Root>
+      <ContextMenu.Trigger asChild>
+        <div className="group relative rounded-lg border border-line bg-panel shadow-raised transition-colors ease-standard hover:border-line-strong">
+          <button className="block w-full text-left" type="button" onClick={onOpen}>
+            <div className="grid aspect-video grid-cols-2 grid-rows-2 gap-px overflow-hidden rounded-t-lg bg-ink">
+              {coverAssetIds.length === 0 ? (
+                <div className="col-span-2 row-span-2 grid place-items-center text-fg-faint">
+                  <Film size={40} strokeWidth={1.5} aria-hidden />
+                </div>
+              ) : (
+                coverAssetIds.map((assetId, index) => (
+                  <img
+                    key={assetId}
+                    alt=""
+                    className={`h-full w-full object-cover ${collageCellClass(coverAssetIds.length, index)}`}
+                    src={api.mediaThumbnailUrl(assetId)}
+                    loading="lazy"
+                  />
+                ))
+              )}
             </div>
-          ) : (
-            coverAssetIds.map((assetId, index) => (
-              <img
-                key={assetId}
-                alt=""
-                className={`h-full w-full object-cover ${collageCellClass(coverAssetIds.length, index)}`}
-                src={api.mediaThumbnailUrl(assetId)}
-                loading="lazy"
-              />
-            ))
-          )}
-        </div>
-        <div className="px-4 py-3">
-          <span className="block truncate text-sm font-semibold text-fg">{draft.name}</span>
-          <span className="mt-1 block text-xs text-fg-muted">
-            {draft.material_count} 个素材 · {formatDate(draft.updated_at)}
-          </span>
-        </div>
-      </button>
+            <div className="px-4 py-3">
+              <span className="block truncate text-sm font-semibold text-fg">{draft.name}</span>
+              <span className="mt-1 block text-xs text-fg-muted">
+                {draft.material_count} 个素材 · {formatDate(draft.updated_at)}
+              </span>
+            </div>
+          </button>
 
-      <button
-        className="absolute right-2 top-2 hidden h-7 w-7 place-items-center rounded-md bg-black/60 text-sm text-fg hover:bg-black/80 group-hover:grid"
-        type="button"
-        aria-label={`草稿 ${draft.name} 更多操作`}
-        onClick={() => setMenuOpen((open) => !open)}
-      >
-        ⋯
-      </button>
-      {menuOpen ? (
-        <div className="absolute right-2 top-10 z-10 w-32 overflow-hidden rounded-md border border-line bg-raised py-1 text-sm">
-          <MenuItem label="重命名" onClick={() => onAction("renameDraft")} />
-          <MenuItem label="复制" onClick={() => onAction("copyDraft")} />
-          <MenuItem label="删除" danger onClick={() => onAction("deleteDraft")} />
+          <DropdownMenu.Root>
+            <DropdownMenu.Trigger asChild>
+              <button
+                className="absolute right-2 top-2 hidden h-7 w-7 place-items-center rounded-md bg-black/60 text-fg transition-colors ease-standard hover:bg-black/80 group-hover:grid data-[state=open]:grid"
+                type="button"
+                aria-label={`草稿 ${draft.name} 更多操作`}
+              >
+                <MoreHorizontal size={16} strokeWidth={1.75} aria-hidden />
+              </button>
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Portal>
+              <DropdownMenu.Content
+                className={MENU_CONTENT_CLASS}
+                align="end"
+                sideOffset={6}
+                loop
+              >
+                <DraftMenuItems item={DropdownMenu.Item} onAction={onAction} />
+              </DropdownMenu.Content>
+            </DropdownMenu.Portal>
+          </DropdownMenu.Root>
         </div>
-      ) : null}
-    </div>
+      </ContextMenu.Trigger>
+      <ContextMenu.Portal>
+        <ContextMenu.Content className={MENU_CONTENT_CLASS} loop>
+          <DraftMenuItems item={ContextMenu.Item} onAction={onAction} />
+        </ContextMenu.Content>
+      </ContextMenu.Portal>
+    </ContextMenu.Root>
   );
 }
 
-function MenuItem({
-  label,
-  danger = false,
-  onClick
+/** 卡片菜单三项（重命名/复制/删除）：DropdownMenu 与 ContextMenu 共用，避免两处漂移。 */
+const MENU_CONTENT_CLASS =
+  "rx-menu z-40 min-w-[9rem] overflow-hidden rounded-lg bg-raised p-1 text-sm shadow-pop";
+const MENU_ITEM_CLASS =
+  "flex cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-1.5 text-fg outline-none data-[highlighted]:bg-hover";
+const MENU_ITEM_DANGER_CLASS =
+  "flex cursor-pointer select-none items-center gap-2 rounded-md px-2.5 py-1.5 text-danger outline-none data-[highlighted]:bg-danger/10";
+
+function DraftMenuItems({
+  item: Item,
+  onAction
 }: {
-  label: string;
-  danger?: boolean;
-  onClick: () => void;
+  item: ElementType;
+  onAction: (kind: EntityDialogKind) => void;
 }): ReactElement {
   return (
-    <button
-      className={`block w-full px-3 py-1.5 text-left hover:bg-hover ${
-        danger ? "text-danger" : "text-fg"
-      }`}
-      type="button"
-      onClick={onClick}
-    >
-      {label}
-    </button>
+    <>
+      <Item className={MENU_ITEM_CLASS} onSelect={() => onAction("renameDraft")}>
+        <PencilLine size={16} strokeWidth={1.75} aria-hidden />
+        重命名
+      </Item>
+      <Item className={MENU_ITEM_CLASS} onSelect={() => onAction("copyDraft")}>
+        <Copy size={16} strokeWidth={1.75} aria-hidden />
+        复制
+      </Item>
+      <Item className={MENU_ITEM_DANGER_CLASS} onSelect={() => onAction("deleteDraft")}>
+        <Trash2 size={16} strokeWidth={1.75} aria-hidden />
+        删除
+      </Item>
+    </>
   );
 }
 
@@ -192,15 +217,6 @@ function collageCellClass(count: number, index: number): string {
     return "row-span-2";
   }
   return "";
-}
-
-function FilmGlyph(): ReactElement {
-  return (
-    <svg aria-hidden width="40" height="40" viewBox="0 0 24 24" fill="none">
-      <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="1.5" />
-      <path d="M7 5v14M17 5v14M3 9h4M3 15h4M17 9h4M17 15h4" stroke="currentColor" strokeWidth="1.5" />
-    </svg>
-  );
 }
 
 function formatDate(iso: string): string {
