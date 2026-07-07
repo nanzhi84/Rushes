@@ -2,8 +2,6 @@
 
 from .capabilities import (
     ASR_TRANSCRIBE,
-    EMBEDDING_IMAGE,
-    EMBEDDING_TEXT,
     LLM_CHAT,
     RERANK_TEXT,
     TTS_SPEECH,
@@ -17,8 +15,6 @@ from .registry import ProviderRegistry
 
 __all__ = [
     "ASR_TRANSCRIBE",
-    "EMBEDDING_IMAGE",
-    "EMBEDDING_TEXT",
     "LLM_CHAT",
     "RERANK_TEXT",
     "TTS_SPEECH",

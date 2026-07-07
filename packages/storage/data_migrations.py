@@ -27,6 +27,20 @@ def apply_data_migrations(connection: Connection) -> None:
 
     _collapse_asset_kinds(connection)
     _ensure_message_kind_column(connection)
+    _ensure_asset_understanding_columns(connection)
+    _drop_removed_annotation_asset_columns(connection)
+    _drop_removed_case_columns(connection)
+    _drop_removed_offline_tables(connection)
+
+
+def _table_exists(connection: Connection, name: str) -> bool:
+    """该库是否存在名为 name 的表（含 fts5 虚拟表，均登记在 sqlite_master）。"""
+
+    row = connection.exec_driver_sql(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).first()
+    return row is not None
 
 
 def _ensure_message_kind_column(connection: Connection) -> None:
@@ -39,19 +53,96 @@ def _ensure_message_kind_column(connection: Connection) -> None:
     connection.exec_driver_sql("UPDATE messages SET kind='user' WHERE role='user'")
 
 
+def _ensure_asset_understanding_columns(connection: Connection) -> None:
+    """老库的 assets 表补 Spec C 的三列：缩略图哈希 / 便宜索引 JSON / 理解状态。
+
+    SQLite 的 ALTER TABLE ADD COLUMN 不支持带外键约束，迁移里加普通列即可；
+    schema 定义带 thumbnail_object_hash→objects.hash 的外键，供新库 create_all 使用。
+    每列都先用 PRAGMA table_info 守卫，可在每次启动重复执行。
+    """
+
+    columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(assets)").all()}
+    if "thumbnail_object_hash" not in columns:
+        connection.exec_driver_sql("ALTER TABLE assets ADD COLUMN thumbnail_object_hash TEXT")
+    if "index_json" not in columns:
+        connection.exec_driver_sql("ALTER TABLE assets ADD COLUMN index_json TEXT")
+    if "understanding_status" not in columns:
+        connection.exec_driver_sql(
+            "ALTER TABLE assets ADD COLUMN understanding_status TEXT NOT NULL DEFAULT 'none'"
+        )
+
+
+def _drop_removed_annotation_asset_columns(connection: Connection) -> None:
+    """删除离线标注遗留的 assets 列：annotation_status/annotation_pass/index_status。
+
+    这些列在旧库里是 NOT NULL 无默认值，删列前它们会让「新代码省略该列的 INSERT」
+    直接撞 NOT NULL 约束——所以必须真删（SQLite ≥3.35 支持 DROP COLUMN）。
+    每列先用 PRAGMA table_info 守卫，可重复执行；新库本就没有这些列，直接跳过。
+    """
+
+    columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(assets)").all()}
+    for column in ("annotation_status", "annotation_pass", "index_status"):
+        if column in columns:
+            connection.exec_driver_sql(f"ALTER TABLE assets DROP COLUMN {column}")
+
+
+def _drop_removed_case_columns(connection: Connection) -> None:
+    """删除候选包遗留的 cases 列：candidate_pack_id（含指向 candidate_packs 的外键）。
+
+    必须在 DROP candidate_packs 之前真删：否则旧库里这条悬空外键会让后续
+    「新代码省略该列的 case INSERT」在 candidate_packs 被删后撞 no such table。
+    SQLite ≥3.35 支持 DROP COLUMN；先用 PRAGMA table_info 守卫，新库本就没有此列。
+    """
+
+    columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(cases)").all()}
+    if "candidate_pack_id" in columns:
+        connection.exec_driver_sql("ALTER TABLE cases DROP COLUMN candidate_pack_id")
+
+
+def _drop_removed_offline_tables(connection: Connection) -> None:
+    """删除离线标注/检索遗留的表。
+
+    Task 7 起 timeline 从摘要时间戳直接组装，不再经候选包/标注投影，故这些表
+    彻底退场：annotation_signal_projection、clip_fts(fts5 虚拟表)、
+    annotation_clip_projection、annotations、candidate_packs。
+    按外键子→父顺序 DROP：signal 投影与 clip_fts 依赖 clip 投影，clip 投影依赖
+    annotations；candidate_packs 曾被 cases.candidate_pack_id 引用（该列已随
+    CaseState 一起删除，旧库残留列恒为 NULL，不阻塞 DROP）。每条 IF EXISTS 守卫，
+    新库本就没有这些表，可在每次启动重复执行。
+    """
+
+    for table in (
+        "annotation_signal_projection",
+        "clip_fts",
+        "annotation_clip_projection",
+        "annotations",
+        "candidate_packs",
+    ):
+        connection.exec_driver_sql(f"DROP TABLE IF EXISTS {table}")
+
+
 def _collapse_asset_kinds(connection: Connection) -> None:
     connection.exec_driver_sql("UPDATE assets SET kind='audio' WHERE kind IN ('bgm','voiceover')")
     # PRAGMA foreign_keys=ON 下删资产必须先清依赖行（FK 子表 → 父表顺序）：
     # clip_fts 检索行 → signal 投影 → clip 投影 → annotations → transcripts → jobs
     # → project_asset_links → assets。clip_fts/signal 依赖 clip 投影定位，须先删。
-    connection.exec_driver_sql(f"DELETE FROM clip_fts WHERE clip_id IN ({_DOOMED_CLIP_IDS})")
-    connection.exec_driver_sql(
-        f"DELETE FROM annotation_signal_projection WHERE clip_id IN ({_DOOMED_CLIP_IDS})"
-    )
-    connection.exec_driver_sql(
-        f"DELETE FROM annotation_clip_projection WHERE asset_id IN ({_DOOMED_ASSET_IDS})"
-    )
-    connection.exec_driver_sql(f"DELETE FROM annotations WHERE asset_id IN ({_DOOMED_ASSET_IDS})")
+    # annotation 表族在后续任务里会被删除；此处按表存在性守卫，兼容删表后的新库。
+    # _DOOMED_CLIP_IDS 子查询依赖 annotation_clip_projection，该表不在则涉及它的语句一并跳过。
+    clip_projection_present = _table_exists(connection, "annotation_clip_projection")
+    if clip_projection_present and _table_exists(connection, "clip_fts"):
+        connection.exec_driver_sql(f"DELETE FROM clip_fts WHERE clip_id IN ({_DOOMED_CLIP_IDS})")
+    if clip_projection_present and _table_exists(connection, "annotation_signal_projection"):
+        connection.exec_driver_sql(
+            f"DELETE FROM annotation_signal_projection WHERE clip_id IN ({_DOOMED_CLIP_IDS})"
+        )
+    if clip_projection_present:
+        connection.exec_driver_sql(
+            f"DELETE FROM annotation_clip_projection WHERE asset_id IN ({_DOOMED_ASSET_IDS})"
+        )
+    if _table_exists(connection, "annotations"):
+        connection.exec_driver_sql(
+            f"DELETE FROM annotations WHERE asset_id IN ({_DOOMED_ASSET_IDS})"
+        )
     connection.exec_driver_sql(f"DELETE FROM transcripts WHERE asset_id IN ({_DOOMED_ASSET_IDS})")
     connection.exec_driver_sql(f"DELETE FROM jobs WHERE asset_id IN ({_DOOMED_ASSET_IDS})")
     connection.exec_driver_sql(

@@ -460,14 +460,6 @@ class RushesClient:
             context=f"导入素材 {path.name}",
         )
 
-    def retry_material_annotation(self, *, project_id: str, asset_id: str) -> JsonObject:
-        """标注属素材页管线（PRD §7：project 级 job 不进 Turn Queue），由驱动脚本模拟素材页触发。"""
-        return self.post_json(
-            f"/api/projects/{project_id}/materials/{asset_id}/retry-annotation",
-            {},
-            context=f"触发素材标注 {asset_id}",
-        )
-
     def select_case_asset(self, *, project_id: str, case_id: str, asset_id: str) -> JsonObject:
         return self.post_json(
             f"/api/projects/{project_id}/cases/{case_id}/assets/select",

@@ -18,16 +18,21 @@ from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
 from contracts.events import (
-    AnnotationFailed,
     AssetImported,
+    AssetIndexReady,
     AssetLinked,
     CaseCreated,
+    MaterialUnderstandingCompleted,
     ProjectCreated,
 )
 from storage import schema
 from storage.db import begin_immediate
 from storage.object_store import ObjectStore
-from storage.repositories import EventLogRepository, JobsRepository
+from storage.repositories import (
+    EventLogRepository,
+    JobsRepository,
+    MaterialSummariesRepository,
+)
 from storage.repositories._json import dump_json, load_json
 from storage.workspace_paths import WorkspacePaths, resolve_asset_path
 
@@ -148,38 +153,6 @@ def test_project_pending_decisions_route_lists_project_scope_decisions(tmp_path:
     assert decisions[0]["scope_type"] == "project"
     assert decisions[0]["case_id"] is None
     assert missing.status_code == 404
-
-
-def test_retry_annotation_route_requeues_failed_asset_and_resets_status(tmp_path: Path) -> None:
-    app = _app(tmp_path)
-    client = _client(app)
-    _seed_failed_annotation_asset(_engine(app))
-
-    retried = client.post(
-        "/api/projects/project_1/materials/asset_1/retry-annotation",
-        headers=AUTH,
-        json={},
-    )
-    missing = client.post(
-        "/api/projects/project_1/materials/missing/retry-annotation",
-        headers=AUTH,
-        json={},
-    )
-
-    assert retried.status_code == 200
-    assert retried.json()["job_id"] is not None
-    assert missing.status_code == 404
-    with _engine(app).connect() as connection:
-        asset = (
-            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == "asset_1"))
-            .one()
-            ._mapping
-        )
-        job = connection.execute(select(schema.jobs)).one()._mapping
-    assert asset["annotation_status"] == "pending"
-    assert asset["failure"] is None
-    assert job["kind"] == "annotation"
-    assert "JobEnqueued" in _event_types(app)
 
 
 def test_cost_routes_and_project_page_aggregate_provider_calls(tmp_path: Path) -> None:
@@ -706,49 +679,6 @@ def _seed_project_case(engine: Engine) -> None:
     )
 
 
-def _seed_failed_annotation_asset(engine: Engine) -> None:
-    _apply_events(
-        engine,
-        ProjectCreated(project_id="project_1", name="Project"),
-        AssetImported(
-            project_id="project_1",
-            asset_id="asset_1",
-            payload={
-                "storage_mode": "reference",
-                "reference_path": "/tmp/source.mp4",
-                "kind": "video",
-                "source": "local_path",
-                "filename": "source.mp4",
-                "hash": "hash",
-                "mtime": 1,
-                "size": 1,
-                "ingest_status": "failed",
-                "annotation_status": "failed",
-                "annotation_pass": "cheap",
-                "index_status": "partial",
-                "usable": False,
-                "failure": {
-                    "error_code": "annotation_failed",
-                    "message": "failed",
-                    "retryable": True,
-                },
-            },
-        ),
-        AssetLinked(project_id="project_1", asset_id="asset_1"),
-        AnnotationFailed(
-            project_id="project_1",
-            asset_id="asset_1",
-            payload={
-                "failure": {
-                    "error_code": "annotation_failed",
-                    "message": "failed",
-                    "retryable": True,
-                }
-            },
-        ),
-    )
-
-
 def _insert_provider_cost_rows(engine: Engine) -> None:
     with begin_immediate(engine) as connection:
         connection.execute(
@@ -871,3 +801,227 @@ def _insert_import_url_job(engine: Engine) -> None:
                 "finished_at": None,
             }
         )
+
+
+def _seed_indexed_asset(
+    app: FastAPI,
+    *,
+    asset_id: str,
+    thumbnail_bytes: bytes | None,
+    duration_sec: float,
+) -> str | None:
+    paths = _state(app).workspace_paths
+    object_ref = ObjectStore(paths).put_bytes(b"source-" + asset_id.encode())
+    thumbnail_hash: str | None = None
+    events: list[Any] = [
+        AssetImported(
+            project_id="project_1",
+            asset_id=asset_id,
+            payload={
+                "storage_mode": "copy",
+                "object_hash": object_ref.object_hash,
+                "object_size": object_ref.size,
+                "kind": "video",
+                "filename": f"{asset_id}.mp4",
+                "hash": object_ref.object_hash,
+                "size": object_ref.size,
+                "mtime": 1,
+                "probe": {"duration_sec": duration_sec, "has_audio": False},
+            },
+        ),
+        AssetLinked(project_id="project_1", asset_id=asset_id),
+    ]
+    if thumbnail_bytes is not None:
+        thumbnail_hash = ObjectStore(paths).put_bytes(thumbnail_bytes).object_hash
+        events.append(
+            AssetIndexReady(
+                project_id="project_1",
+                asset_id=asset_id,
+                payload={
+                    "index_json": {"duration_sec": duration_sec, "shots": []},
+                    "thumbnail_object_hash": thumbnail_hash,
+                    "ingest_status": "indexed",
+                },
+            )
+        )
+        events.append(MaterialUnderstandingCompleted(project_id="project_1", asset_id=asset_id))
+    _apply_events(_engine(app), *events)
+    return thumbnail_hash
+
+
+def test_media_thumbnail_serves_jpeg_and_404_when_missing(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    thumbnail_bytes = b"\xff\xd8\xff\xe0jpeg-body"
+    _seed_indexed_asset(
+        app,
+        asset_id="asset_thumb",
+        thumbnail_bytes=thumbnail_bytes,
+        duration_sec=12.5,
+    )
+    _seed_indexed_asset(app, asset_id="asset_bare", thumbnail_bytes=None, duration_sec=3.0)
+
+    ready = client.get("/api/media/asset_thumb/thumbnail", headers=AUTH)
+    missing = client.get("/api/media/asset_bare/thumbnail", headers=AUTH)
+
+    assert ready.status_code == 200
+    assert ready.headers["content-type"] == "image/jpeg"
+    assert ready.content == thumbnail_bytes
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["reason"] == "thumbnail_not_ready"
+
+
+def test_media_thumbnail_accepts_query_token_like_browser_img(tmp_path: Path) -> None:
+    """浏览器 <img src> 设不了 Authorization header，media 族 GET 必须吃 query token。"""
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    thumbnail_bytes = b"\xff\xd8\xff\xe0jpeg-body"
+    _seed_indexed_asset(
+        app,
+        asset_id="asset_thumb",
+        thumbnail_bytes=thumbnail_bytes,
+        duration_sec=12.5,
+    )
+    _seed_indexed_asset(app, asset_id="asset_bare", thumbnail_bytes=None, duration_sec=3.0)
+
+    ready = client.get("/api/media/asset_thumb/thumbnail", params={"token": TOKEN})
+    missing = client.get("/api/media/asset_bare/thumbnail", params={"token": TOKEN})
+    no_token = client.get("/api/media/asset_thumb/thumbnail")
+    bad_token = client.get("/api/media/asset_thumb/thumbnail", params={"token": "wrong"})
+
+    assert ready.status_code == 200
+    assert ready.content == thumbnail_bytes
+    assert missing.status_code == 404
+    assert missing.json()["detail"]["reason"] == "thumbnail_not_ready"
+    assert no_token.status_code == 401
+    assert no_token.json()["reason"] == "missing_token"
+    assert bad_token.status_code == 401
+    assert bad_token.json()["reason"] == "bad_token"
+
+
+def test_query_token_not_accepted_outside_sse_and_media(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+
+    response = client.get("/api/projects/project_1/materials", params={"token": TOKEN})
+
+    assert response.status_code == 401
+    assert response.json()["reason"] == "missing_token"
+
+
+def _insert_ready_summary(
+    engine: Engine,
+    *,
+    asset_id: str,
+    version: int,
+    summary_json: dict[str, Any],
+) -> None:
+    with begin_immediate(engine) as connection:
+        MaterialSummariesRepository(connection).insert(
+            {
+                "summary_id": f"ms_{asset_id}_v{version}",
+                "asset_id": asset_id,
+                "version": version,
+                "focus": None,
+                "status": "ready",
+                "summary_json": summary_json,
+                "model": "qwen-max",
+                "created_at": "2026-07-04T00:00:00+00:00",
+            }
+        )
+
+
+def test_material_summary_route_returns_latest_ready_summary(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_indexed_asset(app, asset_id="asset_sum", thumbnail_bytes=None, duration_sec=5.0)
+    _insert_ready_summary(
+        _engine(app),
+        asset_id="asset_sum",
+        version=1,
+        summary_json={
+            "asset_id": "asset_sum",
+            "version": 1,
+            "semantic_role": "footage",
+            "overall": "整体描述",
+            "segments": [
+                {
+                    "start_s": 0.0,
+                    "end_s": 2.0,
+                    "description": "开场",
+                    "tags": ["hook"],
+                    "quality": "good",
+                }
+            ],
+            "generated_at": "2026-07-04T00:00:00+00:00",
+            "model": "qwen-max",
+        },
+    )
+
+    response = client.get("/api/projects/project_1/materials/asset_sum/summary", headers=AUTH)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["asset_id"] == "asset_sum"
+    assert body["summary"]["semantic_role"] == "footage"
+    assert body["summary"]["overall"] == "整体描述"
+    assert body["summary"]["segments"][0]["description"] == "开场"
+
+
+def test_material_summary_route_404_when_no_ready_summary(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_indexed_asset(app, asset_id="asset_none", thumbnail_bytes=None, duration_sec=5.0)
+
+    response = client.get("/api/projects/project_1/materials/asset_none/summary", headers=AUTH)
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["reason"] == "summary_not_ready"
+
+
+def test_material_summary_route_404_when_asset_not_linked_to_project(tmp_path: Path) -> None:
+    """跨项目越权：asset 挂在 project_1，从 project_2 查摘要必须 asset_not_linked。"""
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(
+        _engine(app),
+        ProjectCreated(project_id="project_1", name="Project"),
+        ProjectCreated(project_id="project_2", name="Other"),
+    )
+    _seed_indexed_asset(app, asset_id="asset_sum", thumbnail_bytes=None, duration_sec=5.0)
+
+    response = client.get("/api/projects/project_2/materials/asset_sum/summary", headers=AUTH)
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["reason"] == "asset_not_linked"
+
+
+def test_materials_payload_exposes_thumbnail_duration_and_understanding(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    _apply_events(_engine(app), ProjectCreated(project_id="project_1", name="Project"))
+    _seed_indexed_asset(
+        app,
+        asset_id="asset_thumb",
+        thumbnail_bytes=b"\xff\xd8\xff\xe0jpeg",
+        duration_sec=8.0,
+    )
+    _seed_indexed_asset(app, asset_id="asset_bare", thumbnail_bytes=None, duration_sec=3.0)
+
+    response = client.get("/api/projects/project_1/materials", headers=AUTH)
+
+    assert response.status_code == 200
+    assets = {asset["asset_id"]: asset for asset in response.json()["assets"]}
+    indexed = assets["asset_thumb"]
+    assert indexed["thumbnail_ready"] is True
+    assert indexed["duration_sec"] == 8.0
+    assert indexed["understanding_status"] == "ready"
+    bare = assets["asset_bare"]
+    assert bare["thumbnail_ready"] is False
+    assert bare["duration_sec"] == 3.0
+    assert bare["understanding_status"] == "none"

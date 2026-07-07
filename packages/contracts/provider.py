@@ -7,8 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field
 ProviderCapability = Literal[
     "llm.chat",
     "vlm.annotation",
-    "embedding.text",
-    "embedding.image",
     "asr.transcribe",
     "tts.speech",
     "rerank.text",

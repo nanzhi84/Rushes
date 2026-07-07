@@ -109,8 +109,7 @@ def _run(
             path=path,
         )
         imported.append(asset_id)
-        client.retry_material_annotation(project_id=project_id, asset_id=asset_id)
-        stage_log(f"已导入素材并触发标注 {index}/{len(footage)}：{path.name}")
+        stage_log(f"已导入素材 {index}/{len(footage)}：{path.name}")
     if bgm_path is not None:
         bgm_asset_id = unique_id("asset_bgm")
         client.import_local_material(
@@ -141,24 +140,24 @@ def _run(
     )
 
     driver.wait_until(
-        "标注、静音确认与粗剪链路启动",
+        "理解、静音确认与粗剪链路启动",
         lambda state: _audio_mode(state) == "silent" or _timeline_version(state) is not None,
         timeout_s=args.llm_timeout + args.job_timeout,
         idle_nudge=(
-            "请检查当前 case 状态（素材标注/audio_plan/后台任务结果），"
+            "请检查当前 case 状态（素材理解摘要/audio_plan/后台任务结果），"
             "只做尚未完成的下一步，不要重复已完成的步骤。"
         ),
     )
     case = driver.wait_until(
-        "检索、timeline 与预览完成",
+        "素材理解、timeline 与预览完成",
         lambda state: (
             _timeline_version(state) is not None
             and _string_field(state, "preview_current_id") is not None
         ),
         timeout_s=args.llm_timeout + args.job_timeout + args.render_timeout,
         idle_nudge=(
-            "请检查当前 case 状态，cut_plan/candidate 就绪后依次完成检索、"
-            "timeline 与预览渲染，不要重复已完成的步骤。"
+            "请检查当前 case 状态，素材摘要就绪后用 timeline.compose_initial 组装初剪并完成"
+            "预览渲染，不要重复已完成的步骤。"
         ),
     )
     preview_id = _string_field(case, "preview_current_id")

@@ -28,7 +28,7 @@ from contracts.patch import (
     DeleteRangeOp,
     EditSubtitleTextOp,
     GenerateSubtitlesOp,
-    InsertCandidateOp,
+    InsertClipOp,
     RemoveTrackClipsOp,
     ReorderBlocksOp,
     ReplaceClipOp,
@@ -86,10 +86,8 @@ class PatchOutcome:
 
 
 @dataclass(frozen=True, slots=True)
-class _CandidateMaterial:
-    candidate_id: str
+class _ClipMaterial:
     asset_id: str
-    clip_id: str
     source_start_frame: int
     source_end_frame: int
     role: str
@@ -215,8 +213,8 @@ def _apply_resolved_op(
         return _apply_reorder_blocks(timeline, op)
     if isinstance(op, TrimClipOp):
         return _apply_trim_clip(connection, timeline, op)
-    if isinstance(op, InsertCandidateOp):
-        return _apply_insert_candidate(
+    if isinstance(op, InsertClipOp):
+        return _apply_insert_clip(
             connection,
             case_state,
             timeline,
@@ -286,7 +284,15 @@ def _apply_replace_clip(
     timeline: TimelineState,
     op: ReplaceClipOp,
 ) -> TimelineState:
-    candidate = _candidate_material(connection, case_state, op.new_candidate_id)
+    material = _clip_material(
+        connection,
+        case_state,
+        asset_id=op.asset_id,
+        source_start_s=op.source_start_s,
+        source_end_s=op.source_end_s,
+        role=op.role,
+        fps=timeline.fps,
+    )
     tracks = _tracks_by_id(timeline)
     found = False
     for track in tracks.values():
@@ -301,7 +307,7 @@ def _apply_replace_clip(
                     "replace_clip only supports media timeline clips",
                     details={"timeline_clip_id": op.timeline_clip_id},
                 )
-            next_clips.append(_candidate_clip_from_existing(clip, candidate))
+            next_clips.append(_clip_from_material(clip, material))
             found = True
         track.clips = next_clips
     if not found:
@@ -380,32 +386,43 @@ def _apply_trim_clip(
     return _sync_bound_subtitles(result)
 
 
-def _apply_insert_candidate(
+def _apply_insert_clip(
     connection: Connection,
     case_state: CaseState,
     timeline: TimelineState,
-    op: InsertCandidateOp,
+    op: InsertClipOp,
     resolved: ResolvedRange,
 ) -> TimelineState:
-    candidate = _candidate_material(connection, case_state, op.candidate_id)
+    material = _clip_material(
+        connection,
+        case_state,
+        asset_id=op.asset_id,
+        source_start_s=op.source_start_s,
+        source_end_s=op.source_end_s,
+        role=op.role,
+        fps=timeline.fps,
+    )
+    track_id = op.track_id or "visual_base"
     position = min(max(0, resolved.start_frame), timeline.duration_frames)
-    duration = _candidate_insert_duration(connection, case_state, timeline, candidate, op.slot_hint)
+    duration = max(1, round((op.source_end_s - op.source_start_s) * timeline.fps))
     inserted = TimelineMediaClip(
         timeline_clip_id=_new_clip_id(timeline, "tc_insert"),
-        track_id="visual_base",
-        asset_id=candidate.asset_id,
-        clip_id=candidate.clip_id,
-        role=_timeline_role(candidate.role, candidate.asset_kind),
+        track_id=track_id,
+        asset_id=material.asset_id,
+        clip_id=None,
+        role=material.role,
         timeline_start_frame=position,
         timeline_end_frame=position + duration,
-        source_start_frame=candidate.source_start_frame,
-        source_end_frame=min(candidate.source_end_frame, candidate.source_start_frame + duration),
-        parent_block_id=op.slot_hint,
-        effects=[{"kind": "source_summary", "candidate_id": candidate.candidate_id}],
+        source_start_frame=material.source_start_frame,
+        source_end_frame=min(material.source_end_frame, material.source_start_frame + duration),
     )
     tracks = _tracks_by_id(timeline)
-    for track_id, track in tracks.items():
-        if track_id == "visual_base":
+    if track_id != "visual_base":
+        # Overlays sit on top of the primary track: no ripple, no duration change.
+        tracks[track_id].clips = sorted([*tracks[track_id].clips, inserted], key=_clip_sort_key)
+        return _sync_bound_subtitles(_timeline_from_tracks(timeline, tracks))
+    for other_id, track in tracks.items():
+        if other_id == "visual_base":
             track.clips = _insert_visual_clip(track.clips, inserted, position, duration)
         else:
             track.clips = [
@@ -693,34 +710,31 @@ def _trimmed_media_clip(
             "source_end_frame": new_source_end,
             "timeline_end_frame": clip.timeline_start_frame + new_duration,
         }
-    candidate = clip.model_copy(update=updates)
-    if candidate.timeline_start_frame >= candidate.timeline_end_frame:
+    trimmed = clip.model_copy(update=updates)
+    if trimmed.timeline_start_frame >= trimmed.timeline_end_frame:
         raise PatchApplyError(
             "patch.trim.empty_clip",
             "trim_clip would remove the entire clip",
             details={"timeline_clip_id": clip.timeline_clip_id},
         )
-    if (
-        candidate.source_start_frame < 0
-        or candidate.source_start_frame >= candidate.source_end_frame
-    ):
+    if trimmed.source_start_frame < 0 or trimmed.source_start_frame >= trimmed.source_end_frame:
         raise PatchApplyError(
             "patch.trim.invalid_source_range",
             "trim_clip would create an invalid source range",
             details={
                 "timeline_clip_id": clip.timeline_clip_id,
-                "source_start_frame": candidate.source_start_frame,
-                "source_end_frame": candidate.source_end_frame,
+                "source_start_frame": trimmed.source_start_frame,
+                "source_end_frame": trimmed.source_end_frame,
             },
         )
-    frame_count = _asset_frame_count(connection, candidate.asset_id, default_fps=30)
-    if candidate.source_end_frame > frame_count:
+    frame_count = _asset_frame_count(connection, trimmed.asset_id, default_fps=30)
+    if trimmed.source_end_frame > frame_count:
         raise PatchApplyError(
             "patch.trim.source_out_of_bounds",
             "trim_clip would extend past the source asset",
             details={"timeline_clip_id": clip.timeline_clip_id, "frame_count": frame_count},
         )
-    return candidate
+    return trimmed
 
 
 def _insert_visual_clip(
@@ -867,128 +881,76 @@ def _utterances_for_audio_clip(
     return utterances
 
 
-def _candidate_material(
+def _clip_material(
     connection: Connection,
     case_state: CaseState,
-    candidate_id: str,
-) -> _CandidateMaterial:
-    candidate = _candidate_payload(connection, case_state, candidate_id)
-    asset_id = _str_value(candidate.get("asset_id"))
-    clip_id = _str_value(candidate.get("clip_id"))
-    if asset_id is None or clip_id is None:
-        raise PatchApplyError(
-            "patch.candidate.invalid",
-            "candidate payload is missing asset_id or clip_id",
-            details={"candidate_id": candidate_id},
-        )
+    *,
+    asset_id: str,
+    source_start_s: float,
+    source_end_s: float,
+    role: str,
+    fps: int,
+) -> _ClipMaterial:
     _assert_asset_usable(connection, asset_id, case_state=case_state)
-    row = connection.execute(
-        select(
-            schema.annotation_clip_projection.c.start_frame,
-            schema.annotation_clip_projection.c.end_frame,
-            schema.annotation_clip_projection.c.role,
-            schema.assets.c.kind,
+    asset_kind = _asset_kind(connection, asset_id)
+    if role == "image" or asset_kind == "image":
+        return _ClipMaterial(
+            asset_id=asset_id,
+            source_start_frame=0,
+            source_end_frame=1,
+            role=role,
+            asset_kind=asset_kind,
         )
-        .select_from(
-            schema.annotation_clip_projection.join(
-                schema.assets,
-                schema.assets.c.asset_id == schema.annotation_clip_projection.c.asset_id,
-            )
-        )
-        .where(schema.annotation_clip_projection.c.clip_id == clip_id)
-        .where(schema.annotation_clip_projection.c.asset_id == asset_id)
-        .where(schema.annotation_clip_projection.c.usable.is_(True))
-    ).first()
-    if row is None:
+    source_fps = _asset_fps(connection, asset_id, default_fps=fps)
+    frame_count = _asset_frame_count(connection, asset_id, default_fps=fps)
+    source_start = max(0, round(source_start_s * source_fps))
+    source_end = max(source_start + 1, round(source_end_s * source_fps))
+    source_end = min(source_end, frame_count)
+    source_start = min(source_start, source_end - 1)
+    if source_start < 0 or source_start >= source_end:
         raise PatchApplyError(
-            "patch.candidate.clip_unavailable",
-            "candidate clip is no longer usable",
-            details={"candidate_id": candidate_id, "clip_id": clip_id},
+            "patch.clip.invalid_source_range",
+            "clip has no usable source frames",
+            details={"asset_id": asset_id},
         )
-    values = row._mapping
-    return _CandidateMaterial(
-        candidate_id=candidate_id,
+    return _ClipMaterial(
         asset_id=asset_id,
-        clip_id=clip_id,
-        source_start_frame=int(values["start_frame"]),
-        source_end_frame=int(values["end_frame"]),
-        role=str(values["role"]),
-        asset_kind=str(values["kind"]),
+        source_start_frame=source_start,
+        source_end_frame=source_end,
+        role=role,
+        asset_kind=asset_kind,
     )
 
 
-def _candidate_payload(
-    connection: Connection,
-    case_state: CaseState,
-    candidate_id: str,
-) -> Mapping[str, Any]:
-    if case_state.candidate_pack_id is None:
-        raise PatchApplyError(
-            "patch.candidate_pack_missing",
-            "candidate pack is required for candidate patch ops",
-        )
-    row = connection.execute(
-        select(schema.candidate_packs.c.slots).where(
-            schema.candidate_packs.c.candidate_pack_id == case_state.candidate_pack_id
-        )
-    ).first()
-    if row is None:
-        raise PatchApplyError(
-            "patch.candidate_pack_missing",
-            "candidate pack was not found",
-            details={"candidate_pack_id": case_state.candidate_pack_id},
-        )
-    slots = load_json(str(row._mapping["slots"]))
-    if not isinstance(slots, list):
-        raise PatchApplyError("patch.candidate_pack_invalid", "candidate pack slots are invalid")
-    for slot in slots:
-        if not isinstance(slot, Mapping):
-            continue
-        candidates = slot.get("candidates")
-        if not isinstance(candidates, list):
-            continue
-        for candidate in candidates:
-            if isinstance(candidate, Mapping) and candidate.get("candidate_id") == candidate_id:
-                return candidate
-    raise PatchApplyError(
-        "patch.candidate_missing",
-        "candidate is not present in the active candidate pack",
-        details={"candidate_id": candidate_id},
-    )
-
-
-def _candidate_clip_from_existing(
+def _clip_from_material(
     existing: TimelineMediaClip,
-    candidate: _CandidateMaterial,
+    material: _ClipMaterial,
 ) -> TimelineMediaClip:
     duration = _clip_duration(existing)
-    source_end = min(candidate.source_end_frame, candidate.source_start_frame + max(1, duration))
+    source_end = min(material.source_end_frame, material.source_start_frame + max(1, duration))
     return existing.model_copy(
         update={
-            "asset_id": candidate.asset_id,
-            "clip_id": candidate.clip_id,
-            "role": _timeline_role(candidate.role, candidate.asset_kind),
-            "source_start_frame": candidate.source_start_frame,
+            "asset_id": material.asset_id,
+            "clip_id": None,
+            "role": material.role,
+            "source_start_frame": material.source_start_frame,
             "source_end_frame": source_end,
-            "effects": [{"kind": "source_summary", "candidate_id": candidate.candidate_id}],
+            "effects": [],
         }
     )
 
 
-def _candidate_insert_duration(
-    connection: Connection,
-    case_state: CaseState,
-    timeline: TimelineState,
-    candidate: _CandidateMaterial,
-    slot_hint: str | None,
-) -> int:
-    if slot_hint is not None and case_state.cut_plan is not None:
-        for slot in case_state.cut_plan.slots:
-            if slot.slot_id == slot_hint:
-                return max(1, round(slot.target_duration_sec[1] * timeline.fps))
-    available = max(1, candidate.source_end_frame - candidate.source_start_frame)
-    frame_count = _asset_frame_count(connection, candidate.asset_id, default_fps=timeline.fps)
-    return max(1, min(available, frame_count, timeline.fps * 2))
+def _asset_kind(connection: Connection, asset_id: str) -> str:
+    row = connection.execute(
+        select(schema.assets.c.kind).where(schema.assets.c.asset_id == asset_id)
+    ).first()
+    if row is None:
+        raise PatchApplyError(
+            "patch.asset_unavailable",
+            "asset is missing, disabled, or unusable",
+            details={"asset_id": asset_id},
+        )
+    return str(row._mapping["kind"])
 
 
 def _assert_asset_usable(
@@ -1226,14 +1188,6 @@ def _asset_probe(connection: Connection, asset_id: str) -> Mapping[str, Any] | N
         return None
     parsed = load_json(str(value))
     return parsed if isinstance(parsed, Mapping) else None
-
-
-def _timeline_role(role: str, asset_kind: str) -> Literal["a_roll", "b_roll", "image"]:
-    if asset_kind == "image":
-        return "image"
-    if role == "a_roll_candidate":
-        return "a_roll"
-    return "b_roll"
 
 
 def _new_clip_id(timeline: TimelineState, prefix: str) -> str:

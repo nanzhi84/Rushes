@@ -15,7 +15,6 @@ export type FsListResponse = components["schemas"]["FsListResponse"];
 // apps/api/schemas.py 已有 M2 materials/upload response models；当前生成 schema 尚未包含这些路径。
 export type MaterialKind = "video" | "audio" | "image" | "font";
 export type StorageMode = "copy" | "reference";
-export type MaterialAnnotationStatus = "pending" | "analyzing" | "completed" | "failed" | string;
 
 export type AssetJobSummary = {
   job_id: string;
@@ -24,6 +23,8 @@ export type AssetJobSummary = {
   progress: number | null;
   error_json: Record<string, unknown> | null;
 };
+
+export type UnderstandingStatus = "none" | "running" | "ready" | "failed";
 
 export type MaterialAsset = {
   asset_id: string;
@@ -35,14 +36,14 @@ export type MaterialAsset = {
   size: number;
   mtime: number | null;
   ingest_status: string;
-  annotation_status: MaterialAnnotationStatus;
-  annotation_pass: string;
-  index_status: string;
+  understanding_status: UnderstandingStatus | string;
   usable: boolean;
   enabled: boolean;
   probe: Record<string, unknown> | null;
+  duration_sec: number | null;
   proxy_object_hash: string | null;
   proxy_ready: boolean;
+  thumbnail_ready: boolean;
   invalid: boolean;
   failure: Record<string, unknown> | null;
   jobs: AssetJobSummary[];
@@ -52,6 +53,36 @@ export type MaterialsResponse = {
   project_id: string;
   assets: MaterialAsset[];
   invalidated_asset_ids: string[];
+};
+
+// GET .../materials/{aid}/summary 尚未进入 generated/schema.d.ts，先按 apps/api/schemas.py 手写。
+// summary 字段对齐 packages/contracts/understanding.py MaterialSummary。
+export type MaterialSummarySegment = {
+  start_s: number;
+  end_s: number;
+  description: string;
+  transcript?: string | null;
+  tags?: string[];
+  quality: string;
+  notes?: string | null;
+};
+
+export type MaterialSummaryDetail = {
+  asset_id?: string;
+  version?: number;
+  focus?: string | null;
+  semantic_role?: string;
+  overall?: string;
+  language?: string | null;
+  segments?: MaterialSummarySegment[];
+  generated_at?: string;
+  model?: string;
+  [key: string]: unknown;
+};
+
+export type MaterialSummaryResponse = {
+  asset_id: string;
+  summary: MaterialSummaryDetail;
 };
 
 export type MaterialMutationResponse = {
@@ -401,6 +432,12 @@ export const api = {
     );
   },
 
+  getAssetSummary(projectId: string, assetId: string): Promise<MaterialSummaryResponse> {
+    return apiFetch<MaterialSummaryResponse>(
+      `${projectPath(projectId)}/materials/${encodeURIComponent(assetId)}/summary`
+    );
+  },
+
   fsRoots(): Promise<components["schemas"]["FsRootsResponse"]> {
     return apiFetch<components["schemas"]["FsRootsResponse"]>("/api/fs/roots");
   },
@@ -435,14 +472,25 @@ export const api = {
     });
   },
 
+  // media 族 URL 由浏览器原生 <img>/<video>/wavesurfer 直连，设不了 Authorization header，
+  // 统一带 query token（后端 apps/api/deps.py 对 GET /api/media/ 前缀放行 query token，语义同 SSE）。
   mediaProxyUrl(assetId: string): string {
-    return `/api/media/${encodeURIComponent(assetId)}/proxy`;
+    return withQueryToken(`/api/media/${encodeURIComponent(assetId)}/proxy`);
+  },
+
+  mediaThumbnailUrl(assetId: string): string {
+    return withQueryToken(`/api/media/${encodeURIComponent(assetId)}/thumbnail`);
   },
 
   mediaPreviewUrl(previewId: string): string {
-    return `/api/media/preview/${encodeURIComponent(previewId)}`;
+    return withQueryToken(`/api/media/preview/${encodeURIComponent(previewId)}`);
   }
 };
+
+function withQueryToken(path: string): string {
+  const token = getAuthToken();
+  return token ? `${path}?token=${encodeURIComponent(token)}` : path;
+}
 
 function projectPath(projectId: string): string {
   return `/api/projects/${encodeURIComponent(projectId)}`;

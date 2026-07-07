@@ -149,7 +149,6 @@ def run_workflow(
             asset_id=asset_id,
             path=fixture_dir / filename,
         )
-        client.retry_material_annotation(project_id=project_id, asset_id=asset_id)
         imported_asset_ids.append(asset_id)
     image_asset_id = unique_id("asset_product_image")
     client.import_local_material(
@@ -157,14 +156,13 @@ def run_workflow(
         asset_id=image_asset_id,
         path=fixture_dir / IMAGE_FILENAME,
     )
-    client.retry_material_annotation(project_id=project_id, asset_id=image_asset_id)
     imported_asset_ids.append(image_asset_id)
 
     client.create_case(
         project_id=project_id,
         case_id=case_id,
         name="M9 路径 2",
-        goal="无声 B-roll + 图，按种草文案生成 TTS、检索、timeline、字幕/BGM 并导出。",
+        goal="无声 B-roll + 图，按种草文案生成 TTS、理解素材、compose_initial、字幕/BGM 并导出。",
     )
     for asset_id in imported_asset_ids:
         client.select_case_asset(project_id=project_id, case_id=case_id, asset_id=asset_id)
@@ -192,14 +190,14 @@ def run_workflow(
         idle_nudge="继续先生成并确认内容计划。",
     )
     case = driver.wait_until(
-        "TTS、检索、timeline 与预览完成",
+        "TTS、素材理解、timeline 与预览完成",
         lambda state: (
             _timeline_version(state) is not None
             and _string_field(state, "preview_current_id") is not None
-            and (_audio_mode(state) == "tts" or state.get("candidate_pack_id") is not None)
+            and _audio_mode(state) == "tts"
         ),
         timeout_s=llm_timeout + job_timeout + render_timeout,
-        idle_nudge="继续完成 TTS、检索、timeline 和预览渲染。",
+        idle_nudge="继续完成 TTS、素材理解、timeline 组装与预览渲染。",
     )
     _mark_preview_viewed(client, project_id, case_id, case)
 

@@ -35,15 +35,23 @@ from storage.db import begin_immediate
 from storage.repositories import (
     CasesRepository,
     DecisionsRepository,
+    MaterialSummariesRepository,
     MessagesRepository,
     ProjectsRepository,
     TimelineVersionsRepository,
+    TranscriptsRepository,
 )
 from storage.repositories._json import load_json
 from tools import PATCH_OP_REGISTRY, ToolExecutionContext, ToolRegistry, build_default_tool_registry
 from tools.memory_tools import search_relevant_memories
 
-from .context_builder import ContextBuilder, ContextBuildInput, ContextBundle, ContextMessage
+from .context_builder import (
+    AssetDigestRow,
+    ContextBuilder,
+    ContextBuildInput,
+    ContextBundle,
+    ContextMessage,
+)
 from .decision_answering import DecisionAnswerResolver
 from .policy_gate import PolicyContext, PolicyGate, ToolCall, Verdict, mark_replayed, next_replay
 from .reducer import ReducerApplyResult, apply
@@ -96,6 +104,23 @@ def _emit_turn_event(listener: TurnListener | None, event: dict[str, Any]) -> No
     # 监听器绝不能把回合搞崩：hub 内部已兜底，这里再加一层防御。
     with contextlib.suppress(Exception):
         listener.emit(event)
+
+
+def _make_turn_progress(
+    listener: TurnListener | None,
+) -> Callable[[Mapping[str, Any]], None]:
+    """构造注入工具上下文的进度回调（``metadata["turn_progress"]``）。
+
+    有 turn_listener 时把 payload 转成 turn-stream 的 ``subagent_progress`` 事件；无
+    listener 时是纯 no-op。返回值**永远是可调用对象、绝不为 None**，且整段吞掉异常——
+    工具内部的进度上报绝不能把回合搞崩。
+    """
+
+    def _turn_progress(payload: Mapping[str, Any]) -> None:
+        with contextlib.suppress(Exception):
+            _emit_turn_event(listener, {**payload, "type": "subagent_progress"})
+
+    return _turn_progress
 
 
 def _emit_tool_step_finished(
@@ -273,6 +298,7 @@ class _LoadedState:
     messages: tuple[ContextMessage, ...]
     timeline: TimelineState | None
     memory_summaries: tuple[str, ...]
+    asset_digest: tuple[AssetDigestRow, ...]
 
 
 @dataclass(slots=True)
@@ -656,13 +682,14 @@ async def _run_turn_body(
             outcome = "running"
             break
 
-        result = _execute_tool(
+        result = await _execute_tool(
             router,
             tool_call,
             engine=engine,
             state=loaded,
             turn_id=active_turn_id,
             gateway=tool_gateway,
+            turn_listener=turn_listener,
         )
         _emit_tool_step_finished(turn_listener, step_id, tool_call.tool_name, result.status)
         accumulator.tool_results.append(result)
@@ -839,6 +866,7 @@ def _build_context(
             messages=loaded.messages,
             memory_summaries=loaded.memory_summaries,
             turn_observations=turn_observations,
+            asset_digest=loaded.asset_digest,
         )
     )
 
@@ -1010,12 +1038,13 @@ async def _maybe_answer_pending_decision_from_user_message(
         )
         return "natural_language_decision_answer_denied"
 
-    result = _execute_tool(
+    result = await _execute_tool(
         router,
         tool_call,
         engine=engine,
         state=loaded,
         turn_id=turn_id,
+        turn_listener=turn_listener,
     )
     accumulator.tool_results.append(result)
     tracer.record("tool_result", _tool_result_payload(result))
@@ -1076,6 +1105,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
         )
         timeline = _load_timeline(connection, case_state)
         memory_summaries = _load_memory_summaries(connection, case_state)
+        asset_digest = _load_asset_digest(connection, case_state)
     return _LoadedState(
         case_state=case_state,
         project_state=project_state,
@@ -1086,6 +1116,7 @@ def _load_state(engine: Engine, case_id: str) -> _LoadedState:
         messages=messages,
         timeline=timeline,
         memory_summaries=memory_summaries,
+        asset_digest=asset_digest,
     )
 
 
@@ -1149,7 +1180,6 @@ def _load_project_artifact_stats(
         transcript_ids=frozenset(transcript_ids),
         transcript_ids_with_vad=frozenset(transcript_ids_with_vad),
         voiceover_asset_ids=frozenset(voiceover_asset_ids),
-        candidate_pack_valid=_candidate_pack_valid(connection, case_state),
     )
 
 
@@ -1192,15 +1222,83 @@ def _asset_has_audio(asset: Mapping[str, Any]) -> bool:
     return isinstance(probe, Mapping) and probe.get("has_audio") is True
 
 
-def _candidate_pack_valid(connection: Connection, case_state: CaseState) -> bool:
-    if case_state.candidate_pack_id is None:
-        return True
-    row = connection.execute(
-        select(schema.candidate_packs.c.candidate_pack_id).where(
-            schema.candidate_packs.c.candidate_pack_id == case_state.candidate_pack_id
+def _load_asset_digest(
+    connection: Connection,
+    case_state: CaseState,
+) -> tuple[AssetDigestRow, ...]:
+    """逐素材摘要索引：join 已启用链接的 assets + 各自 latest_ready 摘要。
+
+    planner 靠这份索引看懂素材内容（Spec C §C3）。排除 case 级 disabled 与
+    link 级 disabled 素材；缺 ready 摘要的素材只带基础事实、不带 role/overall。
+    """
+
+    disabled = set(case_state.disabled_asset_ids)
+    rows = connection.execute(
+        select(
+            schema.assets.c.asset_id,
+            schema.assets.c.filename,
+            schema.assets.c.kind,
+            schema.assets.c.probe,
+            schema.assets.c.understanding_status,
         )
-    ).first()
-    return row is not None
+        .select_from(
+            schema.assets.join(
+                schema.project_asset_links,
+                schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+            )
+        )
+        .where(schema.project_asset_links.c.project_id == case_state.project_id)
+        .where(schema.project_asset_links.c.enabled.is_(True))
+        .order_by(schema.assets.c.asset_id)
+    ).all()
+    values_list = [
+        dict(row._mapping) for row in rows if str(row._mapping["asset_id"]) not in disabled
+    ]
+    asset_ids = [str(values["asset_id"]) for values in values_list]
+    summaries = MaterialSummariesRepository(connection).list_latest_for_assets(asset_ids)
+    digest: list[AssetDigestRow] = []
+    for values in values_list:
+        asset_id = str(values["asset_id"])
+        semantic_role, overall = _summary_role_and_overall(summaries.get(asset_id))
+        digest.append(
+            AssetDigestRow(
+                asset_id=asset_id,
+                filename=str(values.get("filename") or ""),
+                kind=str(values["kind"]),
+                duration_sec=_probe_duration_sec(values.get("probe")),
+                understanding_status=str(values.get("understanding_status") or "none"),
+                semantic_role=semantic_role,
+                overall=overall,
+            )
+        )
+    return tuple(digest)
+
+
+def _summary_role_and_overall(
+    summary: Mapping[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    if summary is None:
+        return None, None
+    summary_json = summary.get("summary_json")
+    if not isinstance(summary_json, Mapping):
+        return None, None
+    role = summary_json.get("semantic_role")
+    overall = summary_json.get("overall")
+    return (
+        str(role) if role else None,
+        str(overall) if overall else None,
+    )
+
+
+def _probe_duration_sec(raw_probe: Any) -> float | None:
+    if not isinstance(raw_probe, str) or not raw_probe:
+        return None
+    probe = load_json(raw_probe)
+    if isinstance(probe, Mapping):
+        value = probe.get("duration_sec")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return None
 
 
 def _load_decisions(connection: Connection) -> tuple[Decision, ...]:
@@ -1320,7 +1418,7 @@ def _replay_tool_call_from_item(item: TurnQueueItem) -> ToolCall | None:
     )
 
 
-def _execute_tool(
+async def _execute_tool(
     router: ToolRouter,
     tool_call: ToolCall,
     *,
@@ -1328,6 +1426,7 @@ def _execute_tool(
     state: _LoadedState,
     turn_id: str,
     gateway: Any | None = None,
+    turn_listener: TurnListener | None = None,
 ) -> ToolResult:
     with engine.connect() as connection:
         context = ToolExecutionContext(
@@ -1338,10 +1437,15 @@ def _execute_tool(
             decisions=state.decisions,
             readonly_connection=connection,
             created_at=_now_iso(),
-            metadata=_tool_context_metadata(engine, gateway),
+            metadata=_tool_context_metadata(engine, gateway, turn_listener=turn_listener),
         )
         try:
-            return router.execute(tool_call, context)
+            # 同步 handler 直接返回 ToolResult（行为零变化，仍在事件循环内同步跑）；
+            # async handler 返回 Awaitable，此处 await 后再入 accumulator/trace/observation。
+            outcome = router.execute(tool_call, context)
+            if isinstance(outcome, ToolResult):
+                return outcome
+            return await outcome
         except Exception as exc:  # pragma: no cover - defensive harness boundary
             return ToolResult(
                 tool_call_id=context.tool_call_id,
@@ -1437,11 +1541,27 @@ def _defer_tool_call(
 
 
 def _persist_tool_result_data(result: ToolResult, *, engine: Engine) -> None:
+    # handler 只有只读连接：需要落库的行经 ToolResult.data 交回 loop 这里写。
     row = result.data.get("message_row")
-    if not isinstance(row, Mapping):
+    summary_rows = result.data.get("material_summary_rows")
+    transcript_rows = result.data.get("transcript_rows")
+    has_summaries = isinstance(summary_rows, list) and summary_rows
+    has_transcripts = isinstance(transcript_rows, list) and transcript_rows
+    if not isinstance(row, Mapping) and not has_summaries and not has_transcripts:
         return
     with begin_immediate(engine) as connection:
-        MessagesRepository(connection).insert(dict(row))
+        if isinstance(row, Mapping):
+            MessagesRepository(connection).insert(dict(row))
+        if isinstance(summary_rows, list):
+            summaries_repo = MaterialSummariesRepository(connection)
+            for summary_row in summary_rows:
+                if isinstance(summary_row, Mapping):
+                    summaries_repo.insert(dict(summary_row))
+        if isinstance(transcript_rows, list):
+            transcripts_repo = TranscriptsRepository(connection)
+            for transcript_row in transcript_rows:
+                if isinstance(transcript_row, Mapping):
+                    transcripts_repo.insert(dict(transcript_row))
 
 
 def _apply_events(
@@ -1498,7 +1618,7 @@ async def _handle_followups(
             )
             enqueued.append(followup.decision_id)
         elif followup.kind == "enqueue_memory_save":
-            _execute_memory_save_followup(
+            await _execute_memory_save_followup(
                 followup,
                 engine=engine,
                 router=router,
@@ -1516,7 +1636,7 @@ async def _handle_followups(
     return enqueued
 
 
-def _execute_memory_save_followup(
+async def _execute_memory_save_followup(
     followup: HarnessFollowup,
     *,
     engine: Engine,
@@ -1576,7 +1696,7 @@ def _execute_memory_save_followup(
     )
     try:
         state = _load_state(engine, case_id)
-        result = _execute_tool(router, tool_call, engine=engine, state=state, turn_id=turn_id)
+        result = await _execute_tool(router, tool_call, engine=engine, state=state, turn_id=turn_id)
     except Exception as exc:  # pragma: no cover - defensive post-commit boundary
         result = ToolResult(
             tool_call_id=tool_call.tool_call_id or "followup_memory_save",
@@ -1903,7 +2023,6 @@ def _tool_call_id(tool_call: ToolCall) -> str:
 
 def _job_kind_for_tool(tool_name: str, namespace: str) -> str:
     explicit = {
-        "annotation.enqueue": "annotation",
         "audio.asr_original": "asr",
         "asr.transcribe": "asr",
         "tts.speech": "tts",
@@ -1916,7 +2035,7 @@ def _job_kind_for_tool(tool_name: str, namespace: str) -> str:
     }
     if tool_name in explicit:
         return explicit[tool_name]
-    if namespace in {"annotation", "asr", "tts", "proxy", "align"}:
+    if namespace in {"asr", "tts", "proxy", "align"}:
         return namespace
     return tool_name.replace(".", "_")
 
@@ -1929,7 +2048,12 @@ def _asset_id_for_asr(case_state: CaseState) -> str | None:
     return None
 
 
-def _tool_context_metadata(engine: Engine, gateway: Any | None = None) -> dict[str, Any]:
+def _tool_context_metadata(
+    engine: Engine,
+    gateway: Any | None = None,
+    *,
+    turn_listener: TurnListener | None = None,
+) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     database = engine.url.database
     if database is not None and database != ":memory:":
@@ -1937,6 +2061,8 @@ def _tool_context_metadata(engine: Engine, gateway: Any | None = None) -> dict[s
     if gateway is not None:
         # 工具经此调 LLM/VLM/embedding；不注入则全部降级（M9 实测）
         metadata["provider_gateway"] = gateway
+    # 进度通道：永远是可调用对象、绝不为 None（无 listener 时为 no-op）。
+    metadata["turn_progress"] = _make_turn_progress(turn_listener)
     return metadata
 
 

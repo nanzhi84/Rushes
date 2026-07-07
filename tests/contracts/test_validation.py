@@ -2,9 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from contracts import (
-    AnnotationDocument,
     AssetRecord,
-    CandidatePack,
     Decision,
     SubtitleClip,
     TimelineMediaClip,
@@ -13,30 +11,6 @@ from contracts import (
     TimelineTrack,
     TranscriptDocument,
 )
-
-
-def test_clip_start_must_be_less_than_end() -> None:
-    with pytest.raises(ValidationError):
-        AnnotationDocument.model_validate(
-            {
-                "schema": "AnnotationDocument.v1",
-                "annotation_id": "ann_001",
-                "asset_id": "asset_001",
-                "asset_kind": "video",
-                "status": "completed",
-                "generator": {"pipeline_version": "annotation.video.v1", "pass": "cheap"},
-                "clips": [
-                    {
-                        "clip_id": "clip_001",
-                        "source_start_frame": 10,
-                        "source_end_frame": 10,
-                        "role": "avoid",
-                        "summary": "bad interval",
-                    }
-                ],
-                "created_at": "...",
-            }
-        )
 
 
 def test_transcript_word_start_must_be_less_than_end() -> None:
@@ -62,39 +36,6 @@ def test_transcript_word_start_must_be_less_than_end() -> None:
         )
 
 
-def test_candidate_slot_rejects_more_than_eight_candidates() -> None:
-    candidates = [
-        {
-            "candidate_id": f"cand_{index}",
-            "asset_id": "asset_001",
-            "clip_id": "clip_001",
-            "summary_line": "summary",
-            "score": {"bm25_rank": 1, "vector_rank": 1, "rrf": 0.1},
-        }
-        for index in range(9)
-    ]
-    with pytest.raises(ValidationError):
-        CandidatePack.model_validate(
-            {
-                "candidate_pack_id": "pack_001",
-                "case_id": "case_001",
-                "snapshot": {
-                    "generated_at": "2026-07-04T00:00:00Z",
-                    "asset_scope_hash": "hash",
-                    "annotation_versions": {},
-                },
-                "slots": [
-                    {
-                        "slot_id": "slot_001",
-                        "slot_brief": "brief",
-                        "target_duration_sec": [1.0, 2.0],
-                        "candidates": candidates,
-                    }
-                ],
-            }
-        )
-
-
 def test_copy_mode_rejects_reference_path() -> None:
     with pytest.raises(ValidationError):
         AssetRecord.model_validate(
@@ -111,9 +52,6 @@ def test_copy_mode_rejects_reference_path() -> None:
                 "size": 1,
                 "probe": {"duration_sec": 1, "has_audio": False},
                 "ingest_status": "imported",
-                "annotation_status": "pending",
-                "annotation_pass": "none",
-                "index_status": "none",
                 "usable": False,
             }
         )

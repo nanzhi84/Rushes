@@ -11,7 +11,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    LargeBinary,
     MetaData,
     Table,
     Text,
@@ -46,12 +45,6 @@ cases = Table(
     Column("content_plan", Text, nullable=True),
     Column("audio_plan", Text, nullable=True),
     Column("cut_plan", Text, nullable=True),
-    Column(
-        "candidate_pack_id",
-        Text,
-        ForeignKey("candidate_packs.candidate_pack_id"),
-        nullable=True,
-    ),
     Column("timeline_current_version", Integer, nullable=True),
     Column("timeline_validated", Boolean, nullable=False, default=False),
     Column("preview_current_id", Text, ForeignKey("previews.preview_id"), nullable=True),
@@ -81,11 +74,12 @@ assets = Table(
     Column("probe", Text, nullable=True),
     Column("proxy_object_hash", Text, ForeignKey("objects.hash"), nullable=True),
     Column("ingest_status", Text, nullable=False),
-    Column("annotation_status", Text, nullable=False),
-    Column("annotation_pass", Text, nullable=False),
-    Column("index_status", Text, nullable=False),
     Column("usable", Boolean, nullable=False),
     Column("failure", Text, nullable=True),
+    # Spec C：便宜本地索引与 agentic 理解的冗余展示列（纯加法）。
+    Column("thumbnail_object_hash", Text, ForeignKey("objects.hash"), nullable=True),
+    Column("index_json", Text, nullable=True),
+    Column("understanding_status", Text, nullable=False, server_default="none"),
 )
 
 project_asset_links = Table(
@@ -98,46 +92,6 @@ project_asset_links = Table(
     Column("note", Text, nullable=False),
 )
 
-annotations_table = Table(
-    "annotations",
-    metadata,
-    Column("annotation_id", Text, primary_key=True),
-    Column("asset_id", Text, ForeignKey("assets.asset_id"), nullable=False),
-    Column("schema", Text, nullable=False),
-    Column("status", Text, nullable=False),
-    Column("document_json", Text, nullable=False),
-    Column("created_at", Text, nullable=False),
-    Column("updated_at", Text, nullable=False),
-)
-
-annotation_clip_projection = Table(
-    "annotation_clip_projection",
-    metadata,
-    Column("clip_id", Text, primary_key=True),
-    Column("annotation_id", Text, ForeignKey("annotations.annotation_id"), nullable=False),
-    Column("asset_id", Text, ForeignKey("assets.asset_id"), nullable=False),
-    Column("start_frame", Integer, nullable=False),
-    Column("end_frame", Integer, nullable=False),
-    Column("role", Text, nullable=False),
-    Column("summary", Text, nullable=False),
-    Column("keywords_json", Text, nullable=False),
-    Column("quality_score", Float, nullable=True),
-    Column("usable", Boolean, nullable=False),
-    Column("embedding", LargeBinary, nullable=True),
-)
-
-annotation_signal_projection = Table(
-    "annotation_signal_projection",
-    metadata,
-    Column("signal_id", Text, primary_key=True),
-    Column("clip_id", Text, ForeignKey("annotation_clip_projection.clip_id"), nullable=False),
-    Column("namespace", Text, nullable=False),
-    Column("field", Text, nullable=False),
-    Column("value_text", Text, nullable=True),
-    Column("value_number", Float, nullable=True),
-    Column("confidence", Float, nullable=True),
-)
-
 transcripts = Table(
     "transcripts",
     metadata,
@@ -147,6 +101,25 @@ transcripts = Table(
     Column("raw_preserved", Boolean, nullable=False),
     Column("utterances", Text, nullable=False),
     Column("vad_segments", Text, nullable=False),
+)
+
+material_summaries = Table(
+    "material_summaries",
+    metadata,
+    Column("summary_id", Text, primary_key=True),
+    Column("asset_id", Text, ForeignKey("assets.asset_id"), nullable=False),
+    Column("version", Integer, nullable=False),
+    Column("focus", Text, nullable=True),
+    Column("status", Text, nullable=False),
+    Column("summary_json", Text, nullable=False),
+    Column("model", Text, nullable=True),
+    Column("created_at", Text, nullable=False),
+)
+Index(
+    "ux_material_summaries_asset_version",
+    material_summaries.c.asset_id,
+    material_summaries.c.version,
+    unique=True,
 )
 
 decisions = Table(
@@ -186,15 +159,6 @@ Index(
     timeline_versions.c.case_id,
     timeline_versions.c.version,
     unique=True,
-)
-
-candidate_packs = Table(
-    "candidate_packs",
-    metadata,
-    Column("candidate_pack_id", Text, primary_key=True),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=False),
-    Column("slots", Text, nullable=False),
-    Column("created_at", Text, nullable=False),
 )
 
 previews = Table(
@@ -344,13 +308,10 @@ ALL_TABLE_NAMES: tuple[str, ...] = (
     "cases",
     "assets",
     "project_asset_links",
-    "annotations",
-    "annotation_clip_projection",
-    "annotation_signal_projection",
     "transcripts",
+    "material_summaries",
     "decisions",
     "timeline_versions",
-    "candidate_packs",
     "previews",
     "exports",
     "memory_candidates",
@@ -363,25 +324,12 @@ ALL_TABLE_NAMES: tuple[str, ...] = (
     "objects",
 )
 
-FTS_TABLE_NAME = "clip_fts"
-CREATE_CLIP_FTS_SQL = (
-    "CREATE VIRTUAL TABLE IF NOT EXISTS clip_fts "
-    "USING fts5(clip_id, summary, keywords, retrieval_sentence, ocr_text)"
-)
-DROP_CLIP_FTS_SQL = "DROP TABLE IF EXISTS clip_fts"
-
 
 def create_all(connection: Connection) -> None:
     metadata.create_all(connection)
-    create_fts(connection)
-
-
-def create_fts(connection: Connection) -> None:
-    connection.exec_driver_sql(CREATE_CLIP_FTS_SQL)
 
 
 def drop_all(connection: Connection) -> None:
-    connection.exec_driver_sql(DROP_CLIP_FTS_SQL)
     metadata.drop_all(connection)
 
 

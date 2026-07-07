@@ -10,8 +10,6 @@ from contracts.provider import ProviderCapability, ProviderResult
 
 LLM_CHAT: ProviderCapability = "llm.chat"
 VLM_ANNOTATION: ProviderCapability = "vlm.annotation"
-EMBEDDING_TEXT: ProviderCapability = "embedding.text"
-EMBEDDING_IMAGE: ProviderCapability = "embedding.image"
 ASR_TRANSCRIBE: ProviderCapability = "asr.transcribe"
 TTS_SPEECH: ProviderCapability = "tts.speech"
 RERANK_TEXT: ProviderCapability = "rerank.text"
@@ -19,8 +17,6 @@ RERANK_TEXT: ProviderCapability = "rerank.text"
 ALL_CAPABILITIES: tuple[ProviderCapability, ...] = (
     LLM_CHAT,
     VLM_ANNOTATION,
-    EMBEDDING_TEXT,
-    EMBEDDING_IMAGE,
     ASR_TRANSCRIBE,
     TTS_SPEECH,
     RERANK_TEXT,

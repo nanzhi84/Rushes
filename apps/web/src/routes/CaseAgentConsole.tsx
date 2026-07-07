@@ -562,7 +562,6 @@ const CASE_EVENT_TYPES = [
   "AudioPlanUpdated",
   "CutPlanUpdated",
   "PostprocessPlanUpdated",
-  "CandidatePackCreated",
   "TimelineVersionCreated",
   "TimelineVersionRestored",
   "TimelineValidated",

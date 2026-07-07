@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
-from sqlalchemy import and_, select
+from sqlalchemy import select
 
 from contracts.case import CaseState, CutPlan
 from contracts.events import ContentPlanUpdated, CutPlanUpdated
@@ -150,7 +150,7 @@ def _succeeded(
     # 下一步是什么，否则会反复重调本工具（M9 风景混剪实测）
     observation = _observation(plan)
     if emit_cut_plan:
-        observation += "。cut_plan 已产出，下一步可直接 retrieval.search_candidates。"
+        observation += "。cut_plan 已产出，可继续推进 timeline 与预览。"
     elif case_state.audio_plan is None:
         observation += (
             "。注意：audio_plan 尚未确定，本次未产出 cut_plan——请先用 "
@@ -606,32 +606,24 @@ def _asset_summaries(context: ToolExecutionContext) -> list[_AssetSummary]:
     assert context.case_state is not None
     assert context.readonly_connection is not None
     case_state = context.case_state
-    join_clause = schema.assets.join(
-        schema.project_asset_links,
-        schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
-    ).outerjoin(
-        schema.annotation_clip_projection,
-        and_(
-            schema.annotation_clip_projection.c.asset_id == schema.assets.c.asset_id,
-            schema.annotation_clip_projection.c.usable.is_(True),
-        ),
-    )
+    # The offline annotation projection that supplied per-clip summaries is removed;
+    # content planning now works from asset filenames until the understanding chain
+    # feeds richer summaries (Spec C / Task 9).
     statement = (
         select(
             schema.assets.c.asset_id,
             schema.assets.c.filename,
-            schema.annotation_clip_projection.c.summary,
-            schema.annotation_clip_projection.c.quality_score,
         )
-        .select_from(join_clause)
+        .select_from(
+            schema.assets.join(
+                schema.project_asset_links,
+                schema.project_asset_links.c.asset_id == schema.assets.c.asset_id,
+            )
+        )
         .where(schema.project_asset_links.c.project_id == case_state.project_id)
         .where(schema.project_asset_links.c.enabled.is_(True))
         .where(schema.assets.c.usable.is_(True))
-        .order_by(
-            schema.assets.c.asset_id,
-            schema.annotation_clip_projection.c.quality_score.desc(),
-            schema.annotation_clip_projection.c.clip_id,
-        )
+        .order_by(schema.assets.c.asset_id)
     )
     if case_state.selected_asset_ids:
         statement = statement.where(schema.assets.c.asset_id.in_(case_state.selected_asset_ids))
@@ -644,15 +636,12 @@ def _asset_summaries(context: ToolExecutionContext) -> list[_AssetSummary]:
         asset_id = str(values["asset_id"])
         if asset_id in assets:
             continue
-        summary_value = values.get("summary")
         filename = str(values.get("filename") or asset_id)
         assets[asset_id] = _AssetSummary(
             asset_id=asset_id,
             filename=filename,
-            summary=str(summary_value).strip() if isinstance(summary_value, str) else "",
-            quality_score=(
-                float(values["quality_score"]) if values.get("quality_score") is not None else None
-            ),
+            summary="",
+            quality_score=None,
         )
     return list(assets.values())
 

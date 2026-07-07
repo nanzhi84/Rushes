@@ -22,7 +22,7 @@ NOW = "2026-07-05T00:00:00+00:00"
 def test_validator_rejects_primary_visual_gap(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_asset_with_annotation(connection, "asset_1")
+        _seed_asset(connection, "asset_1")
     report = validate_timeline(
         engine,
         _case_state(),
@@ -41,7 +41,7 @@ def test_validator_rejects_primary_visual_gap(tmp_path: Path) -> None:
 def test_validator_rejects_primary_visual_overlap(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_asset_with_annotation(connection, "asset_1")
+        _seed_asset(connection, "asset_1")
     report = validate_timeline(
         engine,
         _case_state(),
@@ -60,7 +60,7 @@ def test_validator_rejects_primary_visual_overlap(tmp_path: Path) -> None:
 def test_validator_rejects_source_range_out_of_asset_bounds(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_asset_with_annotation(connection, "asset_1", probe={"duration_sec": 1.0, "fps": 30})
+        _seed_asset(connection, "asset_1", probe={"duration_sec": 1.0, "fps": 30})
     report = validate_timeline(
         engine,
         _case_state(),
@@ -70,35 +70,10 @@ def test_validator_rejects_source_range_out_of_asset_bounds(tmp_path: Path) -> N
     assert "timeline.source_range.out_of_bounds" in _codes(report)
 
 
-def test_validator_rejects_hard_quality_event_overlap(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    with engine.begin() as connection:
-        _seed_asset_with_annotation(
-            connection,
-            "asset_1",
-            hard_events=[
-                {
-                    "event_id": "q_1",
-                    "kind": "blur",
-                    "severity": "hard",
-                    "start_frame": 10,
-                    "end_frame": 20,
-                }
-            ],
-        )
-    report = validate_timeline(
-        engine,
-        _case_state(),
-        _timeline([_clip("tc_1", 0, 30)], duration_frames=30),
-    )
-
-    assert "timeline.source_range.hard_quality_overlap" in _codes(report)
-
-
 def test_validator_rejects_unusable_or_disabled_asset_reference(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_asset_with_annotation(connection, "asset_1", usable=False)
+        _seed_asset(connection, "asset_1", usable=False)
     report = validate_timeline(
         engine,
         _case_state(disabled_asset_ids=["asset_1"]),
@@ -114,7 +89,7 @@ def test_validator_rejects_unusable_or_disabled_asset_reference(tmp_path: Path) 
 def test_validator_rejects_fps_mismatch(tmp_path: Path) -> None:
     engine = _engine(tmp_path, fps=24)
     with engine.begin() as connection:
-        _seed_asset_with_annotation(connection, "asset_1")
+        _seed_asset(connection, "asset_1")
     report = validate_timeline(
         engine,
         _case_state(),
@@ -129,7 +104,7 @@ def test_validator_rejects_identity_mismatch_negative_duration_and_visual_overru
 ) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_asset_with_annotation(connection, "asset_1")
+        _seed_asset(connection, "asset_1")
     report = validate_timeline(
         engine,
         _case_state(),
@@ -150,7 +125,7 @@ def test_validator_rejects_identity_mismatch_negative_duration_and_visual_overru
 def test_validator_rejects_dangling_subtitle_binding(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_asset_with_annotation(connection, "asset_1")
+        _seed_asset(connection, "asset_1")
     timeline = _timeline(
         [_clip("tc_1", 0, 30)],
         duration_frames=30,
@@ -175,8 +150,8 @@ def test_validator_rejects_dangling_subtitle_binding(tmp_path: Path) -> None:
 def test_validator_rejects_audio_and_subtitle_out_of_bounds(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_asset_with_annotation(connection, "asset_1")
-        _seed_asset_with_annotation(connection, "asset_vo")
+        _seed_asset(connection, "asset_1")
+        _seed_asset(connection, "asset_vo")
     report = validate_timeline(
         engine,
         _case_state(),
@@ -209,9 +184,9 @@ def test_validator_rejects_audio_and_subtitle_out_of_bounds(tmp_path: Path) -> N
 def test_validator_accepts_resolved_subtitle_binding_variants(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_asset_with_annotation(connection, "asset_1")
-        _seed_asset_with_annotation(connection, "asset_vo")
-        _seed_asset_with_annotation(connection, "asset_orig")
+        _seed_asset(connection, "asset_1")
+        _seed_asset(connection, "asset_vo")
+        _seed_asset(connection, "asset_orig")
     timeline = _timeline(
         [_clip("tc_1", 0, 30)],
         duration_frames=30,
@@ -269,7 +244,7 @@ def test_validator_rejects_missing_and_unlinked_asset_references(tmp_path: Path)
     )
 
     with engine.begin() as connection:
-        _seed_asset_with_annotation(connection, "asset_unlinked", link_enabled=False)
+        _seed_asset(connection, "asset_unlinked", link_enabled=False)
     unlinked_report = validate_timeline(
         engine,
         _case_state(),
@@ -286,7 +261,7 @@ def test_validator_rejects_missing_and_unlinked_asset_references(tmp_path: Path)
 def test_validator_preserves_warnings_and_hook_formats_errors(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
-        _seed_asset_with_annotation(connection, "asset_1")
+        _seed_asset(connection, "asset_1")
     timeline = _timeline(
         [_clip("tc_1", 10, 30, source_start=10, source_end=30)],
         duration_frames=30,
@@ -451,14 +426,13 @@ def _subtitle(
     }
 
 
-def _seed_asset_with_annotation(
+def _seed_asset(
     connection: Connection,
     asset_id: str,
     *,
     usable: bool = True,
     link_enabled: bool = True,
     probe: dict[str, Any] | None = None,
-    hard_events: list[dict[str, Any]] | None = None,
 ) -> None:
     connection.execute(
         schema.assets.insert().values(
@@ -475,9 +449,6 @@ def _seed_asset_with_annotation(
             probe=dump_json(probe or {"duration_sec": 10.0, "fps": 30.0}),
             proxy_object_hash=None,
             ingest_status="indexed",
-            annotation_status="completed",
-            annotation_pass="cheap",
-            index_status="ready",
             usable=usable,
             failure=None,
         )
@@ -489,28 +460,6 @@ def _seed_asset_with_annotation(
             enabled=link_enabled,
             linked_at=NOW,
             note="",
-        )
-    )
-    document = {
-        "schema": "AnnotationDocument.v1",
-        "annotation_id": f"ann_{asset_id}",
-        "asset_id": asset_id,
-        "asset_kind": "video",
-        "status": "completed",
-        "generator": {"pipeline_version": "annotation.video.v1", "pass": "cheap"},
-        "clips": [],
-        "quality_events": hard_events or [],
-        "created_at": NOW,
-    }
-    connection.execute(
-        schema.annotations_table.insert().values(
-            annotation_id=f"ann_{asset_id}",
-            asset_id=asset_id,
-            schema="AnnotationDocument.v1",
-            status="completed",
-            document_json=dump_json(document),
-            created_at=NOW,
-            updated_at=NOW,
         )
     )
 

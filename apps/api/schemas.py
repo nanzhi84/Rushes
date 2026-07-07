@@ -101,7 +101,6 @@ class CaseRecord(ApiResponseModel):
     content_plan: dict[str, Any] | None
     audio_plan: dict[str, Any] | None
     cut_plan: dict[str, Any] | None
-    candidate_pack_id: str | None
     timeline_current_version: int | None
     timeline_validated: bool
     preview_current_id: str | None
@@ -199,14 +198,14 @@ class MaterialAsset(ApiResponseModel):
     size: int
     mtime: int | None
     ingest_status: str
-    annotation_status: str
-    annotation_pass: str
-    index_status: str
+    understanding_status: str
     usable: bool
     enabled: bool
     probe: dict[str, Any] | None
+    duration_sec: float | None
     proxy_object_hash: str | None
     proxy_ready: bool
+    thumbnail_ready: bool
     invalid: bool
     failure: dict[str, Any] | None
     jobs: list[AssetJobSummary]
@@ -216,6 +215,11 @@ class MaterialsResponse(ApiResponseModel):
     project_id: str
     assets: list[MaterialAsset]
     invalidated_asset_ids: list[str] = []
+
+
+class MaterialSummaryResponse(ApiResponseModel):
+    asset_id: str
+    summary: dict[str, Any]
 
 
 class MaterialMutationResponse(ApiResponseModel):

@@ -1,16 +1,13 @@
+import { useState } from "react";
 import type { ReactElement } from "react";
-import type { MaterialAsset } from "../../api/client";
-import {
-  annotationLabel,
-  annotationTone,
-  indexLabel,
-  indexTone,
-  StatusBadge
-} from "./StatusBadge";
+import { api, type MaterialAsset } from "../../api/client";
+import { StatusBadge, understandingBadgeProps } from "./StatusBadge";
 
 type MaterialsTableProps = {
   assets: MaterialAsset[];
   actionPending: boolean;
+  activeAssetId?: string | null;
+  onSelect?: (asset: MaterialAsset) => void;
   onRelocate: (asset: MaterialAsset) => void;
   onToggleEnabled: (asset: MaterialAsset) => void;
   onUnlink: (asset: MaterialAsset) => void;
@@ -19,6 +16,8 @@ type MaterialsTableProps = {
 export function MaterialsTable({
   assets,
   actionPending,
+  activeAssetId,
+  onSelect,
   onRelocate,
   onToggleEnabled,
   onUnlink
@@ -33,97 +32,121 @@ export function MaterialsTable({
 
   return (
     <div className="overflow-x-auto rounded-lg border border-[#d9dee7] bg-white">
-      <table className="min-w-[1060px] w-full text-left text-sm">
+      <table className="min-w-[1120px] w-full text-left text-sm">
         <thead className="border-b border-[#d9dee7] bg-[#f8fafc] text-xs font-semibold text-[#475569]">
           <tr>
+            <th className="px-3 py-3">缩略图</th>
             <th className="px-3 py-3">文件名</th>
             <th className="px-3 py-3">类型</th>
-            <th className="px-3 py-3">时长/分辨率</th>
-            <th className="px-3 py-3">标注</th>
-            <th className="px-3 py-3">索引</th>
+            <th className="px-3 py-3">时长</th>
+            <th className="px-3 py-3">理解状态</th>
             <th className="px-3 py-3">可用</th>
             <th className="px-3 py-3">运行中任务</th>
             <th className="px-3 py-3">操作</th>
           </tr>
         </thead>
         <tbody className="divide-y divide-[#eef2f7]">
-          {assets.map((asset) => (
-            <tr key={asset.asset_id} className={asset.invalid ? "bg-[#fff7ed]" : "bg-white"}>
-              <td className="max-w-[260px] px-3 py-3 align-top">
-                <div className="font-medium text-[#17202a]">{asset.filename || asset.asset_id}</div>
-                <div className="mt-1 truncate text-xs text-[#64748b]" title={asset.asset_id}>
-                  {asset.asset_id}
-                </div>
-                {asset.invalid ? (
-                  <div className="mt-2">
-                    <StatusBadge label="源文件失效" tone="danger" />
+          {assets.map((asset) => {
+            const understanding = understandingBadgeProps(asset.understanding_status);
+            const active = activeAssetId === asset.asset_id;
+            const rowTone = active ? "bg-[#eff6ff]" : asset.invalid ? "bg-[#fff7ed]" : "bg-white";
+            return (
+              <tr
+                key={asset.asset_id}
+                className={`${rowTone} ${onSelect ? "cursor-pointer hover:bg-[#f8fafc]" : ""}`}
+                onClick={onSelect ? () => onSelect(asset) : undefined}
+              >
+                <td className="px-3 py-3 align-top">
+                  <MaterialThumbnail asset={asset} />
+                </td>
+                <td className="max-w-[240px] px-3 py-3 align-top">
+                  <div className="font-medium text-[#17202a]">{asset.filename || asset.asset_id}</div>
+                  <div className="mt-1 truncate text-xs text-[#64748b]" title={asset.asset_id}>
+                    {asset.asset_id}
                   </div>
-                ) : null}
-              </td>
-              <td className="px-3 py-3 align-top">
-                <div>{kindLabel(asset.kind)}</div>
-                <div className="mt-1 text-xs text-[#64748b]">{storageLabel(asset.storage_mode)}</div>
-              </td>
-              <td className="px-3 py-3 align-top text-[#334155]">{probeSummary(asset)}</td>
-              <td className="px-3 py-3 align-top">
-                <div className="flex flex-col gap-1">
-                  <StatusBadge
-                    label={annotationLabel(asset.annotation_status)}
-                    tone={annotationTone(asset.annotation_status)}
-                  />
-                  <span className="text-xs text-[#64748b]">pass: {asset.annotation_pass}</span>
-                </div>
-              </td>
-              <td className="px-3 py-3 align-top">
-                <StatusBadge label={indexLabel(asset.index_status)} tone={indexTone(asset.index_status)} />
-              </td>
-              <td className="px-3 py-3 align-top">
-                <StatusBadge label={asset.usable ? "可用" : "不可用"} tone={asset.usable ? "success" : "danger"} />
-                <div className="mt-1 text-xs text-[#64748b]">{asset.enabled ? "已启用" : "已禁用"}</div>
-              </td>
-              <td className="min-w-[150px] px-3 py-3 align-top">{jobSummary(asset)}</td>
-              <td className="min-w-[220px] px-3 py-3 align-top">
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    className="rounded-md border border-[#cbd5e1] px-2 py-1 text-xs hover:bg-[#f1f5f9] disabled:text-[#94a3b8]"
-                    type="button"
-                    disabled={actionPending}
-                    onClick={() => onToggleEnabled(asset)}
-                  >
-                    {asset.enabled ? "禁用" : "启用"}
-                  </button>
-                  <button
-                    className="rounded-md border border-[#cbd5e1] px-2 py-1 text-xs text-[#b42318] hover:bg-[#fee4e2] disabled:text-[#94a3b8]"
-                    type="button"
-                    disabled={actionPending}
-                    onClick={() => onUnlink(asset)}
-                  >
-                    删除引用
-                  </button>
-                  <button
-                    className="rounded-md border border-[#cbd5e1] px-2 py-1 text-xs hover:bg-[#f1f5f9] disabled:text-[#94a3b8]"
-                    type="button"
-                    disabled
-                    title="后端尚未暴露 annotation.retry REST 入口"
-                  >
-                    重试标注
-                  </button>
                   {asset.invalid ? (
+                    <div className="mt-2">
+                      <StatusBadge label="源文件失效" tone="danger" />
+                    </div>
+                  ) : null}
+                </td>
+                <td className="px-3 py-3 align-top">
+                  <div>{kindLabel(asset.kind)}</div>
+                  <div className="mt-1 text-xs text-[#64748b]">{storageLabel(asset.storage_mode)}</div>
+                </td>
+                <td className="px-3 py-3 align-top text-[#334155]">
+                  <div>{formatDuration(asset.duration_sec)}</div>
+                  {resolutionLabel(asset) ? (
+                    <div className="mt-1 text-xs text-[#64748b]">{resolutionLabel(asset)}</div>
+                  ) : null}
+                </td>
+                <td className="px-3 py-3 align-top">
+                  <StatusBadge label={understanding.label} tone={understanding.tone} />
+                </td>
+                <td className="px-3 py-3 align-top">
+                  <StatusBadge label={asset.usable ? "可用" : "不可用"} tone={asset.usable ? "success" : "danger"} />
+                  <div className="mt-1 text-xs text-[#64748b]">{asset.enabled ? "已启用" : "已禁用"}</div>
+                </td>
+                <td className="min-w-[150px] px-3 py-3 align-top">{jobSummary(asset)}</td>
+                <td
+                  className="min-w-[220px] px-3 py-3 align-top"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div className="flex flex-wrap gap-2">
                     <button
-                      className="rounded-md bg-[#17202a] px-2 py-1 text-xs font-medium text-white disabled:bg-[#94a3b8]"
+                      className="rounded-md border border-[#cbd5e1] px-2 py-1 text-xs hover:bg-[#f1f5f9] disabled:text-[#94a3b8]"
                       type="button"
                       disabled={actionPending}
-                      onClick={() => onRelocate(asset)}
+                      onClick={() => onToggleEnabled(asset)}
                     >
-                      重新定位
+                      {asset.enabled ? "禁用" : "启用"}
                     </button>
-                  ) : null}
-                </div>
-              </td>
-            </tr>
-          ))}
+                    <button
+                      className="rounded-md border border-[#cbd5e1] px-2 py-1 text-xs text-[#b42318] hover:bg-[#fee4e2] disabled:text-[#94a3b8]"
+                      type="button"
+                      disabled={actionPending}
+                      onClick={() => onUnlink(asset)}
+                    >
+                      删除引用
+                    </button>
+                    {asset.invalid ? (
+                      <button
+                        className="rounded-md bg-[#17202a] px-2 py-1 text-xs font-medium text-white disabled:bg-[#94a3b8]"
+                        type="button"
+                        disabled={actionPending}
+                        onClick={() => onRelocate(asset)}
+                      >
+                        重新定位
+                      </button>
+                    ) : null}
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function MaterialThumbnail({ asset }: { asset: MaterialAsset }): ReactElement {
+  // 加载失败（如缩略图对象丢失）时兜底回 kind 占位，避免裂图。
+  const [failed, setFailed] = useState(false);
+  if (asset.thumbnail_ready && !failed) {
+    return (
+      <img
+        src={api.mediaThumbnailUrl(asset.asset_id)}
+        alt={`${asset.filename || asset.asset_id} 缩略图`}
+        className="h-12 w-20 rounded border border-[#e2e8f0] object-cover"
+        loading="lazy"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return (
+    <div className="flex h-12 w-20 items-center justify-center rounded border border-dashed border-[#cbd5e1] bg-[#f8fafc] text-xs text-[#94a3b8]">
+      {kindLabel(asset.kind)}
     </div>
   );
 }
@@ -142,36 +165,30 @@ function storageLabel(mode: string): string {
   return mode === "reference" ? "reference" : mode === "copy" ? "copy" : mode;
 }
 
-function probeSummary(asset: MaterialAsset): string {
+function resolutionLabel(asset: MaterialAsset): string | null {
   const probe = asset.probe;
   if (!probe) {
-    return "未探测";
+    return null;
   }
-  const duration = numberValue(probe.duration_sec);
   const width = numberValue(probe.width);
   const height = numberValue(probe.height);
-  const parts: string[] = [];
-  if (duration !== null) {
-    parts.push(formatDuration(duration));
-  }
-  if (width !== null && height !== null) {
-    parts.push(`${width}x${height}`);
-  }
-  return parts.length > 0 ? parts.join(" / ") : "已探测";
+  return width !== null && height !== null ? `${width}x${height}` : null;
 }
 
 function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function formatDuration(seconds: number): string {
-  if (seconds < 60) {
-    return `${seconds.toFixed(1)}s`;
+// duration_sec → mm:ss；缺省显示占位符。
+function formatDuration(seconds: number | null): string {
+  if (seconds === null || !Number.isFinite(seconds)) {
+    return "—";
   }
-  const minutes = Math.floor(seconds / 60);
-  const rest = Math.round(seconds % 60)
+  const total = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(total / 60)
     .toString()
     .padStart(2, "0");
+  const rest = (total % 60).toString().padStart(2, "0");
   return `${minutes}:${rest}`;
 }
 

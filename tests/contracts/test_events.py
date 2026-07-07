@@ -25,21 +25,35 @@ EVENT_PAYLOADS: dict[str, dict[str, object]] = {
     "AssetImported": {"event": "AssetImported", "asset_id": "asset_001", "job_id": "job_001"},
     "AssetProbed": {"event": "AssetProbed", "asset_id": "asset_001", "job_id": "job_001"},
     "ProxyGenerated": {"event": "ProxyGenerated", "asset_id": "asset_001", "job_id": "job_001"},
-    "AnnotationCompleted": {
-        "event": "AnnotationCompleted",
-        "asset_id": "asset_001",
-        "job_id": "job_001",
-        "annotation_id": "ann_001",
-    },
-    "AnnotationFailed": {
-        "event": "AnnotationFailed",
-        "asset_id": "asset_001",
-        "job_id": "job_001",
-    },
     "AssetInvalidated": {
         "event": "AssetInvalidated",
         "asset_id": "asset_001",
         "job_id": "job_001",
+    },
+    "AssetIndexReady": {
+        "event": "AssetIndexReady",
+        "asset_id": "asset_001",
+        "payload": {"index_json": {"shots": []}, "thumbnail_object_hash": "thumb_001"},
+    },
+    "AssetIndexFailed": {
+        "event": "AssetIndexFailed",
+        "asset_id": "asset_001",
+        "payload": {"failure": {"message": "index failed"}},
+    },
+    "MaterialUnderstandingStarted": {
+        "event": "MaterialUnderstandingStarted",
+        "asset_id": "asset_001",
+        "payload": {"version": 1},
+    },
+    "MaterialUnderstandingCompleted": {
+        "event": "MaterialUnderstandingCompleted",
+        "asset_id": "asset_001",
+        "payload": {"summary_id": "sum_001", "version": 1},
+    },
+    "MaterialUnderstandingFailed": {
+        "event": "MaterialUnderstandingFailed",
+        "asset_id": "asset_001",
+        "payload": {"failure": {"message": "understand timeout"}},
     },
     "AssetLinked": {"event": "AssetLinked", "project_id": "project_001", "asset_id": "asset_001"},
     "AssetUnlinked": {
@@ -84,12 +98,6 @@ EVENT_PAYLOADS: dict[str, dict[str, object]] = {
     "PostprocessPlanUpdated": {
         "event": "PostprocessPlanUpdated",
         "case_id": "case_001",
-        "base_version": 1,
-    },
-    "CandidatePackCreated": {
-        "event": "CandidatePackCreated",
-        "case_id": "case_001",
-        "candidate_pack_id": "cand_001",
         "base_version": 1,
     },
     "TimelineVersionCreated": {
@@ -211,9 +219,12 @@ EXPECTED_VERSION_MODES: dict[str, str] = {
     "AssetImported": "merge",
     "AssetProbed": "merge",
     "ProxyGenerated": "merge",
-    "AnnotationCompleted": "merge",
-    "AnnotationFailed": "merge",
     "AssetInvalidated": "merge",
+    "AssetIndexReady": "merge",
+    "AssetIndexFailed": "merge",
+    "MaterialUnderstandingStarted": "merge",
+    "MaterialUnderstandingCompleted": "merge",
+    "MaterialUnderstandingFailed": "merge",
     "AssetLinked": "merge",
     "AssetUnlinked": "merge",
     "CaseAssetScopeChanged": "strict",
@@ -225,7 +236,6 @@ EXPECTED_VERSION_MODES: dict[str, str] = {
     "AudioPlanUpdated": "strict",
     "CutPlanUpdated": "strict",
     "PostprocessPlanUpdated": "strict",
-    "CandidatePackCreated": "strict",
     "TimelineVersionCreated": "strict",
     "TimelineVersionRestored": "strict",
     "TimelineValidated": "strict",
@@ -253,8 +263,8 @@ EXPECTED_VERSION_MODES: dict[str, str] = {
 def test_event_registry_matches_prd_event_table() -> None:
     registry = event_registry()
     assert set(registry) == set(EVENT_PAYLOADS)
-    assert len(registry) == 49
-    assert len(EVENT_CLASSES) == 49
+    assert len(registry) == 51
+    assert len(EVENT_CLASSES) == 51
 
 
 def test_each_event_discriminator_parses_to_expected_class() -> None:

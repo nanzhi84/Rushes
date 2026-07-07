@@ -49,9 +49,12 @@ REDUCER_DISPATCH_EVENTS: frozenset[str] = frozenset(
         "AssetImported",
         "AssetProbed",
         "ProxyGenerated",
-        "AnnotationCompleted",
-        "AnnotationFailed",
         "AssetInvalidated",
+        "AssetIndexReady",
+        "AssetIndexFailed",
+        "MaterialUnderstandingStarted",
+        "MaterialUnderstandingCompleted",
+        "MaterialUnderstandingFailed",
         "AssetLinked",
         "AssetUnlinked",
         "CaseAssetScopeChanged",
@@ -63,7 +66,6 @@ REDUCER_DISPATCH_EVENTS: frozenset[str] = frozenset(
         "AudioPlanUpdated",
         "CutPlanUpdated",
         "PostprocessPlanUpdated",
-        "CandidatePackCreated",
         "TimelineVersionCreated",
         "TimelineVersionRestored",
         "TimelineValidated",
@@ -282,9 +284,12 @@ def _apply_event(context: _ReducerContext, event: DomainEventBase) -> None:
         "AssetImported",
         "AssetProbed",
         "ProxyGenerated",
-        "AnnotationCompleted",
-        "AnnotationFailed",
         "AssetInvalidated",
+        "AssetIndexReady",
+        "AssetIndexFailed",
+        "MaterialUnderstandingStarted",
+        "MaterialUnderstandingCompleted",
+        "MaterialUnderstandingFailed",
     }:
         _apply_asset_event(context, event)
     elif name == "AssetLinked":
@@ -307,8 +312,6 @@ def _apply_event(context: _ReducerContext, event: DomainEventBase) -> None:
         "PostprocessPlanUpdated",
     }:
         _apply_plan_updated(context, event)
-    elif name == "CandidatePackCreated":
-        _apply_candidate_pack_created(context, event)
     elif name == "TimelineVersionCreated":
         _apply_timeline_version_created(context, event)
     elif name == "TimelineVersionRestored":
@@ -438,7 +441,6 @@ def _apply_case_created(context: _ReducerContext, event: DomainEventBase) -> Non
             "content_plan": None,
             "audio_plan": None,
             "cut_plan": None,
-            "candidate_pack_id": None,
             "timeline_current_version": None,
             "timeline_validated": False,
             "preview_current_id": None,
@@ -610,12 +612,6 @@ def _copy_case_owned_rows(
 ) -> CaseState:
     data = copied.model_dump(mode="json")
     _copy_case_timeline_rows(context, source.case_id, copied.case_id)
-    if source.candidate_pack_id is not None:
-        data["candidate_pack_id"] = _copy_candidate_pack(
-            context,
-            source.candidate_pack_id,
-            copied.case_id,
-        )
     data["preview_current_id"] = _copy_preview_ref(
         context,
         source.preview_current_id,
@@ -632,37 +628,6 @@ def _copy_case_owned_rows(
         copied.case_id,
     )
     return CaseState.model_validate(data)
-
-
-def _copy_candidate_pack(
-    context: _ReducerContext,
-    source_candidate_pack_id: str,
-    target_case_id: str,
-) -> str | None:
-    source_row = context.connection.execute(
-        select(schema.candidate_packs).where(
-            schema.candidate_packs.c.candidate_pack_id == source_candidate_pack_id
-        )
-    ).first()
-    if source_row is None:
-        return None
-    target_candidate_pack_id = f"{target_case_id}:{source_candidate_pack_id}"
-    if not _row_exists(
-        context.connection,
-        schema.candidate_packs,
-        "candidate_pack_id",
-        target_candidate_pack_id,
-    ):
-        source_values = dict(source_row._mapping)
-        context.connection.execute(
-            schema.candidate_packs.insert().values(
-                candidate_pack_id=target_candidate_pack_id,
-                case_id=target_case_id,
-                slots=source_values["slots"],
-                created_at=context.created_at,
-            )
-        )
-    return target_candidate_pack_id
 
 
 def _copy_case_timeline_rows(
@@ -777,6 +742,7 @@ def _apply_asset_event(context: _ReducerContext, event: DomainEventBase) -> None
     payload = event.payload
     object_hash = payload.get("object_hash")
     proxy_object_hash = payload.get("proxy_object_hash")
+    thumbnail_object_hash = payload.get("thumbnail_object_hash")
     if isinstance(object_hash, str):
         _ensure_object(context, object_hash, size=_optional_int(payload.get("object_size")))
     if isinstance(proxy_object_hash, str):
@@ -784,6 +750,12 @@ def _apply_asset_event(context: _ReducerContext, event: DomainEventBase) -> None
             context,
             proxy_object_hash,
             size=_optional_int(payload.get("proxy_object_size")),
+        )
+    if isinstance(thumbnail_object_hash, str):
+        _ensure_object(
+            context,
+            thumbnail_object_hash,
+            size=_optional_int(payload.get("thumbnail_object_size")),
         )
     if not _row_exists(context.connection, schema.assets, "asset_id", asset_id):
         values = _asset_insert_values(asset_id, payload)
@@ -916,32 +888,6 @@ def _apply_plan_updated(context: _ReducerContext, event: DomainEventBase) -> Non
     if key not in event.payload:
         return
     context.patch_case_state(case_id, {key: event.payload[key]})
-
-
-def _apply_candidate_pack_created(context: _ReducerContext, event: DomainEventBase) -> None:
-    case_id = _required_attr(event, "case_id")
-    candidate_pack_id = getattr(event, "candidate_pack_id", None) or event.payload.get(
-        "candidate_pack_id"
-    )
-    if not isinstance(candidate_pack_id, str):
-        raise ValueError("CandidatePackCreated requires candidate_pack_id")
-    if not _row_exists(
-        context.connection,
-        schema.candidate_packs,
-        "candidate_pack_id",
-        candidate_pack_id,
-    ):
-        pack = event.payload.get("candidate_pack", {})
-        slots = event.payload.get("slots", pack.get("slots", []) if isinstance(pack, dict) else [])
-        context.connection.execute(
-            schema.candidate_packs.insert().values(
-                candidate_pack_id=candidate_pack_id,
-                case_id=case_id,
-                slots=dump_json(slots),
-                created_at=str(event.payload.get("created_at", context.created_at)),
-            )
-        )
-    context.patch_case_state(case_id, {"candidate_pack_id": candidate_pack_id})
 
 
 def _apply_timeline_version_created(context: _ReducerContext, event: DomainEventBase) -> None:
@@ -1123,8 +1069,6 @@ def _apply_job_event(context: _ReducerContext, event: DomainEventBase) -> None:
     requested_by_case_id = getattr(event, "requested_by_case_id", None)
     if not _row_exists(context.connection, schema.jobs, "job_id", job_id):
         _insert_job(context, event)
-    if event.event == "JobEnqueued":
-        _mark_asset_job_enqueued(context, event)
     status = _job_status_for_event(event)
     values: dict[str, Any] = {"status": status}
     progress = getattr(event, "progress", None)
@@ -1179,36 +1123,6 @@ def _insert_job(context: _ReducerContext, event: DomainEventBase) -> None:
             created_at=str(event.payload.get("created_at", context.created_at)),
             started_at=event.payload.get("started_at"),
             finished_at=event.payload.get("finished_at"),
-        )
-    )
-
-
-def _mark_asset_job_enqueued(context: _ReducerContext, event: DomainEventBase) -> None:
-    if str(event.payload.get("kind", "")) != "annotation":
-        return
-    asset_id = event.payload.get("asset_id")
-    if not isinstance(asset_id, str):
-        job_payload = event.payload.get("job_payload")
-        if isinstance(job_payload, Mapping):
-            payload_asset_id = job_payload.get("asset_id")
-            asset_id = payload_asset_id if isinstance(payload_asset_id, str) else None
-    if not isinstance(asset_id, str):
-        return
-    job_payload = event.payload.get("job_payload")
-    requested_pass = job_payload.get("pass") if isinstance(job_payload, Mapping) else None
-    annotation_pass = "deep" if requested_pass == "deep" else "cheap"
-    if not _row_exists(context.connection, schema.assets, "asset_id", asset_id):
-        return
-    context.connection.execute(
-        update(schema.assets)
-        .where(schema.assets.c.asset_id == asset_id)
-        .values(
-            ingest_status="annotating",
-            annotation_status="pending",
-            annotation_pass=annotation_pass,
-            index_status="partial",
-            usable=False,
-            failure=None,
         )
     )
 
@@ -1403,7 +1317,6 @@ def _case_update_values(case_state: CaseState) -> dict[str, Any]:
         "cut_plan": None
         if case_state.cut_plan is None
         else case_state.cut_plan.model_dump(mode="json", by_alias=True),
-        "candidate_pack_id": case_state.candidate_pack_id,
         "timeline_current_version": case_state.timeline_current_version,
         "timeline_validated": case_state.timeline_validated,
         "preview_current_id": case_state.preview_current_id,
@@ -1455,10 +1368,7 @@ def _asset_insert_values(asset_id: str, payload: Mapping[str, Any]) -> dict[str,
         "probe": None if payload.get("probe") is None else dump_json(payload["probe"]),
         "proxy_object_hash": payload.get("proxy_object_hash"),
         "ingest_status": str(payload.get("ingest_status", "imported")),
-        "annotation_status": str(payload.get("annotation_status", "pending")),
-        "annotation_pass": str(payload.get("annotation_pass", "none")),
-        "index_status": str(payload.get("index_status", "none")),
-        "usable": bool(payload.get("usable", False)),
+        "usable": bool(payload.get("usable", True)),
         "failure": None if payload.get("failure") is None else dump_json(payload["failure"]),
     }
 
@@ -1478,9 +1388,6 @@ def _asset_update_values_for_event(event: DomainEventBase) -> dict[str, Any]:
             "mtime",
             "size",
             "ingest_status",
-            "annotation_status",
-            "annotation_pass",
-            "index_status",
             "usable",
         ):
             if key in payload:
@@ -1499,18 +1406,27 @@ def _asset_update_values_for_event(event: DomainEventBase) -> dict[str, Any]:
     elif event.event == "ProxyGenerated":
         values["proxy_object_hash"] = payload.get("proxy_object_hash")
         values["ingest_status"] = str(payload.get("ingest_status", "proxying"))
-    elif event.event == "AnnotationCompleted":
-        values["annotation_status"] = "completed"
-        values["annotation_pass"] = str(payload.get("annotation_pass", "cheap"))
-        values["index_status"] = str(payload.get("index_status", "ready"))
-        values["usable"] = bool(payload.get("usable", True))
-    elif event.event == "AnnotationFailed":
-        values["annotation_status"] = "failed"
-        values["failure"] = dump_json(payload.get("failure", {"message": "annotation failed"}))
-        values["usable"] = False
     elif event.event == "AssetInvalidated":
         values["usable"] = False
         values["failure"] = dump_json(payload.get("failure", {"message": "asset invalidated"}))
+    elif event.event == "AssetIndexReady":
+        # 便宜本地索引就绪：写结构化索引 JSON、缩略图对象哈希，并把摄入状态推到 indexed。
+        if "index_json" in payload:
+            values["index_json"] = (
+                None if payload["index_json"] is None else dump_json(payload["index_json"])
+            )
+        if "thumbnail_object_hash" in payload:
+            values["thumbnail_object_hash"] = payload["thumbnail_object_hash"]
+        values["ingest_status"] = str(payload.get("ingest_status", "indexed"))
+    elif event.event == "AssetIndexFailed":
+        # 索引失败不阻塞任何流程，仅记录失败信息（Spec C §C1）。
+        values["failure"] = dump_json(payload.get("failure", {"message": "index failed"}))
+    elif event.event == "MaterialUnderstandingStarted":
+        values["understanding_status"] = "running"
+    elif event.event == "MaterialUnderstandingCompleted":
+        values["understanding_status"] = "ready"
+    elif event.event == "MaterialUnderstandingFailed":
+        values["understanding_status"] = "failed"
     return values
 
 

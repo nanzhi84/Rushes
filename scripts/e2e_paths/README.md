@@ -53,7 +53,7 @@ uv run python scripts/e2e_paths/run_path2.py \
 
 - 导入 3 段无声 B-roll 和 1 张图。
 - 等内容计划确认，进入 TTS。
-- 等 TTS、检索、timeline、预览。
+- 等 TTS、素材理解摘要、timeline 组装、预览。
 - 字幕选择 `clean_bottom`，BGM 从项目已上传的 audio 素材中选、无音频素材则跳过，确认 export。
 - 下载最终 MP4，并用 ffprobe 检查时长在预期区间内。
 
@@ -70,8 +70,8 @@ uv run python scripts/e2e_paths/run_path2.py \
 - 路径 1 fixture TTS、路径 2 TTS：`RUSHES_VOLC_TTS_AKSK`、
   `RUSHES_VOLC_TTS_APPID`、`RUSHES_VOLC_TTS_CLUSTER`，可选
   `RUSHES_VOLC_TTS_VOICE_TYPE`。
-- 路径 2 图/视频标注和检索按本机配置启用，通常需要 `RUSHES_VLM_API_KEY`；
-  embedding 没有配置时会降级到关键词检索，效果可能不稳定。
+- 路径 2 图/视频的按需理解（understand.materials 子代理看帧）需要
+  `RUSHES_VLM_API_KEY`；缺失时子代理无法看帧，理解会失败并由主代理绕过或重试。
 
 本机还需要 `ffmpeg` 和 `ffprobe`。
 

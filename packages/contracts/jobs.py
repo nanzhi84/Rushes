@@ -11,6 +11,7 @@ JobKind = Literal[
     "render_preview",
     "render_final",
     "proxy",
+    "index",
     "align",
     "import_url",
     "noop",

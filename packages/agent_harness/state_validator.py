@@ -48,7 +48,6 @@ CASE_STATE_EVENT_NAMES = frozenset(
         "AudioPlanUpdated",
         "CutPlanUpdated",
         "PostprocessPlanUpdated",
-        "CandidatePackCreated",
         "TimelineVersionCreated",
         "TimelineVersionRestored",
         "TimelineValidated",
@@ -70,9 +69,12 @@ PROJECT_ASSET_EVENT_NAMES = frozenset(
         "AssetImported",
         "AssetProbed",
         "ProxyGenerated",
-        "AnnotationCompleted",
-        "AnnotationFailed",
         "AssetInvalidated",
+        "AssetIndexReady",
+        "AssetIndexFailed",
+        "MaterialUnderstandingStarted",
+        "MaterialUnderstandingCompleted",
+        "MaterialUnderstandingFailed",
         "AssetLinked",
         "AssetUnlinked",
     }
@@ -125,18 +127,6 @@ def _validate_case_references(
             ValidationViolation(
                 code="invalid_preview_current_id",
                 message="preview_current_id does not belong to this case",
-                case_id=case_state.case_id,
-            )
-        )
-    if case_state.candidate_pack_id is not None and not _candidate_pack_belongs_to_case(
-        connection,
-        case_state.candidate_pack_id,
-        case_state.case_id,
-    ):
-        violations.append(
-            ValidationViolation(
-                code="invalid_candidate_pack_id",
-                message="candidate_pack_id does not belong to this case",
                 case_id=case_state.case_id,
             )
         )
@@ -284,20 +274,6 @@ def _preview_belongs_to_case(connection: Connection, preview_id: str, case_id: s
         select(schema.previews.c.preview_id).where(
             schema.previews.c.preview_id == preview_id,
             schema.previews.c.case_id == case_id,
-        )
-    ).first()
-    return row is not None
-
-
-def _candidate_pack_belongs_to_case(
-    connection: Connection,
-    candidate_pack_id: str,
-    case_id: str,
-) -> bool:
-    row = connection.execute(
-        select(schema.candidate_packs.c.candidate_pack_id).where(
-            schema.candidate_packs.c.candidate_pack_id == candidate_pack_id,
-            schema.candidate_packs.c.case_id == case_id,
         )
     ).first()
     return row is not None

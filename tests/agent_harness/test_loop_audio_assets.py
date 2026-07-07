@@ -48,9 +48,6 @@ def _insert_asset(
             probe=None,
             proxy_object_hash=None,
             ingest_status="imported",
-            annotation_status="pending",
-            annotation_pass="none",
-            index_status="none",
             usable=usable,
             failure=None,
         )

@@ -53,7 +53,6 @@ def _insert_project_and_case(
                 "content_plan": None,
                 "audio_plan": None,
                 "cut_plan": None,
-                "candidate_pack_id": None,
                 "timeline_current_version": timeline_current_version,
                 "timeline_validated": False,
                 "preview_current_id": None,
@@ -127,7 +126,6 @@ def _insert_case_for_existing_project(tmp_path: Path, case_id: str) -> None:
                 "content_plan": None,
                 "audio_plan": None,
                 "cut_plan": None,
-                "candidate_pack_id": None,
                 "timeline_current_version": None,
                 "timeline_validated": False,
                 "preview_current_id": None,
@@ -233,14 +231,6 @@ def test_case_copied_deep_copies_case_owned_references(tmp_path: Path) -> None:
     engine = create_workspace_engine(tmp_path)
     with begin_immediate(engine) as connection:
         connection.execute(
-            schema.candidate_packs.insert().values(
-                candidate_pack_id="pack_1",
-                case_id="case_1",
-                slots=dump_json([{"slot_id": "slot_1"}]),
-                created_at=NOW,
-            )
-        )
-        connection.execute(
             schema.objects.insert().values(
                 hash="hash_preview",
                 rel_path="objects/hash_preview",
@@ -261,7 +251,7 @@ def test_case_copied_deep_copies_case_owned_references(tmp_path: Path) -> None:
         connection.execute(
             schema.cases.update()
             .where(schema.cases.c.case_id == "case_1")
-            .values(candidate_pack_id="pack_1", preview_current_id="preview_1")
+            .values(preview_current_id="preview_1")
         )
 
     result = apply(
@@ -288,23 +278,16 @@ def test_case_copied_deep_copies_case_owned_references(tmp_path: Path) -> None:
                 schema.timeline_versions.c.version == 1,
             )
         ).one()
-        copied_pack = connection.execute(
-            select(schema.candidate_packs).where(
-                schema.candidate_packs.c.candidate_pack_id == "case_2:pack_1"
-            )
-        ).one()
         copied_preview = connection.execute(
             select(schema.previews).where(schema.previews.c.preview_id == "case_2:preview_1")
         ).one()
 
     assert result.status == "applied"
     assert copied_case is not None
-    assert copied_case["candidate_pack_id"] == "case_2:pack_1"
     assert copied_case["timeline_current_version"] == 1
     assert copied_case["preview_current_id"] == "case_2:preview_1"
     assert copied_timeline._mapping["case_id"] == "case_2"
     assert load_json(copied_timeline._mapping["document_json"])["case_id"] == "case_2"
-    assert copied_pack._mapping["case_id"] == "case_2"
     assert copied_preview._mapping["case_id"] == "case_2"
 
 
@@ -377,16 +360,6 @@ def test_asset_and_asset_link_merge_events_update_records(tmp_path: Path) -> Non
                 "payload": {"proxy_object_hash": "obj_proxy_1", "ingest_status": "ready"},
             },
             {
-                "event": "AnnotationCompleted",
-                "asset_id": "asset_1",
-                "job_id": "job_annotation_1",
-                "payload": {
-                    "annotation_pass": "cheap",
-                    "index_status": "ready",
-                    "usable": True,
-                },
-            },
-            {
                 "event": "AssetInvalidated",
                 "asset_id": "asset_1",
                 "job_id": "job_invalid_1",
@@ -399,9 +372,8 @@ def test_asset_and_asset_link_merge_events_update_records(tmp_path: Path) -> Non
                 "payload": {"reference_path": "/tmp/bad.mp4"},
             },
             {
-                "event": "AnnotationFailed",
+                "event": "AssetIndexFailed",
                 "asset_id": "asset_2",
-                "job_id": "job_annotation_2",
                 "payload": {"failure": {"message": "no speech"}},
             },
             {
@@ -445,13 +417,125 @@ def test_asset_and_asset_link_merge_events_update_records(tmp_path: Path) -> Non
     assert result.status == "applied"
     assert load_json(asset_1_values["probe"]) == {"duration_sec": 3}
     assert asset_1_values["proxy_object_hash"] == "obj_proxy_1"
-    assert asset_1_values["annotation_status"] == "completed"
     assert asset_1_values["usable"] is False
     assert load_json(asset_1_values["failure"]) == {"message": "bad media"}
-    assert asset_2_values["annotation_status"] == "failed"
     assert load_json(asset_2_values["failure"]) == {"message": "no speech"}
     assert object_count == 2
     assert link_count == 0
+
+
+def test_asset_index_and_understanding_events_update_asset_columns(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    engine = create_workspace_engine(tmp_path)
+
+    result = apply(
+        [
+            {
+                "event": "AssetImported",
+                "asset_id": "asset_1",
+                "job_id": "job_import_1",
+                "payload": {"reference_path": "/tmp/source.mp4", "size": 10},
+            },
+            {
+                "event": "AssetIndexReady",
+                "asset_id": "asset_1",
+                "payload": {
+                    "index_json": {"shots": [{"start_s": 0.0, "end_s": 2.0}]},
+                    "thumbnail_object_hash": "thumb_hash_1",
+                },
+            },
+            {
+                "event": "MaterialUnderstandingStarted",
+                "asset_id": "asset_1",
+                "payload": {"version": 1},
+            },
+            {
+                "event": "MaterialUnderstandingCompleted",
+                "asset_id": "asset_1",
+                "payload": {"summary_id": "sum_1", "version": 1},
+            },
+            {
+                "event": "AssetImported",
+                "asset_id": "asset_2",
+                "job_id": "job_import_2",
+                "payload": {"reference_path": "/tmp/bad.mp4"},
+            },
+            {
+                "event": "AssetIndexFailed",
+                "asset_id": "asset_2",
+                "payload": {"failure": {"message": "scenedetect crashed"}},
+            },
+            {
+                "event": "MaterialUnderstandingFailed",
+                "asset_id": "asset_2",
+                "payload": {"failure": {"message": "subagent timeout"}},
+            },
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+
+    with begin_immediate(engine) as connection:
+        asset_1 = (
+            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == "asset_1"))
+            .one()
+            ._mapping
+        )
+        asset_2 = (
+            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == "asset_2"))
+            .one()
+            ._mapping
+        )
+        thumbnail_object = connection.execute(
+            select(schema.objects).where(schema.objects.c.hash == "thumb_hash_1")
+        ).first()
+
+    assert result.status == "applied"
+    # AssetIndexReady：写便宜索引 JSON、缩略图哈希，并把摄入状态推到 indexed
+    assert load_json(asset_1["index_json"]) == {"shots": [{"start_s": 0.0, "end_s": 2.0}]}
+    assert asset_1["thumbnail_object_hash"] == "thumb_hash_1"
+    assert asset_1["ingest_status"] == "indexed"
+    # 缩略图哈希被登记进 objects（满足外键）
+    assert thumbnail_object is not None
+    # MaterialUnderstanding* 顺序推进 understanding_status
+    assert asset_1["understanding_status"] == "ready"
+    # asset_2：AssetIndexFailed 记录索引失败，MaterialUnderstandingFailed 只置理解状态
+    assert asset_2["understanding_status"] == "failed"
+    assert load_json(asset_2["failure"]) == {"message": "scenedetect crashed"}
+
+
+def test_asset_understanding_status_defaults_to_none(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    engine = create_workspace_engine(tmp_path)
+
+    apply(
+        [
+            {
+                "event": "AssetImported",
+                "asset_id": "asset_1",
+                "job_id": "job_import_1",
+                "payload": {"reference_path": "/tmp/source.mp4", "size": 10},
+            }
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+
+    with begin_immediate(engine) as connection:
+        asset = (
+            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == "asset_1"))
+            .one()
+            ._mapping
+        )
+
+    # server_default：新导入素材理解状态为 none，索引列为空
+    assert asset["understanding_status"] == "none"
+    assert asset["index_json"] is None
+    assert asset["thumbnail_object_hash"] is None
 
 
 def test_case_asset_scope_changed_updates_selected_and_disabled_assets(tmp_path: Path) -> None:
@@ -959,7 +1043,7 @@ def test_pending_tool_call_followup_is_returned_but_not_executed(tmp_path: Path)
     assert decision._mapping["pending_tool_call_status"] == "approved"
 
 
-def test_plan_updates_and_candidate_pack_created_patch_case_state(tmp_path: Path) -> None:
+def test_plan_updates_patch_case_state(tmp_path: Path) -> None:
     _prepare_workspace(tmp_path)
     _insert_project_and_case(tmp_path)
     engine = create_workspace_engine(tmp_path)
@@ -1001,12 +1085,6 @@ def test_plan_updates_and_candidate_pack_created_patch_case_state(tmp_path: Path
                     }
                 },
             },
-            {
-                "event": "CandidatePackCreated",
-                "case_id": "case_1",
-                "candidate_pack_id": "pack_1",
-                "payload": {"slots": [{"slot_id": "s1"}]},
-            },
         ],
         engine=engine,
         base_version=0,
@@ -1016,11 +1094,6 @@ def test_plan_updates_and_candidate_pack_created_patch_case_state(tmp_path: Path
 
     with begin_immediate(engine) as connection:
         case = CasesRepository(connection).get("case_1")
-        pack = connection.execute(
-            select(schema.candidate_packs).where(
-                schema.candidate_packs.c.candidate_pack_id == "pack_1"
-            )
-        ).one()
 
     assert result.status == "applied"
     assert case is not None
@@ -1029,9 +1102,7 @@ def test_plan_updates_and_candidate_pack_created_patch_case_state(tmp_path: Path
     assert case["audio_plan"]["mode"] == "silent"
     assert case["cut_plan"]["total_target_duration_sec"] == 12.0
     assert case["postprocess_plan"]["subtitle"]["style_template_id"] == "large"
-    assert case["candidate_pack_id"] == "pack_1"
     assert case["state_version"] == 1
-    assert load_json(pack._mapping["slots"]) == [{"slot_id": "s1"}]
 
 
 def test_case_decision_answer_applies_effect_and_logs_followup_event(tmp_path: Path) -> None:

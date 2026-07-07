@@ -18,7 +18,7 @@ from contracts.case import CaseState
 from contracts.provider import ProviderDescriptor
 from contracts.tool import ToolSpec
 from contracts.tool_result import ToolResult
-from providers.capabilities import LLM_CHAT, ProviderRequest
+from providers.capabilities import LLM_CHAT, VLM_ANNOTATION, ProviderRequest
 from providers.gateway import ProviderGateway
 from providers.mock import MockProvider
 from providers.registry import ProviderRegistry
@@ -54,6 +54,9 @@ class GoldenCase:
     expected_tool_trace: Sequence[ExpectedToolTrace]
     assertions: GoldenAssertions
     registry_factory: Callable[[], ToolRegistry] = build_default_tool_registry
+    # VLM_ANNOTATION 脚本项（形如 {"content": "<动作 JSON 串>"}），供理解子代理消费。
+    # 非空时同一 MockProvider 兼跑 LLM_CHAT + VLM_ANNOTATION，网关作为 tool_gateway 注入。
+    vlm_script: Sequence[dict[str, Any]] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,25 +116,27 @@ class GoldenExecutor:
         with engine.begin() as connection:
             schema.create_all(connection)
         case.build_workspace(engine)
-        provider = MockProvider(
-            scripts={
-                LLM_CHAT: list(case.provider_script),
-            }
-        )
+        scripts: dict[Any, list[dict[str, Any]]] = {LLM_CHAT: list(case.provider_script)}
+        capabilities = [LLM_CHAT]
+        if case.vlm_script:
+            scripts[VLM_ANNOTATION] = list(case.vlm_script)
+            capabilities.append(VLM_ANNOTATION)
+        provider = MockProvider(scripts=scripts)
         provider_registry = ProviderRegistry()
         provider_registry.register(
             ProviderDescriptor(
                 provider_id="mock",
                 display_name="Mock",
                 version="1",
-                capabilities=[LLM_CHAT],
+                capabilities=capabilities,
                 config_model=EmptyInput,
                 client_ref="providers.mock.MockProvider",
                 supports_json_schema=True,
             ),
             provider,
         )
-        planner = GatewayPlanner(ProviderGateway(registry=provider_registry))
+        gateway = ProviderGateway(registry=provider_registry)
+        planner = GatewayPlanner(gateway)
         tool_traces: list[ToolTraceEntry] = []
 
         async def runner(item: TurnQueueItem, token: StopToken) -> None:
@@ -142,6 +147,7 @@ class GoldenExecutor:
                 planner=planner,
                 registry=case.registry_factory(),
                 turn_id=f"golden_{case.name}_{item.item_id}",
+                tool_gateway=gateway,
             )
             tool_traces.extend(_trace_entries(result.tool_results))
 
@@ -196,7 +202,6 @@ def base_workspace(engine: Engine, *, state_version: int = 0) -> None:
                 "content_plan": None,
                 "audio_plan": None,
                 "cut_plan": None,
-                "candidate_pack_id": None,
                 "timeline_current_version": None,
                 "timeline_validated": False,
                 "preview_current_id": None,
@@ -209,6 +214,55 @@ def base_workspace(engine: Engine, *, state_version: int = 0) -> None:
                 "disabled_asset_ids": [],
                 "scratch_memory": {},
             }
+        )
+
+
+def understand_compose_workspace(engine: Engine) -> None:
+    """在 base_workspace 之上补一段可用视频素材 + 确认静音 audio_plan。
+
+    供「understand.materials → asset.read_summary → timeline.compose_initial」golden：
+    素材带便宜索引（index_json）与 usable 位，满足 compose_initial 的前置工件；
+    audio_plan={"mode":"silent"} 满足 audio_plan_confirmed。
+    """
+
+    from storage.repositories._json import dump_json
+
+    base_workspace(engine)
+    with begin_immediate(engine) as connection:
+        connection.execute(
+            schema.cases.update()
+            .where(schema.cases.c.case_id == "case_1")
+            .values(audio_plan=dump_json({"mode": "silent"}))
+        )
+        connection.execute(
+            schema.assets.insert().values(
+                asset_id="asset_1",
+                storage_mode="reference",
+                object_hash=None,
+                reference_path="/tmp/asset_1.mp4",
+                kind="video",
+                source="local_path",
+                filename="scenery_01.mp4",
+                hash="hash_asset_1",
+                mtime=1,
+                size=1,
+                probe=dump_json({"duration_sec": 10.0, "fps": 30.0, "has_audio": False}),
+                proxy_object_hash=None,
+                ingest_status="indexed",
+                usable=True,
+                failure=None,
+                index_json=dump_json({"duration_sec": 10.0, "shots": [], "vad": []}),
+                understanding_status="none",
+            )
+        )
+        connection.execute(
+            schema.project_asset_links.insert().values(
+                project_id="project_1",
+                asset_id="asset_1",
+                enabled=True,
+                linked_at=NOW,
+                note="",
+            )
         )
 
 

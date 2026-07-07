@@ -1,39 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { MaterialAsset } from "../api/client";
+import { storeAuthToken } from "../auth";
 import { ProjectMaterialsView } from "./ProjectMaterialsPage";
 
 describe("ProjectMaterialsView", () => {
-  it("渲染素材列表里的各类标注状态徽章", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        jsonResponse({
-          project_id: "project_1",
-          invalidated_asset_ids: [],
-          assets: [
-            material({ asset_id: "asset_pending", filename: "pending.mp4", annotation_status: "pending" }),
-            material({ asset_id: "asset_analyzing", filename: "analyzing.mp4", annotation_status: "analyzing" }),
-            material({
-              asset_id: "asset_completed",
-              filename: "completed.mp4",
-              annotation_status: "completed",
-              index_status: "ready"
-            }),
-            material({ asset_id: "asset_failed", filename: "failed.mp4", annotation_status: "failed" })
-          ]
-        })
-      )
-    );
-
-    renderMaterials();
-
-    expect(await screen.findByText("待标注")).toBeTruthy();
-    expect(screen.getByText("标注中")).toBeTruthy();
-    expect(screen.getByText("已完成")).toBeTruthy();
-    expect(screen.getByText("失败")).toBeTruthy();
-    expect(screen.getByText("已索引")).toBeTruthy();
+  afterEach(() => {
+    window.sessionStorage.clear();
   });
 
   it("按 init、parts、complete 顺序完成分片上传", async () => {
@@ -250,6 +224,140 @@ describe("ProjectMaterialsView", () => {
     expect(await screen.findByText("源文件失效")).toBeTruthy();
     expect(screen.getByRole("button", { name: "重新定位" })).toBeTruthy();
   });
+
+  it("缩略图就绪渲染带 query token 的 img，加载失败兜底回占位，时长按 mm:ss 显示", async () => {
+    storeAuthToken("test-token");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          project_id: "project_1",
+          invalidated_asset_ids: [],
+          assets: [
+            material({
+              asset_id: "asset_thumb",
+              filename: "clip.mp4",
+              thumbnail_ready: true,
+              duration_sec: 92
+            })
+          ]
+        })
+      )
+    );
+
+    renderMaterials();
+
+    const thumb = (await screen.findByAltText("clip.mp4 缩略图")) as HTMLImageElement;
+    expect(thumb.getAttribute("src")).toBe("/api/media/asset_thumb/thumbnail?token=test-token");
+    expect(screen.getByText("01:32")).toBeTruthy();
+    // 类型列本身有一个「视频」。
+    expect(screen.getAllByText("视频")).toHaveLength(1);
+
+    fireEvent.error(thumb);
+    expect(screen.queryByAltText("clip.mp4 缩略图")).toBeNull();
+    // 加载失败后缩略图列兜底为 kind 占位，「视频」多出一处。
+    expect(screen.getAllByText("视频")).toHaveLength(2);
+  });
+
+  it("按理解状态渲染徽标文案", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          project_id: "project_1",
+          invalidated_asset_ids: [],
+          assets: [
+            material({ asset_id: "a_none", understanding_status: "none" }),
+            material({ asset_id: "a_running", understanding_status: "running" }),
+            material({ asset_id: "a_ready", understanding_status: "ready" }),
+            material({ asset_id: "a_failed", understanding_status: "failed" })
+          ]
+        })
+      )
+    );
+
+    renderMaterials();
+
+    expect(await screen.findByText("未理解")).toBeTruthy();
+    expect(screen.getByText("理解中")).toBeTruthy();
+    expect(screen.getByText("已理解")).toBeTruthy();
+    expect(screen.getByText("理解失败")).toBeTruthy();
+  });
+
+  it("素材表格不再出现标注相关 UI", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          project_id: "project_1",
+          invalidated_asset_ids: [],
+          assets: [material({ asset_id: "asset_1", understanding_status: "ready" })]
+        })
+      )
+    );
+
+    renderMaterials();
+
+    await screen.findByText("已理解");
+    expect(screen.queryByText(/标注/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /重试标注/ })).toBeNull();
+  });
+
+  it("点击已理解素材拉取并渲染摘要分段时间戳表", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/materials/asset_ready/summary")) {
+        return jsonResponse({
+          asset_id: "asset_ready",
+          summary: {
+            asset_id: "asset_ready",
+            version: 1,
+            semantic_role: "footage",
+            overall: "整体是一段城市夜景空镜",
+            segments: [
+              {
+                start_s: 0,
+                end_s: 3.5,
+                description: "霓虹灯特写",
+                tags: ["night", "neon"],
+                quality: "good"
+              }
+            ]
+          }
+        });
+      }
+      if (url.endsWith("/materials")) {
+        return jsonResponse({
+          project_id: "project_1",
+          invalidated_asset_ids: [],
+          assets: [
+            material({
+              asset_id: "asset_ready",
+              filename: "city.mp4",
+              understanding_status: "ready"
+            })
+          ]
+        });
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderMaterials();
+
+    fireEvent.click(await screen.findByText("city.mp4"));
+
+    expect(await screen.findByText("整体是一段城市夜景空镜")).toBeTruthy();
+    expect(screen.getByText("霓虹灯特写")).toBeTruthy();
+    expect(screen.getByText("00:00.0 - 00:03.5")).toBeTruthy();
+    expect(screen.getByText("night、neon")).toBeTruthy();
+    await waitFor(() => {
+      const summaryCall = fetchMock.mock.calls.find(([input]) =>
+        String(input).endsWith("/materials/asset_ready/summary")
+      );
+      expect(summaryCall).toBeTruthy();
+    });
+  });
 });
 
 function renderMaterials(): void {
@@ -280,14 +388,14 @@ function material(overrides: Partial<MaterialAsset> = {}): MaterialAsset {
     size: 1024,
     mtime: 1,
     ingest_status: "imported",
-    annotation_status: "pending",
-    annotation_pass: "none",
-    index_status: "none",
+    understanding_status: "none",
     usable: true,
     enabled: true,
     probe: { duration_sec: 12.5, width: 1920, height: 1080 },
+    duration_sec: 12.5,
     proxy_object_hash: null,
     proxy_ready: false,
+    thumbnail_ready: false,
     invalid: false,
     failure: null,
     jobs: [],

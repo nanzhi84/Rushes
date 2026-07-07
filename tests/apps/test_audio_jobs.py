@@ -520,7 +520,6 @@ def _engine_with_asset(
                 "content_plan": content_plan,
                 "audio_plan": audio_plan,
                 "cut_plan": cut_plan,
-                "candidate_pack_id": None,
                 "timeline_current_version": None,
                 "preview_current_id": None,
                 "last_viewed_preview_id": None,
@@ -547,9 +546,6 @@ def _engine_with_asset(
                 probe=None,
                 proxy_object_hash=None,
                 ingest_status="imported",
-                annotation_status="pending",
-                annotation_pass="none",
-                index_status="none",
                 usable=True,
                 failure=None,
             )

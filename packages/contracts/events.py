@@ -130,29 +130,47 @@ class ProxyGenerated(DomainEventBase):
     merge_key: ClassVar[tuple[str, ...]] = ("asset_id",)
 
 
-class AnnotationCompleted(DomainEventBase):
-    event: Literal["AnnotationCompleted"] = "AnnotationCompleted"
-    asset_id: str
-    job_id: str | None = None
-    annotation_id: str | None = None
-    version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("asset_id", "job_id")
-
-
-class AnnotationFailed(DomainEventBase):
-    event: Literal["AnnotationFailed"] = "AnnotationFailed"
-    asset_id: str
-    job_id: str | None = None
-    version_mode: ClassVar[VersionMode] = "merge"
-    merge_key: ClassVar[tuple[str, ...]] = ("asset_id", "job_id")
-
-
 class AssetInvalidated(DomainEventBase):
     event: Literal["AssetInvalidated"] = "AssetInvalidated"
     asset_id: str
     job_id: str | None = None
     version_mode: ClassVar[VersionMode] = "merge"
     merge_key: ClassVar[tuple[str, ...]] = ("asset_id", "job_id")
+
+
+class AssetIndexReady(DomainEventBase):
+    event: Literal["AssetIndexReady"] = "AssetIndexReady"
+    asset_id: str
+    version_mode: ClassVar[VersionMode] = "merge"
+    merge_key: ClassVar[tuple[str, ...]] = ()
+
+
+class AssetIndexFailed(DomainEventBase):
+    event: Literal["AssetIndexFailed"] = "AssetIndexFailed"
+    asset_id: str
+    version_mode: ClassVar[VersionMode] = "merge"
+    merge_key: ClassVar[tuple[str, ...]] = ()
+
+
+class MaterialUnderstandingStarted(DomainEventBase):
+    event: Literal["MaterialUnderstandingStarted"] = "MaterialUnderstandingStarted"
+    asset_id: str
+    version_mode: ClassVar[VersionMode] = "merge"
+    merge_key: ClassVar[tuple[str, ...]] = ()
+
+
+class MaterialUnderstandingCompleted(DomainEventBase):
+    event: Literal["MaterialUnderstandingCompleted"] = "MaterialUnderstandingCompleted"
+    asset_id: str
+    version_mode: ClassVar[VersionMode] = "merge"
+    merge_key: ClassVar[tuple[str, ...]] = ()
+
+
+class MaterialUnderstandingFailed(DomainEventBase):
+    event: Literal["MaterialUnderstandingFailed"] = "MaterialUnderstandingFailed"
+    asset_id: str
+    version_mode: ClassVar[VersionMode] = "merge"
+    merge_key: ClassVar[tuple[str, ...]] = ()
 
 
 class AssetLinked(DomainEventBase):
@@ -239,14 +257,6 @@ class CutPlanUpdated(DomainEventBase):
 class PostprocessPlanUpdated(DomainEventBase):
     event: Literal["PostprocessPlanUpdated"] = "PostprocessPlanUpdated"
     case_id: str
-    version_mode: ClassVar[VersionMode] = "strict"
-    merge_key: ClassVar[tuple[str, ...]] = ()
-
-
-class CandidatePackCreated(DomainEventBase):
-    event: Literal["CandidatePackCreated"] = "CandidatePackCreated"
-    case_id: str
-    candidate_pack_id: str | None = None
     version_mode: ClassVar[VersionMode] = "strict"
     merge_key: ClassVar[tuple[str, ...]] = ()
 
@@ -442,9 +452,12 @@ EVENT_CLASSES: tuple[type[DomainEventBase], ...] = (
     AssetImported,
     AssetProbed,
     ProxyGenerated,
-    AnnotationCompleted,
-    AnnotationFailed,
     AssetInvalidated,
+    AssetIndexReady,
+    AssetIndexFailed,
+    MaterialUnderstandingStarted,
+    MaterialUnderstandingCompleted,
+    MaterialUnderstandingFailed,
     AssetLinked,
     AssetUnlinked,
     CaseAssetScopeChanged,
@@ -456,7 +469,6 @@ EVENT_CLASSES: tuple[type[DomainEventBase], ...] = (
     AudioPlanUpdated,
     CutPlanUpdated,
     PostprocessPlanUpdated,
-    CandidatePackCreated,
     TimelineVersionCreated,
     TimelineVersionRestored,
     TimelineValidated,
@@ -494,9 +506,12 @@ type EventName = Literal[
     "AssetImported",
     "AssetProbed",
     "ProxyGenerated",
-    "AnnotationCompleted",
-    "AnnotationFailed",
     "AssetInvalidated",
+    "AssetIndexReady",
+    "AssetIndexFailed",
+    "MaterialUnderstandingStarted",
+    "MaterialUnderstandingCompleted",
+    "MaterialUnderstandingFailed",
     "AssetLinked",
     "AssetUnlinked",
     "CaseAssetScopeChanged",
@@ -508,7 +523,6 @@ type EventName = Literal[
     "AudioPlanUpdated",
     "CutPlanUpdated",
     "PostprocessPlanUpdated",
-    "CandidatePackCreated",
     "TimelineVersionCreated",
     "TimelineVersionRestored",
     "TimelineValidated",
@@ -546,9 +560,12 @@ type EVENT_UNION = Annotated[
     | AssetImported
     | AssetProbed
     | ProxyGenerated
-    | AnnotationCompleted
-    | AnnotationFailed
     | AssetInvalidated
+    | AssetIndexReady
+    | AssetIndexFailed
+    | MaterialUnderstandingStarted
+    | MaterialUnderstandingCompleted
+    | MaterialUnderstandingFailed
     | AssetLinked
     | AssetUnlinked
     | CaseAssetScopeChanged
@@ -560,7 +577,6 @@ type EVENT_UNION = Annotated[
     | AudioPlanUpdated
     | CutPlanUpdated
     | PostprocessPlanUpdated
-    | CandidatePackCreated
     | TimelineVersionCreated
     | TimelineVersionRestored
     | TimelineValidated

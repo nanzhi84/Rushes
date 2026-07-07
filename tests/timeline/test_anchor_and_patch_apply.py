@@ -180,14 +180,17 @@ def test_timeline_apply_patch_tool_conflict_returns_decision(tmp_path: Path) -> 
     assert "timeline_summary" in result.data
 
 
-def test_apply_patch_implements_candidate_and_direct_edit_ops(tmp_path: Path) -> None:
+def test_apply_patch_implements_clip_and_direct_edit_ops(tmp_path: Path) -> None:
     cases = [
         (
             "replace_clip",
             {
                 "kind": "replace_clip",
                 "timeline_clip_id": "tc_v2",
-                "new_candidate_id": "cand_new",
+                "asset_id": "asset_new",
+                "source_start_s": 0.0,
+                "source_end_s": 2.0,
+                "role": "b_roll",
             },
             lambda timeline: _visual_clip(timeline, "tc_v2").asset_id == "asset_new",
         ),
@@ -202,8 +205,15 @@ def test_apply_patch_implements_candidate_and_direct_edit_ops(tmp_path: Path) ->
             lambda timeline: timeline.duration_frames == 255,
         ),
         (
-            "insert_candidate",
-            {"kind": "insert_candidate", "candidate_id": "cand_new", "position_sec": 3.0},
+            "insert_clip",
+            {
+                "kind": "insert_clip",
+                "asset_id": "asset_new",
+                "source_start_s": 0.0,
+                "source_end_s": 2.0,
+                "role": "b_roll",
+                "position_s": 3.0,
+            },
             lambda timeline: timeline.duration_frames == 330,
         ),
         (
@@ -255,10 +265,9 @@ def test_apply_patch_implements_candidate_and_direct_edit_ops(tmp_path: Path) ->
             if op["kind"] == "generate_subtitles":
                 timeline = _timeline(version=index, subtitles=False)
             store_timeline_version(connection, timeline, created_at=NOW)
-            _seed_candidate_pack(connection)
             outcome = apply_patch(
                 connection,
-                _case_state(timeline_current_version=index, candidate_pack_id="pack_1"),
+                _case_state(timeline_current_version=index),
                 TimelinePatchRequest.model_validate(
                     {
                         "case_id": "case_1",
@@ -273,6 +282,81 @@ def test_apply_patch_implements_candidate_and_direct_edit_ops(tmp_path: Path) ->
         assert outcome.status == "succeeded"
         assert outcome.timeline is not None
         assert assertion(outcome.timeline)
+
+
+def test_insert_clip_supports_image_role_on_visual_base(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    with engine.begin() as connection:
+        _seed_project_media(connection)
+        _seed_asset(connection, "asset_img", kind="image", probe={})
+        store_timeline_version(connection, _timeline(version=1), created_at=NOW)
+        outcome = apply_patch(
+            connection,
+            _case_state(timeline_current_version=1),
+            TimelinePatchRequest.model_validate(
+                {
+                    "case_id": "case_1",
+                    "reference": {"timeline_version": 1},
+                    "op": {
+                        "kind": "insert_clip",
+                        "asset_id": "asset_img",
+                        "source_start_s": 0.0,
+                        "source_end_s": 2.0,
+                        "role": "image",
+                        "position_s": 0.0,
+                    },
+                    "reason": "insert image",
+                }
+            ),
+            created_at=NOW,
+        )
+
+    assert outcome.status == "succeeded"
+    assert outcome.timeline is not None
+    inserted = next(
+        clip
+        for clip in _track_clips(outcome.timeline, "visual_base")
+        if clip.asset_id == "asset_img"
+    )
+    assert inserted.role == "image"
+    assert (inserted.source_start_frame, inserted.source_end_frame) == (0, 1)
+    assert outcome.timeline.duration_frames == 330
+
+
+def test_insert_clip_on_visual_overlay_does_not_ripple(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    with engine.begin() as connection:
+        _seed_project_media(connection)
+        store_timeline_version(connection, _timeline(version=1), created_at=NOW)
+        outcome = apply_patch(
+            connection,
+            _case_state(timeline_current_version=1),
+            TimelinePatchRequest.model_validate(
+                {
+                    "case_id": "case_1",
+                    "reference": {"timeline_version": 1},
+                    "op": {
+                        "kind": "insert_clip",
+                        "asset_id": "asset_new",
+                        "source_start_s": 0.0,
+                        "source_end_s": 1.0,
+                        "role": "b_roll",
+                        "track_id": "visual_overlay",
+                        "position_s": 1.0,
+                    },
+                    "reason": "insert overlay",
+                }
+            ),
+            created_at=NOW,
+        )
+
+    assert outcome.status == "succeeded"
+    assert outcome.timeline is not None
+    overlay = _track_clips(outcome.timeline, "visual_overlay")
+    assert len(overlay) == 1
+    assert overlay[0].asset_id == "asset_new"
+    # overlay insert keeps timeline duration and primary track untouched
+    assert outcome.timeline.duration_frames == 270
 
 
 def test_apply_patch_reports_boundary_failures_without_new_timeline(tmp_path: Path) -> None:
@@ -407,7 +491,6 @@ def _case_state(
     *,
     timeline_current_version: int | None,
     last_viewed_preview_id: str | None = None,
-    candidate_pack_id: str | None = None,
 ) -> CaseState:
     return CaseState.model_validate(
         {
@@ -431,7 +514,6 @@ def _case_state(
                 ],
                 "total_target_duration_sec": 2.0,
             },
-            "candidate_pack_id": candidate_pack_id,
             "timeline_current_version": timeline_current_version,
             "last_viewed_preview_id": last_viewed_preview_id,
             "rough_cut_approved": True,
@@ -457,10 +539,6 @@ def _seed_project_media(connection: Connection) -> None:
         _seed_asset(connection, asset_id)
     _seed_asset(connection, "asset_vo", kind="audio", probe={"duration_sec": 9.0, "fps": 30})
     _seed_asset(connection, "asset_bgm", kind="audio", probe={"duration_sec": 9.0, "fps": 30})
-    _seed_projection(connection, "asset_1", "clip_1")
-    _seed_projection(connection, "asset_2", "clip_2")
-    _seed_projection(connection, "asset_3", "clip_3")
-    _seed_projection(connection, "asset_new", "clip_new")
     connection.execute(
         schema.transcripts.insert().values(
             transcript_id="tr_vo",
@@ -501,9 +579,6 @@ def _seed_asset(
             probe=dump_json(probe or {"duration_sec": 10.0, "fps": 30.0}),
             proxy_object_hash=None,
             ingest_status="indexed",
-            annotation_status="completed",
-            annotation_pass="cheap",
-            index_status="ready",
             usable=True,
             failure=None,
         )
@@ -515,76 +590,6 @@ def _seed_asset(
             enabled=True,
             linked_at=NOW,
             note="",
-        )
-    )
-
-
-def _seed_projection(connection: Connection, asset_id: str, clip_id: str) -> None:
-    annotation_id = f"ann_{asset_id}"
-    connection.execute(
-        schema.annotations_table.insert().values(
-            annotation_id=annotation_id,
-            asset_id=asset_id,
-            schema="AnnotationDocument.v1",
-            status="completed",
-            document_json=dump_json(
-                {
-                    "schema": "AnnotationDocument.v1",
-                    "annotation_id": annotation_id,
-                    "asset_id": asset_id,
-                    "asset_kind": "video",
-                    "status": "completed",
-                    "generator": {"pipeline_version": "annotation.video.v1", "pass": "cheap"},
-                    "clips": [],
-                    "quality_events": [],
-                    "created_at": NOW,
-                }
-            ),
-            created_at=NOW,
-            updated_at=NOW,
-        )
-    )
-    connection.execute(
-        schema.annotation_clip_projection.insert().values(
-            clip_id=clip_id,
-            annotation_id=annotation_id,
-            asset_id=asset_id,
-            start_frame=0,
-            end_frame=300,
-            role="b_roll_candidate",
-            summary="candidate",
-            keywords_json=dump_json(["candidate"]),
-            quality_score=0.9,
-            usable=True,
-            embedding=None,
-        )
-    )
-
-
-def _seed_candidate_pack(connection: Connection) -> None:
-    connection.execute(
-        schema.candidate_packs.insert().values(
-            candidate_pack_id="pack_1",
-            case_id="case_1",
-            slots=dump_json(
-                [
-                    {
-                        "slot_id": "slot_insert",
-                        "slot_brief": "insert",
-                        "target_duration_sec": [1.0, 2.0],
-                        "candidates": [
-                            {
-                                "candidate_id": "cand_new",
-                                "asset_id": "asset_new",
-                                "clip_id": "clip_new",
-                                "summary_line": "new",
-                                "score": {"bm25_rank": 1, "vector_rank": 1, "rrf": 1.0},
-                            }
-                        ],
-                    }
-                ]
-            ),
-            created_at=NOW,
         )
     )
 

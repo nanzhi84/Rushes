@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from contracts.candidate import CandidatePack
 from contracts.decision import Decision
 from contracts.project import ProjectState
 from contracts.subtitle import SubtitleClip
@@ -38,7 +38,7 @@ DEFAULT_BLOCK_BUDGETS: dict[str, int] = {
     "artifacts": 6000,
     "pending_decision": 1000,
     "memory": 1500,
-    "assets": 1000,
+    "assets": 2000,
     "messages": 8000,
     "turn_observations": 2500,
     "allowed_tools": 4000,
@@ -57,6 +57,20 @@ class ContextMessage(BaseModel):
     case_id: str | None = None
 
 
+class AssetDigestRow(BaseModel):
+    """单条素材摘要索引行：join assets 基础事实 + latest_ready 摘要（Spec C §C3）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    filename: str
+    kind: str
+    duration_sec: float | None = None
+    understanding_status: str = "none"
+    semantic_role: str | None = None
+    overall: str | None = None
+
+
 class ContextBuildInput(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
@@ -64,13 +78,13 @@ class ContextBuildInput(BaseModel):
     decisions: tuple[Decision, ...] = Field(default_factory=tuple)
     pending_decision: Decision | None = None
     timeline: TimelineState | None = None
-    candidate_pack: CandidatePack | None = None
     memory_summaries: tuple[str, ...] = Field(default_factory=tuple)
     messages: tuple[ContextMessage, ...] = Field(default_factory=tuple)
     turn_observations: tuple[str, ...] = Field(default_factory=tuple)
     rolling_summary: str | None = None
     current_action: str | None = None
     allowed_tools: tuple[ToolSpec, ...] = Field(default_factory=tuple)
+    asset_digest: tuple[AssetDigestRow, ...] = Field(default_factory=tuple)
 
 
 class ContextBundle(BaseModel):
@@ -120,7 +134,12 @@ class ContextBuilder:
                 self._budgets["memory"],
                 self._counter,
             ),
-            "assets": _render_assets_block(context.preconditions),
+            "assets": _render_assets_block(
+                context.preconditions,
+                context.asset_digest,
+                self._budgets["assets"],
+                self._counter,
+            ),
             "messages": _render_messages_block(
                 context.messages,
                 context.rolling_summary,
@@ -150,13 +169,13 @@ def _render_system_block(total_budget: int) -> str:
             "阶段推进指引（case_header 的 stage 字段标记当前阶段；工具列表按前置条件动态暴露，"
             "看不到的工具说明其前置未满足，先完成当前阶段的关键动作）：",
             "- briefing：明确目标、检查素材（audio.inspect_sources；assets 块 usable_count ≥ 1 "
-            "表示标注已完成，为 0 时才需要 annotation.enqueue）。audio_plan 未确定且素材含人声时，"
+            "表示有可用素材）。需要看懂素材内容时用 understand.materials 生成带时间戳的摘要、"
+            "asset.read_summary 读取。audio_plan 未确定且素材含人声时，"
             "必须用 interaction.ask_user 创建 audio_mode 决策（原声粗剪 / TTS 配音 / 静音），"
             "这是解锁后续工具的唯一路径。",
             "- drafting：按 audio_plan 推进——原声：audio.asr_original → audio.rough_cut_speech；"
-            "TTS：audio.generate_tts。cut_plan 已确定后立即 retrieval.search_candidates → "
-            "timeline.plan_from_candidates → render.preview → interaction.show_preview，"
-            "不要回头重复 annotation/asr；用户表达满意时用 interaction.confirm_action "
+            "TTS：audio.generate_tts。cut_plan 与 timeline 就绪后 render.preview → "
+            "interaction.show_preview；用户表达满意时用 interaction.confirm_action "
             "创建 approve_rough_cut 确认。",
             "- refining：粗剪已确认。逐项询问字幕与 BGM（timeline.apply_patch 的 "
             "generate_subtitles / add_bgm op；postprocess_plan 缺失时 gate 会自动转决策，"
@@ -274,8 +293,6 @@ def _artifact_parts(context: ContextBuildInput) -> list[tuple[str, str]]:
                 ),
             )
         )
-    if context.candidate_pack is not None:
-        parts.append(("candidate_pack", _render_candidate_pack(context.candidate_pack)))
     if context.timeline is not None:
         aspect_ratio = (
             context.preconditions.project_state.defaults.aspect_ratio
@@ -292,32 +309,16 @@ def _artifact_parts(context: ContextBuildInput) -> list[tuple[str, str]]:
 
 
 def _artifact_priority(name: str, current_action: str | None) -> int:
-    if current_action is None:
-        base = ["timeline", "candidate_pack", "cut_plan", "audio_plan", "content_plan", "brief"]
-    elif "timeline" in current_action or "render" in current_action:
-        base = ["timeline", "cut_plan", "candidate_pack", "audio_plan", "content_plan", "brief"]
-    elif "retrieval" in current_action or "candidate" in current_action:
-        base = ["candidate_pack", "cut_plan", "audio_plan", "content_plan", "brief", "timeline"]
+    if current_action is None or "timeline" in current_action or "render" in current_action:
+        base = ["timeline", "cut_plan", "audio_plan", "content_plan", "brief"]
     elif "audio" in current_action:
-        base = ["audio_plan", "content_plan", "brief", "cut_plan", "candidate_pack", "timeline"]
+        base = ["audio_plan", "content_plan", "brief", "cut_plan", "timeline"]
     else:
-        base = ["brief", "content_plan", "audio_plan", "cut_plan", "candidate_pack", "timeline"]
+        base = ["brief", "content_plan", "audio_plan", "cut_plan", "timeline"]
     try:
         return base.index(name)
     except ValueError:
         return len(base)
-
-
-def _render_candidate_pack(candidate_pack: CandidatePack) -> str:
-    lines = [f"candidate_pack: {candidate_pack.candidate_pack_id}"]
-    for slot in candidate_pack.slots:
-        lines.append(f"- {slot.slot_id}: {slot.slot_brief}")
-        for candidate in slot.candidates[:3]:
-            lines.append(
-                f"  * {candidate.candidate_id} {candidate.asset_id}/{candidate.clip_id}: "
-                f"{candidate.summary_line}"
-            )
-    return "\n".join(lines)
 
 
 def render_timeline_summary(timeline: TimelineState, *, aspect_ratio: str) -> str:
@@ -454,23 +455,79 @@ def _render_memory_block(
     return _fit_lines(lines, budget, counter)
 
 
-def _render_assets_block(context: PreconditionContext) -> str:
+MAX_ASSET_INDEX_ROWS = 50
+_OVERALL_LIMIT = 80
+_FILENAME_LIMIT = 60
+# 空白（含换行）与 C0/C1 控制字符、DEL：折叠成单空格，防止外部字符串伪造多行条目。
+_INLINE_UNSAFE_RUN = re.compile(r"[\s\x00-\x1f\x7f-\x9f]+")
+
+
+def _render_assets_block(
+    context: PreconditionContext,
+    digest: Sequence[AssetDigestRow],
+    budget: int,
+    counter: TokenCounter,
+) -> str:
     stats = context.project_artifacts
     case_state = context.case_state
     selected = case_state.selected_asset_ids if case_state is not None else []
     disabled = case_state.disabled_asset_ids if case_state is not None else []
-    return "\n".join(
-        (
-            "assets:",
-            f"usable_count: {stats.usable_asset_count or len(stats.usable_asset_ids)}",
-            f"with_audio_count: {len(stats.asset_ids_with_audio)}",
-            f"transcript_assets: {', '.join(sorted(stats.transcript_asset_ids)) or 'none'}",
-            "transcript_with_vad_assets: "
-            f"{', '.join(sorted(stats.transcript_with_vad_asset_ids)) or 'none'}",
-            f"selected_asset_ids: {', '.join(selected) or 'none'}",
-            f"disabled_asset_ids: {', '.join(disabled) or 'none'}",
-        )
-    )
+    header_lines = [
+        "assets:",
+        f"usable_count: {stats.usable_asset_count or len(stats.usable_asset_ids)}",
+        f"with_audio_count: {len(stats.asset_ids_with_audio)}",
+        f"transcript_assets: {', '.join(sorted(stats.transcript_asset_ids)) or 'none'}",
+        "transcript_with_vad_assets: "
+        f"{', '.join(sorted(stats.transcript_with_vad_asset_ids)) or 'none'}",
+        f"selected_asset_ids: {', '.join(selected) or 'none'}",
+        f"disabled_asset_ids: {', '.join(disabled) or 'none'}",
+    ]
+    total = len(digest)
+    if total == 0:
+        return "\n".join(header_lines)
+
+    index_header = f"index (共 {total} 个素材):"
+    index_lines = [_render_asset_index_line(row) for row in digest]
+    cap = min(total, MAX_ASSET_INDEX_ROWS)
+    shown = 0
+    # 逐行贪心，行数上限 50 与预算双重约束，超出尾行「另有 N 个素材」。
+    while shown < cap:
+        omitted = total - (shown + 1)
+        tail = [f"另有 {omitted} 个素材"] if omitted > 0 else []
+        candidate = "\n".join((*header_lines, index_header, *index_lines[: shown + 1], *tail))
+        if counter(candidate) > budget:
+            break
+        shown += 1
+
+    omitted = total - shown
+    lines = [*header_lines, index_header, *index_lines[:shown]]
+    if omitted > 0:
+        lines.append(f"另有 {omitted} 个素材")
+    return "\n".join(lines)
+
+
+def _render_asset_index_line(row: AssetDigestRow) -> str:
+    duration = "时长未知" if row.duration_sec is None else f"{row.duration_sec:.1f}s"
+    filename = _clip_inline(row.filename, _FILENAME_LIMIT)
+    parts = [f"- {row.asset_id} {filename} [{row.kind}] {duration} 理解:{row.understanding_status}"]
+    if row.semantic_role:
+        parts.append(f"role={_fold_inline(row.semantic_role)}")
+    if row.overall:
+        parts.append(_clip_inline(row.overall, _OVERALL_LIMIT))
+    return " · ".join(parts)
+
+
+def _fold_inline(text: str) -> str:
+    """外部来源字符串（文件名/模型输出）折叠成安全单行：控制字符与空白连跑变单空格。"""
+
+    return _INLINE_UNSAFE_RUN.sub(" ", text).strip()
+
+
+def _clip_inline(text: str, limit: int) -> str:
+    folded = _fold_inline(text)
+    if len(folded) <= limit:
+        return folded
+    return folded[:limit] + "…"
 
 
 def _render_messages_block(

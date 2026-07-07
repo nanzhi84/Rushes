@@ -266,11 +266,19 @@ def _request_token(request: Request) -> str | None:
         if separator and scheme.lower() == "bearer" and token:
             return token
         return ""
-    if _is_sse_endpoint(request.url.path):
+    if _allows_query_token(request):
         query_token = request.query_params.get("token")
         if query_token:
             return query_token
     return None
+
+
+def _allows_query_token(request: Request) -> bool:
+    """SSE 与只读媒体流允许 query token：浏览器原生 EventSource/<img>/<video> 设不了 header。"""
+    path = request.url.path
+    if _is_sse_endpoint(path):
+        return True
+    return request.method.upper() == "GET" and _is_media_endpoint(path)
 
 
 def _content_type_refusal_reason(request: Request) -> SecurityReason | None:
@@ -287,6 +295,10 @@ def _content_type_refusal_reason(request: Request) -> SecurityReason | None:
 
 def _is_sse_endpoint(path: str) -> bool:
     return path == "/api/events" or path.endswith("/events") or path.endswith("/turn-stream")
+
+
+def _is_media_endpoint(path: str) -> bool:
+    return path.startswith("/api/media/")
 
 
 def _is_upload_part_endpoint(path: str) -> bool:

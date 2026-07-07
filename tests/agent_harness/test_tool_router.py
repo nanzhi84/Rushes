@@ -1,3 +1,5 @@
+import inspect
+
 from pydantic import BaseModel, ConfigDict
 
 from agent_harness.policy_gate import ToolCall
@@ -23,26 +25,36 @@ def _echo(input_model: EchoInput, context: ToolExecutionContext) -> ToolResult:
     )
 
 
+async def _async_echo(input_model: EchoInput, context: ToolExecutionContext) -> ToolResult:
+    return ToolResult(
+        tool_call_id=context.tool_call_id,
+        tool_name="x.async_echo",
+        status="succeeded",
+        observation=input_model.text,
+    )
+
+
+def _echo_spec(name: str) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        namespace="x",
+        version="1",
+        input_model=EchoInput,
+        result_model=None,
+        handler_ref=f"tests.{name}",
+        allowed_scopes=["case_agent_console"],
+        requires_artifacts=[],
+        requires_active_project=False,
+        requires_active_case=False,
+        side_effects=[],
+        emits_events=[],
+        description="echo",
+    )
+
+
 def _registry() -> ToolRegistry:
     registry = ToolRegistry()
-    registry.register(
-        ToolSpec(
-            name="x.echo",
-            namespace="x",
-            version="1",
-            input_model=EchoInput,
-            result_model=None,
-            handler_ref="tests.echo",
-            allowed_scopes=["case_agent_console"],
-            requires_artifacts=[],
-            requires_active_project=False,
-            requires_active_case=False,
-            side_effects=[],
-            emits_events=[],
-            description="echo",
-        ),
-        _echo,
-    )
+    registry.register(_echo_spec("x.echo"), _echo)
     return registry
 
 
@@ -80,3 +92,18 @@ def test_tool_router_uses_strict_input_model_validation() -> None:
     assert result.status == "failed"
     assert result.error is not None
     assert result.error.error_code == "invalid_tool_input"
+
+
+async def test_tool_router_returns_awaitable_for_async_handler() -> None:
+    registry = ToolRegistry()
+    registry.register(_echo_spec("x.async_echo"), _async_echo)
+
+    outcome = ToolRouter(registry).execute(
+        ToolCall(tool_name="x.async_echo", arguments={"text": "hi"}, tool_call_id="tc_1"),
+        ToolExecutionContext(tool_call_id="tc_1", turn_id="turn_1"),
+    )
+
+    assert inspect.isawaitable(outcome)
+    result = await outcome
+    assert result.status == "succeeded"
+    assert result.observation == "hi"

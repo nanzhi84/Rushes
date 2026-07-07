@@ -43,7 +43,7 @@ def validate_timeline(
         checks.extend(_validate_identity(context, timeline))
         checks.extend(_validate_primary_visual_coverage(timeline))
         checks.extend(_validate_asset_references(context, timeline))
-        checks.extend(_validate_source_ranges_and_quality_events(context, timeline))
+        checks.extend(_validate_source_ranges(context, timeline))
         checks.extend(_validate_audio_and_subtitle_bindings(timeline))
         checks.extend(_validate_fps_and_ranges(context, timeline))
     return TimelineValidationReport(
@@ -197,12 +197,11 @@ def _validate_asset_references(
     return checks
 
 
-def _validate_source_ranges_and_quality_events(
+def _validate_source_ranges(
     context: TimelineValidationContext,
     timeline: TimelineState,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
-    hard_events_by_asset = _hard_quality_events_by_asset(context.connection, _asset_ids(timeline))
     probe_by_asset = _asset_probe_rows(context.connection, _asset_ids(timeline))
     for clip in _all_media_clips(timeline):
         probe = probe_by_asset.get(clip.asset_id)
@@ -222,20 +221,6 @@ def _validate_source_ranges_and_quality_events(
                     frame_count=frame_count,
                 )
             )
-        for event_start, event_end in hard_events_by_asset.get(clip.asset_id, ()):
-            if max(clip.source_start_frame, event_start) < min(clip.source_end_frame, event_end):
-                checks.append(
-                    _error(
-                        "timeline.source_range.hard_quality_overlap",
-                        "clip source range intersects a hard quality event",
-                        timeline_clip_id=clip.timeline_clip_id,
-                        asset_id=clip.asset_id,
-                        source_start_frame=clip.source_start_frame,
-                        source_end_frame=clip.source_end_frame,
-                        quality_event_start_frame=event_start,
-                        quality_event_end_frame=event_end,
-                    )
-                )
     return checks
 
 
@@ -446,51 +431,6 @@ def _asset_probe_rows(
     return {str(row._mapping["asset_id"]): _probe_payload(row._mapping["probe"]) for row in rows}
 
 
-def _hard_quality_events_by_asset(
-    connection: Connection,
-    asset_ids: set[str],
-) -> dict[str, tuple[tuple[int, int], ...]]:
-    if not asset_ids:
-        return {}
-    rows = connection.execute(
-        select(
-            schema.annotations_table.c.asset_id,
-            schema.annotations_table.c.document_json,
-        )
-        .where(schema.annotations_table.c.asset_id.in_(asset_ids))
-        .where(schema.annotations_table.c.status == "completed")
-        .order_by(
-            schema.annotations_table.c.asset_id,
-            schema.annotations_table.c.updated_at.desc(),
-        )
-    ).all()
-    result: dict[str, tuple[tuple[int, int], ...]] = {}
-    for row in rows:
-        asset_id = str(row._mapping["asset_id"])
-        if asset_id in result:
-            continue
-        result[asset_id] = tuple(_hard_quality_events(str(row._mapping["document_json"])))
-    return result
-
-
-def _hard_quality_events(document_json: str) -> list[tuple[int, int]]:
-    document = load_json(document_json)
-    if not isinstance(document, dict):
-        return []
-    events = document.get("quality_events")
-    if not isinstance(events, list):
-        return []
-    result: list[tuple[int, int]] = []
-    for event in events:
-        if not isinstance(event, dict) or event.get("severity") != "hard":
-            continue
-        start = _int_value(event.get("start_frame"))
-        end = _int_value(event.get("end_frame"))
-        if start is not None and end is not None and start < end:
-            result.append((start, end))
-    return result
-
-
 def _project_fps(connection: Connection, project_id: str) -> int:
     row = connection.execute(
         select(schema.projects.c.defaults).where(schema.projects.c.project_id == project_id)
@@ -536,16 +476,6 @@ def _probe_payload(value: Any) -> Mapping[str, Any] | None:
         return value
     parsed = load_json(str(value))
     return parsed if isinstance(parsed, dict) else None
-
-
-def _int_value(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return None
 
 
 def _error(code: str, message: str, **details: Any) -> dict[str, Any]:

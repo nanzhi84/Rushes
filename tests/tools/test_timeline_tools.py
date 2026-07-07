@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from array import array
 from pathlib import Path
 from typing import Any
 
@@ -9,11 +8,9 @@ from sqlalchemy.engine import Connection
 
 from agent_harness.policy_gate import PolicyContext, PolicyGate
 from agent_harness.reducer import apply
-from contracts.candidate import CandidatePack
 from contracts.case import CaseState
 from contracts.timeline import TimelineState
 from domain.preconditions import PreconditionContext, ProjectArtifactStats
-from indexing import build_candidate_pack
 from storage import schema
 from storage.db import create_workspace_engine
 from storage.repositories import CasesRepository
@@ -22,125 +19,22 @@ from timeline import store_timeline_version
 from tools import ToolExecutionContext, build_default_tool_registry
 from tools.specs import (
     PATCH_OP_REGISTRY,
+    ComposeInitialInput,
     TimelineInspectInput,
-    TimelinePlanFromCandidatesInput,
     TimelineRestoreVersionInput,
     TimelineValidateInput,
     tool_specs,
 )
 from tools.timeline_tools import (
-    inspect as timeline_inspect,
-)
-from tools.timeline_tools import (
-    plan_from_candidates,
+    compose_initial,
     restore_version,
     validate,
 )
+from tools.timeline_tools import (
+    inspect as timeline_inspect,
+)
 
 NOW = "2026-07-05T00:00:00+00:00"
-
-
-def test_plan_from_candidates_happy_path_creates_valid_timeline_version(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "product closeup")
-        case_state = _case_state()
-        pack = build_candidate_pack(connection, case_state, case_state.cut_plan, {})
-        _persist_pack(connection, pack)
-        result = plan_from_candidates(
-            TimelinePlanFromCandidatesInput(
-                selections=[_selection_for_asset(pack, "asset_1")],
-            ),
-            _context(
-                connection,
-                case_state.model_copy(update={"candidate_pack_id": pack.candidate_pack_id}),
-                pack,
-            ),
-        )
-        rows = connection.execute(select(schema.timeline_versions)).all()
-
-    assert result.status == "succeeded"
-    assert [event["event"] for event in result.events] == [
-        "TimelineVersionCreated",
-        "TimelineValidated",
-    ]
-    assert len(rows) == 1
-    assert rows[0]._mapping["version"] == 1
-
-
-def test_plan_from_candidates_removes_stale_unselected_candidate_and_observes(
-    tmp_path: Path,
-) -> None:
-    engine = _engine(tmp_path)
-    with engine.begin() as connection:
-        _seed_clip(connection, "asset_keep", "clip_keep", "product closeup")
-        _seed_clip(connection, "asset_drop", "clip_drop", "product closeup")
-        base_state = _case_state()
-        pack = build_candidate_pack(connection, base_state, base_state.cut_plan, {})
-        _persist_pack(connection, pack)
-        case_state = base_state.model_copy(
-            update={
-                "candidate_pack_id": pack.candidate_pack_id,
-                "disabled_asset_ids": ["asset_drop"],
-            }
-        )
-        result = plan_from_candidates(
-            TimelinePlanFromCandidatesInput(
-                selections=[_selection_for_asset(pack, "asset_keep")],
-            ),
-            _context(connection, case_state, pack),
-        )
-
-    assert result.status == "succeeded"
-    assert result.data["removed_candidates"][0]["asset_id"] == "asset_drop"
-    assert "removed 1 stale candidate" in result.observation
-
-
-def test_plan_from_candidates_selected_candidate_invalid_requires_user(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "product closeup")
-        base_state = _case_state()
-        pack = build_candidate_pack(connection, base_state, base_state.cut_plan, {})
-        _persist_pack(connection, pack)
-        case_state = base_state.model_copy(
-            update={
-                "candidate_pack_id": pack.candidate_pack_id,
-                "disabled_asset_ids": ["asset_1"],
-            }
-        )
-        result = plan_from_candidates(
-            TimelinePlanFromCandidatesInput(selections=[_selection_for_asset(pack, "asset_1")]),
-            _context(connection, case_state, pack),
-        )
-
-    assert result.status == "requires_user"
-    assert result.events[0]["event"] == "DecisionCreated"
-    assert result.data["invalid_selected_candidates"][0]["asset_id"] == "asset_1"
-
-
-def test_plan_from_candidates_fails_when_scope_changes_without_candidate_removal(
-    tmp_path: Path,
-) -> None:
-    engine = _engine(tmp_path)
-    with engine.begin() as connection:
-        _seed_clip(connection, "asset_1", "clip_1", "product closeup")
-        case_state = _case_state()
-        pack = build_candidate_pack(connection, case_state, case_state.cut_plan, {})
-        _persist_pack(connection, pack)
-        _seed_clip(connection, "asset_new", "clip_new", "product closeup")
-        result = plan_from_candidates(
-            TimelinePlanFromCandidatesInput(selections=[_selection_for_asset(pack, "asset_1")]),
-            _context(
-                connection,
-                case_state.model_copy(update={"candidate_pack_id": pack.candidate_pack_id}),
-                pack,
-            ),
-        )
-
-    assert result.status == "failed"
-    assert result.error is not None
-    assert result.error.error_code == "candidate_pack_scope_changed"
 
 
 def test_validate_invalid_timeline_and_render_preview_not_allowed(tmp_path: Path) -> None:
@@ -156,7 +50,7 @@ def test_validate_invalid_timeline_and_render_preview_not_allowed(tmp_path: Path
         )
         store_timeline_version(connection, timeline, created_at=NOW)
         case_state = _case_state(timeline_current_version=1)
-        result = validate(TimelineValidateInput(), _context(connection, case_state, None))
+        result = validate(TimelineValidateInput(), _context(connection, case_state))
     registry = build_default_tool_registry()
     gate = PolicyGate(
         tool_specs={spec.name: spec for spec in tool_specs()},
@@ -176,6 +70,72 @@ def test_validate_invalid_timeline_and_render_preview_not_allowed(tmp_path: Path
     assert "render.preview" not in {spec.name for spec in allowed}
 
 
+def test_compose_initial_builds_valid_timeline_and_bumps_version(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    with engine.begin() as connection:
+        _seed_clip(connection, "asset_1", "clip_1", "product closeup")
+        _seed_clip(connection, "asset_2", "clip_2", "b roll")
+        _seed_asset_kind(connection, "asset_vo", kind="audio")
+        result = compose_initial(
+            ComposeInitialInput(
+                clips=[
+                    {
+                        "asset_id": "asset_1",
+                        "source_start_s": 0.0,
+                        "source_end_s": 1.5,
+                        "role": "a_roll",
+                    },
+                    {
+                        "asset_id": "asset_2",
+                        "source_start_s": 2.0,
+                        "source_end_s": 3.0,
+                        "role": "b_roll",
+                    },
+                ],
+                voiceover_asset_id="asset_vo",
+            ),
+            _context(connection, _case_state()),
+        )
+        stored = connection.execute(
+            select(schema.timeline_versions).where(schema.timeline_versions.c.version == 1)
+        ).one()
+
+    assert result.status == "succeeded"
+    assert result.data["timeline_version"] == 1
+    assert result.data["validation_report"]["valid"] is True
+    visual = _track_clips(result.data["timeline"], "visual_base")
+    assert [(clip["timeline_start_frame"], clip["timeline_end_frame"]) for clip in visual] == [
+        (0, 45),
+        (45, 75),
+    ]
+    assert len(_track_clips(result.data["timeline"], "voiceover")) == 1
+    event_names = {event["event"] for event in result.events}
+    assert {"TimelineVersionCreated", "TimelineValidated"} <= event_names
+    assert load_json(stored._mapping["document_json"])["version"] == 1
+
+
+def test_compose_initial_reports_invalid_clip_inputs(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    with engine.begin() as connection:
+        result = compose_initial(
+            ComposeInitialInput(
+                clips=[
+                    {
+                        "asset_id": "ghost",
+                        "source_start_s": 0.0,
+                        "source_end_s": 1.0,
+                        "role": "a_roll",
+                    }
+                ]
+            ),
+            _context(connection, _case_state()),
+        )
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.error_code == "timeline_materialization_failed"
+
+
 def test_inspect_returns_timeline_summary(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     with engine.begin() as connection:
@@ -187,7 +147,7 @@ def test_inspect_returns_timeline_summary(tmp_path: Path) -> None:
         )
         result = timeline_inspect(
             TimelineInspectInput(),
-            _context(connection, _case_state(timeline_current_version=1), None),
+            _context(connection, _case_state(timeline_current_version=1)),
         )
 
     assert result.status == "succeeded"
@@ -222,7 +182,7 @@ def test_restore_version_writes_new_record_and_reducer_restores_rough_cut(
         )
         result = restore_version(
             TimelineRestoreVersionInput(source_version=1),
-            _context(connection, case_state, None),
+            _context(connection, case_state),
         )
 
     applied = apply(result.events, engine=engine, base_version=0, actor="agent", created_at=NOW)
@@ -274,27 +234,60 @@ def _engine(tmp_path: Path):
     return engine
 
 
+def _seed_asset_kind(connection: Connection, asset_id: str, *, kind: str) -> None:
+    connection.execute(
+        schema.assets.insert().values(
+            asset_id=asset_id,
+            storage_mode="reference",
+            object_hash=None,
+            reference_path=f"/tmp/{asset_id}",
+            kind=kind,
+            source="local_path",
+            filename=f"{asset_id}",
+            hash=f"hash_{asset_id}",
+            mtime=1,
+            size=1,
+            probe=dump_json({"duration_sec": 10.0, "fps": 30.0}),
+            proxy_object_hash=None,
+            ingest_status="indexed",
+            usable=True,
+            failure=None,
+        )
+    )
+    connection.execute(
+        schema.project_asset_links.insert().values(
+            project_id="project_1",
+            asset_id=asset_id,
+            enabled=True,
+            linked_at=NOW,
+            note="",
+        )
+    )
+
+
+def _track_clips(timeline: dict[str, Any], track_id: str) -> list[dict[str, Any]]:
+    for track in timeline["tracks"]:
+        if track["track_id"] == track_id:
+            return list(track["clips"])
+    raise AssertionError(f"missing track {track_id}")
+
+
 def _context(
     connection: Connection,
     case_state: CaseState,
-    pack: CandidatePack | None,
 ) -> ToolExecutionContext:
-    metadata: dict[str, Any] = {}
-    if pack is not None:
-        metadata["candidate_pack"] = pack
     return ToolExecutionContext(
         tool_call_id="tc_1",
         turn_id="turn_1",
         case_state=case_state,
         readonly_connection=connection,
         created_at=NOW,
-        metadata=metadata,
+        metadata={},
     )
 
 
 def _case_state(
     *,
-    candidate_pack_id: str | None = None,
     timeline_current_version: int | None = None,
     rough_cut_approved: bool = False,
     rough_cut_approved_version: int | None = None,
@@ -317,7 +310,6 @@ def _case_state(
                 ],
                 "total_target_duration_sec": 3.0,
             },
-            "candidate_pack_id": candidate_pack_id,
             "timeline_current_version": timeline_current_version,
             "rough_cut_approved": rough_cut_approved,
             "rough_cut_approved_version": rough_cut_approved_version,
@@ -364,32 +356,12 @@ def _seed_case_row(
     )
 
 
-def _persist_pack(connection: Connection, pack: CandidatePack) -> None:
-    connection.execute(
-        schema.candidate_packs.insert().values(
-            candidate_pack_id=pack.candidate_pack_id,
-            case_id=pack.case_id,
-            slots=dump_json([slot.model_dump(mode="json") for slot in pack.slots]),
-            created_at=pack.snapshot.generated_at,
-        )
-    )
-
-
-def _selection_for_asset(pack: CandidatePack, asset_id: str) -> dict[str, str]:
-    for slot in pack.slots:
-        for candidate in slot.candidates:
-            if candidate.asset_id == asset_id:
-                return {"slot_id": slot.slot_id, "candidate_id": candidate.candidate_id}
-    raise AssertionError(f"candidate not found for {asset_id}")
-
-
 def _seed_clip(
     connection: Connection,
     asset_id: str,
     clip_id: str,
     summary: str,
 ) -> None:
-    annotation_id = f"ann_{asset_id}"
     connection.execute(
         schema.assets.insert().values(
             asset_id=asset_id,
@@ -405,9 +377,6 @@ def _seed_clip(
             probe=dump_json({"duration_sec": 10.0, "fps": 30.0}),
             proxy_object_hash=None,
             ingest_status="indexed",
-            annotation_status="completed",
-            annotation_pass="cheap",
-            index_status="ready",
             usable=True,
             failure=None,
         )
@@ -420,51 +389,6 @@ def _seed_clip(
             linked_at=NOW,
             note="",
         )
-    )
-    document = {
-        "schema": "AnnotationDocument.v1",
-        "annotation_id": annotation_id,
-        "asset_id": asset_id,
-        "asset_kind": "video",
-        "status": "completed",
-        "generator": {"pipeline_version": "annotation.video.v1", "pass": "cheap"},
-        "clips": [],
-        "quality_events": [],
-        "created_at": NOW,
-    }
-    connection.execute(
-        schema.annotations_table.insert().values(
-            annotation_id=annotation_id,
-            asset_id=asset_id,
-            schema="AnnotationDocument.v1",
-            status="completed",
-            document_json=dump_json(document),
-            created_at=NOW,
-            updated_at=NOW,
-        )
-    )
-    connection.execute(
-        schema.annotation_clip_projection.insert().values(
-            clip_id=clip_id,
-            annotation_id=annotation_id,
-            asset_id=asset_id,
-            start_frame=0,
-            end_frame=90,
-            role="b_roll_candidate",
-            summary=summary,
-            keywords_json=dump_json(summary.split()),
-            quality_score=0.9,
-            usable=True,
-            embedding=array("f", [1.0, 0.0]).tobytes(),
-        )
-    )
-    connection.exec_driver_sql(
-        (
-            "INSERT INTO clip_fts "
-            "(clip_id, summary, keywords, retrieval_sentence, ocr_text) "
-            "VALUES (?, ?, ?, ?, ?)"
-        ),
-        (clip_id, summary, " ".join(summary.split()), summary, ""),
     )
 
 

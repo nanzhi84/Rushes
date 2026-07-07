@@ -270,9 +270,6 @@ def _seed_project_case_assets(connection, source: Path) -> None:
             probe=dump_json({"duration_sec": 1.0, "fps": 30.0, "has_audio": False}),
             proxy_object_hash=None,
             ingest_status="indexed",
-            annotation_status="completed",
-            annotation_pass="cheap",
-            index_status="ready",
             usable=True,
             failure=None,
         )

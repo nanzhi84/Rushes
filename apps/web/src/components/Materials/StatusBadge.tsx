@@ -17,46 +17,18 @@ export function StatusBadge({ label, tone = "neutral" }: StatusBadgeProps): Reac
   );
 }
 
-export function annotationLabel(status: string): string {
-  const labels: Record<string, string> = {
-    pending: "待标注",
-    analyzing: "标注中",
-    completed: "已完成",
-    failed: "失败"
-  };
-  return labels[status] ?? status;
-}
-
-export function annotationTone(status: string): StatusTone {
-  if (status === "completed") {
-    return "success";
+// 素材理解状态 → 徽标文案与色调（Spec C：none/running/ready/failed）。
+export function understandingBadgeProps(status: string): { label: string; tone: StatusTone } {
+  if (status === "ready") {
+    return { label: "已理解", tone: "success" };
+  }
+  if (status === "running") {
+    return { label: "理解中", tone: "info" };
   }
   if (status === "failed") {
-    return "danger";
+    return { label: "理解失败", tone: "danger" };
   }
-  if (status === "analyzing") {
-    return "info";
-  }
-  return "warning";
-}
-
-export function indexLabel(status: string): string {
-  const labels: Record<string, string> = {
-    none: "未索引",
-    partial: "部分索引",
-    ready: "已索引"
-  };
-  return labels[status] ?? status;
-}
-
-export function indexTone(status: string): StatusTone {
-  if (status === "ready") {
-    return "success";
-  }
-  if (status === "partial") {
-    return "info";
-  }
-  return "neutral";
+  return { label: "未理解", tone: "neutral" };
 }
 
 function toneClass(tone: StatusTone): string {

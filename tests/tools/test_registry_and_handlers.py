@@ -91,13 +91,10 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "audio.align_uploaded_voiceover",
         "content.create_plan",
         "content.revise_plan",
-        "annotation.enqueue",
-        "annotation.status",
-        "annotation.retry",
-        "annotation.inspect",
         "media.view_frames",
-        "retrieval.search_candidates",
-        "timeline.plan_from_candidates",
+        "understand.materials",
+        "asset.read_summary",
+        "timeline.compose_initial",
         "timeline.apply_patch",
         "timeline.validate",
         "timeline.inspect",
@@ -167,31 +164,10 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
     assert content_revise.exposure == "llm"
     assert content_revise.requires_active_case is True
     assert content_revise.emits_events == ["ContentPlanUpdated", "CutPlanUpdated"]
-    assert registry.require("annotation.enqueue").spec.emits_events == ["JobEnqueued"]
-    assert registry.require("annotation.status").spec.side_effects == []
     media_view_frames = registry.require("media.view_frames").spec
     assert media_view_frames.side_effects == []
     assert media_view_frames.requires_confirmation is False
     assert media_view_frames.emits_events == []
-    retrieval = registry.require("retrieval.search_candidates").spec
-    assert retrieval.requires_artifacts == [
-        "audio_plan_confirmed",
-        "cut_plan_exists",
-        "usable_asset_exists",
-    ]
-    assert retrieval.emits_events == [
-        "CandidatePackCreated",
-        "CapabilityDegraded",
-        "ProviderCallRecorded",
-    ]
-    plan_from_candidates = registry.require("timeline.plan_from_candidates").spec
-    assert plan_from_candidates.requires_artifacts == ["candidate_pack_exists"]
-    assert plan_from_candidates.emits_events == [
-        "TimelineVersionCreated",
-        "TimelineValidated",
-        "TimelineValidationFailed",
-        "DecisionCreated",
-    ]
     apply_patch = registry.require("timeline.apply_patch").spec
     assert apply_patch.requires_artifacts == ["timeline_exists"]
     assert apply_patch.emits_events == [
@@ -235,7 +211,7 @@ def test_default_tool_and_patch_registries_match_m0_surface() -> None:
         "replace_clip",
         "reorder_blocks",
         "trim_clip",
-        "insert_candidate",
+        "insert_clip",
         "generate_subtitles",
         "set_subtitle_style",
         "edit_subtitle_text",

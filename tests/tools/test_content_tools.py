@@ -121,7 +121,8 @@ def test_create_plan_without_gateway_falls_back_to_one_slot_per_asset(
     ]
     cut_plan = result.events[1]["payload"]["cut_plan"]
     assert len(cut_plan["slots"]) == 2
-    assert [slot["brief"] for slot in cut_plan["slots"]] == ["瀑布远景", "森林横移"]
+    # 离线标注投影已下线：回退 brief 现在取素材文件名（Spec C / Task 9 前）
+    assert [slot["brief"] for slot in cut_plan["slots"]] == ["asset_1.mp4", "asset_2.mp4"]
     for slot in cut_plan["slots"]:
         low, high = slot["target_duration_sec"]
         assert (low + high) / 2 == pytest.approx(10.0)
@@ -184,7 +185,7 @@ def test_create_plan_garbage_llm_output_falls_back(tmp_path: Path) -> None:
 
     assert result.status == "succeeded"
     assert result.data["source"] == "fallback"
-    assert result.events[1]["payload"]["cut_plan"]["slots"][0]["brief"] == "可用风景"
+    assert result.events[1]["payload"]["cut_plan"]["slots"][0]["brief"] == "asset_1.mp4"
 
 
 def test_revise_plan_updates_existing_plan_and_cut_plan(tmp_path: Path) -> None:
@@ -350,7 +351,6 @@ def _seed_clip(
     *,
     quality_score: float,
 ) -> None:
-    annotation_id = f"ann_{asset_id}"
     connection.execute(
         schema.assets.insert().values(
             asset_id=asset_id,
@@ -366,9 +366,6 @@ def _seed_clip(
             probe=dump_json({"duration_sec": 10.0, "fps": 30.0}),
             proxy_object_hash=None,
             ingest_status="indexed",
-            annotation_status="completed",
-            annotation_pass="cheap",
-            index_status="ready",
             usable=True,
             failure=None,
         )
@@ -380,44 +377,6 @@ def _seed_clip(
             enabled=True,
             linked_at=NOW,
             note="",
-        )
-    )
-    connection.execute(
-        schema.annotations_table.insert().values(
-            annotation_id=annotation_id,
-            asset_id=asset_id,
-            schema="AnnotationDocument.v1",
-            status="completed",
-            document_json=dump_json(
-                {
-                    "schema": "AnnotationDocument.v1",
-                    "annotation_id": annotation_id,
-                    "asset_id": asset_id,
-                    "asset_kind": "video",
-                    "status": "completed",
-                    "generator": {"pipeline_version": "annotation.video.v1", "pass": "cheap"},
-                    "clips": [],
-                    "quality_events": [],
-                    "created_at": NOW,
-                }
-            ),
-            created_at=NOW,
-            updated_at=NOW,
-        )
-    )
-    connection.execute(
-        schema.annotation_clip_projection.insert().values(
-            clip_id=clip_id,
-            annotation_id=annotation_id,
-            asset_id=asset_id,
-            start_frame=0,
-            end_frame=90,
-            role="b_roll_candidate",
-            summary=summary,
-            keywords_json=dump_json(summary.split()),
-            quality_score=quality_score,
-            usable=True,
-            embedding=None,
         )
     )
 
@@ -706,62 +665,3 @@ def test_fallback_storyline_when_everything_empty() -> None:
     assert text  # goal 存在时用 goal 组装
     sections = _fallback_sections(text, [], None)
     assert sections[0]["section_id"] == "section_001"
-
-
-def test_search_observation_lists_candidate_ids_or_hints_empty() -> None:
-    """search_candidates 的 observation：列候选 id 或给空包指引（M9 回归）。"""
-    from contracts.candidate import (
-        Candidate,
-        CandidatePack,
-        CandidatePackSnapshot,
-        CandidateScore,
-        CandidateSlot,
-    )
-    from tools.retrieval.handlers import _search_observation
-
-    snapshot = CandidatePackSnapshot(
-        generated_at="2026-07-06T00:00:00+00:00", asset_scope_hash="h", annotation_versions={}
-    )
-    empty = CandidatePack(
-        candidate_pack_id="cand_empty",
-        case_id="case_1",
-        query_context={},
-        snapshot=snapshot,
-        slots=[
-            CandidateSlot(
-                slot_id="slot_001",
-                slot_brief="海边",
-                target_duration_sec=(5.0, 8.0),
-                candidates=[],
-            )
-        ],
-    )
-    text = _search_observation(empty)
-    assert "候选为 0" in text
-    assert "不要原样重试" in text
-
-    filled = CandidatePack(
-        candidate_pack_id="cand_full",
-        case_id="case_1",
-        query_context={},
-        snapshot=snapshot,
-        slots=[
-            CandidateSlot(
-                slot_id="slot_001",
-                slot_brief="海边",
-                target_duration_sec=(5.0, 8.0),
-                candidates=[
-                    Candidate(
-                        candidate_id="cand_1_1_clipx",
-                        asset_id="asset_x",
-                        clip_id="clip_x",
-                        summary_line="海岸日落，20.0s 可用",
-                        score=CandidateScore(bm25_rank=1, vector_rank=0, rrf=0.5),
-                    )
-                ],
-            )
-        ],
-    )
-    text = _search_observation(filled)
-    assert "candidate_id=cand_1_1_clipx" in text
-    assert "不要自行构造" in text

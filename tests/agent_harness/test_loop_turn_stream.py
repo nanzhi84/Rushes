@@ -6,14 +6,19 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.engine import Engine
 
 from agent_harness.loop import ScriptedPlanner, run_turn
 from agent_harness.turn_queue import TurnQueueItem
+from contracts.tool import ToolSpec
+from contracts.tool_result import ToolResult
 from storage import schema
 from storage.db import begin_immediate, create_workspace_engine
 from storage.repositories import CasesRepository, MessagesRepository
 from storage.repositories.projects import ProjectsRepository
+from tools import ToolExecutionContext, build_default_tool_registry
+from tools.registry import ToolRegistry
 
 NOW = "2026-07-06T00:00:00+00:00"
 
@@ -61,7 +66,6 @@ def _prepare_workspace(tmp_path: Path) -> Engine:
                 "content_plan": None,
                 "audio_plan": None,
                 "cut_plan": None,
-                "candidate_pack_id": None,
                 "timeline_current_version": None,
                 "timeline_validated": False,
                 "preview_current_id": None,
@@ -226,3 +230,163 @@ async def test_listener_exception_never_breaks_turn(tmp_path: Path) -> None:
     )
 
     assert result.outcome == "finished"
+
+
+# --- async 工具执行路径 + 进度通道 ------------------------------------------
+
+
+class _EmptyInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+def _async_tool_spec(name: str) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        namespace="x",
+        version="1",
+        input_model=_EmptyInput,
+        result_model=None,
+        handler_ref=f"tests.{name}",
+        allowed_scopes=["case_agent_console"],
+        requires_artifacts=[],
+        requires_active_project=False,
+        requires_active_case=False,
+        side_effects=[],
+        emits_events=[],
+        description="async test tool",
+    )
+
+
+def _registry_with(name: str, handler: Any) -> ToolRegistry:
+    registry = build_default_tool_registry()
+    registry.register(_async_tool_spec(name), handler)
+    return registry
+
+
+async def test_async_tool_handler_is_awaited_and_result_flows(tmp_path: Path) -> None:
+    engine = _prepare_workspace(tmp_path)
+
+    async def async_handler(input_model: _EmptyInput, context: ToolExecutionContext) -> ToolResult:
+        del input_model
+        return ToolResult(
+            tool_call_id=context.tool_call_id,
+            tool_name="x.async_ok",
+            status="succeeded",
+            observation="async done",
+        )
+
+    result = await run_turn(
+        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "go"}),
+        engine=engine,
+        planner=ScriptedPlanner(
+            [
+                {"tool_name": "x.async_ok", "arguments": {}},
+                {"content": "完成。"},
+            ]
+        ),
+        registry=_registry_with("x.async_ok", async_handler),
+        turn_id="turn_async",
+    )
+
+    assert result.outcome == "finished"
+    tool_result = result.tool_results[-1]
+    assert tool_result.status == "succeeded"
+    assert tool_result.observation == "async done"
+
+
+async def test_async_tool_handler_progress_emits_subagent_progress(tmp_path: Path) -> None:
+    engine = _prepare_workspace(tmp_path)
+    listener = _RecordingListener()
+
+    async def async_handler(input_model: _EmptyInput, context: ToolExecutionContext) -> ToolResult:
+        del input_model
+        context.metadata["turn_progress"]({"note": "x"})
+        return ToolResult(
+            tool_call_id=context.tool_call_id,
+            tool_name="x.async_progress",
+            status="succeeded",
+            observation="ok",
+        )
+
+    result = await run_turn(
+        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "go"}),
+        engine=engine,
+        planner=ScriptedPlanner(
+            [
+                {"tool_name": "x.async_progress", "arguments": {}},
+                {"content": "完成。"},
+            ]
+        ),
+        registry=_registry_with("x.async_progress", async_handler),
+        turn_id="turn_progress",
+        turn_listener=listener,
+    )
+
+    assert result.outcome == "finished"
+    progress = listener.of_type("subagent_progress")
+    assert len(progress) == 1
+    assert progress[0]["type"] == "subagent_progress"
+    assert progress[0]["note"] == "x"
+
+
+async def test_async_and_sync_handler_exceptions_are_equivalent(tmp_path: Path) -> None:
+    async def _run(name: str, handler: Any) -> ToolResult:
+        engine = _prepare_workspace(tmp_path / name)
+        outcome = await run_turn(
+            TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "go"}),
+            engine=engine,
+            planner=ScriptedPlanner([{"tool_name": name, "arguments": {}}]),
+            registry=_registry_with(name, handler),
+            turn_id=f"turn_{name}",
+        )
+        return outcome.tool_results[-1]
+
+    def sync_boom(input_model: _EmptyInput, context: ToolExecutionContext) -> ToolResult:
+        del input_model, context
+        raise RuntimeError("sync boom")
+
+    async def async_boom(input_model: _EmptyInput, context: ToolExecutionContext) -> ToolResult:
+        del input_model, context
+        raise RuntimeError("async boom")
+
+    sync_result = await _run("x.sync_boom", sync_boom)
+    async_result = await _run("x.async_boom", async_boom)
+
+    assert sync_result.status == async_result.status == "failed"
+    assert sync_result.error is not None
+    assert async_result.error is not None
+    assert sync_result.error.error_code == async_result.error.error_code == "tool_handler_exception"
+    assert async_result.error.details.get("exception_type") == "RuntimeError"
+
+
+async def test_turn_progress_is_noop_without_listener(tmp_path: Path) -> None:
+    engine = _prepare_workspace(tmp_path)
+
+    async def async_handler(input_model: _EmptyInput, context: ToolExecutionContext) -> ToolResult:
+        del input_model
+        # 无 turn_listener 时 turn_progress 必须是可调用的 no-op，绝不为 None、绝不抛错。
+        callback = context.metadata["turn_progress"]
+        assert callable(callback)
+        callback({"note": "no listener"})
+        return ToolResult(
+            tool_call_id=context.tool_call_id,
+            tool_name="x.async_noop",
+            status="succeeded",
+            observation="ok",
+        )
+
+    result = await run_turn(
+        TurnQueueItem(case_id="case_1", kind="user_message", payload={"content": "go"}),
+        engine=engine,
+        planner=ScriptedPlanner(
+            [
+                {"tool_name": "x.async_noop", "arguments": {}},
+                {"content": "完成。"},
+            ]
+        ),
+        registry=_registry_with("x.async_noop", async_handler),
+        turn_id="turn_noop",
+    )
+
+    assert result.outcome == "finished"
+    assert result.tool_results[-1].status == "succeeded"

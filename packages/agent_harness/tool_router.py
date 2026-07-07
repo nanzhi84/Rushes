@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Mapping
 from typing import Any
 
 from pydantic import ValidationError
@@ -30,7 +30,10 @@ class ToolRouter:
         self,
         tool_call: ToolCall | Mapping[str, Any],
         context: ToolExecutionContext,
-    ) -> ToolResult:
+    ) -> ToolResult | Awaitable[ToolResult]:
+        # 同步签名不变（侵入最小）：resolve + 严格校验仍同步完成；只把 handler 的返回值
+        # 原样透传——同步 handler 返回 ToolResult，async handler 返回 Awaitable[ToolResult]，
+        # 由 _execute_tool 在事件循环内按需 await。
         parsed_call = ToolCall.from_input(tool_call)
         registered = self._registry.get(
             parsed_call.tool_name,
