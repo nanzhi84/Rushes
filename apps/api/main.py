@@ -8,11 +8,14 @@ import hashlib
 import json
 import logging
 import os
+import shutil
+import subprocess
+import sys
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, NoReturn, cast
+from typing import Any, Literal, NoReturn, cast
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
@@ -206,6 +209,12 @@ class JobCancelRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str | None = None
+
+
+class FsPickRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["files", "folder"] = "files"
 
 
 class MaterialImportLocalRequest(BaseModel):
@@ -1519,6 +1528,26 @@ def _register_routes(app: FastAPI) -> None:
         entries = _list_media_entries(root)
         return {"path": str(root), "entries": entries}
 
+    @app.post(
+        "/api/fs/pick",
+        response_model=api_schemas.FsPickResponse,
+        responses=_response_docs(mutation=True),
+    )
+    async def fs_pick(payload: FsPickRequest, request: Request) -> dict[str, Any]:
+        """弹出宿主机原生文件/文件夹选择对话框（macOS NSOpenPanel）并返回绝对路径。
+
+        后端与用户同机，这是浏览器沙箱之外拿到磁盘路径、实现零拷贝 reference
+        导入的唯一途径；非 macOS 或无 GUI 会话时报 available=false，前端回退分片上传。
+        """
+
+        state_from_request(request)
+        if not _native_picker_available():
+            return {"available": False, "paths": []}
+        paths = await run_in_threadpool(_run_native_picker, payload.mode)
+        if paths is None:
+            return {"available": False, "paths": []}
+        return {"available": True, "paths": paths}
+
     @app.get(
         "/api/projects/{project_id}/cases/{case_id}/events",
         response_class=StreamingResponse,
@@ -2046,6 +2075,55 @@ def _run_asset_tool(
 
 # 单一定义在 apps/api/deps.py（与 fs/list 的 MEDIA_EXTENSIONS 同源）。
 _MATERIAL_KIND_BY_SUFFIX = MATERIAL_KIND_BY_SUFFIX
+
+
+def _native_picker_available() -> bool:
+    return sys.platform == "darwin" and shutil.which("osascript") is not None
+
+
+# choose file/folder 是 StandardAdditions 用户交互命令；包一层 with timeout 防
+# AppleEvent 两分钟默认超时把还开着的对话框判死。
+_PICKER_SCRIPTS = {
+    "files": (
+        "with timeout of 3600 seconds\n"
+        'set picked to choose file with prompt "选择要导入的素材" '
+        "with multiple selections allowed\n"
+        'set out to ""\n'
+        "repeat with f in picked\n"
+        "set out to out & POSIX path of f & linefeed\n"
+        "end repeat\n"
+        "return out\n"
+        "end timeout"
+    ),
+    "folder": (
+        "with timeout of 3600 seconds\n"
+        'set picked to choose folder with prompt "选择要导入的素材文件夹"\n'
+        "return POSIX path of picked\n"
+        "end timeout"
+    ),
+}
+
+
+def _run_native_picker(mode: str) -> list[str] | None:
+    """跑 osascript 对话框：返回所选绝对路径；用户取消返回 []；环境不可用返回 None。"""
+
+    try:
+        completed = subprocess.run(
+            ["osascript", "-e", _PICKER_SCRIPTS[mode]],
+            capture_output=True,
+            text=True,
+            timeout=3600,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if completed.returncode != 0:
+        # -128 = 用户点了取消；其余（无 GUI 会话等）视为不可用走回退。
+        if "-128" in completed.stderr:
+            return []
+        LOGGER.warning("原生选择对话框失败：%s", completed.stderr.strip())
+        return None
+    return [line for line in completed.stdout.splitlines() if line.strip()]
 
 
 def _expand_import_sources(

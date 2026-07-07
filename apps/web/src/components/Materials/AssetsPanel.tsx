@@ -44,8 +44,10 @@ export function AssetsPanel({
   const [currentDir, setCurrentDir] = useState("");
   const [dragging, setDragging] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
+  const [picking, setPicking] = useState(false);
   const [skippedFiles, setSkippedFiles] = useState<string[]>([]);
   const [failedFiles, setFailedFiles] = useState<string[]>([]);
+  const [duplicateFiles, setDuplicateFiles] = useState<string[]>([]);
   const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
   const [relocatingAsset, setRelocatingAsset] = useState<MaterialAsset | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -62,7 +64,35 @@ export function AssetsPanel({
     await queryClient.invalidateQueries({ queryKey: queryKeys.materials(projectId) });
   };
 
-  const importing = uploadProgress !== null;
+  const importing = uploadProgress !== null || picking;
+
+  /** 首选：后端弹 macOS 原生选择框拿绝对路径 → reference 原地导入（零拷贝）；
+      非 macOS/无 GUI 回退到浏览器选择器（分片上传）。 */
+  async function pickAndImport(mode: "files" | "folder"): Promise<void> {
+    setPicking(true);
+    try {
+      const picked = await api.pickLocalPaths(mode);
+      if (!picked.available) {
+        (mode === "files" ? fileInputRef : folderInputRef).current?.click();
+        return;
+      }
+      if (picked.paths.length === 0) {
+        return; // 用户取消
+      }
+      const response = await api.importLocalMaterial(projectId, {
+        paths: picked.paths,
+        storage_mode: "reference"
+      });
+      setSkippedFiles(response.skipped ?? []);
+      setFailedFiles(response.failed ?? []);
+      setDuplicateFiles(response.duplicates ?? []);
+      await invalidateMaterials();
+    } catch {
+      setFailedFiles(["导入失败，请重试"]);
+    } finally {
+      setPicking(false);
+    }
+  }
 
   /** 逐文件分片上传；单个失败不影响后续，逐个完成即时刷新列表。 */
   async function importCandidates(candidates: ImportCandidate[]): Promise<void> {
@@ -80,6 +110,7 @@ export function AssetsPanel({
     }
     setSkippedFiles(skipped);
     setFailedFiles([]);
+    setDuplicateFiles([]);
     if (supported.length === 0) {
       return;
     }
@@ -217,7 +248,7 @@ export function AssetsPanel({
             className="rounded-md bg-raised px-2.5 py-1.5 text-xs font-medium text-fg hover:bg-hover disabled:opacity-40"
             type="button"
             disabled={importing}
-            onClick={() => folderInputRef.current?.click()}
+            onClick={() => void pickAndImport("folder")}
           >
             导入文件夹
           </button>
@@ -225,7 +256,7 @@ export function AssetsPanel({
             className="rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-white hover:bg-accent-strong disabled:opacity-40"
             type="button"
             disabled={importing}
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => void pickAndImport("files")}
           >
             ＋ 导入素材
           </button>
@@ -298,7 +329,7 @@ export function AssetsPanel({
           <button
             className="grid w-full place-items-center rounded-lg border border-dashed border-line-strong px-4 py-10 text-center text-sm text-fg-muted hover:border-accent"
             type="button"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => void pickAndImport("files")}
           >
             还没有素材。点击从 Finder 选择，或直接把文件/文件夹拖进来。
           </button>
@@ -342,6 +373,11 @@ export function AssetsPanel({
           <p className="mt-3 rounded-md border border-warn/40 bg-warn/10 px-3 py-2 text-xs text-warn">
             已跳过 {skippedFiles.length} 个不支持的文件：{skippedFiles.slice(0, 5).join("、")}
             {skippedFiles.length > 5 ? " 等" : ""}
+          </p>
+        ) : null}
+        {duplicateFiles.length > 0 ? (
+          <p className="mt-3 rounded-md border border-line bg-raised px-3 py-2 text-xs text-fg-muted">
+            {duplicateFiles.length} 个文件已在素材库中，未重复导入。
           </p>
         ) : null}
         {failedFiles.length > 0 ? (

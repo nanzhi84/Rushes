@@ -273,6 +273,13 @@ class FsListEntry(ApiResponseModel):
     extension: str | None = None
 
 
+class FsPickResponse(ApiResponseModel):
+    # 宿主机原生选择对话框：非 macOS/无 GUI 时 available=false（前端回退分片上传）；
+    # 用户取消时 available=true 且 paths 为空。
+    available: bool
+    paths: list[str] = []
+
+
 class FsListResponse(ApiResponseModel):
     path: str
     entries: list[FsListEntry]

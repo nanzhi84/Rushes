@@ -55,6 +55,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/fs/pick": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Fs Pick
+         * @description 弹出宿主机原生文件/文件夹选择对话框（macOS NSOpenPanel）并返回绝对路径。
+         *
+         *     后端与用户同机，这是浏览器沙箱之外拿到磁盘路径、实现零拷贝 reference
+         *     导入的唯一途径；非 macOS 或无 GUI 会话时报 available=false，前端回退分片上传。
+         */
+        post: operations["fs_pick_api_fs_pick_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/fs/roots": {
         parameters: {
             query?: never;
@@ -976,6 +999,25 @@ export interface components {
             /** Path */
             path: string;
         };
+        /** FsPickRequest */
+        FsPickRequest: {
+            /**
+             * Mode
+             * @default files
+             * @enum {string}
+             */
+            mode: "files" | "folder";
+        };
+        /** FsPickResponse */
+        FsPickResponse: {
+            /** Available */
+            available: boolean;
+            /**
+             * Paths
+             * @default []
+             */
+            paths: string[];
+        };
         /** FsRoot */
         FsRoot: {
             /** Exists */
@@ -1602,6 +1644,66 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    fs_pick_api_fs_pick_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FsPickRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FsPickResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
                 };
             };
             /** @description Validation Error */

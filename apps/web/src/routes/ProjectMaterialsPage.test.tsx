@@ -41,6 +41,50 @@ describe("ProjectMaterialsView", () => {
     expect(await screen.findByText("root.mp4")).toBeTruthy();
   });
 
+  it("原生对话框可用时走 reference 原地导入而非上传", async () => {
+    const fetchMock = stubFetch({
+      assets: [],
+      pickResponse: { available: true, paths: ["/Users/me/素材A"] }
+    });
+    renderMaterials();
+
+    fireEvent.click(await screen.findByText("＋ 导入素材"));
+
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(([url]) =>
+        String(url).endsWith("/materials/import-local")
+      );
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+        paths: ["/Users/me/素材A"],
+        storage_mode: "reference"
+      });
+    });
+    expect(
+      fetchMock.mock.calls.find(([url]) => String(url).includes("/api/uploads/init"))
+    ).toBeFalsy();
+  });
+
+  it("原生对话框不可用时回退浏览器上传选择器", async () => {
+    const fetchMock = stubFetch({
+      assets: [],
+      pickResponse: { available: false, paths: [] }
+    });
+    renderMaterials();
+
+    fireEvent.click(await screen.findByText("＋ 导入素材"));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.find(([url]) => String(url).endsWith("/api/fs/pick"))
+      ).toBeTruthy();
+    });
+    // 回退 = 触发隐藏 file input（jsdom 无法真正弹框，断言未发起 import-local）
+    expect(
+      fetchMock.mock.calls.find(([url]) => String(url).endsWith("/materials/import-local"))
+    ).toBeFalsy();
+  });
+
   it("文件夹选择经分片上传携带 rel_dir", async () => {
     const fetchMock = stubFetch({ assets: [] });
     renderMaterials();
@@ -207,11 +251,15 @@ type StubOptions = {
   assets: MaterialAsset[];
   importResponse?: Record<string, unknown>;
   summary?: Record<string, unknown>;
+  pickResponse?: Record<string, unknown>;
 };
 
 function stubFetch(options: StubOptions): ReturnType<typeof vi.fn> {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url.endsWith("/api/fs/pick")) {
+      return jsonResponse(options.pickResponse ?? { available: false, paths: [] });
+    }
     if (url === "/api/uploads/init") {
       return jsonResponse(
         {

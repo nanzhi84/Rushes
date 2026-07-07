@@ -11,6 +11,7 @@ export type DecisionAnswer = components["schemas"]["DecisionAnswerRequest"]["ans
 export type FsRoot = components["schemas"]["FsRoot"];
 export type FsListEntry = components["schemas"]["FsListEntry"];
 export type FsListResponse = components["schemas"]["FsListResponse"];
+export type FsPickResponse = components["schemas"]["FsPickResponse"];
 
 // apps/api/schemas.py 已有 M2 materials/upload response models；当前生成 schema 尚未包含这些路径。
 export type MaterialKind = "video" | "audio" | "image" | "font";
@@ -447,6 +448,14 @@ export const api = {
 
   fsRoots(): Promise<components["schemas"]["FsRootsResponse"]> {
     return apiFetch<components["schemas"]["FsRootsResponse"]>("/api/fs/roots");
+  },
+
+  /** 弹出宿主机原生选择对话框（macOS）；available=false 时前端回退分片上传。 */
+  pickLocalPaths(mode: "files" | "folder"): Promise<FsPickResponse> {
+    return apiFetch<FsPickResponse>("/api/fs/pick", {
+      method: "POST",
+      body: { mode }
+    });
   },
 
   fsList(path: string): Promise<FsListResponse> {
