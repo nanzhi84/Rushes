@@ -1,11 +1,12 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
+import { WORKSPACE_EVENT_TYPES } from "../api/event_types";
 import { acquireApiEventSource } from "../auth";
 import { queryKeys } from "./query_client";
 
 export type ConnectionState = "connecting" | "open" | "closed";
 
-/** 订阅 workspace 级 SSE（共享连接）：维护连接状态，并在结构性事件到达时失效项目/树查询。 */
+/** 订阅 workspace 级 SSE（共享连接）：维护连接状态，并在结构性事件到达时失效草稿列表查询。 */
 export function useWorkspaceEvents(): ConnectionState {
   const queryClient = useQueryClient();
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
@@ -19,8 +20,7 @@ export function useWorkspaceEvents(): ConnectionState {
     const handleOpen = () => setConnectionState("open");
     const handleError = () => setConnectionState("closed");
     const handleWorkspaceEvent = () => {
-      void queryClient.invalidateQueries({ queryKey: queryKeys.projectTree });
-      void queryClient.invalidateQueries({ queryKey: queryKeys.projects });
+      void queryClient.invalidateQueries({ queryKey: queryKeys.drafts });
     };
     source.addEventListener("open", handleOpen);
     source.addEventListener("error", handleError);
@@ -49,21 +49,3 @@ export function connectionLabel(state: ConnectionState): string {
   }
   return "连接中";
 }
-
-const WORKSPACE_EVENT_TYPES = [
-  "ProjectCreated",
-  "ProjectRenamed",
-  "ProjectTrashed",
-  "ProjectCopied",
-  "CaseCreated",
-  "CaseRenamed",
-  "CaseCopied",
-  "CaseMoved",
-  "CaseClosed",
-  "CaseTrashed",
-  "AssetLinked",
-  "AssetUnlinked",
-  "MemorySaved",
-  "CapabilityDegraded",
-  "SecurityRefusal"
-];

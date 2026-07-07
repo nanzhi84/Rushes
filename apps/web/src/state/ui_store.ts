@@ -1,20 +1,10 @@
 import { create } from "zustand";
 
-export type EntityDialogKind =
-  | "createProject"
-  | "renameProject"
-  | "copyProject"
-  | "deleteProject"
-  | "createCase"
-  | "renameCase"
-  | "copyCase"
-  | "deleteCase"
-  | "moveCase";
+export type EntityDialogKind = "renameDraft" | "copyDraft" | "deleteDraft";
 
 export type EntityDialogState = {
   kind: EntityDialogKind;
-  projectId?: string;
-  caseId?: string;
+  draftId: string;
 };
 
 type UiState = {

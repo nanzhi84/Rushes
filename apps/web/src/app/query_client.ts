@@ -19,18 +19,16 @@ export const queryClient = new QueryClient({
 });
 
 export const queryKeys = {
-  projectTree: ["project-tree"] as const,
-  projects: ["projects"] as const,
-  project: (projectId: string) => ["project", projectId] as const,
-  materials: (projectId: string) => ["materials", projectId] as const,
-  materialSummary: (projectId: string, assetId: string) =>
-    ["material-summary", projectId, assetId] as const,
+  drafts: ["drafts"] as const,
+  draft: (draftId: string) => ["draft", draftId] as const,
+  materials: (draftId: string) => ["materials", draftId] as const,
+  materialSummary: (draftId: string, assetId: string) =>
+    ["material-summary", draftId, assetId] as const,
   fsRoots: ["fs-roots"] as const,
   fsList: (path: string) => ["fs-list", path] as const,
-  case: (projectId: string, caseId: string) => ["case", projectId, caseId] as const,
-  timeline: (projectId: string, caseId: string, version: number | null) =>
-    ["timeline", projectId, caseId, version] as const,
-  messages: (projectId: string, caseId: string) => ["messages", projectId, caseId] as const,
-  currentDecision: (projectId: string, caseId: string) =>
-    ["current-decision", projectId, caseId] as const
+  timeline: (draftId: string, version: number | null) => ["timeline", draftId, version] as const,
+  messages: (draftId: string) => ["messages", draftId] as const,
+  currentDecision: (draftId: string) => ["current-decision", draftId] as const,
+  pendingDecisions: (draftId: string) => ["pending-decisions", draftId] as const,
+  costs: (draftId: string) => ["costs", draftId] as const
 };
