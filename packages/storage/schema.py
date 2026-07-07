@@ -11,7 +11,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
-    LargeBinary,
     MetaData,
     Table,
     Text,
@@ -46,14 +45,6 @@ cases = Table(
     Column("content_plan", Text, nullable=True),
     Column("audio_plan", Text, nullable=True),
     Column("cut_plan", Text, nullable=True),
-    # Retained for the timeline candidate materializer (Task 7); the offline
-    # retrieval write-path that populated candidate packs is removed.
-    Column(
-        "candidate_pack_id",
-        Text,
-        ForeignKey("candidate_packs.candidate_pack_id"),
-        nullable=True,
-    ),
     Column("timeline_current_version", Integer, nullable=True),
     Column("timeline_validated", Boolean, nullable=False, default=False),
     Column("preview_current_id", Text, ForeignKey("previews.preview_id"), nullable=True),
@@ -99,38 +90,6 @@ project_asset_links = Table(
     Column("enabled", Boolean, nullable=False),
     Column("linked_at", Text, nullable=False),
     Column("note", Text, nullable=False),
-)
-
-# NOTE(Task 7): annotations/annotation_clip_projection/candidate_packs are retained
-# only because the timeline candidate materializer (packages/timeline) still reads
-# them. The offline annotation/retrieval write-path that filled them is gone, so
-# they stay empty until Task 7 reworks timeline candidate materialization.
-annotations_table = Table(
-    "annotations",
-    metadata,
-    Column("annotation_id", Text, primary_key=True),
-    Column("asset_id", Text, ForeignKey("assets.asset_id"), nullable=False),
-    Column("schema", Text, nullable=False),
-    Column("status", Text, nullable=False),
-    Column("document_json", Text, nullable=False),
-    Column("created_at", Text, nullable=False),
-    Column("updated_at", Text, nullable=False),
-)
-
-annotation_clip_projection = Table(
-    "annotation_clip_projection",
-    metadata,
-    Column("clip_id", Text, primary_key=True),
-    Column("annotation_id", Text, ForeignKey("annotations.annotation_id"), nullable=False),
-    Column("asset_id", Text, ForeignKey("assets.asset_id"), nullable=False),
-    Column("start_frame", Integer, nullable=False),
-    Column("end_frame", Integer, nullable=False),
-    Column("role", Text, nullable=False),
-    Column("summary", Text, nullable=False),
-    Column("keywords_json", Text, nullable=False),
-    Column("quality_score", Float, nullable=True),
-    Column("usable", Boolean, nullable=False),
-    Column("embedding", LargeBinary, nullable=True),
 )
 
 transcripts = Table(
@@ -200,15 +159,6 @@ Index(
     timeline_versions.c.case_id,
     timeline_versions.c.version,
     unique=True,
-)
-
-candidate_packs = Table(
-    "candidate_packs",
-    metadata,
-    Column("candidate_pack_id", Text, primary_key=True),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=False),
-    Column("slots", Text, nullable=False),
-    Column("created_at", Text, nullable=False),
 )
 
 previews = Table(
@@ -358,13 +308,10 @@ ALL_TABLE_NAMES: tuple[str, ...] = (
     "cases",
     "assets",
     "project_asset_links",
-    "annotations",
-    "annotation_clip_projection",
     "transcripts",
     "material_summaries",
     "decisions",
     "timeline_versions",
-    "candidate_packs",
     "previews",
     "exports",
     "memory_candidates",

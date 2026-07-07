@@ -351,7 +351,6 @@ def _seed_clip(
     *,
     quality_score: float,
 ) -> None:
-    annotation_id = f"ann_{asset_id}"
     connection.execute(
         schema.assets.insert().values(
             asset_id=asset_id,
@@ -378,29 +377,6 @@ def _seed_clip(
             enabled=True,
             linked_at=NOW,
             note="",
-        )
-    )
-    connection.execute(
-        schema.annotations_table.insert().values(
-            annotation_id=annotation_id,
-            asset_id=asset_id,
-            schema="AnnotationDocument.v1",
-            status="completed",
-            document_json=dump_json(
-                {
-                    "schema": "AnnotationDocument.v1",
-                    "annotation_id": annotation_id,
-                    "asset_id": asset_id,
-                    "asset_kind": "video",
-                    "status": "completed",
-                    "generator": {"pipeline_version": "annotation.video.v1", "pass": "cheap"},
-                    "clips": [],
-                    "quality_events": [],
-                    "created_at": NOW,
-                }
-            ),
-            created_at=NOW,
-            updated_at=NOW,
         )
     )
 

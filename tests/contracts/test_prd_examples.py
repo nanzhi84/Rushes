@@ -3,7 +3,6 @@ from pydantic import BaseModel
 from contracts import (
     AnnotationDocument,
     AssetRecord,
-    CandidatePack,
     CaseState,
     CutPlan,
     Decision,
@@ -45,7 +44,6 @@ def test_case_state_prd_example_round_trips() -> None:
             "content_plan": None,
             "audio_plan": None,
             "cut_plan": None,
-            "candidate_pack_id": None,
             "timeline_current_version": None,
             "timeline_validated": False,
             "preview_current_id": None,
@@ -360,38 +358,6 @@ def test_resolved_timeline_patch_prd_example_round_trips() -> None:
                 "affected_clip_ids": ["tc_019"],
             },
             "produced_timeline_version": 10,
-        },
-    )
-
-
-def test_candidate_pack_prd_example_round_trips() -> None:
-    assert_round_trip(
-        CandidatePack,
-        {
-            "candidate_pack_id": "cand_001",
-            "case_id": "case_007",
-            "query_context": {"cut_plan_ref": "...", "audio_mode": "tts"},
-            "snapshot": {
-                "generated_at": "2026-07-04T00:00:00Z",
-                "asset_scope_hash": "hash(已链接∧usable∧未禁用的 asset_id 集 + selected/disabled)",
-                "annotation_versions": {"asset_007": "ann_001@v2"},
-            },
-            "slots": [
-                {
-                    "slot_id": "slot_hook",
-                    "slot_brief": "开头 3 秒钩子，产品特写优先",
-                    "target_duration_sec": [2.0, 4.0],
-                    "candidates": [
-                        {
-                            "candidate_id": "cand_hook_1",
-                            "asset_id": "asset_007",
-                            "clip_id": "clip_002",
-                            "summary_line": "产品特写，手部拿起瓶身，2.8s 可用，质量 0.92",
-                            "score": {"bm25_rank": 1, "vector_rank": 3, "rrf": 0.031},
-                        }
-                    ],
-                }
-            ],
         },
     )
 

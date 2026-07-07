@@ -1,4 +1,4 @@
-"""timeline 工具 handler 的守卫分支与 candidate pack 回退加载路径。"""
+"""timeline 工具 handler 的守卫分支。"""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from storage.repositories._json import dump_json
 from timeline import PatchApplyError, PatchOutcome
 from tools import ToolExecutionContext
 from tools.specs import (
+    ComposeInitialInput,
     TimelineInspectInput,
     TimelineRestoreVersionInput,
     TimelineValidateInput,
@@ -175,6 +176,25 @@ def test_all_handlers_fail_without_case_or_connection(tmp_path: Path) -> None:
             assert no_conn.status == "failed"
             assert no_conn.error is not None
             assert no_conn.error.error_code == "missing_connection"
+
+
+def test_compose_initial_fails_without_case_or_connection(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    input_model = ComposeInitialInput(
+        clips=[
+            {"asset_id": "asset_1", "source_start_s": 0.0, "source_end_s": 1.0, "role": "a_roll"}
+        ]
+    )
+    with engine.connect() as connection:
+        no_case = handlers.compose_initial(input_model, _context(connection=connection))
+        assert no_case.status == "failed"
+        assert no_case.error is not None
+        assert no_case.error.error_code == "missing_case"
+
+        no_conn = handlers.compose_initial(input_model, _context(case_state=_case_state()))
+        assert no_conn.status == "failed"
+        assert no_conn.error is not None
+        assert no_conn.error.error_code == "missing_connection"
 
 
 def test_handlers_fail_without_current_timeline(tmp_path: Path) -> None:

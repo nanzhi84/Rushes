@@ -19,7 +19,7 @@ from contracts.patch import (
     DeleteRangeOp,
     EditSubtitleTextOp,
     GenerateSubtitlesOp,
-    InsertCandidateOp,
+    InsertClipOp,
     PatchTimeRange,
     RemoveTrackClipsOp,
     ReorderBlocksOp,
@@ -198,9 +198,14 @@ def _resolve_on_timeline(
         start, end = _seconds_to_frame_range(op.time_range_sec, fps=timeline.fps)
         track_ids = _tracks_for_delete_scope(op.scope)
         return _resolved_range(timeline, start, end, track_ids=track_ids)
-    if isinstance(op, InsertCandidateOp):
-        frame = _second_to_frame(op.position_sec, fps=timeline.fps)
-        return _resolved_range(timeline, frame, frame + 1, track_ids=("visual_base",))
+    if isinstance(op, InsertClipOp):
+        track_id = op.track_id or "visual_base"
+        frame = (
+            _range_end(timeline)
+            if op.position_s is None
+            else _second_to_frame(op.position_s, fps=timeline.fps)
+        )
+        return _resolved_range(timeline, frame, frame + 1, track_ids=(track_id,))
     if isinstance(op, TrimClipOp):
         clip = _find_clip(timeline, op.timeline_clip_id)
         if clip is None:

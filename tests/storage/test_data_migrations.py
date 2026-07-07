@@ -43,34 +43,55 @@ def _insert_link(connection: Connection, asset_id: str) -> None:
     )
 
 
+# annotations/annotation_clip_projection/candidate_packs 已从 schema 移除（Task 7）；
+# 老库仍带着它们，这里用裸 DDL 复原，验证迁移的守卫式 DELETE + DROP 链路。
+_LEGACY_ANNOTATIONS_DDL = (
+    "CREATE TABLE annotations ("
+    "annotation_id TEXT PRIMARY KEY, "
+    "asset_id TEXT NOT NULL REFERENCES assets(asset_id), "
+    "schema TEXT NOT NULL, status TEXT NOT NULL, document_json TEXT NOT NULL, "
+    "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+)
+_LEGACY_CLIP_PROJECTION_DDL = (
+    "CREATE TABLE annotation_clip_projection ("
+    "clip_id TEXT PRIMARY KEY, "
+    "annotation_id TEXT NOT NULL REFERENCES annotations(annotation_id), "
+    "asset_id TEXT NOT NULL REFERENCES assets(asset_id), "
+    "start_frame INTEGER NOT NULL, end_frame INTEGER NOT NULL, role TEXT NOT NULL, "
+    "summary TEXT NOT NULL, keywords_json TEXT NOT NULL, quality_score REAL, "
+    "usable BOOLEAN NOT NULL, embedding BLOB)"
+)
+_LEGACY_CANDIDATE_PACKS_DDL = (
+    "CREATE TABLE candidate_packs ("
+    "candidate_pack_id TEXT PRIMARY KEY, "
+    "case_id TEXT NOT NULL REFERENCES cases(case_id), "
+    "slots TEXT NOT NULL, created_at TEXT NOT NULL)"
+)
+
+
+def _create_legacy_annotation_tables(connection: Connection) -> None:
+    connection.exec_driver_sql(_LEGACY_ANNOTATIONS_DDL)
+    connection.exec_driver_sql(_LEGACY_CLIP_PROJECTION_DDL)
+    connection.exec_driver_sql(_LEGACY_CANDIDATE_PACKS_DDL)
+
+
 def _insert_asset_dependencies(connection: Connection, asset_id: str) -> None:
-    """给资产种上仍存留的、FK 指向 assets 的依赖行。"""
+    """给资产种上依赖行（含老库仍在的 annotation 表族）。"""
 
     annotation_id = f"ann-{asset_id}"
     clip_id = f"clip-{asset_id}"
-    connection.execute(
-        schema.annotations_table.insert().values(
-            annotation_id=annotation_id,
-            asset_id=asset_id,
-            schema="v1",
-            status="done",
-            document_json="{}",
-            created_at="t",
-            updated_at="t",
-        )
+    connection.exec_driver_sql(
+        "INSERT INTO annotations "
+        "(annotation_id, asset_id, schema, status, document_json, created_at, updated_at) "
+        "VALUES (?, ?, 'v1', 'done', '{}', 't', 't')",
+        (annotation_id, asset_id),
     )
-    connection.execute(
-        schema.annotation_clip_projection.insert().values(
-            clip_id=clip_id,
-            annotation_id=annotation_id,
-            asset_id=asset_id,
-            start_frame=0,
-            end_frame=10,
-            role="b_roll",
-            summary="s",
-            keywords_json="[]",
-            usable=True,
-        )
+    connection.exec_driver_sql(
+        "INSERT INTO annotation_clip_projection "
+        "(clip_id, annotation_id, asset_id, start_frame, end_frame, role, summary, "
+        "keywords_json, usable) "
+        "VALUES (?, ?, ?, 0, 10, 'b_roll', 's', '[]', 1)",
+        (clip_id, annotation_id, asset_id),
     )
     connection.execute(
         schema.transcripts.insert().values(
@@ -99,12 +120,8 @@ def _insert_asset_dependencies(connection: Connection, asset_id: str) -> None:
 
 
 def _dependency_counts(connection: Connection, asset_id: str) -> dict[str, int]:
+    # annotation 表族在迁移中整表 DROP，迁移后无法计数；这里只查始终存活的依赖表。
     queries: dict[str, tuple[str, tuple[str, ...]]] = {
-        "annotations": ("SELECT COUNT(*) FROM annotations WHERE asset_id = ?", (asset_id,)),
-        "clips": (
-            "SELECT COUNT(*) FROM annotation_clip_projection WHERE asset_id = ?",
-            (asset_id,),
-        ),
         "transcripts": ("SELECT COUNT(*) FROM transcripts WHERE asset_id = ?", (asset_id,)),
         "jobs": ("SELECT COUNT(*) FROM jobs WHERE asset_id = ?", (asset_id,)),
     }
@@ -116,6 +133,7 @@ def _dependency_counts(connection: Connection, asset_id: str) -> dict[str, int]:
 
 def _seed_legacy_workspace(connection: Connection) -> None:
     schema.create_all(connection)
+    _create_legacy_annotation_tables(connection)
     connection.execute(
         schema.projects.insert().values(
             project_id="p1",
@@ -184,8 +202,6 @@ def _link_exists(connection: Connection, asset_id: str) -> bool:
 _SNAPSHOT_TABLES = (
     "assets",
     "project_asset_links",
-    "annotations",
-    "annotation_clip_projection",
     "transcripts",
     "jobs",
 )
@@ -636,6 +652,10 @@ def _rebuild_legacy_offline_db(db_path: Path) -> None:
         raw.execute("PRAGMA foreign_keys=OFF")
         raw.execute("DROP TABLE assets")
         raw.execute(_OLD_ASSETS_DDL)
+        # annotation 表族已从 schema 移除，老库仍带着它们：用裸 DDL 复原后再种依赖行
+        raw.execute(_LEGACY_ANNOTATIONS_DDL)
+        raw.execute(_LEGACY_CLIP_PROJECTION_DDL)
+        raw.execute(_LEGACY_CANDIDATE_PACKS_DDL)
         raw.execute(_LEGACY_SIGNAL_DDL)
         raw.execute(_LEGACY_CLIP_FTS_DDL)
         raw.execute(
@@ -685,7 +705,13 @@ def test_legacy_annotation_db_migration_drops_offline_columns_and_tables(tmp_pat
         legacy_columns = _asset_columns(connection)
         assert {"annotation_status", "annotation_pass", "index_status"} <= legacy_columns
         tables_before = _table_names(connection)
-        assert {"annotation_signal_projection", "clip_fts"} <= tables_before
+        assert {
+            "annotation_signal_projection",
+            "clip_fts",
+            "annotations",
+            "annotation_clip_projection",
+            "candidate_packs",
+        } <= tables_before
 
     # 启动即跑迁移，不应崩
     with engine.begin() as connection:
@@ -696,10 +722,14 @@ def test_legacy_annotation_db_migration_drops_offline_columns_and_tables(tmp_pat
         # 三个离线标注列被真删（否则新代码省略它们的 INSERT 会撞 NOT NULL）
         assert {"annotation_status", "annotation_pass", "index_status"}.isdisjoint(columns)
         tables_after = _table_names(connection)
-        # signal 投影与 clip_fts 已删；timeline 仍依赖的三张表保留
-        assert "annotation_signal_projection" not in tables_after
-        assert "clip_fts" not in tables_after
-        assert {"annotations", "annotation_clip_projection", "candidate_packs"} <= tables_after
+        # 离线标注/检索表族整体退场：signal/clip_fts 与 annotation 三表全部 DROP
+        assert {
+            "annotation_signal_projection",
+            "clip_fts",
+            "annotations",
+            "annotation_clip_projection",
+            "candidate_packs",
+        }.isdisjoint(tables_after)
         # 待删素材连同 clip/signal/fts 依赖被清空，父行也删掉
         assert _asset_row(connection, ASSET_SUBTITLE) is None
         # 关键回归：删列后新代码用精简列 INSERT 素材必须成功
@@ -716,6 +746,49 @@ def test_legacy_annotation_db_migration_drops_offline_columns_and_tables(tmp_pat
             )
         )
         assert _asset_row(connection, "asset-post-migration") is not None
+
+
+def test_legacy_case_candidate_pack_column_dropped_before_table(tmp_path: Path) -> None:
+    """旧库 cases.candidate_pack_id 外键指向 candidate_packs：迁移须先删列再删表，
+
+    否则删表后新 case 的 INSERT 会在外键校验时撞 no such table。
+    """
+
+    engine = create_workspace_engine(tmp_path)
+    with engine.begin() as connection:
+        schema.create_all(connection)
+    db_path = WorkspacePaths.from_root(tmp_path).db_path
+
+    import sqlite3
+
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.execute("PRAGMA foreign_keys=OFF")
+        raw.execute("DROP TABLE cases")
+        raw.execute(_LEGACY_CANDIDATE_PACKS_DDL)
+        raw.execute(
+            "CREATE TABLE cases (case_id TEXT PRIMARY KEY, "
+            "candidate_pack_id TEXT REFERENCES candidate_packs(candidate_pack_id))"
+        )
+        raw.execute("INSERT INTO cases (case_id, candidate_pack_id) VALUES ('c1', NULL)")
+        raw.commit()
+    finally:
+        raw.close()
+
+    with engine.begin() as connection:
+        assert "candidate_pack_id" in {
+            row[1] for row in connection.exec_driver_sql("PRAGMA table_info(cases)").all()
+        }
+
+        apply_data_migrations(connection)
+
+        cols = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(cases)").all()}
+        assert "candidate_pack_id" not in cols
+        assert "candidate_packs" not in _table_names(connection)
+        # 关键回归：外键强制开启下，删列+删表后新 case INSERT 不再撞 no such table
+        assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar_one() == 1
+        connection.exec_driver_sql("INSERT INTO cases (case_id) VALUES ('c2')")
+        assert connection.exec_driver_sql("SELECT COUNT(*) FROM cases").scalar_one() == 2
 
 
 def _table_names(connection: Connection) -> set[str]:

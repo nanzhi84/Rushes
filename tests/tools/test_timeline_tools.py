@@ -19,17 +19,19 @@ from timeline import store_timeline_version
 from tools import ToolExecutionContext, build_default_tool_registry
 from tools.specs import (
     PATCH_OP_REGISTRY,
+    ComposeInitialInput,
     TimelineInspectInput,
     TimelineRestoreVersionInput,
     TimelineValidateInput,
     tool_specs,
 )
 from tools.timeline_tools import (
-    inspect as timeline_inspect,
-)
-from tools.timeline_tools import (
+    compose_initial,
     restore_version,
     validate,
+)
+from tools.timeline_tools import (
+    inspect as timeline_inspect,
 )
 
 NOW = "2026-07-05T00:00:00+00:00"
@@ -66,6 +68,72 @@ def test_validate_invalid_timeline_and_render_preview_not_allowed(tmp_path: Path
     assert registry.get("render.preview") is not None
     assert result.data["valid"] is False
     assert "render.preview" not in {spec.name for spec in allowed}
+
+
+def test_compose_initial_builds_valid_timeline_and_bumps_version(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    with engine.begin() as connection:
+        _seed_clip(connection, "asset_1", "clip_1", "product closeup")
+        _seed_clip(connection, "asset_2", "clip_2", "b roll")
+        _seed_asset_kind(connection, "asset_vo", kind="audio")
+        result = compose_initial(
+            ComposeInitialInput(
+                clips=[
+                    {
+                        "asset_id": "asset_1",
+                        "source_start_s": 0.0,
+                        "source_end_s": 1.5,
+                        "role": "a_roll",
+                    },
+                    {
+                        "asset_id": "asset_2",
+                        "source_start_s": 2.0,
+                        "source_end_s": 3.0,
+                        "role": "b_roll",
+                    },
+                ],
+                voiceover_asset_id="asset_vo",
+            ),
+            _context(connection, _case_state()),
+        )
+        stored = connection.execute(
+            select(schema.timeline_versions).where(schema.timeline_versions.c.version == 1)
+        ).one()
+
+    assert result.status == "succeeded"
+    assert result.data["timeline_version"] == 1
+    assert result.data["validation_report"]["valid"] is True
+    visual = _track_clips(result.data["timeline"], "visual_base")
+    assert [(clip["timeline_start_frame"], clip["timeline_end_frame"]) for clip in visual] == [
+        (0, 45),
+        (45, 75),
+    ]
+    assert len(_track_clips(result.data["timeline"], "voiceover")) == 1
+    event_names = {event["event"] for event in result.events}
+    assert {"TimelineVersionCreated", "TimelineValidated"} <= event_names
+    assert load_json(stored._mapping["document_json"])["version"] == 1
+
+
+def test_compose_initial_reports_invalid_clip_inputs(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    with engine.begin() as connection:
+        result = compose_initial(
+            ComposeInitialInput(
+                clips=[
+                    {
+                        "asset_id": "ghost",
+                        "source_start_s": 0.0,
+                        "source_end_s": 1.0,
+                        "role": "a_roll",
+                    }
+                ]
+            ),
+            _context(connection, _case_state()),
+        )
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.error_code == "timeline_materialization_failed"
 
 
 def test_inspect_returns_timeline_summary(tmp_path: Path) -> None:
@@ -166,6 +234,44 @@ def _engine(tmp_path: Path):
     return engine
 
 
+def _seed_asset_kind(connection: Connection, asset_id: str, *, kind: str) -> None:
+    connection.execute(
+        schema.assets.insert().values(
+            asset_id=asset_id,
+            storage_mode="reference",
+            object_hash=None,
+            reference_path=f"/tmp/{asset_id}",
+            kind=kind,
+            source="local_path",
+            filename=f"{asset_id}",
+            hash=f"hash_{asset_id}",
+            mtime=1,
+            size=1,
+            probe=dump_json({"duration_sec": 10.0, "fps": 30.0}),
+            proxy_object_hash=None,
+            ingest_status="indexed",
+            usable=True,
+            failure=None,
+        )
+    )
+    connection.execute(
+        schema.project_asset_links.insert().values(
+            project_id="project_1",
+            asset_id=asset_id,
+            enabled=True,
+            linked_at=NOW,
+            note="",
+        )
+    )
+
+
+def _track_clips(timeline: dict[str, Any], track_id: str) -> list[dict[str, Any]]:
+    for track in timeline["tracks"]:
+        if track["track_id"] == track_id:
+            return list(track["clips"])
+    raise AssertionError(f"missing track {track_id}")
+
+
 def _context(
     connection: Connection,
     case_state: CaseState,
@@ -256,7 +362,6 @@ def _seed_clip(
     clip_id: str,
     summary: str,
 ) -> None:
-    annotation_id = f"ann_{asset_id}"
     connection.execute(
         schema.assets.insert().values(
             asset_id=asset_id,
@@ -283,28 +388,6 @@ def _seed_clip(
             enabled=True,
             linked_at=NOW,
             note="",
-        )
-    )
-    document = {
-        "schema": "AnnotationDocument.v1",
-        "annotation_id": annotation_id,
-        "asset_id": asset_id,
-        "asset_kind": "video",
-        "status": "completed",
-        "generator": {"pipeline_version": "annotation.video.v1", "pass": "cheap"},
-        "clips": [],
-        "quality_events": [],
-        "created_at": NOW,
-    }
-    connection.execute(
-        schema.annotations_table.insert().values(
-            annotation_id=annotation_id,
-            asset_id=asset_id,
-            schema="AnnotationDocument.v1",
-            status="completed",
-            document_json=dump_json(document),
-            created_at=NOW,
-            updated_at=NOW,
         )
     )
 

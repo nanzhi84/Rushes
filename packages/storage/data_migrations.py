@@ -29,6 +29,7 @@ def apply_data_migrations(connection: Connection) -> None:
     _ensure_message_kind_column(connection)
     _ensure_asset_understanding_columns(connection)
     _drop_removed_annotation_asset_columns(connection)
+    _drop_removed_case_columns(connection)
     _drop_removed_offline_tables(connection)
 
 
@@ -85,16 +86,39 @@ def _drop_removed_annotation_asset_columns(connection: Connection) -> None:
             connection.exec_driver_sql(f"ALTER TABLE assets DROP COLUMN {column}")
 
 
-def _drop_removed_offline_tables(connection: Connection) -> None:
-    """删除离线检索遗留的表：annotation_signal_projection 与 clip_fts(fts5 虚拟表)。
+def _drop_removed_case_columns(connection: Connection) -> None:
+    """删除候选包遗留的 cases 列：candidate_pack_id（含指向 candidate_packs 的外键）。
 
-    annotations / annotation_clip_projection / candidate_packs 仍被 timeline 候选
-    materializer 引用（Task 7 收口），故此处不删；signal 投影与全文索引已无引用，安全 DROP。
-    先删 signal（其外键指向 annotation_clip_projection），再删 clip_fts。
+    必须在 DROP candidate_packs 之前真删：否则旧库里这条悬空外键会让后续
+    「新代码省略该列的 case INSERT」在 candidate_packs 被删后撞 no such table。
+    SQLite ≥3.35 支持 DROP COLUMN；先用 PRAGMA table_info 守卫，新库本就没有此列。
     """
 
-    connection.exec_driver_sql("DROP TABLE IF EXISTS annotation_signal_projection")
-    connection.exec_driver_sql("DROP TABLE IF EXISTS clip_fts")
+    columns = {row[1] for row in connection.exec_driver_sql("PRAGMA table_info(cases)").all()}
+    if "candidate_pack_id" in columns:
+        connection.exec_driver_sql("ALTER TABLE cases DROP COLUMN candidate_pack_id")
+
+
+def _drop_removed_offline_tables(connection: Connection) -> None:
+    """删除离线标注/检索遗留的表。
+
+    Task 7 起 timeline 从摘要时间戳直接组装，不再经候选包/标注投影，故这些表
+    彻底退场：annotation_signal_projection、clip_fts(fts5 虚拟表)、
+    annotation_clip_projection、annotations、candidate_packs。
+    按外键子→父顺序 DROP：signal 投影与 clip_fts 依赖 clip 投影，clip 投影依赖
+    annotations；candidate_packs 曾被 cases.candidate_pack_id 引用（该列已随
+    CaseState 一起删除，旧库残留列恒为 NULL，不阻塞 DROP）。每条 IF EXISTS 守卫，
+    新库本就没有这些表，可在每次启动重复执行。
+    """
+
+    for table in (
+        "annotation_signal_projection",
+        "clip_fts",
+        "annotation_clip_projection",
+        "annotations",
+        "candidate_packs",
+    ):
+        connection.exec_driver_sql(f"DROP TABLE IF EXISTS {table}")
 
 
 def _collapse_asset_kinds(connection: Connection) -> None:

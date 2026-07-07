@@ -61,7 +61,7 @@ EXPECTED_PATCH_OPS: frozenset[str] = frozenset(
         "replace_clip",
         "reorder_blocks",
         "trim_clip",
-        "insert_candidate",
+        "insert_clip",
         "generate_subtitles",
         "set_subtitle_style",
         "edit_subtitle_text",

@@ -20,7 +20,7 @@ from contracts.patch import (
     DeleteRangeOp,
     EditSubtitleTextOp,
     GenerateSubtitlesOp,
-    InsertCandidateOp,
+    InsertClipOp,
     RemoveTrackClipsOp,
     ReorderBlocksOp,
     ReplaceClipOp,
@@ -329,6 +329,30 @@ class ContentRevisePlanInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     revision_hint: str
+
+
+class ComposeInitialClip(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    source_start_s: float
+    source_end_s: float
+    role: Literal["a_roll", "b_roll", "image"]
+
+    @model_validator(mode="after")
+    def validate_source_range(self) -> ComposeInitialClip:
+        if self.source_start_s < 0:
+            raise ValueError("source_start_s must be non-negative")
+        if self.source_start_s >= self.source_end_s:
+            raise ValueError("source_start_s must be < source_end_s")
+        return self
+
+
+class ComposeInitialInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    clips: list[ComposeInitialClip] = Field(min_length=1)
+    voiceover_asset_id: str | None = None
 
 
 class TimelineValidateInput(BaseModel):
@@ -972,6 +996,29 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             description="Read the latest ready material summaries for the given assets.",
         ),
         ToolSpec(
+            name="timeline.compose_initial",
+            namespace="timeline",
+            version="1",
+            input_model=ComposeInitialInput,
+            result_model=None,
+            handler_ref="tools.timeline_tools.compose_initial",
+            allowed_scopes=["case_agent_console"],
+            requires_artifacts=[
+                "active_case",
+                "audio_plan_confirmed",
+                "usable_asset_exists",
+            ],
+            requires_active_project=True,
+            requires_active_case=True,
+            side_effects=["timeline", "case"],
+            emits_events=[
+                "TimelineVersionCreated",
+                "TimelineValidated",
+                "TimelineValidationFailed",
+            ],
+            description="Assemble timeline v1 directly from summary-level clip selections.",
+        ),
+        ToolSpec(
             name="timeline.apply_patch",
             namespace="timeline",
             version="1",
@@ -1170,7 +1217,7 @@ def patch_op_registry() -> PatchOpRegistry:
                 kind="replace_clip",
                 params_model=ReplaceClipOp,
                 ripple_semantics="in_place",
-                description="Replace an existing timeline clip with a candidate.",
+                description="Replace a timeline clip's source with another asset span.",
             ),
             PatchOpSpec(
                 kind="reorder_blocks",
@@ -1185,10 +1232,10 @@ def patch_op_registry() -> PatchOpRegistry:
                 description="Trim a clip head or tail by user-referenced seconds.",
             ),
             PatchOpSpec(
-                kind="insert_candidate",
-                params_model=InsertCandidateOp,
+                kind="insert_clip",
+                params_model=InsertClipOp,
                 ripple_semantics="ripple",
-                description="Insert a candidate at a user-referenced position.",
+                description="Insert an asset span at a user-referenced position.",
             ),
             PatchOpSpec(
                 kind="generate_subtitles",
@@ -1300,6 +1347,7 @@ def build_default_tool_registry() -> ToolRegistry:
     from .render_tools import preview as render_preview
     from .render_tools import status as render_status
     from .timeline_tools import apply_patch as timeline_apply_patch
+    from .timeline_tools import compose_initial as timeline_compose_initial
     from .timeline_tools import inspect as timeline_inspect
     from .timeline_tools import restore_version as timeline_restore_version
     from .timeline_tools import validate as timeline_validate
@@ -1341,6 +1389,7 @@ def build_default_tool_registry() -> ToolRegistry:
         "media.view_frames": media_view_frames,
         "understand.materials": understand_materials,
         "asset.read_summary": asset_read_summary,
+        "timeline.compose_initial": timeline_compose_initial,
         "timeline.apply_patch": timeline_apply_patch,
         "timeline.validate": timeline_validate,
         "timeline.inspect": timeline_inspect,

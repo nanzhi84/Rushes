@@ -41,12 +41,25 @@ class DeleteRangeOp(TimeRangeSec):
     ripple: bool
 
 
+ClipRole = Literal["a_roll", "b_roll", "image"]
+ClipInsertTrack = Literal["visual_base", "visual_overlay"]
+
+
 class ReplaceClipOp(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["replace_clip"]
     timeline_clip_id: str
-    new_candidate_id: str
+    asset_id: str
+    source_start_s: float
+    source_end_s: float
+    role: ClipRole
+
+    @model_validator(mode="after")
+    def validate_source_range(self) -> "ReplaceClipOp":
+        if self.source_start_s >= self.source_end_s:
+            raise ValueError("source_start_s must be < source_end_s")
+        return self
 
 
 class ReorderBlocksOp(BaseModel):
@@ -65,13 +78,22 @@ class TrimClipOp(BaseModel):
     delta_sec: float
 
 
-class InsertCandidateOp(BaseModel):
+class InsertClipOp(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["insert_candidate"]
-    slot_hint: str | None = None
-    candidate_id: str
-    position_sec: float
+    kind: Literal["insert_clip"]
+    asset_id: str
+    source_start_s: float
+    source_end_s: float
+    role: ClipRole
+    track_id: ClipInsertTrack | None = None
+    position_s: float | None = None
+
+    @model_validator(mode="after")
+    def validate_source_range(self) -> "InsertClipOp":
+        if self.source_start_s >= self.source_end_s:
+            raise ValueError("source_start_s must be < source_end_s")
+        return self
 
 
 class AllRange(BaseModel):
@@ -175,7 +197,7 @@ type TimelinePatchOp = Annotated[
     | ReplaceClipOp
     | ReorderBlocksOp
     | TrimClipOp
-    | InsertCandidateOp
+    | InsertClipOp
     | GenerateSubtitlesOp
     | SetSubtitleStyleOp
     | EditSubtitleTextOp

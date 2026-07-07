@@ -1,7 +1,7 @@
 """Frame-level timeline materialization and validation."""
 
 from .anchor import AnchorConflict, AnchorResolution, AnchorResolutionError, resolve_anchor
-from .materializer import MaterializationError, materialize_from_selection
+from .materializer import MaterializationError, materialize_from_clips
 from .patch_apply import PatchApplyError, PatchOutcome, apply_patch
 from .summary import render_timeline_summary
 from .validator import (
@@ -32,7 +32,7 @@ __all__ = [
     "build_timeline_invariant_hook",
     "get_timeline_version",
     "list_timeline_versions",
-    "materialize_from_selection",
+    "materialize_from_clips",
     "render_timeline_summary",
     "resolve_anchor",
     "restore_timeline_version",

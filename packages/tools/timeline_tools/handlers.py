@@ -16,6 +16,7 @@ from contracts.events import (
     DecisionCreated,
     TimelineValidated,
     TimelineValidationFailed,
+    TimelineVersionCreated,
     TimelineVersionRestored,
 )
 from contracts.patch import AddBgmOp, TimelinePatchRequest
@@ -24,10 +25,13 @@ from storage import schema
 from storage.repositories._json import load_json
 from timeline import (
     AnchorConflict,
+    MaterializationError,
     PatchOutcome,
     get_timeline_version,
+    materialize_from_clips,
     render_timeline_summary,
     restore_timeline_version,
+    store_timeline_version,
     update_timeline_validation_report,
     validate_timeline,
 )
@@ -36,10 +40,86 @@ from timeline import (
 )
 from tools.context import ToolExecutionContext
 from tools.specs import (
+    ComposeInitialInput,
     TimelineInspectInput,
     TimelineRestoreVersionInput,
     TimelineValidateInput,
 )
+
+
+def compose_initial(
+    input_model: ComposeInitialInput,
+    context: ToolExecutionContext,
+) -> ToolResult:
+    tool_name = "timeline.compose_initial"
+    case_state = context.case_state
+    if case_state is None:
+        return _failed(tool_name, context, "missing_case", "active case required")
+    if context.readonly_connection is None:
+        return _failed(tool_name, context, "missing_connection", "repository access required")
+
+    try:
+        timeline = materialize_from_clips(
+            context.readonly_connection,
+            case_state,
+            [clip.model_dump(mode="json") for clip in input_model.clips],
+            voiceover_asset_id=input_model.voiceover_asset_id,
+        )
+    except MaterializationError as exc:
+        return _failed(tool_name, context, "timeline_materialization_failed", str(exc))
+
+    report = validate_timeline(context.readonly_connection, case_state, timeline)
+    timeline = timeline.model_copy(update={"validation_report": report})
+    store_timeline_version(context.readonly_connection, timeline, created_at=_created_at(context))
+    changed_track_ids = ["visual_base"]
+    if input_model.voiceover_asset_id is not None:
+        changed_track_ids.append("voiceover")
+    created_event = TimelineVersionCreated(
+        project_id=case_state.project_id,
+        case_id=case_state.case_id,
+        timeline_version=timeline.version,
+        parent_version=timeline.parent_version,
+        payload={
+            "timeline_id": timeline.timeline_id,
+            "timeline_version": timeline.version,
+            "parent_version": timeline.parent_version,
+            "timeline": timeline.model_dump(mode="json"),
+            "validation_report": report.model_dump(mode="json"),
+            "changed_track_ids": changed_track_ids,
+            "created_at": _created_at(context),
+        },
+    )
+    validation_event = _validation_event(
+        case_state,
+        timeline.version,
+        report.model_dump(mode="json"),
+    )
+    status = "succeeded" if report.valid else "failed"
+    observation = (
+        f"composed timeline v{timeline.version} with {len(input_model.clips)} clip(s): "
+        f"{'valid' if report.valid else 'invalid'}"
+    )
+    return ToolResult(
+        tool_call_id=context.tool_call_id,
+        tool_name=tool_name,
+        status=status,
+        observation=observation,
+        data={
+            "case_id": case_state.case_id,
+            "timeline_version": timeline.version,
+            "timeline": timeline.model_dump(mode="json"),
+            "validation_report": report.model_dump(mode="json"),
+        },
+        artifacts=[ToolArtifact(artifact_id=timeline.timeline_id, kind="timeline")],
+        events=[created_event.model_dump(mode="json"), validation_event.model_dump(mode="json")],
+        error=None
+        if report.valid
+        else ToolError(
+            error_code="timeline_validation_failed",
+            message="timeline composed but failed validation",
+            details={"validation_report": report.model_dump(mode="json")},
+        ),
+    )
 
 
 def apply_patch(

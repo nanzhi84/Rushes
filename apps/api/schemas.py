@@ -101,7 +101,6 @@ class CaseRecord(ApiResponseModel):
     content_plan: dict[str, Any] | None
     audio_plan: dict[str, Any] | None
     cut_plan: dict[str, Any] | None
-    candidate_pack_id: str | None
     timeline_current_version: int | None
     timeline_validated: bool
     preview_current_id: str | None

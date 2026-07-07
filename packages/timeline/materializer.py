@@ -1,4 +1,11 @@
-"""Materialize LLM candidate selections into frame-accurate TimelineState."""
+"""Assemble frame-accurate TimelineState directly from summary-level clips.
+
+The agentic material-understanding path replaces the offline candidate-pack
+retrieval loop: the agent picks clips as ``asset_id`` + source second interval +
+timeline role, and this module turns that summary-level plan into a six-track
+``TimelineState`` (fps / second→frame conversion, source clamping, contiguous
+primary track). All frame-level detail stays behind this boundary.
+"""
 
 from __future__ import annotations
 
@@ -10,127 +17,88 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.engine import Connection, Engine
 
-from contracts.candidate import Candidate, CandidatePack, CandidateSlot
-from contracts.case import CaseState, CutPlanSlot
+from contracts.case import CaseState
 from contracts.timeline import TimelineMediaClip, TimelineState, TimelineTrack
 from storage import schema
 from storage.repositories._json import load_json
 
+_VISUAL_ROLES = ("a_roll", "b_roll", "image")
+
 
 class MaterializationError(ValueError):
-    """Raised when semantic selections cannot be materialized safely."""
+    """Raised when summary-level clips cannot be materialized safely."""
 
 
 @dataclass(frozen=True, slots=True)
-class _ClipProjection:
-    clip_id: str
-    annotation_id: str
+class _ClipSpec:
     asset_id: str
-    start_frame: int
-    end_frame: int
+    source_start_s: float
+    source_end_s: float
     role: str
-    summary: str
-    probe: Mapping[str, Any] | None
-    annotation_document_json: str
-    asset_kind: str
 
 
 @dataclass(frozen=True, slots=True)
-class _SelectedSpan:
-    source_start_frame: int
-    source_end_frame: int
-    timeline_duration_frames: int
-    warning: dict[str, Any] | None = None
+class _AssetRow:
+    kind: str
+    probe: Mapping[str, Any] | None
 
 
-def materialize_from_selection(
+def materialize_from_clips(
     engine: Engine | Connection,
     case_state: CaseState,
-    pack: CandidatePack,
-    selections: Sequence[Mapping[str, str]],
+    clips: Sequence[Mapping[str, Any]],
+    *,
+    voiceover_asset_id: str | None = None,
 ) -> TimelineState:
-    """Convert selected candidate IDs into a six-track TimelineState.
+    """Build a six-track TimelineState from summary-level clip selections.
 
-    The LLM-facing surface is intentionally limited to slot_id and candidate_id.
-    Source frames, timeline frames, fps conversion, clamping, and hard-event
-    avoidance all happen at this boundary.
+    Each entry in ``clips`` gives ``asset_id`` + ``source_start_s`` /
+    ``source_end_s`` + ``role`` (``a_roll`` / ``b_roll`` / ``image``). Visual
+    clips are laid contiguously on ``visual_base``; when ``voiceover_asset_id``
+    is provided one voiceover clip is stretched across the whole timeline.
     """
 
-    if pack.case_id != case_state.case_id:
-        raise MaterializationError("candidate pack does not belong to the active case")
-    if case_state.cut_plan is None:
-        raise MaterializationError("cut_plan is required to materialize a timeline")
-
-    selected_by_slot = _selection_map(selections)
-    slot_by_id = {slot.slot_id: slot for slot in case_state.cut_plan.slots}
-    missing_slots = [slot.slot_id for slot in pack.slots if slot.slot_id not in selected_by_slot]
-    if missing_slots:
-        raise MaterializationError("missing selection for slot(s): " + ", ".join(missing_slots))
-
+    specs = [_parse_clip(clip) for clip in clips]
     with _connection_context(engine) as connection:
         project_fps = _project_fps(connection, case_state.project_id)
-        selected_candidates = _resolve_candidates(pack, selected_by_slot)
-        clip_rows = _clip_projection_rows(
-            connection,
-            [candidate.clip_id for candidate in selected_candidates.values()],
-        )
         version = (case_state.timeline_current_version or 0) + 1
         timeline_id = f"{case_state.case_id}:v{version}"
         visual_clips: list[TimelineMediaClip] = []
-        voiceover_clips: list[TimelineMediaClip] = []
-        checks: list[dict[str, Any]] = []
         cursor = 0
-        for index, pack_slot in enumerate(pack.slots, start=1):
-            candidate = selected_candidates[pack_slot.slot_id]
-            clip_row = clip_rows.get(candidate.clip_id)
-            if clip_row is None:
-                raise MaterializationError(f"selected clip not found: {candidate.clip_id}")
-            cut_slot = slot_by_id.get(pack_slot.slot_id)
-            if cut_slot is None:
-                raise MaterializationError(f"cut_plan slot not found: {pack_slot.slot_id}")
-            span = _select_clean_source_span(
-                clip_row,
-                cut_slot,
-                project_fps=project_fps,
+        for index, spec in enumerate(specs, start=1):
+            asset = _asset_row(connection, spec.asset_id)
+            source_fps = _source_fps(asset.probe, default=float(project_fps))
+            frame_count = _asset_total_frames(asset.probe, source_fps=source_fps)
+            duration_frames = max(1, round((spec.source_end_s - spec.source_start_s) * project_fps))
+            source_start, source_end = _source_frame_span(
+                spec,
+                asset,
+                source_fps=source_fps,
+                frame_count=frame_count,
             )
-            if span.warning is not None:
-                checks.append(span.warning)
             timeline_start = cursor
-            timeline_end = cursor + span.timeline_duration_frames
+            timeline_end = cursor + duration_frames
             visual_clips.append(
                 TimelineMediaClip(
-                    timeline_clip_id=_timeline_clip_id("visual", index, pack_slot.slot_id),
+                    timeline_clip_id=_timeline_clip_id("visual", index),
                     track_id="visual_base",
-                    asset_id=clip_row.asset_id,
-                    clip_id=clip_row.clip_id,
-                    role=_timeline_role(clip_row.role),
+                    asset_id=spec.asset_id,
+                    clip_id=None,
+                    role=spec.role,
                     timeline_start_frame=timeline_start,
                     timeline_end_frame=timeline_end,
-                    source_start_frame=span.source_start_frame,
-                    source_end_frame=span.source_end_frame,
-                    parent_block_id=pack_slot.slot_id,
-                    effects=[
-                        {
-                            "kind": "source_summary",
-                            "summary": clip_row.summary,
-                            "candidate_id": candidate.candidate_id,
-                        }
-                    ],
+                    source_start_frame=source_start,
+                    source_end_frame=source_end,
+                    parent_block_id=f"block_{index:03d}",
                 )
             )
-            voiceover = _voiceover_clip_for_slot(
-                connection,
-                case_state,
-                cut_slot,
-                slot_index=index,
-                slot_id=pack_slot.slot_id,
-                timeline_start_frame=timeline_start,
-                timeline_end_frame=timeline_end,
-                project_fps=project_fps,
-            )
-            if voiceover is not None:
-                voiceover_clips.append(voiceover)
             cursor = timeline_end
+        voiceover_clips = _voiceover_clips(
+            connection,
+            voiceover_asset_id,
+            duration_frames=cursor,
+            project_fps=project_fps,
+        )
 
     return TimelineState(
         timeline_id=timeline_id,
@@ -140,294 +108,85 @@ def materialize_from_selection(
         duration_frames=cursor,
         tracks=_tracks(visual_clips=visual_clips, voiceover_clips=voiceover_clips),
         parent_version=case_state.timeline_current_version,
-        validation_report={"valid": True, "checks": checks},
+        validation_report={"valid": True, "checks": []},
     )
 
 
-def _selection_map(selections: Sequence[Mapping[str, str]]) -> dict[str, str]:
-    selected: dict[str, str] = {}
-    for selection in selections:
-        slot_id = selection.get("slot_id")
-        candidate_id = selection.get("candidate_id")
-        if not isinstance(slot_id, str) or not isinstance(candidate_id, str):
-            raise MaterializationError("each selection requires slot_id and candidate_id")
-        if slot_id in selected:
-            raise MaterializationError(f"duplicate selection for slot: {slot_id}")
-        selected[slot_id] = candidate_id
-    return selected
+def _parse_clip(clip: Mapping[str, Any]) -> _ClipSpec:
+    asset_id = clip.get("asset_id")
+    role = clip.get("role")
+    source_start_s = clip.get("source_start_s")
+    source_end_s = clip.get("source_end_s")
+    if not isinstance(asset_id, str) or not asset_id:
+        raise MaterializationError("each clip requires an asset_id")
+    if role not in _VISUAL_ROLES:
+        raise MaterializationError(f"unsupported clip role: {role!r}")
+    if not isinstance(source_start_s, int | float) or isinstance(source_start_s, bool):
+        raise MaterializationError(f"clip {asset_id} requires numeric source_start_s")
+    if not isinstance(source_end_s, int | float) or isinstance(source_end_s, bool):
+        raise MaterializationError(f"clip {asset_id} requires numeric source_end_s")
+    if float(source_start_s) < 0:
+        raise MaterializationError(f"clip {asset_id} source_start_s must be non-negative")
+    if float(source_start_s) >= float(source_end_s):
+        raise MaterializationError(f"clip {asset_id} requires source_start_s < source_end_s")
+    return _ClipSpec(
+        asset_id=asset_id,
+        source_start_s=float(source_start_s),
+        source_end_s=float(source_end_s),
+        role=role,
+    )
 
 
-def _resolve_candidates(
-    pack: CandidatePack,
-    selected_by_slot: Mapping[str, str],
-) -> dict[str, Candidate]:
-    resolved: dict[str, Candidate] = {}
-    for slot in pack.slots:
-        selected_candidate_id = selected_by_slot[slot.slot_id]
-        candidate = _candidate_for_slot(slot, selected_candidate_id)
-        if candidate is None:
-            raise MaterializationError(
-                f"candidate {selected_candidate_id} is not in slot {slot.slot_id}"
-            )
-        resolved[slot.slot_id] = candidate
-    unknown_slots = sorted(set(selected_by_slot) - {slot.slot_id for slot in pack.slots})
-    if unknown_slots:
-        raise MaterializationError(
-            "selection references unknown slot(s): " + ", ".join(unknown_slots)
-        )
-    return resolved
-
-
-def _candidate_for_slot(slot: CandidateSlot, candidate_id: str) -> Candidate | None:
-    for candidate in slot.candidates:
-        if candidate.candidate_id == candidate_id:
-            return candidate
-    return None
-
-
-def _clip_projection_rows(
-    connection: Connection,
-    clip_ids: Sequence[str],
-) -> dict[str, _ClipProjection]:
-    if not clip_ids:
-        return {}
-    rows = connection.execute(
-        select(
-            schema.annotation_clip_projection.c.clip_id,
-            schema.annotation_clip_projection.c.annotation_id,
-            schema.annotation_clip_projection.c.asset_id,
-            schema.annotation_clip_projection.c.start_frame,
-            schema.annotation_clip_projection.c.end_frame,
-            schema.annotation_clip_projection.c.role,
-            schema.annotation_clip_projection.c.summary,
-            schema.assets.c.probe,
-            schema.assets.c.kind,
-            schema.annotations_table.c.document_json,
-        )
-        .select_from(
-            schema.annotation_clip_projection.join(
-                schema.assets,
-                schema.assets.c.asset_id == schema.annotation_clip_projection.c.asset_id,
-            ).join(
-                schema.annotations_table,
-                schema.annotations_table.c.annotation_id
-                == schema.annotation_clip_projection.c.annotation_id,
-            )
-        )
-        .where(schema.annotation_clip_projection.c.clip_id.in_(list(clip_ids)))
-    ).all()
-    result: dict[str, _ClipProjection] = {}
-    for row in rows:
-        values = row._mapping
-        probe = _probe_payload(values["probe"])
-        clip_id = str(values["clip_id"])
-        result[clip_id] = _ClipProjection(
-            clip_id=clip_id,
-            annotation_id=str(values["annotation_id"]),
-            asset_id=str(values["asset_id"]),
-            start_frame=int(values["start_frame"]),
-            end_frame=int(values["end_frame"]),
-            role=str(values["role"]),
-            summary=str(values["summary"]),
-            probe=probe,
-            annotation_document_json=str(values["document_json"]),
-            asset_kind=str(values["kind"]),
-        )
-    return result
-
-
-def _select_clean_source_span(
-    clip: _ClipProjection,
-    slot: CutPlanSlot,
+def _source_frame_span(
+    spec: _ClipSpec,
+    asset: _AssetRow,
     *,
-    project_fps: int,
-) -> _SelectedSpan:
-    if clip.asset_kind == "image":
-        return _image_span(clip, slot, project_fps=project_fps)
-    source_fps = _source_fps(clip.probe, default=float(project_fps))
-    asset_total_frames = _asset_total_frames(clip.probe, source_fps=source_fps)
-    source_start = max(0, clip.start_frame)
-    source_end = (
-        clip.end_frame if asset_total_frames is None else min(clip.end_frame, asset_total_frames)
-    )
-    if source_start >= source_end:
-        raise MaterializationError(f"clip has no usable source frames: {clip.clip_id}")
-    clean_spans = _clean_spans(
-        source_start,
-        source_end,
-        _hard_quality_events(clip.annotation_document_json),
-    )
-    warning: dict[str, Any] | None = None
-    if clean_spans:
-        selected_start, selected_end = max(clean_spans, key=lambda item: item[1] - item[0])
-    else:
-        selected_start, selected_end = source_start, source_end
-        warning = _warning(
-            "timeline.materialize.no_clean_span",
-            "no clean span remains after hard quality events; using clamped clip span",
-            slot_id=slot.slot_id,
-            clip_id=clip.clip_id,
-        )
-    min_frames, max_frames = _target_frame_window(slot, project_fps=project_fps)
-    clean_project_frames = _source_to_project_frames(
-        selected_end - selected_start,
-        source_fps=source_fps,
-        project_fps=project_fps,
-    )
-    if clean_project_frames > max_frames:
-        timeline_duration = max_frames
-        source_needed = max(
-            1,
-            round((timeline_duration / project_fps) * source_fps),
-        )
-        selected_end = min(selected_end, selected_start + source_needed)
-    else:
-        timeline_duration = max(1, clean_project_frames)
-        if clean_project_frames < min_frames:
-            warning = _warning(
-                "timeline.materialize.short_clean_span",
-                "clean span is shorter than the slot target; using the full clean span",
-                slot_id=slot.slot_id,
-                clip_id=clip.clip_id,
-                target_min_frames=min_frames,
-                actual_frames=clean_project_frames,
-            )
-    return _SelectedSpan(
-        source_start_frame=selected_start,
-        source_end_frame=selected_end,
-        timeline_duration_frames=timeline_duration,
-        warning=warning,
-    )
-
-
-def _image_span(
-    clip: _ClipProjection,
-    slot: CutPlanSlot,
-    *,
-    project_fps: int,
-) -> _SelectedSpan:
-    _min_frames, max_frames = _target_frame_window(slot, project_fps=project_fps)
-    source_start = max(0, clip.start_frame)
-    source_end = max(source_start + 1, min(clip.end_frame, source_start + 1))
-    return _SelectedSpan(
-        source_start_frame=source_start,
-        source_end_frame=source_end,
-        timeline_duration_frames=max_frames,
-    )
-
-
-def _voiceover_clip_for_slot(
-    connection: Connection,
-    case_state: CaseState,
-    slot: CutPlanSlot,
-    *,
-    slot_index: int,
-    slot_id: str,
-    timeline_start_frame: int,
-    timeline_end_frame: int,
-    project_fps: int,
-) -> TimelineMediaClip | None:
-    if slot.narration_ref is None or case_state.audio_plan is None:
-        return None
-    voiceover_asset_id = case_state.audio_plan.voiceover_asset_id
-    if voiceover_asset_id is None:
-        return None
-    source_span = _voiceover_source_span(
-        connection,
-        voiceover_asset_id,
-        slot.narration_ref,
-        project_fps=project_fps,
-    )
-    if source_span is None:
-        return None
-    source_start, source_end = source_span
-    return TimelineMediaClip(
-        timeline_clip_id=_timeline_clip_id("voiceover", slot_index, slot_id),
-        track_id="voiceover",
-        asset_id=voiceover_asset_id,
-        clip_id=None,
-        role="voiceover",
-        timeline_start_frame=timeline_start_frame,
-        timeline_end_frame=timeline_end_frame,
-        source_start_frame=source_start,
-        source_end_frame=source_end,
-        lock_policy="sync_to_audio",
-        parent_block_id=slot_id,
-        effects=[
-            {
-                "kind": "narration_ref",
-                "narration_ref": dict(slot.narration_ref),
-            }
-        ],
-    )
-
-
-def _voiceover_source_span(
-    connection: Connection,
-    asset_id: str,
-    narration_ref: Mapping[str, Any],
-    *,
-    project_fps: int,
-) -> tuple[int, int] | None:
-    start_ms, end_ms = _narration_ms_range(connection, asset_id, narration_ref)
-    if start_ms is None or end_ms is None or start_ms >= end_ms:
-        return None
-    probe = _asset_probe(connection, asset_id)
-    source_fps = _source_fps(probe, default=float(project_fps))
-    source_start = max(0, round(start_ms / 1000 * source_fps))
-    source_end = max(source_start + 1, round(end_ms / 1000 * source_fps))
-    total_frames = _asset_total_frames(probe, source_fps=source_fps)
-    if total_frames is not None:
-        source_end = min(source_end, total_frames)
-        if source_start >= source_end:
-            return None
+    source_fps: float,
+    frame_count: int | None,
+) -> tuple[int, int]:
+    if spec.role == "image" or asset.kind == "image":
+        return 0, 1
+    source_start = max(0, round(spec.source_start_s * source_fps))
+    source_end = max(source_start + 1, round(spec.source_end_s * source_fps))
+    if frame_count is not None:
+        source_end = min(source_end, frame_count)
+        source_start = min(source_start, source_end - 1)
+    if source_start < 0 or source_start >= source_end:
+        raise MaterializationError(f"clip {spec.asset_id} has no usable source frames")
     return source_start, source_end
 
 
-def _narration_ms_range(
+def _voiceover_clips(
     connection: Connection,
-    asset_id: str,
-    narration_ref: Mapping[str, Any],
-) -> tuple[int | None, int | None]:
-    start_ms = _int_value(narration_ref.get("start_ms"))
-    end_ms = _int_value(narration_ref.get("end_ms"))
-    if start_ms is not None and end_ms is not None:
-        return start_ms, end_ms
-    transcript_id = narration_ref.get("transcript_id")
-    utterance_ids = narration_ref.get("utterance_ids")
-    if (
-        not isinstance(transcript_id, str)
-        or not isinstance(utterance_ids, Sequence)
-        or isinstance(utterance_ids, str | bytes)
-    ):
-        return None, None
-    wanted = {str(item) for item in utterance_ids if isinstance(item, str)}
-    if not wanted:
-        return None, None
-    row = connection.execute(
-        select(schema.transcripts.c.utterances)
-        .where(schema.transcripts.c.transcript_id == transcript_id)
-        .where(schema.transcripts.c.asset_id == asset_id)
-    ).first()
-    if row is None:
-        return None, None
-    utterances = load_json(str(row._mapping["utterances"]))
-    if not isinstance(utterances, list):
-        return None, None
-    starts: list[int] = []
-    ends: list[int] = []
-    for utterance in utterances:
-        if not isinstance(utterance, dict) or utterance.get("utterance_id") not in wanted:
-            continue
-        candidate_start = _int_value(utterance.get("start_ms"))
-        candidate_end = _int_value(utterance.get("end_ms"))
-        if candidate_start is None or candidate_end is None or candidate_start >= candidate_end:
-            continue
-        starts.append(candidate_start)
-        ends.append(candidate_end)
-    if not starts or not ends:
-        return None, None
-    return min(starts), max(ends)
+    voiceover_asset_id: str | None,
+    *,
+    duration_frames: int,
+    project_fps: int,
+) -> list[TimelineMediaClip]:
+    if voiceover_asset_id is None or duration_frames <= 0:
+        return []
+    probe = _asset_probe(connection, voiceover_asset_id)
+    source_fps = _source_fps(probe, default=float(project_fps))
+    frame_count = _asset_total_frames(probe, source_fps=source_fps)
+    source_end = max(1, round(duration_frames / project_fps * source_fps))
+    if frame_count is not None:
+        source_end = min(source_end, frame_count)
+    if source_end <= 0:
+        return []
+    return [
+        TimelineMediaClip(
+            timeline_clip_id="tc_voiceover_001",
+            track_id="voiceover",
+            asset_id=voiceover_asset_id,
+            clip_id=None,
+            role="voiceover",
+            timeline_start_frame=0,
+            timeline_end_frame=duration_frames,
+            source_start_frame=0,
+            source_end_frame=source_end,
+            lock_policy="sync_to_audio",
+        )
+    ]
 
 
 def _tracks(
@@ -445,72 +204,15 @@ def _tracks(
     ]
 
 
-def _clean_spans(
-    start_frame: int,
-    end_frame: int,
-    hard_events: Sequence[tuple[int, int]],
-) -> list[tuple[int, int]]:
-    spans = [(start_frame, end_frame)]
-    for event_start, event_end in sorted(hard_events):
-        next_spans: list[tuple[int, int]] = []
-        for span_start, span_end in spans:
-            overlap_start = max(span_start, event_start)
-            overlap_end = min(span_end, event_end)
-            if overlap_start >= overlap_end:
-                next_spans.append((span_start, span_end))
-                continue
-            if span_start < overlap_start:
-                next_spans.append((span_start, overlap_start))
-            if overlap_end < span_end:
-                next_spans.append((overlap_end, span_end))
-        spans = next_spans
-    return [(start, end) for start, end in spans if start < end]
-
-
-def _hard_quality_events(document_json: str) -> list[tuple[int, int]]:
-    document = load_json(document_json)
-    if not isinstance(document, dict):
-        return []
-    events = document.get("quality_events")
-    if not isinstance(events, list):
-        return []
-    hard_events: list[tuple[int, int]] = []
-    for event in events:
-        if not isinstance(event, dict) or event.get("severity") != "hard":
-            continue
-        start = _int_value(event.get("start_frame"))
-        end = _int_value(event.get("end_frame"))
-        if start is not None and end is not None and start < end:
-            hard_events.append((start, end))
-    return hard_events
-
-
-def _target_frame_window(slot: CutPlanSlot, *, project_fps: int) -> tuple[int, int]:
-    min_sec, max_sec = slot.target_duration_sec
-    min_frames = max(1, round(min_sec * project_fps))
-    max_frames = max(min_frames, round(max_sec * project_fps))
-    return min_frames, max_frames
-
-
-def _source_to_project_frames(
-    source_frames: int,
-    *,
-    source_fps: float,
-    project_fps: int,
-) -> int:
-    return max(1, round((source_frames / source_fps) * project_fps))
-
-
-def _timeline_role(role: str) -> str:
-    role_map = {
-        "a_roll_candidate": "a_roll",
-        "b_roll_candidate": "b_roll",
-        "image_candidate": "image",
-    }
-    mapped = role_map.get(role)
-    if mapped is None:
-        raise MaterializationError(f"unsupported candidate role: {role}")
-    return mapped
+def _asset_row(connection: Connection, asset_id: str) -> _AssetRow:
+    row = connection.execute(
+        select(schema.assets.c.kind, schema.assets.c.probe).where(
+            schema.assets.c.asset_id == asset_id
+        )
+    ).first()
+    if row is None:
+        raise MaterializationError(f"asset not found: {asset_id}")
+    return _AssetRow(kind=str(row._mapping["kind"]), probe=_probe_payload(row._mapping["probe"]))
 
 
 def _project_fps(connection: Connection, project_id: str) -> int:
@@ -569,32 +271,8 @@ def _probe_payload(value: Any) -> Mapping[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _int_value(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return None
-
-
-def _warning(
-    code: str,
-    message: str,
-    **details: Any,
-) -> dict[str, Any]:
-    return {
-        "code": code,
-        "severity": "warning",
-        "message": message,
-        "details": details,
-    }
-
-
-def _timeline_clip_id(prefix: str, index: int, slot_id: str) -> str:
-    safe_slot = "".join(char if char.isalnum() or char == "_" else "_" for char in slot_id)
-    return f"tc_{prefix}_{index:03d}_{safe_slot}"
+def _timeline_clip_id(prefix: str, index: int) -> str:
+    return f"tc_{prefix}_{index:03d}"
 
 
 def _connection_context(engine: Engine | Connection) -> Any:

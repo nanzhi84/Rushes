@@ -15,13 +15,6 @@ from .annotation import (
     VisionCompositionExtension,
 )
 from .asset import AssetFailure, AssetKind, AssetProbe, AssetRecord, AssetSource, StorageMode
-from .candidate import (
-    Candidate,
-    CandidatePack,
-    CandidatePackSnapshot,
-    CandidateScore,
-    CandidateSlot,
-)
 from .case import (
     AudioMode,
     AudioPlan,
@@ -57,7 +50,7 @@ from .patch import (
     DeleteRangeOp,
     EditSubtitleTextOp,
     GenerateSubtitlesOp,
-    InsertCandidateOp,
+    InsertClipOp,
     PatchTimeRange,
     RemoveTrackClipsOp,
     ReorderBlocksOp,
@@ -122,11 +115,6 @@ __all__ = [
     "AudioSpeechExtension",
     "BgmPostprocessPlan",
     "Brief",
-    "Candidate",
-    "CandidatePack",
-    "CandidatePackSnapshot",
-    "CandidateScore",
-    "CandidateSlot",
     "CaseState",
     "ClipIdsRange",
     "CommerceProductExtension",
@@ -142,7 +130,7 @@ __all__ = [
     "EditingAffordanceExtension",
     "EventName",
     "GenerateSubtitlesOp",
-    "InsertCandidateOp",
+    "InsertClipOp",
     "InteractionKind",
     "InteractionOption",
     "Job",
