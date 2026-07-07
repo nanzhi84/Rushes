@@ -106,19 +106,3 @@ def test_list_latest_for_assets_empty_input_returns_empty(tmp_path: Path) -> Non
     with begin_immediate(engine) as connection:
         repo = MaterialSummariesRepository(connection)
         assert repo.list_latest_for_assets([]) == {}
-
-
-def test_mark_status_flips_summary_status(tmp_path: Path) -> None:
-    _prepare_workspace(tmp_path)
-    engine = create_workspace_engine(tmp_path)
-    with begin_immediate(engine) as connection:
-        _insert_asset(connection, "asset_1")
-        repo = MaterialSummariesRepository(connection)
-        repo.insert(_summary_values("s1", "asset_1", 1, status="running"))
-        assert repo.latest_ready("asset_1") is None
-
-        repo.mark_status("s1", "ready")
-
-        latest = repo.latest_ready("asset_1")
-    assert latest is not None
-    assert latest["status"] == "ready"

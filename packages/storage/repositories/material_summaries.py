@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.engine import Connection
 
 from storage import schema
@@ -62,10 +62,3 @@ class MaterialSummariesRepository:
             decoded = decode_json_columns(dict(row._mapping), JSON_COLUMNS)
             latest[str(decoded["asset_id"])] = decoded
         return latest
-
-    def mark_status(self, summary_id: str, status: str) -> None:
-        self._connection.execute(
-            update(schema.material_summaries)
-            .where(schema.material_summaries.c.summary_id == summary_id)
-            .values(status=status)
-        )

@@ -223,9 +223,7 @@ def _assemble_result(
             results[asset_id] = {"status": "failed", "reason": "素材不存在或未链接到项目"}
             lines.append(f"【{asset_id}】理解失败：素材不存在或未链接到项目。")
             continue
-        outcome = outcomes.get(asset_id)
-        if outcome is None:  # defensive; should not happen
-            continue
+        outcome = outcomes[asset_id]
         # 只对真实存在的素材派事件：给不存在的 asset 发事件会在 reducer 里插出幽灵行。
         events.append(_event(MaterialUnderstandingStarted, asset_id, project_id))
         if outcome.status == "ready" and outcome.summary is not None:

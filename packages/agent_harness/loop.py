@@ -118,7 +118,7 @@ def _make_turn_progress(
 
     def _turn_progress(payload: Mapping[str, Any]) -> None:
         with contextlib.suppress(Exception):
-            _emit_turn_event(listener, {"type": "subagent_progress", **payload})
+            _emit_turn_event(listener, {**payload, "type": "subagent_progress"})
 
     return _turn_progress
 
