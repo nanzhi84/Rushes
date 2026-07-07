@@ -15,6 +15,7 @@ import {
   StructuredInteractionRenderer
 } from "../components/Console/StructuredInteractionRenderer";
 import type { DomainSsePayload } from "../components/Console/StructuredInteractionRenderer";
+import { DEFAULT_MATERIALS_PANEL_WIDTH, useUiStore } from "../state/ui_store";
 import { DraftEditorView } from "./DraftEditor";
 
 type MockPreviewProps = {
@@ -121,8 +122,44 @@ describe("DraftEditorView", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     window.sessionStorage.clear();
+    window.localStorage.clear();
+    useUiStore.setState({ materialsPanelWidth: DEFAULT_MATERIALS_PANEL_WIDTH });
     MockEventSource.instances = [];
     consoleComponentMocks.reset();
+  });
+
+  it("时间线是纵向根布局的直属子级：与三栏行同级，全宽通栏", () => {
+    const fetchMock = mockFetch({ decision: null });
+    renderEditor(fetchMock);
+
+    const timeline = screen.getByLabelText("时间线");
+    const chat = screen.getByLabelText("剪辑对话");
+    // 聊天在三栏行内部；三栏行与时间线共享同一个纵向根容器 → 时间线不再被"右列"包裹。
+    const threeColumnRow = chat.parentElement;
+    expect(threeColumnRow?.parentElement).toBe(timeline.parentElement);
+    expect(timeline.contains(chat)).toBe(false);
+  });
+
+  it("素材列可拖宽：拖宽手柄存在，宽度受 ui_store 驱动", () => {
+    const fetchMock = mockFetch({ decision: null });
+    renderEditor(fetchMock);
+
+    expect(screen.getByLabelText("调整素材面板宽度")).toBeTruthy();
+    const panel = screen.getByTestId("materials-panel");
+    expect(panel.style.width).toBe(`${DEFAULT_MATERIALS_PANEL_WIDTH}px`);
+
+    act(() => {
+      useUiStore.getState().setMaterialsPanelWidth(420);
+    });
+    expect(panel.style.width).toBe("420px");
+  });
+
+  it("顶栏成本小计渲染估算金额，且编辑器隐藏设置按钮", async () => {
+    const fetchMock = mockFetch({ decision: null, costs: 1.2345 });
+    renderEditor(fetchMock);
+
+    expect(await screen.findByText("¥1.2345")).toBeTruthy();
+    expect(screen.queryByText("设置")).toBeNull();
   });
 
   it("发送消息后禁用输入框，并在 TurnEnded SSE 后恢复", async () => {
@@ -480,15 +517,27 @@ function mockFetch({
   decision,
   timeline = false,
   messages = [],
-  onAnswer
+  onAnswer,
+  costs
 }: {
   decision: Decision | null;
   timeline?: boolean;
   messages?: DraftMessageFixture[] | (() => DraftMessageFixture[]);
   onAnswer?: (url: string, init: RequestInit | undefined) => void;
+  costs?: number;
 }): FetchMock {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url.endsWith("/costs")) {
+      return jsonResponse({
+        costs: {
+          total_cost_estimate: costs ?? 0,
+          provider_call_count: 0,
+          by_provider: {},
+          by_capability: {}
+        }
+      });
+    }
     if (url === "/api/drafts/draft_1") {
       return jsonResponse({
         draft: {

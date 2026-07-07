@@ -7,6 +7,7 @@ import { queryKeys } from "../app/query_client";
 import { useWorkspaceEvents } from "../app/use_workspace_events";
 import { EntityActionDialog } from "../components/Shell/EntityActionDialog";
 import { TopBar } from "../components/Shell/TopBar";
+import { WorkspaceSettingsDialog } from "../components/Shell/WorkspaceSettingsDialog";
 import { useUiStore, type EntityDialogKind } from "../state/ui_store";
 
 export function DraftsHomePage(): ReactElement {
@@ -14,6 +15,7 @@ export function DraftsHomePage(): ReactElement {
   const queryClient = useQueryClient();
   const connectionState = useWorkspaceEvents();
   const { entityDialog, openEntityDialog, closeEntityDialog } = useUiStore();
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const draftsQuery = useQuery({
     queryKey: queryKeys.drafts,
@@ -39,7 +41,7 @@ export function DraftsHomePage(): ReactElement {
 
   return (
     <div className="flex min-h-screen flex-col bg-ink text-fg">
-      <TopBar connectionState={connectionState} />
+      <TopBar connectionState={connectionState} onSettingsClick={() => setSettingsOpen(true)} />
 
       <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-8">
         <div className="flex flex-wrap items-end justify-between gap-4">
@@ -92,6 +94,7 @@ export function DraftsHomePage(): ReactElement {
       </main>
 
       <EntityActionDialog dialog={entityDialog} drafts={drafts} onClose={closeEntityDialog} />
+      <WorkspaceSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </div>
   );
 }

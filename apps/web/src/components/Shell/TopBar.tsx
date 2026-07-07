@@ -7,9 +7,19 @@ type TopBarProps = {
   leading?: ReactNode;
   /** 连接状态左侧的附加动作（如导出按钮）。 */
   trailing?: ReactNode;
+  /** 是否显示设置按钮；编辑器隐藏（设置只在草稿墙）。缺省保持显示。 */
+  showSettings?: boolean;
+  /** 设置按钮点击回调（如打开全局设置弹窗）。 */
+  onSettingsClick?: () => void;
 };
 
-export function TopBar({ connectionState, leading, trailing }: TopBarProps): ReactElement {
+export function TopBar({
+  connectionState,
+  leading,
+  trailing,
+  showSettings = true,
+  onSettingsClick
+}: TopBarProps): ReactElement {
   return (
     <header className="flex h-12 shrink-0 items-center justify-between border-b border-line bg-panel px-4">
       <div className="flex min-w-0 items-center gap-3">{leading ?? <Wordmark />}</div>
@@ -19,9 +29,15 @@ export function TopBar({ connectionState, leading, trailing }: TopBarProps): Rea
           <span className={`h-2 w-2 rounded-full ${connectionColor(connectionState)}`} />
           {connectionLabel(connectionState)}
         </span>
-        <button className="rounded-md px-2 py-1 hover:bg-hover hover:text-fg" type="button">
-          设置
-        </button>
+        {showSettings ? (
+          <button
+            className="rounded-md px-2 py-1 hover:bg-hover hover:text-fg"
+            type="button"
+            onClick={onSettingsClick}
+          >
+            设置
+          </button>
+        ) : null}
       </div>
     </header>
   );
