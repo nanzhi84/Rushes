@@ -1,4 +1,4 @@
-"""Pure SSE routing predicates derived from PRD §4.5."""
+"""Pure SSE routing predicates derived from PRD §4.5（只有 draft / workspace 两域）。"""
 
 from __future__ import annotations
 
@@ -21,20 +21,20 @@ def should_push_sse(event: DomainEventBase) -> bool:
     return event.event not in SSE_SUPPRESSED_EVENTS
 
 
-def routes_to_case(event: DomainEventBase, case_id: str) -> bool:
-    """Case endpoint predicate: case_id or requested_by_case_id must match."""
+def routes_to_draft(event: DomainEventBase, draft_id: str) -> bool:
+    """Draft endpoint predicate: draft_id or requested_by_draft_id must match."""
 
     if event.event in SSE_SUPPRESSED_EVENTS:
         return False
-    event_case_id = _string_attr(event, "case_id")
-    if event_case_id == case_id:
+    event_draft_id = _string_attr(event, "draft_id")
+    if event_draft_id == draft_id:
         return True
-    requested_by_case_id = _requested_by_case_id(event)
-    return requested_by_case_id == case_id
+    requested_by_draft_id = _requested_by_draft_id(event)
+    return requested_by_draft_id == draft_id
 
 
 def routes_to_workspace(event: DomainEventBase) -> bool:
-    """Workspace endpoint predicate, including §4.5 special cases."""
+    """Workspace endpoint predicate, including §4.5 special rules."""
 
     if event.event in SSE_SUPPRESSED_EVENTS:
         return False
@@ -42,9 +42,9 @@ def routes_to_workspace(event: DomainEventBase) -> bool:
         return False
     if event.event in {"CapabilityDegraded", "SecurityRefusal"}:
         return True
-    if _string_attr(event, "case_id") is not None or _requested_by_case_id(event) is not None:
+    if _string_attr(event, "draft_id") is not None or _requested_by_draft_id(event) is not None:
         return True
-    if _string_attr(event, "project_id") is not None or _string_attr(event, "asset_id") is not None:
+    if _string_attr(event, "asset_id") is not None:
         return True
     if event.event in MEMORY_EVENTS:
         return True
@@ -53,12 +53,12 @@ def routes_to_workspace(event: DomainEventBase) -> bool:
     return _string_attr(event, "scope_type") == "workspace"
 
 
-def _requested_by_case_id(event: DomainEventBase) -> str | None:
-    direct = _string_attr(event, "requested_by_case_id")
+def _requested_by_draft_id(event: DomainEventBase) -> str | None:
+    direct = _string_attr(event, "requested_by_draft_id")
     if direct is not None:
         return direct
     payload = event.payload
-    value = payload.get("requested_by_case_id")
+    value = payload.get("requested_by_draft_id")
     return value if isinstance(value, str) else None
 
 

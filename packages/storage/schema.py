@@ -19,25 +19,15 @@ from sqlalchemy.engine import Connection
 
 metadata = MetaData()
 
-projects = Table(
-    "projects",
+drafts = Table(
+    "drafts",
     metadata,
-    Column("project_id", Text, primary_key=True),
-    Column("name", Text, nullable=False),
-    Column("status", Text, nullable=False),
-    Column("defaults", Text, nullable=False),
-    Column("created_at", Text, nullable=False),
-    Column("updated_at", Text, nullable=False),
-)
-
-cases = Table(
-    "cases",
-    metadata,
-    Column("case_id", Text, primary_key=True),
-    Column("project_id", Text, ForeignKey("projects.project_id"), nullable=False),
+    Column("draft_id", Text, primary_key=True),
     Column("name", Text, nullable=False),
     Column("state_version", Integer, nullable=False, default=0),
     Column("status", Text, nullable=False),
+    # 草稿默认参数（DraftDefaults）：创建时从 workspace defaults 拷贝（旧模型属工程实体）。
+    Column("defaults", Text, nullable=False),
     Column("pending_decision_id", Text, ForeignKey("decisions.decision_id"), nullable=True),
     Column("running_jobs", Text, nullable=False),
     Column("last_error", Text, nullable=True),
@@ -53,9 +43,12 @@ cases = Table(
     Column("rough_cut_approved_version", Integer, nullable=True),
     Column("postprocess_plan", Text, nullable=True),
     Column("export_current_id", Text, ForeignKey("exports.export_id"), nullable=True),
-    Column("selected_asset_ids", Text, nullable=False),
-    Column("disabled_asset_ids", Text, nullable=False),
     Column("scratch_memory", Text, nullable=False),
+    Column("messages_tail_ref", Text, nullable=True),
+    # 草稿独立持有生命周期时间戳（旧模型由工程实体持有），非 DraftState 契约字段：
+    # load 路径重建 DraftState 前须剔除这两列（extra="forbid"）。
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
 )
 
 assets = Table(
@@ -82,12 +75,11 @@ assets = Table(
     Column("understanding_status", Text, nullable=False, server_default="none"),
 )
 
-project_asset_links = Table(
-    "project_asset_links",
+draft_asset_links = Table(
+    "draft_asset_links",
     metadata,
-    Column("project_id", Text, ForeignKey("projects.project_id"), primary_key=True),
+    Column("draft_id", Text, ForeignKey("drafts.draft_id"), primary_key=True),
     Column("asset_id", Text, ForeignKey("assets.asset_id"), primary_key=True),
-    Column("enabled", Boolean, nullable=False),
     Column("linked_at", Text, nullable=False),
     Column("note", Text, nullable=False),
     # 文件夹导入时相对所选根目录的子路径（含所选目录名），素材面板按它分组；直接导入的文件为 NULL。
@@ -129,8 +121,7 @@ decisions = Table(
     metadata,
     Column("decision_id", Text, primary_key=True),
     Column("scope_type", Text, nullable=False),
-    Column("project_id", Text, ForeignKey("projects.project_id"), nullable=True),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=True),
+    Column("draft_id", Text, ForeignKey("drafts.draft_id"), nullable=True),
     Column("type", Text, nullable=False),
     Column("question", Text, nullable=False),
     Column("options", Text, nullable=False),
@@ -148,7 +139,7 @@ timeline_versions = Table(
     "timeline_versions",
     metadata,
     Column("timeline_id", Text, primary_key=True),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=False),
+    Column("draft_id", Text, ForeignKey("drafts.draft_id"), nullable=False),
     Column("version", Integer, nullable=False),
     Column("parent_version", Integer, nullable=True),
     Column("created_by_patch_id", Text, nullable=True),
@@ -157,8 +148,8 @@ timeline_versions = Table(
     Column("created_at", Text, nullable=False),
 )
 Index(
-    "ix_timeline_versions_case_version",
-    timeline_versions.c.case_id,
+    "ix_timeline_versions_draft_version",
+    timeline_versions.c.draft_id,
     timeline_versions.c.version,
     unique=True,
 )
@@ -167,7 +158,7 @@ previews = Table(
     "previews",
     metadata,
     Column("preview_id", Text, primary_key=True),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=False),
+    Column("draft_id", Text, ForeignKey("drafts.draft_id"), nullable=False),
     Column("timeline_version", Integer, nullable=False),
     Column("object_hash", Text, ForeignKey("objects.hash"), nullable=False),
     Column("quality", Text, nullable=False),
@@ -178,7 +169,7 @@ exports = Table(
     "exports",
     metadata,
     Column("export_id", Text, primary_key=True),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=False),
+    Column("draft_id", Text, ForeignKey("drafts.draft_id"), nullable=False),
     Column("timeline_version", Integer, nullable=False),
     Column("object_hash", Text, ForeignKey("objects.hash"), nullable=False),
     Column("quality", Text, nullable=False),
@@ -189,7 +180,7 @@ memory_candidates = Table(
     "memory_candidates",
     metadata,
     Column("candidate_id", Text, primary_key=True),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=False),
+    Column("draft_id", Text, ForeignKey("drafts.draft_id"), nullable=False),
     Column("content", Text, nullable=False),
     Column("suggested_scope", Text, nullable=False),
     Column("status", Text, nullable=False),
@@ -202,10 +193,9 @@ memories = Table(
     metadata,
     Column("memory_id", Text, primary_key=True),
     Column("scope", Text, nullable=False),
-    Column("project_id", Text, ForeignKey("projects.project_id"), nullable=True),
     Column("content", Text, nullable=False),
     Column("tags", Text, nullable=False),
-    Column("created_from_case_id", Text, ForeignKey("cases.case_id"), nullable=True),
+    Column("created_from_draft_id", Text, ForeignKey("drafts.draft_id"), nullable=True),
     Column("created_at", Text, nullable=False),
 )
 
@@ -213,7 +203,7 @@ messages = Table(
     "messages",
     metadata,
     Column("message_id", Text, primary_key=True),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=False),
+    Column("draft_id", Text, ForeignKey("drafts.draft_id"), nullable=False),
     Column("role", Text, nullable=False),
     Column("kind", Text, nullable=False, server_default="reply"),
     Column("content", Text, nullable=False),
@@ -226,9 +216,8 @@ jobs = Table(
     Column("job_id", Text, primary_key=True),
     Column("kind", Text, nullable=False),
     Column("status", Text, nullable=False),
-    Column("project_id", Text, ForeignKey("projects.project_id"), nullable=True),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=True),
-    Column("requested_by_case_id", Text, ForeignKey("cases.case_id"), nullable=True),
+    Column("draft_id", Text, ForeignKey("drafts.draft_id"), nullable=True),
+    Column("requested_by_draft_id", Text, ForeignKey("drafts.draft_id"), nullable=True),
     Column("asset_id", Text, ForeignKey("assets.asset_id"), nullable=True),
     Column("idempotency_key", Text, nullable=False),
     Column("payload_json", Text, nullable=False),
@@ -253,15 +242,13 @@ event_log = Table(
     Column("event_id", Integer, primary_key=True, autoincrement=True),
     Column("event_type", Text, nullable=False),
     Column("actor", Text, nullable=False),
-    Column("project_id", Text, ForeignKey("projects.project_id"), nullable=True),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=True),
+    Column("draft_id", Text, ForeignKey("drafts.draft_id"), nullable=True),
     Column("payload_json", Text, nullable=False),
     Column("state_version", Integer, nullable=True),
     Column("created_at", Text, nullable=False),
 )
 Index("ix_event_log_cursor", event_log.c.event_id)
-Index("ix_event_log_case_cursor", event_log.c.case_id, event_log.c.event_id)
-Index("ix_event_log_project_cursor", event_log.c.project_id, event_log.c.event_id)
+Index("ix_event_log_draft_cursor", event_log.c.draft_id, event_log.c.event_id)
 
 provider_calls = Table(
     "provider_calls",
@@ -270,7 +257,7 @@ provider_calls = Table(
     Column("provider_id", Text, nullable=False),
     Column("capability", Text, nullable=False),
     Column("model", Text, nullable=False),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=True),
+    Column("draft_id", Text, ForeignKey("drafts.draft_id"), nullable=True),
     Column("job_id", Text, ForeignKey("jobs.job_id"), nullable=True),
     Column("latency_ms", Integer, nullable=False),
     Column("usage_json", Text, nullable=False),
@@ -283,15 +270,15 @@ agent_traces = Table(
     metadata,
     Column("trace_id", Text, primary_key=True),
     Column("turn_id", Text, nullable=False),
-    Column("case_id", Text, ForeignKey("cases.case_id"), nullable=False),
+    Column("draft_id", Text, ForeignKey("drafts.draft_id"), nullable=False),
     Column("seq", Integer, nullable=False),
     Column("kind", Text, nullable=False),
     Column("payload_json", Text, nullable=False),
     Column("created_at", Text, nullable=False),
 )
 Index(
-    "ix_agent_traces_case_turn_seq",
-    agent_traces.c.case_id,
+    "ix_agent_traces_draft_turn_seq",
+    agent_traces.c.draft_id,
     agent_traces.c.turn_id,
     agent_traces.c.seq,
 )
@@ -306,10 +293,9 @@ objects = Table(
 )
 
 ALL_TABLE_NAMES: tuple[str, ...] = (
-    "projects",
-    "cases",
+    "drafts",
     "assets",
-    "project_asset_links",
+    "draft_asset_links",
     "transcripts",
     "material_summaries",
     "decisions",

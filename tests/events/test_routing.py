@@ -1,40 +1,40 @@
 from contracts.events import (
+    AssetImported,
     CapabilityDegraded,
     ContextCompacted,
     JobProgress,
     MemoryCandidateExtracted,
     PolicyRefusal,
-    ProjectCreated,
     ProviderCallRecorded,
     SecurityRefusal,
     TurnEnded,
 )
-from events.routing import routes_to_case, routes_to_workspace, should_push_sse
+from events.routing import routes_to_draft, routes_to_workspace, should_push_sse
 
 
-def test_requested_by_case_id_routes_job_to_case_and_workspace() -> None:
-    event = JobProgress(event="JobProgress", job_id="job_1", requested_by_case_id="case_1")
+def test_requested_by_draft_id_routes_job_to_draft_and_workspace() -> None:
+    event = JobProgress(event="JobProgress", job_id="job_1", requested_by_draft_id="draft_1")
 
-    assert routes_to_case(event, "case_1")
-    assert not routes_to_case(event, "case_2")
+    assert routes_to_draft(event, "draft_1")
+    assert not routes_to_draft(event, "draft_2")
     assert routes_to_workspace(event)
 
 
-def test_payload_requested_by_case_id_is_case_route_key() -> None:
-    event = ProjectCreated(
-        event="ProjectCreated",
-        project_id="project_1",
-        payload={"requested_by_case_id": "case_1"},
+def test_payload_requested_by_draft_id_is_draft_route_key() -> None:
+    event = AssetImported(
+        event="AssetImported",
+        asset_id="asset_1",
+        payload={"requested_by_draft_id": "draft_1"},
     )
 
-    assert routes_to_case(event, "case_1")
+    assert routes_to_draft(event, "draft_1")
     assert routes_to_workspace(event)
 
 
-def test_turn_ended_is_case_only() -> None:
-    event = TurnEnded(event="TurnEnded", turn_id="turn_1", case_id="case_1")
+def test_turn_ended_is_draft_only() -> None:
+    event = TurnEnded(event="TurnEnded", turn_id="turn_1", draft_id="draft_1")
 
-    assert routes_to_case(event, "case_1")
+    assert routes_to_draft(event, "draft_1")
     assert not routes_to_workspace(event)
 
 
@@ -47,28 +47,28 @@ def test_record_events_do_not_push_sse() -> None:
 
     for event in events:
         assert not should_push_sse(event)
-        assert not routes_to_case(event, "case_1")
+        assert not routes_to_draft(event, "draft_1")
         assert not routes_to_workspace(event)
 
 
-def test_memory_candidate_routes_workspace_and_case_when_case_id_present() -> None:
+def test_memory_candidate_routes_workspace_and_draft_when_draft_id_present() -> None:
     event = MemoryCandidateExtracted(
         event="MemoryCandidateExtracted",
         candidate_id="candidate_1",
-        case_id="case_1",
+        draft_id="draft_1",
     )
 
-    assert routes_to_case(event, "case_1")
+    assert routes_to_draft(event, "draft_1")
     assert routes_to_workspace(event)
 
 
 def test_capability_degraded_and_security_refusal_visibility_rules() -> None:
-    case_degradation = CapabilityDegraded(
+    draft_degradation = CapabilityDegraded(
         event="CapabilityDegraded",
         degradation_id="deg_1",
         capability="asr",
         reason="timeout",
-        case_id="case_1",
+        draft_id="draft_1",
     )
     workspace_degradation = CapabilityDegraded(
         event="CapabilityDegraded",
@@ -83,9 +83,9 @@ def test_capability_degraded_and_security_refusal_visibility_rules() -> None:
         reason="outside roots",
     )
 
-    assert routes_to_case(case_degradation, "case_1")
-    assert routes_to_workspace(case_degradation)
-    assert not routes_to_case(workspace_degradation, "case_1")
+    assert routes_to_draft(draft_degradation, "draft_1")
+    assert routes_to_workspace(draft_degradation)
+    assert not routes_to_draft(workspace_degradation, "draft_1")
     assert routes_to_workspace(workspace_degradation)
-    assert not routes_to_case(security_refusal, "case_1")
+    assert not routes_to_draft(security_refusal, "draft_1")
     assert routes_to_workspace(security_refusal)
