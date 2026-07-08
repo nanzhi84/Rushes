@@ -142,17 +142,15 @@ function DecisionCard({
 }
 
 function ProgressCard({ item }: { item: ProgressInteractionItem }): ReactElement {
-  const percent = item.progress ?? 0;
+  const view = progressCardView(item);
   return (
-    <article className="rounded-md border border-info/40 bg-raised p-4">
+    <article className={`rounded-md border p-4 ${view.cardClass}`}>
       <div className="flex items-center justify-between gap-3">
         <div>
-          <p className="text-xs font-medium text-info">进度</p>
+          <p className={`text-xs font-medium ${view.toneClass}`}>进度</p>
           <h3 className="mt-1 text-sm font-semibold text-fg">{item.job_kind}</h3>
         </div>
-        <span className="text-sm font-medium text-info">
-          {item.progress === null ? "处理中" : `${item.progress}%`}
-        </span>
+        <span className={`text-sm font-medium ${view.toneClass}`}>{view.statusText}</span>
       </div>
       <div
         className="mt-3 h-2 overflow-hidden rounded bg-panel"
@@ -160,12 +158,67 @@ function ProgressCard({ item }: { item: ProgressInteractionItem }): ReactElement
         aria-label={`${item.job_kind} 进度`}
         aria-valuemin={0}
         aria-valuemax={100}
-        aria-valuenow={percent}
+        aria-valuenow={view.percent}
       >
-        <div className="h-full bg-accent" style={{ width: `${percent}%` }} />
+        <div className={`h-full ${view.barClass}`} style={{ width: `${view.percent}%` }} />
       </div>
     </article>
   );
+}
+
+type ProgressCardView = {
+  statusText: string;
+  percent: number;
+  cardClass: string;
+  toneClass: string;
+  barClass: string;
+};
+
+// 终态（succeeded/failed/cancelled）必须让卡片显性收尾——不发进度事件的 job（asr/tts/align/
+// import_url）从不填进度条，只有靠 status 才能把「处理中」翻到「已完成」，否则永远停在处理中。
+function progressCardView(item: ProgressInteractionItem): ProgressCardView {
+  switch (item.status) {
+    case "succeeded":
+      return {
+        statusText: "已完成",
+        percent: 100,
+        cardClass: "border-ok/40 bg-raised",
+        toneClass: "text-ok",
+        barClass: "bg-ok"
+      };
+    case "failed":
+      return {
+        statusText: "失败",
+        percent: item.progress ?? 0,
+        cardClass: "border-danger/40 bg-danger/10",
+        toneClass: "text-danger",
+        barClass: "bg-danger"
+      };
+    case "cancelled":
+      return {
+        statusText: "已取消",
+        percent: item.progress ?? 0,
+        cardClass: "border-line bg-raised",
+        toneClass: "text-fg-muted",
+        barClass: "bg-line-strong"
+      };
+    case "queued":
+      return {
+        statusText: "排队中",
+        percent: item.progress ?? 0,
+        cardClass: "border-info/40 bg-raised",
+        toneClass: "text-info",
+        barClass: "bg-accent"
+      };
+    default:
+      return {
+        statusText: item.progress === null ? "处理中" : `${item.progress}%`,
+        percent: item.progress ?? 0,
+        cardClass: "border-info/40 bg-raised",
+        toneClass: "text-info",
+        barClass: "bg-accent"
+      };
+  }
 }
 
 function ErrorCard({ item }: { item: ErrorInteractionItem }): ReactElement {

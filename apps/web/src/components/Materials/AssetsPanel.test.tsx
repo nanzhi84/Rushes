@@ -74,6 +74,23 @@ describe("AssetsPanel 单击试看 / 右键摘要", () => {
     expect(screen.queryByText("素材理解摘要")).toBeNull();
   });
 
+  it("瓦片主点击面有可访问名「试看 {文件名}」，经 role+name 可达且触发试看", async () => {
+    const onPreviewAsset = vi.fn();
+    renderPanel([makeAsset({ asset_id: "clip", filename: "clip.mp4" })], {
+      management: true,
+      onPreviewAsset
+    });
+
+    // 原生 <button> 本就键盘可达（Enter/Space 由浏览器激活）；缺的是显性可访问名——
+    // 用 role+name 定位即验证读屏/键盘用户能唯一命中主点击面，且区别于 ⋯ 的「更多操作」。
+    const tile = await screen.findByRole("button", { name: "试看 clip.mp4" });
+    expect(screen.getByRole("button", { name: "素材 clip.mp4 更多操作" })).toBeTruthy();
+
+    fireEvent.click(tile);
+    expect(onPreviewAsset).toHaveBeenCalledTimes(1);
+    expect(onPreviewAsset.mock.calls[0]?.[0]?.asset_id).toBe("clip");
+  });
+
   it("右键菜单「查看理解摘要」仍打开摘要抽屉", async () => {
     renderPanel([makeAsset({ asset_id: "clip", filename: "clip.mp4" })], { management: true });
 
