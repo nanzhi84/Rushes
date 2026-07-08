@@ -29,7 +29,7 @@ from agent_harness.decision_answering import DecisionAnswerResolver
 from agent_harness.loop import (
     LLMPlanner,
     MappingPlannerAdapter,
-    ScriptedPlanner,
+    NoProviderPlanner,
     recover_approved_pending_tool_calls,
     run_turn,
 )
@@ -234,7 +234,9 @@ def create_app(
     async def default_runner(item: TurnQueueItem, stop_token: StopToken) -> None:
         if queue is None:
             raise RuntimeError("turn queue is not initialized")
-        active_planner = env_planner or ScriptedPlanner([])
+        # 无密钥时用 NoProviderPlanner 回一句中文说明（不是 ScriptedPlanner——那会吐
+        # 「（脚本耗尽，结束本回合）」这类内部占位文案进产品路径）。
+        active_planner = env_planner or NoProviderPlanner()
         await run_turn(
             item,
             engine=engine,

@@ -20,6 +20,13 @@ for port in "$API_PORT" "$WEB_PORT"; do
   fi
 done
 
+# 两个模型密钥都缺就黄字警告（不阻断启动）：没密钥剪辑代理无法工作，聊天只会回一句
+# 「未配置模型密钥…」。别静默——否则会表现为「发消息没反应」而看不出原因。
+if [ -z "${RUSHES_DASHSCOPE_API_KEY:-}" ] && [ -z "${RUSHES_LLM_API_KEY:-}" ]; then
+  printf '\033[33m警告：未检测到 RUSHES_DASHSCOPE_API_KEY 或 RUSHES_LLM_API_KEY，剪辑代理将无法工作。\033[0m\n' >&2
+  printf '\033[33m      先 export 密钥再启动：export RUSHES_DASHSCOPE_API_KEY=sk-xxxx\033[0m\n' >&2
+fi
+
 cleanup() {
   trap - EXIT INT TERM
   kill 0 2>/dev/null || true
@@ -39,7 +46,7 @@ done
 uv run python -m apps.worker.main "$WORKSPACE" &
 
 RUSHES_WEB_PROXY_TARGET="http://127.0.0.1:$API_PORT" \
-  npx -y pnpm@10.13.1 --dir "$ROOT/apps/web" dev -- --host 127.0.0.1 --port "$WEB_PORT" --strictPort &
+  npx -y pnpm@10.13.1 --dir "$ROOT/apps/web" dev --host 127.0.0.1 --port "$WEB_PORT" --strictPort &
 
 sleep 2
 echo

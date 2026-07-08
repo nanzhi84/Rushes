@@ -6,6 +6,7 @@ from sqlalchemy.engine import Engine
 
 from agent_harness.decision_answering import ScriptedDecisionAnswerResolver
 from agent_harness.loop import (
+    NoProviderPlanner,
     ScriptedPlanner,
     recover_approved_pending_tool_calls,
     run_turn,
@@ -773,3 +774,16 @@ def test_message_content_is_decoded_as_text(tmp_path: Path) -> None:
         ).scalar_one()
 
     assert load_json(row) == "hello"
+
+
+async def test_no_provider_planner_replies_with_missing_key_message() -> None:
+    """无密钥兜底 planner：回一句中文说明、不吐「脚本耗尽」、纯 content 结束回合。"""
+    planner = NoProviderPlanner()
+
+    step = await planner.plan(None, [])  # type: ignore[arg-type]
+
+    assert step.tool_call is None  # 纯 content → run_turn 落一条 reply 并 TurnEnded
+    assert step.content is not None
+    assert "RUSHES_DASHSCOPE_API_KEY" in step.content
+    assert "RUSHES_LLM_API_KEY" in step.content
+    assert "脚本耗尽" not in step.content
