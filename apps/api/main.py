@@ -1737,8 +1737,13 @@ _PICKER_SCRIPTS = {
     ),
     "folder": (
         "with timeout of 3600 seconds\n"
-        'set picked to choose folder with prompt "选择要导入的素材文件夹"\n'
-        "return POSIX path of picked\n"
+        'set picked to choose folder with prompt "选择要导入的素材文件夹（可多选）" '
+        "with multiple selections allowed\n"
+        'set out to ""\n'
+        "repeat with f in picked\n"
+        "set out to out & POSIX path of f & linefeed\n"
+        "end repeat\n"
+        "return out\n"
         "end timeout"
     ),
 }
