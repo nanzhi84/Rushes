@@ -69,6 +69,38 @@ def test_reference_import_lists_material_without_object_copy(tmp_path: Path) -> 
     assert object_count == 0
 
 
+def test_import_local_enqueues_poster_before_proxy(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    source = _media_file(tmp_path, b"raw-media")
+    assert _create_draft(client).status_code == 201
+
+    assert (
+        client.post(
+            "/api/drafts/draft_1/materials/import-local",
+            headers=AUTH,
+            json={"path": str(source)},
+        ).status_code
+        == 200
+    )
+
+    engine = _engine(app)
+    with engine.connect() as connection:
+        kinds = {str(row._mapping["kind"]) for row in connection.execute(select(schema.jobs)).all()}
+    # 导入即入队 poster + proxy 两行。
+    assert {"poster", "proxy"} <= kinds
+    # poster claim 优先级最高：同批入队时先被认领（now 取远期确保 next_run_at 已到期）。
+    with begin_immediate(engine) as connection:
+        claimed_id = JobsRepository(connection).claim_next(
+            worker_id="w1", now="2099-01-01T00:00:00+00:00"
+        )
+    with engine.connect() as connection:
+        claimed_kind = connection.execute(
+            select(schema.jobs.c.kind).where(schema.jobs.c.job_id == claimed_id)
+        ).scalar_one()
+    assert claimed_kind == "poster"
+
+
 def test_reference_source_change_invalidates_on_materials_list(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
@@ -347,9 +379,11 @@ async def test_proxy_job_probes_and_generates_proxy_with_ffmpeg(tmp_path: Path) 
     )
     runner = JobRunner(engine=_engine(app))
 
-    result = await runner.run_once()
+    # 导入入队 poster + proxy；poster 优先认领（封面/时长秒出），第二次 run_once 跑 proxy。
+    first = await runner.run_once()
+    second = await runner.run_once()
 
-    assert result.status == "succeeded"
+    assert {first.status, second.status} == {"succeeded"}
     with _engine(app).connect() as connection:
         asset = connection.execute(select(schema.assets)).one()._mapping
     assert load_json(asset["probe"])["duration_sec"] > 0

@@ -1493,6 +1493,7 @@ def _global_assets_by_reference_path(
                 schema.assets.c.asset_id,
                 schema.assets.c.reference_path,
                 schema.assets.c.proxy_object_hash,
+                schema.assets.c.thumbnail_object_hash,
                 schema.assets.c.index_json,
             )
             .where(schema.assets.c.reference_path.in_(list(set(candidate_paths))))
@@ -1506,6 +1507,7 @@ def _global_assets_by_reference_path(
             result[reference_path] = {
                 "asset_id": str(values["asset_id"]),
                 "proxy_object_hash": values.get("proxy_object_hash"),
+                "thumbnail_object_hash": values.get("thumbnail_object_hash"),
                 "index_json": values.get("index_json"),
             }
     return result
@@ -1524,13 +1526,38 @@ def _link_existing_asset(
         link_payload["rel_dir"] = rel_dir
     events: list[Any] = [AssetLinked(draft_id=draft_id, asset_id=asset_id, payload=link_payload)]
     proxy_hash = hit.get("proxy_object_hash")
+    thumbnail_hash = hit.get("thumbnail_object_hash")
+    has_thumbnail = isinstance(thumbnail_hash, str) and thumbnail_hash != ""
     if not isinstance(proxy_hash, str) or proxy_hash == "":
+        # 从零加工：poster 先入队秒出封面/时长，再补 proxy。
+        if not has_thumbnail:
+            events.append(_poster_job_event(draft_id=draft_id, asset_id=asset_id))
         events.append(_proxy_job_event(draft_id=draft_id, asset_id=asset_id))
     elif hit.get("index_json") is None:
+        # proxy 已就绪但缺索引：缩略图缺失时也补个 poster，让封面秒出而不必等 index。
+        if not has_thumbnail:
+            events.append(_poster_job_event(draft_id=draft_id, asset_id=asset_id))
         events.append(_index_job_event(draft_id=draft_id, asset_id=asset_id))
     result = apply(tuple(events), engine=engine, base_version=None, actor="user")
     _ensure_applied(result)
     return _event_ids(result)
+
+
+def _poster_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:
+    idempotency_key = f"asset:{asset_id}:poster"
+    return JobEnqueued(
+        job_id=_job_id("poster", idempotency_key),
+        draft_id=draft_id,
+        requested_by_draft_id=draft_id,
+        payload={
+            "kind": "poster",
+            "asset_id": asset_id,
+            "idempotency_key": idempotency_key,
+            "job_payload": {"asset_id": asset_id},
+            "attempts": 0,
+            "max_retries": 2,
+        },
+    )
 
 
 def _proxy_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:

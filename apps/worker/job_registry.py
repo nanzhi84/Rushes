@@ -98,9 +98,11 @@ def build_default_job_registry(
             build_proxy_handler,
             workspace_paths_from_engine,
         )
+        from .poster_jobs import build_poster_handler
         from .render_jobs import build_render_final_handler, build_render_preview_handler
 
         paths = workspace_paths or workspace_paths_from_engine(engine)
+        registry.register("poster", build_poster_handler(engine, paths))
         registry.register("proxy", build_proxy_handler(engine, paths))
         registry.register("index", build_index_handler(engine, paths))
         registry.register("asr", build_asr_handler(engine, paths, gateway=provider_gateway))

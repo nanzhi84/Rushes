@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.engine import Engine
 
 from contracts.asset import AssetKind
@@ -23,6 +24,7 @@ from media.shots import split_shots
 from media.thumbnails import extract_video_thumbnail, render_image_thumbnail
 from media.vad import SileroModelMissing, default_model_path, run_silero_vad
 from media.waveform import compute_waveform_peaks
+from storage import schema
 from storage.object_store import ObjectStore
 from storage.workspace_paths import WorkspacePaths
 
@@ -35,7 +37,10 @@ def build_index_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
         asset_id = _job_asset_id(job)
         try:
             source_path, kind = _asset_source(engine, paths, asset_id)
-            index_json, thumbnail_object_hash = _build_index(kind, source_path, paths)
+            existing_thumbnail = _existing_thumbnail_hash(engine, asset_id)
+            index_json, thumbnail_object_hash = _build_index(
+                kind, source_path, paths, existing_thumbnail=existing_thumbnail
+            )
         except Exception as exc:  # cheap best-effort index degrades, never blocks the asset
             _apply_or_raise(
                 engine,
@@ -75,29 +80,43 @@ def _build_index(
     kind: str,
     source_path: Path,
     paths: WorkspacePaths,
+    *,
+    existing_thumbnail: str | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     if kind == AssetKind.VIDEO.value:
-        return _index_video(source_path, paths)
+        return _index_video(source_path, paths, existing_thumbnail=existing_thumbnail)
     if kind == AssetKind.AUDIO.value:
         return _index_audio(source_path, paths)
     if kind == AssetKind.IMAGE.value:
-        return _index_image(source_path, paths)
+        return _index_image(source_path, paths, existing_thumbnail=existing_thumbnail)
     if kind == AssetKind.FONT.value:
         return _index_font(source_path)
     raise ValueError(f"unsupported asset kind for index: {kind}")
 
 
-def _index_video(source_path: Path, paths: WorkspacePaths) -> tuple[dict[str, Any], str | None]:
+def _index_video(
+    source_path: Path,
+    paths: WorkspacePaths,
+    *,
+    existing_thumbnail: str | None = None,
+) -> tuple[dict[str, Any], str | None]:
     duration_sec = probe_media(source_path).duration_sec
-    cover_sec = 1.0 if duration_sec >= 2.0 else max(0.0, duration_sec / 10.0)
-    thumbnail = extract_video_thumbnail(source_path, seconds=cover_sec)
-    thumbnail_object_hash = ObjectStore(paths).put_bytes(thumbnail).object_hash
+    # 封面缩略图已由 poster 秒出的话，跳过重复的 ffmpeg 抽帧；index 只补 scenes。
+    thumbnail_object_hash = existing_thumbnail or _extract_video_cover(
+        source_path, paths, duration_sec
+    )
     shots = split_shots(source_path)
     index_json: dict[str, Any] = {
         "duration_sec": duration_sec,
         "shots": [{"start_sec": shot.start_sec, "end_sec": shot.end_sec} for shot in shots],
     }
     return index_json, thumbnail_object_hash
+
+
+def _extract_video_cover(source_path: Path, paths: WorkspacePaths, duration_sec: float) -> str:
+    cover_sec = 1.0 if duration_sec >= 2.0 else max(0.0, duration_sec / 10.0)
+    thumbnail = extract_video_thumbnail(source_path, seconds=cover_sec)
+    return ObjectStore(paths).put_bytes(thumbnail).object_hash
 
 
 def _index_audio(source_path: Path, paths: WorkspacePaths) -> tuple[dict[str, Any], str | None]:
@@ -112,10 +131,32 @@ def _index_audio(source_path: Path, paths: WorkspacePaths) -> tuple[dict[str, An
     return index_json, None
 
 
-def _index_image(source_path: Path, paths: WorkspacePaths) -> tuple[dict[str, Any], str | None]:
+def _index_image(
+    source_path: Path,
+    paths: WorkspacePaths,
+    *,
+    existing_thumbnail: str | None = None,
+) -> tuple[dict[str, Any], str | None]:
+    # 图片缩略图已由 poster 产出的话直接复用，不再重复渲染。
+    if existing_thumbnail:
+        return {"duration_sec": 0.0}, existing_thumbnail
     thumbnail = render_image_thumbnail(source_path)
     thumbnail_object_hash = ObjectStore(paths).put_bytes(thumbnail).object_hash
     return {"duration_sec": 0.0}, thumbnail_object_hash
+
+
+def _existing_thumbnail_hash(engine: Engine, asset_id: str) -> str | None:
+    """poster 是否已产出缩略图：有则 index 跳过重复抽帧/渲染，只补 scenes 等。"""
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(schema.assets.c.thumbnail_object_hash).where(
+                schema.assets.c.asset_id == asset_id
+            )
+        ).first()
+    if row is None:
+        return None
+    value = row._mapping["thumbnail_object_hash"]
+    return value if isinstance(value, str) and value else None
 
 
 def _index_font(source_path: Path) -> tuple[dict[str, Any], str | None]:

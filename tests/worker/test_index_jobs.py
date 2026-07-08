@@ -164,6 +164,39 @@ async def test_index_video_writes_shots_and_thumbnail(tmp_path: Path) -> None:
 
 
 @ffmpeg_only
+async def test_index_video_reuses_poster_thumbnail(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "clip.mp4"
+    _make_video(source)
+    engine, paths, asset_id = _ingest(tmp_path, kind="video", source=source)
+    # 模拟 poster 已产出封面：预写 thumbnail_object_hash。
+    apply(
+        [
+            {
+                "event": "AssetIndexReady",
+                "asset_id": asset_id,
+                "payload": {"thumbnail_object_hash": "poster_thumb"},
+            }
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+    )
+
+    def _boom(*_args: Any, **_kwargs: Any) -> bytes:
+        raise AssertionError("index re-extracted thumbnail despite poster output")
+
+    monkeypatch.setattr(index_jobs, "extract_video_thumbnail", _boom)
+
+    await build_index_handler(engine, paths)(_job(asset_id))
+
+    row = _asset_row(engine, asset_id)
+    # 复用 poster 的封面，不重复抽帧；scenes 仍由 index 补齐。
+    assert row["thumbnail_object_hash"] == "poster_thumb"
+    assert row["ingest_status"] == "indexed"
+    assert "shots" in load_json(row["index_json"])
+
+
+@ffmpeg_only
 async def test_index_audio_writes_peaks_and_empty_vad(tmp_path: Path) -> None:
     source = tmp_path / "audio.wav"
     _make_audio(source)

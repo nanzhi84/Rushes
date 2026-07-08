@@ -66,6 +66,8 @@ def import_local_file(
             reference_path=reference_path,
         ),
         AssetLinked(draft_id=draft_id, asset_id=asset_id, payload=link_payload),
+        # poster 先入队（claim 优先级高于 proxy）：缩略图/时长秒出，不必等 proxy 转码。
+        _poster_job_event(draft_id=draft_id, asset_id=asset_id),
         _proxy_job_event(draft_id=draft_id, asset_id=asset_id),
     ]
     return _succeeded(
@@ -196,6 +198,23 @@ def _asset_imported_event(
             "ingest_status": "imported",
             "usable": True,
             "failure": None,
+        },
+    )
+
+
+def _poster_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:
+    idempotency_key = f"asset:{asset_id}:poster"
+    return JobEnqueued(
+        job_id=_job_id("poster", idempotency_key),
+        draft_id=draft_id,
+        requested_by_draft_id=draft_id,
+        payload={
+            "kind": "poster",
+            "asset_id": asset_id,
+            "idempotency_key": idempotency_key,
+            "job_payload": {"asset_id": asset_id},
+            "attempts": 0,
+            "max_retries": 2,
         },
     )
 
