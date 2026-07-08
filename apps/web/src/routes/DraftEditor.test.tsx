@@ -425,7 +425,7 @@ describe("DraftEditorView", () => {
       draftEventsSource().emit("JobProgress", jobProgressPayload(0.42));
     });
 
-    const progress = await screen.findByRole("progressbar", { name: "素材分析 进度" });
+    const progress = await screen.findByRole("progressbar", { name: "语音转写 进度" });
     expect(progress.getAttribute("aria-valuenow")).toBe("42");
 
     act(() => {
@@ -470,6 +470,57 @@ describe("DraftEditorView", () => {
       kind: "unknown",
       eventName: "FutureEvent"
     });
+  });
+
+  it("素材加工型 job（proxy/poster/index）事件不产进度卡", () => {
+    let items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "proxy"));
+    items = reduceStructuredInteractionItems(items, jobEventPayload("JobSucceeded", "poster"));
+    items = reduceStructuredInteractionItems(items, jobEventPayload("JobEnqueued", "index"));
+    items = reduceStructuredInteractionItems(items, jobEventPayload("JobFailed", "index"));
+    expect(items).toHaveLength(0);
+  });
+
+  it("白名单 job（asr）产进度卡且文案按 kind 给中文名", () => {
+    const items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "asr"));
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: "progress", job_id: "job_1", job_kind: "语音转写" });
+  });
+
+  it("同一 job 的 queued→running→succeeded 合并进一张卡并流转到完成态", () => {
+    // 三种事件的 job 标识都取顶层 event.job_id（这里都是 job_1），必须合并进同一张卡而非各自成卡。
+    let items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "asr"));
+    expect(items).toMatchObject([{ kind: "progress", job_id: "job_1", status: "queued" }]);
+
+    items = reduceStructuredInteractionItems(items, jobProgressPayload(0.5));
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ job_id: "job_1", status: "running", progress: 50 });
+
+    items = reduceStructuredInteractionItems(items, jobEventPayload("JobSucceeded", "asr"));
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ job_id: "job_1", status: "succeeded" });
+  });
+
+  it("进度卡终态 succeeded 显示已完成而非停在处理中", () => {
+    // 复现真机 bug：asr 等 job 从不发 JobProgress，progress 恒为 null，只能靠 status 收尾。
+    render(
+      <StructuredInteractionRenderer
+        item={{
+          kind: "progress",
+          id: "progress:job_1",
+          job_id: "job_1",
+          job_kind: "语音转写",
+          progress: null,
+          status: "succeeded"
+        }}
+        onAnswerDecision={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("已完成")).toBeTruthy();
+    expect(screen.queryByText("处理中")).toBeNull();
+    expect(
+      screen.getByRole("progressbar", { name: "语音转写 进度" }).getAttribute("aria-valuenow")
+    ).toBe("100");
   });
 
   it("时间线 seek 会联动传给 PreviewPlayer", async () => {
@@ -713,6 +764,7 @@ function audioModeDecision(overrides: Partial<Decision> = {}): Decision {
 }
 
 function jobProgressPayload(progress: number): DomainSsePayload {
+  // 真实后端把 job kind 嵌在 event.payload.kind（顶层只有 progress）；asr 属于白名单 job，会出进度卡。
   return {
     event_id: 10,
     event: {
@@ -720,8 +772,21 @@ function jobProgressPayload(progress: number): DomainSsePayload {
       draft_id: "draft_1",
       requested_by_draft_id: "draft_1",
       job_id: "job_1",
-      kind: "素材分析",
-      progress
+      progress,
+      payload: { kind: "asr", progress }
+    }
+  };
+}
+
+function jobEventPayload(eventName: string, kind: string): DomainSsePayload {
+  return {
+    event_id: 11,
+    event: {
+      event: eventName,
+      draft_id: "draft_1",
+      requested_by_draft_id: "draft_1",
+      job_id: "job_1",
+      payload: { kind }
     }
   };
 }

@@ -395,11 +395,14 @@ function AssetTile({
     active ? "border-selected bg-selected" : "border-line hover:border-line-strong"
   } ${asset.usable ? "" : "opacity-50"}`;
 
+  const filename = asset.filename || asset.asset_id;
   const body = (
     <button
       className="block w-full text-left"
       type="button"
-      title={asset.filename || asset.asset_id}
+      title={filename}
+      // 主点击面即试看：给显性可访问名（区别于 ⋯ 的「更多操作」），键盘/读屏可达且不歧义。
+      aria-label={onClick ? `试看 ${filename}` : filename}
       onClick={onClick}
     >
       <div className="relative aspect-video bg-ink">

@@ -12,6 +12,7 @@ from sqlalchemy import select
 from contracts.asset import AssetKind, AssetSource, StorageMode
 from contracts.events import AssetImported, AssetLinked, JobEnqueued
 from contracts.tool_result import ToolError, ToolResult
+from media.probe import asset_needs_proxy
 from storage import schema
 from storage.object_store import CHUNK_SIZE, ObjectStore
 from storage.workspace_paths import WorkspacePaths
@@ -66,10 +67,15 @@ def import_local_file(
             reference_path=reference_path,
         ),
         AssetLinked(draft_id=draft_id, asset_id=asset_id, payload=link_payload),
-        # poster 先入队（claim 优先级高于 proxy）：缩略图/时长秒出，不必等 proxy 转码。
+        # poster 先入队（claim 优先级高于 proxy/index）：缩略图/时长秒出。
         _poster_job_event(draft_id=draft_id, asset_id=asset_id),
-        _proxy_job_event(draft_id=draft_id, asset_id=asset_id),
     ]
+    # 代理只为「浏览器播不动的格式」兜底：h264/hevc 视频、常见音频、图片都直读即播，不入 proxy 队，
+    # 直接入队 index（index 原本挂在 proxy handler 末尾，跳 proxy 就得在此补上索引这一步）。
+    if asset_needs_proxy(input_model.kind, source):
+        events.append(_proxy_job_event(draft_id=draft_id, asset_id=asset_id))
+    else:
+        events.append(_index_job_event(draft_id=draft_id, asset_id=asset_id))
     return _succeeded(
         "asset.import_local_file",
         context,
@@ -227,6 +233,23 @@ def _proxy_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:
         requested_by_draft_id=draft_id,
         payload={
             "kind": "proxy",
+            "asset_id": asset_id,
+            "idempotency_key": idempotency_key,
+            "job_payload": {"asset_id": asset_id},
+            "attempts": 0,
+            "max_retries": 2,
+        },
+    )
+
+
+def _index_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:
+    idempotency_key = f"asset:{asset_id}:index"
+    return JobEnqueued(
+        job_id=_job_id("index", idempotency_key),
+        draft_id=draft_id,
+        requested_by_draft_id=draft_id,
+        payload={
+            "kind": "index",
             "asset_id": asset_id,
             "idempotency_key": idempotency_key,
             "job_payload": {"asset_id": asset_id},

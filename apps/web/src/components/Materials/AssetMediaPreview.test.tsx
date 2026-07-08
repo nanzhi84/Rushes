@@ -22,9 +22,24 @@ describe("AssetMediaPreview 原片优先与回落", () => {
     );
   });
 
-  it("原片 onError 但 proxy 未就绪时提示转码中", () => {
+  it("原片 onError 且无转码任务时提示格式不支持", () => {
     render(
-      <AssetMediaPreview asset={makeAsset({ asset_id: "v", kind: "video", proxy_ready: false })} />
+      <AssetMediaPreview asset={makeAsset({ asset_id: "v", kind: "video", proxy_ready: false })} />,
+    );
+    fireEvent.error(document.querySelector("video")!);
+    expect(screen.getByText("此素材格式暂不支持预览。")).toBeTruthy();
+  });
+
+  it("原片 onError 且代理转码进行中时提示转码中", () => {
+    render(
+      <AssetMediaPreview
+        asset={makeAsset({
+          asset_id: "v",
+          kind: "video",
+          proxy_ready: false,
+          jobs: [{ kind: "proxy", status: "running" }] as MaterialAsset["jobs"],
+        })}
+      />
     );
     fireEvent.error(screen.getByLabelText("v.mp4 视频试看"));
     expect(screen.getByText("转码中，稍候可预览。")).toBeTruthy();

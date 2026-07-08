@@ -20,7 +20,7 @@ from contracts.events import (
     ProxyGenerated,
 )
 from contracts.jobs import Job
-from media.probe import MediaProbeError, probe_media
+from media.probe import MediaProbeError, asset_needs_proxy, probe_media
 from media.proxy import MediaProxyError, generate_proxy
 from media.url_import import UrlImportError, download_url_to_object
 from storage import schema
@@ -122,7 +122,8 @@ def build_import_url_handler(
             ) from exc
         kind = _payload_str(payload, "kind") or AssetKind.VIDEO.value
         object_ref = result.object_ref
-        stat_mtime = Path(paths.object_path(object_ref.object_hash)).stat().st_mtime_ns
+        object_path = Path(paths.object_path(object_ref.object_hash))
+        stat_mtime = object_path.stat().st_mtime_ns
         imported = AssetImported(
             draft_id=draft_id,
             asset_id=asset_id,
@@ -147,20 +148,25 @@ def build_import_url_handler(
                 "content_type": result.content_type,
             },
         )
-        proxy_job = _proxy_job_event(draft_id=draft_id, asset_id=asset_id)
+        # 可播格式（h264/hevc、常见音频、图片）直读即播，跳 proxy 直接补 index；否则入 proxy 队。
+        if asset_needs_proxy(kind, object_path):
+            followup = _proxy_job_event(draft_id=draft_id, asset_id=asset_id)
+        else:
+            followup = _index_job_event(draft_id=draft_id, asset_id=asset_id)
         _apply_many_or_raise(
             engine,
             (
                 imported,
                 AssetLinked(draft_id=draft_id, asset_id=asset_id),
-                proxy_job,
+                followup,
             ),
         )
         return JobExecutionResult(
             {
                 "asset_id": asset_id,
                 "object_hash": object_ref.object_hash,
-                "proxy_job_id": proxy_job.job_id,
+                "followup_job_id": followup.job_id,
+                "followup_kind": followup.payload["kind"],
             }
         )
 

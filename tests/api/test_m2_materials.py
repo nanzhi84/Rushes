@@ -350,24 +350,8 @@ def test_media_proxy_supports_http_range_206(tmp_path: Path) -> None:
 async def test_proxy_job_probes_and_generates_proxy_with_ffmpeg(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)
-    video = tmp_path / "allowed" / "fixture.mp4"
-    video.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc=duration=1:size=128x128:rate=30",
-            "-pix_fmt",
-            "yuv420p",
-            str(video),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    # 用非浏览器可播编码（mpeg4）编码：这类才会入 proxy 队，走 probe→proxy→index 全链。
+    video = _encode_video(tmp_path / "allowed" / "fixture.mp4", codec="mpeg4")
     assert _create_draft(client).status_code == 201
     assert (
         client.post(
@@ -377,6 +361,9 @@ async def test_proxy_job_probes_and_generates_proxy_with_ffmpeg(tmp_path: Path) 
         ).status_code
         == 200
     )
+    with _engine(app).connect() as connection:
+        kinds = {str(r._mapping["kind"]) for r in connection.execute(select(schema.jobs)).all()}
+    assert kinds == {"poster", "proxy"}  # 不可播 → 入 proxy 队
     runner = JobRunner(engine=_engine(app))
 
     # 导入入队 poster + proxy；poster 优先认领（封面/时长秒出），第二次 run_once 跑 proxy。
@@ -390,6 +377,40 @@ async def test_proxy_job_probes_and_generates_proxy_with_ffmpeg(tmp_path: Path) 
     assert asset["proxy_object_hash"] is not None
     assert _state(app).workspace_paths.object_path(asset["proxy_object_hash"]).exists()
     assert {"AssetProbed", "ProxyGenerated"} <= set(_event_types(app))
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+@pytest.mark.ffmpeg
+async def test_import_playable_video_skips_proxy_and_enqueues_index(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    # h264 浏览器可硬解直读：导入不入 proxy 队，直接 poster + index（省掉整段转码）。
+    video = _encode_video(tmp_path / "allowed" / "playable.mp4", codec="libx264")
+    assert _create_draft(client).status_code == 201
+    assert (
+        client.post(
+            "/api/drafts/draft_1/materials/import-local",
+            headers=AUTH,
+            json={"path": str(video)},
+        ).status_code
+        == 200
+    )
+    with _engine(app).connect() as connection:
+        kinds = {str(r._mapping["kind"]) for r in connection.execute(select(schema.jobs)).all()}
+    assert kinds == {"poster", "index"}  # 可播 → 0 条 proxy
+
+    runner = JobRunner(engine=_engine(app))
+    first = await runner.run_once()
+    second = await runner.run_once()
+
+    assert {first.status, second.status} == {"succeeded"}
+    with _engine(app).connect() as connection:
+        asset = connection.execute(select(schema.assets)).one()._mapping
+    # 时长/封面来自 poster；索引来自 index；全程无 proxy。
+    assert load_json(asset["probe"])["duration_sec"] > 0
+    assert asset["proxy_object_hash"] is None
+    assert asset["index_json"] is not None
+    assert "ProxyGenerated" not in set(_event_types(app))
 
 
 @pytest.mark.parametrize(
@@ -538,6 +559,29 @@ def _media_file(tmp_path: Path, data: bytes) -> Path:
     path = tmp_path / "allowed" / "raw.mp4"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
+    return path
+
+
+def _encode_video(path: Path, *, codec: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1:size=128x128:rate=30",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            codec,
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     return path
 
 

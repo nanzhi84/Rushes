@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import media.hwaccel as hwaccel_module
 import media.proxy as proxy_module
 from media.probe import probe_media
 from media.proxy import generate_proxy
@@ -17,19 +18,25 @@ FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None and shutil.which("ffprobe"
 
 @pytest.fixture(autouse=True)
 def _clear_encoder_cache() -> object:
-    # 编码器探测结果是进程级缓存，用例间必须清干净，避免相互污染。
+    # 编码/硬解探测结果都是进程级缓存，用例间必须清干净，避免相互污染。硬解默认置 False：让
+    # 编码器选择类用例的命令断言保持稳定，且不真的去起 ffmpeg -hwaccels 子进程（保持 hermetic）。
     proxy_module._encoder_cache.clear()
+    hwaccel_module._decode_available_cache.clear()
+    hwaccel_module._decode_available_cache["ffmpeg"] = False
     yield
     proxy_module._encoder_cache.clear()
+    hwaccel_module._decode_available_cache.clear()
 
 
 def _fake_ffmpeg_runner(
     *,
     encoders_stdout: str,
     fail_encoders: frozenset[str] = frozenset(),
+    fail_hwaccel_decode: bool = False,
 ) -> tuple[Callable[..., subprocess.CompletedProcess[str]], list[list[str]]]:
     """伪 subprocess.run：`-encoders` 返回给定清单；转码按 -c:v 编码器判成败，
-    成功则给目标文件写真字节（供 ObjectStore.put_file 读取）。"""
+    成功则给目标文件写真字节（供 ObjectStore.put_file 读取）。
+    ``fail_hwaccel_decode`` 时，命令含 `-hwaccel` 的转码判失败（模拟输入硬解运行期失败）。"""
     calls: list[list[str]] = []
 
     def run(
@@ -43,7 +50,7 @@ def _fake_ffmpeg_runner(
         if "-encoders" in command:
             return subprocess.CompletedProcess(command, 0, encoders_stdout, "")
         encoder = command[command.index("-c:v") + 1]
-        if encoder in fail_encoders:
+        if encoder in fail_encoders or (fail_hwaccel_decode and "-hwaccel" in command):
             return subprocess.CompletedProcess(command, 1, "", f"{encoder} runtime failure")
         Path(command[-1]).write_bytes(b"proxy-bytes")
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -161,6 +168,44 @@ def test_proxy_uses_libx264_without_probe_off_macos(tmp_path: Path, monkeypatch)
     assert not any("-encoders" in command for command in calls)  # 非 macOS 不探测硬件编码
     transcode = _transcodes(calls)[0]
     assert "libx264" in transcode
+
+
+def test_proxy_uses_hwaccel_decode_when_available(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(proxy_module, "_is_macos", lambda: True)
+    hwaccel_module._decode_available_cache["ffmpeg"] = True  # 输入侧硬解可用
+    run, calls = _fake_ffmpeg_runner(encoders_stdout="V..... h264_videotoolbox HW H.264")
+    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    source, paths = _source_and_paths(tmp_path)
+
+    generate_proxy(source, paths=paths)
+
+    transcode = _transcodes(calls)[0]
+    # -hwaccel videotoolbox 放在 -i 之前作为输入解码参数。
+    assert "-hwaccel" in transcode
+    assert transcode.index("-hwaccel") < transcode.index("-i")
+    assert transcode[transcode.index("-hwaccel") + 1] == "videotoolbox"
+
+
+def test_proxy_falls_back_to_software_when_hwaccel_decode_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(proxy_module, "_is_macos", lambda: True)
+    hwaccel_module._decode_available_cache["ffmpeg"] = True
+    run, calls = _fake_ffmpeg_runner(
+        encoders_stdout="V..... h264_videotoolbox HW H.264",
+        fail_hwaccel_decode=True,
+    )
+    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    source, paths = _source_and_paths(tmp_path)
+
+    ref = generate_proxy(source, paths=paths)
+
+    assert ref.size > 0
+    transcodes = _transcodes(calls)
+    assert "-hwaccel" in transcodes[0]  # 先试硬解
+    # 硬件路径失败后整条回落软件路径：无 -hwaccel、软件编码器。
+    assert "-hwaccel" not in transcodes[1]
+    assert "libx264" in transcodes[1]
 
 
 def _make_test_video(tmp_path: Path) -> Path:

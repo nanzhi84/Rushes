@@ -80,6 +80,27 @@ def test_import_local_file_defaults_to_reference_and_queues_proxy(tmp_path: Path
     assert result.data["draft_id"] == "draft_1"
 
 
+def test_import_local_file_playable_enqueues_index_not_proxy(tmp_path: Path, monkeypatch) -> None:
+    import tools.asset.handlers as handlers
+
+    # 可播格式：跳 proxy，改为直接入队 index（index 原本挂在 proxy handler 末尾）。
+    monkeypatch.setattr(handlers, "asset_needs_proxy", lambda *a, **k: False)
+    source = tmp_path / "playable.mp4"
+    source.write_bytes(b"playable")
+
+    result = import_local_file(AssetImportLocalFileInput(path=str(source)), _context())
+
+    assert result.status == "succeeded"
+    assert [event["event"] for event in result.events] == [
+        "AssetImported",
+        "AssetLinked",
+        "JobEnqueued",
+        "JobEnqueued",
+    ]
+    assert result.events[2]["payload"]["kind"] == "poster"
+    assert result.events[3]["payload"]["kind"] == "index"
+
+
 def test_import_local_file_copy_mode_copies_to_object_store(tmp_path: Path) -> None:
     paths = WorkspacePaths.from_root(tmp_path / "workspace").initialize()
     source = tmp_path / "clip.mp4"

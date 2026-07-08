@@ -148,6 +148,39 @@ const SILENT_EVENTS = new Set([
   "TurnEnded"
 ]);
 
+// 只有这些 job kind 才进对话流出进度/错误卡——与后端 observation 桥的 _AGENT_WAITED_JOB_KINDS
+// 完全一致（apps/api/main.py）。素材加工型 job（poster/proxy/index/annotation/noop）导入时
+// 几十个并发，全进对话会刷屏，直接不产卡（进度另经素材面板的旋转点体现）。
+const PROGRESS_JOB_KINDS = new Set([
+  "asr",
+  "tts",
+  "align",
+  "render_preview",
+  "render_final",
+  "import_url"
+]);
+
+// 进度卡标题按 kind 给中文名，比笼统的「后台任务」可读。
+const JOB_KIND_LABELS: Record<string, string> = {
+  asr: "语音转写",
+  tts: "TTS 合成",
+  align: "人声对齐",
+  render_preview: "渲染预览",
+  render_final: "渲染成片",
+  import_url: "URL 下载"
+};
+
+// job kind 嵌在事件 payload.kind（后端 job_runner `_terminal_event` / loop.py JobEnqueued /
+// render_jobs.py JobProgress 都写在这里），不是顶层字段。
+function progressJobKind(event: DomainSseEvent): string | null {
+  const payload = objectValue(event.payload);
+  const kind = payload ? stringValue(payload.kind) : null;
+  if (kind === null || !PROGRESS_JOB_KINDS.has(kind)) {
+    return null;
+  }
+  return kind;
+}
+
 function decisionEventItem(
   event: DomainSseEvent,
   status: Decision["status"]
@@ -175,17 +208,28 @@ function progressEventItem(
   if (!jobId) {
     return null;
   }
+  const kind = progressJobKind(event);
+  if (kind === null) {
+    return null;
+  }
   return {
     kind: "progress",
     id: progressItemId(jobId),
     job_id: jobId,
-    job_kind: stringValue(event.kind) ?? stringValue(event.job_kind) ?? "后台任务",
+    job_kind: JOB_KIND_LABELS[kind] ?? kind,
     progress: normalizeProgress(event.progress),
     status
   };
 }
 
 function errorEventItem(event: DomainSseEvent): StructuredInteractionItem | null {
+  // 素材加工型 job（poster/proxy/index/annotation/noop）失败也不进对话流——与进度卡白名单一致，
+  // 失败态改由素材面板/试看提示体现，避免导入几十个 job 时错误卡刷屏。
+  const payload = objectValue(event.payload);
+  const payloadKind = payload ? stringValue(payload.kind) : null;
+  if (payloadKind !== null && !PROGRESS_JOB_KINDS.has(payloadKind)) {
+    return null;
+  }
   const jobId = stringValue(event.job_id);
   const details = objectValue(event.failure) ?? objectValue(event.error) ?? objectValue(event.error_json);
   const errorCode = stringValue(event.error_code) ?? stringValue(details?.error_code) ?? "JOB_FAILED";

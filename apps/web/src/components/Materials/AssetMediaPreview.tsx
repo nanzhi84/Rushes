@@ -48,9 +48,19 @@ export function AssetMediaPreview({ asset, className }: AssetMediaPreviewProps):
   };
 
   if (failed) {
+    // 可播格式已不再生成代理（性能专项），「转码中」只在确有代理任务在跑时说。
+    const proxyJobActive = (asset.jobs ?? []).some(
+      (job) => job.kind === "proxy" && (job.status === "pending" || job.status === "running"),
+    );
     return (
       <PreviewNotice
-        text={asset.proxy_ready ? "该素材暂时无法预览。" : "转码中，稍候可预览。"}
+        text={
+          asset.proxy_ready
+            ? "该素材暂时无法预览。"
+            : proxyJobActive
+              ? "转码中，稍候可预览。"
+              : "此素材格式暂不支持预览。"
+        }
       />
     );
   }

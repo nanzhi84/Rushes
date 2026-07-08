@@ -55,6 +55,7 @@ from contracts.events import (
 from contracts.tool_result import ToolResult
 from contracts.workspace import WorkspaceDefaults
 from media.invalidation import revalidate_draft_references
+from media.probe import asset_needs_proxy
 from providers.decision_answering import build_openai_compatible_decision_answer_resolver
 from providers.gateway import ProviderCallRecord
 from providers.planner import build_openai_compatible_planner
@@ -1507,6 +1508,7 @@ def _global_assets_by_reference_path(
             select(
                 schema.assets.c.asset_id,
                 schema.assets.c.reference_path,
+                schema.assets.c.kind,
                 schema.assets.c.proxy_object_hash,
                 schema.assets.c.thumbnail_object_hash,
                 schema.assets.c.index_json,
@@ -1521,11 +1523,25 @@ def _global_assets_by_reference_path(
         if isinstance(reference_path, str):
             result[reference_path] = {
                 "asset_id": str(values["asset_id"]),
+                "reference_path": reference_path,
+                "kind": values.get("kind"),
                 "proxy_object_hash": values.get("proxy_object_hash"),
                 "thumbnail_object_hash": values.get("thumbnail_object_hash"),
                 "index_json": values.get("index_json"),
             }
     return result
+
+
+def _hit_needs_proxy(hit: Mapping[str, Any]) -> bool:
+    """全局命中的 reference 素材是否需要 proxy：按 kind + 原片路径判可播性（探测失败按需代理兜底）。
+
+    kind/路径缺失时保守按「需代理」处理。
+    """
+    reference_path = hit.get("reference_path")
+    kind = hit.get("kind")
+    if not isinstance(reference_path, str) or not isinstance(kind, str):
+        return True
+    return asset_needs_proxy(kind, reference_path)
 
 
 def _link_existing_asset(
@@ -1534,7 +1550,7 @@ def _link_existing_asset(
     hit: Mapping[str, Any],
     rel_dir: str | None,
 ) -> list[int]:
-    """分支②：全局命中但本草稿未链——秒建链；缺 proxy/index 产物按现规则补队（同幂等键 merge）。"""
+    """分支②：全局命中但本草稿未链——秒建链；未完成加工的产物按现规则补队（同幂等键 merge）。"""
     asset_id = str(hit["asset_id"])
     link_payload: dict[str, Any] = {}
     if rel_dir:
@@ -1543,16 +1559,18 @@ def _link_existing_asset(
     proxy_hash = hit.get("proxy_object_hash")
     thumbnail_hash = hit.get("thumbnail_object_hash")
     has_thumbnail = isinstance(thumbnail_hash, str) and thumbnail_hash != ""
-    if not isinstance(proxy_hash, str) or proxy_hash == "":
-        # 从零加工：poster 先入队秒出封面/时长，再补 proxy。
+    proxy_ready = isinstance(proxy_hash, str) and proxy_hash != ""
+    # 索引是加工链最后一步：index_json 已在就说明全部产物就绪，无需补任何队。可播素材现在本就
+    # 没有 proxy（proxy_hash=None 是正常终态，不再当作「没加工完」）——只按「有没有索引」判补队。
+    if hit.get("index_json") is None:
         if not has_thumbnail:
             events.append(_poster_job_event(draft_id=draft_id, asset_id=asset_id))
-        events.append(_proxy_job_event(draft_id=draft_id, asset_id=asset_id))
-    elif hit.get("index_json") is None:
-        # proxy 已就绪但缺索引：缩略图缺失时也补个 poster，让封面秒出而不必等 index。
-        if not has_thumbnail:
-            events.append(_poster_job_event(draft_id=draft_id, asset_id=asset_id))
-        events.append(_index_job_event(draft_id=draft_id, asset_id=asset_id))
+        if proxy_ready or not _hit_needs_proxy(hit):
+            # 已有 proxy，或本就无需 proxy（可播/图片/字体）：直接补 index。
+            events.append(_index_job_event(draft_id=draft_id, asset_id=asset_id))
+        else:
+            # 需要 proxy 且尚无：入 proxy 队（proxy handler 末尾会自动接上 index）。
+            events.append(_proxy_job_event(draft_id=draft_id, asset_id=asset_id))
     result = apply(tuple(events), engine=engine, base_version=None, actor="user")
     _ensure_applied(result)
     return _event_ids(result)
