@@ -16,7 +16,8 @@ from .llm import (
     OpenAICompatibleLLMProvider,
 )
 
-DEFAULT_OPENAI_COMPATIBLE_VLM_MODEL = "qwen-vl-plus"
+# qwen3.7-plus 是多模态模型（实测可读图），承担素材理解/标注的视频理解角色。
+DEFAULT_OPENAI_COMPATIBLE_VLM_MODEL = "qwen3.7-plus"
 OPENAI_COMPATIBLE_VLM_PROVIDER_ID = "openai_compatible.vlm"
 
 
