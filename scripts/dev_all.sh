@@ -6,6 +6,34 @@ set -euo pipefail
 # 把前端代理挂到别人的后端上——那会表现为「一切操作都失败」而看不出原因。
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# 自动加载仓库根 .env（本地密钥，已 gitignore）。语义：已 export 的同名变量优先，
+# .env 不覆盖——只给「当前环境里尚未设置」的键赋值（临时 KEY=val bash scripts/... 可覆盖）。
+# 刻意不用 `set -a; . .env`：那会无条件覆盖已有 env，违背 export 优先。
+_load_dotenv() {
+  local env_file="$1"
+  [ -f "$env_file" ] || return 0
+  local line key val
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"                       # 去掉可能的 CRLF
+    line="${line#"${line%%[![:space:]]*}"}"    # 去掉行首空白
+    case "$line" in '' | '#'*) continue ;; esac  # 跳过空行与注释
+    line="${line#export }"                       # 容忍可选 export 前缀
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"
+    val="${line#*=}"
+    key="${key%"${key##*[![:space:]]}"}"         # 去掉 key 尾部空白
+    case "$key" in '' | *[!A-Za-z0-9_]*) continue ;; esac  # 只认合法标识符
+    [ -n "${!key+x}" ] && continue               # export 优先：已设（含空串）则不覆盖
+    case "$val" in                               # 去掉首尾成对引号
+      \"*\") val="${val#\"}" && val="${val%\"}" ;;
+      \'*\') val="${val#\'}" && val="${val%\'}" ;;
+    esac
+    export "$key=$val"
+  done <"$env_file"
+}
+_load_dotenv "$ROOT/.env"
+
 API_PORT="${RUSHES_API_PORT:-8010}"
 WEB_PORT="${RUSHES_WEB_PORT:-8011}"
 WORKSPACE="${RUSHES_WORKSPACE_PATH:-$ROOT/.rushes}"
