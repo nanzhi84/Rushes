@@ -229,16 +229,11 @@ export function AssetsPanel({
               <AssetTile
                 key={asset.asset_id}
                 asset={asset}
-                active={previewingAssetId === asset.asset_id || activeAssetId === asset.asset_id}
+                active={previewingAssetId === asset.asset_id}
                 management={management}
                 actionPending={actionPending}
-                onClick={
-                  management
-                    ? () => setActiveAssetId(asset.asset_id)
-                    : onPreviewAsset
-                      ? () => onPreviewAsset(asset)
-                      : undefined
-                }
+                // 单击 = 选中 + 右栏试看（对齐剪映）；摘要抽屉只从右键菜单进。
+                onClick={onPreviewAsset ? () => onPreviewAsset(asset) : undefined}
                 onViewSummary={() => setActiveAssetId(asset.asset_id)}
                 onRelocate={() => setRelocatingAsset(asset)}
                 onRequestDelete={() => setDeletingAsset(asset)}
@@ -397,7 +392,7 @@ function AssetTile({
   // 转码/索引后台任务仍在跑 → 右下角「处理中」旋转点，完成即消失。
   const ingesting = isIngestProcessing(asset);
   const tileClass = `group relative overflow-hidden rounded-md border transition-colors ease-standard ${
-    active ? "border-accent" : "border-line hover:border-line-strong"
+    active ? "border-selected bg-selected" : "border-line hover:border-line-strong"
   } ${asset.usable ? "" : "opacity-50"}`;
 
   const body = (

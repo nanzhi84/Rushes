@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
+import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { MaterialAsset } from "../../api/client";
 import { storeAuthToken } from "../../auth";
@@ -57,6 +58,32 @@ describe("AssetsPanel 导入状态就地化", () => {
   });
 });
 
+describe("AssetsPanel 单击试看 / 右键摘要", () => {
+  it("单击瓦片触发 onPreviewAsset，且不打开摘要抽屉", async () => {
+    const onPreviewAsset = vi.fn();
+    renderPanel([makeAsset({ asset_id: "clip", filename: "clip.mp4" })], {
+      management: true,
+      onPreviewAsset
+    });
+
+    fireEvent.click(await screen.findByTitle("clip.mp4"));
+
+    expect(onPreviewAsset).toHaveBeenCalledTimes(1);
+    expect(onPreviewAsset.mock.calls[0]?.[0]?.asset_id).toBe("clip");
+    // 单击不再开摘要抽屉
+    expect(screen.queryByText("素材理解摘要")).toBeNull();
+  });
+
+  it("右键菜单「查看理解摘要」仍打开摘要抽屉", async () => {
+    renderPanel([makeAsset({ asset_id: "clip", filename: "clip.mp4" })], { management: true });
+
+    fireEvent.contextMenu(await screen.findByTitle("clip.mp4"));
+    fireEvent.click(await screen.findByText("查看理解摘要"));
+
+    expect(await screen.findByText("素材理解摘要")).toBeTruthy();
+  });
+});
+
 describe("MaterialSummaryPanel 理解语义澄清", () => {
   it("未理解时提示理解是对话里按需调用的工具（understand.materials）", () => {
     renderSummary(makeAsset({ understanding_status: "none" }));
@@ -75,12 +102,15 @@ describe("MaterialSummaryPanel 理解语义澄清", () => {
   });
 });
 
-function renderPanel(assets: MaterialAsset[]): void {
+function renderPanel(
+  assets: MaterialAsset[],
+  props: Partial<ComponentProps<typeof AssetsPanel>> = {}
+): void {
   storeAuthToken("test-token");
   vi.stubGlobal("fetch", materialsFetch(assets));
   render(
     <QueryClientProvider client={testQueryClient()}>
-      <AssetsPanel draftId="draft_1" enableEvents={false} />
+      <AssetsPanel draftId="draft_1" enableEvents={false} {...props} />
     </QueryClientProvider>
   );
 }

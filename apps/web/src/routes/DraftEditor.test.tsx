@@ -5,7 +5,7 @@ import {
   createRouter,
   RouterContextProvider
 } from "@tanstack/react-router";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Decision, DecisionAnswer } from "../api/client";
 import { storeAuthToken } from "../auth";
@@ -483,6 +483,24 @@ describe("DraftEditorView", () => {
       expect(latestPreviewProps?.seekSec).toBe(2.5);
     });
   });
+
+  it("单击素材瓦片在预览区挂载试看，再击取消回占位", async () => {
+    const fetchMock = mockFetch({ decision: null, materials: [videoAssetFixture()] });
+    renderEditor(fetchMock);
+
+    fireEvent.click(await screen.findByTitle("clip.mp4"));
+
+    // 预览区挂载素材试看（原片优先）+ 顶部工具条
+    expect(await screen.findByLabelText("clip.mp4 视频试看")).toBeTruthy();
+    expect(screen.getByText("试看 · clip.mp4")).toBeTruthy();
+
+    // 再次单击同一瓦片取消试看，回到「暂无时间线」占位
+    fireEvent.click(await screen.findByTitle("clip.mp4"));
+
+    await waitFor(() => expect(screen.queryByLabelText("clip.mp4 视频试看")).toBeNull());
+    // 预览区回到成片占位（时间线区也有同名占位，故按预览区作用域断言）
+    expect(within(screen.getByLabelText("预览区")).getByText(/暂无时间线/)).toBeTruthy();
+  });
 });
 
 function renderEditor(fetchMock: FetchMock): void {
@@ -517,12 +535,14 @@ function mockFetch({
   decision,
   timeline = false,
   messages = [],
+  materials = [],
   onAnswer,
   costs
 }: {
   decision: Decision | null;
   timeline?: boolean;
   messages?: DraftMessageFixture[] | (() => DraftMessageFixture[]);
+  materials?: Array<Record<string, unknown>>;
   onAnswer?: (url: string, init: RequestInit | undefined) => void;
   costs?: number;
 }): FetchMock {
@@ -580,6 +600,9 @@ function mockFetch({
         replays_enqueued: 0
       });
     }
+    if (url.endsWith("/materials")) {
+      return jsonResponse({ draft_id: "draft_1", assets: materials, invalidated_asset_ids: [] });
+    }
     return jsonResponse({});
   });
 }
@@ -633,6 +656,31 @@ function timelineResponseFixture() {
         }
       ]
     }
+  };
+}
+
+function videoAssetFixture(): Record<string, unknown> {
+  return {
+    asset_id: "clip",
+    storage_mode: "reference",
+    kind: "video",
+    source: "local_path",
+    filename: "clip.mp4",
+    hash: "h_clip",
+    size: 1024,
+    mtime: 0,
+    ingest_status: "indexed",
+    understanding_status: "none",
+    usable: true,
+    rel_dir: null,
+    probe: null,
+    duration_sec: null,
+    proxy_object_hash: null,
+    proxy_ready: true,
+    thumbnail_ready: true,
+    invalid: false,
+    failure: null,
+    jobs: []
   };
 }
 

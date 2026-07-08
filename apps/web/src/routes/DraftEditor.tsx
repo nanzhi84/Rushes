@@ -2,9 +2,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
+import { X } from "lucide-react";
 import {
   api,
   type DecisionAnswer,
+  type MaterialAsset,
   type MessageRecord,
   type TimelineClipJson,
   type TimelineJson
@@ -30,6 +32,7 @@ import {
   type ConsoleMessage,
   type ConsoleMessageRole
 } from "../components/Console/runtime";
+import { AssetMediaPreview } from "../components/Materials/AssetMediaPreview";
 import { AssetsPanel } from "../components/Materials/AssetsPanel";
 import { PreviewPlayer } from "../components/PreviewPlayer";
 import { EntityActionDialog } from "../components/Shell/EntityActionDialog";
@@ -61,6 +64,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const [awaitingTurnEnd, setAwaitingTurnEnd] = useState(false);
   const [streamState, setStreamState] = useState<"connecting" | "open" | "closed">("connecting");
   const [structuredItems, setStructuredItems] = useState<StructuredInteractionItem[]>([]);
+  const [previewingAssetId, setPreviewingAssetId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [unmatchedClipId, setUnmatchedClipId] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
@@ -94,6 +98,16 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     queryFn: () => api.draftCosts(draftId)
   });
   const totalCost = costsQuery.data?.costs.total_cost_estimate ?? null;
+
+  // 与 AssetsPanel 共享同一条 materials 查询缓存（同 queryKey，react-query 去重），
+  // 从最新列表按 id 反查试看素材，保证 proxy_ready 等字段跟随后台任务刷新。
+  const materialsQuery = useQuery({
+    queryKey: queryKeys.materials(draftId),
+    queryFn: () => api.listMaterials(draftId)
+  });
+  const previewingAsset = previewingAssetId
+    ? (materialsQuery.data?.assets.find((asset) => asset.asset_id === previewingAssetId) ?? null)
+    : null;
 
   const currentDraft = draftQuery.data?.draft ?? null;
   const draftName = currentDraft?.name ?? draftId;
@@ -252,6 +266,11 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const handlePreviewTimeUpdate = useCallback((sec: number) => {
     setPlayheadSec(sec);
   }, []);
+  // 单击瓦片试看；再点已选中瓦片取消，回到成片/占位。
+  const handlePreviewAsset = useCallback((asset: MaterialAsset) => {
+    setPreviewingAssetId((current) => (current === asset.asset_id ? null : asset.asset_id));
+  }, []);
+  const closeAssetPreview = useCallback(() => setPreviewingAssetId(null), []);
   const handleTimelineSeek = useCallback((sec: number) => {
     setSeekSec(sec);
     setPlayheadSec(sec);
@@ -468,7 +487,12 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
           className="min-h-0 shrink-0 border-r border-line bg-panel"
           style={{ width: materialsPanelWidth }}
         >
-          <AssetsPanel draftId={draftId} management />
+          <AssetsPanel
+            draftId={draftId}
+            management
+            onPreviewAsset={handlePreviewAsset}
+            previewingAssetId={previewingAssetId}
+          />
         </div>
 
         <ResizeHandle
@@ -478,9 +502,11 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
           ariaLabel="调整素材面板宽度"
         />
 
-        {/* 右：预览（弹性） */}
+        {/* 右：预览（弹性）——选中素材时试看原片，否则回到成片/占位 */}
         <section className="min-h-0 min-w-0 flex-1 p-3" aria-label="预览区">
-          {timelineVersion === null ? (
+          {previewingAsset ? (
+            <AssetPreviewPane asset={previewingAsset} onClose={closeAssetPreview} />
+          ) : timelineVersion === null ? (
             <PreviewPlaceholder text="暂无时间线。让代理开始剪辑后，这里会出现成片预览。" />
           ) : timelineQuery.isPending ? (
             <PreviewPlaceholder text="时间线加载中…" />
@@ -613,6 +639,47 @@ function PreviewPlaceholder({ text }: { text: string }): ReactElement {
   return (
     <div className="grid h-full place-items-center rounded-lg border border-dashed border-line-strong">
       <p className="max-w-[260px] text-center text-sm leading-6 text-fg-muted">{text}</p>
+    </div>
+  );
+}
+
+/** 素材试看面板：顶部工具条（素材名 + 关闭）+ 原片优先播放器；Esc 关闭回成片。 */
+function AssetPreviewPane({
+  asset,
+  onClose
+}: {
+  asset: MaterialAsset;
+  onClose: () => void;
+}): ReactElement {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-line bg-panel">
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-line px-3 py-2">
+        <span className="truncate text-sm text-fg" title={`试看 · ${asset.filename || asset.asset_id}`}>
+          试看 · {asset.filename || asset.asset_id}
+        </span>
+        <button
+          type="button"
+          className="grid size-7 shrink-0 place-items-center rounded-md text-fg-muted transition-colors ease-standard hover:bg-hover hover:text-fg"
+          aria-label="关闭试看"
+          title="关闭试看（Esc）"
+          onClick={onClose}
+        >
+          <X size={16} strokeWidth={1.75} aria-hidden />
+        </button>
+      </div>
+      <div className="grid min-h-0 flex-1 place-items-center overflow-hidden bg-black p-3">
+        <AssetMediaPreview asset={asset} />
+      </div>
     </div>
   );
 }
