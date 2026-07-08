@@ -257,6 +257,32 @@ class ScriptedPlanner:
         return max(0, len(self._steps) - self._index)
 
 
+class NoProviderPlanner:
+    """未配置模型密钥时的兜底 planner：回一句中文说明并正常结束回合。
+
+    ScriptedPlanner 是给 tests/golden 用的固定脚本 planner，绝不进产品路径——否则用户
+    会看到「（脚本耗尽，结束本回合）」这类内部占位文案（真实实测：无密钥导入后聊天区
+    刷出该气泡）。本 planner 每步只回纯 content，run_turn 会落一条 reply 并正常 TurnEnded。
+    """
+
+    MESSAGE = (
+        "未配置模型密钥（RUSHES_DASHSCOPE_API_KEY 或 RUSHES_LLM_API_KEY），"
+        "剪辑代理无法工作。请在启动 dev_all.sh 前 export 密钥。"
+    )
+
+    async def plan(
+        self,
+        context: ContextBundle,
+        tools: Sequence[ToolSpec],
+        *,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> PlannerStep:
+        del context, tools
+        if on_delta is not None:
+            on_delta(self.MESSAGE)
+        return PlannerStep(content=self.MESSAGE)
+
+
 def _scripted_step(value: PlannerStep | ToolCall | Mapping[str, Any]) -> PlannerStep:
     if isinstance(value, PlannerStep):
         return value

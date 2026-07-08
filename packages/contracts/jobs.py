@@ -10,6 +10,7 @@ JobKind = Literal[
     "tts",
     "render_preview",
     "render_final",
+    "poster",
     "proxy",
     "index",
     "align",

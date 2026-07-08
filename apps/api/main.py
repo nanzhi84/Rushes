@@ -29,7 +29,7 @@ from agent_harness.decision_answering import DecisionAnswerResolver
 from agent_harness.loop import (
     LLMPlanner,
     MappingPlannerAdapter,
-    ScriptedPlanner,
+    NoProviderPlanner,
     recover_approved_pending_tool_calls,
     run_turn,
 )
@@ -107,6 +107,12 @@ DEFAULT_LLM_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_LLM_MODEL = "qwen-plus"
 # 首页草稿墙每卡封面上限（thumbnail_ready 素材，导入时间倒序）。
 DRAFT_COVER_LIMIT = 4
+# 只有 Agent 在回合内「等结果」的 job 种类，终态事件才该回灌成 job_observation turn
+# 唤醒主循环；proxy/index/poster 这类素材加工 job 的进度只走 SSE 给 UI，绝不进对话
+# （否则一次导入一批素材会刷出一堆「后台任务事件」气泡——真实素材包 31 个 .mov 实测）。
+_AGENT_WAITED_JOB_KINDS: frozenset[str] = frozenset(
+    {"asr", "tts", "align", "render_preview", "render_final", "import_url"}
+)
 
 
 class DraftCreateRequest(BaseModel):
@@ -228,7 +234,9 @@ def create_app(
     async def default_runner(item: TurnQueueItem, stop_token: StopToken) -> None:
         if queue is None:
             raise RuntimeError("turn queue is not initialized")
-        active_planner = env_planner or ScriptedPlanner([])
+        # 无密钥时用 NoProviderPlanner 回一句中文说明（不是 ScriptedPlanner——那会吐
+        # 「（脚本耗尽，结束本回合）」这类内部占位文案进产品路径）。
+        active_planner = env_planner or NoProviderPlanner()
         await run_turn(
             item,
             engine=engine,
@@ -416,6 +424,9 @@ async def _job_observation_bridge(
                 draft_id = payload.get("requested_by_draft_id") or values.get("draft_id")
                 job_id = payload.get("job_id")
                 if not isinstance(draft_id, str) or not isinstance(job_id, str):
+                    continue
+                if _observation_job_kind(payload) not in _AGENT_WAITED_JOB_KINDS:
+                    # 素材加工型 job（proxy/index/poster）不唤 Agent：进度经 SSE 给 UI。
                     continue
                 await turn_queue.enqueue_job_observation(draft_id, job_id=job_id, event=payload)
             cursor = int(max_row or cursor)
@@ -993,7 +1004,8 @@ def _register_routes(app: FastAPI) -> None:
         result = apply((event,), engine=state.engine, base_version=None, actor="user")
         _ensure_applied(result)
         target_draft_id = _job_observation_draft_id(job)
-        if target_draft_id is not None:
+        # 只有 Agent 等待型 job 取消才唤醒主循环；素材加工型（proxy/index/poster）取消不进对话。
+        if target_draft_id is not None and job.get("kind") in _AGENT_WAITED_JOB_KINDS:
             await state.turn_queue.enqueue_job_observation(
                 target_draft_id,
                 job_id=job_id,
@@ -1011,6 +1023,19 @@ def _register_routes(app: FastAPI) -> None:
         state = state_from_request(request)
         proxy_path = _require_proxy_path(state.engine, state.workspace_paths, asset_id)
         return _range_response(proxy_path, request)
+
+    @app.api_route(
+        "/api/media/{asset_id}/source",
+        methods=["GET", "HEAD"],  # 播放器加载源前会 HEAD 探测 Content-Type，与 GET 同权
+        response_class=StreamingResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def media_source(asset_id: str, request: Request) -> StreamingResponse:
+        # 直读素材原片（reference 导入的绝对路径文件）：原片在导入时已过 fs_roots 校验，
+        # 直读安全。前端「单击瓦片试看」优先原片、失败再回落 proxy（见 AssetMediaPreview）。
+        state = state_from_request(request)
+        source_path = _require_source_path(state.engine, asset_id)
+        return _range_response(source_path, request)
 
     @app.api_route(
         "/api/media/{asset_id}/thumbnail",
@@ -1483,6 +1508,7 @@ def _global_assets_by_reference_path(
                 schema.assets.c.asset_id,
                 schema.assets.c.reference_path,
                 schema.assets.c.proxy_object_hash,
+                schema.assets.c.thumbnail_object_hash,
                 schema.assets.c.index_json,
             )
             .where(schema.assets.c.reference_path.in_(list(set(candidate_paths))))
@@ -1496,6 +1522,7 @@ def _global_assets_by_reference_path(
             result[reference_path] = {
                 "asset_id": str(values["asset_id"]),
                 "proxy_object_hash": values.get("proxy_object_hash"),
+                "thumbnail_object_hash": values.get("thumbnail_object_hash"),
                 "index_json": values.get("index_json"),
             }
     return result
@@ -1514,13 +1541,38 @@ def _link_existing_asset(
         link_payload["rel_dir"] = rel_dir
     events: list[Any] = [AssetLinked(draft_id=draft_id, asset_id=asset_id, payload=link_payload)]
     proxy_hash = hit.get("proxy_object_hash")
+    thumbnail_hash = hit.get("thumbnail_object_hash")
+    has_thumbnail = isinstance(thumbnail_hash, str) and thumbnail_hash != ""
     if not isinstance(proxy_hash, str) or proxy_hash == "":
+        # 从零加工：poster 先入队秒出封面/时长，再补 proxy。
+        if not has_thumbnail:
+            events.append(_poster_job_event(draft_id=draft_id, asset_id=asset_id))
         events.append(_proxy_job_event(draft_id=draft_id, asset_id=asset_id))
     elif hit.get("index_json") is None:
+        # proxy 已就绪但缺索引：缩略图缺失时也补个 poster，让封面秒出而不必等 index。
+        if not has_thumbnail:
+            events.append(_poster_job_event(draft_id=draft_id, asset_id=asset_id))
         events.append(_index_job_event(draft_id=draft_id, asset_id=asset_id))
     result = apply(tuple(events), engine=engine, base_version=None, actor="user")
     _ensure_applied(result)
     return _event_ids(result)
+
+
+def _poster_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:
+    idempotency_key = f"asset:{asset_id}:poster"
+    return JobEnqueued(
+        job_id=_job_id("poster", idempotency_key),
+        draft_id=draft_id,
+        requested_by_draft_id=draft_id,
+        payload={
+            "kind": "poster",
+            "asset_id": asset_id,
+            "idempotency_key": idempotency_key,
+            "job_payload": {"asset_id": asset_id},
+            "attempts": 0,
+            "max_retries": 2,
+        },
+    )
 
 
 def _proxy_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:
@@ -1930,6 +1982,23 @@ def _require_proxy_path(engine: Engine, paths: WorkspacePaths, asset_id: str) ->
     return proxy_path
 
 
+def _require_source_path(engine: Engine, asset_id: str) -> Path:
+    asset = _require_asset(engine, asset_id)
+    # 已失效（源文件被删/改名/改内容，见 media/invalidation）：明确 404 带 reason，
+    # 前端据此回落 proxy，而不是把坏源塞给 <video>。
+    failure = _load_json_if_str(asset.get("failure"))
+    if not bool(asset.get("usable", True)) and _failure_code(failure) == "reference_invalidated":
+        raise HTTPException(status_code=404, detail={"reason": "reference_invalidated"})
+    reference_path = asset.get("reference_path")
+    if not isinstance(reference_path, str) or reference_path == "":
+        # COPY 模式素材无原片路径（原片已拷进对象库）：无直读源，前端回落 proxy。
+        raise HTTPException(status_code=404, detail={"reason": "source_not_available"})
+    source_path = Path(reference_path)
+    if not source_path.exists() or not source_path.is_file():
+        raise HTTPException(status_code=404, detail={"reason": "source_not_found"})
+    return source_path
+
+
 def _require_thumbnail_path(engine: Engine, paths: WorkspacePaths, asset_id: str) -> Path:
     asset = _require_asset(engine, asset_id)
     thumbnail_hash = asset.get("thumbnail_object_hash")
@@ -2043,13 +2112,33 @@ def _iter_file_range(path: Path, start: int, end: int) -> Iterator[bytes]:
             yield chunk
 
 
+# /source 直读原片会碰到图片与各种音视频容器，Content-Type 必须准确，否则 <img>/<video>
+# 拒绝渲染；proxy/preview/export 恒为 .mp4，扩展这张表对它们无副作用（未知后缀仍回落 mp4）。
+_MEDIA_TYPE_BY_SUFFIX: dict[str, str] = {
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/aac",
+    ".aac": "audio/aac",
+    ".wav": "audio/wav",
+    ".flac": "audio/flac",
+    ".ogg": "audio/ogg",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".tiff": "image/tiff",
+}
+
+
 def _media_type_for_path(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix == ".mp3":
-        return "audio/mpeg"
-    if suffix in {".m4a", ".aac"}:
-        return "audio/aac"
-    return "video/mp4"
+    return _MEDIA_TYPE_BY_SUFFIX.get(path.suffix.lower(), "video/mp4")
 
 
 def _fingerprint(arguments: Mapping[str, Any]) -> str:
@@ -2104,6 +2193,15 @@ def _job_observation_draft_id(job: Mapping[str, Any]) -> str | None:
         return requested_by_draft_id
     draft_id = job.get("draft_id")
     return draft_id if isinstance(draft_id, str) else None
+
+
+def _observation_job_kind(payload: Mapping[str, Any]) -> str | None:
+    """终态事件 payload 里 kind 嵌在 event.payload.kind（见 job_runner `_terminal_event`）。"""
+    inner = payload.get("payload")
+    if isinstance(inner, Mapping):
+        kind = inner.get("kind")
+        return kind if isinstance(kind, str) else None
+    return None
 
 
 def _ensure_applied(result: ReducerApplyResult) -> None:

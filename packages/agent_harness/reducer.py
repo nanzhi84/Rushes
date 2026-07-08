@@ -1261,14 +1261,18 @@ def _asset_update_values_for_event(event: DomainEventBase) -> dict[str, Any]:
         values["usable"] = False
         values["failure"] = dump_json(payload.get("failure", {"message": "asset invalidated"}))
     elif event.event == "AssetIndexReady":
-        # 便宜本地索引就绪：写结构化索引 JSON、缩略图对象哈希，并把摄入状态推到 indexed。
+        # 便宜本地索引就绪：写结构化索引 JSON、缩略图对象哈希。
         if "index_json" in payload:
             values["index_json"] = (
                 None if payload["index_json"] is None else dump_json(payload["index_json"])
             )
         if "thumbnail_object_hash" in payload:
             values["thumbnail_object_hash"] = payload["thumbnail_object_hash"]
-        values["ingest_status"] = str(payload.get("ingest_status", "indexed"))
+        # 只在事件显式带 ingest_status 时推进摄入状态：poster 快任务只产封面/缩略图，
+        # 借本事件秒出缩略图但不该把状态跳到 indexed（proxy/scenes 还没做）；
+        # 真正的 index handler 始终带 ingest_status="indexed"，行为不变。
+        if "ingest_status" in payload:
+            values["ingest_status"] = str(payload["ingest_status"])
     elif event.event == "AssetIndexFailed":
         # 索引失败不阻塞任何流程，仅记录失败信息（Spec C §C1）。
         values["failure"] = dump_json(payload.get("failure", {"message": "index failed"}))

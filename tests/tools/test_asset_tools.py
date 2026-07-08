@@ -68,7 +68,11 @@ def test_import_local_file_defaults_to_reference_and_queues_proxy(tmp_path: Path
         "AssetImported",
         "AssetLinked",
         "JobEnqueued",
+        "JobEnqueued",
     ]
+    # poster 先于 proxy 入队：缩略图/时长秒出，不必等 proxy 转码。
+    assert result.events[2]["payload"]["kind"] == "poster"
+    assert result.events[3]["payload"]["kind"] == "proxy"
     assert result.events[0]["payload"]["storage_mode"] == "reference"
     assert result.events[0]["payload"]["reference_path"] == str(source.resolve())
     assert result.events[0]["payload"]["object_hash"] is None

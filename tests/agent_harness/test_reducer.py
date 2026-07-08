@@ -434,6 +434,7 @@ def test_asset_index_and_understanding_events_update_asset_columns(tmp_path: Pat
                 "payload": {
                     "index_json": {"shots": [{"start_s": 0.0, "end_s": 2.0}]},
                     "thumbnail_object_hash": "thumb_hash_1",
+                    "ingest_status": "indexed",
                 },
             },
             {

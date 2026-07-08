@@ -178,6 +178,21 @@ input:disabled {
   animation: rx-menu-in var(--duration-fast) var(--ease-out-snappy);
 }
 
+/* 素材瓦片「处理中」占位：缩略图未就绪时，kind 图标做细微呼吸脉冲。
+   时长/缓动一律引用动效令牌；reduced-motion 由下方媒体查询统一兜底关闭。 */
+@keyframes tile-pulse {
+  from {
+    opacity: 0.5;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.tile-pulse {
+  animation: tile-pulse var(--duration-slow) var(--ease-standard) infinite alternate;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -290,6 +290,11 @@ export const api = {
 
   // media 族 URL 由浏览器原生 <img>/<video>/wavesurfer 直连，设不了 Authorization header，
   // 统一带 query token（后端 apps/api/deps.py 对 GET /api/media/ 前缀放行 query token，语义同 SSE）。
+  // 素材试看优先直连原片（导入即刻可播，浏览器硬解 H.264/HEVC）；原片播不动时前端回落 proxy。
+  mediaSourceUrl(assetId: string): string {
+    return withQueryToken(`/api/media/${encodeURIComponent(assetId)}/source`);
+  },
+
   mediaProxyUrl(assetId: string): string {
     return withQueryToken(`/api/media/${encodeURIComponent(assetId)}/proxy`);
   },
