@@ -41,10 +41,27 @@ def build_default_tool_gateway(
         registry.register(openai_compatible_llm_descriptor(), provider)
     if vlm_key:
         vlm_model = os.environ.get("RUSHES_VLM_MODEL")
+        # 推理型多模态模型（qwen3.7-plus）非流式整包返回常超 60s，超时默认放宽到
+        # 180s（RUSHES_VLM_TIMEOUT_S 可覆盖），否则理解子代理会高频撞超时重试。
+        vlm_timeout = _vlm_timeout_seconds()
         vlm_provider = (
-            OpenAICompatibleVLMProvider(api_key=vlm_key, model=vlm_model)
+            OpenAICompatibleVLMProvider(api_key=vlm_key, model=vlm_model, timeout=vlm_timeout)
             if vlm_model
-            else OpenAICompatibleVLMProvider(api_key=vlm_key)
+            else OpenAICompatibleVLMProvider(api_key=vlm_key, timeout=vlm_timeout)
         )
         registry.register(openai_compatible_vlm_descriptor(), vlm_provider)
     return ProviderGateway(registry=registry, recorder=recorder)
+
+
+_DEFAULT_VLM_TIMEOUT_SECONDS = 180.0
+
+
+def _vlm_timeout_seconds() -> float:
+    raw = os.environ.get("RUSHES_VLM_TIMEOUT_S")
+    if raw is None:
+        return _DEFAULT_VLM_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_VLM_TIMEOUT_SECONDS
+    return value if value > 0 else _DEFAULT_VLM_TIMEOUT_SECONDS

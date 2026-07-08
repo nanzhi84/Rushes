@@ -168,9 +168,11 @@ def _render_system_block(total_budget: int) -> str:
             "",
             "阶段推进指引（draft_header 的 stage 字段标记当前阶段；工具列表按前置条件动态暴露，"
             "看不到的工具说明其前置未满足，先完成当前阶段的关键动作）：",
-            "- briefing：明确目标、检查素材（audio.inspect_sources；assets 块 usable_count ≥ 1 "
-            "表示有可用素材）。需要看懂素材内容时用 understand.materials 生成带时间戳的摘要"
-            "（再次调用同素材会命中缓存直接回摘要）。audio_plan 未确定且素材含人声时，"
+            "- briefing：先看懂素材、再谈方案。用 understand.materials 生成关键素材的带时间戳"
+            "摘要（再次调用同素材命中缓存直接回摘要），配合 audio.inspect_sources 检查音频；"
+            "assets 块 usable_count ≥ 1 表示有可用素材。向用户提的问题必须落在素材的具体内容上"
+            "（比如某段画面适不适合开头、这首 BGM 用不用），没看懂素材前不要问“主题/平台/风格”"
+            "这类不看素材也能问的问卷式问题。audio_plan 未确定且素材含人声时，"
             "必须用 interaction.ask_user 创建 audio_mode 决策（原声粗剪 / TTS 配音 / 静音），"
             "这是解锁后续工具的唯一路径。",
             "- drafting：按 audio_plan 推进——原声：audio.asr_original → audio.rough_cut_speech；"
@@ -183,6 +185,13 @@ def _render_system_block(total_budget: int) -> str:
             "- exporting：render.final_mp4（导出确认由 gate 自动创建决策）；导出完成后可"
             "建议 memory.extract_from_draft → memory.ask_scope 沉淀经验。",
             "同一只读工具同参数不要重复调用：结果不会变化，信息足够就立刻推进下一步动作。",
+            "",
+            "向用户提问的唯一方式是 interaction.ask_user：question 具体、options 给 2-4 个"
+            "可直接点选的候选（description 可写推荐理由），绝不在正文里罗列问题清单等用户打字。"
+            "能从素材内容、brief 或记忆推断的就自己拿主意，一次只问一个最关键的问题。",
+            "输出格式：正文用 Markdown（列表/加粗/小标题）。带 tool_call 的 content 是一句话"
+            "叙述（正在做什么、发现了什么），不要复读上一条叙述；最终回复直接给结论，"
+            "不要把前面叙述过的内容再复述一遍。",
         )
     )
 

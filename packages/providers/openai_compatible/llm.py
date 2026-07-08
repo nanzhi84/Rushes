@@ -16,7 +16,7 @@ from contracts.provider import ProviderDescriptor, ProviderError, ProviderResult
 from providers.capabilities import LLM_CHAT, ProviderRequest
 
 DEFAULT_OPENAI_COMPATIBLE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DEFAULT_OPENAI_COMPATIBLE_MODEL = "qwen-plus"
+DEFAULT_OPENAI_COMPATIBLE_MODEL = "qwen3.7-max"
 OPENAI_COMPATIBLE_LLM_PROVIDER_ID = "openai_compatible.llm"
 _CHAT_COMPLETIONS_PATH = "chat/completions"
 _DEFAULT_MAX_RETRIES = 2

@@ -186,24 +186,20 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const refreshMessages = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) });
   }, [draftId, queryClient]);
-  const { inProgressMessages, toolSteps } = useTurnStream(draftId, {
+  const { items: streamItems } = useTurnStream(draftId, {
     onTurnEnded: refreshMessages
   });
 
-  // 历史消息为准，流式 buffer 按 message_id 去重后追加，避免落库后与历史重复。
+  // 当前回合的消息以流式列表为准（与工具行按到达顺序交错展示），历史里同
+  // message_id 的落库副本让位，避免同一条消息渲染两遍且丢失工具行的位置。
   const messages = useMemo<ConsoleMessage[]>(() => {
-    const historyIds = new Set(historyMessages.map((message) => message.id));
-    const streaming: ConsoleMessage[] = inProgressMessages
-      .filter((message) => !historyIds.has(message.message_id))
-      .map((message) => ({
-        id: message.message_id,
-        role: "assistant",
-        kind: message.kind,
-        content: message.text,
-        createdAt: ""
-      }));
-    return [...historyMessages, ...streaming];
-  }, [historyMessages, inProgressMessages]);
+    const streamMessageIds = new Set(
+      streamItems
+        .filter((item) => item.type === "message")
+        .map((item) => item.message_id)
+    );
+    return historyMessages.filter((message) => !streamMessageIds.has(message.id));
+  }, [historyMessages, streamItems]);
 
   const postMessage = useMutation({
     mutationFn: (content: string) => api.postMessage(draftId, { content }),
@@ -304,7 +300,14 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const handleClipClick = useCallback(
     (clipId: string) => {
       setSelectedClipId(clipId);
-      const messageMatch = messages.find((message) => message.content.includes(clipId));
+      const streamMatch = streamItems.find(
+        (item) => item.type === "message" && item.text.includes(clipId)
+      );
+      const messageMatch =
+        messages.find((message) => message.content.includes(clipId)) ??
+        (streamMatch && streamMatch.type === "message"
+          ? { id: streamMatch.message_id }
+          : undefined);
       const structuredMatch = renderedStructuredItems.some((item) => JSON.stringify(item).includes(clipId));
       const targetId = messageMatch?.id ?? (structuredMatch ? "structured-interactions" : null);
       setHighlightedMessageId(targetId);
@@ -313,7 +316,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         window.requestAnimationFrame(() => scrollToMessage(targetId));
       }
     },
-    [messages, renderedStructuredItems]
+    [messages, renderedStructuredItems, streamItems]
   );
   const handleExport = useCallback(() => {
     postMessage.mutate("请把当前时间线导出为最终 MP4。");
@@ -426,7 +429,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             onAnswerDecision={handleAnswerDecision}
             answerPending={answerDecision.isPending}
             highlightedMessageId={highlightedMessageId}
-            toolSteps={toolSteps}
+            streamItems={streamItems}
           />
 
           {sideDecisionItem ? (

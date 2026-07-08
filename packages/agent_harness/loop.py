@@ -121,16 +121,42 @@ def _make_turn_progress(
     return _turn_progress
 
 
+# 流式工具步事件里参数摘要/结果观察的截断上限：给前端行内展示用，全文走 trace。
+_STREAM_ARGS_SUMMARY_LIMIT = 160
+_STREAM_OBSERVATION_LIMIT = 600
+
+
+def _stream_args_summary(arguments: Mapping[str, Any]) -> str:
+    if not arguments:
+        return ""
+    try:
+        text = json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        text = str(arguments)
+    if len(text) > _STREAM_ARGS_SUMMARY_LIMIT:
+        return text[:_STREAM_ARGS_SUMMARY_LIMIT] + "…"
+    return text
+
+
 def _emit_tool_step_finished(
     listener: TurnListener | None,
     step_id: str,
     tool: str,
     status: str,
+    observation: str | None = None,
 ) -> None:
-    _emit_turn_event(
-        listener,
-        {"type": "tool_step_finished", "step_id": step_id, "tool": tool, "status": status},
-    )
+    payload: dict[str, Any] = {
+        "type": "tool_step_finished",
+        "step_id": step_id,
+        "tool": tool,
+        "status": status,
+    }
+    if observation:
+        trimmed = observation.strip()
+        if len(trimmed) > _STREAM_OBSERVATION_LIMIT:
+            trimmed = trimmed[:_STREAM_OBSERVATION_LIMIT] + "…"
+        payload["observation"] = trimmed
+    _emit_turn_event(listener, payload)
 
 
 def _delta_forwarder(
@@ -600,7 +626,12 @@ async def _run_turn_body(
         step_id = tool_call.tool_call_id or _tool_call_id(tool_call)
         _emit_turn_event(
             turn_listener,
-            {"type": "tool_step_started", "step_id": step_id, "tool": tool_call.tool_name},
+            {
+                "type": "tool_step_started",
+                "step_id": step_id,
+                "tool": tool_call.tool_name,
+                "args_summary": _stream_args_summary(tool_call.arguments),
+            },
         )
 
         verdict = policy_gate.adjudicate(
@@ -615,7 +646,9 @@ async def _run_turn_body(
         tracer.record("gate", _verdict_payload(verdict))
 
         if verdict.status == "deny":
-            _emit_tool_step_finished(turn_listener, step_id, tool_call.tool_name, "deny")
+            _emit_tool_step_finished(
+                turn_listener, step_id, tool_call.tool_name, "deny", verdict.reason
+            )
             illegal_outputs += 1
             synthetic_result = _synthetic_tool_result(tool_call, "failed", verdict.reason)
             accumulator.tool_results.append(synthetic_result)
@@ -650,7 +683,9 @@ async def _run_turn_body(
 
         illegal_outputs = 0
         if verdict.status == "ask":
-            _emit_tool_step_finished(turn_listener, step_id, tool_call.tool_name, "ask")
+            _emit_tool_step_finished(
+                turn_listener, step_id, tool_call.tool_name, "ask", verdict.reason
+            )
             result = _synthetic_tool_result(tool_call, "requires_user", verdict.reason)
             accumulator.tool_results.append(result)
             tracer.record("tool_result", _tool_result_payload(result))
@@ -674,7 +709,9 @@ async def _run_turn_body(
                 turn_id=active_turn_id,
                 engine=engine,
             )
-            _emit_tool_step_finished(turn_listener, step_id, tool_call.tool_name, result.status)
+            _emit_tool_step_finished(
+                turn_listener, step_id, tool_call.tool_name, result.status, result.observation
+            )
             turn_observations.append(_turn_observation_entry(tool_call, result))
             accumulator.tool_results.append(result)
             tracer.record("tool_result", _tool_result_payload(result))
@@ -713,7 +750,9 @@ async def _run_turn_body(
             gateway=tool_gateway,
             turn_listener=turn_listener,
         )
-        _emit_tool_step_finished(turn_listener, step_id, tool_call.tool_name, result.status)
+        _emit_tool_step_finished(
+            turn_listener, step_id, tool_call.tool_name, result.status, result.observation
+        )
         accumulator.tool_results.append(result)
         turn_observations.append(_turn_observation_entry(tool_call, result))
         tracer.record("tool_result", _tool_result_payload(result))

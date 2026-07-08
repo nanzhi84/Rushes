@@ -105,7 +105,7 @@ LOGGER = logging.getLogger("rushes.api")
 SSE_POLL_INTERVAL_SECONDS = 0.05
 SSE_BATCH_SIZE = 100
 DEFAULT_LLM_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-DEFAULT_LLM_MODEL = "qwen-plus"
+DEFAULT_LLM_MODEL = "qwen3.7-max"
 # 首页草稿墙每卡封面上限（thumbnail_ready 素材，导入时间倒序）。
 DRAFT_COVER_LIMIT = 4
 # 只有 Agent 在回合内「等结果」的 job 种类，终态事件才该回灌成 job_observation turn

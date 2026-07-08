@@ -4,21 +4,28 @@ import { createDraftTurnStreamSource } from "../../api/client";
 // 流式消息 kind：text_delta 阶段是 assistant（尚未定型），message_completed 后定为 narration/reply。
 export type TurnStreamMessageKind = "assistant" | "narration" | "reply";
 
-export type InProgressMessage = {
+export type StreamMessageItem = {
+  type: "message";
   message_id: string;
   kind: TurnStreamMessageKind;
   text: string;
 };
 
-export type ToolStep = {
+export type StreamToolItem = {
+  type: "tool";
   step_id: string;
   tool: string;
   status: string;
+  argsSummary: string | null;
+  observation: string | null;
 };
 
+// 消息与工具步合并成按到达顺序排列的单一列表：前端据此把工具行内嵌在
+// 叙述之间（对齐 Claude Code 的呈现方式），而不是把工具堆在消息流末尾。
+export type TurnStreamItem = StreamMessageItem | StreamToolItem;
+
 export type TurnStreamState = {
-  inProgressMessages: InProgressMessage[];
-  toolSteps: ToolStep[];
+  items: TurnStreamItem[];
   turnActive: boolean;
 };
 
@@ -27,8 +34,8 @@ export type TurnStreamEvent =
   | { type: "turn_started"; turn_id?: string }
   | { type: "text_delta"; message_id: string; kind?: string; delta?: string }
   | { type: "message_completed"; message_id: string; kind: "narration" | "reply"; content: string }
-  | { type: "tool_step_started"; step_id: string; tool: string }
-  | { type: "tool_step_finished"; step_id: string; tool: string; status: string }
+  | { type: "tool_step_started"; step_id: string; tool: string; args_summary?: string }
+  | { type: "tool_step_finished"; step_id: string; tool: string; status: string; observation?: string }
   | { type: "turn_ended"; outcome: string; reason: string | null }
   | { type: "turn_error"; message: string }
   | { type: string; [key: string]: unknown };
@@ -39,8 +46,7 @@ export type UseTurnStreamOptions = {
 };
 
 const INITIAL_STATE: TurnStreamState = {
-  inProgressMessages: [],
-  toolSteps: [],
+  items: [],
   turnActive: false
 };
 
@@ -49,16 +55,15 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
   switch (event.type) {
     case "turn_started":
       // 新回合（或重连重放）从零重建，避免 text_delta 被重复追加。
-      return { inProgressMessages: [], toolSteps: [], turnActive: true };
+      return { items: [], turnActive: true };
     case "text_delta": {
       if (typeof event.message_id !== "string") {
         return state;
       }
       return {
-        ...state,
         turnActive: true,
-        inProgressMessages: appendDelta(
-          state.inProgressMessages,
+        items: appendDelta(
+          state.items,
           event.message_id,
           typeof event.delta === "string" ? event.delta : ""
         )
@@ -70,9 +75,9 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
       }
       // content 为全文，整体替换流式 buffer（failover 双发的自愈语义）。
       return {
-        ...state,
         turnActive: true,
-        inProgressMessages: replaceMessage(state.inProgressMessages, {
+        items: upsertMessage(state.items, {
+          type: "message",
           message_id: event.message_id,
           kind: normalizeCompletedKind(event.kind),
           text: typeof event.content === "string" ? event.content : ""
@@ -84,12 +89,14 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
         return state;
       }
       return {
-        ...state,
         turnActive: true,
-        toolSteps: upsertToolStep(state.toolSteps, {
+        items: upsertToolStep(state.items, {
+          type: "tool",
           step_id: event.step_id,
           tool: event.tool,
-          status: "running"
+          status: "running",
+          argsSummary: typeof event.args_summary === "string" && event.args_summary ? event.args_summary : null,
+          observation: null
         })
       };
     }
@@ -99,10 +106,13 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
       }
       return {
         ...state,
-        toolSteps: upsertToolStep(state.toolSteps, {
+        items: upsertToolStep(state.items, {
+          type: "tool",
           step_id: event.step_id,
           tool: event.tool,
-          status: typeof event.status === "string" ? event.status : "succeeded"
+          status: typeof event.status === "string" ? event.status : "succeeded",
+          argsSummary: null,
+          observation: typeof event.observation === "string" && event.observation ? event.observation : null
         })
       };
     }
@@ -157,36 +167,47 @@ export function useTurnStream(
 }
 
 function appendDelta(
-  messages: InProgressMessage[],
+  items: TurnStreamItem[],
   messageId: string,
   delta: string
-): InProgressMessage[] {
-  const index = messages.findIndex((item) => item.message_id === messageId);
+): TurnStreamItem[] {
+  const index = items.findIndex(
+    (item) => item.type === "message" && item.message_id === messageId
+  );
   if (index < 0) {
-    return [...messages, { message_id: messageId, kind: "assistant", text: delta }];
+    return [...items, { type: "message", message_id: messageId, kind: "assistant", text: delta }];
   }
-  return messages.map((item, current) =>
-    current === index ? { ...item, text: item.text + delta } : item
+  return items.map((item, current) =>
+    current === index && item.type === "message" ? { ...item, text: item.text + delta } : item
   );
 }
 
-function replaceMessage(
-  messages: InProgressMessage[],
-  next: InProgressMessage
-): InProgressMessage[] {
-  const index = messages.findIndex((item) => item.message_id === next.message_id);
+function upsertMessage(items: TurnStreamItem[], next: StreamMessageItem): TurnStreamItem[] {
+  const index = items.findIndex(
+    (item) => item.type === "message" && item.message_id === next.message_id
+  );
   if (index < 0) {
-    return [...messages, next];
+    return [...items, next];
   }
-  return messages.map((item, current) => (current === index ? next : item));
+  return items.map((item, current) => (current === index ? next : item));
 }
 
-function upsertToolStep(steps: ToolStep[], next: ToolStep): ToolStep[] {
-  const index = steps.findIndex((item) => item.step_id === next.step_id);
+function upsertToolStep(items: TurnStreamItem[], next: StreamToolItem): TurnStreamItem[] {
+  const index = items.findIndex((item) => item.type === "tool" && item.step_id === next.step_id);
   if (index < 0) {
-    return [...steps, next];
+    return [...items, next];
   }
-  return steps.map((item, current) => (current === index ? { ...item, ...next } : item));
+  // started 带 argsSummary、finished 带 observation：两次事件各补一半，合并保留已知字段。
+  return items.map((item, current) =>
+    current === index && item.type === "tool"
+      ? {
+          ...item,
+          status: next.status,
+          argsSummary: next.argsSummary ?? item.argsSummary,
+          observation: next.observation ?? item.observation
+        }
+      : item
+  );
 }
 
 function normalizeCompletedKind(kind: unknown): TurnStreamMessageKind {

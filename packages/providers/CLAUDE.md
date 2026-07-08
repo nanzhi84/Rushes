@@ -5,4 +5,4 @@
 - **OpenAI 兼容 provider 是双 capability**：`openai_compatible/llm.py`（`llm.chat`）与 `openai_compatible/vlm.py`（`vlm.understanding`）各自一个 descriptor。国内 provider（`aliyun/`ASR、`volcengine/`TTS、以及 openai_compatible）**都强制 IPv4 + `trust_env=False`**（`force_ipv4=True` → `httpx.AsyncHTTPTransport(local_address="0.0.0.0")`），别去掉。
 - **`MockProvider`（`mock/scripted.py`）是测试/golden 的脚本化范式**：按 `capability → 预置响应队列` 出结果，队列耗尽返回 `mock_script_exhausted` 错误。golden 回放和单测都靠它免真网。
 - **本层禁止 import agent_harness/tools**（只依赖 contracts，见根 `ALLOWED_IMPORTS`）。planner adapter 刻意不 import harness，只返回结构兼容的 mapping。
-- 环境变量：`RUSHES_LLM_{API_KEY,BASE_URL,MODEL}`、`RUSHES_VLM_{API_KEY,MODEL}`、`RUSHES_DASHSCOPE_API_KEY`（ASR/阿里系，也作 LLM key 的兜底来源）。
+- 环境变量：`RUSHES_LLM_{API_KEY,BASE_URL,MODEL}`、`RUSHES_VLM_{API_KEY,MODEL,TIMEOUT_S}`、`RUSHES_DASHSCOPE_API_KEY`（ASR/阿里系，也作 LLM key 的兜底来源）。默认模型：主规划 `qwen3.7-max`（纯文本）、VLM `qwen3.7-plus`（多模态带推理，非流式响应慢，`RUSHES_VLM_TIMEOUT_S` 缺省 180s）。

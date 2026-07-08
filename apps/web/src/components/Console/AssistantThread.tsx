@@ -1,4 +1,5 @@
 import type { ReactElement } from "react";
+import { Markdown } from "./Markdown";
 import { StructuredInteractionRenderer } from "./StructuredInteractionRenderer";
 import type { AnswerDecisionHandler } from "./StructuredInteractionRenderer";
 import type {
@@ -6,22 +7,28 @@ import type {
   ConsoleDataMessagePart,
   ConsoleExternalStoreRuntime
 } from "./runtime";
-import type { ToolStep } from "./useTurnStream";
+import type { StreamMessageItem, StreamToolItem, TurnStreamItem } from "./useTurnStream";
+
+const STRUCTURED_MESSAGE_ID = "structured-interactions";
 
 export function AssistantThread({
   runtime,
   onAnswerDecision,
   answerPending,
   highlightedMessageId = null,
-  toolSteps = []
+  streamItems = []
 }: {
   runtime: ConsoleExternalStoreRuntime;
   onAnswerDecision: AnswerDecisionHandler;
   answerPending: boolean;
   highlightedMessageId?: string | null;
-  toolSteps?: ToolStep[];
+  streamItems?: TurnStreamItem[];
 }): ReactElement {
-  const isEmpty = runtime.messages.length === 0 && toolSteps.length === 0;
+  // 结构化交互卡（决策/进度）固定排在最后：本回合流式内容之后才是待回答的卡片。
+  const regularMessages = runtime.messages.filter((message) => message.id !== STRUCTURED_MESSAGE_ID);
+  const structuredMessage =
+    runtime.messages.find((message) => message.id === STRUCTURED_MESSAGE_ID) ?? null;
+  const isEmpty = regularMessages.length === 0 && streamItems.length === 0 && !structuredMessage;
   return (
     <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4" aria-label="消息列表">
       {isEmpty ? (
@@ -29,7 +36,7 @@ export function AssistantThread({
           这里会显示当前剪辑任务的消息流。
         </p>
       ) : (
-        runtime.messages.map((message) => (
+        regularMessages.map((message) => (
           <MessageRow
             key={message.id}
             message={message}
@@ -39,15 +46,40 @@ export function AssistantThread({
           />
         ))
       )}
-      {toolSteps.length > 0 ? (
-        <ul className="space-y-2" aria-label="工具执行过程">
-          {toolSteps.map((step) => (
-            <ToolStepRow key={step.step_id} step={step} />
-          ))}
-        </ul>
+      {streamItems.map((item) =>
+        item.type === "message" ? (
+          <MessageRow
+            key={item.message_id}
+            message={toStreamMessage(item)}
+            onAnswerDecision={onAnswerDecision}
+            answerPending={answerPending}
+            highlighted={highlightedMessageId === item.message_id}
+          />
+        ) : (
+          <ToolStepRow key={item.step_id} step={item} />
+        )
+      )}
+      {structuredMessage ? (
+        <MessageRow
+          message={structuredMessage}
+          onAnswerDecision={onAnswerDecision}
+          answerPending={answerPending}
+          highlighted={highlightedMessageId === structuredMessage.id}
+        />
       ) : null}
     </div>
   );
+}
+
+// 流式消息复用 MessageRow 的持久化消息形状：id 就是 message_id，落库后由历史接管同一行。
+function toStreamMessage(item: StreamMessageItem): ConsoleAssistantMessage {
+  return {
+    id: item.message_id,
+    role: "assistant",
+    createdAt: "",
+    metadata: { consoleRole: "assistant", messageKind: item.kind },
+    content: [{ type: "text", text: item.text }]
+  };
 }
 
 function MessageRow({
@@ -100,18 +132,24 @@ function MessageRow({
     );
   }
 
+  const renderAsMarkdown = message.role === "assistant";
   return (
     <article
       data-console-message-id={message.id}
       data-message-kind={message.metadata.messageKind ?? undefined}
       className={messageClass(message, highlighted)}
     >
-      <span className="text-xs font-medium uppercase text-fg-muted">{roleLabel(message)}</span>
       {message.content.map((part, index) =>
         part.type === "text" ? (
-          <p key={`${message.id}:${index}`} className="mt-1 whitespace-pre-wrap leading-7">
-            {part.text}
-          </p>
+          renderAsMarkdown ? (
+            <div key={`${message.id}:${index}`} className="text-[0.95rem]">
+              <Markdown text={part.text} />
+            </div>
+          ) : (
+            <p key={`${message.id}:${index}`} className="whitespace-pre-wrap leading-7">
+              {part.text}
+            </p>
+          )
         ) : null
       )}
     </article>
@@ -131,9 +169,9 @@ function messageClass(message: ConsoleAssistantMessage, highlighted: boolean): s
   if (message.role === "assistant") {
     // narration 叙述用弱化样式：更浅的底色与文字，和正式 reply 拉开层级。
     if (isNarration(message)) {
-      return `${highlight} mr-auto max-w-[80%] rounded-lg border border-line bg-raised px-4 py-2 text-sm text-fg-muted shadow-raised`;
+      return `${highlight} mr-auto max-w-[88%] rounded-lg px-1 py-0.5 text-sm text-fg-muted`;
     }
-    return `${highlight} mr-auto max-w-[80%] rounded-lg bg-raised px-4 py-3 text-fg shadow-raised`;
+    return `${highlight} mr-auto max-w-[88%] rounded-lg bg-raised px-4 py-3 text-fg shadow-raised`;
   }
   return `${highlight} mx-auto max-w-[80%] rounded-md bg-raised px-4 py-3 text-fg-muted shadow-raised`;
 }
@@ -142,45 +180,52 @@ function highlightClass(highlighted: boolean): string {
   return highlighted ? "ring-2 ring-accent ring-offset-2 ring-offset-ink" : "";
 }
 
-function roleLabel(message: ConsoleAssistantMessage): string {
-  if (message.role === "user") {
-    return "用户";
-  }
-  if (message.role === "assistant") {
-    return isNarration(message) ? "助手叙述" : "助手";
-  }
-  return "系统";
-}
-
-function ToolStepRow({ step }: { step: ToolStep }): ReactElement {
+/** Claude Code 式工具行：状态圆点 + 中文名 + 参数摘要一行带过，结果可展开。 */
+function ToolStepRow({ step }: { step: StreamToolItem }): ReactElement {
   const label = TOOL_STEP_LABELS[step.tool] ?? step.tool;
+  const summaryRow = (
+    <span className="flex min-w-0 items-center gap-2">
+      <span
+        aria-hidden
+        className={`${toolStatusToneClass(step.status)} ${step.status === "running" ? "tile-pulse" : ""} text-[0.6rem] leading-none`}
+      >
+        ●
+      </span>
+      <span className="shrink-0 text-sm text-fg">{label}</span>
+      {step.argsSummary ? (
+        <span className="min-w-0 truncate font-mono text-xs text-fg-faint">{step.argsSummary}</span>
+      ) : null}
+      <span className="ml-auto shrink-0 pl-2 text-xs text-fg-faint">
+        {toolStatusLabel(step.status)}
+      </span>
+    </span>
+  );
+
+  if (!step.observation) {
+    return (
+      <div
+        data-tool-step-id={step.step_id}
+        data-tool-status={step.status}
+        className="mr-auto w-full max-w-[88%] px-1 py-0.5"
+      >
+        {summaryRow}
+      </div>
+    );
+  }
   return (
-    <li
+    <details
       data-tool-step-id={step.step_id}
       data-tool-status={step.status}
-      className="mr-auto flex max-w-[80%] items-center gap-2 rounded-md border border-line bg-raised px-3 py-2 text-sm text-fg-muted shadow-raised"
+      className="mr-auto w-full max-w-[88%] px-1 py-0.5"
     >
-      <span aria-hidden className={toolStatusToneClass(step.status)}>
-        {toolStatusIcon(step.status)}
-      </span>
-      <span className="flex-1">{label}</span>
-      <span className="text-xs text-fg-faint">{toolStatusLabel(step.status)}</span>
-    </li>
+      <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+        {summaryRow}
+      </summary>
+      <div className="mt-1 border-l-2 border-line pl-3 text-xs leading-5 text-fg-muted whitespace-pre-wrap">
+        {step.observation}
+      </div>
+    </details>
   );
-}
-
-function toolStatusIcon(status: string): string {
-  switch (status) {
-    case "succeeded":
-      return "✓";
-    case "failed":
-    case "deny":
-      return "✗";
-    case "running":
-      return "…";
-    default:
-      return "•";
-  }
 }
 
 function toolStatusToneClass(status: string): string {
@@ -190,6 +235,8 @@ function toolStatusToneClass(status: string): string {
     case "failed":
     case "deny":
       return "text-danger";
+    case "ask":
+      return "text-warn";
     default:
       return "text-fg-faint";
   }
@@ -204,16 +251,24 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
   succeeded: "完成",
   failed: "失败",
   deny: "已拒绝",
-  ask: "待确认"
+  ask: "待确认",
+  requires_user: "待回答"
 };
 
 // 工具名 → 中文文案集中映射；未映射时回退到原始工具名。
 const TOOL_STEP_LABELS: Record<string, string> = {
+  "asset.list_assets": "清点素材",
+  "asset.import_local_file": "导入本地素材",
+  "asset.import_url": "URL 导入素材",
+  "understand.materials": "理解素材",
+  "decision.answer": "记录你的回答",
   "timeline.apply_patch": "修改时间线",
+  "timeline.compose_initial": "生成初版时间线",
   "timeline.restore_version": "恢复时间线版本",
   "timeline.validate": "校验时间线",
   "timeline.inspect": "查看时间线",
   "render.preview": "渲染预览",
+  "render.final_mp4": "导出成片",
   "render.status": "查询渲染进度",
   "content.create_plan": "生成内容方案",
   "content.revise_plan": "修订内容方案",
