@@ -107,6 +107,12 @@ DEFAULT_LLM_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_LLM_MODEL = "qwen-plus"
 # 首页草稿墙每卡封面上限（thumbnail_ready 素材，导入时间倒序）。
 DRAFT_COVER_LIMIT = 4
+# 只有 Agent 在回合内「等结果」的 job 种类，终态事件才该回灌成 job_observation turn
+# 唤醒主循环；proxy/index/poster 这类素材加工 job 的进度只走 SSE 给 UI，绝不进对话
+# （否则一次导入一批素材会刷出一堆「后台任务事件」气泡——真实素材包 31 个 .mov 实测）。
+_AGENT_WAITED_JOB_KINDS: frozenset[str] = frozenset(
+    {"asr", "tts", "align", "render_preview", "render_final", "import_url"}
+)
 
 
 class DraftCreateRequest(BaseModel):
@@ -416,6 +422,9 @@ async def _job_observation_bridge(
                 draft_id = payload.get("requested_by_draft_id") or values.get("draft_id")
                 job_id = payload.get("job_id")
                 if not isinstance(draft_id, str) or not isinstance(job_id, str):
+                    continue
+                if _observation_job_kind(payload) not in _AGENT_WAITED_JOB_KINDS:
+                    # 素材加工型 job（proxy/index/poster）不唤 Agent：进度经 SSE 给 UI。
                     continue
                 await turn_queue.enqueue_job_observation(draft_id, job_id=job_id, event=payload)
             cursor = int(max_row or cursor)
@@ -993,7 +1002,8 @@ def _register_routes(app: FastAPI) -> None:
         result = apply((event,), engine=state.engine, base_version=None, actor="user")
         _ensure_applied(result)
         target_draft_id = _job_observation_draft_id(job)
-        if target_draft_id is not None:
+        # 只有 Agent 等待型 job 取消才唤醒主循环；素材加工型（proxy/index/poster）取消不进对话。
+        if target_draft_id is not None and job.get("kind") in _AGENT_WAITED_JOB_KINDS:
             await state.turn_queue.enqueue_job_observation(
                 target_draft_id,
                 job_id=job_id,
@@ -2104,6 +2114,15 @@ def _job_observation_draft_id(job: Mapping[str, Any]) -> str | None:
         return requested_by_draft_id
     draft_id = job.get("draft_id")
     return draft_id if isinstance(draft_id, str) else None
+
+
+def _observation_job_kind(payload: Mapping[str, Any]) -> str | None:
+    """终态事件 payload 里 kind 嵌在 event.payload.kind（见 job_runner `_terminal_event`）。"""
+    inner = payload.get("payload")
+    if isinstance(inner, Mapping):
+        kind = inner.get("kind")
+        return kind if isinstance(kind, str) else None
+    return None
 
 
 def _ensure_applied(result: ReducerApplyResult) -> None:
