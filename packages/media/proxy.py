@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from uuid import uuid4
 
+from media.hwaccel import hwaccel_decode_args
 from storage.object_store import ObjectRef, ObjectStore
 from storage.workspace_paths import WorkspacePaths
 
@@ -43,17 +44,22 @@ def generate_proxy(
 
 def _run_video_proxy_with_fallback(ffmpeg_bin: str, source: Path, destination: Path) -> None:
     encoder = _preferred_video_encoder(ffmpeg_bin)
+    decode_args = hwaccel_decode_args(ffmpeg_bin)
     result = _run_ffmpeg(
-        _video_proxy_command(ffmpeg_bin, source, destination, video_encoder=encoder)
+        _video_proxy_command(
+            ffmpeg_bin, source, destination, video_encoder=encoder, decode_args=decode_args
+        )
     )
     if result.returncode == 0:
         return
-    if encoder == _VIDEOTOOLBOX_ENCODER:
-        # 硬件编码运行期失败（无硬件/驱动异常/编码器编入但不可用）：把本进程后续探测结果
-        # 降级为软件编码，并用 libx264 立即重试一次。
+    if decode_args or encoder == _VIDEOTOOLBOX_ENCODER:
+        # 硬件路径（硬解/硬编）运行期失败：把本进程后续探测降级为软件编码，并整条回落
+        # 「软解 + libx264」立即重试一次（输入编码不被 videotoolbox 支持时也走这条）。
         _encoder_cache[ffmpeg_bin] = _SOFTWARE_ENCODER
         result = _run_ffmpeg(
-            _video_proxy_command(ffmpeg_bin, source, destination, video_encoder=_SOFTWARE_ENCODER)
+            _video_proxy_command(
+                ffmpeg_bin, source, destination, video_encoder=_SOFTWARE_ENCODER, decode_args=[]
+            )
         )
         if result.returncode == 0:
             return
@@ -109,10 +115,12 @@ def _video_proxy_command(
     destination: Path,
     *,
     video_encoder: str,
+    decode_args: list[str] | None = None,
 ) -> list[str]:
     return [
         ffmpeg_bin,
         "-y",
+        *(decode_args or []),
         "-i",
         str(source),
         "-map",
