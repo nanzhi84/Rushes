@@ -164,10 +164,7 @@ def _correct_with_pyav(path: Path, probe: AssetProbe) -> AssetProbe:
         if video_stream is None:
             return probe
         fps = _float_rate(getattr(video_stream, "average_rate", None)) or probe.fps
-        # 容器索引里的帧数（元数据，不解码）。旧实现逐帧解码计数在 1080p60 HEVC 上要 ~8 CPU 秒/次，
-        # 而 probe_media 在 poster/index/proxy 三处各调一次——那是导入风扇狂叫的第二大头。
-        # stream.frames 与逐帧解码计数在实测样本上完全一致；缺失（=0）时退回 ffprobe 时长。
-        frame_count = _stream_frame_count(video_stream)
+        frame_count = _video_frame_count(video_stream, container)
         duration = probe.duration_sec
         if fps is not None and frame_count > 0:
             duration = frame_count / fps
@@ -183,11 +180,36 @@ def _correct_with_pyav(path: Path, probe: AssetProbe) -> AssetProbe:
         container.close()
 
 
+def _video_frame_count(video_stream: Any, container: Any) -> int:
+    """视频帧数：优先容器索引元数据 stream.frames（不解码，毫秒级）。
+
+    元数据帧数在 1080p60 HEVC 上把逐帧解码计数的 ~8 CPU 秒/次省成近乎零（probe_media 在
+    poster/index/proxy 各调一次，那是导入风扇狂叫的第二大头），实测样本上两者结果一致。
+    但部分容器/流（尤其非 mp4/mov 或转封装产物）nb_frames 缺失或为 0——此时回落到逐帧解码
+    计数这条准确但慢的旧路径（罕见，接受其代价），避免时长退化。
+    """
+
+    frames = _stream_frame_count(video_stream)
+    if frames > 0:
+        return frames
+    return _decoded_video_frames(container)
+
+
 def _stream_frame_count(video_stream: Any) -> int:
     try:
         return int(getattr(video_stream, "frames", 0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _decoded_video_frames(container: Any) -> int:
+    count = 0
+    try:
+        for _frame in container.decode(video=0):
+            count += 1
+    except Exception:
+        return 0
+    return count
 
 
 def _first_stream(streams: list[Any], codec_type: str) -> dict[str, Any] | None:

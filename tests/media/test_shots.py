@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from media.shots import Shot, ShotSplitConfig, split_shots
+from media.shots import (
+    Shot,
+    ShotSplitConfig,
+    _analysis_clip_command,
+    _tmp_dir,
+    split_shots,
+)
+from storage.workspace_paths import WorkspacePaths
 
 FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 
@@ -55,6 +62,44 @@ def test_split_shots_returns_single_shot_without_cuts(tmp_path: Path) -> None:
 def test_split_shots_requires_existing_file(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         split_shots(tmp_path / "missing.mp4")
+
+
+def test_analysis_clip_command_preserves_time_base_and_scales() -> None:
+    command = _analysis_clip_command(
+        Path("/src.mov"), Path("/out.mp4"), ["-hwaccel", "videotoolbox"]
+    )
+    # 保时基：passthrough 不丢/重排帧；只降分辨率、不改 fps（无 -r / 无 fps 滤镜）。
+    assert command[command.index("-vsync") + 1] == "passthrough"
+    assert "scale=-2:180" in command
+    assert "-r" not in command
+    assert not any("fps=" in arg for arg in command)
+    # 硬解参数在 -i 之前。
+    assert command.index("-hwaccel") < command.index("-i")
+
+
+def test_tmp_dir_uses_workspace_tmp_when_paths_given(tmp_path: Path) -> None:
+    paths = WorkspacePaths.from_root(tmp_path / "ws")
+    resolved = _tmp_dir(paths)
+    assert resolved == str(paths.tmp_dir)
+    assert paths.tmp_dir.exists()  # 目录被创建
+    assert _tmp_dir(None) is None
+
+
+@pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg not installed")
+@pytest.mark.ffmpeg
+def test_split_shots_preserves_cut_time_within_tolerance(tmp_path: Path) -> None:
+    video = _make_two_scene_video(tmp_path)  # 0.5s 红 + 0.5s 蓝 @30fps，切点在 ~0.5s
+    paths = WorkspacePaths.from_root(tmp_path / "ws").initialize()
+
+    shots = split_shots(
+        video, config=ShotSplitConfig(content_threshold=12.0, min_scene_len=3), paths=paths
+    )
+
+    assert len(shots) >= 2
+    # 经 180p 硬解降采样预处理后，红→蓝切点时间与原片误差 ≤0.2s（时间轴保真）。
+    assert abs(shots[0].end_sec - 0.5) <= 0.2
+    # 分析用小片写在 workspace tmp 且已随 finally 清理，无残留目录。
+    assert not list(paths.tmp_dir.glob("rushes_shots_*"))
 
 
 def test_prepare_analysis_clip_uses_original_without_hwaccel(tmp_path: Path, monkeypatch) -> None:
