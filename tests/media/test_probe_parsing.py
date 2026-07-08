@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,8 +14,37 @@ from media.probe import (
     _float_rate,
     _probe_from_ffprobe,
     _rate,
+    _video_frame_count,
     probe_media,
 )
+
+
+class _DecodeContainer:
+    def __init__(self, frame_count: int) -> None:
+        self._frame_count = frame_count
+        self.decoded = False
+
+    def decode(self, **_kwargs: object) -> list[object]:
+        self.decoded = True
+        return [object() for _ in range(self._frame_count)]
+
+
+def test_video_frame_count_prefers_stream_metadata_without_decoding() -> None:
+    container = _DecodeContainer(999)
+    frames = _video_frame_count(SimpleNamespace(frames=650), container)
+    assert frames == 650
+    assert container.decoded is False  # nb_frames 就位时绝不解码
+
+
+def test_video_frame_count_falls_back_to_decode_when_nb_frames_missing() -> None:
+    container = _DecodeContainer(3)
+    frames = _video_frame_count(SimpleNamespace(frames=0), container)
+    assert frames == 3
+    assert container.decoded is True  # nb_frames 缺失回落逐帧计数
+
+
+def test_video_frame_count_handles_none_nb_frames() -> None:
+    assert _video_frame_count(SimpleNamespace(frames=None), _DecodeContainer(2)) == 2
 
 
 def test_probe_media_rejects_missing_binary(tmp_path: Path) -> None:

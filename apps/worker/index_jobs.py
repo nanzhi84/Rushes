@@ -105,7 +105,7 @@ def _index_video(
     thumbnail_object_hash = existing_thumbnail or _extract_video_cover(
         source_path, paths, duration_sec
     )
-    shots = split_shots(source_path)
+    shots = split_shots(source_path, paths=paths)
     index_json: dict[str, Any] = {
         "duration_sec": duration_sec,
         "shots": [{"start_sec": shot.start_sec, "end_sec": shot.end_sec} for shot in shots],
