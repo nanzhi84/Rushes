@@ -9,7 +9,7 @@ const USER_MESSAGE = "把开头三秒删掉";
 // content 即散文协议，纯 content = 最终回复 → 落 messages(kind=reply) + TurnEnded。
 // 该用例因此在 CI 无外网环境下确定性地走通「开始创作 → 发消息 → content 回复 →
 // GET messages → 前端渲染助手气泡」这条 Spec B 新链路（断最终文本可见，稳定）。
-const SCRIPTED_REPLY = /脚本耗尽/;
+const SCRIPTED_REPLY = "未配置模型密钥"; // 无密钥环境下 NoProviderPlanner 的回复锚点（e2e 不配真实密钥）
 
 test("流式控制台：开始创作后发消息，对话流出现助手回复文本", async ({ page }) => {
   await page.goto(`/#t=${TOKEN}`);
