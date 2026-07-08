@@ -2,15 +2,64 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+import media.proxy as proxy_module
 from media.probe import probe_media
 from media.proxy import generate_proxy
 from storage.workspace_paths import WorkspacePaths
 
 FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+
+@pytest.fixture(autouse=True)
+def _clear_encoder_cache() -> object:
+    # 编码器探测结果是进程级缓存，用例间必须清干净，避免相互污染。
+    proxy_module._encoder_cache.clear()
+    yield
+    proxy_module._encoder_cache.clear()
+
+
+def _fake_ffmpeg_runner(
+    *,
+    encoders_stdout: str,
+    fail_encoders: frozenset[str] = frozenset(),
+) -> tuple[Callable[..., subprocess.CompletedProcess[str]], list[list[str]]]:
+    """伪 subprocess.run：`-encoders` 返回给定清单；转码按 -c:v 编码器判成败，
+    成功则给目标文件写真字节（供 ObjectStore.put_file 读取）。"""
+    calls: list[list[str]] = []
+
+    def run(
+        command: list[str],
+        *,
+        capture_output: bool = False,
+        check: bool = False,
+        text: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(list(command))
+        if "-encoders" in command:
+            return subprocess.CompletedProcess(command, 0, encoders_stdout, "")
+        encoder = command[command.index("-c:v") + 1]
+        if encoder in fail_encoders:
+            return subprocess.CompletedProcess(command, 1, "", f"{encoder} runtime failure")
+        Path(command[-1]).write_bytes(b"proxy-bytes")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    return run, calls
+
+
+def _source_and_paths(tmp_path: Path) -> tuple[Path, WorkspacePaths]:
+    source = tmp_path / "src.mp4"
+    source.write_bytes(b"x")  # ffmpeg 被 mock，内容无所谓，只需文件存在（strict resolve）。
+    paths = WorkspacePaths.from_root(tmp_path / "workspace").initialize()
+    return source, paths
+
+
+def _transcodes(calls: list[list[str]]) -> list[list[str]]:
+    return [command for command in calls if "-encoders" not in command]
 
 
 @pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg/ffprobe not installed")
@@ -38,6 +87,80 @@ def test_generate_proxy_writes_object_store_proxy(tmp_path: Path) -> None:
     assert proxy_path.exists()
     assert proxy_path.stat().st_size == proxy_ref.size
     assert proxy_ref.size > 0
+
+
+def test_proxy_prefers_videotoolbox_on_macos(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(proxy_module, "_is_macos", lambda: True)
+    run, calls = _fake_ffmpeg_runner(encoders_stdout="V..... h264_videotoolbox HW H.264")
+    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    source, paths = _source_and_paths(tmp_path)
+
+    ref = generate_proxy(source, paths=paths)
+
+    assert ref.size > 0
+    transcode = _transcodes(calls)[0]
+    assert "h264_videotoolbox" in transcode
+    assert "libx264" not in transcode
+
+
+def test_proxy_uses_libx264_when_videotoolbox_absent(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(proxy_module, "_is_macos", lambda: True)
+    run, calls = _fake_ffmpeg_runner(encoders_stdout="V..... libx264 H.264")
+    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    source, paths = _source_and_paths(tmp_path)
+
+    generate_proxy(source, paths=paths)
+
+    transcode = _transcodes(calls)[0]
+    assert "libx264" in transcode
+    assert "h264_videotoolbox" not in transcode
+
+
+def test_proxy_falls_back_to_libx264_when_hardware_transcode_fails(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(proxy_module, "_is_macos", lambda: True)
+    run, calls = _fake_ffmpeg_runner(
+        encoders_stdout="V..... h264_videotoolbox HW H.264",
+        fail_encoders=frozenset({"h264_videotoolbox"}),
+    )
+    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    source, paths = _source_and_paths(tmp_path)
+
+    ref = generate_proxy(source, paths=paths)
+
+    assert ref.size > 0
+    transcodes = _transcodes(calls)
+    assert "h264_videotoolbox" in transcodes[0]
+    assert "libx264" in transcodes[1]
+    # 硬件运行期失败后，本进程后续探测结果被降级为软件编码。
+    assert proxy_module._encoder_cache["ffmpeg"] == "libx264"
+
+
+def test_proxy_probes_encoder_once_and_caches(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(proxy_module, "_is_macos", lambda: True)
+    run, calls = _fake_ffmpeg_runner(encoders_stdout="V..... h264_videotoolbox HW H.264")
+    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    source, paths = _source_and_paths(tmp_path)
+
+    generate_proxy(source, paths=paths)
+    generate_proxy(source, paths=paths)
+
+    probes = [command for command in calls if "-encoders" in command]
+    assert len(probes) == 1  # 探测只跑一次，第二个 job 复用缓存
+
+
+def test_proxy_uses_libx264_without_probe_off_macos(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(proxy_module, "_is_macos", lambda: False)
+    run, calls = _fake_ffmpeg_runner(encoders_stdout="V..... h264_videotoolbox HW H.264")
+    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    source, paths = _source_and_paths(tmp_path)
+
+    generate_proxy(source, paths=paths)
+
+    assert not any("-encoders" in command for command in calls)  # 非 macOS 不探测硬件编码
+    transcode = _transcodes(calls)[0]
+    assert "libx264" in transcode
 
 
 def _make_test_video(tmp_path: Path) -> Path:
