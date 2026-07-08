@@ -48,7 +48,9 @@ export function MaterialSummaryPanel({
       </header>
 
       {!ready ? (
-        <p className="mt-3 text-sm text-fg-muted">该素材尚未完成理解，暂无摘要。</p>
+        <p className="mt-3 text-sm leading-6 text-fg-muted">
+          {understandingHint(asset.understanding_status)}
+        </p>
       ) : summaryQuery.isLoading ? (
         <p className="mt-3 text-sm text-fg-muted">正在读取摘要</p>
       ) : summaryQuery.error ? (
@@ -102,6 +104,17 @@ export function MaterialSummaryPanel({
       )}
     </section>
   );
+}
+
+/** 未就绪时的提示：理解是对话里按需调用的工具（understand.materials），不在导入流程里。 */
+function understandingHint(status: string): string {
+  if (status === "running") {
+    return "正在理解该素材，稍候摘要就会出现，结果会缓存——无需手动等待。";
+  }
+  if (status === "failed") {
+    return "上次理解失败。可在剪辑对话中让代理重试理解工具（understand.materials）。";
+  }
+  return "尚未理解。剪辑对话中，代理会按需调用理解工具（understand.materials）生成摘要，结果会缓存——无需手动等待。";
 }
 
 function formatTags(segment: MaterialSummarySegment): string {

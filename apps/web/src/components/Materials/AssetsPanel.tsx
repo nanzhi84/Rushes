@@ -4,13 +4,18 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   FileText,
+  Film,
   Folder,
   FolderOpen,
+  Image as ImageIcon,
+  Loader2,
   MapPin,
   MoreHorizontal,
+  Music,
   Plus,
   RotateCw,
-  Trash2
+  Trash2,
+  Type
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { ElementType, ReactElement } from "react";
@@ -383,6 +388,14 @@ function AssetTile({
 }): ReactElement {
   const [thumbFailed, setThumbFailed] = useState(false);
   const understanding = understandingBadgeProps(asset.understanding_status);
+  // 未理解（none）时不渲染状态点：理解是对话里按需调用的工具，不是导入待办。
+  const showUnderstandingDot = asset.understanding_status !== "none";
+  // 缩略图（秒级 poster 任务）就绪即换真图；未就绪时用 kind 占位图标 + 呼吸脉冲表示处理中。
+  const thumbReady = asset.thumbnail_ready && !thumbFailed;
+  const KindIcon = kindIcon(asset.kind);
+  const hasDuration = asset.duration_sec !== null && asset.duration_sec > 0;
+  // 转码/索引后台任务仍在跑 → 右下角「处理中」旋转点，完成即消失。
+  const ingesting = isIngestProcessing(asset);
   const tileClass = `group relative overflow-hidden rounded-md border transition-colors ease-standard ${
     active ? "border-accent" : "border-line hover:border-line-strong"
   } ${asset.usable ? "" : "opacity-50"}`;
@@ -395,7 +408,7 @@ function AssetTile({
       onClick={onClick}
     >
       <div className="relative aspect-video bg-ink">
-        {asset.thumbnail_ready && !thumbFailed ? (
+        {thumbReady ? (
           <img
             src={api.mediaThumbnailUrl(asset.asset_id)}
             alt={`${asset.filename || asset.asset_id} 缩略图`}
@@ -404,30 +417,48 @@ function AssetTile({
             onError={() => setThumbFailed(true)}
           />
         ) : (
-          <div className="grid h-full w-full place-items-center text-xs text-fg-faint">
-            {kindLabel(asset.kind)}
+          <div
+            className="tile-pulse grid h-full w-full place-items-center text-fg-faint"
+            aria-label={`${kindLabel(asset.kind)}处理中`}
+          >
+            <KindIcon size={24} strokeWidth={1.5} aria-hidden />
           </div>
         )}
-        {asset.duration_sec !== null && asset.duration_sec > 0 ? (
-          <span className="absolute bottom-1 right-1 rounded bg-black/70 px-1 py-0.5 text-2xs tabular-nums text-white">
-            {formatDuration(asset.duration_sec)}
-          </span>
-        ) : null}
         {asset.invalid ? (
           <span className="absolute left-1 top-1">
             <StatusBadge label="失效" tone="danger" />
           </span>
+        ) : null}
+        {ingesting || hasDuration ? (
+          <div className="absolute bottom-1 right-1 flex items-center gap-1">
+            {ingesting ? (
+              <span
+                className="grid h-5 w-5 place-items-center rounded bg-black/70 text-white"
+                aria-label="转码与索引处理中"
+                title="处理中"
+              >
+                <Loader2 size={14} strokeWidth={2} className="animate-spin" aria-hidden />
+              </span>
+            ) : null}
+            {asset.duration_sec !== null && asset.duration_sec > 0 ? (
+              <span className="rounded bg-black/70 px-1 py-0.5 text-2xs tabular-nums text-white">
+                {formatDuration(asset.duration_sec)}
+              </span>
+            ) : null}
+          </div>
         ) : null}
       </div>
       <div className="flex items-center justify-between gap-1 px-1.5 py-1">
         <span className="truncate text-2xs text-fg-muted">
           {asset.filename || asset.asset_id}
         </span>
-        <span
-          aria-label={`理解状态：${understanding.label}`}
-          className={`h-1.5 w-1.5 shrink-0 rounded-full ${understandingDotClass(asset.understanding_status)}`}
-          title={understanding.label}
-        />
+        {showUnderstandingDot ? (
+          <span
+            aria-label={`理解状态：${understanding.label}`}
+            className={`h-1.5 w-1.5 shrink-0 rounded-full ${understandingDotClass(asset.understanding_status)}`}
+            title={understanding.label}
+          />
+        ) : null}
       </div>
     </button>
   );
@@ -592,6 +623,26 @@ function kindLabel(kind: string): string {
     font: "字体"
   };
   return labels[kind] ?? kind;
+}
+
+/** 缩略图未就绪时的占位图标：按 kind 取 lucide 图标，兜底 FileText。 */
+function kindIcon(kind: string): ElementType {
+  const icons: Record<string, ElementType> = {
+    video: Film,
+    audio: Music,
+    image: ImageIcon,
+    font: Type
+  };
+  return icons[kind] ?? FileText;
+}
+
+/** proxy/index 后台任务仍在排队或执行——用 payload 现有的 jobs 状态字段判定，完成即为假。 */
+function isIngestProcessing(asset: MaterialAsset): boolean {
+  return asset.jobs.some(
+    (job) =>
+      (job.kind === "proxy" || job.kind === "index") &&
+      (job.status === "pending" || job.status === "running")
+  );
 }
 
 function formatDuration(seconds: number): string {
