@@ -766,6 +766,82 @@ def test_media_head_accepts_query_token_like_player_probe(tmp_path: Path) -> Non
     assert head_no_token.status_code == 401
 
 
+def _import_reference(client: TestClient, source: Path, *, storage_mode: str | None = None) -> str:
+    body: dict[str, Any] = {"path": str(source)}
+    if storage_mode is not None:
+        body["storage_mode"] = storage_mode
+    resp = client.post("/api/drafts/draft_1/materials/import-local", headers=AUTH, json=body)
+    assert resp.status_code == 200
+    return str(resp.json()["asset_id"])
+
+
+def test_media_source_streams_reference_original_with_range_and_head(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_draft(client).status_code == 201
+    source = _media_file(tmp_path, b"original-bytes-0123456789")
+    asset_id = _import_reference(client, source)
+
+    full = client.get(f"/api/media/{asset_id}/source", headers=AUTH)
+    ranged = client.get(f"/api/media/{asset_id}/source", headers={**AUTH, "Range": "bytes=0-7"})
+    head = client.head(f"/api/media/{asset_id}/source", headers=AUTH)
+
+    assert full.status_code == 200
+    assert full.content == b"original-bytes-0123456789"
+    assert full.headers["content-type"] == "video/mp4"  # .mp4 原片
+    assert ranged.status_code == 206
+    assert ranged.content == b"original"
+    assert ranged.headers["accept-ranges"] == "bytes"
+    assert head.status_code == 200
+    assert head.content == b""
+
+
+def test_media_source_404_when_reference_invalidated(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_draft(client).status_code == 201
+    source = _media_file(tmp_path, b"before-change")
+    asset_id = _import_reference(client, source)
+    source.write_bytes(b"after-change-different-bytes")
+    # 一次 materials 列表触发 revalidation，落 AssetInvalidated（usable=False + 失效码）。
+    assert client.get("/api/drafts/draft_1/materials", headers=AUTH).status_code == 200
+
+    resp = client.get(f"/api/media/{asset_id}/source", headers=AUTH)
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["reason"] == "reference_invalidated"
+
+
+def test_media_source_404_for_copy_asset_without_reference(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_draft(client).status_code == 201
+    source = _media_file(tmp_path, b"copy-me")
+    asset_id = _import_reference(client, source, storage_mode="copy")
+
+    resp = client.get(f"/api/media/{asset_id}/source", headers=AUTH)
+
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["reason"] == "source_not_available"
+
+
+def test_media_source_accepts_query_token_like_browser_video(tmp_path: Path) -> None:
+    """<video src> 设不了 Authorization header，/source GET 必须吃 query token（同 media 族）。"""
+    app = _app(tmp_path)
+    client = _client(app)
+    assert _create_draft(client).status_code == 201
+    source = _media_file(tmp_path, b"token-gated-original")
+    asset_id = _import_reference(client, source)
+
+    ok = client.get(f"/api/media/{asset_id}/source", params={"token": TOKEN})
+    no_token = client.get(f"/api/media/{asset_id}/source")
+
+    assert ok.status_code == 200
+    assert ok.content == b"token-gated-original"
+    assert no_token.status_code == 401
+    assert no_token.json()["reason"] == "missing_token"
+
+
 def test_query_token_not_accepted_outside_sse_and_media(tmp_path: Path) -> None:
     app = _app(tmp_path)
     client = _client(app)

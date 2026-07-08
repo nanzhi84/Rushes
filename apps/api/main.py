@@ -1025,6 +1025,19 @@ def _register_routes(app: FastAPI) -> None:
         return _range_response(proxy_path, request)
 
     @app.api_route(
+        "/api/media/{asset_id}/source",
+        methods=["GET", "HEAD"],  # 播放器加载源前会 HEAD 探测 Content-Type，与 GET 同权
+        response_class=StreamingResponse,
+        responses=_response_docs(not_found=True),
+    )
+    async def media_source(asset_id: str, request: Request) -> StreamingResponse:
+        # 直读素材原片（reference 导入的绝对路径文件）：原片在导入时已过 fs_roots 校验，
+        # 直读安全。前端「单击瓦片试看」优先原片、失败再回落 proxy（见 AssetMediaPreview）。
+        state = state_from_request(request)
+        source_path = _require_source_path(state.engine, asset_id)
+        return _range_response(source_path, request)
+
+    @app.api_route(
         "/api/media/{asset_id}/thumbnail",
         methods=["GET", "HEAD"],  # 播放器加载源前会 HEAD 探测 Content-Type，与 GET 同权
         response_class=Response,
@@ -1969,6 +1982,23 @@ def _require_proxy_path(engine: Engine, paths: WorkspacePaths, asset_id: str) ->
     return proxy_path
 
 
+def _require_source_path(engine: Engine, asset_id: str) -> Path:
+    asset = _require_asset(engine, asset_id)
+    # 已失效（源文件被删/改名/改内容，见 media/invalidation）：明确 404 带 reason，
+    # 前端据此回落 proxy，而不是把坏源塞给 <video>。
+    failure = _load_json_if_str(asset.get("failure"))
+    if not bool(asset.get("usable", True)) and _failure_code(failure) == "reference_invalidated":
+        raise HTTPException(status_code=404, detail={"reason": "reference_invalidated"})
+    reference_path = asset.get("reference_path")
+    if not isinstance(reference_path, str) or reference_path == "":
+        # COPY 模式素材无原片路径（原片已拷进对象库）：无直读源，前端回落 proxy。
+        raise HTTPException(status_code=404, detail={"reason": "source_not_available"})
+    source_path = Path(reference_path)
+    if not source_path.exists() or not source_path.is_file():
+        raise HTTPException(status_code=404, detail={"reason": "source_not_found"})
+    return source_path
+
+
 def _require_thumbnail_path(engine: Engine, paths: WorkspacePaths, asset_id: str) -> Path:
     asset = _require_asset(engine, asset_id)
     thumbnail_hash = asset.get("thumbnail_object_hash")
@@ -2082,13 +2112,33 @@ def _iter_file_range(path: Path, start: int, end: int) -> Iterator[bytes]:
             yield chunk
 
 
+# /source 直读原片会碰到图片与各种音视频容器，Content-Type 必须准确，否则 <img>/<video>
+# 拒绝渲染；proxy/preview/export 恒为 .mp4，扩展这张表对它们无副作用（未知后缀仍回落 mp4）。
+_MEDIA_TYPE_BY_SUFFIX: dict[str, str] = {
+    ".mp4": "video/mp4",
+    ".m4v": "video/mp4",
+    ".mov": "video/quicktime",
+    ".webm": "video/webm",
+    ".mkv": "video/x-matroska",
+    ".avi": "video/x-msvideo",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/aac",
+    ".aac": "audio/aac",
+    ".wav": "audio/wav",
+    ".flac": "audio/flac",
+    ".ogg": "audio/ogg",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".tiff": "image/tiff",
+}
+
+
 def _media_type_for_path(path: Path) -> str:
-    suffix = path.suffix.lower()
-    if suffix == ".mp3":
-        return "audio/mpeg"
-    if suffix in {".m4a", ".aac"}:
-        return "audio/aac"
-    return "video/mp4"
+    return _MEDIA_TYPE_BY_SUFFIX.get(path.suffix.lower(), "video/mp4")
 
 
 def _fingerprint(arguments: Mapping[str, Any]) -> str:
