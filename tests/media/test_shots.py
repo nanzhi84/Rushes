@@ -57,6 +57,59 @@ def test_split_shots_requires_existing_file(tmp_path: Path) -> None:
         split_shots(tmp_path / "missing.mp4")
 
 
+def test_prepare_analysis_clip_uses_original_without_hwaccel(tmp_path: Path, monkeypatch) -> None:
+    import media.shots as shots_module
+
+    monkeypatch.setattr(shots_module, "hwaccel_decode_args", lambda *a, **k: [])
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"x")
+
+    analysis_path, cleanup = shots_module._prepare_analysis_clip(source)
+
+    assert analysis_path == source  # 无硬解：直接在原片上分析
+    cleanup()  # noop 不报错
+
+
+def test_prepare_analysis_clip_falls_back_when_prepass_fails(tmp_path: Path, monkeypatch) -> None:
+    import media.shots as shots_module
+
+    monkeypatch.setattr(
+        shots_module, "hwaccel_decode_args", lambda *a, **k: ["-hwaccel", "videotoolbox"]
+    )
+    monkeypatch.setattr(
+        shots_module.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 1, "", "boom"),
+    )
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"x")
+
+    analysis_path, cleanup = shots_module._prepare_analysis_clip(source)
+
+    assert analysis_path == source  # 预处理失败回落原片
+    cleanup()
+
+
+def test_prepare_analysis_clip_falls_back_when_ffmpeg_missing(tmp_path: Path, monkeypatch) -> None:
+    import media.shots as shots_module
+
+    monkeypatch.setattr(
+        shots_module, "hwaccel_decode_args", lambda *a, **k: ["-hwaccel", "videotoolbox"]
+    )
+
+    def boom(*args, **kwargs):
+        raise OSError("no ffmpeg")
+
+    monkeypatch.setattr(shots_module.subprocess, "run", boom)
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"x")
+
+    analysis_path, cleanup = shots_module._prepare_analysis_clip(source)
+
+    assert analysis_path == source  # ffmpeg 起不来也回落原片
+    cleanup()
+
+
 def _make_two_scene_video(tmp_path: Path) -> Path:
     video = tmp_path / "two_scenes.mp4"
     subprocess.run(
