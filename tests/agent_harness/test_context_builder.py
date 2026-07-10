@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict
 
 from agent_harness.context_builder import (
@@ -380,3 +382,74 @@ def test_workspace_and_draft_blocks_handle_missing_state() -> None:
         )
     )
     assert _render_draft_header_block(empty) == "draft: none"
+
+
+def _catalog_spec(
+    name: str,
+    cost_tier: Literal["free", "cheap", "expensive"],
+    description: str = "能力说明",
+) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        namespace=name.split(".")[0],
+        version="1",
+        input_model=EmptyInput,
+        result_model=None,
+        handler_ref=f"handlers.{name}",
+        allowed_scopes=["draft_editor"],
+        requires_artifacts=[],
+        requires_active_draft=False,
+        side_effects=[],
+        emits_events=[],
+        cost_tier=cost_tier,
+        description=description,
+    )
+
+
+def test_allowed_tools_catalog_lists_one_line_per_tool_without_schema() -> None:
+    from agent_harness.context_builder import _render_allowed_tools_block
+
+    specs = [
+        _catalog_spec("z.expensive", "expensive", "跑云端模型"),
+        _catalog_spec("a.cheap", "cheap", "本地写状态"),
+        _catalog_spec("b.free", "free", "只读清单"),
+    ]
+
+    rendered = _render_allowed_tools_block(specs)
+    tool_lines = [line for line in rendered.splitlines() if line.startswith("- ")]
+
+    # 每个允许工具恰好一行，且带上描述
+    assert len(tool_lines) == len(specs)
+    for spec in specs:
+        matches = [line for line in tool_lines if line.startswith(f"- {spec.name}（")]
+        assert len(matches) == 1
+        assert spec.description in matches[0]
+
+    # 成本标签用中文，三档齐全
+    assert "（免费）" in rendered
+    assert "（便宜）" in rendered
+    assert "（昂贵）" in rendered
+
+    # 不再 dump JSON Schema：无 input_schema / model_json_schema / object 痕迹
+    assert "input_schema" not in rendered
+    assert "model_json_schema" not in rendered
+    assert '"type": "object"' not in rendered
+
+    # 按成本从低到高分组：free → cheap → expensive
+    assert rendered.index("b.free") < rendered.index("a.cheap") < rendered.index("z.expensive")
+
+
+def test_allowed_tools_catalog_sorts_by_name_within_tier() -> None:
+    from agent_harness.context_builder import _render_allowed_tools_block
+
+    rendered = _render_allowed_tools_block(
+        [_catalog_spec("free.b", "free"), _catalog_spec("free.a", "free")]
+    )
+
+    assert rendered.index("free.a") < rendered.index("free.b")
+
+
+def test_allowed_tools_catalog_empty_is_explicit() -> None:
+    from agent_harness.context_builder import _render_allowed_tools_block
+
+    assert _render_allowed_tools_block([]) == "allowed_tools: none"

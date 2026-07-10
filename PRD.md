@@ -578,7 +578,7 @@ sequenceDiagram
 | memory | memory.search_relevant top-k（k ≤ 5）摘要 | 1.5k | 按相关性截断 |
 | assets | 素材摘要索引：每个已 link 素材一行（文件名、kind、rel_dir、时长、understanding_status、semantic_role、overall 截断） | 1k | 完整 segments 不常驻，主代理需要时调 `understand.materials`（命中缓存取全文） |
 | messages | 最近消息窗口 + 更早对话的滚动摘要 | 8k | 滚动摘要 |
-| allowed_tools | 本轮合法工具 schema | 4k | 由前置条件表决定，不截断 |
+| allowed_tools | 本轮合法工具的**能力目录**：一行一工具（name + 成本标签 + 一句描述），按 `cost_tier`（free/cheap/expensive）从低到高分组——完整参数 Schema 只随原生 `tools` 参数下发一份，不在 system 块重复 | 1.2k | 由前置条件表决定，不截断 |
 
 **timeline 摘要格式**（全量 TimelineState 永不进 prompt）：
 
@@ -602,10 +602,12 @@ flowchart TB
   D --> E{"requires_confirmation 且<br/>无对应 answered decision?"}
   E -->|是| F["仍暴露，但 PolicyGate<br/>会将执行转 ask"]
   E -->|否| G["进入 allowed_tools"]
-  C --> H["输出 tools 列表 + strict schema"]
+  C --> H["原生 tools 参数带唯一一份 strict schema；<br/>system 块只渲染能力目录（name+成本+描述）"]
   F --> H
   G --> H
 ```
+
+briefing 阶段指引采用**渐进证据梯度**：从最低成本证据开始（assets 块 / `asset.list_assets`，免费）→ 需要看画面再 `media.view_frames` 少量抽帧（昂贵）→ 只对进入剪辑决策的素材 `understand.materials` 深度理解（昂贵、增量、有缓存）；证据够了就停，不要求「先看懂全部素材」。`ToolSpec.cost_tier` 是该梯度的机器可读依据。
 
 ### 4.4 PolicyGate：事前裁剪 + 事后校验
 
@@ -1518,6 +1520,7 @@ flowchart LR
 ```
 
 - **无向量库、无 FTS、无 RRF、无候选包**：主代理直接读 MaterialSummary 的 `segments`（含 description/quality/时间戳）推理选段，用秒级 source 段落调 `timeline.compose_initial`；读全文即 `understand.materials` 命中缓存（原独立的 `asset.read_summary` 工具已并入，§6.2/§6.3）。
+- **进入深度理解前走渐进证据梯度**（§4.3）：L0 清单（`asset.list_assets`）→ 少量抽帧定向看（`media.view_frames`）→ 仅对最终候选 `understand.materials`；不必为动手而理解全部素材。
 - 选材范围受作用域约束：仅限当前草稿已链接、usable 的素材（不用即删，无 selected/disabled 维度）。
 - 素材存活由 validator 保证（§10.2 第 2b 条：compose/validate/materialize 前重验 asset 仍 usable ∧ linked 到本草稿），素材断链直接 validate 失败，不静默替换。
 

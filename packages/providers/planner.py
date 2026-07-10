@@ -25,7 +25,7 @@ from providers.registry import ProviderRegistry
 CONTEXT_BLOCK_ORDER: tuple[str, ...] = (
     "system",
     "workspace",
-    "case_header",
+    "draft_header",
     "artifacts",
     "pending_decision",
     "memory",

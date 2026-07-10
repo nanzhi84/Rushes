@@ -198,6 +198,39 @@ def test_default_tool_and_patch_registries_match_surface() -> None:
     assert PATCH_OP_REGISTRY.require("add_bgm").requires_artifacts == ["rough_cut_approved"]
 
 
+def test_every_tool_spec_declares_cost_tier() -> None:
+    specs = {spec.name: spec for spec in tool_specs()}
+    assert len(specs) == 31
+    # 31 个 spec 全部显式落在三档之内，无遗漏
+    assert all(spec.cost_tier in {"free", "cheap", "expensive"} for spec in specs.values())
+
+    # free 组只含只读本地状态工具（渐进披露里模型可随手取证）
+    free_tools = {name for name, spec in specs.items() if spec.cost_tier == "free"}
+    assert free_tools == {
+        "asset.list_assets",
+        "timeline.inspect",
+        "render.status",
+        "memory.search_relevant",
+    }
+
+    # 碰云端模型 / 长任务的工具必须是 expensive
+    for name in (
+        "understand.materials",
+        "media.view_frames",
+        "audio.asr_original",
+        "audio.rough_cut_speech",
+        "audio.generate_tts",
+        "render.preview",
+        "render.final_mp4",
+        "memory.extract_from_draft",
+    ):
+        assert specs[name].cost_tier == "expensive", name
+
+    # 本地写状态类是 cheap
+    for name in ("interaction.ask_user", "content.create_plan", "timeline.apply_patch"):
+        assert specs[name].cost_tier == "cheap", name
+
+
 def test_registry_exposes_latest_stable_unless_experimental_enabled() -> None:
     registry = ToolRegistry()
     registry.register(_spec("x.echo", version="1"), _handler)

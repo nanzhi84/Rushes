@@ -292,7 +292,7 @@ async def test_planner_builds_messages_and_tools_in_prd_block_order() -> None:
         content,
         "## system",
         "## workspace",
-        "## case_header",
+        "## draft_header",
         "## artifacts",
         "## pending_decision",
         "## memory",
@@ -438,7 +438,7 @@ def _context_bundle() -> ContextBundle:
     blocks = {
         "system": "system block",
         "workspace": "workspace block",
-        "case_header": "case block",
+        "draft_header": "draft block",
         "artifacts": "artifacts block",
         "pending_decision": "pending block",
         "memory": "memory block",
