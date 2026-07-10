@@ -24,9 +24,17 @@ export type StreamToolItem = {
 // 叙述之间（对齐 Claude Code 的呈现方式），而不是把工具堆在消息流末尾。
 export type TurnStreamItem = StreamMessageItem | StreamToolItem;
 
+// 素材理解等子代理执行期间的实时动态：按素材粒度只保留最近一条 note。
+export type SubagentProgressEntry = {
+  asset_id: string;
+  note: string;
+};
+
 export type TurnStreamState = {
   items: TurnStreamItem[];
   turnActive: boolean;
+  // 挂在「当前进行中工具行」下方的子代理进度；工具收尾或回合结束即清空。
+  subagentProgress: SubagentProgressEntry[];
 };
 
 // 服务端 event: turn_stream，data 里以 type 区分。字段见 packages/agent_harness/loop.py。
@@ -36,6 +44,7 @@ export type TurnStreamEvent =
   | { type: "message_completed"; message_id: string; kind: "narration" | "reply"; content: string }
   | { type: "tool_step_started"; step_id: string; tool: string; args_summary?: string }
   | { type: "tool_step_finished"; step_id: string; tool: string; status: string; observation?: string }
+  | { type: "subagent_progress"; asset_id?: string; note?: string }
   | { type: "turn_ended"; outcome: string; reason: string | null }
   | { type: "turn_error"; message: string }
   | { type: string; [key: string]: unknown };
@@ -45,9 +54,10 @@ export type UseTurnStreamOptions = {
   onTurnError?: (message: string) => void;
 };
 
-const INITIAL_STATE: TurnStreamState = {
+export const INITIAL_STATE: TurnStreamState = {
   items: [],
-  turnActive: false
+  turnActive: false,
+  subagentProgress: []
 };
 
 // 纯 reducer：便于单测，也让重连快照重放（turn_started 起头）能从头重建状态。
@@ -55,12 +65,13 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
   switch (event.type) {
     case "turn_started":
       // 新回合（或重连重放）从零重建，避免 text_delta 被重复追加。
-      return { items: [], turnActive: true };
+      return { items: [], turnActive: true, subagentProgress: [] };
     case "text_delta": {
       if (typeof event.message_id !== "string") {
         return state;
       }
       return {
+        ...state,
         turnActive: true,
         items: appendDelta(
           state.items,
@@ -75,6 +86,7 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
       }
       // content 为全文，整体替换流式 buffer（failover 双发的自愈语义）。
       return {
+        ...state,
         turnActive: true,
         items: upsertMessage(state.items, {
           type: "message",
@@ -89,6 +101,7 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
         return state;
       }
       return {
+        ...state,
         turnActive: true,
         items: upsertToolStep(state.items, {
           type: "tool",
@@ -113,14 +126,30 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
           status: typeof event.status === "string" ? event.status : "succeeded",
           argsSummary: null,
           observation: typeof event.observation === "string" && event.observation ? event.observation : null
-        })
+        }),
+        // 工具收尾即清空其子代理进度，避免残留串到下一个进行中工具行上。
+        subagentProgress: []
+      };
+    }
+    case "subagent_progress": {
+      if (typeof event.asset_id !== "string" || !event.asset_id) {
+        return state;
+      }
+      const note = typeof event.note === "string" ? event.note : "";
+      if (!note) {
+        return state;
+      }
+      return {
+        ...state,
+        turnActive: true,
+        subagentProgress: upsertProgress(state.subagentProgress, { asset_id: event.asset_id, note })
       };
     }
     case "turn_ended":
       // 封口：本回合结束，历史消息会被 refetch 接管；流式 buffer 交给 message_id 去重清理。
-      return { ...state, turnActive: false };
+      return { ...state, turnActive: false, subagentProgress: [] };
     case "turn_error":
-      return { ...state, turnActive: false };
+      return { ...state, turnActive: false, subagentProgress: [] };
     default:
       return state;
   }
@@ -208,6 +237,18 @@ function upsertToolStep(items: TurnStreamItem[], next: StreamToolItem): TurnStre
         }
       : item
   );
+}
+
+function upsertProgress(
+  entries: SubagentProgressEntry[],
+  next: SubagentProgressEntry
+): SubagentProgressEntry[] {
+  const index = entries.findIndex((entry) => entry.asset_id === next.asset_id);
+  if (index < 0) {
+    return [...entries, next];
+  }
+  // 同一素材的新 note 覆盖旧的，保持原有顺序稳定（不因刷新跳到末尾）。
+  return entries.map((entry, current) => (current === index ? next : entry));
 }
 
 function normalizeCompletedKind(kind: unknown): TurnStreamMessageKind {

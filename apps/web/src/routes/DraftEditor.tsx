@@ -186,7 +186,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const refreshMessages = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) });
   }, [draftId, queryClient]);
-  const { items: streamItems } = useTurnStream(draftId, {
+  const { items: streamItems, subagentProgress } = useTurnStream(draftId, {
     onTurnEnded: refreshMessages
   });
 
@@ -430,6 +430,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             answerPending={answerDecision.isPending}
             highlightedMessageId={highlightedMessageId}
             streamItems={streamItems}
+            subagentProgress={subagentProgress}
           />
 
           {sideDecisionItem ? (
