@@ -268,7 +268,7 @@ erDiagram
     text reference_path "reference 模式"
     text kind "video|image|audio|font"
     text source "upload|local_path|url"
-    text hash "sha256"
+    text hash "sha256（reference 导入期为 pending 占位，hash job 补算后覆盖）"
     int  mtime
     int  size
     json probe "duration,fps,wh,has_audio"
@@ -461,8 +461,8 @@ workspace/
 
 reference 配套规则：
 
-1. 导入时分块流式算 SHA-256（不整读内存）。
-2. 启动时与进素材面板时做失效检测：先 mtime+size 快路径，不一致再重算 hash；缺失/变更 → `usable=false` + `AssetInvalidated` 事件 + UI 提示重新定位。
+1. 导入同步路径**不整文件读取**：`hash` 列先写 `pending:{size}:{mtime_ns}` 占位（provisional fingerprint），canonical SHA-256 由最低认领优先级的后台 `hash` job 分块补算，经 `AssetHashComputed` 事件覆盖占位。copy 模式的 hash 复用 CAS 入库时已算的 object_hash，不入 hash job。
+2. 启动时与进素材面板时做失效检测：先 mtime+size 快路径，不一致再重算 hash 比对；`hash` 列仍是 `pending:` 占位（补算空窗）时跳过慢路径，size/mtime 一变即判失效。缺失/变更 → `usable=false` + `AssetInvalidated` 事件 + UI 提示重新定位。
 3. 无论哪种模式，代理文件、抽帧、缩略图、渲染产物一律进 object store。
 4. 读素材统一走 `resolve_asset_path(asset_id)`，调用方不感知 storage_mode。
 5. **全局按 `reference_path` 去重**：import-local 先查全局 `assets`（不限当前草稿）——命中即复用该 asset 秒级建链（`AssetLinked`，复用已有代理/缩略图/分镜/波形/理解摘要；缺产物才补队），未命中才新建 AssetRecord 走 ingest 管线。`hash` 列保留，暂不参与去重。
@@ -677,14 +677,14 @@ flowchart LR
 }
 ```
 
-**事件全集（contracts/events.py 判别联合，共 44 个）：**
+**事件全集（contracts/events.py 判别联合，共 45 个）：**
 
-由 v1.5 的 51 个事件收敛而来——**删除 7**（`ProjectCreated`/`ProjectRenamed`/`ProjectTrashed`/`ProjectCopied` 四个 Project 事件 + `CaseMoved` + `CaseClosed` + `CaseAssetScopeChanged`）、**改名 4**（`CaseCreated→DraftCreated`、`CaseRenamed→DraftRenamed`、`CaseCopied→DraftCopied`、`CaseTrashed→DraftTrashed`），其余事件的锚字段字面改为 `draft_id` / `requested_by_draft_id`，strict/merge 语义不变。四处清单 `EVENT_CLASSES`/`EventName`/`EVENT_UNION`/`REDUCER_DISPATCH_EVENTS` 同步为 44，check_contracts 卡。
+由 v1.5 的 51 个事件收敛而来——**删除 7**（`ProjectCreated`/`ProjectRenamed`/`ProjectTrashed`/`ProjectCopied` 四个 Project 事件 + `CaseMoved` + `CaseClosed` + `CaseAssetScopeChanged`）、**改名 4**（`CaseCreated→DraftCreated`、`CaseRenamed→DraftRenamed`、`CaseCopied→DraftCopied`、`CaseTrashed→DraftTrashed`），其余事件的锚字段字面改为 `draft_id` / `requested_by_draft_id`，strict/merge 语义不变；后又**新增 1**（`AssetHashComputed`，hash 后台补算回填）。四处清单 `EVENT_CLASSES`/`EventName`/`EVENT_UNION`/`REDUCER_DISPATCH_EVENTS` 同步为 45，check_contracts 卡。
 
 | 事件族 | 事件 |
 |---|---|
 | Draft | DraftCreated / DraftRenamed / DraftCopied / DraftTrashed |
-| Asset | AssetImported / AssetProbed / ProxyGenerated / AssetIndexReady / AssetIndexFailed / AssetInvalidated / AssetLinked / AssetUnlinked |
+| Asset | AssetImported / AssetProbed / AssetHashComputed / ProxyGenerated / AssetIndexReady / AssetIndexFailed / AssetInvalidated / AssetLinked / AssetUnlinked |
 | Understanding | MaterialUnderstandingStarted / MaterialUnderstandingCompleted / MaterialUnderstandingFailed |
 | Decision | DecisionCreated / DecisionAnswered / DecisionCancelled |
 | Plan | BriefUpdated / ContentPlanUpdated / AudioPlanUpdated / CutPlanUpdated / PostprocessPlanUpdated |
@@ -694,7 +694,7 @@ flowchart LR
 | Job | JobEnqueued / JobProgress / JobSucceeded / JobFailed / JobCancelled |
 | Harness | PolicyRefusal / ProviderCallRecorded / ContextCompacted / TurnEnded / CapabilityDegraded / SecurityRefusal |
 
-（4 Draft + 8 Asset + 3 Understanding + 3 Decision + 5 Plan + 4 Timeline + 3 Render + 3 Memory + 5 Job + 6 Harness = **44**。）
+（4 Draft + 9 Asset + 3 Understanding + 3 Decision + 5 Plan + 4 Timeline + 3 Render + 3 Memory + 5 Job + 6 Harness = **45**。）
 
 **Reducer 版本规则：权威事件表（每个 DomainEvent 一一归类）**
 
@@ -703,7 +703,7 @@ flowchart LR
 | 事件 | 版本 | 幂等/合并键 | 状态影响 |
 |---|---|---|---|
 | DraftCreated/DraftRenamed/DraftCopied/DraftTrashed | merge | draft_id | Draft 结构；**仅 UI/REST 发起**（§6，Agent 无对应工具）；引用一致性由 Validator 保证 |
-| AssetImported/AssetProbed/ProxyGenerated/AssetIndexReady/AssetIndexFailed/AssetInvalidated | merge | asset_id (+job_id) | AssetRecord |
+| AssetImported/AssetProbed/AssetHashComputed/ProxyGenerated/AssetIndexReady/AssetIndexFailed/AssetInvalidated | merge | asset_id (+job_id) | AssetRecord（AssetHashComputed 只覆盖 hash 列，替换 pending 占位） |
 | AssetLinked/AssetUnlinked | merge | (draft_id, asset_id) | DraftAssetLink |
 | DecisionCreated/Answered/Cancelled（scope=draft） | strict | decision_id | pending_decision_id + Decision 行；**DecisionAnswered 同时拥有 §7.6.1 归约触及的全部 DraftState 字段**（含 approve_rough_cut 的 rough_cut_approved / rough_cut_approved_version——不借道 CutPlanUpdated 暗改） |
 | DecisionCreated/Answered/Cancelled（scope=workspace） | merge | decision_id（status 字段 CAS） | 仅 Decision 行，不触碰任何 DraftState |
@@ -806,7 +806,7 @@ stateDiagram-v2
 | job 类型 | 触发方 | 完成后去向 |
 |---|---|---|
 | draft 级（asr / tts / render_preview / render_final / align） | 草稿内 Agent | observation 入该草稿 Turn Queue；进 DraftState.running_jobs |
-| asset 级（proxy / index / import 下载） | 素材导入（UI/agent）/ proxy 完成自动链入 index | **不进任何 Turn Queue**：落 EventLog + workspace 级 SSE 更新素材面板；Agent 下轮从素材统计自然看到 |
+| asset 级（poster / proxy / index / hash / import 下载） | 素材导入（UI/agent）/ proxy 完成自动链入 index | **不进任何 Turn Queue**：落 EventLog + workspace 级 SSE 更新素材面板；Agent 下轮从素材统计自然看到。认领优先级 poster 最高、hash 最低（`CLAIM_SQL` 三级） |
 | asset 级但由草稿内 Agent 触发 | 草稿内 Agent | 记 `requested_by_draft_id`，完成后 observation 入该草稿 Turn Queue（Agent 在等这个结果）；同时照常发 workspace SSE |
 
 注：**素材理解不是 job**——`understand.materials` 在 turn 内同步派子代理并 `asyncio.gather` 并发（§4 子代理机制），不入 job 队列；导入只自动跑便宜 index job（本地无网络）。
@@ -980,7 +980,7 @@ Agent 可跳过任何非必需节点（如无旁白场景直接 visual storyline
 |---|---|---|---|
 | `asset.import_local_file` | 本地路径导入（默认 reference，直挂当前草稿）；**全局按 reference_path 去重**：命中已有 asset 只发 AssetLinked 秒级建链，未命中才建档进 ingest（§3.5、§8.1） | - | AssetImported* / AssetLinked |
 | `asset.import_url` | 导入用户显式 URL；确认后入 `import_url` job 下载（只下载该文件，不抓页面），完成后建档进 ingest 并链到当前草稿 | ✓ url_import | JobEnqueued → AssetImported → AssetLinked |
-| `asset.list_assets` | 列当前草稿全部链接素材（`asset_id / kind / rel_dir / usable / has_summary`）；合并原 list_project_assets + list_case_scope | - | -（只读） |
+| `asset.list_assets` | 当前草稿素材的 L0 清单：每行 `asset_id / filename / kind / rel_dir / duration_sec / width / height / orientation / has_audio / usable / ingest_status / understanding_status / has_summary / thumbnail_ready`，支持 `kind / has_audio / only_usable` 过滤与 keyset 分页（`limit` + `after`，data 带 `next_after / total`）；合并原 list_project_assets + list_case_scope | - | -（只读） |
 
 **读素材理解摘要**不再有独立的 `asset.read_summary` 工具：读最新 ready MaterialSummary 全文 = 调 `understand.materials`（命中缓存直接返回全文、不起子代理，§6.3 / §4.11）。
 
@@ -1341,12 +1341,12 @@ sequenceDiagram
 flowchart TB
   A["Import: local reference / URL"] --> B0{"全局 reference_path 命中?"}
   B0 -->|命中| BL["只发 AssetLinked 秒级建链<br/>复用已有代理/索引/摘要（缺产物才补队）"]
-  B0 -->|未命中| B["Create AssetRecord + 流式 SHA-256"]
+  B0 -->|未命中| B["Create AssetRecord<br/>hash 先写 pending 占位<br/>canonical SHA-256 走后台 hash job（最低优先级）"]
   B --> C["Probe: ffprobe + PyAV 精确帧率与帧数"]
-  C --> P["生成 proxy 低码率代理 → object store (job)"]
+  C --> P["生成 proxy 低码率代理 → object store (job)<br/>（仅浏览器播不动的格式，可直播格式跳过）"]
   P --> D{"Asset Kind"}
 
-  D -->|video| V1["便宜索引 index job（本地无网络）:<br/>封面帧 + PySceneDetect 分镜边界（秒）<br/>+ 每镜头首帧缩略图 + 本地 VAD 语音区间"]
+  D -->|video| V1["便宜索引 index job（本地无网络）:<br/>封面帧 + 本地 VAD 语音区间<br/>（分镜边界不再默认跑，理解子代理按需算并回填）"]
   V1 --> V6["写 index_json + thumbnail<br/>index job succeeded"]
 
   D -->|image| I1["缩略图"] --> V6
@@ -1358,7 +1358,7 @@ flowchart TB
 
 理解（看帧 VLM / 听音频 / 读索引 → MaterialSummary）不在 ingest 里跑，而是主代理需要时按需派子代理（§4.11）。ASR 也不在 ingest 强跑——口播粗剪或理解子代理需要时才触发 `asr.transcribe` 写 transcripts（§9）。
 
-索引规则：便宜索引只产技术元数据 + 缩略图 + 分镜边界 + 波形/VAD，**不做质量判定**；画面质量好坏（模糊/抖动/过曝等）由理解子代理看帧后写进 MaterialSummary 的 `segments[].quality`（good/usable/avoid）。索引失败只记 `index_status=failed`，不阻塞任何流程；理解失败见 §4.11 失败语义（重试或经用户知情后绕过）。
+索引规则：便宜索引只产技术元数据 + 缩略图 + 波形/VAD，**不做质量判定**；分镜边界（PySceneDetect）不在默认索引里跑——唯一消费方是理解子代理，由它在需要时按需计算并回填 `index_json.shots`（`AssetIndexReady` merge 事件），算一次全局复用；画面质量好坏（模糊/抖动/过曝等）由理解子代理看帧后写进 MaterialSummary 的 `segments[].quality`（good/usable/avoid）。索引失败只记 `index_status=failed`，不阻塞任何流程；理解失败见 §4.11 失败语义（重试或经用户知情后绕过）。
 
 ### 8.2 理解按需分级（成本控制）
 
