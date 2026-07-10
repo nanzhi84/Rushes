@@ -10,6 +10,7 @@ import asyncio
 import json
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -801,3 +802,135 @@ async def test_shots_backfill_without_sink_batches_event(
         "MaterialUnderstandingStarted",
         "MaterialUnderstandingCompleted",
     ]
+
+
+async def test_shots_backfill_timeout_marks_asset_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(understand_handlers, "_timeout_seconds", lambda: 0.05)
+
+    def _slow_split(_path: Any, *, paths: Any = None) -> tuple[Shot, ...]:
+        # 分镜回填阻塞超过单素材超时：回填现纳入 wait_for，应触发 timeout 失败而非挂死回合。
+        time.sleep(0.5)
+        return (Shot(shot_id="shot_0001", start_sec=0.0, end_sec=6.0),)
+
+    monkeypatch.setattr(understand_handlers, "split_shots", _slow_split)
+    engine = _engine(tmp_path, [{"asset_id": "asset_1", "index_json": {"duration_sec": 12.0}}])
+    gateway = ScriptedVlmGateway({"asset_1": [_emit()]})
+    with engine.connect() as connection:
+        result = await materials(
+            UnderstandMaterialsInput(asset_ids=["asset_1"]),
+            _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
+        )
+
+    assert result.status == "succeeded"
+    assert result.data["results"]["asset_1"]["status"] == "failed"
+    assert "超时" in result.data["results"]["asset_1"]["reason"]
+
+
+async def test_consumer_error_cancels_inflight_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    engine = _engine(tmp_path, [{"asset_id": "fast"}, {"asset_id": "slow"}])
+    gate = asyncio.Event()  # 从不 set：slow 的 VLM 卡住，直到被取消。
+    gateway = GatedVlmGateway(gate, slow_asset="slow")
+
+    class RaisingSink:
+        def __init__(self) -> None:
+            self.calls: list[list[str | None]] = []
+
+        def __call__(self, rows: dict[str, Any], events: list[dict[str, Any]]) -> None:
+            self.calls.append([e.get("asset_id") for e in events])
+            raise RuntimeError("sink boom")
+
+    sink = RaisingSink()
+    with engine.connect() as connection, pytest.raises(RuntimeError, match="sink boom"):
+        await materials(
+            UnderstandMaterialsInput(asset_ids=["fast", "slow"]),
+            _context(engine, connection, gateway=gateway, tmp_path=tmp_path, sink=sink),
+        )
+
+    # 第一个 outcome(fast) 落 sink 即抛错；finally 取消仍在飞的 slow 任务——slow 从未走到 sink，
+    # 未继续经 sink 脏写库（否则会有第二次 sink 调用）。
+    assert sink.calls == [["fast", "fast"]]
+
+
+async def test_transcript_id_unique_across_reunderstanding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+
+    async def _fake_transcribe(
+        _context: Any, _info: Any, start_s: Any, end_s: Any
+    ) -> TranscribeResult:
+        return TranscribeResult(
+            text="你好",
+            language="zh",
+            provider_id="mock_asr",
+            raw_preserved=True,
+            utterances=[
+                {"utterance_id": "u1", "text": "你好", "start_ms": 0, "end_ms": 800, "words": []}
+            ],
+            vad_segments=[],
+            seconds=90.0,
+        )
+
+    monkeypatch.setattr(understand_handlers, "_transcribe_segment", _fake_transcribe)
+    engine = _engine(
+        tmp_path,
+        [
+            {
+                "asset_id": "asset_1",
+                "index_json": {
+                    "duration_sec": 90.0,
+                    "shots": [],
+                    "vad": [{"start_ms": 0, "end_ms": 800, "kind": "speech"}],
+                },
+            }
+        ],
+    )
+    # 同一 turn 对同素材二次理解（focus 深挖绕过缓存）各产一条转写行：
+    # transcript_id 加随机段才不撞主键。
+    for _ in range(2):
+        gateway = ScriptedVlmGateway(
+            {"asset_1": [{"action": "transcribe", "start_s": 0.0, "end_s": 90.0}, _emit()]}
+        )
+        with engine.connect() as connection:
+            result = await materials(
+                UnderstandMaterialsInput(asset_ids=["asset_1"], focus="口播是否清晰"),
+                _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
+            )
+        _persist_rows(result, engine)
+
+    with engine.connect() as connection:
+        transcripts = TranscriptsRepository(connection).list_for_asset("asset_1")
+    assert len(transcripts) == 2
+
+
+async def test_null_index_json_backfills_shots_on_first_understanding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers,
+        "split_shots",
+        lambda _path, *, paths=None: (Shot(shot_id="shot_0001", start_sec=0.0, end_sec=6.0),),
+    )
+    # index_json 为 None（index job 还没跑就被理解）也要回填 shots，否则理解成功后缓存永久命中、
+    # shots 从此没有计算机会。事件 payload 只带 shots（交 reducer 按键合并、不带缩略图/整份快照）。
+    engine = _engine(tmp_path, [{"asset_id": "asset_1", "index_json": None}])
+    gateway = ScriptedVlmGateway({"asset_1": [_emit()]})
+    with engine.connect() as connection:
+        result = await materials(
+            UnderstandMaterialsInput(asset_ids=["asset_1"]),
+            _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
+        )
+
+    assert result.status == "succeeded"
+    index_event = next(e for e in result.events if e["event"] == "AssetIndexReady")
+    assert index_event["payload"]["index_json"] == {
+        "shots": [{"shot_id": "shot_0001", "start_sec": 0.0, "end_sec": 6.0}]
+    }
+    assert "thumbnail_object_hash" not in index_event["payload"]

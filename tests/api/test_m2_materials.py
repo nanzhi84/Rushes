@@ -18,6 +18,7 @@ from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
 from contracts.events import (
+    AssetHashComputed,
     AssetImported,
     AssetIndexReady,
     AssetLinked,
@@ -106,14 +107,13 @@ def test_reference_source_change_invalidates_on_materials_list(tmp_path: Path) -
     client = _client(app)
     source = _media_file(tmp_path, b"before")
     assert _create_draft(client).status_code == 201
-    assert (
-        client.post(
-            "/api/drafts/draft_1/materials/import-local",
-            headers=AUTH,
-            json={"path": str(source)},
-        ).status_code
-        == 200
+    imported = client.post(
+        "/api/drafts/draft_1/materials/import-local",
+        headers=AUTH,
+        json={"path": str(source)},
     )
+    assert imported.status_code == 200
+    _land_canonical_hash(app, imported.json()["asset_id"], source)
     source.write_bytes(b"after-change")
 
     response = client.get("/api/drafts/draft_1/materials", headers=AUTH)
@@ -653,6 +653,25 @@ def _apply_events(engine: Engine, *events: Any) -> None:
     assert result.status == "applied"
 
 
+def _land_canonical_hash(app: FastAPI, asset_id: str, source: Path) -> None:
+    """等价于 hash job 已跑完：以当前文件的同刻快照落 canonical hash。
+
+    失效检测在 pending 占位期不判定，要断言失效链路必须先让 canonical hash 就绪。
+    """
+    stat = source.stat()
+    _apply_events(
+        _engine(app),
+        AssetHashComputed(
+            asset_id=asset_id,
+            payload={
+                "hash": hashlib.sha256(source.read_bytes()).hexdigest(),
+                "mtime": stat.st_mtime_ns,
+                "size": stat.st_size,
+            },
+        ),
+    )
+
+
 def _event_types(app: FastAPI) -> list[str]:
     with _engine(app).connect() as connection:
         rows = EventLogRepository(connection).read_after(0, limit=500)
@@ -848,6 +867,7 @@ def test_media_source_404_when_reference_invalidated(tmp_path: Path) -> None:
     assert _create_draft(client).status_code == 201
     source = _media_file(tmp_path, b"before-change")
     asset_id = _import_reference(client, source)
+    _land_canonical_hash(app, asset_id, source)
     source.write_bytes(b"after-change-different-bytes")
     # 一次 materials 列表触发 revalidation，落 AssetInvalidated（usable=False + 失效码）。
     assert client.get("/api/drafts/draft_1/materials", headers=AUTH).status_code == 200

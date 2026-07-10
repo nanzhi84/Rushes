@@ -292,6 +292,40 @@ def test_list_assets_keyset_pagination(tmp_path: Path) -> None:
     assert page3.data["next_after"] is None
 
 
+def test_list_assets_pagination_with_has_audio_filter(tmp_path: Path) -> None:
+    engine = create_workspace_engine(tmp_path / "workspace")
+    with engine.begin() as connection:
+        schema.create_all(connection)
+        _seed_draft(connection)
+        # asset_0 / asset_2 有音轨，asset_1 / asset_3 无——has_audio 过滤走内存路径。
+        for index in range(4):
+            asset_id = f"asset_{index}"
+            _seed_asset(
+                connection,
+                asset_id,
+                kind="video",
+                probe={"duration_sec": 1.0, "width": 10, "height": 10, "has_audio": index % 2 == 0},
+            )
+            _seed_link(connection, asset_id, rel_dir=None)
+
+    with engine.connect() as connection:
+        page1 = list_assets(
+            AssetListAssetsInput(has_audio=True, limit=1), _context(connection=connection)
+        )
+        page2 = list_assets(
+            AssetListAssetsInput(has_audio=True, limit=1, after=page1.data["next_after"]),
+            _context(connection=connection),
+        )
+
+    # total 是过滤后全集（2），分页语义（next_after）与 SQL 下推路径一致。
+    assert [item["asset_id"] for item in page1.data["assets"]] == ["asset_0"]
+    assert page1.data["total"] == 2
+    assert page1.data["next_after"] == "asset_0"
+    assert [item["asset_id"] for item in page2.data["assets"]] == ["asset_2"]
+    assert page2.data["total"] == 2
+    assert page2.data["next_after"] is None
+
+
 def test_list_assets_orientation_from_probe(tmp_path: Path) -> None:
     engine = create_workspace_engine(tmp_path / "workspace")
     with engine.begin() as connection:

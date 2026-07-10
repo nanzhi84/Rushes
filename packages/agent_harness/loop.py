@@ -124,12 +124,15 @@ def _make_turn_progress(
 def _make_partial_result_sink(
     engine: Engine,
     base_version: int | None,
+    sink_results: list[ReducerApplyResult],
 ) -> Callable[[Mapping[str, Any], Sequence[DomainEventBase | Mapping[str, Any]]], None]:
     """构造增量产物提交回调（``metadata["partial_result_sink"]``）。
 
     understand 子代理逐素材完成时经此即时落库并发事件，与 loop 主路径完全同构：同一批
     先 ``_persist_result_rows`` 落库、再 ``_apply_events`` 发事件。run_turn 单协程内
-    子代理串行提交，天然无并发写问题。
+    子代理串行提交，天然无并发写问题。每次归约结果收进 ``sink_results`` 交回主路径记账；
+    非 applied 立即 raise——摘要行已写但事件没落是脏态（行在库里、understanding_status
+    永不变绿），必须让工具诚实失败（上游 materials 的 finally 会收拢其余在飞任务）。
     """
 
     def _sink(
@@ -137,9 +140,50 @@ def _make_partial_result_sink(
         events: Sequence[DomainEventBase | Mapping[str, Any]],
     ) -> None:
         _persist_result_rows(rows, engine=engine)
-        _apply_events(events, engine=engine, base_version=base_version, actor="agent")
+        result = _apply_events(events, engine=engine, base_version=base_version, actor="agent")
+        sink_results.append(result)
+        if result.status != "applied":
+            event_names = ", ".join(
+                event.event if isinstance(event, DomainEventBase) else str(event.get("event"))
+                for event in events
+            )
+            raise RuntimeError(
+                f"partial_result_sink 归约未落库：status={result.status} events=[{event_names}]"
+            )
 
     return _sink
+
+
+def _record_sink_results(
+    sink_results: Sequence[ReducerApplyResult],
+    *,
+    accumulator: _RunAccumulator | None,
+    tracer: TraceRecorder | NullTraceRecorder | None,
+) -> None:
+    """把增量 sink 应用的归约结果并入主记录处（accumulator + trace），别静默吞掉。"""
+
+    for sink_result in sink_results:
+        if accumulator is not None:
+            accumulator.reducer_results.append(sink_result)
+        if tracer is not None:
+            tracer.record(
+                "events",
+                {
+                    "stage": "partial_result_sink",
+                    "reducer": {
+                        "status": sink_result.status,
+                        "applied_events": [
+                            {
+                                "event_id": applied.event_id,
+                                "event_type": applied.event_type,
+                                "state_version": applied.state_version,
+                            }
+                            for applied in sink_result.applied_events
+                        ],
+                        "skipped_events": sink_result.skipped_events,
+                    },
+                },
+            )
 
 
 # 流式工具步事件里参数摘要/结果观察的截断上限：给前端行内展示用，全文走 trace。
@@ -770,6 +814,8 @@ async def _run_turn_body(
             turn_id=active_turn_id,
             gateway=tool_gateway,
             turn_listener=turn_listener,
+            accumulator=accumulator,
+            tracer=tracer,
         )
         _emit_tool_step_finished(
             turn_listener, step_id, tool_call.tool_name, result.status, result.observation
@@ -1125,6 +1171,8 @@ async def _maybe_answer_pending_decision_from_user_message(
         state=loaded,
         turn_id=turn_id,
         turn_listener=turn_listener,
+        accumulator=accumulator,
+        tracer=tracer,
     )
     accumulator.tool_results.append(result)
     tracer.record("tool_result", _tool_result_payload(result))
@@ -1488,7 +1536,11 @@ async def _execute_tool(
     turn_id: str,
     gateway: Any | None = None,
     turn_listener: TurnListener | None = None,
+    accumulator: _RunAccumulator | None = None,
+    tracer: TraceRecorder | NullTraceRecorder | None = None,
 ) -> ToolResult:
+    # 增量 sink 逐素材应用的归约结果收进这里，工具返回后并入 accumulator/trace，别静默吞掉。
+    sink_results: list[ReducerApplyResult] = []
     with engine.connect() as connection:
         context = ToolExecutionContext(
             tool_call_id=tool_call.tool_call_id or _tool_call_id(tool_call),
@@ -1502,17 +1554,16 @@ async def _execute_tool(
                 gateway,
                 turn_listener=turn_listener,
                 base_version=state.draft_state.state_version,
+                sink_results=sink_results,
             ),
         )
         try:
             # 同步 handler 直接返回 ToolResult（行为零变化，仍在事件循环内同步跑）；
             # async handler 返回 Awaitable，此处 await 后再入 accumulator/trace/observation。
             outcome = router.execute(tool_call, context)
-            if isinstance(outcome, ToolResult):
-                return outcome
-            return await outcome
+            result = outcome if isinstance(outcome, ToolResult) else await outcome
         except Exception as exc:  # pragma: no cover - defensive harness boundary
-            return ToolResult(
+            result = ToolResult(
                 tool_call_id=context.tool_call_id,
                 tool_name=tool_call.tool_name,
                 status="failed",
@@ -1524,6 +1575,8 @@ async def _execute_tool(
                     details={"exception_type": type(exc).__name__},
                 ),
             )
+    _record_sink_results(sink_results, accumulator=accumulator, tracer=tracer)
+    return result
 
 
 def _defer_tool_call(
@@ -1768,7 +1821,15 @@ async def _execute_memory_save_followup(
     )
     try:
         state = _load_state(engine, draft_id)
-        result = await _execute_tool(router, tool_call, engine=engine, state=state, turn_id=turn_id)
+        result = await _execute_tool(
+            router,
+            tool_call,
+            engine=engine,
+            state=state,
+            turn_id=turn_id,
+            accumulator=accumulator,
+            tracer=tracer,
+        )
     except Exception as exc:  # pragma: no cover - defensive post-commit boundary
         result = ToolResult(
             tool_call_id=tool_call.tool_call_id or "followup_memory_save",
@@ -2116,6 +2177,7 @@ def _tool_context_metadata(
     *,
     turn_listener: TurnListener | None = None,
     base_version: int | None = None,
+    sink_results: list[ReducerApplyResult] | None = None,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     database = engine.url.database
@@ -2127,7 +2189,9 @@ def _tool_context_metadata(
     # 进度通道：永远是可调用对象、绝不为 None（无 listener 时为 no-op）。
     metadata["turn_progress"] = _make_turn_progress(turn_listener)
     # 增量产物提交通道：understand 子代理逐素材落库/发事件走它，写路径仍归 harness。
-    metadata["partial_result_sink"] = _make_partial_result_sink(engine, base_version)
+    metadata["partial_result_sink"] = _make_partial_result_sink(
+        engine, base_version, sink_results if sink_results is not None else []
+    )
     return metadata
 
 

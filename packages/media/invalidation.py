@@ -88,9 +88,11 @@ def _is_reference_invalid(row: dict[str, Any]) -> bool:
         return False
     row_hash = row.get("hash")
     if isinstance(row_hash, str) and row_hash.startswith("pending:"):
-        # canonical sha256 未就绪：跳过慢路径，size/mtime 一变就判失效（provisional 语义，
-        # 空窗只有 hash job 补算前的几秒，宁可误杀 touch 也不放过真改动）。
-        return True
+        # canonical sha256 未就绪：推迟失效判定，挂起期一律不判失效。
+        # 权衡：hash job 是最低优先级、批量导入空窗可达分钟级，期间 iCloud/同步工具只 touch
+        # mtime（内容没变）就会被 size/mtime 一变即失效的旧逻辑永久杀掉（usable=False 无恢复路径）。
+        # 宁可挂起期漏判，等 canonical hash 就绪（hash job 以当刻快照刷新三列）后再恢复完整检测。
+        return False
     return _sha256(path) != row_hash
 
 

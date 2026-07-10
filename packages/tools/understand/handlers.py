@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -143,9 +143,10 @@ async def materials(
             if sink is not None:
                 _sink_outcome(sink, outcome, context, asset_info.get(asset_id), focus, draft_id)
     else:
-        # 逐素材增量完成：单素材（含其按需分镜）一到就经 sink 立即落库发事件（UI 卡片逐个变绿），
-        # 不必等最慢的那个算完分镜/理解；无 sink 的旧路径退回批量回填。
-        async for outcome, asset_index_events in _iter_understanding(
+        # 逐素材增量完成：单素材（含其按需分镜）一到就经 sink 立即落库发事件（UI 卡片
+        # 逐个变绿），不必等最慢的那个算完分镜/理解；无 sink 的旧路径退回批量回填。
+        # tasks 由本函数直接持有，消费循环包 try/finally，退出前 cancel + gather 收拢在飞任务。
+        tasks = _spawn_understanding_tasks(
             pending,
             asset_info,
             context,
@@ -155,14 +156,24 @@ async def materials(
             progress=progress,
             sink=sink,
             draft_id=draft_id,
-        ):
-            outcomes[outcome.asset_id] = outcome
-            if sink is not None:
-                _sink_outcome(
-                    sink, outcome, context, asset_info.get(outcome.asset_id), focus, draft_id
-                )
-            else:
-                index_events.extend(asset_index_events)
+        )
+        try:
+            for completed in asyncio.as_completed(tasks):
+                outcome, asset_index_events = await completed
+                outcomes[outcome.asset_id] = outcome
+                if sink is not None:
+                    _sink_outcome(
+                        sink, outcome, context, asset_info.get(outcome.asset_id), focus, draft_id
+                    )
+                else:
+                    index_events.extend(asset_index_events)
+        finally:
+            # 消费循环任何异常（如 sink 落库抛错）或回合取消都不能弃置在飞任务：
+            # 否则它们继续在后台跑、经 sink 脏写库发事件、VLM 费用照烧。
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     return _assemble_result(
         tool_name,
@@ -179,7 +190,7 @@ async def materials(
     )
 
 
-async def _iter_understanding(
+def _spawn_understanding_tasks(
     pending: Mapping[str, _Pending],
     asset_info: Mapping[str, _AssetInfo],
     context: ToolExecutionContext,
@@ -190,36 +201,42 @@ async def _iter_understanding(
     progress: Any,
     sink: PartialResultSink | None,
     draft_id: str | None,
-) -> AsyncIterator[tuple[SubagentOutcome, list[dict[str, Any]]]]:
-    """按完成顺序 yield 各素材 ``(outcome, index_events)``。
+) -> list[asyncio.Task[tuple[SubagentOutcome, list[dict[str, Any]]]]]:
+    """给每个 pending 素材起一个理解任务，返回 Task 列表交调用方持有并收拢。
 
     每个素材一个任务：Semaphore 并发内先按需算分镜（与其他素材的 VLM 调用重叠）、再派子代理，
-    因此第 1 个素材完成不必等最慢项算完分镜。单素材 ``wait_for`` 超时、失败隔离。``index_events``
-    在 sink 存在时已即时发出、返回空；无 sink 时随 outcome 带回、由调用方批量回填。
+    因此第 1 个素材完成不必等最慢项算完分镜。**回填 + 建 spec + 子代理整体纳入单素材 wait_for
+    超时**：长视频在无硬解、回落原片的机器上 PySceneDetect 可无界运行，若把回填放在 wait_for 之外
+    就会挂死回合、超时永不触发。``index_events`` 在 sink 存在时已即时发出、返回空；无 sink 时随
+    outcome 带回、由调用方批量回填（回填先于子代理执行，故超时也保留已产出的分镜事件）。
     """
 
-    if not pending:
-        return
     semaphore = asyncio.Semaphore(_concurrency())
     timeout = _timeout_seconds()
 
     async def _one(asset_id: str, item: _Pending) -> tuple[SubagentOutcome, list[dict[str, Any]]]:
         async with semaphore:
-            info, index_events = await _backfill_shots_one(
-                asset_info[asset_id], context, sink=sink, draft_id=draft_id
-            )
-            spec = _make_spec(
-                context,
-                info,
-                gateway=gateway,
-                focus=focus,
-                version=item.version,
-                prior_summary=item.prior_summary,
-                model=model,
-                progress=progress,
-            )
+            produced_events: list[dict[str, Any]] = []
+
+            async def _run() -> SubagentOutcome:
+                info, index_events = await _backfill_shots_one(
+                    asset_info[asset_id], context, sink=sink, draft_id=draft_id
+                )
+                produced_events.extend(index_events)
+                spec = _make_spec(
+                    context,
+                    info,
+                    gateway=gateway,
+                    focus=focus,
+                    version=item.version,
+                    prior_summary=item.prior_summary,
+                    model=model,
+                    progress=progress,
+                )
+                return await run_understanding_subagent(spec)
+
             try:
-                outcome = await asyncio.wait_for(run_understanding_subagent(spec), timeout=timeout)
+                outcome = await asyncio.wait_for(_run(), timeout=timeout)
             except TimeoutError:
                 outcome = SubagentOutcome(
                     asset_id=asset_id,
@@ -234,11 +251,9 @@ async def _iter_understanding(
                     failure_reason=f"理解异常：{exc}",
                     failure_code="vlm_error",
                 )
-            return outcome, index_events
+            return outcome, produced_events
 
-    tasks = [asyncio.ensure_future(_one(asset_id, item)) for asset_id, item in pending.items()]
-    for completed in asyncio.as_completed(tasks):
-        yield await completed
+    return [asyncio.ensure_future(_one(asset_id, item)) for asset_id, item in pending.items()]
 
 
 def _sink_outcome(
@@ -381,11 +396,17 @@ async def _backfill_shots_one(
     在子代理任务内、``run_understanding_subagent`` 之前执行（与其他素材的 VLM 调用重叠），
     返回回填后的 ``_AssetInfo``（喂当前子代理索引）与需批量回填的事件列表。sink 存在时即时
     落库/发事件、返回空事件；分镜失败降级为记日志、shots 缺失继续理解，绝不让素材理解失败。
+
+    ``index_json`` 为 None（素材在 index job 完成前就被理解）也放行回填，否则理解成功后缓存永久
+    命中、shots 从此没有计算机会。事件 payload **只带 shots**，交 reducer 按键合并——不再用启动时
+    快照的整份 index_json/缩略图去覆盖排队期间 worker 并发写入的新索引/新缩略图。
     """
 
     index = info.index_json
-    if info.kind != "video" or info.path is None or not isinstance(index, dict) or "shots" in index:
+    if info.kind != "video" or info.path is None:
         return info, []
+    if isinstance(index, dict) and "shots" in index:
+        return info, []  # 已有 shots，无需回填
     paths = _workspace_paths_or_none(context)
     if paths is None:
         return info, []
@@ -394,12 +415,13 @@ async def _backfill_shots_one(
     except Exception as exc:  # 分镜是廉价加成，失败只降级不阻塞理解
         logger.warning("按需分镜失败，跳过 shots 回填：asset_id=%s err=%s", info.asset_id, exc)
         return info, []
-    merged = {**index, "shots": [_shot_payload(shot) for shot in shots]}
-    updated = replace(info, index_json=merged)
+    shots_payload = [_shot_payload(shot) for shot in shots]
+    base = index if isinstance(index, dict) else {}
+    updated = replace(info, index_json={**base, "shots": shots_payload})
     event = AssetIndexReady(
         asset_id=info.asset_id,
         draft_id=draft_id,
-        payload={"index_json": merged, "thumbnail_object_hash": info.thumbnail_object_hash},
+        payload={"index_json": {"shots": shots_payload}},
     ).model_dump(mode="json")
     if sink is not None:
         sink({}, [event])
@@ -664,7 +686,9 @@ def _transcript_row(
 ) -> dict[str, Any]:
     safe_turn = turn_id.replace(":", "_")
     return {
-        "transcript_id": f"tr_us_{safe_turn}_{asset_id}_{seq}",
+        # 加随机段（仿 summary_id）：同一回合对同素材二次理解（focus 深挖）再转写时，
+        # 裸 tr_us_{turn}_{asset}_{seq} 会撞主键让整个工具失败。
+        "transcript_id": f"tr_us_{safe_turn}_{asset_id}_{seq}_{uuid4().hex[:8]}",
         "asset_id": asset_id,
         "provider_id": result.provider_id,
         "raw_preserved": result.raw_preserved,

@@ -4,7 +4,6 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-import pytest
 from apps.worker.hash_jobs import build_hash_handler
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
@@ -12,6 +11,7 @@ from sqlalchemy.engine import Engine
 from agent_harness.reducer import apply
 from contracts.events import AssetImported, DraftCreated
 from contracts.jobs import Job
+from media import invalidation
 from storage import schema
 from storage.db import create_workspace_engine
 from storage.workspace_paths import WorkspacePaths
@@ -81,12 +81,38 @@ async def test_hash_job_computes_canonical_sha256(tmp_path: Path) -> None:
     assert _asset_row(engine, asset_id)["hash"] == expected
 
 
-async def test_hash_job_raises_when_file_missing(tmp_path: Path) -> None:
+async def test_hash_job_snapshots_stat_with_hash(tmp_path: Path) -> None:
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"v0")
+    engine, paths, asset_id = _ingest_reference(tmp_path, source)
+    # 导入后、hash job 跑前文件被改写：新内容 + 新 mtime/size。
+    source.write_bytes(b"v1-longer-bytes")
+    new_stat = source.stat()
+
+    await build_hash_handler(engine, paths)(_job(asset_id))
+
+    row = _asset_row(engine, asset_id)
+    # 三列同刻快照：hash 与 mtime/size 都描述改写后的新文件（而非导入时的旧值）。
+    assert row["hash"] == hashlib.sha256(b"v1-longer-bytes").hexdigest()
+    assert row["mtime"] == new_stat.st_mtime_ns
+    assert row["size"] == new_stat.st_size
+    # 未再变的文件失效检测判有效（快路径命中）；再改一次则判失效。
+    assert invalidation._is_reference_invalid(row) is False
+    source.write_bytes(b"v2-even-longer-bytes")
+    assert invalidation._is_reference_invalid(_asset_row(engine, asset_id)) is True
+
+
+async def test_hash_job_missing_file_degrades_without_failing(tmp_path: Path) -> None:
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"gone")
     engine, paths, asset_id = _ingest_reference(tmp_path, source)
+    before = _asset_row(engine, asset_id)
     source.unlink()
 
-    # 文件读失败抛异常，交给 job 重试机制（runner 视为 retryable）。
-    with pytest.raises(FileNotFoundError):
-        await build_hash_handler(engine, paths)(_job(asset_id))
+    # best-effort：文件读失败只降级返回、job 成功，绝不抛异常/发 JobFailed 阴杀完全可用的素材。
+    result = await build_hash_handler(engine, paths)(_job(asset_id))
+
+    assert result.result_json["hash_status"] == "skipped"
+    after = _asset_row(engine, asset_id)
+    assert after["usable"] == before["usable"]  # 素材可用性不变
+    assert after["hash"] == before["hash"]  # hash 仍是导入时的 pending 占位

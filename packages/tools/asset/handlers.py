@@ -7,7 +7,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from contracts.asset import AssetKind, AssetSource, StorageMode
 from contracts.events import AssetImported, AssetLinked, JobEnqueued
@@ -125,7 +125,16 @@ def list_assets(input_model: AssetListAssetsInput, context: ToolExecutionContext
             "missing_draft",
             "active draft and repository access required",
         )
-    statement = (
+    join = schema.assets.join(
+        schema.draft_asset_links,
+        schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id,
+    )
+    filters = [schema.draft_asset_links.c.draft_id == draft_id]
+    if input_model.kind is not None:
+        filters.append(schema.assets.c.kind == input_model.kind)
+    if input_model.only_usable:
+        filters.append(schema.assets.c.usable.is_(True))
+    columns = (
         select(
             schema.assets.c.asset_id,
             schema.assets.c.filename,
@@ -137,33 +146,44 @@ def list_assets(input_model: AssetListAssetsInput, context: ToolExecutionContext
             schema.assets.c.usable,
             schema.draft_asset_links.c.rel_dir,
         )
-        .select_from(
-            schema.assets.join(
-                schema.draft_asset_links,
-                schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id,
-            )
-        )
-        .where(schema.draft_asset_links.c.draft_id == draft_id)
+        .select_from(join)
+        .where(*filters)
         .order_by(schema.assets.c.asset_id)
     )
-    if input_model.kind is not None:
-        statement = statement.where(schema.assets.c.kind == input_model.kind)
-    if input_model.only_usable:
-        statement = statement.where(schema.assets.c.usable.is_(True))
-    rows = context.readonly_connection.execute(statement).all()
-    asset_ids = [str(row._mapping["asset_id"]) for row in rows]
-    with_summary = _asset_ids_with_summary(context, asset_ids)
-    entries = [_asset_manifest_entry(row._mapping, with_summary) for row in rows]
-    # has_audio 在 probe JSON 里、无法用 SQL 过滤，落到内存筛；probe 缺失（None）两种取值都不命中。
-    if input_model.has_audio is not None:
+    connection = context.readonly_connection
+    if input_model.has_audio is None:
+        # has_audio 是唯一没法下推的过滤（藏在 probe JSON 里）；它为 None 时把 total/after/limit
+        # 全下推 SQL，每页只取 limit+1 行、只对本页查 has_summary，不再全量取行 + 解码全部 probe。
+        total = int(
+            connection.execute(select(func.count()).select_from(join).where(*filters)).scalar_one()
+        )
+        statement = columns
+        if input_model.after is not None:
+            statement = statement.where(schema.assets.c.asset_id > input_model.after)
+        if input_model.limit is not None:
+            statement = statement.limit(input_model.limit + 1)
+        rows = connection.execute(statement).all()
+        asset_ids = [str(row._mapping["asset_id"]) for row in rows]
+        with_summary = _asset_ids_with_summary(context, asset_ids)
+        entries = [_asset_manifest_entry(row._mapping, with_summary) for row in rows]
+        next_after: str | None = None
+        if input_model.limit is not None and len(entries) > input_model.limit:
+            entries = entries[: input_model.limit]
+            next_after = entries[-1]["asset_id"]
+    else:
+        # has_audio 非 None：probe 在 JSON 里无法下推，保留内存路径（全量取行后筛）。
+        rows = connection.execute(columns).all()
+        asset_ids = [str(row._mapping["asset_id"]) for row in rows]
+        with_summary = _asset_ids_with_summary(context, asset_ids)
+        entries = [_asset_manifest_entry(row._mapping, with_summary) for row in rows]
         entries = [entry for entry in entries if entry["has_audio"] == input_model.has_audio]
-    total = len(entries)
-    if input_model.after is not None:
-        entries = [entry for entry in entries if entry["asset_id"] > input_model.after]
-    next_after: str | None = None
-    if input_model.limit is not None and len(entries) > input_model.limit:
-        entries = entries[: input_model.limit]
-        next_after = entries[-1]["asset_id"]
+        total = len(entries)
+        if input_model.after is not None:
+            entries = [entry for entry in entries if entry["asset_id"] > input_model.after]
+        next_after = None
+        if input_model.limit is not None and len(entries) > input_model.limit:
+            entries = entries[: input_model.limit]
+            next_after = entries[-1]["asset_id"]
     return _succeeded(
         "asset.list_assets",
         context,

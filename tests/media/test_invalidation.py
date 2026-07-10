@@ -51,13 +51,13 @@ def test_reference_revalidation_invalidates_when_hash_changes(tmp_path: Path) ->
     assert failure["error_code"] == "reference_invalidated"
 
 
-def test_reference_revalidation_pending_hash_invalidates_on_change(
+def test_reference_revalidation_pending_hash_defers_on_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = tmp_path / "source.mp4"
     source.write_bytes(b"before")
-    # pending 占位：canonical sha256 未就绪，mtime 设 0 以便重写后判为变化。
+    # pending 占位：canonical sha256 未就绪，mtime 设 0 以便重写后 stat 判为变化。
     engine = _engine_with_reference(tmp_path, source, digest="pending:6:0", mtime=0)
     source.write_bytes(b"after!")
 
@@ -68,8 +68,10 @@ def test_reference_revalidation_pending_hash_invalidates_on_change(
 
     result = invalidation.revalidate_draft_references(engine, "draft_1", apply_events=apply)
 
-    assert result.invalidated_asset_ids == ("asset_1",)
-    assert _asset_row(engine)["usable"] is False
+    # canonical hash 未就绪：挂起期一律不判失效，等 hash job 补齐三列后再恢复检测——
+    # 否则 iCloud/同步工具在几分钟空窗里只 touch mtime 就会永久误杀素材（无恢复路径）。
+    assert result.invalidated_asset_ids == ()
+    assert _asset_row(engine)["usable"] is True
 
 
 def test_reference_revalidation_pending_hash_valid_when_unchanged(
