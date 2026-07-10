@@ -70,6 +70,8 @@ EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "status",
         "summary_json",
         "model",
+        "fingerprint",
+        "prompt_version",
         "created_at",
     ),
     "decisions": (

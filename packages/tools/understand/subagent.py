@@ -26,6 +26,9 @@ MAX_ILLEGAL_JSON = 3
 MAX_EMIT_ATTEMPTS = 2
 MAX_FRAMES_PER_VIEW = 6
 
+# 子代理 system prompt 版本：改动 _SYSTEM_PROMPT 时人工递增，旧摘要据此判缓存过期。
+UNDERSTAND_PROMPT_VERSION = "v1"
+
 
 @dataclass(frozen=True, slots=True)
 class TranscribeResult:
@@ -88,6 +91,8 @@ class SubagentOutcome:
     status: str  # "ready" | "failed"
     summary: MaterialSummary | None = None
     failure_reason: str | None = None
+    # 失败结构化分类：timeout / vlm_error / schema_invalid / budget_exhausted。
+    failure_code: str | None = None
     transcribe_results: tuple[TranscribeResult, ...] = ()
     frames_viewed: int = 0
     asr_seconds: float = 0.0
@@ -119,7 +124,7 @@ async def run_understanding_subagent(spec: SubagentSpec) -> SubagentOutcome:
         try:
             raw_action = await spec.vlm(messages)
         except Exception as exc:  # provider/transport failure surfaces as subagent failure
-            return _failed(spec, state, f"VLM 调用失败：{exc}")
+            return _failed(spec, state, f"VLM 调用失败：{exc}", code="vlm_error")
 
         action = _coerce_action(raw_action)
         if action is None:
@@ -127,7 +132,7 @@ async def run_understanding_subagent(spec: SubagentSpec) -> SubagentOutcome:
             # （下方三个已知分支）才清零，避免持续输出未知动作烧满步数预算。
             illegal_json += 1
             if illegal_json >= MAX_ILLEGAL_JSON:
-                return _failed(spec, state, "连续多次未返回合法的动作 JSON")
+                return _failed(spec, state, "连续多次未返回合法的动作 JSON", code="schema_invalid")
             correction = (
                 "上一步没有返回合法的动作 JSON。请只返回一个对象，形如 "
                 '{"action":"view_frames|transcribe|emit_summary", ...}。'
@@ -159,16 +164,16 @@ async def run_understanding_subagent(spec: SubagentSpec) -> SubagentOutcome:
                     steps=state.steps,
                 )
             if emit_attempts >= MAX_EMIT_ATTEMPTS:
-                return _failed(spec, state, f"摘要 schema 校验失败：{error}")
+                return _failed(spec, state, f"摘要 schema 校验失败：{error}", code="schema_invalid")
             correction = f"emit_summary 的 summary 不符合契约：{error}。请修正后重新提交。"
             continue
 
         illegal_json += 1
         if illegal_json >= MAX_ILLEGAL_JSON:
-            return _failed(spec, state, "连续多次返回未知动作")
+            return _failed(spec, state, "连续多次返回未知动作", code="schema_invalid")
         correction = f"未知动作 {name!r}。可用动作：view_frames、transcribe、emit_summary。"
 
-    return _failed(spec, state, "步数预算耗尽仍未产出摘要")
+    return _failed(spec, state, "步数预算耗尽仍未产出摘要", code="budget_exhausted")
 
 
 async def _do_view_frames(
@@ -238,12 +243,15 @@ def _build_summary(
         return None, _first_validation_error(exc)
 
 
-def _failed(spec: SubagentSpec, state: _RunState, reason: str) -> SubagentOutcome:
+def _failed(
+    spec: SubagentSpec, state: _RunState, reason: str, *, code: str | None = None
+) -> SubagentOutcome:
     spec.progress({"asset_id": spec.asset_id, "note": f"理解失败：{reason}"})
     return SubagentOutcome(
         asset_id=spec.asset_id,
         status="failed",
         failure_reason=reason,
+        failure_code=code,
         transcribe_results=tuple(state.transcribe_results),
         frames_viewed=state.frames_viewed,
         asr_seconds=round(state.asr_seconds, 3),

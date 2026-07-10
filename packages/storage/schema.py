@@ -107,6 +107,10 @@ material_summaries = Table(
     Column("status", Text, nullable=False),
     Column("summary_json", Text, nullable=False),
     Column("model", Text, nullable=True),
+    # 缓存键强化（Spec C §C3）：fingerprint={size}:{mtime}，prompt_version 随子代理
+    # system prompt 递增。有值且不匹配才判过期；NULL（历史行）视为命中，不惩罚存量摘要。
+    Column("fingerprint", Text, nullable=True),
+    Column("prompt_version", Text, nullable=True),
     Column("created_at", Text, nullable=False),
 )
 Index(

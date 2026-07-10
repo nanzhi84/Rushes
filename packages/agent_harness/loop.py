@@ -121,6 +121,27 @@ def _make_turn_progress(
     return _turn_progress
 
 
+def _make_partial_result_sink(
+    engine: Engine,
+    base_version: int | None,
+) -> Callable[[Mapping[str, Any], Sequence[DomainEventBase | Mapping[str, Any]]], None]:
+    """构造增量产物提交回调（``metadata["partial_result_sink"]``）。
+
+    understand 子代理逐素材完成时经此即时落库并发事件，与 loop 主路径完全同构：同一批
+    先 ``_persist_result_rows`` 落库、再 ``_apply_events`` 发事件。run_turn 单协程内
+    子代理串行提交，天然无并发写问题。
+    """
+
+    def _sink(
+        rows: Mapping[str, Any],
+        events: Sequence[DomainEventBase | Mapping[str, Any]],
+    ) -> None:
+        _persist_result_rows(rows, engine=engine)
+        _apply_events(events, engine=engine, base_version=base_version, actor="agent")
+
+    return _sink
+
+
 # 流式工具步事件里参数摘要/结果观察的截断上限：给前端行内展示用，全文走 trace。
 _STREAM_ARGS_SUMMARY_LIMIT = 160
 _STREAM_OBSERVATION_LIMIT = 600
@@ -1476,7 +1497,12 @@ async def _execute_tool(
             decisions=state.decisions,
             readonly_connection=connection,
             created_at=_now_iso(),
-            metadata=_tool_context_metadata(engine, gateway, turn_listener=turn_listener),
+            metadata=_tool_context_metadata(
+                engine,
+                gateway,
+                turn_listener=turn_listener,
+                base_version=state.draft_state.state_version,
+            ),
         )
         try:
             # 同步 handler 直接返回 ToolResult（行为零变化，仍在事件循环内同步跑）；
@@ -1583,9 +1609,13 @@ def _defer_tool_call(
 
 def _persist_tool_result_data(result: ToolResult, *, engine: Engine) -> None:
     # handler 只有只读连接：需要落库的行经 ToolResult.data 交回 loop 这里写。
-    row = result.data.get("message_row")
-    summary_rows = result.data.get("material_summary_rows")
-    transcript_rows = result.data.get("transcript_rows")
+    _persist_result_rows(result.data, engine=engine)
+
+
+def _persist_result_rows(data: Mapping[str, Any], *, engine: Engine) -> None:
+    row = data.get("message_row")
+    summary_rows = data.get("material_summary_rows")
+    transcript_rows = data.get("transcript_rows")
     has_summaries = isinstance(summary_rows, list) and summary_rows
     has_transcripts = isinstance(transcript_rows, list) and transcript_rows
     if not isinstance(row, Mapping) and not has_summaries and not has_transcripts:
@@ -2085,6 +2115,7 @@ def _tool_context_metadata(
     gateway: Any | None = None,
     *,
     turn_listener: TurnListener | None = None,
+    base_version: int | None = None,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {}
     database = engine.url.database
@@ -2095,6 +2126,8 @@ def _tool_context_metadata(
         metadata["provider_gateway"] = gateway
     # 进度通道：永远是可调用对象、绝不为 None（无 listener 时为 no-op）。
     metadata["turn_progress"] = _make_turn_progress(turn_listener)
+    # 增量产物提交通道：understand 子代理逐素材落库/发事件走它，写路径仍归 harness。
+    metadata["partial_result_sink"] = _make_partial_result_sink(engine, base_version)
     return metadata
 
 
