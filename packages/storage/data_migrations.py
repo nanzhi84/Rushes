@@ -26,8 +26,23 @@ from sqlalchemy.engine import Connection
 def apply_data_migrations(connection: Connection) -> None:
     """Apply idempotent raw-SQL fixups to a workspace database.
 
-    删库重建后当前无历史迁移，恒为 no-op；保留启动期入口与幂等契约不变，
-    使 API 与 worker 的启动流程无需感知迁移是否为空。
+    每次 API/worker 启动都会跑，靠存在性守卫做到可重复：先查表/查列，已是目标态即 no-op。
     """
 
-    return None
+    _ensure_material_summary_cache_columns(connection)
+
+
+def _ensure_material_summary_cache_columns(connection: Connection) -> None:
+    """material_summaries 补 fingerprint / prompt_version 两列（Spec C §C3 缓存键强化）。
+
+    新库经 create_all 已带这两列，此处恒 no-op；存量库缺列时 ALTER 补上。
+    """
+
+    rows = connection.exec_driver_sql("PRAGMA table_info(material_summaries)").all()
+    if not rows:
+        return
+    columns = {str(row[1]) for row in rows}
+    if "fingerprint" not in columns:
+        connection.exec_driver_sql("ALTER TABLE material_summaries ADD COLUMN fingerprint TEXT")
+    if "prompt_version" not in columns:
+        connection.exec_driver_sql("ALTER TABLE material_summaries ADD COLUMN prompt_version TEXT")

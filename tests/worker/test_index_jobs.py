@@ -146,7 +146,7 @@ def _job(asset_id: str) -> Job:
 
 
 @ffmpeg_only
-async def test_index_video_writes_shots_and_thumbnail(tmp_path: Path) -> None:
+async def test_index_video_writes_duration_and_thumbnail(tmp_path: Path) -> None:
     source = tmp_path / "clip.mp4"
     _make_video(source)
     engine, paths, asset_id = _ingest(tmp_path, kind="video", source=source)
@@ -159,7 +159,8 @@ async def test_index_video_writes_shots_and_thumbnail(tmp_path: Path) -> None:
     assert isinstance(row["thumbnail_object_hash"], str)
     assert paths.object_path(row["thumbnail_object_hash"]).exists()
     index_json = load_json(row["index_json"])
-    assert "shots" in index_json
+    # 镜头切分已从默认导入摘除（issue #53）：index_json 只留 duration_sec，不含 shots。
+    assert "shots" not in index_json
     assert index_json["duration_sec"] > 0
 
 
@@ -190,10 +191,12 @@ async def test_index_video_reuses_poster_thumbnail(tmp_path: Path, monkeypatch) 
     await build_index_handler(engine, paths)(_job(asset_id))
 
     row = _asset_row(engine, asset_id)
-    # 复用 poster 的封面，不重复抽帧；scenes 仍由 index 补齐。
+    # 复用 poster 的封面，不重复抽帧；index 只补 duration_sec，不再切镜头。
     assert row["thumbnail_object_hash"] == "poster_thumb"
     assert row["ingest_status"] == "indexed"
-    assert "shots" in load_json(row["index_json"])
+    index_json = load_json(row["index_json"])
+    assert "shots" not in index_json
+    assert index_json["duration_sec"] > 0
 
 
 @ffmpeg_only

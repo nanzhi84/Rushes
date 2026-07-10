@@ -14,21 +14,27 @@ from ._rows import row_to_dict
 
 JSON_COLUMNS = {"payload_json", "result_json", "error_json"}
 
-# poster（缩略图/时长秒出）优先于其余种类认领，其余按 created_at FIFO——
-# 让导入一批素材时封面第一时间冒出，而不是排在 proxy 转码后面。
+# 三级认领优先级：poster（缩略图/时长秒出）最先，hash（后台补算 canonical sha256）最后，
+# 其余（proxy/index/asr…）居中，各级内按 created_at FIFO——让导入一批素材时封面第一时间冒出，
+# 而后台哈希不与真正推进素材可用性的加工抢占。
 CLAIM_SQL = text(
     """
     UPDATE jobs SET status='running', worker_id=:w, started_at=:t, heartbeat_at=:t
     WHERE job_id = (SELECT job_id FROM jobs
                     WHERE status='pending' AND next_run_at <= :t
-                    ORDER BY (CASE WHEN kind='poster' THEN 0 ELSE 1 END), created_at LIMIT 1)
+                    ORDER BY (CASE WHEN kind='poster' THEN 0
+                                   WHEN kind='hash' THEN 2 ELSE 1 END), created_at LIMIT 1)
       AND status='pending'
     """
 )
 
 # 认领后回查刚拿到的 job_id：与 CLAIM_SQL 用同一优先级排序，避免同一 worker 在同一
 # 时间戳内并发认领时回查到另一行。
-_CLAIM_PRIORITY = case((schema.jobs.c.kind == "poster", 0), else_=1)
+_CLAIM_PRIORITY = case(
+    (schema.jobs.c.kind == "poster", 0),
+    (schema.jobs.c.kind == "hash", 2),
+    else_=1,
+)
 
 
 class JobsRepository:

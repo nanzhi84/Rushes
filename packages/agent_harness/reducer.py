@@ -42,6 +42,7 @@ REDUCER_DISPATCH_EVENTS: frozenset[str] = frozenset(
         "DraftTrashed",
         "AssetImported",
         "AssetProbed",
+        "AssetHashComputed",
         "ProxyGenerated",
         "AssetInvalidated",
         "AssetIndexReady",
@@ -274,6 +275,7 @@ def _apply_event(context: _ReducerContext, event: DomainEventBase) -> None:
     elif name in {
         "AssetImported",
         "AssetProbed",
+        "AssetHashComputed",
         "ProxyGenerated",
         "AssetInvalidated",
         "AssetIndexReady",
@@ -618,10 +620,39 @@ def _apply_asset_event(context: _ReducerContext, event: DomainEventBase) -> None
         values = _asset_insert_values(asset_id, payload)
         context.connection.execute(schema.assets.insert().values(**values))
     updates = _asset_update_values_for_event(event)
+    if event.event == "AssetIndexReady" and "index_json" in payload:
+        # 按键合并进现值（纯函数拿不到连接，特判于此）：便宜索引与按需分镜是两批异步事件，
+        # 谁先到都不该覆盖对方的键。现值 NULL 视为 {}，payload 键覆盖同名键。
+        updates["index_json"] = _merged_index_json(
+            context.connection, asset_id, payload.get("index_json")
+        )
     if updates:
         context.connection.execute(
             update(schema.assets).where(schema.assets.c.asset_id == asset_id).values(**updates)
         )
+
+
+def _merged_index_json(connection: Connection, asset_id: str, incoming: Any) -> str | None:
+    """把 AssetIndexReady 的 index_json 按键合并进现行值后 dump。
+
+    现值为 NULL 视为 ``{}``；``incoming`` 的键覆盖同名键（浅合并，够用：shots/duration_sec/
+    vad/peaks/font_meta 是彼此独立的顶层键）。``incoming`` 显式为 None 时视作清空。
+    """
+
+    if incoming is None:
+        return None
+    if not isinstance(incoming, Mapping):
+        return dump_json(incoming)
+    row = connection.execute(
+        select(schema.assets.c.index_json).where(schema.assets.c.asset_id == asset_id)
+    ).first()
+    current: dict[str, Any] = {}
+    if row is not None:
+        raw = row._mapping["index_json"]
+        loaded = load_json(raw) if isinstance(raw, str) and raw else None
+        if isinstance(loaded, dict):
+            current = loaded
+    return dump_json({**current, **dict(incoming)})
 
 
 def _apply_asset_linked(context: _ReducerContext, event: DomainEventBase) -> None:
@@ -1254,6 +1285,14 @@ def _asset_update_values_for_event(event: DomainEventBase) -> dict[str, Any]:
     elif event.event == "AssetProbed":
         values["probe"] = dump_json(payload.get("probe", {}))
         values["ingest_status"] = str(payload.get("ingest_status", "probing"))
+    elif event.event == "AssetHashComputed":
+        # 后台补算就绪：canonical sha256 连同同刻快照的 mtime/size 一起覆盖导入占位。
+        # 三列必须同刻一致，否则失效检测的 stat 快路径会拿旧 mtime/size 对新 hash，永久误判。
+        values["hash"] = str(payload.get("hash", ""))
+        if "mtime" in payload:
+            values["mtime"] = payload["mtime"]
+        if "size" in payload:
+            values["size"] = payload["size"]
     elif event.event == "ProxyGenerated":
         values["proxy_object_hash"] = payload.get("proxy_object_hash")
         values["ingest_status"] = str(payload.get("ingest_status", "proxying"))

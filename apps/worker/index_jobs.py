@@ -1,4 +1,4 @@
-"""Cheap local index job: cover frame, shots, VAD, peaks, and font metadata.
+"""Cheap local index job: cover frame, VAD, peaks, and font metadata.
 
 The index is best-effort and never blocks asset usability: any failure emits an
 ``AssetIndexFailed`` event and the job still succeeds (Spec C §C1).
@@ -20,7 +20,6 @@ from contracts.events import AssetIndexFailed, AssetIndexReady
 from contracts.jobs import Job
 from media.font_meta import read_font_meta
 from media.probe import probe_media
-from media.shots import split_shots
 from media.thumbnails import extract_video_thumbnail, render_image_thumbnail
 from media.vad import SileroModelMissing, default_model_path, run_silero_vad
 from media.waveform import compute_waveform_peaks
@@ -101,15 +100,12 @@ def _index_video(
     existing_thumbnail: str | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     duration_sec = probe_media(source_path).duration_sec
-    # 封面缩略图已由 poster 秒出的话，跳过重复的 ffmpeg 抽帧；index 只补 scenes。
+    # 封面缩略图已由 poster 秒出的话，跳过重复的 ffmpeg 抽帧。镜头切分不在默认索引里跑
+    # （唯一消费方是理解子代理，按需触发再算），index_json 不再含 shots。
     thumbnail_object_hash = existing_thumbnail or _extract_video_cover(
         source_path, paths, duration_sec
     )
-    shots = split_shots(source_path, paths=paths)
-    index_json: dict[str, Any] = {
-        "duration_sec": duration_sec,
-        "shots": [{"start_sec": shot.start_sec, "end_sec": shot.end_sec} for shot in shots],
-    }
+    index_json: dict[str, Any] = {"duration_sec": duration_sec}
     return index_json, thumbnail_object_hash
 
 

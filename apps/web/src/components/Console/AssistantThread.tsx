@@ -7,7 +7,12 @@ import type {
   ConsoleDataMessagePart,
   ConsoleExternalStoreRuntime
 } from "./runtime";
-import type { StreamMessageItem, StreamToolItem, TurnStreamItem } from "./useTurnStream";
+import type {
+  StreamMessageItem,
+  StreamToolItem,
+  SubagentProgressEntry,
+  TurnStreamItem
+} from "./useTurnStream";
 
 const STRUCTURED_MESSAGE_ID = "structured-interactions";
 
@@ -16,18 +21,22 @@ export function AssistantThread({
   onAnswerDecision,
   answerPending,
   highlightedMessageId = null,
-  streamItems = []
+  streamItems = [],
+  subagentProgress = []
 }: {
   runtime: ConsoleExternalStoreRuntime;
   onAnswerDecision: AnswerDecisionHandler;
   answerPending: boolean;
   highlightedMessageId?: string | null;
   streamItems?: TurnStreamItem[];
+  subagentProgress?: SubagentProgressEntry[];
 }): ReactElement {
   // 结构化交互卡（决策/进度）固定排在最后：本回合流式内容之后才是待回答的卡片。
   const regularMessages = runtime.messages.filter((message) => message.id !== STRUCTURED_MESSAGE_ID);
   const structuredMessage =
     runtime.messages.find((message) => message.id === STRUCTURED_MESSAGE_ID) ?? null;
+  // 子代理进度挂在「当前进行中工具行」下方——不特判工具名，取最后一个 running 工具步即可。
+  const activeToolStepId = findActiveToolStepId(streamItems);
   const isEmpty = regularMessages.length === 0 && streamItems.length === 0 && !structuredMessage;
   return (
     <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4" aria-label="消息列表">
@@ -56,7 +65,11 @@ export function AssistantThread({
             highlighted={highlightedMessageId === item.message_id}
           />
         ) : (
-          <ToolStepRow key={item.step_id} step={item} />
+          <ToolStepRow
+            key={item.step_id}
+            step={item}
+            progress={item.step_id === activeToolStepId ? subagentProgress : []}
+          />
         )
       )}
       {structuredMessage ? (
@@ -181,7 +194,13 @@ function highlightClass(highlighted: boolean): string {
 }
 
 /** Claude Code 式工具行：状态圆点 + 中文名 + 参数摘要一行带过，结果可展开。 */
-function ToolStepRow({ step }: { step: StreamToolItem }): ReactElement {
+function ToolStepRow({
+  step,
+  progress = []
+}: {
+  step: StreamToolItem;
+  progress?: SubagentProgressEntry[];
+}): ReactElement {
   const label = TOOL_STEP_LABELS[step.tool] ?? step.tool;
   const summaryRow = (
     <span className="flex min-w-0 items-center gap-2">
@@ -201,23 +220,12 @@ function ToolStepRow({ step }: { step: StreamToolItem }): ReactElement {
     </span>
   );
 
-  if (!step.observation) {
-    return (
-      <div
-        data-tool-step-id={step.step_id}
-        data-tool-status={step.status}
-        className="mr-auto w-full max-w-[88%] px-1 py-0.5"
-      >
-        {summaryRow}
-      </div>
-    );
-  }
-  return (
-    <details
-      data-tool-step-id={step.step_id}
-      data-tool-status={step.status}
-      className="mr-auto w-full max-w-[88%] px-1 py-0.5"
-    >
+  const toolRow = !step.observation ? (
+    <div data-tool-step-id={step.step_id} data-tool-status={step.status} className="px-1 py-0.5">
+      {summaryRow}
+    </div>
+  ) : (
+    <details data-tool-step-id={step.step_id} data-tool-status={step.status} className="px-1 py-0.5">
       <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
         {summaryRow}
       </summary>
@@ -226,6 +234,56 @@ function ToolStepRow({ step }: { step: StreamToolItem }): ReactElement {
       </div>
     </details>
   );
+
+  return (
+    <div className="mr-auto w-full max-w-[88%]">
+      {toolRow}
+      {progress.length > 0 ? (
+        <ul className="mt-0.5 space-y-0.5 pl-5" aria-label="子代理进度">
+          {progress.map((entry) => (
+            <SubagentProgressRow key={entry.asset_id} entry={entry} />
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+/** 进度行：次级弱化文本 + ↳ 缩进，读作当前工具行的子活动（对齐工具行的次级信息层级）。 */
+function SubagentProgressRow({ entry }: { entry: SubagentProgressEntry }): ReactElement {
+  return (
+    <li
+      data-subagent-progress-asset={entry.asset_id}
+      className="flex min-w-0 items-baseline gap-1.5 text-xs leading-5"
+    >
+      <span aria-hidden className="shrink-0 text-fg-faint">
+        ↳
+      </span>
+      {showAssetPrefix(entry.note) ? (
+        <span className="max-w-[8rem] shrink-0 truncate font-mono text-[0.7rem] text-fg-faint">
+          {entry.asset_id}
+        </span>
+      ) : null}
+      <span className="min-w-0 truncate text-fg-muted">{entry.note}</span>
+    </li>
+  );
+}
+
+// 取最后一个 running 工具步作为「当前进行中工具行」；无进行中工具则不挂进度。
+function findActiveToolStepId(items: TurnStreamItem[]): string | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.type === "tool" && item.status === "running") {
+      return item.step_id;
+    }
+  }
+  return null;
+}
+
+// note 已含文件名（如 IMG_2031.mp4）时，文件名本身即可辨认素材，不再叠加不友好的 asset_id；
+// 否则（"转写音频中"等通用文案）用 asset_id 前缀区分并发的多个素材。
+function showAssetPrefix(note: string): boolean {
+  return !/\.[a-z][a-z0-9]{1,4}\b/i.test(note);
 }
 
 function toolStatusToneClass(status: string): string {

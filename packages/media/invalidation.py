@@ -86,7 +86,14 @@ def _is_reference_invalid(row: dict[str, Any]) -> bool:
     unchanged_mtime = int(row.get("mtime") or 0) == stat.st_mtime_ns
     if unchanged_size and unchanged_mtime:
         return False
-    return _sha256(path) != row.get("hash")
+    row_hash = row.get("hash")
+    if isinstance(row_hash, str) and row_hash.startswith("pending:"):
+        # canonical sha256 未就绪：推迟失效判定，挂起期一律不判失效。
+        # 权衡：hash job 是最低优先级、批量导入空窗可达分钟级，期间 iCloud/同步工具只 touch
+        # mtime（内容没变）就会被 size/mtime 一变即失效的旧逻辑永久杀掉（usable=False 无恢复路径）。
+        # 宁可挂起期漏判，等 canonical hash 就绪（hash job 以当刻快照刷新三列）后再恢复完整检测。
+        return False
+    return _sha256(path) != row_hash
 
 
 def _sha256(path: Path) -> str:

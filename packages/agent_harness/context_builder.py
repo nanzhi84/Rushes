@@ -41,7 +41,7 @@ DEFAULT_BLOCK_BUDGETS: dict[str, int] = {
     "assets": 2000,
     "messages": 8000,
     "turn_observations": 2500,
-    "allowed_tools": 4000,
+    "allowed_tools": 1200,
 }
 FIXED_BLOCKS = frozenset(
     {"system", "workspace", "draft_header", "pending_decision", "allowed_tools"}
@@ -168,13 +168,15 @@ def _render_system_block(total_budget: int) -> str:
             "",
             "阶段推进指引（draft_header 的 stage 字段标记当前阶段；工具列表按前置条件动态暴露，"
             "看不到的工具说明其前置未满足，先完成当前阶段的关键动作）：",
-            "- briefing：先看懂素材、再谈方案。用 understand.materials 生成关键素材的带时间戳"
-            "摘要（再次调用同素材命中缓存直接回摘要），配合 audio.inspect_sources 检查音频；"
-            "assets 块 usable_count ≥ 1 表示有可用素材。向用户提的问题必须落在素材的具体内容上"
-            "（比如某段画面适不适合开头、这首 BGM 用不用），没看懂素材前不要问“主题/平台/风格”"
-            "这类不看素材也能问的问卷式问题。audio_plan 未确定且素材含人声时，"
-            "必须用 interaction.ask_user 创建 audio_mode 决策（原声粗剪 / TTS 配音 / 静音），"
-            "这是解锁后续工具的唯一路径。",
+            "- briefing：从最低成本的证据开始、逐级升级，证据够了就停；不必为动手而理解全部素材，"
+            "超出需要的深度理解是浪费。先读 assets 块与 asset.list_assets（免费；文件名/时长/尺寸/"
+            "方向/音轨/状态往往已够判断素材构成）；需要看画面内容时再用 media.view_frames 对少量"
+            "候选抽帧提问（昂贵，一次少量帧）；只对真正要进剪辑决策的素材调 understand.materials "
+            "生成带时间戳摘要（昂贵；逐素材增量完成，再次调用同素材命中缓存直接回摘要），"
+            "配合 audio.inspect_sources 检查音频。向用户提的问题必须落在素材的具体内容上"
+            "（比如某段画面适不适合开头、这首 BGM 用不用），不要问“主题/平台/风格”这类不看素材"
+            "也能问的问卷式问题。audio_plan 未确定且素材含人声时，必须用 interaction.ask_user "
+            "创建 audio_mode 决策（原声粗剪 / TTS 配音 / 静音），这是解锁后续工具的唯一路径。",
             "- drafting：按 audio_plan 推进——原声：audio.asr_original → audio.rough_cut_speech；"
             "TTS：audio.generate_tts。cut_plan 与 timeline 就绪后 render.preview → "
             "interaction.show_preview；用户表达满意时用 interaction.confirm_action "
@@ -566,17 +568,31 @@ def _render_turn_observations_block(
     return header + "\n" + "\n".join(lines)
 
 
+_COST_TIER_LABELS: dict[str, str] = {"free": "免费", "cheap": "便宜", "expensive": "昂贵"}
+_COST_TIER_ORDER: dict[str, int] = {"free": 0, "cheap": 1, "expensive": 2}
+
+
 def _render_allowed_tools_block(allowed_tools: Sequence[ToolSpec]) -> str:
-    payload = [
-        {
-            "name": spec.name,
-            "namespace": spec.namespace,
-            "description": spec.description,
-            "input_schema": spec.input_model.model_json_schema(),
-        }
-        for spec in allowed_tools
+    """能力目录：一行一工具，只给名字/成本/描述。
+
+    完整参数 Schema 已随原生 tools 参数下发，这里再 dump 一份 JSON Schema 纯属重复占用
+    上下文，故只保留一句话能力说明，并按成本从低到高分组，引导模型先用便宜工具取证。
+    """
+
+    if not allowed_tools:
+        return "allowed_tools: none"
+    ordered = sorted(
+        allowed_tools,
+        key=lambda spec: (_COST_TIER_ORDER[spec.cost_tier], spec.name),
+    )
+    lines = [
+        "能力目录（完整参数 Schema 已在原生 tools 参数里；这里只列能力，按成本从低到高选用）：",
+        *(
+            f"- {spec.name}（{_COST_TIER_LABELS[spec.cost_tier]}）：{spec.description}"
+            for spec in ordered
+        ),
     ]
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return "\n".join(lines)
 
 
 def _section(name: str, payload: Mapping[str, Any]) -> str:

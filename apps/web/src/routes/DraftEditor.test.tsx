@@ -299,6 +299,70 @@ describe("DraftEditorView", () => {
     expect(step2.getAttribute("data-tool-status")).toBe("failed");
   });
 
+  it("subagent_progress 实时挂在进行中的理解工具行下方，同素材新 note 覆盖旧的", async () => {
+    const fetchMock = mockFetch({ decision: null });
+    renderEditor(fetchMock);
+
+    const stream = turnStreamSource();
+    emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
+    emitTurnStream(stream, { type: "tool_step_started", step_id: "s1", tool: "understand.materials" });
+    emitTurnStream(stream, {
+      type: "subagent_progress",
+      asset_id: "asset_01a2",
+      note: "正在查看 IMG_2031.mp4 02:10 画面"
+    });
+    emitTurnStream(stream, {
+      type: "subagent_progress",
+      asset_id: "asset_09f3",
+      note: "转写音频中"
+    });
+
+    // 两条素材进度都渲染出来；带文件名的 note 只显示 note（不叠 asset_id）。
+    expect(await screen.findByText("正在查看 IMG_2031.mp4 02:10 画面")).toBeTruthy();
+    const progressList = screen.getByLabelText("子代理进度");
+    expect(within(progressList).getByText("转写音频中")).toBeTruthy();
+    // 无文件名的通用文案用 asset_id 前缀区分并发素材。
+    expect(within(progressList).getByText("asset_09f3")).toBeTruthy();
+
+    // 进度行确实挂在 understand 工具行的同一容器里（不是独立漂浮在消息流末尾）。
+    const understandRow = screen.getByText("理解素材").closest("[data-tool-step-id]") as HTMLElement;
+    expect(understandRow.parentElement?.contains(progressList)).toBe(true);
+
+    // 同素材新 note 覆盖旧的，仍只有一条该素材的进度行。
+    emitTurnStream(stream, {
+      type: "subagent_progress",
+      asset_id: "asset_09f3",
+      note: "产出摘要中"
+    });
+    await waitFor(() => expect(screen.getByText("产出摘要中")).toBeTruthy());
+    expect(screen.queryByText("转写音频中")).toBeNull();
+    expect(screen.getAllByText("产出摘要中")).toHaveLength(1);
+  });
+
+  it("理解工具完成后其子代理进度行消失，不残留到后续工具行", async () => {
+    const fetchMock = mockFetch({ decision: null });
+    renderEditor(fetchMock);
+
+    const stream = turnStreamSource();
+    emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
+    emitTurnStream(stream, { type: "tool_step_started", step_id: "s1", tool: "understand.materials" });
+    emitTurnStream(stream, { type: "subagent_progress", asset_id: "asset_01a2", note: "转写音频中" });
+
+    expect(await screen.findByText("转写音频中")).toBeTruthy();
+
+    emitTurnStream(stream, {
+      type: "tool_step_finished",
+      step_id: "s1",
+      tool: "understand.materials",
+      status: "succeeded"
+    });
+    // 下一个工具进行中，但上一批的进度不应串过来。
+    emitTurnStream(stream, { type: "tool_step_started", step_id: "s2", tool: "timeline.compose_initial" });
+
+    await waitFor(() => expect(screen.queryByText("转写音频中")).toBeNull());
+    expect(screen.queryByLabelText("子代理进度")).toBeNull();
+  });
+
   it("turn-stream turn_ended 封口流式气泡并刷新历史消息", async () => {
     let sealed = false;
     const fetchMock = mockFetch({

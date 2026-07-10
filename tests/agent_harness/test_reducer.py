@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import func, select
 
@@ -13,9 +14,9 @@ from storage.repositories.event_log import EventLogRepository
 NOW = "2026-07-04T00:00:00+00:00"
 
 
-def test_reducer_dispatch_covers_all_44_registered_events() -> None:
-    # 单级草稿模型定版 44 事件：reducer 归约表与 contracts 事件注册表逐一对齐。
-    assert len(REDUCER_DISPATCH_EVENTS) == 44
+def test_reducer_dispatch_covers_all_registered_events() -> None:
+    # reducer 归约表与 contracts 事件注册表逐一对齐（含 issue #53 新增的 AssetHashComputed）。
+    assert len(REDUCER_DISPATCH_EVENTS) == 45
     assert frozenset(event_registry()) == REDUCER_DISPATCH_EVENTS
 
 
@@ -529,6 +530,177 @@ def test_asset_understanding_status_defaults_to_none(tmp_path: Path) -> None:
     assert asset["understanding_status"] == "none"
     assert asset["index_json"] is None
     assert asset["thumbnail_object_hash"] is None
+
+
+def test_asset_hash_computed_updates_hash_mtime_size(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    engine = create_workspace_engine(tmp_path)
+
+    result = apply(
+        [
+            {
+                "event": "AssetImported",
+                "asset_id": "asset_1",
+                "job_id": "job_import_1",
+                "payload": {
+                    "reference_path": "/tmp/source.mp4",
+                    "size": 10,
+                    "mtime": 5,
+                    "hash": "pending:10:5",
+                    "ingest_status": "imported",
+                },
+            },
+            {
+                "event": "AssetHashComputed",
+                "asset_id": "asset_1",
+                "job_id": "job_hash_1",
+                # 同刻快照：hash 连同 mtime/size 一起落库（描述改写后的新文件）。
+                "payload": {"hash": "b" * 64, "mtime": 99, "size": 42},
+            },
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+
+    with begin_immediate(engine) as connection:
+        asset = (
+            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == "asset_1"))
+            .one()
+            ._mapping
+        )
+
+    assert result.status == "applied"
+    # canonical sha256 覆盖 pending 占位，且三列同刻一致——其余保持 AssetImported 的落库值。
+    assert asset["hash"] == "b" * 64
+    assert asset["mtime"] == 99
+    assert asset["size"] == 42
+    assert asset["ingest_status"] == "imported"
+    assert asset["reference_path"] == "/tmp/source.mp4"
+
+
+def _asset_mapping(engine: Any, asset_id: str) -> Any:
+    with begin_immediate(engine) as connection:
+        return (
+            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == asset_id))
+            .one()
+            ._mapping
+        )
+
+
+def test_asset_index_ready_merges_index_json_by_key_either_order(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    engine = create_workspace_engine(tmp_path)
+    apply(
+        [
+            {
+                "event": "AssetImported",
+                "asset_id": "asset_1",
+                "job_id": "job_import_1",
+                "payload": {"reference_path": "/tmp/a.mp4", "size": 1},
+            }
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+
+    def _index_ready(payload: dict[str, Any]) -> dict[str, Any]:
+        return {"event": "AssetIndexReady", "asset_id": "asset_1", "payload": payload}
+
+    # 顺序：按需分镜回填先到（只带 shots），index job 后到（只带 duration_sec + 缩略图）。
+    apply(
+        [
+            _index_ready(
+                {"index_json": {"shots": [{"shot_id": "s1", "start_sec": 0.0, "end_sec": 2.0}]}}
+            )
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+    apply(
+        [
+            _index_ready(
+                {
+                    "index_json": {"duration_sec": 12.0},
+                    "thumbnail_object_hash": "thumb_index",
+                    "ingest_status": "indexed",
+                }
+            )
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+
+    asset = _asset_mapping(engine, "asset_1")
+    # index job 带整份 index_json 也不再覆盖已回填的 shots：两键并存（消掉乱序竞态）。
+    assert load_json(asset["index_json"]) == {
+        "shots": [{"shot_id": "s1", "start_sec": 0.0, "end_sec": 2.0}],
+        "duration_sec": 12.0,
+    }
+    assert asset["thumbnail_object_hash"] == "thumb_index"
+    assert asset["ingest_status"] == "indexed"
+
+
+def test_asset_index_ready_backfill_keeps_poster_thumbnail(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    engine = create_workspace_engine(tmp_path)
+    apply(
+        [
+            {
+                "event": "AssetImported",
+                "asset_id": "asset_1",
+                "job_id": "job_import_1",
+                "payload": {"reference_path": "/tmp/a.mp4", "size": 1},
+            }
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+    # poster 先补写缩略图（只带 thumbnail、无 index_json）。
+    apply(
+        [
+            {
+                "event": "AssetIndexReady",
+                "asset_id": "asset_1",
+                "payload": {"thumbnail_object_hash": "thumb_poster"},
+            }
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+    # 回填期间（F8）只带 shots：既不清缩略图、也不覆盖并发写入。
+    apply(
+        [
+            {
+                "event": "AssetIndexReady",
+                "asset_id": "asset_1",
+                "payload": {
+                    "index_json": {"shots": [{"shot_id": "s1", "start_sec": 0.0, "end_sec": 2.0}]}
+                },
+            }
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+
+    asset = _asset_mapping(engine, "asset_1")
+    assert asset["thumbnail_object_hash"] == "thumb_poster"
+    assert load_json(asset["index_json"]) == {
+        "shots": [{"shot_id": "s1", "start_sec": 0.0, "end_sec": 2.0}]
+    }
 
 
 def test_merge_preview_result_records_artifact_without_stale_version_conflict(

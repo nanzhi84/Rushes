@@ -132,6 +132,13 @@ class AssetImportUrlInput(BaseModel):
 class AssetListAssetsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    kind: Literal["video", "audio", "image", "font"] | None = None
+    has_audio: bool | None = None
+    only_usable: bool | None = None
+    limit: int | None = Field(default=None, ge=1, le=200)
+    # keyset 分页游标：按 asset_id 升序，返回 asset_id 严格大于 after 的行。
+    after: str | None = None
+
 
 class MediaViewFramesTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -320,6 +327,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=False,
             side_effects=["draft"],
             emits_events=["DecisionAnswered"],
+            cost_tier="cheap",
             description="Convert a structured user answer into a DecisionAnswered event.",
         ),
         ToolSpec(
@@ -334,6 +342,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=False,
             side_effects=["draft"],
             emits_events=["DecisionCreated"],
+            cost_tier="cheap",
             description="Ask an open or multiple-choice question through a Decision.",
         ),
         ToolSpec(
@@ -348,6 +357,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=False,
             side_effects=["draft"],
             emits_events=["DecisionCreated"],
+            cost_tier="cheap",
             description="Create a confirmation Decision for an action.",
         ),
         ToolSpec(
@@ -362,6 +372,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=False,
             side_effects=[],
             emits_events=[],
+            cost_tier="cheap",
             description="Emit a frontend-renderable progress interaction.",
         ),
         ToolSpec(
@@ -376,6 +387,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=False,
             side_effects=[],
             emits_events=[],
+            cost_tier="cheap",
             description="Emit a frontend-renderable preview interaction.",
         ),
         ToolSpec(
@@ -390,6 +402,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=False,
             side_effects=[],
             emits_events=[],
+            cost_tier="cheap",
             description="Emit a frontend-renderable timeline summary.",
         ),
         ToolSpec(
@@ -404,6 +417,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=False,
             side_effects=[],
             emits_events=[],
+            cost_tier="cheap",
             description="Emit a frontend-renderable structured error.",
         ),
         ToolSpec(
@@ -420,6 +434,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             idempotency_key_fields=["path", "storage_mode"],
             emits_events=["AssetImported", "AssetLinked", "JobEnqueued"],
             exposure="harness_only",
+            cost_tier="expensive",
             description="Import a local media file into the active draft, defaulting to reference.",
         ),
         ToolSpec(
@@ -438,6 +453,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             idempotency_key_fields=["url"],
             emits_events=["JobEnqueued", "AssetImported"],
             is_long_running=True,
+            cost_tier="expensive",
             description="Import one explicitly confirmed URL and link it to the active draft.",
         ),
         ToolSpec(
@@ -452,7 +468,11 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=True,
             side_effects=[],
             emits_events=[],
-            description="List every asset linked to the active draft.",
+            cost_tier="free",
+            description=(
+                "List assets linked to the active draft with optional kind/has_audio/only_usable "
+                "filters and keyset pagination (limit + after)."
+            ),
         ),
         ToolSpec(
             name="audio.inspect_sources",
@@ -466,6 +486,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=True,
             side_effects=["asset"],
             emits_events=["AssetProbed", "CapabilityDegraded"],
+            cost_tier="cheap",
             description="Inspect draft assets for audio tracks and local speech/silence segments.",
         ),
         ToolSpec(
@@ -485,6 +506,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             idempotency_key_fields=["asset_id", "provider_id"],
             emits_events=["JobEnqueued"],
             is_long_running=True,
+            cost_tier="expensive",
             description="Queue raw-preserving ASR for the selected original audio asset.",
         ),
         ToolSpec(
@@ -502,6 +524,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=True,
             side_effects=["draft"],
             emits_events=["DecisionCreated", "CapabilityDegraded", "ProviderCallRecorded"],
+            cost_tier="expensive",
             description=(
                 "Create an approve_speech_cut decision from rule and semantic rough-cut candidates."
             ),
@@ -523,6 +546,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             idempotency_key_fields=["provider_id", "asr_provider_id", "voice_type"],
             emits_events=["JobEnqueued"],
             is_long_running=True,
+            cost_tier="expensive",
             description=(
                 "Queue Volcengine TTS synthesis plus ASR timestamp fallback cut-plan "
                 "materialization."
@@ -545,6 +569,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             idempotency_key_fields=["asset_id", "provider_id", "script_text"],
             emits_events=["JobEnqueued"],
             is_long_running=True,
+            cost_tier="expensive",
             description=(
                 "Queue uploaded voiceover ASR and local DP alignment against the user script."
             ),
@@ -561,6 +586,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=True,
             side_effects=["draft"],
             emits_events=["ContentPlanUpdated", "CutPlanUpdated"],
+            cost_tier="cheap",
             description="Create a content plan and, for silent mode, a visual cut plan.",
         ),
         ToolSpec(
@@ -575,6 +601,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=True,
             side_effects=["draft"],
             emits_events=["ContentPlanUpdated", "CutPlanUpdated"],
+            cost_tier="cheap",
             description="Revise the existing content plan and matching silent-mode cut plan.",
         ),
         ToolSpec(
@@ -590,6 +617,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_confirmation=False,
             side_effects=[],
             emits_events=[],
+            cost_tier="expensive",
             description="Extract requested video frames and ask VLM for visual confirmation.",
         ),
         ToolSpec(
@@ -609,6 +637,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
                 "MaterialUnderstandingCompleted",
                 "MaterialUnderstandingFailed",
             ],
+            cost_tier="expensive",
             description=(
                 "Dispatch understanding subagents to produce timestamped material summaries."
             ),
@@ -633,6 +662,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
                 "TimelineValidated",
                 "TimelineValidationFailed",
             ],
+            cost_tier="cheap",
             description="Assemble timeline v1 directly from summary-level clip selections.",
         ),
         ToolSpec(
@@ -652,6 +682,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
                 "TimelineValidationFailed",
                 "DecisionCreated",
             ],
+            cost_tier="cheap",
             description="Apply a TimelinePatchRequest against the viewed timeline anchor.",
         ),
         ToolSpec(
@@ -666,6 +697,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=True,
             side_effects=["timeline", "draft"],
             emits_events=["TimelineValidated", "TimelineValidationFailed"],
+            cost_tier="cheap",
             description="Validate the current timeline version against PRD §10.2 invariants.",
         ),
         ToolSpec(
@@ -680,6 +712,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=True,
             side_effects=[],
             emits_events=[],
+            cost_tier="free",
             description="Return a prompt-safe summary for the current timeline version.",
         ),
         ToolSpec(
@@ -694,6 +727,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=True,
             side_effects=["timeline", "draft"],
             emits_events=["TimelineVersionRestored"],
+            cost_tier="cheap",
             description="Restore an old timeline as a new version record.",
         ),
         ToolSpec(
@@ -710,6 +744,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             idempotency_key_fields=["timeline_version"],
             emits_events=["JobEnqueued"],
             is_long_running=True,
+            cost_tier="expensive",
             description="Queue a cached preview render for the current validated timeline.",
         ),
         ToolSpec(
@@ -728,6 +763,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             idempotency_key_fields=["timeline_version"],
             emits_events=["JobEnqueued"],
             is_long_running=True,
+            cost_tier="expensive",
             description="Queue a confirmed final MP4 export for the current validated timeline.",
         ),
         ToolSpec(
@@ -742,6 +778,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=True,
             side_effects=[],
             emits_events=[],
+            cost_tier="free",
             description="Read current preview/export artifacts and running render jobs.",
         ),
         ToolSpec(
@@ -760,6 +797,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
                 "CapabilityDegraded",
                 "ProviderCallRecorded",
             ],
+            cost_tier="expensive",
             description="Extract one pending long-term memory candidate from the current draft.",
         ),
         ToolSpec(
@@ -775,6 +813,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             side_effects=["draft"],
             idempotency_key_fields=["candidate_id"],
             emits_events=["DecisionCreated"],
+            cost_tier="cheap",
             description="Ask the user whether to save a memory candidate as a user memory.",
         ),
         ToolSpec(
@@ -791,6 +830,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             idempotency_key_fields=["candidate_id"],
             emits_events=["MemorySaved"],
             exposure="harness_only",
+            cost_tier="cheap",
             description="Persist an approved memory candidate after memory_scope is answered.",
         ),
         ToolSpec(
@@ -805,6 +845,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=True,
             side_effects=[],
             emits_events=[],
+            cost_tier="free",
             description="Search user memories for relevant summaries.",
         ),
     )

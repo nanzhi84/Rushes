@@ -13,6 +13,7 @@ JobKind = Literal[
     "poster",
     "proxy",
     "index",
+    "hash",
     "align",
     "import_url",
     "noop",

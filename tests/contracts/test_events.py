@@ -13,6 +13,12 @@ EVENT_PAYLOADS: dict[str, dict[str, object]] = {
     "DraftTrashed": {"event": "DraftTrashed", "draft_id": "draft_001"},
     "AssetImported": {"event": "AssetImported", "asset_id": "asset_001", "job_id": "job_001"},
     "AssetProbed": {"event": "AssetProbed", "asset_id": "asset_001", "job_id": "job_001"},
+    "AssetHashComputed": {
+        "event": "AssetHashComputed",
+        "asset_id": "asset_001",
+        "job_id": "job_001",
+        "payload": {"hash": "a" * 64},
+    },
     "ProxyGenerated": {"event": "ProxyGenerated", "asset_id": "asset_001", "job_id": "job_001"},
     "AssetInvalidated": {
         "event": "AssetInvalidated",
@@ -196,6 +202,7 @@ EXPECTED_VERSION_MODES: dict[str, str] = {
     "DraftTrashed": "merge",
     "AssetImported": "merge",
     "AssetProbed": "merge",
+    "AssetHashComputed": "merge",
     "ProxyGenerated": "merge",
     "AssetInvalidated": "merge",
     "AssetIndexReady": "merge",
@@ -240,8 +247,8 @@ EXPECTED_VERSION_MODES: dict[str, str] = {
 def test_event_registry_matches_prd_event_table() -> None:
     registry = event_registry()
     assert set(registry) == set(EVENT_PAYLOADS)
-    assert len(registry) == 44
-    assert len(EVENT_CLASSES) == 44
+    assert len(registry) == 45
+    assert len(EVENT_CLASSES) == 45
 
 
 def test_each_event_discriminator_parses_to_expected_class() -> None:

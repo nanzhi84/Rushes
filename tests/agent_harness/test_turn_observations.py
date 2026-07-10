@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agent_harness.context_builder import (
     ContextBuilder,
     ContextBuildInput,
@@ -154,3 +156,48 @@ def test_tool_context_metadata_includes_gateway(tmp_path: Path) -> None:
     assert metadata["provider_gateway"] is marker
     assert "workspace_path" in metadata
     assert "provider_gateway" not in _tool_context_metadata(engine, None)
+
+
+def test_partial_result_sink_raises_on_non_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_harness import loop as loop_mod
+    from agent_harness.reducer import ReducerApplyResult
+
+    engine = _engine(tmp_path)
+    # 伪造归约拒绝（validator 未通过）：sink 不能静默吞——摘要行已写但事件没落是脏态
+    # （行在库里、understanding_status 永不变绿），必须 raise 让工具诚实失败。
+    monkeypatch.setattr(
+        loop_mod,
+        "_apply_events",
+        lambda *a, **k: ReducerApplyResult(status="validation_failed"),
+    )
+    collected: list[ReducerApplyResult] = []
+    sink = loop_mod._make_partial_result_sink(engine, None, collected)
+    with pytest.raises(RuntimeError, match="partial_result_sink"):
+        sink({}, [{"event": "MaterialUnderstandingCompleted", "asset_id": "a1"}])
+    assert collected and collected[0].status == "validation_failed"
+
+
+def test_partial_result_sink_collects_applied_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_harness import loop as loop_mod
+    from agent_harness.reducer import AppliedEvent, ReducerApplyResult
+
+    engine = _engine(tmp_path)
+    applied = ReducerApplyResult(
+        status="applied",
+        applied_events=(
+            AppliedEvent(event_id=1, event_type="MaterialUnderstandingStarted", state_version=None),
+        ),
+    )
+    monkeypatch.setattr(loop_mod, "_apply_events", lambda *a, **k: applied)
+    collected: list[ReducerApplyResult] = []
+    sink = loop_mod._make_partial_result_sink(engine, None, collected)
+    sink({}, [{"event": "MaterialUnderstandingStarted", "asset_id": "a1"}])
+    assert collected == [applied]
+    # _record_sink_results 把结果并入主记录处（accumulator），不再静默吞掉。
+    accumulator = loop_mod._RunAccumulator()
+    loop_mod._record_sink_results(collected, accumulator=accumulator, tracer=None)
+    assert accumulator.reducer_results == [applied]

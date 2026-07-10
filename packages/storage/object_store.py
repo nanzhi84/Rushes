@@ -17,6 +17,15 @@ from .workspace_paths import WorkspacePaths
 CHUNK_SIZE = 1024 * 1024
 
 
+def sha256_file(path: str | Path) -> str:
+    """分块读取整文件算 sha256（内容寻址与 hash job 共用的 canonical 实现）。"""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source_file:
+        for chunk in iter(lambda: source_file.read(CHUNK_SIZE), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True, slots=True)
 class ObjectRef:
     object_hash: str
@@ -100,11 +109,7 @@ class ObjectStore:
         return self._paths.tmp_dir / f"{object_hash}.{uuid4().hex}.tmp"
 
     def _hash_file(self, source: Path) -> str:
-        digest = hashlib.sha256()
-        with source.open("rb") as source_file:
-            for chunk in iter(lambda: source_file.read(CHUNK_SIZE), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
+        return sha256_file(source)
 
     def _copy_stream(self, source: BinaryIO, destination: BinaryIO) -> None:
         for chunk in iter(lambda: source.read(CHUNK_SIZE), b""):

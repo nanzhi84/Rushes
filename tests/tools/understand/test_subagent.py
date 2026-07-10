@@ -221,6 +221,7 @@ async def test_illegal_json_three_times_fails() -> None:
     outcome = await run_understanding_subagent(spec)
     assert outcome.status == "failed"
     assert "合法" in (outcome.failure_reason or "")
+    assert outcome.failure_code == "schema_invalid"
 
 
 @pytest.mark.asyncio
@@ -230,6 +231,7 @@ async def test_unknown_action_three_times_fails_fast() -> None:
     outcome = await run_understanding_subagent(spec)
     assert outcome.status == "failed"
     assert "未知动作" in (outcome.failure_reason or "")
+    assert outcome.failure_code == "schema_invalid"
     assert outcome.steps == 3
     assert len(vlm.calls) == 3
 
@@ -274,6 +276,7 @@ async def test_emit_schema_invalid_twice_fails() -> None:
     outcome = await run_understanding_subagent(spec)
     assert outcome.status == "failed"
     assert "schema" in (outcome.failure_reason or "")
+    assert outcome.failure_code == "schema_invalid"
 
 
 @pytest.mark.asyncio
@@ -285,6 +288,7 @@ async def test_step_budget_exhausted_fails() -> None:
     outcome = await run_understanding_subagent(spec)
     assert outcome.status == "failed"
     assert "预算" in (outcome.failure_reason or "")
+    assert outcome.failure_code == "budget_exhausted"
 
 
 @pytest.mark.asyncio
@@ -297,6 +301,7 @@ async def test_vlm_exception_fails() -> None:
     outcome = await run_understanding_subagent(spec)
     assert outcome.status == "failed"
     assert "VLM 调用失败" in (outcome.failure_reason or "")
+    assert outcome.failure_code == "vlm_error"
 
 
 @pytest.mark.asyncio
