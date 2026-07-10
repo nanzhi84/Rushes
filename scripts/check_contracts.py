@@ -56,7 +56,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
 }
 
 # 单级草稿模型定版计数（PRD §4.5 事件表 / §6 工具契约）：偏离即视为契约漂移，必须显式改动此处。
-EXPECTED_EVENT_COUNT = 44
+EXPECTED_EVENT_COUNT = 45
 EXPECTED_TOOL_COUNT = 31
 
 EXPECTED_PATCH_OPS: frozenset[str] = frozenset(

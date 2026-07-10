@@ -13,9 +13,9 @@ from storage.repositories.event_log import EventLogRepository
 NOW = "2026-07-04T00:00:00+00:00"
 
 
-def test_reducer_dispatch_covers_all_44_registered_events() -> None:
-    # 单级草稿模型定版 44 事件：reducer 归约表与 contracts 事件注册表逐一对齐。
-    assert len(REDUCER_DISPATCH_EVENTS) == 44
+def test_reducer_dispatch_covers_all_registered_events() -> None:
+    # reducer 归约表与 contracts 事件注册表逐一对齐（含 issue #53 新增的 AssetHashComputed）。
+    assert len(REDUCER_DISPATCH_EVENTS) == 45
     assert frozenset(event_registry()) == REDUCER_DISPATCH_EVENTS
 
 
@@ -529,6 +529,50 @@ def test_asset_understanding_status_defaults_to_none(tmp_path: Path) -> None:
     assert asset["understanding_status"] == "none"
     assert asset["index_json"] is None
     assert asset["thumbnail_object_hash"] is None
+
+
+def test_asset_hash_computed_updates_only_hash_column(tmp_path: Path) -> None:
+    _prepare_workspace(tmp_path)
+    engine = create_workspace_engine(tmp_path)
+
+    result = apply(
+        [
+            {
+                "event": "AssetImported",
+                "asset_id": "asset_1",
+                "job_id": "job_import_1",
+                "payload": {
+                    "reference_path": "/tmp/source.mp4",
+                    "size": 10,
+                    "hash": "pending:10:5",
+                    "ingest_status": "imported",
+                },
+            },
+            {
+                "event": "AssetHashComputed",
+                "asset_id": "asset_1",
+                "job_id": "job_hash_1",
+                "payload": {"hash": "b" * 64},
+            },
+        ],
+        engine=engine,
+        base_version=None,
+        actor="job",
+        created_at=NOW,
+    )
+
+    with begin_immediate(engine) as connection:
+        asset = (
+            connection.execute(select(schema.assets).where(schema.assets.c.asset_id == "asset_1"))
+            .one()
+            ._mapping
+        )
+
+    assert result.status == "applied"
+    # canonical sha256 覆盖 pending 占位，且只动 hash 列——其余保持 AssetImported 的落库值。
+    assert asset["hash"] == "b" * 64
+    assert asset["ingest_status"] == "imported"
+    assert asset["reference_path"] == "/tmp/source.mp4"
 
 
 def test_merge_preview_result_records_artifact_without_stale_version_conflict(

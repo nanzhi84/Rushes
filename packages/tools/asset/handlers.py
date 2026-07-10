@@ -14,7 +14,8 @@ from contracts.events import AssetImported, AssetLinked, JobEnqueued
 from contracts.tool_result import ToolError, ToolResult
 from media.probe import asset_needs_proxy
 from storage import schema
-from storage.object_store import CHUNK_SIZE, ObjectStore
+from storage.object_store import ObjectStore
+from storage.repositories._json import load_json
 from storage.workspace_paths import WorkspacePaths
 from tools.context import ToolExecutionContext
 from tools.specs import (
@@ -38,16 +39,20 @@ def import_local_file(
         )
     source = Path(input_model.path).expanduser().resolve(strict=True)
     stat = source.stat()
-    digest = _sha256(source)
     asset_id = input_model.asset_id or _new_id("asset")
     object_hash: str | None = None
     object_size: int | None = None
     reference_path: str | None = str(source)
     if input_model.storage_mode is StorageMode.COPY:
+        # COPY 时 put_file 已整文件哈希——object_hash 即真 sha256，直接沿用，无需 hash job。
         ref = ObjectStore(_workspace_paths(context)).put_file(source)
         object_hash = ref.object_hash
         object_size = ref.size
         reference_path = None
+        digest = ref.object_hash
+    else:
+        # REFERENCE 不在同步路径整文件哈希：先发 pending 占位，真 sha256 交后台 hash job。
+        digest = f"pending:{stat.st_size}:{stat.st_mtime_ns}"
     link_payload: dict[str, Any] = {}
     if input_model.rel_dir:
         link_payload["rel_dir"] = input_model.rel_dir
@@ -70,6 +75,9 @@ def import_local_file(
         # poster 先入队（claim 优先级高于 proxy/index）：缩略图/时长秒出。
         _poster_job_event(draft_id=draft_id, asset_id=asset_id),
     ]
+    if input_model.storage_mode is StorageMode.REFERENCE:
+        # canonical sha256 在后台补算（claim 优先级最低，不与 poster/proxy/index 抢）。
+        events.append(_hash_job_event(draft_id=draft_id, asset_id=asset_id))
     # 代理只为「浏览器播不动的格式」兜底：h264/hevc 视频、常见音频、图片都直读即播，不入 proxy 队，
     # 直接入队 index（index 原本挂在 proxy handler 末尾，跳 proxy 就得在此补上索引这一步）。
     if asset_needs_proxy(input_model.kind, source):
@@ -109,7 +117,6 @@ def import_url(input_model: AssetImportUrlInput, context: ToolExecutionContext) 
 
 
 def list_assets(input_model: AssetListAssetsInput, context: ToolExecutionContext) -> ToolResult:
-    del input_model
     draft_id = _active_draft_id(context)
     if draft_id is None or context.readonly_connection is None:
         return _failed(
@@ -118,10 +125,15 @@ def list_assets(input_model: AssetListAssetsInput, context: ToolExecutionContext
             "missing_draft",
             "active draft and repository access required",
         )
-    rows = context.readonly_connection.execute(
+    statement = (
         select(
             schema.assets.c.asset_id,
+            schema.assets.c.filename,
             schema.assets.c.kind,
+            schema.assets.c.probe,
+            schema.assets.c.thumbnail_object_hash,
+            schema.assets.c.ingest_status,
+            schema.assets.c.understanding_status,
             schema.assets.c.usable,
             schema.draft_asset_links.c.rel_dir,
         )
@@ -133,26 +145,108 @@ def list_assets(input_model: AssetListAssetsInput, context: ToolExecutionContext
         )
         .where(schema.draft_asset_links.c.draft_id == draft_id)
         .order_by(schema.assets.c.asset_id)
-    ).all()
+    )
+    if input_model.kind is not None:
+        statement = statement.where(schema.assets.c.kind == input_model.kind)
+    if input_model.only_usable:
+        statement = statement.where(schema.assets.c.usable.is_(True))
+    rows = context.readonly_connection.execute(statement).all()
     asset_ids = [str(row._mapping["asset_id"]) for row in rows]
     with_summary = _asset_ids_with_summary(context, asset_ids)
-    assets = [
-        {
-            "asset_id": str(row._mapping["asset_id"]),
-            "kind": str(row._mapping["kind"]),
-            "rel_dir": row._mapping["rel_dir"],
-            "usable": bool(row._mapping["usable"]),
-            "has_summary": str(row._mapping["asset_id"]) in with_summary,
-        }
-        for row in rows
-    ]
+    entries = [_asset_manifest_entry(row._mapping, with_summary) for row in rows]
+    # has_audio 在 probe JSON 里、无法用 SQL 过滤，落到内存筛；probe 缺失（None）两种取值都不命中。
+    if input_model.has_audio is not None:
+        entries = [entry for entry in entries if entry["has_audio"] == input_model.has_audio]
+    total = len(entries)
+    if input_model.after is not None:
+        entries = [entry for entry in entries if entry["asset_id"] > input_model.after]
+    next_after: str | None = None
+    if input_model.limit is not None and len(entries) > input_model.limit:
+        entries = entries[: input_model.limit]
+        next_after = entries[-1]["asset_id"]
     return _succeeded(
         "asset.list_assets",
         context,
-        f"当前草稿共链接 {len(assets)} 个素材。",
-        data={"draft_id": draft_id, "assets": assets},
+        _list_assets_observation(entries, total=total, next_after=next_after),
+        data={
+            "draft_id": draft_id,
+            "assets": entries,
+            "total": total,
+            "next_after": next_after,
+        },
         events=[],
     )
+
+
+def _asset_manifest_entry(
+    mapping: Any,
+    with_summary: set[str],
+) -> dict[str, Any]:
+    asset_id = str(mapping["asset_id"])
+    probe = load_json(mapping["probe"]) if isinstance(mapping["probe"], str) else None
+    width = probe.get("width") if isinstance(probe, dict) else None
+    height = probe.get("height") if isinstance(probe, dict) else None
+    duration = probe.get("duration_sec") if isinstance(probe, dict) else None
+    has_audio = probe.get("has_audio") if isinstance(probe, dict) else None
+    thumbnail = mapping["thumbnail_object_hash"]
+    return {
+        "asset_id": asset_id,
+        "filename": mapping["filename"] or "",
+        "kind": str(mapping["kind"]),
+        "rel_dir": mapping["rel_dir"],
+        "duration_sec": duration if isinstance(duration, int | float) else None,
+        "width": width if isinstance(width, int) else None,
+        "height": height if isinstance(height, int) else None,
+        "orientation": _orientation(width, height),
+        "has_audio": has_audio if isinstance(has_audio, bool) else None,
+        "usable": bool(mapping["usable"]),
+        "ingest_status": str(mapping["ingest_status"]),
+        "understanding_status": str(mapping["understanding_status"] or "none"),
+        "has_summary": asset_id in with_summary,
+        "thumbnail_ready": isinstance(thumbnail, str) and thumbnail != "",
+    }
+
+
+def _orientation(width: Any, height: Any) -> str | None:
+    if not isinstance(width, int) or not isinstance(height, int) or width <= 0 or height <= 0:
+        return None
+    if width > height:
+        return "landscape"
+    if width < height:
+        return "portrait"
+    return "square"
+
+
+def _list_assets_observation(
+    entries: list[dict[str, Any]],
+    *,
+    total: int,
+    next_after: str | None,
+) -> str:
+    kinds = ("video", "audio", "image", "font")
+    # 统计口径落在「过滤后总数」这一页之外的全集不便再算，观测按当前返回页给出即时概览。
+    counts = {kind: sum(1 for entry in entries if entry["kind"] == kind) for kind in kinds}
+    usable = sum(1 for entry in entries if entry["usable"])
+    understood = sum(1 for entry in entries if entry["understanding_status"] == "ready")
+    head = (
+        f"共 {total} 个素材，本页 {len(entries)} 个"
+        f"（视频 {counts['video']} / 音频 {counts['audio']} /"
+        f" 图片 {counts['image']} / 字体 {counts['font']}）；"
+        f"可用 {usable} 个，已理解 {understood} 个。"
+    )
+    lines = [head]
+    for entry in entries[:10]:
+        duration = entry["duration_sec"]
+        duration_text = f"{duration:.1f}s" if isinstance(duration, int | float) else "时长未知"
+        summary_flag = "已理解" if entry["has_summary"] else "未理解"
+        usable_flag = "可用" if entry["usable"] else "不可用"
+        lines.append(
+            f"- {entry['asset_id']} {entry['filename']} | {entry['kind']} | "
+            f"{duration_text} | {usable_flag} | {summary_flag}"
+        )
+    if next_after is not None:
+        lines.append(f"还有更多，可用 after={next_after} 继续翻页。")
+    return "\n".join(lines)
 
 
 def _asset_ids_with_summary(
@@ -216,6 +310,23 @@ def _poster_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:
         requested_by_draft_id=draft_id,
         payload={
             "kind": "poster",
+            "asset_id": asset_id,
+            "idempotency_key": idempotency_key,
+            "job_payload": {"asset_id": asset_id},
+            "attempts": 0,
+            "max_retries": 2,
+        },
+    )
+
+
+def _hash_job_event(*, draft_id: str, asset_id: str) -> JobEnqueued:
+    idempotency_key = f"asset:{asset_id}:hash"
+    return JobEnqueued(
+        job_id=_job_id("hash", idempotency_key),
+        draft_id=draft_id,
+        requested_by_draft_id=draft_id,
+        payload={
+            "kind": "hash",
             "asset_id": asset_id,
             "idempotency_key": idempotency_key,
             "job_payload": {"asset_id": asset_id},
@@ -305,14 +416,6 @@ def _workspace_paths(context: ToolExecutionContext) -> WorkspacePaths:
     if isinstance(raw_root, str | Path):
         return WorkspacePaths.from_root(raw_root).initialize()
     raise ValueError("asset tool requires workspace_paths metadata")
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(CHUNK_SIZE), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _job_id(kind: str, idempotency_key: str) -> str:

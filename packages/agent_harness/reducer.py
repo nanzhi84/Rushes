@@ -42,6 +42,7 @@ REDUCER_DISPATCH_EVENTS: frozenset[str] = frozenset(
         "DraftTrashed",
         "AssetImported",
         "AssetProbed",
+        "AssetHashComputed",
         "ProxyGenerated",
         "AssetInvalidated",
         "AssetIndexReady",
@@ -274,6 +275,7 @@ def _apply_event(context: _ReducerContext, event: DomainEventBase) -> None:
     elif name in {
         "AssetImported",
         "AssetProbed",
+        "AssetHashComputed",
         "ProxyGenerated",
         "AssetInvalidated",
         "AssetIndexReady",
@@ -1254,6 +1256,9 @@ def _asset_update_values_for_event(event: DomainEventBase) -> dict[str, Any]:
     elif event.event == "AssetProbed":
         values["probe"] = dump_json(payload.get("probe", {}))
         values["ingest_status"] = str(payload.get("ingest_status", "probing"))
+    elif event.event == "AssetHashComputed":
+        # 后台补算的 canonical sha256 就绪：只覆盖 hash 列，替换导入时的 pending 占位。
+        values["hash"] = str(payload.get("hash", ""))
     elif event.event == "ProxyGenerated":
         values["proxy_object_hash"] = payload.get("proxy_object_hash")
         values["ingest_status"] = str(payload.get("ingest_status", "proxying"))

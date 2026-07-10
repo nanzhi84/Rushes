@@ -363,7 +363,8 @@ async def test_proxy_job_probes_and_generates_proxy_with_ffmpeg(tmp_path: Path) 
     )
     with _engine(app).connect() as connection:
         kinds = {str(r._mapping["kind"]) for r in connection.execute(select(schema.jobs)).all()}
-    assert kinds == {"poster", "proxy"}  # 不可播 → 入 proxy 队
+    # 不可播 → 入 proxy 队；REFERENCE 另有后台 hash 补算。
+    assert kinds == {"poster", "proxy", "hash"}
     runner = JobRunner(engine=_engine(app))
 
     # 导入入队 poster + proxy；poster 优先认领（封面/时长秒出），第二次 run_once 跑 proxy。
@@ -397,7 +398,8 @@ async def test_import_playable_video_skips_proxy_and_enqueues_index(tmp_path: Pa
     )
     with _engine(app).connect() as connection:
         kinds = {str(r._mapping["kind"]) for r in connection.execute(select(schema.jobs)).all()}
-    assert kinds == {"poster", "index"}  # 可播 → 0 条 proxy
+    # 可播 → 0 条 proxy；REFERENCE 另有后台 hash 补算。
+    assert kinds == {"poster", "index", "hash"}
 
     runner = JobRunner(engine=_engine(app))
     first = await runner.run_once()

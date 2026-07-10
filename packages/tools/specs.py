@@ -132,6 +132,13 @@ class AssetImportUrlInput(BaseModel):
 class AssetListAssetsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    kind: Literal["video", "audio", "image", "font"] | None = None
+    has_audio: bool | None = None
+    only_usable: bool | None = None
+    limit: int | None = Field(default=None, ge=1, le=200)
+    # keyset 分页游标：按 asset_id 升序，返回 asset_id 严格大于 after 的行。
+    after: str | None = None
+
 
 class MediaViewFramesTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -452,7 +459,10 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             requires_active_draft=True,
             side_effects=[],
             emits_events=[],
-            description="List every asset linked to the active draft.",
+            description=(
+                "List assets linked to the active draft with optional kind/has_audio/only_usable "
+                "filters and keyset pagination (limit + after)."
+            ),
         ),
         ToolSpec(
             name="audio.inspect_sources",

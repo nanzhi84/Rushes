@@ -51,6 +51,49 @@ def test_reference_revalidation_invalidates_when_hash_changes(tmp_path: Path) ->
     assert failure["error_code"] == "reference_invalidated"
 
 
+def test_reference_revalidation_pending_hash_invalidates_on_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"before")
+    # pending 占位：canonical sha256 未就绪，mtime 设 0 以便重写后判为变化。
+    engine = _engine_with_reference(tmp_path, source, digest="pending:6:0", mtime=0)
+    source.write_bytes(b"after!")
+
+    def fail_hash(path: Path) -> str:
+        raise AssertionError(f"pending hash must skip sha256 slow path: {path}")
+
+    monkeypatch.setattr(invalidation, "_sha256", fail_hash)
+
+    result = invalidation.revalidate_draft_references(engine, "draft_1", apply_events=apply)
+
+    assert result.invalidated_asset_ids == ("asset_1",)
+    assert _asset_row(engine)["usable"] is False
+
+
+def test_reference_revalidation_pending_hash_valid_when_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"same")
+    stat = source.stat()
+    engine = _engine_with_reference(
+        tmp_path, source, digest=f"pending:{stat.st_size}:{stat.st_mtime_ns}"
+    )
+
+    def fail_hash(path: Path) -> str:
+        raise AssertionError(f"unchanged metadata must skip sha256 slow path: {path}")
+
+    monkeypatch.setattr(invalidation, "_sha256", fail_hash)
+
+    result = invalidation.revalidate_draft_references(engine, "draft_1", apply_events=apply)
+
+    assert result.invalidated_asset_ids == ()
+    assert _asset_row(engine)["usable"] is True
+
+
 def _engine_with_reference(
     tmp_path: Path,
     source: Path,

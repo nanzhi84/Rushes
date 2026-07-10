@@ -86,7 +86,12 @@ def _is_reference_invalid(row: dict[str, Any]) -> bool:
     unchanged_mtime = int(row.get("mtime") or 0) == stat.st_mtime_ns
     if unchanged_size and unchanged_mtime:
         return False
-    return _sha256(path) != row.get("hash")
+    row_hash = row.get("hash")
+    if isinstance(row_hash, str) and row_hash.startswith("pending:"):
+        # canonical sha256 未就绪：跳过慢路径，size/mtime 一变就判失效（provisional 语义，
+        # 空窗只有 hash job 补算前的几秒，宁可误杀 touch 也不放过真改动）。
+        return True
+    return _sha256(path) != row_hash
 
 
 def _sha256(path: Path) -> str:

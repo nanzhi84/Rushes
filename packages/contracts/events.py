@@ -73,6 +73,14 @@ class AssetProbed(DomainEventBase):
     merge_key: ClassVar[tuple[str, ...]] = ("asset_id",)
 
 
+class AssetHashComputed(DomainEventBase):
+    event: Literal["AssetHashComputed"] = "AssetHashComputed"
+    asset_id: str
+    job_id: str | None = None
+    version_mode: ClassVar[VersionMode] = "merge"
+    merge_key: ClassVar[tuple[str, ...]] = ("asset_id",)
+
+
 class ProxyGenerated(DomainEventBase):
     event: Literal["ProxyGenerated"] = "ProxyGenerated"
     asset_id: str
@@ -388,6 +396,7 @@ EVENT_CLASSES: tuple[type[DomainEventBase], ...] = (
     DraftTrashed,
     AssetImported,
     AssetProbed,
+    AssetHashComputed,
     ProxyGenerated,
     AssetInvalidated,
     AssetIndexReady,
@@ -435,6 +444,7 @@ type EventName = Literal[
     "DraftTrashed",
     "AssetImported",
     "AssetProbed",
+    "AssetHashComputed",
     "ProxyGenerated",
     "AssetInvalidated",
     "AssetIndexReady",
@@ -482,6 +492,7 @@ type EVENT_UNION = Annotated[
     | DraftTrashed
     | AssetImported
     | AssetProbed
+    | AssetHashComputed
     | ProxyGenerated
     | AssetInvalidated
     | AssetIndexReady
