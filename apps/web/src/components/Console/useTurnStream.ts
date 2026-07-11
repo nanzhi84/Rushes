@@ -1,8 +1,8 @@
 import { useEffect, useReducer, useRef } from "react";
 import { createDraftTurnStreamSource } from "../../api/client";
 
-// 流式消息 kind：text_delta 阶段是 assistant（尚未定型），message_completed 后定为 narration/reply。
-export type TurnStreamMessageKind = "assistant" | "narration" | "reply";
+// text_delta 阶段是 assistant；完成后区分叙述、正式回复和后台观察。
+export type TurnStreamMessageKind = "assistant" | "narration" | "reply" | "observation";
 
 export type StreamMessageItem = {
   type: "message";
@@ -47,7 +47,12 @@ export type TurnStreamState = {
 export type TurnStreamEvent =
   | { type: "turn_started"; turn_id?: string }
   | { type: "text_delta"; message_id: string; kind?: string; delta?: string }
-  | { type: "message_completed"; message_id: string; kind: "narration" | "reply"; content: string }
+  | {
+      type: "message_completed";
+      message_id: string;
+      kind: "narration" | "reply" | "observation";
+      content: string;
+    }
   | { type: "tool_step_started"; step_id: string; tool: string; args_summary?: string }
   | { type: "tool_step_finished"; step_id: string; tool: string; status: string; observation?: string }
   | {
@@ -272,7 +277,10 @@ function upsertProgress(
 }
 
 function normalizeCompletedKind(kind: unknown): TurnStreamMessageKind {
-  return kind === "narration" ? "narration" : "reply";
+  if (kind === "narration" || kind === "observation") {
+    return kind;
+  }
+  return "reply";
 }
 
 function parseUnderstandingProgress(event: TurnStreamEvent): UnderstandingProgress | null {

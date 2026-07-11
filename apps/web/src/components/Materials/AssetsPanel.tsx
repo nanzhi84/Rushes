@@ -143,11 +143,11 @@ export function AssetsPanel({
 
   return (
     <section className="flex h-full min-h-0 flex-col" aria-label="素材面板">
-      <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
-        <span className="text-sm font-semibold text-fg">
-          素材 <span className="font-normal text-fg-muted">{assets.length}</span>
+      <header className="flex min-h-8 shrink-0 items-center justify-between gap-2 border-b border-line px-2">
+        <span className="whitespace-nowrap text-xs font-semibold text-fg">
+          我的素材 <span className="font-normal text-fg-muted">{assets.length}</span>
         </span>
-        <div className="flex flex-wrap items-center justify-end gap-2">
+        <div className="flex min-w-0 items-center justify-end gap-1">
           {picking ? <span className="text-xs text-fg-muted">等待选择…</span> : null}
           {understandingProgress ? (
             <div
@@ -175,26 +175,28 @@ export function AssetsPanel({
           ) : null}
           {management ? (
             <button
-              className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line px-2.5 py-1.5 text-xs text-fg-muted transition-colors ease-standard hover:bg-hover disabled:opacity-40"
+              className="grid size-7 shrink-0 place-items-center rounded-sm text-fg-muted transition-colors ease-standard hover:bg-hover disabled:opacity-40"
               type="button"
+              aria-label="重新检测失效素材"
+              title="重新检测失效素材"
               disabled={revalidateMaterials.isPending}
               onClick={() => revalidateMaterials.mutate()}
             >
               <RotateCw size={14} strokeWidth={1.75} aria-hidden />
-              重新检测失效
             </button>
           ) : null}
           <button
-            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-raised px-2.5 py-1.5 text-xs font-medium text-fg transition-colors ease-standard hover:bg-hover disabled:opacity-40"
+            className="grid size-7 shrink-0 place-items-center rounded-sm text-fg-muted transition-colors ease-standard hover:bg-hover disabled:opacity-40"
             type="button"
+            aria-label="导入文件夹"
+            title="导入文件夹"
             disabled={picking}
             onClick={() => void pickAndImport("folder")}
           >
             <FolderOpen size={14} strokeWidth={1.75} aria-hidden />
-            导入文件夹
           </button>
           <button
-            className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md bg-accent px-2.5 py-1.5 text-xs font-medium text-white transition-colors ease-standard hover:bg-accent-strong disabled:opacity-40"
+            className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-sm bg-accent px-2 py-1 text-2xs font-semibold text-white transition-colors ease-standard hover:bg-accent-strong disabled:opacity-40"
             type="button"
             disabled={picking}
             onClick={() => void pickAndImport("files")}
@@ -232,7 +234,7 @@ export function AssetsPanel({
         </nav>
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {materialsQuery.isLoading ? (
           <p className="text-sm text-fg-muted">正在读取素材</p>
         ) : materialsQuery.error ? (
@@ -240,13 +242,20 @@ export function AssetsPanel({
             素材列表加载失败
           </p>
         ) : assets.length === 0 ? (
-          <button
-            className="grid w-full place-items-center rounded-lg border border-dashed border-line-strong px-4 py-10 text-center text-sm text-fg-muted hover:border-accent"
-            type="button"
-            onClick={() => void pickAndImport("files")}
-          >
-            还没有素材。点击从 Finder 选择文件或文件夹，原地索引不占额外磁盘。
-          </button>
+          <div className="grid min-h-48 place-items-center px-5 text-center">
+            <div>
+              <Film size={22} strokeWidth={1.5} className="mx-auto mb-3 text-fg-faint" aria-hidden />
+              <p className="text-xs leading-5 text-fg-muted">还没有素材</p>
+              <button
+                className="mt-3 rounded-sm bg-raised px-3 py-1.5 text-xs text-fg hover:bg-hover"
+                type="button"
+                onClick={() => void pickAndImport("files")}
+              >
+                从 Finder 导入
+              </button>
+              <p className="mt-2 text-2xs text-fg-faint">原地索引，不复制文件</p>
+            </div>
+          </div>
         ) : (
           <div className={gridClassName ?? "grid grid-cols-2 gap-2 xl:grid-cols-3"}>
             {folders.map((folder) => (

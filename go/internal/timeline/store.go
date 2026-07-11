@@ -52,6 +52,56 @@ func NextVersion(ctx context.Context, database *storage.DB, draftID string) (int
 	return version, err
 }
 
+type VersionNavigation struct {
+	Parent *int
+	Redo   *int
+	Latest int
+}
+
+func Navigation(
+	ctx context.Context,
+	database *storage.DB,
+	draftID string,
+	version int,
+) (VersionNavigation, error) {
+	var parent sql.NullInt64
+	if err := database.Read().QueryRowContext(ctx, `
+		SELECT parent_version FROM timeline_versions WHERE draft_id=? AND version=?`,
+		draftID, version,
+	).Scan(&parent); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return VersionNavigation{}, storage.ErrNotFound
+		}
+		return VersionNavigation{}, err
+	}
+	var latest int
+	if err := database.Read().QueryRowContext(ctx, `
+		SELECT COALESCE(MAX(version),0) FROM timeline_versions WHERE draft_id=?`,
+		draftID,
+	).Scan(&latest); err != nil {
+		return VersionNavigation{}, err
+	}
+	var redo sql.NullInt64
+	if err := database.Read().QueryRowContext(ctx, `
+		SELECT version FROM timeline_versions
+		WHERE draft_id=? AND parent_version=?
+		ORDER BY version DESC LIMIT 1`,
+		draftID, version,
+	).Scan(&redo); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return VersionNavigation{}, err
+	}
+	result := VersionNavigation{Latest: latest}
+	if parent.Valid {
+		value := int(parent.Int64)
+		result.Parent = &value
+	}
+	if redo.Valid {
+		value := int(redo.Int64)
+		result.Redo = &value
+	}
+	return result, nil
+}
+
 func LatestPreviewID(
 	ctx context.Context,
 	database *storage.DB,

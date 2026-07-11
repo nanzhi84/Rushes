@@ -7,6 +7,26 @@ function apply(events: TurnStreamEvent[]): TurnStreamState {
 }
 
 describe("reduceTurnStream · subagent_progress", () => {
+  it("后台 observation 完成事件保留专用消息类型", () => {
+    const state = apply([
+      { type: "turn_started", turn_id: "turn_1" },
+      {
+        type: "message_completed",
+        message_id: "m1",
+        kind: "observation",
+        content: "后台任务已完成"
+      }
+    ]);
+    expect(state.items).toEqual([
+      {
+        type: "message",
+        message_id: "m1",
+        kind: "observation",
+        text: "后台任务已完成"
+      }
+    ]);
+  });
+
   it("理解批次进度按 completed/total 递增并在工具完成后清空", () => {
     const running = apply([
       { type: "turn_started", turn_id: "turn_1" },

@@ -485,7 +485,10 @@ type DraftResponse struct {
 // DraftTimelineResponse defines model for DraftTimelineResponse.
 type DraftTimelineResponse struct {
 	DraftId         string                 `json:"draft_id"`
+	LatestVersion   int                    `json:"latest_version"`
+	ParentVersion   *int                   `json:"parent_version"`
 	PreviewId       *string                `json:"preview_id"`
+	RedoVersion     *int                   `json:"redo_version"`
 	Summary         string                 `json:"summary"`
 	Timeline        map[string]interface{} `json:"timeline"`
 	TimelineVersion int                    `json:"timeline_version"`
@@ -702,6 +705,16 @@ type SecurityRefusalResponseError string
 // StorageMode defines model for StorageMode.
 type StorageMode string
 
+// TimelinePatchRequest defines model for TimelinePatchRequest.
+type TimelinePatchRequest struct {
+	Op map[string]interface{} `json:"op"`
+}
+
+// TimelineRestoreRequest defines model for TimelineRestoreRequest.
+type TimelineRestoreRequest struct {
+	Version int `json:"version"`
+}
+
 // TurnCancelResponse defines model for TurnCancelResponse.
 type TurnCancelResponse struct {
 	DraftId   string                   `json:"draft_id"`
@@ -777,6 +790,12 @@ type ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPostJSONRequestBody 
 
 // EnqueueMessageApiDraftsDraftIdMessagesPostJSONRequestBody defines body for EnqueueMessageApiDraftsDraftIdMessagesPost for application/json ContentType.
 type EnqueueMessageApiDraftsDraftIdMessagesPostJSONRequestBody = MessageCreateRequest
+
+// ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPostJSONRequestBody defines body for ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost for application/json ContentType.
+type ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPostJSONRequestBody = TimelinePatchRequest
+
+// RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePostJSONRequestBody defines body for RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost for application/json ContentType.
+type RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePostJSONRequestBody = TimelineRestoreRequest
 
 // FsPickApiFsPickPostJSONRequestBody defines body for FsPickApiFsPickPost for application/json ContentType.
 type FsPickApiFsPickPostJSONRequestBody = FsPickRequest
@@ -1032,6 +1051,12 @@ type ServerInterface interface {
 	// Get Draft Timeline
 	// (GET /api/drafts/{draft_id}/timeline)
 	GetDraftTimelineApiDraftsDraftIdTimelineGet(w http.ResponseWriter, r *http.Request, draftId string, params GetDraftTimelineApiDraftsDraftIdTimelineGetParams)
+	// Apply Timeline Patch
+	// (POST /api/drafts/{draft_id}/timeline/patch)
+	ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(w http.ResponseWriter, r *http.Request, draftId string)
+	// Restore Timeline Version
+	// (POST /api/drafts/{draft_id}/timeline/restore)
+	RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost(w http.ResponseWriter, r *http.Request, draftId string)
 	// Draft Turn Stream
 	// (GET /api/drafts/{draft_id}/turn-stream)
 	DraftTurnStreamApiDraftsDraftIdTurnStreamGet(w http.ResponseWriter, r *http.Request, draftId string)
@@ -1206,6 +1231,18 @@ func (_ Unimplemented) PreviewViewedApiDraftsDraftIdPreviewsPreviewIdViewedPost(
 // Get Draft Timeline
 // (GET /api/drafts/{draft_id}/timeline)
 func (_ Unimplemented) GetDraftTimelineApiDraftsDraftIdTimelineGet(w http.ResponseWriter, r *http.Request, draftId string, params GetDraftTimelineApiDraftsDraftIdTimelineGetParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Apply Timeline Patch
+// (POST /api/drafts/{draft_id}/timeline/patch)
+func (_ Unimplemented) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(w http.ResponseWriter, r *http.Request, draftId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Restore Timeline Version
+// (POST /api/drafts/{draft_id}/timeline/restore)
+func (_ Unimplemented) RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost(w http.ResponseWriter, r *http.Request, draftId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -1875,6 +1912,58 @@ func (siw *ServerInterfaceWrapper) GetDraftTimelineApiDraftsDraftIdTimelineGet(w
 	handler.ServeHTTP(w, r)
 }
 
+// ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost operation middleware
+func (siw *ServerInterfaceWrapper) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "draft_id" -------------
+	var draftId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "draft_id", chi.URLParam(r, "draft_id"), &draftId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "draft_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(w, r, draftId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost operation middleware
+func (siw *ServerInterfaceWrapper) RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "draft_id" -------------
+	var draftId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "draft_id", chi.URLParam(r, "draft_id"), &draftId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "draft_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost(w, r, draftId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // DraftTurnStreamApiDraftsDraftIdTurnStreamGet operation middleware
 func (siw *ServerInterfaceWrapper) DraftTurnStreamApiDraftsDraftIdTurnStreamGet(w http.ResponseWriter, r *http.Request) {
 
@@ -2460,6 +2549,12 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/drafts/{draft_id}/timeline", wrapper.GetDraftTimelineApiDraftsDraftIdTimelineGet)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/drafts/{draft_id}/timeline/patch", wrapper.ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/drafts/{draft_id}/timeline/restore", wrapper.RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/drafts/{draft_id}/turn-stream", wrapper.DraftTurnStreamApiDraftsDraftIdTurnStreamGet)

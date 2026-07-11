@@ -61,7 +61,10 @@ func TestRenderTimelineAndInspectSnapshot(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	source := filepath.Join(database.Paths.Temporary, "render-source.mp4")
-	if _, err := RunCommand(t.Context(), "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", source); err != nil {
+	if _, err := RunCommand(t.Context(), "ffmpeg", "-y",
+		"-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=1",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", source); err != nil {
 		t.Fatal(err)
 	}
 	info, _ := os.Stat(source)
@@ -73,15 +76,28 @@ func TestRenderTimelineAndInspectSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	document, err := timeline.ComposeInitial("draft", 1, []timeline.Selection{{
-		AssetID: "render_asset", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
+		AssetID: "render_asset", AssetKind: "video", HasAudio: true,
+		SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	document.Tracks[1].Clips = []timeline.Clip{{
+		TimelineClipID: "overlay_render", TrackID: "visual_overlay", AssetID: "render_asset", AssetKind: "video",
+		TimelineStartFrame: 10, TimelineEndFrame: 25, SourceStartFrame: 0, SourceEndFrame: 15, PlaybackRate: 1,
+	}}
+	document.Tracks[5].Clips = []timeline.Clip{{
+		TimelineClipID: "subtitle_render", TrackID: "subtitles", Text: "真实多轨预览",
+		TimelineStartFrame: 5, TimelineEndFrame: 25,
+	}}
 	var progress int
 	rendered, err := RenderTimeline(t.Context(), database, document, PreviewProfile, func(Progress) { progress++ })
 	if err != nil || rendered.Object.Size == 0 || progress == 0 {
 		t.Fatalf("rendered=%#v progress=%d err=%v", rendered, progress, err)
+	}
+	probe, err := ProbeFile(t.Context(), rendered.Object.Path)
+	if err != nil || !probe.HasAudio {
+		t.Fatalf("rendered probe=%#v err=%v", probe, err)
 	}
 	inspection, err := InspectVideo(t.Context(), rendered.Object.Path, ExpectedVideo{
 		Width: rendered.Width, Height: rendered.Height, FPS: rendered.FPS, DurationSec: rendered.DurationSec,

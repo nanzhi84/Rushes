@@ -130,8 +130,13 @@ done:
 		}
 	}
 	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_react", 20)
-	if err != nil || len(messages) != 2 || messages[1].Content != "EINO-SERVICE-OK" {
+	if err != nil || len(messages) != 3 || messages[1].Kind != "tool" ||
+		messages[2].Content != "EINO-SERVICE-OK" {
 		t.Fatalf("messages=%#v err=%v", messages, err)
+	}
+	modelMessages, modelErr := service.modelMessages(t.Context(), "draft_react")
+	if modelErr != nil || len(modelMessages) != 2 {
+		t.Fatalf("tool trace 不应进入模型上下文: messages=%#v err=%v", modelMessages, modelErr)
 	}
 }
 
@@ -209,6 +214,13 @@ func TestJobObservationBridgeWakesAgentForWaitedTerminalJob(t *testing.T) {
 			if event["type"] == "message_completed" {
 				if event["content"] != "后台任务已完成，我已读取结果并继续推进。" {
 					t.Fatalf("event=%#v", event)
+				}
+				if event["kind"] != "observation" {
+					t.Fatalf("后台回调应以 observation 呈现: %#v", event)
+				}
+				messages, listErr := storage.ListMessages(t.Context(), database.Read(), "draft_bridge", 20)
+				if listErr != nil || len(messages) != 1 || messages[0].Kind != "observation" {
+					t.Fatalf("messages=%#v err=%v", messages, listErr)
 				}
 				return
 			}
@@ -807,7 +819,7 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 	if cursor := service.bridgeIteration(t.Context(), 9); cursor != 9 {
 		t.Fatalf("closed bridge cursor=%d", cursor)
 	}
-	reporter := service.toolReporter("draft_closed")
+	reporter := service.toolReporter(t.Context(), "draft_closed")
 	reporter("orphan", "finished", nil, nil, errors.New("tool failed"))
 }
 

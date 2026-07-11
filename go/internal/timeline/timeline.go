@@ -30,15 +30,20 @@ type Document struct {
 }
 
 type Track struct {
-	TrackID   string `json:"track_id"`
-	TrackType string `json:"track_type"`
-	Clips     []Clip `json:"clips"`
+	TrackID   string  `json:"track_id"`
+	TrackType string  `json:"track_type"`
+	Clips     []Clip  `json:"clips"`
+	Muted     bool    `json:"muted,omitempty"`
+	Solo      bool    `json:"solo,omitempty"`
+	Locked    bool    `json:"locked,omitempty"`
+	GainDB    float64 `json:"gain_db,omitempty"`
 }
 
 type Clip struct {
 	TimelineClipID     string           `json:"timeline_clip_id"`
 	TrackID            string           `json:"track_id"`
 	AssetID            string           `json:"asset_id,omitempty"`
+	AssetKind          string           `json:"asset_kind,omitempty"`
 	ClipID             *string          `json:"clip_id,omitempty"`
 	Role               string           `json:"role,omitempty"`
 	Text               string           `json:"text,omitempty"`
@@ -50,14 +55,17 @@ type Clip struct {
 	GainDB             float64          `json:"gain_db,omitempty"`
 	LockPolicy         string           `json:"lock_policy,omitempty"`
 	ParentBlockID      string           `json:"parent_block_id,omitempty"`
+	Linked             bool             `json:"linked,omitempty"`
 	Effects            []map[string]any `json:"effects,omitempty"`
 }
 
 type Selection struct {
 	AssetID          string
+	AssetKind        string
 	SourceStartFrame int
 	SourceEndFrame   int
 	Role             string
+	HasAudio         bool
 }
 
 type ValidationIssue struct {
@@ -77,6 +85,7 @@ func ComposeInitial(draftID string, version int, selections []Selection) (Docume
 	}
 	document := Empty(draftID, version)
 	primary := &document.Tracks[0]
+	originalAudio := &document.Tracks[2]
 	cursor := 0
 	for index, selection := range selections {
 		if selection.AssetID == "" || selection.SourceStartFrame < 0 || selection.SourceEndFrame <= selection.SourceStartFrame {
@@ -84,13 +93,25 @@ func ComposeInitial(draftID string, version int, selections []Selection) (Docume
 		}
 		duration := selection.SourceEndFrame - selection.SourceStartFrame
 		clipID := fmt.Sprintf("clip_v%d_%03d", version, index+1)
+		parentBlockID := fmt.Sprintf("block_%03d", index+1)
 		primary.Clips = append(primary.Clips, Clip{
 			TimelineClipID: clipID, TrackID: primary.TrackID, AssetID: selection.AssetID,
-			Role: selection.Role, TimelineStartFrame: cursor, TimelineEndFrame: cursor + duration,
+			AssetKind: selection.AssetKind,
+			Role:      selection.Role, TimelineStartFrame: cursor, TimelineEndFrame: cursor + duration,
 			SourceStartFrame: selection.SourceStartFrame,
 			SourceEndFrame:   selection.SourceEndFrame,
-			PlaybackRate:     1, LockPolicy: "free", ParentBlockID: fmt.Sprintf("block_%03d", index+1),
+			PlaybackRate:     1, LockPolicy: "free", ParentBlockID: parentBlockID,
+			Linked: selection.HasAudio,
 		})
+		if selection.HasAudio {
+			originalAudio.Clips = append(originalAudio.Clips, Clip{
+				TimelineClipID: clipID + "_audio", TrackID: originalAudio.TrackID,
+				AssetID: selection.AssetID, AssetKind: selection.AssetKind,
+				Role: "original_audio", TimelineStartFrame: cursor, TimelineEndFrame: cursor + duration,
+				SourceStartFrame: selection.SourceStartFrame, SourceEndFrame: selection.SourceEndFrame,
+				PlaybackRate: 1, LockPolicy: "free", ParentBlockID: parentBlockID, Linked: true,
+			})
+		}
 		cursor += duration
 	}
 	document.DurationFrames = cursor
@@ -127,7 +148,13 @@ func Validate(document Document) ValidationReport {
 			add("duplicate_track", track.TrackID)
 		}
 		tracks[track.TrackID] = track
+		if track.GainDB < -60 || track.GainDB > 12 {
+			add("invalid_track_gain", track.TrackID)
+		}
 		for _, clip := range track.Clips {
+			if clip.TrackID != track.TrackID {
+				add("clip_track_mismatch", clip.TimelineClipID)
+			}
 			if clip.TimelineStartFrame < 0 || clip.TimelineEndFrame <= clip.TimelineStartFrame || clip.TimelineEndFrame > document.DurationFrames {
 				add("invalid_clip_range", clip.TimelineClipID)
 			}
@@ -136,6 +163,9 @@ func Validate(document Document) ValidationReport {
 			}
 			if clip.PlaybackRate < 0 {
 				add("invalid_playback_rate", clip.TimelineClipID)
+			}
+			if clip.GainDB < -60 || clip.GainDB > 12 {
+				add("invalid_clip_gain", clip.TimelineClipID)
 			}
 		}
 	}
@@ -173,6 +203,22 @@ func ApplyPatch(document Document, operation map[string]any) (Document, error) {
 	switch kind {
 	case "trim_clip":
 		err = trimClip(&copy, operation)
+	case "split_clip":
+		err = splitClip(&copy, operation)
+	case "reorder_clip":
+		err = reorderClip(&copy, operation)
+	case "move_clip":
+		err = moveClip(&copy, operation)
+	case "trim_clip_edge":
+		err = trimClipEdge(&copy, operation)
+	case "delete_clip":
+		err = deleteClip(&copy, operation)
+	case "set_track_state":
+		err = setTrackState(&copy, operation)
+	case "set_clip_linked":
+		err = setClipLinked(&copy, operation)
+	case "insert_subtitle":
+		err = insertSubtitle(&copy, operation)
 	case "delete_range":
 		err = deleteRange(&copy, operation)
 	case "insert_clip":
@@ -182,13 +228,24 @@ func ApplyPatch(document Document, operation map[string]any) (Document, error) {
 	case "set_playback_rate":
 		err = setPlaybackRate(&copy, operation)
 	case "adjust_gain":
-		err = updateClip(&copy, operation, func(clip *Clip) error {
-			clip.GainDB = numberValue(operation["gain_db"])
+		err = updateEditableClip(&copy, operation, func(_ *Track, clip *Clip) error {
+			gain := numberValue(operation["gain_db"])
+			if gain < -60 || gain > 12 {
+				return errors.New("gain_db 必须在 [-60,12] 范围内")
+			}
+			clip.GainDB = gain
 			return nil
 		})
 	case "edit_subtitle_text":
-		err = updateClip(&copy, operation, func(clip *Clip) error {
-			clip.Text = stringValue(operation["text"])
+		err = updateEditableClip(&copy, operation, func(track *Track, clip *Clip) error {
+			if track.TrackID != "subtitles" {
+				return errors.New("只能编辑字幕轨文字")
+			}
+			text := strings.TrimSpace(stringValue(operation["text"]))
+			if text == "" {
+				return errors.New("字幕文字不能为空")
+			}
+			clip.Text = text
 			return nil
 		})
 	case "remove_track_clips":
@@ -227,7 +284,7 @@ func ToMap(document Document) (map[string]any, error) {
 }
 
 func trimClip(document *Document, operation map[string]any) error {
-	return updateClip(document, operation, func(clip *Clip) error {
+	return updateEditableClip(document, operation, func(_ *Track, clip *Clip) error {
 		start, startErr := frameValue(operation, "source_start_frame")
 		end, endErr := frameValue(operation, "source_end_frame")
 		if startErr != nil || endErr != nil {
@@ -250,14 +307,193 @@ func trimClip(document *Document, operation map[string]any) error {
 	})
 }
 
+func splitClip(document *Document, operation map[string]any) error {
+	location, err := editableLocation(document, operation)
+	if err != nil {
+		return err
+	}
+	splitFrame, err := frameValue(operation, "split_frame")
+	if err != nil {
+		return err
+	}
+	selected := document.Tracks[location.trackIndex].Clips[location.clipIndex]
+	groupID := ""
+	if selected.Linked {
+		groupID = selected.ParentBlockID
+	}
+	rightGroupID := groupID
+	if rightGroupID != "" {
+		rightGroupID = fmt.Sprintf("%s_split_%d", groupID, splitFrame)
+	}
+	for _, member := range linkedGroup(document, groupID) {
+		track := document.Tracks[member.trackIndex]
+		clip := track.Clips[member.clipIndex]
+		if track.Locked {
+			return fmt.Errorf("轨道 %s 已锁定", track.TrackID)
+		}
+		if splitFrame <= clip.TimelineStartFrame || splitFrame >= clip.TimelineEndFrame {
+			return errors.New("联动片段未覆盖同一个切点")
+		}
+	}
+	selectedID := selected.TimelineClipID
+	for trackIndex := range document.Tracks {
+		track := &document.Tracks[trackIndex]
+		next := make([]Clip, 0, len(track.Clips)+1)
+		for _, clip := range track.Clips {
+			shouldSplit := clip.TimelineClipID == selectedID
+			if groupID != "" {
+				shouldSplit = shouldSplit || (clip.Linked && clip.ParentBlockID == groupID)
+			}
+			if !shouldSplit {
+				next = append(next, clip)
+				continue
+			}
+			left, right, splitErr := splitClipValue(clip, splitFrame, groupID, rightGroupID)
+			if splitErr != nil {
+				return splitErr
+			}
+			if clip.TimelineClipID == selectedID {
+				right.TimelineClipID = valueOr(
+					stringValue(operation["new_timeline_clip_id"]),
+					right.TimelineClipID,
+				)
+			}
+			next = append(next, left, right)
+		}
+		track.Clips = next
+	}
+	return nil
+}
+
+func splitClipValue(clip Clip, splitFrame int, leftGroupID, rightGroupID string) (Clip, Clip, error) {
+	if clip.AssetID == "" || splitFrame <= clip.TimelineStartFrame || splitFrame >= clip.TimelineEndFrame {
+		return Clip{}, Clip{}, errors.New("split_clip 切点必须位于可分割素材片段内部")
+	}
+	sourceSplit := clip.SourceStartFrame + int(math.Round(
+		float64(splitFrame-clip.TimelineStartFrame)*effectiveRate(clip),
+	))
+	if sourceSplit <= clip.SourceStartFrame || sourceSplit >= clip.SourceEndFrame {
+		return Clip{}, Clip{}, errors.New("split_clip 源切点无效")
+	}
+	left := clip
+	left.TimelineEndFrame = splitFrame
+	left.SourceEndFrame = sourceSplit
+	right := clip
+	right.TimelineClipID = fmt.Sprintf("%s_split_%d", clip.TimelineClipID, splitFrame)
+	right.TimelineStartFrame = splitFrame
+	right.SourceStartFrame = sourceSplit
+	if clip.Linked {
+		left.ParentBlockID = leftGroupID
+		right.ParentBlockID = rightGroupID
+	}
+	return left, right, nil
+}
+
+// reorder_clip 只改变主视觉片段顺序，并重新紧密排布该轨道。其他轨道保留
+// 时间坐标，因此不会制造主视觉空洞，也不会绕开后续 Validate/Reducer 门禁。
+func reorderClip(document *Document, operation map[string]any) error {
+	id := valueOr(stringValue(operation["timeline_clip_id"]), stringValue(operation["clip_id"]))
+	if id == "" {
+		return errors.New("reorder_clip 缺少 timeline_clip_id")
+	}
+	targetFrame, err := frameValue(operation, "target_frame")
+	if err != nil {
+		return err
+	}
+	if targetFrame < 0 || targetFrame > document.DurationFrames {
+		return errors.New("reorder_clip target_frame 超出时间线")
+	}
+	track := trackByID(document, "visual_base")
+	if track == nil || track.Locked {
+		return errors.New("reorder_clip 缺少主视觉轨或轨道已锁定")
+	}
+	for _, clip := range track.Clips {
+		if !clip.Linked || clip.ParentBlockID == "" {
+			continue
+		}
+		for _, member := range linkedGroup(document, clip.ParentBlockID) {
+			memberTrack := document.Tracks[member.trackIndex]
+			if memberTrack.TrackID != "visual_base" && memberTrack.Locked {
+				return fmt.Errorf("联动轨道 %s 已锁定", memberTrack.TrackID)
+			}
+		}
+	}
+	clips := append([]Clip(nil), track.Clips...)
+	sort.SliceStable(clips, func(i, j int) bool {
+		return clips[i].TimelineStartFrame < clips[j].TimelineStartFrame
+	})
+	clipIndex := -1
+	var moving Clip
+	for index, clip := range clips {
+		if clip.TimelineClipID == id {
+			clipIndex = index
+			moving = clip
+			break
+		}
+	}
+	if clipIndex < 0 {
+		return fmt.Errorf("clip 不存在或不在主视觉轨: %s", id)
+	}
+	clips = append(clips[:clipIndex], clips[clipIndex+1:]...)
+	insertAt := len(clips)
+	for index, clip := range clips {
+		midpoint := clip.TimelineStartFrame + (clip.TimelineEndFrame-clip.TimelineStartFrame)/2
+		if targetFrame < midpoint {
+			insertAt = index
+			break
+		}
+	}
+	clips = append(clips, Clip{})
+	copy(clips[insertAt+1:], clips[insertAt:])
+	clips[insertAt] = moving
+	cursor := 0
+	for index := range clips {
+		duration := clips[index].TimelineEndFrame - clips[index].TimelineStartFrame
+		clips[index].TimelineStartFrame = cursor
+		clips[index].TimelineEndFrame = cursor + duration
+		cursor += duration
+	}
+	track.Clips = clips
+	for _, clip := range track.Clips {
+		syncLinkedTiming(document, clip)
+	}
+	for trackIndex := range document.Tracks {
+		if document.Tracks[trackIndex].TrackID != "visual_base" {
+			sortTrack(&document.Tracks[trackIndex])
+		}
+	}
+	return nil
+}
+
+func syncLinkedTiming(document *Document, primary Clip) {
+	if !primary.Linked || primary.ParentBlockID == "" {
+		return
+	}
+	for trackIndex := range document.Tracks {
+		if document.Tracks[trackIndex].TrackID == "visual_base" {
+			continue
+		}
+		for clipIndex := range document.Tracks[trackIndex].Clips {
+			clip := &document.Tracks[trackIndex].Clips[clipIndex]
+			if clip.Linked && clip.ParentBlockID == primary.ParentBlockID {
+				clip.TimelineStartFrame = primary.TimelineStartFrame
+				clip.TimelineEndFrame = primary.TimelineEndFrame
+			}
+		}
+	}
+}
+
 func deleteRange(document *Document, operation map[string]any) error {
 	start, startErr := frameValue(operation, "start_frame")
 	end, endErr := frameValue(operation, "end_frame")
 	if startErr != nil || endErr != nil {
 		return errors.Join(startErr, endErr)
 	}
-	if start < 0 || end <= start || end > document.DurationFrames {
+	if start < 0 || end <= start || end > document.DurationFrames || end-start >= document.DurationFrames {
 		return errors.New("delete_range 范围无效")
+	}
+	if err := ensureRippleUnlocked(document, start, ""); err != nil {
+		return err
 	}
 	delta := end - start
 	for trackIndex := range document.Tracks {
@@ -276,23 +512,34 @@ func deleteRange(document *Document, operation map[string]any) error {
 			}
 			if clip.TimelineStartFrame < start && clip.TimelineEndFrame > end {
 				clip.TimelineEndFrame -= delta
-				clip.SourceEndFrame -= delta
+				if clip.AssetID != "" {
+					clip.SourceEndFrame -= int(math.Round(float64(delta) * effectiveRate(clip)))
+				}
 				kept = append(kept, clip)
 			} else if clip.TimelineStartFrame < start {
 				clip.TimelineEndFrame = start
-				clip.SourceEndFrame = clip.SourceStartFrame + (clip.TimelineEndFrame - clip.TimelineStartFrame)
+				if clip.AssetID != "" {
+					clip.SourceEndFrame = clip.SourceStartFrame + int(math.Round(
+						float64(clip.TimelineEndFrame-clip.TimelineStartFrame)*effectiveRate(clip),
+					))
+				}
 				kept = append(kept, clip)
 			} else if clip.TimelineEndFrame > end {
 				removed := end - clip.TimelineStartFrame
 				clip.TimelineStartFrame = start
 				clip.TimelineEndFrame -= delta
-				clip.SourceStartFrame += removed
+				if clip.AssetID != "" {
+					clip.SourceStartFrame += int(math.Round(float64(removed) * effectiveRate(clip)))
+				}
 				kept = append(kept, clip)
 			}
 		}
 		document.Tracks[trackIndex].Clips = kept
 	}
 	document.DurationFrames -= delta
+	for trackIndex := range document.Tracks {
+		sortTrack(&document.Tracks[trackIndex])
+	}
 	return nil
 }
 
@@ -307,8 +554,8 @@ func insertClip(document *Document, operation map[string]any) error {
 		return errors.New("insert_clip 参数无效")
 	}
 	track := trackByID(document, valueOr(stringValue(operation["track_id"]), "visual_base"))
-	if track == nil {
-		return errors.New("insert_clip track 不存在")
+	if track == nil || track.Locked {
+		return errors.New("insert_clip track 不存在或已锁定")
 	}
 	duration := end - start
 	startFrame := document.DurationFrames
@@ -327,7 +574,7 @@ func insertClip(document *Document, operation map[string]any) error {
 }
 
 func replaceClip(document *Document, operation map[string]any) error {
-	return updateClip(document, operation, func(clip *Clip) error {
+	return updateEditableClip(document, operation, func(_ *Track, clip *Clip) error {
 		assetID := stringValue(operation["asset_id"])
 		if assetID == "" {
 			return errors.New("replace_clip 缺少 asset_id")
@@ -341,7 +588,7 @@ func replaceClip(document *Document, operation map[string]any) error {
 }
 
 func setPlaybackRate(document *Document, operation map[string]any) error {
-	return updateClip(document, operation, func(clip *Clip) error {
+	return updateEditableClip(document, operation, func(_ *Track, clip *Clip) error {
 		rate := numberValue(operation["playback_rate"])
 		if rate <= 0 || rate > 8 {
 			return errors.New("playback_rate 必须在 (0,8]")
@@ -355,26 +602,10 @@ func setPlaybackRate(document *Document, operation map[string]any) error {
 	})
 }
 
-func updateClip(document *Document, operation map[string]any, update func(*Clip) error) error {
-	id := valueOr(stringValue(operation["timeline_clip_id"]), stringValue(operation["clip_id"]))
-	if id == "" {
-		return errors.New("patch op 缺少 timeline_clip_id")
-	}
-	for trackIndex := range document.Tracks {
-		for clipIndex := range document.Tracks[trackIndex].Clips {
-			clip := &document.Tracks[trackIndex].Clips[clipIndex]
-			if clip.TimelineClipID == id {
-				return update(clip)
-			}
-		}
-	}
-	return fmt.Errorf("clip 不存在: %s", id)
-}
-
 func removeTrackClips(document *Document, trackID string) error {
 	track := trackByID(document, trackID)
-	if track == nil || trackID == "visual_base" {
-		return errors.New("不能清空不存在的轨道或主视觉轨")
+	if track == nil || trackID == "visual_base" || track.Locked {
+		return errors.New("不能清空不存在、锁定的轨道或主视觉轨")
 	}
 	track.Clips = []Clip{}
 	return nil

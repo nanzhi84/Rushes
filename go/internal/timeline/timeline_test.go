@@ -2,6 +2,7 @@ package timeline
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -82,12 +83,21 @@ func TestApplyPatchSubsetTable(t *testing.T) {
 		check func(Document) bool
 	}{
 		{"trim", map[string]any{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_frame": 15, "source_end_frame": 45}, func(value Document) bool { return value.DurationFrames == 90 }},
+		{"split", map[string]any{"kind": "split_clip", "timeline_clip_id": "clip_v1_001", "split_frame": 30}, func(value Document) bool {
+			return len(value.Tracks[0].Clips) == 3 && value.Tracks[0].Clips[0].TimelineEndFrame == 30 && value.Tracks[0].Clips[1].TimelineStartFrame == 30
+		}},
+		{"reorder", map[string]any{"kind": "reorder_clip", "timeline_clip_id": "clip_v1_001", "target_frame": 120}, func(value Document) bool {
+			return value.Tracks[0].Clips[0].AssetID == "b" && value.Tracks[0].Clips[1].AssetID == "a" && value.DurationFrames == 120
+		}},
 		{"delete", map[string]any{"kind": "delete_range", "start_frame": 30, "end_frame": 60}, func(value Document) bool { return value.DurationFrames == 90 }},
 		{"insert", map[string]any{"kind": "insert_clip", "asset_id": "c", "source_start_frame": 0, "source_end_frame": 30}, func(value Document) bool { return value.DurationFrames == 150 && len(value.Tracks[0].Clips) == 3 }},
 		{"replace", map[string]any{"kind": "replace_clip", "timeline_clip_id": "clip_v1_001", "asset_id": "c"}, func(value Document) bool { return value.Tracks[0].Clips[0].AssetID == "c" }},
 		{"rate", map[string]any{"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 2.0}, func(value Document) bool { return value.DurationFrames == 90 }},
 		{"gain", map[string]any{"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -3.0}, func(value Document) bool { return value.Tracks[0].Clips[0].GainDB == -3 }},
 		{"subtitle", map[string]any{"kind": "edit_subtitle_text", "timeline_clip_id": "subtitle", "text": "新字幕"}, func(value Document) bool { return value.Tracks[5].Clips[0].Text == "新字幕" }},
+		{"insert subtitle", map[string]any{"kind": "insert_subtitle", "timeline_clip_id": "subtitle_new", "start_frame": 30, "end_frame": 60, "text": "新增字幕"}, func(value Document) bool {
+			return len(value.Tracks[5].Clips) == 2 && value.Tracks[5].Clips[1].Text == "新增字幕"
+		}},
 		{"clear overlay", map[string]any{"kind": "remove_track_clips", "track_id": "visual_overlay"}, func(value Document) bool { return len(value.Tracks[1].Clips) == 0 }},
 	}
 	for _, item := range tests {
@@ -102,6 +112,162 @@ func TestApplyPatchSubsetTable(t *testing.T) {
 	if _, err := ApplyPatch(base, map[string]any{"kind": "unknown"}); err == nil {
 		t.Fatal("未知 patch op 应失败")
 	}
+}
+
+func TestLinkedAudioAndProfessionalEditingOperations(t *testing.T) {
+	t.Parallel()
+	base, err := ComposeInitial("draft_pro_edit", 1, []Selection{
+		{AssetID: "a", AssetKind: "video", SourceEndFrame: 30, Role: "a_roll", HasAudio: true},
+		{AssetID: "b", AssetKind: "video", SourceEndFrame: 30, Role: "a_roll", HasAudio: true},
+		{AssetID: "c", AssetKind: "video", SourceEndFrame: 30, Role: "a_roll", HasAudio: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(base.Tracks[0].Clips) != 3 || len(base.Tracks[2].Clips) != 3 {
+		t.Fatalf("linked tracks=%#v", base.Tracks)
+	}
+	for index := range base.Tracks[0].Clips {
+		visual := base.Tracks[0].Clips[index]
+		audio := base.Tracks[2].Clips[index]
+		if !visual.Linked || !audio.Linked || visual.ParentBlockID == "" || visual.ParentBlockID != audio.ParentBlockID {
+			t.Fatalf("visual=%#v audio=%#v", visual, audio)
+		}
+	}
+
+	t.Run("split keeps linked audio aligned", func(t *testing.T) {
+		result, patchErr := ApplyPatch(base, map[string]any{
+			"kind": "split_clip", "timeline_clip_id": "clip_v1_001", "split_frame": 15,
+		})
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		if len(result.Tracks[0].Clips) != 4 || len(result.Tracks[2].Clips) != 4 {
+			t.Fatalf("visual=%#v audio=%#v", result.Tracks[0].Clips, result.Tracks[2].Clips)
+		}
+		visualRight := result.Tracks[0].Clips[1]
+		audioRight := result.Tracks[2].Clips[1]
+		if visualRight.TimelineStartFrame != 15 || audioRight.TimelineStartFrame != 15 ||
+			visualRight.ParentBlockID != audioRight.ParentBlockID || visualRight.ParentBlockID == base.Tracks[0].Clips[0].ParentBlockID {
+			t.Fatalf("visualRight=%#v audioRight=%#v", visualRight, audioRight)
+		}
+	})
+
+	t.Run("reorder keeps linked audio aligned", func(t *testing.T) {
+		result, patchErr := ApplyPatch(base, map[string]any{
+			"kind": "move_clip", "timeline_clip_id": "clip_v1_001", "target_frame": 90,
+			"target_track_id": "visual_base", "mode": "insert",
+		})
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		for index, expected := range []string{"b", "c", "a"} {
+			visual := result.Tracks[0].Clips[index]
+			audio := result.Tracks[2].Clips[index]
+			if visual.AssetID != expected || audio.AssetID != expected ||
+				visual.TimelineStartFrame != audio.TimelineStartFrame || visual.TimelineEndFrame != audio.TimelineEndFrame {
+				t.Fatalf("index=%d visual=%#v audio=%#v", index, visual, audio)
+			}
+		}
+	})
+
+	t.Run("track controls persist and locking blocks edits", func(t *testing.T) {
+		controlled, patchErr := ApplyPatch(base, map[string]any{
+			"kind": "set_track_state", "track_id": "original_audio",
+			"muted": true, "solo": true, "gain_db": -6.0,
+		})
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		audioTrack := controlled.Tracks[2]
+		if !audioTrack.Muted || !audioTrack.Solo || audioTrack.GainDB != -6 {
+			t.Fatalf("audio track=%#v", audioTrack)
+		}
+		locked, patchErr := ApplyPatch(base, map[string]any{
+			"kind": "set_track_state", "track_id": "original_audio", "locked": true,
+		})
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		if _, patchErr = ApplyPatch(locked, map[string]any{
+			"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001_audio", "gain_db": -3.0,
+		}); patchErr == nil || !strings.Contains(patchErr.Error(), "已锁定") {
+			t.Fatalf("locked edit err=%v", patchErr)
+		}
+		if _, patchErr = ApplyPatch(base, map[string]any{
+			"kind": "set_track_state", "track_id": "visual_base", "muted": true,
+		}); patchErr == nil {
+			t.Fatal("主视觉轨静音应失败")
+		}
+	})
+
+	t.Run("unlinked audio moves across audio tracks", func(t *testing.T) {
+		unlinked, patchErr := ApplyPatch(base, map[string]any{
+			"kind": "set_clip_linked", "timeline_clip_id": "clip_v1_001_audio", "linked": false,
+		})
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		result, patchErr := ApplyPatch(unlinked, map[string]any{
+			"kind": "move_clip", "timeline_clip_id": "clip_v1_001_audio",
+			"target_track_id": "voiceover", "target_frame": 15, "mode": "overwrite",
+		})
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		if len(result.Tracks[2].Clips) != 2 || len(result.Tracks[3].Clips) != 1 {
+			t.Fatalf("original=%#v voiceover=%#v", result.Tracks[2].Clips, result.Tracks[3].Clips)
+		}
+		moved := result.Tracks[3].Clips[0]
+		if moved.TrackID != "voiceover" || moved.TimelineStartFrame != 15 || moved.TimelineEndFrame != 45 || moved.Linked {
+			t.Fatalf("moved=%#v", moved)
+		}
+		if report := Validate(result); !report.Valid {
+			t.Fatalf("report=%#v", report)
+		}
+	})
+
+	t.Run("overlay inserts into primary and free clips trim and delete", func(t *testing.T) {
+		withOverlay := base
+		withOverlay.Tracks = append([]Track(nil), base.Tracks...)
+		withOverlay.Tracks[1].Clips = []Clip{{
+			TimelineClipID: "overlay_1", TrackID: "visual_overlay", AssetID: "still",
+			AssetKind: "image", TimelineStartFrame: 0, TimelineEndFrame: 15,
+			SourceStartFrame: 0, SourceEndFrame: 15, PlaybackRate: 1,
+		}}
+		inserted, patchErr := ApplyPatch(withOverlay, map[string]any{
+			"kind": "move_clip", "timeline_clip_id": "overlay_1", "target_track_id": "visual_base",
+			"target_frame": 30, "mode": "insert",
+		})
+		if patchErr != nil {
+			t.Fatal(patchErr)
+		}
+		if inserted.DurationFrames != 105 || len(inserted.Tracks[0].Clips) != 4 || len(inserted.Tracks[1].Clips) != 0 {
+			t.Fatalf("inserted=%#v", inserted)
+		}
+		if report := Validate(inserted); !report.Valid {
+			t.Fatalf("report=%#v", report)
+		}
+
+		free := base
+		free.Tracks = append([]Track(nil), base.Tracks...)
+		free.Tracks[3].Clips = []Clip{{
+			TimelineClipID: "voice_1", TrackID: "voiceover", AssetID: "voice", AssetKind: "audio",
+			TimelineStartFrame: 10, TimelineEndFrame: 40, SourceStartFrame: 0, SourceEndFrame: 30, PlaybackRate: 1,
+		}}
+		trimmed, patchErr := ApplyPatch(free, map[string]any{
+			"kind": "trim_clip_edge", "timeline_clip_id": "voice_1", "edge": "start", "timeline_frame": 15,
+		})
+		if patchErr != nil || trimmed.Tracks[3].Clips[0].SourceStartFrame != 5 {
+			t.Fatalf("trimmed=%#v err=%v", trimmed.Tracks[3].Clips, patchErr)
+		}
+		deleted, patchErr := ApplyPatch(trimmed, map[string]any{
+			"kind": "delete_clip", "timeline_clip_id": "voice_1",
+		})
+		if patchErr != nil || len(deleted.Tracks[3].Clips) != 0 {
+			t.Fatalf("deleted=%#v err=%v", deleted.Tracks[3].Clips, patchErr)
+		}
+	})
 }
 
 func TestValidationAndPatchFailureBranches(t *testing.T) {
@@ -132,10 +298,15 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_frame": 0.5, "source_end_frame": 30},
 		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_frame": "0", "source_end_frame": 30},
 		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_s": 0, "source_end_s": 1},
+		{"kind": "split_clip", "timeline_clip_id": "clip_v1_001", "split_frame": 0},
+		{"kind": "split_clip", "timeline_clip_id": "missing", "split_frame": 30},
+		{"kind": "reorder_clip", "timeline_clip_id": "clip_v1_001", "target_frame": -1},
+		{"kind": "reorder_clip", "timeline_clip_id": "missing", "target_frame": 30},
 		{"kind": "replace_clip", "timeline_clip_id": "clip_v1_001"},
 		{"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 9},
 		{"kind": "adjust_gain"},
 		{"kind": "edit_subtitle_text", "timeline_clip_id": "missing", "text": "x"},
+		{"kind": "insert_subtitle", "start_frame": 0, "end_frame": 99, "text": ""},
 		{"kind": "remove_track_clips", "track_id": "visual_base"},
 	}
 	for _, operation := range badOperations {
@@ -225,5 +396,41 @@ func TestTimelineStoreMissingAndPreviewLookup(t *testing.T) {
 	}
 	if valueOr("  ", "fallback") != "fallback" || valueOr("value", "fallback") != "value" {
 		t.Fatal("valueOr mismatch")
+	}
+}
+
+func TestVersionNavigationFollowsParentAndLatestChild(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	document, _ := ComposeInitial("draft_nav", 1, []Selection{{AssetID: "a", SourceEndFrame: 30}})
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO drafts(
+			draft_id,name,state_version,status,defaults_json,running_jobs_json,brief_json,
+			timeline_current_version,timeline_validated,scratch_memory_json,created_at,updated_at
+		) VALUES('draft_nav','d',0,'active','{}','[]','{}',1,1,'{}',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	for version, parent := range []any{nil, 1, 2, 1} {
+		document.Version = version + 1
+		document.TimelineID = fmt.Sprintf("draft_nav:v%d", version+1)
+		data, _ := json.Marshal(document)
+		if _, err := database.Write().ExecContext(t.Context(), `
+			INSERT INTO timeline_versions(timeline_id,draft_id,version,parent_version,document_json,created_at)
+			VALUES(?,?,?,?,?,?)`, document.TimelineID, "draft_nav", version+1, parent, string(data), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	navigation, err := Navigation(t.Context(), database, "draft_nav", 1)
+	if err != nil || navigation.Parent != nil || navigation.Redo == nil || *navigation.Redo != 4 || navigation.Latest != 4 {
+		t.Fatalf("navigation=%#v err=%v", navigation, err)
+	}
+	navigation, err = Navigation(t.Context(), database, "draft_nav", 3)
+	if err != nil || navigation.Parent == nil || *navigation.Parent != 2 || navigation.Redo != nil || navigation.Latest != 4 {
+		t.Fatalf("navigation=%#v err=%v", navigation, err)
 	}
 }

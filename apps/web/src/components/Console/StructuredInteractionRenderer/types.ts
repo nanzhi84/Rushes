@@ -41,6 +41,7 @@ export type PreviewInteractionItem = {
   id: string;
   title: string;
   description: string;
+  occurrences?: number;
 };
 
 export type TimelineInteractionItem = {
@@ -48,6 +49,7 @@ export type TimelineInteractionItem = {
   id: string;
   title: string;
   description: string;
+  occurrences?: number;
 };
 
 export type UnknownInteractionItem = {

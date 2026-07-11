@@ -107,7 +107,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		"type": "turn_started", "turn_id": turnID,
 	})
 	ctx = rushestools.WithDraftID(ctx, item.DraftID)
-	ctx = rushestools.WithReporter(ctx, service.toolReporter(item.DraftID))
+	ctx = rushestools.WithReporter(ctx, service.toolReporter(ctx, item.DraftID))
 	content, err := service.turnContent(ctx, item, messageID)
 	if errors.Is(err, context.Canceled) {
 		service.hub.Record(item.DraftID, StreamEvent{
@@ -120,10 +120,14 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		return err
 	}
 	if content != "" {
+		messageKind := "reply"
+		if item.Kind == QueueJobObservation {
+			messageKind = "observation"
+		}
 		result, applyErr := reducer.Apply(ctx, service.database, nil, reducer.Options{
 			Actor: contracts.ActorAgent,
 			ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
-				ID: messageID, DraftID: item.DraftID, Role: "assistant", Kind: "reply", Content: content,
+				ID: messageID, DraftID: item.DraftID, Role: "assistant", Kind: messageKind, Content: content,
 			}},
 		})
 		if applyErr != nil {
@@ -135,7 +139,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		}
 		service.hub.Record(item.DraftID, StreamEvent{
 			"type": "message_completed", "message_id": messageID,
-			"kind": "reply", "content": content,
+			"kind": messageKind, "content": content,
 		})
 	}
 	service.hub.Record(item.DraftID, StreamEvent{
@@ -202,7 +206,7 @@ func (service *Service) fallbackTurn(
 		for _, asset := range listed.Assets {
 			assetIDs = append(assetIDs, asset.AssetID)
 		}
-		reporter := service.toolReporter(draftID)
+		reporter := service.toolReporter(ctx, draftID)
 		input := rushestools.UnderstandInput{AssetIDs: assetIDs, Depth: "deep", Focus: "e2e_cancel"}
 		reporter("understand.materials", "started", input, nil, nil)
 		output, executeErr := service.ExecuteTool(ctx, "understand.materials", input)
@@ -258,6 +262,9 @@ func (service *Service) modelMessages(ctx context.Context, draftID string) ([]*s
 	}
 	messages := make([]*schema.Message, 0, len(rows))
 	for _, row := range rows {
+		if row.Kind == "tool" || row.Kind == "observation" {
+			continue
+		}
 		if row.Role == "assistant" {
 			messages = append(messages, schema.AssistantMessage(row.Content, nil))
 		} else {
@@ -267,22 +274,28 @@ func (service *Service) modelMessages(ctx context.Context, draftID string) ([]*s
 	return messages, nil
 }
 
-func (service *Service) toolReporter(draftID string) rushestools.Reporter {
+func (service *Service) toolReporter(ctx context.Context, draftID string) rushestools.Reporter {
+	type activeStep struct {
+		id          string
+		argsSummary string
+	}
 	var mu sync.Mutex
-	steps := map[string]string{}
+	steps := map[string]activeStep{}
 	return func(name, phase string, input, output any, err error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if phase == "started" {
 			stepID := randomID("step")
-			steps[name] = stepID
+			argsSummary := compactJSON(input)
+			steps[name] = activeStep{id: stepID, argsSummary: argsSummary}
 			service.hub.Record(draftID, StreamEvent{
 				"type": "tool_step_started", "step_id": stepID, "tool": name,
-				"args_summary": compactJSON(input),
+				"args_summary": argsSummary,
 			})
 			return
 		}
-		stepID := steps[name]
+		step := steps[name]
+		stepID := step.id
 		if stepID == "" {
 			stepID = randomID("step")
 		}
@@ -296,7 +309,38 @@ func (service *Service) toolReporter(draftID string) rushestools.Reporter {
 			"type": "tool_step_finished", "step_id": stepID, "tool": name,
 			"status": status, "observation": observation,
 		})
+		_ = service.persistToolTrace(
+			context.WithoutCancel(ctx), draftID, stepID, name, status, step.argsSummary, observation,
+		)
 	}
+}
+
+// 工具折叠区在刷新后仍需存在，因此完成态通过 Reducer 持久化为 system/tool 消息。
+// 该消息只供 UI 回放，modelMessages 会过滤，避免工具 JSON 污染模型上下文。
+func (service *Service) persistToolTrace(
+	ctx context.Context,
+	draftID, stepID, name, status, argsSummary, observation string,
+) error {
+	content, err := json.Marshal(map[string]any{
+		"step_id": stepID, "tool": name, "status": status,
+		"args_summary": argsSummary, "observation": observation,
+	})
+	if err != nil {
+		return err
+	}
+	result, err := reducer.Apply(ctx, service.database, nil, reducer.Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
+			ID: stepID, DraftID: draftID, Role: "system", Kind: "tool", Content: string(content),
+		}},
+	})
+	if err != nil {
+		return err
+	}
+	if result.Status != reducer.StatusApplied {
+		return fmt.Errorf("tool trace reducer status: %s", result.Status)
+	}
+	return nil
 }
 
 func runeChunks(value string, size int) []string {
@@ -330,7 +374,7 @@ func (service *Service) executeReported(
 	draftID, name string,
 	input any,
 ) (any, error) {
-	reporter := service.toolReporter(draftID)
+	reporter := service.toolReporter(ctx, draftID)
 	reporter(name, "started", input, nil, nil)
 	output, err := service.ExecuteTool(ctx, name, input)
 	reporter(name, "finished", input, output, err)

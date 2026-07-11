@@ -1169,6 +1169,16 @@ func nullableInt64(value any) any {
 		return int64(typed)
 	case int64:
 		return typed
+	case *int:
+		if typed != nil {
+			return int64(*typed)
+		}
+		return nil
+	case *int64:
+		if typed != nil {
+			return *typed
+		}
+		return nil
 	case float64:
 		return int64(typed)
 	default:

@@ -1,5 +1,11 @@
 import { useMemo, useState } from "react";
 import type { FormEvent, ReactElement } from "react";
+import {
+  Check,
+  ChevronRight,
+  CircleAlert,
+  CircleHelp
+} from "lucide-react";
 import type { Decision, DecisionAnswer, DecisionOption } from "../../../api/client";
 import type {
   AnswerDecisionHandler,
@@ -27,15 +33,15 @@ export function StructuredInteractionRenderer({
         <DecisionCard item={item} onAnswerDecision={onAnswerDecision} answerPending={answerPending} />
       );
     case "progress":
-      return <ProgressCard item={item} />;
+      return <ProgressRow item={item} />;
     case "error":
-      return <ErrorCard item={item} />;
+      return <ErrorRow item={item} />;
     case "preview":
-      return <PlaceholderCard item={item} label="预览" />;
+      return <EventRow item={item} />;
     case "timeline":
-      return <PlaceholderCard item={item} label="时间线" />;
+      return <EventRow item={item} />;
     case "unknown":
-      return <UnknownCard item={item} />;
+      return <UnknownRow item={item} />;
   }
 }
 
@@ -73,45 +79,62 @@ function DecisionCard({
 
   return (
     <article className={decisionCardClass(isPending)} data-testid="decision-card">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-xs font-medium text-fg-muted">确认项</p>
-          <h3 className="mt-1 text-sm font-semibold text-fg">
+      <div className="flex items-start gap-2.5 border-b border-line px-3 py-2.5">
+        <span className="grid size-7 shrink-0 place-items-center rounded-md bg-selected text-accent-strong">
+          <CircleHelp size={15} strokeWidth={1.8} aria-hidden />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-2xs font-medium text-accent-strong">需要你的选择</p>
+          <h3 className="mt-0.5 text-sm font-semibold leading-5 text-fg">
             {decision?.question ?? "确认项已创建，正在读取详情"}
           </h3>
         </div>
-        <span className="rounded border border-line-strong px-2 py-1 text-xs text-fg-muted">
+        <span className="shrink-0 pt-0.5 text-2xs font-medium text-fg-muted">
           {decisionStatusLabel(item.status)}
         </span>
       </div>
 
       {decision ? (
-        <div className="mt-4 space-y-3">
+        <div className="space-y-3 px-3 py-3">
           {decision.options && decision.options.length > 0 ? (
-            <div className="grid gap-2" role="group" aria-label="确认选项">
-              {decision.options.map((option) => (
+            <div className="grid gap-1.5" role="group" aria-label="确认选项">
+              {decision.options.map((option) => {
+                const selected = isSelectedOption(decision, item.answer ?? decision.answer ?? null, option);
+                return (
                 <button
                   key={option.option_id}
-                  className="rounded-md border border-line-strong bg-panel px-3 py-2 text-left text-sm text-fg hover:bg-hover disabled:bg-raised disabled:text-fg-faint"
+                  className={`group flex items-start gap-2 rounded-md border px-2.5 py-2 text-left text-sm transition-[transform,background-color,border-color] duration-fast active:translate-y-px disabled:cursor-default ${
+                    selected
+                      ? "border-accent/50 bg-selected text-fg"
+                      : "border-line-strong bg-panel text-fg hover:border-accent/40 hover:bg-hover disabled:border-line disabled:bg-raised disabled:text-fg-faint"
+                  }`}
                   type="button"
                   disabled={disabled}
                   onClick={() => onAnswerDecision(decision.decision_id, buttonAnswer(option))}
                 >
-                  <span className="font-medium">{option.label}</span>
-                  {option.description ? (
-                    <span className="mt-1 block text-xs leading-5 text-fg-muted">{option.description}</span>
-                  ) : null}
+                  <span className="min-w-0 flex-1">
+                    <span className="font-medium">{option.label}</span>
+                    {option.description ? (
+                      <span className="mt-0.5 block text-xs leading-5 text-fg-muted">{option.description}</span>
+                    ) : null}
+                  </span>
+                  {selected ? (
+                    <Check size={14} strokeWidth={2} aria-hidden className="mt-0.5 shrink-0 text-accent-strong" />
+                  ) : (
+                    <ChevronRight size={14} strokeWidth={1.8} aria-hidden className="mt-0.5 shrink-0 text-fg-faint transition-transform duration-fast group-hover:translate-x-0.5" />
+                  )}
                 </button>
-              ))}
+                );
+              })}
             </div>
           ) : null}
 
           {decision.allow_free_text ? (
-            <form className="space-y-2" onSubmit={submitFreeText}>
+            <form className="space-y-2 border-t border-line pt-3" onSubmit={submitFreeText}>
               <label className="block text-xs font-medium text-fg-muted">
                 自由回答
                 <input
-                  className="mt-1 w-full rounded-md border border-line-strong px-3 py-2 text-sm outline-none focus:border-accent disabled:bg-raised"
+                  className="mt-1.5 w-full rounded-md border border-line-strong bg-panel px-2.5 py-2 text-sm text-fg outline-none placeholder:text-fg-faint focus:border-accent disabled:bg-raised"
                   value={freeText}
                   onChange={(event) => setFreeText(event.target.value)}
                   disabled={disabled}
@@ -119,7 +142,7 @@ function DecisionCard({
                 />
               </label>
               <button
-                className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-40"
+                className="rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-white transition-[transform,background-color] duration-fast hover:bg-accent-strong active:translate-y-px disabled:opacity-40"
                 type="submit"
                 disabled={disabled || freeText.trim().length === 0}
               >
@@ -128,32 +151,38 @@ function DecisionCard({
             </form>
           ) : null}
 
-          <p className="text-xs leading-5 text-fg-muted">可点选项，也可直接发消息自然语言回答。</p>
+          <p className="text-2xs leading-4 text-fg-faint">可点选项，也可直接发消息回答。</p>
         </div>
       ) : (
-        <p className="mt-3 text-sm text-fg-muted">确认项详情会随当前状态查询补齐。</p>
+        <p className="px-3 py-3 text-sm text-fg-muted">确认项详情会随当前状态查询补齐。</p>
       )}
 
       {!isPending && answerLabel ? (
-        <p className="mt-3 rounded bg-raised px-3 py-2 text-sm text-fg-muted">结果：{answerLabel}</p>
+        <p className="border-t border-line bg-selected px-3 py-2 text-sm text-fg-muted">
+          结果：{answerLabel}
+        </p>
       ) : null}
     </article>
   );
 }
 
-function ProgressCard({ item }: { item: ProgressInteractionItem }): ReactElement {
-  const view = progressCardView(item);
+function ProgressRow({ item }: { item: ProgressInteractionItem }): ReactElement {
+  const view = progressRowView(item);
   return (
-    <article className={`rounded-md border p-4 ${view.cardClass}`}>
-      <div className="flex items-center justify-between gap-3">
-        <div>
-          <p className={`text-xs font-medium ${view.toneClass}`}>进度</p>
-          <h3 className="mt-1 text-sm font-semibold text-fg">{item.job_kind}</h3>
-        </div>
-        <span className={`text-sm font-medium ${view.toneClass}`}>{view.statusText}</span>
+    <div className="my-px py-0.5 text-xs" data-testid="progress-row" data-layout="inline">
+      <div className="flex min-w-0 items-center gap-1.5">
+        <span
+          aria-hidden
+          className={`size-1.5 shrink-0 rounded-full ${view.dotClass} ${view.active ? "animate-pulse" : ""}`}
+        />
+        <span className="min-w-0 flex-1 truncate text-fg-muted">{item.job_kind}</span>
+        <span className={`shrink-0 text-2xs ${view.toneClass}`}>{view.statusText}</span>
+        <span className="shrink-0 font-mono text-2xs tabular-nums text-fg-faint">
+          {view.percent}%
+        </span>
       </div>
       <div
-        className="mt-3 h-2 overflow-hidden rounded bg-panel"
+        className="ml-3 mt-1 h-px overflow-hidden bg-line"
         role="progressbar"
         aria-label={`${item.job_kind} 进度`}
         aria-valuemin={0}
@@ -162,99 +191,121 @@ function ProgressCard({ item }: { item: ProgressInteractionItem }): ReactElement
       >
         <div className={`h-full ${view.barClass}`} style={{ width: `${view.percent}%` }} />
       </div>
-    </article>
+    </div>
   );
 }
 
-type ProgressCardView = {
+type ProgressRowView = {
   statusText: string;
   percent: number;
-  cardClass: string;
   toneClass: string;
   barClass: string;
+  dotClass: string;
+  active: boolean;
 };
 
-// 终态（succeeded/failed/cancelled）必须让卡片显性收尾；即使没有中间进度，
+// 终态（succeeded/failed/cancelled）必须让状态行显性收尾；即使没有中间进度，
 // 也要靠 status 把「处理中」翻到最终状态。
-function progressCardView(item: ProgressInteractionItem): ProgressCardView {
+function progressRowView(item: ProgressInteractionItem): ProgressRowView {
   switch (item.status) {
     case "succeeded":
       return {
         statusText: "已完成",
         percent: 100,
-        cardClass: "border-ok/40 bg-raised",
         toneClass: "text-ok",
-        barClass: "bg-ok"
+        barClass: "bg-ok",
+        dotClass: "bg-ok",
+        active: false
       };
     case "failed":
       return {
         statusText: "失败",
         percent: item.progress ?? 0,
-        cardClass: "border-danger/40 bg-danger/10",
         toneClass: "text-danger",
-        barClass: "bg-danger"
+        barClass: "bg-danger",
+        dotClass: "bg-danger",
+        active: false
       };
     case "cancelled":
       return {
         statusText: "已取消",
         percent: item.progress ?? 0,
-        cardClass: "border-line bg-raised",
         toneClass: "text-fg-muted",
-        barClass: "bg-line-strong"
+        barClass: "bg-line-strong",
+        dotClass: "bg-fg-faint",
+        active: false
       };
     case "queued":
       return {
         statusText: "排队中",
         percent: item.progress ?? 0,
-        cardClass: "border-info/40 bg-raised",
         toneClass: "text-info",
-        barClass: "bg-accent"
+        barClass: "bg-accent",
+        dotClass: "bg-fg-faint",
+        active: true
       };
     default:
       return {
-        statusText: item.progress === null ? "处理中" : `${item.progress}%`,
+        statusText: "处理中",
         percent: item.progress ?? 0,
-        cardClass: "border-info/40 bg-raised",
         toneClass: "text-info",
-        barClass: "bg-accent"
+        barClass: "bg-accent",
+        dotClass: "bg-fg-faint",
+        active: true
       };
   }
 }
 
-function ErrorCard({ item }: { item: ErrorInteractionItem }): ReactElement {
+function ErrorRow({ item }: { item: ErrorInteractionItem }): ReactElement {
   return (
-    <article className="rounded-md border border-danger/40 bg-danger/10 p-4">
-      <p className="text-xs font-medium text-danger">错误</p>
-      <h3 className="mt-1 text-sm font-semibold text-fg">{item.error_code}</h3>
-      <p className="mt-2 text-sm leading-6 text-danger">{item.message}</p>
-      <p className="mt-2 text-xs text-danger">{item.retryable ? "可重试" : "不可重试"}</p>
-    </article>
+    <div
+      className="my-1 border-l-2 border-danger/60 py-0.5 pl-2.5 text-xs"
+      data-testid="error-row"
+      data-layout="inline"
+    >
+      <div className="flex min-w-0 items-start gap-1.5">
+        <CircleAlert size={13} strokeWidth={1.8} aria-hidden className="mt-0.5 shrink-0 text-danger" />
+        <p className="min-w-0 flex-1 leading-5 text-danger">
+          <span className="font-medium">执行失败</span>
+          <span className="ml-1 font-mono text-2xs text-fg-faint">{item.error_code}</span>
+          <span className="block text-fg-muted">{item.message}</span>
+        </p>
+        <span className="shrink-0 text-2xs text-danger">
+          {item.retryable ? "可重试" : "需调整"}
+        </span>
+      </div>
+    </div>
   );
 }
 
-function PlaceholderCard({
-  item,
-  label
-}: {
-  item: PreviewInteractionItem | TimelineInteractionItem;
-  label: string;
-}): ReactElement {
+function EventRow({ item }: { item: PreviewInteractionItem | TimelineInteractionItem }): ReactElement {
   return (
-    <article className="rounded-md border border-line bg-raised p-4">
-      <p className="text-xs font-medium text-fg-muted">{label}</p>
-      <h3 className="mt-1 text-sm font-semibold text-fg">{item.title}</h3>
-      <p className="mt-2 text-sm leading-6 text-fg-muted">{item.description}</p>
-    </article>
+    <div
+      className="my-px flex min-w-0 items-start gap-1.5 py-0.5 text-xs text-fg-muted"
+      data-testid={`${item.kind}-event-row`}
+      data-layout="inline"
+    >
+      <span aria-hidden className="mt-1 size-1.5 shrink-0 rounded-full bg-ok" />
+      <span className="shrink-0 font-medium text-fg-muted">{item.title}</span>
+      <span className="min-w-0 flex-1 truncate text-fg-faint" title={item.description}>
+        {item.description}
+      </span>
+      {item.occurrences && item.occurrences > 1 ? (
+        <span className="shrink-0 font-mono text-2xs text-fg-faint">×{item.occurrences}</span>
+      ) : null}
+    </div>
   );
 }
 
-function UnknownCard({ item }: { item: UnknownInteractionItem }): ReactElement {
+function UnknownRow({ item }: { item: UnknownInteractionItem }): ReactElement {
   return (
-    <details className="rounded-md border border-line bg-panel p-4">
-      <summary className="cursor-pointer text-sm font-semibold text-fg">
+    <details className="group text-xs text-fg-muted" data-layout="inline">
+      <summary className="-ml-1 inline-flex h-5 cursor-pointer list-none items-center gap-1.5 rounded-sm px-1 transition-colors duration-fast hover:bg-hover [&::-webkit-details-marker]:hidden">
+        <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warn" />
         未知结构化事件：{item.eventName}
+        <ChevronRight size={12} strokeWidth={1.8} aria-hidden className="transition-transform duration-base group-open:rotate-90" />
       </summary>
-      <pre className="mt-3 max-h-56 overflow-auto rounded bg-raised p-3 text-xs text-fg">
+      <pre className="mt-1 max-h-40 overflow-auto border-l-2 border-line-strong/50 pl-3 font-mono text-2xs leading-4 text-fg-muted">
         {JSON.stringify(item.raw, null, 2)}
       </pre>
     </details>
@@ -294,8 +345,16 @@ function decisionStatusLabel(status: Decision["status"]): string {
 }
 
 function decisionCardClass(isPending: boolean): string {
-  const base = "rounded-md border p-4";
+  const base = "overflow-hidden rounded-md border";
   return isPending
-    ? `${base} border-line bg-panel`
-    : `${base} border-line bg-raised opacity-75`;
+    ? `${base} border-accent/35 bg-raised`
+    : `${base} border-line bg-raised opacity-80`;
+}
+
+function isSelectedOption(
+  decision: Decision,
+  answer: DecisionAnswer | null,
+  option: DecisionOption
+): boolean {
+  return Boolean(answer?.option_id && answer.option_id === option.option_id && decision.status !== "pending");
 }
