@@ -603,14 +603,6 @@ type MaterialImportLocalRequest struct {
 	StorageMode *StorageMode `json:"storage_mode,omitempty"`
 }
 
-// MaterialImportUrlRequest defines model for MaterialImportUrlRequest.
-type MaterialImportUrlRequest struct {
-	AssetId  *string `json:"asset_id,omitempty"`
-	Filename *string `json:"filename,omitempty"`
-	MaxBytes *int    `json:"max_bytes,omitempty"`
-	Url      string  `json:"url"`
-}
-
 // MaterialMutationResponse defines model for MaterialMutationResponse.
 type MaterialMutationResponse struct {
 	AssetId    *string   `json:"asset_id,omitempty"`
@@ -782,9 +774,6 @@ type CopyDraftApiDraftsDraftIdCopyPostJSONRequestBody = DraftCopyRequest
 
 // ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPostJSONRequestBody defines body for ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPost for application/json ContentType.
 type ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPostJSONRequestBody = MaterialImportLocalRequest
-
-// ImportUrlMaterialApiDraftsDraftIdMaterialsImportUrlPostJSONRequestBody defines body for ImportUrlMaterialApiDraftsDraftIdMaterialsImportUrlPost for application/json ContentType.
-type ImportUrlMaterialApiDraftsDraftIdMaterialsImportUrlPostJSONRequestBody = MaterialImportUrlRequest
 
 // EnqueueMessageApiDraftsDraftIdMessagesPostJSONRequestBody defines body for EnqueueMessageApiDraftsDraftIdMessagesPost for application/json ContentType.
 type EnqueueMessageApiDraftsDraftIdMessagesPostJSONRequestBody = MessageCreateRequest
@@ -1022,9 +1011,6 @@ type ServerInterface interface {
 	// Import Local Material
 	// (POST /api/drafts/{draft_id}/materials/import-local)
 	ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPost(w http.ResponseWriter, r *http.Request, draftId string)
-	// Import Url Material
-	// (POST /api/drafts/{draft_id}/materials/import-url)
-	ImportUrlMaterialApiDraftsDraftIdMaterialsImportUrlPost(w http.ResponseWriter, r *http.Request, draftId string)
 	// Revalidate Materials
 	// (POST /api/drafts/{draft_id}/materials/revalidate)
 	RevalidateMaterialsApiDraftsDraftIdMaterialsRevalidatePost(w http.ResponseWriter, r *http.Request, draftId string)
@@ -1178,12 +1164,6 @@ func (_ Unimplemented) ListMaterialsApiDraftsDraftIdMaterialsGet(w http.Response
 // Import Local Material
 // (POST /api/drafts/{draft_id}/materials/import-local)
 func (_ Unimplemented) ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPost(w http.ResponseWriter, r *http.Request, draftId string) {
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// Import Url Material
-// (POST /api/drafts/{draft_id}/materials/import-url)
-func (_ Unimplemented) ImportUrlMaterialApiDraftsDraftIdMaterialsImportUrlPost(w http.ResponseWriter, r *http.Request, draftId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -1645,32 +1625,6 @@ func (siw *ServerInterfaceWrapper) ImportLocalMaterialApiDraftsDraftIdMaterialsI
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPost(w, r, draftId)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// ImportUrlMaterialApiDraftsDraftIdMaterialsImportUrlPost operation middleware
-func (siw *ServerInterfaceWrapper) ImportUrlMaterialApiDraftsDraftIdMaterialsImportUrlPost(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-	_ = err
-
-	// ------------- Path parameter "draft_id" -------------
-	var draftId string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "draft_id", chi.URLParam(r, "draft_id"), &draftId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "draft_id", Err: err})
-		return
-	}
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.ImportUrlMaterialApiDraftsDraftIdMaterialsImportUrlPost(w, r, draftId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -2485,9 +2439,6 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/drafts/{draft_id}/materials/import-local", wrapper.ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPost)
-	})
-	r.Group(func(r chi.Router) {
-		r.Post(options.BaseURL+"/api/drafts/{draft_id}/materials/import-url", wrapper.ImportUrlMaterialApiDraftsDraftIdMaterialsImportUrlPost)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/drafts/{draft_id}/materials/revalidate", wrapper.RevalidateMaterialsApiDraftsDraftIdMaterialsRevalidatePost)

@@ -233,7 +233,7 @@ func TestRenderWorkerCreatesPreviewWithRenderSnapshot(t *testing.T) {
 		{Type: "AssetLinked", DraftID: "draft_render", Payload: map[string]any{"asset_id": "asset_render"}},
 	}, contracts.ActorUser, now)
 	document, err := timeline.ComposeInitial("draft_render", 1, []timeline.Selection{{
-		AssetID: "asset_render", SourceStart: 0, SourceEnd: 1, Role: "a_roll",
+		AssetID: "asset_render", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)

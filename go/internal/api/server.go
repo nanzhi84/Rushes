@@ -29,7 +29,6 @@ type Config struct {
 	Logger       *slog.Logger
 	Picker       Picker
 	Agent        *agent.Service
-	URLClient    *http.Client
 }
 
 type Server struct {
@@ -41,7 +40,6 @@ type Server struct {
 	logger       *slog.Logger
 	picker       Picker
 	agent        *agent.Service
-	urlClient    *http.Client
 	ownsAgent    bool
 }
 
@@ -63,9 +61,6 @@ func NewServer(config Config) (*Server, error) {
 	if config.Picker == nil {
 		config.Picker = nativePicker
 	}
-	if config.URLClient == nil {
-		config.URLClient = newURLImportClient()
-	}
 	ownedAgent := false
 	if config.Agent == nil {
 		var err error
@@ -83,7 +78,7 @@ func NewServer(config Config) (*Server, error) {
 		database: config.Database, token: config.Token, port: config.Port,
 		fsRoots: roots, sseMaxEvents: config.SSEMaxEvents,
 		logger: config.Logger, picker: config.Picker, agent: config.Agent,
-		urlClient: config.URLClient, ownsAgent: ownedAgent,
+		ownsAgent: ownedAgent,
 	}, nil
 }
 

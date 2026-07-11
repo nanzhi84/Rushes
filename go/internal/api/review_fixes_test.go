@@ -2,9 +2,7 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,17 +10,6 @@ import (
 	"strings"
 	"testing"
 )
-
-type roundTripFunc func(*http.Request) (*http.Response, error)
-
-func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
-	return function(request)
-}
-
-type failingReadCloser struct{}
-
-func (failingReadCloser) Read([]byte) (int, error) { return 0, errors.New("download interrupted") }
-func (failingReadCloser) Close() error             { return nil }
 
 func TestAdvertisedLifecycleCostDeleteAndCancelRoutesDoNotFallBack(t *testing.T) {
 	t.Parallel()
@@ -170,9 +157,6 @@ func TestAdvertisedRoutesReturnInternalErrorWhenDatabaseIsUnavailable(t *testing
 		{http.MethodDelete, "/api/drafts/draft_db_error", map[string]any{"confirm": true}},
 		{http.MethodPost, "/api/drafts/draft_db_error/copy", map[string]any{}},
 		{http.MethodGet, "/api/drafts/draft_db_error/costs", nil},
-		{http.MethodPost, "/api/drafts/draft_db_error/materials/import-url", map[string]any{
-			"url": "https://example.com/a.mp4",
-		}},
 		{http.MethodDelete, "/api/drafts/draft_db_error/materials/asset_db_error", nil},
 		{http.MethodPost, "/api/jobs/job_db_error/cancel", map[string]any{}},
 	}
@@ -277,179 +261,13 @@ func TestAdvertisedRouteErrorContracts(t *testing.T) {
 	}
 }
 
-func TestURLImportUsesBoundedExplicitClientAndEnqueuesIngest(t *testing.T) {
+func TestURLMaterialImportRouteIsRemoved(t *testing.T) {
 	t.Parallel()
-	server, handler := testServer(t, t.TempDir(), 0)
-	server.urlClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader("remote-media")),
-			Request:    request,
-		}, nil
-	})}
-	createDraftThroughAPI(t, handler, "draft_url")
-
-	imported := httptest.NewRecorder()
-	handler.ServeHTTP(imported, apiRequest(t, http.MethodPost,
-		"/api/drafts/draft_url/materials/import-url", map[string]any{
-			"url": "https://example.com/clip.mp4", "asset_id": "asset_url", "max_bytes": 1024,
-		}))
-	if imported.Code != http.StatusOK {
-		t.Fatalf("import=%d body=%s", imported.Code, imported.Body.String())
-	}
-	asset, err := server.database.Read().QueryContext(t.Context(), `
-		SELECT source, storage_mode, object_hash FROM assets WHERE asset_id='asset_url'`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = asset.Close() }()
-	if !asset.Next() {
-		t.Fatal("URL 素材未落库")
-	}
-	var source, mode, hash string
-	if err := asset.Scan(&source, &mode, &hash); err != nil || source != "url" || mode != "copy" || len(hash) != 64 {
-		t.Fatalf("source=%s mode=%s hash=%s err=%v", source, mode, hash, err)
-	}
-	customFilename := httptest.NewRecorder()
-	handler.ServeHTTP(customFilename, apiRequest(t, http.MethodPost,
-		"/api/drafts/draft_url/materials/import-url", map[string]any{
-			"url": "https://example.com/download", "filename": "voice.wav",
-		}))
-	if customFilename.Code != http.StatusOK || !strings.Contains(customFilename.Body.String(), `"asset_id":"asset_`) {
-		t.Fatalf("custom filename=%d body=%s", customFilename.Code, customFilename.Body.String())
-	}
-
-	tooLarge := httptest.NewRecorder()
-	handler.ServeHTTP(tooLarge, apiRequest(t, http.MethodPost,
-		"/api/drafts/draft_url/materials/import-url", map[string]any{
-			"url": "https://example.com/large.mp4", "asset_id": "asset_large", "max_bytes": 1,
-		}))
-	if tooLarge.Code != http.StatusRequestEntityTooLarge || !strings.Contains(tooLarge.Body.String(), "url_too_large") {
-		t.Fatalf("too large=%d body=%s", tooLarge.Code, tooLarge.Body.String())
-	}
-
-	invalid := httptest.NewRecorder()
-	handler.ServeHTTP(invalid, apiRequest(t, http.MethodPost,
-		"/api/drafts/draft_url/materials/import-url", map[string]any{
-			"url": "file:///tmp/clip.mp4",
-		}))
-	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), "invalid_url") {
-		t.Fatalf("invalid=%d body=%s", invalid.Code, invalid.Body.String())
-	}
-}
-
-func TestURLImportSecurityAndFailureContracts(t *testing.T) {
-	t.Parallel()
-	server, handler := testServer(t, t.TempDir(), 0)
-	createDraftThroughAPI(t, handler, "draft_url_errors")
-	request := func(path string, body any) *httptest.ResponseRecorder {
-		t.Helper()
-		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, apiRequest(t, http.MethodPost, path, body))
-		return recorder
-	}
-	for _, item := range []struct {
-		body   any
-		status int
-		reason string
-	}{
-		{map[string]any{"url": "https://user:pass@example.com/a.mp4"}, 400, "invalid_url"},
-		{map[string]any{"url": "https://example.com/"}, 400, "missing_filename"},
-		{map[string]any{"url": "https://example.com/file.txt"}, 400, "unsupported_material_type"},
-		{map[string]any{"url": "https://example.com/a.mp4", "max_bytes": 0}, 400, "invalid_max_bytes"},
-	} {
-		recorder := request("/api/drafts/draft_url_errors/materials/import-url", item.body)
-		if recorder.Code != item.status || !strings.Contains(recorder.Body.String(), item.reason) {
-			t.Fatalf("body=%#v status=%d response=%s", item.body, recorder.Code, recorder.Body.String())
-		}
-	}
-	missing := request("/api/drafts/missing/materials/import-url", map[string]any{
-		"url": "https://example.com/a.mp4",
-	})
-	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), "draft_not_found") {
-		t.Fatalf("missing=%d body=%s", missing.Code, missing.Body.String())
-	}
-	invalidJSONRequest := apiRequest(t, http.MethodPost,
-		"/api/drafts/draft_url_errors/materials/import-url", nil)
-	invalidJSONRequest.Body = io.NopCloser(strings.NewReader("{"))
-	invalidJSONRequest.ContentLength = 1
-	invalidJSON := httptest.NewRecorder()
-	handler.ServeHTTP(invalidJSON, invalidJSONRequest)
-	if invalidJSON.Code != http.StatusBadRequest || !strings.Contains(invalidJSON.Body.String(), "invalid_json") {
-		t.Fatalf("invalid json=%d body=%s", invalidJSON.Code, invalidJSON.Body.String())
-	}
-
-	server.urlClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		return nil, errors.New("network unavailable")
-	})}
-	failed := request("/api/drafts/draft_url_errors/materials/import-url", map[string]any{
-		"url": "https://example.com/a.mp4",
-	})
-	if failed.Code != http.StatusBadGateway || !strings.Contains(failed.Body.String(), "url_download_failed") {
-		t.Fatalf("failed=%d body=%s", failed.Code, failed.Body.String())
-	}
-	server.urlClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusNotFound, Header: make(http.Header),
-			Body: io.NopCloser(strings.NewReader("missing")), Request: request,
-		}, nil
-	})}
-	badStatus := request("/api/drafts/draft_url_errors/materials/import-url", map[string]any{
-		"url": "https://example.com/a.mp4",
-	})
-	if badStatus.Code != http.StatusBadGateway || !strings.Contains(badStatus.Body.String(), "url_download_status") {
-		t.Fatalf("bad status=%d body=%s", badStatus.Code, badStatus.Body.String())
-	}
-	server.urlClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK, Header: make(http.Header), ContentLength: 10,
-			Body: io.NopCloser(strings.NewReader("0123456789")), Request: request,
-		}, nil
-	})}
-	declaredLarge := request("/api/drafts/draft_url_errors/materials/import-url", map[string]any{
-		"url": "https://example.com/a.mp4", "max_bytes": 1,
-	})
-	if declaredLarge.Code != http.StatusRequestEntityTooLarge || !strings.Contains(declaredLarge.Body.String(), "url_too_large") {
-		t.Fatalf("declared large=%d body=%s", declaredLarge.Code, declaredLarge.Body.String())
-	}
-	server.urlClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
-		return &http.Response{
-			StatusCode: http.StatusOK, Header: make(http.Header), Body: failingReadCloser{}, Request: request,
-		}, nil
-	})}
-	interrupted := request("/api/drafts/draft_url_errors/materials/import-url", map[string]any{
-		"url": "https://example.com/a.mp4",
-	})
-	if interrupted.Code != http.StatusBadGateway || !strings.Contains(interrupted.Body.String(), "url_download_failed") {
-		t.Fatalf("interrupted=%d body=%s", interrupted.Code, interrupted.Body.String())
-	}
-
-	client := newURLImportClient()
-	transport, ok := client.Transport.(*http.Transport)
-	if !ok || transport.Proxy != nil || transport.DialContext == nil || !transport.ForceAttemptHTTP2 {
-		t.Fatalf("transport=%#v", client.Transport)
-	}
-	if _, err := transport.DialContext(t.Context(), "tcp", "127.0.0.1:9"); err == nil {
-		t.Fatal("URL importer must reject loopback")
-	}
-	if _, err := transport.DialContext(t.Context(), "tcp", "missing-port"); err == nil {
-		t.Fatal("URL importer must reject malformed dial addresses")
-	}
-	for _, address := range []string{"0.0.0.0", "127.0.0.1", "10.0.0.1", "169.254.1.1", "224.0.0.1"} {
-		if !unsafeImportAddress(net.ParseIP(address)) {
-			t.Fatalf("unsafe address accepted: %s", address)
-		}
-	}
-	redirect := client.CheckRedirect
-	validRequest, _ := http.NewRequest(http.MethodGet, "https://example.com/a.mp4", nil)
-	invalidRequest, _ := http.NewRequest(http.MethodGet, "file:///tmp/a.mp4", nil)
-	if err := redirect(validRequest, nil); err != nil || redirect(invalidRequest, nil) == nil ||
-		redirect(validRequest, make([]*http.Request, 5)) == nil {
-		t.Fatal("redirect policy mismatch")
-	}
-	overflowed := &boundedReader{reader: strings.NewReader("ignored"), remaining: -1}
-	if _, err := overflowed.Read(make([]byte, 1)); !errors.Is(err, errURLImportTooLarge) {
-		t.Fatalf("overflowed reader err=%v", err)
+	_, handler := testServer(t, t.TempDir(), 0)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, apiRequest(t, http.MethodPost,
+		"/api/drafts/any/materials/import-url", map[string]any{"url": "https://example.com/a.mp4"}))
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("removed URL import route status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }

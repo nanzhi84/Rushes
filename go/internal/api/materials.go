@@ -6,13 +6,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
-	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -28,10 +24,6 @@ type importEntry struct {
 	path   string
 	relDir *string
 }
-
-const defaultURLImportMaxBytes int64 = 512 << 20
-
-var errURLImportTooLarge = errors.New("URL 素材超过大小限制")
 
 func (server *Server) ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPost(
 	writer http.ResponseWriter,
@@ -90,124 +82,6 @@ func (server *Server) ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPos
 	writeJSON(writer, http.StatusOK, response)
 }
 
-func (server *Server) ImportUrlMaterialApiDraftsDraftIdMaterialsImportUrlPost(
-	writer http.ResponseWriter,
-	request *http.Request,
-	draftID string,
-) {
-	if _, err := storage.GetDraft(request.Context(), server.database.Read(), draftID); errors.Is(err, storage.ErrNotFound) {
-		writeNotFound(writer, "draft_not_found")
-		return
-	} else if err != nil {
-		server.internalError(writer, err)
-		return
-	}
-	var payload MaterialImportUrlRequest
-	if err := decodeJSON(request, &payload); err != nil {
-		writeBadRequest(writer, "invalid_json")
-		return
-	}
-	parsed, err := validateImportURL(payload.Url)
-	if err != nil {
-		writeBadRequest(writer, "invalid_url")
-		return
-	}
-	filename := pathpkg.Base(parsed.Path)
-	if payload.Filename != nil && strings.TrimSpace(*payload.Filename) != "" {
-		filename = filepath.Base(strings.TrimSpace(*payload.Filename))
-	}
-	if filename == "" || filename == "." || filename == "/" {
-		writeBadRequest(writer, "missing_filename")
-		return
-	}
-	kind, supported := materialKind(filename)
-	if !supported {
-		writeBadRequest(writer, "unsupported_material_type")
-		return
-	}
-	maxBytes := defaultURLImportMaxBytes
-	if payload.MaxBytes != nil {
-		maxBytes = int64(*payload.MaxBytes)
-	}
-	if maxBytes <= 0 || maxBytes > 2<<30 {
-		writeBadRequest(writer, "invalid_max_bytes")
-		return
-	}
-	download, err := http.NewRequestWithContext(request.Context(), http.MethodGet, parsed.String(), nil)
-	if err != nil {
-		writeBadRequest(writer, "invalid_url")
-		return
-	}
-	response, err := server.urlClient.Do(download)
-	if err != nil {
-		writeJSON(writer, http.StatusBadGateway, map[string]any{
-			"detail": map[string]string{"reason": "url_download_failed"},
-		})
-		return
-	}
-	defer func() { _ = response.Body.Close() }()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		writeJSON(writer, http.StatusBadGateway, map[string]any{
-			"detail": map[string]string{"reason": "url_download_status"},
-		})
-		return
-	}
-	if response.ContentLength > maxBytes {
-		writeJSON(writer, http.StatusRequestEntityTooLarge, map[string]any{
-			"detail": map[string]string{"reason": "url_too_large"},
-		})
-		return
-	}
-	store := media.NewObjectStore(server.database.Paths)
-	object, err := store.Put(request.Context(), &boundedReader{reader: response.Body, remaining: maxBytes})
-	if errors.Is(err, errURLImportTooLarge) {
-		writeJSON(writer, http.StatusRequestEntityTooLarge, map[string]any{
-			"detail": map[string]string{"reason": "url_too_large"},
-		})
-		return
-	}
-	if err != nil {
-		writeJSON(writer, http.StatusBadGateway, map[string]any{
-			"detail": map[string]string{"reason": "url_download_failed"},
-		})
-		return
-	}
-	assetID := newID("asset")
-	if payload.AssetId != nil && strings.TrimSpace(*payload.AssetId) != "" {
-		assetID = strings.TrimSpace(*payload.AssetId)
-	}
-	jobID := newID("job")
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := reducer.Apply(request.Context(), server.database, []contracts.Event{
-		{Type: "AssetImported", Payload: map[string]any{
-			"asset_id": assetID, "job_id": jobID, "storage_mode": string(Copy),
-			"object_hash": object.Hash, "object_size": object.Size,
-			"kind": kind, "source": "url", "filename": filename,
-			"hash": object.Hash, "size": object.Size, "ingest_status": "imported",
-		}},
-		{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{"asset_id": assetID}},
-		{Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
-			"job_id": jobID, "kind": "ingest", "asset_id": assetID,
-			"requested_by_draft_id": draftID, "idempotency_key": "asset:" + assetID + ":ingest",
-			"job_payload": map[string]any{"asset_id": assetID}, "max_retries": 2,
-			"next_run_at": now, "priority": 10,
-		}},
-	}, reducer.Options{Actor: contracts.ActorUser})
-	if err != nil {
-		server.internalError(writer, err)
-		return
-	}
-	if result.Status != reducer.StatusApplied {
-		writeReducerResult(writer, result)
-		return
-	}
-	assetIDs := []string{assetID}
-	writeJSON(writer, http.StatusOK, MaterialMutationResponse{
-		DraftId: draftID, AssetId: &assetID, AssetIds: &assetIDs, JobId: &jobID,
-		EventIds: reducerEventIDs(result),
-	})
-}
-
 func (server *Server) DeleteMaterialApiDraftsDraftIdMaterialsAssetIdDelete(
 	writer http.ResponseWriter,
 	request *http.Request,
@@ -237,76 +111,6 @@ func (server *Server) DeleteMaterialApiDraftsDraftIdMaterialsAssetIdDelete(
 	writeJSON(writer, http.StatusOK, MaterialMutationResponse{
 		DraftId: draftID, AssetId: &assetID, EventIds: reducerEventIDs(result),
 	})
-}
-
-func validateImportURL(raw string) (*url.URL, error) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || parsed.Hostname() == "" || parsed.User != nil ||
-		(parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return nil, errors.New("URL 必须是无凭据的 http/https 地址")
-	}
-	return parsed, nil
-}
-
-func newURLImportClient() *http.Client {
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	transport := &http.Transport{
-		Proxy: nil,
-		DialContext: func(ctx context.Context, _ string, address string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(address)
-			if err != nil {
-				return nil, err
-			}
-			addresses, err := net.DefaultResolver.LookupIP(ctx, "ip4", host)
-			if err != nil {
-				return nil, err
-			}
-			for _, address := range addresses {
-				if !unsafeImportAddress(address) {
-					return dialer.DialContext(ctx, "tcp4", net.JoinHostPort(address.String(), port))
-				}
-			}
-			return nil, fmt.Errorf("URL 主机没有可用公网 IPv4: %s", host)
-		},
-		ForceAttemptHTTP2: true,
-	}
-	return &http.Client{
-		Timeout:   2 * time.Minute,
-		Transport: transport,
-		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return errors.New("URL 重定向次数过多")
-			}
-			_, err := validateImportURL(request.URL.String())
-			return err
-		},
-	}
-}
-
-func unsafeImportAddress(address net.IP) bool {
-	return address.IsUnspecified() || address.IsLoopback() || address.IsPrivate() ||
-		address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() || address.IsMulticast()
-}
-
-type boundedReader struct {
-	reader    io.Reader
-	remaining int64
-}
-
-func (reader *boundedReader) Read(buffer []byte) (int, error) {
-	if reader.remaining < 0 {
-		return 0, errURLImportTooLarge
-	}
-	limit := reader.remaining + 1
-	if int64(len(buffer)) > limit {
-		buffer = buffer[:limit]
-	}
-	read, err := reader.reader.Read(buffer)
-	reader.remaining -= int64(read)
-	if reader.remaining < 0 {
-		return read, errURLImportTooLarge
-	}
-	return read, err
 }
 
 func (server *Server) expandImportEntries(requested []string) ([]importEntry, []string, string, bool) {

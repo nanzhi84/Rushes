@@ -54,13 +54,14 @@ type AssetListInput struct {
 }
 
 type AssetManifest struct {
-	AssetID             string  `json:"asset_id"`
-	Filename            string  `json:"filename"`
-	Kind                string  `json:"kind"`
-	DurationSec         float64 `json:"duration_sec,omitempty"`
-	Usable              bool    `json:"usable"`
-	IngestStatus        string  `json:"ingest_status"`
-	UnderstandingStatus string  `json:"understanding_status"`
+	AssetID             string `json:"asset_id"`
+	Filename            string `json:"filename"`
+	Kind                string `json:"kind"`
+	DurationFrames      int    `json:"duration_frames,omitempty"`
+	TimelineFPS         int    `json:"timeline_fps"`
+	Usable              bool   `json:"usable"`
+	IngestStatus        string `json:"ingest_status"`
+	UnderstandingStatus string `json:"understanding_status"`
 }
 
 type AssetListResult struct {
@@ -105,10 +106,10 @@ type DecisionAnswerInput struct {
 }
 
 type ComposeClip struct {
-	AssetID     string  `json:"asset_id" jsonschema:"required"`
-	SourceStart float64 `json:"source_start_s"`
-	SourceEnd   float64 `json:"source_end_s" jsonschema:"required"`
-	Role        string  `json:"role" jsonschema:"required"`
+	AssetID          string `json:"asset_id" jsonschema:"required"`
+	SourceStartFrame int    `json:"source_start_frame"`
+	SourceEndFrame   int    `json:"source_end_frame" jsonschema:"required"`
+	Role             string `json:"role" jsonschema:"required"`
 }
 
 type ComposeInitialInput struct {
@@ -116,7 +117,7 @@ type ComposeInitialInput struct {
 }
 
 type TimelinePatchInput struct {
-	Op map[string]any `json:"op" jsonschema:"required"`
+	Op map[string]any `json:"op" jsonschema:"required" jsonschema_description:"时间线语义补丁；所有位置和范围必须使用整数帧字段，如 start_frame、end_frame、source_start_frame、source_end_frame，禁止使用秒字段"`
 }
 
 type TimelineValidateInput struct{}

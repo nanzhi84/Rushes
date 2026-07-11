@@ -31,7 +31,7 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 	ctx := tools.WithDraftID(t.Context(), "draft_timeline_api")
 	if _, err := server.agent.ExecuteTool(ctx, "timeline.compose_initial", tools.ComposeInitialInput{
 		Clips: []tools.ComposeClip{{
-			AssetID: "asset_timeline_api", SourceStart: 0, SourceEnd: 2, Role: "a_roll",
+			AssetID: "asset_timeline_api", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll",
 		}},
 	}); err != nil {
 		t.Fatal(err)

@@ -173,7 +173,7 @@ func convertResult[O any](raw any) (O, error) {
 	return result, nil
 }
 
-var prohibitedParts = []string{"frame", "timecode", "ffmpeg", "filter_complex", "codec", "bitrate", "crf", "preset", "pix_fmt"}
+var prohibitedParts = []string{"timecode", "ffmpeg", "filter_complex", "codec", "bitrate", "crf", "preset", "pix_fmt"}
 var prohibitedNames = map[string]struct{}{
 	"path": {}, "file": {}, "file_path": {}, "source_path": {}, "reference_path": {},
 	"workspace_object_uri": {}, "local_path": {}, "argv": {}, "vf": {}, "af": {},
@@ -225,11 +225,11 @@ func registerDecisionAnswer(registry *Registry) error {
 }
 
 func registerComposeInitial(registry *Registry) error {
-	return addTool[ComposeInitialInput, ToolResult](registry, "timeline.compose_initial", "从摘要级片段选择组装时间线 v1", []string{"usable_asset_exists"}, ExposureLLM, false, false)
+	return addTool[ComposeInitialInput, ToolResult](registry, "timeline.compose_initial", "按整数帧源区间组装时间线 v1；先从 asset.list_assets 读取 duration_frames 与 timeline_fps", []string{"usable_asset_exists"}, ExposureLLM, false, false)
 }
 
 func registerApplyPatch(registry *Registry) error {
-	return addTool[TimelinePatchInput, ToolResult](registry, "timeline.apply_patch", "对当前时间线应用语义补丁", []string{"timeline_exists"}, ExposureLLM, false, false)
+	return addTool[TimelinePatchInput, ToolResult](registry, "timeline.apply_patch", "对当前时间线应用语义补丁；所有时间位置只接受整数帧，不接受秒", []string{"timeline_exists"}, ExposureLLM, false, false)
 }
 
 func registerTimelineValidate(registry *Registry) error {

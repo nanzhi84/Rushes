@@ -36,28 +36,28 @@ type Track struct {
 }
 
 type Clip struct {
-	TimelineClipID string           `json:"timeline_clip_id"`
-	TrackID        string           `json:"track_id"`
-	AssetID        string           `json:"asset_id,omitempty"`
-	ClipID         *string          `json:"clip_id,omitempty"`
-	Role           string           `json:"role,omitempty"`
-	Text           string           `json:"text,omitempty"`
-	TimelineStart  int              `json:"timeline_start_frame"`
-	TimelineEnd    int              `json:"timeline_end_frame"`
-	SourceStart    int              `json:"source_start_frame,omitempty"`
-	SourceEnd      int              `json:"source_end_frame,omitempty"`
-	PlaybackRate   float64          `json:"playback_rate,omitempty"`
-	GainDB         float64          `json:"gain_db,omitempty"`
-	LockPolicy     string           `json:"lock_policy,omitempty"`
-	ParentBlockID  string           `json:"parent_block_id,omitempty"`
-	Effects        []map[string]any `json:"effects,omitempty"`
+	TimelineClipID     string           `json:"timeline_clip_id"`
+	TrackID            string           `json:"track_id"`
+	AssetID            string           `json:"asset_id,omitempty"`
+	ClipID             *string          `json:"clip_id,omitempty"`
+	Role               string           `json:"role,omitempty"`
+	Text               string           `json:"text,omitempty"`
+	TimelineStartFrame int              `json:"timeline_start_frame"`
+	TimelineEndFrame   int              `json:"timeline_end_frame"`
+	SourceStartFrame   int              `json:"source_start_frame,omitempty"`
+	SourceEndFrame     int              `json:"source_end_frame,omitempty"`
+	PlaybackRate       float64          `json:"playback_rate,omitempty"`
+	GainDB             float64          `json:"gain_db,omitempty"`
+	LockPolicy         string           `json:"lock_policy,omitempty"`
+	ParentBlockID      string           `json:"parent_block_id,omitempty"`
+	Effects            []map[string]any `json:"effects,omitempty"`
 }
 
 type Selection struct {
-	AssetID     string
-	SourceStart float64
-	SourceEnd   float64
-	Role        string
+	AssetID          string
+	SourceStartFrame int
+	SourceEndFrame   int
+	Role             string
 }
 
 type ValidationIssue struct {
@@ -79,17 +79,17 @@ func ComposeInitial(draftID string, version int, selections []Selection) (Docume
 	primary := &document.Tracks[0]
 	cursor := 0
 	for index, selection := range selections {
-		if selection.AssetID == "" || selection.SourceStart < 0 || selection.SourceEnd <= selection.SourceStart {
+		if selection.AssetID == "" || selection.SourceStartFrame < 0 || selection.SourceEndFrame <= selection.SourceStartFrame {
 			return Document{}, fmt.Errorf("clip %d 源范围无效", index)
 		}
-		duration := max(1, int(math.Round((selection.SourceEnd-selection.SourceStart)*float64(document.FPS))))
+		duration := selection.SourceEndFrame - selection.SourceStartFrame
 		clipID := fmt.Sprintf("clip_v%d_%03d", version, index+1)
 		primary.Clips = append(primary.Clips, Clip{
 			TimelineClipID: clipID, TrackID: primary.TrackID, AssetID: selection.AssetID,
-			Role: selection.Role, TimelineStart: cursor, TimelineEnd: cursor + duration,
-			SourceStart:  int(math.Round(selection.SourceStart * float64(document.FPS))),
-			SourceEnd:    int(math.Round(selection.SourceEnd * float64(document.FPS))),
-			PlaybackRate: 1, LockPolicy: "free", ParentBlockID: fmt.Sprintf("block_%03d", index+1),
+			Role: selection.Role, TimelineStartFrame: cursor, TimelineEndFrame: cursor + duration,
+			SourceStartFrame: selection.SourceStartFrame,
+			SourceEndFrame:   selection.SourceEndFrame,
+			PlaybackRate:     1, LockPolicy: "free", ParentBlockID: fmt.Sprintf("block_%03d", index+1),
 		})
 		cursor += duration
 	}
@@ -128,10 +128,10 @@ func Validate(document Document) ValidationReport {
 		}
 		tracks[track.TrackID] = track
 		for _, clip := range track.Clips {
-			if clip.TimelineStart < 0 || clip.TimelineEnd <= clip.TimelineStart || clip.TimelineEnd > document.DurationFrames {
+			if clip.TimelineStartFrame < 0 || clip.TimelineEndFrame <= clip.TimelineStartFrame || clip.TimelineEndFrame > document.DurationFrames {
 				add("invalid_clip_range", clip.TimelineClipID)
 			}
-			if clip.AssetID != "" && clip.SourceEnd <= clip.SourceStart {
+			if clip.AssetID != "" && clip.SourceEndFrame <= clip.SourceStartFrame {
 				add("invalid_source_range", clip.TimelineClipID)
 			}
 			if clip.PlaybackRate < 0 {
@@ -149,13 +149,13 @@ func Validate(document Document) ValidationReport {
 		add("empty_primary_visual", "主视觉轨没有 clip")
 	} else {
 		sorted := append([]Clip(nil), primary.Clips...)
-		sort.Slice(sorted, func(i, j int) bool { return sorted[i].TimelineStart < sorted[j].TimelineStart })
+		sort.Slice(sorted, func(i, j int) bool { return sorted[i].TimelineStartFrame < sorted[j].TimelineStartFrame })
 		cursor := 0
 		for _, clip := range sorted {
-			if clip.TimelineStart != cursor {
+			if clip.TimelineStartFrame != cursor {
 				add("primary_visual_gap_or_overlap", clip.TimelineClipID)
 			}
-			cursor = clip.TimelineEnd
+			cursor = clip.TimelineEndFrame
 		}
 		if cursor != document.DurationFrames {
 			add("primary_visual_not_full_coverage", fmt.Sprintf("coverage=%d duration=%d", cursor, document.DurationFrames))
@@ -228,28 +228,34 @@ func ToMap(document Document) (map[string]any, error) {
 
 func trimClip(document *Document, operation map[string]any) error {
 	return updateClip(document, operation, func(clip *Clip) error {
-		start := numberValue(operation["source_start_s"])
-		end := numberValue(operation["source_end_s"])
+		start, startErr := frameValue(operation, "source_start_frame")
+		end, endErr := frameValue(operation, "source_end_frame")
+		if startErr != nil || endErr != nil {
+			return errors.Join(startErr, endErr)
+		}
 		if start < 0 || end <= start {
 			return errors.New("trim_clip 源范围无效")
 		}
-		oldDuration := clip.TimelineEnd - clip.TimelineStart
-		clip.SourceStart = int(math.Round(start * float64(document.FPS)))
-		clip.SourceEnd = int(math.Round(end * float64(document.FPS)))
+		oldDuration := clip.TimelineEndFrame - clip.TimelineStartFrame
+		clip.SourceStartFrame = start
+		clip.SourceEndFrame = end
 		rate := clip.PlaybackRate
 		if rate <= 0 {
 			rate = 1
 		}
-		newDuration := max(1, int(math.Round((end-start)*float64(document.FPS)/rate)))
-		clip.TimelineEnd = clip.TimelineStart + newDuration
-		shiftAfter(document, clip.TimelineStart+oldDuration, newDuration-oldDuration)
+		newDuration := max(1, int(math.Round(float64(end-start)/rate)))
+		clip.TimelineEndFrame = clip.TimelineStartFrame + newDuration
+		shiftAfter(document, clip.TimelineStartFrame+oldDuration, newDuration-oldDuration)
 		return nil
 	})
 }
 
 func deleteRange(document *Document, operation map[string]any) error {
-	start := int(math.Round(numberValue(operation["start_s"]) * float64(document.FPS)))
-	end := int(math.Round(numberValue(operation["end_s"]) * float64(document.FPS)))
+	start, startErr := frameValue(operation, "start_frame")
+	end, endErr := frameValue(operation, "end_frame")
+	if startErr != nil || endErr != nil {
+		return errors.Join(startErr, endErr)
+	}
 	if start < 0 || end <= start || end > document.DurationFrames {
 		return errors.New("delete_range 范围无效")
 	}
@@ -258,29 +264,29 @@ func deleteRange(document *Document, operation map[string]any) error {
 		clips := document.Tracks[trackIndex].Clips
 		kept := clips[:0]
 		for _, clip := range clips {
-			if clip.TimelineEnd <= start {
+			if clip.TimelineEndFrame <= start {
 				kept = append(kept, clip)
 				continue
 			}
-			if clip.TimelineStart >= end {
-				clip.TimelineStart -= delta
-				clip.TimelineEnd -= delta
+			if clip.TimelineStartFrame >= end {
+				clip.TimelineStartFrame -= delta
+				clip.TimelineEndFrame -= delta
 				kept = append(kept, clip)
 				continue
 			}
-			if clip.TimelineStart < start && clip.TimelineEnd > end {
-				clip.TimelineEnd -= delta
-				clip.SourceEnd -= delta
+			if clip.TimelineStartFrame < start && clip.TimelineEndFrame > end {
+				clip.TimelineEndFrame -= delta
+				clip.SourceEndFrame -= delta
 				kept = append(kept, clip)
-			} else if clip.TimelineStart < start {
-				clip.TimelineEnd = start
-				clip.SourceEnd = clip.SourceStart + (clip.TimelineEnd - clip.TimelineStart)
+			} else if clip.TimelineStartFrame < start {
+				clip.TimelineEndFrame = start
+				clip.SourceEndFrame = clip.SourceStartFrame + (clip.TimelineEndFrame - clip.TimelineStartFrame)
 				kept = append(kept, clip)
-			} else if clip.TimelineEnd > end {
-				removed := end - clip.TimelineStart
-				clip.TimelineStart = start
-				clip.TimelineEnd -= delta
-				clip.SourceStart += removed
+			} else if clip.TimelineEndFrame > end {
+				removed := end - clip.TimelineStartFrame
+				clip.TimelineStartFrame = start
+				clip.TimelineEndFrame -= delta
+				clip.SourceStartFrame += removed
 				kept = append(kept, clip)
 			}
 		}
@@ -292,8 +298,11 @@ func deleteRange(document *Document, operation map[string]any) error {
 
 func insertClip(document *Document, operation map[string]any) error {
 	assetID := stringValue(operation["asset_id"])
-	start := numberValue(operation["source_start_s"])
-	end := numberValue(operation["source_end_s"])
+	start, startErr := frameValue(operation, "source_start_frame")
+	end, endErr := frameValue(operation, "source_end_frame")
+	if startErr != nil || endErr != nil {
+		return errors.Join(startErr, endErr)
+	}
 	if assetID == "" || start < 0 || end <= start {
 		return errors.New("insert_clip 参数无效")
 	}
@@ -301,13 +310,13 @@ func insertClip(document *Document, operation map[string]any) error {
 	if track == nil {
 		return errors.New("insert_clip track 不存在")
 	}
-	duration := max(1, int(math.Round((end-start)*float64(document.FPS))))
+	duration := end - start
 	startFrame := document.DurationFrames
 	clip := Clip{
 		TimelineClipID: valueOr(stringValue(operation["timeline_clip_id"]), fmt.Sprintf("clip_v%d_%03d", document.Version+1, len(track.Clips)+1)),
 		TrackID:        track.TrackID, AssetID: assetID, Role: valueOr(stringValue(operation["role"]), "b_roll"),
-		TimelineStart: startFrame, TimelineEnd: startFrame + duration,
-		SourceStart: int(math.Round(start * float64(document.FPS))), SourceEnd: int(math.Round(end * float64(document.FPS))),
+		TimelineStartFrame: startFrame, TimelineEndFrame: startFrame + duration,
+		SourceStartFrame: start, SourceEndFrame: end,
 		PlaybackRate: 1, LockPolicy: "free",
 	}
 	track.Clips = append(track.Clips, clip)
@@ -337,11 +346,11 @@ func setPlaybackRate(document *Document, operation map[string]any) error {
 		if rate <= 0 || rate > 8 {
 			return errors.New("playback_rate 必须在 (0,8]")
 		}
-		oldDuration := clip.TimelineEnd - clip.TimelineStart
-		newDuration := max(1, int(math.Round(float64(clip.SourceEnd-clip.SourceStart)/rate)))
+		oldDuration := clip.TimelineEndFrame - clip.TimelineStartFrame
+		newDuration := max(1, int(math.Round(float64(clip.SourceEndFrame-clip.SourceStartFrame)/rate)))
 		clip.PlaybackRate = rate
-		clip.TimelineEnd = clip.TimelineStart + newDuration
-		shiftAfter(document, clip.TimelineStart+oldDuration, newDuration-oldDuration)
+		clip.TimelineEndFrame = clip.TimelineStartFrame + newDuration
+		shiftAfter(document, clip.TimelineStartFrame+oldDuration, newDuration-oldDuration)
 		return nil
 	})
 }
@@ -378,9 +387,9 @@ func shiftAfter(document *Document, boundary, delta int) {
 	for trackIndex := range document.Tracks {
 		for clipIndex := range document.Tracks[trackIndex].Clips {
 			clip := &document.Tracks[trackIndex].Clips[clipIndex]
-			if clip.TimelineStart >= boundary {
-				clip.TimelineStart += delta
-				clip.TimelineEnd += delta
+			if clip.TimelineStartFrame >= boundary {
+				clip.TimelineStartFrame += delta
+				clip.TimelineEndFrame += delta
 			}
 		}
 	}
@@ -424,6 +433,37 @@ func numberValue(value any) float64 {
 	default:
 		return 0
 	}
+}
+
+func frameValue(operation map[string]any, key string) (int, error) {
+	value, exists := operation[key]
+	if !exists {
+		return 0, fmt.Errorf("patch op 缺少 %s", key)
+	}
+	var number float64
+	switch typed := value.(type) {
+	case float64:
+		number = typed
+	case float32:
+		number = float64(typed)
+	case int:
+		return typed, nil
+	case int64:
+		if int64(int(typed)) != typed {
+			return 0, fmt.Errorf("%s 超出整数范围", key)
+		}
+		return int(typed), nil
+	default:
+		return 0, fmt.Errorf("%s 必须是整数帧", key)
+	}
+	if math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number {
+		return 0, fmt.Errorf("%s 必须是整数帧", key)
+	}
+	converted := int(number)
+	if float64(converted) != number {
+		return 0, fmt.Errorf("%s 超出整数范围", key)
+	}
+	return converted, nil
 }
 
 func valueOr(value, fallback string) string {

@@ -54,8 +54,8 @@ func RenderTimeline(
 		if err != nil {
 			return RenderResult{}, fmt.Errorf("解析 clip %s: %w", clip.TimelineClipID, err)
 		}
-		sourceStart := float64(clip.SourceStart) / float64(document.FPS)
-		timelineDuration := float64(clip.TimelineEnd-clip.TimelineStart) / float64(document.FPS)
+		sourceStart := float64(clip.SourceStartFrame) / float64(document.FPS)
+		timelineDuration := float64(clip.TimelineEndFrame-clip.TimelineStartFrame) / float64(document.FPS)
 		if kind == "image" {
 			args = append(args, "-loop", "1", "-t", formatSeconds(timelineDuration), "-i", source)
 		} else {

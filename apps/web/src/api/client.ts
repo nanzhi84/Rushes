@@ -109,7 +109,6 @@ type DraftCreateRequest = Schemas["DraftCreateRequest"];
 type DraftUpdateRequest = Schemas["DraftUpdateRequest"];
 type DraftCopyRequest = Schemas["DraftCopyRequest"];
 type MaterialImportLocalRequest = Schemas["MaterialImportLocalRequest"];
-type MaterialImportUrlRequest = Schemas["MaterialImportUrlRequest"];
 type MessageCreateRequest = Schemas["MessageCreateRequest"];
 type DecisionAnswerRequest = Schemas["DecisionAnswerRequest"];
 
@@ -247,16 +246,6 @@ export const api = {
     payload: MaterialImportLocalRequest
   ): Promise<MaterialMutationResponse> {
     return apiFetch<MaterialMutationResponse>(`${draftPath(draftId)}/materials/import-local`, {
-      method: "POST",
-      body: payload
-    });
-  },
-
-  importUrlMaterial(
-    draftId: string,
-    payload: MaterialImportUrlRequest
-  ): Promise<MaterialMutationResponse> {
-    return apiFetch<MaterialMutationResponse>(`${draftPath(draftId)}/materials/import-url`, {
       method: "POST",
       body: payload
     });

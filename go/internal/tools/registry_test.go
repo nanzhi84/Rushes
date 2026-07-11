@@ -184,7 +184,7 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 		t.Fatal("missing draft should fail")
 	}
 	if prohibitedField(reflect.TypeFor[prohibitedPathInput]()) != "path" ||
-		prohibitedField(reflect.TypeFor[*prohibitedFrameInput]()) != "frame_count" ||
+		prohibitedField(reflect.TypeFor[*prohibitedFrameInput]()) != "" ||
 		prohibitedField(reflect.TypeFor[string]()) != "" ||
 		prohibitedField(reflect.TypeFor[cleanInput]()) != "" {
 		t.Fatal("PolicyGate field detection mismatch")

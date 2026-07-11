@@ -177,23 +177,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/drafts/{draft_id}/materials/import-url": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Import Url Material */
-        post: operations["import_url_material_api_drafts__draft_id__materials_import_url_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/drafts/{draft_id}/materials/revalidate": {
         parameters: {
             query?: never;
@@ -947,17 +930,6 @@ export interface components {
             /** Paths */
             paths?: string[] | null;
             storage_mode?: components["schemas"]["StorageMode"] | null;
-        };
-        /** MaterialImportUrlRequest */
-        MaterialImportUrlRequest: {
-            /** Asset Id */
-            asset_id?: string | null;
-            /** Filename */
-            filename?: string | null;
-            /** Max Bytes */
-            max_bytes?: number | null;
-            /** Url */
-            url: string;
         };
         /** MaterialMutationResponse */
         MaterialMutationResponse: {
@@ -1953,86 +1925,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SecurityRefusalResponse"] | components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Conflict */
-            409: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Unsupported Media Type */
-            415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SecurityRefusalResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    import_url_material_api_drafts__draft_id__materials_import_url_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                draft_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["MaterialImportUrlRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["MaterialMutationResponse"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SecurityRefusalResponse"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SecurityRefusalResponse"];
                 };
             };
             /** @description Not Found */

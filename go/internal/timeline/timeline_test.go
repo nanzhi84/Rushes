@@ -12,8 +12,8 @@ import (
 func TestComposeValidateInspectAndStore(t *testing.T) {
 	t.Parallel()
 	document, err := ComposeInitial("draft_timeline", 1, []Selection{
-		{AssetID: "a", SourceStart: 0, SourceEnd: 2, Role: "a_roll"},
-		{AssetID: "b", SourceStart: 1, SourceEnd: 2.5, Role: "b_roll"},
+		{AssetID: "a", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll"},
+		{AssetID: "b", SourceStartFrame: 30, SourceEndFrame: 75, Role: "b_roll"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -25,7 +25,7 @@ func TestComposeValidateInspectAndStore(t *testing.T) {
 	if summary := Inspect(document); !strings.Contains(summary, "3.50 秒") || !strings.Contains(summary, "主视觉 2 段") {
 		t.Fatalf("summary=%s", summary)
 	}
-	document.Tracks[0].Clips[1].TimelineStart++
+	document.Tracks[0].Clips[1].TimelineStartFrame++
 	if invalid := Validate(document); invalid.Valid || len(invalid.Issues) == 0 {
 		t.Fatalf("invalid=%#v", invalid)
 	}
@@ -35,7 +35,7 @@ func TestComposeValidateInspectAndStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = database.Close() })
-	document.Tracks[0].Clips[1].TimelineStart--
+	document.Tracks[0].Clips[1].TimelineStartFrame--
 	data, _ := json.Marshal(document)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := database.Write().ExecContext(t.Context(), `
@@ -62,28 +62,28 @@ func TestComposeValidateInspectAndStore(t *testing.T) {
 func TestApplyPatchSubsetTable(t *testing.T) {
 	t.Parallel()
 	base, err := ComposeInitial("draft_patch", 1, []Selection{
-		{AssetID: "a", SourceStart: 0, SourceEnd: 2, Role: "a_roll"},
-		{AssetID: "b", SourceStart: 0, SourceEnd: 2, Role: "b_roll"},
+		{AssetID: "a", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll"},
+		{AssetID: "b", SourceStartFrame: 0, SourceEndFrame: 60, Role: "b_roll"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	base.Tracks[1].Clips = []Clip{{
 		TimelineClipID: "overlay", TrackID: "visual_overlay", AssetID: "a",
-		TimelineStart: 0, TimelineEnd: 30, SourceStart: 0, SourceEnd: 30, PlaybackRate: 1,
+		TimelineStartFrame: 0, TimelineEndFrame: 30, SourceStartFrame: 0, SourceEndFrame: 30, PlaybackRate: 1,
 	}}
 	base.Tracks[5].Clips = []Clip{{
 		TimelineClipID: "subtitle", TrackID: "subtitles", Text: "旧字幕",
-		TimelineStart: 0, TimelineEnd: 30,
+		TimelineStartFrame: 0, TimelineEndFrame: 30,
 	}}
 	tests := []struct {
 		name  string
 		op    map[string]any
 		check func(Document) bool
 	}{
-		{"trim", map[string]any{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_s": 0.5, "source_end_s": 1.5}, func(value Document) bool { return value.DurationFrames == 90 }},
-		{"delete", map[string]any{"kind": "delete_range", "start_s": 1.0, "end_s": 2.0}, func(value Document) bool { return value.DurationFrames == 90 }},
-		{"insert", map[string]any{"kind": "insert_clip", "asset_id": "c", "source_start_s": 0.0, "source_end_s": 1.0}, func(value Document) bool { return value.DurationFrames == 150 && len(value.Tracks[0].Clips) == 3 }},
+		{"trim", map[string]any{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_frame": 15, "source_end_frame": 45}, func(value Document) bool { return value.DurationFrames == 90 }},
+		{"delete", map[string]any{"kind": "delete_range", "start_frame": 30, "end_frame": 60}, func(value Document) bool { return value.DurationFrames == 90 }},
+		{"insert", map[string]any{"kind": "insert_clip", "asset_id": "c", "source_start_frame": 0, "source_end_frame": 30}, func(value Document) bool { return value.DurationFrames == 150 && len(value.Tracks[0].Clips) == 3 }},
 		{"replace", map[string]any{"kind": "replace_clip", "timeline_clip_id": "clip_v1_001", "asset_id": "c"}, func(value Document) bool { return value.Tracks[0].Clips[0].AssetID == "c" }},
 		{"rate", map[string]any{"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 2.0}, func(value Document) bool { return value.DurationFrames == 90 }},
 		{"gain", map[string]any{"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -3.0}, func(value Document) bool { return value.Tracks[0].Clips[0].GainDB == -3 }},
@@ -112,7 +112,7 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 	document.Tracks = append(document.Tracks, document.Tracks[0])
 	document.Tracks[0].Clips = []Clip{{
 		TimelineClipID: "bad", TrackID: "visual_base", AssetID: "asset",
-		TimelineStart: -1, TimelineEnd: 2, SourceStart: 3, SourceEnd: 2, PlaybackRate: -1,
+		TimelineStartFrame: -1, TimelineEndFrame: 2, SourceStartFrame: 3, SourceEndFrame: 2, PlaybackRate: -1,
 	}}
 	document.Tracks = document.Tracks[:2]
 	report := Validate(document)
@@ -120,15 +120,18 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 		t.Fatalf("report=%#v", report)
 	}
 
-	base, err := ComposeInitial("draft_errors", 1, []Selection{{AssetID: "a", SourceEnd: 2}})
+	base, err := ComposeInitial("draft_errors", 1, []Selection{{AssetID: "a", SourceEndFrame: 60}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	badOperations := []map[string]any{
-		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_s": 2, "source_end_s": 1},
-		{"kind": "delete_range", "start_s": -1, "end_s": 1},
-		{"kind": "insert_clip", "asset_id": "", "source_start_s": 0, "source_end_s": 1},
-		{"kind": "insert_clip", "asset_id": "a", "source_start_s": 0, "source_end_s": 1, "track_id": "missing"},
+		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_frame": 60, "source_end_frame": 30},
+		{"kind": "delete_range", "start_frame": -1, "end_frame": 30},
+		{"kind": "insert_clip", "asset_id": "", "source_start_frame": 0, "source_end_frame": 30},
+		{"kind": "insert_clip", "asset_id": "a", "source_start_frame": 0, "source_end_frame": 30, "track_id": "missing"},
+		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_frame": 0.5, "source_end_frame": 30},
+		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_frame": "0", "source_end_frame": 30},
+		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_s": 0, "source_end_s": 1},
 		{"kind": "replace_clip", "timeline_clip_id": "clip_v1_001"},
 		{"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 9},
 		{"kind": "adjust_gain"},
@@ -141,13 +144,13 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 		}
 	}
 	for index, selection := range []Selection{
-		{}, {AssetID: "a", SourceStart: -1, SourceEnd: 1}, {AssetID: "a", SourceStart: 2, SourceEnd: 1},
+		{}, {AssetID: "a", SourceStartFrame: -1, SourceEndFrame: 1}, {AssetID: "a", SourceStartFrame: 2, SourceEndFrame: 1},
 	} {
 		if _, err := ComposeInitial("draft", 1, []Selection{selection}); err == nil {
 			t.Fatalf("selection[%d] should fail", index)
 		}
 	}
-	if _, err := ComposeInitial("", 1, []Selection{{AssetID: "a", SourceEnd: 1}}); err == nil {
+	if _, err := ComposeInitial("", 1, []Selection{{AssetID: "a", SourceEndFrame: 1}}); err == nil {
 		t.Fatal("empty draft should fail")
 	}
 }
@@ -158,16 +161,16 @@ func TestDeleteRangeHandlesEveryOverlapShape(t *testing.T) {
 	document.DurationFrames = 120
 	document.Tracks[0].Clips = []Clip{{
 		TimelineClipID: "cover", TrackID: "visual_base", AssetID: "a",
-		TimelineStart: 0, TimelineEnd: 120, SourceStart: 0, SourceEnd: 120, PlaybackRate: 1,
+		TimelineStartFrame: 0, TimelineEndFrame: 120, SourceStartFrame: 0, SourceEndFrame: 120, PlaybackRate: 1,
 	}}
 	document.Tracks[1].Clips = []Clip{
-		{TimelineClipID: "before", TimelineStart: 0, TimelineEnd: 20},
-		{TimelineClipID: "left", TimelineStart: 10, TimelineEnd: 40, SourceStart: 0, SourceEnd: 30},
-		{TimelineClipID: "inside", TimelineStart: 35, TimelineEnd: 45},
-		{TimelineClipID: "right", TimelineStart: 50, TimelineEnd: 100, SourceStart: 0, SourceEnd: 50},
-		{TimelineClipID: "after", TimelineStart: 100, TimelineEnd: 120},
+		{TimelineClipID: "before", TimelineStartFrame: 0, TimelineEndFrame: 20},
+		{TimelineClipID: "left", TimelineStartFrame: 10, TimelineEndFrame: 40, SourceStartFrame: 0, SourceEndFrame: 30},
+		{TimelineClipID: "inside", TimelineStartFrame: 35, TimelineEndFrame: 45},
+		{TimelineClipID: "right", TimelineStartFrame: 50, TimelineEndFrame: 100, SourceStartFrame: 0, SourceEndFrame: 50},
+		{TimelineClipID: "after", TimelineStartFrame: 100, TimelineEndFrame: 120},
 	}
-	result, err := ApplyPatch(document, map[string]any{"kind": "delete_range", "start_s": 1, "end_s": 2})
+	result, err := ApplyPatch(document, map[string]any{"kind": "delete_range", "start_frame": 30, "end_frame": 60})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +196,7 @@ func TestTimelineStoreMissingAndPreviewLookup(t *testing.T) {
 		t.Fatalf("missing preview=%v err=%v", preview, err)
 	}
 
-	document, _ := ComposeInitial("draft_preview", 1, []Selection{{AssetID: "a", SourceEnd: 1}})
+	document, _ := ComposeInitial("draft_preview", 1, []Selection{{AssetID: "a", SourceEndFrame: 30}})
 	data, _ := json.Marshal(document)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	hash := strings.Repeat("a", 64)

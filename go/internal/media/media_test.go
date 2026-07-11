@@ -73,7 +73,7 @@ func TestRenderTimelineAndInspectSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	document, err := timeline.ComposeInitial("draft", 1, []timeline.Selection{{
-		AssetID: "render_asset", SourceStart: 0, SourceEnd: 1, Role: "a_roll",
+		AssetID: "render_asset", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -272,11 +272,11 @@ func TestMediaKindShortcutsResolveAndRenderValidation(t *testing.T) {
 	}
 	badFPS := timeline.Empty("d", 1)
 	badFPS.FPS = 0
-	badFPS.Tracks[0].Clips = []timeline.Clip{{TimelineClipID: "c", AssetID: "copy", TimelineEnd: 1}}
+	badFPS.Tracks[0].Clips = []timeline.Clip{{TimelineClipID: "c", AssetID: "copy", TimelineEndFrame: 1}}
 	if _, err := RenderTimeline(t.Context(), database, badFPS, PreviewProfile, nil); err == nil {
 		t.Fatal("bad fps should fail")
 	}
-	missingAsset, _ := timeline.ComposeInitial("d", 1, []timeline.Selection{{AssetID: "missing", SourceEnd: 1}})
+	missingAsset, _ := timeline.ComposeInitial("d", 1, []timeline.Selection{{AssetID: "missing", SourceEndFrame: 30}})
 	if _, err := RenderTimeline(t.Context(), database, missingAsset, PreviewProfile, nil); err == nil {
 		t.Fatal("missing clip asset should fail")
 	}
@@ -345,7 +345,7 @@ func TestMediaAudioImageAndProcessBoundaryPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	document, err := timeline.ComposeInitial("image_draft", 1, []timeline.Selection{{
-		AssetID: "image_render", SourceStart: 0, SourceEnd: 0.2, Role: "b_roll",
+		AssetID: "image_render", SourceStartFrame: 0, SourceEndFrame: 6, Role: "b_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)

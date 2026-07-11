@@ -355,7 +355,7 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 	ctx := rushestools.WithDraftID(t.Context(), "draft_timeline_tools")
 	if _, err := service.ExecuteTool(ctx, "timeline.compose_initial", rushestools.ComposeInitialInput{
 		Clips: []rushestools.ComposeClip{{
-			AssetID: "asset_timeline", SourceStart: 0, SourceEnd: 2, Role: "a_roll",
+			AssetID: "asset_timeline", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll",
 		}},
 	}); err != nil {
 		t.Fatal(err)
@@ -663,7 +663,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	invalid := timeline.Empty("draft_failures", 1)
 	invalid.FPS = 0
 	invalid.Tracks[0].Clips = []timeline.Clip{{
-		TimelineClipID: "bad", TrackID: "visual_base", AssetID: "a", TimelineEnd: 1, SourceEnd: 1,
+		TimelineClipID: "bad", TrackID: "visual_base", AssetID: "a", TimelineEndFrame: 1, SourceEndFrame: 1,
 	}}
 	result, err := service.persistTimeline(ctx, "draft_failures", invalid, nil, "invalid")
 	if err != nil || result.Status != "validation_failed" {

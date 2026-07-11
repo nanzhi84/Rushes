@@ -19,6 +19,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
+	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
@@ -359,13 +360,13 @@ func (service *Service) fallbackFullMainline(ctx context.Context, draftID string
 	}
 	clips := make([]rushestools.ComposeClip, 0, len(listed.Assets))
 	for _, asset := range listed.Assets {
-		end := asset.DurationSec
-		if end <= 0 {
-			end = 1
+		endFrame := asset.DurationFrames
+		if endFrame <= 0 {
+			endFrame = timeline.DefaultFPS
 		}
-		end = min(end, 5)
+		endFrame = min(endFrame, 5*timeline.DefaultFPS)
 		clips = append(clips, rushestools.ComposeClip{
-			AssetID: asset.AssetID, SourceStart: 0, SourceEnd: end, Role: "b_roll",
+			AssetID: asset.AssetID, SourceStartFrame: 0, SourceEndFrame: endFrame, Role: "b_roll",
 		})
 	}
 	if _, err := service.executeReported(ctx, draftID, "timeline.compose_initial", rushestools.ComposeInitialInput{Clips: clips}); err != nil {
@@ -485,6 +486,6 @@ func randomID(prefix string) string {
 
 func boolPointer(value bool) *bool { return &value }
 
-const systemPrompt = `你是 Rushes 本地视频剪辑 Agent。只使用已注册工具推进“导入、理解、时间线、预览、导出”主线；需要用户选择时调用 interaction.ask_user；不要编造文件、素材、时间线或渲染结果。`
+const systemPrompt = `你是 Rushes 本地视频剪辑 Agent。只使用已注册工具推进“导入、理解、时间线、预览、导出”主线；需要用户选择时调用 interaction.ask_user；不要编造文件、素材、时间线或渲染结果。时间线的唯一精确坐标是整数帧：先从 asset.list_assets 读取 duration_frames 与 timeline_fps，所有 compose 和 patch 参数使用 *_frame，绝不使用 *_s 秒字段。`
 
 var _ rushestools.Executor = (*Service)(nil)
