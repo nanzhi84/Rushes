@@ -30,8 +30,8 @@ export function ResizeHandle({
       aria-label={ariaLabel}
       className={
         orientation === "vertical"
-          ? "w-1 shrink-0 cursor-col-resize bg-line transition-colors hover:bg-accent/70"
-          : "h-1 shrink-0 cursor-row-resize bg-line transition-colors hover:bg-accent/70"
+          ? "w-1 shrink-0 cursor-col-resize bg-line transition-colors hover:bg-accent/50"
+          : "h-1 shrink-0 cursor-row-resize bg-line transition-colors hover:bg-accent/50"
       }
       onPointerDown={(event) => {
         dragRef.current = { startPos: readPos(event), startValue: value };

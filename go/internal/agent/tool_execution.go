@@ -195,9 +195,15 @@ func (service *Service) toolComposeInitial(
 	}
 	selections := make([]timeline.Selection, 0, len(input.Clips))
 	for _, clip := range input.Clips {
+		asset, assetErr := storage.GetAsset(ctx, service.database.Read(), clip.AssetID)
+		if assetErr != nil {
+			return rushestools.ToolResult{}, assetErr
+		}
+		hasAudio, _ := asset.Probe["has_audio"].(bool)
 		selections = append(selections, timeline.Selection{
-			AssetID: clip.AssetID, SourceStartFrame: clip.SourceStartFrame,
-			SourceEndFrame: clip.SourceEndFrame, Role: clip.Role,
+			AssetID: clip.AssetID, AssetKind: asset.Kind, HasAudio: hasAudio,
+			SourceStartFrame: clip.SourceStartFrame, SourceEndFrame: clip.SourceEndFrame,
+			Role: clip.Role,
 		})
 	}
 	document, err := timeline.ComposeInitial(draftID, version, selections)

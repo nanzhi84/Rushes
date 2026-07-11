@@ -64,12 +64,25 @@ export type TimelineClipJson = {
   clip_id?: string | null;
   role?: string;
   text?: string;
+  source_start_frame?: number;
+  source_end_frame?: number;
+  playback_rate?: number;
+  gain_db?: number;
+  lock_policy?: string;
+  asset_kind?: string;
+  parent_block_id?: string;
+  linked?: boolean;
   [key: string]: unknown;
 };
 
 export type TimelineTrackJson = {
   track_id: string;
+  track_type?: string;
   clips?: TimelineClipJson[];
+  muted?: boolean;
+  solo?: boolean;
+  locked?: boolean;
+  gain_db?: number;
   [key: string]: unknown;
 };
 
@@ -83,6 +96,9 @@ export type TimelineJson = {
 export type DraftTimelineResponse = {
   draft_id: string;
   timeline_version: number;
+  parent_version: number | null;
+  redo_version: number | null;
+  latest_version: number;
   timeline: TimelineJson;
   summary: string;
   preview_id: string | null;
@@ -111,6 +127,7 @@ type DraftCopyRequest = Schemas["DraftCopyRequest"];
 type MaterialImportLocalRequest = Schemas["MaterialImportLocalRequest"];
 type MessageCreateRequest = Schemas["MessageCreateRequest"];
 type DecisionAnswerRequest = Schemas["DecisionAnswerRequest"];
+export type TimelinePatchRequest = Schemas["TimelinePatchRequest"];
 
 // 安全中间件对所有 mutation（含无 body 的 POST/DELETE）强制 Content-Type: application/json。
 // 无 body 的 mutation 显式带该头；带 body 的由 apiFetch 自动补。
@@ -138,6 +155,26 @@ export function postPreviewViewed(
     `${draftPath(draftId)}/previews/${encodeURIComponent(previewId)}/viewed`,
     { method: "POST", headers: JSON_MUTATION_HEADERS }
   );
+}
+
+export function applyTimelinePatch(
+  draftId: string,
+  payload: TimelinePatchRequest
+): Promise<DraftTimelineResponse> {
+  return apiFetch<DraftTimelineResponse>(`${draftPath(draftId)}/timeline/patch`, {
+    method: "POST",
+    body: payload
+  });
+}
+
+export function restoreTimelineVersion(
+  draftId: string,
+  version: number
+): Promise<DraftTimelineResponse> {
+  return apiFetch<DraftTimelineResponse>(`${draftPath(draftId)}/timeline/restore`, {
+    method: "POST",
+    body: { version }
+  });
 }
 
 // limit=最老的前 N 条，升序返回；当前规模够用。
@@ -222,6 +259,10 @@ export const api = {
   },
 
   fetchDraftTimeline,
+
+  applyTimelinePatch,
+
+  restoreTimelineVersion,
 
   postPreviewViewed,
 

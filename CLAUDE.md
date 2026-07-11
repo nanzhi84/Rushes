@@ -4,6 +4,7 @@
 
 - 面向用户的文案、错误与 Agent 台词一律使用简体中文。
 - 根目录 `.env` 是所有本地手工、开发和 E2E 流程的统一配置源；显式 export 的同名变量优先，任何日志和测试输出都不得泄漏密钥。
+- **供用户手测的本地环境必须加载仓库根 `.env`**：无论通过 dev、test、E2E、tmux 还是手工命令启动，都要确保 API 和 worker 在启动前按 `scripts/dev_all.sh` 与 `go/internal/config.LoadDotEnv` 的语义加载 `.env`（已显式 export 的变量优先，`.env` 只补未设置项）。不要把后端密钥注入 Web；确定性的自动化测试若必须禁用真实 provider，应显式覆盖/清空并说明。交付前检查运行中 API/worker 已继承所需变量并完成健康检查，但绝不输出密钥值。
 
 ## 常用命令
 

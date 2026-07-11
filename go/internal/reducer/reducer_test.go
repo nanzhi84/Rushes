@@ -685,7 +685,10 @@ func TestReducerHelperConversionAndFailureBranches(t *testing.T) {
 		value any
 		want  any
 	}{
-		{1, int64(1)}, {int64(2), int64(2)}, {float64(3), int64(3)}, {"bad", nil},
+		{1, int64(1)}, {int64(2), int64(2)}, {float64(3), int64(3)},
+		{func() *int { value := 4; return &value }(), int64(4)},
+		{func() *int64 { value := int64(5); return &value }(), int64(5)},
+		{(*int)(nil), nil}, {"bad", nil},
 	} {
 		if got := nullableInt64(item.value); got != item.want {
 			t.Fatalf("nullableInt64(%T)=%v want=%v", item.value, got, item.want)

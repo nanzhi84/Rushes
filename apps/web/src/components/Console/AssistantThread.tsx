@@ -1,4 +1,11 @@
-import type { ReactElement } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactElement, UIEvent } from "react";
+import {
+  ChevronRight,
+  CornerDownRight,
+  LoaderCircle,
+  TerminalSquare
+} from "lucide-react";
 import { Markdown } from "./Markdown";
 import { StructuredInteractionRenderer } from "./StructuredInteractionRenderer";
 import type { AnswerDecisionHandler } from "./StructuredInteractionRenderer";
@@ -15,6 +22,16 @@ import type {
 } from "./useTurnStream";
 
 const STRUCTURED_MESSAGE_ID = "structured-interactions";
+const FOLLOW_THRESHOLD_PX = 48;
+
+type HistoryBlock =
+  | { type: "message"; message: ConsoleAssistantMessage }
+  | { type: "activity"; id: string; messages: ConsoleAssistantMessage[] }
+  | { type: "tools"; id: string; steps: StreamToolItem[] };
+
+type StreamBlock =
+  | { type: "message"; message: StreamMessageItem }
+  | { type: "tools"; id: string; steps: StreamToolItem[] };
 
 export function AssistantThread({
   runtime,
@@ -31,60 +48,153 @@ export function AssistantThread({
   streamItems?: TurnStreamItem[];
   subagentProgress?: SubagentProgressEntry[];
 }): ReactElement {
-  // 结构化交互卡（决策/进度）固定排在最后：本回合流式内容之后才是待回答的卡片。
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const followLatestRef = useRef(true);
+  const [hasNewOutput, setHasNewOutput] = useState(false);
+
+  // 结构化交互固定排在当前回合之后，避免确认卡被新的工具输出挤到中间。
   const regularMessages = runtime.messages.filter((message) => message.id !== STRUCTURED_MESSAGE_ID);
   const structuredMessage =
     runtime.messages.find((message) => message.id === STRUCTURED_MESSAGE_ID) ?? null;
-  // 子代理进度挂在「当前进行中工具行」下方——不特判工具名，取最后一个 running 工具步即可。
+  const historyBlocks = useMemo(() => groupHistoryMessages(regularMessages), [regularMessages]);
+  const streamBlocks = useMemo(() => groupStreamItems(streamItems), [streamItems]);
   const activeToolStepId = findActiveToolStepId(streamItems);
-  const isEmpty = regularMessages.length === 0 && streamItems.length === 0 && !structuredMessage;
-  return (
-    <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4" aria-label="消息列表">
-      {isEmpty ? (
-        <p className="rounded-md border border-dashed border-line-strong px-4 py-6 text-sm text-fg-muted">
-          这里会显示当前剪辑任务的消息流。
-        </p>
-      ) : (
-        regularMessages.map((message) => (
-          <MessageRow
-            key={message.id}
-            message={message}
-            onAnswerDecision={onAnswerDecision}
-            answerPending={answerPending}
-            highlighted={highlightedMessageId === message.id}
-          />
-        ))
-      )}
-      {streamItems.map((item) =>
-        item.type === "message" ? (
-          <MessageRow
-            key={item.message_id}
-            message={toStreamMessage(item)}
-            onAnswerDecision={onAnswerDecision}
-            answerPending={answerPending}
-            highlighted={highlightedMessageId === item.message_id}
-          />
-        ) : (
-          <ToolStepRow
-            key={item.step_id}
-            step={item}
-            progress={item.step_id === activeToolStepId ? subagentProgress : []}
-          />
+  const isEmpty = historyBlocks.length === 0 && streamBlocks.length === 0 && !structuredMessage;
+
+  const streamFingerprint = useMemo(
+    () =>
+      streamItems
+        .map((item) =>
+          item.type === "message"
+            ? `${item.message_id}:${item.kind}:${item.text.length}`
+            : `${item.step_id}:${item.status}:${item.observation?.length ?? 0}`
         )
-      )}
-      {structuredMessage ? (
-        <MessageRow
-          message={structuredMessage}
-          onAnswerDecision={onAnswerDecision}
-          answerPending={answerPending}
-          highlighted={highlightedMessageId === structuredMessage.id}
-        />
+        .join("|"),
+    [streamItems]
+  );
+  const progressFingerprint = subagentProgress
+    .map((entry) => `${entry.asset_id}:${entry.note}`)
+    .join("|");
+
+  // Claude Code 式 follow mode：用户停留在底部时持续追随增量；手动上滚后不抢滚动位置。
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller) {
+      return;
+    }
+    if (followLatestRef.current) {
+      scroller.scrollTop = scroller.scrollHeight;
+      setHasNewOutput(false);
+    } else if (runtime.isRunning) {
+      setHasNewOutput(true);
+    }
+  }, [historyBlocks.length, progressFingerprint, runtime.isRunning, streamFingerprint, structuredMessage]);
+
+  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
+    const scroller = event.currentTarget;
+    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    const followsLatest = distance <= FOLLOW_THRESHOLD_PX;
+    followLatestRef.current = followsLatest;
+    if (followsLatest) {
+      setHasNewOutput(false);
+    }
+  };
+
+  const jumpToLatest = () => {
+    const scroller = scrollerRef.current;
+    if (!scroller) {
+      return;
+    }
+    followLatestRef.current = true;
+    scroller.scrollTop = scroller.scrollHeight;
+    setHasNewOutput(false);
+  };
+
+  return (
+    <div className="relative min-h-0 flex-1">
+      <div
+        ref={scrollerRef}
+        className="absolute inset-0 overflow-y-auto px-4 py-4"
+        aria-label="消息列表"
+        onScroll={handleScroll}
+      >
+        {isEmpty ? (
+          <div className="flex min-h-40 items-start gap-2.5 px-1 py-6 text-fg-faint">
+            <TerminalSquare size={15} strokeWidth={1.7} aria-hidden className="mt-0.5 shrink-0" />
+            <p className="max-w-64 text-xs leading-5">
+              描述成片目标、节奏或要删除的内容。剪辑过程和工具调用会持续显示在这里。
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {historyBlocks.map((block) =>
+              block.type === "activity" ? (
+                <BackgroundActivityGroup key={block.id} messages={block.messages} />
+              ) : block.type === "tools" ? (
+                <ToolActivityGroup
+                  key={block.id}
+                  steps={block.steps}
+                  activeToolStepId={null}
+                  progress={[]}
+                />
+              ) : (
+                <MessageRow
+                  key={block.message.id}
+                  message={block.message}
+                  onAnswerDecision={onAnswerDecision}
+                  answerPending={answerPending}
+                  highlighted={highlightedMessageId === block.message.id}
+                />
+              )
+            )}
+
+            {streamBlocks.map((block) =>
+              block.type === "message" ? (
+                <MessageRow
+                  key={block.message.message_id}
+                  message={toStreamMessage(block.message)}
+                  onAnswerDecision={onAnswerDecision}
+                  answerPending={answerPending}
+                  highlighted={highlightedMessageId === block.message.message_id}
+                  streaming={block.message.kind === "assistant"}
+                />
+              ) : (
+                <ToolActivityGroup
+                  key={block.id}
+                  steps={block.steps}
+                  activeToolStepId={activeToolStepId}
+                  progress={subagentProgress}
+                />
+              )
+            )}
+
+            {structuredMessage ? (
+              <MessageRow
+                message={structuredMessage}
+                onAnswerDecision={onAnswerDecision}
+                answerPending={answerPending}
+                highlighted={highlightedMessageId === structuredMessage.id}
+              />
+            ) : null}
+          </div>
+        )}
+      </div>
+
+      {hasNewOutput ? (
+        <button
+          className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-md border border-line-strong bg-raised px-2.5 py-1.5 text-xs font-medium text-fg shadow-overlay transition-[transform,background-color] duration-base ease-out-snappy hover:bg-hover active:translate-y-px"
+          type="button"
+          onClick={jumpToLatest}
+        >
+          <CornerDownRight size={13} strokeWidth={1.8} aria-hidden />
+          查看最新输出
+        </button>
       ) : null}
     </div>
   );
 }
 
-// 流式消息复用 MessageRow 的持久化消息形状：id 就是 message_id，落库后由历史接管同一行。
+// 流式消息复用持久化消息形状；落库后由 message_id 去重并交给历史列表接管。
 function toStreamMessage(item: StreamMessageItem): ConsoleAssistantMessage {
   return {
     id: item.message_id,
@@ -99,29 +209,21 @@ function MessageRow({
   message,
   onAnswerDecision,
   answerPending,
-  highlighted
+  highlighted,
+  streaming = false
 }: {
   message: ConsoleAssistantMessage;
   onAnswerDecision: AnswerDecisionHandler;
   answerPending: boolean;
   highlighted: boolean;
+  streaming?: boolean;
 }): ReactElement {
   if (message.metadata.consoleRole === "system_observation") {
-    return (
-      <details
-        data-console-message-id={message.id}
-        className={`${highlightClass(highlighted)} mx-auto max-w-[84%] rounded-md bg-raised px-4 py-3 text-sm text-fg-muted shadow-raised`}
-      >
-        <summary className="cursor-pointer text-xs font-medium text-fg-muted">系统观察</summary>
-        {message.content.map((part, index) =>
-          part.type === "text" ? (
-            <p key={`${message.id}:${index}`} className="mt-2 whitespace-pre-wrap leading-6">
-              {part.text}
-            </p>
-          ) : null
-        )}
-      </details>
-    );
+    return <BackgroundActivityGroup messages={[message]} />;
+  }
+
+  if (isBackgroundActivity(message)) {
+    return <BackgroundActivityGroup messages={[message]} />;
   }
 
   const dataParts = message.content.filter(
@@ -131,7 +233,7 @@ function MessageRow({
     return (
       <div
         data-console-message-id={message.id}
-        className={`${highlightClass(highlighted)} mr-auto max-w-[88%] space-y-3 rounded-md`}
+        className={`${highlightClass(highlighted)} w-full space-y-0.5`}
       >
         {dataParts.map((part) => (
           <StructuredInteractionRenderer
@@ -145,55 +247,160 @@ function MessageRow({
     );
   }
 
-  const renderAsMarkdown = message.role === "assistant";
+  if (message.role === "user") {
+    return (
+      <article
+        data-console-message-id={message.id}
+        data-message-kind={message.metadata.messageKind ?? undefined}
+        className="flex w-full justify-end"
+      >
+        <div
+          data-user-message=""
+          className={`${highlightClass(highlighted)} w-fit max-w-[85%] rounded-sm bg-user-bubble px-3 py-1.5 text-[13px] leading-5 text-fg`}
+        >
+          {message.content.map((part, index) =>
+            part.type === "text" ? (
+              <p key={`${message.id}:${index}`} className="break-words whitespace-pre-wrap">
+                {part.text}
+              </p>
+            ) : null
+          )}
+        </div>
+      </article>
+    );
+  }
+
+  const narration = isNarration(message);
   return (
     <article
       data-console-message-id={message.id}
       data-message-kind={message.metadata.messageKind ?? undefined}
-      className={messageClass(message, highlighted)}
+      data-streaming={streaming ? "true" : undefined}
+      className={`${highlightClass(highlighted)} ${
+        narration
+          ? "w-full py-0.5 text-xs text-fg-muted"
+          : "w-full py-1 text-[13px] text-fg"
+      }`}
     >
-      {message.content.map((part, index) =>
-        part.type === "text" ? (
-          renderAsMarkdown ? (
-            <div key={`${message.id}:${index}`} className="text-[0.95rem]">
-              <Markdown text={part.text} />
+      <div className="min-w-0 flex-1">
+        {message.content.map((part, index) =>
+          part.type === "text" ? (
+            <div key={`${message.id}:${index}`} className={narration ? "leading-5" : "leading-[1.55]"}>
+              {narration ? <p className="whitespace-pre-wrap">{part.text}</p> : <Markdown text={part.text} />}
             </div>
-          ) : (
-            <p key={`${message.id}:${index}`} className="whitespace-pre-wrap leading-7">
-              {part.text}
-            </p>
-          )
-        ) : null
-      )}
+          ) : null
+        )}
+        {streaming ? (
+          <span className="sr-only" role="status">
+            正在生成
+          </span>
+        ) : null}
+      </div>
     </article>
   );
 }
 
-function isNarration(message: ConsoleAssistantMessage): boolean {
-  return message.role === "assistant" && message.metadata.messageKind === "narration";
+function BackgroundActivityGroup({
+  messages
+}: {
+  messages: ConsoleAssistantMessage[];
+}): ReactElement {
+  const entries = compactActivityMessages(messages);
+  const total = messages.length;
+  return (
+    <details
+      data-testid="background-activity-group"
+      data-background-count={total}
+      data-layout="inline"
+      className="group w-full text-xs text-fg-muted"
+    >
+      <summary className="-ml-1 inline-flex h-5 cursor-pointer list-none items-center gap-1.5 rounded-sm px-1 text-fg-muted transition-colors duration-fast hover:bg-hover hover:text-fg [&::-webkit-details-marker]:hidden">
+        <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-ok" />
+        <span className="font-medium text-fg-muted">后台活动</span>
+        <span className="font-mono text-2xs text-fg-faint">{total} 条</span>
+        <ChevronRight
+          size={12}
+          strokeWidth={1.8}
+          aria-hidden
+          className="shrink-0 text-fg-faint transition-transform duration-base group-open:rotate-90"
+        />
+      </summary>
+      <div className="mt-1 max-h-40 overflow-y-auto border-l-2 border-line-strong/50 pl-3">
+        <ul className="space-y-1" aria-label="后台活动详情">
+          {entries.map((entry) => (
+            <li key={entry.text} className="flex items-start gap-2 text-xs leading-5 text-fg-muted">
+              <span className="min-w-0 flex-1 whitespace-pre-wrap">{entry.text}</span>
+              {entry.count > 1 ? (
+                <span className="shrink-0 font-mono text-2xs text-fg-faint">×{entry.count}</span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </details>
+  );
 }
 
-function messageClass(message: ConsoleAssistantMessage, highlighted: boolean): string {
-  const highlight = highlightClass(highlighted);
-  if (message.role === "user") {
-    // accent 减负：用户气泡改低饱和深底 + accent 描边，不再整块铺纯橙。
-    return `${highlight} ml-auto max-w-[80%] rounded-lg border border-user-bubble-border bg-user-bubble px-4 py-3 text-fg shadow-raised`;
-  }
-  if (message.role === "assistant") {
-    // narration 叙述用弱化样式：更浅的底色与文字，和正式 reply 拉开层级。
-    if (isNarration(message)) {
-      return `${highlight} mr-auto max-w-[88%] rounded-lg px-1 py-0.5 text-sm text-fg-muted`;
+function ToolActivityGroup({
+  steps,
+  activeToolStepId,
+  progress
+}: {
+  steps: StreamToolItem[];
+  activeToolStepId: string | null;
+  progress: SubagentProgressEntry[];
+}): ReactElement {
+  const isActive = steps.some((step) => step.status === "running");
+  const hasIssue = steps.some((step) => ["failed", "deny", "ask", "requires_user"].includes(step.status));
+  const wasActiveRef = useRef(isActive);
+  const [expanded, setExpanded] = useState(isActive || hasIssue);
+
+  useEffect(() => {
+    if (isActive || hasIssue) {
+      setExpanded(true);
+    } else if (wasActiveRef.current) {
+      setExpanded(false);
     }
-    return `${highlight} mr-auto max-w-[88%] rounded-lg bg-raised px-4 py-3 text-fg shadow-raised`;
-  }
-  return `${highlight} mx-auto max-w-[80%] rounded-md bg-raised px-4 py-3 text-fg-muted shadow-raised`;
+    wasActiveRef.current = isActive;
+  }, [hasIssue, isActive]);
+
+  return (
+    <details
+      open={expanded}
+      onToggle={(event) => setExpanded(event.currentTarget.open)}
+      data-testid="tool-activity-group"
+      data-layout="inline"
+      className="group w-full text-xs text-fg-muted"
+    >
+      <summary className="-ml-1 flex min-h-5 cursor-pointer list-none items-start gap-1.5 rounded-sm px-1 py-0.5 transition-colors duration-fast hover:bg-hover [&::-webkit-details-marker]:hidden">
+        <StatusDot status={hasIssue ? "failed" : isActive ? "running" : "succeeded"} />
+        <span className="shrink-0 font-medium text-fg-muted">
+          {isActive ? "正在使用工具" : hasIssue ? "工具调用需要处理" : "已使用工具"}
+        </span>
+        <span className="min-w-0 flex-1 truncate text-fg-faint" title={toolGroupSummary(steps)}>
+          {toolGroupSummary(steps)}
+        </span>
+        {isActive ? <span className="shrink-0 text-2xs text-fg-faint">持续更新</span> : null}
+        <ChevronRight
+          size={12}
+          strokeWidth={1.8}
+          aria-hidden
+          className="mt-0.5 shrink-0 text-fg-faint transition-transform duration-base group-open:rotate-90"
+        />
+      </summary>
+      <div className="mt-1 border-l border-line-strong/50 pl-3">
+        {steps.map((step) => (
+          <ToolStepRow
+            key={step.step_id}
+            step={step}
+            progress={step.step_id === activeToolStepId ? progress : []}
+          />
+        ))}
+      </div>
+    </details>
+  );
 }
 
-function highlightClass(highlighted: boolean): string {
-  return highlighted ? "ring-2 ring-accent ring-offset-2 ring-offset-ink" : "";
-}
-
-/** Claude Code 式工具行：状态圆点 + 中文名 + 参数摘要一行带过，结果可展开。 */
 function ToolStepRow({
   step,
   progress = []
@@ -202,44 +409,52 @@ function ToolStepRow({
   progress?: SubagentProgressEntry[];
 }): ReactElement {
   const label = TOOL_STEP_LABELS[step.tool] ?? step.tool;
+  const hasDetails = Boolean(step.argsSummary || step.observation);
   const summaryRow = (
-    <span className="flex min-w-0 items-center gap-2">
-      <span
-        aria-hidden
-        className={`${toolStatusToneClass(step.status)} ${step.status === "running" ? "tile-pulse" : ""} text-[0.6rem] leading-none`}
-      >
-        ●
-      </span>
-      <span className="shrink-0 text-sm text-fg">{label}</span>
-      {step.argsSummary ? (
-        <span className="min-w-0 truncate font-mono text-xs text-fg-faint">{step.argsSummary}</span>
-      ) : null}
-      <span className="ml-auto shrink-0 pl-2 text-xs text-fg-faint">
+    <span className="flex min-w-0 flex-1 items-start gap-1.5">
+      <StatusDot status={step.status} />
+      <span className="min-w-0 flex-1 break-words text-xs text-fg-muted">{label}</span>
+      <span className={`shrink-0 text-2xs ${toolStatusToneClass(step.status)}`}>
         {toolStatusLabel(step.status)}
       </span>
+      {hasDetails ? (
+        <ChevronRight size={12} strokeWidth={1.7} aria-hidden className="shrink-0 text-fg-faint transition-transform duration-fast group-open/tool:rotate-90" />
+      ) : null}
     </span>
   );
 
-  const toolRow = !step.observation ? (
-    <div data-tool-step-id={step.step_id} data-tool-status={step.status} className="px-1 py-0.5">
-      {summaryRow}
-    </div>
-  ) : (
-    <details data-tool-step-id={step.step_id} data-tool-status={step.status} className="px-1 py-0.5">
-      <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
-        {summaryRow}
-      </summary>
-      <div className="mt-1 border-l-2 border-line pl-3 text-xs leading-5 text-fg-muted whitespace-pre-wrap">
-        {step.observation}
-      </div>
-    </details>
-  );
-
   return (
-    <div className="mr-auto w-full max-w-[88%]">
-      {toolRow}
+    <div className="py-0.5" data-tool-step-id={step.step_id} data-tool-status={step.status}>
+      {hasDetails ? (
+        <details className="group/tool">
+          <summary className="flex cursor-pointer list-none items-center [&::-webkit-details-marker]:hidden">
+            {summaryRow}
+          </summary>
+          <div className="ml-2.5 mt-1 border-l border-line pl-3">
+            {step.argsSummary ? (
+              <div className="mb-1.5">
+                <p className="text-2xs font-medium text-fg-faint">输入</p>
+                <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-[0.65rem] leading-4 text-fg-muted">
+                  {formatToolPayload(step.argsSummary)}
+                </pre>
+              </div>
+            ) : null}
+            {step.observation ? (
+              <div>
+                <p className="text-2xs font-medium text-fg-faint">结果</p>
+                <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[0.65rem] leading-4 text-fg-muted">
+                  {formatToolPayload(step.observation)}
+                </pre>
+              </div>
+            ) : null}
+          </div>
+        </details>
+      ) : (
+        summaryRow
+      )}
+
       {progress.length > 0 ? (
-        <ul className="mt-0.5 space-y-0.5 pl-5" aria-label="子代理进度">
+        <ul className="mt-1 space-y-1 pl-5" aria-label="子代理进度">
           {progress.map((entry) => (
             <SubagentProgressRow key={entry.asset_id} entry={entry} />
           ))}
@@ -249,18 +464,15 @@ function ToolStepRow({
   );
 }
 
-/** 进度行：次级弱化文本 + ↳ 缩进，读作当前工具行的子活动（对齐工具行的次级信息层级）。 */
 function SubagentProgressRow({ entry }: { entry: SubagentProgressEntry }): ReactElement {
   return (
     <li
       data-subagent-progress-asset={entry.asset_id}
-      className="flex min-w-0 items-baseline gap-1.5 text-xs leading-5"
+      className="flex min-w-0 items-center gap-1.5 text-2xs leading-4"
     >
-      <span aria-hidden className="shrink-0 text-fg-faint">
-        ↳
-      </span>
+      <LoaderCircle size={11} strokeWidth={1.7} aria-hidden className="shrink-0 animate-spin text-accent" />
       {showAssetPrefix(entry.note) ? (
-        <span className="max-w-[8rem] shrink-0 truncate font-mono text-[0.7rem] text-fg-faint">
+        <span className="max-w-[7rem] shrink-0 truncate font-mono text-[0.65rem] text-fg-faint">
           {entry.asset_id}
         </span>
       ) : null}
@@ -269,7 +481,116 @@ function SubagentProgressRow({ entry }: { entry: SubagentProgressEntry }): React
   );
 }
 
-// 取最后一个 running 工具步作为「当前进行中工具行」；无进行中工具则不挂进度。
+function StatusDot({ status }: { status: string }): ReactElement {
+  return (
+    <span
+      aria-hidden
+      className={`mt-1 size-1.5 shrink-0 rounded-full ${statusDotClass(status)} ${
+        status === "running" ? "animate-pulse" : ""
+      }`}
+    />
+  );
+}
+
+function groupHistoryMessages(messages: ConsoleAssistantMessage[]): HistoryBlock[] {
+  const blocks: HistoryBlock[] = [];
+  let activity: ConsoleAssistantMessage[] = [];
+  let tools: StreamToolItem[] = [];
+  const flushActivity = () => {
+    if (activity.length === 0) {
+      return;
+    }
+    blocks.push({ type: "activity", id: `activity:${activity[0].id}`, messages: activity });
+    activity = [];
+  };
+  const flushTools = () => {
+    if (tools.length === 0) {
+      return;
+    }
+    blocks.push({ type: "tools", id: `history-tools:${tools[0].step_id}`, steps: tools });
+    tools = [];
+  };
+  for (const message of messages) {
+    if (message.metadata.messageKind === "tool") {
+      const parsed = parsePersistedTool(message);
+      flushActivity();
+      if (parsed) {
+        tools.push(parsed);
+        continue;
+      }
+      flushTools();
+      blocks.push({ type: "message", message });
+      continue;
+    }
+    if (isBackgroundActivity(message) || message.metadata.consoleRole === "system_observation") {
+      flushTools();
+      activity.push(message);
+      continue;
+    }
+    flushActivity();
+    flushTools();
+    blocks.push({ type: "message", message });
+  }
+  flushActivity();
+  flushTools();
+  return blocks;
+}
+
+function groupStreamItems(items: TurnStreamItem[]): StreamBlock[] {
+  const blocks: StreamBlock[] = [];
+  let tools: StreamToolItem[] = [];
+  const flushTools = () => {
+    if (tools.length === 0) {
+      return;
+    }
+    blocks.push({ type: "tools", id: `tools:${tools[0].step_id}`, steps: tools });
+    tools = [];
+  };
+  for (const item of items) {
+    if (item.type === "tool") {
+      tools.push(item);
+      continue;
+    }
+    flushTools();
+    blocks.push({ type: "message", message: item });
+  }
+  flushTools();
+  return blocks;
+}
+
+function compactActivityMessages(messages: ConsoleAssistantMessage[]): Array<{ text: string; count: number }> {
+  const entries: Array<{ text: string; count: number }> = [];
+  for (const message of messages) {
+    const text = messageText(message);
+    const existing = entries.find((entry) => entry.text === text);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      entries.push({ text, count: 1 });
+    }
+  }
+  return entries;
+}
+
+function messageText(message: ConsoleAssistantMessage): string {
+  return message.content
+    .filter((part) => part.type === "text")
+    .map((part) => (part.type === "text" ? part.text : ""))
+    .join("\n")
+    .trim();
+}
+
+function isBackgroundActivity(message: ConsoleAssistantMessage): boolean {
+  if (message.metadata.messageKind === "observation") {
+    return true;
+  }
+  return message.role === "assistant" && messageText(message).startsWith("后台任务已完成");
+}
+
+function isNarration(message: ConsoleAssistantMessage): boolean {
+  return message.role === "assistant" && message.metadata.messageKind === "narration";
+}
+
 function findActiveToolStepId(items: TurnStreamItem[]): string | null {
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index];
@@ -280,10 +601,61 @@ function findActiveToolStepId(items: TurnStreamItem[]): string | null {
   return null;
 }
 
-// note 已含文件名（如 IMG_2031.mp4）时，文件名本身即可辨认素材，不再叠加不友好的 asset_id；
-// 否则（"转写音频中"等通用文案）用 asset_id 前缀区分并发的多个素材。
 function showAssetPrefix(note: string): boolean {
   return !/\.[a-z][a-z0-9]{1,4}\b/i.test(note);
+}
+
+function formatToolPayload(value: string): string {
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+function parsePersistedTool(message: ConsoleAssistantMessage): StreamToolItem | null {
+  try {
+    const raw = JSON.parse(messageText(message)) as Record<string, unknown>;
+    if (typeof raw.tool !== "string" || typeof raw.status !== "string") {
+      return null;
+    }
+    return {
+      type: "tool",
+      step_id: typeof raw.step_id === "string" && raw.step_id ? raw.step_id : message.id,
+      tool: raw.tool,
+      status: raw.status,
+      argsSummary: typeof raw.args_summary === "string" && raw.args_summary ? raw.args_summary : null,
+      observation: typeof raw.observation === "string" && raw.observation ? raw.observation : null
+    };
+  } catch {
+    return null;
+  }
+}
+
+function toolGroupSummary(steps: StreamToolItem[]): string {
+  const counts = new Map<string, number>();
+  for (const step of steps) {
+    const label = TOOL_STEP_LABELS[step.tool] ?? step.tool;
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([label, count]) => (count > 1 ? `${label} ×${count}` : label))
+    .join("、");
+}
+
+function statusDotClass(status: string): string {
+  switch (status) {
+    case "succeeded":
+      return "bg-ok";
+    case "failed":
+    case "deny":
+      return "bg-danger";
+    case "ask":
+    case "requires_user":
+      return "bg-warn";
+    default:
+      return "bg-fg-faint";
+  }
 }
 
 function toolStatusToneClass(status: string): string {
@@ -294,6 +666,7 @@ function toolStatusToneClass(status: string): string {
     case "deny":
       return "text-danger";
     case "ask":
+    case "requires_user":
       return "text-warn";
     default:
       return "text-fg-faint";
@@ -302,6 +675,10 @@ function toolStatusToneClass(status: string): string {
 
 function toolStatusLabel(status: string): string {
   return TOOL_STATUS_LABELS[status] ?? status;
+}
+
+function highlightClass(highlighted: boolean): string {
+  return highlighted ? "ring-2 ring-accent ring-offset-2 ring-offset-panel" : "";
 }
 
 const TOOL_STATUS_LABELS: Record<string, string> = {
@@ -313,7 +690,6 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
   requires_user: "待回答"
 };
 
-// 工具名 → 中文文案集中映射；未映射时回退到原始工具名。
 const TOOL_STEP_LABELS: Record<string, string> = {
   "asset.list_assets": "清点素材",
   "asset.import_local_file": "导入本地素材",

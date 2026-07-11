@@ -44,7 +44,7 @@ export function PreviewPlayer({
     <MediaPlayer
       src={src}
       playsInline
-      className={`flex w-full flex-col overflow-hidden rounded-lg border border-line bg-black text-white shadow-raised ${
+      className={`flex w-full flex-col overflow-hidden border border-line bg-black text-white ${
         fit === "height" ? "h-full min-h-0" : ""
       }`}
       aria-label="预览播放器"
@@ -165,7 +165,7 @@ function PreviewPlayerControls({
   const VolumeIcon = effectiveVolume <= 0 ? VolumeX : effectiveVolume < 0.5 ? Volume1 : Volume2;
 
   return (
-    <div className="flex flex-col gap-2 border-t border-line bg-raised px-3 pb-2 pt-2.5">
+    <div className="flex flex-col gap-1 border-t border-line bg-raised px-2 pb-1.5 pt-1.5">
       {/* 可拖 scrub 进度条（accent 已播 / fg-faint 缓冲 / line-strong 未缓冲） */}
       <ScrubBar
         currentTime={currentTime}
@@ -178,7 +178,7 @@ function PreviewPlayerControls({
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <button
           type="button"
-          className="grid size-8 place-items-center rounded-md bg-accent text-white transition-colors duration-[var(--duration-fast)] ease-standard hover:bg-accent-strong focus:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
+          className="grid size-7 place-items-center rounded-sm bg-accent text-white transition-colors duration-[var(--duration-fast)] ease-standard hover:bg-accent-strong focus:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
           aria-label={paused ? "播放" : "暂停"}
           onClick={(event) => {
             if (paused) {
@@ -196,7 +196,7 @@ function PreviewPlayerControls({
         </button>
         <button
           type="button"
-          className="grid size-8 place-items-center rounded-md border border-line text-fg-muted transition-colors duration-[var(--duration-fast)] ease-standard hover:bg-hover hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
+          className="grid size-7 place-items-center rounded-sm text-fg-muted transition-colors duration-[var(--duration-fast)] ease-standard hover:bg-hover hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
           aria-label="后退一帧"
           title="后退一帧"
           onClick={(event) => stepFrame(-1, event)}
@@ -205,7 +205,7 @@ function PreviewPlayerControls({
         </button>
         <button
           type="button"
-          className="grid size-8 place-items-center rounded-md border border-line text-fg-muted transition-colors duration-[var(--duration-fast)] ease-standard hover:bg-hover hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
+          className="grid size-7 place-items-center rounded-sm text-fg-muted transition-colors duration-[var(--duration-fast)] ease-standard hover:bg-hover hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
           aria-label="前进一帧"
           title="前进一帧"
           onClick={(event) => stepFrame(1, event)}
@@ -223,7 +223,7 @@ function PreviewPlayerControls({
           <div className="flex items-center gap-1.5">
             <button
               type="button"
-              className="grid size-8 place-items-center rounded-md text-fg-muted transition-colors duration-[var(--duration-fast)] ease-standard hover:bg-hover hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
+              className="grid size-7 place-items-center rounded-sm text-fg-muted transition-colors duration-[var(--duration-fast)] ease-standard hover:bg-hover hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
               aria-label={muted ? "取消静音" : "静音"}
               title={muted ? "取消静音" : "静音"}
               onClick={(event) => remote.toggleMuted(event.nativeEvent)}
@@ -234,7 +234,7 @@ function PreviewPlayerControls({
           </div>
           <button
             type="button"
-            className="grid size-8 place-items-center rounded-md text-fg-muted transition-colors duration-[var(--duration-fast)] ease-standard hover:bg-hover hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
+            className="grid size-7 place-items-center rounded-sm text-fg-muted transition-colors duration-[var(--duration-fast)] ease-standard hover:bg-hover hover:text-fg focus:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
             aria-label={fullscreen ? "退出全屏" : "全屏"}
             title={fullscreen ? "退出全屏" : "全屏"}
             onClick={(event) => remote.toggleFullscreen(undefined, event.nativeEvent)}

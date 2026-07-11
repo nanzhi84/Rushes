@@ -63,6 +63,38 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 		!strings.Contains(response.Body.String(), `"visual_base"`) {
 		t.Fatalf("timeline status=%d body=%s", response.Code, response.Body.String())
 	}
+	patched := httptest.NewRecorder()
+	handler.ServeHTTP(patched, apiRequest(t, http.MethodPost,
+		"/api/drafts/draft_timeline_api/timeline/patch", map[string]any{"op": map[string]any{
+			"kind": "split_clip", "timeline_clip_id": "clip_v1_001", "split_frame": 30,
+		}}))
+	if patched.Code != http.StatusOK || !strings.Contains(patched.Body.String(), `"timeline_version":2`) ||
+		!strings.Contains(patched.Body.String(), `"clip_v1_001_split_30"`) ||
+		!strings.Contains(patched.Body.String(), `"parent_version":1`) ||
+		!strings.Contains(patched.Body.String(), `"latest_version":2`) {
+		t.Fatalf("patch status=%d body=%s", patched.Code, patched.Body.String())
+	}
+	var renderJobs int
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM jobs WHERE draft_id='draft_timeline_api' AND kind='render_preview'`,
+	).Scan(&renderJobs); err != nil || renderJobs != 1 {
+		t.Fatalf("render jobs=%d err=%v", renderJobs, err)
+	}
+	restored := httptest.NewRecorder()
+	handler.ServeHTTP(restored, apiRequest(t, http.MethodPost,
+		"/api/drafts/draft_timeline_api/timeline/restore", map[string]any{"version": 1}))
+	if restored.Code != http.StatusOK || !strings.Contains(restored.Body.String(), `"timeline_version":1`) ||
+		!strings.Contains(restored.Body.String(), `"parent_version":null`) ||
+		!strings.Contains(restored.Body.String(), `"redo_version":2`) ||
+		!strings.Contains(restored.Body.String(), `"latest_version":2`) {
+		t.Fatalf("restore status=%d body=%s", restored.Code, restored.Body.String())
+	}
+	var currentVersion int
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT timeline_current_version FROM drafts WHERE draft_id='draft_timeline_api'`,
+	).Scan(&currentVersion); err != nil || currentVersion != 1 {
+		t.Fatalf("current version=%d err=%v", currentVersion, err)
+	}
 	viewed := httptest.NewRecorder()
 	handler.ServeHTTP(viewed, apiRequest(t, http.MethodPost,
 		"/api/drafts/draft_timeline_api/previews/preview_timeline_api/viewed", nil))

@@ -21,17 +21,17 @@ export function TopBar({
   onSettingsClick
 }: TopBarProps): ReactElement {
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between border-b border-line bg-panel px-4">
-      <div className="flex min-w-0 items-center gap-3">{leading ?? <Wordmark />}</div>
-      <div className="flex shrink-0 items-center gap-3 text-sm text-fg-muted">
+    <header className="flex h-10 shrink-0 items-center justify-between border-b border-line bg-panel px-3">
+      <div className="flex min-w-0 items-center gap-2">{leading ?? <Wordmark />}</div>
+      <div className="flex shrink-0 items-center gap-2 text-xs text-fg-muted">
         {trailing}
-        <span className="inline-flex items-center gap-2" data-testid="connection-state">
-          <span className={`h-2 w-2 rounded-full ${connectionColor(connectionState)}`} />
+        <span className="inline-flex items-center gap-1.5" data-testid="connection-state">
+          <span className={`size-1.5 rounded-full ${connectionColor(connectionState)}`} />
           {connectionLabel(connectionState)}
         </span>
         {showSettings ? (
           <button
-            className="rounded-md px-2 py-1 hover:bg-hover hover:text-fg"
+            className="rounded-sm px-2 py-1 hover:bg-hover hover:text-fg"
             type="button"
             onClick={onSettingsClick}
           >
@@ -45,8 +45,8 @@ export function TopBar({
 
 export function Wordmark(): ReactElement {
   return (
-    <span className="flex items-center gap-2 text-sm font-semibold tracking-wide text-fg">
-      <span aria-hidden className="h-4 w-1.5 rounded-full bg-accent" />
+    <span className="flex items-center gap-2 text-[13px] font-semibold tracking-wide text-fg">
+      <span aria-hidden className="h-3.5 w-1 rounded-sm bg-accent" />
       Rushes
     </span>
   );
