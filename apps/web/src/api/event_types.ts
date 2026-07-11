@@ -3,9 +3,13 @@
 
 export const ALL_EVENT_TYPES = [
   "DraftCreated",
+  "DraftRenamed",
+  "DraftCopied",
+  "DraftTrashed",
   "AssetImported",
   "AssetProbed",
   "AssetLinked",
+  "AssetUnlinked",
   "MaterialUnderstandingStarted",
   "MaterialUnderstandingCompleted",
   "MaterialUnderstandingFailed",
@@ -19,6 +23,7 @@ export const ALL_EVENT_TYPES = [
   "JobEnqueued",
   "JobSucceeded",
   "JobFailed",
+  "JobCancelled",
   "ProxyGenerated",
   "JobProgress",
   "TimelineVersionRestored",
@@ -27,7 +32,12 @@ export const ALL_EVENT_TYPES = [
 
 export type EventType = (typeof ALL_EVENT_TYPES)[number];
 
-const DRAFT_LIFECYCLE_EVENTS = ["DraftCreated"] as const satisfies readonly EventType[];
+const DRAFT_LIFECYCLE_EVENTS = [
+  "DraftCreated",
+  "DraftRenamed",
+  "DraftCopied",
+  "DraftTrashed"
+] as const satisfies readonly EventType[];
 
 const DECISION_EVENTS = [
   "DecisionCreated",
@@ -51,13 +61,15 @@ export const JOB_EVENT_TYPES = [
   "JobEnqueued",
   "JobProgress",
   "JobSucceeded",
-  "JobFailed"
+  "JobFailed",
+  "JobCancelled"
 ] as const satisfies readonly EventType[];
 
 const ASSET_EVENTS = [
   "AssetImported",
   "AssetProbed",
   "AssetLinked",
+  "AssetUnlinked",
   "ProxyGenerated",
   "MaterialUnderstandingStarted",
   "MaterialUnderstandingCompleted",
@@ -68,6 +80,7 @@ const ASSET_EVENTS = [
 export const DRAFT_EVENT_TYPES = [
   ...DRAFT_LIFECYCLE_EVENTS,
   "AssetLinked",
+  "AssetUnlinked",
   ...DECISION_EVENTS,
   ...TIMELINE_EVENTS,
   ...PREVIEW_EVENTS,

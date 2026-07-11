@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -97,6 +98,174 @@ func (server *Server) GetDraftApiDraftsDraftIdGet(
 		return
 	}
 	writeJSON(writer, http.StatusOK, DraftResponse{Draft: draftRecord(draft)})
+}
+
+func (server *Server) RenameDraftApiDraftsDraftIdPatch(
+	writer http.ResponseWriter,
+	request *http.Request,
+	draftID string,
+) {
+	_, err := storage.GetDraft(request.Context(), server.database.Read(), draftID)
+	if errors.Is(err, storage.ErrNotFound) {
+		writeNotFound(writer, "draft_not_found")
+		return
+	}
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	var payload DraftUpdateRequest
+	if err := decodeJSON(request, &payload); err != nil {
+		writeBadRequest(writer, "invalid_json")
+		return
+	}
+	name := strings.TrimSpace(payload.Name)
+	if name == "" || len([]rune(name)) > 200 {
+		writeBadRequest(writer, "invalid_name")
+		return
+	}
+	result, err := reducer.Apply(request.Context(), server.database, []contracts.Event{{
+		Type: "DraftRenamed", DraftID: draftID, Payload: map[string]any{"name": name},
+	}}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	if result.Status != reducer.StatusApplied {
+		writeReducerResult(writer, result)
+		return
+	}
+	updated, err := storage.GetDraft(request.Context(), server.database.Read(), draftID)
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, DraftMutationResponse{
+		Draft: draftRecord(updated), EventIds: reducerEventIDs(result),
+	})
+}
+
+func (server *Server) DeleteDraftApiDraftsDraftIdDelete(
+	writer http.ResponseWriter,
+	request *http.Request,
+	draftID string,
+) {
+	if _, err := storage.GetDraft(request.Context(), server.database.Read(), draftID); errors.Is(err, storage.ErrNotFound) {
+		writeNotFound(writer, "draft_not_found")
+		return
+	} else if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	var payload ConfirmRequest
+	if err := decodeJSON(request, &payload); err != nil {
+		writeBadRequest(writer, "invalid_json")
+		return
+	}
+	if payload.Confirm == nil || !*payload.Confirm {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"detail": map[string]string{"reason": "confirmation_required"},
+		})
+		return
+	}
+	result, err := reducer.Apply(request.Context(), server.database, []contracts.Event{{
+		Type: "DraftTrashed", DraftID: draftID, Payload: map[string]any{},
+	}}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	if result.Status != reducer.StatusApplied {
+		writeReducerResult(writer, result)
+		return
+	}
+	draft, err := storage.GetDraft(request.Context(), server.database.Read(), draftID)
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, DraftMutationResponse{
+		Draft: draftRecord(draft), EventIds: reducerEventIDs(result),
+	})
+}
+
+func (server *Server) CopyDraftApiDraftsDraftIdCopyPost(
+	writer http.ResponseWriter,
+	request *http.Request,
+	draftID string,
+) {
+	source, err := storage.GetDraft(request.Context(), server.database.Read(), draftID)
+	if errors.Is(err, storage.ErrNotFound) {
+		writeNotFound(writer, "draft_not_found")
+		return
+	}
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	var payload DraftCopyRequest
+	if err := decodeJSON(request, &payload); err != nil {
+		writeBadRequest(writer, "invalid_json")
+		return
+	}
+	targetID := newID("draft")
+	if payload.DraftId != nil && strings.TrimSpace(*payload.DraftId) != "" {
+		targetID = strings.TrimSpace(*payload.DraftId)
+	}
+	if _, err := storage.GetDraft(request.Context(), server.database.Read(), targetID); err == nil {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"detail": map[string]string{"reason": "draft_already_exists"},
+		})
+		return
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		server.internalError(writer, err)
+		return
+	}
+	name := source.Name + " Copy"
+	if payload.Name != nil && strings.TrimSpace(*payload.Name) != "" {
+		name = strings.TrimSpace(*payload.Name)
+	}
+	result, err := reducer.Apply(request.Context(), server.database, []contracts.Event{{
+		Type: "DraftCopied", DraftID: targetID,
+		Payload: map[string]any{"source_draft_id": draftID, "name": name},
+	}}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	if result.Status != reducer.StatusApplied {
+		writeReducerResult(writer, result)
+		return
+	}
+	copied, err := storage.GetDraft(request.Context(), server.database.Read(), targetID)
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, DraftMutationResponse{
+		Draft: draftRecord(copied), EventIds: reducerEventIDs(result),
+	})
+}
+
+func (server *Server) DraftCostsApiDraftsDraftIdCostsGet(
+	writer http.ResponseWriter,
+	request *http.Request,
+	draftID string,
+) {
+	if _, err := storage.GetDraft(request.Context(), server.database.Read(), draftID); errors.Is(err, storage.ErrNotFound) {
+		writeNotFound(writer, "draft_not_found")
+		return
+	} else if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, DraftCostsResponse{
+		DraftId: draftID,
+		Costs: CostSummary{
+			ByCapability: map[string]float32{}, ByProvider: map[string]float32{},
+			ProviderCallCount: 0, TotalCostEstimate: 0,
+		},
+	})
 }
 
 func draftRecord(draft storage.Draft) DraftRecord {

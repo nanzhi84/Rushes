@@ -9,8 +9,8 @@ import (
 func TestEventRegistryCoreSetAndVersionModes(t *testing.T) {
 	t.Parallel()
 
-	if got := len(EventRegistry); got != 21 {
-		t.Fatalf("事件数=%d，Issue 核心 20 + PreviewViewed 应为 21", got)
+	if got := len(EventRegistry); got != 26 {
+		t.Fatalf("事件数=%d，核心与前端生命周期事件应为 26", got)
 	}
 	strict := map[string]bool{
 		"DecisionCreated": true, "DecisionAnswered": true,

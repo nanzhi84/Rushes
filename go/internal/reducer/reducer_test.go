@@ -151,6 +151,262 @@ func TestResultRowsCommitWithReducer(t *testing.T) {
 	}
 }
 
+func TestMaterialSummaryRowsAllocateMonotonicVersions(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	result, err := Apply(t.Context(), database, []contracts.Event{{
+		Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset-summary", "job_id": "job-summary", "filename": "font.otf",
+		},
+	}}, Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("asset result=%#v err=%v", result, err)
+	}
+	for index, id := range []string{"summary-1", "summary-2"} {
+		result, err = Apply(t.Context(), database, nil, Options{
+			Actor: contracts.ActorAgent,
+			ResultRows: ResultRows{MaterialSummaries: []MaterialSummaryRow{{
+				ID: id, AssetID: "asset-summary", Version: 0, Status: "ready",
+				Summary: map[string]any{"pass": index + 1},
+			}}},
+		})
+		if err != nil || result.Status != StatusApplied {
+			t.Fatalf("summary %d result=%#v err=%v", index, result, err)
+		}
+	}
+	rows, err := database.Read().QueryContext(t.Context(), `
+		SELECT version FROM material_summaries WHERE asset_id=? ORDER BY version`, "asset-summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	versions := []int{}
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			t.Fatal(err)
+		}
+		versions = append(versions, version)
+	}
+	if len(versions) != 2 || versions[0] != 1 || versions[1] != 2 {
+		t.Fatalf("versions=%v", versions)
+	}
+}
+
+func TestDraftLifecycleCopyAssetUnlinkAndJobCancellation(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft-source")
+	hash := strings.Repeat("f", 64)
+	result, err := Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset-copy", "job_id": "job-asset-copy", "filename": "clip.mp4",
+		}},
+		{Type: "AssetLinked", DraftID: "draft-source", Payload: map[string]any{
+			"asset_id": "asset-copy", "note": "keep", "rel_dir": "clips",
+		}},
+	}, Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("assets result=%#v err=%v", result, err)
+	}
+	base := 0
+	result, err = Apply(t.Context(), database, []contracts.Event{{
+		Type: "TimelineVersionCreated", DraftID: "draft-source", BaseVersion: &base,
+		Payload: map[string]any{
+			"timeline_version": 1,
+			"document_json": map[string]any{
+				"timeline_id": "draft-source:v1", "draft_id": "draft-source", "version": 1,
+			},
+		},
+	}}, Options{Actor: contracts.ActorAgent})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("timeline result=%#v err=%v", result, err)
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{{
+		Type: "PreviewRendered", DraftID: "draft-source", Payload: map[string]any{
+			"artifact_id": "preview-copy", "timeline_version": 1,
+			"object_hash": hash, "object_size": 1,
+		},
+	}, {
+		Type: "ExportCompleted", DraftID: "draft-source", Payload: map[string]any{
+			"artifact_id": "export-copy", "timeline_version": 1,
+			"object_hash": hash, "object_size": 1,
+		},
+	}}, Options{Actor: contracts.ActorJob})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("preview result=%#v err=%v", result, err)
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{
+		{Type: "DraftRenamed", DraftID: "draft-source", Payload: map[string]any{"name": "已改名"}},
+		{Type: "DraftCopied", DraftID: "draft-copy", Payload: map[string]any{
+			"source_draft_id": "draft-source", "name": "副本",
+		}},
+		{Type: "DraftTrashed", DraftID: "draft-source", Payload: map[string]any{}},
+	}, Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("lifecycle result=%#v err=%v", result, err)
+	}
+	copied, err := storage.GetDraft(t.Context(), database.Read(), "draft-copy")
+	if err != nil || copied.Name != "副本" || copied.StateVersion != 0 ||
+		copied.PreviewCurrentID == nil || *copied.PreviewCurrentID != "draft-copy:preview-copy" ||
+		copied.ExportCurrentID == nil || *copied.ExportCurrentID != "draft-copy:export-copy" {
+		t.Fatalf("copied=%#v err=%v", copied, err)
+	}
+	var timelineDraft, timelineID string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT draft_id, json_extract(document_json, '$.timeline_id')
+		FROM timeline_versions WHERE draft_id='draft-copy' AND version=1`,
+	).Scan(&timelineDraft, &timelineID); err != nil || timelineDraft != "draft-copy" || timelineID != "draft-copy:v1" {
+		t.Fatalf("timeline draft=%s id=%s err=%v", timelineDraft, timelineID, err)
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft-copy", Payload: map[string]any{
+			"job_id": "job-cancel", "kind": "ingest", "requested_by_draft_id": "draft-copy",
+		},
+	}}, Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("enqueue result=%#v err=%v", result, err)
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{
+		{Type: "JobCancelled", DraftID: "draft-copy", Payload: map[string]any{
+			"job_id": "job-cancel", "kind": "ingest", "requested_by_draft_id": "draft-copy",
+		}},
+		{Type: "AssetUnlinked", DraftID: "draft-copy", Payload: map[string]any{"asset_id": "asset-copy"}},
+	}, Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("cancel/unlink result=%#v err=%v", result, err)
+	}
+	var jobStatus string
+	var links int
+	if err := database.Read().QueryRow("SELECT status FROM jobs WHERE job_id='job-cancel'").Scan(&jobStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRow("SELECT COUNT(*) FROM draft_asset_links WHERE draft_id='draft-copy'").Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	source, _ := storage.GetDraft(t.Context(), database.Read(), "draft-source")
+	if source.Status != "trashed" || source.Name != "已改名" || jobStatus != "cancelled" || links != 0 {
+		t.Fatalf("source=%#v job=%s links=%d", source, jobStatus, links)
+	}
+}
+
+func TestDraftCopyRejectsInvalidSourcesAndRollsBack(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft-copy-source")
+	createDraft(t, database, "draft-copy-existing")
+
+	for _, item := range []struct {
+		name  string
+		event contracts.Event
+	}{
+		{
+			name:  "missing source id",
+			event: contracts.Event{Type: "DraftCopied", DraftID: "copy-missing-id", Payload: map[string]any{}},
+		},
+		{
+			name: "missing source draft",
+			event: contracts.Event{Type: "DraftCopied", DraftID: "copy-missing-source", Payload: map[string]any{
+				"source_draft_id": "does-not-exist",
+			}},
+		},
+		{
+			name: "target already exists",
+			event: contracts.Event{Type: "DraftCopied", DraftID: "draft-copy-existing", Payload: map[string]any{
+				"source_draft_id": "draft-copy-source",
+			}},
+		},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			result, err := Apply(t.Context(), database, []contracts.Event{item.event}, Options{Actor: contracts.ActorUser})
+			if err == nil || result.Status != "" {
+				t.Fatalf("result=%#v err=%v", result, err)
+			}
+		})
+	}
+
+	base := 0
+	result, err := Apply(t.Context(), database, []contracts.Event{{
+		Type: "TimelineVersionCreated", DraftID: "draft-copy-source", BaseVersion: &base,
+		Payload: map[string]any{"timeline_version": 1},
+	}}, Options{Actor: contracts.ActorAgent})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("timeline result=%#v err=%v", result, err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		UPDATE timeline_versions SET document_json='{' WHERE draft_id='draft-copy-source'`); err != nil {
+		t.Fatal(err)
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{{
+		Type: "DraftCopied", DraftID: "copy-malformed-timeline", Payload: map[string]any{
+			"source_draft_id": "draft-copy-source",
+		},
+	}}, Options{Actor: contracts.ActorUser})
+	if err == nil || result.Status != "" {
+		t.Fatalf("malformed timeline result=%#v err=%v", result, err)
+	}
+	if _, err := storage.GetDraft(t.Context(), database.Read(), "copy-malformed-timeline"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("failed copy must roll back target draft: %v", err)
+	}
+
+	result, err = Apply(t.Context(), database, []contracts.Event{{
+		Type: "AssetUnlinked", DraftID: "draft-copy-source", Payload: map[string]any{"asset_id": "missing"},
+	}}, Options{Actor: contracts.ActorUser})
+	if err == nil || result.Status != "" {
+		t.Fatalf("missing link result=%#v err=%v", result, err)
+	}
+}
+
+func TestDraftCopyHelpersPropagateTransactionFailures(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	tx, err := database.Write().BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	state := &applyState{
+		tx: tx, createdAt: time.Now().UTC().Format(time.RFC3339Nano),
+		originalVersions: map[string]int{}, touched: map[string]struct{}{},
+	}
+	checks := []struct {
+		name string
+		call func() error
+	}{
+		{"draft lifecycle", func() error {
+			return applyDraftLifecycle(t.Context(), state, contracts.Event{
+				Type: "DraftRenamed", DraftID: "draft", Payload: map[string]any{"name": "x"},
+			})
+		}},
+		{"draft copy", func() error {
+			return applyDraftCopied(t.Context(), state, contracts.Event{
+				Type: "DraftCopied", DraftID: "copy", Payload: map[string]any{"source_draft_id": "source"},
+			})
+		}},
+		{"timelines", func() error { return copyDraftTimelines(t.Context(), state, "source", "target") }},
+		{"previews", func() error {
+			_, err := copyDraftPreviews(t.Context(), state, "source", "target")
+			return err
+		}},
+		{"exports", func() error {
+			_, err := copyDraftExports(t.Context(), state, "source", "target")
+			return err
+		}},
+		{"asset unlink", func() error {
+			return applyAssetUnlinked(t.Context(), state, contracts.Event{
+				Type: "AssetUnlinked", DraftID: "draft", Payload: map[string]any{"asset_id": "asset"},
+			})
+		}},
+	}
+	for _, check := range checks {
+		if err := check.call(); err == nil {
+			t.Fatalf("%s should propagate transaction failure", check.name)
+		}
+	}
+}
+
 func TestDecisionCreatedPersistsNativeGoOptionSlice(t *testing.T) {
 	t.Parallel()
 	database := openTestDB(t)

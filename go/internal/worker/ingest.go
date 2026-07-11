@@ -26,9 +26,12 @@ func RegisterIngest(registry *Registry, database *storage.DB) error {
 		if err := report(ctx, job, 0.05); err != nil {
 			return nil, err
 		}
-		probe, err := media.ProbeFile(ctx, source)
-		if err != nil {
-			return nil, err
+		probe := media.Probe{}
+		if kind != "font" {
+			probe, err = media.ProbeFile(ctx, source)
+			if err != nil {
+				return nil, err
+			}
 		}
 		if err := report(ctx, job, 0.2); err != nil {
 			return nil, err

@@ -157,7 +157,7 @@ func (service *Service) toolUnderstand(
 		}}, reducer.Options{
 			Actor: contracts.ActorAgent,
 			ResultRows: reducer.ResultRows{MaterialSummaries: []reducer.MaterialSummaryRow{{
-				ID: summaryID, AssetID: assetID, Version: 1,
+				ID: summaryID, AssetID: assetID, Version: 0,
 				Focus: stringPointerValue(input.Focus), Status: "ready", Summary: summaryMap,
 				Model: stringPointerValue(summary.Model), PromptVersion: stringPointerValue("go-mini-loop-v1"),
 			}}},

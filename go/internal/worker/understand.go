@@ -57,12 +57,7 @@ func RegisterUnderstand(
 			var summaryMap map[string]any
 			data, _ := json.Marshal(summary)
 			_ = json.Unmarshal(data, &summaryMap)
-			var version int
-			if err := database.Read().QueryRowContext(ctx, `
-				SELECT COALESCE(MAX(version),0)+1 FROM material_summaries WHERE asset_id=?`, assetID).Scan(&version); err != nil {
-				return nil, err
-			}
-			summaryID := fmt.Sprintf("summary_%s_%d", assetID, version)
+			summaryID := fmt.Sprintf("summary_%s_%s", assetID, job.ID)
 			result, err := reducer.Apply(ctx, database, []contracts.Event{{
 				Type: "MaterialUnderstandingCompleted", Payload: map[string]any{
 					"asset_id": assetID, "job_id": job.ID, "summary_id": summaryID,
@@ -70,7 +65,7 @@ func RegisterUnderstand(
 			}}, reducer.Options{
 				Actor: contracts.ActorJob,
 				ResultRows: reducer.ResultRows{MaterialSummaries: []reducer.MaterialSummaryRow{{
-					ID: summaryID, AssetID: assetID, Version: version, Status: "ready", Summary: summaryMap,
+					ID: summaryID, AssetID: assetID, Version: 0, Status: "ready", Summary: summaryMap,
 				}}},
 			})
 			if err != nil || result.Status != reducer.StatusApplied {

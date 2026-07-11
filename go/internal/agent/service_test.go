@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
@@ -265,6 +266,59 @@ func TestUnderstandingMiniLoopCancellationKeepsCompletedSummaryAndResetsPendingA
 		case <-deadline:
 			t.Fatal("等待理解 1/2 超时")
 		}
+	}
+}
+
+func TestUnderstandingRepeatedRunsAllocateNewSummaryVersion(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_understand_repeat")
+	font := filepath.Join(database.Paths.Temporary, "repeat.otf")
+	if err := os.WriteFile(font, []byte("font fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset_repeat", "job_id": "job_repeat", "storage_mode": "reference",
+			"reference_path": font, "kind": "font", "source": "local_path",
+			"filename": "repeat.otf", "hash": "repeat", "size": 1, "ingest_status": "ready",
+		}},
+		{Type: "AssetLinked", DraftID: "draft_understand_repeat", Payload: map[string]any{
+			"asset_id": "asset_repeat",
+		}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("asset status=%s err=%v", result.Status, err)
+	}
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(t.Context(), "draft_understand_repeat")
+	for _, focus := range []string{"首次", "更深入"} {
+		if _, err := service.ExecuteTool(ctx, "understand.materials", rushestools.UnderstandInput{
+			AssetIDs: []string{"asset_repeat"}, Focus: focus,
+		}); err != nil {
+			t.Fatalf("focus=%s err=%v", focus, err)
+		}
+	}
+	rows, err := database.Read().QueryContext(t.Context(), `
+		SELECT version FROM material_summaries WHERE asset_id='asset_repeat' ORDER BY version`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	versions := []int{}
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			t.Fatal(err)
+		}
+		versions = append(versions, version)
+	}
+	if len(versions) != 2 || versions[0] != 1 || versions[1] != 2 {
+		t.Fatalf("versions=%v", versions)
 	}
 }
 

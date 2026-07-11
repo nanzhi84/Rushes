@@ -56,7 +56,7 @@ type MessageRow struct {
 type MaterialSummaryRow struct {
 	ID            string
 	AssetID       string
-	Version       int
+	Version       int // 小于 1 时在当前 reducer 事务内按 asset 分配下一版本。
 	Focus         *string
 	Status        string
 	Summary       map[string]any
@@ -309,11 +309,15 @@ func applyEvent(ctx context.Context, state *applyState, event contracts.Event) e
 	switch event.Type {
 	case "DraftCreated":
 		return applyDraftCreated(ctx, state, event)
+	case "DraftRenamed", "DraftCopied", "DraftTrashed":
+		return applyDraftLifecycle(ctx, state, event)
 	case "AssetImported", "AssetProbed", "ProxyGenerated",
 		"MaterialUnderstandingStarted", "MaterialUnderstandingCompleted", "MaterialUnderstandingFailed":
 		return applyAssetEvent(ctx, state, event)
 	case "AssetLinked":
 		return applyAssetLinked(ctx, state, event)
+	case "AssetUnlinked":
+		return applyAssetUnlinked(ctx, state, event)
 	case "DecisionCreated":
 		return applyDecisionCreated(ctx, state, event)
 	case "DecisionAnswered":
@@ -330,7 +334,7 @@ func applyEvent(ctx context.Context, state *applyState, event contracts.Event) e
 		return applyPreviewViewed(ctx, state, event)
 	case "ExportCompleted":
 		return applyExportCompleted(ctx, state, event)
-	case "JobEnqueued", "JobProgress", "JobSucceeded", "JobFailed":
+	case "JobEnqueued", "JobProgress", "JobSucceeded", "JobFailed", "JobCancelled":
 		return applyJob(ctx, state, event)
 	default:
 		return fmt.Errorf("reducer 未实现事件 %s", event.Type)
@@ -358,6 +362,202 @@ func applyDraftCreated(ctx context.Context, state *applyState, event contracts.E
 		state.originalVersions[event.DraftID] = intFrom(event.Payload["state_version"], 0)
 	}
 	return err
+}
+
+func applyDraftLifecycle(ctx context.Context, state *applyState, event contracts.Event) error {
+	if event.Type == "DraftCopied" {
+		return applyDraftCopied(ctx, state, event)
+	}
+	if err := state.touch(ctx, event.DraftID); err != nil {
+		return err
+	}
+	switch event.Type {
+	case "DraftRenamed":
+		_, err := state.tx.ExecContext(ctx, "UPDATE drafts SET name=? WHERE draft_id=?",
+			stringFrom(event.Payload["name"], "未命名草稿"), event.DraftID)
+		return err
+	case "DraftTrashed":
+		_, err := state.tx.ExecContext(ctx, "UPDATE drafts SET status='trashed' WHERE draft_id=?", event.DraftID)
+		return err
+	default:
+		return fmt.Errorf("未实现草稿生命周期事件 %s", event.Type)
+	}
+}
+
+func applyDraftCopied(ctx context.Context, state *applyState, event contracts.Event) error {
+	sourceDraftID := stringFrom(event.Payload["source_draft_id"], "")
+	if sourceDraftID == "" {
+		return errors.New("DraftCopied 缺少 source_draft_id")
+	}
+	var sourceName string
+	var sourcePreview, sourceViewedPreview, sourceExport sql.NullString
+	if err := state.tx.QueryRowContext(ctx, `
+		SELECT name, preview_current_id, last_viewed_preview_id, export_current_id
+		FROM drafts WHERE draft_id=?`, sourceDraftID,
+	).Scan(&sourceName, &sourcePreview, &sourceViewedPreview, &sourceExport); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("草稿不存在: %s", sourceDraftID)
+		}
+		return err
+	}
+	name := stringFrom(event.Payload["name"], sourceName+" Copy")
+	result, err := state.tx.ExecContext(ctx, `
+		INSERT INTO drafts(
+			draft_id, name, state_version, status, defaults_json, pending_decision_id,
+			running_jobs_json, last_error_json, brief_json, content_plan_json,
+			timeline_current_version, timeline_validated, preview_current_id,
+			last_viewed_preview_id, export_current_id, scratch_memory_json,
+			messages_tail_ref, created_at, updated_at
+		)
+		SELECT ?, ?, 0, 'active', defaults_json, NULL, '[]', NULL, brief_json,
+			content_plan_json, timeline_current_version, timeline_validated, NULL,
+			NULL, NULL, scratch_memory_json, NULL, ?, ?
+		FROM drafts WHERE draft_id=?`,
+		event.DraftID, name, state.createdAt, state.createdAt, sourceDraftID,
+	)
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
+		return errors.Join(rowsErr, fmt.Errorf("复制草稿失败: %s", sourceDraftID))
+	}
+	state.originalVersions[event.DraftID] = 0
+	if _, err := state.tx.ExecContext(ctx, `
+		INSERT INTO draft_asset_links(draft_id, asset_id, linked_at, note, rel_dir)
+		SELECT ?, asset_id, ?, note, rel_dir FROM draft_asset_links WHERE draft_id=?`,
+		event.DraftID, state.createdAt, sourceDraftID,
+	); err != nil {
+		return err
+	}
+	if err := copyDraftTimelines(ctx, state, sourceDraftID, event.DraftID); err != nil {
+		return err
+	}
+	previewIDs, err := copyDraftPreviews(ctx, state, sourceDraftID, event.DraftID)
+	if err != nil {
+		return err
+	}
+	exportIDs, err := copyDraftExports(ctx, state, sourceDraftID, event.DraftID)
+	if err != nil {
+		return err
+	}
+	_, err = state.tx.ExecContext(ctx, `
+		UPDATE drafts SET preview_current_id=?, last_viewed_preview_id=?, export_current_id=?
+		WHERE draft_id=?`, copiedReference(sourcePreview, previewIDs),
+		copiedReference(sourceViewedPreview, previewIDs), copiedReference(sourceExport, exportIDs), event.DraftID)
+	return err
+}
+
+func copyDraftTimelines(ctx context.Context, state *applyState, sourceDraftID, targetDraftID string) error {
+	rows, err := state.tx.QueryContext(ctx, `
+		SELECT version, parent_version, created_by_patch_id, document_json, validation_report_json
+		FROM timeline_versions WHERE draft_id=? ORDER BY version`, sourceDraftID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var version int
+		var parent sql.NullInt64
+		var patch, validation sql.NullString
+		var raw string
+		if err := rows.Scan(&version, &parent, &patch, &raw, &validation); err != nil {
+			return err
+		}
+		document := map[string]any{}
+		if err := json.Unmarshal([]byte(raw), &document); err != nil {
+			return err
+		}
+		timelineID := fmt.Sprintf("%s:v%d", targetDraftID, version)
+		document["draft_id"] = targetDraftID
+		document["timeline_id"] = timelineID
+		if _, err := state.tx.ExecContext(ctx, `
+			INSERT INTO timeline_versions(
+				timeline_id, draft_id, version, parent_version, created_by_patch_id,
+				document_json, validation_report_json, created_at
+			) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`, timelineID, targetDraftID, version,
+			parent, patch, mustJSON(document), validation, state.createdAt,
+		); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func copyDraftPreviews(
+	ctx context.Context,
+	state *applyState,
+	sourceDraftID, targetDraftID string,
+) (map[string]string, error) {
+	rows, err := state.tx.QueryContext(ctx, `
+		SELECT preview_id, timeline_version, object_hash, quality_json,
+			render_width, render_height, render_fps, expected_duration_sec
+		FROM previews WHERE draft_id=?`, sourceDraftID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	identifiers := map[string]string{}
+	for rows.Next() {
+		var sourceID, objectHash, quality string
+		var timelineVersion int
+		var width, height sql.NullInt64
+		var fps, duration sql.NullFloat64
+		if err := rows.Scan(&sourceID, &timelineVersion, &objectHash, &quality,
+			&width, &height, &fps, &duration); err != nil {
+			return nil, err
+		}
+		targetID := targetDraftID + ":" + sourceID
+		if _, err := state.tx.ExecContext(ctx, `
+			INSERT INTO previews(
+				preview_id, draft_id, timeline_version, object_hash, quality_json,
+				render_width, render_height, render_fps, expected_duration_sec, created_at
+			) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, targetID, targetDraftID,
+			timelineVersion, objectHash, quality, width, height, fps, duration, state.createdAt,
+		); err != nil {
+			return nil, err
+		}
+		identifiers[sourceID] = targetID
+	}
+	return identifiers, rows.Err()
+}
+
+func copyDraftExports(
+	ctx context.Context,
+	state *applyState,
+	sourceDraftID, targetDraftID string,
+) (map[string]string, error) {
+	rows, err := state.tx.QueryContext(ctx, `
+		SELECT export_id, timeline_version, object_hash, quality_json
+		FROM exports WHERE draft_id=?`, sourceDraftID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	identifiers := map[string]string{}
+	for rows.Next() {
+		var sourceID, objectHash, quality string
+		var timelineVersion int
+		if err := rows.Scan(&sourceID, &timelineVersion, &objectHash, &quality); err != nil {
+			return nil, err
+		}
+		targetID := targetDraftID + ":" + sourceID
+		if _, err := state.tx.ExecContext(ctx, `
+			INSERT INTO exports(export_id, draft_id, timeline_version, object_hash, quality_json, created_at)
+			VALUES(?, ?, ?, ?, ?, ?)`, targetID, targetDraftID, timelineVersion,
+			objectHash, quality, state.createdAt,
+		); err != nil {
+			return nil, err
+		}
+		identifiers[sourceID] = targetID
+	}
+	return identifiers, rows.Err()
+}
+
+func copiedReference(source sql.NullString, identifiers map[string]string) any {
+	if !source.Valid {
+		return nil
+	}
+	return nullableText(identifiers[source.String])
 }
 
 func applyAssetEvent(ctx context.Context, state *applyState, event contracts.Event) error {
@@ -445,6 +645,22 @@ func applyAssetLinked(ctx context.Context, state *applyState, event contracts.Ev
 		nullableString(event.Payload["rel_dir"]),
 	)
 	return err
+}
+
+func applyAssetUnlinked(ctx context.Context, state *applyState, event contracts.Event) error {
+	if err := state.touch(ctx, event.DraftID); err != nil {
+		return err
+	}
+	result, err := state.tx.ExecContext(ctx,
+		"DELETE FROM draft_asset_links WHERE draft_id=? AND asset_id=?",
+		event.DraftID, stringFrom(event.Payload["asset_id"], ""))
+	if err != nil {
+		return err
+	}
+	if rows, rowsErr := result.RowsAffected(); rowsErr != nil || rows != 1 {
+		return errors.Join(rowsErr, errors.New("素材未链接到草稿"))
+	}
+	return nil
 }
 
 func applyDecisionCreated(ctx context.Context, state *applyState, event contracts.Event) error {
@@ -665,7 +881,7 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 	}
 	status := map[string]string{
 		"JobEnqueued": "pending", "JobProgress": "running",
-		"JobSucceeded": "succeeded", "JobFailed": "failed",
+		"JobSucceeded": "succeeded", "JobFailed": "failed", "JobCancelled": "cancelled",
 	}[event.Type]
 	if event.Type == "JobEnqueued" {
 		_, err := state.tx.ExecContext(ctx, `
@@ -687,7 +903,7 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 		}
 	} else {
 		finishedAt := any(nil)
-		if status == "succeeded" || status == "failed" {
+		if status == "succeeded" || status == "failed" || status == "cancelled" {
 			finishedAt = state.createdAt
 		}
 		_, err := state.tx.ExecContext(ctx, `
@@ -775,12 +991,20 @@ func persistResultRows(
 		if createdAt == "" {
 			createdAt = defaultCreatedAt
 		}
+		version := summary.Version
+		if version < 1 {
+			if err := tx.QueryRowContext(ctx, `
+				SELECT COALESCE(MAX(version), 0) + 1 FROM material_summaries WHERE asset_id=?`,
+				summary.AssetID).Scan(&version); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO material_summaries(
 				summary_id, asset_id, version, focus, status, summary_json, model,
 				fingerprint, prompt_version, created_at
 			) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			summary.ID, summary.AssetID, summary.Version, summary.Focus, summary.Status,
+			summary.ID, summary.AssetID, version, summary.Focus, summary.Status,
 			mustJSON(summary.Summary), summary.Model, summary.Fingerprint, summary.PromptVersion, createdAt,
 		); err != nil {
 			return err

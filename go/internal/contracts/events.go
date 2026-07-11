@@ -30,13 +30,16 @@ type EventSpec struct {
 	DraftScope bool
 }
 
-// EventRegistry 是 Go 精简核心的事件契约。PreviewViewed 是 Issue #56
-// 明确要求为前端兼容额外保留的第 21 个事件。
+// EventRegistry 是 Go 精简核心与前端仍在使用的生命周期契约。
 var EventRegistry = map[string]EventSpec{
 	"DraftCreated":                   {Mode: VersionMerge, MergeKeys: []string{"draft_id"}, DraftScope: true},
+	"DraftRenamed":                   {Mode: VersionMerge, MergeKeys: []string{"draft_id", "name"}, DraftScope: true},
+	"DraftCopied":                    {Mode: VersionMerge, MergeKeys: []string{"draft_id"}, DraftScope: true},
+	"DraftTrashed":                   {Mode: VersionMerge, MergeKeys: []string{"draft_id"}, DraftScope: true},
 	"AssetImported":                  {Mode: VersionMerge, MergeKeys: []string{"asset_id", "job_id"}},
 	"AssetProbed":                    {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
 	"AssetLinked":                    {Mode: VersionMerge, MergeKeys: []string{"draft_id", "asset_id"}, DraftScope: true},
+	"AssetUnlinked":                  {Mode: VersionMerge, MergeKeys: []string{"draft_id", "asset_id"}, DraftScope: true},
 	"MaterialUnderstandingStarted":   {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
 	"MaterialUnderstandingCompleted": {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
 	"MaterialUnderstandingFailed":    {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
@@ -50,6 +53,7 @@ var EventRegistry = map[string]EventSpec{
 	"JobEnqueued":                    {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
 	"JobSucceeded":                   {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
 	"JobFailed":                      {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
+	"JobCancelled":                   {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
 	"ProxyGenerated":                 {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
 	"JobProgress":                    {Mode: VersionMerge, MergeKeys: []string{"job_id", "progress"}},
 	"TimelineVersionRestored":        {Mode: VersionStrict, DraftScope: true},
@@ -147,9 +151,10 @@ func RegisteredEventNames() []string {
 
 func RoutesToWorkspace(event Event) bool {
 	switch event.Type {
-	case "DraftCreated", "AssetLinked", "AssetImported", "AssetProbed", "ProxyGenerated",
+	case "DraftCreated", "DraftRenamed", "DraftCopied", "DraftTrashed",
+		"AssetLinked", "AssetUnlinked", "AssetImported", "AssetProbed", "ProxyGenerated",
 		"MaterialUnderstandingStarted", "MaterialUnderstandingCompleted", "MaterialUnderstandingFailed",
-		"JobEnqueued", "JobProgress", "JobSucceeded", "JobFailed":
+		"JobEnqueued", "JobProgress", "JobSucceeded", "JobFailed", "JobCancelled":
 		return true
 	default:
 		return false

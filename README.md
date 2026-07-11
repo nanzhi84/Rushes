@@ -47,7 +47,7 @@ chi API ───────────────► Eino ReAct Agent ──
 
 目录职责：
 
-- `go/internal/contracts`：21 个领域事件、strict/merge 版本模式与 SSE 路由。
+- `go/internal/contracts`：26 个核心与前端生命周期事件、strict/merge 版本模式与 SSE 路由。
 - `go/internal/storage`：纯 Go SQLite、迁移、读模型和对象路径。
 - `go/internal/reducer`：事件校验、乐观锁、幂等、物化与侧行同事务提交。
 - `go/internal/agent` / `tools` / `providers`：Eino ReAct、TurnQueue、流式协议、Qwen/Ark 适配。

@@ -332,6 +332,23 @@ func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
 	if _, err := handler(t.Context(), Job{ID: "by_asset", AssetID: &assetID}, func(context.Context, Job, float64) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
+	rows, err := database.Read().QueryContext(t.Context(), `
+		SELECT version FROM material_summaries WHERE asset_id=? ORDER BY version`, assetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	versions := []int{}
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			t.Fatal(err)
+		}
+		versions = append(versions, version)
+	}
+	if len(versions) != 2 || versions[0] != 1 || versions[1] != 2 {
+		t.Fatalf("summary versions=%v", versions)
+	}
 	if _, err := handler(t.Context(), Job{ID: "missing", Payload: map[string]any{}}, func(context.Context, Job, float64) error { return nil }); err == nil {
 		t.Fatal("missing assets should fail")
 	}
@@ -502,6 +519,48 @@ func TestImageIngestShortcutAndMalformedJobPayload(t *testing.T) {
 	}
 	if _, err := GetJob(t.Context(), database, "bad_payload"); err == nil {
 		t.Fatal("malformed payload should fail")
+	}
+}
+
+func TestFontIngestSkipsFFprobeAndBecomesReady(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	font := filepath.Join(database.Paths.Temporary, "font.otf")
+	if err := os.WriteFile(font, []byte("not a media container"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	createDraft(t, database, "draft_font", now)
+	apply(t, database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset_font_ingest", "job_id": "job_font", "storage_mode": "reference",
+			"reference_path": font, "kind": "font", "source": "local_path",
+			"filename": "font.otf", "hash": "font", "size": 1, "ingest_status": "imported",
+		}},
+		{Type: "AssetLinked", DraftID: "draft_font", Payload: map[string]any{
+			"asset_id": "asset_font_ingest",
+		}},
+		{Type: "JobEnqueued", DraftID: "draft_font", Payload: map[string]any{
+			"job_id": "job_font", "kind": "ingest", "asset_id": "asset_font_ingest",
+			"requested_by_draft_id": "draft_font", "idempotency_key": "font-ingest",
+			"next_run_at": now.Format(time.RFC3339Nano),
+		}},
+	}, contracts.ActorUser, now)
+	registry := NewRegistry()
+	if err := RegisterIngest(registry, database); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewRunner(RunnerConfig{Database: database, Registry: registry, WorkerID: "font"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := runner.RunOnce(t.Context()); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	asset, err := storage.GetAsset(t.Context(), database.Read(), "asset_font_ingest")
+	if err != nil || asset.IngestStatus != "ready" || !asset.Usable || asset.Probe == nil ||
+		asset.ProxyObjectHash != nil || asset.ThumbnailObjectHash != nil {
+		t.Fatalf("asset=%#v err=%v", asset, err)
 	}
 }
 
