@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from contracts.asset import AssetKind, StorageMode
+from contracts.asset import AssetKind, AssetListAssetsResult, StorageMode
 from contracts.decision import (
     DecisionAnswer,
     DecisionOption,
@@ -29,7 +29,9 @@ from contracts.patch import (
     TimelinePatchRequest,
     TrimClipOp,
 )
+from contracts.preview_inspection import PreviewInspectionResult
 from contracts.tool import PatchOpSpec, ToolSpec
+from contracts.understanding import UnderstandMaterialsResult
 
 from .registry import PatchOpRegistry, ToolHandler, ToolRegistry
 
@@ -134,45 +136,14 @@ class AssetListAssetsInput(BaseModel):
 
     kind: Literal["video", "audio", "image", "font"] | None = None
     has_audio: bool | None = None
+    rel_dir: str | None = None
+    ingest_status: (
+        Literal["imported", "probing", "probed", "proxying", "indexed", "ready", "failed"] | None
+    ) = None
     only_usable: bool | None = None
     limit: int | None = Field(default=None, ge=1, le=200)
     # keyset 分页游标：按 asset_id 升序，返回 asset_id 严格大于 after 的行。
     after: str | None = None
-
-
-class MediaViewFramesTarget(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    asset_id: str | None = None
-    timeline_version: int | None = None
-    at_sec: list[float] = Field(min_length=1)
-
-    @field_validator("at_sec")
-    @classmethod
-    def _dedupe_sort_at_sec(cls, value: list[float]) -> list[float]:
-        if any(item < 0 for item in value):
-            raise ValueError("at_sec 不能为负数")
-        return sorted(set(value))
-
-    @model_validator(mode="after")
-    def _validate_target_mode(self) -> MediaViewFramesTarget:
-        if self.asset_id is not None and self.timeline_version is not None:
-            raise ValueError("target 只能使用 asset_id 或 timeline_version 之一")
-        return self
-
-
-class MediaViewFramesInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    target: MediaViewFramesTarget
-    question: str | None = None
-    max_frames: int = Field(default=8, ge=1, le=8)
-
-    @model_validator(mode="after")
-    def _validate_frame_count(self) -> MediaViewFramesInput:
-        if len(self.target.at_sec) > self.max_frames:
-            raise ValueError("at_sec 数量超过 max_frames")
-        return self
 
 
 class AudioInspectSourcesInput(BaseModel):
@@ -273,6 +244,20 @@ class RenderPreviewInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class RenderInspectPreviewInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preview_id: str
+    checks: list[Literal["streams", "decode", "black", "freeze", "silence", "loudness"]] | None = (
+        None
+    )
+
+    @field_validator("checks")
+    @classmethod
+    def _dedupe_checks(cls, value: list[str] | None) -> list[str] | None:
+        return None if value is None else list(dict.fromkeys(value))
+
+
 class RenderFinalMp4Input(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -310,7 +295,15 @@ class UnderstandMaterialsInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     asset_ids: list[str] = Field(min_length=1)
+    depth: Literal["scan", "deep"] = "deep"
     focus: str | None = None
+    max_steps_per_asset: int | None = Field(default=None, ge=1, le=12)
+
+    @model_validator(mode="after")
+    def validate_depth_options(self) -> UnderstandMaterialsInput:
+        if self.depth == "scan" and self.max_steps_per_asset is not None:
+            raise ValueError("depth=scan 不支持 max_steps_per_asset")
+        return self
 
 
 def tool_specs() -> tuple[ToolSpec, ...]:
@@ -461,7 +454,7 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             namespace="asset",
             version="1",
             input_model=AssetListAssetsInput,
-            result_model=None,
+            result_model=AssetListAssetsResult,
             handler_ref="tools.asset.list_assets",
             allowed_scopes=["draft_editor"],
             requires_artifacts=[],
@@ -605,27 +598,11 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             description="Revise the existing content plan and matching silent-mode cut plan.",
         ),
         ToolSpec(
-            name="media.view_frames",
-            namespace="media",
-            version="1",
-            input_model=MediaViewFramesInput,
-            result_model=None,
-            handler_ref="tools.media_tools.view_frames",
-            allowed_scopes=["draft_editor"],
-            requires_artifacts=[],
-            requires_active_draft=True,
-            requires_confirmation=False,
-            side_effects=[],
-            emits_events=[],
-            cost_tier="expensive",
-            description="Extract requested video frames and ask VLM for visual confirmation.",
-        ),
-        ToolSpec(
             name="understand.materials",
             namespace="understand",
             version="1",
             input_model=UnderstandMaterialsInput,
-            result_model=None,
+            result_model=UnderstandMaterialsResult,
             handler_ref="tools.understand.materials",
             allowed_scopes=["draft_editor"],
             requires_artifacts=[],
@@ -638,8 +615,10 @@ def tool_specs() -> tuple[ToolSpec, ...]:
                 "MaterialUnderstandingFailed",
             ],
             cost_tier="expensive",
+            cost_note="depth=scan 便宜 / depth=deep 昂贵",
             description=(
-                "Dispatch understanding subagents to produce timestamped material summaries."
+                "Scan many visual assets cheaply or deeply inspect selected assets "
+                "with timestamped evidence."
             ),
         ),
         ToolSpec(
@@ -746,6 +725,23 @@ def tool_specs() -> tuple[ToolSpec, ...]:
             is_long_running=True,
             cost_tier="expensive",
             description="Queue a cached preview render for the current validated timeline.",
+        ),
+        ToolSpec(
+            name="render.inspect_preview",
+            namespace="render",
+            version="1",
+            input_model=RenderInspectPreviewInput,
+            result_model=PreviewInspectionResult,
+            handler_ref="tools.render_tools.inspect_preview",
+            allowed_scopes=["draft_editor"],
+            requires_artifacts=["any_preview_exists"],
+            requires_active_draft=True,
+            side_effects=[],
+            emits_events=[],
+            cost_tier="expensive",
+            description=(
+                "Inspect a rendered preview's pixels, audio, streams, and advisory visual quality."
+            ),
         ),
         ToolSpec(
             name="render.final_mp4",
@@ -957,7 +953,6 @@ def build_default_tool_registry() -> ToolRegistry:
         show_progress,
         show_timeline,
     )
-    from .media_tools import view_frames as media_view_frames
     from .memory_tools import (
         ask_scope as memory_ask_scope,
     )
@@ -971,6 +966,7 @@ def build_default_tool_registry() -> ToolRegistry:
         search_relevant as memory_search_relevant,
     )
     from .render_tools import final_mp4 as render_final_mp4
+    from .render_tools import inspect_preview as render_inspect_preview
     from .render_tools import preview as render_preview
     from .render_tools import status as render_status
     from .timeline_tools import apply_patch as timeline_apply_patch
@@ -998,7 +994,6 @@ def build_default_tool_registry() -> ToolRegistry:
         "audio.align_uploaded_voiceover": audio_align_uploaded_voiceover,
         "content.create_plan": content_create_plan,
         "content.revise_plan": content_revise_plan,
-        "media.view_frames": media_view_frames,
         "understand.materials": understand_materials,
         "timeline.compose_initial": timeline_compose_initial,
         "timeline.apply_patch": timeline_apply_patch,
@@ -1006,6 +1001,7 @@ def build_default_tool_registry() -> ToolRegistry:
         "timeline.inspect": timeline_inspect,
         "timeline.restore_version": timeline_restore_version,
         "render.preview": render_preview,
+        "render.inspect_preview": render_inspect_preview,
         "render.final_mp4": render_final_mp4,
         "render.status": render_status,
         "memory.extract_from_draft": memory_extract_from_draft,

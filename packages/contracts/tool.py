@@ -27,6 +27,8 @@ class ToolSpec(BaseModel):
     exposure: Literal["llm", "harness_only"] = "llm"
     # 供渐进披露排序：free=纯读本地状态；cheap=本地计算/写状态；expensive=云端模型或长任务。
     cost_tier: Literal["free", "cheap", "expensive"] = "cheap"
+    # 参数化工具可用一行解释不同参数档位的真实成本；能力目录优先展示该文本。
+    cost_note: str | None = None
     description: str
 
 

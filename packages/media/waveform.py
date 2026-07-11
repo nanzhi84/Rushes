@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
+
+from .process import run_media_command
 
 DEFAULT_BUCKETS = 512
 DEFAULT_SAMPLE_RATE = 8000
@@ -61,7 +62,7 @@ def compute_waveform_peaks(
         "pcm_s16le",
         "pipe:1",
     ]
-    result = subprocess.run(command, capture_output=True, check=False)
+    result = run_media_command(command, text=False)
     if result.returncode != 0:
         raise WaveformError(_stderr_summary(result.stderr) or "ffmpeg PCM decode failed")
     pcm = np.frombuffer(result.stdout, dtype=np.int16)

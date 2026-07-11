@@ -7,7 +7,6 @@ The index is best-effort and never blocks asset usability: any failure emits an
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -20,6 +19,7 @@ from contracts.events import AssetIndexFailed, AssetIndexReady
 from contracts.jobs import Job
 from media.font_meta import read_font_meta
 from media.probe import probe_media
+from media.process import run_media_command
 from media.thumbnails import extract_video_thumbnail, render_image_thumbnail
 from media.vad import SileroModelMissing, default_model_path, run_silero_vad
 from media.waveform import compute_waveform_peaks
@@ -35,7 +35,7 @@ def build_index_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
     async def _handler(job: Job) -> JobExecutionResult:
         asset_id = _job_asset_id(job)
         try:
-            source_path, kind = _asset_source(engine, paths, asset_id)
+            source_path, kind, _ = _asset_source(engine, paths, asset_id)
             existing_thumbnail = _existing_thumbnail_hash(engine, asset_id)
             index_json, thumbnail_object_hash = _build_index(
                 kind, source_path, paths, existing_thumbnail=existing_thumbnail
@@ -215,6 +215,6 @@ def _transcode_wav_16k_mono(
         "pcm_s16le",
         str(dest_path),
     ]
-    result = subprocess.run(command, capture_output=True, check=False, text=True)
+    result = run_media_command(command, text=True, timeout=180, decode_intensive=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg wav transcode failed: {source_path}")

@@ -28,7 +28,9 @@ def test_probe_returns_false_off_macos(monkeypatch) -> None:
     monkeypatch.setattr(hwaccel, "is_macos", lambda: False)
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        hwaccel.subprocess, "run", lambda *a, **k: calls.append(a[0]) or _completed(0, "")
+        hwaccel,
+        "run_media_command",
+        lambda *a, **k: calls.append(a[0]) or _completed(0, ""),
     )
     assert hwaccel.videotoolbox_decode_available("ffmpeg") is False
     assert calls == []  # 非 macOS 直接判否，不起子进程
@@ -43,7 +45,7 @@ def test_probe_detects_videotoolbox_and_caches(monkeypatch) -> None:
         runs += 1
         return _completed(0, "Hardware acceleration methods:\nvideotoolbox\n")
 
-    monkeypatch.setattr(hwaccel.subprocess, "run", fake_run)
+    monkeypatch.setattr(hwaccel, "run_media_command", fake_run)
     assert hwaccel.videotoolbox_decode_available("ffmpeg") is True
     assert hwaccel.videotoolbox_decode_available("ffmpeg") is True
     assert runs == 1  # 每个 ffmpeg_bin 只探一次
@@ -52,7 +54,9 @@ def test_probe_detects_videotoolbox_and_caches(monkeypatch) -> None:
 def test_probe_returns_false_when_videotoolbox_absent(monkeypatch) -> None:
     monkeypatch.setattr(hwaccel, "is_macos", lambda: True)
     monkeypatch.setattr(
-        hwaccel.subprocess, "run", lambda *a, **k: _completed(0, "Hardware:\nnvdec\n")
+        hwaccel,
+        "run_media_command",
+        lambda *a, **k: _completed(0, "Hardware:\nnvdec\n"),
     )
     assert hwaccel.videotoolbox_decode_available("ffmpeg") is False
 
@@ -63,7 +67,7 @@ def test_probe_returns_false_on_subprocess_error(monkeypatch) -> None:
     def boom(*args, **kwargs):
         raise OSError("no ffmpeg")
 
-    monkeypatch.setattr(hwaccel.subprocess, "run", boom)
+    monkeypatch.setattr(hwaccel, "run_media_command", boom)
     assert hwaccel.videotoolbox_decode_available("ffmpeg") is False
 
 

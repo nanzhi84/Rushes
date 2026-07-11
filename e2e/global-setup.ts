@@ -30,7 +30,7 @@ async function globalSetup(): Promise<void> {
     const api = startProcess("api", "uv", [
       "run",
       "uvicorn",
-      "apps.api.main:create_app_from_env",
+      "e2e.fixtures.app:create_app_from_env",
       "--factory",
       "--host",
       "127.0.0.1",
@@ -58,9 +58,8 @@ async function globalSetup(): Promise<void> {
     ]);
     started.push(worker);
 
-    // corepack 按 cwd 的 package.json 选 pnpm 版本；从 repo 根用 --dir 启动会拿错版本
-    const web = startProcess("web", "pnpm", [
-      "dev",
+    // 直接启动已锁定依赖里的 Vite，避免本机全局 pnpm 版本影响 E2E 运行。
+    const web = startProcess("web", path.join(REPO_ROOT, "apps/web/node_modules/.bin/vite"), [
       "--host",
       "127.0.0.1",
       "--port",

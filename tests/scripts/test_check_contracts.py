@@ -20,6 +20,24 @@ def test_dependency_checker_reports_reverse_import(tmp_path: Path) -> None:
     assert violations[0].edge.target_group == "agent_harness"
 
 
+def test_dependency_checker_blocks_legacy_apps_tool_family_import(tmp_path: Path) -> None:
+    app_dir = tmp_path / "apps" / "api"
+    tool_dir = tmp_path / "packages" / "tools" / "asset"
+    app_dir.mkdir(parents=True)
+    tool_dir.mkdir(parents=True)
+    (app_dir / "bad.py").write_text(
+        "from tools.asset import import_local_file\n",
+        encoding="utf-8",
+    )
+    (tool_dir / "__init__.py").write_text("", encoding="utf-8")
+
+    _edges, violations = check_contracts.check_dependency_directions(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].edge.module == "tools.asset"
+    assert "tool_execution" in violations[0].reason
+
+
 def test_event_and_tool_contract_reports_are_clean() -> None:
     event_report = check_contracts.check_event_consistency()
     tool_report = check_contracts.check_tool_registry()

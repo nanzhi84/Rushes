@@ -23,6 +23,18 @@ class TurnQueueItem:
 @dataclass(slots=True)
 class StopToken:
     cancel_requested: bool = False
+    _event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.cancel_requested:
+            self._event.set()
+
+    def request_cancel(self) -> None:
+        self.cancel_requested = True
+        self._event.set()
+
+    async def wait_cancelled(self) -> None:
+        await self._event.wait()
 
 
 TurnRunner = Callable[[TurnQueueItem, StopToken], Awaitable[None]]
@@ -145,7 +157,7 @@ class _DraftWorker:
     def request_stop(self) -> bool:
         if self._current_stop_token is None:
             return False
-        self._current_stop_token.cancel_requested = True
+        self._current_stop_token.request_cancel()
         return True
 
     async def join(self) -> None:

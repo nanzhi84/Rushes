@@ -122,8 +122,8 @@ def test_prepare_analysis_clip_falls_back_when_prepass_fails(tmp_path: Path, mon
         shots_module, "hwaccel_decode_args", lambda *a, **k: ["-hwaccel", "videotoolbox"]
     )
     monkeypatch.setattr(
-        shots_module.subprocess,
-        "run",
+        shots_module,
+        "run_media_command",
         lambda *a, **k: subprocess.CompletedProcess(a[0], 1, "", "boom"),
     )
     source = tmp_path / "clip.mp4"
@@ -145,7 +145,7 @@ def test_prepare_analysis_clip_falls_back_when_ffmpeg_missing(tmp_path: Path, mo
     def boom(*args, **kwargs):
         raise OSError("no ffmpeg")
 
-    monkeypatch.setattr(shots_module.subprocess, "run", boom)
+    monkeypatch.setattr(shots_module, "run_media_command", boom)
     source = tmp_path / "clip.mp4"
     source.write_bytes(b"x")
 

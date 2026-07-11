@@ -13,7 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 
 from agent_harness.reducer import apply
-from contracts.events import DraftCreated
+from contracts.events import AssetImported, AssetIndexReady, AssetLinked, DraftCreated
 from storage import schema
 from storage.db import begin_immediate
 from storage.repositories import DraftsRepository, EventLogRepository
@@ -246,6 +246,66 @@ def test_import_local_second_draft_requeues_missing_proxy_via_merge(tmp_path: Pa
     assert second.json()["asset_ids"] == [asset_id]
     # 缺 proxy 产物 → 补队；但同幂等键 merge，不产生新 job 行。
     assert _job_count(engine) == jobs_before
+
+
+def test_import_local_second_draft_backfills_proxy_for_indexed_legacy_asset(
+    tmp_path: Path,
+) -> None:
+    app = _app(tmp_path)
+    engine = _engine(app)
+    _seed_draft(engine, "draft_a", "草稿A")
+    _seed_draft(engine, "draft_b", "草稿B")
+    media = _media_file(tmp_path, b"legacy-indexed-clip")
+    client = _client(app)
+    asset_id = "asset_legacy_indexed"
+    # 直接构造旧可播性规则留下的终态：索引已完成、没有 proxy，也从未创建 proxy job。
+    result = apply(
+        (
+            AssetImported(
+                draft_id="draft_a",
+                asset_id=asset_id,
+                payload={
+                    "storage_mode": "reference",
+                    "reference_path": str(media),
+                    "kind": "video",
+                    "source": "local",
+                    "filename": media.name,
+                    "hash": "legacy-hash",
+                    "mtime": media.stat().st_mtime_ns,
+                    "size": media.stat().st_size,
+                    "probe": {"duration_sec": 1.0, "has_audio": False},
+                    "ingest_status": "imported",
+                    "usable": True,
+                },
+            ),
+            AssetLinked(draft_id="draft_a", asset_id=asset_id),
+            AssetIndexReady(
+                draft_id="draft_a",
+                asset_id=asset_id,
+                payload={"index_json": {"duration_sec": 1.0}, "ingest_status": "indexed"},
+            ),
+        ),
+        engine=engine,
+        base_version=None,
+        actor="job",
+    )
+    assert result.status == "applied"
+
+    second = client.post(
+        "/api/drafts/draft_b/materials/import-local",
+        headers=AUTH,
+        json={"path": str(media)},
+    )
+
+    assert second.status_code == 200
+    with engine.connect() as connection:
+        proxy_jobs = connection.execute(
+            select(func.count())
+            .select_from(schema.jobs)
+            .where(schema.jobs.c.asset_id == asset_id)
+            .where(schema.jobs.c.kind == "proxy")
+        ).scalar_one()
+    assert proxy_jobs == 1
 
 
 def _app(tmp_path: Path) -> FastAPI:

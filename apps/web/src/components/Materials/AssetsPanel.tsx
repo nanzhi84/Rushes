@@ -14,6 +14,7 @@ import {
   Music,
   Plus,
   RotateCw,
+  Square,
   Trash2,
   Type
 } from "lucide-react";
@@ -35,6 +36,9 @@ type AssetsPanelProps = {
   /** 管理模式：瓦片菜单 + 摘要详情 + 失效重检。 */
   management?: boolean;
   gridClassName?: string;
+  understandingProgress?: { completed: number; total: number } | null;
+  onCancelUnderstanding?: () => void;
+  cancellingUnderstanding?: boolean;
 };
 
 /** 素材面板：文件夹分组网格；导入只走「系统原生选择框 → reference 零拷贝索引」。 */
@@ -44,7 +48,10 @@ export function AssetsPanel({
   previewingAssetId = null,
   enableEvents = true,
   management = false,
-  gridClassName
+  gridClassName,
+  understandingProgress = null,
+  onCancelUnderstanding,
+  cancellingUnderstanding = false
 }: AssetsPanelProps): ReactElement {
   const queryClient = useQueryClient();
   const [currentDir, setCurrentDir] = useState("");
@@ -142,6 +149,30 @@ export function AssetsPanel({
         </span>
         <div className="flex flex-wrap items-center justify-end gap-2">
           {picking ? <span className="text-xs text-fg-muted">等待选择…</span> : null}
+          {understandingProgress ? (
+            <div
+              className="flex items-center gap-1.5 rounded-md border border-info/40 bg-info/10 px-2 py-1 text-xs text-info"
+              role="status"
+              aria-label={`素材理解中 ${understandingProgress.completed}/${understandingProgress.total}`}
+            >
+              <Loader2 size={13} className="animate-spin" aria-hidden />
+              <span>
+                理解中 {understandingProgress.completed}/{understandingProgress.total}
+              </span>
+              {onCancelUnderstanding ? (
+                <button
+                  className="ml-1 inline-flex items-center gap-1 rounded px-1 py-0.5 text-info hover:bg-info/15 disabled:opacity-40"
+                  type="button"
+                  aria-label="取消素材理解"
+                  disabled={cancellingUnderstanding}
+                  onClick={onCancelUnderstanding}
+                >
+                  <Square size={10} fill="currentColor" aria-hidden />
+                  取消
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {management ? (
             <button
               className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line px-2.5 py-1.5 text-xs text-fg-muted transition-colors ease-standard hover:bg-hover disabled:opacity-40"
@@ -651,4 +682,3 @@ function formatDuration(seconds: number): string {
   const rest = (total % 60).toString().padStart(2, "0");
   return `${minutes}:${rest}`;
 }
-

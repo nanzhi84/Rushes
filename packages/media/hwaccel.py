@@ -7,8 +7,9 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
+
+from .process import run_media_command
 
 _HWACCEL = "videotoolbox"
 # 每个 ffmpeg_bin 只探测一次 `-hwaccels` 列表（探测要起一次 ffmpeg 子进程）。
@@ -41,13 +42,11 @@ def _probe_decode_available(ffmpeg_bin: str) -> bool:
     if not is_macos():
         return False
     try:
-        result = subprocess.run(
+        result = run_media_command(
             [ffmpeg_bin, "-hide_banner", "-hwaccels"],
-            capture_output=True,
-            check=False,
             text=True,
             timeout=10,
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, TimeoutError):
         return False
     return result.returncode == 0 and _HWACCEL in result.stdout

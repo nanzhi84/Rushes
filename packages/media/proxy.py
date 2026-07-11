@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from media.hwaccel import hwaccel_decode_args
 from storage.object_store import ObjectRef, ObjectStore
 from storage.workspace_paths import WorkspacePaths
+
+from .process import run_media_command
 
 _VIDEOTOOLBOX_ENCODER = "h264_videotoolbox"
 _SOFTWARE_ENCODER = "libx264"
@@ -81,11 +83,10 @@ def _probe_video_encoder(ffmpeg_bin: str) -> str:
     if not _is_macos():
         return _SOFTWARE_ENCODER
     try:
-        result = subprocess.run(
+        result = run_media_command(
             [ffmpeg_bin, "-hide_banner", "-encoders"],
-            capture_output=True,
-            check=False,
             text=True,
+            timeout=30,
         )
     except OSError:
         return _SOFTWARE_ENCODER
@@ -98,8 +99,8 @@ def _is_macos() -> bool:
     return sys.platform == "darwin"
 
 
-def _run_ffmpeg(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, check=False, text=True)
+def _run_ffmpeg(command: list[str]) -> Any:
+    return run_media_command(command, text=True)
 
 
 def _run_or_raise(command: list[str], destination: Path) -> None:
@@ -130,6 +131,10 @@ def _video_proxy_command(
         "-vf",
         "scale=-2:540",
         *_video_encoder_args(video_encoder),
+        # 输入可能是 HEVC/H.264 4:2:2 10-bit；libx264 默认继承像素格式会产出浏览器仍不可播的
+        # High 4:2:2 代理。硬/软编码路径都强制浏览器通用的 8-bit 4:2:0。
+        "-pix_fmt",
+        "yuv420p",
         "-movflags",
         "+faststart",
         "-c:a",

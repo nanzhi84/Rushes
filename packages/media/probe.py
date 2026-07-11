@@ -4,16 +4,20 @@ from __future__ import annotations
 
 import importlib
 import json
-import subprocess
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, cast
 
 from contracts.asset import AssetKind, AssetProbe
 
+from .process import run_media_command
+
 # 浏览器（macOS Safari/Chrome）可直接播放的编码：源可直读即播，无需转码代理兜底。
 # 视频 h264/hevc 走 macOS 硬解；其余（prores/dnxhd/vp9/av1/未知等）才需要 proxy 回落。
-BROWSER_PLAYABLE_VIDEO_CODECS = frozenset({"h264", "hevc"})
+BROWSER_PLAYABLE_VIDEO_FORMATS = {
+    "h264": frozenset({"yuv420p", "yuvj420p"}),
+    "hevc": frozenset({"yuv420p", "yuv420p10le"}),
+}
 BROWSER_PLAYABLE_AUDIO_CODECS = frozenset(
     {
         "aac",
@@ -68,8 +72,8 @@ def probe_stream_codec(
         str(source),
     ]
     try:
-        result = subprocess.run(command, capture_output=True, check=False, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
+        result = run_media_command(command, text=True, timeout=30)
+    except (OSError, TimeoutError):
         return None
     if result.returncode != 0:
         return None
@@ -80,6 +84,49 @@ def probe_stream_codec(
     return None
 
 
+def probe_video_stream_format(
+    path: str | Path,
+    *,
+    ffprobe_bin: str = "ffprobe",
+) -> tuple[str, str] | None:
+    """Read the first video stream's codec and pixel format for browser playability."""
+
+    source = Path(path).expanduser().resolve(strict=False)
+    try:
+        result = run_media_command(
+            [
+                ffprobe_bin,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name,pix_fmt",
+                "-of",
+                "json",
+                str(source),
+            ],
+            text=True,
+            timeout=30,
+        )
+    except (OSError, TimeoutError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    streams = payload.get("streams") if isinstance(payload, dict) else None
+    if not isinstance(streams, list) or not streams or not isinstance(streams[0], dict):
+        return None
+    codec = streams[0].get("codec_name")
+    pixel_format = streams[0].get("pix_fmt")
+    if not isinstance(codec, str) or not isinstance(pixel_format, str):
+        return None
+    return codec.lower(), pixel_format.lower()
+
+
 def asset_needs_proxy(
     kind: AssetKind | str,
     source_path: str | Path,
@@ -88,7 +135,7 @@ def asset_needs_proxy(
 ) -> bool:
     """代理只为「浏览器播不动的格式」兜底回落：可播即无需转码代理，省掉整段转码。
 
-    - 视频：编码 ∈ {h264, hevc} 可播（macOS 硬解），其余需代理。
+    - 视频：h264/hevc 且像素格式为浏览器硬解支持的 4:2:0 组合才可播；其余需代理。
     - 音频：编码 ∈ 常见可播集（aac/mp3/flac/opus/pcm…）可播，其余需代理。
     - 图片：走缩略图/原图直连，从不用媒体代理。
     - 字体：无媒体代理。
@@ -99,11 +146,14 @@ def asset_needs_proxy(
     if kind_value in (AssetKind.FONT.value, AssetKind.IMAGE.value):
         return False
     if kind_value == AssetKind.VIDEO.value:
-        codec = probe_stream_codec(source_path, stream_type="v", ffprobe_bin=ffprobe_bin)
-        return codec is None or codec not in BROWSER_PLAYABLE_VIDEO_CODECS
+        stream_format = probe_video_stream_format(source_path, ffprobe_bin=ffprobe_bin)
+        if stream_format is None:
+            return True
+        codec, pixel_format = stream_format
+        return pixel_format not in BROWSER_PLAYABLE_VIDEO_FORMATS.get(codec, frozenset())
     if kind_value == AssetKind.AUDIO.value:
-        codec = probe_stream_codec(source_path, stream_type="a", ffprobe_bin=ffprobe_bin)
-        return codec is None or codec not in BROWSER_PLAYABLE_AUDIO_CODECS
+        audio_codec = probe_stream_codec(source_path, stream_type="a", ffprobe_bin=ffprobe_bin)
+        return audio_codec is None or audio_codec not in BROWSER_PLAYABLE_AUDIO_CODECS
     return True
 
 
@@ -118,7 +168,7 @@ def _run_ffprobe(path: Path, *, ffprobe_bin: str) -> dict[str, Any]:
         "-show_streams",
         str(path),
     ]
-    result = subprocess.run(command, capture_output=True, check=False, text=True)
+    result = run_media_command(command, text=True)
     if result.returncode != 0:
         raise MediaProbeError(_stderr_summary(result.stderr) or "ffprobe failed")
     try:

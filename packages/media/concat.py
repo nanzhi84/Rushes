@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import json
 import math
@@ -15,6 +14,7 @@ from uuid import uuid4
 from contracts.timeline import TimelineMediaClip, TimelineState
 from storage.workspace_paths import WorkspacePaths
 
+from .process import communicate_media_command
 from .segment_render import (
     MediaSource,
     ProgressCallback,
@@ -326,15 +326,15 @@ def _audio_input_command(
 
 
 async def _run_loudnorm_pass(command: Sequence[str]) -> dict[str, str] | None:
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    assert process.stderr is not None
-    stderr = (await process.stderr.read()).decode(errors="replace")
-    returncode = await process.wait()
-    if returncode != 0:
+    try:
+        result = await communicate_media_command(command)
+    except TimeoutError as exc:
+        raise SegmentRenderError(
+            "ffmpeg loudnorm analysis timed out",
+            stderr_summary="timeout",
+        ) from exc
+    stderr = result.stderr.decode(errors="replace")
+    if result.returncode != 0:
         raise SegmentRenderError(
             _stderr_summary(stderr) or "ffmpeg loudnorm analysis failed",
             stderr_summary=_stderr_summary(stderr),

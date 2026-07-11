@@ -11,6 +11,18 @@ type FetchMock = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 
 // 素材瓦片的导入状态就地化 + 理解语义澄清：只断言瓦片自身的状态展示，不进对话流程。
 describe("AssetsPanel 导入状态就地化", () => {
+  it("理解进行中显示 N/M，取消入口可终止当前理解", async () => {
+    const onCancelUnderstanding = vi.fn();
+    renderPanel([], {
+      understandingProgress: { completed: 2, total: 5 },
+      onCancelUnderstanding
+    });
+
+    expect(await screen.findByRole("status", { name: "素材理解中 2/5" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "取消素材理解" }));
+    expect(onCancelUnderstanding).toHaveBeenCalledTimes(1);
+  });
+
   it("缩略图未就绪显示 kind 占位（脉冲），proxy/index 在跑显示旋转点", async () => {
     renderPanel([
       makeAsset({

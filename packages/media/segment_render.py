@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 import itertools
 import json
 import re
-import subprocess
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +16,7 @@ from contracts.subtitle import SubtitleClip
 from contracts.timeline import TimelineMediaClip, TimelineState
 from storage.workspace_paths import WorkspacePaths
 
+from .process import run_media_command, stream_media_command
 from .render_cache import DEFAULT_MAX_BYTES, SegmentRenderCache, segment_cache_key
 from .subtitles_ass import (
     SubtitleTemplateMap,
@@ -451,26 +450,20 @@ async def run_ffmpeg_command(
     duration_seconds: float | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> None:
-    process = await asyncio.create_subprocess_exec(
-        *command,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    assert process.stdout is not None
-    assert process.stderr is not None
-    stderr_task = asyncio.create_task(process.stderr.read())
     progress_state: dict[str, str] = {}
-    while True:
-        line = await process.stdout.readline()
-        if not line:
-            break
+
+    async def _on_line(line: bytes) -> None:
         sample = parse_progress_line(line.decode(errors="replace"), progress_state)
         if sample is not None and sample.out_time_ms is not None:
             progress = progress_from_out_time_ms(sample.out_time_ms, duration_seconds)
             await _emit_progress(progress_callback, progress)
-    returncode = await process.wait()
-    stderr = (await stderr_task).decode(errors="replace")
-    if returncode != 0:
+
+    try:
+        result = await stream_media_command(command, on_stdout_line=_on_line)
+    except TimeoutError as exc:
+        raise SegmentRenderError("ffmpeg render timed out", stderr_summary="timeout") from exc
+    stderr = result.stderr.decode(errors="replace")
+    if result.returncode != 0:
         summary = stderr_summary(stderr)
         raise SegmentRenderError(summary or "ffmpeg render failed", stderr_summary=summary)
     await _emit_progress(progress_callback, 1.0)
@@ -521,12 +514,7 @@ def progress_from_out_time_ms(out_time_ms: int, duration_seconds: float | None) 
 
 
 def get_ffmpeg_version(*, ffmpeg_bin: str = "ffmpeg") -> str:
-    result = subprocess.run(
-        [ffmpeg_bin, "-version"],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
+    result = run_media_command([ffmpeg_bin, "-version"], text=True, timeout=30)
     if result.returncode != 0:
         raise SegmentRenderError(
             stderr_summary(result.stderr) or "ffmpeg -version failed",

@@ -30,11 +30,17 @@ export type SubagentProgressEntry = {
   note: string;
 };
 
+export type UnderstandingProgress = {
+  completed: number;
+  total: number;
+};
+
 export type TurnStreamState = {
   items: TurnStreamItem[];
   turnActive: boolean;
   // 挂在「当前进行中工具行」下方的子代理进度；工具收尾或回合结束即清空。
   subagentProgress: SubagentProgressEntry[];
+  understandingProgress: UnderstandingProgress | null;
 };
 
 // 服务端 event: turn_stream，data 里以 type 区分。字段见 packages/agent_harness/loop.py。
@@ -44,7 +50,14 @@ export type TurnStreamEvent =
   | { type: "message_completed"; message_id: string; kind: "narration" | "reply"; content: string }
   | { type: "tool_step_started"; step_id: string; tool: string; args_summary?: string }
   | { type: "tool_step_finished"; step_id: string; tool: string; status: string; observation?: string }
-  | { type: "subagent_progress"; asset_id?: string; note?: string }
+  | {
+      type: "subagent_progress";
+      asset_id?: string;
+      note?: string;
+      tool?: string;
+      completed?: number;
+      total?: number;
+    }
   | { type: "turn_ended"; outcome: string; reason: string | null }
   | { type: "turn_error"; message: string }
   | { type: string; [key: string]: unknown };
@@ -57,7 +70,8 @@ export type UseTurnStreamOptions = {
 export const INITIAL_STATE: TurnStreamState = {
   items: [],
   turnActive: false,
-  subagentProgress: []
+  subagentProgress: [],
+  understandingProgress: null
 };
 
 // 纯 reducer：便于单测，也让重连快照重放（turn_started 起头）能从头重建状态。
@@ -65,7 +79,7 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
   switch (event.type) {
     case "turn_started":
       // 新回合（或重连重放）从零重建，避免 text_delta 被重复追加。
-      return { items: [], turnActive: true, subagentProgress: [] };
+      return { items: [], turnActive: true, subagentProgress: [], understandingProgress: null };
     case "text_delta": {
       if (typeof event.message_id !== "string") {
         return state;
@@ -128,12 +142,17 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
           observation: typeof event.observation === "string" && event.observation ? event.observation : null
         }),
         // 工具收尾即清空其子代理进度，避免残留串到下一个进行中工具行上。
-        subagentProgress: []
+        subagentProgress: [],
+        understandingProgress:
+          event.tool === "understand.materials" ? null : state.understandingProgress
       };
     }
     case "subagent_progress": {
+      const understandingProgress = parseUnderstandingProgress(event) ?? state.understandingProgress;
       if (typeof event.asset_id !== "string" || !event.asset_id) {
-        return state;
+        return understandingProgress === state.understandingProgress
+          ? state
+          : { ...state, turnActive: true, understandingProgress };
       }
       const note = typeof event.note === "string" ? event.note : "";
       if (!note) {
@@ -142,14 +161,15 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
       return {
         ...state,
         turnActive: true,
-        subagentProgress: upsertProgress(state.subagentProgress, { asset_id: event.asset_id, note })
+        subagentProgress: upsertProgress(state.subagentProgress, { asset_id: event.asset_id, note }),
+        understandingProgress
       };
     }
     case "turn_ended":
       // 封口：本回合结束，历史消息会被 refetch 接管；流式 buffer 交给 message_id 去重清理。
-      return { ...state, turnActive: false, subagentProgress: [] };
+      return { ...state, turnActive: false, subagentProgress: [], understandingProgress: null };
     case "turn_error":
-      return { ...state, turnActive: false, subagentProgress: [] };
+      return { ...state, turnActive: false, subagentProgress: [], understandingProgress: null };
     default:
       return state;
   }
@@ -253,4 +273,20 @@ function upsertProgress(
 
 function normalizeCompletedKind(kind: unknown): TurnStreamMessageKind {
   return kind === "narration" ? "narration" : "reply";
+}
+
+function parseUnderstandingProgress(event: TurnStreamEvent): UnderstandingProgress | null {
+  if (
+    event.type !== "subagent_progress" ||
+    event.tool !== "understand.materials" ||
+    typeof event.completed !== "number" ||
+    typeof event.total !== "number"
+  ) {
+    return null;
+  }
+  const total = Math.max(0, Math.floor(event.total));
+  return {
+    completed: Math.max(0, Math.min(total, Math.floor(event.completed))),
+    total
+  };
 }

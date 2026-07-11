@@ -166,6 +166,11 @@ previews = Table(
     Column("timeline_version", Integer, nullable=False),
     Column("object_hash", Text, ForeignKey("objects.hash"), nullable=False),
     Column("quality", Text, nullable=False),
+    # 渲染发生时的预期快照；检查旧 preview 时绝不能拿当前 timeline 对账。
+    Column("render_width", Integer, nullable=True),
+    Column("render_height", Integer, nullable=True),
+    Column("render_fps", Float, nullable=True),
+    Column("expected_duration_sec", Float, nullable=True),
     Column("created_at", Text, nullable=False),
 )
 

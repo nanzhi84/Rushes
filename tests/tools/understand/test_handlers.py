@@ -16,6 +16,8 @@ from typing import Any
 
 import pytest
 
+from agent_harness.tool_execution import apply_tool_events
+from agent_harness.turn_queue import StopToken
 from contracts.draft import DraftState
 from contracts.provider import ProviderResult
 from media import Shot
@@ -24,8 +26,10 @@ from providers.gateway import ProviderGatewayResult
 from providers.openai_compatible.vlm import DEFAULT_OPENAI_COMPATIBLE_VLM_MODEL
 from storage import schema
 from storage.db import create_workspace_engine
+from storage.object_store import ObjectStore
 from storage.repositories import MaterialSummariesRepository, TranscriptsRepository
 from storage.repositories._json import dump_json
+from storage.workspace_paths import WorkspacePaths
 from tools import ToolExecutionContext
 from tools.specs import UnderstandMaterialsInput
 from tools.understand import handlers as understand_handlers
@@ -141,6 +145,70 @@ class SlowGateway:
         )
 
 
+class ScanGateway:
+    """按每批多图标签返回粗扫 JSON，可指定某个素材所在批次失败。"""
+
+    def __init__(self, *, fail_on_asset: str | None = None) -> None:
+        self.fail_on_asset = fail_on_asset
+        self.calls: list[list[str]] = []
+
+    async def call(self, request: Any) -> ProviderGatewayResult:
+        content = request.payload["messages"][0]["content"]
+        labels = [
+            item["text"]
+            for item in content
+            if item.get("type") == "text"
+            and isinstance(item.get("text"), str)
+            and item["text"].startswith("asset_id=")
+        ]
+        asset_ids = [label.split(";", 1)[0].split("=", 1)[1] for label in labels]
+        self.calls.append(asset_ids)
+        if self.fail_on_asset in asset_ids:
+            raise RuntimeError("mock batch failure")
+        focused = "还必须给 relevance_0_100" in content[0]["text"]
+        rows = []
+        for asset_id in asset_ids:
+            row: dict[str, Any] = {
+                "asset_id": asset_id,
+                "gist": f"{asset_id} 的画面概览",
+                "tags": ["实拍"],
+                "confidence": 0.9,
+            }
+            if focused:
+                row["relevance_0_100"] = 100 - int(asset_id.rsplit("_", 1)[-1])
+            rows.append(row)
+        return ProviderGatewayResult(
+            result=ProviderResult(
+                provider_id="mock_vlm",
+                capability=VLM_UNDERSTANDING,
+                request_id=request.request_id,
+                model="mock",
+                latency_ms=1,
+                normalized_output={"content": json.dumps({"assets": rows})},
+            )
+        )
+
+
+class CancellableScanGateway:
+    def __init__(self, expected_calls: int) -> None:
+        self.expected_calls = expected_calls
+        self.started = 0
+        self.cancelled = 0
+        self.all_started = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    async def call(self, _request: Any) -> ProviderGatewayResult:
+        self.started += 1
+        if self.started == self.expected_calls:
+            self.all_started.set()
+        try:
+            await self.gate.wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        raise AssertionError("scan gate should only finish through cancellation")
+
+
 def _engine(tmp_path: Path, asset_specs: list[dict[str, Any]]) -> Any:
     engine = create_workspace_engine(tmp_path)
     with engine.begin() as connection:
@@ -247,6 +315,7 @@ def _context(
     tmp_path: Path,
     progress: Any | None = None,
     sink: Any | None = None,
+    stop_token: StopToken | None = None,
 ) -> ToolExecutionContext:
     metadata: dict[str, Any] = {"workspace_path": str(tmp_path)}
     if gateway is not None:
@@ -255,6 +324,8 @@ def _context(
         metadata["turn_progress"] = progress
     if sink is not None:
         metadata["partial_result_sink"] = sink
+    if stop_token is not None:
+        metadata["stop_token"] = stop_token
     return ToolExecutionContext(
         tool_call_id="tc_understand",
         turn_id="turn_1",
@@ -274,10 +345,332 @@ def _draft_state() -> DraftState:
     )
 
 
+async def test_scan_31_visuals_uses_four_calls_and_never_mutates_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
+    visual_ids = [f"asset_{index:02d}" for index in range(31)]
+    engine = _engine(
+        tmp_path,
+        [
+            *({"asset_id": asset_id} for asset_id in visual_ids),
+            {"asset_id": "audio_31", "kind": "audio"},
+        ],
+    )
+    gateway = ScanGateway()
+    with engine.connect() as connection:
+        before_statuses = connection.execute(
+            schema.assets.select().with_only_columns(
+                schema.assets.c.asset_id,
+                schema.assets.c.understanding_status,
+            )
+        ).all()
+        result = await materials(
+            UnderstandMaterialsInput(
+                asset_ids=[*visual_ids, "audio_31"],
+                depth="scan",
+            ),
+            _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
+        )
+        after_statuses = connection.execute(
+            schema.assets.select().with_only_columns(
+                schema.assets.c.asset_id,
+                schema.assets.c.understanding_status,
+            )
+        ).all()
+        summary_rows = connection.execute(schema.material_summaries.select()).all()
+
+    assert len(gateway.calls) == 4
+    assert all(len(batch) <= 8 for batch in gateway.calls)
+    assert result.status == "succeeded"
+    assert result.events == []
+    assert before_statuses == after_statuses
+    assert len(result.data["scan"]["assets"]) == 31
+    assert all(item["gist"] and item["frames_used"] for item in result.data["scan"]["assets"])
+    assert result.data["scan"]["skipped"] == [{"asset_id": "audio_31", "reason": "audio"}]
+    # scan 结果不携带任何待持久化行。
+    assert "material_summary_rows" not in result.data
+    assert summary_rows == []
+
+
+async def test_scan_focus_sorts_results_and_batch_failure_is_isolated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
+    asset_ids = [f"asset_{index:02d}" for index in range(17)]
+    engine = _engine(tmp_path, [{"asset_id": asset_id} for asset_id in asset_ids])
+    gateway = ScanGateway(fail_on_asset="asset_08")
+    with engine.connect() as connection:
+        result = await materials(
+            UnderstandMaterialsInput(asset_ids=asset_ids, depth="scan", focus="找开场镜头"),
+            _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
+        )
+
+    returned = result.data["scan"]["assets"]
+    skipped = result.data["scan"]["skipped"]
+    assert len(gateway.calls) == 3
+    assert [item["relevance_0_100"] for item in returned] == sorted(
+        (item["relevance_0_100"] for item in returned), reverse=True
+    )
+    assert {item["asset_id"] for item in skipped if item["reason"] == "vlm_error"} == set(
+        asset_ids[8:16]
+    )
+    assert {item["asset_id"] for item in returned} == set(asset_ids[:8] + asset_ids[16:])
+
+    no_focus_gateway = ScanGateway()
+    with engine.connect() as connection:
+        no_focus = await materials(
+            UnderstandMaterialsInput(asset_ids=asset_ids[:2], depth="scan"),
+            _context(engine, connection, gateway=no_focus_gateway, tmp_path=tmp_path),
+        )
+    assert all("relevance_0_100" not in item for item in no_focus.data["scan"]["assets"])
+
+
+async def test_scan_cancel_stops_inflight_batches_and_marks_unfinished_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
+    asset_ids = [f"asset_{index:02d}" for index in range(9)]
+    engine = _engine(tmp_path, [{"asset_id": asset_id} for asset_id in asset_ids])
+    gateway = CancellableScanGateway(expected_calls=2)
+    stop_token = StopToken()
+    with engine.connect() as connection:
+        task = asyncio.create_task(
+            materials(
+                UnderstandMaterialsInput(asset_ids=asset_ids, depth="scan"),
+                _context(
+                    engine,
+                    connection,
+                    gateway=gateway,
+                    tmp_path=tmp_path,
+                    stop_token=stop_token,
+                ),
+            )
+        )
+        await asyncio.wait_for(gateway.all_started.wait(), timeout=1)
+        stop_token.request_cancel()
+        result = await asyncio.wait_for(task, timeout=1)
+
+    assert gateway.cancelled == 2
+    assert result.data["scan"]["assets"] == []
+    assert result.events == []
+    assert result.data["scan"]["skipped"] == [
+        {"asset_id": asset_id, "reason": "cancelled"} for asset_id in asset_ids
+    ]
+
+
+async def test_scan_cancel_waits_for_inflight_frame_process_to_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def slow_extract(
+        _path: Path,
+        _seconds: float,
+        *,
+        cancel_event: threading.Event,
+        **_kwargs: Any,
+    ) -> str:
+        started.set()
+        if not cancel_event.wait(timeout=2):
+            raise AssertionError("frame extraction did not receive cancellation")
+        stopped.set()
+        raise RuntimeError("cancelled")
+
+    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", slow_extract)
+    engine = _engine(tmp_path, [{"asset_id": "asset_slow"}])
+    stop_token = StopToken()
+    with engine.connect() as connection:
+        task = asyncio.create_task(
+            materials(
+                UnderstandMaterialsInput(asset_ids=["asset_slow"], depth="scan"),
+                _context(
+                    engine,
+                    connection,
+                    gateway=ScanGateway(),
+                    tmp_path=tmp_path,
+                    stop_token=stop_token,
+                ),
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 1)
+        stop_token.request_cancel()
+        result = await asyncio.wait_for(task, timeout=1)
+
+    assert stopped.is_set()
+    assert result.data["scan"]["assets"] == []
+    assert result.data["scan"]["skipped"] == [{"asset_id": "asset_slow", "reason": "cancelled"}]
+
+
+async def test_scan_poster_reports_actual_cover_timestamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine(tmp_path, [{"asset_id": "asset_01"}])
+    paths = WorkspacePaths.from_root(tmp_path).initialize()
+    poster = ObjectStore(paths).put_bytes(b"poster")
+    with engine.begin() as connection:
+        connection.execute(
+            schema.objects.insert().values(
+                hash=poster.object_hash,
+                rel_path=poster.rel_path,
+                size=poster.size,
+                created_at=NOW,
+            )
+        )
+        connection.execute(
+            schema.assets.update()
+            .where(schema.assets.c.asset_id == "asset_01")
+            .values(thumbnail_object_hash=poster.object_hash)
+        )
+    seen_mimes: list[str | None] = []
+
+    def fake_image_data_uri(_path: Path, *, mime: str | None = None) -> str:
+        seen_mimes.append(mime)
+        return DATA_URI
+
+    monkeypatch.setattr(understand_handlers, "image_path_data_uri", fake_image_data_uri)
+    with engine.connect() as connection:
+        result = await materials(
+            UnderstandMaterialsInput(asset_ids=["asset_01"], depth="scan"),
+            _context(engine, connection, gateway=ScanGateway(), tmp_path=tmp_path),
+        )
+
+    assert result.data["scan"]["assets"][0]["frames_used"] == [{"at_sec": 1.0, "source": "poster"}]
+    assert "1.00s/poster" in result.observation
+    assert seen_mimes == ["image/jpeg"]
+
+
+async def test_scan_and_deep_reject_asset_not_linked_to_current_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
+    engine = _engine(tmp_path, [{"asset_id": "foreign_asset"}])
+    with engine.begin() as connection:
+        connection.execute(
+            schema.draft_asset_links.delete().where(
+                schema.draft_asset_links.c.asset_id == "foreign_asset"
+            )
+        )
+
+    gateway = ScanGateway()
+    with engine.connect() as connection:
+        scan = await materials(
+            UnderstandMaterialsInput(asset_ids=["foreign_asset"], depth="scan"),
+            _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
+        )
+        deep = await materials(
+            UnderstandMaterialsInput(asset_ids=["foreign_asset"], depth="deep"),
+            _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
+        )
+
+    assert scan.data["scan"]["assets"] == []
+    assert scan.data["scan"]["skipped"] == [{"asset_id": "foreign_asset", "reason": "not_found"}]
+    assert deep.data["results"]["foreign_asset"]["status"] == "failed"
+    assert deep.events == []
+
+
+@pytest.mark.parametrize("max_steps", [2, None])
+async def test_point_query_does_not_persist_or_degrade_primary_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    max_steps: int | None,
+) -> None:
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
+    engine = _engine(tmp_path, [{"asset_id": "asset_1"}])
+    _seed_summary(engine, "asset_1", version=3, overall="完整归档摘要")
+    gateway = ScriptedVlmGateway({"asset_1": [_emit({**_GOOD_SUMMARY, "overall": "窄问题回答"})]})
+    with engine.connect() as connection:
+        result = await materials(
+            UnderstandMaterialsInput(
+                asset_ids=["asset_1"],
+                focus="02:10 附近适合做开头吗？",
+                max_steps_per_asset=max_steps,
+            ),
+            _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
+        )
+
+    assert result.data["deep"]["mode"] == "point_query"
+    assert result.events == []
+    assert "material_summary_rows" not in result.data
+    with engine.connect() as connection:
+        latest = MaterialSummariesRepository(connection).latest_ready("asset_1")
+    assert latest is not None
+    assert latest["version"] == 3
+    assert latest["summary_json"]["overall"] == "完整归档摘要"
+
+
+async def test_blank_focus_uses_archive_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
+    engine = _engine(tmp_path, [{"asset_id": "asset_1"}])
+    gateway = ScriptedVlmGateway({"asset_1": [_emit()]})
+    with engine.connect() as connection:
+        result = await materials(
+            UnderstandMaterialsInput(asset_ids=["asset_1"], focus="   "),
+            _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
+        )
+
+    assert result.data["deep"]["mode"] == "archive"
+    assert "material_summary_rows" in result.data
+    assert [event["event"] for event in result.events] == [
+        "MaterialUnderstandingStarted",
+        "MaterialUnderstandingCompleted",
+    ]
+
+
+async def test_archive_six_step_budget_exhaustion_returns_failure_without_hanging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
+    engine = _engine(tmp_path, [{"asset_id": "asset_1"}])
+    gateway = ScriptedVlmGateway(
+        {"asset_1": [{"action": "view_frames", "timestamps_s": [0.0]}] * 6}
+    )
+    with engine.connect() as connection:
+        result = await asyncio.wait_for(
+            materials(
+                UnderstandMaterialsInput(
+                    asset_ids=["asset_1"],
+                    depth="deep",
+                    max_steps_per_asset=6,
+                ),
+                _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
+            ),
+            timeout=2,
+        )
+
+    assert len(gateway.calls) == 6
+    assert result.data["deep"]["mode"] == "archive"
+    assert result.data["results"]["asset_1"]["failure_code"] == "budget_exhausted"
+    assert [event["event"] for event in result.events] == [
+        "MaterialUnderstandingStarted",
+        "MaterialUnderstandingFailed",
+    ]
+
+
 async def test_ready_summary_persists_rows_and_emits_events(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     engine = _engine(tmp_path, [{"asset_id": "asset_1"}])
     gateway = ScriptedVlmGateway(
         {"asset_1": [{"action": "view_frames", "timestamps_s": [2.0, 4.0]}, _emit()]}
@@ -324,13 +717,19 @@ async def test_cache_hit_skips_subagent(tmp_path: Path) -> None:
 async def test_focus_increments_version_and_feeds_prior(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     engine = _engine(tmp_path, [{"asset_id": "asset_1"}])
     _seed_summary(engine, "asset_1", version=1, overall="旧摘要正文")
     gateway = ScriptedVlmGateway({"asset_1": [_emit()]})
     with engine.connect() as connection:
         result = await materials(
-            UnderstandMaterialsInput(asset_ids=["asset_1"], focus="口播是否清晰"),
+            UnderstandMaterialsInput(
+                asset_ids=["asset_1"],
+                focus="口播是否清晰",
+                max_steps_per_asset=5,
+            ),
             _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
         )
 
@@ -377,7 +776,9 @@ async def test_concurrency_capped_by_semaphore(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("RUSHES_UNDERSTAND_CONCURRENCY", "2")
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     asset_ids = [f"asset_{i}" for i in range(4)]
     engine = _engine(tmp_path, [{"asset_id": a} for a in asset_ids])
     gateway = ConcurrencyProbeGateway([_emit()])
@@ -409,7 +810,9 @@ async def test_timeout_marks_asset_failed(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 async def test_transcribe_rows_persisted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
 
     async def _fake_transcribe(
         _context: Any, _info: Any, start_s: Any, end_s: Any
@@ -524,7 +927,9 @@ async def _wait_until(predicate: Any, *, timeout: float = 1.0) -> None:
 async def test_incremental_sink_persists_first_asset_before_slow_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     engine = _engine(tmp_path, [{"asset_id": "asset_fast"}, {"asset_id": "asset_slow"}])
     gate = asyncio.Event()
     gateway = GatedVlmGateway(gate, slow_asset="asset_slow")
@@ -554,10 +959,114 @@ async def test_incremental_sink_persists_first_asset_before_slow_one(
         assert MaterialSummariesRepository(connection).latest_ready("asset_fast") is not None
 
 
+async def test_cancel_keeps_completed_summary_and_leaves_inflight_asset_without_running_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
+    engine = _engine(tmp_path, [{"asset_id": "fast"}, {"asset_id": "slow"}])
+    gate = asyncio.Event()
+    gateway = GatedVlmGateway(gate, slow_asset="slow")
+    stop_token = StopToken()
+
+    class ReducerSink(RecordingSink):
+        def __call__(self, rows: dict[str, Any], events: list[dict[str, Any]]) -> None:
+            super().__call__(rows, events)
+            applied = apply_tool_events(events, engine=engine, base_version=None, actor="agent")
+            assert applied.status == "applied"
+
+    sink = ReducerSink(engine)
+
+    def progress(payload: dict[str, Any]) -> None:
+        if payload.get("completed") == 1:
+            stop_token.request_cancel()
+
+    with engine.connect() as connection:
+        result = await materials(
+            UnderstandMaterialsInput(asset_ids=["fast", "slow"]),
+            _context(
+                engine,
+                connection,
+                gateway=gateway,
+                tmp_path=tmp_path,
+                progress=progress,
+                sink=sink,
+                stop_token=stop_token,
+            ),
+        )
+
+    assert result.data["results"]["fast"]["status"] == "ready"
+    assert result.data["results"]["slow"]["failure_code"] == "cancelled"
+    assert sink.event_types_for("fast") == [
+        "MaterialUnderstandingStarted",
+        "MaterialUnderstandingCompleted",
+    ]
+    assert sink.event_types_for("slow") == []
+    with engine.connect() as connection:
+        assert MaterialSummariesRepository(connection).latest_ready("fast") is not None
+        statuses = dict(
+            connection.execute(
+                schema.assets.select().with_only_columns(
+                    schema.assets.c.asset_id,
+                    schema.assets.c.understanding_status,
+                )
+            ).all()
+        )
+    assert statuses == {"fast": "ready", "slow": "none"}
+
+
+async def test_cancel_waits_for_inflight_shot_split_thread_to_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = _engine(
+        tmp_path,
+        [{"asset_id": "slow", "index_json": {"duration_sec": 12.0}}],
+    )
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def slow_split(_path: Path, *, paths: Any, cancel_event: threading.Event) -> tuple[Any, ...]:
+        del paths
+        started.set()
+        if not cancel_event.wait(timeout=2):
+            raise AssertionError("shot split did not receive cancellation")
+        stopped.set()
+        raise RuntimeError("cancelled")
+
+    monkeypatch.setattr(understand_handlers, "split_shots", slow_split)
+    stop_token = StopToken()
+    sink = RecordingSink(engine)
+    gateway = ScriptedVlmGateway({"slow": [_emit()]})
+    with engine.connect() as connection:
+        task = asyncio.create_task(
+            materials(
+                UnderstandMaterialsInput(asset_ids=["slow"]),
+                _context(
+                    engine,
+                    connection,
+                    gateway=gateway,
+                    tmp_path=tmp_path,
+                    sink=sink,
+                    stop_token=stop_token,
+                ),
+            )
+        )
+        await _wait_until(started.is_set)
+        stop_token.request_cancel()
+        result = await asyncio.wait_for(task, timeout=1)
+
+    assert stopped.is_set()
+    assert result.data["results"]["slow"]["failure_code"] == "cancelled"
+    assert sink.events == []
+
+
 async def test_failure_isolation_sinks_failure_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     engine = _engine(tmp_path, [{"asset_id": "ok"}, {"asset_id": "bad"}])
     gateway = ScriptedVlmGateway(
         {"ok": [_emit()], "bad": [{"foo": "x"}, {"foo": "x"}, {"foo": "x"}]}
@@ -671,10 +1180,13 @@ async def test_cache_all_keys_match_hits(tmp_path: Path) -> None:
 async def test_shots_backfilled_on_demand_feeds_subagent_and_sink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     calls: list[Any] = []
 
-    def _fake_split(path: Any, *, paths: Any = None) -> tuple[Shot, ...]:
+    def _fake_split(path: Any, *, paths: Any = None, cancel_event: Any = None) -> tuple[Shot, ...]:
+        del cancel_event
         calls.append(path)
         return (Shot(shot_id="shot_0001", start_sec=0.0, end_sec=6.0),)
 
@@ -700,10 +1212,13 @@ async def test_shots_backfilled_on_demand_feeds_subagent_and_sink(
 async def test_slow_shots_backfill_does_not_block_fast_asset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     release = threading.Event()
 
-    def _split(path: Any, *, paths: Any = None) -> tuple[Shot, ...]:
+    def _split(path: Any, *, paths: Any = None, cancel_event: Any = None) -> tuple[Shot, ...]:
+        del cancel_event
         # 慢素材的分镜阻塞在后台线程里，直到测试放行；快素材已有 shots，不会走到这里。
         if "slow" in str(path):
             release.wait(timeout=5)
@@ -736,10 +1251,13 @@ async def test_slow_shots_backfill_does_not_block_fast_asset(
 
 
 async def test_shots_present_skips_split(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     called: list[int] = []
 
-    def _fake_split(_path: Any, *, paths: Any = None) -> tuple[Shot, ...]:
+    def _fake_split(_path: Any, *, paths: Any = None, cancel_event: Any = None) -> tuple[Shot, ...]:
+        del cancel_event
         called.append(1)
         return ()
 
@@ -760,7 +1278,9 @@ async def test_shots_present_skips_split(tmp_path: Path, monkeypatch: pytest.Mon
 async def test_shots_split_failure_keeps_asset_ready(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
 
     def _boom(_path: Any, *, paths: Any = None) -> tuple[Shot, ...]:
         raise RuntimeError("坏视频")
@@ -781,11 +1301,15 @@ async def test_shots_split_failure_keeps_asset_ready(
 async def test_shots_backfill_without_sink_batches_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     monkeypatch.setattr(
         understand_handlers,
         "split_shots",
-        lambda _path, *, paths=None: (Shot(shot_id="shot_0001", start_sec=0.0, end_sec=6.0),),
+        lambda _path, *, paths=None, cancel_event=None: (
+            Shot(shot_id="shot_0001", start_sec=0.0, end_sec=6.0),
+        ),
     )
     engine = _engine(tmp_path, [{"asset_id": "asset_1", "index_json": {"duration_sec": 12.0}}])
     gateway = ScriptedVlmGateway({"asset_1": [_emit()]})
@@ -807,10 +1331,13 @@ async def test_shots_backfill_without_sink_batches_event(
 async def test_shots_backfill_timeout_marks_asset_failed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     monkeypatch.setattr(understand_handlers, "_timeout_seconds", lambda: 0.05)
 
-    def _slow_split(_path: Any, *, paths: Any = None) -> tuple[Shot, ...]:
+    def _slow_split(_path: Any, *, paths: Any = None, cancel_event: Any = None) -> tuple[Shot, ...]:
+        del cancel_event
         # 分镜回填阻塞超过单素材超时：回填现纳入 wait_for，应触发 timeout 失败而非挂死回合。
         time.sleep(0.5)
         return (Shot(shot_id="shot_0001", start_sec=0.0, end_sec=6.0),)
@@ -832,7 +1359,9 @@ async def test_shots_backfill_timeout_marks_asset_failed(
 async def test_consumer_error_cancels_inflight_tasks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     engine = _engine(tmp_path, [{"asset_id": "fast"}, {"asset_id": "slow"}])
     gate = asyncio.Event()  # 从不 set：slow 的 VLM 卡住，直到被取消。
     gateway = GatedVlmGateway(gate, slow_asset="slow")
@@ -860,7 +1389,9 @@ async def test_consumer_error_cancels_inflight_tasks(
 async def test_transcript_id_unique_across_reunderstanding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
 
     async def _fake_transcribe(
         _context: Any, _info: Any, start_s: Any, end_s: Any
@@ -899,7 +1430,11 @@ async def test_transcript_id_unique_across_reunderstanding(
         )
         with engine.connect() as connection:
             result = await materials(
-                UnderstandMaterialsInput(asset_ids=["asset_1"], focus="口播是否清晰"),
+                UnderstandMaterialsInput(
+                    asset_ids=["asset_1"],
+                    focus="口播是否清晰",
+                    max_steps_per_asset=5,
+                ),
                 _context(engine, connection, gateway=gateway, tmp_path=tmp_path),
             )
         _persist_rows(result, engine)
@@ -912,11 +1447,15 @@ async def test_transcript_id_unique_across_reunderstanding(
 async def test_null_index_json_backfills_shots_on_first_understanding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(understand_handlers, "extract_frame_data_uri", lambda _p, _s: DATA_URI)
+    monkeypatch.setattr(
+        understand_handlers, "extract_frame_data_uri", lambda _p, _s, **_kwargs: DATA_URI
+    )
     monkeypatch.setattr(
         understand_handlers,
         "split_shots",
-        lambda _path, *, paths=None: (Shot(shot_id="shot_0001", start_sec=0.0, end_sec=6.0),),
+        lambda _path, *, paths=None, cancel_event=None: (
+            Shot(shot_id="shot_0001", start_sec=0.0, end_sec=6.0),
+        ),
     )
     # index_json 为 None（index job 还没跑就被理解）也要回填 shots，否则理解成功后缓存永久命中、
     # shots 从此没有计算机会。事件 payload 只带 shots（交 reducer 按键合并、不带缩略图/整份快照）。

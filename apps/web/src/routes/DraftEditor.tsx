@@ -186,7 +186,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const refreshMessages = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) });
   }, [draftId, queryClient]);
-  const { items: streamItems, subagentProgress } = useTurnStream(draftId, {
+  const { items: streamItems, subagentProgress, understandingProgress } = useTurnStream(draftId, {
     onTurnEnded: refreshMessages
   });
 
@@ -218,6 +218,10 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
       ]);
     },
     onError: () => setAwaitingTurnEnd(false)
+  });
+
+  const cancelTurn = useMutation({
+    mutationFn: () => api.cancelTurn(draftId)
   });
 
   const answerDecision = useMutation({
@@ -496,6 +500,9 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             management
             onPreviewAsset={handlePreviewAsset}
             previewingAssetId={previewingAssetId}
+            understandingProgress={understandingProgress}
+            onCancelUnderstanding={() => cancelTurn.mutate()}
+            cancellingUnderstanding={cancelTurn.isPending}
           />
         </div>
 

@@ -31,7 +31,7 @@ def build_poster_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
     async def _handler(job: Job) -> JobExecutionResult:
         asset_id = _job_asset_id(job)
         try:
-            source_path, kind = _asset_source(engine, paths, asset_id)
+            source_path, kind, _ = _asset_source(engine, paths, asset_id)
             events = _poster_events(job, asset_id, kind, source_path, paths)
         except Exception as exc:  # best-effort：封面/时长产不出只降级，不阻塞素材可用性
             return JobExecutionResult(

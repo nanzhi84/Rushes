@@ -32,7 +32,7 @@ from .job_registry import JobExecutionError, JobExecutionResult, JobHandler
 def build_proxy_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
     async def _handler(job: Job) -> JobExecutionResult:
         asset_id = _job_asset_id(job)
-        source_path, kind = _asset_source(engine, paths, asset_id)
+        source_path, kind, already_indexed = _asset_source(engine, paths, asset_id)
         if kind == AssetKind.FONT.value:
             # 字体没有可转码的媒体代理：跳过 probe/proxy，直接进入本地索引读取元数据。
             _enqueue_index(engine, job, asset_id)
@@ -47,7 +47,7 @@ def build_proxy_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
                     job_id=job.job_id,
                     payload={
                         "probe": probe.model_dump(mode="json"),
-                        "ingest_status": "probing",
+                        "ingest_status": "indexed" if already_indexed else "probing",
                     },
                 ),
             )
@@ -65,7 +65,7 @@ def build_proxy_handler(engine: Engine, paths: WorkspacePaths) -> JobHandler:
                     payload={
                         "proxy_object_hash": proxy.object_hash,
                         "proxy_object_size": proxy.size,
-                        "ingest_status": "proxying",
+                        "ingest_status": "indexed" if already_indexed else "proxying",
                     },
                 ),
             )
@@ -193,15 +193,21 @@ def _job_asset_id(job: Job) -> str:
     )
 
 
-def _asset_source(engine: Engine, paths: WorkspacePaths, asset_id: str) -> tuple[Path, str]:
+def _asset_source(
+    engine: Engine,
+    paths: WorkspacePaths,
+    asset_id: str,
+) -> tuple[Path, str, bool]:
     with engine.connect() as connection:
         source_path = resolve_asset_path(asset_id, connection=connection, paths=paths)
         row = connection.execute(
-            select(schema.assets.c.kind).where(schema.assets.c.asset_id == asset_id)
+            select(schema.assets.c.kind, schema.assets.c.index_json).where(
+                schema.assets.c.asset_id == asset_id
+            )
         ).first()
     if row is None:
         raise FileNotFoundError(f"asset not found: {asset_id}")
-    return source_path, str(row._mapping["kind"])
+    return source_path, str(row._mapping["kind"]), row._mapping["index_json"] is not None
 
 
 def _is_audio_proxy_kind(kind: str) -> bool:

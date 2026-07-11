@@ -314,6 +314,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/drafts/{draft_id}/turn/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel Current Turn */
+        post: operations["cancel_current_turn_api_drafts__draft_id__turn_cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/events": {
         parameters: {
             query?: never;
@@ -1089,6 +1106,18 @@ export interface components {
          * @enum {string}
          */
         StorageMode: "copy" | "reference";
+        /** TurnCancelResponse */
+        TurnCancelResponse: {
+            /** Draft Id */
+            draft_id: string;
+            /** Requested */
+            requested: boolean;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "requested" | "idle";
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -2567,6 +2596,73 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    cancel_current_turn_api_drafts__draft_id__turn_cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                draft_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TurnCancelResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
                 };
             };
             /** @description Validation Error */

@@ -132,6 +132,10 @@ def list_assets(input_model: AssetListAssetsInput, context: ToolExecutionContext
     filters = [schema.draft_asset_links.c.draft_id == draft_id]
     if input_model.kind is not None:
         filters.append(schema.assets.c.kind == input_model.kind)
+    if input_model.rel_dir is not None:
+        filters.append(schema.draft_asset_links.c.rel_dir == input_model.rel_dir)
+    if input_model.ingest_status is not None:
+        filters.append(schema.assets.c.ingest_status == input_model.ingest_status)
     if input_model.only_usable:
         filters.append(schema.assets.c.usable.is_(True))
     columns = (
@@ -207,6 +211,7 @@ def _asset_manifest_entry(
     width = probe.get("width") if isinstance(probe, dict) else None
     height = probe.get("height") if isinstance(probe, dict) else None
     duration = probe.get("duration_sec") if isinstance(probe, dict) else None
+    fps = probe.get("fps") if isinstance(probe, dict) else None
     has_audio = probe.get("has_audio") if isinstance(probe, dict) else None
     thumbnail = mapping["thumbnail_object_hash"]
     return {
@@ -215,6 +220,7 @@ def _asset_manifest_entry(
         "kind": str(mapping["kind"]),
         "rel_dir": mapping["rel_dir"],
         "duration_sec": duration if isinstance(duration, int | float) else None,
+        "fps": float(fps) if isinstance(fps, int | float) else None,
         "width": width if isinstance(width, int) else None,
         "height": height if isinstance(height, int) else None,
         "orientation": _orientation(width, height),

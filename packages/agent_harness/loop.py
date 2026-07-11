@@ -8,7 +8,6 @@ import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from sqlalchemy import select
@@ -37,10 +36,9 @@ from storage.repositories import (
     MaterialSummariesRepository,
     MessagesRepository,
     TimelineVersionsRepository,
-    TranscriptsRepository,
 )
 from storage.repositories._json import load_json
-from tools import PATCH_OP_REGISTRY, ToolExecutionContext, ToolRegistry, build_default_tool_registry
+from tools import PATCH_OP_REGISTRY, ToolRegistry, build_default_tool_registry
 from tools.memory_tools import search_relevant_memories
 
 from .context_builder import (
@@ -53,6 +51,7 @@ from .context_builder import (
 from .decision_answering import DecisionAnswerResolver
 from .policy_gate import PolicyContext, PolicyGate, ToolCall, Verdict, mark_replayed, next_replay
 from .reducer import ReducerApplyResult, apply
+from .tool_execution import execute_internal_tool
 from .tool_router import ToolRouter
 from .trace import NullTraceRecorder, TraceRecorder
 from .turn_queue import StopToken, TurnQueue, TurnQueueItem
@@ -119,39 +118,6 @@ def _make_turn_progress(
             _emit_turn_event(listener, {**payload, "type": "subagent_progress"})
 
     return _turn_progress
-
-
-def _make_partial_result_sink(
-    engine: Engine,
-    base_version: int | None,
-    sink_results: list[ReducerApplyResult],
-) -> Callable[[Mapping[str, Any], Sequence[DomainEventBase | Mapping[str, Any]]], None]:
-    """构造增量产物提交回调（``metadata["partial_result_sink"]``）。
-
-    understand 子代理逐素材完成时经此即时落库并发事件，与 loop 主路径完全同构：同一批
-    先 ``_persist_result_rows`` 落库、再 ``_apply_events`` 发事件。run_turn 单协程内
-    子代理串行提交，天然无并发写问题。每次归约结果收进 ``sink_results`` 交回主路径记账；
-    非 applied 立即 raise——摘要行已写但事件没落是脏态（行在库里、understanding_status
-    永不变绿），必须让工具诚实失败（上游 materials 的 finally 会收拢其余在飞任务）。
-    """
-
-    def _sink(
-        rows: Mapping[str, Any],
-        events: Sequence[DomainEventBase | Mapping[str, Any]],
-    ) -> None:
-        _persist_result_rows(rows, engine=engine)
-        result = _apply_events(events, engine=engine, base_version=base_version, actor="agent")
-        sink_results.append(result)
-        if result.status != "applied":
-            event_names = ", ".join(
-                event.event if isinstance(event, DomainEventBase) else str(event.get("event"))
-                for event in events
-            )
-            raise RuntimeError(
-                f"partial_result_sink 归约未落库：status={result.status} events=[{event_names}]"
-            )
-
-    return _sink
 
 
 def _record_sink_results(
@@ -450,7 +416,7 @@ async def run_turn(
     )
     router = ToolRouter(active_registry)
     active_turn_id = turn_id or _turn_id(item)
-    loaded = _load_state(engine, item.draft_id)
+    loaded = load_internal_state(engine, item.draft_id)
     tracer = trace_recorder or TraceRecorder(
         engine=engine,
         draft_id=item.draft_id,
@@ -515,6 +481,7 @@ async def _run_turn_body(
             decision_answer_resolver,
             router,
             policy_gate,
+            active_registry,
             engine=engine,
             turn_id=active_turn_id,
             turn_queue=turn_queue,
@@ -580,7 +547,7 @@ async def _run_turn_body(
             outcome = "forced_end"
             break
 
-        loaded = _load_state(engine, item.draft_id)
+        loaded = load_internal_state(engine, item.draft_id)
         context_bundle = _build_context(policy_gate, loaded, tuple(turn_observations))
         tracer.record(
             "context",
@@ -699,14 +666,32 @@ async def _run_turn_body(
             },
         )
 
-        verdict = policy_gate.adjudicate(
+        execution = await execute_internal_tool(
             tool_call,
-            PolicyContext(
+            engine=engine,
+            registry=active_registry,
+            router=router,
+            policy_gate=policy_gate,
+            policy_context=PolicyContext(
                 preconditions=context_bundle_input_preconditions(loaded),
                 decisions=loaded.decisions,
                 pending_decision=loaded.pending_decision,
                 allowed_tools=tuple(context_bundle.allowed_tools),
             ),
+            draft_state=loaded.draft_state,
+            decisions=loaded.decisions,
+            turn_id=active_turn_id,
+            actor="agent",
+            base_version=loaded.draft_state.state_version,
+            gateway=tool_gateway,
+            turn_progress=_make_turn_progress(turn_listener),
+            stop_token=token,
+        )
+        verdict = execution.verdict
+        _record_sink_results(
+            execution.partial_reducer_results,
+            accumulator=accumulator,
+            tracer=tracer,
         )
         tracer.record("gate", _verdict_payload(verdict))
 
@@ -806,30 +791,16 @@ async def _run_turn_body(
             outcome = "running"
             break
 
-        result = await _execute_tool(
-            router,
-            tool_call,
-            engine=engine,
-            state=loaded,
-            turn_id=active_turn_id,
-            gateway=tool_gateway,
-            turn_listener=turn_listener,
-            accumulator=accumulator,
-            tracer=tracer,
-        )
+        if execution.result is None or execution.reducer_result is None:  # pragma: no cover
+            raise RuntimeError("allow verdict did not execute tool")
+        result = execution.result
+        reducer_result = execution.reducer_result
         _emit_tool_step_finished(
             turn_listener, step_id, tool_call.tool_name, result.status, result.observation
         )
         accumulator.tool_results.append(result)
         turn_observations.append(_turn_observation_entry(tool_call, result))
         tracer.record("tool_result", _tool_result_payload(result))
-        _persist_tool_result_data(result, engine=engine)
-        reducer_result = _apply_events(
-            result.events,
-            engine=engine,
-            base_version=loaded.draft_state.state_version,
-            actor="agent",
-        )
         accumulator.reducer_results.append(reducer_result)
         tracer.record("events", _events_payload(result.events, reducer_result))
         if reducer_result.status != "applied":
@@ -851,6 +822,8 @@ async def _run_turn_body(
             reducer_result,
             engine=engine,
             router=router,
+            registry=active_registry,
+            policy_gate=policy_gate,
             turn_queue=turn_queue,
             turn_id=active_turn_id,
             accumulator=accumulator,
@@ -868,7 +841,7 @@ async def _run_turn_body(
             forced_reason = "stopped_by_user"
             _force_reply(
                 engine=engine,
-                state=_load_state(engine, item.draft_id),
+                state=load_internal_state(engine, item.draft_id),
                 turn_id=active_turn_id,
                 message="已按停止请求结束本回合。",
                 reason=forced_reason,
@@ -883,7 +856,7 @@ async def _run_turn_body(
             forced_reason = "nonblocking_tool_limit"
             _force_reply(
                 engine=engine,
-                state=_load_state(engine, item.draft_id),
+                state=load_internal_state(engine, item.draft_id),
                 turn_id=active_turn_id,
                 message=(
                     f"本回合已连续完成 {max_nonblocking_tools} 个非阻塞步骤，"
@@ -1036,8 +1009,11 @@ def _turn_observation_entry(tool_call: ToolCall, result: ToolResult) -> str:
     if len(arguments) > 160:
         arguments = arguments[:160] + "…"
     observation = result.observation or ""
-    if len(observation) > 400:
-        observation = observation[:400] + "…"
+    # scan 最多 31 条紧凑证据行（含时间锚点）；400 字会让 planner 只看到最前几条，
+    # 等同于“粗扫了但证据不可用”。该工具单独放宽，仍受 context_builder 的 2500 token block 限制。
+    observation_limit = 9_000 if tool_call.tool_name == "understand.materials" else 400
+    if len(observation) > observation_limit:
+        observation = observation[:observation_limit] + "…"
     return f"{tool_call.tool_name}({arguments}) -> {result.status}: {observation}"
 
 
@@ -1046,6 +1022,7 @@ async def _maybe_answer_pending_decision_from_user_message(
     resolver: DecisionAnswerResolver,
     router: ToolRouter,
     policy_gate: PolicyGate,
+    active_registry: ToolRegistry,
     *,
     engine: Engine,
     turn_id: str,
@@ -1059,7 +1036,7 @@ async def _maybe_answer_pending_decision_from_user_message(
     user_message = str(item.payload.get("content", ""))
     if user_message == "":
         return None
-    loaded = _load_state(engine, item.draft_id)
+    loaded = load_internal_state(engine, item.draft_id)
     if loaded.pending_decision is None:
         return None
     try:
@@ -1130,14 +1107,30 @@ async def _maybe_answer_pending_decision_from_user_message(
         },
     )
     tracer.record("action", step.model_dump())
-    verdict = policy_gate.adjudicate(
+    execution = await execute_internal_tool(
         tool_call,
-        PolicyContext(
+        engine=engine,
+        registry=active_registry,
+        router=router,
+        policy_gate=policy_gate,
+        policy_context=PolicyContext(
             preconditions=context_bundle_input_preconditions(loaded),
             decisions=loaded.decisions,
             pending_decision=loaded.pending_decision,
             allowed_tools=tuple(context_bundle.allowed_tools),
         ),
+        draft_state=loaded.draft_state,
+        decisions=loaded.decisions,
+        turn_id=turn_id,
+        actor="user",
+        base_version=loaded.draft_state.state_version,
+        turn_progress=_make_turn_progress(turn_listener),
+    )
+    verdict = execution.verdict
+    _record_sink_results(
+        execution.partial_reducer_results,
+        accumulator=accumulator,
+        tracer=tracer,
     )
     tracer.record("gate", _verdict_payload(verdict))
     if verdict.status != "allow":
@@ -1164,24 +1157,12 @@ async def _maybe_answer_pending_decision_from_user_message(
         )
         return "natural_language_decision_answer_denied"
 
-    result = await _execute_tool(
-        router,
-        tool_call,
-        engine=engine,
-        state=loaded,
-        turn_id=turn_id,
-        turn_listener=turn_listener,
-        accumulator=accumulator,
-        tracer=tracer,
-    )
+    if execution.result is None or execution.reducer_result is None:  # pragma: no cover
+        raise RuntimeError("allow verdict did not execute decision tool")
+    result = execution.result
+    reducer_result = execution.reducer_result
     accumulator.tool_results.append(result)
     tracer.record("tool_result", _tool_result_payload(result))
-    reducer_result = _apply_events(
-        result.events,
-        engine=engine,
-        base_version=loaded.draft_state.state_version,
-        actor="user",
-    )
     accumulator.reducer_results.append(reducer_result)
     tracer.record("events", _events_payload(result.events, reducer_result))
     if reducer_result.status != "applied":
@@ -1202,6 +1183,8 @@ async def _maybe_answer_pending_decision_from_user_message(
         reducer_result,
         engine=engine,
         router=router,
+        registry=active_registry,
+        policy_gate=policy_gate,
         turn_queue=turn_queue,
         turn_id=turn_id,
         accumulator=accumulator,
@@ -1211,7 +1194,7 @@ async def _maybe_answer_pending_decision_from_user_message(
     return None
 
 
-def _load_state(engine: Engine, draft_id: str) -> _LoadedState:
+def load_internal_state(engine: Engine, draft_id: str) -> _LoadedState:
     with engine.connect() as connection:
         draft_row = DraftsRepository(connection).get(draft_id)
         if draft_row is None:
@@ -1251,6 +1234,11 @@ def _load_state(engine: Engine, draft_id: str) -> _LoadedState:
         memory_summaries=memory_summaries,
         asset_digest=asset_digest,
     )
+
+
+# 兼容仍直接构造 harness 状态的既有测试；产品调用统一使用公开命名。
+def _load_state(engine: Engine, draft_id: str) -> _LoadedState:
+    return load_internal_state(engine, draft_id)
 
 
 def _load_draft_artifact_stats(
@@ -1298,6 +1286,13 @@ def _load_draft_artifact_stats(
         if isinstance(vad_segments, list) and vad_segments:
             transcript_ids_with_vad.add(transcript_id)
             transcript_with_vad_asset_ids.add(asset_id)
+    preview_count = len(
+        connection.execute(
+            select(schema.previews.c.preview_id).where(
+                schema.previews.c.draft_id == draft_state.draft_id
+            )
+        ).all()
+    )
     return DraftArtifactStats(
         usable_asset_count=len(usable_asset_ids),
         usable_asset_ids=frozenset(usable_asset_ids),
@@ -1307,6 +1302,7 @@ def _load_draft_artifact_stats(
         transcript_ids=frozenset(transcript_ids),
         transcript_ids_with_vad=frozenset(transcript_ids_with_vad),
         voiceover_asset_ids=frozenset(voiceover_asset_ids),
+        preview_count=preview_count,
     )
 
 
@@ -1527,58 +1523,6 @@ def _replay_tool_call_from_item(item: TurnQueueItem) -> ToolCall | None:
     )
 
 
-async def _execute_tool(
-    router: ToolRouter,
-    tool_call: ToolCall,
-    *,
-    engine: Engine,
-    state: _LoadedState,
-    turn_id: str,
-    gateway: Any | None = None,
-    turn_listener: TurnListener | None = None,
-    accumulator: _RunAccumulator | None = None,
-    tracer: TraceRecorder | NullTraceRecorder | None = None,
-) -> ToolResult:
-    # 增量 sink 逐素材应用的归约结果收进这里，工具返回后并入 accumulator/trace，别静默吞掉。
-    sink_results: list[ReducerApplyResult] = []
-    with engine.connect() as connection:
-        context = ToolExecutionContext(
-            tool_call_id=tool_call.tool_call_id or _tool_call_id(tool_call),
-            turn_id=turn_id,
-            draft_state=state.draft_state,
-            decisions=state.decisions,
-            readonly_connection=connection,
-            created_at=_now_iso(),
-            metadata=_tool_context_metadata(
-                engine,
-                gateway,
-                turn_listener=turn_listener,
-                base_version=state.draft_state.state_version,
-                sink_results=sink_results,
-            ),
-        )
-        try:
-            # 同步 handler 直接返回 ToolResult（行为零变化，仍在事件循环内同步跑）；
-            # async handler 返回 Awaitable，此处 await 后再入 accumulator/trace/observation。
-            outcome = router.execute(tool_call, context)
-            result = outcome if isinstance(outcome, ToolResult) else await outcome
-        except Exception as exc:  # pragma: no cover - defensive harness boundary
-            result = ToolResult(
-                tool_call_id=context.tool_call_id,
-                tool_name=tool_call.tool_name,
-                status="failed",
-                observation=str(exc),
-                error=ToolError(
-                    error_code="tool_handler_exception",
-                    message=str(exc),
-                    retryable=False,
-                    details={"exception_type": type(exc).__name__},
-                ),
-            )
-    _record_sink_results(sink_results, accumulator=accumulator, tracer=tracer)
-    return result
-
-
 def _defer_tool_call(
     registered: Any,
     tool_call: ToolCall,
@@ -1660,34 +1604,6 @@ def _defer_tool_call(
     )
 
 
-def _persist_tool_result_data(result: ToolResult, *, engine: Engine) -> None:
-    # handler 只有只读连接：需要落库的行经 ToolResult.data 交回 loop 这里写。
-    _persist_result_rows(result.data, engine=engine)
-
-
-def _persist_result_rows(data: Mapping[str, Any], *, engine: Engine) -> None:
-    row = data.get("message_row")
-    summary_rows = data.get("material_summary_rows")
-    transcript_rows = data.get("transcript_rows")
-    has_summaries = isinstance(summary_rows, list) and summary_rows
-    has_transcripts = isinstance(transcript_rows, list) and transcript_rows
-    if not isinstance(row, Mapping) and not has_summaries and not has_transcripts:
-        return
-    with begin_immediate(engine) as connection:
-        if isinstance(row, Mapping):
-            MessagesRepository(connection).insert(dict(row))
-        if isinstance(summary_rows, list):
-            summaries_repo = MaterialSummariesRepository(connection)
-            for summary_row in summary_rows:
-                if isinstance(summary_row, Mapping):
-                    summaries_repo.insert(dict(summary_row))
-        if isinstance(transcript_rows, list):
-            transcripts_repo = TranscriptsRepository(connection)
-            for transcript_row in transcript_rows:
-                if isinstance(transcript_row, Mapping):
-                    transcripts_repo.insert(dict(transcript_row))
-
-
 def _apply_events(
     events: Sequence[DomainEventBase | Mapping[str, Any]],
     *,
@@ -1714,6 +1630,8 @@ async def _handle_followups(
     *,
     engine: Engine,
     router: ToolRouter,
+    registry: ToolRegistry,
+    policy_gate: PolicyGate,
     turn_queue: TurnQueue | None,
     turn_id: str,
     accumulator: _RunAccumulator,
@@ -1746,6 +1664,8 @@ async def _handle_followups(
                 followup,
                 engine=engine,
                 router=router,
+                registry=registry,
+                policy_gate=policy_gate,
                 turn_id=turn_id,
                 accumulator=accumulator,
                 tracer=tracer,
@@ -1768,6 +1688,8 @@ async def _execute_memory_save_followup(
     turn_id: str,
     accumulator: _RunAccumulator,
     tracer: TraceRecorder | NullTraceRecorder,
+    registry: ToolRegistry | None = None,
+    policy_gate: PolicyGate | None = None,
 ) -> None:
     """Execute memory.save directly after commit.
 
@@ -1777,6 +1699,11 @@ async def _execute_memory_save_followup(
     harness applies that event in a separate transaction.
     """
 
+    registry = registry or build_default_tool_registry()
+    policy_gate = policy_gate or PolicyGate(
+        tool_specs=registry.specs_by_name(),
+        patch_op_specs=PATCH_OP_REGISTRY.as_mapping(),
+    )
     candidate_id = followup.payload.get("candidate_id")
     scope = followup.payload.get("scope")
     draft_id = followup.payload.get("draft_id")
@@ -1820,16 +1747,42 @@ async def _execute_memory_save_followup(
         },
     )
     try:
-        state = _load_state(engine, draft_id)
-        result = await _execute_tool(
-            router,
+        state = load_internal_state(engine, draft_id)
+        execution = await execute_internal_tool(
             tool_call,
             engine=engine,
-            state=state,
+            registry=registry,
+            router=router,
+            policy_gate=policy_gate,
+            policy_context=PolicyContext(
+                preconditions=context_bundle_input_preconditions(state),
+                decisions=state.decisions,
+                pending_decision=state.pending_decision,
+            ),
+            draft_state=state.draft_state,
+            decisions=state.decisions,
             turn_id=turn_id,
+            actor="system",
+            base_version=None,
+            include_harness_only=True,
+        )
+        _record_sink_results(
+            execution.partial_reducer_results,
             accumulator=accumulator,
             tracer=tracer,
         )
+        if execution.verdict.status != "allow":
+            result = _synthetic_tool_result(
+                tool_call,
+                "failed",
+                execution.verdict.reason,
+            )
+            reducer_result = ReducerApplyResult(status="applied")
+        else:
+            if execution.result is None or execution.reducer_result is None:
+                raise RuntimeError("allow verdict did not execute memory.save")
+            result = execution.result
+            reducer_result = execution.reducer_result
     except Exception as exc:  # pragma: no cover - defensive post-commit boundary
         result = ToolResult(
             tool_call_id=tool_call.tool_call_id or "followup_memory_save",
@@ -1843,9 +1796,9 @@ async def _execute_memory_save_followup(
                 details={"exception_type": type(exc).__name__},
             ),
         )
+        reducer_result = ReducerApplyResult(status="applied")
     accumulator.tool_results.append(result)
     tracer.record("tool_result", _tool_result_payload(result))
-    reducer_result = _apply_events(result.events, engine=engine, base_version=None, actor="system")
     accumulator.reducer_results.append(reducer_result)
     tracer.record("events", _events_payload(result.events, reducer_result))
     if result.status != "succeeded" or reducer_result.status != "applied":
@@ -2169,30 +2122,6 @@ def _asset_id_for_asr(draft_state: DraftState) -> str | None:
     if draft_state.audio_plan is not None and draft_state.audio_plan.source_asset_ids:
         return draft_state.audio_plan.source_asset_ids[0]
     return None
-
-
-def _tool_context_metadata(
-    engine: Engine,
-    gateway: Any | None = None,
-    *,
-    turn_listener: TurnListener | None = None,
-    base_version: int | None = None,
-    sink_results: list[ReducerApplyResult] | None = None,
-) -> dict[str, Any]:
-    metadata: dict[str, Any] = {}
-    database = engine.url.database
-    if database is not None and database != ":memory:":
-        metadata["workspace_path"] = str(Path(database).parent)
-    if gateway is not None:
-        # 工具经此调 LLM/VLM/embedding；不注入则全部降级（M9 实测）
-        metadata["provider_gateway"] = gateway
-    # 进度通道：永远是可调用对象、绝不为 None（无 listener 时为 no-op）。
-    metadata["turn_progress"] = _make_turn_progress(turn_listener)
-    # 增量产物提交通道：understand 子代理逐素材落库/发事件走它，写路径仍归 harness。
-    metadata["partial_result_sink"] = _make_partial_result_sink(
-        engine, base_version, sink_results if sink_results is not None else []
-    )
-    return metadata
 
 
 def _job_idempotency_key(

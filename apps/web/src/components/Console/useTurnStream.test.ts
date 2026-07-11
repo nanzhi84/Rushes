@@ -7,6 +7,36 @@ function apply(events: TurnStreamEvent[]): TurnStreamState {
 }
 
 describe("reduceTurnStream · subagent_progress", () => {
+  it("理解批次进度按 completed/total 递增并在工具完成后清空", () => {
+    const running = apply([
+      { type: "turn_started", turn_id: "turn_1" },
+      { type: "tool_step_started", step_id: "s1", tool: "understand.materials" },
+      {
+        type: "subagent_progress",
+        tool: "understand.materials",
+        completed: 0,
+        total: 3,
+        note: "理解中 0/3"
+      },
+      {
+        type: "subagent_progress",
+        tool: "understand.materials",
+        completed: 2,
+        total: 3,
+        note: "理解中 2/3"
+      }
+    ]);
+    expect(running.understandingProgress).toEqual({ completed: 2, total: 3 });
+
+    const finished = reduceTurnStream(running, {
+      type: "tool_step_finished",
+      step_id: "s1",
+      tool: "understand.materials",
+      status: "succeeded"
+    });
+    expect(finished.understandingProgress).toBeNull();
+  });
+
   it("按 asset_id 记录最近一条 note", () => {
     const state = apply([
       { type: "turn_started", turn_id: "turn_1" },

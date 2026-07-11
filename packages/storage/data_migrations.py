@@ -30,6 +30,7 @@ def apply_data_migrations(connection: Connection) -> None:
     """
 
     _ensure_material_summary_cache_columns(connection)
+    _ensure_preview_snapshot_columns(connection)
 
 
 def _ensure_material_summary_cache_columns(connection: Connection) -> None:
@@ -46,3 +47,19 @@ def _ensure_material_summary_cache_columns(connection: Connection) -> None:
         connection.exec_driver_sql("ALTER TABLE material_summaries ADD COLUMN fingerprint TEXT")
     if "prompt_version" not in columns:
         connection.exec_driver_sql("ALTER TABLE material_summaries ADD COLUMN prompt_version TEXT")
+
+
+def _ensure_preview_snapshot_columns(connection: Connection) -> None:
+    rows = connection.exec_driver_sql("PRAGMA table_info(previews)").all()
+    if not rows:
+        return
+    columns = {str(row[1]) for row in rows}
+    definitions = {
+        "render_width": "INTEGER",
+        "render_height": "INTEGER",
+        "render_fps": "REAL",
+        "expected_duration_sec": "REAL",
+    }
+    for name, sql_type in definitions.items():
+        if name not in columns:
+            connection.exec_driver_sql(f"ALTER TABLE previews ADD COLUMN {name} {sql_type}")

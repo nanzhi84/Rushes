@@ -133,3 +133,38 @@ async def test_proxy_handler_video_enqueues_index_after_proxy(tmp_path: Path) ->
 
     assert isinstance(result.result_json["proxy_object_hash"], str)
     assert len(_index_jobs(engine)) == 1
+
+
+@pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg not installed")
+async def test_proxy_handler_backfill_does_not_regress_indexed_status(tmp_path: Path) -> None:
+    source = tmp_path / "legacy-clip.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1:size=160x120:rate=30",
+            "-pix_fmt",
+            "yuv420p",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    engine, paths, asset_id = _ingest(tmp_path, kind="video", source=source)
+    with engine.begin() as connection:
+        connection.execute(
+            schema.assets.update()
+            .where(schema.assets.c.asset_id == asset_id)
+            .values(index_json='{"duration_sec":1.0}', ingest_status="indexed")
+        )
+
+    await build_proxy_handler(engine, paths)(_proxy_job(asset_id))
+
+    with engine.connect() as connection:
+        status = connection.execute(
+            select(schema.assets.c.ingest_status).where(schema.assets.c.asset_id == asset_id)
+        ).scalar_one()
+    assert status == "indexed"

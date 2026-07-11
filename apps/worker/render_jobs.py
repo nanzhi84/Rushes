@@ -309,6 +309,15 @@ def _completed_event(
         "quality": FINAL_MP4_PROFILE.cache_payload() if final else PREVIEW_PROFILE.cache_payload(),
         "job_id": job.job_id,
     }
+    if not final:
+        payload.update(
+            {
+                "render_width": PREVIEW_PROFILE.width,
+                "render_height": PREVIEW_PROFILE.height,
+                "render_fps": timeline.fps,
+                "expected_duration_sec": timeline.duration_frames / timeline.fps,
+            }
+        )
     if final:
         return ExportCompleted(
             draft_id=draft_state.draft_id,

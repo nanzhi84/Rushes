@@ -169,17 +169,24 @@ def _render_system_block(total_budget: int) -> str:
             "阶段推进指引（draft_header 的 stage 字段标记当前阶段；工具列表按前置条件动态暴露，"
             "看不到的工具说明其前置未满足，先完成当前阶段的关键动作）：",
             "- briefing：从最低成本的证据开始、逐级升级，证据够了就停；不必为动手而理解全部素材，"
-            "超出需要的深度理解是浪费。先读 assets 块与 asset.list_assets（免费；文件名/时长/尺寸/"
-            "方向/音轨/状态往往已够判断素材构成）；需要看画面内容时再用 media.view_frames 对少量"
-            "候选抽帧提问（昂贵，一次少量帧）；只对真正要进剪辑决策的素材调 understand.materials "
-            "生成带时间戳摘要（昂贵；逐素材增量完成，再次调用同素材命中缓存直接回摘要），"
+            "超出需要的深度理解是浪费。证据梯度固定为 L0 清单（免费）→ scan 粗扫（便宜）→ 少量"
+            "候选 deep（昂贵）。先读 assets 块与 asset.list_assets（文件名/时长/尺寸/方向/音轨/状态"
+            "往往已够判断素材构成）；粗扫配方：understand.materials(asset_ids=[全部候选], "
+            'depth="scan", focus="要找什么")；点查配方：understand.materials(asset_ids=[单个], '
+            'depth="deep", focus="02:10 附近画面适合做开头吗", max_steps_per_asset=2)。'
+            "定向问题必须给小步数；单素材带 focus 未给步数时系统按 4 处理。"
+            "归档 deep 单次不超过 3 个"
+            "且只限 L0/scan 已选中的候选；已有摘要能回答就直接引用，不要重新理解。"
+            "同一批 asset_ids 在本回合 scan 完成后，不得只改写 focus 再扫一次；"
+            "直接使用已有 relevance 排序挑候选。"
             "配合 audio.inspect_sources 检查音频。向用户提的问题必须落在素材的具体内容上"
             "（比如某段画面适不适合开头、这首 BGM 用不用），不要问“主题/平台/风格”这类不看素材"
             "也能问的问卷式问题。audio_plan 未确定且素材含人声时，必须用 interaction.ask_user "
             "创建 audio_mode 决策（原声粗剪 / TTS 配音 / 静音），这是解锁后续工具的唯一路径。",
             "- drafting：按 audio_plan 推进——原声：audio.asr_original → audio.rough_cut_speech；"
             "TTS：audio.generate_tts。cut_plan 与 timeline 就绪后 render.preview → "
-            "interaction.show_preview；用户表达满意时用 interaction.confirm_action "
+            "render.inspect_preview → interaction.show_preview；用户表达满意时用 "
+            "interaction.confirm_action "
             "创建 approve_rough_cut 确认。",
             "- refining：粗剪已确认。逐项询问字幕与 BGM（timeline.apply_patch 的 "
             "generate_subtitles / add_bgm op；postprocess_plan 缺失时 gate 会自动转决策，"
@@ -562,10 +569,9 @@ def _render_turn_observations_block(
     if not observations:
         return "本回合尚未执行任何工具。"
     lines = [f"- {item}" for item in observations]
-    while lines and counter("\n".join(lines)) > budget:
-        lines.pop(0)
+    body = _fit_lines(lines, budget, counter, from_end=True)
     header = "本回合已执行（时间顺序，不要重复相同调用）："
-    return header + "\n" + "\n".join(lines)
+    return header + "\n" + body
 
 
 _COST_TIER_LABELS: dict[str, str] = {"free": "免费", "cheap": "便宜", "expensive": "昂贵"}
@@ -588,7 +594,10 @@ def _render_allowed_tools_block(allowed_tools: Sequence[ToolSpec]) -> str:
     lines = [
         "能力目录（完整参数 Schema 已在原生 tools 参数里；这里只列能力，按成本从低到高选用）：",
         *(
-            f"- {spec.name}（{_COST_TIER_LABELS[spec.cost_tier]}）：{spec.description}"
+            "- "
+            + spec.name
+            + f"（{spec.cost_note or _COST_TIER_LABELS[spec.cost_tier]}）："
+            + spec.description
             for spec in ordered
         ),
     ]

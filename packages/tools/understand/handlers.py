@@ -13,8 +13,11 @@ handler 只有只读连接：落库与发事件走 loop 注入的 ``metadata["pa
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import logging
 import os
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -34,6 +37,7 @@ from contracts.events import (
 )
 from contracts.tool_result import ToolError, ToolResult
 from contracts.transcript import TranscriptDocument
+from contracts.understanding import ScanAssetResult, ScanFrameUsed, ScanSkippedAsset
 from media import Shot, split_shots
 from providers import (
     VLM_UNDERSTANDING,
@@ -48,7 +52,12 @@ from storage.repositories import MaterialSummariesRepository
 from storage.repositories._json import load_json
 from storage.workspace_paths import WorkspacePaths, resolve_asset_path
 from tools.context import ToolExecutionContext
-from tools.media_tools import extract_frame_data_uri
+from tools.media_tools import (
+    LabeledImage,
+    extract_frame_data_uri,
+    image_path_data_uri,
+    multimodal_messages,
+)
 from tools.specs import UnderstandMaterialsInput
 
 from .asr import transcribe_to_document
@@ -64,6 +73,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONCURRENCY = 3
 DEFAULT_TIMEOUT_S = 300.0
+SCAN_BATCH_SIZE = 8
 
 # 增量提交回调（loop 注入 metadata["partial_result_sink"]）：rows 是 material_summary_rows /
 # transcript_rows 形态的落库字典，events 是同批领域事件；先落库后发事件由 loop 侧保证。
@@ -90,7 +100,22 @@ class _Pending:
     prior_summary: dict[str, Any] | None
 
 
+@dataclass(frozen=True, slots=True)
+class _ScanPrepared:
+    info: _AssetInfo
+    image: LabeledImage
+    frame_used: ScanFrameUsed
+
+
 async def materials(
+    input_model: UnderstandMaterialsInput, context: ToolExecutionContext
+) -> ToolResult:
+    if input_model.depth == "scan":
+        return await _scan_materials(input_model, context)
+    return await _deep_materials(input_model, context)
+
+
+async def _deep_materials(
     input_model: UnderstandMaterialsInput, context: ToolExecutionContext
 ) -> ToolResult:
     tool_name = "understand.materials"
@@ -105,6 +130,10 @@ async def materials(
     progress = _progress(context)
     sink = _partial_sink(context)
     model = _vlm_model()
+    point_query = _point_query_mode(input_model)
+    step_budget = _effective_step_budget(input_model)
+    archive = not point_query
+    active_sink = sink if archive else None
 
     summaries_repo = MaterialSummariesRepository(connection)
     latest = summaries_repo.list_latest_for_assets(asset_ids)
@@ -122,7 +151,11 @@ async def materials(
         if prior is not None and focus is None and _cache_valid(prior, info, model):
             cached[asset_id] = dict(prior["summary_json"])
             continue
-        version = int(prior["version"]) + 1 if prior is not None else 1
+        version = (
+            int(prior["version"])
+            if point_query and prior is not None
+            else (int(prior["version"]) + 1 if prior is not None else 1)
+        )
         pending[asset_id] = _Pending(
             version=version,
             prior_summary=dict(prior["summary_json"]) if prior is not None else None,
@@ -130,6 +163,16 @@ async def materials(
 
     outcomes: dict[str, SubagentOutcome] = {}
     index_events: list[dict[str, Any]] = []
+    completed_count = 0
+    total_count = len(pending)
+    progress(
+        {
+            "tool": tool_name,
+            "completed": completed_count,
+            "total": total_count,
+            "note": f"理解中 {completed_count}/{total_count}",
+        }
+    )
     if gateway is None:
         # 无 VLM 通道：不派子代理、不算分镜（分镜的用处是喂子代理，理解注定失败就没必要烧 CPU）。
         for asset_id in pending:
@@ -140,8 +183,19 @@ async def materials(
                 failure_code="vlm_error",
             )
             outcomes[asset_id] = outcome
-            if sink is not None:
-                _sink_outcome(sink, outcome, context, asset_info.get(asset_id), focus, draft_id)
+            completed_count += 1
+            if active_sink is not None:
+                _sink_outcome(
+                    active_sink, outcome, context, asset_info.get(asset_id), focus, draft_id
+                )
+            progress(
+                {
+                    "tool": tool_name,
+                    "completed": completed_count,
+                    "total": total_count,
+                    "note": f"理解中 {completed_count}/{total_count}",
+                }
+            )
     else:
         # 逐素材增量完成：单素材（含其按需分镜）一到就经 sink 立即落库发事件（UI 卡片
         # 逐个变绿），不必等最慢的那个算完分镜/理解；无 sink 的旧路径退回批量回填。
@@ -154,19 +208,42 @@ async def materials(
             focus=focus,
             model=model,
             progress=progress,
-            sink=sink,
+            sink=active_sink,
             draft_id=draft_id,
+            archive=archive,
+            step_budget=step_budget,
         )
+        remaining = set(tasks)
         try:
-            for completed in asyncio.as_completed(tasks):
-                outcome, asset_index_events = await completed
-                outcomes[outcome.asset_id] = outcome
-                if sink is not None:
-                    _sink_outcome(
-                        sink, outcome, context, asset_info.get(outcome.asset_id), focus, draft_id
+            while remaining and not _cancel_requested(context):
+                done, remaining = await asyncio.wait(
+                    remaining,
+                    timeout=0.05,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for completed in done:
+                    outcome, asset_index_events = await completed
+                    outcomes[outcome.asset_id] = outcome
+                    completed_count += 1
+                    if active_sink is not None:
+                        _sink_outcome(
+                            active_sink,
+                            outcome,
+                            context,
+                            asset_info.get(outcome.asset_id),
+                            focus,
+                            draft_id,
+                        )
+                    else:
+                        index_events.extend(asset_index_events)
+                    progress(
+                        {
+                            "tool": tool_name,
+                            "completed": completed_count,
+                            "total": total_count,
+                            "note": f"理解中 {completed_count}/{total_count}",
+                        }
                     )
-                else:
-                    index_events.extend(asset_index_events)
         finally:
             # 消费循环任何异常（如 sink 落库抛错）或回合取消都不能弃置在飞任务：
             # 否则它们继续在后台跑、经 sink 脏写库发事件、VLM 费用照烧。
@@ -174,6 +251,17 @@ async def materials(
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+        if _cancel_requested(context):
+            for asset_id in pending:
+                outcomes.setdefault(
+                    asset_id,
+                    SubagentOutcome(
+                        asset_id=asset_id,
+                        status="failed",
+                        failure_reason="用户已取消本轮理解",
+                        failure_code="cancelled",
+                    ),
+                )
 
     return _assemble_result(
         tool_name,
@@ -185,9 +273,365 @@ async def materials(
         cached=cached,
         missing=missing,
         outcomes=outcomes,
-        incremental=sink is not None,
+        incremental=active_sink is not None,
         index_events=index_events,
+        archive=archive,
     )
+
+
+async def _scan_materials(
+    input_model: UnderstandMaterialsInput, context: ToolExecutionContext
+) -> ToolResult:
+    """Cheap, non-persistent multi-asset visual scan in batches of at most eight."""
+
+    tool_name = "understand.materials"
+    connection = context.readonly_connection
+    if connection is None:
+        return _failed(tool_name, context, "missing_connection", "需要只读仓库连接")
+    asset_ids = list(dict.fromkeys(input_model.asset_ids))
+    focus = (input_model.focus or "").strip() or None
+    info_by_id = _load_asset_info(connection, asset_ids, context)
+    skipped: list[ScanSkippedAsset] = []
+    visual: list[_AssetInfo] = []
+    for asset_id in asset_ids:
+        info = info_by_id.get(asset_id)
+        if info is None:
+            skipped.append(ScanSkippedAsset(asset_id=asset_id, reason="not_found"))
+        elif info.kind == "audio":
+            skipped.append(ScanSkippedAsset(asset_id=asset_id, reason="audio"))
+        elif info.kind not in {"video", "image"}:
+            skipped.append(ScanSkippedAsset(asset_id=asset_id, reason="unsupported_kind"))
+        else:
+            visual.append(info)
+
+    scan_cancel_event = threading.Event()
+    prepare_tasks = [
+        asyncio.create_task(_prepare_scan_frame(info, context, scan_cancel_event))
+        for info in visual
+    ]
+    info_by_task = dict(zip(prepare_tasks, visual, strict=True))
+    prepared_by_id: dict[str, _ScanPrepared] = {}
+    frame_failed: set[str] = set()
+    remaining_prepare = set(prepare_tasks)
+    try:
+        while remaining_prepare:
+            prepare_done, remaining_prepare = await asyncio.wait(
+                remaining_prepare,
+                timeout=0.05,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for prepare_task in prepare_done:
+                info = info_by_task[prepare_task]
+                try:
+                    prepared_item = await prepare_task
+                except Exception:
+                    frame_failed.add(info.asset_id)
+                    skipped.append(ScanSkippedAsset(asset_id=info.asset_id, reason="frame_error"))
+                else:
+                    prepared_by_id[info.asset_id] = prepared_item
+            if _cancel_requested(context):
+                scan_cancel_event.set()
+                break
+    finally:
+        if remaining_prepare:
+            scan_cancel_event.set()
+        for task in prepare_tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*prepare_tasks, return_exceptions=True)
+
+    cancelled_during_prepare = _cancel_requested(context)
+    if cancelled_during_prepare:
+        skipped.extend(
+            ScanSkippedAsset(asset_id=info.asset_id, reason="cancelled")
+            for info in visual
+            if info.asset_id not in frame_failed
+        )
+        prepared: list[_ScanPrepared] = []
+    else:
+        prepared = [
+            prepared_by_id[info.asset_id] for info in visual if info.asset_id in prepared_by_id
+        ]
+
+    gateway = _provider_gateway(context)
+    progress = _progress(context)
+    batches = [
+        prepared[index : index + SCAN_BATCH_SIZE]
+        for index in range(0, len(prepared), SCAN_BATCH_SIZE)
+    ]
+    progress(
+        {
+            "tool": tool_name,
+            "completed": 0,
+            "total": len(batches),
+            "note": f"正在粗扫 0/{len(batches)} 批",
+        }
+    )
+    if cancelled_during_prepare:
+        assets: list[ScanAssetResult] = []
+    elif gateway is None:
+        skipped.extend(
+            ScanSkippedAsset(asset_id=item.info.asset_id, reason="vlm_error") for item in prepared
+        )
+        assets = []
+    else:
+        tasks = [
+            asyncio.create_task(
+                _scan_batch(
+                    batch,
+                    context,
+                    gateway=gateway,
+                    focus=focus,
+                    model=_vlm_model(),
+                    batch_index=index,
+                )
+            )
+            for index, batch in enumerate(batches, start=1)
+        ]
+        assets = []
+        completed_batches = 0
+        settled_asset_ids: set[str] = set()
+        remaining_batches = set(tasks)
+        try:
+            while remaining_batches:
+                batch_done, remaining_batches = await asyncio.wait(
+                    remaining_batches,
+                    timeout=0.05,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for batch_task in batch_done:
+                    batch_assets, batch_skipped = await batch_task
+                    assets.extend(batch_assets)
+                    skipped.extend(batch_skipped)
+                    batch_index = tasks.index(batch_task)
+                    settled_asset_ids.update(item.info.asset_id for item in batches[batch_index])
+                    completed_batches += 1
+                    progress(
+                        {
+                            "tool": tool_name,
+                            "completed": completed_batches,
+                            "total": len(batches),
+                            "note": f"正在粗扫 {completed_batches}/{len(batches)} 批",
+                        }
+                    )
+                if _cancel_requested(context):
+                    break
+        finally:
+            for batch_task in tasks:
+                if not batch_task.done():
+                    batch_task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if _cancel_requested(context):
+            scan_cancel_event.set()
+            skipped.extend(
+                ScanSkippedAsset(asset_id=item.info.asset_id, reason="cancelled")
+                for item in prepared
+                if item.info.asset_id not in settled_asset_ids
+            )
+
+    if focus is not None:
+        assets.sort(key=lambda item: item.relevance_0_100 or 0.0, reverse=True)
+    order = {asset_id: index for index, asset_id in enumerate(asset_ids)}
+    skipped.sort(key=lambda item: order.get(item.asset_id, len(order)))
+    lines: list[str] = []
+    for scan_asset in assets:
+        evidence = "、".join(
+            f"{frame.at_sec:.2f}s/{frame.source}" for frame in scan_asset.frames_used
+        )
+        gist = " ".join(scan_asset.gist.split())[:120]
+        tags = "、".join(scan_asset.tags[:6]) or "无"
+        lines.append(
+            f"【{scan_asset.asset_id}】{gist}；标签：{tags}；证据：{evidence}；"
+            f"置信度 {scan_asset.confidence:.2f}"
+            + (
+                f"；相关度 {scan_asset.relevance_0_100:.0f}"
+                if scan_asset.relevance_0_100 is not None
+                else ""
+            )
+        )
+    lines.extend(f"【{item.asset_id}】已跳过：{item.reason}" for item in skipped)
+    data = {
+        "depth": "scan",
+        "scan": {
+            "assets": [item.model_dump(mode="json", exclude_none=True) for item in assets],
+            "skipped": [item.model_dump(mode="json") for item in skipped],
+        },
+        "deep": None,
+    }
+    return ToolResult(
+        tool_call_id=context.tool_call_id,
+        tool_name=tool_name,
+        status="succeeded",
+        observation="\n".join(lines) if lines else "没有可粗扫的视觉素材。",
+        data=data,
+        events=[],
+    )
+
+
+async def _prepare_scan_frame(
+    info: _AssetInfo,
+    context: ToolExecutionContext,
+    cancel_event: threading.Event,
+) -> _ScanPrepared:
+    paths = _workspace_paths_or_none(context)
+    if paths is not None and info.thumbnail_object_hash is not None:
+        poster = paths.object_path(info.thumbnail_object_hash)
+        if poster.is_file():
+            poster_sec = (
+                0.0
+                if info.kind == "image"
+                else (
+                    1.0
+                    if (info.duration_sec or 0.0) >= 2.0
+                    else max(0.0, (info.duration_sec or 0.0) / 10)
+                )
+            )
+            return _ScanPrepared(
+                info=info,
+                image=LabeledImage(
+                    label=(
+                        f"asset_id={info.asset_id}; at_sec={_fmt_sec(poster_sec)}; source=poster"
+                    ),
+                    data_uri=await _cancellable_thread_call(
+                        # thumbnail worker 固定输出 JPEG；对象存储路径是无扩展名 hash，
+                        # 因此这里必须显式保留真实 MIME，不能靠 suffix 猜成 octet-stream。
+                        lambda: image_path_data_uri(poster, mime="image/jpeg"),
+                        cancel_event,
+                    ),
+                ),
+                frame_used=ScanFrameUsed(at_sec=poster_sec, source="poster"),
+            )
+    if info.path is None or not info.path.is_file():
+        raise FileNotFoundError(info.asset_id)
+    source_path = info.path
+    at_sec = 0.0 if info.kind == "image" else max(0.0, (info.duration_sec or 0.0) / 2)
+    if info.kind == "image":
+        data_uri = await _cancellable_thread_call(
+            lambda: image_path_data_uri(source_path), cancel_event
+        )
+    else:
+        data_uri = await _cancellable_thread_call(
+            lambda: extract_frame_data_uri(source_path, at_sec, cancel_event=cancel_event),
+            cancel_event,
+        )
+    return _ScanPrepared(
+        info=info,
+        image=LabeledImage(
+            label=f"asset_id={info.asset_id}; at_sec={_fmt_sec(at_sec)}; source=extracted",
+            data_uri=data_uri,
+        ),
+        frame_used=ScanFrameUsed(at_sec=at_sec, source="extracted"),
+    )
+
+
+async def _cancellable_thread_call(call: Callable[[], str], cancel_event: threading.Event) -> str:
+    worker = asyncio.create_task(asyncio.to_thread(call))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        cancel_event.set()
+        with contextlib.suppress(Exception):
+            await asyncio.shield(worker)
+        raise
+
+
+async def _scan_batch(
+    batch: list[_ScanPrepared],
+    context: ToolExecutionContext,
+    *,
+    gateway: Any,
+    focus: str | None,
+    model: str,
+    batch_index: int,
+) -> tuple[list[ScanAssetResult], list[ScanSkippedAsset]]:
+    prompt = (
+        "你是视频素材粗扫器。每个 asset_id 只基于其紧随的图像给出一句 gist、短 tags、"
+        "0 到 1 的 confidence。"
+        + (
+            f"筛选关注点：{focus}。还必须给 relevance_0_100，并按每个素材独立评分。"
+            if focus is not None
+            else "不要返回 relevance_0_100 字段。"
+        )
+        + ' 只返回 JSON：{"assets":[{"asset_id":"...","gist":"...","tags":[],"confidence":0.8'
+        + ('，"relevance_0_100":80' if focus is not None else "")
+        + "}]}。"
+    )
+    request = ProviderRequest(
+        capability=VLM_UNDERSTANDING,
+        request_id=f"understand_scan_{context.tool_call_id}_{batch_index}_{uuid4().hex[:8]}",
+        model=model,
+        draft_id=_draft_id(context),
+        payload={
+            "messages": multimodal_messages(prompt, [item.image for item in batch]),
+            "params": {"temperature": 0, "response_format": {"type": "json_object"}},
+        },
+    )
+    try:
+        gateway_result = await gateway.call(request)
+        result = gateway_result.result
+        if result.error is not None:
+            raise RuntimeError(f"{result.error.error_code}: {result.error.message}")
+        output = _action_from_output(result.normalized_output)
+        parsed = _scan_assets_from_output(output, batch, focus=focus)
+    except Exception:
+        return [], [
+            ScanSkippedAsset(asset_id=item.info.asset_id, reason="vlm_error") for item in batch
+        ]
+    found = {item.asset_id for item in parsed}
+    skipped = [
+        ScanSkippedAsset(asset_id=item.info.asset_id, reason="invalid_response")
+        for item in batch
+        if item.info.asset_id not in found
+    ]
+    return parsed, skipped
+
+
+def _scan_assets_from_output(
+    output: Mapping[str, Any],
+    batch: list[_ScanPrepared],
+    *,
+    focus: str | None,
+) -> list[ScanAssetResult]:
+    raw_assets = output.get("assets")
+    if not isinstance(raw_assets, list):
+        return []
+    prepared_by_id = {item.info.asset_id: item for item in batch}
+    parsed: list[ScanAssetResult] = []
+    seen: set[str] = set()
+    for raw in raw_assets:
+        if not isinstance(raw, Mapping):
+            continue
+        asset_id = raw.get("asset_id")
+        if not isinstance(asset_id, str) or asset_id in seen or asset_id not in prepared_by_id:
+            continue
+        gist = raw.get("gist")
+        if not isinstance(gist, str) or not gist.strip():
+            continue
+        confidence = _bounded_number(raw.get("confidence"), lower=0, upper=1)
+        relevance = (
+            _bounded_number(raw.get("relevance_0_100"), lower=0, upper=100)
+            if focus is not None
+            else None
+        )
+        if confidence is None or (focus is not None and relevance is None):
+            continue
+        tags = raw.get("tags")
+        tag_values = (
+            [str(tag).strip() for tag in tags if str(tag).strip()] if isinstance(tags, list) else []
+        )
+        evidence = prepared_by_id[asset_id]
+        parsed.append(
+            ScanAssetResult(
+                asset_id=asset_id,
+                gist=gist.strip(),
+                tags=tag_values,
+                relevance_0_100=relevance,
+                confidence=confidence,
+                frames_used=[evidence.frame_used],
+            )
+        )
+        seen.add(asset_id)
+    return parsed
 
 
 def _spawn_understanding_tasks(
@@ -201,6 +645,8 @@ def _spawn_understanding_tasks(
     progress: Any,
     sink: PartialResultSink | None,
     draft_id: str | None,
+    archive: bool,
+    step_budget: int,
 ) -> list[asyncio.Task[tuple[SubagentOutcome, list[dict[str, Any]]]]]:
     """给每个 pending 素材起一个理解任务，返回 Task 列表交调用方持有并收拢。
 
@@ -217,11 +663,19 @@ def _spawn_understanding_tasks(
     async def _one(asset_id: str, item: _Pending) -> tuple[SubagentOutcome, list[dict[str, Any]]]:
         async with semaphore:
             produced_events: list[dict[str, Any]] = []
+            cancel_event = threading.Event()
 
             async def _run() -> SubagentOutcome:
-                info, index_events = await _backfill_shots_one(
-                    asset_info[asset_id], context, sink=sink, draft_id=draft_id
-                )
+                info = asset_info[asset_id]
+                index_events: list[dict[str, Any]] = []
+                if archive:
+                    info, index_events = await _backfill_shots_one(
+                        info,
+                        context,
+                        sink=sink,
+                        draft_id=draft_id,
+                        cancel_event=cancel_event,
+                    )
                 produced_events.extend(index_events)
                 spec = _make_spec(
                     context,
@@ -232,12 +686,18 @@ def _spawn_understanding_tasks(
                     prior_summary=item.prior_summary,
                     model=model,
                     progress=progress,
+                    step_budget=step_budget,
+                    cancel_event=cancel_event,
                 )
                 return await run_understanding_subagent(spec)
 
             try:
                 outcome = await asyncio.wait_for(_run(), timeout=timeout)
+            except asyncio.CancelledError:
+                cancel_event.set()
+                raise
             except TimeoutError:
+                cancel_event.set()
                 outcome = SubagentOutcome(
                     asset_id=asset_id,
                     status="failed",
@@ -306,6 +766,7 @@ def _assemble_result(
     outcomes: Mapping[str, SubagentOutcome],
     incremental: bool,
     index_events: list[dict[str, Any]],
+    archive: bool,
 ) -> ToolResult:
     events: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
@@ -315,7 +776,7 @@ def _assemble_result(
     counts = {"ready": 0, "failed": 0, "cached": 0}
 
     # 增量路径下产物已由 sink 逐素材落库/发事件，最终 ToolResult 只保留汇总，避免 loop 双写。
-    if not incremental:
+    if archive and not incremental:
         events.extend(index_events)
 
     for asset_id in asset_ids:
@@ -323,22 +784,36 @@ def _assemble_result(
         filename = info.filename if info is not None else asset_id
         if asset_id in cached:
             summary = cached[asset_id]
-            results[asset_id] = {"status": "cached", "summary": summary}
+            results[asset_id] = {
+                "asset_id": asset_id,
+                "status": "cached",
+                "version": _optional_summary_version(summary),
+                "summary": summary,
+            }
             lines.append("（缓存命中）" + _summary_text(asset_id, filename, summary))
             counts["cached"] += 1
             continue
         if asset_id in missing:
-            results[asset_id] = {"status": "failed", "reason": "素材不存在或未链接到项目"}
+            results[asset_id] = {
+                "asset_id": asset_id,
+                "status": "failed",
+                "reason": "素材不存在或未链接到项目",
+            }
             lines.append(f"【{asset_id}】理解失败：素材不存在或未链接到项目。")
             counts["failed"] += 1
             continue
         outcome = outcomes[asset_id]
         if outcome.status == "ready" and outcome.summary is not None:
             summary = outcome.summary.model_dump(mode="json")
-            results[asset_id] = {"status": "ready", "summary": summary}
+            results[asset_id] = {
+                "asset_id": asset_id,
+                "status": "ready",
+                "version": _optional_summary_version(summary),
+                "summary": summary,
+            }
             lines.append(_summary_text(asset_id, filename, summary))
             counts["ready"] += 1
-            if not incremental:
+            if archive and not incremental:
                 # 只对真实存在的素材派事件：给不存在的 asset 发事件会在 reducer 里插出幽灵行。
                 events.append(_event(MaterialUnderstandingStarted, asset_id, draft_id))
                 summary_rows.append(
@@ -350,11 +825,16 @@ def _assemble_result(
         else:
             reason = outcome.failure_reason or "未知原因"
             code = outcome.failure_code
-            results[asset_id] = {"status": "failed", "reason": reason, "failure_code": code}
+            results[asset_id] = {
+                "asset_id": asset_id,
+                "status": "failed",
+                "reason": reason,
+                "failure_code": code,
+            }
             suffix = f"（{code}）" if code else ""
             lines.append(f"【{asset_id}/{filename}】理解失败{suffix}：{reason}。")
             counts["failed"] += 1
-            if not incremental:
+            if archive and not incremental:
                 events.append(_event(MaterialUnderstandingStarted, asset_id, draft_id))
                 events.append(
                     _event(
@@ -369,7 +849,15 @@ def _assemble_result(
         f"共 {counts['ready']} 个理解完成、{counts['failed']} 个失败、"
         f"{counts['cached']} 个缓存命中。"
     )
-    data: dict[str, Any] = {"results": results}
+    data: dict[str, Any] = {
+        "depth": "deep",
+        "scan": None,
+        "results": results,
+        "deep": {
+            "mode": "archive" if archive else "point_query",
+            "assets": [results[asset_id] for asset_id in asset_ids],
+        },
+    }
     if summary_rows:
         data["material_summary_rows"] = summary_rows
     if transcript_rows:
@@ -390,6 +878,7 @@ async def _backfill_shots_one(
     *,
     sink: PartialResultSink | None,
     draft_id: str | None,
+    cancel_event: threading.Event,
 ) -> tuple[_AssetInfo, list[dict[str, Any]]]:
     """给缺 shots 的单个 video 素材按需算分镜，合并进 index_json 并发 AssetIndexReady。
 
@@ -410,8 +899,18 @@ async def _backfill_shots_one(
     paths = _workspace_paths_or_none(context)
     if paths is None:
         return info, []
+    worker = asyncio.create_task(
+        asyncio.to_thread(split_shots, info.path, paths=paths, cancel_event=cancel_event)
+    )
     try:
-        shots = await asyncio.to_thread(split_shots, info.path, paths=paths)
+        # shield 防止外层 task.cancel 直接把 Future 标成 cancelled；收到取消后先通知
+        # 分镜线程停止 ffmpeg/PySceneDetect，再等线程真正收拢，避免回合结束后继续烧 CPU/写缓存。
+        shots = await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        cancel_event.set()
+        with contextlib.suppress(Exception):
+            await asyncio.shield(worker)
+        raise
     except Exception as exc:  # 分镜是廉价加成，失败只降级不阻塞理解
         logger.warning("按需分镜失败，跳过 shots 回填：asset_id=%s err=%s", info.asset_id, exc)
         return info, []
@@ -473,6 +972,8 @@ def _make_spec(
     prior_summary: dict[str, Any] | None,
     model: str,
     progress: Any,
+    step_budget: int,
+    cancel_event: threading.Event,
 ) -> SubagentSpec:
     async def _vlm(messages: list[dict[str, Any]]) -> dict[str, Any]:
         request = ProviderRequest(
@@ -494,7 +995,7 @@ def _make_spec(
     def _extract(seconds: float) -> str:
         if info.path is None:
             raise FileNotFoundError(f"素材文件不可读：{info.asset_id}")
-        return extract_frame_data_uri(info.path, seconds)
+        return extract_frame_data_uri(info.path, seconds, cancel_event=cancel_event)
 
     async def _transcribe(start_s: float | None, end_s: float | None) -> TranscribeResult:
         return await _transcribe_segment(context, info, start_s, end_s)
@@ -514,6 +1015,8 @@ def _make_spec(
         focus=focus,
         prior_summary=prior_summary,
         progress=progress,
+        step_budget=step_budget,
+        cancel_event=cancel_event,
     )
 
 
@@ -597,8 +1100,19 @@ def _load_asset_info(
 ) -> dict[str, _AssetInfo]:
     if not asset_ids:
         return {}
+    draft_id = _draft_id(context)
+    if draft_id is None:
+        return {}
     rows = connection.execute(
-        select(schema.assets).where(schema.assets.c.asset_id.in_(asset_ids))
+        select(schema.assets)
+        .join(
+            schema.draft_asset_links,
+            schema.draft_asset_links.c.asset_id == schema.assets.c.asset_id,
+        )
+        .where(
+            schema.assets.c.asset_id.in_(asset_ids),
+            schema.draft_asset_links.c.draft_id == draft_id,
+        )
     ).all()
     paths = _workspace_paths_or_none(context)
     info: dict[str, _AssetInfo] = {}
@@ -752,7 +1266,6 @@ def _action_from_output(output: Any) -> dict[str, Any]:
 
 
 def _try_json(value: str) -> Any:
-    import json
 
     try:
         return json.loads(value)
@@ -814,12 +1327,45 @@ def _partial_sink(context: ToolExecutionContext) -> PartialResultSink | None:
     return sink if callable(sink) else None
 
 
+def _cancel_requested(context: ToolExecutionContext) -> bool:
+    token = context.metadata.get("stop_token")
+    return bool(getattr(token, "cancel_requested", False))
+
+
 def _as_int(value: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _as_str_or_none(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
+
+
+def _bounded_number(value: Any, *, lower: float, upper: float) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    number = float(value)
+    if lower <= number <= upper:
+        return number
+    return None
+
+
+def _point_query_mode(input_model: UnderstandMaterialsInput) -> bool:
+    if input_model.max_steps_per_asset is not None:
+        return input_model.max_steps_per_asset <= 4
+    return bool(
+        input_model.focus and input_model.focus.strip() and len(set(input_model.asset_ids)) == 1
+    )
+
+
+def _effective_step_budget(input_model: UnderstandMaterialsInput) -> int:
+    if input_model.max_steps_per_asset is not None:
+        return input_model.max_steps_per_asset
+    return 4 if _point_query_mode(input_model) else 12
+
+
+def _optional_summary_version(summary: Mapping[str, Any]) -> int | None:
+    value = summary.get("version")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _workspace_paths(context: ToolExecutionContext) -> WorkspacePaths:

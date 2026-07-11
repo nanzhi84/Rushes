@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StorageMode(StrEnum):
@@ -57,7 +57,9 @@ class AssetRecord(BaseModel):
     size: int
     probe: AssetProbe
     proxy_object_uri: str | None = None
-    ingest_status: Literal["imported", "probing", "proxying", "indexed", "failed"]
+    ingest_status: Literal[
+        "imported", "probing", "probed", "proxying", "indexed", "ready", "failed"
+    ]
     usable: bool
     failure: AssetFailure | None = None
 
@@ -74,3 +76,34 @@ class AssetRecord(BaseModel):
             if self.reference_path is None:
                 raise ValueError("reference storage mode requires reference_path")
         return self
+
+
+class AssetManifestEntry(BaseModel):
+    """asset.list_assets 面向 planner 的紧凑素材清单条目。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    asset_id: str
+    filename: str
+    kind: AssetKind
+    rel_dir: str | None = None
+    duration_sec: float | None = None
+    fps: float | None = None
+    width: int | None = None
+    height: int | None = None
+    orientation: Literal["landscape", "portrait", "square"] | None = None
+    has_audio: bool | None = None
+    usable: bool
+    ingest_status: str
+    understanding_status: str
+    has_summary: bool
+    thumbnail_ready: bool
+
+
+class AssetListAssetsResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    draft_id: str
+    assets: list[AssetManifestEntry] = Field(default_factory=list)
+    total: int = Field(ge=0)
+    next_after: str | None = None
