@@ -430,49 +430,71 @@ func (service *Service) toolEnqueueRender(
 	if draft.TimelineCurrentVersion == nil || !draft.TimelineValidated {
 		return rushestools.ToolResult{}, errors.New("当前时间线尚未验证")
 	}
-	idempotencyKey := fmt.Sprintf("%s:%s:%d", kind, draftID, *draft.TimelineCurrentVersion)
-	if existing, found, err := service.findRenderJob(ctx, kind, idempotencyKey); err != nil {
+	baseIdempotencyKey := fmt.Sprintf("%s:%s:%d", kind, draftID, *draft.TimelineCurrentVersion)
+	idempotencyKey := baseIdempotencyKey
+	retryOfJobID := ""
+	if existing, found, err := service.findRenderJob(ctx, kind, baseIdempotencyKey, true); err != nil {
 		return rushestools.ToolResult{}, err
 	} else if found {
-		return existing, nil
+		if existing.Status != "failed" && existing.Status != "cancelled" {
+			return renderJobResult(kind, existing.ID, existing.Status), nil
+		}
+		retryOfJobID = existing.ID
+		idempotencyKey = fmt.Sprintf("%s:retry:%s", baseIdempotencyKey, existing.ID)
 	}
 	jobID := randomID("job")
+	jobPayload := map[string]any{"timeline_version": *draft.TimelineCurrentVersion}
+	if retryOfJobID != "" {
+		jobPayload["retry_of_job_id"] = retryOfJobID
+	}
 	result, err := reducer.Apply(ctx, service.database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: draftID,
 		Payload: map[string]any{
 			"job_id": jobID, "kind": kind, "requested_by_draft_id": draftID,
 			"idempotency_key": idempotencyKey,
-			"job_payload":     map[string]any{"timeline_version": *draft.TimelineCurrentVersion},
+			"job_payload":     jobPayload,
 			"next_run_at":     time.Now().UTC().Format(time.RFC3339Nano), "priority": 30,
 		},
 	}}, reducer.Options{Actor: contracts.ActorAgent})
 	if err != nil || result.Status != reducer.StatusApplied {
-		if existing, found, lookupErr := service.findRenderJob(ctx, kind, idempotencyKey); lookupErr != nil {
+		if existing, found, lookupErr := service.findRenderJob(ctx, kind, idempotencyKey, false); lookupErr != nil {
 			return rushestools.ToolResult{}, errors.Join(err, lookupErr)
 		} else if found {
-			return existing, nil
+			return renderJobResult(kind, existing.ID, existing.Status), nil
 		}
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("reducer status: %s", result.Status))
 	}
 	return renderJobResult(kind, jobID, "pending"), nil
 }
 
+type renderJobRef struct {
+	ID     string
+	Status string
+}
+
 func (service *Service) findRenderJob(
 	ctx context.Context,
 	kind, idempotencyKey string,
-) (rushestools.ToolResult, bool, error) {
-	var jobID, status string
-	err := service.database.Read().QueryRowContext(ctx, `
-		SELECT job_id, status FROM jobs WHERE kind=? AND idempotency_key=?`,
-		kind, idempotencyKey,
-	).Scan(&jobID, &status)
+	includeRetries bool,
+) (renderJobRef, bool, error) {
+	query := "SELECT job_id, status FROM jobs WHERE kind=? AND idempotency_key=? LIMIT 1"
+	arguments := []any{kind, idempotencyKey}
+	if includeRetries {
+		retryPrefix := idempotencyKey + ":retry:"
+		query = `SELECT job_id, status FROM jobs
+			WHERE kind=? AND (idempotency_key=? OR substr(idempotency_key, 1, length(?))=?)
+			ORDER BY rowid DESC LIMIT 1`
+		arguments = []any{kind, idempotencyKey, retryPrefix, retryPrefix}
+	}
+	var job renderJobRef
+	err := service.database.Read().QueryRowContext(ctx, query, arguments...).Scan(&job.ID, &job.Status)
 	if errors.Is(err, sql.ErrNoRows) {
-		return rushestools.ToolResult{}, false, nil
+		return renderJobRef{}, false, nil
 	}
 	if err != nil {
-		return rushestools.ToolResult{}, false, err
+		return renderJobRef{}, false, err
 	}
-	return renderJobResult(kind, jobID, status), true, nil
+	return job, true, nil
 }
 
 func renderJobResult(kind, jobID, jobStatus string) rushestools.ToolResult {

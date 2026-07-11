@@ -393,7 +393,38 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 		t.Fatalf("render jobs=%d err=%v", renderJobs, err)
 	}
 	if _, err := database.Write().ExecContext(t.Context(),
-		"UPDATE jobs SET status='succeeded' WHERE job_id=?", firstRender.Data["job_id"]); err != nil {
+		"UPDATE jobs SET status='failed' WHERE job_id=?", firstRender.Data["job_id"]); err != nil {
+		t.Fatal(err)
+	}
+	retriedRenderRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retriedRender := retriedRenderRaw.(rushestools.ToolResult)
+	if retriedRender.Status != "queued" || retriedRender.Data["job_id"] == firstRender.Data["job_id"] {
+		t.Fatalf("failed render retry=%#v", retriedRender)
+	}
+	reusedRetryRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reusedRetryRaw.(rushestools.ToolResult).Data["job_id"] != retriedRender.Data["job_id"] {
+		t.Fatalf("active retry not reused=%#v", reusedRetryRaw)
+	}
+	if _, err := database.Write().ExecContext(t.Context(),
+		"UPDATE jobs SET status='cancelled' WHERE job_id=?", retriedRender.Data["job_id"]); err != nil {
+		t.Fatal(err)
+	}
+	secondRetryRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRetry := secondRetryRaw.(rushestools.ToolResult)
+	if secondRetry.Status != "queued" || secondRetry.Data["job_id"] == retriedRender.Data["job_id"] {
+		t.Fatalf("cancelled render retry=%#v", secondRetry)
+	}
+	if _, err := database.Write().ExecContext(t.Context(),
+		"UPDATE jobs SET status='succeeded' WHERE job_id=?", secondRetry.Data["job_id"]); err != nil {
 		t.Fatal(err)
 	}
 	completedRenderRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
@@ -401,8 +432,13 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 		t.Fatal(err)
 	}
 	completedRender := completedRenderRaw.(rushestools.ToolResult)
-	if completedRender.Status != "succeeded" || completedRender.Data["job_id"] != firstRender.Data["job_id"] {
+	if completedRender.Status != "succeeded" || completedRender.Data["job_id"] != secondRetry.Data["job_id"] {
 		t.Fatalf("completed render idempotency=%#v", completedRender)
+	}
+	var retryJobs int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM jobs WHERE kind='render_preview'`).Scan(&retryJobs); err != nil || retryJobs != 3 {
+		t.Fatalf("render retry jobs=%d err=%v", retryJobs, err)
 	}
 	if _, err := service.ExecuteTool(ctx, "timeline.restore_version", rushestools.TimelineRestoreInput{SourceVersion: 1}); err != nil {
 		t.Fatal(err)
@@ -750,7 +786,7 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 			t.Fatalf("closed database: %s 应失败", name)
 		}
 	}
-	if _, _, err := service.findRenderJob(t.Context(), "render_preview", "closed"); err == nil {
+	if _, _, err := service.findRenderJob(t.Context(), "render_preview", "closed", false); err == nil {
 		t.Fatal("closed findRenderJob 应失败")
 	}
 	if _, err := service.modelMessages(ctx, "draft_closed"); err == nil {
