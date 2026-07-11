@@ -64,6 +64,12 @@ func (server *Server) CancelJobApiJobsJobIdCancelPost(
 	result, err := reducer.Apply(request.Context(), server.database, []contracts.Event{{
 		Type: "JobCancelled", DraftID: eventDraftID, Payload: eventPayload,
 	}}, reducer.Options{Actor: contracts.ActorUser})
+	if errors.Is(err, reducer.ErrJobNotCancellable) {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"detail": map[string]string{"reason": "job_not_cancellable"},
+		})
+		return
+	}
 	if err != nil {
 		server.internalError(writer, err)
 		return

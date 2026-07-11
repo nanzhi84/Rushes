@@ -322,10 +322,28 @@ func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
 	if err != nil || result["status"] != "completed" || len(progress) != 2 {
 		t.Fatalf("result=%#v progress=%v err=%v", result, progress, err)
 	}
+	retryProgress := []float64{}
+	result, err = handler(t.Context(), Job{
+		ID: "understand_job", Payload: map[string]any{
+			"asset_ids": []any{"asset_u1", "asset_u2"}, "focus": "人物",
+		},
+	}, func(_ context.Context, _ Job, value float64) error {
+		retryProgress = append(retryProgress, value)
+		return nil
+	})
+	if err != nil || result["status"] != "completed" || len(retryProgress) != 2 {
+		t.Fatalf("retry result=%#v progress=%v err=%v", result, retryProgress, err)
+	}
 	for _, assetID := range []string{"asset_u1", "asset_u2"} {
 		asset, _ := storage.GetAsset(t.Context(), database.Read(), assetID)
 		if asset.UnderstandingStatus != "ready" {
 			t.Fatalf("%s status=%s", assetID, asset.UnderstandingStatus)
+		}
+		var summaries int
+		if err := database.Read().QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM material_summaries WHERE asset_id=?", assetID,
+		).Scan(&summaries); err != nil || summaries != 1 {
+			t.Fatalf("%s summaries=%d err=%v", assetID, summaries, err)
 		}
 	}
 	assetID := "asset_u1"
@@ -470,6 +488,84 @@ func TestRunnerFailsUnknownJobWithoutRetry(t *testing.T) {
 	job, err := GetJob(t.Context(), database, "job_unknown")
 	if err != nil || job.Status != "failed" {
 		t.Fatalf("job=%#v err=%v", job, err)
+	}
+}
+
+func TestRunnerPreservesCancellationAgainstLateProgressAndSuccess(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	now := time.Now().UTC()
+	createDraft(t, database, "draft_cancel_running", now)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	registry := NewRegistry()
+	if err := registry.Register("blocking", func(
+		ctx context.Context,
+		job Job,
+		report ProgressReporter,
+	) (map[string]any, error) {
+		close(started)
+		<-release
+		if err := report(ctx, job, 0.5); err != nil {
+			return nil, err
+		}
+		return map[string]any{"late": true}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	apply(t, database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft_cancel_running", Payload: map[string]any{
+			"job_id": "job_cancel_running", "kind": "blocking",
+			"requested_by_draft_id": "draft_cancel_running", "idempotency_key": "cancel-running",
+			"next_run_at": now.Format(time.RFC3339Nano),
+		},
+	}}, contracts.ActorUser, now)
+	runner, err := NewRunner(RunnerConfig{
+		Database: database, Registry: registry, WorkerID: "cancel-running",
+		HeartbeatInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type runResult struct {
+		worked bool
+		err    error
+	}
+	result := make(chan runResult, 1)
+	go func() {
+		worked, runErr := runner.RunOnce(t.Context())
+		result <- runResult{worked: worked, err: runErr}
+	}()
+	<-started
+	cancelled, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobCancelled", DraftID: "draft_cancel_running", Payload: map[string]any{
+			"job_id": "job_cancel_running", "kind": "blocking",
+			"requested_by_draft_id": "draft_cancel_running",
+		},
+	}}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || cancelled.Status != reducer.StatusApplied {
+		t.Fatalf("cancel result=%#v err=%v", cancelled, err)
+	}
+	close(release)
+	select {
+	case finished := <-result:
+		if finished.err != nil || !finished.worked {
+			t.Fatalf("runner result=%#v", finished)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not stop after cancellation")
+	}
+	job, err := GetJob(t.Context(), database, "job_cancel_running")
+	if err != nil || job.Status != "cancelled" {
+		t.Fatalf("job=%#v err=%v", job, err)
+	}
+	var lateEvents int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM event_log
+		WHERE json_extract(payload_json, '$.job_id')='job_cancel_running'
+		AND event_type IN ('JobProgress','JobSucceeded','JobFailed')`,
+	).Scan(&lateEvents); err != nil || lateEvents != 0 {
+		t.Fatalf("late events=%d err=%v", lateEvents, err)
 	}
 }
 
@@ -714,7 +810,9 @@ func TestWorkerDatabaseAndSerializationFailures(t *testing.T) {
 		t.Fatal("closed terminal should fail")
 	}
 	done := make(chan struct{})
-	runner.heartbeat(t.Context(), Job{ID: "job"}, done)
+	heartbeatContext, cancelHeartbeat := context.WithCancel(t.Context())
+	defer cancelHeartbeat()
+	runner.heartbeat(heartbeatContext, cancelHeartbeat, Job{ID: "job"}, done)
 	<-done
 	func() {
 		defer func() {

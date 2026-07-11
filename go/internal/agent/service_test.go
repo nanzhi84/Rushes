@@ -183,13 +183,22 @@ func TestJobObservationBridgeWakesAgentForWaitedTerminalJob(t *testing.T) {
 	t.Cleanup(service.Close)
 	_, stream, unsubscribe := service.Hub().Subscribe("draft_bridge")
 	defer unsubscribe()
-	result, err := reducer.Apply(t.Context(), database, []contracts.Event{{
-		Type: "JobSucceeded", DraftID: "draft_bridge",
-		Payload: map[string]any{
-			"job_id": "job_render", "kind": "render_preview",
-			"requested_by_draft_id": "draft_bridge", "result": map[string]any{"preview_id": "p1"},
+	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
+		{
+			Type: "JobEnqueued", DraftID: "draft_bridge",
+			Payload: map[string]any{
+				"job_id": "job_render", "kind": "render_preview",
+				"requested_by_draft_id": "draft_bridge",
+			},
 		},
-	}}, reducer.Options{Actor: contracts.ActorJob})
+		{
+			Type: "JobSucceeded", DraftID: "draft_bridge",
+			Payload: map[string]any{
+				"job_id": "job_render", "kind": "render_preview",
+				"requested_by_draft_id": "draft_bridge", "result": map[string]any{"preview_id": "p1"},
+			},
+		},
+	}, reducer.Options{Actor: contracts.ActorJob})
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("apply status=%s err=%v", result.Status, err)
 	}

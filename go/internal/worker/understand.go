@@ -35,6 +35,20 @@ func RegisterUnderstand(
 		focus, _ := job.Payload["focus"].(string)
 		completedIDs := []string{}
 		for index, assetID := range assetIDs {
+			summaryID := fmt.Sprintf("summary_%s_%s", assetID, job.ID)
+			var summaryExists int
+			if err := database.Read().QueryRowContext(ctx,
+				"SELECT COUNT(*) FROM material_summaries WHERE summary_id=?", summaryID,
+			).Scan(&summaryExists); err != nil {
+				return nil, err
+			}
+			if summaryExists != 0 {
+				completedIDs = append(completedIDs, assetID)
+				if err := report(ctx, job, float64(index+1)/float64(len(assetIDs))); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			asset, err := storage.GetAsset(ctx, database.Read(), assetID)
 			if err != nil {
 				return nil, err
@@ -57,7 +71,6 @@ func RegisterUnderstand(
 			var summaryMap map[string]any
 			data, _ := json.Marshal(summary)
 			_ = json.Unmarshal(data, &summaryMap)
-			summaryID := fmt.Sprintf("summary_%s_%s", assetID, job.ID)
 			result, err := reducer.Apply(ctx, database, []contracts.Event{{
 				Type: "MaterialUnderstandingCompleted", Payload: map[string]any{
 					"asset_id": assetID, "job_id": job.ID, "summary_id": summaryID,

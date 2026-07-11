@@ -114,7 +114,7 @@ func (runner *Runner) RunOnce(ctx context.Context) (bool, error) {
 	jobCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	heartbeatDone := make(chan struct{})
-	go runner.heartbeat(jobCtx, *job, heartbeatDone)
+	go runner.heartbeat(jobCtx, cancel, *job, heartbeatDone)
 
 	handler, handlerErr := runner.registry.Require(job.Kind)
 	var result map[string]any
@@ -123,6 +123,13 @@ func (runner *Runner) RunOnce(ctx context.Context) (bool, error) {
 	}
 	cancel()
 	<-heartbeatDone
+	stored, statusErr := GetJob(ctx, runner.database, job.ID)
+	if statusErr != nil {
+		return true, statusErr
+	}
+	if stored.Status != "running" {
+		return true, nil
+	}
 	if handlerErr != nil {
 		failure := failureJSON(handlerErr)
 		if !errors.Is(handlerErr, context.Canceled) && job.Attempts+1 <= job.MaxRetries {
@@ -134,12 +141,25 @@ func (runner *Runner) RunOnce(ctx context.Context) (bool, error) {
 				return true, nil
 			}
 		}
-		return true, runner.emitTerminal(ctx, *job, "JobFailed", nil, failure)
+		terminalErr := runner.emitTerminal(ctx, *job, "JobFailed", nil, failure)
+		if errors.Is(terminalErr, reducer.ErrJobCancelled) {
+			return true, nil
+		}
+		return true, terminalErr
 	}
-	return true, runner.emitTerminal(ctx, *job, "JobSucceeded", result, nil)
+	terminalErr := runner.emitTerminal(ctx, *job, "JobSucceeded", result, nil)
+	if errors.Is(terminalErr, reducer.ErrJobCancelled) {
+		return true, nil
+	}
+	return true, terminalErr
 }
 
-func (runner *Runner) heartbeat(ctx context.Context, job Job, done chan<- struct{}) {
+func (runner *Runner) heartbeat(
+	ctx context.Context,
+	cancel context.CancelFunc,
+	job Job,
+	done chan<- struct{},
+) {
 	defer close(done)
 	ticker := time.NewTicker(runner.heartbeatInterval)
 	defer ticker.Stop()
@@ -150,6 +170,7 @@ func (runner *Runner) heartbeat(ctx context.Context, job Job, done chan<- struct
 		case <-ticker.C:
 			ok, err := Heartbeat(ctx, runner.database, job.ID, runner.workerID, runner.now())
 			if err != nil || !ok {
+				cancel()
 				return
 			}
 		}

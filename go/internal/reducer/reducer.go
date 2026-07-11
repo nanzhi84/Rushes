@@ -22,6 +22,11 @@ const (
 	StatusValidationFailed Status = "validation_failed"
 )
 
+var (
+	ErrJobCancelled      = errors.New("job 已取消")
+	ErrJobNotCancellable = errors.New("job 当前状态不可取消")
+)
+
 type VersionConflict struct {
 	DraftID             string `json:"draft_id"`
 	ExpectedBaseVersion *int   `json:"expected_base_version"`
@@ -883,6 +888,18 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 		"JobEnqueued": "pending", "JobProgress": "running",
 		"JobSucceeded": "succeeded", "JobFailed": "failed", "JobCancelled": "cancelled",
 	}[event.Type]
+	if event.Type != "JobEnqueued" {
+		var currentStatus string
+		if err := state.tx.QueryRowContext(ctx, "SELECT status FROM jobs WHERE job_id=?", jobID).Scan(&currentStatus); err != nil {
+			return err
+		}
+		if currentStatus == "cancelled" && event.Type != "JobCancelled" {
+			return ErrJobCancelled
+		}
+		if event.Type == "JobCancelled" && currentStatus != "pending" && currentStatus != "running" && currentStatus != "cancelled" {
+			return ErrJobNotCancellable
+		}
+	}
 	if event.Type == "JobEnqueued" {
 		_, err := state.tx.ExecContext(ctx, `
 			INSERT INTO jobs(

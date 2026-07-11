@@ -433,6 +433,9 @@ func TestURLImportSecurityAndFailureContracts(t *testing.T) {
 	if _, err := transport.DialContext(t.Context(), "tcp", "127.0.0.1:9"); err == nil {
 		t.Fatal("URL importer must reject loopback")
 	}
+	if _, err := transport.DialContext(t.Context(), "tcp", "missing-port"); err == nil {
+		t.Fatal("URL importer must reject malformed dial addresses")
+	}
 	for _, address := range []string{"0.0.0.0", "127.0.0.1", "10.0.0.1", "169.254.1.1", "224.0.0.1"} {
 		if !unsafeImportAddress(net.ParseIP(address)) {
 			t.Fatalf("unsafe address accepted: %s", address)
@@ -444,5 +447,9 @@ func TestURLImportSecurityAndFailureContracts(t *testing.T) {
 	if err := redirect(validRequest, nil); err != nil || redirect(invalidRequest, nil) == nil ||
 		redirect(validRequest, make([]*http.Request, 5)) == nil {
 		t.Fatal("redirect policy mismatch")
+	}
+	overflowed := &boundedReader{reader: strings.NewReader("ignored"), remaining: -1}
+	if _, err := overflowed.Read(make([]byte, 1)); !errors.Is(err, errURLImportTooLarge) {
+		t.Fatalf("overflowed reader err=%v", err)
 	}
 }

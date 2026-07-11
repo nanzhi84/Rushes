@@ -288,6 +288,47 @@ func TestDraftLifecycleCopyAssetUnlinkAndJobCancellation(t *testing.T) {
 	if source.Status != "trashed" || source.Name != "已改名" || jobStatus != "cancelled" || links != 0 {
 		t.Fatalf("source=%#v job=%s links=%d", source, jobStatus, links)
 	}
+	for _, event := range []contracts.Event{
+		{Type: "JobProgress", DraftID: "draft-copy", Payload: map[string]any{
+			"job_id": "job-cancel", "kind": "ingest", "requested_by_draft_id": "draft-copy", "progress": 0.9,
+		}},
+		{Type: "JobSucceeded", DraftID: "draft-copy", Payload: map[string]any{
+			"job_id": "job-cancel", "kind": "ingest", "requested_by_draft_id": "draft-copy",
+		}},
+	} {
+		result, err = Apply(t.Context(), database, []contracts.Event{event}, Options{Actor: contracts.ActorJob})
+		if !errors.Is(err, ErrJobCancelled) || result.Status != "" {
+			t.Fatalf("late %s result=%#v err=%v", event.Type, result, err)
+		}
+	}
+	if err := database.Read().QueryRow("SELECT status FROM jobs WHERE job_id='job-cancel'").Scan(&jobStatus); err != nil || jobStatus != "cancelled" {
+		t.Fatalf("late terminal changed status=%s err=%v", jobStatus, err)
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{
+		{Type: "JobEnqueued", DraftID: "draft-copy", Payload: map[string]any{
+			"job_id": "job-finished", "kind": "render_preview", "requested_by_draft_id": "draft-copy",
+		}},
+		{Type: "JobSucceeded", DraftID: "draft-copy", Payload: map[string]any{
+			"job_id": "job-finished", "kind": "render_preview", "requested_by_draft_id": "draft-copy",
+		}},
+	}, Options{Actor: contracts.ActorJob})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("finished job result=%#v err=%v", result, err)
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobCancelled", DraftID: "draft-copy", Payload: map[string]any{
+			"job_id": "job-finished", "kind": "render_preview", "requested_by_draft_id": "draft-copy",
+		},
+	}}, Options{Actor: contracts.ActorUser})
+	if !errors.Is(err, ErrJobNotCancellable) || result.Status != "" {
+		t.Fatalf("finished cancellation result=%#v err=%v", result, err)
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobProgress", Payload: map[string]any{"job_id": "missing-job", "progress": 0.5},
+	}}, Options{Actor: contracts.ActorJob})
+	if err == nil || result.Status != "" {
+		t.Fatalf("missing job progress result=%#v err=%v", result, err)
+	}
 }
 
 func TestDraftCopyRejectsInvalidSourcesAndRollsBack(t *testing.T) {
