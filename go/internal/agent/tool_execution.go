@@ -430,22 +430,65 @@ func (service *Service) toolEnqueueRender(
 	if draft.TimelineCurrentVersion == nil || !draft.TimelineValidated {
 		return rushestools.ToolResult{}, errors.New("当前时间线尚未验证")
 	}
+	idempotencyKey := fmt.Sprintf("%s:%s:%d", kind, draftID, *draft.TimelineCurrentVersion)
+	if existing, found, err := service.findRenderJob(ctx, kind, idempotencyKey); err != nil {
+		return rushestools.ToolResult{}, err
+	} else if found {
+		return existing, nil
+	}
 	jobID := randomID("job")
 	result, err := reducer.Apply(ctx, service.database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: draftID,
 		Payload: map[string]any{
 			"job_id": jobID, "kind": kind, "requested_by_draft_id": draftID,
-			"idempotency_key": fmt.Sprintf("%s:%s:%d", kind, draftID, *draft.TimelineCurrentVersion),
+			"idempotency_key": idempotencyKey,
 			"job_payload":     map[string]any{"timeline_version": *draft.TimelineCurrentVersion},
 			"next_run_at":     time.Now().UTC().Format(time.RFC3339Nano), "priority": 30,
 		},
 	}}, reducer.Options{Actor: contracts.ActorAgent})
 	if err != nil || result.Status != reducer.StatusApplied {
+		if existing, found, lookupErr := service.findRenderJob(ctx, kind, idempotencyKey); lookupErr != nil {
+			return rushestools.ToolResult{}, errors.Join(err, lookupErr)
+		} else if found {
+			return existing, nil
+		}
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("reducer status: %s", result.Status))
 	}
+	return renderJobResult(kind, jobID, "pending"), nil
+}
+
+func (service *Service) findRenderJob(
+	ctx context.Context,
+	kind, idempotencyKey string,
+) (rushestools.ToolResult, bool, error) {
+	var jobID, status string
+	err := service.database.Read().QueryRowContext(ctx, `
+		SELECT job_id, status FROM jobs WHERE kind=? AND idempotency_key=?`,
+		kind, idempotencyKey,
+	).Scan(&jobID, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return rushestools.ToolResult{}, false, nil
+	}
+	if err != nil {
+		return rushestools.ToolResult{}, false, err
+	}
+	return renderJobResult(kind, jobID, status), true, nil
+}
+
+func renderJobResult(kind, jobID, jobStatus string) rushestools.ToolResult {
+	status := jobStatus
+	observation := kind + " 任务已存在"
+	switch jobStatus {
+	case "pending", "running":
+		status = "queued"
+		observation = kind + " 任务已排队"
+	case "succeeded":
+		observation = kind + " 任务已完成"
+	}
 	return rushestools.ToolResult{
-		Status: "queued", Observation: kind + " 已入队", Data: map[string]any{"job_id": jobID},
-	}, nil
+		Status: status, Observation: observation,
+		Data: map[string]any{"job_id": jobID, "job_status": jobStatus},
+	}
 }
 
 func (service *Service) toolRenderStatus(ctx context.Context, draftID string) (rushestools.ToolResult, error) {

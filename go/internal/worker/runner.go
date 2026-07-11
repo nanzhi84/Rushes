@@ -127,7 +127,7 @@ func (runner *Runner) RunOnce(ctx context.Context) (bool, error) {
 	if statusErr != nil {
 		return true, statusErr
 	}
-	if stored.Status != "running" {
+	if stored.Status != "running" || !sameClaim(stored, *job) {
 		return true, nil
 	}
 	if handlerErr != nil {
@@ -142,13 +142,13 @@ func (runner *Runner) RunOnce(ctx context.Context) (bool, error) {
 			}
 		}
 		terminalErr := runner.emitTerminal(ctx, *job, "JobFailed", nil, failure)
-		if errors.Is(terminalErr, reducer.ErrJobCancelled) {
+		if errors.Is(terminalErr, reducer.ErrJobCancelled) || errors.Is(terminalErr, reducer.ErrJobClaimLost) {
 			return true, nil
 		}
 		return true, terminalErr
 	}
 	terminalErr := runner.emitTerminal(ctx, *job, "JobSucceeded", result, nil)
-	if errors.Is(terminalErr, reducer.ErrJobCancelled) {
+	if errors.Is(terminalErr, reducer.ErrJobCancelled) || errors.Is(terminalErr, reducer.ErrJobClaimLost) {
 		return true, nil
 	}
 	return true, terminalErr
@@ -168,7 +168,7 @@ func (runner *Runner) heartbeat(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			ok, err := Heartbeat(ctx, runner.database, job.ID, runner.workerID, runner.now())
+			ok, err := Heartbeat(ctx, runner.database, job, runner.now())
 			if err != nil || !ok {
 				cancel()
 				return
@@ -184,6 +184,7 @@ func (runner *Runner) reportProgress(ctx context.Context, job Job, progress floa
 		Payload: map[string]any{
 			"job_id": job.ID, "kind": job.Kind, "asset_id": value(job.AssetID),
 			"requested_by_draft_id": value(job.RequestedByDraftID), "progress": progress,
+			"worker_id": value(job.WorkerID), "started_at": value(job.StartedAt),
 		},
 	}}, reducer.Options{Actor: contracts.ActorJob})
 	return err
@@ -201,7 +202,8 @@ func (runner *Runner) emitTerminal(
 		Payload: map[string]any{
 			"job_id": job.ID, "kind": job.Kind, "asset_id": value(job.AssetID),
 			"requested_by_draft_id": value(job.RequestedByDraftID),
-			"progress":              1.0, "result": result, "error": failure,
+			"worker_id":             value(job.WorkerID), "started_at": value(job.StartedAt),
+			"progress": 1.0, "result": result, "error": failure,
 		},
 	}}, reducer.Options{Actor: contracts.ActorJob})
 	if err != nil {
@@ -225,4 +227,10 @@ func value(pointer *string) string {
 		return ""
 	}
 	return *pointer
+}
+
+func sameClaim(left, right Job) bool {
+	return left.WorkerID != nil && right.WorkerID != nil &&
+		left.StartedAt != nil && right.StartedAt != nil &&
+		*left.WorkerID == *right.WorkerID && *left.StartedAt == *right.StartedAt
 }

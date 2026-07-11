@@ -25,6 +25,7 @@ const (
 var (
 	ErrJobCancelled      = errors.New("job 已取消")
 	ErrJobNotCancellable = errors.New("job 当前状态不可取消")
+	ErrJobClaimLost      = errors.New("job 已被其他 worker 重新领取")
 )
 
 type VersionConflict struct {
@@ -890,7 +891,10 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 	}[event.Type]
 	if event.Type != "JobEnqueued" {
 		var currentStatus string
-		if err := state.tx.QueryRowContext(ctx, "SELECT status FROM jobs WHERE job_id=?", jobID).Scan(&currentStatus); err != nil {
+		var currentWorkerID, currentStartedAt sql.NullString
+		if err := state.tx.QueryRowContext(ctx,
+			"SELECT status, worker_id, started_at FROM jobs WHERE job_id=?", jobID,
+		).Scan(&currentStatus, &currentWorkerID, &currentStartedAt); err != nil {
 			return err
 		}
 		if currentStatus == "cancelled" && event.Type != "JobCancelled" {
@@ -898,6 +902,14 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 		}
 		if event.Type == "JobCancelled" && currentStatus != "pending" && currentStatus != "running" && currentStatus != "cancelled" {
 			return ErrJobNotCancellable
+		}
+		expectedWorkerID := stringFrom(event.Payload["worker_id"], "")
+		expectedStartedAt := stringFrom(event.Payload["started_at"], "")
+		if expectedWorkerID != "" || expectedStartedAt != "" {
+			if !currentWorkerID.Valid || !currentStartedAt.Valid ||
+				currentWorkerID.String != expectedWorkerID || currentStartedAt.String != expectedStartedAt {
+				return ErrJobClaimLost
+			}
 		}
 	}
 	if event.Type == "JobEnqueued" {

@@ -38,7 +38,10 @@ func TestClaimPriorityHeartbeatRetryAndStaleRecovery(t *testing.T) {
 	if err != nil || job == nil || job.ID != "job_first" {
 		t.Fatalf("claim=%#v err=%v", job, err)
 	}
-	if ok, err := Heartbeat(t.Context(), database, job.ID, "worker_a", now.Add(5*time.Second)); err != nil || !ok {
+	if job.WorkerID == nil || *job.WorkerID != "worker_a" || job.StartedAt == nil {
+		t.Fatalf("claim identity=%#v", job)
+	}
+	if ok, err := Heartbeat(t.Context(), database, *job, now.Add(5*time.Second)); err != nil || !ok {
 		t.Fatalf("heartbeat ok=%v err=%v", ok, err)
 	}
 	if got := RetryDelay(1); got != time.Second {
@@ -62,6 +65,25 @@ func TestClaimPriorityHeartbeatRetryAndStaleRecovery(t *testing.T) {
 	recovered, err := RecoverStale(t.Context(), database, now, 60*time.Second)
 	if err != nil || recovered != 1 {
 		t.Fatalf("recovered=%d err=%v", recovered, err)
+	}
+	replacement, err := Claim(t.Context(), database, "worker_b", now.Add(time.Second))
+	if err != nil || replacement == nil || replacement.ID != job.ID ||
+		replacement.WorkerID == nil || *replacement.WorkerID != "worker_b" {
+		t.Fatalf("replacement=%#v err=%v", replacement, err)
+	}
+	if ok, err := Heartbeat(t.Context(), database, *job, now.Add(2*time.Second)); err != nil || ok {
+		t.Fatalf("stale heartbeat ok=%v err=%v", ok, err)
+	}
+	if ok, err := ScheduleRetry(t.Context(), database, *job, now.Add(2*time.Second), nil); err != nil || ok {
+		t.Fatalf("stale retry ok=%v err=%v", ok, err)
+	}
+	claimRunner := &Runner{database: database}
+	if err := claimRunner.emitTerminal(t.Context(), *job, "JobSucceeded", map[string]any{"stale": true}, nil); !errors.Is(err, reducer.ErrJobClaimLost) {
+		t.Fatalf("stale terminal err=%v", err)
+	}
+	stored, err = GetJob(t.Context(), database, job.ID)
+	if err != nil || stored.Status != "running" || !sameClaim(stored, *replacement) {
+		t.Fatalf("replacement overwritten stored=%#v err=%v", stored, err)
 	}
 }
 
@@ -437,7 +459,10 @@ func TestRunnerLoopRegistryAndTerminalFailureBranches(t *testing.T) {
 	if job, err := Claim(t.Context(), database, "worker", time.Now()); err != nil || job != nil {
 		t.Fatalf("empty claim=%#v err=%v", job, err)
 	}
-	if ok, err := Heartbeat(t.Context(), database, "missing", "worker", time.Now()); err != nil || ok {
+	missingWorker, missingStartedAt := "worker", time.Now().UTC().Format(time.RFC3339Nano)
+	if ok, err := Heartbeat(t.Context(), database, Job{
+		ID: "missing", WorkerID: &missingWorker, StartedAt: &missingStartedAt,
+	}, time.Now()); err != nil || ok {
 		t.Fatalf("missing heartbeat ok=%v err=%v", ok, err)
 	}
 	if ok, err := ScheduleRetry(t.Context(), database, Job{ID: "missing"}, time.Now(), nil); err != nil || ok {
@@ -779,7 +804,10 @@ func TestWorkerDatabaseAndSerializationFailures(t *testing.T) {
 	if _, err := Claim(t.Context(), database, "closed", now); err == nil {
 		t.Fatal("closed claim should fail")
 	}
-	if _, err := Heartbeat(t.Context(), database, "job", "worker", now); err == nil {
+	workerID, startedAt := "worker", now.Format(time.RFC3339Nano)
+	if _, err := Heartbeat(t.Context(), database, Job{
+		ID: "job", WorkerID: &workerID, StartedAt: &startedAt,
+	}, now); err == nil {
 		t.Fatal("closed heartbeat should fail")
 	}
 	if _, err := RecoverStale(t.Context(), database, now, time.Minute); err == nil {

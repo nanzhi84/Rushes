@@ -373,13 +373,36 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 	if err != nil || inspected.(rushestools.ToolResult).Observation == "" {
 		t.Fatalf("inspect=%#v err=%v", inspected, err)
 	}
-	if _, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{}); err != nil {
+	firstRenderRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
+	if err != nil {
 		t.Fatal(err)
+	}
+	secondRenderRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRender := firstRenderRaw.(rushestools.ToolResult)
+	secondRender := secondRenderRaw.(rushestools.ToolResult)
+	if firstRender.Status != "queued" || secondRender.Status != "queued" ||
+		firstRender.Data["job_id"] != secondRender.Data["job_id"] {
+		t.Fatalf("render idempotency first=%#v second=%#v", firstRender, secondRender)
 	}
 	var renderJobs int
 	if err := database.Read().QueryRowContext(t.Context(),
 		"SELECT COUNT(*) FROM jobs WHERE kind='render_preview' AND status='pending'").Scan(&renderJobs); err != nil || renderJobs != 1 {
 		t.Fatalf("render jobs=%d err=%v", renderJobs, err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(),
+		"UPDATE jobs SET status='succeeded' WHERE job_id=?", firstRender.Data["job_id"]); err != nil {
+		t.Fatal(err)
+	}
+	completedRenderRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedRender := completedRenderRaw.(rushestools.ToolResult)
+	if completedRender.Status != "succeeded" || completedRender.Data["job_id"] != firstRender.Data["job_id"] {
+		t.Fatalf("completed render idempotency=%#v", completedRender)
 	}
 	if _, err := service.ExecuteTool(ctx, "timeline.restore_version", rushestools.TimelineRestoreInput{SourceVersion: 1}); err != nil {
 		t.Fatal(err)
@@ -387,6 +410,9 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 	draft, _ = storage.GetDraft(t.Context(), database.Read(), "draft_timeline_tools")
 	if draft.TimelineCurrentVersion == nil || *draft.TimelineCurrentVersion != 1 || draft.TimelineValidated {
 		t.Fatalf("draft after restore=%#v", draft)
+	}
+	if _, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{}); err == nil {
+		t.Fatal("未验证时间线不应进入渲染队列")
 	}
 }
 
@@ -691,6 +717,9 @@ func TestJobBridgeSkipsMalformedAndUnrelatedEvents(t *testing.T) {
 }
 
 func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
+	if stringPointerValue("") != nil {
+		t.Fatal("空字符串不应生成指针")
+	}
 	database := agentTestDatabase(t)
 	createAgentDraft(t, database, "draft_closed")
 	service, err := NewService(t.Context(), database, nil)
@@ -720,6 +749,9 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 		if _, err := service.ExecuteTool(ctx, name, input); err == nil {
 			t.Fatalf("closed database: %s 应失败", name)
 		}
+	}
+	if _, _, err := service.findRenderJob(t.Context(), "render_preview", "closed"); err == nil {
+		t.Fatal("closed findRenderJob 应失败")
 	}
 	if _, err := service.modelMessages(ctx, "draft_closed"); err == nil {
 		t.Fatal("closed modelMessages 应失败")

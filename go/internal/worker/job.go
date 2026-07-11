@@ -22,11 +22,13 @@ type Job struct {
 	Attempts           int
 	MaxRetries         int
 	Priority           int
+	WorkerID           *string
+	StartedAt          *string
 }
 
 const jobColumns = `
 job_id, kind, status, draft_id, requested_by_draft_id, asset_id,
-payload_json, attempts, max_retries, priority`
+payload_json, attempts, max_retries, priority, worker_id, started_at`
 
 func Claim(ctx context.Context, database *storage.DB, workerID string, now time.Time) (*Job, error) {
 	timestamp := now.UTC().Format(time.RFC3339Nano)
@@ -82,11 +84,11 @@ func GetJob(ctx context.Context, database *storage.DB, jobID string) (Job, error
 
 func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 	var job Job
-	var draftID, requestedByDraftID, assetID sql.NullString
+	var draftID, requestedByDraftID, assetID, workerID, startedAt sql.NullString
 	var payloadJSON string
 	if err := row.Scan(
 		&job.ID, &job.Kind, &job.Status, &draftID, &requestedByDraftID, &assetID,
-		&payloadJSON, &job.Attempts, &job.MaxRetries, &job.Priority,
+		&payloadJSON, &job.Attempts, &job.MaxRetries, &job.Priority, &workerID, &startedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Job{}, storage.ErrNotFound
@@ -96,17 +98,19 @@ func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 	job.DraftID = nullStringPointer(draftID)
 	job.RequestedByDraftID = nullStringPointer(requestedByDraftID)
 	job.AssetID = nullStringPointer(assetID)
+	job.WorkerID = nullStringPointer(workerID)
+	job.StartedAt = nullStringPointer(startedAt)
 	if err := json.Unmarshal([]byte(payloadJSON), &job.Payload); err != nil {
 		return Job{}, fmt.Errorf("job %s payload 无效: %w", job.ID, err)
 	}
 	return job, nil
 }
 
-func Heartbeat(ctx context.Context, database *storage.DB, jobID, workerID string, now time.Time) (bool, error) {
+func Heartbeat(ctx context.Context, database *storage.DB, job Job, now time.Time) (bool, error) {
 	result, err := database.Write().ExecContext(ctx, `
 		UPDATE jobs SET heartbeat_at=?
-		WHERE job_id=? AND worker_id=? AND status='running'`,
-		now.UTC().Format(time.RFC3339Nano), jobID, workerID)
+		WHERE job_id=? AND worker_id=? AND started_at=? AND status='running'`,
+		now.UTC().Format(time.RFC3339Nano), job.ID, value(job.WorkerID), value(job.StartedAt))
 	if err != nil {
 		return false, err
 	}
@@ -144,8 +148,9 @@ func ScheduleRetry(
 	result, err := database.Write().ExecContext(ctx, `
 		UPDATE jobs SET status='pending', worker_id=NULL, heartbeat_at=NULL,
 		started_at=NULL, attempts=?, next_run_at=?, error_json=?
-		WHERE job_id=? AND status='running'`, attempts,
-		now.Add(delay).UTC().Format(time.RFC3339Nano), mustJSON(failure), job.ID)
+		WHERE job_id=? AND worker_id=? AND started_at=? AND status='running'`, attempts,
+		now.Add(delay).UTC().Format(time.RFC3339Nano), mustJSON(failure), job.ID,
+		value(job.WorkerID), value(job.StartedAt))
 	if err != nil {
 		return false, err
 	}
