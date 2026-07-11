@@ -4,6 +4,14 @@ from .audio_extract import AudioExtractError, ExtractedAudio, extract_audio_to_w
 from .final_mp4 import FINAL_MP4_PROFILE, render_final_mp4
 from .font_meta import FontMeta, FontMetaError, read_font_meta
 from .preview import PREVIEW_PROFILE, render_preview
+from .preview_inspection import (
+    ALL_INSPECTION_CHECKS,
+    DETERMINISTIC_INSPECTION_VERSION,
+    DeterministicPreviewInspection,
+    InspectionCheck,
+    PreviewSnapshot,
+    inspect_preview_file,
+)
 from .probe import MediaProbeError, probe_media
 from .proxy import MediaProxyError, generate_proxy
 from .render_cache import SegmentRenderCache, segment_cache_key
@@ -22,15 +30,20 @@ from .vad import SileroModelMissing, VadError, VadResult, run_silero_vad
 from .waveform import WaveformError, compute_waveform_peaks, downsample_peaks
 
 __all__ = [
+    "ALL_INSPECTION_CHECKS",
+    "DETERMINISTIC_INSPECTION_VERSION",
     "FINAL_MP4_PROFILE",
     "PREVIEW_PROFILE",
     "AudioExtractError",
+    "DeterministicPreviewInspection",
     "ExtractedAudio",
     "FontMeta",
     "FontMetaError",
+    "InspectionCheck",
     "MediaProbeError",
     "MediaProxyError",
     "MediaSource",
+    "PreviewSnapshot",
     "RenderProfile",
     "SegmentRenderCache",
     "SegmentRenderError",
@@ -49,6 +62,7 @@ __all__ = [
     "extract_audio_to_wav",
     "extract_video_thumbnail",
     "generate_proxy",
+    "inspect_preview_file",
     "parse_ffmpeg_progress",
     "probe_media",
     "read_font_meta",

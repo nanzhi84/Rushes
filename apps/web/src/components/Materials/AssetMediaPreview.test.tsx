@@ -45,6 +45,32 @@ describe("AssetMediaPreview 原片优先与回落", () => {
     expect(screen.getByText("转码中，稍候可预览。")).toBeTruthy();
   });
 
+  it("原片先失败后同素材代理就绪时自动恢复到 proxy", () => {
+    const pending = makeAsset({
+      asset_id: "v",
+      kind: "video",
+      proxy_ready: false,
+      jobs: [{ kind: "proxy", status: "running" }] as MaterialAsset["jobs"],
+    });
+    const { rerender } = render(<AssetMediaPreview asset={pending} />);
+    fireEvent.error(screen.getByLabelText("v.mp4 视频试看"));
+    expect(screen.getByText("转码中，稍候可预览。")).toBeTruthy();
+
+    rerender(
+      <AssetMediaPreview
+        asset={{
+          ...pending,
+          proxy_ready: true,
+          jobs: [{ kind: "proxy", status: "succeeded" }] as MaterialAsset["jobs"],
+        }}
+      />,
+    );
+
+    expect(screen.getByLabelText("v.mp4 视频试看").getAttribute("src")).toContain(
+      "/api/media/v/proxy",
+    );
+  });
+
   it("图片走原图直连，不进 proxy 回落逻辑", () => {
     render(
       <AssetMediaPreview

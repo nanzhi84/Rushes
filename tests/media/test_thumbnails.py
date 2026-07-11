@@ -55,7 +55,7 @@ def test_extract_video_thumbnail_falls_back_to_software_when_hwaccel_fails(
             return subprocess.CompletedProcess(command, 1, b"", b"hw decode failed")
         return subprocess.CompletedProcess(command, 0, JPEG_MAGIC + b"soft", b"")
 
-    monkeypatch.setattr(thumbnails_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(thumbnails_module, "run_media_command", fake_run)
 
     data = extract_video_thumbnail(video, seconds=0.1)
 

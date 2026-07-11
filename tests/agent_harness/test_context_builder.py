@@ -449,6 +449,17 @@ def test_allowed_tools_catalog_sorts_by_name_within_tier() -> None:
     assert rendered.index("free.a") < rendered.index("free.b")
 
 
+def test_understand_catalog_uses_scan_and_deep_dual_cost_note() -> None:
+    from agent_harness.context_builder import _render_allowed_tools_block
+    from tools.specs import tool_specs
+
+    understand = next(spec for spec in tool_specs() if spec.name == "understand.materials")
+    rendered = _render_allowed_tools_block([understand])
+
+    assert "understand.materials（depth=scan 便宜 / depth=deep 昂贵）" in rendered
+    assert "media.view_frames" not in rendered
+
+
 def test_allowed_tools_catalog_empty_is_explicit() -> None:
     from agent_harness.context_builder import _render_allowed_tools_block
 

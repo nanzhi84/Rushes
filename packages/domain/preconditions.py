@@ -28,6 +28,7 @@ class DraftArtifactStats(BaseModel):
     transcript_ids: frozenset[str] = Field(default_factory=frozenset)
     transcript_ids_with_vad: frozenset[str] = Field(default_factory=frozenset)
     voiceover_asset_ids: frozenset[str] = Field(default_factory=frozenset)
+    preview_count: int = 0
 
 
 class DraftAudioAsset(BaseModel):
@@ -136,6 +137,10 @@ def preview_for_current_version_exists(context: PreconditionContext) -> bool:
     )
 
 
+def any_preview_exists(context: PreconditionContext) -> bool:
+    return context.draft_state is not None and context.draft_artifacts.preview_count > 0
+
+
 def voiceover_asset_exists(context: PreconditionContext) -> bool:
     draft_state = context.draft_state
     if draft_state is None or draft_state.audio_plan is None:
@@ -158,6 +163,7 @@ PRECONDITION_REGISTRY: dict[str, PreconditionFn] = {
     "timeline_validated": timeline_validated,
     "rough_cut_approved": rough_cut_approved,
     "preview_for_current_version_exists": preview_for_current_version_exists,
+    "any_preview_exists": any_preview_exists,
     "voiceover_asset_exists": voiceover_asset_exists,
 }
 

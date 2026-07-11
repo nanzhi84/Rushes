@@ -28,7 +28,14 @@ from domain.decision_effects import (
 from events.event_log import append_domain_event, validate_domain_event
 from storage import schema
 from storage.db import begin_immediate
-from storage.repositories import DecisionsRepository, DraftsRepository, EventLogRepository
+from storage.repositories import (
+    DecisionsRepository,
+    DraftsRepository,
+    EventLogRepository,
+    MaterialSummariesRepository,
+    MessagesRepository,
+    TranscriptsRepository,
+)
 from storage.repositories._json import dump_json, encode_json_columns, load_json
 from storage.repositories.drafts import JSON_COLUMNS as _DRAFT_JSON_COLUMNS
 
@@ -174,8 +181,9 @@ def apply(
     actor: Actor,
     created_at: str | None = None,
     timeline_invariant_hook: TimelineInvariantHook | None = None,
+    result_rows: Mapping[str, Any] | None = None,
 ) -> ReducerApplyResult:
-    """Apply a batch of DomainEvents in one BEGIN IMMEDIATE transaction."""
+    """Apply events and their side rows in one BEGIN IMMEDIATE transaction."""
 
     timestamp = created_at or _now_iso()
     parsed_events = tuple(
@@ -206,6 +214,7 @@ def apply(
                     ReducerApplyResult(status="validation_failed", validation_failed=validation)
                 )
 
+            _persist_result_rows(context.connection, result_rows)
             _persist_touched_draft_states(context)
             applied_events = _append_events(context)
             return ReducerApplyResult(
@@ -220,6 +229,28 @@ def apply(
             )
     except _AbortReducer as abort:
         return abort.result
+
+
+def _persist_result_rows(connection: Connection, rows: Mapping[str, Any] | None) -> None:
+    """Persist tool-produced rows inside the reducer transaction."""
+
+    if rows is None:
+        return
+    message_row = rows.get("message_row")
+    if isinstance(message_row, Mapping):
+        MessagesRepository(connection).insert(dict(message_row))
+    summary_rows = rows.get("material_summary_rows")
+    if isinstance(summary_rows, list):
+        summaries_repository = MaterialSummariesRepository(connection)
+        for row in summary_rows:
+            if isinstance(row, Mapping):
+                summaries_repository.insert(dict(row))
+    transcript_rows = rows.get("transcript_rows")
+    if isinstance(transcript_rows, list):
+        transcripts_repository = TranscriptsRepository(connection)
+        for row in transcript_rows:
+            if isinstance(row, Mapping):
+                transcripts_repository.insert(dict(row))
 
 
 def _normalize_event(
@@ -547,6 +578,10 @@ def _copy_preview_ref(
                 timeline_version=values["timeline_version"],
                 object_hash=values["object_hash"],
                 quality=values["quality"],
+                render_width=values["render_width"],
+                render_height=values["render_height"],
+                render_fps=values["render_fps"],
+                expected_duration_sec=values["expected_duration_sec"],
                 created_at=context.created_at,
             )
         )
@@ -866,6 +901,10 @@ def _apply_preview_rendered(context: _ReducerContext, event: DomainEventBase) ->
                 timeline_version=timeline_version,
                 object_hash=object_hash,
                 quality=dump_json(event.payload.get("quality", {})),
+                render_width=event.payload.get("render_width"),
+                render_height=event.payload.get("render_height"),
+                render_fps=event.payload.get("render_fps"),
+                expected_duration_sec=event.payload.get("expected_duration_sec"),
                 created_at=str(event.payload.get("created_at", context.created_at)),
             )
         )

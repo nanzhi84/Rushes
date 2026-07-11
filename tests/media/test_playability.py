@@ -22,17 +22,31 @@ def test_image_and_font_never_need_proxy() -> None:
 
 
 def test_video_playable_codecs_skip_proxy(monkeypatch) -> None:
-    monkeypatch.setattr(probe, "probe_stream_codec", lambda *a, **k: "hevc")
+    monkeypatch.setattr(probe, "probe_video_stream_format", lambda *a, **k: ("hevc", "yuv420p10le"))
     assert asset_needs_proxy(AssetKind.VIDEO, "/clip.mov") is False
-    monkeypatch.setattr(probe, "probe_stream_codec", lambda *a, **k: "h264")
+    monkeypatch.setattr(probe, "probe_video_stream_format", lambda *a, **k: ("h264", "yuv420p"))
     assert asset_needs_proxy("video", "/clip.mp4") is False
 
 
 def test_video_unplayable_or_unknown_codec_needs_proxy(monkeypatch) -> None:
-    monkeypatch.setattr(probe, "probe_stream_codec", lambda *a, **k: "prores")
+    monkeypatch.setattr(
+        probe,
+        "probe_video_stream_format",
+        lambda *a, **k: ("prores", "yuv422p10le"),
+    )
     assert asset_needs_proxy(AssetKind.VIDEO, "/clip.mov") is True
-    monkeypatch.setattr(probe, "probe_stream_codec", lambda *a, **k: None)
+    monkeypatch.setattr(probe, "probe_video_stream_format", lambda *a, **k: None)
     assert asset_needs_proxy(AssetKind.VIDEO, "/clip.mov") is True  # 探测失败按需代理兜底
+
+
+def test_hevc_422_needs_proxy_even_though_codec_name_is_playable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        probe,
+        "probe_video_stream_format",
+        lambda *a, **k: ("hevc", "yuv422p10le"),
+    )
+
+    assert asset_needs_proxy(AssetKind.VIDEO, "/clip.mov") is True
 
 
 def test_audio_playable_vs_unplayable(monkeypatch) -> None:

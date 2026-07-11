@@ -30,10 +30,15 @@ from agent_harness.loop import (
     LLMPlanner,
     MappingPlannerAdapter,
     NoProviderPlanner,
+    context_bundle_input_preconditions,
+    load_internal_state,
     recover_approved_pending_tool_calls,
     run_turn,
 )
+from agent_harness.policy_gate import PolicyContext, PolicyGate, ToolCall
 from agent_harness.reducer import ReducerApplyResult, apply
+from agent_harness.tool_execution import execute_internal_tool_sync
+from agent_harness.tool_router import ToolRouter
 from agent_harness.turn_queue import StopToken, TurnQueue, TurnQueueItem, TurnRunner
 from contracts.asset import AssetKind, StorageMode
 from contracts.decision import Decision, DecisionAnswer, DecisionOption, PendingToolCall
@@ -76,9 +81,7 @@ from storage.repositories._json import load_json
 from storage.workspace_paths import WorkspacePaths
 from timeline import get_timeline_version
 from timeline.summary import render_timeline_summary
-from tools import ToolExecutionContext
-from tools.asset import import_local_file as asset_import_local_file
-from tools.specs import AssetImportLocalFileInput
+from tools import PATCH_OP_REGISTRY, build_default_tool_registry
 
 from . import schemas as api_schemas
 from .deps import (
@@ -114,6 +117,15 @@ DRAFT_COVER_LIMIT = 4
 _AGENT_WAITED_JOB_KINDS: frozenset[str] = frozenset(
     {"asr", "tts", "align", "render_preview", "render_final", "import_url"}
 )
+
+# 事件级 REST 直写白名单（均为纯 CRUD/生命周期动作，仍只经 reducer 单写，不是工具执行）：
+# create_draft→DraftCreated；rename_draft→DraftRenamed；delete_draft→DraftTrashed；
+# copy_draft→DraftCopied；request_url_import→DecisionCreated；delete_material→AssetUnlinked；
+# preview_viewed→PreviewViewed；answer_decision→DecisionAnswered；cancel_job→JobCancelled；
+# materials/revalidate→AssetInvalidated。除此之外，任何 handler 工具调用必须走
+# agent_harness.tool_execution.execute_internal_tool；不得在 apps 层新增 tools.<family> 旁路。
+# 跨草稿素材复用的 AssetLinked/JobEnqueued 与已批准 URL 导入 replay 是上述 CRUD 的内部后续，
+# 集中保留在 _link_existing_asset/_maybe_enqueue_url_import_job，禁止扩散成通用工具执行入口。
 
 
 class DraftCreateRequest(BaseModel):
@@ -206,6 +218,7 @@ def create_app(
     planner: LLMPlanner | None = None,
     decision_answer_resolver: DecisionAnswerResolver | None = None,
     turn_runner: TurnRunner | None = None,
+    tool_gateway: Any | None = None,
     startup_port: int | None = None,
     sse_max_events: int | None = None,
 ) -> FastAPI:
@@ -229,7 +242,9 @@ def create_app(
     )
     queue: TurnQueue | None = None
 
-    tool_gateway = build_default_tool_gateway(recorder=_StorageProviderCallRecorder(engine))
+    active_tool_gateway = tool_gateway or build_default_tool_gateway(
+        recorder=_StorageProviderCallRecorder(engine)
+    )
     turn_stream_hub = TurnStreamHub()
 
     async def default_runner(item: TurnQueueItem, stop_token: StopToken) -> None:
@@ -245,7 +260,7 @@ def create_app(
             turn_queue=queue,
             stop_token=stop_token,
             decision_answer_resolver=env_decision_answer_resolver,
-            tool_gateway=tool_gateway,
+            tool_gateway=active_tool_gateway,
             turn_listener=turn_stream_hub.listener_for(item.draft_id),
         )
 
@@ -666,17 +681,18 @@ def _register_routes(app: FastAPI) -> None:
                     continue
                 # 分支③：未命中 → 现状链路 AssetImported + AssetLinked + JobEnqueued(proxy)。
                 try:
-                    result = _run_asset_tool(
+                    # 注意：_import_all 整体在下方 run_in_threadpool 中执行，因此这里可安全
+                    # 使用只允许在线程内运行的同步执行桥，不处于 FastAPI 事件循环。
+                    result = _execute_rest_tool(
                         state,
                         tool_name="asset.import_local_file",
-                        handler=asset_import_local_file,
-                        input_model=AssetImportLocalFileInput(
-                            asset_id=payload.asset_id,
-                            path=str(file_path),
-                            storage_mode=payload.storage_mode or StorageMode.REFERENCE,
-                            kind=_infer_material_kind(str(file_path)),
-                            rel_dir=rel_dir,
-                        ),
+                        arguments={
+                            "asset_id": payload.asset_id,
+                            "path": str(file_path),
+                            "storage_mode": (payload.storage_mode or StorageMode.REFERENCE).value,
+                            "kind": _infer_material_kind(str(file_path)).value,
+                            "rel_dir": rel_dir,
+                        },
                         draft_state=draft_state,
                         actor="user",
                     )
@@ -811,6 +827,21 @@ def _register_routes(app: FastAPI) -> None:
             "kind": "user_message",
             "draft_id": draft_id,
             "message_id": message_id,
+        }
+
+    @app.post(
+        "/api/drafts/{draft_id}/turn/cancel",
+        response_model=api_schemas.TurnCancelResponse,
+        responses=_response_docs(mutation=True, not_found=True),
+    )
+    async def cancel_current_turn(draft_id: str, request: Request) -> dict[str, Any]:
+        state = state_from_request(request)
+        _require_draft(state.engine, draft_id)
+        requested = state.turn_queue.request_stop(draft_id)
+        return {
+            "draft_id": draft_id,
+            "status": "requested" if requested else "idle",
+            "requested": requested,
         }
 
     @app.get(
@@ -1560,17 +1591,17 @@ def _link_existing_asset(
     thumbnail_hash = hit.get("thumbnail_object_hash")
     has_thumbnail = isinstance(thumbnail_hash, str) and thumbnail_hash != ""
     proxy_ready = isinstance(proxy_hash, str) and proxy_hash != ""
-    # 索引是加工链最后一步：index_json 已在就说明全部产物就绪，无需补任何队。可播素材现在本就
-    # 没有 proxy（proxy_hash=None 是正常终态，不再当作「没加工完」）——只按「有没有索引」判补队。
-    if hit.get("index_json") is None:
-        if not has_thumbnail:
-            events.append(_poster_job_event(draft_id=draft_id, asset_id=asset_id))
-        if proxy_ready or not _hit_needs_proxy(hit):
-            # 已有 proxy，或本就无需 proxy（可播/图片/字体）：直接补 index。
-            events.append(_index_job_event(draft_id=draft_id, asset_id=asset_id))
-        else:
-            # 需要 proxy 且尚无：入 proxy 队（proxy handler 末尾会自动接上 index）。
-            events.append(_proxy_job_event(draft_id=draft_id, asset_id=asset_id))
+    # 不能只凭 index_json 判定「加工完成」：可播性规则升级后，历史素材可能已经有索引，
+    # 但原片（例如 HEVC 4:2:2）仍需要新补浏览器代理。每次跨草稿复用都重新探测原片；
+    # 无需代理的可播素材保留 proxy_hash=None 作为正常终态。
+    needs_proxy = _hit_needs_proxy(hit)
+    if not has_thumbnail:
+        events.append(_poster_job_event(draft_id=draft_id, asset_id=asset_id))
+    if needs_proxy and not proxy_ready:
+        # proxy handler 完成后会再幂等补 index；已有旧索引也允许补新代理。
+        events.append(_proxy_job_event(draft_id=draft_id, asset_id=asset_id))
+    elif hit.get("index_json") is None:
+        events.append(_index_job_event(draft_id=draft_id, asset_id=asset_id))
     result = apply(tuple(events), engine=engine, base_version=None, actor="user")
     _ensure_applied(result)
     return _event_ids(result)
@@ -1729,42 +1760,76 @@ def _failure_code(value: Any) -> str | None:
     return code if isinstance(code, str) else None
 
 
-def _run_asset_tool(
+def _execute_rest_tool(
     state: ApiState,
     *,
     tool_name: str,
-    handler: Any,
-    input_model: Any,
+    arguments: Mapping[str, Any],
     draft_state: DraftState,
     actor: Actor,
     base_version: int | None = None,
 ) -> ToolResult:
-    with state.engine.connect() as connection:
-        result = cast(
-            ToolResult,
-            handler(
-                input_model,
-                ToolExecutionContext(
-                    tool_call_id=f"api_{tool_name.replace('.', '_')}_{uuid.uuid4().hex[:8]}",
-                    turn_id="api",
-                    draft_state=draft_state,
-                    readonly_connection=connection,
-                    metadata={"workspace_paths": state.workspace_paths},
-                ),
-            ),
-        )
-    if result.status == "failed":
-        reason = result.error.error_code if result.error is not None else "tool_failed"
+    registry = build_default_tool_registry()
+    policy_gate = PolicyGate(
+        tool_specs=registry.specs_by_name(),
+        patch_op_specs=PATCH_OP_REGISTRY.as_mapping(),
+    )
+    router = ToolRouter(registry)
+    loaded = load_internal_state(state.engine, draft_state.draft_id)
+    execution = execute_internal_tool_sync(
+        ToolCall(
+            tool_name=tool_name,
+            arguments=dict(arguments),
+            tool_call_id=f"api_{tool_name.replace('.', '_')}_{uuid.uuid4().hex[:8]}",
+        ),
+        engine=state.engine,
+        registry=registry,
+        router=router,
+        policy_gate=policy_gate,
+        policy_context=PolicyContext(
+            preconditions=context_bundle_input_preconditions(loaded),
+            decisions=loaded.decisions,
+            pending_decision=loaded.pending_decision,
+        ),
+        draft_state=loaded.draft_state,
+        decisions=loaded.decisions,
+        turn_id="api",
+        actor=actor,
+        base_version=base_version,
+        workspace_paths=state.workspace_paths,
+        include_harness_only=True,
+    )
+    if execution.verdict.status != "allow":
         raise HTTPException(
             status_code=409,
-            detail={"reason": reason},
+            detail={
+                "error_code": "tool_policy_rejected",
+                "verdict": execution.verdict.status,
+                "reason": execution.verdict.reason,
+            },
         )
-    reducer_result = apply(
-        result.events,
-        engine=state.engine,
-        base_version=base_version,
-        actor=actor,
-    )
+    result = execution.result
+    reducer_result = execution.reducer_result
+    if result is None or reducer_result is None:
+        raise RuntimeError("allow verdict did not execute REST tool")
+    if result.status == "failed":
+        reason = result.error.error_code if result.error is not None else "tool_failed"
+        exception_type = (
+            result.error.details.get("exception_type")
+            if result.error is not None and result.error.details is not None
+            else None
+        )
+        if exception_type in {"FileNotFoundError", "PermissionError", "OSError"}:
+            # 批量本地导入需要把单文件 I/O 失败计入 failed 后继续处理其余路径。
+            raise OSError(result.observation)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": reason,
+                "verdict": execution.verdict.status,
+                "reason": result.observation,
+            },
+        )
     _ensure_applied(reducer_result)
     data = dict(result.data)
     data["event_ids"] = _event_ids(reducer_result)

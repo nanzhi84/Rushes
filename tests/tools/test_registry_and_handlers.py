@@ -76,12 +76,12 @@ def test_default_tool_and_patch_registries_match_surface() -> None:
         "interaction.show_preview",
         "interaction.show_timeline",
         "interaction.show_error",
-        "media.view_frames",
         "memory.extract_from_draft",
         "memory.ask_scope",
         "memory.save",
         "memory.search_relevant",
         "render.preview",
+        "render.inspect_preview",
         "render.final_mp4",
         "render.status",
         "timeline.compose_initial",
@@ -138,10 +138,10 @@ def test_default_tool_and_patch_registries_match_surface() -> None:
     assert content_revise.exposure == "llm"
     assert content_revise.requires_active_draft is True
     assert content_revise.emits_events == ["ContentPlanUpdated", "CutPlanUpdated"]
-    media_view_frames = registry.require("media.view_frames").spec
-    assert media_view_frames.side_effects == []
-    assert media_view_frames.requires_confirmation is False
-    assert media_view_frames.emits_events == []
+    inspect_preview = registry.require("render.inspect_preview").spec
+    assert inspect_preview.side_effects == []
+    assert inspect_preview.requires_artifacts == ["any_preview_exists"]
+    assert inspect_preview.emits_events == []
     apply_patch = registry.require("timeline.apply_patch").spec
     assert apply_patch.requires_artifacts == ["timeline_exists"]
     assert apply_patch.emits_events == [
@@ -216,7 +216,7 @@ def test_every_tool_spec_declares_cost_tier() -> None:
     # 碰云端模型 / 长任务的工具必须是 expensive
     for name in (
         "understand.materials",
-        "media.view_frames",
+        "render.inspect_preview",
         "audio.asr_original",
         "audio.rough_cut_speech",
         "audio.generate_tts",
@@ -225,6 +225,8 @@ def test_every_tool_spec_declares_cost_tier() -> None:
         "memory.extract_from_draft",
     ):
         assert specs[name].cost_tier == "expensive", name
+
+    assert specs["understand.materials"].cost_note == ("depth=scan 便宜 / depth=deep 昂贵")
 
     # 本地写状态类是 cheap
     for name in ("interaction.ask_user", "content.create_plan", "timeline.apply_patch"):

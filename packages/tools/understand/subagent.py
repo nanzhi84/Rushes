@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import threading
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -83,6 +85,7 @@ class SubagentSpec:
     progress: Progress = _noop_progress
     now: NowFn = _now_iso
     step_budget: int = DEFAULT_STEP_BUDGET
+    cancel_event: threading.Event | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,7 +190,15 @@ async def _do_view_frames(
     for seconds in timestamps:
         spec.progress({"asset_id": spec.asset_id, "note": f"正在查看 {_fmt_clock(seconds)} 画面"})
         try:
-            data_uri = await asyncio.to_thread(spec.extract_frame, seconds)
+            worker = asyncio.create_task(asyncio.to_thread(spec.extract_frame, seconds))
+            try:
+                data_uri = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                if spec.cancel_event is not None:
+                    spec.cancel_event.set()
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(worker)
+                raise
         except Exception as exc:
             state.viewed.append((f"t={_fmt_sec(seconds)}s 抽帧失败：{exc}", None))
             continue

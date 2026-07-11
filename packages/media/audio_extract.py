@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 from storage.workspace_paths import WorkspacePaths
+
+from .process import run_media_command
 
 
 class AudioExtractError(RuntimeError):
@@ -47,7 +48,7 @@ def extract_audio_to_wav(
         "wav",
         str(destination),
     ]
-    result = subprocess.run(command, capture_output=True, check=False, text=True)
+    result = run_media_command(command, text=True)
     if result.returncode != 0:
         destination.unlink(missing_ok=True)
         raise AudioExtractError(_stderr_summary(result.stderr) or "ffmpeg audio extraction failed")

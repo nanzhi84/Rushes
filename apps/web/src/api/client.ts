@@ -99,6 +99,7 @@ export type CostSummary = Schemas["CostSummary"];
 export type MessageRecord = Schemas["MessageRecord"];
 export type MessagesResponse = Schemas["MessagesResponse"];
 export type MessageQueuedResponse = Schemas["MessageQueuedResponse"];
+export type TurnCancelResponse = Schemas["TurnCancelResponse"];
 export type CurrentDecisionResponse = Schemas["CurrentDecisionResponse"];
 export type PendingDecisionsResponse = Schemas["PendingDecisionsResponse"];
 export type DecisionAnswerResponse = Schemas["DecisionAnswerResponse"];
@@ -194,6 +195,13 @@ export const api = {
     return apiFetch<MessageQueuedResponse>(`${draftPath(draftId)}/messages`, {
       method: "POST",
       body: payload
+    });
+  },
+
+  cancelTurn(draftId: string): Promise<TurnCancelResponse> {
+    return apiFetch<TurnCancelResponse>(`${draftPath(draftId)}/turn/cancel`, {
+      method: "POST",
+      headers: JSON_MUTATION_HEADERS
     });
   },
 

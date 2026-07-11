@@ -128,11 +128,19 @@ class PolicyGate:
         self._tool_specs = dict(tool_specs)
         self._patch_op_specs = dict(patch_op_specs)
 
-    def compute_allowed_tools(self, context: PolicyContext) -> list[ToolSpec]:
+    def compute_allowed_tools(
+        self,
+        context: PolicyContext,
+        *,
+        include_harness_only: bool = False,
+    ) -> list[ToolSpec]:
         pending_decision = _pending_blocking_decision(context)
         allowed: list[ToolSpec] = []
         for spec in self._tool_specs.values():
-            if spec.status != "stable" or spec.exposure != "llm":
+            if spec.status != "stable" or (
+                spec.exposure != "llm"
+                and not (include_harness_only and spec.exposure == "harness_only")
+            ):
                 continue
             if pending_decision is not None:
                 if _is_pending_decision_whitelisted(spec):
@@ -176,7 +184,11 @@ class PolicyGate:
                 reason += f"；未满足前置：{', '.join(unmet)}。请先完成对应步骤，不要重复调用本工具"
             return self._deny(parsed_call, context, reason)
 
-        prohibited_key = _first_prohibited_argument_key(parsed_call.arguments)
+        prohibited_key = (
+            _first_prohibited_argument_key(parsed_call.arguments)
+            if spec.exposure == "llm"
+            else None
+        )
         if prohibited_key is not None:
             return self._deny(
                 parsed_call,
@@ -655,6 +667,12 @@ def _first_prohibited_argument_key(value: Any) -> str | None:
             if nested is not None:
                 return nested
     return None
+
+
+def prohibited_argument_key(value: Any) -> str | None:
+    """Public mirror used by static contract checks to prevent schema/gate drift."""
+
+    return _first_prohibited_argument_key(value)
 
 
 def _is_prohibited_argument_key(key: str) -> bool:

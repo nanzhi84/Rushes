@@ -101,6 +101,16 @@ def check_dependency_directions(
         allowed = ALLOWED_IMPORTS[edge.source_group]
         if edge.target_group not in allowed:
             violations.append(ImportViolation(edge=edge, reason="import direction is not allowed"))
+        if edge.source_group == "apps" and edge.module.startswith("tools."):
+            violations.append(
+                ImportViolation(
+                    edge=edge,
+                    reason=(
+                        "apps may only import the tools registry from the tools root; "
+                        "execution must use agent_harness.tool_execution"
+                    ),
+                )
+            )
     graph: dict[str, set[str]] = {group: set() for group in LOCAL_GROUPS}
     for edge in edges:
         if edge.source_group != edge.target_group:
@@ -138,6 +148,7 @@ def check_event_consistency() -> dict[str, Any]:
 
 
 def check_tool_registry() -> dict[str, Any]:
+    from agent_harness.policy_gate import prohibited_argument_key
     from contracts.events import event_registry
     from domain.preconditions import assert_known_preconditions
     from tools import PATCH_OP_REGISTRY, build_default_tool_registry
@@ -155,6 +166,14 @@ def check_tool_registry() -> dict[str, Any]:
         unknown_events = sorted(set(spec.emits_events) - known_events)
         if unknown_events:
             errors.append(f"{spec.name}: unknown events {unknown_events}")
+        if spec.exposure == "llm":
+            for field_name in spec.input_model.model_fields:
+                collision = prohibited_argument_key({field_name: None})
+                if collision is not None:
+                    errors.append(
+                        f"{spec.name}: input field collides with PolicyGate prohibition: "
+                        f"{collision}"
+                    )
         rows.append(
             {
                 "name": spec.name,
@@ -165,6 +184,9 @@ def check_tool_registry() -> dict[str, Any]:
         )
     if len(rows) != EXPECTED_TOOL_COUNT:
         errors.append(f"registered tool count: expected {EXPECTED_TOOL_COUNT}, got {len(rows)}")
+    for tool_name in ("understand.materials", "render.inspect_preview", "asset.list_assets"):
+        if registry.require(tool_name).spec.result_model is None:
+            errors.append(f"{tool_name}: result_model must not be empty")
     patch_ops = {spec.kind for spec in PATCH_OP_REGISTRY.list()}
     missing_patch_ops = sorted(EXPECTED_PATCH_OPS - patch_ops)
     extra_patch_ops = sorted(patch_ops - EXPECTED_PATCH_OPS)
@@ -228,7 +250,7 @@ def main() -> int:
     print("Patch ops")
     _print_table([{"kind": kind} for kind in tool_report["patch_ops"]], ("kind",))
 
-    errors = []
+    errors: list[str] = []
     errors.extend(_format_import_violation(violation) for violation in import_violations)
     if event_report["event_count"] != EXPECTED_EVENT_COUNT:
         errors.append(

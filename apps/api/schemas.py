@@ -94,6 +94,12 @@ class MessageQueuedResponse(ApiResponseModel):
     message_id: str
 
 
+class TurnCancelResponse(ApiResponseModel):
+    draft_id: str
+    status: Literal["requested", "idle"]
+    requested: bool
+
+
 class MessageRecord(ApiResponseModel):
     message_id: str
     role: str

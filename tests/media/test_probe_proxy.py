@@ -9,7 +9,7 @@ import pytest
 
 import media.hwaccel as hwaccel_module
 import media.proxy as proxy_module
-from media.probe import probe_media
+from media.probe import probe_media, probe_video_stream_format
 from media.proxy import generate_proxy
 from storage.workspace_paths import WorkspacePaths
 
@@ -41,10 +41,7 @@ def _fake_ffmpeg_runner(
 
     def run(
         command: list[str],
-        *,
-        capture_output: bool = False,
-        check: bool = False,
-        text: bool = False,
+        **_kwargs: object,
     ) -> subprocess.CompletedProcess[str]:
         calls.append(list(command))
         if "-encoders" in command:
@@ -99,7 +96,7 @@ def test_generate_proxy_writes_object_store_proxy(tmp_path: Path) -> None:
 def test_proxy_prefers_videotoolbox_on_macos(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(proxy_module, "_is_macos", lambda: True)
     run, calls = _fake_ffmpeg_runner(encoders_stdout="V..... h264_videotoolbox HW H.264")
-    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    monkeypatch.setattr(proxy_module, "run_media_command", run)
     source, paths = _source_and_paths(tmp_path)
 
     ref = generate_proxy(source, paths=paths)
@@ -113,7 +110,7 @@ def test_proxy_prefers_videotoolbox_on_macos(tmp_path: Path, monkeypatch) -> Non
 def test_proxy_uses_libx264_when_videotoolbox_absent(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(proxy_module, "_is_macos", lambda: True)
     run, calls = _fake_ffmpeg_runner(encoders_stdout="V..... libx264 H.264")
-    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    monkeypatch.setattr(proxy_module, "run_media_command", run)
     source, paths = _source_and_paths(tmp_path)
 
     generate_proxy(source, paths=paths)
@@ -131,7 +128,7 @@ def test_proxy_falls_back_to_libx264_when_hardware_transcode_fails(
         encoders_stdout="V..... h264_videotoolbox HW H.264",
         fail_encoders=frozenset({"h264_videotoolbox"}),
     )
-    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    monkeypatch.setattr(proxy_module, "run_media_command", run)
     source, paths = _source_and_paths(tmp_path)
 
     ref = generate_proxy(source, paths=paths)
@@ -147,7 +144,7 @@ def test_proxy_falls_back_to_libx264_when_hardware_transcode_fails(
 def test_proxy_probes_encoder_once_and_caches(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(proxy_module, "_is_macos", lambda: True)
     run, calls = _fake_ffmpeg_runner(encoders_stdout="V..... h264_videotoolbox HW H.264")
-    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    monkeypatch.setattr(proxy_module, "run_media_command", run)
     source, paths = _source_and_paths(tmp_path)
 
     generate_proxy(source, paths=paths)
@@ -160,7 +157,7 @@ def test_proxy_probes_encoder_once_and_caches(tmp_path: Path, monkeypatch) -> No
 def test_proxy_uses_libx264_without_probe_off_macos(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(proxy_module, "_is_macos", lambda: False)
     run, calls = _fake_ffmpeg_runner(encoders_stdout="V..... h264_videotoolbox HW H.264")
-    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    monkeypatch.setattr(proxy_module, "run_media_command", run)
     source, paths = _source_and_paths(tmp_path)
 
     generate_proxy(source, paths=paths)
@@ -168,13 +165,45 @@ def test_proxy_uses_libx264_without_probe_off_macos(tmp_path: Path, monkeypatch)
     assert not any("-encoders" in command for command in calls)  # 非 macOS 不探测硬件编码
     transcode = _transcodes(calls)[0]
     assert "libx264" in transcode
+    assert transcode[transcode.index("-pix_fmt") + 1] == "yuv420p"
+
+
+@pytest.mark.skipif(not FFMPEG_AVAILABLE, reason="ffmpeg/ffprobe not installed")
+@pytest.mark.ffmpeg
+def test_software_proxy_converts_422_source_to_browser_playable_420(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "source-422.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=0.25:size=64x64:rate=24",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv422p",
+            str(source),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(proxy_module, "_is_macos", lambda: False)
+    paths = WorkspacePaths.from_root(tmp_path / "workspace").initialize()
+
+    ref = generate_proxy(source, paths=paths)
+
+    assert probe_video_stream_format(paths.object_path(ref.object_hash)) == ("h264", "yuv420p")
 
 
 def test_proxy_uses_hwaccel_decode_when_available(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(proxy_module, "_is_macos", lambda: True)
     hwaccel_module._decode_available_cache["ffmpeg"] = True  # 输入侧硬解可用
     run, calls = _fake_ffmpeg_runner(encoders_stdout="V..... h264_videotoolbox HW H.264")
-    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    monkeypatch.setattr(proxy_module, "run_media_command", run)
     source, paths = _source_and_paths(tmp_path)
 
     generate_proxy(source, paths=paths)
@@ -195,7 +224,7 @@ def test_proxy_falls_back_to_software_when_hwaccel_decode_fails(
         encoders_stdout="V..... h264_videotoolbox HW H.264",
         fail_hwaccel_decode=True,
     )
-    monkeypatch.setattr(proxy_module.subprocess, "run", run)
+    monkeypatch.setattr(proxy_module, "run_media_command", run)
     source, paths = _source_and_paths(tmp_path)
 
     ref = generate_proxy(source, paths=paths)

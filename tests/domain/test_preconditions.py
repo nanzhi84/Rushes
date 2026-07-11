@@ -45,6 +45,7 @@ def test_all_prd_preconditions_have_true_and_false_scenarios() -> None:
             transcript_ids=frozenset({"tr_voice"}),
             transcript_ids_with_vad=frozenset({"tr_voice"}),
             voiceover_asset_ids=frozenset({"asset_vo"}),
+            preview_count=1,
         ),
     )
     false_context = PreconditionContext(
@@ -73,12 +74,26 @@ def test_all_prd_preconditions_have_true_and_false_scenarios() -> None:
         "timeline_validated",
         "rough_cut_approved",
         "preview_for_current_version_exists",
+        "any_preview_exists",
         "voiceover_asset_exists",
     ]
 
     for name in names:
         assert evaluate_precondition(name, true_context), name
         assert not evaluate_precondition(name, false_context), name
+
+
+def test_any_preview_exists_survives_timeline_version_change() -> None:
+    context = PreconditionContext(
+        draft_state=_draft_state(
+            timeline_current_version=4,
+            preview_current_id=None,
+        ),
+        draft_artifacts=DraftArtifactStats(preview_count=1),
+    )
+
+    assert evaluate_precondition("any_preview_exists", context)
+    assert not evaluate_precondition("preview_for_current_version_exists", context)
 
 
 def test_usable_asset_exists_falls_back_to_count() -> None:

@@ -106,6 +106,10 @@ EXPECTED_COLUMNS: dict[str, tuple[str, ...]] = {
         "timeline_version",
         "object_hash",
         "quality",
+        "render_width",
+        "render_height",
+        "render_fps",
+        "expected_duration_sec",
         "created_at",
     ),
     "exports": (

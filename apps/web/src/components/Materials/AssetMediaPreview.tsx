@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import { api, type MaterialAsset } from "../../api/client";
 
@@ -17,12 +17,23 @@ type PlaybackSource = "source" | "proxy";
 export function AssetMediaPreview({ asset, className }: AssetMediaPreviewProps): ReactElement {
   const [source, setSource] = useState<PlaybackSource>("source");
   const [failed, setFailed] = useState(false);
+  const previousAsset = useRef({ assetId: asset.asset_id, proxyReady: asset.proxy_ready });
 
-  // 换素材时回到「原片优先」并清掉失败态。
+  // 换素材时回到原片优先；同一素材若先播放失败、后台代理随后完成，则自动恢复并切 proxy，
+  // 不要求用户手动关闭再重开试看。
   useEffect(() => {
-    setSource("source");
-    setFailed(false);
-  }, [asset.asset_id]);
+    const previous = previousAsset.current;
+    const assetChanged = previous.assetId !== asset.asset_id;
+    const proxyBecameReady = !previous.proxyReady && asset.proxy_ready;
+    previousAsset.current = { assetId: asset.asset_id, proxyReady: asset.proxy_ready };
+    if (assetChanged) {
+      setSource("source");
+      setFailed(false);
+    } else if (proxyBecameReady && failed && source === "source") {
+      setSource("proxy");
+      setFailed(false);
+    }
+  }, [asset.asset_id, asset.proxy_ready, failed, source]);
 
   if (asset.kind === "image") {
     return (

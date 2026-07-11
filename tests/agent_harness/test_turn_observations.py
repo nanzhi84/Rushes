@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from agent_harness.context_builder import (
     ContextBuilder,
@@ -81,6 +82,37 @@ def test_turn_observation_entry_truncates_arguments_and_observation() -> None:
     assert len(entry) < 700
 
 
+def test_scan_observation_keeps_all_31_evidence_anchors() -> None:
+    call = ToolCall(
+        tool_call_id="tc_scan",
+        tool_name="understand.materials",
+        arguments={"asset_ids": [f"asset_{index:02d}" for index in range(31)], "depth": "scan"},
+    )
+    observation = "\n".join(
+        f"【asset_{index:02d}】摘要；证据：{index:.2f}s/poster；置信度 0.90" for index in range(31)
+    )
+
+    entry = _turn_observation_entry(
+        call,
+        ToolResult(
+            tool_call_id="tc_scan",
+            tool_name="understand.materials",
+            status="succeeded",
+            observation=observation,
+        ),
+    )
+    bundle = ContextBuilder().build(
+        ContextBuildInput(
+            preconditions=PreconditionContext(draft_artifacts=DraftArtifactStats()),
+            turn_observations=(entry,),
+        )
+    )
+
+    assert "0.00s/poster" in entry
+    assert "30.00s/poster" in entry
+    assert "30.00s/poster" in bundle.blocks["turn_observations"]
+
+
 def test_turn_observations_block_renders_and_trims() -> None:
     builder = ContextBuilder(budgets={"turn_observations": 20})
     bundle = builder.build(
@@ -148,32 +180,44 @@ def test_build_default_tool_gateway_registers_capabilities(monkeypatch) -> None:
 
 
 def test_tool_context_metadata_includes_gateway(tmp_path: Path) -> None:
-    from agent_harness.loop import _tool_context_metadata
+    from agent_harness.tool_execution import _tool_metadata
 
     engine = _engine(tmp_path)
     marker = object()
-    metadata = _tool_context_metadata(engine, marker)
+    metadata = _tool_metadata(
+        engine,
+        gateway=marker,
+        turn_progress=None,
+        stop_token=None,
+        workspace_paths=None,
+    )
     assert metadata["provider_gateway"] is marker
     assert "workspace_path" in metadata
-    assert "provider_gateway" not in _tool_context_metadata(engine, None)
+    assert "provider_gateway" not in _tool_metadata(
+        engine,
+        gateway=None,
+        turn_progress=None,
+        stop_token=None,
+        workspace_paths=None,
+    )
 
 
 def test_partial_result_sink_raises_on_non_applied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from agent_harness import loop as loop_mod
+    from agent_harness import tool_execution as execution_mod
     from agent_harness.reducer import ReducerApplyResult
 
     engine = _engine(tmp_path)
-    # 伪造归约拒绝（validator 未通过）：sink 不能静默吞——摘要行已写但事件没落是脏态
-    # （行在库里、understanding_status 永不变绿），必须 raise 让工具诚实失败。
+    # 伪造归约拒绝（validator 未通过）：sink 不能静默吞，必须 raise 让工具诚实失败；
+    # 真实执行路径由 Reducer 同一事务保证 rows/events 全部回滚。
     monkeypatch.setattr(
-        loop_mod,
-        "_apply_events",
+        execution_mod,
+        "apply_tool_events",
         lambda *a, **k: ReducerApplyResult(status="validation_failed"),
     )
     collected: list[ReducerApplyResult] = []
-    sink = loop_mod._make_partial_result_sink(engine, None, collected)
+    sink = execution_mod._make_partial_result_sink(engine, None, "agent", collected)
     with pytest.raises(RuntimeError, match="partial_result_sink"):
         sink({}, [{"event": "MaterialUnderstandingCompleted", "asset_id": "a1"}])
     assert collected and collected[0].status == "validation_failed"
@@ -183,6 +227,7 @@ def test_partial_result_sink_collects_applied_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from agent_harness import loop as loop_mod
+    from agent_harness import tool_execution as execution_mod
     from agent_harness.reducer import AppliedEvent, ReducerApplyResult
 
     engine = _engine(tmp_path)
@@ -192,12 +237,70 @@ def test_partial_result_sink_collects_applied_results(
             AppliedEvent(event_id=1, event_type="MaterialUnderstandingStarted", state_version=None),
         ),
     )
-    monkeypatch.setattr(loop_mod, "_apply_events", lambda *a, **k: applied)
+    monkeypatch.setattr(execution_mod, "apply_tool_events", lambda *a, **k: applied)
     collected: list[ReducerApplyResult] = []
-    sink = loop_mod._make_partial_result_sink(engine, None, collected)
+    sink = execution_mod._make_partial_result_sink(engine, None, "agent", collected)
     sink({}, [{"event": "MaterialUnderstandingStarted", "asset_id": "a1"}])
     assert collected == [applied]
     # _record_sink_results 把结果并入主记录处（accumulator），不再静默吞掉。
     accumulator = loop_mod._RunAccumulator()
     loop_mod._record_sink_results(collected, accumulator=accumulator, tracer=None)
     assert accumulator.reducer_results == [applied]
+
+
+def test_partial_result_sink_advances_version_between_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_harness import tool_execution as execution_mod
+    from agent_harness.reducer import ReducerApplyResult
+
+    engine = _engine(tmp_path)
+    observed_versions: list[int | None] = []
+
+    def _apply(*args, **kwargs):
+        observed_versions.append(kwargs["base_version"])
+        next_version = len(observed_versions)
+        return ReducerApplyResult(status="applied", draft_state_versions={"draft_1": next_version})
+
+    monkeypatch.setattr(execution_mod, "apply_tool_events", _apply)
+    current_version: list[int | None] = [0]
+    sink = execution_mod._make_partial_result_sink(engine, 0, "agent", [], current_version)
+
+    sink({}, [{"event": "DraftRenamed", "draft_id": "draft_1"}])
+    sink({}, [{"event": "DraftRenamed", "draft_id": "draft_1"}])
+
+    assert observed_versions == [0, 1]
+    assert current_version == [2]
+
+
+def test_result_rows_roll_back_on_reducer_version_conflict(tmp_path: Path) -> None:
+    from agent_harness.tool_execution import apply_tool_events
+
+    engine = _engine(tmp_path)
+    result = apply_tool_events(
+        [
+            {
+                "event": "BriefUpdated",
+                "draft_id": "draft_1",
+                "payload": {"brief": {"goal": "New", "confirmed_facts": []}},
+            }
+        ],
+        engine=engine,
+        base_version=-1,
+        actor="agent",
+        rows={
+            "message_row": {
+                "message_id": "msg_orphan",
+                "draft_id": "draft_1",
+                "role": "assistant",
+                "kind": "reply",
+                "content": {"text": "must roll back"},
+                "created_at": NOW,
+            }
+        },
+    )
+
+    assert result.status == "version_conflict"
+    with engine.connect() as connection:
+        assert connection.execute(select(schema.messages)).all() == []
+        assert connection.execute(select(schema.event_log)).all() == []

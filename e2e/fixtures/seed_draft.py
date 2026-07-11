@@ -18,6 +18,9 @@ from typing import Any
 from agent_harness.loop import _load_state
 from agent_harness.reducer import ReducerApplyResult, apply
 from contracts.events import (
+    AssetImported,
+    AssetIndexReady,
+    AssetLinked,
     ExportCompleted,
     MemoryCandidateExtracted,
     MemorySaved,
@@ -34,6 +37,8 @@ MEMORY_CANDIDATE_ID = "e2e_mem_candidate_draft_a"
 EXPORT_ID = "e2e_export_draft_a"
 CLIP_ID = "e2e_clip_draft_a"
 FIXTURE_NAME = "path3-fixture.mp4"
+READY_ASSET_ID = "e2e_cancel_ready"
+SLOW_ASSET_ID = "e2e_cancel_slow"
 NOW = "2026-07-05T00:00:00+00:00"
 
 
@@ -50,6 +55,11 @@ def main() -> None:
     seed_draft.add_argument("--asset-id", required=True)
     seed_draft.add_argument("--fixture-path", required=True)
 
+    seed_cancel = subparsers.add_parser("seed-cancel-assets")
+    seed_cancel.add_argument("--workspace", required=True)
+    seed_cancel.add_argument("--draft-id", required=True)
+    seed_cancel.add_argument("--fixture-path", required=True)
+
     verify_memory = subparsers.add_parser("verify-memory")
     verify_memory.add_argument("--workspace", required=True)
     verify_memory.add_argument("--draft-id", required=True)
@@ -62,6 +72,9 @@ def main() -> None:
         return
     if args.command == "seed-draft-a":
         command_seed_draft_a(args)
+        return
+    if args.command == "seed-cancel-assets":
+        command_seed_cancel_assets(args)
         return
     if args.command == "verify-memory":
         command_verify_memory(args)
@@ -159,6 +172,62 @@ def command_seed_draft_a(args: argparse.Namespace) -> None:
                     },
                 ),
             ),
+            engine=engine,
+            base_version=None,
+            actor="system",
+            created_at=NOW,
+        )
+    )
+
+
+def command_seed_cancel_assets(args: argparse.Namespace) -> None:
+    engine = create_workspace_engine(args.workspace)
+    fixture_path = Path(args.fixture_path).expanduser().resolve(strict=True)
+    workspace_paths = WorkspacePaths.from_root(args.workspace).initialize()
+    object_hash = copy_fixture_to_object_store(workspace_paths, fixture_path)
+    upsert_object(engine, object_hash, fixture_path.stat().st_size)
+    events: list[Any] = []
+    for asset_id in (READY_ASSET_ID, SLOW_ASSET_ID):
+        events.extend(
+            [
+                AssetImported(
+                    draft_id=args.draft_id,
+                    asset_id=asset_id,
+                    payload={
+                        "storage_mode": "copy",
+                        "object_hash": object_hash,
+                        "object_size": fixture_path.stat().st_size,
+                        "kind": "video",
+                        "source": "upload",
+                        "filename": f"{asset_id}.mp4",
+                        "hash": object_hash,
+                        "mtime": fixture_path.stat().st_mtime_ns,
+                        "size": fixture_path.stat().st_size,
+                        "probe": {
+                            "duration_sec": 2.0,
+                            "fps": 30.0,
+                            "width": 320,
+                            "height": 568,
+                            "has_audio": False,
+                        },
+                        "ingest_status": "indexed",
+                        "usable": True,
+                    },
+                ),
+                AssetLinked(draft_id=args.draft_id, asset_id=asset_id),
+                AssetIndexReady(
+                    draft_id=args.draft_id,
+                    asset_id=asset_id,
+                    payload={
+                        "index_json": {"duration_sec": 2.0, "shots": []},
+                        "ingest_status": "indexed",
+                    },
+                ),
+            ]
+        )
+    apply_checked(
+        apply(
+            tuple(events),
             engine=engine,
             base_version=None,
             actor="system",

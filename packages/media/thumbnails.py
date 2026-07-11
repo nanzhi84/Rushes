@@ -7,10 +7,11 @@ instead of a base64 data URI.
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
 from media.hwaccel import hwaccel_decode_args
+
+from .process import run_media_command
 
 DEFAULT_MAX_SIZE = 768
 
@@ -89,7 +90,7 @@ def _thumbnail_command(
 
 
 def _run_ffmpeg_jpeg(command: list[str]) -> bytes:
-    result = subprocess.run(command, capture_output=True, check=False)
+    result = run_media_command(command, text=False, timeout=60)
     if result.returncode != 0:
         raise ThumbnailError(_stderr_summary(result.stderr) or "ffmpeg thumbnail failed")
     if not result.stdout:
@@ -100,7 +101,7 @@ def _run_ffmpeg_jpeg(command: list[str]) -> bytes:
 def _try_ffmpeg_jpeg(command: list[str]) -> bytes | None:
     """跑 ffmpeg 抽帧，成功返回 JPEG 字节，任何失败返回 None（供硬解→软解回落）。"""
 
-    result = subprocess.run(command, capture_output=True, check=False)
+    result = run_media_command(command, text=False, timeout=60)
     if result.returncode != 0 or not result.stdout:
         return None
     return result.stdout

@@ -176,7 +176,13 @@ def test_list_assets_returns_l0_manifest_rows(tmp_path: Path) -> None:
             "asset_a",
             kind="video",
             filename="a.mp4",
-            probe={"duration_sec": 12.5, "width": 1920, "height": 1080, "has_audio": True},
+            probe={
+                "duration_sec": 12.5,
+                "fps": 29.97,
+                "width": 1920,
+                "height": 1080,
+                "has_audio": True,
+            },
             thumbnail_object_hash="thumb_a",
             understanding_status="ready",
             ingest_status="indexed",
@@ -200,6 +206,7 @@ def test_list_assets_returns_l0_manifest_rows(tmp_path: Path) -> None:
         "kind": "video",
         "rel_dir": "clips/set1",
         "duration_sec": 12.5,
+        "fps": 29.97,
         "width": 1920,
         "height": 1080,
         "orientation": "landscape",
@@ -217,6 +224,42 @@ def test_list_assets_returns_l0_manifest_rows(tmp_path: Path) -> None:
     assert assets["asset_b"]["has_audio"] is None
     assert assets["asset_b"]["thumbnail_ready"] is False
     assert assets["asset_b"]["understanding_status"] == "none"
+
+
+def test_list_assets_filters_rel_dir_and_ingest_status_and_validates_result(
+    tmp_path: Path,
+) -> None:
+    from tools.specs import build_default_tool_registry
+
+    engine = create_workspace_engine(tmp_path / "workspace")
+    with engine.begin() as connection:
+        schema.create_all(connection)
+        _seed_draft(connection)
+        _seed_asset(connection, "asset_a", kind="video", ingest_status="indexed")
+        _seed_asset(connection, "asset_b", kind="video", ingest_status="failed")
+        _seed_asset(connection, "asset_c", kind="video", ingest_status="indexed")
+        _seed_asset(connection, "asset_d", kind="audio", ingest_status="probed")
+        _seed_link(connection, "asset_a", rel_dir="clips/set1")
+        _seed_link(connection, "asset_b", rel_dir="clips/set1")
+        _seed_link(connection, "asset_c", rel_dir="clips/set2")
+        _seed_link(connection, "asset_d", rel_dir="clips/set1")
+
+    with engine.connect() as connection:
+        result = list_assets(
+            AssetListAssetsInput(rel_dir="clips/set1", ingest_status="indexed"),
+            _context(connection=connection),
+        )
+
+    assert [item["asset_id"] for item in result.data["assets"]] == ["asset_a"]
+    with engine.connect() as connection:
+        probed = list_assets(
+            AssetListAssetsInput(ingest_status="probed"),
+            _context(connection=connection),
+        )
+    assert [item["asset_id"] for item in probed.data["assets"]] == ["asset_d"]
+    spec = build_default_tool_registry().require("asset.list_assets").spec
+    assert spec.result_model is not None
+    spec.result_model.model_validate(result.data)
 
 
 def test_list_assets_filters_by_kind_audio_and_usable(tmp_path: Path) -> None:

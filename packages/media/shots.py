@@ -10,14 +10,16 @@ resolution/fps agnostic.
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from media.hwaccel import hwaccel_decode_args
 from storage.workspace_paths import WorkspacePaths
+
+from .process import MediaCommandCancelled, run_media_command
 
 # 分析用小片的目标高度：分镜只要秒级摘要边界，180p 足够，且解码/分析都廉价。
 _ANALYSIS_HEIGHT = 180
@@ -27,6 +29,10 @@ _PREPASS_TIMEOUT_S = 120
 
 class ShotSplitError(RuntimeError):
     """Raised when shot splitting cannot inspect a video."""
+
+
+class ShotSplitCancelled(ShotSplitError):
+    """Raised when an in-flight shot split receives a cancellation signal."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +53,7 @@ def split_shots(
     *,
     config: ShotSplitConfig | None = None,
     paths: WorkspacePaths | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[Shot, ...]:
     """Split ``video_path`` into second-boundary shots via PySceneDetect.
 
@@ -55,11 +62,15 @@ def split_shots(
 
     cfg = config or ShotSplitConfig()
     path = Path(video_path).expanduser().resolve(strict=True)
-    return _pyscenedetect_shots(path, cfg, paths)
+    _raise_if_cancelled(cancel_event)
+    return _pyscenedetect_shots(path, cfg, paths, cancel_event)
 
 
 def _pyscenedetect_shots(
-    path: Path, config: ShotSplitConfig, paths: WorkspacePaths | None
+    path: Path,
+    config: ShotSplitConfig,
+    paths: WorkspacePaths | None,
+    cancel_event: threading.Event | None,
 ) -> tuple[Shot, ...]:
     try:
         from scenedetect import SceneManager, open_video
@@ -70,8 +81,9 @@ def _pyscenedetect_shots(
     # opencv 直接软解 1080p60 HEVC 全帧要 ~34 CPU 秒/文件（吃满所有核 → 导入风扇狂叫）。先用
     # ffmpeg 硬解(videotoolbox)降采样成 180p 小片再分析，约 6 CPU 秒且分镜边界一致；无硬解/预处理
     # 失败回落原片直接分析（保持旧行为）。fps 保持不变，故 min_scene_len(按帧) 语义不变。
-    analysis_path, cleanup = _prepare_analysis_clip(path, paths)
+    analysis_path, cleanup = _prepare_analysis_clip(path, paths, cancel_event=cancel_event)
     try:
+        _raise_if_cancelled(cancel_event)
         video = open_video(str(analysis_path))
         scene_manager = SceneManager()
         scene_manager.add_detector(
@@ -80,7 +92,15 @@ def _pyscenedetect_shots(
                 min_scene_len=config.min_scene_len,
             )
         )
-        scene_manager.detect_scenes(video)
+        watcher_done = threading.Event()
+        watcher = _start_cancel_watcher(scene_manager, cancel_event, watcher_done)
+        try:
+            scene_manager.detect_scenes(video)
+        finally:
+            watcher_done.set()
+            if watcher is not None:
+                watcher.join(timeout=1)
+        _raise_if_cancelled(cancel_event)
         scenes = scene_manager.get_scene_list()
         if not scenes:
             return (Shot(shot_id="shot_0001", start_sec=0.0, end_sec=_video_duration_sec(video)),)
@@ -95,7 +115,10 @@ def _pyscenedetect_shots(
 
 
 def _prepare_analysis_clip(
-    path: Path, paths: WorkspacePaths | None = None
+    path: Path,
+    paths: WorkspacePaths | None = None,
+    *,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[Path, Callable[[], None]]:
     """用 ffmpeg 硬解把源片降采样成 180p 小片供分析；失败/无硬解回落原片。
 
@@ -105,20 +128,23 @@ def _prepare_analysis_clip(
     """
 
     decode_args = hwaccel_decode_args()
+    _raise_if_cancelled(cancel_event)
     if not decode_args:
         # 无硬解：软解预处理并不比 opencv 直接软解省，直接在原片上分析（保持旧行为）。
         return path, _noop
     workdir = Path(tempfile.mkdtemp(prefix="rushes_shots_", dir=_tmp_dir(paths)))
     analysis_path = workdir / "analysis.mp4"
     try:
-        result = subprocess.run(
+        result = run_media_command(
             _analysis_clip_command(path, analysis_path, decode_args),
-            capture_output=True,
-            check=False,
             text=True,
             timeout=_PREPASS_TIMEOUT_S,
+            cancel_event=cancel_event,
         )
-    except (OSError, subprocess.SubprocessError):
+    except MediaCommandCancelled:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise ShotSplitCancelled("shot split cancelled") from None
+    except (OSError, TimeoutError):
         shutil.rmtree(workdir, ignore_errors=True)
         return path, _noop
     if result.returncode != 0 or not analysis_path.exists():
@@ -162,6 +188,32 @@ def _tmp_dir(paths: WorkspacePaths | None) -> str | None:
 
 def _noop() -> None:
     return None
+
+
+def _start_cancel_watcher(
+    scene_manager: object,
+    cancel_event: threading.Event | None,
+    done: threading.Event,
+) -> threading.Thread | None:
+    if cancel_event is None:
+        return None
+
+    def _watch() -> None:
+        while not done.wait(0.05):
+            if cancel_event.is_set():
+                stop = getattr(scene_manager, "stop", None)
+                if callable(stop):
+                    stop()
+                return
+
+    watcher = threading.Thread(target=_watch, name="rushes-shot-cancel", daemon=True)
+    watcher.start()
+    return watcher
+
+
+def _raise_if_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise ShotSplitCancelled("shot split cancelled")
 
 
 def _video_duration_sec(video: object) -> float:
