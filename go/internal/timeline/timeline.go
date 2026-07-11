@@ -602,22 +602,6 @@ func setPlaybackRate(document *Document, operation map[string]any) error {
 	})
 }
 
-func updateClip(document *Document, operation map[string]any, update func(*Clip) error) error {
-	id := valueOr(stringValue(operation["timeline_clip_id"]), stringValue(operation["clip_id"]))
-	if id == "" {
-		return errors.New("patch op 缺少 timeline_clip_id")
-	}
-	for trackIndex := range document.Tracks {
-		for clipIndex := range document.Tracks[trackIndex].Clips {
-			clip := &document.Tracks[trackIndex].Clips[clipIndex]
-			if clip.TimelineClipID == id {
-				return update(clip)
-			}
-		}
-	}
-	return fmt.Errorf("clip 不存在: %s", id)
-}
-
 func removeTrackClips(document *Document, trackID string) error {
 	track := trackByID(document, trackID)
 	if track == nil || trackID == "visual_base" || track.Locked {

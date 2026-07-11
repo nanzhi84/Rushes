@@ -61,11 +61,12 @@ func RenderTimeline(
 		sourceStart := float64(clip.SourceStartFrame) / float64(document.FPS)
 		sourceDuration := float64(clip.SourceEndFrame-clip.SourceStartFrame) / float64(document.FPS)
 		timelineDuration := float64(clip.TimelineEndFrame-clip.TimelineStartFrame) / float64(document.FPS)
-		if kind == "image" {
+		switch kind {
+		case "image":
 			args = append(args, "-loop", "1", "-t", formatSeconds(timelineDuration), "-i", source)
-		} else if kind == "video" {
+		case "video":
 			args = append(args, "-ss", formatSeconds(sourceStart), "-t", formatSeconds(max(sourceDuration, 0.04)), "-i", source)
-		} else {
+		default:
 			return RenderResult{}, fmt.Errorf("主视觉 clip %s 不是视频或图片", clip.TimelineClipID)
 		}
 		videoFilter := fmt.Sprintf(
@@ -173,11 +174,12 @@ func appendVisualOverlays(
 			sourceStart := float64(clip.SourceStartFrame) / float64(document.FPS)
 			sourceDuration := float64(clip.SourceEndFrame-clip.SourceStartFrame) / float64(document.FPS)
 			timelineDuration := float64(clip.TimelineEndFrame-clip.TimelineStartFrame) / float64(document.FPS)
-			if kind == "image" {
+			switch kind {
+			case "image":
 				args = append(args, "-loop", "1", "-t", formatSeconds(timelineDuration), "-i", source)
-			} else if kind == "video" {
+			case "video":
 				args = append(args, "-ss", formatSeconds(sourceStart), "-t", formatSeconds(max(sourceDuration, 0.04)), "-i", source)
-			} else {
+			default:
 				return "", args, filters, inputIndex, fmt.Errorf("叠加 clip %s 不是视频或图片", clip.TimelineClipID)
 			}
 			inputLabel := fmt.Sprintf("overlay%d", overlayNumber)

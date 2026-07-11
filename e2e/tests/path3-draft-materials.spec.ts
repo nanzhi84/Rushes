@@ -43,7 +43,7 @@ test("Go 主线：导入、理解、时间线、预览、确认与最终导出",
   await expect(page.getByRole("heading", { name: "草稿" })).toBeVisible();
   await page.getByRole("button", { name: "开始创作", exact: true }).click();
   await expect(page).toHaveURL(/\/drafts\//);
-  await expect(page.getByText("剪辑对话")).toBeVisible();
+  await expect(page.getByRole("complementary", { name: "剪辑对话" })).toBeVisible();
   const draftAId = idFromUrl(page.url());
 
   // 2. 中栏素材面板导入 fixture（原生选择框 → reference 原地索引）→ 断言文件名出现。
