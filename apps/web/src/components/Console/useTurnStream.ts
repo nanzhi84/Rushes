@@ -43,7 +43,7 @@ export type TurnStreamState = {
   understandingProgress: UnderstandingProgress | null;
 };
 
-// 服务端 event: turn_stream，data 里以 type 区分。字段见 packages/agent_harness/loop.py。
+// 服务端统一发送 event: turn_stream；8 种 type 由 go/internal/agent 定义。
 export type TurnStreamEvent =
   | { type: "turn_started"; turn_id?: string }
   | { type: "text_delta"; message_id: string; kind?: string; delta?: string }

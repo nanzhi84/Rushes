@@ -1,0 +1,143 @@
+version: "2"
+
+run:
+  tests: true
+  relative-path-mode: gomod
+
+linters:
+  default: none
+  enable:
+    - depguard
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  settings:
+    depguard:
+      rules:
+        contracts:
+          list-mode: strict
+          files:
+            - "**/internal/contracts/**/*.go"
+          allow:
+            - $gostd
+
+        storage:
+          list-mode: strict
+          files:
+            - "**/internal/storage/**/*.go"
+          allow:
+            - $gostd
+            - github.com/nanzhi84/Rushes/go/internal/contracts
+            - modernc.org/sqlite
+
+        reducer:
+          list-mode: strict
+          files:
+            - "**/internal/reducer/**/*.go"
+          allow:
+            - $gostd
+            - github.com/nanzhi84/Rushes/go/internal/contracts
+            - github.com/nanzhi84/Rushes/go/internal/storage
+
+        providers:
+          list-mode: strict
+          files:
+            - "**/internal/providers/**/*.go"
+          allow:
+            - $gostd
+            - github.com/cloudwego/eino
+            - github.com/cloudwego/eino-ext
+            - github.com/nanzhi84/Rushes/go/internal/contracts
+
+        media:
+          list-mode: strict
+          files:
+            - "**/internal/media/**/*.go"
+          allow:
+            - $gostd
+            - github.com/nanzhi84/Rushes/go/internal/contracts
+            - github.com/nanzhi84/Rushes/go/internal/storage
+            - github.com/nanzhi84/Rushes/go/internal/timeline
+            - github.com/nanzhi84/Rushes/go/internal/understanding
+
+        timeline:
+          list-mode: strict
+          files:
+            - "**/internal/timeline/**/*.go"
+          allow:
+            - $gostd
+            - github.com/nanzhi84/Rushes/go/internal/contracts
+            - github.com/nanzhi84/Rushes/go/internal/storage
+
+        tools:
+          list-mode: strict
+          files:
+            - "**/internal/tools/**/*.go"
+          allow:
+            - $gostd
+            - github.com/cloudwego/eino
+            - github.com/nanzhi84/Rushes/go/internal/contracts
+            - github.com/nanzhi84/Rushes/go/internal/media
+            - github.com/nanzhi84/Rushes/go/internal/providers
+            - github.com/nanzhi84/Rushes/go/internal/storage
+            - github.com/nanzhi84/Rushes/go/internal/timeline
+
+        understanding:
+          list-mode: strict
+          files:
+            - "**/internal/understanding/**/*.go"
+          allow:
+            - $gostd
+            - github.com/cloudwego/eino
+            - github.com/nanzhi84/Rushes/go/internal/media
+            - github.com/nanzhi84/Rushes/go/internal/storage
+
+        agent:
+          list-mode: strict
+          files:
+            - "**/internal/agent/**/*.go"
+          allow:
+            - $gostd
+            - github.com/cloudwego/eino
+            - github.com/nanzhi84/Rushes/go/internal/contracts
+            - github.com/nanzhi84/Rushes/go/internal/media
+            - github.com/nanzhi84/Rushes/go/internal/reducer
+            - github.com/nanzhi84/Rushes/go/internal/storage
+            - github.com/nanzhi84/Rushes/go/internal/timeline
+            - github.com/nanzhi84/Rushes/go/internal/tools
+            - github.com/nanzhi84/Rushes/go/internal/understanding
+
+        api:
+          list-mode: strict
+          files:
+            - "**/internal/api/**/*.go"
+          allow:
+            - $gostd
+            - github.com/go-chi/chi/v5
+            - github.com/oapi-codegen
+            - github.com/nanzhi84/Rushes/go/internal/agent
+            - github.com/nanzhi84/Rushes/go/internal/contracts
+            - github.com/nanzhi84/Rushes/go/internal/media
+            - github.com/nanzhi84/Rushes/go/internal/reducer
+            - github.com/nanzhi84/Rushes/go/internal/storage
+            - github.com/nanzhi84/Rushes/go/internal/timeline
+            - github.com/nanzhi84/Rushes/go/internal/tools
+
+        worker:
+          list-mode: strict
+          files:
+            - "**/internal/worker/**/*.go"
+          allow:
+            - $gostd
+            - github.com/nanzhi84/Rushes/go/internal/contracts
+            - github.com/nanzhi84/Rushes/go/internal/media
+            - github.com/nanzhi84/Rushes/go/internal/reducer
+            - github.com/nanzhi84/Rushes/go/internal/storage
+            - github.com/nanzhi84/Rushes/go/internal/timeline
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

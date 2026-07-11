@@ -1,0 +1,4 @@
+id: 42
+event: DraftCreated
+data: {"event":{"event":"DraftCreated","actor":"user","draft_id":"draft_1","payload":{"name":"演示"},"created_at":"2026-07-10T00:00:00Z"},"event_id":42}
+

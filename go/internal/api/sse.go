@@ -1,0 +1,122 @@
+package api
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/nanzhi84/Rushes/go/internal/contracts"
+	"github.com/nanzhi84/Rushes/go/internal/storage"
+)
+
+func (server *Server) WorkspaceEventsApiEventsGet(writer http.ResponseWriter, request *http.Request) {
+	server.streamEvents(writer, request, nil, contracts.RoutesToWorkspace)
+}
+
+func (server *Server) DraftEventsApiDraftsDraftIdEventsGet(
+	writer http.ResponseWriter,
+	request *http.Request,
+	draftID string,
+) {
+	if _, err := storage.GetDraft(request.Context(), server.database.Read(), draftID); err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			writeNotFound(writer, "draft_not_found")
+		} else {
+			server.internalError(writer, err)
+		}
+		return
+	}
+	server.streamEvents(writer, request, &draftID, func(event contracts.Event) bool {
+		return contracts.RoutesToDraft(event, draftID)
+	})
+}
+
+func (server *Server) streamEvents(
+	writer http.ResponseWriter,
+	request *http.Request,
+	draftID *string,
+	predicate func(contracts.Event) bool,
+) {
+	writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	writer.Header().Set("Cache-Control", "no-cache")
+	writer.Header().Set("Connection", "keep-alive")
+	writer.Header().Set("X-Accel-Buffering", "no")
+	controller := http.NewResponseController(writer)
+	cursor := lastEventID(request)
+	poll := time.NewTicker(50 * time.Millisecond)
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer poll.Stop()
+	defer heartbeat.Stop()
+	emitted := 0
+
+	for {
+		rows, err := storage.ListEventsAfter(request.Context(), server.database.Read(), cursor, draftID, 256)
+		if err != nil {
+			server.logger.Error("SSE 查询失败", "error", err)
+			return
+		}
+		for _, row := range rows {
+			cursor = row.ID
+			event, err := contracts.ParseEvent(row.PayloadJSON)
+			if err != nil {
+				server.logger.Error("SSE 事件反序列化失败", "event_id", row.ID, "error", err)
+				continue
+			}
+			if !predicate(event) {
+				continue
+			}
+			frame, err := encodeSSE(row.ID, event)
+			if err != nil {
+				server.logger.Error("SSE 编码失败", "error", err)
+				return
+			}
+			if _, err := io.WriteString(writer, frame); err != nil {
+				return
+			}
+			if err := controller.Flush(); err != nil {
+				return
+			}
+			emitted++
+			if server.sseMaxEvents > 0 && emitted >= server.sseMaxEvents {
+				return
+			}
+		}
+
+		select {
+		case <-request.Context().Done():
+			return
+		case <-heartbeat.C:
+			if _, err := io.WriteString(writer, ": ping\n\n"); err != nil {
+				return
+			}
+			if err := controller.Flush(); err != nil {
+				return
+			}
+		case <-poll.C:
+		}
+	}
+}
+
+func encodeSSE(eventID int64, event contracts.Event) (string, error) {
+	data, err := json.Marshal(map[string]any{"event_id": eventID, "event": event})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("id: %d\nevent: %s\ndata: %s\n\n", eventID, event.Type, data), nil
+}
+
+func lastEventID(request *http.Request) int64 {
+	raw := request.Header.Get("Last-Event-ID")
+	if raw == "" {
+		raw = request.URL.Query().Get("last_event_id")
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}

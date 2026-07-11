@@ -1,0 +1,3 @@
+# SSE frames intentionally end with a blank line as required by the wire protocol.
+go/internal/agent/testdata/*.golden whitespace=-blank-at-eof
+go/internal/api/testdata/*.golden whitespace=-blank-at-eof

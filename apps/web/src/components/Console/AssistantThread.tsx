@@ -317,7 +317,6 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
 const TOOL_STEP_LABELS: Record<string, string> = {
   "asset.list_assets": "清点素材",
   "asset.import_local_file": "导入本地素材",
-  "asset.import_url": "URL 导入素材",
   "understand.materials": "理解素材",
   "decision.answer": "记录你的回答",
   "timeline.apply_patch": "修改时间线",
@@ -328,22 +327,7 @@ const TOOL_STEP_LABELS: Record<string, string> = {
   "render.preview": "渲染预览",
   "render.final_mp4": "导出成片",
   "render.status": "查询渲染进度",
-  "content.create_plan": "生成内容方案",
-  "content.revise_plan": "修订内容方案",
-  "audio.generate_tts": "生成配音",
-  "audio.rough_cut_speech": "粗剪口播",
-  "audio.asr_original": "识别原声",
-  "audio.align_uploaded_voiceover": "对齐上传配音",
-  "audio.inspect_sources": "检查音频素材",
-  "media.view_frames": "查看画面",
+  "render.inspect_preview": "检查成片",
   "interaction.ask_user": "向你提问",
-  "interaction.confirm_action": "请求确认",
-  "interaction.show_preview": "展示预览",
-  "interaction.show_timeline": "展示时间线",
-  "interaction.show_progress": "更新进度",
-  "interaction.show_error": "展示错误",
-  "memory.search_relevant": "检索记忆",
-  "memory.save": "保存记忆",
-  "memory.ask_scope": "询问记忆范围",
-  "memory.extract_from_draft": "提炼记忆"
+  "interaction.confirm_action": "请求确认"
 };

@@ -436,7 +436,7 @@ export interface paths {
         delete?: never;
         options?: never;
         /** Media Export */
-        head: operations["media_export_api_media_export__export_id__get"];
+        head: operations["media_export_api_media_export__export_id__head"];
         patch?: never;
         trace?: never;
     };
@@ -454,7 +454,7 @@ export interface paths {
         delete?: never;
         options?: never;
         /** Media Preview */
-        head: operations["media_preview_api_media_preview__preview_id__get"];
+        head: operations["media_preview_api_media_preview__preview_id__head"];
         patch?: never;
         trace?: never;
     };
@@ -472,7 +472,7 @@ export interface paths {
         delete?: never;
         options?: never;
         /** Media Proxy */
-        head: operations["media_proxy_api_media__asset_id__proxy_get"];
+        head: operations["media_proxy_api_media__asset_id__proxy_head"];
         patch?: never;
         trace?: never;
     };
@@ -490,7 +490,7 @@ export interface paths {
         delete?: never;
         options?: never;
         /** Media Source */
-        head: operations["media_source_api_media__asset_id__source_get"];
+        head: operations["media_source_api_media__asset_id__source_head"];
         patch?: never;
         trace?: never;
     };
@@ -508,7 +508,7 @@ export interface paths {
         delete?: never;
         options?: never;
         /** Media Thumbnail */
-        head: operations["media_thumbnail_api_media__asset_id__thumbnail_get"];
+        head: operations["media_thumbnail_api_media__asset_id__thumbnail_head"];
         patch?: never;
         trace?: never;
     };
@@ -3004,7 +3004,7 @@ export interface operations {
             };
         };
     };
-    media_export_api_media_export__export_id__get: {
+    media_export_api_media_export__export_id__head: {
         parameters: {
             query?: never;
             header?: never;
@@ -3116,7 +3116,7 @@ export interface operations {
             };
         };
     };
-    media_preview_api_media_preview__preview_id__get: {
+    media_preview_api_media_preview__preview_id__head: {
         parameters: {
             query?: never;
             header?: never;
@@ -3228,7 +3228,7 @@ export interface operations {
             };
         };
     };
-    media_proxy_api_media__asset_id__proxy_get: {
+    media_proxy_api_media__asset_id__proxy_head: {
         parameters: {
             query?: never;
             header?: never;
@@ -3340,7 +3340,7 @@ export interface operations {
             };
         };
     };
-    media_source_api_media__asset_id__source_get: {
+    media_source_api_media__asset_id__source_head: {
         parameters: {
             query?: never;
             header?: never;
@@ -3452,7 +3452,7 @@ export interface operations {
             };
         };
     };
-    media_thumbnail_api_media__asset_id__thumbnail_get: {
+    media_thumbnail_api_media__asset_id__thumbnail_head: {
         parameters: {
             query?: never;
             header?: never;
