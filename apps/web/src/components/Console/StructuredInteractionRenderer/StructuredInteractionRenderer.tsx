@@ -174,8 +174,8 @@ type ProgressCardView = {
   barClass: string;
 };
 
-// 终态（succeeded/failed/cancelled）必须让卡片显性收尾——不发进度事件的 job（asr/tts/align/
-// import_url）从不填进度条，只有靠 status 才能把「处理中」翻到「已完成」，否则永远停在处理中。
+// 终态（succeeded/failed/cancelled）必须让卡片显性收尾；即使没有中间进度，
+// 也要靠 status 把「处理中」翻到最终状态。
 function progressCardView(item: ProgressInteractionItem): ProgressCardView {
   switch (item.status) {
     case "succeeded":

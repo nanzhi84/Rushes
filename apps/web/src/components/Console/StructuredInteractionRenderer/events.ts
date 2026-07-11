@@ -74,8 +74,6 @@ export function itemFromEvent(payload: DomainSsePayload): StructuredInteractionI
       return decisionEventItem(event, "pending");
     case "DecisionAnswered":
       return decisionEventItem(event, "answered");
-    case "DecisionCancelled":
-      return decisionEventItem(event, "cancelled");
     case "JobEnqueued":
       return progressEventItem(event, "queued");
     case "JobProgress":
@@ -84,18 +82,17 @@ export function itemFromEvent(payload: DomainSsePayload): StructuredInteractionI
       return progressEventItem(event, "succeeded");
     case "JobFailed":
       return errorEventItem(event);
-    case "JobCancelled":
-      return progressEventItem(event, "cancelled");
     case "PreviewRendered":
       return {
         kind: "preview",
         id: `preview:${payload.event_id}`,
         title: "预览已生成",
-        description: stringValue(event.preview_id) ?? "可在右侧查看预览。"
+        description: stringValue(eventField(event, "artifact_id")) ?? "可在右侧查看预览。"
       };
     case "TimelineVersionCreated":
     case "TimelineVersionRestored":
     case "TimelineValidated":
+    case "TimelineValidationFailed":
       return {
         kind: "timeline",
         id: `timeline:${payload.event_id}`,
@@ -107,16 +104,7 @@ export function itemFromEvent(payload: DomainSsePayload): StructuredInteractionI
         kind: "preview",
         id: `export:${payload.event_id}`,
         title: "导出完成",
-        description: stringValue(event.output_path) ?? "最终 MP4 已生成。"
-      };
-    case "CapabilityDegraded":
-      return {
-        kind: "error",
-        id: `capability:${payload.event_id}`,
-        error_code: stringValue(event.capability) ?? "CAPABILITY_DEGRADED",
-        message: stringValue(event.message) ?? stringValue(event.reason) ?? "部分能力降级，请留意后续结果。",
-        retryable: false,
-        details: event
+        description: stringValue(eventField(event, "artifact_id")) ?? "最终 MP4 已生成。"
       };
     default:
       // 常规生命周期事件不进对话流；真正未知的事件保留 JSON 兜底防止信息丢失。
@@ -134,44 +122,32 @@ export function itemFromEvent(payload: DomainSsePayload): StructuredInteractionI
 
 const SILENT_EVENTS = new Set([
   "DraftCreated",
-  "DraftRenamed",
-  "DraftCopied",
-  "DraftTrashed",
-  "BriefUpdated",
-  "ContentPlanUpdated",
-  "AudioPlanUpdated",
-  "CutPlanUpdated",
-  "PostprocessPlanUpdated",
-  "PreviewViewed",
-  "MemoryCandidateExtracted",
-  "MemoryCandidateDiscarded",
-  "TurnEnded"
+  "AssetImported",
+  "AssetProbed",
+  "AssetLinked",
+  "ProxyGenerated",
+  "MaterialUnderstandingStarted",
+  "MaterialUnderstandingCompleted",
+  "MaterialUnderstandingFailed",
+  "PreviewViewed"
 ]);
 
-// 只有这些 job kind 才进对话流出进度/错误卡——与后端 observation 桥的 _AGENT_WAITED_JOB_KINDS
-// 完全一致（apps/api/main.py）。素材加工型 job（poster/proxy/index/annotation/noop）导入时
-// 几十个并发，全进对话会刷屏，直接不产卡（进度另经素材面板的旋转点体现）。
+// 只有 Agent 会等待的 job 才进入对话进度卡；ingest 进度由素材面板呈现。
+// 此集合与 go/internal/agent.agentWaitedJobKinds 对齐。
 const PROGRESS_JOB_KINDS = new Set([
-  "asr",
-  "tts",
-  "align",
+  "understand",
   "render_preview",
-  "render_final",
-  "import_url"
+  "render_final"
 ]);
 
 // 进度卡标题按 kind 给中文名，比笼统的「后台任务」可读。
 const JOB_KIND_LABELS: Record<string, string> = {
-  asr: "语音转写",
-  tts: "TTS 合成",
-  align: "人声对齐",
+  understand: "理解素材",
   render_preview: "渲染预览",
-  render_final: "渲染成片",
-  import_url: "URL 下载"
+  render_final: "渲染成片"
 };
 
-// job kind 嵌在事件 payload.kind（后端 job_runner `_terminal_event` / loop.py JobEnqueued /
-// render_jobs.py JobProgress 都写在这里），不是顶层字段。
+// 领域事件是 envelope；job 字段位于 event.payload。
 function progressJobKind(event: DomainSseEvent): string | null {
   const payload = objectValue(event.payload);
   const kind = payload ? stringValue(payload.kind) : null;
@@ -185,11 +161,11 @@ function decisionEventItem(
   event: DomainSseEvent,
   status: Decision["status"]
 ): StructuredInteractionItem | null {
-  const decisionId = stringValue(event.decision_id);
+  const decisionId = stringValue(eventField(event, "decision_id"));
   if (!decisionId) {
     return null;
   }
-  const rawAnswer = event.answer;
+  const rawAnswer = eventField(event, "answer");
   return {
     kind: "decision",
     id: decisionItemId(decisionId),
@@ -204,7 +180,7 @@ function progressEventItem(
   event: DomainSseEvent,
   status: ProgressInteractionItem["status"]
 ): StructuredInteractionItem | null {
-  const jobId = stringValue(event.job_id);
+  const jobId = stringValue(eventField(event, "job_id"));
   if (!jobId) {
     return null;
   }
@@ -217,29 +193,28 @@ function progressEventItem(
     id: progressItemId(jobId),
     job_id: jobId,
     job_kind: JOB_KIND_LABELS[kind] ?? kind,
-    progress: normalizeProgress(event.progress),
+    progress: normalizeProgress(eventField(event, "progress")),
     status
   };
 }
 
 function errorEventItem(event: DomainSseEvent): StructuredInteractionItem | null {
-  // 素材加工型 job（poster/proxy/index/annotation/noop）失败也不进对话流——与进度卡白名单一致，
-  // 失败态改由素材面板/试看提示体现，避免导入几十个 job 时错误卡刷屏。
+  // ingest 失败由素材面板呈现，避免批量导入时在对话区刷屏。
   const payload = objectValue(event.payload);
   const payloadKind = payload ? stringValue(payload.kind) : null;
   if (payloadKind !== null && !PROGRESS_JOB_KINDS.has(payloadKind)) {
     return null;
   }
-  const jobId = stringValue(event.job_id);
-  const details = objectValue(event.failure) ?? objectValue(event.error) ?? objectValue(event.error_json);
-  const errorCode = stringValue(event.error_code) ?? stringValue(details?.error_code) ?? "JOB_FAILED";
-  const message = stringValue(event.message) ?? stringValue(details?.message) ?? "任务执行失败";
+  const jobId = stringValue(eventField(event, "job_id"));
+  const details = objectValue(eventField(event, "failure")) ?? objectValue(eventField(event, "error"));
+  const errorCode = stringValue(eventField(event, "error_code")) ?? stringValue(details?.error_code) ?? "JOB_FAILED";
+  const message = stringValue(eventField(event, "message")) ?? stringValue(details?.message) ?? "任务执行失败";
   return {
     kind: "error",
     id: jobId ? `error:${jobId}` : `error:${errorCode}`,
     error_code: errorCode,
     message,
-    retryable: booleanValue(event.retryable) ?? booleanValue(details?.retryable) ?? false,
+    retryable: booleanValue(eventField(event, "retryable")) ?? booleanValue(details?.retryable) ?? false,
     details: details ?? event
   };
 }
@@ -302,12 +277,20 @@ function timelineTitle(eventName: string): string {
   if (eventName === "TimelineValidated") {
     return "时间线校验通过";
   }
+  if (eventName === "TimelineValidationFailed") {
+    return "时间线校验失败";
+  }
   return "时间线已更新";
 }
 
 function timelineDescription(event: DomainSseEvent): string {
-  const version = stringValue(event.timeline_version) ?? stringValue(event.version);
+  const version = stringValue(eventField(event, "timeline_version")) ?? stringValue(eventField(event, "version"));
   return version ? `版本 ${version}，可在右侧查看时间线。` : "可在右侧查看时间线。";
+}
+
+function eventField(event: DomainSseEvent, key: string): unknown {
+  const payload = objectValue(event.payload);
+  return payload?.[key] ?? event[key];
 }
 
 function stringValue(value: unknown): string | null {

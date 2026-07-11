@@ -12,6 +12,7 @@ const E2E_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(E2E_DIR, "..");
 const WORKSPACE_DIR = path.join(REPO_ROOT, ".e2e-workspace");
 const FIXTURE_DIR = path.join(WORKSPACE_DIR, "fixtures");
+const BIN_DIR = path.join(WORKSPACE_DIR, "bin");
 const STATE_FILE = path.join(WORKSPACE_DIR, "state.json");
 const API_URL = "http://127.0.0.1:18000";
 const WEB_URL = "http://127.0.0.1:15173";
@@ -24,38 +25,34 @@ async function globalSetup(): Promise<void> {
   mkdirSync(path.join(WORKSPACE_DIR, "logs"), { recursive: true });
 
   try {
-    // 造好导入 fixture（草稿本体改由测试内「开始创作」经真实 REST 建，不再预置项目）。
-    seed("init", ["--fixture-dir", FIXTURE_DIR]);
+    makeFixtures();
+    buildGoBinaries();
 
-    const api = startProcess("api", "uv", [
-      "run",
-      "uvicorn",
-      "e2e.fixtures.app:create_app_from_env",
-      "--factory",
-      "--host",
-      "127.0.0.1",
-      "--port",
-      "18000"
+    const api = startProcess("api", path.join(BIN_DIR, "rushes-api"), [
+      "-workspace",
+      WORKSPACE_DIR,
+      "-port",
+      "18000",
+      "-token",
+      TOKEN
     ], {
       RUSHES_WORKSPACE_PATH: WORKSPACE_DIR,
       RUSHES_API_TOKEN: TOKEN,
       RUSHES_API_PORT: "18000",
-      RUSHES_FS_ROOTS: FIXTURE_DIR
+      RUSHES_FS_ROOTS: FIXTURE_DIR,
+      RUSHES_DASHSCOPE_API_KEY: ""
     });
     started.push(api);
     await waitForApi();
 
-    const worker = startProcess("worker", "uv", [
-      "run",
-      "python",
-      "-m",
-      "apps.worker.main",
+    const worker = startProcess("worker", path.join(BIN_DIR, "rushes-worker"), [
+      "-workspace",
       WORKSPACE_DIR,
-      "--worker-id",
-      "e2e-worker",
-      "--poll-interval",
-      "0.5"
-    ]);
+      "-concurrency",
+      "2"
+    ], {
+      RUSHES_DASHSCOPE_API_KEY: ""
+    });
     started.push(worker);
 
     // 直接启动已锁定依赖里的 Vite，避免本机全局 pnpm 版本影响 E2E 运行。
@@ -90,12 +87,31 @@ function cleanWorkspace(): void {
   mkdirSync(FIXTURE_DIR, { recursive: true });
 }
 
-function seed(command: string, args: string[]): void {
-  execFileSync("uv", ["run", "python", "e2e/fixtures/seed_draft.py", command, ...args], {
-    cwd: REPO_ROOT,
-    env: { ...process.env },
+function buildGoBinaries(): void {
+  mkdirSync(BIN_DIR, { recursive: true });
+  execFileSync("go", ["build", "-o", path.join(BIN_DIR, "rushes-api"), "./cmd/api"], {
+    cwd: path.join(REPO_ROOT, "go"),
     stdio: "inherit"
   });
+  execFileSync("go", ["build", "-o", path.join(BIN_DIR, "rushes-worker"), "./cmd/worker"], {
+    cwd: path.join(REPO_ROOT, "go"),
+    stdio: "inherit"
+  });
+}
+
+function makeFixtures(): void {
+  for (const [name, source] of [
+    ["path3-fixture.mp4", "testsrc2=size=320x568:rate=30:duration=2"],
+    ["path3-fixture-2.mp4", "color=c=blue:size=320x568:rate=30:duration=2"],
+    ["understanding-cancel-a.mp4", "color=c=red:size=320x568:rate=30:duration=2"],
+    ["understanding-cancel-b.mp4", "color=c=green:size=320x568:rate=30:duration=2"]
+  ] as const) {
+    execFileSync(
+      "ffmpeg",
+      ["-y", "-loglevel", "error", "-f", "lavfi", "-i", source, "-c:v", "libx264", "-pix_fmt", "yuv420p", path.join(FIXTURE_DIR, name)],
+      { stdio: "inherit" }
+    );
+  }
 }
 
 function startProcess(

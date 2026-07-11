@@ -1,0 +1,6 @@
+profile: go/coverage.out
+threshold:
+  file: 0
+  package: 0
+  total: 90
+force-annotation-comment: true

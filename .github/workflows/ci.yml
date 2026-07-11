@@ -2,120 +2,139 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
+env:
+  GO_VERSION_FILE: go/go.mod
+  PNPM_VERSION: 10.13.1
+
 jobs:
-  checks:
-    runs-on: ubuntu-latest
-
+  go-test:
+    name: Go test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Install ffmpeg
-        # 先移除与本仓库无关的 microsoft apt 源：packages.microsoft.com 间歇性签名故障会让 apt-get update 整体退出 100
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: go/go.sum
+          check-latest: true
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.sources /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update && sudo apt-get install -y ffmpeg
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg
+      - name: Test with race detector
+        working-directory: go
+        run: go test -race ./...
 
-      - name: Sync dependencies
-        run: uv sync
-
-      - name: Run Ruff lint
-        run: uv run ruff check
-
-      - name: Check Ruff formatting
-        run: uv run ruff format --check
-
-      - name: Run mypy
-        run: uv run mypy
-
-      - name: Run pytest
-        run: uv run pytest
-
-      - name: Check PRD contracts
-        run: uv run python scripts/check_contracts.py
-
-  web:
+  go-quality:
+    name: Go quality, contracts and coverage
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: apps/web
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
-          version: 10.13.1
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: go/go.sum
+          check-latest: true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: apps/web/pnpm-lock.yaml
-
-      - name: Install web dependencies
-        run: pnpm install --frozen-lockfile || pnpm install
-
-      - name: Typecheck web
-        run: pnpm typecheck
-
-      - name: Test web
-        run: pnpm test -- --run
-
-      - name: Build web
-        run: pnpm build
-
-  e2e:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.13.1
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
       - name: Install ffmpeg
-        # 先移除与本仓库无关的 microsoft apt 源：packages.microsoft.com 间歇性签名故障会让 apt-get update 整体退出 100
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.sources /etc/apt/sources.list.d/azure-cli.list
-          sudo apt-get update && sudo apt-get install -y ffmpeg
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - name: Install web dependencies for contract generation
+        run: pnpm --dir apps/web install --frozen-lockfile
+      - name: Verify generated contracts and SSE golden frames
+        run: bash scripts/check_go_contracts.sh
+      - name: Go vet
+        working-directory: go
+        run: go vet ./...
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: latest
+          working-directory: go
+          args: --timeout=5m
+      - name: Generate race-enabled coverage profile
+        run: bash scripts/check_go_coverage.sh
+      - name: Enforce 90 percent coverage
+        uses: vladopajic/go-test-coverage@v2
+        with:
+          config: ./.testcoverage.yml
+      - name: Scan Go dependencies
+        working-directory: go
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
 
-      - name: Sync Python dependencies
-        run: uv sync
+  web:
+    name: Web typecheck, test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - run: pnpm --dir apps/web install --frozen-lockfile
+      - run: pnpm --dir apps/web typecheck
+      - run: pnpm --dir apps/web test -- --run
+      - run: pnpm --dir apps/web build
 
-      - name: Install web dependencies
-        run: pnpm --dir apps/web install --frozen-lockfile || pnpm --dir apps/web install
-
-      - name: Install E2E dependencies
-        run: pnpm --dir e2e install
-
-      - name: Install Playwright Chromium
-        run: pnpm --dir e2e exec playwright install chromium --with-deps
-
-      - name: Run Playwright E2E
-        run: pnpm --dir e2e exec playwright test
-
+  e2e:
+    name: Playwright against Go API and worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: ${{ env.GO_VERSION_FILE }}
+          cache-dependency-path: go/go.sum
+          check-latest: true
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            apps/web/pnpm-lock.yaml
+            e2e/pnpm-lock.yaml
+      - name: Install ffmpeg
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.sources /etc/apt/sources.list.d/azure-cli.list
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+      - run: pnpm --dir apps/web install --frozen-lockfile
+      - run: pnpm --dir e2e install --frozen-lockfile
+      - run: pnpm --dir e2e exec playwright install chromium --with-deps
+      - run: pnpm --dir e2e exec playwright test
       - name: Upload Playwright report
         if: failure()
         uses: actions/upload-artifact@v4

@@ -6,19 +6,15 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WEB_DIR="${REPO_ROOT}/apps/web"
 OPENAPI_JSON="${WEB_DIR}/openapi.json"
 
+if [[ ! -f "${OPENAPI_JSON}" ]]; then
+  echo "缺少冻结契约：${OPENAPI_JSON}" >&2
+  exit 1
+fi
+
 mkdir -p "${WEB_DIR}/src/api/generated"
 
-PYTHONPATH="${REPO_ROOT}/packages:${REPO_ROOT}" uv run python - <<'PY' > "${OPENAPI_JSON}"
-import json
-import tempfile
-from pathlib import Path
-
-from apps.api.main import create_app
-
-with tempfile.TemporaryDirectory(prefix="rushes-openapi-") as tmpdir:
-    app = create_app(Path(tmpdir) / "workspace", token="openapi-typegen-token", startup_port=8000)
-    print(json.dumps(app.openapi(), ensure_ascii=False, indent=2, sort_keys=True))
-PY
+cd "${REPO_ROOT}/go"
+go run ./cmd/specfix -check "${OPENAPI_JSON}"
 
 cd "${WEB_DIR}"
-pnpm openapi-typescript openapi.json -o src/api/generated/schema.d.ts
+npx -y pnpm@10.13.1 exec openapi-typescript openapi.json -o src/api/generated/schema.d.ts

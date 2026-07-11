@@ -1,0 +1,3 @@
+event: turn_stream
+data: {"content":"完成","kind":"reply","message_id":"msg_1","type":"message_completed"}
+

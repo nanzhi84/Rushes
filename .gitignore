@@ -1,45 +1,26 @@
 .DS_Store
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.hypothesis/
+# Secrets
+.env
+.env.*
 
-# Coverage
-.coverage
-.coverage.*
-coverage.xml
-htmlcov/
-
-# Local agent/runtime workspaces
+# Local runtime and agent workspaces
 .claude/
 .rushes/
 .models/
 .worktrees/
 workspace/
 .e2e-workspace/
-.e2e-paths-fixtures/
-.e2e-paths-output/
-.e2e-paths-workspace/
+.playwright-mcp/
 
-# secrets
-.env
-.env.*
-
-# web
+# JavaScript dependencies and build/test output
 node_modules/
 apps/web/dist/
-apps/web/openapi.json
+apps/web/tsconfig.tsbuildinfo
 e2e/playwright-report/
 e2e/test-results/
 
-# Playwright MCP 会话产物
-.playwright-mcp/
-
-# TypeScript 增量编译缓存
-apps/web/tsconfig.tsbuildinfo
+# Go local build, generated compatibility spec and coverage profiles
+go/bin/
+go/coverage*
+go/internal/api/openapi.compat.json

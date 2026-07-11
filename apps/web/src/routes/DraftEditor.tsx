@@ -149,10 +149,6 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
 
   const invalidateDraftQueries = useCallback(
     async (payload: DomainSsePayload) => {
-      const event = payload.event;
-      if (event.event === "TurnEnded") {
-        setAwaitingTurnEnd(false);
-      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
         queryClient.invalidateQueries({ queryKey: ["timeline", draftId] }),
@@ -183,11 +179,13 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   }, [draftId, invalidateDraftQueries]);
 
   // turn-stream 订阅置于领域 /events 订阅之后，保证 /events 是首个 EventSource。
-  const refreshMessages = useCallback(() => {
+  const finishTurn = useCallback(() => {
+    setAwaitingTurnEnd(false);
     void queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) });
   }, [draftId, queryClient]);
   const { items: streamItems, subagentProgress, understandingProgress } = useTurnStream(draftId, {
-    onTurnEnded: refreshMessages
+    onTurnEnded: finishTurn,
+    onTurnError: finishTurn
   });
 
   // 当前回合的消息以流式列表为准（与工具行按到达顺序交错展示），历史里同

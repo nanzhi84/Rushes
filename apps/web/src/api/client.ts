@@ -25,7 +25,7 @@ export type MaterialsResponse = Schemas["MaterialsResponse"];
 export type MaterialMutationResponse = Schemas["MaterialMutationResponse"];
 
 // summary 明细 shape 在 generated 里是 opaque（summary: {[key]: unknown}），
-// 保留手写窄化类型对齐 packages/contracts/understanding.py MaterialSummary。
+// 保留手写窄化类型，对齐 Go understanding.MaterialSummary。
 export type MaterialSummarySegment = {
   start_s: number;
   end_s: number;
@@ -297,7 +297,7 @@ export const api = {
   },
 
   // media 族 URL 由浏览器原生 <img>/<video>/wavesurfer 直连，设不了 Authorization header，
-  // 统一带 query token（后端 apps/api/deps.py 对 GET /api/media/ 前缀放行 query token，语义同 SSE）。
+  // 统一带 query token（Go 鉴权中间件对白名单媒体 GET/HEAD 放行，语义同 SSE）。
   // 素材试看优先直连原片（导入即刻可播，浏览器硬解 H.264/HEVC）；原片播不动时前端回落 proxy。
   mediaSourceUrl(assetId: string): string {
     return withQueryToken(`/api/media/${encodeURIComponent(assetId)}/source`);

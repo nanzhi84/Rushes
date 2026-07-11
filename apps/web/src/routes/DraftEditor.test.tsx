@@ -162,7 +162,7 @@ describe("DraftEditorView", () => {
     expect(screen.queryByText("设置")).toBeNull();
   });
 
-  it("发送消息后禁用输入框，并在 TurnEnded SSE 后恢复", async () => {
+  it("发送消息后禁用输入框，并在 turn-stream 终态后恢复", async () => {
     const fetchMock = mockFetch({ decision: null });
     renderEditor(fetchMock);
 
@@ -174,15 +174,10 @@ describe("DraftEditorView", () => {
     expect(screen.getByText("剪掉开头 3 秒")).toBeTruthy();
     expect(draftEventsSource().url).toContain("token=test-token");
 
-    act(() => {
-      draftEventsSource().emit("TurnEnded", {
-        event_id: 1,
-        event: {
-          event: "TurnEnded",
-          draft_id: "draft_1",
-          turn_id: "turn_1"
-        }
-      });
+    emitTurnStream(turnStreamSource(), {
+      type: "turn_ended",
+      outcome: "finished",
+      reason: null
     });
 
     await waitFor(() => expect(input.disabled).toBe(false));
@@ -403,29 +398,29 @@ describe("DraftEditorView", () => {
     expect(screen.getAllByText("落库后的最终回复")).toHaveLength(1);
   });
 
-  it("audio_mode Decision 渲染五个选项并点击提交 button answer", async () => {
+  it("结构化 Decision 渲染五个选项并点击提交 button answer", async () => {
     const answerRequests: Array<{ url: string; body: unknown }> = [];
     const fetchMock = mockFetch({
-      decision: audioModeDecision(),
+      decision: editingStyleDecision(),
       onAnswer: (url, init) => {
         answerRequests.push({ url, body: JSON.parse(String(init?.body)) });
       }
     });
     renderEditor(fetchMock);
 
-    await screen.findByText("原视频里有人声，这次怎么处理声音？");
-    for (const label of ["保留原声", "口播粗剪", "使用上传配音", "使用 TTS", "无旁白视频"]) {
+    await screen.findByText("这次希望采用哪种剪辑风格？");
+    for (const label of ["快节奏", "舒缓", "叙事", "活力", "极简"]) {
       expect(screen.getByRole("button", { name: new RegExp(label) })).toBeTruthy();
     }
 
-    fireEvent.click(screen.getByRole("button", { name: /口播粗剪/ }));
+    fireEvent.click(screen.getByRole("button", { name: /叙事/ }));
 
     await waitFor(() => expect(answerRequests).toHaveLength(1));
-    expect(answerRequests[0]?.url).toBe("/api/decisions/dec_audio/answer");
+    expect(answerRequests[0]?.url).toBe("/api/decisions/dec_style/answer");
     expect(answerRequests[0]?.body).toMatchObject({
       draft_id: "draft_1",
       answer: {
-        option_id: "rough_cut",
+        option_id: "story",
         answered_via: "button",
         payload: {}
       }
@@ -435,7 +430,7 @@ describe("DraftEditorView", () => {
   it("allow_free_text 提交 natural_language answer", async () => {
     const answerRequests: Array<{ body: unknown }> = [];
     const fetchMock = mockFetch({
-      decision: audioModeDecision({ options: [], allow_free_text: true }),
+      decision: editingStyleDecision({ options: [], allow_free_text: true }),
       onAnswer: (_url, init) => {
         answerRequests.push({ body: JSON.parse(String(init?.body)) });
       }
@@ -443,14 +438,14 @@ describe("DraftEditorView", () => {
     renderEditor(fetchMock);
 
     fireEvent.change(await screen.findByLabelText("自由回答"), {
-      target: { value: "保留一点原声，再加轻快 BGM" }
+      target: { value: "节奏明快，镜头切换干净" }
     });
     fireEvent.click(screen.getByText("提交回答"));
 
     await waitFor(() => expect(answerRequests).toHaveLength(1));
     expect(answerRequests[0]?.body).toMatchObject({
       answer: {
-        free_text: "保留一点原声，再加轻快 BGM",
+        free_text: "节奏明快，镜头切换干净",
         answered_via: "natural_language",
         payload: {}
       }
@@ -463,22 +458,22 @@ describe("DraftEditorView", () => {
       <StructuredInteractionRenderer
         item={{
           kind: "decision",
-          id: "decision:dec_audio",
-          decision_id: "dec_audio",
-          decision: audioModeDecision({
+          id: "decision:dec_style",
+          decision_id: "dec_style",
+          decision: editingStyleDecision({
             status: "answered",
-            answer: { option_id: "rough_cut", answered_via: "button", payload: {} }
+            answer: { option_id: "story", answered_via: "button", payload: {} }
           }),
           status: "answered",
-          answer: { option_id: "rough_cut", answered_via: "button", payload: {} }
+          answer: { option_id: "story", answered_via: "button", payload: {} }
         }}
         onAnswerDecision={onAnswer}
       />
     );
 
     expect(screen.getByText("已回答")).toBeTruthy();
-    expect(screen.getByText("结果：口播粗剪")).toBeTruthy();
-    expect((screen.getByRole("button", { name: /口播粗剪/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("结果：叙事")).toBeTruthy();
+    expect((screen.getByRole("button", { name: /叙事/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("JobProgress SSE 更新进度条", async () => {
@@ -489,7 +484,7 @@ describe("DraftEditorView", () => {
       draftEventsSource().emit("JobProgress", jobProgressPayload(0.42));
     });
 
-    const progress = await screen.findByRole("progressbar", { name: "语音转写 进度" });
+    const progress = await screen.findByRole("progressbar", { name: "理解素材 进度" });
     expect(progress.getAttribute("aria-valuenow")).toBe("42");
 
     act(() => {
@@ -536,43 +531,42 @@ describe("DraftEditorView", () => {
     });
   });
 
-  it("素材加工型 job（proxy/poster/index）事件不产进度卡", () => {
-    let items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "proxy"));
-    items = reduceStructuredInteractionItems(items, jobEventPayload("JobSucceeded", "poster"));
-    items = reduceStructuredInteractionItems(items, jobEventPayload("JobEnqueued", "index"));
-    items = reduceStructuredInteractionItems(items, jobEventPayload("JobFailed", "index"));
+  it("素材 ingest job 事件不在对话区产进度卡", () => {
+    let items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "ingest"));
+    items = reduceStructuredInteractionItems(items, jobEventPayload("JobSucceeded", "ingest"));
+    items = reduceStructuredInteractionItems(items, jobEventPayload("JobFailed", "ingest"));
     expect(items).toHaveLength(0);
   });
 
-  it("白名单 job（asr）产进度卡且文案按 kind 给中文名", () => {
-    const items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "asr"));
+  it("白名单 job（understand）产进度卡且文案按 kind 给中文名", () => {
+    const items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "understand"));
     expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ kind: "progress", job_id: "job_1", job_kind: "语音转写" });
+    expect(items[0]).toMatchObject({ kind: "progress", job_id: "job_1", job_kind: "理解素材" });
   });
 
   it("同一 job 的 queued→running→succeeded 合并进一张卡并流转到完成态", () => {
     // 三种事件的 job 标识都取顶层 event.job_id（这里都是 job_1），必须合并进同一张卡而非各自成卡。
-    let items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "asr"));
+    let items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "understand"));
     expect(items).toMatchObject([{ kind: "progress", job_id: "job_1", status: "queued" }]);
 
     items = reduceStructuredInteractionItems(items, jobProgressPayload(0.5));
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ job_id: "job_1", status: "running", progress: 50 });
 
-    items = reduceStructuredInteractionItems(items, jobEventPayload("JobSucceeded", "asr"));
+    items = reduceStructuredInteractionItems(items, jobEventPayload("JobSucceeded", "understand"));
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({ job_id: "job_1", status: "succeeded" });
   });
 
   it("进度卡终态 succeeded 显示已完成而非停在处理中", () => {
-    // 复现真机 bug：asr 等 job 从不发 JobProgress，progress 恒为 null，只能靠 status 收尾。
+    // 即使某个 job 没发中间 JobProgress，也必须靠终态显式收尾。
     render(
       <StructuredInteractionRenderer
         item={{
           kind: "progress",
           id: "progress:job_1",
           job_id: "job_1",
-          job_kind: "语音转写",
+          job_kind: "理解素材",
           progress: null,
           status: "succeeded"
         }}
@@ -583,7 +577,7 @@ describe("DraftEditorView", () => {
     expect(screen.getByText("已完成")).toBeTruthy();
     expect(screen.queryByText("处理中")).toBeNull();
     expect(
-      screen.getByRole("progressbar", { name: "语音转写 进度" }).getAttribute("aria-valuenow")
+      screen.getByRole("progressbar", { name: "理解素材 进度" }).getAttribute("aria-valuenow")
     ).toBe("100");
   });
 
@@ -706,10 +700,10 @@ function mockFetch({
         messages: typeof messages === "function" ? messages() : messages
       });
     }
-    if (url === "/api/decisions/dec_audio/answer") {
+    if (url === "/api/decisions/dec_style/answer") {
       onAnswer?.(url, init);
       return jsonResponse({
-        decision_id: "dec_audio",
+        decision_id: "dec_style",
         status: "answered",
         event_ids: [2],
         replays_enqueued: 0
@@ -799,7 +793,7 @@ function videoAssetFixture(): Record<string, unknown> {
   };
 }
 
-function audioModeDecision(overrides: Partial<Decision> = {}): Decision {
+function editingStyleDecision(overrides: Partial<Decision> = {}): Decision {
   const answer = (overrides.answer ?? null) as DecisionAnswer | null;
   return {
     allow_free_text: true,
@@ -807,37 +801,38 @@ function audioModeDecision(overrides: Partial<Decision> = {}): Decision {
     blocking: true,
     consumed_at: null,
     created_by_tool_call_id: "tc_1",
-    decision_id: "dec_audio",
+    decision_id: "dec_style",
     draft_id: "draft_1",
     options: [
-      { option_id: "keep_original", label: "保留原声" },
-      { option_id: "rough_cut", label: "口播粗剪" },
-      { option_id: "uploaded_voiceover", label: "使用上传配音" },
-      { option_id: "tts", label: "使用 TTS" },
-      { option_id: "silent", label: "无旁白视频" }
+      { option_id: "fast", label: "快节奏" },
+      { option_id: "calm", label: "舒缓" },
+      { option_id: "story", label: "叙事" },
+      { option_id: "energetic", label: "活力" },
+      { option_id: "minimal", label: "极简" }
     ],
     pending_tool_call: null,
     pending_tool_call_status: null,
-    question: "原视频里有人声，这次怎么处理声音？",
+    question: "这次希望采用哪种剪辑风格？",
     replayed_tool_call_id: null,
     scope_type: "draft",
     status: "pending",
-    type: "audio_mode",
+    type: "generic",
     ...overrides
   };
 }
 
 function jobProgressPayload(progress: number): DomainSsePayload {
-  // 真实后端把 job kind 嵌在 event.payload.kind（顶层只有 progress）；asr 属于白名单 job，会出进度卡。
   return {
     event_id: 10,
     event: {
       event: "JobProgress",
       draft_id: "draft_1",
-      requested_by_draft_id: "draft_1",
-      job_id: "job_1",
-      progress,
-      payload: { kind: "asr", progress }
+      payload: {
+        requested_by_draft_id: "draft_1",
+        job_id: "job_1",
+        kind: "understand",
+        progress
+      }
     }
   };
 }
@@ -848,9 +843,7 @@ function jobEventPayload(eventName: string, kind: string): DomainSsePayload {
     event: {
       event: eventName,
       draft_id: "draft_1",
-      requested_by_draft_id: "draft_1",
-      job_id: "job_1",
-      payload: { kind }
+      payload: { requested_by_draft_id: "draft_1", job_id: "job_1", kind }
     }
   };
 }
