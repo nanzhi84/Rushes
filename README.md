@@ -97,8 +97,10 @@ cd go
 RUSHES_REQUIRE_LIVE_MODELS=1 \
 RUSHES_DASHSCOPE_API_KEY=... \
 RUSHES_ARK_API_KEY=... \
-RUSHES_ARK_MODEL=... \
+RUSHES_ARK_MODEL=doubao-seed-2-0-lite-260215 \
 go test -tags=integration ./spikes -run 'TestQwen|TestArk' -v
 ```
+
+`RUSHES_ARK_MODEL` 接受方舟 Model ID 或 `ep-*` 推理接入点 ID；对应模型服务必须已在方舟控制台开通。
 
 CI 在 Ubuntu 与 macOS 上执行 Go `-race`，并运行契约对拍、90% 覆盖率、golangci-lint、govulncheck、前端三连和 Playwright。

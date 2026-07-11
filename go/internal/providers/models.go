@@ -114,7 +114,7 @@ func NewArk(ctx context.Context, cfg ArkConfig) (model.ToolCallingChatModel, err
 		return nil, errors.New("缺少 Ark APIKey 或 AK/SK")
 	}
 	if strings.TrimSpace(cfg.Model) == "" {
-		return nil, errors.New("缺少 Ark 推理接入点 ID")
+		return nil, errors.New("缺少 Ark Model ID 或推理接入点 ID")
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 60 * time.Second
