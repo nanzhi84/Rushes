@@ -43,7 +43,7 @@ export function TopBar({
   );
 }
 
-export function Wordmark(): ReactElement {
+function Wordmark(): ReactElement {
   return (
     <span className="flex items-center gap-2 text-[13px] font-semibold tracking-wide text-fg">
       <span aria-hidden className="h-3.5 w-1 rounded-sm bg-accent" />

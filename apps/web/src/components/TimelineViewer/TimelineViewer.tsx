@@ -29,7 +29,7 @@ export type TimelineJson = {
   tracks: TimelineTrackJson[];
 };
 
-export type TimelineTrackJson = {
+type TimelineTrackJson = {
   track_id: string;
   track_type?: string;
   clips?: TimelineClipJson[];
@@ -39,7 +39,7 @@ export type TimelineTrackJson = {
   gain_db?: number;
 };
 
-export type TimelineClipJson = {
+type TimelineClipJson = {
   timeline_clip_id?: string;
   track_id?: string;
   timeline_start_frame?: number;

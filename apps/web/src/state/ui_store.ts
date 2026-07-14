@@ -23,13 +23,13 @@ const CHAT_WIDTH_KEY = "rushes.ui.chatPanelWidth";
 const MATERIALS_WIDTH_KEY = "rushes.ui.materialsPanelWidth";
 const TIMELINE_HEIGHT_KEY = "rushes.ui.timelinePanelHeight";
 
-export const DEFAULT_CHAT_PANEL_WIDTH = 400;
+const DEFAULT_CHAT_PANEL_WIDTH = 400;
 export const DEFAULT_MATERIALS_PANEL_WIDTH = 300;
-export const DEFAULT_TIMELINE_PANEL_HEIGHT = 260;
+const DEFAULT_TIMELINE_PANEL_HEIGHT = 260;
 
-export const CHAT_PANEL_WIDTH_RANGE = { min: 300, max: 640 } as const;
-export const MATERIALS_PANEL_WIDTH_RANGE = { min: 240, max: 480 } as const;
-export const TIMELINE_PANEL_HEIGHT_RANGE = { min: 160, max: 480 } as const;
+const CHAT_PANEL_WIDTH_RANGE = { min: 300, max: 640 } as const;
+const MATERIALS_PANEL_WIDTH_RANGE = { min: 240, max: 480 } as const;
+const TIMELINE_PANEL_HEIGHT_RANGE = { min: 160, max: 480 } as const;
 
 export const useUiStore = create<UiState>((set) => ({
   entityDialog: null,

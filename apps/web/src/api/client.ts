@@ -1,4 +1,4 @@
-import { apiFetch, createApiEventSource, getAuthToken } from "../auth";
+import { apiFetch, getAuthToken } from "../auth";
 import type { components } from "./generated/schema";
 
 type Schemas = components["schemas"];
@@ -7,19 +7,11 @@ type Schemas = components["schemas"];
 export type DecisionOption = Schemas["DecisionOption"];
 export type Decision = Schemas["Decision"];
 export type DecisionAnswer = Schemas["DecisionAnswer"];
-export type FsRoot = Schemas["FsRoot"];
 export type FsListEntry = Schemas["FsListEntry"];
 export type FsListResponse = Schemas["FsListResponse"];
 export type FsRootsResponse = Schemas["FsRootsResponse"];
 export type FsPickResponse = Schemas["FsPickResponse"];
-export type StorageMode = Schemas["StorageMode"];
 
-// ---- 素材：结构化字段引 generated；kind/understanding_status 在 schema 里是裸 string，
-//      前端保留窄化 helper union 供 UI 判定。 ----
-export type MaterialKind = "video" | "audio" | "image" | "font";
-export type UnderstandingStatus = "none" | "running" | "ready" | "failed";
-
-export type AssetJobSummary = Schemas["AssetJobSummary"];
 export type MaterialAsset = Schemas["MaterialAsset"];
 export type MaterialsResponse = Schemas["MaterialsResponse"];
 export type MaterialMutationResponse = Schemas["MaterialMutationResponse"];
@@ -36,7 +28,7 @@ export type MaterialSummarySegment = {
   notes?: string | null;
 };
 
-export type MaterialSummaryDetail = {
+type MaterialSummaryDetail = {
   asset_id?: string;
   version?: number;
   focus?: string | null;
@@ -108,13 +100,11 @@ export type DraftTimelineResponse = {
 export type DraftListItem = Schemas["DraftListItem"];
 export type DraftListResponse = Schemas["DraftListResponse"];
 export type DraftBatchDeleteResponse = Schemas["DraftBatchDeleteResponse"];
-export type DraftRecord = Schemas["DraftRecord"];
 export type DraftResponse = Schemas["DraftResponse"];
 export type DraftMutationResponse = Schemas["DraftMutationResponse"];
 export type DraftCostsResponse = Schemas["DraftCostsResponse"];
-export type CostSummary = Schemas["CostSummary"];
 export type MessageRecord = Schemas["MessageRecord"];
-export type MessagesResponse = Schemas["MessagesResponse"];
+type MessagesResponse = Schemas["MessagesResponse"];
 export type MessageQueuedResponse = Schemas["MessageQueuedResponse"];
 export type TurnCancelResponse = Schemas["TurnCancelResponse"];
 export type ConversationClearResponse = Schemas["ConversationClearResponse"];
@@ -161,13 +151,8 @@ export function applyTimelinePatch(
 }
 
 // limit=最老的前 N 条，升序返回；当前规模够用。
-export function getDraftMessages(draftId: string): Promise<MessagesResponse> {
+function getDraftMessages(draftId: string): Promise<MessagesResponse> {
   return apiFetch<MessagesResponse>(`${draftPath(draftId)}/messages?limit=200`);
-}
-
-// turn-stream SSE 工厂：鉴权同 createApiEventSource（query token）。断线由浏览器自动重连。
-export function createDraftTurnStreamSource(draftId: string): EventSource {
-  return createApiEventSource(`${draftPath(draftId)}/turn-stream`);
 }
 
 export function clearDraftConversation(draftId: string): Promise<ConversationClearResponse> {

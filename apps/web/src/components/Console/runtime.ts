@@ -12,7 +12,7 @@ export type ConsoleMessage = {
   kind?: string | null;
 };
 
-export type ConsoleTextPart = {
+type ConsoleTextPart = {
   type: "text";
   text: string;
 };
@@ -65,7 +65,7 @@ export function useConsoleExternalStoreRuntime({
   );
 }
 
-export function toAssistantUiMessages(
+function toAssistantUiMessages(
   messages: ConsoleMessage[],
   structuredItems: StructuredInteractionItem[]
 ): ConsoleAssistantMessage[] {

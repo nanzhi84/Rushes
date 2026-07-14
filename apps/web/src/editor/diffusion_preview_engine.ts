@@ -5,8 +5,6 @@ import { previewCoverLayout } from "./preview_layout";
 import { resumePreviewClock } from "./preview_clock";
 import { timelineRuntimeSignature } from "./preview_timeline_signature";
 
-export { frameTime } from "./frame_time";
-
 export type DiffusionMediaResolver = (assetId: string, assetKind: string) => string;
 
 type RuntimeClip = {
@@ -14,15 +12,6 @@ type RuntimeClip = {
   sourceKey: string;
   trackId: string;
 };
-
-export function supportsDiffusionPreview(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof document !== "undefined" &&
-    typeof window.AudioContext !== "undefined" &&
-    typeof window.VideoDecoder !== "undefined"
-  );
-}
 
 // DiffusionPreviewEngine 只做代理素材即时预览。Rushes 的整数帧时间线仍是唯一
 // 业务事实；传给 Core 的所有时间值都使用 `123f`，不在持久层引入第二种时间基。
