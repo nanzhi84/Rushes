@@ -36,7 +36,6 @@ type AssetsPanelProps = {
   enableEvents?: boolean;
   /** 管理模式：瓦片菜单 + 摘要详情 + 失效重检。 */
   management?: boolean;
-  gridClassName?: string;
 };
 
 /** 素材面板：文件夹分组网格；导入只走「系统原生选择框 → reference 零拷贝索引」。 */
@@ -45,8 +44,7 @@ export function AssetsPanel({
   onPreviewAsset,
   previewingAssetId = null,
   enableEvents = true,
-  management = false,
-  gridClassName
+  management = false
 }: AssetsPanelProps): ReactElement {
   const queryClient = useQueryClient();
   const [currentDir, setCurrentDir] = useState("");
@@ -302,7 +300,7 @@ export function AssetsPanel({
             </div>
           </div>
         ) : (
-          <div className={gridClassName ?? "grid grid-cols-2 gap-2 xl:grid-cols-3"}>
+          <div className="grid grid-cols-2 gap-2 xl:grid-cols-3">
             {folders.map((folder) => (
               <FolderTile
                 key={folder.path}

@@ -23,8 +23,6 @@ type ffprobePayload struct {
 	} `json:"format"`
 	Streams []struct {
 		CodecType   string `json:"codec_type"`
-		CodecName   string `json:"codec_name"`
-		PixelFormat string `json:"pix_fmt"`
 		Duration    string `json:"duration"`
 		AverageRate string `json:"avg_frame_rate"`
 		Width       int    `json:"width"`

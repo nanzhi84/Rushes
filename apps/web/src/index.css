@@ -16,7 +16,6 @@
   --color-accent: #dc7036; /* 主按钮/选中/焦点 */
   --color-accent-strong: #c65f2a; /* 强调悬浮 */
   --color-user-bubble: #e0deda; /* 源站 ableton-sunlit 的克制右侧气泡 */
-  --color-user-bubble-border: transparent;
   --color-selected: color-mix(in srgb, var(--color-accent) 12%, var(--color-raised));
   --color-focus-ring: var(--color-accent);
   --color-track-video: #588fc0;
@@ -52,7 +51,6 @@
   --duration-slow: 260ms; /* 弹层/抽屉 */
   --ease-out-snappy: cubic-bezier(0.2, 0, 0, 1); /* 干脆的减速 */
   --ease-standard: cubic-bezier(0.4, 0, 0.2, 1); /* 通用平滑 */
-  --ease-spring: cubic-bezier(0.34, 1.3, 0.64, 1); /* 轻微回弹（浮出菜单） */
 
   --font-sans:
     Inter, ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Segoe UI", sans-serif;
