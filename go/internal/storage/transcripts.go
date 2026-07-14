@@ -19,12 +19,6 @@ type Transcript struct {
 const transcriptColumns = `
 transcript_id, asset_id, provider_id, raw_preserved, utterances_json, vad_segments_json`
 
-func GetTranscript(ctx context.Context, query Querier, transcriptID string) (Transcript, error) {
-	return scanTranscript(query.QueryRowContext(ctx,
-		"SELECT "+transcriptColumns+" FROM transcripts WHERE transcript_id=?", transcriptID,
-	))
-}
-
 func LatestTranscript(ctx context.Context, query Querier, assetID string) (Transcript, error) {
 	return scanTranscript(query.QueryRowContext(ctx, `
 		SELECT `+transcriptColumns+` FROM transcripts

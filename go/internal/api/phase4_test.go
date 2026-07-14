@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,7 +38,7 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := media.NewObjectStore(server.database.Paths)
-	object, err := store.PutBytes(t.Context(), []byte("preview"))
+	object, err := store.Put(t.Context(), bytes.NewReader([]byte("preview")))
 	if err != nil {
 		t.Fatal(err)
 	}

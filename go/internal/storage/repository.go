@@ -184,14 +184,6 @@ func ListEventsAfter(
 	return events, rows.Err()
 }
 
-func CountTables(ctx context.Context, query Querier) (int, error) {
-	var count int
-	err := query.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM sqlite_master
-		WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&count)
-	return count, err
-}
-
 func decodeMap(raw string) map[string]any {
 	result := map[string]any{}
 	if raw != "" {

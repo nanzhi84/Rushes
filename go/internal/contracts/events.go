@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -138,15 +137,6 @@ func ParseEvent(data []byte) (Event, error) {
 		return Event{}, err
 	}
 	return event, event.Validate()
-}
-
-func RegisteredEventNames() []string {
-	names := make([]string, 0, len(EventRegistry))
-	for name := range EventRegistry {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }
 
 func RoutesToWorkspace(event Event) bool {

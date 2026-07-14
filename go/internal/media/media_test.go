@@ -35,11 +35,11 @@ func TestObjectStoreDeduplicatesContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewObjectStore(paths)
-	first, err := store.PutBytes(t.Context(), []byte("same"))
+	first, err := store.Put(t.Context(), bytes.NewReader([]byte("same")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := store.PutBytes(t.Context(), []byte("same"))
+	second, err := store.Put(t.Context(), bytes.NewReader([]byte("same")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestMediaKindShortcutsResolveAndRenderValidation(t *testing.T) {
 	if _, _, err := ResolveAssetSource(t.Context(), database, "no_source"); err == nil {
 		t.Fatal("source-less asset should fail")
 	}
-	object, err := store.PutBytes(t.Context(), []byte("copied"))
+	object, err := store.Put(t.Context(), bytes.NewReader([]byte("copied")))
 	if err != nil {
 		t.Fatal(err)
 	}

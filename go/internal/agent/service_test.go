@@ -856,7 +856,7 @@ func TestUnderstandingMiniLoopCancellationKeepsCompletedSummaryAndResetsPendingA
 				if ready.UnderstandingStatus != "ready" || slow.UnderstandingStatus != "none" {
 					t.Fatalf("ready=%s slow=%s", ready.UnderstandingStatus, slow.UnderstandingStatus)
 				}
-				if _, err := storage.LatestMaterialSummary(t.Context(), database.Read(), "ready_asset"); err != nil {
+				if _, err := storage.BestMaterialSummary(t.Context(), database.Read(), "ready_asset"); err != nil {
 					t.Fatal(err)
 				}
 				return
@@ -1362,7 +1362,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	if err != nil || len(audio.Assets) != 1 || audio.Assets[0].SuggestedRole != "sfx" {
 		t.Fatalf("audio role=%#v err=%v", audio, err)
 	}
-	objectiveContext, err := service.draftObjectiveContext(t.Context(), "draft_assets_filter")
+	objectiveContext, err := service.contextManager.builder.Build(t.Context(), "draft_assets_filter")
 	if err != nil || !strings.Contains(objectiveContext, `"audio":1`) ||
 		!strings.Contains(objectiveContext, `"suggested_role":"sfx"`) {
 		t.Fatalf("objective context=%q err=%v", objectiveContext, err)
@@ -1378,7 +1378,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	if err != nil || timelineResult.Status != "succeeded" {
 		t.Fatalf("valid objective timeline=%#v err=%v", timelineResult, err)
 	}
-	objectiveContext, err = service.draftObjectiveContext(t.Context(), "draft_assets_filter")
+	objectiveContext, err = service.contextManager.builder.Build(t.Context(), "draft_assets_filter")
 	if err != nil || !strings.Contains(objectiveContext, `"validated":true`) {
 		t.Fatalf("validated objective context=%q err=%v", objectiveContext, err)
 	}
@@ -1392,7 +1392,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	if err != nil || timelineResult.Status != "validation_failed" {
 		t.Fatalf("invalid objective timeline=%#v err=%v", timelineResult, err)
 	}
-	objectiveContext, err = service.draftObjectiveContext(t.Context(), "draft_assets_filter")
+	objectiveContext, err = service.contextManager.builder.Build(t.Context(), "draft_assets_filter")
 	if err != nil || !strings.Contains(objectiveContext, `"validated":false`) {
 		t.Fatalf("unvalidated objective context=%q err=%v", objectiveContext, err)
 	}

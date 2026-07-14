@@ -510,10 +510,6 @@ func (service *Service) modelMessages(ctx context.Context, draftID string) ([]*s
 	return build.Messages, nil
 }
 
-func (service *Service) draftObjectiveContext(ctx context.Context, draftID string) (string, error) {
-	return service.contextManager.builder.Build(ctx, draftID)
-}
-
 func (service *Service) compactModelContext(
 	ctx context.Context,
 	draftID string,

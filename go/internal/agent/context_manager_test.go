@@ -463,3 +463,30 @@ func joinMessageContent(messages []*schema.Message) string {
 	}
 	return strings.Join(parts, "\n")
 }
+
+// applyMergePatch 是 mergePatchDifference 的逆运算，仅用于测试中校验
+// “基准 + 补丁 == 当前状态” 的往返一致性。
+func applyMergePatch(target, patch any) any {
+	patchMap, patchObject := patch.(map[string]any)
+	if !patchObject {
+		return patch
+	}
+	targetMap, targetObject := target.(map[string]any)
+	if !targetObject {
+		targetMap = map[string]any{}
+	} else {
+		copyMap := make(map[string]any, len(targetMap))
+		for key, value := range targetMap {
+			copyMap[key] = value
+		}
+		targetMap = copyMap
+	}
+	for key, value := range patchMap {
+		if value == nil {
+			delete(targetMap, key)
+			continue
+		}
+		targetMap[key] = applyMergePatch(targetMap[key], value)
+	}
+	return targetMap
+}

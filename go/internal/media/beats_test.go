@@ -20,10 +20,10 @@ func TestParseBeatGridAndFrameConversions(t *testing.T) {
 	if bpm := estimateBPM(seconds); math.Abs(bpm-120) > 0.001 {
 		t.Fatalf("bpm=%f", bpm)
 	}
-	if everyTwo := everyNthBeat(frames, 2); len(everyTwo) != 2 || everyTwo[1] != 45 {
+	if everyTwo := everyNthBeatFrom(frames, 2, 0); len(everyTwo) != 2 || everyTwo[1] != 45 {
 		t.Fatalf("everyTwo=%v", everyTwo)
 	}
-	if everyFour := everyNthBeat(frames, 4); len(everyFour) != 1 || everyFour[0] != 15 {
+	if everyFour := everyNthBeatFrom(frames, 4, 0); len(everyFour) != 1 || everyFour[0] != 15 {
 		t.Fatalf("everyFour=%v", everyFour)
 	}
 }
@@ -42,7 +42,7 @@ func TestBeatParsingRejectsInsufficientAndDeduplicatesFrames(t *testing.T) {
 	if bpm := estimateBPM([]float64{0, 3}); bpm != 0 {
 		t.Fatalf("bpm=%f", bpm)
 	}
-	if values := everyNthBeat(nil, 0); len(values) != 0 {
+	if values := everyNthBeatFrom(nil, 0, 0); len(values) != 0 {
 		t.Fatalf("values=%v", values)
 	}
 	if _, err := parseOnsetSeconds([]byte("junk\n")); err == nil {

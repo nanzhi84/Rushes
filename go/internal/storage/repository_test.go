@@ -76,11 +76,11 @@ func TestRepositoriesRoundTripAllMaterializedViews(t *testing.T) {
 	if err != nil || count != 1 {
 		t.Fatalf("count=%d err=%v", count, err)
 	}
-	summary, err := LatestMaterialSummary(t.Context(), database.Read(), "asset_1")
+	summary, err := BestMaterialSummary(t.Context(), database.Read(), "asset_1")
 	if err != nil || summary["overall"] != "usable" {
 		t.Fatalf("summary=%#v err=%v", summary, err)
 	}
-	if _, err := LatestMaterialSummary(t.Context(), database.Read(), "missing"); !errors.Is(err, ErrNotFound) {
+	if _, err := BestMaterialSummary(t.Context(), database.Read(), "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing summary err=%v", err)
 	}
 	if _, err := database.Write().ExecContext(t.Context(), `

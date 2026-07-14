@@ -127,31 +127,6 @@ func mergePatchDifference(source, target any) (any, bool) {
 	return patch, true
 }
 
-func applyMergePatch(target, patch any) any {
-	patchMap, patchObject := patch.(map[string]any)
-	if !patchObject {
-		return patch
-	}
-	targetMap, targetObject := target.(map[string]any)
-	if !targetObject {
-		targetMap = map[string]any{}
-	} else {
-		copyMap := make(map[string]any, len(targetMap))
-		for key, value := range targetMap {
-			copyMap[key] = value
-		}
-		targetMap = copyMap
-	}
-	for key, value := range patchMap {
-		if value == nil {
-			delete(targetMap, key)
-			continue
-		}
-		targetMap[key] = applyMergePatch(targetMap[key], value)
-	}
-	return targetMap
-}
-
 type ContextManifest struct {
 	WindowID             string
 	WindowNumber         int
