@@ -81,10 +81,25 @@ type TranscriptRow struct {
 	VADSegments  []map[string]any
 }
 
+// AgentContextCheckpointRow persists the model's replacement-history window.
+// It is deliberately a reducer result row rather than a domain event: changing
+// prompt bookkeeping must not pretend that the user's video state changed.
+type AgentContextCheckpointRow struct {
+	DraftID                   string
+	WindowID                  string
+	WindowNumber              int
+	HistoryVersion            int
+	BaseSnapshot              map[string]any
+	BaseSnapshotHash          string
+	Summary                   string
+	CompactedThroughMessageID *string
+}
+
 type ResultRows struct {
-	Message           *MessageRow
-	MaterialSummaries []MaterialSummaryRow
-	Transcripts       []TranscriptRow
+	Message                *MessageRow
+	MaterialSummaries      []MaterialSummaryRow
+	Transcripts            []TranscriptRow
+	AgentContextCheckpoint *AgentContextCheckpointRow
 }
 
 type ValidationHook func(context.Context, *sql.Tx, []string) error
@@ -328,10 +343,10 @@ func applyEvent(ctx context.Context, state *applyState, event contracts.Event) e
 		return applyDecisionCreated(ctx, state, event)
 	case "DecisionAnswered":
 		return applyDecisionAnswered(ctx, state, event)
+	case "ConversationContextCleared":
+		return applyConversationContextCleared(ctx, state, event)
 	case "TimelineVersionCreated":
 		return applyTimelineCreated(ctx, state, event)
-	case "TimelineVersionRestored":
-		return applyTimelineRestored(ctx, state, event)
 	case "TimelineValidated", "TimelineValidationFailed":
 		return applyTimelineValidation(ctx, state, event)
 	case "PreviewRendered":
@@ -455,18 +470,20 @@ func applyDraftCopied(ctx context.Context, state *applyState, event contracts.Ev
 
 func copyDraftTimelines(ctx context.Context, state *applyState, sourceDraftID, targetDraftID string) error {
 	rows, err := state.tx.QueryContext(ctx, `
-		SELECT version, parent_version, created_by_patch_id, document_json, validation_report_json
-		FROM timeline_versions WHERE draft_id=? ORDER BY version`, sourceDraftID)
+		SELECT version, created_by_patch_id, document_json, validation_report_json
+		FROM timeline_versions
+		WHERE draft_id=? AND version=(
+			SELECT timeline_current_version FROM drafts WHERE draft_id=?
+		)`, sourceDraftID, sourceDraftID)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var version int
-		var parent sql.NullInt64
 		var patch, validation sql.NullString
 		var raw string
-		if err := rows.Scan(&version, &parent, &patch, &raw, &validation); err != nil {
+		if err := rows.Scan(&version, &patch, &raw, &validation); err != nil {
 			return err
 		}
 		document := map[string]any{}
@@ -478,10 +495,10 @@ func copyDraftTimelines(ctx context.Context, state *applyState, sourceDraftID, t
 		document["timeline_id"] = timelineID
 		if _, err := state.tx.ExecContext(ctx, `
 			INSERT INTO timeline_versions(
-				timeline_id, draft_id, version, parent_version, created_by_patch_id,
+				timeline_id, draft_id, version, created_by_patch_id,
 				document_json, validation_report_json, created_at
-			) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`, timelineID, targetDraftID, version,
-			parent, patch, mustJSON(document), validation, state.createdAt,
+			) VALUES(?, ?, ?, ?, ?, ?, ?)`, timelineID, targetDraftID, version,
+			patch, mustJSON(document), validation, state.createdAt,
 		); err != nil {
 			return err
 		}
@@ -730,6 +747,34 @@ func applyDecisionAnswered(ctx context.Context, state *applyState, event contrac
 	return err
 }
 
+func applyConversationContextCleared(ctx context.Context, state *applyState, event contracts.Event) error {
+	messageID := stringFrom(event.Payload["message_id"], "")
+	if messageID == "" {
+		return errors.New("ConversationContextCleared 缺少 message_id")
+	}
+	if err := state.touch(ctx, event.DraftID); err != nil {
+		return err
+	}
+	if _, err := state.tx.ExecContext(ctx, `
+		UPDATE decisions SET status='cancelled',
+		pending_tool_call_status=CASE
+			WHEN pending_tool_call_json IS NULL OR pending_tool_call_json='null' THEN pending_tool_call_status
+			ELSE 'discarded'
+		END
+		WHERE draft_id=? AND status='pending'`, event.DraftID); err != nil {
+		return err
+	}
+	if _, err := state.tx.ExecContext(ctx,
+		"DELETE FROM agent_context_checkpoints WHERE draft_id=?", event.DraftID,
+	); err != nil {
+		return err
+	}
+	_, err := state.tx.ExecContext(ctx, `
+		UPDATE drafts SET messages_tail_ref=?, pending_decision_id=NULL WHERE draft_id=?`,
+		messageID, event.DraftID)
+	return err
+}
+
 func applyTimelineCreated(ctx context.Context, state *applyState, event contracts.Event) error {
 	version := intFrom(event.Payload["timeline_version"], 0)
 	if version < 1 {
@@ -742,43 +787,55 @@ func applyTimelineCreated(ctx context.Context, state *applyState, event contract
 	if len(document) == 0 {
 		document = emptyTimeline(event.DraftID, version)
 	}
+	// 单时间线模型：在同一 reducer 事务内用新文档替换旧文档。后续任一步
+	// 失败都会整体回滚，因此不会出现草稿暂时没有时间线的可见状态。
+	if _, err := state.tx.ExecContext(ctx,
+		"DELETE FROM timeline_versions WHERE draft_id=?", event.DraftID,
+	); err != nil {
+		return err
+	}
 	_, err := state.tx.ExecContext(ctx, `
 		INSERT INTO timeline_versions(
-			timeline_id, draft_id, version, parent_version, created_by_patch_id,
+			timeline_id, draft_id, version, created_by_patch_id,
 			document_json, validation_report_json, created_at
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES(?, ?, ?, ?, ?, ?, ?)`,
 		stringFrom(event.Payload["timeline_id"], fmt.Sprintf("%s:v%d", event.DraftID, version)),
-		event.DraftID, version, nullableInt64(event.Payload["parent_version"]),
-		nullableString(event.Payload["patch_id"]), mustJSON(document),
+		event.DraftID, version, nullableString(event.Payload["patch_id"]), mustJSON(document),
 		nullableJSON(event.Payload["validation_report"]), state.createdAt,
 	)
 	if err != nil {
 		return err
 	}
+	operations := sliceValue(event.Payload["edit_operations"])
+	if len(operations) > 0 {
+		batchID := stringFrom(event.Payload["patch_id"], "")
+		if batchID == "" {
+			return errors.New("TimelineVersionCreated 编辑日志缺少 patch_id")
+		}
+		origin := stringFrom(event.Payload["edit_origin"], "agent")
+		if _, err := state.tx.ExecContext(ctx, `
+			INSERT INTO timeline_edit_batches(
+				edit_batch_id,draft_id,actor,origin,operations_json,created_at
+			) VALUES(?, ?, ?, ?, ?, ?)`,
+			batchID, event.DraftID, event.Actor, origin, mustJSON(operations), state.createdAt,
+		); err != nil {
+			return err
+		}
+		// 编辑历史只描述最近意图，不承担撤销/版本恢复。按 reducer 提交顺序
+		// 严格限制为 20 批，防止模型上下文和本地数据库无限增长。
+		if _, err := state.tx.ExecContext(ctx, `
+			DELETE FROM timeline_edit_batches
+			WHERE draft_id=? AND rowid NOT IN (
+				SELECT rowid FROM timeline_edit_batches
+				WHERE draft_id=? ORDER BY rowid DESC LIMIT 20
+			)`, event.DraftID, event.DraftID); err != nil {
+			return err
+		}
+	}
 	if err := state.touch(ctx, event.DraftID); err != nil {
 		return err
 	}
 	_, err = state.tx.ExecContext(ctx,
-		"UPDATE drafts SET timeline_current_version=?, timeline_validated=0 WHERE draft_id=?",
-		version, event.DraftID)
-	return err
-}
-
-func applyTimelineRestored(ctx context.Context, state *applyState, event contracts.Event) error {
-	version := intFrom(event.Payload["timeline_version"], 0)
-	if version < 1 {
-		return errors.New("TimelineVersionRestored 缺少 timeline_version")
-	}
-	var exists int
-	if err := state.tx.QueryRowContext(ctx,
-		"SELECT 1 FROM timeline_versions WHERE draft_id=? AND version=?", event.DraftID, version,
-	).Scan(&exists); err != nil {
-		return err
-	}
-	if err := state.touch(ctx, event.DraftID); err != nil {
-		return err
-	}
-	_, err := state.tx.ExecContext(ctx,
 		"UPDATE drafts SET timeline_current_version=?, timeline_validated=0 WHERE draft_id=?",
 		version, event.DraftID)
 	return err
@@ -1050,6 +1107,35 @@ func persistResultRows(
 			return err
 		}
 	}
+	if checkpoint := rows.AgentContextCheckpoint; checkpoint != nil {
+		if checkpoint.DraftID == "" || checkpoint.WindowID == "" ||
+			checkpoint.WindowNumber < 1 || checkpoint.HistoryVersion < 1 ||
+			checkpoint.BaseSnapshotHash == "" || checkpoint.BaseSnapshot == nil {
+			return errors.New("agent context checkpoint 字段不完整")
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO agent_context_checkpoints(
+				draft_id,window_id,window_number,history_version,
+				base_snapshot_json,base_snapshot_hash,summary,
+				compacted_through_message_id,created_at,updated_at
+			) VALUES(?,?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(draft_id) DO UPDATE SET
+				window_id=excluded.window_id,
+				window_number=excluded.window_number,
+				history_version=excluded.history_version,
+				base_snapshot_json=excluded.base_snapshot_json,
+				base_snapshot_hash=excluded.base_snapshot_hash,
+				summary=excluded.summary,
+				compacted_through_message_id=excluded.compacted_through_message_id,
+				updated_at=excluded.updated_at`,
+			checkpoint.DraftID, checkpoint.WindowID, checkpoint.WindowNumber,
+			checkpoint.HistoryVersion, mustJSON(checkpoint.BaseSnapshot),
+			checkpoint.BaseSnapshotHash, checkpoint.Summary,
+			checkpoint.CompactedThroughMessageID, defaultCreatedAt, defaultCreatedAt,
+		); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1134,7 +1220,8 @@ func emptyTimeline(draftID string, version int) map[string]any {
 }
 
 func emptyResultRows(rows ResultRows) bool {
-	return rows.Message == nil && len(rows.MaterialSummaries) == 0 && len(rows.Transcripts) == 0
+	return rows.Message == nil && len(rows.MaterialSummaries) == 0 &&
+		len(rows.Transcripts) == 0 && rows.AgentContextCheckpoint == nil
 }
 
 func sortedKeys(values map[string]struct{}) []string {

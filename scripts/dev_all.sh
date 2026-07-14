@@ -43,10 +43,52 @@ port_in_use() {
 
 load_dotenv "$ROOT/.env"
 
+persist_generated_token() {
+  local env_file="$1"
+  local token="$2"
+  local temporary old_umask
+  old_umask="$(umask)"
+  umask 077
+  touch "$env_file"
+  temporary="$(mktemp "${env_file}.tmp.XXXXXX")"
+  awk -v token="$token" '
+    BEGIN { replaced = 0 }
+    {
+      candidate = $0
+      sub(/^[[:space:]]*export[[:space:]]+/, "", candidate)
+      if (candidate ~ /^[[:space:]]*RUSHES_API_TOKEN[[:space:]]*=/) {
+        if (!replaced) {
+          print "RUSHES_API_TOKEN=" token
+          replaced = 1
+        }
+        next
+      }
+      print
+    }
+    END {
+      if (!replaced) print "RUSHES_API_TOKEN=" token
+    }
+  ' "$env_file" >"$temporary"
+  chmod 600 "$temporary"
+  mv "$temporary" "$env_file"
+  umask "$old_umask"
+}
+
 API_PORT="${RUSHES_API_PORT:-8010}"
 WEB_PORT="${RUSHES_WEB_PORT:-8011}"
 WORKSPACE="${RUSHES_WORKSPACE_PATH:-$ROOT/.rushes}"
-TOKEN="${RUSHES_API_TOKEN:-$(openssl rand -hex 32)}"
+case "$WORKSPACE" in
+  /*) ;;
+  *) WORKSPACE="$ROOT/$WORKSPACE" ;;
+esac
+if [[ -n "${RUSHES_API_TOKEN:-}" ]]; then
+  TOKEN="$RUSHES_API_TOKEN"
+else
+  TOKEN="$(openssl rand -hex 32)"
+  persist_generated_token "$ROOT/.env" "$TOKEN"
+  export RUSHES_API_TOKEN="$TOKEN"
+  printf '\033[32m已生成本地启动 token 并安全保存到 .env；后续启动将自动复用。\033[0m\n'
+fi
 BIN_DIR="$WORKSPACE/bin"
 
 for port in "$API_PORT" "$WEB_PORT"; do
@@ -104,14 +146,16 @@ RUSHES_WORKSPACE_PATH="$WORKSPACE" \
   "$BIN_DIR/rushes-worker" -env-file "$ROOT/.env" -workspace "$WORKSPACE" &
 pids+=("$!")
 
-RUSHES_WEB_PROXY_TARGET="http://127.0.0.1:$API_PORT" \
+env -u RUSHES_DASHSCOPE_API_KEY -u RUSHES_API_TOKEN \
+  RUSHES_WEB_PROXY_TARGET="http://127.0.0.1:$API_PORT" \
   npx -y pnpm@10.13.1 --dir "$ROOT/apps/web" dev --host 127.0.0.1 --port "$WEB_PORT" --strictPort &
 pids+=("$!")
 
 echo
 echo "════════════════════════════════════════════════════"
 echo "  Rushes Go 全栈已启动："
-echo "  http://127.0.0.1:$WEB_PORT/#t=$TOKEN"
+echo "  日常访问：http://127.0.0.1:$WEB_PORT"
+echo "  首次登录：http://127.0.0.1:$WEB_PORT/#t=$TOKEN"
 echo "  API :$API_PORT · workspace: $WORKSPACE · Ctrl+C 全停"
 echo "════════════════════════════════════════════════════"
 

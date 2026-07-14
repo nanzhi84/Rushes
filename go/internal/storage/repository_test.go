@@ -83,6 +83,30 @@ func TestRepositoriesRoundTripAllMaterializedViews(t *testing.T) {
 	if _, err := LatestMaterialSummary(t.Context(), database.Read(), "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing summary err=%v", err)
 	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO material_summaries(summary_id,asset_id,version,status,summary_json,fingerprint,created_at)
+		VALUES
+		('summary_rich','asset_1',2,'ready',
+		 '{"overall":"rich","segments":[
+		   {"description":"夜晚火焰人物起舞","tags":["火焰","人物"]},
+		   {"description":"海边远景建立环境","tags":["海边","远景"]},
+		   {"description":"舞者转身动作","tags":["舞者","动作"]}
+		 ]}','fingerprint-rich',?),
+		('summary_shallow','asset_1',3,'ready',
+		 '{"overall":"shallow","segments":[{"description":"人物","tags":["人物"]}]}',
+		 'fingerprint-shallow',?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	best, err := BestMaterialSummary(t.Context(), database.Read(), "asset_1")
+	if err != nil || best["overall"] != "rich" {
+		t.Fatalf("best summary=%#v err=%v", best, err)
+	}
+	cached, err := MaterialSummaryByFingerprint(
+		t.Context(), database.Read(), "asset_1", "fingerprint-shallow",
+	)
+	if err != nil || cached["overall"] != "shallow" {
+		t.Fatalf("fingerprint cache=%#v err=%v", cached, err)
+	}
 	jobs, err := ListAssetJobs(t.Context(), database.Read(), "asset_1")
 	if err != nil || len(jobs) != 1 || jobs[0].Progress == nil || *jobs[0].Progress != 0.5 {
 		t.Fatalf("jobs=%#v err=%v", jobs, err)

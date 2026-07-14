@@ -92,6 +92,45 @@ func TestImportLocalRecursiveDeduplicateAndInstantLink(t *testing.T) {
 	}
 }
 
+func TestExpandImportEntriesAcceptsMixedFilesAndMultipleFolders(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	paths := map[string]string{
+		filepath.Join(root, "folder-a", "nested", "a.mp4"): "a",
+		filepath.Join(root, "folder-b", "b.jpg"):           "b",
+		filepath.Join(root, "single.wav"):                  "single",
+	}
+	for path, data := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server, _ := testServer(t, root, 0)
+	entries, skipped, reason, forbidden := server.expandImportEntries([]string{
+		filepath.Join(root, "single.wav"),
+		filepath.Join(root, "folder-a"),
+		filepath.Join(root, "folder-b"),
+	})
+	if forbidden || reason != "" || len(skipped) != 0 || len(entries) != 3 {
+		t.Fatalf("entries=%v skipped=%v reason=%s forbidden=%v", entries, skipped, reason, forbidden)
+	}
+	relDirs := map[string]string{}
+	for _, entry := range entries {
+		if entry.relDir != nil {
+			relDirs[filepath.Base(entry.path)] = *entry.relDir
+		}
+	}
+	if relDirs["a.mp4"] != "folder-a/nested" || relDirs["b.jpg"] != "folder-b" {
+		t.Fatalf("relDirs=%v", relDirs)
+	}
+	if _, exists := relDirs["single.wav"]; exists {
+		t.Fatalf("单文件不应被归入文件夹：relDirs=%v", relDirs)
+	}
+}
+
 func TestMediaRangesAcrossSourceProxyThumbnailPreviewAndExport(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

@@ -68,10 +68,13 @@ export type TimelineClipJson = {
   source_end_frame?: number;
   playback_rate?: number;
   gain_db?: number;
+  fade_in_frames?: number;
+  fade_out_frames?: number;
   lock_policy?: string;
   asset_kind?: string;
   parent_block_id?: string;
   linked?: boolean;
+  effects?: Array<Record<string, unknown>>;
   [key: string]: unknown;
 };
 
@@ -96,9 +99,6 @@ export type TimelineJson = {
 export type DraftTimelineResponse = {
   draft_id: string;
   timeline_version: number;
-  parent_version: number | null;
-  redo_version: number | null;
-  latest_version: number;
   timeline: TimelineJson;
   summary: string;
   preview_id: string | null;
@@ -107,6 +107,7 @@ export type DraftTimelineResponse = {
 // ---- 草稿 / 消息 / 成本：引 generated ----
 export type DraftListItem = Schemas["DraftListItem"];
 export type DraftListResponse = Schemas["DraftListResponse"];
+export type DraftBatchDeleteResponse = Schemas["DraftBatchDeleteResponse"];
 export type DraftRecord = Schemas["DraftRecord"];
 export type DraftResponse = Schemas["DraftResponse"];
 export type DraftMutationResponse = Schemas["DraftMutationResponse"];
@@ -116,6 +117,7 @@ export type MessageRecord = Schemas["MessageRecord"];
 export type MessagesResponse = Schemas["MessagesResponse"];
 export type MessageQueuedResponse = Schemas["MessageQueuedResponse"];
 export type TurnCancelResponse = Schemas["TurnCancelResponse"];
+export type ConversationClearResponse = Schemas["ConversationClearResponse"];
 export type CurrentDecisionResponse = Schemas["CurrentDecisionResponse"];
 export type PendingDecisionsResponse = Schemas["PendingDecisionsResponse"];
 export type DecisionAnswerResponse = Schemas["DecisionAnswerResponse"];
@@ -124,6 +126,7 @@ export type DecisionAnswerResponse = Schemas["DecisionAnswerResponse"];
 type DraftCreateRequest = Schemas["DraftCreateRequest"];
 type DraftUpdateRequest = Schemas["DraftUpdateRequest"];
 type DraftCopyRequest = Schemas["DraftCopyRequest"];
+type DraftBatchDeleteRequest = Schemas["DraftBatchDeleteRequest"];
 type MaterialImportLocalRequest = Schemas["MaterialImportLocalRequest"];
 type MessageCreateRequest = Schemas["MessageCreateRequest"];
 type DecisionAnswerRequest = Schemas["DecisionAnswerRequest"];
@@ -133,18 +136,8 @@ export type TimelinePatchRequest = Schemas["TimelinePatchRequest"];
 // 无 body 的 mutation 显式带该头；带 body 的由 apiFetch 自动补。
 const JSON_MUTATION_HEADERS = { "Content-Type": "application/json" } as const;
 
-export function fetchDraftTimeline(
-  draftId: string,
-  version?: number | null
-): Promise<DraftTimelineResponse> {
-  const params = new URLSearchParams();
-  if (version !== undefined && version !== null) {
-    params.set("version", String(version));
-  }
-  const query = params.toString();
-  return apiFetch<DraftTimelineResponse>(
-    `${draftPath(draftId)}/timeline${query ? `?${query}` : ""}`
-  );
+export function fetchDraftTimeline(draftId: string): Promise<DraftTimelineResponse> {
+  return apiFetch<DraftTimelineResponse>(`${draftPath(draftId)}/timeline`);
 }
 
 export function postPreviewViewed(
@@ -167,16 +160,6 @@ export function applyTimelinePatch(
   });
 }
 
-export function restoreTimelineVersion(
-  draftId: string,
-  version: number
-): Promise<DraftTimelineResponse> {
-  return apiFetch<DraftTimelineResponse>(`${draftPath(draftId)}/timeline/restore`, {
-    method: "POST",
-    body: { version }
-  });
-}
-
 // limit=最老的前 N 条，升序返回；当前规模够用。
 export function getDraftMessages(draftId: string): Promise<MessagesResponse> {
   return apiFetch<MessagesResponse>(`${draftPath(draftId)}/messages?limit=200`);
@@ -185,6 +168,13 @@ export function getDraftMessages(draftId: string): Promise<MessagesResponse> {
 // turn-stream SSE 工厂：鉴权同 createApiEventSource（query token）。断线由浏览器自动重连。
 export function createDraftTurnStreamSource(draftId: string): EventSource {
   return createApiEventSource(`${draftPath(draftId)}/turn-stream`);
+}
+
+export function clearDraftConversation(draftId: string): Promise<ConversationClearResponse> {
+  return apiFetch<ConversationClearResponse>(`${draftPath(draftId)}/conversation/clear`, {
+    method: "POST",
+    headers: JSON_MUTATION_HEADERS
+  });
 }
 
 export const api = {
@@ -226,6 +216,14 @@ export const api = {
     });
   },
 
+  trashDrafts(draftIds: string[], confirm = true): Promise<DraftBatchDeleteResponse> {
+    const payload: DraftBatchDeleteRequest = { draft_ids: draftIds, confirm };
+    return apiFetch<DraftBatchDeleteResponse>("/api/drafts", {
+      method: "DELETE",
+      body: payload
+    });
+  },
+
   // ---- 对话 / 决策 / 时间线 / 成本 ----
   postMessage(draftId: string, payload: MessageCreateRequest): Promise<MessageQueuedResponse> {
     return apiFetch<MessageQueuedResponse>(`${draftPath(draftId)}/messages`, {
@@ -240,6 +238,8 @@ export const api = {
       headers: JSON_MUTATION_HEADERS
     });
   },
+
+  clearDraftConversation,
 
   getDraftMessages,
 
@@ -261,8 +261,6 @@ export const api = {
   fetchDraftTimeline,
 
   applyTimelinePatch,
-
-  restoreTimelineVersion,
 
   postPreviewViewed,
 
@@ -314,10 +312,14 @@ export const api = {
   },
 
   /** 弹出宿主机原生选择对话框（macOS）；available=false 时前端提示不可用。 */
-  pickLocalPaths(mode: "files" | "folder"): Promise<FsPickResponse> {
+  pickLocalPaths(
+    mode: "files" | "folder" | "mixed",
+    signal?: AbortSignal
+  ): Promise<FsPickResponse> {
     return apiFetch<FsPickResponse>("/api/fs/pick", {
       method: "POST",
-      body: { mode }
+      body: { mode },
+      signal
     });
   },
 

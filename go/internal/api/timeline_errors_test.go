@@ -16,7 +16,6 @@ func TestTimelineMutationEndpointsRejectMissingAndInvalidInputs(t *testing.T) {
 		body map[string]any
 	}{
 		{"/api/drafts/missing/timeline/patch", map[string]any{"op": map[string]any{"kind": "split_clip"}}},
-		{"/api/drafts/missing/timeline/restore", map[string]any{"version": 1}},
 	} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, apiRequest(t, http.MethodPost, item.path, item.body))
@@ -32,8 +31,6 @@ func TestTimelineMutationEndpointsRejectMissingAndInvalidInputs(t *testing.T) {
 	}{
 		{"/api/drafts/timeline_errors/timeline/patch", map[string]any{}},
 		{"/api/drafts/timeline_errors/timeline/patch", map[string]any{"op": map[string]any{"kind": "unknown"}}},
-		{"/api/drafts/timeline_errors/timeline/restore", map[string]any{"version": 0}},
-		{"/api/drafts/timeline_errors/timeline/restore", map[string]any{"version": 1}},
 	} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, apiRequest(t, http.MethodPost, item.path, item.body))
@@ -42,10 +39,7 @@ func TestTimelineMutationEndpointsRejectMissingAndInvalidInputs(t *testing.T) {
 		}
 	}
 
-	for _, path := range []string{
-		"/api/drafts/timeline_errors/timeline/patch",
-		"/api/drafts/timeline_errors/timeline/restore",
-	} {
+	for _, path := range []string{"/api/drafts/timeline_errors/timeline/patch"} {
 		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{"))
 		request.Host = "127.0.0.1:8000"
 		request.Header.Set("Authorization", "Bearer "+testToken)

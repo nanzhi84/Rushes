@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { MATERIAL_EVENT_TYPES } from "../../api/event_types";
 import { queryKeys } from "../../app/query_client";
 import { acquireApiEventSource } from "../../auth";
+import { useDocumentVisibility } from "../../app/use_document_visibility";
 
 type MaterialsSsePayload = {
   event_id: number;
@@ -15,9 +16,10 @@ type MaterialsSsePayload = {
 /** 订阅 workspace SSE（共享连接）中素材相关事件，失效当前草稿的素材列表查询。 */
 export function useMaterialsEvents(draftId: string, enabled: boolean): void {
   const queryClient = useQueryClient();
+  const documentVisible = useDocumentVisibility();
 
   useEffect(() => {
-    if (!enabled) {
+    if (!enabled || !documentVisible) {
       return;
     }
     const { source, release } = acquireApiEventSource("/api/events");
@@ -38,5 +40,5 @@ export function useMaterialsEvents(draftId: string, enabled: boolean): void {
       }
       release();
     };
-  }, [enabled, draftId, queryClient]);
+  }, [documentVisible, enabled, draftId, queryClient]);
 }

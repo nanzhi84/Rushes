@@ -31,30 +31,68 @@ export function bootstrapAuthFromLaunchUrl(
   history.replaceState(null, document.title, `${location.pathname}${location.search}`);
 }
 
+export function listenForLaunchUrlAuth(
+  target: Window = window,
+  location: Location = target.location,
+  history: History = target.history
+): () => void {
+  const handleHashChange = () => bootstrapAuthFromLaunchUrl(location, history);
+  target.addEventListener("hashchange", handleHashChange);
+  return () => target.removeEventListener("hashchange", handleHashChange);
+}
+
 export function getAuthToken(): string | null {
-  try {
-    return window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
-  } catch {
+  const persisted = readStorage("localStorage");
+  if (persisted) {
+    return persisted;
+  }
+  const sessionToken = readStorage("sessionStorage");
+  if (!sessionToken) {
     return null;
   }
+  try {
+    window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, sessionToken);
+    window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  } catch {
+    // localStorage 不可用时仍保留旧会话的 token。
+  }
+  return sessionToken;
 }
 
 export function storeAuthToken(token: string): void {
   try {
-    window.sessionStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+    window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+    window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
   } catch {
-    return;
+    try {
+      window.sessionStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+    } catch {
+      return;
+    }
   }
   window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
 }
 
 export function clearAuthToken(): void {
   try {
+    window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  } catch {
+    // 仍需尝试清理会话级的旧 token。
+  }
+  try {
     window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
   } catch {
-    return;
+    // 两种存储均不可用时也要通知 UI 刷新认证态。
   }
   window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
+}
+
+function readStorage(storageName: "localStorage" | "sessionStorage"): string | null {
+  try {
+    return window[storageName].getItem(AUTH_TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
 }
 
 export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): Promise<T> {

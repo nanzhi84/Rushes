@@ -355,7 +355,7 @@ func (server *Server) GetMaterialSummaryApiDraftsDraftIdMaterialsAssetIdSummaryG
 		server.internalError(writer, err)
 		return
 	}
-	summary, err := storage.LatestMaterialSummary(request.Context(), server.database.Read(), assetID)
+	summary, err := storage.BestMaterialSummary(request.Context(), server.database.Read(), assetID)
 	if errors.Is(err, storage.ErrNotFound) {
 		writeNotFound(writer, "summary_not_ready")
 		return

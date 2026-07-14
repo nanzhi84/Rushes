@@ -593,3 +593,62 @@ func TestEditingRangeAndTypeHelpers(t *testing.T) {
 		t.Fatal("clamp mismatch")
 	}
 }
+
+func TestSemanticAnchorMetadataFollowsMoveRippleAndTrim(t *testing.T) {
+	document := newEditingDocument(t, false)
+	document.Tracks[1].Clips = []Clip{{
+		TimelineClipID: "semantic_broll", TrackID: "visual_overlay",
+		AssetID: "broll", AssetKind: "video", Role: "b_roll",
+		TimelineStartFrame: 10, TimelineEndFrame: 20,
+		SourceStartFrame: 0, SourceEndFrame: 10, PlaybackRate: 1,
+		Metadata: map[string]any{
+			"kind":                           "b_roll_semantic_anchor",
+			"anchor_timeline_start_frame":    8,
+			"anchor_timeline_end_frame":      24,
+			"placement_timeline_start_frame": 10,
+			"placement_timeline_end_frame":   20,
+		},
+	}}
+	if err := moveClip(&document, map[string]any{
+		"timeline_clip_id": "semantic_broll", "target_frame": 40, "mode": "overwrite",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clip := &document.Tracks[1].Clips[0]
+	assertMetadataFrame := func(key string, want int) {
+		t.Helper()
+		value, ok := numericValue(clip.Metadata[key])
+		if !ok || int(value) != want {
+			t.Fatalf("%s=%#v want=%d", key, clip.Metadata[key], want)
+		}
+	}
+	if clip.TimelineStartFrame != 40 || clip.TimelineEndFrame != 50 {
+		t.Fatalf("moved clip=%#v", clip)
+	}
+	assertMetadataFrame("anchor_timeline_start_frame", 38)
+	assertMetadataFrame("anchor_timeline_end_frame", 54)
+	assertMetadataFrame("placement_timeline_start_frame", 40)
+	assertMetadataFrame("placement_timeline_end_frame", 50)
+
+	shiftAfter(&document, 30, 5)
+	clip = &document.Tracks[1].Clips[0]
+	if clip.TimelineStartFrame != 45 || clip.TimelineEndFrame != 55 {
+		t.Fatalf("ripple clip=%#v", clip)
+	}
+	assertMetadataFrame("anchor_timeline_start_frame", 43)
+	assertMetadataFrame("anchor_timeline_end_frame", 59)
+	assertMetadataFrame("placement_timeline_start_frame", 45)
+	assertMetadataFrame("placement_timeline_end_frame", 55)
+
+	if err := trimClip(&document, map[string]any{
+		"timeline_clip_id": "semantic_broll", "source_start_frame": 0, "source_end_frame": 6,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clip = &document.Tracks[1].Clips[0]
+	if clip.TimelineEndFrame != 51 {
+		t.Fatalf("trimmed clip=%#v", clip)
+	}
+	assertMetadataFrame("placement_timeline_start_frame", 45)
+	assertMetadataFrame("placement_timeline_end_frame", 51)
+}

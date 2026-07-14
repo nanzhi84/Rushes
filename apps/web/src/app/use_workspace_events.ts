@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { WORKSPACE_EVENT_TYPES } from "../api/event_types";
 import { acquireApiEventSource } from "../auth";
 import { queryKeys } from "./query_client";
+import { useDocumentVisibility } from "./use_document_visibility";
 
 export type ConnectionState = "connecting" | "open" | "closed";
 
@@ -10,8 +11,13 @@ export type ConnectionState = "connecting" | "open" | "closed";
 export function useWorkspaceEvents(): ConnectionState {
   const queryClient = useQueryClient();
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
+  const documentVisible = useDocumentVisibility();
 
   useEffect(() => {
+    if (!documentVisible) {
+      setConnectionState("connecting");
+      return;
+    }
     const { source, release } = acquireApiEventSource("/api/events");
     // 共享连接：用 addEventListener，不占用 onopen/onerror 独占槽位。
     if (source.readyState === 1 /* OPEN */) {
@@ -35,7 +41,7 @@ export function useWorkspaceEvents(): ConnectionState {
       }
       release();
     };
-  }, [queryClient]);
+  }, [documentVisible, queryClient]);
 
   return connectionState;
 }

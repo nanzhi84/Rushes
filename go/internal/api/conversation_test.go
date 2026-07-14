@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/contracts"
+	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -102,6 +104,100 @@ func TestDecisionAnswerReplaysPendingToolCall(t *testing.T) {
 	}
 }
 
+func TestClearConversationHidesHistoryAndPreservesObjectiveState(t *testing.T) {
+	t.Parallel()
+	server, handler := testServer(t, t.TempDir(), 0)
+	createDraftThroughAPI(t, handler, "draft_clear_context")
+	result, err := reducer.Apply(t.Context(), server.database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset_keep", "job_id": "job_asset_keep", "kind": "video",
+			"filename": "keep.mp4", "probe": map[string]any{"duration_sec": 1},
+			"ingest_status": "ready", "understanding_status": "ready",
+		}},
+		{Type: "AssetLinked", DraftID: "draft_clear_context", Payload: map[string]any{"asset_id": "asset_keep"}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("asset setup=%#v err=%v", result, err)
+	}
+	ctx := tools.WithDraftID(t.Context(), "draft_clear_context")
+	if _, err := server.agent.ExecuteTool(ctx, "timeline.compose_initial", tools.ComposeInitialInput{
+		Clips: []tools.ComposeClip{{
+			AssetID: "asset_keep", SourceStartFrame: 0, SourceEndFrame: 30, Role: "video",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	old := httptest.NewRecorder()
+	handler.ServeHTTP(old, apiRequest(t, http.MethodPost,
+		"/api/drafts/draft_clear_context/messages", map[string]any{"content": "旧对话内容"}))
+	if old.Code != http.StatusAccepted {
+		t.Fatalf("old=%d body=%s", old.Code, old.Body.String())
+	}
+	server.agent.Queue().JoinDraft("draft_clear_context")
+	waiting, err := server.agent.ExecuteTool(ctx, "interaction.ask_user", tools.AskUserInput{Question: "旧问题？"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisionID := waiting.(tools.ToolResult).Data["decision_id"].(string)
+	var rawBefore int
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM messages WHERE draft_id='draft_clear_context'`).Scan(&rawBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	cleared := httptest.NewRecorder()
+	handler.ServeHTTP(cleared, apiRequest(t, http.MethodPost,
+		"/api/drafts/draft_clear_context/conversation/clear", nil))
+	if cleared.Code != http.StatusOK || !strings.Contains(cleared.Body.String(), `"status":"cleared"`) ||
+		!strings.Contains(cleared.Body.String(), `"timeline"`) {
+		t.Fatalf("clear=%d body=%s", cleared.Code, cleared.Body.String())
+	}
+	draft, err := storage.GetDraft(t.Context(), server.database.Read(), "draft_clear_context")
+	if err != nil || draft.MessagesTailRef == nil || draft.TimelineCurrentVersion == nil ||
+		*draft.TimelineCurrentVersion != 1 || !draft.TimelineValidated {
+		t.Fatalf("draft=%#v err=%v", draft, err)
+	}
+	decision, err := storage.GetDecision(t.Context(), server.database.Read(), decisionID)
+	if err != nil || decision.Status != "cancelled" {
+		t.Fatalf("decision=%#v err=%v", decision, err)
+	}
+	var linked, rawAfter int
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM draft_asset_links WHERE draft_id='draft_clear_context'`).Scan(&linked); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM messages WHERE draft_id='draft_clear_context'`).Scan(&rawAfter); err != nil {
+		t.Fatal(err)
+	}
+	if linked != 1 || rawAfter != rawBefore+1 {
+		t.Fatalf("linked=%d rawBefore=%d rawAfter=%d", linked, rawBefore, rawAfter)
+	}
+	history := httptest.NewRecorder()
+	handler.ServeHTTP(history, apiRequest(t, http.MethodGet,
+		"/api/drafts/draft_clear_context/messages?limit=200", nil))
+	if history.Code != http.StatusOK || strings.Contains(history.Body.String(), "旧对话内容") ||
+		!strings.Contains(history.Body.String(), "素材理解、时间线和预览均已保留") {
+		t.Fatalf("history=%d body=%s", history.Code, history.Body.String())
+	}
+	current := httptest.NewRecorder()
+	handler.ServeHTTP(current, apiRequest(t, http.MethodGet,
+		"/api/drafts/draft_clear_context/decisions/current", nil))
+	if current.Code != http.StatusOK || !strings.Contains(current.Body.String(), `"decision":null`) {
+		t.Fatalf("current=%d body=%s", current.Code, current.Body.String())
+	}
+
+	newMessage := httptest.NewRecorder()
+	handler.ServeHTTP(newMessage, apiRequest(t, http.MethodPost,
+		"/api/drafts/draft_clear_context/messages", map[string]any{"content": "继续优化现有时间线"}))
+	server.agent.Queue().JoinDraft("draft_clear_context")
+	visible, err := storage.ListMessages(t.Context(), server.database.Read(), "draft_clear_context", 20)
+	if err != nil || len(visible) != 3 || visible[0].Kind != "context_reset" ||
+		visible[1].Content != "继续优化现有时间线" {
+		t.Fatalf("visible=%#v err=%v", visible, err)
+	}
+}
+
 func TestCancelEndpointStopsActiveTurn(t *testing.T) {
 	t.Parallel()
 	server, handler := testServer(t, t.TempDir(), 0)
@@ -118,6 +214,12 @@ func TestCancelEndpointStopsActiveTurn(t *testing.T) {
 	case <-stream:
 	case <-time.After(time.Second):
 		t.Fatal("turn 未启动")
+	}
+	busyClear := httptest.NewRecorder()
+	handler.ServeHTTP(busyClear, apiRequest(t, http.MethodPost,
+		"/api/drafts/draft_cancel_api/conversation/clear", nil))
+	if busyClear.Code != http.StatusConflict || !strings.Contains(busyClear.Body.String(), "turn_active") {
+		t.Fatalf("busy clear=%d body=%s", busyClear.Code, busyClear.Body.String())
 	}
 	cancelled := httptest.NewRecorder()
 	handler.ServeHTTP(cancelled, apiRequest(t, http.MethodPost,

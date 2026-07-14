@@ -75,6 +75,63 @@ describe("DraftsHomePage", () => {
     expect(await screen.findByText("编辑器:draft_new")).toBeTruthy();
   });
 
+  it("批量管理可选择草稿、二次确认并一次删除", async () => {
+    renderHome();
+
+    await screen.findByText("7月7日");
+    fireEvent.click(screen.getByRole("button", { name: "批量管理" }));
+
+    const first = await screen.findByRole("button", { name: "选择草稿 7月7日" });
+    const second = screen.getByRole("button", { name: "选择草稿 旅行 Vlog" });
+    expect(screen.getByRole("button", { name: "删除所选" }).hasAttribute("disabled")).toBe(true);
+
+    fireEvent.click(first);
+    fireEvent.click(second);
+    expect(first.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByText("2", { selector: "strong" })).toBeTruthy();
+    expect(screen.queryByText("编辑器:draft_1")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除所选" }));
+    expect(await screen.findByRole("dialog", { name: "删除 2 条草稿？" })).toBeTruthy();
+    expect(screen.getByText("7月7日", { selector: "li" })).toBeTruthy();
+    expect(screen.getByText("旅行 Vlog", { selector: "li" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除 2 条草稿" }));
+    expect(await screen.findByText("还没有草稿")).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "删除 2 条草稿？" })).toBeNull();
+  });
+
+  it("批量管理支持全选、取消全选与退出", async () => {
+    renderHome();
+
+    await screen.findByText("7月7日");
+    fireEvent.click(screen.getByRole("button", { name: "批量管理" }));
+    fireEvent.click(await screen.findByRole("button", { name: "全选" }));
+    expect(screen.getByText("2", { selector: "strong" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "取消全选" }));
+    expect(screen.getByText("0", { selector: "strong" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "退出" }));
+    expect(screen.queryByRole("toolbar", { name: "草稿批量管理" })).toBeNull();
+    expect(screen.getByRole("button", { name: "批量管理" })).toBeTruthy();
+  });
+
+  it("批量删除失败时保留选择和草稿并显示原子失败提示", async () => {
+    renderHome({ batchDeleteFails: true });
+
+    await screen.findByText("7月7日");
+    fireEvent.click(screen.getByRole("button", { name: "批量管理" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择草稿 7月7日" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除所选" }));
+    fireEvent.click(await screen.findByRole("button", { name: "删除 1 条草稿" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "未删除任何草稿，已保留当前选择，请重试。"
+    );
+    expect(screen.getByText("7月7日", { selector: "li" })).toBeTruthy();
+    expect(screen.getByText("7月7日", { selector: "span" })).toBeTruthy();
+  });
+
   it("点击设置打开全局设置弹窗，关闭后消失", async () => {
     renderHome();
 
@@ -98,6 +155,7 @@ type DraftFixture = {
 
 type HomeFixture = {
   drafts?: DraftFixture[];
+  batchDeleteFails?: boolean;
 };
 
 function DraftMarker(): ReactElement {
@@ -140,13 +198,31 @@ function renderHome(fixture: HomeFixture = {}): void {
 function mockFetch(
   fixture: HomeFixture
 ): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
-  const drafts = fixture.drafts ?? [
+  let drafts = fixture.drafts ?? [
     { draft_id: "draft_1", name: "7月7日", material_count: 3, cover_asset_ids: ["asset_1", "asset_2"] },
     { draft_id: "draft_2", name: "旅行 Vlog", material_count: 0, cover_asset_ids: [] }
   ];
   return (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = (init?.method ?? "GET").toUpperCase();
+    if (url === "/api/drafts" && method === "DELETE") {
+      if (fixture.batchDeleteFails) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ detail: { reason: "internal_error" } }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          })
+        );
+      }
+      const payload = JSON.parse(String(init?.body)) as { draft_ids: string[] };
+      const deleted = new Set(payload.draft_ids);
+      drafts = drafts.filter((draft) => !deleted.has(draft.draft_id));
+      return jsonResponse({
+        deleted_count: payload.draft_ids.length,
+        deleted_draft_ids: payload.draft_ids,
+        event_ids: payload.draft_ids.map((_, index) => index + 1)
+      });
+    }
     if (url.includes("/api/drafts") && method === "POST") {
       return jsonResponse({ draft: { draft_id: "draft_new" }, event_ids: [] });
     }

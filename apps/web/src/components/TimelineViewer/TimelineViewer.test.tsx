@@ -1,13 +1,15 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { createRef } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TimelineViewer } from "./TimelineViewer";
-import type { TimelineJson } from "./TimelineViewer";
+import type { TimelineJson, TimelineViewerHandle } from "./TimelineViewer";
 
 const waveSurferMock = vi.hoisted(() => ({
   create: vi.fn((..._args: unknown[]) => ({
     on: vi.fn(),
     un: vi.fn(),
     exportPeaks: vi.fn(() => [[]]),
+    getDuration: vi.fn(() => 3),
     destroy: vi.fn()
   }))
 }));
@@ -36,14 +38,14 @@ describe("TimelineViewer", () => {
 
     const rects = screen.getAllByTestId("timeline-clip");
     expect(rects).toHaveLength(3);
-    expect(rects[0]?.getAttribute("x")).toBe("0");
-    expect(rects[0]?.getAttribute("width")).toBe("60");
-    expect(rects[1]?.getAttribute("x")).toBe("60");
-    expect(rects[1]?.getAttribute("width")).toBe("120");
+    expect(rects[0]?.getAttribute("x")).toBe("1");
+    expect(rects[0]?.getAttribute("width")).toBe("58");
+    expect(rects[1]?.getAttribute("x")).toBe("61");
+    expect(rects[1]?.getAttribute("width")).toBe("118");
     expect(rects[1]?.getAttribute("stroke")).toBe("var(--color-focus-ring)");
-    expect(rects[1]?.getAttribute("stroke-width")).toBe("2");
-    expect(rects[2]?.getAttribute("x")).toBe("30");
-    expect(rects[2]?.getAttribute("width")).toBe("60");
+    expect(rects[1]?.getAttribute("stroke-width")).toBe("2.5");
+    expect(rects[2]?.getAttribute("x")).toBe("31");
+    expect(rects[2]?.getAttribute("width")).toBe("58");
 
     fireEvent.click(rects[0] as Element);
 
@@ -56,20 +58,107 @@ describe("TimelineViewer", () => {
     const playhead = screen.getByTestId("timeline-playhead");
     const line = playhead.querySelector("line");
 
-    expect(line?.getAttribute("x1")).toBe("90");
-    expect(line?.getAttribute("x2")).toBe("90");
+    expect(playhead.getAttribute("visibility")).toBe("visible");
+    expect(playhead.getAttribute("transform")).toBe("translate(90 0)");
+    expect(line?.getAttribute("x1")).toBe("0");
+    expect(line?.getAttribute("x2")).toBe("0");
   });
 
-  it("点击空白轨道区换算秒数并触发 onSeek", () => {
+  it("播放时可直接推进播放头 DOM 并自动跟随长时间线", () => {
+    const ref = createRef<TimelineViewerHandle>();
+    render(<TimelineViewer ref={ref} timeline={timelineFixture()} pxPerSec={60} />);
+    const surface = screen.getByTestId("timeline-scroll-surface");
+    Object.defineProperty(surface, "clientWidth", { configurable: true, value: 300 });
+
+    act(() => ref.current?.setPlayheadSec(2.5, true));
+
+    expect(screen.getByTestId("timeline-playhead").getAttribute("transform")).toBe(
+      "translate(150 0)"
+    );
+    expect(surface.scrollLeft).toBeGreaterThan(0);
+  });
+
+  it("按下空白轨道区立即换算秒数并触发 onSeek", () => {
     const onSeek = vi.fn();
     render(<TimelineViewer timeline={timelineFixture()} pxPerSec={60} onSeek={onSeek} />);
 
-    fireEvent.click(screen.getByRole("img", { name: "时间线轨道图" }), {
+    const timeline = screen.getByRole("img", { name: "时间线轨道图" });
+    fireEvent.pointerDown(timeline, {
+      button: 0,
+      pointerId: 1,
       clientX: 120
     });
+    fireEvent.pointerUp(timeline, { pointerId: 1, clientX: 120 });
 
     expect(onSeek).toHaveBeenCalledTimes(1);
     expect(onSeek.mock.calls[0]?.[0]).toBeCloseTo(2);
+  });
+
+  it("点击空白轨道会先清除片段选择", () => {
+    const onDeselect = vi.fn();
+    render(
+      <TimelineViewer
+        timeline={timelineFixture()}
+        selectedClipId="tc_a"
+        onDeselect={onDeselect}
+      />
+    );
+
+    fireEvent.pointerDown(screen.getByRole("img", { name: "时间线轨道图" }), {
+      button: 0,
+      pointerId: 3,
+      clientX: 210
+    });
+
+    expect(onDeselect).toHaveBeenCalledTimes(1);
+  });
+
+  it("支持以指针位置为锚点的 Ctrl 或 Command 滚轮连续缩放", () => {
+    const onZoomChange = vi.fn();
+    render(
+      <TimelineViewer
+        timeline={timelineFixture()}
+        pxPerSec={60}
+        onZoomChange={onZoomChange}
+      />
+    );
+    const surface = screen.getByTestId("timeline-scroll-surface");
+    Object.defineProperty(surface, "clientWidth", { configurable: true, value: 600 });
+    vi.spyOn(surface, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 240,
+      width: 600,
+      height: 240,
+      toJSON: () => ({})
+    });
+
+    fireEvent.wheel(surface, { ctrlKey: true, deltaY: -120, clientX: 320 });
+
+    expect(onZoomChange).toHaveBeenCalledTimes(1);
+    expect(onZoomChange.mock.calls[0]?.[0]).toBeGreaterThan(60);
+  });
+
+  it("拖动时逐指针事件更新播放头，并在松开时提交最终时间", () => {
+    const onSeek = vi.fn();
+    render(<TimelineViewer timeline={timelineFixture()} pxPerSec={60} onSeek={onSeek} />);
+    const timeline = screen.getByRole("img", { name: "时间线轨道图" });
+
+    fireEvent.pointerDown(timeline, { button: 0, pointerId: 7, clientX: 30 });
+    fireEvent.pointerMove(timeline, { pointerId: 7, clientX: 120 });
+
+    expect(screen.getByTestId("timeline-playhead").getAttribute("transform")).toBe(
+      "translate(120 0)"
+    );
+
+    fireEvent.pointerUp(timeline, { pointerId: 7, clientX: 180 });
+    expect(onSeek).toHaveBeenLastCalledWith(3);
+    expect(screen.getByTestId("timeline-playhead").getAttribute("transform")).toBe(
+      "translate(180 0)"
+    );
   });
 
   it("点击 clip 只触发 onClipClick，不触发 onSeek", () => {
@@ -188,24 +277,149 @@ describe("TimelineViewer", () => {
     expect(onTrackStateChange).toHaveBeenCalledWith("original_audio", { gain_db: -8 });
   });
 
-  it("有 waveformSrc 时用 wavesurfer 解码 peaks（内嵌波形数据源），卸载时销毁", () => {
+  it("始终保留主视频、音乐和音效三条核心轨道，隐藏其他空轨", () => {
+    const timeline = timelineFixture();
+    timeline.tracks.splice(
+      1,
+      0,
+      { track_id: "visual_overlay", clips: [] },
+      { track_id: "original_audio", clips: [] },
+      { track_id: "voiceover", clips: [] },
+      {
+        track_id: "bgm",
+        clips: [
+          {
+            timeline_clip_id: "bgm_1",
+            track_id: "bgm",
+            asset_id: "asset_music",
+            asset_kind: "audio",
+            timeline_start_frame: 0,
+            timeline_end_frame: 90
+          }
+        ]
+      },
+      { track_id: "sfx", clips: [] }
+    );
+
+    render(<TimelineViewer timeline={timeline} />);
+
+    expect(screen.getByText("主视频")).toBeTruthy();
+    expect(screen.getByText("音乐")).toBeTruthy();
+    expect(screen.queryByText("叠加")).toBeNull();
+    expect(screen.queryByText("原声")).toBeNull();
+    expect(screen.queryByText("配音")).toBeNull();
+    expect(screen.getByText("音效")).toBeTruthy();
+    expect(screen.getByText("V1")).toBeTruthy();
+    expect(screen.getByText("A1")).toBeTruthy();
+    expect(screen.getByText("A2")).toBeTruthy();
+    expect(screen.getByTestId("timeline-track-stack").className).toContain("items-center");
+  });
+
+  it("从 BGM 元数据绘制普通拍点、强拍和小节强拍标记", () => {
+    const timeline = timelineFixture();
+    timeline.tracks.push({
+      track_id: "bgm",
+      clips: [
+        {
+          timeline_clip_id: "bgm_beat_grid",
+          track_id: "bgm",
+          asset_id: "music",
+          timeline_start_frame: 0,
+          timeline_end_frame: 90,
+          effects: [
+            {
+              kind: "beat_grid",
+              beat_frames: [15, 30, 45],
+              strong_beat_frames: [30],
+              downbeat_frames: [45]
+            }
+          ]
+        }
+      ]
+    });
+
+    render(<TimelineViewer timeline={timeline} pxPerSec={60} />);
+
+    const markers = screen.getByTestId("timeline-beat-markers");
+    expect(markers.querySelectorAll(":scope > g")).toHaveLength(3);
+    expect(screen.getByText(/小节强拍/)).toBeTruthy();
+  });
+
+  it("后端旧数据缺少音轨节点时也会补齐音乐和音效轨", () => {
+    render(<TimelineViewer timeline={timelineFixture()} />);
+
+    expect(screen.getByText("主视频")).toBeTruthy();
+    expect(screen.getByText("音乐")).toBeTruthy();
+    expect(screen.getByText("音效")).toBeTruthy();
+  });
+
+  it("按每个音频素材分别用 wavesurfer 解码代理波形，卸载时销毁", () => {
+    const timeline = timelineFixture();
+    timeline.tracks.push({
+      track_id: "bgm",
+      clips: [{
+        timeline_clip_id: "bgm_wave",
+        track_id: "bgm",
+        asset_id: "asset_music",
+        asset_kind: "audio",
+        timeline_start_frame: 0,
+        timeline_end_frame: 90,
+        source_start_frame: 0,
+        source_end_frame: 90
+      }]
+    });
     const { unmount } = render(
       <TimelineViewer
-        timeline={timelineFixture()}
+        timeline={timeline}
         pxPerSec={72}
-        waveformSrc="/api/media/preview/prev_1"
       />
     );
 
     expect(waveSurferMock.create).toHaveBeenCalledTimes(1);
     expect(waveSurferMock.create.mock.calls[0]?.[0]).toMatchObject({
-      url: "/api/media/preview/prev_1"
+      url: "/api/media/asset_music/proxy"
     });
 
     const instance = waveSurferMock.create.mock.results[0]?.value;
     unmount();
 
     expect(instance.destroy).toHaveBeenCalledTimes(1);
+  });
+
+  it("音频片段显示淡出包络与可拖拽手柄，并按整数帧提交", () => {
+    const onClipFadeChange = vi.fn();
+    const timeline = timelineFixture();
+    timeline.tracks.push({
+      track_id: "bgm",
+      clips: [{
+        timeline_clip_id: "bgm_fade",
+        track_id: "bgm",
+        asset_id: "asset_music",
+        asset_kind: "audio",
+        timeline_start_frame: 0,
+        timeline_end_frame: 90,
+        source_start_frame: 0,
+        source_end_frame: 90,
+        fade_out_frames: 15
+      }]
+    });
+
+    render(
+      <TimelineViewer
+        timeline={timeline}
+        pxPerSec={60}
+        selectedClipId="bgm_fade"
+        onClipFadeChange={onClipFadeChange}
+      />
+    );
+
+    const handle = screen.getByTestId("timeline-fade-out-handle");
+    expect(handle.getAttribute("aria-valuenow")).toBe("15");
+    expect(handle.parentElement?.querySelector('path[fill="var(--color-panel)"]')).toBeTruthy();
+    fireEvent.pointerDown(handle, { pointerId: 4, clientX: 150 });
+    fireEvent.pointerUp(handle, { pointerId: 4, clientX: 130 });
+
+    expect(onClipFadeChange).toHaveBeenCalledWith("bgm_fade", 0, 25);
   });
 });
 

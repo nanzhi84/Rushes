@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -278,7 +279,7 @@ func TestRenderWorkerCreatesPreviewWithRenderSnapshot(t *testing.T) {
 		FROM previews WHERE draft_id='draft_render'`).Scan(&previewID, &hash, &width, &height, &fps, &duration); err != nil {
 		t.Fatal(err)
 	}
-	if previewID == "" || len(hash) != 64 || width != 360 || height != 640 || fps != 30 || duration != 1 {
+	if previewID == "" || len(hash) != 64 || width != 960 || height != 540 || fps != 30 || duration != 1 {
 		t.Fatalf("preview=%s hash=%s snapshot=%dx%d %.2f %.2f", previewID, hash, width, height, fps, duration)
 	}
 	stored, err := GetJob(t.Context(), database, "job_render")
@@ -356,6 +357,15 @@ func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
 	if err != nil || result["status"] != "completed" || len(retryProgress) != 2 {
 		t.Fatalf("retry result=%#v progress=%v err=%v", result, retryProgress, err)
 	}
+	cacheResult, err := handler(t.Context(), Job{
+		ID: "understand_cache_hit", Payload: map[string]any{
+			"asset_ids": []string{"asset_u1"}, "focus": "人物",
+		},
+	}, func(context.Context, Job, float64) error { return nil })
+	if err != nil || !reflect.DeepEqual(cacheResult["cache_hit_asset_ids"], []string{"asset_u1"}) ||
+		len(cacheResult["analyzed_asset_ids"].([]string)) != 0 {
+		t.Fatalf("cache result=%#v err=%v", cacheResult, err)
+	}
 	for _, assetID := range []string{"asset_u1", "asset_u2"} {
 		asset, _ := storage.GetAsset(t.Context(), database.Read(), assetID)
 		if asset.UnderstandingStatus != "ready" {
@@ -397,6 +407,11 @@ func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
 	}
 	if got := stringSlice(1); got != nil {
 		t.Fatalf("invalid string slice=%v", got)
+	}
+	for input, expected := range map[any]int{int(3): 3, int64(4): 4, float64(5.9): 5, "6": 0} {
+		if got := understandInt(input); got != expected {
+			t.Fatalf("understandInt(%#v)=%d want=%d", input, got, expected)
+		}
 	}
 }
 
@@ -479,9 +494,6 @@ func TestRunnerLoopRegistryAndTerminalFailureBranches(t *testing.T) {
 	}
 	if _, err := GetJob(t.Context(), database, "missing"); err != storage.ErrNotFound {
 		t.Fatalf("missing job err=%v", err)
-	}
-	for _, value := range []any{float64(1), 2, int64(3), "bad"} {
-		_ = intFromPayload(value)
 	}
 	partial := NewRegistry()
 	if err := partial.Register("render_preview", handler); err != nil {

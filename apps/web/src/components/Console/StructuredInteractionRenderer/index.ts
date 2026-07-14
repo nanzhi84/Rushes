@@ -1,4 +1,7 @@
-export { StructuredInteractionRenderer } from "./StructuredInteractionRenderer";
+export {
+  DecisionInteractionGroup,
+  StructuredInteractionRenderer
+} from "./StructuredInteractionRenderer";
 export {
   itemFromEvent,
   markDecisionAnswered,
@@ -7,6 +10,7 @@ export {
 } from "./events";
 export type {
   AnswerDecisionHandler,
+  DecisionInteractionItem,
   DomainSsePayload,
   StructuredInteractionItem
 } from "./types";

@@ -7,19 +7,27 @@ import {
   TerminalSquare
 } from "lucide-react";
 import { Markdown } from "./Markdown";
-import { StructuredInteractionRenderer } from "./StructuredInteractionRenderer";
-import type { AnswerDecisionHandler } from "./StructuredInteractionRenderer";
+import {
+  DecisionInteractionGroup,
+  StructuredInteractionRenderer
+} from "./StructuredInteractionRenderer";
+import type {
+  AnswerDecisionHandler,
+  DecisionInteractionItem
+} from "./StructuredInteractionRenderer";
 import type {
   ConsoleAssistantMessage,
   ConsoleDataMessagePart,
   ConsoleExternalStoreRuntime
 } from "./runtime";
 import type {
+  ModelRetryState,
   StreamMessageItem,
   StreamToolItem,
   SubagentProgressEntry,
   TurnStreamItem
 } from "./useTurnStream";
+import { formatElapsedTime, useElapsedSeconds } from "./useElapsedTime";
 
 const STRUCTURED_MESSAGE_ID = "structured-interactions";
 const FOLLOW_THRESHOLD_PX = 48;
@@ -39,6 +47,7 @@ export function AssistantThread({
   answerPending,
   highlightedMessageId = null,
   streamItems = [],
+  modelRetry = null,
   subagentProgress = []
 }: {
   runtime: ConsoleExternalStoreRuntime;
@@ -46,6 +55,7 @@ export function AssistantThread({
   answerPending: boolean;
   highlightedMessageId?: string | null;
   streamItems?: TurnStreamItem[];
+  modelRetry?: ModelRetryState | null;
   subagentProgress?: SubagentProgressEntry[];
 }): ReactElement {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -59,7 +69,11 @@ export function AssistantThread({
   const historyBlocks = useMemo(() => groupHistoryMessages(regularMessages), [regularMessages]);
   const streamBlocks = useMemo(() => groupStreamItems(streamItems), [streamItems]);
   const activeToolStepId = findActiveToolStepId(streamItems);
-  const isEmpty = historyBlocks.length === 0 && streamBlocks.length === 0 && !structuredMessage;
+  const isEmpty =
+    historyBlocks.length === 0 &&
+    streamBlocks.length === 0 &&
+    !structuredMessage &&
+    !runtime.isRunning;
 
   const streamFingerprint = useMemo(
     () =>
@@ -75,6 +89,9 @@ export function AssistantThread({
   const progressFingerprint = subagentProgress
     .map((entry) => `${entry.asset_id}:${entry.note}`)
     .join("|");
+  const retryFingerprint = modelRetry
+    ? `${modelRetry.attempt}:${modelRetry.maxRetries}:${modelRetry.reason}`
+    : "";
 
   // Claude Code 式 follow mode：用户停留在底部时持续追随增量；手动上滚后不抢滚动位置。
   useEffect(() => {
@@ -88,7 +105,14 @@ export function AssistantThread({
     } else if (runtime.isRunning) {
       setHasNewOutput(true);
     }
-  }, [historyBlocks.length, progressFingerprint, runtime.isRunning, streamFingerprint, structuredMessage]);
+  }, [
+    historyBlocks.length,
+    progressFingerprint,
+    retryFingerprint,
+    runtime.isRunning,
+    streamFingerprint,
+    structuredMessage
+  ]);
 
   const handleScroll = (event: UIEvent<HTMLDivElement>) => {
     const scroller = event.currentTarget;
@@ -168,6 +192,10 @@ export function AssistantThread({
               )
             )}
 
+            {runtime.isRunning ? (
+              <TurnActivityIndicator items={streamItems} modelRetry={modelRetry} />
+            ) : null}
+
             {structuredMessage ? (
               <MessageRow
                 message={structuredMessage}
@@ -190,6 +218,43 @@ export function AssistantThread({
           查看最新输出
         </button>
       ) : null}
+    </div>
+  );
+}
+
+function TurnActivityIndicator({
+  items,
+  modelRetry
+}: {
+  items: TurnStreamItem[];
+  modelRetry: ModelRetryState | null;
+}): ReactElement {
+  const elapsedSeconds = useElapsedSeconds(true);
+  const label = turnActivityLabel(items, modelRetry);
+  const elapsed = formatElapsedTime(elapsedSeconds);
+  return (
+    <div
+      className="flex min-w-0 items-center gap-1.5 py-1 text-xs text-fg-muted"
+      data-testid="turn-activity-indicator"
+      data-turn-activity={label}
+    >
+      <LoaderCircle
+        size={13}
+        strokeWidth={1.8}
+        aria-hidden
+        className="shrink-0 animate-spin text-accent"
+      />
+      <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
+      <time
+        className="shrink-0 font-mono text-2xs tabular-nums text-fg-faint"
+        aria-label={`已用时 ${elapsedSeconds} 秒`}
+        title={`当前任务已运行 ${elapsedSeconds} 秒`}
+      >
+        已用 {elapsed}
+      </time>
+      <span className="sr-only" role="status">
+        当前任务进行中：{label}
+      </span>
     </div>
   );
 }
@@ -230,12 +295,16 @@ function MessageRow({
     (part): part is ConsoleDataMessagePart => part.type === "data"
   );
   if (dataParts.length > 0) {
+    const decisionItems = dataParts.flatMap((part): DecisionInteractionItem[] =>
+      part.data.kind === "decision" ? [part.data] : []
+    );
+    const otherParts = dataParts.filter((part) => part.data.kind !== "decision");
     return (
       <div
         data-console-message-id={message.id}
         className={`${highlightClass(highlighted)} w-full space-y-0.5`}
       >
-        {dataParts.map((part) => (
+        {otherParts.map((part) => (
           <StructuredInteractionRenderer
             key={part.data.id}
             item={part.data}
@@ -243,6 +312,13 @@ function MessageRow({
             answerPending={answerPending}
           />
         ))}
+        {decisionItems.length > 0 ? (
+          <DecisionInteractionGroup
+            items={decisionItems}
+            onAnswerDecision={onAnswerDecision}
+            answerPending={answerPending}
+          />
+        ) : null}
       </div>
     );
   }
@@ -601,6 +677,29 @@ function findActiveToolStepId(items: TurnStreamItem[]): string | null {
   return null;
 }
 
+function turnActivityLabel(items: TurnStreamItem[], modelRetry: ModelRetryState | null): string {
+  if (modelRetry) {
+    return `${modelRetry.reason}，正在重试 ${modelRetry.attempt}/${modelRetry.maxRetries}`;
+  }
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (item.type === "tool" && item.status === "running") {
+      return `正在${TOOL_STEP_LABELS[item.tool] ?? `执行 ${item.tool}`}`;
+    }
+  }
+  const latest = items.at(-1);
+  if (latest?.type === "message" && latest.kind === "assistant") {
+    return "正在生成回复";
+  }
+  if (latest?.type === "message") {
+    return latest.kind === "narration" ? "正在继续处理" : "正在收尾";
+  }
+  if (latest?.type === "tool") {
+    return "正在整理工具结果";
+  }
+  return "正在读取上下文";
+}
+
 function showAssetPrefix(note: string): boolean {
   return !/\.[a-z][a-z0-9]{1,4}\b/i.test(note);
 }
@@ -694,10 +793,14 @@ const TOOL_STEP_LABELS: Record<string, string> = {
   "asset.list_assets": "清点素材",
   "asset.import_local_file": "导入本地素材",
   "understand.materials": "理解素材",
+  "media.search_shots": "检索镜头",
+  "audio.analyze_beats": "分析音乐节拍",
+  "audio.analyze_speech_pauses": "分析口播气口",
   "decision.answer": "记录你的回答",
   "timeline.apply_patch": "修改时间线",
+  "timeline.apply_patches": "批量修改时间线",
+  "timeline.recut_to_beats": "按节拍重剪",
   "timeline.compose_initial": "生成初版时间线",
-  "timeline.restore_version": "恢复时间线版本",
   "timeline.validate": "校验时间线",
   "timeline.inspect": "查看时间线",
   "render.preview": "渲染预览",

@@ -29,18 +29,38 @@ func Get(
 	if err := json.Unmarshal([]byte(raw), &document); err != nil {
 		return Document{}, err
 	}
+	ensureRequiredTracks(&document)
 	return document, nil
+}
+
+// 迁移前创建的时间线按读取时补齐后来新增的空轨，避免 schema 演进使现有草稿失效。
+func ensureRequiredTracks(document *Document) {
+	existing := make(map[string]struct{}, len(document.Tracks))
+	for _, track := range document.Tracks {
+		existing[track.TrackID] = struct{}{}
+	}
+	for _, required := range requiredTracks {
+		if _, found := existing[required.ID]; found {
+			continue
+		}
+		document.Tracks = append(document.Tracks, Track{
+			TrackID: required.ID, TrackType: required.Type, Clips: []Clip{},
+		})
+	}
 }
 
 func Latest(ctx context.Context, database *storage.DB, draftID string) (Document, error) {
 	var version sql.NullInt64
 	err := database.Read().QueryRowContext(ctx,
 		"SELECT timeline_current_version FROM drafts WHERE draft_id=?", draftID).Scan(&version)
-	if errors.Is(err, sql.ErrNoRows) || !version.Valid {
+	if errors.Is(err, sql.ErrNoRows) {
 		return Document{}, storage.ErrNotFound
 	}
 	if err != nil {
 		return Document{}, err
+	}
+	if !version.Valid {
+		return Document{}, storage.ErrNotFound
 	}
 	return Get(ctx, database, draftID, int(version.Int64))
 }
@@ -48,58 +68,8 @@ func Latest(ctx context.Context, database *storage.DB, draftID string) (Document
 func NextVersion(ctx context.Context, database *storage.DB, draftID string) (int, error) {
 	var version int
 	err := database.Read().QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(version),0)+1 FROM timeline_versions WHERE draft_id=?`, draftID).Scan(&version)
+		SELECT COALESCE(timeline_current_version,0)+1 FROM drafts WHERE draft_id=?`, draftID).Scan(&version)
 	return version, err
-}
-
-type VersionNavigation struct {
-	Parent *int
-	Redo   *int
-	Latest int
-}
-
-func Navigation(
-	ctx context.Context,
-	database *storage.DB,
-	draftID string,
-	version int,
-) (VersionNavigation, error) {
-	var parent sql.NullInt64
-	if err := database.Read().QueryRowContext(ctx, `
-		SELECT parent_version FROM timeline_versions WHERE draft_id=? AND version=?`,
-		draftID, version,
-	).Scan(&parent); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return VersionNavigation{}, storage.ErrNotFound
-		}
-		return VersionNavigation{}, err
-	}
-	var latest int
-	if err := database.Read().QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(version),0) FROM timeline_versions WHERE draft_id=?`,
-		draftID,
-	).Scan(&latest); err != nil {
-		return VersionNavigation{}, err
-	}
-	var redo sql.NullInt64
-	if err := database.Read().QueryRowContext(ctx, `
-		SELECT version FROM timeline_versions
-		WHERE draft_id=? AND parent_version=?
-		ORDER BY version DESC LIMIT 1`,
-		draftID, version,
-	).Scan(&redo); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return VersionNavigation{}, err
-	}
-	result := VersionNavigation{Latest: latest}
-	if parent.Valid {
-		value := int(parent.Int64)
-		result.Parent = &value
-	}
-	if redo.Valid {
-		value := int(redo.Int64)
-		result.Redo = &value
-	}
-	return result, nil
 }
 
 func LatestPreviewID(

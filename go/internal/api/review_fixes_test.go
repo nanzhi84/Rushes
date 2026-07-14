@@ -152,6 +152,7 @@ func TestAdvertisedRoutesReturnInternalErrorWhenDatabaseIsUnavailable(t *testing
 	}{
 		{http.MethodPost, "/api/drafts", map[string]any{}},
 		{http.MethodGet, "/api/drafts", nil},
+		{http.MethodDelete, "/api/drafts", map[string]any{"draft_ids": []string{"draft_db_error"}, "confirm": true}},
 		{http.MethodGet, "/api/drafts/draft_db_error", nil},
 		{http.MethodPatch, "/api/drafts/draft_db_error", map[string]any{"name": "x"}},
 		{http.MethodDelete, "/api/drafts/draft_db_error", map[string]any{"confirm": true}},

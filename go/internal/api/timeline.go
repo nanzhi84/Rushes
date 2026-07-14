@@ -16,7 +16,6 @@ func (server *Server) GetDraftTimelineApiDraftsDraftIdTimelineGet(
 	writer http.ResponseWriter,
 	request *http.Request,
 	draftID string,
-	params GetDraftTimelineApiDraftsDraftIdTimelineGetParams,
 ) {
 	if _, err := storage.GetDraft(request.Context(), server.database.Read(), draftID); errors.Is(err, storage.ErrNotFound) {
 		writeNotFound(writer, "draft_not_found")
@@ -25,7 +24,7 @@ func (server *Server) GetDraftTimelineApiDraftsDraftIdTimelineGet(
 		server.internalError(writer, err)
 		return
 	}
-	response, err := server.draftTimelineResponse(request.Context(), draftID, params.Version)
+	response, err := server.draftTimelineResponse(request.Context(), draftID)
 	if errors.Is(err, storage.ErrNotFound) {
 		writeNotFound(writer, "not_found")
 		return
@@ -54,8 +53,22 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 		writeBadRequest(writer, "timeline_patch_invalid")
 		return
 	}
-	ctx := tools.WithDraftID(request.Context(), draftID)
-	raw, err := server.agent.ExecuteTool(ctx, "timeline.apply_patch", tools.TimelinePatchInput{Op: payload.Op})
+	ctx := tools.WithTimelineMutationOrigin(
+		tools.WithDraftID(request.Context(), draftID),
+		"manual",
+	)
+	toolName := "timeline.apply_patch"
+	var toolInput any = tools.TimelinePatchInput{Op: payload.Op}
+	if kind, _ := payload.Op["kind"].(string); kind == "batch" {
+		operations, valid := timelinePatchOperations(payload.Op["ops"])
+		if !valid || len(operations) == 0 || len(operations) > 100 {
+			writeBadRequest(writer, "timeline_patch_invalid")
+			return
+		}
+		toolName = "timeline.apply_patches"
+		toolInput = tools.TimelinePatchBatchInput{Ops: operations}
+	}
+	raw, err := server.agent.ExecuteTool(ctx, toolName, toolInput)
 	if err != nil {
 		writeBadRequest(writer, "timeline_patch_invalid: "+err.Error())
 		return
@@ -69,12 +82,10 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 		writeBadRequest(writer, "timeline_patch_validation_failed")
 		return
 	}
-	// 手动剪辑成功后自动刷新预览。排队失败不回滚已落库的新版本，避免客户端
-	// 重试时重复应用 patch；SSE/状态栏仍会如实呈现后续渲染状态。
-	if _, renderErr := server.agent.ExecuteTool(ctx, "render.preview", tools.RenderPreviewInput{}); renderErr != nil {
-		server.logger.Warn("时间线已修改，但预览刷新排队失败", "draft_id", draftID, "error", renderErr)
-	}
-	response, err := server.draftTimelineResponse(request.Context(), draftID, nil)
+	// 手动编辑由浏览器 EditorSession 乐观更新，并由 Diffusion Studio Core 即时预览；
+	// 这里只原子保存最新逻辑时间线。
+	// 避免每次拖动后都排队一次完整 FFmpeg 渲染，最终预览/导出仍由显式工具触发。
+	response, err := server.draftTimelineResponse(request.Context(), draftID)
 	if err != nil {
 		server.internalError(writer, err)
 		return
@@ -82,66 +93,30 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 	writeJSON(writer, http.StatusOK, response)
 }
 
-func (server *Server) RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost(
-	writer http.ResponseWriter,
-	request *http.Request,
-	draftID string,
-) {
-	if _, err := storage.GetDraft(request.Context(), server.database.Read(), draftID); errors.Is(err, storage.ErrNotFound) {
-		writeNotFound(writer, "draft_not_found")
-		return
-	} else if err != nil {
-		server.internalError(writer, err)
-		return
+func timelinePatchOperations(value any) ([]map[string]any, bool) {
+	raw, ok := value.([]any)
+	if !ok {
+		if typed, typedOK := value.([]map[string]any); typedOK {
+			return typed, true
+		}
+		return nil, false
 	}
-	var payload TimelineRestoreRequest
-	if err := decodeJSON(request, &payload); err != nil || payload.Version < 1 {
-		writeBadRequest(writer, "timeline_restore_invalid")
-		return
+	operations := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		operation, itemOK := item.(map[string]any)
+		if !itemOK || len(operation) == 0 {
+			return nil, false
+		}
+		operations = append(operations, operation)
 	}
-	ctx := tools.WithDraftID(request.Context(), draftID)
-	if _, err := server.agent.ExecuteTool(ctx, "timeline.restore_version", tools.TimelineRestoreInput{
-		SourceVersion: payload.Version,
-	}); errors.Is(err, storage.ErrNotFound) {
-		writeNotFound(writer, "timeline_version_not_found")
-		return
-	} else if err != nil {
-		writeBadRequest(writer, "timeline_restore_invalid: "+err.Error())
-		return
-	}
-	validated, err := server.agent.ExecuteTool(ctx, "timeline.validate", tools.TimelineValidateInput{})
-	if err != nil {
-		server.internalError(writer, err)
-		return
-	}
-	result, ok := validated.(tools.ToolResult)
-	if !ok || result.Status != "succeeded" {
-		writeBadRequest(writer, "timeline_restore_validation_failed")
-		return
-	}
-	if _, renderErr := server.agent.ExecuteTool(ctx, "render.preview", tools.RenderPreviewInput{}); renderErr != nil {
-		server.logger.Warn("时间线已恢复，但预览刷新排队失败", "draft_id", draftID, "error", renderErr)
-	}
-	response, err := server.draftTimelineResponse(request.Context(), draftID, nil)
-	if err != nil {
-		server.internalError(writer, err)
-		return
-	}
-	writeJSON(writer, http.StatusOK, response)
+	return operations, true
 }
 
 func (server *Server) draftTimelineResponse(
 	ctx context.Context,
 	draftID string,
-	version *int,
 ) (DraftTimelineResponse, error) {
-	var document timeline.Document
-	var err error
-	if version != nil {
-		document, err = timeline.Get(ctx, server.database, draftID, *version)
-	} else {
-		document, err = timeline.Latest(ctx, server.database, draftID)
-	}
+	document, err := timeline.Latest(ctx, server.database, draftID)
 	if err != nil {
 		return DraftTimelineResponse{}, err
 	}
@@ -153,14 +128,9 @@ func (server *Server) draftTimelineResponse(
 	if err != nil {
 		return DraftTimelineResponse{}, err
 	}
-	navigation, err := timeline.Navigation(ctx, server.database, draftID, document.Version)
-	if err != nil {
-		return DraftTimelineResponse{}, err
-	}
 	return DraftTimelineResponse{
 		DraftId: draftID, TimelineVersion: document.Version, Timeline: documentMap,
 		Summary: timeline.Inspect(document), PreviewId: previewID,
-		ParentVersion: navigation.Parent, RedoVersion: navigation.Redo, LatestVersion: navigation.Latest,
 	}, nil
 }
 

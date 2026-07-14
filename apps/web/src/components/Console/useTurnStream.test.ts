@@ -7,6 +7,51 @@ function apply(events: TurnStreamEvent[]): TurnStreamState {
 }
 
 describe("reduceTurnStream · subagent_progress", () => {
+  it("显示模型超时重试，并在模型恢复产出后清空", () => {
+    const retrying = apply([
+      { type: "turn_started", turn_id: "turn_1" },
+      {
+        type: "model_retry",
+        attempt: 2,
+        max_retries: 5,
+        reason: "模型响应超时",
+        next_delay_ms: 500
+      }
+    ]);
+    expect(retrying.turnActive).toBe(true);
+    expect(retrying.modelRetry).toEqual({
+      attempt: 2,
+      maxRetries: 5,
+      reason: "模型响应超时",
+      nextDelayMs: 500
+    });
+
+    const recovered = reduceTurnStream(retrying, {
+      type: "text_delta",
+      message_id: "m1",
+      kind: "assistant",
+      delta: "已恢复"
+    });
+    expect(recovered.modelRetry).toBeNull();
+    expect(recovered.items).toHaveLength(1);
+  });
+
+  it("忽略非法重试序号，并在回合结束时清空重试状态", () => {
+    const invalid = apply([
+      { type: "turn_started", turn_id: "turn_1" },
+      { type: "model_retry", attempt: 6, max_retries: 5 }
+    ]);
+    expect(invalid.modelRetry).toBeNull();
+
+    const ended = apply([
+      { type: "turn_started", turn_id: "turn_1" },
+      { type: "model_retry", attempt: 5, max_retries: 5 },
+      { type: "turn_ended", outcome: "failed", reason: "模型响应超时" }
+    ]);
+    expect(ended.modelRetry).toBeNull();
+    expect(ended.turnActive).toBe(false);
+  });
+
   it("后台 observation 完成事件保留专用消息类型", () => {
     const state = apply([
       { type: "turn_started", turn_id: "turn_1" },
@@ -27,8 +72,8 @@ describe("reduceTurnStream · subagent_progress", () => {
     ]);
   });
 
-  it("理解批次进度按 completed/total 递增并在工具完成后清空", () => {
-    const running = apply([
+  it("不为无素材详情的批次进度创建额外 UI 状态", () => {
+    const state = apply([
       { type: "turn_started", turn_id: "turn_1" },
       { type: "tool_step_started", step_id: "s1", tool: "understand.materials" },
       {
@@ -46,15 +91,8 @@ describe("reduceTurnStream · subagent_progress", () => {
         note: "理解中 2/3"
       }
     ]);
-    expect(running.understandingProgress).toEqual({ completed: 2, total: 3 });
-
-    const finished = reduceTurnStream(running, {
-      type: "tool_step_finished",
-      step_id: "s1",
-      tool: "understand.materials",
-      status: "succeeded"
-    });
-    expect(finished.understandingProgress).toBeNull();
+    expect(state.subagentProgress).toEqual([]);
+    expect(state.items).toHaveLength(1);
   });
 
   it("按 asset_id 记录最近一条 note", () => {

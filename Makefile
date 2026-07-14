@@ -29,7 +29,7 @@ lint:
 
 web:
 	$(PNPM) --dir apps/web typecheck
-	$(PNPM) --dir apps/web test -- --run
+	$(PNPM) --dir apps/web exec vitest run
 	$(PNPM) --dir apps/web build
 
 e2e:

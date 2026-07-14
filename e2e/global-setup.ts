@@ -10,12 +10,14 @@ type ManagedProcess = {
 
 const E2E_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(E2E_DIR, "..");
-const WORKSPACE_DIR = path.join(REPO_ROOT, ".e2e-workspace");
+const WORKSPACE_DIR = process.env.RUSHES_E2E_WORKSPACE ?? path.join(REPO_ROOT, ".playwright-workspace");
 const FIXTURE_DIR = path.join(WORKSPACE_DIR, "fixtures");
 const BIN_DIR = path.join(WORKSPACE_DIR, "bin");
 const STATE_FILE = path.join(WORKSPACE_DIR, "state.json");
-const API_URL = "http://127.0.0.1:18000";
-const WEB_URL = "http://127.0.0.1:15173";
+const API_PORT = process.env.RUSHES_E2E_API_PORT ?? "18001";
+const WEB_PORT = process.env.RUSHES_E2E_WEB_PORT ?? "15174";
+const API_URL = `http://127.0.0.1:${API_PORT}`;
+const WEB_URL = `http://127.0.0.1:${WEB_PORT}`;
 const TOKEN = "e2e-token";
 
 const started: ChildProcess[] = [];
@@ -32,13 +34,13 @@ async function globalSetup(): Promise<void> {
       "-workspace",
       WORKSPACE_DIR,
       "-port",
-      "18000",
+      API_PORT,
       "-token",
       TOKEN
     ], {
       RUSHES_WORKSPACE_PATH: WORKSPACE_DIR,
       RUSHES_API_TOKEN: TOKEN,
-      RUSHES_API_PORT: "18000",
+      RUSHES_API_PORT: API_PORT,
       RUSHES_FS_ROOTS: FIXTURE_DIR,
       RUSHES_DASHSCOPE_API_KEY: ""
     });
@@ -60,7 +62,7 @@ async function globalSetup(): Promise<void> {
       "--host",
       "127.0.0.1",
       "--port",
-      "15173"
+      WEB_PORT
     ], {
       RUSHES_WEB_PROXY_TARGET: API_URL
     }, path.join(REPO_ROOT, "apps/web"));

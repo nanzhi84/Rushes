@@ -11,6 +11,7 @@
 .worktrees/
 workspace/
 .e2e-workspace/
+.playwright-workspace/
 .playwright-mcp/
 
 # JavaScript dependencies and build/test output

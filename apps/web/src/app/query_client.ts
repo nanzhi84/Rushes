@@ -26,7 +26,7 @@ export const queryKeys = {
     ["material-summary", draftId, assetId] as const,
   fsRoots: ["fs-roots"] as const,
   fsList: (path: string) => ["fs-list", path] as const,
-  timeline: (draftId: string, version: number | null) => ["timeline", draftId, version] as const,
+  timeline: (draftId: string) => ["timeline", draftId] as const,
   messages: (draftId: string) => ["messages", draftId] as const,
   currentDecision: (draftId: string) => ["current-decision", draftId] as const,
   pendingDecisions: (draftId: string) => ["pending-decisions", draftId] as const,

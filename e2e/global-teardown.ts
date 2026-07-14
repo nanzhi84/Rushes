@@ -8,7 +8,8 @@ type StateFile = {
 
 const E2E_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(E2E_DIR, "..");
-const STATE_FILE = path.join(REPO_ROOT, ".e2e-workspace", "state.json");
+const WORKSPACE_DIR = process.env.RUSHES_E2E_WORKSPACE ?? path.join(REPO_ROOT, ".playwright-workspace");
+const STATE_FILE = path.join(WORKSPACE_DIR, "state.json");
 
 async function globalTeardown(): Promise<void> {
   if (!existsSync(STATE_FILE)) {

@@ -275,6 +275,7 @@ func moveClip(document *Document, operation map[string]any) error {
 		return errors.New("片段长于移动后的时间线，不能放入叠加轨")
 	}
 	targetFrame = clampInt(targetFrame, 0, max(0, document.DurationFrames-duration))
+	moveDelta := targetFrame - sourceStart
 	if mode == "insert" {
 		shiftTrackForInsert(targetTrack, targetFrame, duration, document.DurationFrames)
 	} else {
@@ -283,6 +284,8 @@ func moveClip(document *Document, operation map[string]any) error {
 	moving.TrackID = targetTrackID
 	moving.TimelineStartFrame = targetFrame
 	moving.TimelineEndFrame = targetFrame + duration
+	shiftClipTimelineMetadata(&moving, moveDelta)
+	syncClipPlacementMetadata(&moving)
 	if sourceTrackID != targetTrackID {
 		moving.Linked = false
 		moving.ParentBlockID = ""
@@ -459,6 +462,7 @@ func insertIntoPrimary(document *Document, moving Clip, targetFrame int) error {
 			if clip.TimelineStartFrame >= targetFrame {
 				clip.TimelineStartFrame += duration
 				clip.TimelineEndFrame += duration
+				shiftClipTimelineMetadata(clip, duration)
 			}
 		}
 	}
@@ -527,6 +531,7 @@ func eraseTrackRange(track *Track, start, end int) {
 			if left.AssetID != "" {
 				left.SourceEndFrame -= int(math.Round(float64(removed) * rate))
 			}
+			syncClipPlacementMetadata(&left)
 			kept = append(kept, left)
 		}
 		if clip.TimelineEndFrame > end {
@@ -537,6 +542,7 @@ func eraseTrackRange(track *Track, start, end int) {
 			if right.AssetID != "" {
 				right.SourceStartFrame += int(math.Round(float64(removed) * rate))
 			}
+			syncClipPlacementMetadata(&right)
 			kept = append(kept, right)
 		}
 	}
@@ -549,6 +555,7 @@ func shiftTrackForInsert(track *Track, frame, duration, timelineDuration int) {
 		if clip.TimelineStartFrame >= frame {
 			clip.TimelineStartFrame += duration
 			clip.TimelineEndFrame += duration
+			shiftClipTimelineMetadata(&clip, duration)
 		}
 		if clip.TimelineStartFrame >= timelineDuration {
 			continue
@@ -559,6 +566,7 @@ func shiftTrackForInsert(track *Track, frame, duration, timelineDuration int) {
 			if clip.AssetID != "" {
 				clip.SourceEndFrame -= int(math.Round(float64(overflow) * effectiveRate(clip)))
 			}
+			syncClipPlacementMetadata(&clip)
 		}
 		kept = append(kept, clip)
 	}
@@ -639,6 +647,35 @@ func numericValue(value any) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+var semanticTimelineMetadataKeys = []string{
+	"anchor_timeline_start_frame", "anchor_timeline_end_frame",
+	"placement_timeline_start_frame", "placement_timeline_end_frame",
+}
+
+// B-roll 的语义锚点既是模型下一轮 context 的证据，也是前端可解释性数据。
+// 时间线片段发生平移时必须同步这些绝对帧字段，否则画面虽然移动了，模型
+// 仍会看到旧台词位置，并在后续编辑中继续放大错位。
+func shiftClipTimelineMetadata(clip *Clip, delta int) {
+	if delta == 0 || clip.Metadata == nil || stringValue(clip.Metadata["kind"]) != "b_roll_semantic_anchor" {
+		return
+	}
+	for _, key := range semanticTimelineMetadataKeys {
+		value, ok := numericValue(clip.Metadata[key])
+		if !ok || math.Trunc(value) != value {
+			continue
+		}
+		clip.Metadata[key] = int(value) + delta
+	}
+}
+
+func syncClipPlacementMetadata(clip *Clip) {
+	if clip.Metadata == nil || stringValue(clip.Metadata["kind"]) != "b_roll_semantic_anchor" {
+		return
+	}
+	clip.Metadata["placement_timeline_start_frame"] = clip.TimelineStartFrame
+	clip.Metadata["placement_timeline_end_frame"] = clip.TimelineEndFrame
 }
 
 func sortTrack(track *Track) {

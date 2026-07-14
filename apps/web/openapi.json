@@ -60,6 +60,63 @@
         "title": "ConfirmRequest",
         "type": "object"
       },
+      "DraftBatchDeleteRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm": {
+            "title": "Confirm",
+            "type": "boolean"
+          },
+          "draft_ids": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Draft Ids",
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "draft_ids",
+          "confirm"
+        ],
+        "title": "DraftBatchDeleteRequest",
+        "type": "object"
+      },
+      "DraftBatchDeleteResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "deleted_count": {
+            "minimum": 0,
+            "title": "Deleted Count",
+            "type": "integer"
+          },
+          "deleted_draft_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted Draft Ids",
+            "type": "array"
+          },
+          "event_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Event Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "deleted_count",
+          "deleted_draft_ids",
+          "event_ids"
+        ],
+        "title": "DraftBatchDeleteResponse",
+        "type": "object"
+      },
       "CostSummary": {
         "additionalProperties": false,
         "properties": {
@@ -93,6 +150,47 @@
           "by_provider"
         ],
         "title": "CostSummary",
+        "type": "object"
+      },
+      "ConversationClearResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "event_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Event Ids",
+            "type": "array"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "string"
+          },
+          "preserved": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Preserved",
+            "type": "array"
+          },
+          "status": {
+            "const": "cleared",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "draft_id",
+          "message_id",
+          "event_ids",
+          "preserved"
+        ],
+        "title": "ConversationClearResponse",
         "type": "object"
       },
       "CurrentDecisionResponse": {
@@ -845,32 +943,6 @@
             ],
             "title": "Preview Id"
           },
-          "parent_version": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Parent Version"
-          },
-          "redo_version": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Redo Version"
-          },
-          "latest_version": {
-            "title": "Latest Version",
-            "type": "integer"
-          },
           "summary": {
             "title": "Summary",
             "type": "string"
@@ -890,10 +962,7 @@
           "timeline_version",
           "timeline",
           "summary",
-          "preview_id",
-          "parent_version",
-          "redo_version",
-          "latest_version"
+          "preview_id"
         ],
         "title": "DraftTimelineResponse",
         "type": "object"
@@ -911,21 +980,6 @@
           "op"
         ],
         "title": "TimelinePatchRequest",
-        "type": "object"
-      },
-      "TimelineRestoreRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "version": {
-            "minimum": 1,
-            "title": "Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "version"
-        ],
-        "title": "TimelineRestoreRequest",
         "type": "object"
       },
       "DraftUpdateRequest": {
@@ -1055,10 +1109,11 @@
         "additionalProperties": false,
         "properties": {
           "mode": {
-            "default": "files",
+            "default": "mixed",
             "enum": [
               "files",
-              "folder"
+              "folder",
+              "mixed"
             ],
             "title": "Mode",
             "type": "string"
@@ -1959,6 +2014,102 @@
       }
     },
     "/api/drafts": {
+      "delete": {
+        "operationId": "batch_delete_drafts_api_drafts_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DraftBatchDeleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DraftBatchDeleteResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Batch Delete Drafts"
+      },
       "get": {
         "operationId": "list_drafts_api_drafts_get",
         "responses": {
@@ -3143,6 +3294,95 @@
         "summary": "Get Material Summary"
       }
     },
+    "/api/drafts/{draft_id}/conversation/clear": {
+      "post": {
+        "operationId": "clear_draft_conversation_api_drafts__draft_id__conversation_clear_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "draft_id",
+            "required": true,
+            "schema": {
+              "title": "Draft Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationClearResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Draft Conversation"
+      }
+    },
     "/api/drafts/{draft_id}/messages": {
       "get": {
         "operationId": "list_draft_messages_api_drafts__draft_id__messages_get",
@@ -3421,22 +3661,6 @@
               "title": "Draft Id",
               "type": "string"
             }
-          },
-          {
-            "in": "query",
-            "name": "version",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Version"
-            }
           }
         ],
         "responses": {
@@ -3591,105 +3815,6 @@
           }
         },
         "summary": "Apply Timeline Patch"
-      }
-    },
-    "/api/drafts/{draft_id}/timeline/restore": {
-      "post": {
-        "operationId": "restore_timeline_version_api_drafts__draft_id__timeline_restore_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "draft_id",
-            "required": true,
-            "schema": {
-              "title": "Draft Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TimelineRestoreRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DraftTimelineResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SecurityRefusalResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SecurityRefusalResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Not Found"
-          },
-          "415": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SecurityRefusalResponse"
-                }
-              }
-            },
-            "description": "Unsupported Media Type"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Restore Timeline Version"
       }
     },
     "/api/drafts/{draft_id}/turn-stream": {
@@ -3942,7 +4067,7 @@
     },
     "/api/fs/pick": {
       "post": {
-        "description": "弹出宿主机原生文件/文件夹选择对话框（macOS NSOpenPanel）并返回绝对路径。\n\n后端与用户同机，这是浏览器沙箱之外拿到磁盘路径、实现零拷贝 reference\n导入的唯一途径；非 macOS 或无 GUI 会话时报 available=false，前端提示改走对话导入。",
+        "description": "弹出宿主机原生文件/文件夹选择对话框（macOS NSOpenPanel）并返回绝对路径。mixed 模式允许在同一个选择框中多选文件与文件夹，文件夹由导入接口递归处理。\n\n后端与用户同机，这是浏览器沙箱之外拿到磁盘路径、实现零拷贝 reference\n导入的唯一途径；非 macOS 或无 GUI 会话时报 available=false，前端提示改走对话导入。",
         "operationId": "fs_pick_api_fs_pick_post",
         "requestBody": {
           "content": {

@@ -13,6 +13,21 @@ import (
 	"github.com/oapi-codegen/runtime"
 )
 
+// Defines values for ConversationClearResponseStatus.
+const (
+	Cleared ConversationClearResponseStatus = "cleared"
+)
+
+// Valid indicates whether the value is a known member of the ConversationClearResponseStatus enum.
+func (e ConversationClearResponseStatus) Valid() bool {
+	switch e {
+	case Cleared:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for DecisionPendingToolCallStatus.
 const (
 	DecisionPendingToolCallStatusApproved  DecisionPendingToolCallStatus = "approved"
@@ -173,6 +188,7 @@ func (e FsListEntryType) Valid() bool {
 const (
 	Files  FsPickRequestMode = "files"
 	Folder FsPickRequestMode = "folder"
+	Mixed  FsPickRequestMode = "mixed"
 )
 
 // Valid indicates whether the value is a known member of the FsPickRequestMode enum.
@@ -181,6 +197,8 @@ func (e FsPickRequestMode) Valid() bool {
 	case Files:
 		return true
 	case Folder:
+		return true
+	case Mixed:
 		return true
 	default:
 		return false
@@ -327,6 +345,18 @@ type ConfirmRequest struct {
 	Confirm *bool `json:"confirm,omitempty"`
 }
 
+// ConversationClearResponse defines model for ConversationClearResponse.
+type ConversationClearResponse struct {
+	DraftId   string                          `json:"draft_id"`
+	EventIds  []int                           `json:"event_ids"`
+	MessageId string                          `json:"message_id"`
+	Preserved []string                        `json:"preserved"`
+	Status    ConversationClearResponseStatus `json:"status"`
+}
+
+// ConversationClearResponseStatus defines model for ConversationClearResponse.Status.
+type ConversationClearResponseStatus string
+
 // CostSummary defines model for CostSummary.
 type CostSummary struct {
 	ByCapability      map[string]float32 `json:"by_capability"`
@@ -407,6 +437,19 @@ type DecisionOption struct {
 	Payload     *map[string]interface{} `json:"payload,omitempty"`
 }
 
+// DraftBatchDeleteRequest defines model for DraftBatchDeleteRequest.
+type DraftBatchDeleteRequest struct {
+	Confirm  bool     `json:"confirm"`
+	DraftIds []string `json:"draft_ids"`
+}
+
+// DraftBatchDeleteResponse defines model for DraftBatchDeleteResponse.
+type DraftBatchDeleteResponse struct {
+	DeletedCount    int      `json:"deleted_count"`
+	DeletedDraftIds []string `json:"deleted_draft_ids"`
+	EventIds        []int    `json:"event_ids"`
+}
+
 // DraftCopyRequest defines model for DraftCopyRequest.
 type DraftCopyRequest struct {
 	DraftId *string `json:"draft_id,omitempty"`
@@ -485,10 +528,7 @@ type DraftResponse struct {
 // DraftTimelineResponse defines model for DraftTimelineResponse.
 type DraftTimelineResponse struct {
 	DraftId         string                 `json:"draft_id"`
-	LatestVersion   int                    `json:"latest_version"`
-	ParentVersion   *int                   `json:"parent_version"`
 	PreviewId       *string                `json:"preview_id"`
-	RedoVersion     *int                   `json:"redo_version"`
 	Summary         string                 `json:"summary"`
 	Timeline        map[string]interface{} `json:"timeline"`
 	TimelineVersion int                    `json:"timeline_version"`
@@ -710,11 +750,6 @@ type TimelinePatchRequest struct {
 	Op map[string]interface{} `json:"op"`
 }
 
-// TimelineRestoreRequest defines model for TimelineRestoreRequest.
-type TimelineRestoreRequest struct {
-	Version int `json:"version"`
-}
-
 // TurnCancelResponse defines model for TurnCancelResponse.
 type TurnCancelResponse struct {
 	DraftId   string                   `json:"draft_id"`
@@ -755,11 +790,6 @@ type ListDraftMessagesApiDraftsDraftIdMessagesGetParams struct {
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
-// GetDraftTimelineApiDraftsDraftIdTimelineGetParams defines parameters for GetDraftTimelineApiDraftsDraftIdTimelineGet.
-type GetDraftTimelineApiDraftsDraftIdTimelineGetParams struct {
-	Version *int `form:"version,omitempty" json:"version,omitempty"`
-}
-
 // FsListApiFsListGetParams defines parameters for FsListApiFsListGet.
 type FsListApiFsListGetParams struct {
 	Path string `form:"path" json:"path"`
@@ -772,6 +802,9 @@ type FsListApiFsListGet403JSONResponseBody struct {
 
 // AnswerDecisionApiDecisionsDecisionIdAnswerPostJSONRequestBody defines body for AnswerDecisionApiDecisionsDecisionIdAnswerPost for application/json ContentType.
 type AnswerDecisionApiDecisionsDecisionIdAnswerPostJSONRequestBody = DecisionAnswerRequest
+
+// BatchDeleteDraftsApiDraftsDeleteJSONRequestBody defines body for BatchDeleteDraftsApiDraftsDelete for application/json ContentType.
+type BatchDeleteDraftsApiDraftsDeleteJSONRequestBody = DraftBatchDeleteRequest
 
 // CreateDraftApiDraftsPostJSONRequestBody defines body for CreateDraftApiDraftsPost for application/json ContentType.
 type CreateDraftApiDraftsPostJSONRequestBody = DraftCreateRequest
@@ -793,9 +826,6 @@ type EnqueueMessageApiDraftsDraftIdMessagesPostJSONRequestBody = MessageCreateRe
 
 // ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPostJSONRequestBody defines body for ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost for application/json ContentType.
 type ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPostJSONRequestBody = TimelinePatchRequest
-
-// RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePostJSONRequestBody defines body for RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost for application/json ContentType.
-type RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePostJSONRequestBody = TimelineRestoreRequest
 
 // FsPickApiFsPickPostJSONRequestBody defines body for FsPickApiFsPickPost for application/json ContentType.
 type FsPickApiFsPickPostJSONRequestBody = FsPickRequest
@@ -994,6 +1024,9 @@ type ServerInterface interface {
 	// Answer Decision
 	// (POST /api/decisions/{decision_id}/answer)
 	AnswerDecisionApiDecisionsDecisionIdAnswerPost(w http.ResponseWriter, r *http.Request, decisionId string)
+	// Batch Delete Drafts
+	// (DELETE /api/drafts)
+	BatchDeleteDraftsApiDraftsDelete(w http.ResponseWriter, r *http.Request)
 	// List Drafts
 	// (GET /api/drafts)
 	ListDraftsApiDraftsGet(w http.ResponseWriter, r *http.Request)
@@ -1009,6 +1042,9 @@ type ServerInterface interface {
 	// Rename Draft
 	// (PATCH /api/drafts/{draft_id})
 	RenameDraftApiDraftsDraftIdPatch(w http.ResponseWriter, r *http.Request, draftId string)
+	// Clear Draft Conversation
+	// (POST /api/drafts/{draft_id}/conversation/clear)
+	ClearDraftConversationApiDraftsDraftIdConversationClearPost(w http.ResponseWriter, r *http.Request, draftId string)
 	// Copy Draft
 	// (POST /api/drafts/{draft_id}/copy)
 	CopyDraftApiDraftsDraftIdCopyPost(w http.ResponseWriter, r *http.Request, draftId string)
@@ -1050,13 +1086,10 @@ type ServerInterface interface {
 	PreviewViewedApiDraftsDraftIdPreviewsPreviewIdViewedPost(w http.ResponseWriter, r *http.Request, draftId string, previewId string)
 	// Get Draft Timeline
 	// (GET /api/drafts/{draft_id}/timeline)
-	GetDraftTimelineApiDraftsDraftIdTimelineGet(w http.ResponseWriter, r *http.Request, draftId string, params GetDraftTimelineApiDraftsDraftIdTimelineGetParams)
+	GetDraftTimelineApiDraftsDraftIdTimelineGet(w http.ResponseWriter, r *http.Request, draftId string)
 	// Apply Timeline Patch
 	// (POST /api/drafts/{draft_id}/timeline/patch)
 	ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(w http.ResponseWriter, r *http.Request, draftId string)
-	// Restore Timeline Version
-	// (POST /api/drafts/{draft_id}/timeline/restore)
-	RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost(w http.ResponseWriter, r *http.Request, draftId string)
 	// Draft Turn Stream
 	// (GET /api/drafts/{draft_id}/turn-stream)
 	DraftTurnStreamApiDraftsDraftIdTurnStreamGet(w http.ResponseWriter, r *http.Request, draftId string)
@@ -1120,6 +1153,12 @@ func (_ Unimplemented) AnswerDecisionApiDecisionsDecisionIdAnswerPost(w http.Res
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// Batch Delete Drafts
+// (DELETE /api/drafts)
+func (_ Unimplemented) BatchDeleteDraftsApiDraftsDelete(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // List Drafts
 // (GET /api/drafts)
 func (_ Unimplemented) ListDraftsApiDraftsGet(w http.ResponseWriter, r *http.Request) {
@@ -1147,6 +1186,12 @@ func (_ Unimplemented) GetDraftApiDraftsDraftIdGet(w http.ResponseWriter, r *htt
 // Rename Draft
 // (PATCH /api/drafts/{draft_id})
 func (_ Unimplemented) RenameDraftApiDraftsDraftIdPatch(w http.ResponseWriter, r *http.Request, draftId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Clear Draft Conversation
+// (POST /api/drafts/{draft_id}/conversation/clear)
+func (_ Unimplemented) ClearDraftConversationApiDraftsDraftIdConversationClearPost(w http.ResponseWriter, r *http.Request, draftId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -1230,19 +1275,13 @@ func (_ Unimplemented) PreviewViewedApiDraftsDraftIdPreviewsPreviewIdViewedPost(
 
 // Get Draft Timeline
 // (GET /api/drafts/{draft_id}/timeline)
-func (_ Unimplemented) GetDraftTimelineApiDraftsDraftIdTimelineGet(w http.ResponseWriter, r *http.Request, draftId string, params GetDraftTimelineApiDraftsDraftIdTimelineGetParams) {
+func (_ Unimplemented) GetDraftTimelineApiDraftsDraftIdTimelineGet(w http.ResponseWriter, r *http.Request, draftId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
 // Apply Timeline Patch
 // (POST /api/drafts/{draft_id}/timeline/patch)
 func (_ Unimplemented) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(w http.ResponseWriter, r *http.Request, draftId string) {
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// Restore Timeline Version
-// (POST /api/drafts/{draft_id}/timeline/restore)
-func (_ Unimplemented) RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost(w http.ResponseWriter, r *http.Request, draftId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -1383,6 +1422,20 @@ func (siw *ServerInterfaceWrapper) AnswerDecisionApiDecisionsDecisionIdAnswerPos
 	handler.ServeHTTP(w, r)
 }
 
+// BatchDeleteDraftsApiDraftsDelete operation middleware
+func (siw *ServerInterfaceWrapper) BatchDeleteDraftsApiDraftsDelete(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.BatchDeleteDraftsApiDraftsDelete(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // ListDraftsApiDraftsGet operation middleware
 func (siw *ServerInterfaceWrapper) ListDraftsApiDraftsGet(w http.ResponseWriter, r *http.Request) {
 
@@ -1480,6 +1533,32 @@ func (siw *ServerInterfaceWrapper) RenameDraftApiDraftsDraftIdPatch(w http.Respo
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.RenameDraftApiDraftsDraftIdPatch(w, r, draftId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ClearDraftConversationApiDraftsDraftIdConversationClearPost operation middleware
+func (siw *ServerInterfaceWrapper) ClearDraftConversationApiDraftsDraftIdConversationClearPost(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "draft_id" -------------
+	var draftId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "draft_id", chi.URLParam(r, "draft_id"), &draftId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "draft_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ClearDraftConversationApiDraftsDraftIdConversationClearPost(w, r, draftId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1885,24 +1964,8 @@ func (siw *ServerInterfaceWrapper) GetDraftTimelineApiDraftsDraftIdTimelineGet(w
 		return
 	}
 
-	// Parameter object where we will unmarshal all parameters from the context
-	var params GetDraftTimelineApiDraftsDraftIdTimelineGetParams
-
-	// ------------- Optional query parameter "version" -------------
-
-	err = runtime.BindQueryParameterWithOptions("form", true, false, "version", r.URL.Query(), &params.Version, runtime.BindQueryParameterOptions{Type: "integer", Format: ""})
-	if err != nil {
-		var requiredError *runtime.RequiredParameterError
-		if errors.As(err, &requiredError) {
-			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "version"})
-		} else {
-			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "version", Err: err})
-		}
-		return
-	}
-
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetDraftTimelineApiDraftsDraftIdTimelineGet(w, r, draftId, params)
+		siw.Handler.GetDraftTimelineApiDraftsDraftIdTimelineGet(w, r, draftId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1929,32 +1992,6 @@ func (siw *ServerInterfaceWrapper) ApplyTimelinePatchApiDraftsDraftIdTimelinePat
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(w, r, draftId)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost operation middleware
-func (siw *ServerInterfaceWrapper) RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-	_ = err
-
-	// ------------- Path parameter "draft_id" -------------
-	var draftId string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "draft_id", chi.URLParam(r, "draft_id"), &draftId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "draft_id", Err: err})
-		return
-	}
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost(w, r, draftId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -2494,6 +2531,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Post(options.BaseURL+"/api/decisions/{decision_id}/answer", wrapper.AnswerDecisionApiDecisionsDecisionIdAnswerPost)
 	})
 	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/drafts", wrapper.BatchDeleteDraftsApiDraftsDelete)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/drafts", wrapper.ListDraftsApiDraftsGet)
 	})
 	r.Group(func(r chi.Router) {
@@ -2507,6 +2547,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Patch(options.BaseURL+"/api/drafts/{draft_id}", wrapper.RenameDraftApiDraftsDraftIdPatch)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/drafts/{draft_id}/conversation/clear", wrapper.ClearDraftConversationApiDraftsDraftIdConversationClearPost)
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/drafts/{draft_id}/copy", wrapper.CopyDraftApiDraftsDraftIdCopyPost)
@@ -2552,9 +2595,6 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/drafts/{draft_id}/timeline/patch", wrapper.ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost)
-	})
-	r.Group(func(r chi.Router) {
-		r.Post(options.BaseURL+"/api/drafts/{draft_id}/timeline/restore", wrapper.RestoreTimelineVersionApiDraftsDraftIdTimelineRestorePost)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/drafts/{draft_id}/turn-stream", wrapper.DraftTurnStreamApiDraftsDraftIdTurnStreamGet)

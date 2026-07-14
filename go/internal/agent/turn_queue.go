@@ -112,6 +112,19 @@ func (queue *TurnQueue) RequestStop(draftID string) bool {
 	return true
 }
 
+func (queue *TurnQueue) IsBusy(draftID string) bool {
+	queue.mu.Lock()
+	worker := queue.workers[draftID]
+	queue.mu.Unlock()
+	if worker == nil {
+		return false
+	}
+	worker.mu.Lock()
+	active := worker.currentStop != nil
+	worker.mu.Unlock()
+	return active || len(worker.queue) > 0
+}
+
 func (queue *TurnQueue) JoinDraft(draftID string) {
 	queue.mu.Lock()
 	worker := queue.workers[draftID]

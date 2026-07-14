@@ -3,9 +3,12 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +21,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
+	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
 type serviceToolModel struct {
@@ -26,7 +30,73 @@ type serviceToolModel struct {
 	tools []*schema.ToolInfo
 }
 
+type thirtyToolExecutionsModel struct {
+	mu             sync.Mutex
+	modelCalls     int
+	toolExecutions int
+}
+
+type selfRepairServiceModel struct {
+	mu    sync.Mutex
+	calls int
+}
+
+type loopingFailureServiceModel struct{}
+
 type failingServiceModel struct{}
+
+type emptyServiceModel struct{}
+
+type terminatingFailureLoopModel struct {
+	mu    sync.Mutex
+	calls int
+}
+
+type failingReadToolServiceModel struct {
+	mu    sync.Mutex
+	calls int
+}
+
+type decisionContinuationModel struct {
+	mu       sync.Mutex
+	messages []*schema.Message
+}
+
+func (modelValue *decisionContinuationModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return modelValue, nil
+}
+
+func (modelValue *decisionContinuationModel) Generate(
+	_ context.Context,
+	messages []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	modelValue.mu.Lock()
+	modelValue.messages = append([]*schema.Message(nil), messages...)
+	modelValue.mu.Unlock()
+	return schema.AssistantMessage("DECISION-CONTINUED", nil), nil
+}
+
+func (modelValue *decisionContinuationModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := modelValue.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (modelValue *decisionContinuationModel) lastPrompt() string {
+	modelValue.mu.Lock()
+	defer modelValue.mu.Unlock()
+	if len(modelValue.messages) == 0 {
+		return ""
+	}
+	return modelValue.messages[len(modelValue.messages)-1].Content
+}
 
 func (modelValue *failingServiceModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return modelValue, nil
@@ -38,6 +108,61 @@ func (*failingServiceModel) Generate(context.Context, []*schema.Message, ...mode
 
 func (*failingServiceModel) Stream(context.Context, []*schema.Message, ...model.Option) (*schema.StreamReader[*schema.Message], error) {
 	return nil, errors.New("model failed")
+}
+
+func (*emptyServiceModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return &emptyServiceModel{}, nil
+}
+
+func (*emptyServiceModel) Generate(context.Context, []*schema.Message, ...model.Option) (*schema.Message, error) {
+	return schema.AssistantMessage("", nil), nil
+}
+
+func (modelValue *emptyServiceModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := modelValue.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (modelValue *terminatingFailureLoopModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return modelValue, nil
+}
+
+func (modelValue *terminatingFailureLoopModel) Generate(
+	context.Context,
+	[]*schema.Message,
+	...model.Option,
+) (*schema.Message, error) {
+	modelValue.mu.Lock()
+	defer modelValue.mu.Unlock()
+	modelValue.calls++
+	if modelValue.calls <= maxModelRepairAttempts+1 {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: randomID("bounded_loop_call"),
+			Function: schema.FunctionCall{
+				Name: "timeline.nonexistent", Arguments: `{"same":true}`,
+			},
+		}}), nil
+	}
+	return schema.AssistantMessage("本轮工具修复未完成，请告诉我下一步怎么处理。", nil), nil
+}
+
+func (modelValue *terminatingFailureLoopModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := modelValue.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
 func (modelValue *serviceToolModel) WithTools(infos []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
@@ -77,6 +202,161 @@ func (modelValue *serviceToolModel) Generate(
 }
 
 func (modelValue *serviceToolModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := modelValue.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (modelValue *thirtyToolExecutionsModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return modelValue, nil
+}
+
+func (modelValue *thirtyToolExecutionsModel) Generate(
+	_ context.Context,
+	messages []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	modelValue.mu.Lock()
+	defer modelValue.mu.Unlock()
+	modelValue.modelCalls++
+	if len(messages) > 0 && messages[len(messages)-1].Role == schema.Tool {
+		modelValue.toolExecutions++
+	}
+	if modelValue.toolExecutions < maxToolExecutionsPerTurn {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: randomID("thirty_step_call"),
+			Function: schema.FunctionCall{
+				Name: "asset.list_assets", Arguments: `{}`,
+			},
+		}}), nil
+	}
+	return schema.AssistantMessage("30 次工具执行完成。", nil), nil
+}
+
+func (modelValue *thirtyToolExecutionsModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := modelValue.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (modelValue *thirtyToolExecutionsModel) counts() (int, int) {
+	modelValue.mu.Lock()
+	defer modelValue.mu.Unlock()
+	return modelValue.modelCalls, modelValue.toolExecutions
+}
+
+func (modelValue *selfRepairServiceModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return modelValue, nil
+}
+
+func (modelValue *selfRepairServiceModel) Generate(
+	_ context.Context,
+	messages []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	modelValue.mu.Lock()
+	defer modelValue.mu.Unlock()
+	modelValue.calls++
+	switch modelValue.calls {
+	case 1:
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "bad_call", Function: schema.FunctionCall{Name: "timeline.nonexistent", Arguments: `{}`},
+		}}), nil
+	case 2:
+		if len(messages) == 0 || messages[len(messages)-1].Role != schema.Tool ||
+			!strings.Contains(messages[len(messages)-1].Content, "unknown_tool") {
+			return nil, errors.New("未知工具错误没有回灌模型")
+		}
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "fixed_call", Function: schema.FunctionCall{Name: "asset.list_assets", Arguments: `{}`},
+		}}), nil
+	default:
+		if len(messages) == 0 || messages[len(messages)-1].Role != schema.Tool {
+			return nil, errors.New("修复后的工具结果没有回灌模型")
+		}
+		return schema.AssistantMessage("已读取真实工具错误并自行修复。", nil), nil
+	}
+}
+
+func (modelValue *selfRepairServiceModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := modelValue.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (modelValue *loopingFailureServiceModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return modelValue, nil
+}
+
+func (*loopingFailureServiceModel) Generate(
+	context.Context,
+	[]*schema.Message,
+	...model.Option,
+) (*schema.Message, error) {
+	return schema.AssistantMessage("", []schema.ToolCall{{
+		ID:       randomID("loop_call"),
+		Function: schema.FunctionCall{Name: "timeline.nonexistent", Arguments: `{"same":true}`},
+	}}), nil
+}
+
+func (modelValue *loopingFailureServiceModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := modelValue.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (modelValue *failingReadToolServiceModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return modelValue, nil
+}
+
+func (modelValue *failingReadToolServiceModel) Generate(
+	_ context.Context,
+	messages []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	modelValue.mu.Lock()
+	defer modelValue.mu.Unlock()
+	modelValue.calls++
+	if modelValue.calls == 1 {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "missing_audio", Function: schema.FunctionCall{
+				Name: "audio.analyze_beats", Arguments: `{"asset_id":"asset_missing"}`,
+			},
+		}}), nil
+	}
+	if len(messages) == 0 || messages[len(messages)-1].Role != schema.Tool ||
+		!strings.Contains(messages[len(messages)-1].Content, `"automatic_retries":0`) ||
+		!strings.Contains(messages[len(messages)-1].Content, `"retryable":false`) {
+		return nil, errors.New("确定性参数失败没有立即回灌模型")
+	}
+	return schema.AssistantMessage("工具失败，但本轮已正常回复。", nil), nil
+}
+
+func (modelValue *failingReadToolServiceModel) Stream(
 	ctx context.Context,
 	messages []*schema.Message,
 	options ...model.Option,
@@ -135,8 +415,305 @@ done:
 		t.Fatalf("messages=%#v err=%v", messages, err)
 	}
 	modelMessages, modelErr := service.modelMessages(t.Context(), "draft_react")
-	if modelErr != nil || len(modelMessages) != 2 {
+	if modelErr != nil || len(modelMessages) != 3 || modelMessages[0].Role != schema.System ||
+		modelMessages[1].Role != schema.User || modelMessages[2].Role != schema.Assistant ||
+		!strings.Contains(modelMessages[2].Content, "EINO-SERVICE-OK") {
 		t.Fatalf("tool trace 不应进入模型上下文: messages=%#v err=%v", modelMessages, modelErr)
+	}
+	for _, message := range modelMessages {
+		if strings.Contains(message.Content, `"step_id"`) || strings.Contains(message.Content, `"args_summary"`) {
+			t.Fatalf("UI tool trace 泄漏进模型上下文: %#v", message)
+		}
+	}
+}
+
+func TestReactAgentAllowsThirtyToolExecutionsAndFinalReply(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_thirty_steps")
+	insertAgentMessage(t, database, "draft_thirty_steps", "user_thirty_steps", "连续执行三十步")
+	modelValue := &thirtyToolExecutionsModel{}
+	service, err := NewService(t.Context(), database, modelValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	_, stream, unsubscribe := service.Hub().Subscribe("draft_thirty_steps")
+	defer unsubscribe()
+	if !service.Queue().EnqueueUserMessage(
+		"draft_thirty_steps", "user_thirty_steps", "连续执行三十步",
+	) {
+		t.Fatal("enqueue 失败")
+	}
+	service.Queue().JoinDraft("draft_thirty_steps")
+	completed := ""
+	for {
+		select {
+		case event := <-stream:
+			switch event["type"] {
+			case "turn_error":
+				t.Fatal("30 次工具执行不应触发步数上限")
+			case "message_completed":
+				completed, _ = event["content"].(string)
+			case "turn_ended":
+				modelCalls, toolExecutions := modelValue.counts()
+				if event["outcome"] != "finished" || completed != "30 次工具执行完成。" ||
+					modelCalls != maxToolExecutionsPerTurn+1 ||
+					toolExecutions != maxToolExecutionsPerTurn {
+					t.Fatalf(
+						"completed=%q event=%#v model_calls=%d tool_executions=%d",
+						completed, event, modelCalls, toolExecutions,
+					)
+				}
+				return
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("30 次工具执行后没有生成最终回复")
+		}
+	}
+}
+
+func TestServiceReturnsToolFailureToModelForSelfRepair(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_self_repair")
+	insertAgentMessage(t, database, "draft_self_repair", "user_self_repair", "先试错再修复")
+	service, err := NewService(t.Context(), database, &selfRepairServiceModel{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	_, stream, unsubscribe := service.Hub().Subscribe("draft_self_repair")
+	defer unsubscribe()
+	if !service.Queue().EnqueueUserMessage("draft_self_repair", "user_self_repair", "先试错再修复") {
+		t.Fatal("enqueue 失败")
+	}
+	service.Queue().JoinDraft("draft_self_repair")
+	completed := ""
+	for {
+		select {
+		case event := <-stream:
+			switch event["type"] {
+			case "turn_error":
+				t.Fatal("可修复的工具失败不应中断回合")
+			case "message_completed":
+				completed, _ = event["content"].(string)
+			case "turn_ended":
+				if completed != "已读取真实工具错误并自行修复。" {
+					t.Fatalf("completed=%q event=%#v", completed, event)
+				}
+				return
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("自修复回合未结束")
+		}
+	}
+}
+
+func TestServiceReturnsDeterministicToolFailureInOneVisibleTrace(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_retry_trace")
+	assetResult, assetErr := reducer.Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset_present", "job_id": "job_present", "kind": "video",
+			"filename": "present.mp4", "usable": true,
+		}},
+		{Type: "AssetLinked", DraftID: "draft_retry_trace", Payload: map[string]any{
+			"asset_id": "asset_present",
+		}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if assetErr != nil || assetResult.Status != reducer.StatusApplied {
+		t.Fatalf("asset status=%s err=%v", assetResult.Status, assetErr)
+	}
+	insertAgentMessage(t, database, "draft_retry_trace", "user_retry_trace", "分析不存在的音频")
+	service, err := NewService(t.Context(), database, &failingReadToolServiceModel{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	if !service.Queue().EnqueueUserMessage("draft_retry_trace", "user_retry_trace", "分析不存在的音频") {
+		t.Fatal("enqueue 失败")
+	}
+	service.Queue().JoinDraft("draft_retry_trace")
+	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_retry_trace", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolRows := 0
+	for _, message := range messages {
+		if message.Kind == "tool" {
+			toolRows++
+		}
+	}
+	if toolRows != 1 || len(messages) != 3 || messages[len(messages)-1].Content != "工具失败，但本轮已正常回复。" {
+		t.Fatalf("确定性失败应立即返回且只展示一个工具终态：tool_rows=%d messages=%#v", toolRows, messages)
+	}
+}
+
+func TestDecisionAnswerObservationResumesAgent(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_decision_continue")
+	insertAgentMessage(t, database, "draft_decision_continue", "user_decision_continue", "帮我做一个混剪")
+	chatModel := &decisionContinuationModel{}
+	service, err := NewService(t.Context(), database, chatModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(t.Context(), "draft_decision_continue")
+	result, err := service.ExecuteTool(ctx, "interaction.ask_user", rushestools.AskUserInput{
+		Question: "请选择混剪风格",
+		Options: []rushestools.DecisionOptionInput{{
+			OptionID: "cinematic", Label: "电影感叙事",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decisionID := result.(rushestools.ToolResult).Data["decision_id"].(string)
+	decision, err := storage.GetDecision(t.Context(), database.Read(), decisionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.PendingToolCall != nil || decision.PendingToolCallStatus != nil {
+		t.Fatalf("普通选择不应伪装成待重放工具: %#v", decision)
+	}
+	if _, err := service.ExecuteTool(ctx, "decision.answer", rushestools.DecisionAnswerInput{
+		DecisionID: decisionID, OptionID: "cinematic",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !service.Queue().EnqueueUIObservation(
+		"draft_decision_continue",
+		"decision_resume_test",
+		"decision_answered",
+		map[string]any{
+			"decision_id": decisionID,
+			"answer":      map[string]any{"option_id": "cinematic"},
+		},
+	) {
+		t.Fatal("决策回答未入队")
+	}
+	service.Queue().JoinDraft("draft_decision_continue")
+	prompt := chatModel.lastPrompt()
+	if !strings.Contains(prompt, "请选择混剪风格") ||
+		!strings.Contains(prompt, "电影感叙事") ||
+		!strings.Contains(prompt, "不要重复提出已经回答的问题") {
+		t.Fatalf("续跑提示缺少已回答决策上下文: %q", prompt)
+	}
+	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_decision_continue", 20)
+	if err != nil || len(messages) < 2 || messages[len(messages)-1].Content != "DECISION-CONTINUED" {
+		t.Fatalf("回答后未生成继续创作消息: messages=%#v err=%v", messages, err)
+	}
+}
+
+func TestTerminalJobObservationResumesAgentWithFailureContext(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_job_continue")
+	insertAgentMessage(t, database, "draft_job_continue", "user_job_continue", "生成预览并检查")
+	chatModel := &decisionContinuationModel{}
+	service, err := NewService(t.Context(), database, chatModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	if !service.Queue().EnqueueJobObservation(
+		"draft_job_continue",
+		"job_failed",
+		map[string]any{
+			"event": "JobFailed",
+			"payload": map[string]any{
+				"job_id": "job_failed", "kind": "render_preview",
+				"error": map[string]any{"message": "音轨越界"},
+			},
+		},
+	) {
+		t.Fatal("job observation 未入队")
+	}
+	service.Queue().JoinDraft("draft_job_continue")
+	prompt := chatModel.lastPrompt()
+	if !strings.Contains(prompt, "render_preview") || !strings.Contains(prompt, "音轨越界") ||
+		!strings.Contains(prompt, "自动续跑") || !strings.Contains(prompt, "修复并重试") {
+		t.Fatalf("job 终态续跑提示不完整: %q", prompt)
+	}
+	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_job_continue", 20)
+	if err != nil || len(messages) < 2 || messages[len(messages)-1].Kind != "reply" {
+		t.Fatalf("job 续跑结果应作为正常回复: messages=%#v err=%v", messages, err)
+	}
+}
+
+func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_job_dedup")
+	insertAgentMessage(t, database, "draft_job_dedup", "user_job_dedup", "渲染预览并检查")
+	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent, ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
+			ID: "tool_inspected", DraftID: "draft_job_dedup", Role: "system", Kind: "tool",
+			Content: `{"tool":"render.inspect_preview","args_summary":"{\"preview_id\":\"preview_done\"}","observation":"{\"summary\":\"ok\"}","status":"succeeded"}`,
+		}},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("tool message status=%s err=%v", result.Status, err)
+	}
+	chatModel := &decisionContinuationModel{}
+	service, err := NewService(t.Context(), database, chatModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	if !service.Queue().EnqueueJobObservation(
+		"draft_job_dedup",
+		"job_done",
+		map[string]any{
+			"event": "JobSucceeded",
+			"payload": map[string]any{
+				"job_id": "job_done", "kind": "render_preview",
+				"result": map[string]any{"artifact_id": "preview_done"},
+			},
+		},
+	) {
+		t.Fatal("job observation 未入队")
+	}
+	service.Queue().JoinDraft("draft_job_dedup")
+	if prompt := chatModel.lastPrompt(); prompt != "" {
+		t.Fatalf("已质检预览不应再次唤醒模型: %q", prompt)
+	}
+	for index, content := range []string{
+		`not-json`,
+		`{"tool":"render.inspect_preview","args_summary":"{\"preview_id\":\"preview_done\"}","status":"failed"}`,
+		`{"tool":"render.inspect_preview","args_summary":"not-json","status":"succeeded"}`,
+	} {
+		result, err = reducer.Apply(t.Context(), database, nil, reducer.Options{
+			Actor: contracts.ActorAgent, ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
+				ID: fmt.Sprintf("tool_ignored_%d", index), DraftID: "draft_job_dedup",
+				Role: "system", Kind: "tool", Content: content,
+			}},
+		})
+		if err != nil || result.Status != reducer.StatusApplied {
+			t.Fatalf("ignored tool message status=%s err=%v", result.Status, err)
+		}
+	}
+	if service.previewAlreadyInspected(t.Context(), "draft_job_dedup", nil) {
+		t.Fatal("缺少预览 ID 时不应判定为已质检")
+	}
+	if !service.previewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_done"}) {
+		t.Fatal("应兼容 preview_id 形式的终态结果")
+	}
+	if service.previewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"artifact_id": "preview_other"}) {
+		t.Fatal("不同预览不应被误去重")
+	}
+	cancelledContext, cancel := context.WithCancel(t.Context())
+	cancel()
+	if service.previewAlreadyInspected(cancelledContext, "draft_job_dedup", map[string]any{"artifact_id": "preview_done"}) {
+		t.Fatal("读取历史失败时应保守地继续后台回调")
+	}
+	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_job_dedup", 20)
+	if err != nil || len(messages) != 5 {
+		t.Fatalf("去重后不应生成重复回复: messages=%#v err=%v", messages, err)
 	}
 }
 
@@ -212,7 +789,7 @@ func TestJobObservationBridgeWakesAgentForWaitedTerminalJob(t *testing.T) {
 		select {
 		case event := <-stream:
 			if event["type"] == "message_completed" {
-				if event["content"] != "后台任务已完成，我已读取结果并继续推进。" {
+				if event["content"] != "render_preview 任务 job_render 已完成。" {
 					t.Fatalf("event=%#v", event)
 				}
 				if event["kind"] != "observation" {
@@ -317,11 +894,23 @@ func TestUnderstandingRepeatedRunsAllocateNewSummaryVersion(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_understand_repeat")
-	for _, focus := range []string{"首次", "更深入"} {
-		if _, err := service.ExecuteTool(ctx, "understand.materials", rushestools.UnderstandInput{
+	cacheHits := 0
+	for _, focus := range []string{"首次", "更深入", "更深入"} {
+		output, err := service.ExecuteTool(ctx, "understand.materials", rushestools.UnderstandInput{
 			AssetIDs: []string{"asset_repeat"}, Focus: focus,
-		}); err != nil {
+		})
+		if err != nil {
 			t.Fatalf("focus=%s err=%v", focus, err)
+		}
+		understood := output.(rushestools.UnderstandResult)
+		if len(understood.Summaries) != 1 || understood.Summaries[0].AssetID != "asset_repeat" ||
+			understood.Summaries[0].Overall == "" || len(understood.Summaries[0].Evidence) != 1 ||
+			understood.Summaries[0].Evidence[0].SourceEndFrame <=
+				understood.Summaries[0].Evidence[0].SourceStartFrame {
+			t.Fatalf("understand 同回合缺少摘要或时间证据: %#v", understood)
+		}
+		if len(understood.CacheHitAssetIDs) > 0 {
+			cacheHits++
 		}
 	}
 	rows, err := database.Read().QueryContext(t.Context(), `
@@ -340,6 +929,9 @@ func TestUnderstandingRepeatedRunsAllocateNewSummaryVersion(t *testing.T) {
 	}
 	if len(versions) != 2 || versions[0] != 1 || versions[1] != 2 {
 		t.Fatalf("versions=%v", versions)
+	}
+	if cacheHits != 1 {
+		t.Fatalf("cache hits=%d want=1", cacheHits)
 	}
 }
 
@@ -381,8 +973,41 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 	}}); err != nil {
 		t.Fatal(err)
 	}
+	batchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []map[string]any{
+		{"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -3.0},
+		{"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 1.25},
+	}})
+	if err != nil || batchRaw.(rushestools.ToolResult).Status != "succeeded" {
+		t.Fatalf("batch=%#v err=%v", batchRaw, err)
+	}
+	failedBatchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []map[string]any{{
+		"kind": "insert_clip", "track_id": "sfx", "timeline_start_frame": 1000,
+		"asset_id": "missing", "asset_kind": "audio", "source_start_frame": 0, "source_end_frame": 30,
+	}}})
+	if err != nil || failedBatchRaw.(rushestools.ToolResult).Status != "failed" {
+		t.Fatalf("failed batch=%#v err=%v", failedBatchRaw, err)
+	}
+	invalidBatchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []map[string]any{
+		{
+			"kind": "insert_clip", "track_id": "sfx", "timeline_start_frame": 20,
+			"asset_id": "sfx", "asset_kind": "audio", "source_start_frame": 0, "source_end_frame": 20,
+		},
+		{
+			"kind": "trim_clip", "timeline_clip_id": "clip_v1_001",
+			"source_start_frame": 0, "source_end_frame": 20,
+		},
+	}})
+	if err != nil || invalidBatchRaw.(rushestools.ToolResult).Status != "failed" {
+		t.Fatalf("invalid batch=%#v err=%v", invalidBatchRaw, err)
+	}
+	latestAfterInvalid, err := timeline.Latest(t.Context(), database, "draft_timeline_tools")
+	if err != nil || latestAfterInvalid.Version != 3 {
+		t.Fatalf("invalid batch must not persist: latest=%#v err=%v", latestAfterInvalid, err)
+	}
 	inspected, err := service.ExecuteTool(ctx, "timeline.inspect", rushestools.TimelineInspectInput{})
-	if err != nil || inspected.(rushestools.ToolResult).Observation == "" {
+	inspectResult := inspected.(rushestools.ToolResult)
+	tracks, tracksOK := inspectResult.Data["tracks"].([]map[string]any)
+	if err != nil || inspectResult.Observation == "" || !tracksOK || len(tracks) != 7 {
 		t.Fatalf("inspect=%#v err=%v", inspected, err)
 	}
 	firstRenderRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
@@ -452,15 +1077,10 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 		SELECT COUNT(*) FROM jobs WHERE kind='render_preview'`).Scan(&retryJobs); err != nil || retryJobs != 3 {
 		t.Fatalf("render retry jobs=%d err=%v", retryJobs, err)
 	}
-	if _, err := service.ExecuteTool(ctx, "timeline.restore_version", rushestools.TimelineRestoreInput{SourceVersion: 1}); err != nil {
-		t.Fatal(err)
-	}
-	draft, _ = storage.GetDraft(t.Context(), database.Read(), "draft_timeline_tools")
-	if draft.TimelineCurrentVersion == nil || *draft.TimelineCurrentVersion != 1 || draft.TimelineValidated {
-		t.Fatalf("draft after restore=%#v", draft)
-	}
-	if _, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{}); err == nil {
-		t.Fatal("未验证时间线不应进入渲染队列")
+	var timelineRows int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM timeline_versions WHERE draft_id='draft_timeline_tools'`).Scan(&timelineRows); err != nil || timelineRows != 1 {
+		t.Fatalf("timeline rows=%d err=%v", timelineRows, err)
 	}
 }
 
@@ -483,6 +1103,13 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 			"probe": map[string]any{"duration_sec": 1}, "ingest_status": "ready",
 		}},
 		{Type: "AssetLinked", DraftID: "draft_full", Payload: map[string]any{"asset_id": "asset_full"}},
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset_audio_only", "job_id": "job_audio_only", "storage_mode": "reference",
+			"reference_path": "/tmp/not-used.mp3", "kind": "audio", "source": "local_path",
+			"filename": "not-used.mp3", "hash": "audio", "size": 1,
+			"probe": map[string]any{"duration_sec": 1}, "ingest_status": "ready",
+		}},
+		{Type: "AssetLinked", DraftID: "draft_full", Payload: map[string]any{"asset_id": "asset_audio_only"}},
 	}, reducer.Options{Actor: contracts.ActorUser})
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("assets status=%s err=%v", result.Status, err)
@@ -497,13 +1124,17 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	if err != nil || content == "" {
 		t.Fatalf("content=%q err=%v", content, err)
 	}
+	document, err := timeline.Latest(t.Context(), database, "draft_full")
+	if err != nil || len(document.Tracks[0].Clips) != 1 || document.Tracks[0].Clips[0].AssetKind != "video" {
+		t.Fatalf("fallback 主视觉应过滤纯音频: document=%#v err=%v", document, err)
+	}
 	if service.Tools() == nil {
 		t.Fatal("registry missing")
 	}
 	if _, err := service.ExecuteTool(ctx, "timeline.validate", rushestools.TimelineValidateInput{}); err != nil {
 		t.Fatal(err)
 	}
-	if inspected, err := service.ExecuteTool(ctx, "timeline.inspect", rushestools.TimelineInspectInput{Version: 1}); err != nil || inspected.(rushestools.ToolResult).Status != "succeeded" {
+	if inspected, err := service.ExecuteTool(ctx, "timeline.inspect", rushestools.TimelineInspectInput{}); err != nil || inspected.(rushestools.ToolResult).Status != "succeeded" {
 		t.Fatalf("inspect=%#v err=%v", inspected, err)
 	}
 	status, err := service.ExecuteTool(ctx, "render.status", rushestools.RenderStatusInput{})
@@ -622,8 +1253,8 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 		_ = interfaceString(value)
 	}
 	for _, name := range []string{
-		"asset.list_assets", "understand.materials", "timeline.compose_initial", "timeline.apply_patch",
-		"timeline.validate", "timeline.inspect", "timeline.restore_version", "render.preview",
+		"asset.list_assets", "understand.materials", "media.search_shots", "audio.analyze_beats", "audio.analyze_speech_pauses", "timeline.compose_initial", "timeline.apply_patch", "timeline.apply_patches", "timeline.recut_to_beats",
+		"timeline.validate", "timeline.inspect", "render.preview",
 		"render.final_mp4", "render.status", "render.inspect_preview",
 	} {
 		if _, err := replayInput(name, map[string]any{}); err != nil && name != "understand.materials" {
@@ -634,8 +1265,8 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 		t.Fatal("unknown replay should fail")
 	}
 	for _, value := range []any{
-		&rushestools.AssetListInput{}, &rushestools.UnderstandInput{}, &rushestools.ComposeInitialInput{},
-		&rushestools.TimelinePatchInput{}, &rushestools.TimelineInspectInput{}, &rushestools.TimelineRestoreInput{},
+		&rushestools.AssetListInput{}, &rushestools.UnderstandInput{}, &rushestools.ShotSearchInput{}, &rushestools.AudioBeatAnalysisInput{}, &rushestools.SpeechPauseAnalysisInput{}, &rushestools.ComposeInitialInput{},
+		&rushestools.TimelinePatchInput{}, &rushestools.TimelinePatchBatchInput{}, &rushestools.TimelineBeatRecutInput{}, &rushestools.TimelineInspectInput{},
 		&rushestools.RenderInspectInput{}, "unchanged",
 	} {
 		_ = reflectValue(value)
@@ -659,16 +1290,33 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_failures")
 	for name, input := range map[string]any{
-		"understand.materials":     rushestools.UnderstandInput{},
-		"timeline.apply_patch":     rushestools.TimelinePatchInput{},
-		"timeline.validate":        rushestools.TimelineValidateInput{},
-		"timeline.inspect":         rushestools.TimelineInspectInput{},
-		"timeline.restore_version": rushestools.TimelineRestoreInput{SourceVersion: 99},
-		"render.preview":           rushestools.RenderPreviewInput{},
-		"render.final_mp4":         rushestools.RenderFinalInput{},
-		"decision.answer":          rushestools.DecisionAnswerInput{DecisionID: "missing"},
+		"understand.materials":        rushestools.UnderstandInput{},
+		"audio.analyze_beats":         rushestools.AudioBeatAnalysisInput{},
+		"audio.analyze_speech_pauses": rushestools.SpeechPauseAnalysisInput{},
+		"timeline.apply_patch":        rushestools.TimelinePatchInput{},
+		"timeline.apply_patches":      rushestools.TimelinePatchBatchInput{},
+		"timeline.recut_to_beats":     rushestools.TimelineBeatRecutInput{},
+		"timeline.validate":           rushestools.TimelineValidateInput{},
+		"timeline.inspect":            rushestools.TimelineInspectInput{},
+		"render.preview":              rushestools.RenderPreviewInput{},
+		"render.final_mp4":            rushestools.RenderFinalInput{},
+		"decision.answer":             rushestools.DecisionAnswerInput{DecisionID: "missing"},
 	} {
-		if _, err := service.ExecuteTool(ctx, name, input); err == nil {
+		output, err := service.ExecuteTool(ctx, name, input)
+		if name == "timeline.inspect" {
+			result := output.(rushestools.ToolResult)
+			if err != nil || result.Status != "succeeded" || result.Data["timeline_exists"] != false {
+				t.Fatalf("%s output=%#v err=%v", name, output, err)
+			}
+			continue
+		}
+		if name == "timeline.recut_to_beats" {
+			if err != nil || output.(rushestools.ToolResult).Status != "failed" {
+				t.Fatalf("%s output=%#v err=%v", name, output, err)
+			}
+			continue
+		}
+		if err == nil {
 			t.Fatalf("%s should fail", name)
 		}
 	}
@@ -677,7 +1325,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	invalid.Tracks[0].Clips = []timeline.Clip{{
 		TimelineClipID: "bad", TrackID: "visual_base", AssetID: "a", TimelineEndFrame: 1, SourceEndFrame: 1,
 	}}
-	result, err := service.persistTimeline(ctx, "draft_failures", invalid, nil, "invalid")
+	result, err := service.persistTimeline(ctx, "draft_failures", invalid, "invalid")
 	if err != nil || result.Status != "validation_failed" {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
@@ -710,9 +1358,700 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	if err != nil || len(filtered.Assets) != 1 || filtered.Assets[0].AssetID != "c" {
 		t.Fatalf("filtered=%#v err=%v", filtered, err)
 	}
+	audio, err := service.toolListAssets(ctx, "draft_assets_filter", rushestools.AssetListInput{Kind: "audio"})
+	if err != nil || len(audio.Assets) != 1 || audio.Assets[0].SuggestedRole != "sfx" {
+		t.Fatalf("audio role=%#v err=%v", audio, err)
+	}
+	objectiveContext, err := service.draftObjectiveContext(t.Context(), "draft_assets_filter")
+	if err != nil || !strings.Contains(objectiveContext, `"audio":1`) ||
+		!strings.Contains(objectiveContext, `"suggested_role":"sfx"`) {
+		t.Fatalf("objective context=%q err=%v", objectiveContext, err)
+	}
+	validObjectiveTimeline := timeline.Empty("draft_assets_filter", 1)
+	validObjectiveTimeline.Tracks[0].Clips = []timeline.Clip{{
+		TimelineClipID: "objective_clip", TrackID: "visual_base", AssetID: "a", AssetKind: "video",
+		Role: "video", TimelineEndFrame: 1, SourceEndFrame: 1, PlaybackRate: 1,
+	}}
+	timelineResult, err := service.persistTimeline(
+		t.Context(), "draft_assets_filter", validObjectiveTimeline, "objective_valid",
+	)
+	if err != nil || timelineResult.Status != "succeeded" {
+		t.Fatalf("valid objective timeline=%#v err=%v", timelineResult, err)
+	}
+	objectiveContext, err = service.draftObjectiveContext(t.Context(), "draft_assets_filter")
+	if err != nil || !strings.Contains(objectiveContext, `"validated":true`) {
+		t.Fatalf("validated objective context=%q err=%v", objectiveContext, err)
+	}
+	invalidObjectiveTimeline := validObjectiveTimeline
+	invalidObjectiveTimeline.TimelineID = "draft_assets_filter:v2"
+	invalidObjectiveTimeline.Version = 2
+	invalidObjectiveTimeline.FPS = 0
+	timelineResult, err = service.persistTimeline(
+		t.Context(), "draft_assets_filter", invalidObjectiveTimeline, "objective_invalid",
+	)
+	if err != nil || timelineResult.Status != "validation_failed" {
+		t.Fatalf("invalid objective timeline=%#v err=%v", timelineResult, err)
+	}
+	objectiveContext, err = service.draftObjectiveContext(t.Context(), "draft_assets_filter")
+	if err != nil || !strings.Contains(objectiveContext, `"validated":false`) {
+		t.Fatalf("unvalidated objective context=%q err=%v", objectiveContext, err)
+	}
 }
 
-func TestModelFailureEmitsTurnError(t *testing.T) {
+func TestAudioBeatAnalysisToolReturnsIntegerFrameGrid(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg 未安装")
+	}
+	if _, err := exec.LookPath("aubiotrack"); err != nil {
+		t.Skip("aubio 未安装")
+	}
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_beats")
+	source := filepath.Join(database.Paths.Temporary, "metronome.wav")
+	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y", "-f", "lavfi", "-i",
+		`aevalsrc=if(lt(mod(t\,0.5)\,0.03)\,0.9*sin(2*PI*1000*t)\,0):s=44100:d=5`,
+		"-c:a", "pcm_s16le", source); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "beat_audio", "job_id": "job_beat_audio", "storage_mode": "reference",
+			"reference_path": source, "kind": "audio", "source": "local_path", "filename": "metronome.wav",
+			"hash": "beat_audio_hash", "size": info.Size(), "ingest_status": "ready", "usable": true,
+			"probe": map[string]any{"duration_sec": 5, "has_audio": true},
+		}},
+		{Type: "AssetLinked", DraftID: "draft_beats", Payload: map[string]any{"asset_id": "beat_audio"}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("asset status=%s err=%v", result.Status, err)
+	}
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(t.Context(), "draft_beats")
+	output, err := service.ExecuteTool(ctx, "audio.analyze_beats", rushestools.AudioBeatAnalysisInput{
+		AssetID: "beat_audio", MaxBeats: 32, WaveformPoints: 32,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beats := output.(rushestools.AudioBeatAnalysisResult)
+	if beats.BPM < 110 || beats.BPM > 130 || len(beats.BeatFrames) < 4 ||
+		len(beats.EveryTwoBeatFrames) < 2 || beats.TimelineFPS != 30 ||
+		beats.Waveform.SampleIntervalFrames <= 0 || len(beats.Waveform.Samples) == 0 ||
+		len(beats.Waveform.SampleFrames) != len(beats.Waveform.Samples) ||
+		len(beats.Waveform.Samples) > 32 || beats.Waveform.Encoding != media.WaveformEncoding {
+		t.Fatalf("beats=%#v", beats)
+	}
+}
+
+func TestSpeechPauseAnalysisSupportsVideoAudioAndTimelineMapping(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg 未安装")
+	}
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_speech_pauses")
+	source := filepath.Join(database.Paths.Temporary, "talking-head.mp4")
+	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y",
+		"-f", "lavfi", "-i", "color=c=black:s=160x90:r=30:d=3",
+		"-f", "lavfi", "-i", `aevalsrc=if(between(t\,1\,2)\,0\,0.7*sin(2*PI*440*t)):s=44100:d=3`,
+		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", source,
+	); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "talk_video", "job_id": "job_talk_video", "storage_mode": "reference",
+			"reference_path": source, "kind": "video", "source": "local_path", "filename": "talking-head.mp4",
+			"hash": "talk_video_hash", "size": info.Size(), "ingest_status": "ready", "usable": true,
+			"probe": map[string]any{"duration_sec": 3, "has_audio": true, "fps": 30},
+		}},
+		{Type: "AssetLinked", DraftID: "draft_speech_pauses", Payload: map[string]any{"asset_id": "talk_video"}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("asset status=%s err=%v", result.Status, err)
+	}
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(t.Context(), "draft_speech_pauses")
+	if _, err := service.ExecuteTool(ctx, "timeline.compose_initial", rushestools.ComposeInitialInput{
+		Clips: []rushestools.ComposeClip{{
+			AssetID: "talk_video", SourceStartFrame: 0, SourceEndFrame: 90, Role: "a_roll",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	output, err := service.ExecuteTool(ctx, "audio.analyze_speech_pauses", rushestools.SpeechPauseAnalysisInput{
+		TimelineClipID: "clip_v1_001", ThresholdDB: -35, MinPauseFrames: 6, KeepEdgeFrames: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis := output.(rushestools.SpeechPauseAnalysisResult)
+	if analysis.AssetID != "talk_video" || analysis.TimelineFPS != 30 || len(analysis.Pauses) != 1 {
+		t.Fatalf("analysis=%#v", analysis)
+	}
+	pause := analysis.Pauses[0]
+	if pause.TimelineStartFrame == nil || pause.TimelineEndFrame == nil ||
+		*pause.TimelineStartFrame < 25 || *pause.TimelineEndFrame > 65 ||
+		*pause.TimelineEndFrame <= *pause.TimelineStartFrame {
+		t.Fatalf("pause=%#v", pause)
+	}
+}
+
+func TestBeatRecutToolAcceptsModelChosenSFXFrameAndKeepsSeparateTrack(t *testing.T) {
+	fakeBin := t.TempDir()
+	fakeAubio := filepath.Join(fakeBin, "aubiotrack")
+	if err := os.WriteFile(fakeAubio, []byte("#!/bin/sh\nprintf '1.000000\\n1.333333\\n1.666667\\n2.000000\\n2.333333\\n2.666667\\n3.000000\\n3.333333\\n3.666667\\n4.000000\\n4.333333\\n4.666667\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_beat_recut")
+	source := filepath.Join(database.Paths.Temporary, "fake-audio.wav")
+	if err := os.WriteFile(source, []byte("fake audio source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "bgm_audio", "job_id": "job_bgm", "storage_mode": "reference",
+			"reference_path": source, "kind": "audio", "source": "local_path", "filename": "bgm.wav",
+			"hash": "bgm_hash", "size": 17, "ingest_status": "ready", "usable": true,
+			"probe": map[string]any{"duration_sec": 4.0, "has_audio": true},
+		}},
+		{Type: "AssetLinked", DraftID: "draft_beat_recut", Payload: map[string]any{"asset_id": "bgm_audio", "linked_at": now}},
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "sfx_audio", "job_id": "job_sfx", "storage_mode": "reference",
+			"reference_path": source, "kind": "audio", "source": "local_path", "filename": "fire.wav",
+			"hash": "sfx_hash", "size": 17, "ingest_status": "ready", "usable": true,
+			"probe": map[string]any{"duration_sec": 1.0, "has_audio": true},
+		}},
+		{Type: "AssetLinked", DraftID: "draft_beat_recut", Payload: map[string]any{"asset_id": "sfx_audio", "linked_at": now}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("assets status=%s err=%v", result.Status, err)
+	}
+
+	document, err := timeline.ComposeInitial("draft_beat_recut", 1, []timeline.Selection{
+		{AssetID: "video_1", AssetKind: "video", SourceEndFrame: 50},
+		{AssetID: "video_2", AssetKind: "video", SourceEndFrame: 50},
+		{AssetID: "video_3", AssetKind: "video", SourceEndFrame: 50},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Tracks[4].Clips = []timeline.Clip{{
+		TimelineClipID: "bgm", TrackID: "bgm", AssetID: "bgm_audio", AssetKind: "audio", Role: "bgm",
+		TimelineStartFrame: 0, TimelineEndFrame: 120, SourceEndFrame: 120, PlaybackRate: 1,
+	}}
+	document.Tracks[6].Clips = []timeline.Clip{{
+		TimelineClipID: "old_sfx", TrackID: "sfx", AssetID: "sfx_audio", AssetKind: "audio", Role: "sfx",
+		TimelineStartFrame: 120, TimelineEndFrame: 150, SourceEndFrame: 30, PlaybackRate: 1,
+	}}
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	if persisted, err := service.persistTimeline(t.Context(), "draft_beat_recut", document, "fixture"); err != nil || persisted.Status != "succeeded" {
+		t.Fatalf("persisted=%#v err=%v", persisted, err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), "draft_beat_recut")
+	expectFailed := func(name string, input rushestools.TimelineBeatRecutInput) {
+		t.Helper()
+		output, callErr := service.ExecuteTool(ctx, "timeline.recut_to_beats", input)
+		if callErr != nil || output.(rushestools.ToolResult).Status != "failed" {
+			t.Fatalf("%s output=%#v err=%v", name, output, callErr)
+		}
+	}
+	expectFailed("missing bgm", rushestools.TimelineBeatRecutInput{
+		BGMTimelineClipID: "missing", CutFrames: []int{30, 70, 110},
+	})
+	expectFailed("wrong cut count", rushestools.TimelineBeatRecutInput{
+		BGMTimelineClipID: "bgm", CutFrames: []int{30},
+	})
+	expectFailed("non increasing cuts", rushestools.TimelineBeatRecutInput{
+		BGMTimelineClipID: "bgm", CutFrames: []int{30, 30, 110},
+	})
+	expectFailed("non beat cut", rushestools.TimelineBeatRecutInput{
+		BGMTimelineClipID: "bgm", CutFrames: []int{31, 70, 110},
+	})
+	expectFailed("clip too short", rushestools.TimelineBeatRecutInput{
+		BGMTimelineClipID: "bgm", CutFrames: []int{70, 110, 150},
+	})
+	expectFailed("missing sfx start", rushestools.TimelineBeatRecutInput{
+		BGMTimelineClipID: "bgm", CutFrames: []int{30, 70, 110},
+		SFX: &rushestools.BeatRecutSFXInput{AssetID: "sfx_audio", DurationFrames: 10},
+	})
+	nonBeatStart, validStart := 40, 70
+	expectFailed("sfx outside timeline", rushestools.TimelineBeatRecutInput{
+		BGMTimelineClipID: "bgm", CutFrames: []int{30, 70, 110},
+		SFX: &rushestools.BeatRecutSFXInput{AssetID: "sfx_audio", StartFrame: &validStart, DurationFrames: 50},
+	})
+	expectFailed("missing sfx asset", rushestools.TimelineBeatRecutInput{
+		BGMTimelineClipID: "bgm", CutFrames: []int{30, 70, 110},
+		SFX: &rushestools.BeatRecutSFXInput{AssetID: "missing", StartFrame: &validStart, DurationFrames: 10},
+	})
+	loudGain := 13.0
+	expectFailed("invalid sfx gain", rushestools.TimelineBeatRecutInput{
+		BGMTimelineClipID: "bgm", CutFrames: []int{30, 70, 110},
+		SFX: &rushestools.BeatRecutSFXInput{AssetID: "sfx_audio", StartFrame: &validStart, DurationFrames: 10, GainDB: &loudGain},
+	})
+	output, err := service.ExecuteTool(ctx, "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{
+		BGMTimelineClipID: "bgm",
+		CutFrames:         []int{30, 70, 110},
+		SFX: &rushestools.BeatRecutSFXInput{
+			AssetID: "sfx_audio", StartFrame: &nonBeatStart, DurationFrames: 10,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolResult := output.(rushestools.ToolResult)
+	if toolResult.Status != "succeeded" || toolResult.Data["duration_frames"] != 110 {
+		t.Fatalf("result=%#v", toolResult)
+	}
+	latest, err := timeline.Latest(t.Context(), database, "draft_beat_recut")
+	if err != nil || latest.Version != 2 || latest.DurationFrames != 110 || !timeline.Validate(latest).Valid {
+		t.Fatalf("latest=%#v err=%v", latest, err)
+	}
+	if got := []int{
+		latest.Tracks[0].Clips[0].TimelineEndFrame,
+		latest.Tracks[0].Clips[1].TimelineEndFrame,
+		latest.Tracks[0].Clips[2].TimelineEndFrame,
+	}; !reflect.DeepEqual(got, []int{30, 70, 110}) {
+		t.Fatalf("cuts=%v", got)
+	}
+	if bgm := latest.Tracks[4].Clips[0]; bgm.TimelineStartFrame != 0 || bgm.TimelineEndFrame != 110 {
+		t.Fatalf("bgm=%#v", bgm)
+	}
+	if len(latest.Tracks[6].Clips) != 1 || latest.Tracks[6].Clips[0].TimelineStartFrame != 40 ||
+		latest.Tracks[6].Clips[0].TimelineEndFrame != 50 || latest.Tracks[6].Clips[0].GainDB != -12 {
+		t.Fatalf("sfx=%#v", latest.Tracks[6].Clips)
+	}
+	if warnings := audioLayoutData(latest)["warnings"].([]string); len(warnings) != 0 {
+		t.Fatalf("warnings=%v", warnings)
+	}
+}
+
+func TestBeatRecutToolRebuildsFullLengthMixFromSourceAssets(t *testing.T) {
+	fakeBin := t.TempDir()
+	fakeAubio := filepath.Join(fakeBin, "aubiotrack")
+	if err := os.WriteFile(fakeAubio, []byte("#!/bin/sh\nprintf '1.000000\\n1.333333\\n1.666667\\n2.000000\\n2.333333\\n2.666667\\n3.000000\\n3.333333\\n3.666667\\n4.000000\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeOnset := filepath.Join(fakeBin, "aubioonset")
+	if err := os.WriteFile(fakeOnset, []byte("#!/bin/sh\nprintf '1.000000\\n2.333333\\n3.666667\\n'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_full_beat_mix")
+	source := filepath.Join(database.Paths.Temporary, "beat-mix-source.wav")
+	if err := os.WriteFile(source, []byte("fake source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	events := []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "mix_bgm", "job_id": "job_mix_bgm", "storage_mode": "reference",
+			"reference_path": source, "kind": "audio", "source": "local_path", "filename": "background-music.wav",
+			"hash": "mix_bgm_hash", "size": 11, "ingest_status": "ready", "usable": true,
+			"probe": map[string]any{"duration_sec": 4.0, "has_audio": true},
+		}},
+		{Type: "AssetLinked", DraftID: "draft_full_beat_mix", Payload: map[string]any{"asset_id": "mix_bgm", "linked_at": now}},
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "mix_sfx", "job_id": "job_mix_sfx", "storage_mode": "reference",
+			"reference_path": source, "kind": "audio", "source": "local_path", "filename": "fire-sfx.wav",
+			"hash": "mix_sfx_hash", "size": 11, "ingest_status": "ready", "usable": true,
+			"probe": map[string]any{"duration_sec": 1.0, "has_audio": true},
+		}},
+		{Type: "AssetLinked", DraftID: "draft_full_beat_mix", Payload: map[string]any{"asset_id": "mix_sfx", "linked_at": now}},
+	}
+	for index := 1; index <= 4; index++ {
+		assetID := fmt.Sprintf("mix_video_%d", index)
+		events = append(events,
+			contracts.Event{Type: "AssetImported", Payload: map[string]any{
+				"asset_id": assetID, "job_id": "job_" + assetID, "storage_mode": "reference",
+				"reference_path": source, "kind": "video", "source": "local_path",
+				"filename": assetID + ".mov", "hash": assetID + "_hash", "size": 11,
+				"ingest_status": "ready", "usable": true,
+				"probe": map[string]any{"duration_sec": 10.0, "has_audio": true},
+			}},
+			contracts.Event{Type: "AssetLinked", DraftID: "draft_full_beat_mix", Payload: map[string]any{
+				"asset_id": assetID, "linked_at": now,
+			}},
+		)
+	}
+	for _, fixture := range []struct {
+		id          string
+		kind        string
+		filename    string
+		durationSec float64
+	}{
+		{id: "mix_short", kind: "video", filename: "short.mov", durationSec: 0.5},
+		{id: "mix_zero_video", kind: "video", filename: "zero.mov", durationSec: 0},
+	} {
+		events = append(events,
+			contracts.Event{Type: "AssetImported", Payload: map[string]any{
+				"asset_id": fixture.id, "job_id": "job_" + fixture.id, "storage_mode": "reference",
+				"reference_path": source, "kind": fixture.kind, "source": "local_path",
+				"filename": fixture.filename, "hash": fixture.id + "_hash", "size": 11,
+				"ingest_status": "ready", "usable": true,
+				"probe": map[string]any{"duration_sec": fixture.durationSec, "has_audio": fixture.kind == "audio"},
+			}},
+			contracts.Event{Type: "AssetLinked", DraftID: "draft_full_beat_mix", Payload: map[string]any{
+				"asset_id": fixture.id, "linked_at": now,
+			}},
+		)
+	}
+	result, err := reducer.Apply(t.Context(), database, events, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("assets status=%s err=%v", result.Status, err)
+	}
+	understandingResult, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{MaterialSummaries: []reducer.MaterialSummaryRow{{
+			ID: "summary_mix_video_1", AssetID: "mix_video_1", Status: "ready",
+			Summary: map[string]any{
+				"asset_id": "mix_video_1", "version": 2,
+				"segments": []map[string]any{{
+					"source_start_frame": 120, "source_end_frame": 220,
+					"quality": "usable", "description": "角色抬手并转身，适合作为动作切点。",
+				}},
+			},
+		}}},
+	})
+	if err != nil || understandingResult.Status != reducer.StatusApplied {
+		t.Fatalf("understanding status=%s err=%v", understandingResult.Status, err)
+	}
+
+	// 真实故障的起点：草稿已有素材但还没有时间线。高层卡点工具必须直接
+	// 原子建片，不能被迫先走 compose_initial 再手工补 BGM/SFX。
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	ctx := rushestools.WithDraftID(t.Context(), "draft_full_beat_mix")
+	nonBeatSFXStart := 40
+	output, err := service.ExecuteTool(ctx, "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", CoverEntireBGM: true, UseAllVideoAssets: true,
+		VideoAssetIDs: []string{"mix_video_1", "mix_video_2", "mix_video_3", "mix_video_4"},
+		SFX: &rushestools.BeatRecutSFXInput{
+			AssetID: "mix_sfx", StartFrame: &nonBeatSFXStart, DurationFrames: 10,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolResult := output.(rushestools.ToolResult)
+	if toolResult.Status != "succeeded" || toolResult.Data["duration_frames"] != 120 ||
+		toolResult.Data["sfx_start_frame"] != 40 ||
+		toolResult.Data["used_all_video_assets"] != true {
+		t.Fatalf("result=%#v", toolResult)
+	}
+	expectBeatMixFailed := func(name string, input rushestools.TimelineBeatRecutInput, want string) {
+		t.Helper()
+		failedOutput, callErr := service.ExecuteTool(ctx, "timeline.recut_to_beats", input)
+		if callErr != nil {
+			t.Fatalf("%s err=%v", name, callErr)
+		}
+		failedResult := failedOutput.(rushestools.ToolResult)
+		if failedResult.Status != "failed" || !strings.Contains(failedResult.Observation, want) {
+			t.Fatalf("%s result=%#v", name, failedResult)
+		}
+	}
+	expectBeatMixFailed("unknown bgm", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "missing", TargetDurationFrames: 120,
+	}, "bgm_asset_id")
+	expectBeatMixFailed("negative target", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: -1,
+	}, "必须为正数")
+	expectBeatMixFailed("target beyond bgm", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 121,
+	}, "超过 BGM")
+	expectBeatMixFailed("infer unique bgm", rushestools.TimelineBeatRecutInput{
+		CoverEntireBGM: true, VideoAssetIDs: []string{"missing"},
+	}, "video_asset_ids")
+	bgmClipID, _ := toolResult.Data["bgm_timeline_clip_id"].(string)
+	expectBeatMixFailed("resolve bgm from current clip", rushestools.TimelineBeatRecutInput{
+		BGMTimelineClipID: bgmClipID, TargetDurationFrames: 120,
+		VideoAssetIDs: []string{"missing"},
+	}, "video_asset_ids")
+	expectBeatMixFailed("reject non video", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
+		VideoAssetIDs: []string{"mix_sfx"},
+	}, "video_asset_ids")
+	expectBeatMixFailed("zero duration video", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
+		VideoAssetIDs: []string{"mix_zero_video"},
+	}, "没有可用于")
+	expectBeatMixFailed("video too short", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
+		VideoAssetIDs: []string{"mix_short"},
+	}, "没有足够长")
+	expectBeatMixFailed("missing sfx", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
+		VideoAssetIDs: []string{"mix_video_1"},
+		SFX:           &rushestools.BeatRecutSFXInput{AssetID: "missing", DurationFrames: 10},
+	}, "SFX 素材")
+	expectBeatMixFailed("sfx duration", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
+		VideoAssetIDs: []string{"mix_video_1"},
+		SFX:           &rushestools.BeatRecutSFXInput{AssetID: "mix_sfx", DurationFrames: 0},
+	}, "duration_frames")
+	expectBeatMixFailed("sfx source too short", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
+		VideoAssetIDs: []string{"mix_video_1"},
+		SFX:           &rushestools.BeatRecutSFXInput{AssetID: "mix_sfx", DurationFrames: 31},
+	}, "超过素材时长")
+	expectBeatMixFailed("missing sfx start", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 20,
+		VideoAssetIDs: []string{"mix_video_1"},
+		SFX:           &rushestools.BeatRecutSFXInput{AssetID: "mix_sfx", DurationFrames: 10},
+	}, "start_frame 必须显式提供")
+	validStart, loudGain := 70, 13.0
+	expectBeatMixFailed("invalid sfx gain", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
+		VideoAssetIDs: []string{"mix_video_1"},
+		SFX: &rushestools.BeatRecutSFXInput{
+			AssetID: "mix_sfx", StartFrame: &validStart, DurationFrames: 10, GainDB: &loudGain,
+		},
+	}, "gain_db")
+	expectBeatMixFailed("deduplicate video ids", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 20,
+		VideoAssetIDs: []string{"mix_video_1", "mix_video_1"},
+		SFX:           &rushestools.BeatRecutSFXInput{AssetID: "missing", DurationFrames: 10},
+	}, "SFX 素材")
+	expectBeatMixFailed("use all requires one cut per video", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 120, UseAllVideoAssets: true,
+		VideoAssetIDs: []string{"mix_video_1", "mix_video_2", "mix_video_3"},
+		CutFrames:     []int{30, 120},
+	}, "cut_frames 数量")
+
+	additional, err := reducer.Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "mix_zero_bgm", "job_id": "job_mix_zero_bgm", "storage_mode": "reference",
+			"reference_path": source, "kind": "audio", "source": "local_path", "filename": "second-music.wav",
+			"hash": "mix_zero_bgm_hash", "size": 11, "ingest_status": "ready", "usable": true,
+			"probe": map[string]any{"duration_sec": 0.0, "has_audio": true},
+		}},
+		{Type: "AssetLinked", DraftID: "draft_full_beat_mix", Payload: map[string]any{
+			"asset_id": "mix_zero_bgm", "linked_at": now,
+		}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || additional.Status != reducer.StatusApplied {
+		t.Fatalf("additional assets status=%s err=%v", additional.Status, err)
+	}
+	expectBeatMixFailed("ambiguous inferred bgm", rushestools.TimelineBeatRecutInput{
+		CoverEntireBGM: true,
+	}, "无法唯一确定 BGM")
+	expectBeatMixFailed("bgm without duration", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_zero_bgm", TargetDurationFrames: 20,
+	}, "缺少可用时长")
+
+	latest, err := timeline.Latest(t.Context(), database, "draft_full_beat_mix")
+	if err != nil || latest.DurationFrames != 120 || !timeline.Validate(latest).Valid {
+		t.Fatalf("latest=%#v err=%v", latest, err)
+	}
+	if got := []int{
+		latest.Tracks[0].Clips[0].TimelineEndFrame,
+		latest.Tracks[0].Clips[1].TimelineEndFrame,
+		latest.Tracks[0].Clips[2].TimelineEndFrame,
+		latest.Tracks[0].Clips[3].TimelineEndFrame,
+	}; !reflect.DeepEqual(got, []int{30, 70, 110, 120}) {
+		t.Fatalf("cuts=%v", got)
+	}
+	if len(latest.Tracks[2].Clips) != 0 {
+		t.Fatalf("beat mix should keep source audio out of the default mix: %#v", latest.Tracks[2].Clips)
+	}
+	if latest.Tracks[0].Clips[0].SourceStartFrame != 120 ||
+		toolResult.Data["understanding_source_ranges_used"] != 1 {
+		t.Fatalf("understanding-aware source selection latest=%#v result=%#v", latest.Tracks[0].Clips[0], toolResult)
+	}
+	if len(latest.Tracks[4].Clips) != 1 || latest.Tracks[4].Clips[0].TimelineEndFrame != 120 {
+		t.Fatalf("bgm=%#v", latest.Tracks[4].Clips)
+	} else if effects := latest.Tracks[4].Clips[0].Effects; len(effects) != 1 || effects[0]["kind"] != "beat_grid" {
+		t.Fatalf("bgm beat metadata=%#v", effects)
+	}
+	if len(latest.Tracks[6].Clips) != 1 || latest.Tracks[6].Clips[0].TimelineStartFrame != 40 ||
+		latest.Tracks[6].Clips[0].TimelineEndFrame != 50 || latest.Tracks[6].Clips[0].GainDB != -12 {
+		t.Fatalf("sfx=%#v", latest.Tracks[6].Clips)
+	}
+
+	// 回归真实故障：模型同时传 bgm_asset_id、目标时长和显式 cut_frames 时，
+	// 必须走完整源素材重建，不能误入只会裁短当前 clip 的旧路径。
+	explicitOutput, explicitErr := service.ExecuteTool(ctx, "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 120, CoverEntireBGM: true,
+		UseAllVideoAssets: true,
+		VideoAssetIDs:     []string{"mix_video_1", "mix_video_2", "mix_video_3"},
+		CutFrames:         []int{30, 70, 120},
+	})
+	if explicitErr != nil {
+		t.Fatal(explicitErr)
+	}
+	explicitResult := explicitOutput.(rushestools.ToolResult)
+	if explicitResult.Status != "succeeded" || !reflect.DeepEqual(explicitResult.Data["cut_frames"], []int{30, 70, 120}) {
+		t.Fatalf("explicit cut rebuild=%#v", explicitResult)
+	}
+	explicitLatest, latestErr := timeline.Latest(t.Context(), database, "draft_full_beat_mix")
+	if latestErr != nil || len(explicitLatest.Tracks[0].Clips) != 3 ||
+		explicitLatest.Tracks[0].Clips[2].TimelineEndFrame != 120 {
+		t.Fatalf("explicit latest=%#v err=%v", explicitLatest, latestErr)
+	}
+
+	// 切点可以多于素材数；每个素材至少出现一次，额外片段必须从同一
+	// 素材的其他不重叠源区间取得。
+	multiOutput, multiErr := service.ExecuteTool(ctx, "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 120, UseAllVideoAssets: true,
+		VideoAssetIDs: []string{"mix_video_1", "mix_video_2", "mix_video_3", "mix_video_4"},
+		CutFrames:     []int{30, 50, 70, 90, 120},
+	})
+	if multiErr != nil {
+		t.Fatal(multiErr)
+	}
+	multiResult := multiOutput.(rushestools.ToolResult)
+	if multiResult.Status != "succeeded" || multiResult.Data["used_all_video_assets"] != true {
+		t.Fatalf("multi-source recut=%#v", multiResult)
+	}
+	multiLatest, multiLatestErr := timeline.Latest(t.Context(), database, "draft_full_beat_mix")
+	if multiLatestErr != nil || len(multiLatest.Tracks[0].Clips) != 5 {
+		t.Fatalf("multi latest=%#v err=%v", multiLatest, multiLatestErr)
+	}
+	usedByAsset := map[string][]beatMixSourceRange{}
+	for _, clip := range multiLatest.Tracks[0].Clips {
+		candidate := beatMixSourceRange{StartFrame: clip.SourceStartFrame, EndFrame: clip.SourceEndFrame}
+		if overlapsAny(candidate, usedByAsset[clip.AssetID]) {
+			t.Fatalf("同一素材源区间重叠: asset=%s ranges=%#v candidate=%#v", clip.AssetID, usedByAsset[clip.AssetID], candidate)
+		}
+		usedByAsset[clip.AssetID] = append(usedByAsset[clip.AssetID], candidate)
+	}
+	if len(usedByAsset) != 4 {
+		t.Fatalf("use_all 未覆盖全部素材: %#v", usedByAsset)
+	}
+
+	searchOutput, searchErr := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+		Query: "角色转身 动作切点", AssetIDs: []string{"mix_video_1"}, MinDurationFrames: 30,
+	})
+	if searchErr != nil {
+		t.Fatal(searchErr)
+	}
+	searchResult := searchOutput.(rushestools.ShotSearchResult)
+	if len(searchResult.Shots) != 1 || searchResult.Shots[0].SourceStartFrame != 120 {
+		t.Fatalf("shot search=%#v", searchResult)
+	}
+	shotOutput, shotErr := service.ExecuteTool(ctx, "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{
+		BGMAssetID: "mix_bgm", TargetDurationFrames: 30,
+		VideoAssetIDs: []string{"mix_video_1"}, CutFrames: []int{30},
+		ShotIDs: []string{searchResult.Shots[0].ShotID},
+	})
+	if shotErr != nil || shotOutput.(rushestools.ToolResult).Status != "succeeded" {
+		t.Fatalf("shot recut=%#v err=%v", shotOutput, shotErr)
+	}
+	shotLatest, shotLatestErr := timeline.Latest(t.Context(), database, "draft_full_beat_mix")
+	if shotLatestErr != nil || shotLatest.Tracks[0].Clips[0].SourceStartFrame != 120 {
+		t.Fatalf("shot latest=%#v err=%v", shotLatest, shotLatestErr)
+	}
+}
+
+func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
+	if cuts := chooseBeatMixCuts(nil, nil, 0, 3); cuts != nil {
+		t.Fatalf("invalid cuts=%v", cuts)
+	}
+	if cuts := chooseBeatMixCuts(nil, []int{0, 20, 20, 100}, 20, 1); !reflect.DeepEqual(cuts, []int{20}) {
+		t.Fatalf("single cut=%v", cuts)
+	}
+	cuts := chooseBeatMixCuts([]int{0, 10, 20, 30, 40, 50, 60, 100}, nil, 100, 3)
+	if len(cuts) != 3 || cuts[2] != 100 || cuts[0] >= cuts[1] {
+		t.Fatalf("distributed cuts=%v", cuts)
+	}
+	fallbackCuts := chooseAllBeatMixCuts([]int{10}, []int{10, 20, 30, 40, 50}, 60, 4)
+	if len(fallbackCuts) != 4 || fallbackCuts[3] != 60 {
+		t.Fatalf("full beat fallback cuts=%v", fallbackCuts)
+	}
+	if candidates := beatCandidatesWithin([]int{-1, 0, 10, 10, 20, 30}, 30); !reflect.DeepEqual(candidates, []int{10, 20}) {
+		t.Fatalf("candidates=%v", candidates)
+	}
+	if !containsFrame([]int{10, 20, 30}, 20) || containsFrame([]int{10, 20, 30}, 25) {
+		t.Fatal("containsFrame bounds failed")
+	}
+	if absInt(-4) != 4 || absInt(4) != 4 {
+		t.Fatal("absInt failed")
+	}
+	ranges := []beatMixSourceRange{{StartFrame: 120, EndFrame: 220}}
+	usedRanges := []beatMixSourceRange{{StartFrame: 120, EndFrame: 150}}
+	if start, ok := chooseUnusedBeatMixSourceStart(300, 30, ranges, usedRanges, -1, true); !ok || start != 150 {
+		t.Fatalf("unused semantic gap start=%d ok=%v", start, ok)
+	}
+	if _, ok := chooseUnusedBeatMixSourceStart(300, 120, ranges, nil, 0, true); ok {
+		t.Fatal("strict short semantic range should not fit")
+	}
+	if start, ok := chooseUnusedBeatMixSourceStart(300, 120, ranges, nil, 0, false); !ok || start != 0 {
+		t.Fatalf("full-source fallback start=%d ok=%v", start, ok)
+	}
+	if _, ok := chooseUnusedBeatMixSourceStart(20, 30, nil, nil, 0, false); ok {
+		t.Fatal("short full source should not fit")
+	}
+	coalesced := beatMixRangesFromUnderstanding([]understanding.Segment{
+		{SourceStartFrame: 0, SourceEndFrame: 100, Quality: "usable", BoundaryKind: "video_start"},
+		{SourceStartFrame: 100, SourceEndFrame: 200, Quality: "usable", BoundaryKind: "analysis_window"},
+		{SourceStartFrame: 200, SourceEndFrame: 300, Quality: "usable", BoundaryKind: "analysis_window"},
+		{SourceStartFrame: 300, SourceEndFrame: 400, Quality: "usable", BoundaryKind: "visual_cut"},
+	}, 400)
+	if !sourceRangeContains(coalesced, 0, 250) || sourceRangeContains(coalesced, 200, 350) {
+		t.Fatalf("analysis-window coalescing=%#v", coalesced)
+	}
+	invalidRanges := beatMixRangesFromUnderstanding([]understanding.Segment{
+		{SourceStartFrame: 0, SourceEndFrame: 50, Quality: "unusable", BoundaryKind: "video_start"},
+		{SourceStartFrame: 80, SourceEndFrame: 80, Quality: "usable", BoundaryKind: "analysis_window"},
+	}, 100)
+	if len(invalidRanges) != 0 {
+		t.Fatalf("invalid ranges=%#v", invalidRanges)
+	}
+}
+
+func TestAudioLayoutDataWarnsWhenSFXDoesNotAccentBGM(t *testing.T) {
+	document := timeline.Empty("draft_audio_layout", 1)
+	document.DurationFrames = 300
+	for index := range document.Tracks {
+		switch document.Tracks[index].TrackID {
+		case "bgm":
+			document.Tracks[index].Clips = []timeline.Clip{{
+				TimelineClipID: "bgm_1", TrackID: "bgm", TimelineStartFrame: 0, TimelineEndFrame: 180,
+			}}
+		case "sfx":
+			document.Tracks[index].Clips = []timeline.Clip{{
+				TimelineClipID: "sfx_late", TrackID: "sfx", TimelineStartFrame: 210, TimelineEndFrame: 240,
+			}}
+		}
+	}
+	layout := audioLayoutData(document)
+	warnings := layout["warnings"].([]string)
+	without := layout["sfx_without_bgm"].([]string)
+	if len(warnings) != 2 || len(without) != 1 || without[0] != "sfx_late" {
+		t.Fatalf("layout=%#v", layout)
+	}
+}
+
+func TestModelFailureStillRepliesAndEndsTurn(t *testing.T) {
 	t.Parallel()
 	database := agentTestDatabase(t)
 	createAgentDraft(t, database, "draft_model_error")
@@ -726,14 +2065,144 @@ func TestModelFailureEmitsTurnError(t *testing.T) {
 	defer unsubscribe()
 	service.Queue().EnqueueUserMessage("draft_model_error", "user_error", "fail")
 	service.Queue().JoinDraft("draft_model_error")
+	completed := ""
 	for {
 		select {
 		case event := <-stream:
-			if event["type"] == "turn_error" {
+			switch event["type"] {
+			case "turn_error":
+				t.Fatal("模型失败不应让回合静默终止")
+			case "message_completed":
+				completed, _ = event["content"].(string)
+			case "turn_ended":
+				if event["outcome"] != "failed" || !strings.Contains(completed, "本轮没有完成") {
+					t.Fatalf("completed=%q event=%#v", completed, event)
+				}
+				messages, listErr := storage.ListMessages(t.Context(), database.Read(), "draft_model_error", 20)
+				if listErr != nil || len(messages) < 2 || messages[len(messages)-1].Role != "assistant" ||
+					messages[len(messages)-1].Content != completed {
+					t.Fatalf("messages=%#v err=%v", messages, listErr)
+				}
 				return
 			}
 		case <-time.After(time.Second):
-			t.Fatal("turn_error missing")
+			t.Fatal("失败回合没有给用户回复并正常收尾")
+		}
+	}
+}
+
+func TestEmptyModelReplyStillProducesVisibleFailure(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_empty_model")
+	insertAgentMessage(t, database, "draft_empty_model", "user_empty_model", "不要静默")
+	service, err := NewService(t.Context(), database, &emptyServiceModel{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	_, stream, unsubscribe := service.Hub().Subscribe("draft_empty_model")
+	defer unsubscribe()
+	service.Queue().EnqueueUserMessage("draft_empty_model", "user_empty_model", "不要静默")
+	service.Queue().JoinDraft("draft_empty_model")
+	completed := ""
+	for {
+		select {
+		case event := <-stream:
+			switch event["type"] {
+			case "message_completed":
+				completed, _ = event["content"].(string)
+			case "turn_ended":
+				if event["outcome"] != "failed" || !strings.Contains(completed, "本轮没有完成") ||
+					!strings.Contains(completed, "模型没有生成最终回复") {
+					t.Fatalf("completed=%q event=%#v", completed, event)
+				}
+				return
+			}
+		case <-time.After(time.Second):
+			t.Fatal("空模型回复导致回合静默")
+		}
+	}
+}
+
+func TestExhaustedRecoveryReplyIsVisibleAndMarkedFailed(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_bounded_recovery")
+	insertAgentMessage(t, database, "draft_bounded_recovery", "user_bounded_recovery", "不要循环")
+	service, err := NewService(t.Context(), database, &terminatingFailureLoopModel{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	_, stream, unsubscribe := service.Hub().Subscribe("draft_bounded_recovery")
+	defer unsubscribe()
+	service.Queue().EnqueueUserMessage("draft_bounded_recovery", "user_bounded_recovery", "不要循环")
+	service.Queue().JoinDraft("draft_bounded_recovery")
+	completed := ""
+	for {
+		select {
+		case event := <-stream:
+			switch event["type"] {
+			case "message_completed":
+				completed, _ = event["content"].(string)
+			case "turn_ended":
+				if event["outcome"] != "failed" || completed != "本轮工具修复未完成，请告诉我下一步怎么处理。" {
+					t.Fatalf("completed=%q event=%#v", completed, event)
+				}
+				messages, listErr := storage.ListMessages(t.Context(), database.Read(), "draft_bounded_recovery", 20)
+				if listErr != nil {
+					t.Fatal(listErr)
+				}
+				toolRows := 0
+				for _, message := range messages {
+					if message.Kind == "tool" {
+						toolRows++
+					}
+				}
+				if toolRows != 1 {
+					t.Fatalf("重复失败不应污染 UI：tool_rows=%d messages=%#v", toolRows, messages)
+				}
+				return
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("恢复预算耗尽后没有可见终态")
+		}
+	}
+}
+
+func TestRepeatedFailedToolLoopStillRepliesAndEndsTurn(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_tool_loop")
+	insertAgentMessage(t, database, "draft_tool_loop", "user_tool_loop", "loop")
+	service, err := NewService(t.Context(), database, &loopingFailureServiceModel{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	_, stream, unsubscribe := service.Hub().Subscribe("draft_tool_loop")
+	defer unsubscribe()
+	service.Queue().EnqueueUserMessage("draft_tool_loop", "user_tool_loop", "loop")
+	service.Queue().JoinDraft("draft_tool_loop")
+	completed := ""
+	for {
+		select {
+		case event := <-stream:
+			switch event["type"] {
+			case "turn_error":
+				t.Fatal("重复工具失败不应让 UI 卡死")
+			case "message_completed":
+				completed, _ = event["content"].(string)
+			case "turn_ended":
+				if event["outcome"] != "failed" || !strings.Contains(completed, "本轮没有完成") ||
+					!strings.Contains(completed, "模型修复失败次数") {
+					t.Fatalf("completed=%q event=%#v", completed, event)
+				}
+				return
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("重复失败回合没有给用户回复并结束")
 		}
 	}
 }
@@ -780,19 +2249,23 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_closed")
 	for name, input := range map[string]any{
-		"asset.list_assets":        rushestools.AssetListInput{},
-		"understand.materials":     rushestools.UnderstandInput{AssetIDs: []string{"asset"}},
-		"interaction.ask_user":     rushestools.AskUserInput{Question: "?"},
-		"decision.answer":          rushestools.DecisionAnswerInput{DecisionID: "decision"},
-		"timeline.compose_initial": rushestools.ComposeInitialInput{},
-		"timeline.apply_patch":     rushestools.TimelinePatchInput{Op: map[string]any{"kind": "noop"}},
-		"timeline.validate":        rushestools.TimelineValidateInput{},
-		"timeline.inspect":         rushestools.TimelineInspectInput{},
-		"timeline.restore_version": rushestools.TimelineRestoreInput{SourceVersion: 1},
-		"render.preview":           rushestools.RenderPreviewInput{},
-		"render.final_mp4":         rushestools.RenderFinalInput{},
-		"render.status":            rushestools.RenderStatusInput{},
-		"render.inspect_preview":   rushestools.RenderInspectInput{PreviewID: "preview"},
+		"asset.list_assets":           rushestools.AssetListInput{},
+		"understand.materials":        rushestools.UnderstandInput{AssetIDs: []string{"asset"}},
+		"media.search_shots":          rushestools.ShotSearchInput{},
+		"audio.analyze_beats":         rushestools.AudioBeatAnalysisInput{AssetID: "asset"},
+		"audio.analyze_speech_pauses": rushestools.SpeechPauseAnalysisInput{AssetID: "asset"},
+		"interaction.ask_user":        rushestools.AskUserInput{Question: "?"},
+		"decision.answer":             rushestools.DecisionAnswerInput{DecisionID: "decision"},
+		"timeline.compose_initial":    rushestools.ComposeInitialInput{},
+		"timeline.apply_patch":        rushestools.TimelinePatchInput{Op: map[string]any{"kind": "noop"}},
+		"timeline.apply_patches":      rushestools.TimelinePatchBatchInput{Ops: []map[string]any{{"kind": "noop"}}},
+		"timeline.recut_to_beats":     rushestools.TimelineBeatRecutInput{CutFrames: []int{30}, BGMTimelineClipID: "bgm"},
+		"timeline.validate":           rushestools.TimelineValidateInput{},
+		"timeline.inspect":            rushestools.TimelineInspectInput{},
+		"render.preview":              rushestools.RenderPreviewInput{},
+		"render.final_mp4":            rushestools.RenderFinalInput{},
+		"render.status":               rushestools.RenderStatusInput{},
+		"render.inspect_preview":      rushestools.RenderInspectInput{PreviewID: "preview"},
 	} {
 		if _, err := service.ExecuteTool(ctx, name, input); err == nil {
 			t.Fatalf("closed database: %s 应失败", name)
@@ -807,7 +2280,7 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 	if _, err := service.fallbackFullMainline(ctx, "draft_closed"); err == nil {
 		t.Fatal("closed fallback mainline 应失败")
 	}
-	if _, err := service.persistTimeline(ctx, "draft_closed", timeline.Empty("draft_closed", 1), nil, "closed"); err == nil {
+	if _, err := service.persistTimeline(ctx, "draft_closed", timeline.Empty("draft_closed", 1), "closed"); err == nil {
 		t.Fatal("closed persist timeline 应失败")
 	}
 	if err := service.runTurn(t.Context(), QueueItem{

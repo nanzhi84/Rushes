@@ -15,6 +15,7 @@ export const ALL_EVENT_TYPES = [
   "MaterialUnderstandingFailed",
   "DecisionCreated",
   "DecisionAnswered",
+  "ConversationContextCleared",
   "TimelineVersionCreated",
   "TimelineValidated",
   "TimelineValidationFailed",
@@ -26,7 +27,6 @@ export const ALL_EVENT_TYPES = [
   "JobCancelled",
   "ProxyGenerated",
   "JobProgress",
-  "TimelineVersionRestored",
   "PreviewViewed"
 ] as const;
 
@@ -44,11 +44,12 @@ const DECISION_EVENTS = [
   "DecisionAnswered"
 ] as const satisfies readonly EventType[];
 
+const CONVERSATION_EVENTS = ["ConversationContextCleared"] as const satisfies readonly EventType[];
+
 const TIMELINE_EVENTS = [
   "TimelineVersionCreated",
   "TimelineValidated",
-  "TimelineValidationFailed",
-  "TimelineVersionRestored"
+  "TimelineValidationFailed"
 ] as const satisfies readonly EventType[];
 
 const PREVIEW_EVENTS = [
@@ -82,6 +83,7 @@ export const DRAFT_EVENT_TYPES = [
   "AssetLinked",
   "AssetUnlinked",
   ...DECISION_EVENTS,
+  ...CONVERSATION_EVENTS,
   ...TIMELINE_EVENTS,
   ...PREVIEW_EVENTS,
   ...JOB_EVENT_TYPES

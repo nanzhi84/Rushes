@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 )
 
 type Asset struct {
@@ -146,6 +147,94 @@ func LatestMaterialSummary(ctx context.Context, query Querier, assetID string) (
 		return nil, err
 	}
 	return summary, nil
+}
+
+func MaterialSummaryByFingerprint(
+	ctx context.Context,
+	query Querier,
+	assetID, fingerprint string,
+) (map[string]any, error) {
+	var raw string
+	err := query.QueryRowContext(ctx, `
+		SELECT summary_json FROM material_summaries
+		WHERE asset_id=? AND fingerprint=? AND status='ready'
+		ORDER BY version DESC LIMIT 1`, assetID, fingerprint).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var summary map[string]any
+	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+		return nil, err
+	}
+	return summary, nil
+}
+
+// BestMaterialSummary is quality-monotonic: a later focused or shallow run is
+// retained, but cannot hide an older summary with richer semantic evidence.
+func BestMaterialSummary(ctx context.Context, query Querier, assetID string) (map[string]any, error) {
+	rows, err := query.QueryContext(ctx, `
+		SELECT summary_json, version FROM material_summaries
+		WHERE asset_id=? AND status='ready'
+		ORDER BY version`, assetID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var best map[string]any
+	bestScore, bestVersion := -1, -1
+	for rows.Next() {
+		var raw string
+		var version int
+		if err := rows.Scan(&raw, &version); err != nil {
+			return nil, err
+		}
+		var summary map[string]any
+		if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+			continue
+		}
+		score := materialSummaryQualityScore(summary)
+		if score > bestScore || score == bestScore && version > bestVersion {
+			best, bestScore, bestVersion = summary, score, version
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if best == nil {
+		return nil, ErrNotFound
+	}
+	return best, nil
+}
+
+func materialSummaryQualityScore(summary map[string]any) int {
+	segments, _ := summary["segments"].([]any)
+	semanticSegments, details := 0, 0
+	for _, value := range segments {
+		segment, _ := value.(map[string]any)
+		description, _ := segment["description"].(string)
+		description = strings.TrimSpace(description)
+		if description != "" && !strings.Contains(description, "待理解") &&
+			!strings.HasPrefix(description, "视频素材，时长约") {
+			semanticSegments++
+		}
+		for _, field := range []string{"tags", "subjects", "actions", "setting", "lighting", "mood", "edit_hints"} {
+			if values, ok := segment[field].([]any); ok {
+				details += len(values)
+			}
+		}
+	}
+	verified := 0
+	if value, ok := summary["verified_cut_count"].(float64); ok {
+		verified = int(value)
+	}
+	depthBonus := 0
+	if depth, _ := summary["analysis_depth"].(string); depth == "deep" {
+		depthBonus = 100
+	}
+	return semanticSegments*1_000_000 + len(segments)*10_000 + verified*1_000 + details*10 + depthBonus
 }
 
 func ObjectPathByHash(paths Paths, hash *string) (string, error) {

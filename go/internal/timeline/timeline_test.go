@@ -2,7 +2,6 @@ package timeline
 
 import (
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +19,7 @@ func TestComposeValidateInspectAndStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	report := Validate(document)
-	if !report.Valid || document.DurationFrames != 105 || len(document.Tracks) != 6 {
+	if !report.Valid || document.DurationFrames != 105 || len(document.Tracks) != 7 {
 		t.Fatalf("document=%#v report=%#v", document, report)
 	}
 	if summary := Inspect(document); !strings.Contains(summary, "3.50 秒") || !strings.Contains(summary, "主视觉 2 段") {
@@ -60,6 +59,71 @@ func TestComposeValidateInspectAndStore(t *testing.T) {
 	}
 }
 
+func TestLinkedAVValidationAtomicEditsAndOriginalAudioSync(t *testing.T) {
+	t.Parallel()
+	base, err := ComposeInitial("draft_linked_integrity", 1, []Selection{
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 10, SourceEndFrame: 40, Role: "a_roll", HasAudio: true},
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 60, SourceEndFrame: 90, Role: "a_roll", HasAudio: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	drifted := base
+	drifted.Tracks = append([]Track(nil), base.Tracks...)
+	drifted.Tracks[2].Clips = append([]Clip(nil), base.Tracks[2].Clips...)
+	drifted.Tracks[2].Clips[0].TimelineStartFrame = 5
+	drifted.Tracks[2].Clips[0].TimelineEndFrame = 35
+	report := Validate(drifted)
+	if report.Valid || !validationHasCode(report, "linked_av_timeline_mismatch") {
+		t.Fatalf("drifted report=%#v", report)
+	}
+
+	repaired, err := ApplyPatch(drifted, map[string]any{
+		"kind": "sync_original_audio", "audio_asset_ids": []string{"talk"},
+	})
+	if err != nil || !Validate(repaired).Valid || len(repaired.Tracks[2].Clips) != len(repaired.Tracks[0].Clips) {
+		t.Fatalf("repaired=%#v report=%#v err=%v", repaired.Tracks[2], Validate(repaired), err)
+	}
+
+	trimmed, err := ApplyPatch(base, map[string]any{
+		"kind": "trim_clip", "timeline_clip_id": "clip_v1_001",
+		"source_start_frame": 15, "source_end_frame": 35,
+	})
+	if err != nil || !Validate(trimmed).Valid || trimmed.DurationFrames != 50 ||
+		trimmed.Tracks[0].Clips[0].TimelineEndFrame != 20 ||
+		trimmed.Tracks[2].Clips[0].TimelineEndFrame != 20 {
+		t.Fatalf("trimmed=%#v audio=%#v report=%#v err=%v", trimmed.Tracks[0], trimmed.Tracks[2], Validate(trimmed), err)
+	}
+
+	rated, err := ApplyPatch(base, map[string]any{
+		"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 2.0,
+	})
+	if err != nil || !Validate(rated).Valid || rated.DurationFrames != 45 ||
+		rated.Tracks[0].Clips[0].TimelineEndFrame != 15 ||
+		rated.Tracks[2].Clips[0].TimelineEndFrame != 15 {
+		t.Fatalf("rated=%#v audio=%#v report=%#v err=%v", rated.Tracks[0], rated.Tracks[2], Validate(rated), err)
+	}
+
+	inserted, err := ApplyPatch(base, map[string]any{
+		"kind": "insert_clip", "timeline_clip_id": "inserted_talk", "track_id": "visual_base",
+		"asset_id": "talk", "asset_kind": "video", "source_start_frame": 100, "source_end_frame": 120,
+		"include_original_audio": true,
+	})
+	if err != nil || !Validate(inserted).Valid || len(inserted.Tracks[0].Clips) != 3 || len(inserted.Tracks[2].Clips) != 3 {
+		t.Fatalf("inserted=%#v audio=%#v report=%#v err=%v", inserted.Tracks[0], inserted.Tracks[2], Validate(inserted), err)
+	}
+}
+
+func validationHasCode(report ValidationReport, code string) bool {
+	for _, issue := range report.Issues {
+		if issue.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func TestApplyPatchSubsetTable(t *testing.T) {
 	t.Parallel()
 	base, err := ComposeInitial("draft_patch", 1, []Selection{
@@ -69,6 +133,7 @@ func TestApplyPatchSubsetTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	base.Tracks[0].Clips[0].AssetKind = "video"
 	base.Tracks[1].Clips = []Clip{{
 		TimelineClipID: "overlay", TrackID: "visual_overlay", AssetID: "a",
 		TimelineStartFrame: 0, TimelineEndFrame: 30, SourceStartFrame: 0, SourceEndFrame: 30, PlaybackRate: 1,
@@ -91,9 +156,22 @@ func TestApplyPatchSubsetTable(t *testing.T) {
 		}},
 		{"delete", map[string]any{"kind": "delete_range", "start_frame": 30, "end_frame": 60}, func(value Document) bool { return value.DurationFrames == 90 }},
 		{"insert", map[string]any{"kind": "insert_clip", "asset_id": "c", "source_start_frame": 0, "source_end_frame": 30}, func(value Document) bool { return value.DurationFrames == 150 && len(value.Tracks[0].Clips) == 3 }},
+		{"insert bgm", map[string]any{
+			"kind": "insert_clip", "track_id": "bgm", "timeline_clip_id": "bgm_1",
+			"asset_id": "music", "asset_kind": "audio", "role": "bgm",
+			"timeline_start_frame": 15, "source_start_frame": 0, "source_end_frame": 30,
+		}, func(value Document) bool {
+			return value.DurationFrames == 120 && len(value.Tracks[4].Clips) == 1 &&
+				value.Tracks[4].Clips[0].TimelineStartFrame == 15 &&
+				value.Tracks[4].Clips[0].TimelineEndFrame == 45 &&
+				value.Tracks[4].Clips[0].AssetKind == "audio" && Validate(value).Valid
+		}},
 		{"replace", map[string]any{"kind": "replace_clip", "timeline_clip_id": "clip_v1_001", "asset_id": "c"}, func(value Document) bool { return value.Tracks[0].Clips[0].AssetID == "c" }},
 		{"rate", map[string]any{"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 2.0}, func(value Document) bool { return value.DurationFrames == 90 }},
 		{"gain", map[string]any{"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -3.0}, func(value Document) bool { return value.Tracks[0].Clips[0].GainDB == -3 }},
+		{"fades", map[string]any{"kind": "set_clip_fades", "timeline_clip_id": "clip_v1_001", "fade_in_frames": 6, "fade_out_frames": 12}, func(value Document) bool {
+			return value.Tracks[0].Clips[0].FadeInFrames == 6 && value.Tracks[0].Clips[0].FadeOutFrames == 12
+		}},
 		{"subtitle", map[string]any{"kind": "edit_subtitle_text", "timeline_clip_id": "subtitle", "text": "新字幕"}, func(value Document) bool { return value.Tracks[5].Clips[0].Text == "新字幕" }},
 		{"insert subtitle", map[string]any{"kind": "insert_subtitle", "timeline_clip_id": "subtitle_new", "start_frame": 30, "end_frame": 60, "text": "新增字幕"}, func(value Document) bool {
 			return len(value.Tracks[5].Clips) == 2 && value.Tracks[5].Clips[1].Text == "新增字幕"
@@ -111,6 +189,34 @@ func TestApplyPatchSubsetTable(t *testing.T) {
 	}
 	if _, err := ApplyPatch(base, map[string]any{"kind": "unknown"}); err == nil {
 		t.Fatal("未知 patch op 应失败")
+	}
+}
+
+func TestTrimAndPlaybackRateOnFreeTrackDoNotChangeCompositionDuration(t *testing.T) {
+	t.Parallel()
+	document, err := ComposeInitial("draft_free_audio", 1, []Selection{{
+		AssetID: "video", AssetKind: "video", SourceEndFrame: 120,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Tracks[4].Clips = []Clip{{
+		TimelineClipID: "bgm", TrackID: "bgm", AssetID: "music", AssetKind: "audio",
+		TimelineStartFrame: 0, TimelineEndFrame: 120, SourceEndFrame: 120, PlaybackRate: 1,
+	}}
+
+	trimmed, err := ApplyPatch(document, map[string]any{
+		"kind": "trim_clip", "timeline_clip_id": "bgm",
+		"source_start_frame": 0, "source_end_frame": 60,
+	})
+	if err != nil || trimmed.DurationFrames != 120 || trimmed.Tracks[4].Clips[0].TimelineEndFrame != 60 {
+		t.Fatalf("trimmed=%#v err=%v", trimmed, err)
+	}
+	rated, err := ApplyPatch(document, map[string]any{
+		"kind": "set_playback_rate", "timeline_clip_id": "bgm", "playback_rate": 2.0,
+	})
+	if err != nil || rated.DurationFrames != 120 || rated.Tracks[4].Clips[0].TimelineEndFrame != 60 {
+		t.Fatalf("rated=%#v err=%v", rated, err)
 	}
 }
 
@@ -278,6 +384,7 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 	document.Tracks = append(document.Tracks, document.Tracks[0])
 	document.Tracks[0].Clips = []Clip{{
 		TimelineClipID: "bad", TrackID: "visual_base", AssetID: "asset",
+		AssetKind:          "audio",
 		TimelineStartFrame: -1, TimelineEndFrame: 2, SourceStartFrame: 3, SourceEndFrame: 2, PlaybackRate: -1,
 	}}
 	document.Tracks = document.Tracks[:2]
@@ -305,6 +412,7 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 		{"kind": "replace_clip", "timeline_clip_id": "clip_v1_001"},
 		{"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 9},
 		{"kind": "adjust_gain"},
+		{"kind": "set_clip_fades", "timeline_clip_id": "clip_v1_001", "fade_in_frames": 40, "fade_out_frames": 40},
 		{"kind": "edit_subtitle_text", "timeline_clip_id": "missing", "text": "x"},
 		{"kind": "insert_subtitle", "start_frame": 0, "end_frame": 99, "text": ""},
 		{"kind": "remove_track_clips", "track_id": "visual_base"},
@@ -315,7 +423,10 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 		}
 	}
 	for index, selection := range []Selection{
-		{}, {AssetID: "a", SourceStartFrame: -1, SourceEndFrame: 1}, {AssetID: "a", SourceStartFrame: 2, SourceEndFrame: 1},
+		{},
+		{AssetID: "a", SourceStartFrame: -1, SourceEndFrame: 1},
+		{AssetID: "a", SourceStartFrame: 2, SourceEndFrame: 1},
+		{AssetID: "a", AssetKind: "audio", SourceEndFrame: 1},
 	} {
 		if _, err := ComposeInitial("draft", 1, []Selection{selection}); err == nil {
 			t.Fatalf("selection[%d] should fail", index)
@@ -333,6 +444,12 @@ func TestDeleteRangeHandlesEveryOverlapShape(t *testing.T) {
 	document.Tracks[0].Clips = []Clip{{
 		TimelineClipID: "cover", TrackID: "visual_base", AssetID: "a",
 		TimelineStartFrame: 0, TimelineEndFrame: 120, SourceStartFrame: 0, SourceEndFrame: 120, PlaybackRate: 1,
+		ParentBlockID: "block_cover", Linked: true,
+	}}
+	document.Tracks[2].Clips = []Clip{{
+		TimelineClipID: "cover_audio", TrackID: "original_audio", AssetID: "a",
+		TimelineStartFrame: 0, TimelineEndFrame: 120, SourceStartFrame: 0, SourceEndFrame: 120, PlaybackRate: 1,
+		ParentBlockID: "block_cover", Linked: true,
 	}}
 	document.Tracks[1].Clips = []Clip{
 		{TimelineClipID: "before", TimelineStartFrame: 0, TimelineEndFrame: 20},
@@ -347,6 +464,18 @@ func TestDeleteRangeHandlesEveryOverlapShape(t *testing.T) {
 	}
 	if result.DurationFrames != 90 || len(result.Tracks[1].Clips) != 4 {
 		t.Fatalf("result=%#v", result.Tracks[1].Clips)
+	}
+	for _, trackIndex := range []int{0, 2} {
+		clips := result.Tracks[trackIndex].Clips
+		if len(clips) != 2 || clips[0].TimelineStartFrame != 0 || clips[0].TimelineEndFrame != 30 ||
+			clips[0].SourceStartFrame != 0 || clips[0].SourceEndFrame != 30 ||
+			clips[1].TimelineStartFrame != 30 || clips[1].TimelineEndFrame != 90 ||
+			clips[1].SourceStartFrame != 60 || clips[1].SourceEndFrame != 120 {
+			t.Fatalf("中段删除没有保留正确源区间，track=%s clips=%#v", result.Tracks[trackIndex].TrackID, clips)
+		}
+		if !clips[0].Linked || !clips[1].Linked || clips[0].ParentBlockID == clips[1].ParentBlockID {
+			t.Fatalf("A/V 联动分段无效，track=%s clips=%#v", result.Tracks[trackIndex].TrackID, clips)
+		}
 	}
 }
 
@@ -399,7 +528,7 @@ func TestTimelineStoreMissingAndPreviewLookup(t *testing.T) {
 	}
 }
 
-func TestVersionNavigationFollowsParentAndLatestChild(t *testing.T) {
+func TestNextVersionFollowsOnlyCurrentTimeline(t *testing.T) {
 	t.Parallel()
 	database, err := storage.Open(t.Context(), t.TempDir())
 	if err != nil {
@@ -407,30 +536,15 @@ func TestVersionNavigationFollowsParentAndLatestChild(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	document, _ := ComposeInitial("draft_nav", 1, []Selection{{AssetID: "a", SourceEndFrame: 30}})
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO drafts(
 			draft_id,name,state_version,status,defaults_json,running_jobs_json,brief_json,
 			timeline_current_version,timeline_validated,scratch_memory_json,created_at,updated_at
-		) VALUES('draft_nav','d',0,'active','{}','[]','{}',1,1,'{}',?,?)`, now, now); err != nil {
+			) VALUES('draft_nav','d',0,'active','{}','[]','{}',4,1,'{}',?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
-	for version, parent := range []any{nil, 1, 2, 1} {
-		document.Version = version + 1
-		document.TimelineID = fmt.Sprintf("draft_nav:v%d", version+1)
-		data, _ := json.Marshal(document)
-		if _, err := database.Write().ExecContext(t.Context(), `
-			INSERT INTO timeline_versions(timeline_id,draft_id,version,parent_version,document_json,created_at)
-			VALUES(?,?,?,?,?,?)`, document.TimelineID, "draft_nav", version+1, parent, string(data), now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	navigation, err := Navigation(t.Context(), database, "draft_nav", 1)
-	if err != nil || navigation.Parent != nil || navigation.Redo == nil || *navigation.Redo != 4 || navigation.Latest != 4 {
-		t.Fatalf("navigation=%#v err=%v", navigation, err)
-	}
-	navigation, err = Navigation(t.Context(), database, "draft_nav", 3)
-	if err != nil || navigation.Parent == nil || *navigation.Parent != 2 || navigation.Redo != nil || navigation.Latest != 4 {
-		t.Fatalf("navigation=%#v err=%v", navigation, err)
+	version, err := NextVersion(t.Context(), database, "draft_nav")
+	if err != nil || version != 5 {
+		t.Fatalf("next version=%d err=%v", version, err)
 	}
 }

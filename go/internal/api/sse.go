@@ -9,12 +9,13 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agent"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
 
 func (server *Server) WorkspaceEventsApiEventsGet(writer http.ResponseWriter, request *http.Request) {
-	server.streamEvents(writer, request, nil, contracts.RoutesToWorkspace)
+	server.streamEvents(writer, request, nil, nil, contracts.RoutesToWorkspace)
 }
 
 func (server *Server) DraftEventsApiDraftsDraftIdEventsGet(
@@ -30,7 +31,7 @@ func (server *Server) DraftEventsApiDraftsDraftIdEventsGet(
 		}
 		return
 	}
-	server.streamEvents(writer, request, &draftID, func(event contracts.Event) bool {
+	server.streamEvents(writer, request, &draftID, &draftID, func(event contracts.Event) bool {
 		return contracts.RoutesToDraft(event, draftID)
 	})
 }
@@ -39,6 +40,7 @@ func (server *Server) streamEvents(
 	writer http.ResponseWriter,
 	request *http.Request,
 	draftID *string,
+	turnDraftID *string,
 	predicate func(contracts.Event) bool,
 ) {
 	writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -52,6 +54,29 @@ func (server *Server) streamEvents(
 	defer poll.Stop()
 	defer heartbeat.Stop()
 	emitted := 0
+	var turnSnapshot []agent.StreamEvent
+	var turnStream <-chan agent.StreamEvent
+	var unsubscribeTurn func()
+	if turnDraftID != nil {
+		turnSnapshot, turnStream, unsubscribeTurn = server.agent.Hub().Subscribe(*turnDraftID)
+		defer unsubscribeTurn()
+	}
+	turnSnapshotPending := len(turnSnapshot) > 0
+	writeTurnEvent := func(event agent.StreamEvent) bool {
+		frame, err := agent.EncodeTurnStreamFrame(event)
+		if err != nil {
+			server.logger.Error("回合 SSE 编码失败", "error", err)
+			return false
+		}
+		if _, err := writer.Write(frame); err != nil {
+			return false
+		}
+		if err := controller.Flush(); err != nil {
+			return false
+		}
+		emitted++
+		return true
+	}
 
 	for {
 		rows, err := storage.ListEventsAfter(request.Context(), server.database.Read(), cursor, draftID, 256)
@@ -85,10 +110,35 @@ func (server *Server) streamEvents(
 				return
 			}
 		}
+		// 先重放持久化领域事件，再补当前回合快照。这样 Last-Event-ID 仍只属于
+		// 领域事件，同时一个草稿页只需一条 SSE 连接。
+		if turnSnapshotPending {
+			for _, event := range turnSnapshot {
+				if !writeTurnEvent(event) {
+					return
+				}
+				if server.sseMaxEvents > 0 && emitted >= server.sseMaxEvents {
+					return
+				}
+			}
+			turnSnapshotPending = false
+			turnSnapshot = nil
+		}
 
 		select {
 		case <-request.Context().Done():
 			return
+		case event, ok := <-turnStream:
+			if !ok {
+				turnStream = nil
+				continue
+			}
+			if !writeTurnEvent(event) {
+				return
+			}
+			if server.sseMaxEvents > 0 && emitted >= server.sseMaxEvents {
+				return
+			}
 		case <-heartbeat.C:
 			if _, err := io.WriteString(writer, ": ping\n\n"); err != nil {
 				return

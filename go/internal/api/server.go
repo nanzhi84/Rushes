@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"sort"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/nanzhi84/Rushes/go/internal/agent"
@@ -39,6 +40,7 @@ type Server struct {
 	sseMaxEvents int
 	logger       *slog.Logger
 	picker       Picker
+	pickerMu     sync.Mutex
 	agent        *agent.Service
 	ownsAgent    bool
 }

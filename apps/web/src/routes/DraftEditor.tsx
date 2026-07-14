@@ -10,14 +10,13 @@ import {
   Link2,
   ListPlus,
   Magnet,
+  MessageSquareX,
   MousePointer2,
   Pencil,
-  Redo2,
   Replace,
   Scissors,
   Square,
   Trash2,
-  Undo2,
   Unlink2,
   X,
   ZoomIn,
@@ -34,8 +33,8 @@ import {
 } from "../api/client";
 import { DRAFT_EVENT_TYPES } from "../api/event_types";
 import { queryKeys } from "../app/query_client";
-import { ApiError, createApiEventSource } from "../auth";
-import { useWorkspaceEvents } from "../app/use_workspace_events";
+import { useDocumentVisibility } from "../app/use_document_visibility";
+import { acquireApiEventSource, ApiError } from "../auth";
 import { AssistantThread } from "../components/Console/AssistantThread";
 import { useTurnStream } from "../components/Console/useTurnStream";
 import {
@@ -55,7 +54,7 @@ import {
 } from "../components/Console/runtime";
 import { AssetMediaPreview } from "../components/Materials/AssetMediaPreview";
 import { AssetsPanel } from "../components/Materials/AssetsPanel";
-import { PreviewPlayer } from "../components/PreviewPlayer";
+import { DiffusionPreviewPlayer } from "../components/PreviewPlayer";
 import { EntityActionDialog } from "../components/Shell/EntityActionDialog";
 import { ResizeHandle } from "../components/Shell/ResizeHandle";
 import { TopBar } from "../components/Shell/TopBar";
@@ -63,9 +62,15 @@ import { TimelineViewer } from "../components/TimelineViewer";
 import type {
   TimelineDropMode,
   TimelineEditMode,
+  TimelineViewerHandle,
   TimelineTrackStatePatch
 } from "../components/TimelineViewer";
 import { useUiStore } from "../state/ui_store";
+import {
+  EditorSession,
+  type EditorSessionSnapshot,
+  type TimelineOperation
+} from "../editor/editor_session";
 
 export function DraftEditorPage(): ReactElement {
   const { draftId } = useParams({ from: "/drafts/$draftId" });
@@ -74,7 +79,6 @@ export function DraftEditorPage(): ReactElement {
 
 export function DraftEditorView({ draftId }: { draftId: string }): ReactElement {
   const queryClient = useQueryClient();
-  const connectionState = useWorkspaceEvents();
   const {
     entityDialog,
     openEntityDialog,
@@ -89,21 +93,30 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const [draft, setDraft] = useState("");
   const [awaitingTurnEnd, setAwaitingTurnEnd] = useState(false);
   const [streamState, setStreamState] = useState<"connecting" | "open" | "closed">("connecting");
+  const documentVisible = useDocumentVisibility();
   const [structuredItems, setStructuredItems] = useState<StructuredInteractionItem[]>([]);
   const [previewingAssetId, setPreviewingAssetId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
-  const [unmatchedClipId, setUnmatchedClipId] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [playheadSec, setPlayheadSec] = useState<number | null>(null);
   const [seekSec, setSeekSec] = useState<number | null>(null);
   const [pxPerSec, setPxPerSec] = useState(DEFAULT_TIMELINE_PX_PER_SEC);
-  const [viewedVersion, setViewedVersion] = useState<number | null>(null);
   const [editMode, setEditMode] = useState<TimelineEditMode>("select");
   const [dropMode, setDropMode] = useState<TimelineDropMode>("insert");
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [timelineEditError, setTimelineEditError] = useState<string | null>(null);
-  const [previewRefreshing, setPreviewRefreshing] = useState(false);
+  const [conversationError, setConversationError] = useState<string | null>(null);
+  const optimisticMessageSequenceRef = useRef(0);
   const timelineBodyRef = useRef<HTMLDivElement | null>(null);
+  const timelineViewerRef = useRef<TimelineViewerHandle | null>(null);
+  const playheadSecRef = useRef<number | null>(null);
+  const playheadTimecodeRef = useRef<HTMLSpanElement | null>(null);
+  const lastPlayheadCommitRef = useRef({ at: 0, sec: 0 });
+  const draftInvalidationTimerRef = useRef<number | null>(null);
+  const editorSessionRef = useRef<EditorSession | null>(null);
+  const editorSessionDraftRef = useRef<string | null>(null);
+  const editorSessionUnsubscribeRef = useRef<(() => void) | null>(null);
+  const [editorSnapshot, setEditorSnapshot] = useState<EditorSessionSnapshot | null>(null);
 
   const messagesQuery = useQuery({
     queryKey: queryKeys.messages(draftId),
@@ -143,19 +156,17 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const currentDraft = draftQuery.data?.draft ?? null;
   const draftName = currentDraft?.name ?? draftId;
   const timelineVersion = currentDraft?.timeline_current_version ?? null;
-  const effectiveVersion = viewedVersion ?? timelineVersion;
-  const viewingHistory =
-    viewedVersion !== null && timelineVersion !== null && viewedVersion !== timelineVersion;
 
   const timelineQuery = useQuery({
-    queryKey: queryKeys.timeline(draftId, effectiveVersion),
-    queryFn: () => api.fetchDraftTimeline(draftId, effectiveVersion),
-    enabled: effectiveVersion !== null
+    queryKey: queryKeys.timeline(draftId),
+    queryFn: () => api.fetchDraftTimeline(draftId),
+    enabled: timelineVersion !== null
   });
 
   const currentDecision = decisionQuery.data?.decision ?? null;
   const historyMessages = messagesQuery.data ?? [];
   const timelinePayload = timelineQuery.data ?? null;
+  const editorTimeline = editorSnapshot?.timeline ?? timelinePayload?.timeline ?? null;
   const previewSrc = timelinePayload?.preview_id
     ? api.mediaPreviewUrl(timelinePayload.preview_id)
     : null;
@@ -174,47 +185,86 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     [currentDecision, structuredItems]
   );
   const sideDecisionItem = useMemo(
-    () => mergeCurrentDecisionItem([], currentDecision)[0] ?? null,
-    [currentDecision]
+    () => {
+      if (
+        !currentDecision ||
+        renderedStructuredItems.some(
+          (item) => item.kind === "decision" && item.decision_id === currentDecision.decision_id
+        )
+      ) {
+        return null;
+      }
+      return mergeCurrentDecisionItem([], currentDecision)[0] ?? null;
+    },
+    [currentDecision, renderedStructuredItems]
   );
 
-  const invalidateDraftQueries = useCallback(
-    async (payload: DomainSsePayload) => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
-        queryClient.invalidateQueries({ queryKey: ["timeline", draftId] }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.costs(draftId) })
-      ]);
+  const scheduleDraftQueryInvalidation = useCallback(
+    () => {
+      if (draftInvalidationTimerRef.current !== null) {
+        window.clearTimeout(draftInvalidationTimerRef.current);
+      }
+      // 首次 SSE 会重放历史领域事件。把同一小段事件突发合并成一次刷新，
+      // 避免几十条旧 Timeline 事件反复取消正在加载的最新时间线请求。
+      draftInvalidationTimerRef.current = window.setTimeout(() => {
+        draftInvalidationTimerRef.current = null;
+        void Promise.all([
+          queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
+          queryClient.invalidateQueries({ queryKey: ["timeline", draftId] }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.costs(draftId) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) })
+        ]);
+      }, 80);
     },
     [draftId, queryClient]
   );
 
   useEffect(() => {
-    const source = createApiEventSource(`/api/drafts/${draftId}/events`);
-    source.onopen = () => setStreamState("open");
-    source.onerror = () => setStreamState("closed");
+    if (!documentVisible) {
+      setStreamState("connecting");
+      return;
+    }
+    const { source, release } = acquireApiEventSource(`/api/drafts/${draftId}/events`);
+    const handleOpen = () => setStreamState("open");
+    const handleError = () => setStreamState("closed");
+    source.addEventListener("open", handleOpen);
+    source.addEventListener("error", handleError);
     const handleEvent = (event: Event) => {
       const message = event as MessageEvent<string>;
       const payload = JSON.parse(message.data) as DomainSsePayload;
       setStructuredItems((current) => reduceStructuredInteractionItems(current, payload));
-      void invalidateDraftQueries(payload);
+      scheduleDraftQueryInvalidation();
     };
     for (const eventName of DRAFT_EVENT_TYPES) {
       source.addEventListener(eventName, handleEvent);
     }
     return () => {
-      source.close();
+      source.removeEventListener("open", handleOpen);
+      source.removeEventListener("error", handleError);
+      for (const eventName of DRAFT_EVENT_TYPES) {
+        source.removeEventListener(eventName, handleEvent);
+      }
+      release();
+      if (draftInvalidationTimerRef.current !== null) {
+        window.clearTimeout(draftInvalidationTimerRef.current);
+        draftInvalidationTimerRef.current = null;
+      }
     };
-  }, [draftId, invalidateDraftQueries]);
+  }, [documentVisible, draftId, scheduleDraftQueryInvalidation]);
 
   // turn-stream 订阅置于领域 /events 订阅之后，保证 /events 是首个 EventSource。
   const finishTurn = useCallback(() => {
     setAwaitingTurnEnd(false);
     void queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) });
   }, [draftId, queryClient]);
-  const { items: streamItems, subagentProgress, understandingProgress } = useTurnStream(draftId, {
+  const {
+    items: streamItems,
+    turnActive,
+    modelRetry,
+    subagentProgress
+  } = useTurnStream(draftId, {
     onTurnEnded: finishTurn,
     onTurnError: finishTurn
   });
@@ -233,8 +283,9 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     onMutate: async (content) => {
       setAwaitingTurnEnd(true);
       await queryClient.cancelQueries({ queryKey: queryKeys.messages(draftId) });
+      optimisticMessageSequenceRef.current += 1;
       const optimistic: ConsoleMessage = {
-        id: `local_${Date.now()}`,
+        id: `local_${Date.now()}_${optimisticMessageSequenceRef.current}`,
         role: "user",
         content,
         createdAt: new Date().toISOString()
@@ -249,6 +300,22 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
 
   const cancelTurn = useMutation({
     mutationFn: () => api.cancelTurn(draftId)
+  });
+
+  const clearConversation = useMutation({
+    mutationFn: () => api.clearDraftConversation(draftId),
+    onMutate: () => setConversationError(null),
+    onSuccess: async () => {
+      setDraft("");
+      setStructuredItems([]);
+      setHighlightedMessageId(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) })
+      ]);
+    },
+    onError: (error) => setConversationError(conversationClearErrorMessage(error))
   });
 
   const answerDecision = useMutation({
@@ -267,42 +334,66 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     }
   });
 
-  const timelinePatch = useMutation({
-    mutationFn: (op: Record<string, unknown>) => api.applyTimelinePatch(draftId, { op }),
-    onSuccess: async (response) => {
-      setTimelineEditError(null);
-      setPreviewRefreshing(true);
-      setViewedVersion(null);
-      queryClient.setQueryData(queryKeys.timeline(draftId, response.timeline_version), response);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
-        queryClient.invalidateQueries({ queryKey: ["timeline", draftId] })
-      ]);
+  useEffect(() => {
+    if (!timelinePayload) {
+      return;
+    }
+    if (editorSessionDraftRef.current !== draftId || !editorSessionRef.current) {
+      editorSessionUnsubscribeRef.current?.();
+      const session = new EditorSession(timelinePayload.timeline);
+      editorSessionRef.current = session;
+      editorSessionDraftRef.current = draftId;
+      editorSessionUnsubscribeRef.current = session.subscribe(setEditorSnapshot);
+    } else {
+      editorSessionRef.current.replaceFromServer(timelinePayload.timeline);
+    }
+  }, [draftId, timelinePayload]);
+
+  useEffect(
+    () => () => {
+      editorSessionUnsubscribeRef.current?.();
+      editorSessionUnsubscribeRef.current = null;
+      editorSessionRef.current = null;
+      editorSessionDraftRef.current = null;
     },
-    onError: (error) => {
+    []
+  );
+
+  const flushEditorSession = useCallback(async (): Promise<void> => {
+    const session = editorSessionRef.current;
+    if (!session || editorSessionDraftRef.current !== draftId) {
+      return;
+    }
+    const operations = session.beginSave();
+    if (operations.length === 0) {
+      return;
+    }
+    try {
+      const response = await api.applyTimelinePatch(draftId, {
+        op: { kind: "batch", ops: operations }
+      });
+      session.acceptSaved(response.timeline);
+      queryClient.setQueryData(queryKeys.timeline(draftId), response);
+      setTimelineEditError(null);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) });
+    } catch (error) {
+      session.rejectSave(error);
       setTimelineEditError(timelinePatchErrorMessage(error));
     }
-  });
+  }, [draftId, queryClient]);
 
-  const timelineRestore = useMutation({
-    mutationFn: (version: number) => api.restoreTimelineVersion(draftId, version),
-    onSuccess: async (response) => {
-      setTimelineEditError(null);
-      setPreviewRefreshing(true);
-      setViewedVersion(null);
-      setSelectedClipId(null);
-      queryClient.setQueryData(queryKeys.timeline(draftId, response.timeline_version), response);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
-        queryClient.invalidateQueries({ queryKey: ["timeline", draftId] })
-      ]);
-    },
-    onError: (error) => {
-      setTimelineEditError(timelinePatchErrorMessage(error));
+  useEffect(() => {
+    if (editorSnapshot?.saveState !== "dirty") {
+      return;
     }
-  });
+    const timer = window.setTimeout(() => void flushEditorSession(), 500);
+    return () => window.clearTimeout(timer);
+  }, [editorSnapshot?.pendingCount, editorSnapshot?.saveState, flushEditorSession]);
 
-  const disabled = awaitingTurnEnd || postMessage.isPending;
+  // turnActive 覆盖刷新/断线重连后重放中的回合；不能只依赖本页发消息时设置的 awaitingTurnEnd。
+  // 运行状态只限制会破坏当前回合的操作，不再禁用输入。消息接口和 TurnQueue
+  // 已经按草稿 FIFO 串行化，因此运行中提交会自然排到当前回合之后。
+  const turnBusy = awaitingTurnEnd || turnActive;
   const submitMessage = useCallback(
     (content: string) => {
       postMessage.mutate(content);
@@ -315,6 +406,16 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     },
     [answerDecision]
   );
+  const handleClearConversation = useCallback(() => {
+    if (
+      !window.confirm(
+        "清空当前对话上下文？素材、素材理解、时间线和预览都会保留，新对话会继承这些客观状态。"
+      )
+    ) {
+      return;
+    }
+    clearConversation.mutate();
+  }, [clearConversation]);
   const handlePreviewFirstPlay = useCallback(() => {
     const previewId = timelinePayload?.preview_id;
     if (!previewId) {
@@ -326,7 +427,19 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
       .catch(() => undefined);
   }, [draftId, queryClient, timelinePayload?.preview_id]);
   const handlePreviewTimeUpdate = useCallback((sec: number) => {
-    setPlayheadSec(sec);
+    playheadSecRef.current = sec;
+    timelineViewerRef.current?.setPlayheadSec(sec, true);
+    if (playheadTimecodeRef.current) {
+      playheadTimecodeRef.current.textContent = formatTimecode(sec);
+    }
+    const now = performance.now();
+    const previous = lastPlayheadCommitRef.current;
+    // 播放头每帧只走命令式 transform。React 状态仅低频同步给吸附候选等
+    // 编辑逻辑，避免整棵工作台以 10fps 重渲染并反过来阻塞解码/绘制。
+    if (now - previous.at >= 500 || Math.abs(sec - previous.sec) >= 5) {
+      lastPlayheadCommitRef.current = { at: now, sec };
+      setPlayheadSec(sec);
+    }
   }, []);
   // 单击瓦片试看；再点已选中瓦片取消，回到成片/占位。
   const handlePreviewAsset = useCallback((asset: MaterialAsset) => {
@@ -334,8 +447,13 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   }, []);
   const closeAssetPreview = useCallback(() => setPreviewingAssetId(null), []);
   const handleTimelineSeek = useCallback((sec: number) => {
+    playheadSecRef.current = sec;
     setSeekSec(sec);
     setPlayheadSec(sec);
+    timelineViewerRef.current?.setPlayheadSec(sec, false);
+    if (playheadTimecodeRef.current) {
+      playheadTimecodeRef.current.textContent = formatTimecode(sec);
+    }
   }, []);
   const zoomOutTimeline = useCallback(() => {
     setPxPerSec((current) => {
@@ -361,43 +479,32 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
       return;
     }
     const available = body.clientWidth - TIMELINE_LABEL_WIDTH - 16;
-    setPxPerSec(Math.max(4, Math.floor(available / durationSec)));
+    setPxPerSec(
+      Math.min(
+        TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1],
+        Math.max(TIMELINE_ZOOM_LEVELS[0], Math.floor(available / durationSec))
+      )
+    );
   }, [timelineQuery.data?.timeline]);
   const handleClipClick = useCallback(
     (clipId: string) => {
       setSelectedClipId(clipId);
-      const streamMatch = streamItems.find(
-        (item) => item.type === "message" && item.text.includes(clipId)
-      );
-      const messageMatch =
-        messages.find((message) => message.content.includes(clipId)) ??
-        (streamMatch && streamMatch.type === "message"
-          ? { id: streamMatch.message_id }
-          : undefined);
-      const structuredMatch = renderedStructuredItems.some((item) => JSON.stringify(item).includes(clipId));
-      const targetId = messageMatch?.id ?? (structuredMatch ? "structured-interactions" : null);
-      setHighlightedMessageId(targetId);
-      setUnmatchedClipId(targetId ? null : clipId);
-      if (targetId) {
-        window.requestAnimationFrame(() => scrollToMessage(targetId));
-      }
+      // 人工编辑保持静默：选中时间线片段不滚动、不高亮，也不向 LLM 面板写提示。
+      setHighlightedMessageId(null);
     },
-    [messages, renderedStructuredItems, streamItems]
+    []
   );
+  const handleTimelineDeselect = useCallback(() => setSelectedClipId(null), []);
   const applyTimelinePatch = useCallback(
-    (op: Record<string, unknown>) => {
-      if (viewingHistory) {
-        setTimelineEditError("历史版本仅供查看，请回到当前版本后再编辑。");
-        return;
+    (op: TimelineOperation) => {
+      try {
+        editorSessionRef.current?.apply(op);
+        setTimelineEditError(null);
+      } catch (error) {
+        setTimelineEditError(timelinePatchErrorMessage(error));
       }
-      if (timelinePatch.isPending || timelineRestore.isPending) {
-        setTimelineEditError("时间线正在修改，请稍候。");
-        return;
-      }
-      setTimelineEditError(null);
-      timelinePatch.mutate(op);
     },
-    [timelinePatch, timelineRestore.isPending, viewingHistory]
+    []
   );
   const handleSplitClip = useCallback(
     (clipId: string, splitFrame: number) => {
@@ -443,33 +550,27 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     [applyTimelinePatch]
   );
   const handleSplitSelected = useCallback(() => {
-    if (!selectedClipId || !timelinePayload) {
+    if (!selectedClipId || !editorTimeline) {
       return;
     }
-    const detail = findTimelineClip(timelinePayload.timeline, selectedClipId);
+    const detail = findTimelineClip(editorTimeline, selectedClipId);
     if (!detail?.assetId) {
       setTimelineEditError("请选择视频或图片片段后再分割。");
       return;
     }
-    const fps = timelinePayload.timeline.fps > 0 ? timelinePayload.timeline.fps : 30;
-    const playheadFrame = Math.round((playheadSec ?? -1) * fps);
+    const fps = editorTimeline.fps > 0 ? editorTimeline.fps : 30;
+    const playheadFrame = Math.round((playheadSecRef.current ?? playheadSec ?? -1) * fps);
     const splitAt =
       playheadFrame > detail.startFrame && playheadFrame < detail.endFrame
         ? playheadFrame
         : Math.round((detail.startFrame + detail.endFrame) / 2);
     handleSplitClip(selectedClipId, splitAt);
-  }, [handleSplitClip, playheadSec, selectedClipId, timelinePayload]);
+  }, [editorTimeline, handleSplitClip, playheadSec, selectedClipId]);
   const handleDeleteSelected = useCallback(() => {
-    if (!selectedClipId || !timelinePayload) {
+    if (!selectedClipId || !editorTimeline) {
       return;
     }
-    if (viewingHistory || timelinePatch.isPending || timelineRestore.isPending) {
-      setTimelineEditError(
-        viewingHistory ? "历史版本仅供查看，请回到当前版本后再编辑。" : "时间线正在修改，请稍候。"
-      );
-      return;
-    }
-    const detail = findTimelineClip(timelinePayload.timeline, selectedClipId);
+    const detail = findTimelineClip(editorTimeline, selectedClipId);
     if (!detail) {
       setTimelineEditError("找不到当前选中的片段。");
       return;
@@ -479,10 +580,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   }, [
     applyTimelinePatch,
     selectedClipId,
-    timelinePatch.isPending,
-    timelinePayload,
-    timelineRestore.isPending,
-    viewingHistory
+    editorTimeline
   ]);
   const handleToggleLinked = useCallback(
     (clipId: string, linked: boolean) => {
@@ -493,6 +591,17 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const handleClipGainChange = useCallback(
     (clipId: string, gainDb: number) => {
       applyTimelinePatch({ kind: "adjust_gain", timeline_clip_id: clipId, gain_db: gainDb });
+    },
+    [applyTimelinePatch]
+  );
+  const handleClipFadeChange = useCallback(
+    (clipId: string, fadeInFrames: number, fadeOutFrames: number) => {
+      applyTimelinePatch({
+        kind: "set_clip_fades",
+        timeline_clip_id: clipId,
+        fade_in_frames: fadeInFrames,
+        fade_out_frames: fadeOutFrames
+      });
     },
     [applyTimelinePatch]
   );
@@ -509,14 +618,14 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     [applyTimelinePatch]
   );
   const handleAddSubtitle = useCallback(() => {
-    const timeline = timelinePayload?.timeline;
+    const timeline = editorTimeline;
     if (!timeline || timeline.duration_frames < 1) {
       return;
     }
     const fps = timeline.fps > 0 ? timeline.fps : 30;
     const length = Math.min(timeline.duration_frames, fps * 2);
     let startFrame = clampNumber(
-      Math.round((playheadSec ?? 0) * fps),
+      Math.round((playheadSecRef.current ?? playheadSec ?? 0) * fps),
       0,
       Math.max(0, timeline.duration_frames - 1)
     );
@@ -535,44 +644,20 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
       end_frame: endFrame,
       text: "在这里输入字幕"
     });
-  }, [applyTimelinePatch, playheadSec, timelinePayload?.timeline]);
-  const restoreVersion = useCallback(
-    (version: number | null | undefined) => {
-      if (!version || timelinePatch.isPending || timelineRestore.isPending) {
-        return;
-      }
-      setTimelineEditError(null);
-      timelineRestore.mutate(version);
-    },
-    [timelinePatch.isPending, timelineRestore]
-  );
-  const handleUndo = useCallback(
-    () => restoreVersion(viewingHistory ? null : timelinePayload?.parent_version),
-    [restoreVersion, timelinePayload?.parent_version, viewingHistory]
-  );
-  const handleRedo = useCallback(
-    () => restoreVersion(viewingHistory ? null : timelinePayload?.redo_version),
-    [restoreVersion, timelinePayload?.redo_version, viewingHistory]
-  );
+  }, [applyTimelinePatch, editorTimeline, playheadSec]);
   const handleExport = useCallback(() => {
     postMessage.mutate("请把当前时间线导出为最终 MP4。");
   }, [postMessage]);
 
   useEffect(() => {
+    playheadSecRef.current = null;
     setPlayheadSec(null);
     setSeekSec(null);
-  }, [timelinePayload?.preview_id]);
-
-  // 时间线推进到新版本时回到「当前版本」视图。
-  useEffect(() => {
-    setViewedVersion(null);
-  }, [timelineVersion]);
-
-  useEffect(() => {
-    if (previewSrc) {
-      setPreviewRefreshing(false);
+    timelineViewerRef.current?.setPlayheadSec(null, false);
+    if (playheadTimecodeRef.current) {
+      playheadTimecodeRef.current.textContent = formatTimecode(0);
     }
-  }, [previewSrc]);
+  }, [timelinePayload?.preview_id]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent): void => {
@@ -586,14 +671,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         return;
       }
       const key = event.key.toLowerCase();
-      if ((event.metaKey || event.ctrlKey) && key === "z" && !event.altKey) {
-        event.preventDefault();
-        if (event.shiftKey) {
-          handleRedo();
-        } else {
-          handleUndo();
-        }
-      } else if (event.metaKey || event.ctrlKey || event.altKey) {
+      if (event.metaKey || event.ctrlKey || event.altKey) {
         return;
       } else if (key === "v") {
         setEditMode("select");
@@ -608,30 +686,23 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     };
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
-  }, [handleDeleteSelected, handleRedo, handleUndo, selectedClipId]);
+  }, [handleDeleteSelected, selectedClipId]);
 
-  const unmatchedClipDetail = useMemo(
-    () =>
-      unmatchedClipId && timelinePayload
-        ? findTimelineClip(timelinePayload.timeline, unmatchedClipId)
-        : null,
-    [timelinePayload, unmatchedClipId]
-  );
   const runtime = useConsoleExternalStoreRuntime({
     messages,
     structuredItems: renderedStructuredItems,
-    isRunning: disabled,
-    canSubmit: !disabled,
+    isRunning: turnBusy,
+    canSubmit: true,
     submit: submitMessage
   });
   const submitComposer = useCallback(() => {
     const content = draft.trim();
-    if (!content || disabled) {
+    if (!content) {
       return;
     }
     setDraft("");
     runtime.submit(content);
-  }, [disabled, draft, runtime]);
+  }, [draft, runtime]);
   const statusLabel = useMemo(() => {
     if (streamState === "open") {
       return "事件流已连接";
@@ -643,27 +714,26 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   }, [streamState]);
 
   const timelineDurationSec = useMemo(() => {
-    const timeline = timelinePayload?.timeline;
+    const timeline = editorTimeline;
     if (!timeline) {
       return 0;
     }
     const fps = timeline.fps > 0 ? timeline.fps : 30;
     return timeline.duration_frames / fps;
-  }, [timelinePayload?.timeline]);
+  }, [editorTimeline]);
   const selectedClipDetail = useMemo(
     () =>
-      selectedClipId && timelinePayload
-        ? findTimelineClip(timelinePayload.timeline, selectedClipId)
+      selectedClipId && editorTimeline
+        ? findTimelineClip(editorTimeline, selectedClipId)
         : null,
-    [selectedClipId, timelinePayload]
+    [editorTimeline, selectedClipId]
   );
-  const timelineEditingDisabled =
-    timelinePatch.isPending || timelineRestore.isPending || viewingHistory || timelineVersion === null;
+  const timelineEditingDisabled = editorTimeline === null;
 
   return (
     <div className="flex h-[100dvh] min-h-0 flex-col bg-ink text-fg">
       <TopBar
-        connectionState={connectionState}
+        connectionState={streamState}
         showSettings={false}
         leading={
           <>
@@ -697,7 +767,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             <button
               className="rounded-sm bg-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-accent-strong disabled:opacity-40"
               type="button"
-              disabled={disabled || timelineVersion === null}
+              disabled={turnBusy || timelineVersion === null}
               onClick={handleExport}
             >
               导出
@@ -715,21 +785,40 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         >
           <div className="flex h-8 shrink-0 items-center justify-between border-b border-line px-3">
             <span className="text-xs font-semibold tracking-wide">AI 剪辑</span>
-            <span className="inline-flex items-center gap-1.5 text-2xs text-fg-faint">
-              <span
-                aria-hidden
-                className={`size-1.5 rounded-full ${
-                  streamState === "open"
-                    ? "bg-ok"
-                    : streamState === "closed"
-                      ? "bg-danger"
-                      : "bg-warn"
-                }`}
-              />
-              <span className="sr-only">{statusLabel}</span>
-              {streamState === "open" ? "在线" : "连接中"}
-            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="inline-flex h-6 items-center gap-1 rounded-sm px-1.5 text-2xs text-fg-faint hover:bg-hover hover:text-fg disabled:opacity-35"
+                aria-label="清空对话上下文"
+                title="清空对话；保留素材与时间线"
+                disabled={turnBusy || clearConversation.isPending}
+                onClick={handleClearConversation}
+              >
+                <MessageSquareX size={12} strokeWidth={1.7} aria-hidden />
+                清空
+              </button>
+              <span className="inline-flex items-center gap-1.5 text-2xs text-fg-faint">
+                <span
+                  aria-hidden
+                  className={`size-1.5 rounded-full ${
+                    streamState === "open"
+                      ? "bg-ok"
+                      : streamState === "closed"
+                        ? "bg-danger"
+                        : "bg-warn"
+                  }`}
+                />
+                <span className="sr-only">{statusLabel}</span>
+                {streamState === "open" ? "在线" : "连接中"}
+              </span>
+            </div>
           </div>
+
+          {conversationError ? (
+            <div className="shrink-0 border-b border-danger/30 bg-danger/8 px-3 py-1 text-2xs text-danger" role="alert">
+              {conversationError}
+            </div>
+          ) : null}
 
           <AssistantThread
             runtime={runtime}
@@ -737,6 +826,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             answerPending={answerDecision.isPending}
             highlightedMessageId={highlightedMessageId}
             streamItems={streamItems}
+            modelRetry={modelRetry}
             subagentProgress={subagentProgress}
           />
 
@@ -773,25 +863,36 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
                     submitComposer();
                   }
                 }}
-                disabled={!runtime.canSubmit}
-                placeholder={runtime.isRunning ? "等待本轮结束…" : "描述你想怎样剪辑…"}
+                placeholder={
+                  runtime.isRunning
+                    ? "描述下一步；发送后会排到当前任务之后…"
+                    : "描述你想怎样剪辑…"
+                }
               />
               <div className="flex items-center justify-between gap-3 border-t border-line px-2 py-1.5">
-                <span className="text-2xs text-fg-faint">
-                  <kbd className="font-mono">Enter</kbd> 发送　
-                  <kbd className="font-mono">Shift+Enter</kbd> 换行
-                </span>
-                {runtime.isRunning ? (
-                  <button
-                    className="flex size-7 items-center justify-center rounded-md border border-line-strong bg-panel text-fg-muted transition-[transform,background-color] duration-fast hover:bg-hover hover:text-fg active:translate-y-px disabled:opacity-40"
-                    type="button"
-                    aria-label="停止当前任务"
-                    disabled={cancelTurn.isPending}
-                    onClick={() => cancelTurn.mutate()}
-                  >
-                    <Square size={11} fill="currentColor" strokeWidth={1.5} aria-hidden />
-                  </button>
-                ) : (
+                <div className="min-w-0 text-2xs text-fg-faint">
+                  {runtime.isRunning ? (
+                    <span className="block truncate text-accent" role="status" aria-live="polite">
+                      新消息将按发送顺序排队
+                    </span>
+                  ) : null}
+                  <span className="block">
+                    <kbd className="font-mono">Enter</kbd> 发送　
+                    <kbd className="font-mono">Shift+Enter</kbd> 换行
+                  </span>
+                </div>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {runtime.isRunning ? (
+                    <button
+                      className="flex size-7 items-center justify-center rounded-md border border-line-strong bg-panel text-fg-muted transition-[transform,background-color] duration-fast hover:bg-hover hover:text-fg active:translate-y-px disabled:opacity-40"
+                      type="button"
+                      aria-label="停止当前任务"
+                      disabled={cancelTurn.isPending}
+                      onClick={() => cancelTurn.mutate()}
+                    >
+                      <Square size={11} fill="currentColor" strokeWidth={1.5} aria-hidden />
+                    </button>
+                  ) : null}
                   <button
                     className="flex size-7 items-center justify-center rounded-md bg-accent text-white transition-[transform,background-color] duration-fast hover:bg-accent-strong active:translate-y-px disabled:opacity-40"
                     type="submit"
@@ -801,7 +902,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
                     <ArrowUp size={15} strokeWidth={2} aria-hidden />
                     <span className="sr-only">发送</span>
                   </button>
-                )}
+                </div>
               </div>
             </div>
           </form>
@@ -826,12 +927,10 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             >
               <AssetsPanel
                 draftId={draftId}
+                enableEvents={false}
                 management
                 onPreviewAsset={handlePreviewAsset}
                 previewingAssetId={previewingAssetId}
-                understandingProgress={understandingProgress}
-                onCancelUnderstanding={() => cancelTurn.mutate()}
-                cancellingUnderstanding={cancelTurn.isPending}
               />
             </div>
 
@@ -858,14 +957,11 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
                   <PreviewPlaceholder text="暂无时间线。告诉 AI 如何剪辑，或先导入素材。" />
                 ) : timelineQuery.isPending ? (
                   <PreviewPlaceholder text="时间线加载中…" />
-                ) : previewRefreshing ? (
-                  <PreviewPlaceholder text="时间线已更新，正在生成新预览…" />
-                ) : timelinePayload && previewSrc ? (
-                  <PreviewPlayer
-                    key={timelinePayload.preview_id}
-                    src={previewSrc}
-                    fps={timelinePayload.timeline.fps}
-                    fit="height"
+                ) : editorTimeline ? (
+                  <DiffusionPreviewPlayer
+                    key={draftId}
+                    timeline={editorTimeline}
+                    fallbackSrc={previewSrc}
                     onFirstPlay={handlePreviewFirstPlay}
                     onTimeUpdate={handlePreviewTimeUpdate}
                     seekSec={seekSec}
@@ -891,21 +987,6 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             aria-label="时间线"
           >
             <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-line px-2">
-              <TimelineToolButton
-                icon={Undo2}
-                label="撤销"
-                shortcut="⌘Z"
-                disabled={timelineEditingDisabled || timelinePayload?.parent_version == null}
-                onClick={handleUndo}
-              />
-              <TimelineToolButton
-                icon={Redo2}
-                label="重做"
-                shortcut="⇧⌘Z"
-                disabled={timelineEditingDisabled || timelinePayload?.redo_version == null}
-                onClick={handleRedo}
-              />
-              <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-line-strong" />
               <TimelineToolButton
                 icon={MousePointer2}
                 label="选择"
@@ -980,26 +1061,18 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
                 active={dropMode === "overwrite"}
                 onClick={() => setDropMode("overwrite")}
               />
-              {timelineVersion !== null ? (
-                <select
-                  aria-label="时间线版本"
-                  className="ml-1 rounded-sm border border-line bg-raised px-1.5 py-1 text-2xs text-fg-muted outline-none focus:border-accent"
-                  value={effectiveVersion ?? ""}
-                  onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setViewedVersion(next === timelineVersion ? null : next);
-                  }}
-                >
-                  {versionOptions(timelinePayload?.latest_version ?? timelineVersion).map((version) => (
-                    <option key={version} value={version}>
-                      v{version}{version === timelineVersion ? " · 当前" : ""}
-                    </option>
-                  ))}
-                </select>
-              ) : null}
-
               <span className="mx-auto font-mono text-2xs tabular-nums text-fg-muted">
-                {formatTimecode(playheadSec ?? 0)} / {formatTimecode(timelineDurationSec)}
+                <span ref={playheadTimecodeRef}>{formatTimecode(playheadSec ?? 0)}</span> / {formatTimecode(timelineDurationSec)}
+              </span>
+
+              <span
+                className={`shrink-0 text-2xs ${
+                  editorSnapshot?.saveState === "error" ? "text-danger" : "text-fg-faint"
+                }`}
+                role="status"
+                data-testid="editor-save-state"
+              >
+                {editorSaveLabel(editorSnapshot?.saveState ?? "saved")}
               </span>
 
               <div className="flex items-center gap-0.5">
@@ -1013,8 +1086,19 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
                 >
                   <ZoomOut size={14} strokeWidth={1.75} aria-hidden />
                 </button>
-                <span className="w-11 text-center text-2xs tabular-nums text-fg-faint">
-                  {pxPerSec}px/s
+                <input
+                  type="range"
+                  aria-label="时间线缩放"
+                  title="拖动缩放；也可在时间线上按住 ⌘/Ctrl 滚轮"
+                  className="h-1 w-20 accent-accent"
+                  min={TIMELINE_ZOOM_LEVELS[0]}
+                  max={TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1]}
+                  step={1}
+                  value={pxPerSec}
+                  onChange={(event) => setPxPerSec(Number(event.target.value))}
+                />
+                <span className="w-12 text-center text-2xs tabular-nums text-fg-faint">
+                  {pxPerSec} px/s
                 </span>
                 <button
                   type="button"
@@ -1036,50 +1120,39 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
               </div>
             </div>
 
-            {viewingHistory || timelineEditError ? (
+            {timelineEditError ? (
               <div
-                className={`flex shrink-0 items-center justify-between gap-3 border-b px-3 py-1 text-2xs ${
-                  timelineEditError
-                    ? "border-danger/30 bg-danger/8 text-danger"
-                    : "border-warn/30 bg-warn/8 text-warn"
-                }`}
+                className="flex shrink-0 items-center justify-between gap-3 border-b border-danger/30 bg-danger/8 px-3 py-1 text-2xs text-danger"
                 role="status"
               >
-                <span>{timelineEditError ?? "正在查看历史版本；恢复后会成为当前编辑版本。"}</span>
-                {viewingHistory && !timelineEditError && timelinePayload ? (
-                  <button
-                    type="button"
-                    className="shrink-0 rounded-sm border border-warn/40 px-2 py-0.5 font-semibold hover:bg-warn/10"
-                    disabled={timelineRestore.isPending}
-                    onClick={() => restoreVersion(timelinePayload.timeline_version)}
-                  >
-                    恢复 v{timelinePayload.timeline_version}
-                  </button>
-                ) : null}
+                <span>{timelineEditError}</span>
               </div>
             ) : null}
 
-            <div ref={timelineBodyRef} className="min-h-0 flex-1 overflow-auto bg-ink">
+            <div ref={timelineBodyRef} className="min-h-0 flex-1 overflow-hidden bg-ink">
               {timelineVersion === null ? (
                 <p className="px-4 py-5 text-xs text-fg-muted">暂无时间线</p>
               ) : timelineQuery.isPending ? (
                 <p className="px-4 py-5 text-xs text-fg-muted">时间线加载中…</p>
-              ) : timelinePayload ? (
+              ) : editorTimeline ? (
                 <TimelineViewer
-                  timeline={timelinePayload.timeline}
+                  ref={timelineViewerRef}
+                  timeline={editorTimeline}
                   pxPerSec={pxPerSec}
                   playheadSec={playheadSec}
                   selectedClipId={selectedClipId}
                   onClipClick={handleClipClick}
+                  onDeselect={handleTimelineDeselect}
                   onSeek={handleTimelineSeek}
-                  waveformSrc={previewSrc}
+                  onZoomChange={setPxPerSec}
                   editMode={editMode}
                   dropMode={dropMode}
                   snapEnabled={snapEnabled}
-                  editing={timelinePatch.isPending || timelineRestore.isPending || viewingHistory}
+                  editing={false}
                   onSplitClip={handleSplitClip}
                   onMoveClip={handleMoveClip}
                   onTrimClip={handleTrimClip}
+                  onClipFadeChange={handleClipFadeChange}
                   onTrackStateChange={handleTrackStateChange}
                 />
               ) : (
@@ -1087,12 +1160,13 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
               )}
             </div>
 
-            {selectedClipDetail || unmatchedClipDetail ? (
+            {selectedClipDetail ? (
               <ClipDetailBar
-                detail={selectedClipDetail ?? unmatchedClipDetail!}
+                detail={selectedClipDetail}
                 editing={timelineEditingDisabled}
                 onToggleLinked={handleToggleLinked}
                 onClipGainChange={handleClipGainChange}
+                onClipFadeChange={handleClipFadeChange}
                 onTrackGainChange={handleTrackGainChange}
                 onSubtitleChange={handleSubtitleChange}
               />
@@ -1207,6 +1281,9 @@ type ClipDetail = {
   assetKind: string | null;
   text: string;
   gainDb: number;
+  fadeInFrames: number;
+  fadeOutFrames: number;
+  fps: number;
   trackGainDb: number;
   linked: boolean;
   trackMuted: boolean;
@@ -1219,6 +1296,7 @@ function ClipDetailBar({
   editing,
   onToggleLinked,
   onClipGainChange,
+  onClipFadeChange,
   onTrackGainChange,
   onSubtitleChange
 }: {
@@ -1226,14 +1304,21 @@ function ClipDetailBar({
   editing: boolean;
   onToggleLinked: (clipId: string, linked: boolean) => void;
   onClipGainChange: (clipId: string, gainDb: number) => void;
+  onClipFadeChange: (clipId: string, fadeInFrames: number, fadeOutFrames: number) => void;
   onTrackGainChange: (trackId: string, gainDb: number) => void;
   onSubtitleChange: (clipId: string, text: string) => void;
 }): ReactElement {
   const [clipGain, setClipGain] = useState(detail.gainDb);
   const [trackGain, setTrackGain] = useState(detail.trackGainDb);
+  const [fadeInFrames, setFadeInFrames] = useState(detail.fadeInFrames);
+  const [fadeOutFrames, setFadeOutFrames] = useState(detail.fadeOutFrames);
   const [subtitleText, setSubtitleText] = useState(detail.text);
   const committedClipGain = useRef(detail.gainDb);
   const committedTrackGain = useRef(detail.trackGainDb);
+  const committedFades = useRef({
+    fadeInFrames: detail.fadeInFrames,
+    fadeOutFrames: detail.fadeOutFrames
+  });
   useEffect(() => {
     setClipGain(detail.gainDb);
     committedClipGain.current = detail.gainDb;
@@ -1242,6 +1327,14 @@ function ClipDetailBar({
     setTrackGain(detail.trackGainDb);
     committedTrackGain.current = detail.trackGainDb;
   }, [detail.trackGainDb]);
+  useEffect(() => {
+    setFadeInFrames(detail.fadeInFrames);
+    setFadeOutFrames(detail.fadeOutFrames);
+    committedFades.current = {
+      fadeInFrames: detail.fadeInFrames,
+      fadeOutFrames: detail.fadeOutFrames
+    };
+  }, [detail.clipId, detail.fadeInFrames, detail.fadeOutFrames]);
   useEffect(() => setSubtitleText(detail.text), [detail.text]);
   const audio = isAudioTrack(detail.trackId);
   const subtitle = detail.trackId === "subtitles";
@@ -1255,6 +1348,16 @@ function ClipDetailBar({
     if (trackGain !== committedTrackGain.current) {
       committedTrackGain.current = trackGain;
       onTrackGainChange(detail.trackId, trackGain);
+    }
+  };
+  const commitFades = (): void => {
+    const committed = committedFades.current;
+    if (
+      fadeInFrames !== committed.fadeInFrames ||
+      fadeOutFrames !== committed.fadeOutFrames
+    ) {
+      committedFades.current = { fadeInFrames, fadeOutFrames };
+      onClipFadeChange(detail.clipId, fadeInFrames, fadeOutFrames);
     }
   };
   const commitSubtitle = (): void => {
@@ -1328,6 +1431,44 @@ function ClipDetailBar({
             />
             <span className="w-10 font-mono tabular-nums">{trackGain.toFixed(0)} dB</span>
           </label>
+          <label className="flex shrink-0 items-center gap-1.5">
+            <span>淡入</span>
+            <input
+              aria-label="片段淡入"
+              className="w-20 accent-accent"
+              type="range"
+              min={0}
+              max={Math.max(0, detail.endFrame - detail.startFrame - fadeOutFrames)}
+              step={1}
+              value={fadeInFrames}
+              disabled={editing || detail.trackLocked}
+              onChange={(event) => setFadeInFrames(Number(event.target.value))}
+              onPointerUp={commitFades}
+              onBlur={commitFades}
+            />
+            <span className="w-10 font-mono tabular-nums">
+              {(fadeInFrames / detail.fps).toFixed(1)}s
+            </span>
+          </label>
+          <label className="flex shrink-0 items-center gap-1.5">
+            <span>淡出</span>
+            <input
+              aria-label="片段淡出"
+              className="w-20 accent-accent"
+              type="range"
+              min={0}
+              max={Math.max(0, detail.endFrame - detail.startFrame - fadeInFrames)}
+              step={1}
+              value={fadeOutFrames}
+              disabled={editing || detail.trackLocked}
+              onChange={(event) => setFadeOutFrames(Number(event.target.value))}
+              onPointerUp={commitFades}
+              onBlur={commitFades}
+            />
+            <span className="w-10 font-mono tabular-nums">
+              {(fadeOutFrames / detail.fps).toFixed(1)}s
+            </span>
+          </label>
         </>
       ) : null}
 
@@ -1367,11 +1508,6 @@ function ClipDetailBar({
   );
 }
 
-function versionOptions(currentVersion: number): number[] {
-  const count = Math.min(currentVersion, MAX_VERSION_OPTIONS);
-  return Array.from({ length: count }, (_item, index) => currentVersion - index);
-}
-
 function findTimelineClip(timeline: TimelineJson, clipId: string): ClipDetail | null {
   const fps = timeline.fps > 0 ? timeline.fps : 30;
   for (const track of timeline.tracks) {
@@ -1395,6 +1531,11 @@ function findTimelineClip(timeline: TimelineJson, clipId: string): ClipDetail | 
         assetKind: typeof clip.asset_kind === "string" ? clip.asset_kind : null,
         text: typeof clip.text === "string" ? clip.text : "",
         gainDb: typeof clip.gain_db === "number" ? clip.gain_db : 0,
+        fadeInFrames:
+          typeof clip.fade_in_frames === "number" ? Math.max(0, Math.round(clip.fade_in_frames)) : 0,
+        fadeOutFrames:
+          typeof clip.fade_out_frames === "number" ? Math.max(0, Math.round(clip.fade_out_frames)) : 0,
+        fps,
         trackGainDb: typeof track.gain_db === "number" ? track.gain_db : 0,
         linked: clip.linked === true,
         trackMuted: track.muted === true,
@@ -1489,12 +1630,33 @@ function timelinePatchErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "时间线修改失败";
 }
 
+function conversationClearErrorMessage(error: unknown): string {
+  const reason = timelinePatchErrorMessage(error);
+  if (reason === "turn_active") {
+    return "当前任务仍在运行，请先停止或等待本轮结束后再清空对话。";
+  }
+  return reason === "API 请求失败：409" ? "当前任务仍在运行，暂时不能清空对话。" : reason;
+}
+
 function formatTimecode(sec: number): string {
   const safe = Math.max(0, sec);
   const minutes = Math.floor(safe / 60);
   const seconds = Math.floor(safe % 60);
   const tenths = Math.floor((safe % 1) * 10);
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${tenths}`;
+}
+
+function editorSaveLabel(state: EditorSessionSnapshot["saveState"]): string {
+  switch (state) {
+    case "dirty":
+      return "本地已更新";
+    case "saving":
+      return "保存中…";
+    case "error":
+      return "保存失败";
+    default:
+      return "已保存";
+  }
 }
 
 /** 成本小计：估算金额以人民币四位小数显示；未加载时占位。 */
@@ -1505,7 +1667,6 @@ function formatCost(total: number | null): string {
   return `¥${total.toFixed(4)}`;
 }
 
-const TIMELINE_ZOOM_LEVELS = [12, 24, 48, 96, 192];
+const TIMELINE_ZOOM_LEVELS = [8, 12, 24, 48, 96, 192, 320];
 const DEFAULT_TIMELINE_PX_PER_SEC = 96;
 const TIMELINE_LABEL_WIDTH = 184;
-const MAX_VERSION_OPTIONS = 50;

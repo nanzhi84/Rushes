@@ -12,6 +12,7 @@ const vidstackMock = vi.hoisted(() => {
     volume: number;
     muted: boolean;
     fullscreen: boolean;
+    playbackRate: number;
   };
   const initial = (): State => ({
     currentTime: 0,
@@ -21,7 +22,8 @@ const vidstackMock = vi.hoisted(() => {
     paused: true,
     volume: 1,
     muted: false,
-    fullscreen: false
+    fullscreen: false,
+    playbackRate: 1
   });
   let state: State = initial();
   const listeners = new Set<() => void>();
@@ -84,10 +86,20 @@ const vidstackMock = vi.hoisted(() => {
 vi.mock("@vidstack/react", async () => {
   const React = await import("react");
   return {
-    MediaPlayer({ children, src }: { children?: unknown; src: string }) {
+    MediaPlayer({
+      children,
+      src
+    }: {
+      children?: unknown;
+      src: string | { src: string; type: string };
+    }) {
       return React.createElement(
         "div",
-        { "data-testid": "media-player", "data-src": src },
+        {
+          "data-testid": "media-player",
+          "data-src": typeof src === "string" ? src : src.src,
+          "data-type": typeof src === "string" ? "" : src.type
+        },
         children as never
       );
     },
@@ -133,6 +145,7 @@ describe("PreviewPlayer", () => {
     expect(screen.getByTestId("media-player").getAttribute("data-src")).toBe(
       "/api/media/preview/prev_1"
     );
+    expect(screen.getByTestId("media-player").getAttribute("data-type")).toBe("video/mp4");
     expect(screen.getByText("00:00:00")).toBeTruthy();
     // 总长 10s @30fps → mm:ss:ff = 00:10:00
     expect(screen.getByText("00:10:00")).toBeTruthy();
@@ -250,5 +263,37 @@ describe("PreviewPlayer", () => {
     });
 
     await waitFor(() => expect(onTimeUpdate).toHaveBeenCalledWith(1.5));
+  });
+
+  it("播放期间在离散 timeupdate 之间按动画帧连续上报时间", async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) => {
+        frames.push(callback);
+        return frames.length;
+      })
+    );
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    vi.spyOn(performance, "now").mockReturnValue(1_000);
+    const onTimeUpdate = vi.fn();
+    render(
+      <PreviewPlayer
+        src="/api/media/preview/prev_1"
+        fps={30}
+        onTimeUpdate={onTimeUpdate}
+      />
+    );
+
+    act(() => {
+      vidstackMock.set({ currentTime: 2, playing: true, paused: false });
+    });
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+
+    act(() => {
+      frames.shift()?.(1_100);
+    });
+
+    expect(onTimeUpdate.mock.calls.at(-1)?.[0]).toBeCloseTo(2.1, 5);
   });
 });

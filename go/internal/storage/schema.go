@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 1
+const schemaVersion = 6
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -187,4 +187,83 @@ CREATE INDEX IF NOT EXISTS ix_event_log_cursor ON event_log(event_id);
 CREATE INDEX IF NOT EXISTS ix_event_log_draft_cursor ON event_log(draft_id, event_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_event_log_merge
 ON event_log(event_type, merge_key) WHERE merge_key IS NOT NULL;
+`
+
+// schemaV2 把时间线持久化收敛为“每个草稿仅保留当前版本”。版本号仍然
+// 单调递增，用于并发校验和渲染产物关联，但不再作为可浏览、可恢复的历史。
+const schemaV2 = `
+CREATE TABLE timeline_versions_v2 (
+    timeline_id TEXT PRIMARY KEY,
+    draft_id TEXT NOT NULL UNIQUE REFERENCES drafts(draft_id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    created_by_patch_id TEXT,
+    document_json TEXT NOT NULL,
+    validation_report_json TEXT,
+    created_at TEXT NOT NULL
+);
+
+INSERT INTO timeline_versions_v2(
+    timeline_id, draft_id, version, created_by_patch_id,
+    document_json, validation_report_json, created_at
+)
+SELECT
+    current.timeline_id, current.draft_id, current.version, current.created_by_patch_id,
+    current.document_json, current.validation_report_json, current.created_at
+FROM timeline_versions AS current
+WHERE current.version = COALESCE(
+    (SELECT drafts.timeline_current_version FROM drafts WHERE drafts.draft_id = current.draft_id),
+    (SELECT MAX(latest.version) FROM timeline_versions AS latest WHERE latest.draft_id = current.draft_id)
+);
+
+DROP TABLE timeline_versions;
+ALTER TABLE timeline_versions_v2 RENAME TO timeline_versions;
+`
+
+// schemaV3 清理已删除的版本恢复功能留下的领域事件，避免旧工作区在 SSE
+// 重放时持续产生未知事件错误。
+const schemaV3 = `
+DELETE FROM event_log WHERE event_type = 'TimelineVersionRestored';
+`
+
+// schemaV4 只保存当前时间线之外的紧凑语义编辑批次，供下一次 Agent 回合理解
+// 人工剪辑意图。它不是时间线快照，也不能用于版本恢复；每个草稿最多保留
+// 最近 20 批，具体裁剪在 reducer 的同一事务里完成。
+const schemaV4 = `
+CREATE TABLE IF NOT EXISTS timeline_edit_batches (
+    edit_batch_id TEXT PRIMARY KEY,
+    draft_id TEXT NOT NULL REFERENCES drafts(draft_id) ON DELETE CASCADE,
+    actor TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    operations_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_timeline_edit_batches_draft
+ON timeline_edit_batches(draft_id, created_at, edit_batch_id);
+`
+
+// schemaV5 accelerates the persistent understanding cache. The table already
+// carried fingerprint from v1, so no data rewrite is required.
+const schemaV5 = `
+CREATE INDEX IF NOT EXISTS ix_material_summaries_fingerprint
+ON material_summaries(asset_id, fingerprint, status);
+`
+
+// schemaV6 stores the model-facing context window independently from the
+// visible conversation. A checkpoint is a replacement-history boundary: the
+// current objective WorldState is stored as a reference snapshot, while older
+// dialogue is represented by one compact handoff summary.
+const schemaV6 = `
+CREATE TABLE IF NOT EXISTS agent_context_checkpoints (
+    draft_id TEXT PRIMARY KEY REFERENCES drafts(draft_id) ON DELETE CASCADE,
+    window_id TEXT NOT NULL,
+    window_number INTEGER NOT NULL,
+    history_version INTEGER NOT NULL,
+    base_snapshot_json TEXT NOT NULL,
+    base_snapshot_hash TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    compacted_through_message_id TEXT REFERENCES messages(message_id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 `

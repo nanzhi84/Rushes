@@ -8,6 +8,22 @@
 4. 渲染工具只入队。worker 完成后写终态事件，job observation bridge 再唤醒同一草稿的 Agent 回合。
 5. 前端领域 SSE 只做 query invalidation；媒体由带 query token 的 Range/HEAD 端点直接播放。
 
+素材理解以 `asset hash + 分析参数 + prompt version` 作为持久化 fingerprint；相同输入直接复用 SQLite 结果。Agent 每回合常驻读取精简 `material_catalog`，逐镜头语义与精确源帧由 `media.search_shots` 按创作意图检索，再以稳定 `shot_id` 交给高层时间线工具执行。
+
+口播是同一套“目录常驻、证据按需检索”模式：`material_catalog` 只常驻 `a_roll/b_roll`、`speech_searchable` 和逐句数量；`speech.inspect` 从 SQLite 按台词语义或源帧范围读取 SRT/ASR、VAD 气口及相似文本证据。模型自行判断口误、重复和配画面语义，`timeline.edit_talking_head` 只解析稳定 ID、校验范围并原子执行源区间正确的波纹删除与独立 B-roll 叠加。完整转写和重复 cut 数据都不进入长期 Context。
+
+## Agent 上下文窗口
+
+上下文采用与 Codex `ContextManager + WorldState + replacement compaction` 相同的分层原则：
+
+1. 系统提示只保存稳定的能力、安全和工具使用规则。
+2. `ContextBuilder` 从 SQLite 生成带稳定 section ID 的客观 `WorldState`；窗口首次保存完整参考快照，后续只注入 RFC 7396 Merge Patch。
+3. 可见消息与模型窗口分开持久化。模型历史只保留 user 指令和 assistant 最终回复，UI 工具折叠记录、observation 和 reset marker 不进入下一轮。
+4. assistant 历史被标记为可能过期的叙述，不能覆盖最新 WorldState。工具调用与结果只在当前 Eino ReAct 回合内成对存在。
+5. 历史超过软预算时，用结构化交接摘要替换旧消息；当前待执行 user 消息留在摘要之外，排在它后面尚未执行的队列消息不会提前泄漏进本轮。清空对话只删除 context checkpoint，素材、理解结果和当前时间线保持不变。
+
+`agent_context_checkpoints` 只保存当前窗口的参考快照、hash、压缩交接和替换边界，不保存历史时间线版本。
+
 ## 写入不变量
 
 - 业务表禁止绕过 `reducer.Apply`；工具结果侧行也必须通过 `ResultRows` 同事务提交。

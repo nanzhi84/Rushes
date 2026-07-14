@@ -27,6 +27,7 @@ elementProto.releasePointerCapture ??= () => {};
 afterEach(() => {
   cleanup();
   window.sessionStorage.clear();
+  window.localStorage.clear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   window.history.pushState(null, document.title, "/");

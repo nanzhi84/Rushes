@@ -44,9 +44,12 @@ func GenerateProxy(
 	}
 	extension := ".mp4"
 	args := []string{
-		"-y", "-i", source, "-map", "0:v:0", "-map", "0:a?", "-vf", "scale=-2:540",
-		"-c:v", "libx264", "-preset", "veryfast", "-crf", "30", "-pix_fmt", "yuv420p",
-		"-movflags", "+faststart", "-c:a", "aac", "-b:a", "96k",
+		"-y", "-i", source, "-map", "0:v:0", "-map", "0:a?",
+		"-vf", "scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2",
+		"-r", "30", "-fps_mode", "cfr",
+		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+		"-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
+		"-movflags", "+faststart", "-c:a", "aac", "-b:a", "128k",
 	}
 	if kind == "audio" {
 		extension = ".mp3"

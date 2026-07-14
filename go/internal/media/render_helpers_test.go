@@ -79,6 +79,20 @@ func TestAppendAudioMixUsesPrimaryAudioFallback(t *testing.T) {
 	if label != "mixed_audio" || len(args) != 1 || inputIndex != 4 || len(filters) != 3 || !strings.Contains(filters[2], "amix=inputs=2") {
 		t.Fatalf("label=%q args=%#v filters=%#v inputIndex=%d", label, args, filters, inputIndex)
 	}
+	faded := audioFilter(0, timeline.Clip{
+		TimelineStartFrame: 15, TimelineEndFrame: 75,
+		SourceStartFrame: 0, SourceEndFrame: 60, PlaybackRate: 1,
+		FadeInFrames: 6, FadeOutFrames: 12,
+	}, -3, document, "faded")
+	for _, expected := range []string{
+		"afade=t=in:st=0:d=0.200000",
+		"afade=t=out:st=1.600000:d=0.400000",
+		"adelay=500:all=1",
+	} {
+		if !strings.Contains(faded, expected) {
+			t.Fatalf("audio filter missing %q: %s", expected, faded)
+		}
+	}
 }
 
 func TestAppendSubtitlesSortsSkipsBlankAndPropagatesCreateError(t *testing.T) {

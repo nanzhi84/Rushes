@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  api,
   applyTimelinePatch,
+  clearDraftConversation,
   fetchDraftTimeline,
-  postPreviewViewed,
-  restoreTimelineVersion
+  postPreviewViewed
 } from "./client";
 
 describe("draft api client functions", () => {
@@ -11,7 +12,7 @@ describe("draft api client functions", () => {
     vi.unstubAllGlobals();
   });
 
-  it("fetchDraftTimeline 使用 draft timeline URL 并带可选 version", async () => {
+  it("fetchDraftTimeline 始终读取草稿的当前时间线", async () => {
     const fetchMock = vi.fn(async (..._args: unknown[]) =>
       jsonResponse({
         draft_id: "draft/1",
@@ -23,10 +24,10 @@ describe("draft api client functions", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await fetchDraftTimeline("draft 1", 3);
+    await fetchDraftTimeline("draft 1");
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/drafts/draft%201/timeline?version=3");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/drafts/draft%201/timeline");
   });
 
   it("postPreviewViewed 使用 viewed URL 和 POST", async () => {
@@ -44,7 +45,29 @@ describe("draft api client functions", () => {
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "POST" });
   });
 
-  it("applyTimelinePatch 使用版本化时间线 patch 路由", async () => {
+  it("clearDraftConversation 调用清空对话路由且不提交删除素材参数", async () => {
+    const fetchMock = vi.fn(async (..._args: unknown[]) =>
+      jsonResponse({
+        status: "cleared",
+        draft_id: "draft 1",
+        message_id: "context_1",
+        event_ids: [1],
+        preserved: ["assets", "material_understanding", "timeline", "preview"]
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await clearDraftConversation("draft 1");
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/drafts/draft%201/conversation/clear"
+    );
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(init).toMatchObject({ method: "POST" });
+    expect(init?.body).toBeUndefined();
+  });
+
+  it("applyTimelinePatch 使用当前时间线 patch 路由", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       jsonResponse({
         draft_id: "draft 1",
@@ -64,18 +87,24 @@ describe("draft api client functions", () => {
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "POST" });
   });
 
-  it("restoreTimelineVersion 使用 restore 路由并提交目标版本", async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      jsonResponse({})
+  it("trashDrafts 通过集合 DELETE 一次提交所选草稿", async () => {
+    const fetchMock = vi.fn(async (..._args: unknown[]) =>
+      jsonResponse({
+        deleted_count: 2,
+        deleted_draft_ids: ["draft_1", "draft_2"],
+        event_ids: [11, 12]
+      })
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await restoreTimelineVersion("draft 1", 2);
+    await api.trashDrafts(["draft_1", "draft_2"]);
 
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/drafts/draft%201/timeline/restore");
-    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ method: "POST" });
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({ version: 2 });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/drafts");
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(init).toMatchObject({ method: "DELETE" });
+    expect(init?.body).toBe(JSON.stringify({ draft_ids: ["draft_1", "draft_2"], confirm: true }));
   });
+
 });
 
 function jsonResponse(payload: unknown): Response {

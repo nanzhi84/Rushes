@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AssistantThread } from "./AssistantThread";
 import type {
   ConsoleAssistantMessage,
@@ -8,6 +8,77 @@ import type {
 import type { StreamMessageItem, TurnStreamItem } from "./useTurnStream";
 
 describe("AssistantThread Claude Code 式消息流", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("真实事件间隙也显示动态阶段与递增耗时", () => {
+    vi.useFakeTimers();
+    const view = renderThread({ isRunning: true });
+
+    const indicator = screen.getByTestId("turn-activity-indicator");
+    expect(indicator.getAttribute("data-turn-activity")).toBe("正在读取上下文");
+    expect(screen.getByText(/00:00/)).toBeTruthy();
+
+    act(() => vi.advanceTimersByTime(3_200));
+    expect(screen.getByText(/00:03/)).toBeTruthy();
+
+    view.rerender(
+      <AssistantThread
+        runtime={runtime([], true)}
+        onAnswerDecision={vi.fn()}
+        answerPending={false}
+        streamItems={[
+          {
+            type: "tool",
+            step_id: "s1",
+            tool: "understand.materials",
+            status: "running",
+            argsSummary: null,
+            observation: null
+          }
+        ]}
+      />
+    );
+    expect(indicator.getAttribute("data-turn-activity")).toBe("正在理解素材");
+    expect(screen.getByText(/00:03/)).toBeTruthy();
+
+    view.rerender(
+      <AssistantThread
+        runtime={runtime([], true)}
+        onAnswerDecision={vi.fn()}
+        answerPending={false}
+        streamItems={[
+          {
+            type: "tool",
+            step_id: "s2",
+            tool: "media.search_shots",
+            status: "running",
+            argsSummary: null,
+            observation: null
+          }
+        ]}
+      />
+    );
+    expect(indicator.getAttribute("data-turn-activity")).toBe("正在检索镜头");
+  });
+
+  it("像 Claude Code 一样持续显示模型超时重试序号", () => {
+    renderThread({
+      isRunning: true,
+      modelRetry: {
+        attempt: 3,
+        maxRetries: 5,
+        reason: "模型响应超时",
+        nextDelayMs: 1000
+      }
+    });
+
+    const indicator = screen.getByTestId("turn-activity-indicator");
+    expect(indicator.getAttribute("data-turn-activity")).toBe("模型响应超时，正在重试 3/5");
+    expect(screen.getByText("模型响应超时，正在重试 3/5")).toBeTruthy();
+  });
+
   it("把连续后台回调折叠并合并重复文案", () => {
     renderThread({
       messages: [
@@ -121,6 +192,86 @@ describe("AssistantThread Claude Code 式消息流", () => {
     expect(assistant?.className).not.toContain("bg-raised");
   });
 
+  it("把同一结构化消息里的多个问题合并成一个紧凑问答组", () => {
+    const answerOne = {
+      free_text: "Tim-Macbook Neo Talking节选.mp4",
+      answered_via: "natural_language" as const,
+      payload: {}
+    };
+    const answerTwo = {
+      free_text: "先剪气口，再配 B-roll",
+      answered_via: "natural_language" as const,
+      payload: {}
+    };
+    renderThread({
+      messages: [
+        {
+          id: "structured-interactions",
+          role: "assistant",
+          createdAt: "2026-07-11T00:00:00Z",
+          metadata: { consoleRole: "assistant" },
+          content: [
+            {
+              type: "data",
+              data: {
+                kind: "decision",
+                id: "decision:one",
+                decision_id: "one",
+                decision: {
+                  decision_id: "one",
+                  scope_type: "draft",
+                  draft_id: "draft_1",
+                  type: "generic",
+                  question: "哪个视频是口播主素材？",
+                  options: [],
+                  allow_free_text: true,
+                  blocking: true,
+                  status: "answered",
+                  answer: answerOne
+                },
+                status: "answered",
+                answer: answerOne
+              }
+            },
+            {
+              type: "data",
+              data: {
+                kind: "decision",
+                id: "decision:two",
+                decision_id: "two",
+                decision: {
+                  decision_id: "two",
+                  scope_type: "draft",
+                  draft_id: "draft_1",
+                  type: "generic",
+                  question: "转录不可用时如何处理？",
+                  options: [],
+                  allow_free_text: true,
+                  blocking: true,
+                  status: "answered",
+                  answer: answerTwo
+                },
+                status: "answered",
+                answer: answerTwo
+              }
+            }
+          ]
+        }
+      ]
+    });
+
+    expect(screen.getAllByTestId("decision-group")).toHaveLength(1);
+    expect(screen.getAllByTestId("decision-question")).toHaveLength(2);
+    expect(screen.getByText("已回答 2 个问题")).toBeTruthy();
+    expect(screen.getByText("问题 1")).toBeTruthy();
+    expect(screen.getByText("问题 2")).toBeTruthy();
+    expect(screen.getAllByText("回答")).toHaveLength(2);
+    expect(screen.getAllByTestId("decision-answer")).toHaveLength(2);
+    expect(screen.getByText("Tim-Macbook Neo Talking节选.mp4")).toBeTruthy();
+    expect(screen.getByText("先剪气口，再配 B-roll")).toBeTruthy();
+    expect(screen.queryByText("你的回答")).toBeNull();
+  });
+
   it("增量回复带流式状态，并只在 follow mode 下追随底部", async () => {
     const first: StreamMessageItem = {
       type: "message",
@@ -168,11 +319,18 @@ describe("AssistantThread Claude Code 式消息流", () => {
 function renderThread({
   messages = [],
   streamItems = [],
+  modelRetry = null,
   subagentProgress = [],
   isRunning = false
 }: {
   messages?: ConsoleAssistantMessage[];
   streamItems?: TurnStreamItem[];
+  modelRetry?: {
+    attempt: number;
+    maxRetries: number;
+    reason: string;
+    nextDelayMs: number | null;
+  } | null;
   subagentProgress?: Array<{ asset_id: string; note: string }>;
   isRunning?: boolean;
 }) {
@@ -182,6 +340,7 @@ function renderThread({
       onAnswerDecision={vi.fn()}
       answerPending={false}
       streamItems={streamItems}
+      modelRetry={modelRetry}
       subagentProgress={subagentProgress}
     />
   );

@@ -61,6 +61,53 @@ func (server *Server) EnqueueMessageApiDraftsDraftIdMessagesPost(
 	})
 }
 
+func (server *Server) ClearDraftConversationApiDraftsDraftIdConversationClearPost(
+	writer http.ResponseWriter,
+	request *http.Request,
+	draftID string,
+) {
+	draft, err := storage.GetDraft(request.Context(), server.database.Read(), draftID)
+	if errors.Is(err, storage.ErrNotFound) {
+		writeNotFound(writer, "draft_not_found")
+		return
+	}
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	if server.agent.Queue().IsBusy(draftID) {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"detail": map[string]string{"reason": "turn_active"},
+		})
+		return
+	}
+	messageID := newID("context")
+	result, err := reducer.Apply(request.Context(), server.database, []contracts.Event{{
+		Type: "ConversationContextCleared", DraftID: draftID,
+		Payload: map[string]any{"message_id": messageID},
+	}}, reducer.Options{
+		Actor:       contracts.ActorUser,
+		BaseVersion: &draft.StateVersion,
+		ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
+			ID: messageID, DraftID: draftID, Role: "system_observation", Kind: "context_reset",
+			Content: "对话上下文已清空；素材、素材理解、时间线和预览均已保留。",
+		}},
+	})
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	if result.Status != reducer.StatusApplied {
+		writeReducerResult(writer, result)
+		return
+	}
+	writeJSON(writer, http.StatusOK, ConversationClearResponse{
+		DraftId: draftID, MessageId: messageID, EventIds: reducerEventIDs(result),
+		Preserved: []string{"assets", "material_understanding", "timeline", "preview"},
+		Status:    ConversationClearResponseStatus("cleared"),
+	})
+}
+
 func (server *Server) ListDraftMessagesApiDraftsDraftIdMessagesGet(
 	writer http.ResponseWriter,
 	request *http.Request,

@@ -26,14 +26,7 @@ func renderHandler(database *storage.DB, final bool) Handler {
 		if draftID == "" {
 			return nil, errors.New("render job 缺少 draft_id")
 		}
-		version := intFromPayload(job.Payload["timeline_version"])
-		var document timeline.Document
-		var err error
-		if version > 0 {
-			document, err = timeline.Get(ctx, database, draftID, version)
-		} else {
-			document, err = timeline.Latest(ctx, database, draftID)
-		}
+		document, err := timeline.Latest(ctx, database, draftID)
 		if err != nil {
 			return nil, err
 		}
@@ -80,18 +73,5 @@ func renderHandler(database *storage.DB, final bool) Handler {
 			"artifact_id": artifactID, "timeline_version": document.Version,
 			"object_hash": rendered.Object.Hash, "profile": profile.Name,
 		}, nil
-	}
-}
-
-func intFromPayload(value any) int {
-	switch typed := value.(type) {
-	case float64:
-		return int(typed)
-	case int:
-		return typed
-	case int64:
-		return int(typed)
-	default:
-		return 0
 	}
 }

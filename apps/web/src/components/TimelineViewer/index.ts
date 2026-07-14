@@ -6,5 +6,6 @@ export type {
   TimelineJson,
   TimelineTrackStatePatch,
   TimelineTrackJson,
+  TimelineViewerHandle,
   TimelineViewerProps
 } from "./TimelineViewer";

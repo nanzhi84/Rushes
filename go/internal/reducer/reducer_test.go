@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,63 @@ func TestDraftCreatedAndMergeDedup(t *testing.T) {
 	draft, err := storage.GetDraft(t.Context(), database.Read(), "draft-1")
 	if err != nil || draft.StateVersion != 0 || draft.Name != "第一条" {
 		t.Fatalf("draft=%#v err=%v", draft, err)
+	}
+}
+
+func TestTimelineEditHistoryKeepsOnlyTwentySemanticBatches(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft-edit-history")
+	for index := 1; index <= 25; index++ {
+		draft, err := storage.GetDraft(t.Context(), database.Read(), "draft-edit-history")
+		if err != nil {
+			t.Fatal(err)
+		}
+		baseVersion := draft.StateVersion
+		result, err := Apply(t.Context(), database, []contracts.Event{{
+			Type: "TimelineVersionCreated", DraftID: "draft-edit-history",
+			Payload: map[string]any{
+				"timeline_version": index,
+				"timeline_id":      fmt.Sprintf("draft-edit-history:v%d", index),
+				"patch_id":         fmt.Sprintf("patch_%02d", index),
+				"edit_origin":      "manual",
+				"edit_operations": []any{map[string]any{
+					"kind": "move_clip", "timeline_clip_id": "clip_a", "target_frame": index,
+				}},
+				"document_json": map[string]any{
+					"timeline_id": fmt.Sprintf("draft-edit-history:v%d", index),
+					"draft_id":    "draft-edit-history", "version": index,
+					"fps": 30, "duration_frames": 1, "tracks": []any{},
+				},
+			},
+		}}, Options{Actor: contracts.ActorUser, BaseVersion: &baseVersion})
+		if err != nil || result.Status != StatusApplied {
+			t.Fatalf("batch %d result=%#v err=%v", index, result, err)
+		}
+	}
+
+	batches, err := storage.ListTimelineEditBatches(
+		t.Context(), database.Read(), "draft-edit-history", 100,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) != 20 || batches[0].ID != "patch_06" || batches[19].ID != "patch_25" {
+		t.Fatalf("batches=%#v", batches)
+	}
+	for _, batch := range batches {
+		if batch.Actor != string(contracts.ActorUser) || batch.Origin != "manual" {
+			t.Fatalf("人工操作来源错误: %#v", batch)
+		}
+	}
+	var timelineRows, currentVersion int
+	if err := database.Read().QueryRow(`
+		SELECT COUNT(*), MAX(version) FROM timeline_versions WHERE draft_id='draft-edit-history'`,
+	).Scan(&timelineRows, &currentVersion); err != nil {
+		t.Fatal(err)
+	}
+	if timelineRows != 1 || currentVersion != 25 {
+		t.Fatalf("timeline rows=%d current=%d", timelineRows, currentVersion)
 	}
 }
 
@@ -595,16 +653,12 @@ func TestReducerMaterializesCompleteCoreEventLifecycle(t *testing.T) {
 		"job_id": "job-fail", "kind": "ingest", "asset_id": "asset-failed",
 		"requested_by_draft_id": "draft-all", "error": map[string]any{"message": "failed"},
 	}})
-	applyStrict(contracts.Event{Type: "TimelineVersionRestored", DraftID: "draft-all", Payload: map[string]any{
-		"timeline_version": 1,
-	}})
-
 	draft, err := storage.GetDraft(t.Context(), database.Read(), "draft-all")
 	if err != nil || draft.ExportCurrentID == nil || *draft.ExportCurrentID != "export-all" ||
 		draft.LastViewedPreviewID == nil || *draft.LastViewedPreviewID != "preview-all" {
 		t.Fatalf("draft=%#v err=%v", draft, err)
 	}
-	for table, want := range map[string]int{"previews": 1, "exports": 1, "jobs": 2, "objects": 5} {
+	for table, want := range map[string]int{"timeline_versions": 1, "previews": 1, "exports": 1, "jobs": 2, "objects": 5} {
 		var count int
 		if err := database.Read().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != want {
 			t.Fatalf("%s count=%d want=%d err=%v", table, count, want, err)
@@ -719,17 +773,12 @@ func TestReducerHelperConversionAndFailureBranches(t *testing.T) {
 	_ = mustJSON(make(chan int))
 }
 
-func TestReducerMissingRestoreAndPreviewRollback(t *testing.T) {
+func TestReducerMissingPreviewRollback(t *testing.T) {
 	t.Parallel()
 	database := openTestDB(t)
 	createDraft(t, database, "draft-missing-rows")
-	base := 0
-	for _, event := range []contracts.Event{
-		{Type: "TimelineVersionRestored", DraftID: "draft-missing-rows", BaseVersion: &base, Payload: map[string]any{"timeline_version": 9}},
-		{Type: "PreviewViewed", DraftID: "draft-missing-rows", Payload: map[string]any{"preview_id": "missing"}},
-	} {
-		if result, err := Apply(t.Context(), database, []contracts.Event{event}, Options{Actor: contracts.ActorUser}); err == nil || result.Status == StatusApplied {
-			t.Fatalf("event=%s result=%#v err=%v", event.Type, result, err)
-		}
+	event := contracts.Event{Type: "PreviewViewed", DraftID: "draft-missing-rows", Payload: map[string]any{"preview_id": "missing"}}
+	if result, err := Apply(t.Context(), database, []contracts.Event{event}, Options{Actor: contracts.ActorUser}); err == nil || result.Status == StatusApplied {
+		t.Fatalf("event=%s result=%#v err=%v", event.Type, result, err)
 	}
 }

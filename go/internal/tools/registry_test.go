@@ -21,6 +21,14 @@ func (fakeExecutor) ExecuteTool(ctx context.Context, name string, _ any) (any, e
 		return AssetListResult{DraftID: draftID, Assets: []AssetManifest{}, Total: 0}, nil
 	case "understand.materials":
 		return UnderstandResult{DraftID: draftID, JobID: "job", Status: "queued"}, nil
+	case "media.search_shots":
+		return ShotSearchResult{Shots: []ShotCandidate{}, TotalMatches: 0}, nil
+	case "audio.analyze_beats":
+		return AudioBeatAnalysisResult{AssetID: "audio", BPM: 120, BeatFrames: []int{0, 15}}, nil
+	case "audio.analyze_speech_pauses":
+		return SpeechPauseAnalysisResult{AssetID: "audio", TimelineFPS: 30, Pauses: []SpeechPauseCandidate{}}, nil
+	case "speech.inspect":
+		return SpeechInspectResult{AssetID: "video", TimelineFPS: 30, Utterances: []SpeechUtteranceEvidence{}}, nil
 	case "render.inspect_preview":
 		return PreviewInspectionResult{Summary: "ok", Issues: []map[string]interface{}{}}, nil
 	default:
@@ -36,6 +44,10 @@ type prohibitedFrameInput struct {
 	FrameCount int `json:"frame_count"`
 }
 
+type prohibitedRevisionInput struct {
+	TimelineRevision int `json:"timeline_revision"`
+}
+
 type cleanInput struct {
 	Value string `json:"value"`
 }
@@ -44,6 +56,26 @@ type failingExecutor struct{}
 
 func (failingExecutor) ExecuteTool(context.Context, string, any) (any, error) {
 	return map[string]any{"status": "failed"}, errors.New("executor failed")
+}
+
+func TestUnderstandResultJSONRemainsBackwardCompatible(t *testing.T) {
+	t.Parallel()
+	legacy, err := json.Marshal(UnderstandResult{
+		DraftID: "draft", JobID: "job", AssetIDs: []string{"asset"}, Status: "completed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(legacy) != `{"draft_id":"draft","job_id":"job","asset_ids":["asset"],"status":"completed"}` {
+		t.Fatalf("旧结果 JSON 形状被破坏: %s", legacy)
+	}
+	var decoded UnderstandResult
+	if err := json.Unmarshal([]byte(`{"draft_id":"draft","job_id":"job","asset_ids":["asset"],"status":"completed"}`), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Status != "completed" || decoded.Summaries != nil {
+		t.Fatalf("旧 JSON 无法兼容解码: %#v", decoded)
+	}
 }
 
 func TestCoreInferToolRegistryAndTypedResults(t *testing.T) {
@@ -59,10 +91,10 @@ func TestCoreInferToolRegistryAndTypedResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := registry.Specs(false)
-	if len(core) != 12 {
+	if len(core) != 19 {
 		t.Fatalf("core tools=%d", len(core))
 	}
-	if len(registry.Specs(true)) != 15 {
+	if len(registry.Specs(true)) != 21 {
 		t.Fatalf("all tools=%d", len(registry.Specs(true)))
 	}
 	typed := map[string]bool{}
@@ -75,15 +107,15 @@ func TestCoreInferToolRegistryAndTypedResults(t *testing.T) {
 			t.Fatalf("spec=%s info=%#v err=%v", spec.Name, info, infoErr)
 		}
 	}
-	for _, expected := range []string{"asset.list_assets", "understand.materials", "render.inspect_preview"} {
+	for _, expected := range []string{"asset.list_assets", "understand.materials", "media.search_shots", "audio.analyze_beats", "audio.analyze_speech_pauses", "speech.inspect", "render.inspect_preview"} {
 		if !typed[expected] {
 			t.Fatalf("%s 缺少结构化 result model", expected)
 		}
 	}
-	if got := len(registry.EinoTools(false, false)); got != 11 {
+	if got := len(registry.EinoTools(false, false)); got != 18 {
 		t.Fatalf("LLM core tools=%d", got)
 	}
-	if got := len(registry.EinoTools(false, true)); got != 12 {
+	if got := len(registry.EinoTools(false, true)); got != 19 {
 		t.Fatalf("含 harness core tools=%d", got)
 	}
 
@@ -138,12 +170,21 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	if !containsSpec(allowed, "timeline.compose_initial") {
 		t.Fatal("可用素材存在后 compose 未放行")
 	}
+	if !containsSpec(allowed, "audio.analyze_beats") {
+		t.Fatal("可用素材存在后节拍分析未放行")
+	}
+	if !containsSpec(allowed, "audio.analyze_speech_pauses") {
+		t.Fatal("可用素材存在后气口分析未放行")
+	}
+	if !containsSpec(allowed, "timeline.recut_to_beats") {
+		t.Fatal("可用素材存在后，空时间线应直接放行卡点重剪")
+	}
 	if _, err := database.Write().ExecContext(t.Context(),
 		"UPDATE drafts SET timeline_current_version=1, timeline_validated=1 WHERE draft_id='draft_gate'"); err != nil {
 		t.Fatal(err)
 	}
 	allowed, _ = registry.Allowed(ctx, true)
-	for _, name := range []string{"timeline.apply_patch", "timeline.validate", "timeline.inspect", "render.preview", "render.final_mp4", "render.status"} {
+	for _, name := range []string{"timeline.apply_patch", "timeline.apply_patches", "timeline.recut_to_beats", "timeline.validate", "timeline.inspect", "render.preview", "render.final_mp4", "render.status"} {
 		if !containsSpec(allowed, name) {
 			t.Fatalf("%s 未放行", name)
 		}
@@ -184,6 +225,7 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 		t.Fatal("missing draft should fail")
 	}
 	if prohibitedField(reflect.TypeFor[prohibitedPathInput]()) != "path" ||
+		prohibitedField(reflect.TypeFor[prohibitedRevisionInput]()) != "timeline_revision" ||
 		prohibitedField(reflect.TypeFor[*prohibitedFrameInput]()) != "" ||
 		prohibitedField(reflect.TypeFor[string]()) != "" ||
 		prohibitedField(reflect.TypeFor[cleanInput]()) != "" {

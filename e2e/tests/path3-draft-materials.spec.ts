@@ -20,13 +20,30 @@ type DraftMutationResponse = {
   event_ids: number[];
 };
 
+type TimelineResponse = {
+  timeline_version: number;
+  timeline: {
+    fps: number;
+    duration_frames: number;
+    tracks: Array<{
+      clips?: Array<{
+        timeline_clip_id?: string;
+        asset_id?: string;
+        source_start_frame?: number;
+        source_end_frame?: number;
+      }>;
+    }>;
+  };
+};
+
 const E2E_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(E2E_DIR, "../..");
-const WORKSPACE_DIR = path.join(REPO_ROOT, ".e2e-workspace");
+const WORKSPACE_DIR =
+  process.env.RUSHES_E2E_WORKSPACE ?? path.join(REPO_ROOT, ".playwright-workspace");
 const FIXTURE_DIR = path.join(WORKSPACE_DIR, "fixtures");
 const FIXTURE_NAME = "path3-fixture.mp4";
 const FIXTURE_PATH = path.join(FIXTURE_DIR, FIXTURE_NAME);
-const API_URL = "http://127.0.0.1:18000";
+const API_URL = `http://127.0.0.1:${process.env.RUSHES_E2E_API_PORT ?? "18001"}`;
 const TOKEN = "e2e-token";
 
 test("Go 主线：导入、理解、时间线、预览、确认与最终导出", async ({
@@ -34,9 +51,10 @@ test("Go 主线：导入、理解、时间线、预览、确认与最终导出",
   request
 }) => {
   // 原生对话框无法无头驱动：拦截 fs/pick 返回 fixture 绝对路径，其后 reference 导入链路全部真实执行。
-  await page.route("**/api/fs/pick", (route) =>
-    route.fulfill({ json: { available: true, paths: [FIXTURE_PATH] } })
-  );
+  await page.route("**/api/fs/pick", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ mode: "mixed" });
+    await route.fulfill({ json: { available: true, paths: [FIXTURE_PATH] } });
+  });
 
   // 1. 首页草稿墙 →「开始创作」= POST /drafts → 直接进编辑器（无表单）。
   await page.goto(`/#t=${TOKEN}`);
@@ -53,20 +71,83 @@ test("Go 主线：导入、理解、时间线、预览、确认与最终导出",
 
   await page.getByLabel("消息输入").fill("E2E_FULL_MAINLINE");
   await page.getByRole("button", { name: "发送" }).click();
-  await expect(page.getByRole("status", { name: /素材理解中/ })).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByLabel("时间线版本")).toHaveValue("1");
-  await expect(page.getByRole("region", { name: "Video Player" })).toBeVisible({
+  await expect(page.getByRole("status", { name: /素材理解中/ })).toHaveCount(0);
+  await expect(page.getByRole("img", { name: "时间线轨道图" })).toBeVisible({
     timeout: 60_000
   });
-  const afterPreview = await waitForDraft(request, draftAId, (draft) => Boolean(draft.preview_current_id));
+  await expect(page.getByLabel("时间线版本")).toHaveCount(0);
+  const initialPreview = page
+    .getByLabel("Diffusion Studio 代理预览")
+    .or(page.getByRole("region", { name: "Video Player" }));
+  await expect(initialPreview).toBeVisible({ timeout: 60_000 });
+
+  // 回归“素材中段取片”：Diffusion Core 的 delay 必须扣掉 source_start_frame。
+  // 旧实现同时把 source start 算入 delay/range，在时间线 0 帧会没有活跃 clip，画布稳定黑屏。
+  const timelineBeforeTrim = await apiGet<TimelineResponse>(
+    request,
+    `/api/drafts/${draftAId}/timeline`
+  );
+  const visualClip = timelineBeforeTrim.timeline.tracks
+    .flatMap((track) => track.clips ?? [])
+    .find((clip) => clip.asset_id === assetId);
+  expect(visualClip?.timeline_clip_id).toBeTruthy();
+  expect(visualClip?.source_end_frame).toBeGreaterThanOrEqual(30);
+  const trimmedTimeline = await apiPost<TimelineResponse>(
+    request,
+    `/api/drafts/${draftAId}/timeline/patch`,
+    {
+      op: {
+        kind: "trim_clip",
+        timeline_clip_id: visualClip?.timeline_clip_id,
+        source_start_frame: 15,
+        source_end_frame: 30
+      }
+    }
+  );
+  expect(trimmedTimeline.timeline_version).toBeGreaterThan(
+    timelineBeforeTrim.timeline_version
+  );
+  expect(
+    trimmedTimeline.timeline.tracks
+      .flatMap((track) => track.clips ?? [])
+      .find((clip) => clip.timeline_clip_id === visualClip?.timeline_clip_id)?.source_start_frame
+  ).toBe(15);
+
+  // 页面重载后必须从最新服务端时间线重建本地预览。将 WebGL canvas
+  // 缩放到小型 2D canvas 取样，验收的是真实画面而不是“播放头有走”。
+  await page.reload();
+  await expect(page.getByLabel("Diffusion Studio 代理预览")).toBeVisible({
+    timeout: 60_000
+  });
+  const previewProgress = page.getByRole("slider", { name: "预览进度" });
+  await previewProgress.press("Home");
+  await expect
+    .poll(async () => Number(await previewProgress.inputValue()))
+    .toBeLessThan(0.05);
+  const previewCanvas = page.locator('canvas[data-diffusion-preview="true"]');
+  await expect(previewCanvas).toBeVisible();
+  await expect
+    .poll(async () => canvasNonBlackRatio(previewCanvas), { timeout: 15_000 })
+    .toBeGreaterThan(0.2);
+  const previewStart = Number(await previewProgress.inputValue());
+  await page.getByRole("button", { name: "播放", exact: true }).click();
+  await expect
+    .poll(async () => Number(await previewProgress.inputValue()), { timeout: 5_000 })
+    .toBeGreaterThan(previewStart + 0.1);
+  await page.getByRole("button", { name: "暂停", exact: true }).click();
+  const afterPreview = await waitForDraft(request, draftAId, (draft) =>
+    Boolean(draft.preview_current_id)
+  );
   expect(afterPreview.preview_current_id).toBeTruthy();
 
   await page.getByLabel("消息输入").fill("导出成片");
   await page.getByRole("button", { name: "发送" }).click();
-  const currentDecision = page.getByLabel("当前确认项");
+  const currentDecision = page.getByRole("region", { name: /个问题待回答/ });
   await expect(currentDecision.getByRole("button", { name: "确认", exact: true })).toBeVisible();
   await currentDecision.getByRole("button", { name: "确认", exact: true }).click();
-  const afterExport = await waitForDraft(request, draftAId, (draft) => Boolean(draft.export_current_id));
+  const afterExport = await waitForDraft(request, draftAId, (draft) =>
+    Boolean(draft.export_current_id)
+  );
   expect(afterExport.export_current_id).toBeTruthy();
 
   // 同路径导入另一个草稿只建链接，不再生成一份素材。
@@ -145,4 +226,29 @@ function idFromUrl(url: string): string {
     throw new Error(`missing draft id in ${url}`);
   }
   return decodeURIComponent(parts[index + 1]);
+}
+
+async function canvasNonBlackRatio(
+  canvas: import("@playwright/test").Locator
+): Promise<number> {
+  return canvas.evaluate((source) => {
+    const sample = document.createElement("canvas");
+    sample.width = 32;
+    sample.height = 32;
+    const context = sample.getContext("2d", { willReadFrequently: true });
+    if (!context) {
+      return 0;
+    }
+    context.drawImage(source, 0, 0, sample.width, sample.height);
+    const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
+    let nonBlack = 0;
+    for (let index = 0; index < pixels.length; index += 4) {
+      if (
+        Math.max(pixels[index] ?? 0, pixels[index + 1] ?? 0, pixels[index + 2] ?? 0) > 20
+      ) {
+        nonBlack += 1;
+      }
+    }
+    return nonBlack / (pixels.length / 4);
+  });
 }

@@ -42,7 +42,7 @@ export function PreviewPlayer({
 }: PreviewPlayerProps): ReactElement {
   return (
     <MediaPlayer
-      src={src}
+      src={{ src, type: "video/mp4" }}
       playsInline
       className={`flex w-full flex-col overflow-hidden border border-line bg-black text-white ${
         fit === "height" ? "h-full min-h-0" : ""
@@ -81,11 +81,12 @@ function PreviewPlayerControls({
   const volume = useMediaState("volume");
   const muted = useMediaState("muted");
   const fullscreen = useMediaState("fullscreen");
+  const playbackRate = useMediaState("playbackRate") ?? 1;
   const remote = useMediaRemote();
   const firstPlayReportedRef = useRef(false);
   const lastSeekSecRef = useRef<number | null | undefined>(undefined);
-  const latestTimeRef = useRef(currentTime);
-  const timeReportFrameRef = useRef<number | null>(null);
+  const playbackAnchorRef = useRef({ sec: currentTime, at: performance.now() });
+  const playbackFrameRef = useRef<number | null>(null);
   const safeFps = useMemo(() => (fps > 0 ? fps : 30), [fps]);
 
   const safeDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
@@ -117,24 +118,30 @@ function PreviewPlayerControls({
   }, [remote, seekSec]);
 
   useEffect(() => {
-    latestTimeRef.current = currentTime;
-    if (!onTimeUpdate || timeReportFrameRef.current !== null) {
+    playbackAnchorRef.current = { sec: currentTime, at: performance.now() };
+    if (!playing) {
+      onTimeUpdate?.(currentTime);
+    }
+  }, [currentTime, onTimeUpdate, playing]);
+
+  useEffect(() => {
+    if (!playing || !onTimeUpdate) {
       return;
     }
-    timeReportFrameRef.current = scheduleFrame(() => {
-      timeReportFrameRef.current = null;
-      onTimeUpdate(latestTimeRef.current);
-    });
-  }, [currentTime, onTimeUpdate]);
-
-  useEffect(
-    () => () => {
-      if (timeReportFrameRef.current !== null) {
-        cancelFrame(timeReportFrameRef.current);
+    const tick = (now: number): void => {
+      const anchor = playbackAnchorRef.current;
+      const estimated = anchor.sec + ((now - anchor.at) / 1000) * playbackRate;
+      onTimeUpdate(safeDuration > 0 ? Math.min(estimated, safeDuration) : Math.max(0, estimated));
+      playbackFrameRef.current = scheduleFrame(tick);
+    };
+    playbackFrameRef.current = scheduleFrame(tick);
+    return () => {
+      if (playbackFrameRef.current !== null) {
+        cancelFrame(playbackFrameRef.current);
+        playbackFrameRef.current = null;
       }
-    },
-    []
-  );
+    };
+  }, [onTimeUpdate, playbackRate, playing, safeDuration]);
 
   const stepFrame = useCallback(
     (direction: -1 | 1, event: MouseEvent<HTMLButtonElement>) => {
@@ -351,11 +358,11 @@ function pad2(value: number): string {
   return value.toString().padStart(2, "0");
 }
 
-function scheduleFrame(callback: () => void): number {
+function scheduleFrame(callback: (now: number) => void): number {
   if (typeof window.requestAnimationFrame === "function") {
     return window.requestAnimationFrame(callback);
   }
-  return window.setTimeout(callback, 16);
+  return window.setTimeout(() => callback(performance.now()), 16);
 }
 
 function cancelFrame(frameId: number): void {

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import type { MaterialAsset } from "../../api/client";
@@ -9,20 +9,121 @@ import { MaterialSummaryPanel } from "./MaterialSummaryPanel";
 
 type FetchMock = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
-// 素材瓦片的导入状态就地化 + 理解语义澄清：只断言瓦片自身的状态展示，不进对话流程。
-describe("AssetsPanel 导入状态就地化", () => {
-  it("理解进行中显示 N/M，取消入口可终止当前理解", async () => {
-    const onCancelUnderstanding = vi.fn();
-    renderPanel([], {
-      understandingProgress: { completed: 2, total: 5 },
-      onCancelUnderstanding
+describe("AssetsPanel 统一导入入口", () => {
+  it("只显示导入素材，并把文件与文件夹交给 mixed 选择器统一导入", async () => {
+    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchMock: FetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      requests.push({ url, init });
+      if (url.endsWith("/materials") && (init?.method ?? "GET") === "GET") {
+        return jsonResponse({ draft_id: "draft_1", assets: [], invalidated_asset_ids: [] });
+      }
+      if (url.endsWith("/api/fs/pick")) {
+        return jsonResponse({
+          available: true,
+          paths: ["/tmp/clip.mp4", "/tmp/folder-a", "/tmp/folder-b"]
+        });
+      }
+      if (url.endsWith("/materials/import-local")) {
+        return jsonResponse({
+          draft_id: "draft_1",
+          event_ids: [],
+          asset_ids: [],
+          duplicates: [],
+          failed: [],
+          skipped: []
+        });
+      }
+      return jsonResponse({});
     });
+    renderPanel([], {}, fetchMock);
 
-    expect(await screen.findByRole("status", { name: "素材理解中 2/5" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "取消素材理解" }));
-    expect(onCancelUnderstanding).toHaveBeenCalledTimes(1);
+    const importButton = await screen.findByRole("button", { name: "导入素材" });
+    expect(screen.queryByRole("button", { name: "导入文件夹" })).toBeNull();
+    fireEvent.click(importButton);
+
+    await waitFor(() => {
+      const pickerRequest = requests.find((request) => request.url.endsWith("/api/fs/pick"));
+      expect(pickerRequest).toBeTruthy();
+      expect(JSON.parse(String(pickerRequest?.init?.body))).toEqual({ mode: "mixed" });
+    });
+    await waitFor(() => {
+      const importRequest = requests.find((request) =>
+        request.url.endsWith("/materials/import-local")
+      );
+      expect(importRequest).toBeTruthy();
+      expect(JSON.parse(String(importRequest?.init?.body))).toEqual({
+        paths: ["/tmp/clip.mp4", "/tmp/folder-a", "/tmp/folder-b"],
+        storage_mode: "reference"
+      });
+    });
   });
 
+  it("等待 Finder 时禁止重复选择，并允许用户取消挂起请求", async () => {
+    let pickerCalls = 0;
+    let aborted = false;
+    const fetchMock: FetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/materials") && (init?.method ?? "GET") === "GET") {
+        return jsonResponse({ draft_id: "draft_1", assets: [], invalidated_asset_ids: [] });
+      }
+      if (url.endsWith("/api/fs/pick")) {
+        pickerCalls += 1;
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            aborted = true;
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        });
+      }
+      return jsonResponse({});
+    });
+    renderPanel([], {}, fetchMock);
+
+    const importButton = await screen.findByRole("button", { name: "导入素材" });
+    const emptyImportButton = await screen.findByRole("button", { name: "从 Finder 导入" });
+    fireEvent.click(emptyImportButton);
+
+    expect((await screen.findByRole("status")).textContent).toContain("等待 Finder 选择");
+    expect((importButton as HTMLButtonElement).disabled).toBe(true);
+    expect((emptyImportButton as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(emptyImportButton);
+    expect(pickerCalls).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "取消素材选择" }));
+
+    await waitFor(() => expect(screen.queryByText("等待 Finder 选择")).toBeNull());
+    expect(aborted).toBe(true);
+    expect((importButton as HTMLButtonElement).disabled).toBe(false);
+    expect((emptyImportButton as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByText("导入失败，请重试。")).toBeNull();
+  });
+
+  it("系统选择框不可用时自动打开支持文件和文件夹的应用内选择器", async () => {
+    const fetchMock: FetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/materials") && (init?.method ?? "GET") === "GET") {
+        return jsonResponse({ draft_id: "draft_1", assets: [], invalidated_asset_ids: [] });
+      }
+      if (url.endsWith("/api/fs/pick")) {
+        return jsonResponse({ available: false, paths: [] });
+      }
+      if (url.endsWith("/api/fs/roots")) {
+        return jsonResponse({ roots: [{ path: "/tmp", name: "tmp", exists: true }] });
+      }
+      return jsonResponse({});
+    });
+    renderPanel([], {}, fetchMock);
+
+    fireEvent.click(await screen.findByRole("button", { name: "导入素材" }));
+
+    expect(await screen.findByText("在应用中选择素材")).toBeTruthy();
+    expect(screen.getByText("选择一个服务器允许访问的根目录")).toBeTruthy();
+  });
+});
+
+// 素材瓦片的导入状态就地化 + 理解语义澄清：只断言瓦片自身的状态展示，不进对话流程。
+describe("AssetsPanel 导入状态就地化", () => {
   it("缩略图未就绪显示 kind 占位（脉冲），proxy/index 在跑显示旋转点", async () => {
     renderPanel([
       makeAsset({
@@ -133,10 +234,11 @@ describe("MaterialSummaryPanel 理解语义澄清", () => {
 
 function renderPanel(
   assets: MaterialAsset[],
-  props: Partial<ComponentProps<typeof AssetsPanel>> = {}
+  props: Partial<ComponentProps<typeof AssetsPanel>> = {},
+  fetchMock: FetchMock = materialsFetch(assets)
 ): void {
   storeAuthToken("test-token");
-  vi.stubGlobal("fetch", materialsFetch(assets));
+  vi.stubGlobal("fetch", fetchMock);
   render(
     <QueryClientProvider client={testQueryClient()}>
       <AssetsPanel draftId="draft_1" enableEvents={false} {...props} />

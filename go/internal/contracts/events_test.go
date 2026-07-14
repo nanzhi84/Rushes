@@ -14,8 +14,9 @@ func TestEventRegistryCoreSetAndVersionModes(t *testing.T) {
 	}
 	strict := map[string]bool{
 		"DecisionCreated": true, "DecisionAnswered": true,
-		"TimelineVersionCreated": true, "TimelineValidated": true,
-		"TimelineValidationFailed": true, "TimelineVersionRestored": true,
+		"ConversationContextCleared": true,
+		"TimelineVersionCreated":     true, "TimelineValidated": true,
+		"TimelineValidationFailed": true,
 	}
 	for name, spec := range EventRegistry {
 		want := VersionMerge
@@ -43,6 +44,20 @@ func TestEventMergeKeyAndDecisionWorkspaceMode(t *testing.T) {
 	key, err := event.MergeKey()
 	if err != nil || key != "draft_id=draft-1\x1fasset_id=asset-1" {
 		t.Fatalf("key=%q err=%v", key, err)
+	}
+	firstProxy := Event{
+		Type: "ProxyGenerated", Actor: ActorJob,
+		Payload: map[string]any{"asset_id": "asset-1", "proxy_object_hash": "hash-1"},
+	}
+	secondProxy := Event{
+		Type: "ProxyGenerated", Actor: ActorJob,
+		Payload: map[string]any{"asset_id": "asset-1", "proxy_object_hash": "hash-2"},
+	}
+	firstKey, firstErr := firstProxy.MergeKey()
+	secondKey, secondErr := secondProxy.MergeKey()
+	if firstErr != nil || secondErr != nil || firstKey == secondKey {
+		t.Fatalf("重新生成的代理必须使用不同幂等键: first=%q second=%q err=%v/%v",
+			firstKey, secondKey, firstErr, secondErr)
 	}
 	workspace := Event{
 		Type:    "DecisionCreated",

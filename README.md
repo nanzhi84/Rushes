@@ -6,15 +6,15 @@ Rushes 是一个本地优先的对话式视频剪辑 Agent：导入素材后，A
 
 ## 快速开始
 
-需要 Go 1.26、Node.js 24、ffmpeg/ffprobe，以及 pnpm 10.13.1。macOS 可运行：
+需要 Go 1.26、Node.js 24、ffmpeg/ffprobe、aubio，以及 pnpm 10.13.1。macOS 可运行：
 
 ```bash
-brew install go ffmpeg node
+brew install go ffmpeg aubio node
 make install-web
 make dev
 ```
 
-`make dev` 会构建并拉起 Go API、Go worker 和 Vite，终端会打印带本地访问 token 的 URL。端口默认是 API `8010`、Web `8011`，可用 `RUSHES_API_PORT` / `RUSHES_WEB_PORT` 覆盖。
+`make dev` 会构建并拉起 Go API、Go worker 和 Vite。首次启动会生成强随机的本地访问 token，以 `600` 权限写入已被 Git 忽略的根目录 `.env`；浏览器通过一次带 `#t=` 的启动 URL 授权后会持久保存，以后直接打开普通 Web 地址即可。端口默认是 API `8010`、Web `8011`，可用 `RUSHES_API_PORT` / `RUSHES_WEB_PORT` 覆盖。
 
 真实模型可在仓库根目录 `.env` 配置；显式 `export` 的变量优先于 `.env`：
 
@@ -23,7 +23,12 @@ RUSHES_DASHSCOPE_API_KEY=sk-...
 RUSHES_QWEN_PLANNER_MODEL=qwen3.7-max
 RUSHES_QWEN_CHAT_MODEL=qwen3.7-max
 RUSHES_QWEN_VISION_MODEL=qwen3.7-plus
+RUSHES_DASHSCOPE_ASR_MODEL=fun-asr-flash-2026-06-15
 ```
+
+`RUSHES_DASHSCOPE_ASR_MODEL` 默认即为 `fun-asr-flash-2026-06-15`。该模型使用
+DashScope `multimodal-generation` 接口；如果需要工作空间专属域名，可把完整接口地址写入
+`RUSHES_DASHSCOPE_ASR_BASE_URL`。旧的 `RUSHES_QWEN_ASR_MODEL` 仍作为兼容回退读取。
 
 没有模型密钥时，本地导入、SQLite、worker、时间线、渲染和 UI 仍可演示，聊天会明确进入无模型降级路径。
 
@@ -33,7 +38,7 @@ RUSHES_QWEN_VISION_MODEL=qwen3.7-plus
 React / Vite
    │ REST + domain SSE + turn-stream
    ▼
-chi API ───────────────► Eino ReAct Agent ─────► 15 个精简工具
+chi API ───────────────► Eino ReAct Agent ─────► 18 个模型工具
    │                         │                         │
    │                         └── TurnQueue / Hub ─────┘
    │
@@ -104,3 +109,24 @@ go test -tags=integration ./spikes -run 'TestQwen|TestArk' -v
 `RUSHES_ARK_MODEL` 接受方舟 Model ID 或 `ep-*` 推理接入点 ID；对应模型服务必须已在方舟控制台开通。
 
 CI 在 Ubuntu 与 macOS 上执行 Go `-race`，并运行契约对拍、90% 覆盖率、golangci-lint、govulncheck、前端三连和 Playwright。
+
+### 口播工具验收
+
+口播工作流不把完整 ASR 塞进每轮上下文。`speech.inspect` 优先复用同名 SRT，否则把单声道 16 kHz 短音频块交给 `fun-asr-flash-2026-06-15`；模型返回的句/词时间戳会直接换算为源帧，缺少完整时间戳时才使用本地对齐。逐句、气口与稳定 ID 持久化到 SQLite，模型可按台词或源帧范围继续检索。`media.search_shots` 可用 `semantic_roles=["b_roll"]` 限定配画面候选，模型完成语义判断后再用 `timeline.edit_talking_head` 一次原子提交删句、删气口和 B-roll 覆盖。
+
+真实模型工具路由与练习素材验收默认跳过，显式运行：
+
+```bash
+cd go
+set -a; source ../.env; set +a
+RUSHES_LIVE_TOOL_EVAL=1 RUSHES_TOOL_EVAL_RUNS=3 \
+  go test ./internal/agent -run TestLiveToolCallingStability -count=1 -v
+RUSHES_TALKING_HEAD_EVAL=1 \
+  go test ./internal/agent -run TestTalkingHeadRealMaterialAcceptance -count=1 -v
+RUSHES_REQUIRE_LIVE_MODELS=1 \
+RUSHES_ASR_LIVE_SOURCE=/absolute/path/to/aroll-without-sidecar.mp4 \
+  go test -tags=integration ./internal/agent \
+  -run TestSpeechInspectBuildsRealFunASRTranscript -count=1 -v
+```
+
+三项验收的硬门槛均为 95%；第二项会通过工具注册表调用真实练习素材，检查 A/B-roll 角色、逐句索引、气口删除、B-roll 语义检索、时间线不变量与上下文全文隔离；第三项必须使用没有同名 SRT 的真实口播，覆盖 DashScope 分块转写、空分块容错、SQLite 持久化与重复工具调用成功率。

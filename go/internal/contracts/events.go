@@ -45,6 +45,7 @@ var EventRegistry = map[string]EventSpec{
 	"MaterialUnderstandingFailed":    {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
 	"DecisionCreated":                {Mode: VersionStrict, MergeKeys: []string{"decision_id"}, DraftScope: true},
 	"DecisionAnswered":               {Mode: VersionStrict, MergeKeys: []string{"decision_id"}, DraftScope: true},
+	"ConversationContextCleared":     {Mode: VersionStrict, DraftScope: true},
 	"TimelineVersionCreated":         {Mode: VersionStrict, DraftScope: true},
 	"TimelineValidated":              {Mode: VersionStrict, DraftScope: true},
 	"TimelineValidationFailed":       {Mode: VersionStrict, DraftScope: true},
@@ -54,9 +55,8 @@ var EventRegistry = map[string]EventSpec{
 	"JobSucceeded":                   {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
 	"JobFailed":                      {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
 	"JobCancelled":                   {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
-	"ProxyGenerated":                 {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
+	"ProxyGenerated":                 {Mode: VersionMerge, MergeKeys: []string{"asset_id", "proxy_object_hash"}},
 	"JobProgress":                    {Mode: VersionMerge, MergeKeys: []string{"job_id", "progress"}},
-	"TimelineVersionRestored":        {Mode: VersionStrict, DraftScope: true},
 	"PreviewViewed":                  {Mode: VersionMerge, MergeKeys: []string{"preview_id"}, DraftScope: true},
 }
 

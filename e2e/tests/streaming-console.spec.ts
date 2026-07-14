@@ -7,6 +7,20 @@ const USER_MESSAGE = "把开头三秒删掉";
 // 「开始创作 → 202 入队 → text_delta → message_completed → turn_ended → 历史回放」。
 const SCRIPTED_REPLY = "未配置模型密钥"; // 无密钥环境下 NoProviderPlanner 的回复锚点（e2e 不配真实密钥）
 
+test("token 首次授权后跨浏览器会话保留", async ({ page, context }) => {
+  await page.goto(`/#t=${TOKEN}`);
+  await expect(page.getByRole("heading", { name: "草稿" })).toBeVisible();
+  await expect(page).not.toHaveURL(/#t=/);
+  expect(await page.evaluate(() => window.localStorage.getItem("rushes.launch_token"))).toBe(TOKEN);
+
+  await page.close();
+  const reopened = await context.newPage();
+  await reopened.goto("/");
+
+  await expect(reopened.getByRole("heading", { name: "草稿" })).toBeVisible();
+  await expect(reopened.getByText("请从后端启动 URL 打开 Rushes")).toHaveCount(0);
+});
+
 test("流式控制台：开始创作后发消息，对话流出现助手回复文本", async ({ page }) => {
   await page.goto(`/#t=${TOKEN}`);
   await expect(page.getByRole("heading", { name: "草稿" })).toBeVisible();

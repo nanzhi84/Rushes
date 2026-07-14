@@ -17,7 +17,7 @@ export default defineConfig({
   globalSetup: "./global-setup.ts",
   globalTeardown: "./global-teardown.ts",
   use: {
-    baseURL: "http://127.0.0.1:15173",
+    baseURL: `http://127.0.0.1:${process.env.RUSHES_E2E_WEB_PORT ?? "15174"}`,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure"

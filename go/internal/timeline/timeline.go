@@ -17,7 +17,7 @@ var requiredTracks = []struct {
 }{
 	{"visual_base", "primary_visual"}, {"visual_overlay", "visual_overlay"},
 	{"original_audio", "audio"}, {"voiceover", "audio"}, {"bgm", "audio"},
-	{"subtitles", "text"},
+	{"subtitles", "text"}, {"sfx", "audio"},
 }
 
 type Document struct {
@@ -53,10 +53,13 @@ type Clip struct {
 	SourceEndFrame     int              `json:"source_end_frame,omitempty"`
 	PlaybackRate       float64          `json:"playback_rate,omitempty"`
 	GainDB             float64          `json:"gain_db,omitempty"`
+	FadeInFrames       int              `json:"fade_in_frames,omitempty"`
+	FadeOutFrames      int              `json:"fade_out_frames,omitempty"`
 	LockPolicy         string           `json:"lock_policy,omitempty"`
 	ParentBlockID      string           `json:"parent_block_id,omitempty"`
 	Linked             bool             `json:"linked,omitempty"`
 	Effects            []map[string]any `json:"effects,omitempty"`
+	Metadata           map[string]any   `json:"metadata,omitempty"`
 }
 
 type Selection struct {
@@ -90,6 +93,13 @@ func ComposeInitial(draftID string, version int, selections []Selection) (Docume
 	for index, selection := range selections {
 		if selection.AssetID == "" || selection.SourceStartFrame < 0 || selection.SourceEndFrame <= selection.SourceStartFrame {
 			return Document{}, fmt.Errorf("clip %d 源范围无效", index)
+		}
+		if selection.AssetKind != "" && selection.AssetKind != "video" && selection.AssetKind != "image" {
+			return Document{}, fmt.Errorf(
+				"clip %d 素材类型 %s 不能放入主视觉轨，仅支持 video/image",
+				index,
+				selection.AssetKind,
+			)
 		}
 		duration := selection.SourceEndFrame - selection.SourceStartFrame
 		clipID := fmt.Sprintf("clip_v%d_%03d", version, index+1)
@@ -133,7 +143,7 @@ func Empty(draftID string, version int) Document {
 
 func Validate(document Document) ValidationReport {
 	report := ValidationReport{Valid: true, Checks: []string{
-		"schema", "required_tracks", "clip_ranges", "primary_visual_coverage",
+		"schema", "required_tracks", "clip_ranges", "primary_visual_coverage", "linked_av_alignment",
 	}, Issues: []ValidationIssue{}}
 	add := func(code, message string) {
 		report.Valid = false
@@ -143,6 +153,11 @@ func Validate(document Document) ValidationReport {
 		add("invalid_document", "fps、duration_frames、version 必须为正数")
 	}
 	tracks := map[string]Track{}
+	clipIDs := map[string]struct{}{}
+	linkedGroups := map[string][]struct {
+		trackID string
+		clip    Clip
+	}{}
 	for _, track := range document.Tracks {
 		if _, duplicate := tracks[track.TrackID]; duplicate {
 			add("duplicate_track", track.TrackID)
@@ -152,6 +167,13 @@ func Validate(document Document) ValidationReport {
 			add("invalid_track_gain", track.TrackID)
 		}
 		for _, clip := range track.Clips {
+			if clip.TimelineClipID == "" {
+				add("missing_clip_id", track.TrackID)
+			} else if _, duplicate := clipIDs[clip.TimelineClipID]; duplicate {
+				add("duplicate_clip_id", clip.TimelineClipID)
+			} else {
+				clipIDs[clip.TimelineClipID] = struct{}{}
+			}
 			if clip.TrackID != track.TrackID {
 				add("clip_track_mismatch", clip.TimelineClipID)
 			}
@@ -166,6 +188,21 @@ func Validate(document Document) ValidationReport {
 			}
 			if clip.GainDB < -60 || clip.GainDB > 12 {
 				add("invalid_clip_gain", clip.TimelineClipID)
+			}
+			clipDuration := clip.TimelineEndFrame - clip.TimelineStartFrame
+			if clip.FadeInFrames < 0 || clip.FadeOutFrames < 0 ||
+				clip.FadeInFrames+clip.FadeOutFrames > clipDuration {
+				add("invalid_clip_fades", clip.TimelineClipID)
+			}
+			if clip.Linked {
+				if clip.ParentBlockID == "" {
+					add("linked_clip_missing_parent", clip.TimelineClipID)
+				} else {
+					linkedGroups[clip.ParentBlockID] = append(linkedGroups[clip.ParentBlockID], struct {
+						trackID string
+						clip    Clip
+					}{trackID: track.TrackID, clip: clip})
+				}
 			}
 		}
 	}
@@ -182,6 +219,13 @@ func Validate(document Document) ValidationReport {
 		sort.Slice(sorted, func(i, j int) bool { return sorted[i].TimelineStartFrame < sorted[j].TimelineStartFrame })
 		cursor := 0
 		for _, clip := range sorted {
+			if clip.AssetKind != "" && clip.AssetKind != "video" && clip.AssetKind != "image" {
+				add("invalid_primary_visual_asset_kind", fmt.Sprintf(
+					"%s asset_kind=%s，仅支持 video/image",
+					clip.TimelineClipID,
+					clip.AssetKind,
+				))
+			}
 			if clip.TimelineStartFrame != cursor {
 				add("primary_visual_gap_or_overlap", clip.TimelineClipID)
 			}
@@ -189,6 +233,48 @@ func Validate(document Document) ValidationReport {
 		}
 		if cursor != document.DurationFrames {
 			add("primary_visual_not_full_coverage", fmt.Sprintf("coverage=%d duration=%d", cursor, document.DurationFrames))
+		}
+	}
+	for groupID, members := range linkedGroups {
+		var visual, audio []Clip
+		for _, member := range members {
+			switch member.trackID {
+			case "visual_base":
+				visual = append(visual, member.clip)
+			case "original_audio":
+				audio = append(audio, member.clip)
+			}
+		}
+		// Other linked free-track groups are valid. Once a group touches the
+		// primary picture or original-audio track it represents one atomic A/V
+		// pair and must never be allowed to drift independently.
+		if len(visual) == 0 && len(audio) == 0 {
+			continue
+		}
+		if len(visual) != 1 || len(audio) != 1 {
+			add("linked_av_missing_pair", fmt.Sprintf(
+				"%s visual_base=%d original_audio=%d", groupID, len(visual), len(audio),
+			))
+			continue
+		}
+		picture, sound := visual[0], audio[0]
+		if picture.AssetID != sound.AssetID {
+			add("linked_av_asset_mismatch", groupID)
+		}
+		if picture.TimelineStartFrame != sound.TimelineStartFrame ||
+			picture.TimelineEndFrame != sound.TimelineEndFrame {
+			add("linked_av_timeline_mismatch", fmt.Sprintf(
+				"%s visual=%d-%d audio=%d-%d", groupID,
+				picture.TimelineStartFrame, picture.TimelineEndFrame,
+				sound.TimelineStartFrame, sound.TimelineEndFrame,
+			))
+		}
+		if picture.SourceStartFrame != sound.SourceStartFrame ||
+			picture.SourceEndFrame != sound.SourceEndFrame {
+			add("linked_av_source_mismatch", groupID)
+		}
+		if math.Abs(effectiveRate(picture)-effectiveRate(sound)) > 0.000001 {
+			add("linked_av_rate_mismatch", groupID)
 		}
 	}
 	return report
@@ -223,6 +309,8 @@ func ApplyPatch(document Document, operation map[string]any) (Document, error) {
 		err = deleteRange(&copy, operation)
 	case "insert_clip":
 		err = insertClip(&copy, operation)
+	case "sync_original_audio":
+		err = syncOriginalAudio(&copy, operation)
 	case "replace_clip":
 		err = replaceClip(&copy, operation)
 	case "set_playback_rate":
@@ -236,6 +324,8 @@ func ApplyPatch(document Document, operation map[string]any) (Document, error) {
 			clip.GainDB = gain
 			return nil
 		})
+	case "set_clip_fades":
+		err = setClipFades(&copy, operation)
 	case "edit_subtitle_text":
 		err = updateEditableClip(&copy, operation, func(track *Track, clip *Clip) error {
 			if track.TrackID != "subtitles" {
@@ -256,6 +346,7 @@ func ApplyPatch(document Document, operation map[string]any) (Document, error) {
 	if err != nil {
 		return Document{}, err
 	}
+	clampClipFades(&copy)
 	copy.Version++
 	copy.TimelineID = fmt.Sprintf("%s:v%d", copy.DraftID, copy.Version)
 	return copy, nil
@@ -267,9 +358,9 @@ func Inspect(document Document) string {
 		counts[track.TrackID] = len(track.Clips)
 	}
 	return fmt.Sprintf(
-		"时间线 v%d：%.2f 秒，%d fps；主视觉 %d 段，叠加 %d 段，字幕 %d 段。",
-		document.Version, float64(document.DurationFrames)/float64(document.FPS), document.FPS,
-		counts["visual_base"], counts["visual_overlay"], counts["subtitles"],
+		"时间线：%.2f 秒，%d fps；主视觉 %d 段，叠加 %d 段，音乐 %d 段，音效 %d 段，字幕 %d 段。",
+		float64(document.DurationFrames)/float64(document.FPS), document.FPS,
+		counts["visual_base"], counts["visual_overlay"], counts["bgm"], counts["sfx"], counts["subtitles"],
 	)
 }
 
@@ -284,27 +375,44 @@ func ToMap(document Document) (map[string]any, error) {
 }
 
 func trimClip(document *Document, operation map[string]any) error {
-	return updateEditableClip(document, operation, func(_ *Track, clip *Clip) error {
-		start, startErr := frameValue(operation, "source_start_frame")
-		end, endErr := frameValue(operation, "source_end_frame")
-		if startErr != nil || endErr != nil {
-			return errors.Join(startErr, endErr)
+	location, err := editableLocation(document, operation)
+	if err != nil {
+		return err
+	}
+	start, startErr := frameValue(operation, "source_start_frame")
+	end, endErr := frameValue(operation, "source_end_frame")
+	if startErr != nil || endErr != nil {
+		return errors.Join(startErr, endErr)
+	}
+	if start < 0 || end <= start {
+		return errors.New("trim_clip 源范围无效")
+	}
+	selected := document.Tracks[location.trackIndex].Clips[location.clipIndex]
+	members := []clipLocation{location}
+	if selected.Linked && selected.ParentBlockID != "" {
+		members = linkedGroup(document, selected.ParentBlockID)
+	}
+	oldDuration := selected.TimelineEndFrame - selected.TimelineStartFrame
+	newDuration := max(1, int(math.Round(float64(end-start)/effectiveRate(selected))))
+	hasPrimary := false
+	for _, member := range members {
+		track := &document.Tracks[member.trackIndex]
+		if track.Locked {
+			return fmt.Errorf("轨道 %s 已锁定", track.TrackID)
 		}
-		if start < 0 || end <= start {
-			return errors.New("trim_clip 源范围无效")
-		}
-		oldDuration := clip.TimelineEndFrame - clip.TimelineStartFrame
+		clip := &track.Clips[member.clipIndex]
 		clip.SourceStartFrame = start
 		clip.SourceEndFrame = end
-		rate := clip.PlaybackRate
-		if rate <= 0 {
-			rate = 1
-		}
-		newDuration := max(1, int(math.Round(float64(end-start)/rate)))
 		clip.TimelineEndFrame = clip.TimelineStartFrame + newDuration
-		shiftAfter(document, clip.TimelineStartFrame+oldDuration, newDuration-oldDuration)
-		return nil
-	})
+		syncClipPlacementMetadata(clip)
+		hasPrimary = hasPrimary || track.TrackID == "visual_base"
+	}
+	// 主视觉决定成片时长，裁剪时需要 ripple 后续片段及其他轨道。
+	// BGM/SFX/字幕等自由轨只改变自身区间。
+	if hasPrimary {
+		shiftAfter(document, selected.TimelineStartFrame+oldDuration, newDuration-oldDuration)
+	}
+	return nil
 }
 
 func splitClip(document *Document, operation map[string]any) error {
@@ -378,14 +486,18 @@ func splitClipValue(clip Clip, splitFrame int, leftGroupID, rightGroupID string)
 	left := clip
 	left.TimelineEndFrame = splitFrame
 	left.SourceEndFrame = sourceSplit
+	left.FadeOutFrames = 0
 	right := clip
 	right.TimelineClipID = fmt.Sprintf("%s_split_%d", clip.TimelineClipID, splitFrame)
 	right.TimelineStartFrame = splitFrame
 	right.SourceStartFrame = sourceSplit
+	right.FadeInFrames = 0
 	if clip.Linked {
 		left.ParentBlockID = leftGroupID
 		right.ParentBlockID = rightGroupID
 	}
+	syncClipPlacementMetadata(&left)
+	syncClipPlacementMetadata(&right)
 	return left, right, nil
 }
 
@@ -498,7 +610,7 @@ func deleteRange(document *Document, operation map[string]any) error {
 	delta := end - start
 	for trackIndex := range document.Tracks {
 		clips := document.Tracks[trackIndex].Clips
-		kept := clips[:0]
+		kept := make([]Clip, 0, len(clips)+1)
 		for _, clip := range clips {
 			if clip.TimelineEndFrame <= start {
 				kept = append(kept, clip)
@@ -507,15 +619,16 @@ func deleteRange(document *Document, operation map[string]any) error {
 			if clip.TimelineStartFrame >= end {
 				clip.TimelineStartFrame -= delta
 				clip.TimelineEndFrame -= delta
+				shiftClipTimelineMetadata(&clip, -delta)
 				kept = append(kept, clip)
 				continue
 			}
 			if clip.TimelineStartFrame < start && clip.TimelineEndFrame > end {
-				clip.TimelineEndFrame -= delta
-				if clip.AssetID != "" {
-					clip.SourceEndFrame -= int(math.Round(float64(delta) * effectiveRate(clip)))
-				}
-				kept = append(kept, clip)
+				// Removing a range from the middle of one source clip must create two
+				// source-contiguous clips. Merely shortening source_end_frame would
+				// delete the tail instead of the selected speech/picture interval.
+				left, right := splitClipAroundDeletedRange(clip, start, end)
+				kept = append(kept, left, right)
 			} else if clip.TimelineStartFrame < start {
 				clip.TimelineEndFrame = start
 				if clip.AssetID != "" {
@@ -523,6 +636,7 @@ func deleteRange(document *Document, operation map[string]any) error {
 						float64(clip.TimelineEndFrame-clip.TimelineStartFrame)*effectiveRate(clip),
 					))
 				}
+				syncClipPlacementMetadata(&clip)
 				kept = append(kept, clip)
 			} else if clip.TimelineEndFrame > end {
 				removed := end - clip.TimelineStartFrame
@@ -531,6 +645,7 @@ func deleteRange(document *Document, operation map[string]any) error {
 				if clip.AssetID != "" {
 					clip.SourceStartFrame += int(math.Round(float64(removed) * effectiveRate(clip)))
 				}
+				syncClipPlacementMetadata(&clip)
 				kept = append(kept, clip)
 			}
 		}
@@ -541,6 +656,31 @@ func deleteRange(document *Document, operation map[string]any) error {
 		sortTrack(&document.Tracks[trackIndex])
 	}
 	return nil
+}
+
+func splitClipAroundDeletedRange(clip Clip, start, end int) (Clip, Clip) {
+	rate := effectiveRate(clip)
+	left := clip
+	right := clip
+	left.TimelineEndFrame = start
+	right.TimelineStartFrame = start
+	right.TimelineEndFrame = clip.TimelineEndFrame - (end - start)
+	if clip.AssetID != "" {
+		left.SourceEndFrame = clip.SourceStartFrame + int(math.Round(
+			float64(start-clip.TimelineStartFrame)*rate,
+		))
+		right.SourceStartFrame = clip.SourceStartFrame + int(math.Round(
+			float64(end-clip.TimelineStartFrame)*rate,
+		))
+	}
+	right.TimelineClipID = fmt.Sprintf("%s_after_%d", clip.TimelineClipID, end)
+	if clip.ParentBlockID != "" {
+		right.ParentBlockID = fmt.Sprintf("%s_after_%d", clip.ParentBlockID, end)
+	}
+	syncClipPlacementMetadata(&left)
+	shiftClipTimelineMetadata(&right, -(end - start))
+	syncClipPlacementMetadata(&right)
+	return left, right
 }
 
 func insertClip(document *Document, operation map[string]any) error {
@@ -559,17 +699,127 @@ func insertClip(document *Document, operation map[string]any) error {
 	}
 	duration := end - start
 	startFrame := document.DurationFrames
+	if track.TrackID != "visual_base" {
+		startFrame = 0
+		if _, provided := operation["timeline_start_frame"]; provided {
+			var startFrameErr error
+			startFrame, startFrameErr = frameValue(operation, "timeline_start_frame")
+			if startFrameErr != nil {
+				return startFrameErr
+			}
+		}
+		if startFrame < 0 || startFrame+duration > document.DurationFrames {
+			return errors.New("非主视觉 clip 必须位于当前时间线范围内")
+		}
+	}
+	includeOriginalAudio := false
+	if raw, provided := operation["include_original_audio"]; provided {
+		var ok bool
+		includeOriginalAudio, ok = raw.(bool)
+		if !ok {
+			return errors.New("include_original_audio 必须是布尔值")
+		}
+	}
+	if includeOriginalAudio && track.TrackID != "visual_base" {
+		return errors.New("include_original_audio 只适用于主视觉视频")
+	}
 	clip := Clip{
 		TimelineClipID: valueOr(stringValue(operation["timeline_clip_id"]), fmt.Sprintf("clip_v%d_%03d", document.Version+1, len(track.Clips)+1)),
-		TrackID:        track.TrackID, AssetID: assetID, Role: valueOr(stringValue(operation["role"]), "b_roll"),
+		TrackID:        track.TrackID, AssetID: assetID, AssetKind: stringValue(operation["asset_kind"]),
+		Role:               valueOr(stringValue(operation["role"]), "b_roll"),
 		TimelineStartFrame: startFrame, TimelineEndFrame: startFrame + duration,
 		SourceStartFrame: start, SourceEndFrame: end,
 		PlaybackRate: 1, LockPolicy: "free",
+	}
+	if rawMetadata, provided := operation["metadata"]; provided {
+		metadata, ok := rawMetadata.(map[string]any)
+		if !ok {
+			return errors.New("insert_clip metadata 必须是对象")
+		}
+		clip.Metadata = metadata
+	}
+	if includeOriginalAudio {
+		originalAudio := trackByID(document, "original_audio")
+		if originalAudio == nil || originalAudio.Locked {
+			return errors.New("原声音轨不存在或已锁定，不能插入带声主视频")
+		}
+		parentBlockID := valueOr(stringValue(operation["parent_block_id"]), "link_"+clip.TimelineClipID)
+		clip.Linked = true
+		clip.ParentBlockID = parentBlockID
+		originalAudio.Clips = append(originalAudio.Clips, Clip{
+			TimelineClipID:     clip.TimelineClipID + "_audio",
+			TrackID:            "original_audio",
+			AssetID:            clip.AssetID,
+			AssetKind:          clip.AssetKind,
+			Role:               "original_audio",
+			TimelineStartFrame: clip.TimelineStartFrame,
+			TimelineEndFrame:   clip.TimelineEndFrame,
+			SourceStartFrame:   clip.SourceStartFrame,
+			SourceEndFrame:     clip.SourceEndFrame,
+			PlaybackRate:       clip.PlaybackRate,
+			LockPolicy:         "free",
+			ParentBlockID:      parentBlockID,
+			Linked:             true,
+		})
+		sortTrack(originalAudio)
 	}
 	track.Clips = append(track.Clips, clip)
 	if track.TrackID == "visual_base" {
 		document.DurationFrames += duration
 	}
+	return nil
+}
+
+func syncOriginalAudio(document *Document, operation map[string]any) error {
+	primary := trackByID(document, "visual_base")
+	originalAudio := trackByID(document, "original_audio")
+	if primary == nil || originalAudio == nil {
+		return errors.New("缺少主视觉轨或原声音轨")
+	}
+	if primary.Locked || originalAudio.Locked {
+		return errors.New("主视觉轨或原声音轨已锁定")
+	}
+	audioAssetIDs, err := stringSetValue(operation["audio_asset_ids"])
+	if err != nil {
+		return err
+	}
+	if len(audioAssetIDs) == 0 {
+		return errors.New("sync_original_audio 缺少带音频的视频素材")
+	}
+	rebuilt := make([]Clip, 0, len(primary.Clips))
+	for index := range primary.Clips {
+		visual := &primary.Clips[index]
+		if _, hasAudio := audioAssetIDs[visual.AssetID]; !hasAudio {
+			if visual.Linked {
+				visual.Linked = false
+				visual.ParentBlockID = ""
+			}
+			continue
+		}
+		parentBlockID := visual.ParentBlockID
+		if parentBlockID == "" {
+			parentBlockID = "sync_" + visual.TimelineClipID
+		}
+		visual.Linked = true
+		visual.ParentBlockID = parentBlockID
+		rebuilt = append(rebuilt, Clip{
+			TimelineClipID:     visual.TimelineClipID + "_audio",
+			TrackID:            "original_audio",
+			AssetID:            visual.AssetID,
+			AssetKind:          visual.AssetKind,
+			Role:               "original_audio",
+			TimelineStartFrame: visual.TimelineStartFrame,
+			TimelineEndFrame:   visual.TimelineEndFrame,
+			SourceStartFrame:   visual.SourceStartFrame,
+			SourceEndFrame:     visual.SourceEndFrame,
+			PlaybackRate:       effectiveRate(*visual),
+			LockPolicy:         "free",
+			ParentBlockID:      parentBlockID,
+			Linked:             true,
+		})
+	}
+	originalAudio.Clips = rebuilt
+	sortTrack(originalAudio)
 	return nil
 }
 
@@ -588,18 +838,68 @@ func replaceClip(document *Document, operation map[string]any) error {
 }
 
 func setPlaybackRate(document *Document, operation map[string]any) error {
-	return updateEditableClip(document, operation, func(_ *Track, clip *Clip) error {
-		rate := numberValue(operation["playback_rate"])
-		if rate <= 0 || rate > 8 {
-			return errors.New("playback_rate 必须在 (0,8]")
+	location, err := editableLocation(document, operation)
+	if err != nil {
+		return err
+	}
+	rate := numberValue(operation["playback_rate"])
+	if rate <= 0 || rate > 8 {
+		return errors.New("playback_rate 必须在 (0,8]")
+	}
+	selected := document.Tracks[location.trackIndex].Clips[location.clipIndex]
+	members := []clipLocation{location}
+	if selected.Linked && selected.ParentBlockID != "" {
+		members = linkedGroup(document, selected.ParentBlockID)
+	}
+	oldDuration := selected.TimelineEndFrame - selected.TimelineStartFrame
+	newDuration := max(1, int(math.Round(float64(selected.SourceEndFrame-selected.SourceStartFrame)/rate)))
+	hasPrimary := false
+	for _, member := range members {
+		track := &document.Tracks[member.trackIndex]
+		if track.Locked {
+			return fmt.Errorf("轨道 %s 已锁定", track.TrackID)
 		}
-		oldDuration := clip.TimelineEndFrame - clip.TimelineStartFrame
-		newDuration := max(1, int(math.Round(float64(clip.SourceEndFrame-clip.SourceStartFrame)/rate)))
+		clip := &track.Clips[member.clipIndex]
 		clip.PlaybackRate = rate
 		clip.TimelineEndFrame = clip.TimelineStartFrame + newDuration
-		shiftAfter(document, clip.TimelineStartFrame+oldDuration, newDuration-oldDuration)
+		syncClipPlacementMetadata(clip)
+		hasPrimary = hasPrimary || track.TrackID == "visual_base"
+	}
+	if hasPrimary {
+		shiftAfter(document, selected.TimelineStartFrame+oldDuration, newDuration-oldDuration)
+	}
+	return nil
+}
+
+func setClipFades(document *Document, operation map[string]any) error {
+	return updateEditableClip(document, operation, func(track *Track, clip *Clip) error {
+		if trackFamily(*track) != "audio" && clip.AssetKind != "video" {
+			return errors.New("只有音频片段或带声音的视频片段支持淡入淡出")
+		}
+		fadeIn, inErr := frameValue(operation, "fade_in_frames")
+		fadeOut, outErr := frameValue(operation, "fade_out_frames")
+		if inErr != nil || outErr != nil {
+			return errors.Join(inErr, outErr)
+		}
+		duration := clip.TimelineEndFrame - clip.TimelineStartFrame
+		if fadeIn < 0 || fadeOut < 0 || fadeIn+fadeOut > duration {
+			return errors.New("淡入与淡出必须为非负整数帧，且总和不能超过片段时长")
+		}
+		clip.FadeInFrames = fadeIn
+		clip.FadeOutFrames = fadeOut
 		return nil
 	})
+}
+
+func clampClipFades(document *Document) {
+	for trackIndex := range document.Tracks {
+		for clipIndex := range document.Tracks[trackIndex].Clips {
+			clip := &document.Tracks[trackIndex].Clips[clipIndex]
+			duration := max(0, clip.TimelineEndFrame-clip.TimelineStartFrame)
+			clip.FadeInFrames = clampInt(clip.FadeInFrames, 0, duration)
+			clip.FadeOutFrames = clampInt(clip.FadeOutFrames, 0, duration-clip.FadeInFrames)
+		}
+	}
 }
 
 func removeTrackClips(document *Document, trackID string) error {
@@ -621,6 +921,7 @@ func shiftAfter(document *Document, boundary, delta int) {
 			if clip.TimelineStartFrame >= boundary {
 				clip.TimelineStartFrame += delta
 				clip.TimelineEndFrame += delta
+				shiftClipTimelineMetadata(clip, delta)
 			}
 		}
 	}
@@ -664,6 +965,33 @@ func numberValue(value any) float64 {
 	default:
 		return 0
 	}
+}
+
+func stringSetValue(value any) (map[string]struct{}, error) {
+	result := map[string]struct{}{}
+	switch typed := value.(type) {
+	case []string:
+		for _, item := range typed {
+			if item = strings.TrimSpace(item); item != "" {
+				result[item] = struct{}{}
+			}
+		}
+	case []any:
+		for _, raw := range typed {
+			item, ok := raw.(string)
+			if !ok {
+				return nil, errors.New("audio_asset_ids 必须是字符串数组")
+			}
+			if item = strings.TrimSpace(item); item != "" {
+				result[item] = struct{}{}
+			}
+		}
+	case nil:
+		return result, nil
+	default:
+		return nil, errors.New("audio_asset_ids 必须是字符串数组")
+	}
+	return result, nil
 }
 
 func frameValue(operation map[string]any, key string) (int, error) {

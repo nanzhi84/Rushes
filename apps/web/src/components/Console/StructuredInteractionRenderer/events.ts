@@ -1,4 +1,4 @@
-import type { Decision, DecisionAnswer } from "../../../api/client";
+import type { Decision, DecisionAnswer, DecisionOption } from "../../../api/client";
 import type {
   DecisionInteractionItem,
   DomainSseEvent,
@@ -12,6 +12,14 @@ export function reduceStructuredInteractionItems(
   current: StructuredInteractionItem[],
   payload: DomainSsePayload
 ): StructuredInteractionItem[] {
+  if (payload.event.event === "ConversationContextCleared") {
+    return [];
+  }
+  // 时间线的保存与校验状态已经在右侧编辑器和工具步骤中体现；无论来自
+  // 人工还是 Agent，都不要再把同一领域事件堆进对话区。
+  if (SILENT_TIMELINE_EVENTS.has(payload.event.event)) {
+    return current;
+  }
   const item = itemFromEvent(payload);
   if (!item) {
     return current;
@@ -33,15 +41,36 @@ export function reduceStructuredInteractionItems(
   }
 
   if (item.kind === "decision" && item.status !== "pending") {
-    return current.map((existing) =>
-      existing.kind === "decision" && existing.decision_id === item.decision_id
-        ? { ...existing, status: item.status, answer: item.answer ?? existing.answer }
-        : existing
+    const matched = current.some(
+      (existing) => existing.kind === "decision" && existing.decision_id === item.decision_id
     );
+    if (!matched) {
+      return upsertById(current, item);
+    }
+    return current.map((existing) => {
+      if (existing.kind !== "decision" || existing.decision_id !== item.decision_id) {
+        return existing;
+      }
+      const answer = item.answer ?? existing.answer ?? null;
+      return {
+        ...existing,
+        status: item.status,
+        answer,
+        decision: existing.decision
+          ? { ...existing.decision, status: item.status, answer }
+          : item.decision
+      };
+    });
   }
 
   return upsertById(current, item);
 }
+
+const SILENT_TIMELINE_EVENTS = new Set([
+  "TimelineVersionCreated",
+  "TimelineValidated",
+  "TimelineValidationFailed"
+]);
 
 export function mergeCurrentDecisionItem(
   items: StructuredInteractionItem[],
@@ -70,7 +99,12 @@ export function markDecisionAnswered(
 ): StructuredInteractionItem[] {
   return items.map((item) =>
     item.kind === "decision" && item.decision_id === decisionId
-      ? { ...item, status: "answered", answer }
+      ? {
+          ...item,
+          status: "answered",
+          answer,
+          decision: item.decision ? { ...item.decision, status: "answered", answer } : null
+        }
       : item
   );
 }
@@ -96,17 +130,6 @@ export function itemFromEvent(payload: DomainSsePayload): StructuredInteractionI
         id: "preview:latest",
         title: "预览已生成",
         description: "可在右侧查看预览。",
-        occurrences: 1
-      };
-    case "TimelineVersionCreated":
-    case "TimelineVersionRestored":
-    case "TimelineValidated":
-    case "TimelineValidationFailed":
-      return {
-        kind: "timeline",
-        id: "timeline:latest",
-        title: timelineTitle(event.event),
-        description: timelineDescription(event),
         occurrences: 1
       };
     case "ExportCompleted":
@@ -140,6 +163,7 @@ const SILENT_EVENTS = new Set([
   "MaterialUnderstandingStarted",
   "MaterialUnderstandingCompleted",
   "MaterialUnderstandingFailed",
+  "ConversationContextCleared",
   "PreviewViewed"
 ]);
 
@@ -177,14 +201,85 @@ function decisionEventItem(
     return null;
   }
   const rawAnswer = eventField(event, "answer");
+  const answer = isDecisionAnswer(rawAnswer) ? rawAnswer : null;
   return {
     kind: "decision",
     id: decisionItemId(decisionId),
     decision_id: decisionId,
-    decision: null,
+    decision: decisionFromEvent(event, decisionId, status, answer),
     status,
-    answer: isDecisionAnswer(rawAnswer) ? rawAnswer : null
+    answer
   };
+}
+
+// DecisionCreated 已经把问题、选项和交互约束写进领域事件。重放时直接恢复
+// 完整确认项，避免 answered 事件只剩 decision_id 后退化成无法辨认的空壳卡片。
+function decisionFromEvent(
+  event: DomainSseEvent,
+  decisionId: string,
+  status: Decision["status"],
+  answer: DecisionAnswer | null
+): Decision | null {
+  const question = stringValue(eventField(event, "question"));
+  if (!question) {
+    return null;
+  }
+  const rawScope = stringValue(eventField(event, "scope_type"));
+  const draftId = stringValue(event.draft_id);
+  return {
+    decision_id: decisionId,
+    scope_type: rawScope === "workspace" ? "workspace" : "draft",
+    draft_id: draftId,
+    type: decisionType(eventField(event, "type")),
+    question,
+    options: decisionOptions(eventField(event, "options")),
+    allow_free_text: booleanValue(eventField(event, "allow_free_text")) ?? false,
+    blocking: booleanValue(eventField(event, "blocking")) ?? false,
+    status,
+    answer
+  };
+}
+
+const DECISION_TYPES = new Set<Decision["type"]>([
+  "audio_mode",
+  "approve_content_plan",
+  "approve_speech_cut",
+  "approve_rough_cut",
+  "subtitle",
+  "bgm",
+  "export",
+  "memory_scope",
+  "url_import",
+  "generic"
+]);
+
+function decisionType(value: unknown): Decision["type"] {
+  const type = stringValue(value) as Decision["type"] | null;
+  return type && DECISION_TYPES.has(type) ? type : "generic";
+}
+
+function decisionOptions(value: unknown): DecisionOption[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((candidate) => {
+    const option = objectValue(candidate);
+    const optionId = stringValue(option?.option_id);
+    const label = stringValue(option?.label);
+    if (!option || !optionId || !label) {
+      return [];
+    }
+    const description = stringValue(option.description);
+    const payload = objectValue(option.payload);
+    return [
+      {
+        option_id: optionId,
+        label,
+        ...(description ? { description } : {}),
+        ...(payload ? { payload } : {})
+      }
+    ];
+  });
 }
 
 function progressEventItem(
@@ -286,11 +381,13 @@ function mergeItem(
   next: StructuredInteractionItem
 ): StructuredInteractionItem {
   if (previous.kind === "decision" && next.kind === "decision") {
+    const answer = next.answer ?? previous.answer ?? null;
+    const decision = next.decision ?? previous.decision;
     return {
       ...previous,
       ...next,
-      decision: next.decision ?? previous.decision,
-      answer: next.answer ?? previous.answer
+      decision: decision ? { ...decision, status: next.status, answer } : null,
+      answer
     };
   }
   if (previous.kind === "progress" && next.kind === "progress") {
@@ -317,24 +414,6 @@ function normalizeProgress(value: unknown): number | null {
   }
   const percent = value <= 1 ? value * 100 : value;
   return Math.max(0, Math.min(100, Math.round(percent)));
-}
-
-function timelineTitle(eventName: string): string {
-  if (eventName === "TimelineVersionRestored") {
-    return "时间线已恢复";
-  }
-  if (eventName === "TimelineValidated") {
-    return "时间线校验通过";
-  }
-  if (eventName === "TimelineValidationFailed") {
-    return "时间线校验失败";
-  }
-  return "时间线已更新";
-}
-
-function timelineDescription(event: DomainSseEvent): string {
-  const version = stringValue(eventField(event, "timeline_version")) ?? stringValue(eventField(event, "version"));
-  return version ? `版本 ${version}，可在右侧查看时间线。` : "可在右侧查看时间线。";
 }
 
 function eventField(event: DomainSseEvent, key: string): unknown {

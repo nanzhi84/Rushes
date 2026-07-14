@@ -30,6 +30,8 @@ type MockTimelineProps = {
   editMode?: string;
   dropMode?: "insert" | "overwrite";
   onClipClick?: (clipId: string) => void;
+  onDeselect?: () => void;
+  onZoomChange?: (pxPerSec: number) => void;
   onSplitClip?: (clipId: string, splitFrame: number) => void;
   onMoveClip?: (
     clipId: string,
@@ -57,7 +59,7 @@ const consoleComponentMocks = vi.hoisted(() => {
 vi.mock("../components/PreviewPlayer", async () => {
   const React = await import("react");
   return {
-    PreviewPlayer(props: MockPreviewProps) {
+    DiffusionPreviewPlayer(props: MockPreviewProps) {
       consoleComponentMocks.previewProps.push(props);
       return React.createElement(
         "button",
@@ -104,7 +106,7 @@ vi.mock("../components/TimelineViewer", async () => {
             type: "button",
             "data-testid": "mock-timeline-move",
             onClick: () =>
-              props.onMoveClip?.("tc_a", "visual_overlay", 30, props.dropMode ?? "insert")
+              props.onMoveClip?.("overlay_a", "visual_base", 30, props.dropMode ?? "insert")
           },
           "Mock Move"
         ),
@@ -143,6 +145,15 @@ vi.mock("../components/TimelineViewer", async () => {
             onClick: () => props.onClipClick?.("subtitle_a")
           },
           "Mock Select Subtitle"
+        ),
+        React.createElement(
+          "button",
+          {
+            type: "button",
+            "data-testid": "mock-timeline-deselect",
+            onClick: () => props.onDeselect?.()
+          },
+          "Mock Deselect"
         )
       );
     }
@@ -225,6 +236,28 @@ describe("DraftEditorView", () => {
     expect(panel.style.width).toBe("420px");
   });
 
+  it("清空对话会二次确认并调用专用端点，不操作素材和时间线", async () => {
+    const fetchMock = mockFetch({ decision: null });
+    const confirmMock = vi.fn(() => true);
+    vi.stubGlobal("confirm", confirmMock);
+    renderEditor(fetchMock);
+
+    fireEvent.click(screen.getByRole("button", { name: "清空对话上下文" }));
+
+    expect(confirmMock).toHaveBeenCalledWith(expect.stringContaining("素材、素材理解、时间线和预览都会保留"));
+    await waitFor(() => {
+      expect(
+        vi.mocked(fetchMock).mock.calls.some(
+          ([input, init]) =>
+            String(input) === "/api/drafts/draft_1/conversation/clear" && init?.method === "POST"
+        )
+      ).toBe(true);
+    });
+    expect(
+      vi.mocked(fetchMock).mock.calls.some(([input]) => String(input).includes("/materials/"))
+    ).toBe(false);
+  });
+
   it("顶栏成本小计渲染估算金额，且编辑器隐藏设置按钮", async () => {
     const fetchMock = mockFetch({ decision: null, costs: 1.2345 });
     renderEditor(fetchMock);
@@ -233,17 +266,30 @@ describe("DraftEditorView", () => {
     expect(screen.queryByText("设置")).toBeNull();
   });
 
-  it("发送消息后禁用输入框，并在 turn-stream 终态后恢复", async () => {
+  it("当前回合运行时仍可输入并把后续消息按顺序排队", async () => {
     const fetchMock = mockFetch({ decision: null });
     renderEditor(fetchMock);
 
     const input = screen.getByLabelText("消息输入") as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: "剪掉开头 3 秒" } });
-    fireEvent.click(screen.getByText("发送"));
+    fireEvent.click(screen.getByRole("button", { name: "发送消息" }));
 
-    await waitFor(() => expect(input.disabled).toBe(true));
+    await waitFor(() => expect(screen.getByText("新消息将按发送顺序排队")).toBeTruthy());
+    expect(input.disabled).toBe(false);
     expect(screen.getByText("剪掉开头 3 秒")).toBeTruthy();
+    expect(screen.getByTestId("turn-activity-indicator")).toBeTruthy();
+    expect(screen.getByText("正在读取上下文")).toBeTruthy();
     expect(draftEventsSource().url).toContain("token=test-token");
+
+    fireEvent.change(input, { target: { value: "然后把结尾淡出" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(screen.getByText("然后把结尾淡出")).toBeTruthy());
+    expect(
+      vi.mocked(fetchMock).mock.calls.filter(
+        ([request, init]) => String(request).endsWith("/messages") && init?.method === "POST"
+      )
+    ).toHaveLength(2);
+    expect(input.disabled).toBe(false);
 
     emitTurnStream(turnStreamSource(), {
       type: "turn_ended",
@@ -251,6 +297,27 @@ describe("DraftEditorView", () => {
       reason: null
     });
 
+    await waitFor(() => expect(input.disabled).toBe(false));
+    expect(screen.queryByTestId("turn-activity-indicator")).toBeNull();
+    expect(screen.queryByText("新消息将按发送顺序排队")).toBeNull();
+  });
+
+  it("重连重放到活跃回合时保持输入可用并显示排队反馈", async () => {
+    const fetchMock = mockFetch({ decision: null });
+    renderEditor(fetchMock);
+
+    const input = screen.getByLabelText("消息输入") as HTMLTextAreaElement;
+    emitTurnStream(turnStreamSource(), { type: "turn_started", turn_id: "turn_replayed" });
+
+    await waitFor(() => expect(screen.getByText("新消息将按发送顺序排队")).toBeTruthy());
+    expect(input.disabled).toBe(false);
+    expect(screen.getByTestId("turn-activity-indicator")).toBeTruthy();
+
+    emitTurnStream(turnStreamSource(), {
+      type: "turn_ended",
+      outcome: "finished",
+      reason: null
+    });
     await waitFor(() => expect(input.disabled).toBe(false));
   });
 
@@ -264,8 +331,10 @@ describe("DraftEditorView", () => {
     expect(input.disabled).toBe(false);
 
     fireEvent.keyDown(input, { key: "Enter" });
-    await waitFor(() => expect(input.disabled).toBe(true));
+    await waitFor(() => expect(screen.getByText("新消息将按发送顺序排队")).toBeTruthy());
+    expect(input.disabled).toBe(false);
     expect(screen.getByLabelText("停止当前任务")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "发送消息" })).toBeTruthy();
     expect(screen.getByText("先分析节奏")).toBeTruthy();
   });
 
@@ -389,6 +458,13 @@ describe("DraftEditorView", () => {
     emitTurnStream(stream, { type: "tool_step_started", step_id: "s1", tool: "understand.materials" });
     emitTurnStream(stream, {
       type: "subagent_progress",
+      tool: "understand.materials",
+      completed: 3,
+      total: 20,
+      note: "理解中 3/20"
+    });
+    emitTurnStream(stream, {
+      type: "subagent_progress",
       asset_id: "asset_01a2",
       note: "正在查看 IMG_2031.mp4 02:10 画面"
     });
@@ -409,6 +485,8 @@ describe("DraftEditorView", () => {
     const understandRow = document.querySelector('[data-tool-step-id="s1"]') as HTMLElement;
     expect(within(understandRow).getByText("理解素材")).toBeTruthy();
     expect(understandRow.parentElement?.contains(progressList)).toBe(true);
+    expect(screen.queryByLabelText("素材理解中 3/20")).toBeNull();
+    expect(screen.queryByRole("button", { name: "取消素材理解" })).toBeNull();
 
     // 同素材新 note 覆盖旧的，仍只有一条该素材的进度行。
     emitTurnStream(stream, {
@@ -514,6 +592,39 @@ describe("DraftEditorView", () => {
     });
   });
 
+  it("当前确认项与同一条 SSE 事件只渲染一个问答面板", async () => {
+    const decision = editingStyleDecision();
+    const fetchMock = mockFetch({ decision });
+    renderEditor(fetchMock);
+
+    await screen.findByText("这次希望采用哪种剪辑风格？");
+    expect(screen.getAllByTestId("decision-group")).toHaveLength(1);
+    expect(screen.getAllByTestId("decision-question")).toHaveLength(1);
+
+    act(() => {
+      draftEventsSource().emit("DecisionCreated", {
+        event_id: 12,
+        event: {
+          event: "DecisionCreated",
+          draft_id: "draft_1",
+          payload: {
+            decision_id: decision.decision_id,
+            scope_type: decision.scope_type,
+            type: decision.type,
+            question: decision.question,
+            options: decision.options,
+            allow_free_text: decision.allow_free_text,
+            blocking: decision.blocking
+          }
+        }
+      });
+    });
+
+    await waitFor(() => expect(screen.getAllByTestId("decision-group")).toHaveLength(1));
+    expect(screen.getAllByTestId("decision-question")).toHaveLength(1);
+    expect(screen.getAllByText("这次希望采用哪种剪辑风格？")).toHaveLength(1);
+  });
+
   it("allow_free_text 提交 natural_language answer", async () => {
     const answerRequests: Array<{ body: unknown }> = [];
     const fetchMock = mockFetch({
@@ -527,7 +638,7 @@ describe("DraftEditorView", () => {
     fireEvent.change(await screen.findByLabelText("自由回答"), {
       target: { value: "节奏明快，镜头切换干净" }
     });
-    fireEvent.click(screen.getByText("提交回答"));
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
 
     await waitFor(() => expect(answerRequests).toHaveLength(1));
     expect(answerRequests[0]?.body).toMatchObject({
@@ -539,7 +650,7 @@ describe("DraftEditorView", () => {
     });
   });
 
-  it("answered Decision 置灰并显示结果", () => {
+  it("answered Decision 紧凑显示原问题和实际答案", () => {
     const onAnswer = vi.fn();
     render(
       <StructuredInteractionRenderer
@@ -558,9 +669,135 @@ describe("DraftEditorView", () => {
       />
     );
 
-    expect(screen.getByText("已回答")).toBeTruthy();
-    expect(screen.getByText("结果：叙事")).toBeTruthy();
-    expect((screen.getByRole("button", { name: /叙事/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("已回答 1 个问题")).toBeTruthy();
+    expect(screen.getByText("这次希望采用哪种剪辑风格？")).toBeTruthy();
+    expect(screen.queryByText("你的回答")).toBeNull();
+    expect(screen.getByText("叙事")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /叙事/ })).toBeNull();
+  });
+
+  it("只有事件占位的 answered Decision 正确收尾，不再伪装成加载中", () => {
+    render(
+      <StructuredInteractionRenderer
+        item={{
+          kind: "decision",
+          id: "decision:dec_answered",
+          decision_id: "dec_answered",
+          decision: null,
+          status: "answered",
+          answer: { option_id: "story", answered_via: "button", payload: {} }
+        }}
+        onAnswerDecision={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("回答已记录")).toBeTruthy();
+    expect(screen.getByText("已回答 1 个问题")).toBeTruthy();
+    expect(screen.queryByText("你的回答")).toBeNull();
+    expect(screen.getByText("story")).toBeTruthy();
+    expect(screen.queryByText(/正在读取详情/)).toBeNull();
+  });
+
+  it("answered Decision 显示自然语言回答原文", () => {
+    render(
+      <StructuredInteractionRenderer
+        item={{
+          kind: "decision",
+          id: "decision:dec_free_text",
+          decision_id: "dec_free_text",
+          decision: editingStyleDecision({
+            decision_id: "dec_free_text",
+            status: "answered",
+            answer: {
+              free_text: "先只剪掉气口，之后直接配 B-roll",
+              answered_via: "natural_language",
+              payload: {}
+            }
+          }),
+          status: "answered",
+          answer: {
+            free_text: "先只剪掉气口，之后直接配 B-roll",
+            answered_via: "natural_language",
+            payload: {}
+          }
+        }}
+        onAnswerDecision={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("先只剪掉气口，之后直接配 B-roll")).toBeTruthy();
+  });
+
+  it("Decision 事件回放保留问题与选项，并把按钮答案还原为可读文本", () => {
+    let items = reduceStructuredInteractionItems([], {
+      event_id: 1,
+      event: {
+        event: "DecisionCreated",
+        draft_id: "draft_1",
+        payload: {
+          decision_id: "dec_aroll",
+          scope_type: "draft",
+          type: "generic",
+          question: "请确认哪个视频是需要剪辑的口播主素材？",
+          options: [
+            { option_id: "aroll", label: "Aroll-气口剪辑完成素材.mov" },
+            { option_id: "tim", label: "Tim-Macbook Neo Talking节选.mp4" }
+          ],
+          allow_free_text: true,
+          blocking: true
+        }
+      }
+    });
+    items = reduceStructuredInteractionItems(items, {
+      event_id: 2,
+      event: {
+        event: "DecisionAnswered",
+        draft_id: "draft_1",
+        payload: {
+          decision_id: "dec_aroll",
+          answer: { option_id: "tim", answered_via: "button", payload: {} }
+        }
+      }
+    });
+
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "decision",
+      status: "answered",
+      decision: {
+        question: "请确认哪个视频是需要剪辑的口播主素材？",
+        status: "answered"
+      },
+      answer: { option_id: "tim" }
+    });
+    render(
+      <StructuredInteractionRenderer
+        item={items[0]!}
+        onAnswerDecision={vi.fn()}
+      />
+    );
+    expect(screen.getByText("请确认哪个视频是需要剪辑的口播主素材？")).toBeTruthy();
+    expect(screen.getByText("Tim-Macbook Neo Talking节选.mp4")).toBeTruthy();
+  });
+
+  it("待补齐的 pending Decision 显示旋转加载与耗时", () => {
+    render(
+      <StructuredInteractionRenderer
+        item={{
+          kind: "decision",
+          id: "decision:dec_pending",
+          decision_id: "dec_pending",
+          decision: null,
+          status: "pending",
+          answer: null
+        }}
+        onAnswerDecision={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText("正在同步确认项")).toBeTruthy();
+    expect(screen.getByText("正在读取可选项")).toBeTruthy();
+    expect(screen.getByText(/00:00/)).toBeTruthy();
   });
 
   it("JobProgress SSE 更新进度条", async () => {
@@ -618,24 +855,74 @@ describe("DraftEditorView", () => {
     expect(screen.getByText("×8")).toBeTruthy();
   });
 
-  it("重复预览与时间线事件各自合并成一个最新状态行", () => {
+  it("重复预览会合并，时间线保存与校验事件不进入对话区", () => {
     let items = reduceStructuredInteractionItems([], activityEventPayload(1, "PreviewRendered"));
     items = reduceStructuredInteractionItems(items, activityEventPayload(2, "PreviewRendered"));
     items = reduceStructuredInteractionItems(items, activityEventPayload(3, "TimelineVersionCreated"));
     items = reduceStructuredInteractionItems(items, activityEventPayload(4, "TimelineValidated"));
 
-    expect(items).toHaveLength(2);
+    expect(items).toHaveLength(1);
     expect(items.find((item) => item.kind === "preview")).toMatchObject({
       id: "preview:latest",
       title: "预览已生成",
       description: "可在右侧查看预览。",
       occurrences: 2
     });
-    expect(items.find((item) => item.kind === "timeline")).toMatchObject({
-      id: "timeline:latest",
-      title: "时间线校验通过",
-      occurrences: 2
+    expect(items.find((item) => item.kind === "timeline")).toBeUndefined();
+  });
+
+  it("人工与 Agent 的时间线保存事件都保持静默", () => {
+    const manual = activityEventPayload(1, "TimelineVersionCreated");
+    manual.event.actor = "user";
+    const agent = activityEventPayload(2, "TimelineVersionCreated");
+    agent.event.actor = "agent";
+
+    expect(reduceStructuredInteractionItems([], manual)).toEqual([]);
+    expect(reduceStructuredInteractionItems([], agent)).toEqual([]);
+  });
+
+  it("领域事件历史突发只合并刷新一次最新时间线", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true });
+    renderEditor(fetchMock);
+    await screen.findByTestId("mock-preview");
+    const timelineRequestCount = (): number =>
+      vi
+        .mocked(fetchMock)
+        .mock.calls.filter(
+          ([input, init]) =>
+            String(input) === "/api/drafts/draft_1/timeline" && init?.method !== "POST"
+        ).length;
+    const baseline = timelineRequestCount();
+    const source = draftEventsSource();
+
+    act(() => {
+      for (let index = 0; index < 50; index += 1) {
+        source.emit("TimelineValidated", {
+          event_id: 1000 + index,
+          event: {
+            event: "TimelineValidated",
+            actor: "agent",
+            draft_id: "draft_1",
+            payload: {}
+          }
+        });
+      }
     });
+
+    await waitFor(() => expect(timelineRequestCount()).toBe(baseline + 1));
+  });
+
+  it("ConversationContextCleared 会清掉清空点之前的结构化交互", () => {
+    const before = reduceStructuredInteractionItems(
+      [],
+      activityEventPayload(1, "PreviewRendered")
+    );
+    const after = reduceStructuredInteractionItems(before, {
+      event_id: 2,
+      event: { event: "ConversationContextCleared", draft_id: "draft_1" }
+    });
+    expect(before).toHaveLength(1);
+    expect(after).toEqual([]);
   });
 
   it("events 到渲染条目的纯函数会按 job_id 合并进度并保留未知事件", () => {
@@ -754,48 +1041,20 @@ describe("DraftEditorView", () => {
 
     fireEvent.click(screen.getByTestId("mock-timeline-split"));
     await waitFor(() => {
-      const patchCall = vi.mocked(fetchMock).mock.calls.find(
-        ([input, init]) =>
-          String(input) === "/api/drafts/draft_1/timeline/patch" && init?.method === "POST"
-      );
-      expect(patchCall).toBeTruthy();
-      expect(JSON.parse(String(patchCall?.[1]?.body))).toEqual({
-        op: { kind: "split_clip", timeline_clip_id: "tc_a", split_frame: 15 }
+      expect(manualPatchOperations(fetchMock)).toContainEqual({
+        kind: "split_clip", timeline_clip_id: "tc_a", split_frame: 15
       });
     });
   });
 
-  it("撤销和重做按版本父链调用 restore API", async () => {
-    const fetchMock = mockFetch({
-      decision: null,
-      timeline: true,
-      navigation: { current: 3, parent: 2, redo: 4, latest: 4 }
-    });
+  it("时间线工具栏不再提供版本切换、撤销和重做", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true });
     renderEditor(fetchMock);
 
-    const undo = await screen.findByRole("button", { name: "撤销 (⌘Z)" });
-    await waitFor(() => expect((undo as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(undo);
-    await waitFor(() => {
-      expect(
-        vi.mocked(fetchMock).mock.calls.some(
-          ([input, init]) =>
-            String(input) === "/api/drafts/draft_1/timeline/restore" &&
-            JSON.parse(String(init?.body)).version === 2
-        )
-      ).toBe(true);
-    });
-
-    const redo = screen.getByRole("button", { name: "重做 (⇧⌘Z)" });
-    await waitFor(() => expect((redo as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(redo);
-    await waitFor(() => {
-      const restoreBodies = vi
-        .mocked(fetchMock)
-        .mock.calls.filter(([input]) => String(input) === "/api/drafts/draft_1/timeline/restore")
-        .map(([, init]) => JSON.parse(String(init?.body)));
-      expect(restoreBodies).toContainEqual({ version: 4 });
-    });
+    await screen.findByTestId("mock-timeline-move");
+    expect(screen.queryByRole("button", { name: "撤销 (⌘Z)" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "重做 (⇧⌘Z)" })).toBeNull();
+    expect(screen.queryByLabelText("时间线版本")).toBeNull();
   });
 
   it("在播放头位置新增可编辑字幕片段", async () => {
@@ -806,17 +1065,16 @@ describe("DraftEditorView", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加字幕" }));
 
     await waitFor(() => {
-      const patchCall = vi
-        .mocked(fetchMock)
-        .mock.calls.find(([input]) => String(input) === "/api/drafts/draft_1/timeline/patch");
-      const payload = JSON.parse(String(patchCall?.[1]?.body));
-      expect(payload.op).toMatchObject({
+      const operation = manualPatchOperations(fetchMock).find(
+        (candidate) => candidate.kind === "insert_subtitle"
+      );
+      expect(operation).toMatchObject({
         kind: "insert_subtitle",
         start_frame: 0,
         end_frame: 60,
         text: "在这里输入字幕"
       });
-      expect(payload.op.timeline_clip_id).toMatch(/^subtitle_manual_/);
+      expect(operation?.timeline_clip_id).toMatch(/^subtitle_manual_/);
     });
   });
 
@@ -828,29 +1086,19 @@ describe("DraftEditorView", () => {
     fireEvent.click(screen.getByRole("button", { name: "覆盖" }));
     fireEvent.click(move);
     await waitFor(() => {
-      const patchBodies = vi
-        .mocked(fetchMock)
-        .mock.calls.filter(([input]) => String(input) === "/api/drafts/draft_1/timeline/patch")
-        .map(([, init]) => JSON.parse(String(init?.body)));
-      expect(patchBodies).toContainEqual({
-        op: {
+      expect(manualPatchOperations(fetchMock)).toContainEqual({
           kind: "move_clip",
-          timeline_clip_id: "tc_a",
-          target_track_id: "visual_overlay",
+          timeline_clip_id: "overlay_a",
+          target_track_id: "visual_base",
           target_frame: 30,
           mode: "overwrite"
-        }
       });
     });
 
     fireEvent.click(screen.getByTestId("mock-track-lock"));
     await waitFor(() => {
-      const patchBodies = vi
-        .mocked(fetchMock)
-        .mock.calls.filter(([input]) => String(input) === "/api/drafts/draft_1/timeline/patch")
-        .map(([, init]) => JSON.parse(String(init?.body)));
-      expect(patchBodies).toContainEqual({
-        op: { kind: "set_track_state", track_id: "voiceover", locked: true }
+      expect(manualPatchOperations(fetchMock)).toContainEqual({
+        kind: "set_track_state", track_id: "voiceover", locked: true
       });
     });
   });
@@ -862,12 +1110,8 @@ describe("DraftEditorView", () => {
     fireEvent.click(await screen.findByTestId("mock-select-video"));
     fireEvent.click(screen.getAllByRole("button", { name: "取消联动" })[0]!);
     await waitFor(() => {
-      const patchBodies = vi
-        .mocked(fetchMock)
-        .mock.calls.filter(([input]) => String(input) === "/api/drafts/draft_1/timeline/patch")
-        .map(([, init]) => JSON.parse(String(init?.body)));
-      expect(patchBodies).toContainEqual({
-        op: { kind: "set_clip_linked", timeline_clip_id: "tc_a", linked: false }
+      expect(manualPatchOperations(fetchMock)).toContainEqual({
+        kind: "set_clip_linked", timeline_clip_id: "tc_a", linked: false
       });
     });
 
@@ -876,14 +1120,34 @@ describe("DraftEditorView", () => {
     fireEvent.change(subtitleInput, { target: { value: "改好的字幕" } });
     fireEvent.click(screen.getByRole("button", { name: "保存字幕" }));
     await waitFor(() => {
-      const patchBodies = vi
-        .mocked(fetchMock)
-        .mock.calls.filter(([input]) => String(input) === "/api/drafts/draft_1/timeline/patch")
-        .map(([, init]) => JSON.parse(String(init?.body)));
-      expect(patchBodies).toContainEqual({
-        op: { kind: "edit_subtitle_text", timeline_clip_id: "subtitle_a", text: "改好的字幕" }
+      expect(manualPatchOperations(fetchMock)).toContainEqual({
+        kind: "edit_subtitle_text", timeline_clip_id: "subtitle_a", text: "改好的字幕"
       });
     });
+  });
+
+  it("选中片段后点击时间线空白处会收起详情栏", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true });
+    renderEditor(fetchMock);
+
+    fireEvent.click(await screen.findByTestId("mock-select-video"));
+    expect(await screen.findByText("已选：")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("mock-timeline-deselect"));
+
+    await waitFor(() => expect(screen.queryByText("已选：")).toBeNull());
+  });
+
+  it("时间线缩放滑杆连续更新每秒像素密度", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true });
+    renderEditor(fetchMock);
+    await screen.findByTestId("mock-timeline-move");
+
+    fireEvent.change(screen.getByRole("slider", { name: "时间线缩放" }), {
+      target: { value: "137" }
+    });
+
+    await waitFor(() => expect(consoleComponentMocks.timelineProps.at(-1)?.pxPerSec).toBe(137));
   });
 
   it("选中音频片段可分别调整片段与轨道音量", async () => {
@@ -895,12 +1159,8 @@ describe("DraftEditorView", () => {
     fireEvent.change(clipGain, { target: { value: "-6" } });
     fireEvent.pointerUp(clipGain);
     await waitFor(() => {
-      const patchBodies = vi
-        .mocked(fetchMock)
-        .mock.calls.filter(([input]) => String(input) === "/api/drafts/draft_1/timeline/patch")
-        .map(([, init]) => JSON.parse(String(init?.body)));
-      expect(patchBodies).toContainEqual({
-        op: { kind: "adjust_gain", timeline_clip_id: "audio_a", gain_db: -6 }
+      expect(manualPatchOperations(fetchMock)).toContainEqual({
+        kind: "adjust_gain", timeline_clip_id: "audio_a", gain_db: -6
       });
     });
 
@@ -908,12 +1168,8 @@ describe("DraftEditorView", () => {
     fireEvent.change(trackGain, { target: { value: "-10" } });
     fireEvent.pointerUp(trackGain);
     await waitFor(() => {
-      const patchBodies = vi
-        .mocked(fetchMock)
-        .mock.calls.filter(([input]) => String(input) === "/api/drafts/draft_1/timeline/patch")
-        .map(([, init]) => JSON.parse(String(init?.body)));
-      expect(patchBodies).toContainEqual({
-        op: { kind: "set_track_state", track_id: "original_audio", gain_db: -10 }
+      expect(manualPatchOperations(fetchMock)).toContainEqual({
+        kind: "set_track_state", track_id: "original_audio", gain_db: -10
       });
     });
   });
@@ -972,7 +1228,6 @@ function mockFetch({
   materials = [],
   onAnswer,
   costs,
-  navigation
 }: {
   decision: Decision | null;
   timeline?: boolean;
@@ -980,12 +1235,6 @@ function mockFetch({
   materials?: Array<Record<string, unknown>>;
   onAnswer?: (url: string, init: RequestInit | undefined) => void;
   costs?: number;
-  navigation?: {
-    current: number;
-    parent: number | null;
-    redo: number | null;
-    latest: number;
-  };
 }): FetchMock {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -1005,12 +1254,12 @@ function mockFetch({
           draft_id: "draft_1",
           name: "7月7日",
           status: "active",
-          timeline_current_version: timeline ? (navigation?.current ?? 1) : null
+          timeline_current_version: timeline ? 1 : null
         }
       });
     }
     if (url.startsWith("/api/drafts/draft_1/timeline")) {
-      return jsonResponse(timelineResponseFixture(navigation));
+      return jsonResponse(timelineResponseFixture());
     }
     if (url.endsWith("/decisions/current")) {
       return jsonResponse({ decision });
@@ -1049,14 +1298,10 @@ function mockFetch({
 }
 
 function turnStreamSource(): MockEventSource {
-  const source = MockEventSource.instances.find((instance) => instance.url.includes("turn-stream"));
-  if (!source) {
-    throw new Error("turn-stream EventSource 未创建");
-  }
-  return source;
+  return draftEventsSource();
 }
 
-// 编辑器还会订阅 workspace 级 /api/events（TopBar 连接态、素材面板），按 URL 定位草稿事件源。
+// 领域事件与 turn-stream 复用同一条草稿 SSE，避免多标签页耗尽 HTTP/1.1 连接。
 function draftEventsSource(): MockEventSource {
   const source = MockEventSource.instances.find((instance) =>
     instance.url.includes("/api/drafts/draft_1/events")
@@ -1073,19 +1318,25 @@ function emitTurnStream(source: MockEventSource, data: Record<string, unknown>):
   });
 }
 
-function timelineResponseFixture(navigation?: {
-  current: number;
-  parent: number | null;
-  redo: number | null;
-  latest: number;
-}) {
-  const current = navigation?.current ?? 1;
+function manualPatchOperations(fetchMock: FetchMock): Record<string, unknown>[] {
+  return vi
+    .mocked(fetchMock)
+    .mock.calls.filter(([input]) => String(input) === "/api/drafts/draft_1/timeline/patch")
+    .flatMap(([, init]) => {
+      const payload = JSON.parse(String(init?.body)) as {
+        op?: Record<string, unknown> & { ops?: Record<string, unknown>[] };
+      };
+      if (payload.op?.kind === "batch") {
+        return payload.op.ops ?? [];
+      }
+      return payload.op ? [payload.op] : [];
+    });
+}
+
+function timelineResponseFixture() {
   return {
     draft_id: "draft_1",
-    timeline_version: current,
-    parent_version: navigation?.parent ?? null,
-    redo_version: navigation?.redo ?? null,
-    latest_version: navigation?.latest ?? current,
+    timeline_version: 1,
     summary: "首版粗剪",
     preview_id: "prev_1",
     timeline: {
@@ -1106,6 +1357,22 @@ function timelineResponseFixture(navigation?: {
               asset_kind: "video",
               linked: true,
               parent_block_id: "block_a"
+            }
+          ]
+        },
+        {
+          track_id: "visual_overlay",
+          clips: [
+            {
+              timeline_clip_id: "overlay_a",
+              track_id: "visual_overlay",
+              timeline_start_frame: 20,
+              timeline_end_frame: 40,
+              source_start_frame: 0,
+              source_end_frame: 20,
+              asset_id: "asset_overlay",
+              asset_kind: "video",
+              linked: false
             }
           ]
         },

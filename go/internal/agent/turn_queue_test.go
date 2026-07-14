@@ -45,6 +45,9 @@ func TestTurnQueueFIFOParallelDraftsAndCancel(t *testing.T) {
 	if !queue.RequestStop("a") {
 		t.Fatal("活跃 turn 应可取消")
 	}
+	if !queue.IsBusy("a") {
+		t.Fatal("尚有排队 turn 时应报告 busy")
+	}
 	queue.JoinDraft("a")
 	queue.JoinDraft("b")
 	mu.Lock()
@@ -55,6 +58,9 @@ func TestTurnQueueFIFOParallelDraftsAndCancel(t *testing.T) {
 	}
 	if queue.RequestStop("missing") {
 		t.Fatal("空闲草稿不应报告取消成功")
+	}
+	if queue.IsBusy("a") || queue.IsBusy("missing") {
+		t.Fatal("消费完成或不存在的草稿不应报告 busy")
 	}
 }
 
@@ -108,14 +114,14 @@ func TestTurnQueueHelpersCloseAndRejectedItems(t *testing.T) {
 	nilRunner.Close()
 }
 
-func TestTurnStreamHubSnapshotEightTypesAndSlowSubscriber(t *testing.T) {
+func TestTurnStreamHubSnapshotAllTypesAndSlowSubscriber(t *testing.T) {
 	t.Parallel()
 	hub := NewTurnStreamHub(2)
-	eight := []string{
+	allTypes := []string{
 		"turn_started", "text_delta", "message_completed", "tool_step_started",
-		"tool_step_finished", "subagent_progress", "turn_ended", "turn_error",
+		"tool_step_finished", "subagent_progress", "model_retry", "turn_ended", "turn_error",
 	}
-	for _, typeName := range eight[:3] {
+	for _, typeName := range allTypes[:3] {
 		hub.Record("draft", StreamEvent{"type": typeName})
 	}
 	snapshot, live, unsubscribe := hub.Subscribe("draft")
@@ -140,7 +146,16 @@ func TestTurnStreamHubSnapshotEightTypesAndSlowSubscriber(t *testing.T) {
 	if string(completedFrame) != string(golden) {
 		t.Fatalf("turn-stream 漂移\n--- expected ---\n%s--- actual ---\n%s", golden, completedFrame)
 	}
-	for _, typeName := range eight[3:6] {
+	retryFrame, err := EncodeTurnStreamFrame(StreamEvent{
+		"type": "model_retry", "attempt": 2, "max_retries": 5,
+		"reason": "模型响应超时", "next_delay_ms": int64(500),
+	})
+	if err != nil || !strings.Contains(string(retryFrame), `"type":"model_retry"`) ||
+		!strings.Contains(string(retryFrame), `"attempt":2`) ||
+		!strings.Contains(string(retryFrame), `"max_retries":5`) {
+		t.Fatalf("retry frame=%q err=%v", retryFrame, err)
+	}
+	for _, typeName := range allTypes[3:6] {
 		hub.Record("draft", StreamEvent{"type": typeName})
 	}
 	select {

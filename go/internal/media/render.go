@@ -15,15 +15,16 @@ import (
 )
 
 type RenderProfile struct {
-	Name   string
-	Width  int
-	Height int
-	CRF    int
+	Name       string
+	Width      int
+	Height     int
+	CRF        int
+	AutoOrient bool
 }
 
 var (
-	PreviewProfile = RenderProfile{Name: "preview", Width: 360, Height: 640, CRF: 30}
-	FinalProfile   = RenderProfile{Name: "final", Width: 720, Height: 1280, CRF: 20}
+	PreviewProfile = RenderProfile{Name: "preview", Width: 540, Height: 960, CRF: 24, AutoOrient: true}
+	FinalProfile   = RenderProfile{Name: "final", Width: 1080, Height: 1920, CRF: 18, AutoOrient: true}
 )
 
 type RenderResult struct {
@@ -48,6 +49,7 @@ func RenderTimeline(
 	if document.FPS <= 0 {
 		return RenderResult{}, errors.New("时间线 fps 无效")
 	}
+	profile = orientProfileToPrimary(ctx, database, primary.Clips, profile)
 	args := []string{"-y"}
 	filters := make([]string, 0, len(primary.Clips)+16)
 	labels := strings.Builder{}
@@ -141,6 +143,48 @@ func RenderTimeline(
 		Object: object, Width: profile.Width, Height: profile.Height,
 		FPS: float64(document.FPS), DurationSec: float64(document.DurationFrames) / float64(document.FPS),
 	}, nil
+}
+
+func orientProfileToPrimary(
+	ctx context.Context,
+	database *storage.DB,
+	clips []timeline.Clip,
+	profile RenderProfile,
+) RenderProfile {
+	if !profile.AutoOrient || profile.Width == profile.Height {
+		return profile
+	}
+	landscapeWeight := 0
+	portraitWeight := 0
+	probes := map[string]Probe{}
+	for _, clip := range clips {
+		probe, exists := probes[clip.AssetID]
+		if !exists {
+			source, kind, err := ResolveAssetSource(ctx, database, clip.AssetID)
+			if err != nil || kind != "video" && kind != "image" {
+				continue
+			}
+			probe, err = ProbeFile(ctx, source)
+			if err != nil {
+				continue
+			}
+			probes[clip.AssetID] = probe
+		}
+		if probe.Width == nil || probe.Height == nil || *probe.Width == *probe.Height {
+			continue
+		}
+		weight := max(1, clip.TimelineEndFrame-clip.TimelineStartFrame)
+		if *probe.Width > *probe.Height {
+			landscapeWeight += weight
+		} else {
+			portraitWeight += weight
+		}
+	}
+	if landscapeWeight > portraitWeight && profile.Width < profile.Height ||
+		portraitWeight > landscapeWeight && profile.Width > profile.Height {
+		profile.Width, profile.Height = profile.Height, profile.Width
+	}
+	return profile
 }
 
 type preparedPrimaryInput struct {
@@ -299,10 +343,24 @@ func audioFilter(
 		fmt.Sprintf("atrim=duration=%s", formatSeconds(
 			float64(clip.TimelineEndFrame-clip.TimelineStartFrame)/float64(document.FPS),
 		)),
-		fmt.Sprintf("adelay=%d:all=1", int(math.Round(
-			float64(clip.TimelineStartFrame)*1000/float64(document.FPS),
-		))),
 	)
+	timelineDuration := float64(clip.TimelineEndFrame-clip.TimelineStartFrame) / float64(document.FPS)
+	if clip.FadeInFrames > 0 {
+		parts = append(parts, fmt.Sprintf(
+			"afade=t=in:st=0:d=%s",
+			formatSeconds(float64(clip.FadeInFrames)/float64(document.FPS)),
+		))
+	}
+	if clip.FadeOutFrames > 0 {
+		fadeDuration := float64(clip.FadeOutFrames) / float64(document.FPS)
+		parts = append(parts, fmt.Sprintf(
+			"afade=t=out:st=%s:d=%s",
+			formatSeconds(max(0, timelineDuration-fadeDuration)), formatSeconds(fadeDuration),
+		))
+	}
+	parts = append(parts, fmt.Sprintf("adelay=%d:all=1", int(math.Round(
+		float64(clip.TimelineStartFrame)*1000/float64(document.FPS),
+	))))
 	return strings.Join(parts, ",") + "[" + label + "]"
 }
 

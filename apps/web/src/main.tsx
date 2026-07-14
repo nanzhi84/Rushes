@@ -9,7 +9,8 @@ import {
   AUTH_CHANGED_EVENT,
   AUTH_REQUIRED_EVENT,
   bootstrapAuthFromLaunchUrl,
-  getAuthToken
+  getAuthToken,
+  listenForLaunchUrlAuth
 } from "./auth";
 import "./index.css";
 
@@ -20,9 +21,11 @@ export function AppRoot(): ReactElement {
 
   useEffect(() => {
     const syncTokenState = () => setHasToken(Boolean(getAuthToken()));
+    const stopListeningForLaunchUrlAuth = listenForLaunchUrlAuth();
     window.addEventListener(AUTH_CHANGED_EVENT, syncTokenState);
     window.addEventListener(AUTH_REQUIRED_EVENT, syncTokenState);
     return () => {
+      stopListeningForLaunchUrlAuth();
       window.removeEventListener(AUTH_CHANGED_EVENT, syncTokenState);
       window.removeEventListener(AUTH_REQUIRED_EVENT, syncTokenState);
     };
@@ -48,7 +51,7 @@ function LaunchGuide(): ReactElement {
         <p className="mt-4 leading-7 text-fg-muted">
           当前页面没有收到启动 token。请使用后端进程打印的本地地址打开应用，地址形如
           <code className="mx-1 rounded bg-raised px-1.5 py-0.5 text-sm text-fg">#t=&lt;token&gt;</code>
-          ，前端会把 token 存入本次浏览器会话。
+          ，前端会持久保存 token。首次授权后，后续可直接打开无 token 的本地地址。
         </p>
       </section>
     </main>

@@ -125,6 +125,91 @@ func (database *DB) Migrate(ctx context.Context) error {
 		if _, err := database.write.ExecContext(ctx, "PRAGMA user_version = 1"); err != nil {
 			return err
 		}
+		version = 1
+	}
+	if version < 2 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV2); err != nil {
+			return fmt.Errorf("应用 schema v2: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 2
+	}
+	if version < 3 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV3); err != nil {
+			return fmt.Errorf("应用 schema v3: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 3
+	}
+	if version < 4 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV4); err != nil {
+			return fmt.Errorf("应用 schema v4: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 4"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 4
+	}
+	if version < 5 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV5); err != nil {
+			return fmt.Errorf("应用 schema v5: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 5"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 5
+	}
+	if version < 6 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV6); err != nil {
+			return fmt.Errorf("应用 schema v6: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 6"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -6,7 +6,6 @@ import {
   FileText,
   Film,
   Folder,
-  FolderOpen,
   Image as ImageIcon,
   Loader2,
   MapPin,
@@ -14,11 +13,10 @@ import {
   Music,
   Plus,
   RotateCw,
-  Square,
   Trash2,
   Type
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ElementType, ReactElement } from "react";
 import { api, type MaterialAsset } from "../../api/client";
 import { queryKeys } from "../../app/query_client";
@@ -26,6 +24,9 @@ import { FsBrowserDialog } from "./FsBrowserDialog";
 import { MaterialSummaryPanel } from "./MaterialSummaryPanel";
 import { StatusBadge, understandingBadgeProps } from "./StatusBadge";
 import { useMaterialsEvents } from "./useMaterialsEvents";
+
+const FINDER_PICKER_TIMEOUT_MS = 60_000;
+type PickerAbortReason = "cancel" | "fallback" | "timeout" | "unmount";
 
 type AssetsPanelProps = {
   draftId: string;
@@ -36,9 +37,6 @@ type AssetsPanelProps = {
   /** 管理模式：瓦片菜单 + 摘要详情 + 失效重检。 */
   management?: boolean;
   gridClassName?: string;
-  understandingProgress?: { completed: number; total: number } | null;
-  onCancelUnderstanding?: () => void;
-  cancellingUnderstanding?: boolean;
 };
 
 /** 素材面板：文件夹分组网格；导入只走「系统原生选择框 → reference 零拷贝索引」。 */
@@ -48,14 +46,13 @@ export function AssetsPanel({
   previewingAssetId = null,
   enableEvents = true,
   management = false,
-  gridClassName,
-  understandingProgress = null,
-  onCancelUnderstanding,
-  cancellingUnderstanding = false
+  gridClassName
 }: AssetsPanelProps): ReactElement {
   const queryClient = useQueryClient();
   const [currentDir, setCurrentDir] = useState("");
   const [picking, setPicking] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [inAppPickerOpen, setInAppPickerOpen] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [skippedFiles, setSkippedFiles] = useState<string[]>([]);
   const [failedFiles, setFailedFiles] = useState<string[]>([]);
@@ -63,6 +60,8 @@ export function AssetsPanel({
   const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
   const [relocatingAsset, setRelocatingAsset] = useState<MaterialAsset | null>(null);
   const [deletingAsset, setDeletingAsset] = useState<MaterialAsset | null>(null);
+  const pickerAbortRef = useRef<AbortController | null>(null);
+  const pickerAbortReasonRef = useRef<PickerAbortReason | null>(null);
 
   const materialsQuery = useQuery({
     queryKey: queryKeys.materials(draftId),
@@ -75,21 +74,23 @@ export function AssetsPanel({
     await queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) });
   };
 
-  /** 后端弹 macOS 原生选择框拿绝对路径 → reference 原地索引（零拷贝，不占双份磁盘）。 */
-  async function pickAndImport(mode: "files" | "folder"): Promise<void> {
-    setPicking(true);
+  useEffect(
+    () => () => {
+      pickerAbortReasonRef.current = "unmount";
+      pickerAbortRef.current?.abort();
+    },
+    []
+  );
+
+  async function importPaths(paths: string[]): Promise<void> {
+    if (paths.length === 0) {
+      return;
+    }
+    setImporting(true);
     setImportError(null);
     try {
-      const picked = await api.pickLocalPaths(mode);
-      if (!picked.available) {
-        setImportError("当前环境无法弹出系统选择框。可以在对话里告诉代理要导入的本地路径。");
-        return;
-      }
-      if (picked.paths.length === 0) {
-        return; // 用户取消
-      }
       const response = await api.importLocalMaterial(draftId, {
-        paths: picked.paths,
+        paths,
         storage_mode: "reference"
       });
       setSkippedFiles(response.skipped ?? []);
@@ -99,8 +100,62 @@ export function AssetsPanel({
     } catch {
       setImportError("导入失败，请重试。");
     } finally {
+      setImporting(false);
+    }
+  }
+
+  function abortNativePicker(reason: PickerAbortReason): void {
+    pickerAbortReasonRef.current = reason;
+    pickerAbortRef.current?.abort();
+    if (reason === "fallback") {
+      setInAppPickerOpen(true);
+    }
+  }
+
+  /** 后端弹 macOS 原生选择框拿绝对路径 → reference 原地索引（零拷贝，不占双份磁盘）。 */
+  async function pickAndImport(): Promise<void> {
+    if (picking || importing || pickerAbortRef.current) {
+      return;
+    }
+    const controller = new AbortController();
+    pickerAbortRef.current = controller;
+    pickerAbortReasonRef.current = null;
+    let paths: string[] = [];
+    setPicking(true);
+    setImportError(null);
+    const timeoutId = window.setTimeout(() => {
+      if (pickerAbortRef.current !== controller) {
+        return;
+      }
+      pickerAbortReasonRef.current = "timeout";
+      controller.abort();
+    }, FINDER_PICKER_TIMEOUT_MS);
+    try {
+      const picked = await api.pickLocalPaths("mixed", controller.signal);
+      if (!picked.available) {
+        setInAppPickerOpen(true);
+        return;
+      }
+      paths = picked.paths;
+    } catch {
+      if (controller.signal.aborted) {
+        if (pickerAbortReasonRef.current === "timeout") {
+          setImportError("Finder 选择等待超时，已停止等待。请重试或改用应用内选择。");
+          setInAppPickerOpen(true);
+        }
+      } else {
+        setImportError("无法打开 Finder 选择框，已切换到应用内选择。");
+        setInAppPickerOpen(true);
+      }
+    } finally {
+      window.clearTimeout(timeoutId);
+      if (pickerAbortRef.current === controller) {
+        pickerAbortRef.current = null;
+        pickerAbortReasonRef.current = null;
+      }
       setPicking(false);
     }
+    await importPaths(paths);
   }
 
   const deleteMaterial = useMutation({
@@ -135,8 +190,9 @@ export function AssetsPanel({
   const activeAsset = activeAssetId
     ? (assets.find((asset) => asset.asset_id === activeAssetId) ?? null)
     : null;
+  const busy = picking || importing;
   const actionPending =
-    picking ||
+    busy ||
     deleteMaterial.isPending ||
     relocateMaterial.isPending ||
     revalidateMaterials.isPending;
@@ -148,30 +204,27 @@ export function AssetsPanel({
           我的素材 <span className="font-normal text-fg-muted">{assets.length}</span>
         </span>
         <div className="flex min-w-0 items-center justify-end gap-1">
-          {picking ? <span className="text-xs text-fg-muted">等待选择…</span> : null}
-          {understandingProgress ? (
-            <div
-              className="flex items-center gap-1.5 rounded-md border border-info/40 bg-info/10 px-2 py-1 text-xs text-info"
-              role="status"
-              aria-label={`素材理解中 ${understandingProgress.completed}/${understandingProgress.total}`}
-            >
-              <Loader2 size={13} className="animate-spin" aria-hidden />
-              <span>
-                理解中 {understandingProgress.completed}/{understandingProgress.total}
-              </span>
-              {onCancelUnderstanding ? (
-                <button
-                  className="ml-1 inline-flex items-center gap-1 rounded px-1 py-0.5 text-info hover:bg-info/15 disabled:opacity-40"
-                  type="button"
-                  aria-label="取消素材理解"
-                  disabled={cancellingUnderstanding}
-                  onClick={onCancelUnderstanding}
-                >
-                  <Square size={10} fill="currentColor" aria-hidden />
-                  取消
-                </button>
-              ) : null}
+          {picking ? (
+            <div className="flex items-center gap-1 text-2xs text-fg-muted">
+              <span role="status">等待 Finder 选择</span>
+              <button
+                className="rounded px-1 py-0.5 text-accent hover:bg-accent/10"
+                type="button"
+                onClick={() => abortNativePicker("fallback")}
+              >
+                应用内选择
+              </button>
+              <button
+                aria-label="取消素材选择"
+                className="rounded px-1 py-0.5 hover:bg-hover hover:text-fg"
+                type="button"
+                onClick={() => abortNativePicker("cancel")}
+              >
+                取消
+              </button>
             </div>
+          ) : importing ? (
+            <span className="text-xs text-fg-muted" role="status">正在导入…</span>
           ) : null}
           {management ? (
             <button
@@ -186,20 +239,11 @@ export function AssetsPanel({
             </button>
           ) : null}
           <button
-            className="grid size-7 shrink-0 place-items-center rounded-sm text-fg-muted transition-colors ease-standard hover:bg-hover disabled:opacity-40"
-            type="button"
-            aria-label="导入文件夹"
-            title="导入文件夹"
-            disabled={picking}
-            onClick={() => void pickAndImport("folder")}
-          >
-            <FolderOpen size={14} strokeWidth={1.75} aria-hidden />
-          </button>
-          <button
             className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-sm bg-accent px-2 py-1 text-2xs font-semibold text-white transition-colors ease-standard hover:bg-accent-strong disabled:opacity-40"
             type="button"
-            disabled={picking}
-            onClick={() => void pickAndImport("files")}
+            disabled={busy}
+            onClick={() => void pickAndImport()}
+            title="选择素材或文件夹；文件夹将递归导入"
           >
             <Plus size={14} strokeWidth={2} aria-hidden />
             导入素材
@@ -247,9 +291,10 @@ export function AssetsPanel({
               <Film size={22} strokeWidth={1.5} className="mx-auto mb-3 text-fg-faint" aria-hidden />
               <p className="text-xs leading-5 text-fg-muted">还没有素材</p>
               <button
-                className="mt-3 rounded-sm bg-raised px-3 py-1.5 text-xs text-fg hover:bg-hover"
+                className="mt-3 rounded-sm bg-raised px-3 py-1.5 text-xs text-fg hover:bg-hover disabled:opacity-40"
                 type="button"
-                onClick={() => void pickAndImport("files")}
+                disabled={busy}
+                onClick={() => void pickAndImport()}
               >
                 从 Finder 导入
               </button>
@@ -314,6 +359,17 @@ export function AssetsPanel({
           />
         </div>
       ) : null}
+
+      <FsBrowserDialog
+        open={inAppPickerOpen}
+        title="在应用中选择素材"
+        submitLabel="导入所选"
+        onClose={() => setInAppPickerOpen(false)}
+        onSelectMany={(paths) => {
+          setInAppPickerOpen(false);
+          void importPaths(paths);
+        }}
+      />
 
       {management ? (
         <FsBrowserDialog

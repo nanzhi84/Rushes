@@ -1,5 +1,6 @@
 import { useEffect, useReducer, useRef } from "react";
-import { createDraftTurnStreamSource } from "../../api/client";
+import { useDocumentVisibility } from "../../app/use_document_visibility";
+import { acquireApiEventSource } from "../../auth";
 
 // text_delta 阶段是 assistant；完成后区分叙述、正式回复和后台观察。
 export type TurnStreamMessageKind = "assistant" | "narration" | "reply" | "observation";
@@ -30,20 +31,23 @@ export type SubagentProgressEntry = {
   note: string;
 };
 
-export type UnderstandingProgress = {
-  completed: number;
-  total: number;
+export type ModelRetryState = {
+  attempt: number;
+  maxRetries: number;
+  reason: string;
+  nextDelayMs: number | null;
 };
 
 export type TurnStreamState = {
   items: TurnStreamItem[];
   turnActive: boolean;
+  // 模型单次请求超时后的可见恢复状态；成功产出任何新进展后立即清空。
+  modelRetry: ModelRetryState | null;
   // 挂在「当前进行中工具行」下方的子代理进度；工具收尾或回合结束即清空。
   subagentProgress: SubagentProgressEntry[];
-  understandingProgress: UnderstandingProgress | null;
 };
 
-// 服务端统一发送 event: turn_stream；8 种 type 由 go/internal/agent 定义。
+// 服务端统一发送 event: turn_stream；事件 type 由 go/internal/agent 定义。
 export type TurnStreamEvent =
   | { type: "turn_started"; turn_id?: string }
   | { type: "text_delta"; message_id: string; kind?: string; delta?: string }
@@ -55,6 +59,13 @@ export type TurnStreamEvent =
     }
   | { type: "tool_step_started"; step_id: string; tool: string; args_summary?: string }
   | { type: "tool_step_finished"; step_id: string; tool: string; status: string; observation?: string }
+  | {
+      type: "model_retry";
+      attempt?: number;
+      max_retries?: number;
+      reason?: string;
+      next_delay_ms?: number;
+    }
   | {
       type: "subagent_progress";
       asset_id?: string;
@@ -75,8 +86,8 @@ export type UseTurnStreamOptions = {
 export const INITIAL_STATE: TurnStreamState = {
   items: [],
   turnActive: false,
-  subagentProgress: [],
-  understandingProgress: null
+  modelRetry: null,
+  subagentProgress: []
 };
 
 // 纯 reducer：便于单测，也让重连快照重放（turn_started 起头）能从头重建状态。
@@ -84,7 +95,28 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
   switch (event.type) {
     case "turn_started":
       // 新回合（或重连重放）从零重建，避免 text_delta 被重复追加。
-      return { items: [], turnActive: true, subagentProgress: [], understandingProgress: null };
+      return { items: [], turnActive: true, modelRetry: null, subagentProgress: [] };
+    case "model_retry": {
+      const attempt = typeof event.attempt === "number" ? event.attempt : 0;
+      const maxRetries = typeof event.max_retries === "number" ? event.max_retries : 0;
+      if (attempt <= 0 || maxRetries <= 0 || attempt > maxRetries) {
+        return state;
+      }
+      return {
+        ...state,
+        turnActive: true,
+        modelRetry: {
+          attempt,
+          maxRetries,
+          reason:
+            typeof event.reason === "string" && event.reason ? event.reason : "模型响应超时",
+          nextDelayMs:
+            typeof event.next_delay_ms === "number" && event.next_delay_ms >= 0
+              ? event.next_delay_ms
+              : null
+        }
+      };
+    }
     case "text_delta": {
       if (typeof event.message_id !== "string") {
         return state;
@@ -92,6 +124,7 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
       return {
         ...state,
         turnActive: true,
+        modelRetry: null,
         items: appendDelta(
           state.items,
           event.message_id,
@@ -107,6 +140,7 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
       return {
         ...state,
         turnActive: true,
+        modelRetry: null,
         items: upsertMessage(state.items, {
           type: "message",
           message_id: event.message_id,
@@ -122,6 +156,7 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
       return {
         ...state,
         turnActive: true,
+        modelRetry: null,
         items: upsertToolStep(state.items, {
           type: "tool",
           step_id: event.step_id,
@@ -147,17 +182,12 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
           observation: typeof event.observation === "string" && event.observation ? event.observation : null
         }),
         // 工具收尾即清空其子代理进度，避免残留串到下一个进行中工具行上。
-        subagentProgress: [],
-        understandingProgress:
-          event.tool === "understand.materials" ? null : state.understandingProgress
+        subagentProgress: []
       };
     }
     case "subagent_progress": {
-      const understandingProgress = parseUnderstandingProgress(event) ?? state.understandingProgress;
       if (typeof event.asset_id !== "string" || !event.asset_id) {
-        return understandingProgress === state.understandingProgress
-          ? state
-          : { ...state, turnActive: true, understandingProgress };
+        return state;
       }
       const note = typeof event.note === "string" ? event.note : "";
       if (!note) {
@@ -166,15 +196,14 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
       return {
         ...state,
         turnActive: true,
-        subagentProgress: upsertProgress(state.subagentProgress, { asset_id: event.asset_id, note }),
-        understandingProgress
+        subagentProgress: upsertProgress(state.subagentProgress, { asset_id: event.asset_id, note })
       };
     }
     case "turn_ended":
       // 封口：本回合结束，历史消息会被 refetch 接管；流式 buffer 交给 message_id 去重清理。
-      return { ...state, turnActive: false, subagentProgress: [], understandingProgress: null };
+      return { ...state, turnActive: false, modelRetry: null, subagentProgress: [] };
     case "turn_error":
-      return { ...state, turnActive: false, subagentProgress: [], understandingProgress: null };
+      return { ...state, turnActive: false, modelRetry: null, subagentProgress: [] };
     default:
       return state;
   }
@@ -187,9 +216,13 @@ export function useTurnStream(
   const [state, dispatch] = useReducer(reduceTurnStream, INITIAL_STATE);
   const optionsRef = useRef(options);
   optionsRef.current = options;
+  const documentVisible = useDocumentVisibility();
 
   useEffect(() => {
-    const source = createDraftTurnStreamSource(draftId);
+    if (!documentVisible) {
+      return;
+    }
+    const { source, release } = acquireApiEventSource(`/api/drafts/${draftId}/events`);
     const handle = (raw: Event) => {
       const message = raw as MessageEvent<string>;
       let event: TurnStreamEvent;
@@ -213,9 +246,9 @@ export function useTurnStream(
     source.addEventListener("turn_stream", handle);
     return () => {
       source.removeEventListener("turn_stream", handle);
-      source.close();
+      release();
     };
-  }, [draftId]);
+  }, [documentVisible, draftId]);
 
   return state;
 }
@@ -281,20 +314,4 @@ function normalizeCompletedKind(kind: unknown): TurnStreamMessageKind {
     return kind;
   }
   return "reply";
-}
-
-function parseUnderstandingProgress(event: TurnStreamEvent): UnderstandingProgress | null {
-  if (
-    event.type !== "subagent_progress" ||
-    event.tool !== "understand.materials" ||
-    typeof event.completed !== "number" ||
-    typeof event.total !== "number"
-  ) {
-    return null;
-  }
-  const total = Math.max(0, Math.floor(event.total));
-  return {
-    completed: Math.max(0, Math.min(total, Math.floor(event.completed))),
-    total
-  };
 }

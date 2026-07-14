@@ -83,6 +83,94 @@ func (server *Server) ListDraftsApiDraftsGet(writer http.ResponseWriter, request
 	writeJSON(writer, http.StatusOK, DraftListResponse{Drafts: items})
 }
 
+const maxBatchDeleteDrafts = 100
+
+// BatchDeleteDraftsApiDraftsDelete 将多个草稿作为一次原子 Reducer 写入软删除。
+// 任一草稿不存在时不会提交其中任何一个 DraftTrashed 事件。
+func (server *Server) BatchDeleteDraftsApiDraftsDelete(
+	writer http.ResponseWriter,
+	request *http.Request,
+) {
+	var payload DraftBatchDeleteRequest
+	if err := decodeJSON(request, &payload); err != nil {
+		writeBadRequest(writer, "invalid_json")
+		return
+	}
+	if !payload.Confirm {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"detail": map[string]string{"reason": "confirmation_required"},
+		})
+		return
+	}
+	if len(payload.DraftIds) == 0 {
+		writeBadRequest(writer, "empty_draft_ids")
+		return
+	}
+	if len(payload.DraftIds) > maxBatchDeleteDrafts {
+		writeBadRequest(writer, "too_many_drafts")
+		return
+	}
+
+	seen := make(map[string]struct{}, len(payload.DraftIds))
+	activeDraftIDs := make([]string, 0, len(payload.DraftIds))
+	for _, rawDraftID := range payload.DraftIds {
+		draftID := strings.TrimSpace(rawDraftID)
+		if draftID == "" || draftID != rawDraftID {
+			writeBadRequest(writer, "invalid_draft_id")
+			return
+		}
+		if _, exists := seen[draftID]; exists {
+			writeBadRequest(writer, "duplicate_draft_id")
+			return
+		}
+		seen[draftID] = struct{}{}
+
+		draft, err := storage.GetDraft(request.Context(), server.database.Read(), draftID)
+		if errors.Is(err, storage.ErrNotFound) {
+			writeJSON(writer, http.StatusNotFound, map[string]any{
+				"detail": map[string]string{"reason": "draft_not_found", "draft_id": draftID},
+			})
+			return
+		}
+		if err != nil {
+			server.internalError(writer, err)
+			return
+		}
+		if draft.Status == "trashed" {
+			continue
+		}
+		if draft.Status != "active" {
+			writeJSON(writer, http.StatusConflict, map[string]any{
+				"detail": map[string]string{"reason": "draft_not_deletable", "draft_id": draftID},
+			})
+			return
+		}
+		activeDraftIDs = append(activeDraftIDs, draftID)
+	}
+
+	events := make([]contracts.Event, 0, len(activeDraftIDs))
+	for _, draftID := range activeDraftIDs {
+		events = append(events, contracts.Event{
+			Type: "DraftTrashed", DraftID: draftID, Payload: map[string]any{},
+		})
+	}
+	result, err := reducer.Apply(request.Context(), server.database, events, reducer.Options{
+		Actor: contracts.ActorUser,
+	})
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	if result.Status != reducer.StatusApplied {
+		writeReducerResult(writer, result)
+		return
+	}
+	writeJSON(writer, http.StatusOK, DraftBatchDeleteResponse{
+		DeletedCount: len(activeDraftIDs), DeletedDraftIds: activeDraftIDs,
+		EventIds: reducerEventIDs(result),
+	})
+}
+
 func (server *Server) GetDraftApiDraftsDraftIdGet(
 	writer http.ResponseWriter,
 	request *http.Request,

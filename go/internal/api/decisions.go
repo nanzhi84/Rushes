@@ -118,9 +118,13 @@ func (server *Server) AnswerDecisionApiDecisionsDecisionIdAnswerPost(
 		writeReducerResult(writer, result)
 		return
 	}
+	queueItemID := replayID
+	if queueItemID == "" {
+		queueItemID = newID("decision_resume")
+	}
 	replays := 0
-	if replayID != "" && server.agent.Queue().EnqueueUIObservation(
-		*decision.DraftID, replayID, "decision_answered",
+	if server.agent.Queue().EnqueueUIObservation(
+		*decision.DraftID, queueItemID, "decision_answered",
 		map[string]any{"decision_id": decisionID, "answer": answer, "pending_tool_call": decision.PendingToolCall},
 	) {
 		replays = 1

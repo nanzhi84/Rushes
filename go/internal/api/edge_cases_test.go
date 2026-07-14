@@ -137,7 +137,7 @@ func TestDraftFSMaterialSummaryAndTimelineErrorContracts(t *testing.T) {
 		}
 	}
 
-	for _, mode := range []string{"files", "folder"} {
+	for _, mode := range []string{"files", "folder", "mixed"} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, apiRequest(t, http.MethodPost, "/api/fs/pick", map[string]any{"mode": mode}))
 		if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), mode) {
@@ -238,8 +238,20 @@ func TestDecisionEndpointConflictOwnershipPendingAndNullBranches(t *testing.T) {
 	handler.ServeHTTP(answer, apiRequest(t, http.MethodPost, "/api/decisions/"+decisionID+"/answer", map[string]any{
 		"draft_id": "draft_decision_edges", "answer": map[string]any{"answered_via": "natural_language", "free_text": "继续"},
 	}))
-	if answer.Code != http.StatusOK {
+	if answer.Code != http.StatusOK || !strings.Contains(answer.Body.String(), `"replays_enqueued":1`) {
 		t.Fatalf("answer=%d body=%s", answer.Code, answer.Body.String())
+	}
+	server.agent.Queue().JoinDraft("draft_decision_edges")
+	stored, err := storage.GetDecision(t.Context(), server.database.Read(), decisionID)
+	if err != nil || stored.PendingToolCall != nil || stored.PendingToolCallStatus != nil {
+		t.Fatalf("普通选择不应留下待重放工具状态: decision=%#v err=%v", stored, err)
+	}
+	var continued int
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM messages
+		WHERE draft_id='draft_decision_edges' AND role='assistant'`,
+	).Scan(&continued); err != nil || continued != 1 {
+		t.Fatalf("回答后应自动续跑一次: count=%d err=%v", continued, err)
 	}
 	again := httptest.NewRecorder()
 	handler.ServeHTTP(again, apiRequest(t, http.MethodPost, "/api/decisions/"+decisionID+"/answer", map[string]any{
@@ -429,7 +441,7 @@ func TestClosedDatabaseReturnsInternalErrorsAcrossAdapters(t *testing.T) {
 			server.GetMaterialSummaryApiDraftsDraftIdMaterialsAssetIdSummaryGet(w, r, "d", "a")
 		},
 		func(w http.ResponseWriter, r *http.Request) {
-			server.GetDraftTimelineApiDraftsDraftIdTimelineGet(w, r, "d", GetDraftTimelineApiDraftsDraftIdTimelineGetParams{})
+			server.GetDraftTimelineApiDraftsDraftIdTimelineGet(w, r, "d")
 		},
 		func(w http.ResponseWriter, r *http.Request) {
 			server.PreviewViewedApiDraftsDraftIdPreviewsPreviewIdViewedPost(w, r, "d", "p")
@@ -514,15 +526,29 @@ func TestFilesystemAndMaterialHelpers(t *testing.T) {
 		func(string) (string, error) { return "", errors.New("missing") }, nil); available {
 		t.Fatal("缺少 osascript 时 picker 不应可用")
 	}
-	for _, mode := range []string{"files", "folder"} {
+	for _, item := range []struct {
+		mode              string
+		chooseFiles       bool
+		chooseDirectories bool
+	}{
+		{mode: "files", chooseFiles: true},
+		{mode: "folder", chooseDirectories: true},
+		{mode: "mixed", chooseFiles: true, chooseDirectories: true},
+	} {
 		var script string
-		paths, available := nativePickerWith(t.Context(), mode, "darwin", lookupOK,
+		paths, available := nativePickerWith(t.Context(), item.mode, "darwin", lookupOK,
 			func(_ context.Context, value string) ([]byte, error) {
 				script = value
 				return []byte(" /tmp/a.mp4 \n\n/tmp/b.mov\n"), nil
 			})
-		if !available || len(paths) != 2 || !strings.Contains(script, "choose "+map[string]string{"files": "file", "folder": "folder"}[mode]) {
-			t.Fatalf("mode=%s paths=%v available=%v script=%q", mode, paths, available, script)
+		filesFlag := "panel.setCanChooseFiles(" + map[bool]string{true: "true", false: "false"}[item.chooseFiles] + ")"
+		directoriesFlag := "panel.setCanChooseDirectories(" + map[bool]string{true: "true", false: "false"}[item.chooseDirectories] + ")"
+		activationPolicy := "application.setActivationPolicy($.NSApplicationActivationPolicyAccessory)"
+		activation := "application.activateIgnoringOtherApps(true)"
+		if !available || len(paths) != 2 || !strings.Contains(script, filesFlag) ||
+			!strings.Contains(script, directoriesFlag) || !strings.Contains(script, activationPolicy) ||
+			!strings.Contains(script, activation) {
+			t.Fatalf("mode=%s paths=%v available=%v script=%q", item.mode, paths, available, script)
 		}
 	}
 	for _, item := range []struct {
@@ -535,5 +561,67 @@ func TestFilesystemAndMaterialHelpers(t *testing.T) {
 		if available != item.available || len(paths) != 0 {
 			t.Fatalf("output=%q available=%v paths=%v", item.output, available, paths)
 		}
+	}
+	cancelledContext, cancelPicker := context.WithCancel(t.Context())
+	cancelPicker()
+	if paths, available := nativePickerWith(cancelledContext, "files", "darwin", lookupOK,
+		func(context.Context, string) ([]byte, error) { return nil, errors.New("signal: killed") }); !available || len(paths) != 0 {
+		t.Fatalf("cancelled picker paths=%v available=%v", paths, available)
+	}
+}
+
+func TestFSPickerAllowsOnlyOneModalRequest(t *testing.T) {
+	database, err := storage.Open(t.Context(), filepath.Join(t.TempDir(), "workspace"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	calls := 0
+	server, err := NewServer(Config{
+		Database: database,
+		Token:    testToken,
+		Port:     8000,
+		FSRoots:  []string{t.TempDir()},
+		Picker: func(ctx context.Context, mode string) ([]string, bool) {
+			calls++
+			close(entered)
+			select {
+			case <-release:
+				return []string{"/tmp/" + mode}, true
+			case <-ctx.Done():
+				return []string{}, true
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Close)
+	handler := server.Handler()
+	firstRequest := apiRequest(t, http.MethodPost, "/api/fs/pick", map[string]any{"mode": "mixed"})
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, firstRequest)
+		firstDone <- recorder
+	}()
+	<-entered
+
+	second := httptest.NewRecorder()
+	handler.ServeHTTP(second, apiRequest(t, http.MethodPost, "/api/fs/pick", map[string]any{"mode": "mixed"}))
+	if second.Code != http.StatusOK || !strings.Contains(second.Body.String(), `"paths":[]`) || calls != 1 {
+		t.Fatalf("second picker status=%d body=%s calls=%d", second.Code, second.Body.String(), calls)
+	}
+
+	close(release)
+	select {
+	case first := <-firstDone:
+		if first.Code != http.StatusOK || !strings.Contains(first.Body.String(), "/tmp/mixed") {
+			t.Fatalf("first picker status=%d body=%s", first.Code, first.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first picker did not finish")
 	}
 }

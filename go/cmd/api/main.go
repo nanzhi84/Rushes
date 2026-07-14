@@ -74,6 +74,21 @@ func run() error {
 		return err
 	}
 	defer agentService.Close()
+	if key := os.Getenv("RUSHES_DASHSCOPE_API_KEY"); key != "" {
+		asrModel := os.Getenv("RUSHES_DASHSCOPE_ASR_MODEL")
+		if asrModel == "" {
+			// 兼容已有本地配置；新配置统一使用不绑定模型家族的变量名。
+			asrModel = os.Getenv("RUSHES_QWEN_ASR_MODEL")
+		}
+		recognizer, asrErr := providers.NewDashScopeASR(providers.DashScopeASRConfig{
+			APIKey: key, BaseURL: os.Getenv("RUSHES_DASHSCOPE_ASR_BASE_URL"),
+			Model: asrModel, Timeout: 90 * time.Second,
+		})
+		if asrErr != nil {
+			return asrErr
+		}
+		agentService.SetSpeechRecognizer(recognizer)
+	}
 
 	server, err := api.NewServer(api.Config{
 		Database: database, Token: token, Port: port,

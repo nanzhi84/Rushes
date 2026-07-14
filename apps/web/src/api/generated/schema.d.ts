@@ -33,7 +33,8 @@ export interface paths {
         put?: never;
         /** Create Draft */
         post: operations["create_draft_api_drafts_post"];
-        delete?: never;
+        /** Batch Delete Drafts */
+        delete: operations["batch_delete_drafts_api_drafts_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -228,6 +229,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/drafts/{draft_id}/conversation/clear": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Clear Draft Conversation */
+        post: operations["clear_draft_conversation_api_drafts__draft_id__conversation_clear_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/drafts/{draft_id}/messages": {
         parameters: {
             query?: never;
@@ -291,23 +309,6 @@ export interface paths {
         put?: never;
         /** Apply Timeline Patch */
         post: operations["apply_timeline_patch_api_drafts__draft_id__timeline_patch_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/drafts/{draft_id}/timeline/restore": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Restore Timeline Version */
-        post: operations["restore_timeline_version_api_drafts__draft_id__timeline_restore_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -393,7 +394,7 @@ export interface paths {
         put?: never;
         /**
          * Fs Pick
-         * @description 弹出宿主机原生文件/文件夹选择对话框（macOS NSOpenPanel）并返回绝对路径。
+         * @description 弹出宿主机原生文件/文件夹选择对话框（macOS NSOpenPanel）并返回绝对路径。mixed 模式允许在同一个选择框中多选文件与文件夹，文件夹由导入接口递归处理。
          *
          *     后端与用户同机，这是浏览器沙箱之外拿到磁盘路径、实现零拷贝 reference
          *     导入的唯一途径；非 macOS 或无 GUI 会话时报 available=false，前端提示改走对话导入。
@@ -556,6 +557,22 @@ export interface components {
              */
             confirm: boolean;
         };
+        /** DraftBatchDeleteRequest */
+        DraftBatchDeleteRequest: {
+            /** Confirm */
+            confirm: boolean;
+            /** Draft Ids */
+            draft_ids: string[];
+        };
+        /** DraftBatchDeleteResponse */
+        DraftBatchDeleteResponse: {
+            /** Deleted Count */
+            deleted_count: number;
+            /** Deleted Draft Ids */
+            deleted_draft_ids: string[];
+            /** Event Ids */
+            event_ids: number[];
+        };
         /** CostSummary */
         CostSummary: {
             /** By Capability */
@@ -570,6 +587,22 @@ export interface components {
             provider_call_count: number;
             /** Total Cost Estimate */
             total_cost_estimate: number;
+        };
+        /** ConversationClearResponse */
+        ConversationClearResponse: {
+            /** Draft Id */
+            draft_id: string;
+            /** Event Ids */
+            event_ids: number[];
+            /** Message Id */
+            message_id: string;
+            /** Preserved */
+            preserved: string[];
+            /**
+             * Status
+             * @constant
+             */
+            status: "cleared";
         };
         /** CurrentDecisionResponse */
         CurrentDecisionResponse: {
@@ -806,12 +839,6 @@ export interface components {
             draft_id: string;
             /** Preview Id */
             preview_id: string | null;
-            /** Parent Version */
-            parent_version: number | null;
-            /** Redo Version */
-            redo_version: number | null;
-            /** Latest Version */
-            latest_version: number;
             /** Summary */
             summary: string;
             /** Timeline */
@@ -827,11 +854,6 @@ export interface components {
             op: {
                 [key: string]: unknown;
             };
-        };
-        /** TimelineRestoreRequest */
-        TimelineRestoreRequest: {
-            /** Version */
-            version: number;
         };
         /** DraftUpdateRequest */
         DraftUpdateRequest: {
@@ -875,10 +897,10 @@ export interface components {
         FsPickRequest: {
             /**
              * Mode
-             * @default files
+             * @default mixed
              * @enum {string}
              */
-            mode: "files" | "folder";
+            mode: "files" | "folder" | "mixed";
         };
         /** FsPickResponse */
         FsPickResponse: {
@@ -1320,6 +1342,93 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    batch_delete_drafts_api_drafts_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DraftBatchDeleteRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DraftBatchDeleteResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Conflict */
@@ -2229,6 +2338,82 @@ export interface operations {
             };
         };
     };
+    clear_draft_conversation_api_drafts__draft_id__conversation_clear_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                draft_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationClearResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_draft_messages_api_drafts__draft_id__messages_get: {
         parameters: {
             query?: {
@@ -2439,9 +2624,7 @@ export interface operations {
     };
     get_draft_timeline_api_drafts__draft_id__timeline_get: {
         parameters: {
-            query?: {
-                version?: number | null;
-            };
+            query?: never;
             header?: never;
             path: {
                 draft_id: string;
@@ -2509,86 +2692,6 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["TimelinePatchRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["DraftTimelineResponse"];
-                };
-            };
-            /** @description Bad Request */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SecurityRefusalResponse"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SecurityRefusalResponse"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Unsupported Media Type */
-            415: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SecurityRefusalResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    restore_timeline_version_api_drafts__draft_id__timeline_restore_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                draft_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TimelineRestoreRequest"];
             };
         };
         responses: {

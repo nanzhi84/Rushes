@@ -16,6 +16,7 @@ const (
 	DefaultPlannerModel     = "qwen3.7-max"
 	DefaultChatModel        = "qwen3.7-max"
 	DefaultVisionModel      = "qwen3.7-plus"
+	defaultAgentTimeout     = 120 * time.Second
 )
 
 type QwenConfig struct {
@@ -52,14 +53,14 @@ func NewQwenTiers(ctx context.Context, config QwenTierConfig) (QwenTiers, error)
 	}
 	planner, err := NewQwen(ctx, QwenConfig{
 		APIKey: config.APIKey, BaseURL: config.BaseURL, Model: config.PlannerModel,
-		Timeout: 60 * time.Second, EnableThinking: true,
+		Timeout: defaultAgentTimeout, EnableThinking: true,
 	})
 	if err != nil {
 		return QwenTiers{}, err
 	}
 	chat, err := NewQwen(ctx, QwenConfig{
 		APIKey: config.APIKey, BaseURL: config.BaseURL, Model: config.ChatModel,
-		Timeout: 60 * time.Second,
+		Timeout: defaultAgentTimeout,
 	})
 	if err != nil {
 		return QwenTiers{}, err

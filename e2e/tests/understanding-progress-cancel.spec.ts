@@ -12,14 +12,14 @@ type MaterialsResponse = {
 
 const E2E_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(E2E_DIR, "../..");
-const WORKSPACE_DIR = path.join(REPO_ROOT, ".e2e-workspace");
+const WORKSPACE_DIR = process.env.RUSHES_E2E_WORKSPACE ?? path.join(REPO_ROOT, ".playwright-workspace");
 const FIXTURE_PATH = path.join(WORKSPACE_DIR, "fixtures", "understanding-cancel-a.mp4");
 const SECOND_FIXTURE_PATH = path.join(WORKSPACE_DIR, "fixtures", "understanding-cancel-b.mp4");
-const API_URL = "http://127.0.0.1:18000";
+const API_URL = `http://127.0.0.1:${process.env.RUSHES_E2E_API_PORT ?? "18001"}`;
 const TOKEN = "e2e-token";
 const TRIGGER = "E2E_CANCEL_UNDERSTANDING";
 
-test("真实理解链路显示 N/M，可取消并保留已完成摘要", async ({ page, request }) => {
+test("素材理解静默执行，可停止整轮并保留已完成摘要", async ({ page, request }) => {
   await page.goto(`/#t=${TOKEN}`);
   await page.getByRole("button", { name: "开始创作", exact: true }).click();
   await expect(page).toHaveURL(/\/drafts\//);
@@ -39,14 +39,13 @@ test("真实理解链路显示 N/M，可取消并保留已完成摘要", async (
   await page.getByLabel("消息输入").fill(TRIGGER);
   await page.getByRole("button", { name: "发送" }).click();
 
-  await expect(page.getByRole("status", { name: "素材理解中 1/2" })).toBeVisible({
+  await expect(page.getByRole("status", { name: /素材理解中/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "取消素材理解" })).toHaveCount(0);
+  await expect(page.getByText("摘要已完成", { exact: false })).toBeVisible({
     timeout: 30_000
   });
-  await page.getByRole("button", { name: "取消素材理解" }).click();
+  await page.getByRole("button", { name: "停止当前任务" }).click();
 
-  await expect(page.getByRole("status", { name: /素材理解中/ })).toHaveCount(0, {
-    timeout: 30_000
-  });
   await expect(page.getByLabel("消息输入")).toBeEnabled();
 
   const materials = await waitForSettledMaterials(request, draftId, imported.asset_ids);

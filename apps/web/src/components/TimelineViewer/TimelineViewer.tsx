@@ -1,21 +1,25 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import type {
-  MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
-  ReactElement
+  ReactElement,
+  WheelEvent as ReactWheelEvent
 } from "react";
 import {
-  AudioLines,
-  Image as ImageIcon,
   Link2,
   Lock,
-  Type,
   Unlock,
-  Video,
   Volume2,
   VolumeX
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { api } from "../../api/client";
 
@@ -49,9 +53,12 @@ export type TimelineClipJson = {
   source_end_frame?: number;
   playback_rate?: number;
   gain_db?: number;
+  fade_in_frames?: number;
+  fade_out_frames?: number;
   lock_policy?: string;
   parent_block_id?: string;
   linked?: boolean;
+  effects?: Array<Record<string, unknown>>;
 };
 
 export type TimelineEditMode = "select" | "trim" | "blade";
@@ -69,8 +76,9 @@ export type TimelineViewerProps = {
   playheadSec?: number | null;
   selectedClipId?: string | null;
   onClipClick?: (clipId: string) => void;
+  onDeselect?: () => void;
   onSeek?: (sec: number) => void;
-  waveformSrc?: string | null;
+  onZoomChange?: (pxPerSec: number) => void;
   editMode?: TimelineEditMode;
   dropMode?: TimelineDropMode;
   snapEnabled?: boolean;
@@ -83,7 +91,12 @@ export type TimelineViewerProps = {
     mode: TimelineDropMode
   ) => void;
   onTrimClip?: (clipId: string, edge: "start" | "end", frame: number) => void;
+  onClipFadeChange?: (clipId: string, fadeInFrames: number, fadeOutFrames: number) => void;
   onTrackStateChange?: (trackId: string, patch: TimelineTrackStatePatch) => void;
+};
+
+export type TimelineViewerHandle = {
+  setPlayheadSec: (sec: number | null, follow?: boolean) => void;
 };
 
 type TrackKind = "video" | "audio" | "subtitle" | "overlay";
@@ -100,8 +113,13 @@ type DrawableClip = {
   sourceEndFrame: number | null;
   playbackRate: number;
   gainDb: number;
+  fadeInFrames: number;
+  fadeOutFrames: number;
   linked: boolean;
   parentBlockId: string | null;
+  beatFrames: number[];
+  strongBeatFrames: number[];
+  downbeatFrames: number[];
 };
 
 type DrawableTrack = {
@@ -137,6 +155,25 @@ type TrimDragState = {
   element: SVGRectElement;
 };
 
+type FadeDragState = {
+  clip: DrawableClip;
+  edge: "in" | "out";
+  pointerId: number;
+  startClientX: number;
+  element: SVGCircleElement;
+};
+
+type AssetWaveform = {
+  durationSec: number;
+  peaks: number[];
+};
+
+type SeekDragState = {
+  pointerId: number;
+  lastPreviewAt: number;
+  lastEmittedSec: number;
+};
+
 type SnapCandidate = {
   frame: number;
   label: string;
@@ -150,39 +187,48 @@ type SnapResult = {
   candidate: SnapCandidate | null;
 };
 
-const LABEL_WIDTH = 184;
-const HEADER_HEIGHT = 28;
-const TRACK_HEIGHT = 50;
-const TRACK_GAP = 4;
-const CLIP_HEIGHT = 32;
-const FILM_TILE_WIDTH = 56;
-const TRIM_HANDLE_WIDTH = 8;
-const SNAP_THRESHOLD_PX = 8;
-
-const TRACK_ICON: Record<TrackKind, LucideIcon> = {
-  video: Video,
-  audio: AudioLines,
-  subtitle: Type,
-  overlay: ImageIcon
+type BeatMarker = {
+  frame: number;
+  kind: "beat" | "strong" | "downbeat";
 };
 
-export function TimelineViewer({
-  timeline,
-  pxPerSec = 96,
-  playheadSec = null,
-  selectedClipId = null,
-  onClipClick,
-  onSeek,
-  waveformSrc = null,
-  editMode = "select",
-  dropMode = "insert",
-  snapEnabled = true,
-  editing = false,
-  onSplitClip,
-  onMoveClip,
-  onTrimClip,
-  onTrackStateChange
-}: TimelineViewerProps): ReactElement {
+const LABEL_WIDTH = 184;
+const HEADER_HEIGHT = 28;
+const TRACK_HEIGHT = 58;
+const TRACK_GAP = 1;
+const CLIP_HEIGHT = 42;
+const FILM_TILE_WIDTH = 56;
+const TRIM_HANDLE_WIDTH = 8;
+const CLIP_VISUAL_GAP = 2;
+const WAVEFORM_SAMPLE_COUNT = 6000;
+const SNAP_THRESHOLD_PX = 8;
+const SEEK_PREVIEW_INTERVAL_MS = 50;
+const MIN_PX_PER_SEC = 8;
+const MAX_PX_PER_SEC = 320;
+
+export const TimelineViewer = forwardRef<TimelineViewerHandle, TimelineViewerProps>(
+  function TimelineViewer(
+    {
+      timeline,
+      pxPerSec = 96,
+      playheadSec = null,
+      selectedClipId = null,
+      onClipClick,
+      onDeselect,
+      onSeek,
+      onZoomChange,
+      editMode = "select",
+      dropMode = "insert",
+      snapEnabled = true,
+      editing = false,
+      onSplitClip,
+      onMoveClip,
+      onTrimClip,
+      onClipFadeChange,
+      onTrackStateChange
+    },
+    forwardedRef
+  ): ReactElement {
   const safeFps = timeline.fps > 0 ? timeline.fps : 30;
   const durationSec = Math.max(0, timeline.duration_frames / safeFps);
   const timelineWidth = Math.max(1, durationSec * pxPerSec);
@@ -191,7 +237,8 @@ export function TimelineViewer({
   const ticks = useMemo(() => buildTicks(durationSec, pxPerSec), [durationSec, pxPerSec]);
   const clampedPlayheadSec =
     playheadSec === null ? null : clamp(playheadSec, 0, durationSec);
-  const playheadX = clampedPlayheadSec === null ? null : clampedPlayheadSec * pxPerSec;
+  const scrollSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const playheadRef = useRef<SVGGElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const snapGuideRef = useRef<SVGGElement | null>(null);
   const snapGuideTextRef = useRef<SVGTextElement | null>(null);
@@ -199,13 +246,90 @@ export function TimelineViewer({
   const trimPreviewRef = useRef<SVGRectElement | null>(null);
   const clipDragRef = useRef<ClipDragState | null>(null);
   const trimDragRef = useRef<TrimDragState | null>(null);
+  const fadeDragRef = useRef<FadeDragState | null>(null);
+  const seekDragRef = useRef<SeekDragState | null>(null);
   const suppressClipClickRef = useRef(false);
+  const pendingZoomRef = useRef<{ anchorSec: number; viewportX: number } | null>(null);
 
-  const sampleCount = Math.min(6000, Math.max(512, Math.round(durationSec * 24)));
-  const peaks = useTimelinePeaks(waveformSrc, sampleCount);
+  const updatePlayhead = useCallback(
+    (sec: number | null, follow = false) => {
+      const playhead = playheadRef.current;
+      if (!playhead || sec === null || !Number.isFinite(sec)) {
+        playhead?.setAttribute("visibility", "hidden");
+        return;
+      }
+      const x = clamp(sec, 0, durationSec) * pxPerSec;
+      playhead.setAttribute("visibility", "visible");
+      playhead.setAttribute("transform", `translate(${x} 0)`);
+      if (!follow) {
+        return;
+      }
+      const scroller = scrollSurfaceRef.current;
+      if (!scroller) {
+        return;
+      }
+      const viewportWidth = Math.max(1, scroller.clientWidth - LABEL_WIDTH);
+      const visibleX = x - scroller.scrollLeft;
+      const followBoundary = viewportWidth * 0.7;
+      if (visibleX > followBoundary) {
+        scroller.scrollLeft = Math.max(0, x - followBoundary);
+      } else if (visibleX < 0) {
+        scroller.scrollLeft = Math.max(0, x - viewportWidth * 0.2);
+      }
+    },
+    [durationSec, pxPerSec]
+  );
+
+  useImperativeHandle(
+    forwardedRef,
+    () => ({ setPlayheadSec: updatePlayhead }),
+    [updatePlayhead]
+  );
+
+  useLayoutEffect(() => {
+    updatePlayhead(playheadSec, false);
+  }, [playheadSec, updatePlayhead]);
+
+  const waveforms = useAssetWaveforms(tracks, WAVEFORM_SAMPLE_COUNT);
   const snapCandidates = useMemo(
     () => buildSnapCandidates(tracks, ticks, clampedPlayheadSec, safeFps, timeline.duration_frames),
     [clampedPlayheadSec, safeFps, ticks, timeline.duration_frames, tracks]
+  );
+
+  useLayoutEffect(() => {
+    const pending = pendingZoomRef.current;
+    const scroller = scrollSurfaceRef.current;
+    if (!pending || !scroller) {
+      return;
+    }
+    const target = pending.anchorSec * pxPerSec - pending.viewportX;
+    scroller.scrollLeft = clamp(target, 0, Math.max(0, scroller.scrollWidth - scroller.clientWidth));
+    pendingZoomRef.current = null;
+  }, [pxPerSec]);
+
+  const handleZoomWheel = useCallback(
+    (event: ReactWheelEvent<HTMLDivElement>) => {
+      if ((!event.ctrlKey && !event.metaKey) || !onZoomChange) {
+        return;
+      }
+      event.preventDefault();
+      const scroller = scrollSurfaceRef.current;
+      if (!scroller) {
+        return;
+      }
+      const rect = scroller.getBoundingClientRect();
+      const viewportX = clamp(event.clientX - rect.left - LABEL_WIDTH, 0, scroller.clientWidth);
+      const anchorSec = clamp((scroller.scrollLeft + viewportX) / pxPerSec, 0, durationSec);
+      const next = Math.round(
+        clamp(pxPerSec * Math.exp(-event.deltaY * 0.0025), MIN_PX_PER_SEC, MAX_PX_PER_SEC)
+      );
+      if (next === pxPerSec) {
+        return;
+      }
+      pendingZoomRef.current = { anchorSec, viewportX };
+      onZoomChange(next);
+    },
+    [durationSec, onZoomChange, pxPerSec]
   );
 
   const hideGuides = useCallback(() => {
@@ -244,17 +368,81 @@ export function TimelineViewer({
     [timelineWidth]
   );
 
-  const handleSeekClick = useCallback(
-    (event: ReactMouseEvent<SVGSVGElement>) => {
+  const seekSecAt = useCallback(
+    (clientX: number) => {
+      const rect = svgRef.current?.getBoundingClientRect();
+      const localX = clientX - (rect?.left ?? 0);
+      return clamp(localX / pxPerSec, 0, durationSec);
+    },
+    [durationSec, pxPerSec]
+  );
+
+  const beginSeekDrag = useCallback(
+    (event: ReactPointerEvent<SVGSVGElement>) => {
+      if (event.button !== 0) {
+        return;
+      }
+      const target = event.target as Element | null;
+      if (target?.closest("[data-clip-group]") && !target.closest("[data-playhead-handle]")) {
+        return;
+      }
+      onDeselect?.();
       if (!onSeek) {
         return;
       }
-      const rect = event.currentTarget.getBoundingClientRect();
-      const localX = event.clientX - rect.left;
-      onSeek(clamp(localX / pxPerSec, 0, durationSec));
+      event.preventDefault();
+      const sec = seekSecAt(event.clientX);
+      seekDragRef.current = {
+        pointerId: event.pointerId,
+        lastPreviewAt: performance.now(),
+        lastEmittedSec: sec
+      };
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      updatePlayhead(sec, false);
+      onSeek(sec);
     },
-    [durationSec, onSeek, pxPerSec]
+    [onDeselect, onSeek, seekSecAt, updatePlayhead]
   );
+
+  const updateSeekDrag = useCallback(
+    (event: ReactPointerEvent<SVGSVGElement>) => {
+      const drag = seekDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId || !onSeek) {
+        return;
+      }
+      event.preventDefault();
+      const sec = seekSecAt(event.clientX);
+      updatePlayhead(sec, false);
+      const now = performance.now();
+      if (now - drag.lastPreviewAt >= SEEK_PREVIEW_INTERVAL_MS) {
+        drag.lastPreviewAt = now;
+        drag.lastEmittedSec = sec;
+        onSeek(sec);
+      }
+    },
+    [onSeek, seekSecAt, updatePlayhead]
+  );
+
+  const finishSeekDrag = useCallback(
+    (event: ReactPointerEvent<SVGSVGElement>) => {
+      const drag = seekDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId || !onSeek) {
+        return;
+      }
+      const sec = seekSecAt(event.clientX);
+      seekDragRef.current = null;
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+      updatePlayhead(sec, false);
+      if (Math.abs(sec - drag.lastEmittedSec) > Number.EPSILON) {
+        onSeek(sec);
+      }
+    },
+    [onSeek, seekSecAt, updatePlayhead]
+  );
+
+  const cancelSeekDrag = useCallback(() => {
+    seekDragRef.current = null;
+  }, []);
 
   const calculateDragPreview = useCallback(
     (event: ReactPointerEvent<SVGRectElement>, drag: ClipDragState) => {
@@ -488,11 +676,110 @@ export function TimelineViewer({
     snapGuideRef.current?.setAttribute("visibility", "hidden");
   }, []);
 
+  const calculateFadeFrames = useCallback(
+    (event: ReactPointerEvent<SVGCircleElement>, drag: FadeDragState) => {
+      const delta = Math.round(((event.clientX - drag.startClientX) / pxPerSec) * safeFps);
+      const duration = drag.clip.endFrame - drag.clip.startFrame;
+      if (drag.edge === "in") {
+        return {
+          fadeInFrames: clamp(
+            drag.clip.fadeInFrames + delta,
+            0,
+            Math.max(0, duration - drag.clip.fadeOutFrames)
+          ),
+          fadeOutFrames: drag.clip.fadeOutFrames
+        };
+      }
+      return {
+        fadeInFrames: drag.clip.fadeInFrames,
+        fadeOutFrames: clamp(
+          drag.clip.fadeOutFrames - delta,
+          0,
+          Math.max(0, duration - drag.clip.fadeInFrames)
+        )
+      };
+    },
+    [pxPerSec, safeFps]
+  );
+
+  const beginFadeDrag = useCallback(
+    (
+      event: ReactPointerEvent<SVGCircleElement>,
+      clip: DrawableClip,
+      edge: "in" | "out"
+    ) => {
+      if (editing || !onClipFadeChange) {
+        return;
+      }
+      event.stopPropagation();
+      fadeDragRef.current = {
+        clip,
+        edge,
+        pointerId: event.pointerId,
+        startClientX: event.clientX,
+        element: event.currentTarget
+      };
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    },
+    [editing, onClipFadeChange]
+  );
+
+  const updateFadeDrag = useCallback(
+    (event: ReactPointerEvent<SVGCircleElement>) => {
+      const drag = fadeDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) {
+        return;
+      }
+      event.preventDefault();
+      const next = calculateFadeFrames(event, drag);
+      const deltaFrames =
+        drag.edge === "in"
+          ? next.fadeInFrames - drag.clip.fadeInFrames
+          : drag.clip.fadeOutFrames - next.fadeOutFrames;
+      drag.element.setAttribute(
+        "transform",
+        `translate(${(deltaFrames / safeFps) * pxPerSec} 0)`
+      );
+    },
+    [calculateFadeFrames, pxPerSec, safeFps]
+  );
+
+  const finishFadeDrag = useCallback(
+    (event: ReactPointerEvent<SVGCircleElement>) => {
+      const drag = fadeDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) {
+        return;
+      }
+      const next = calculateFadeFrames(event, drag);
+      drag.element.removeAttribute("transform");
+      fadeDragRef.current = null;
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+      if (
+        next.fadeInFrames !== drag.clip.fadeInFrames ||
+        next.fadeOutFrames !== drag.clip.fadeOutFrames
+      ) {
+        onClipFadeChange?.(drag.clip.clipId, next.fadeInFrames, next.fadeOutFrames);
+      }
+    },
+    [calculateFadeFrames, onClipFadeChange]
+  );
+
+  const cancelFadeDrag = useCallback(() => {
+    fadeDragRef.current?.element.removeAttribute("transform");
+    fadeDragRef.current = null;
+  }, []);
+
   return (
-    <div className="overflow-auto" data-testid="timeline-scroll-surface">
+    <div
+      ref={scrollSurfaceRef}
+      className="h-full overflow-auto"
+      data-testid="timeline-scroll-surface"
+      onWheel={handleZoomWheel}
+    >
       <div
-        className="relative flex min-w-full"
-        style={{ width: LABEL_WIDTH + timelineWidth, minHeight: svgHeight }}
+        className="relative flex min-h-full min-w-full items-center"
+        style={{ width: LABEL_WIDTH + timelineWidth }}
+        data-testid="timeline-track-stack"
       >
         <div
           className="sticky left-0 z-20 shrink-0 border-r border-line bg-panel"
@@ -518,8 +805,11 @@ export function TimelineViewer({
           aria-label="时间线轨道图"
           width={timelineWidth}
           height={svgHeight}
-          className="block shrink-0"
-          onClick={handleSeekClick}
+          className="block shrink-0 select-none touch-none"
+          onPointerDown={beginSeekDrag}
+          onPointerMove={updateSeekDrag}
+          onPointerUp={finishSeekDrag}
+          onPointerCancel={cancelSeekDrag}
         >
           <defs>
             <linearGradient id="tl-label-scrim" x1="0" y1="0" x2="0" y2="1">
@@ -579,9 +869,17 @@ export function TimelineViewer({
                     y={0}
                     width={timelineWidth}
                     height={TRACK_HEIGHT}
-                    rx={3}
-                    fill="var(--color-ink)"
+                    fill="var(--color-panel)"
                     opacity={track.muted ? 0.66 : 1}
+                  />
+                  <line
+                    x1={0}
+                    x2={timelineWidth}
+                    y1={TRACK_HEIGHT - 0.5}
+                    y2={TRACK_HEIGHT - 0.5}
+                    stroke="var(--color-line-strong)"
+                    strokeOpacity={0.9}
+                    pointerEvents="none"
                   />
                   {track.clips.map((clip) => {
                     const x = (clip.startFrame / safeFps) * pxPerSec;
@@ -589,21 +887,42 @@ export function TimelineViewer({
                       ((clip.endFrame - clip.startFrame) / safeFps) * pxPerSec,
                       2
                     );
+                    const visualGeometry = clipVisualGeometry(x, width);
+                    const visualX = visualGeometry.x;
+                    const visualWidth = visualGeometry.width;
                     const selected = selectedClipId === clip.clipId;
                     const clipY = (TRACK_HEIGHT - CLIP_HEIGHT) / 2;
-                    const startSec = clip.startFrame / safeFps;
-                    const endSec = clip.endFrame / safeFps;
                     const sid = sanitizeId(clip.clipId);
                     const thumbUrl =
                       (track.kind === "video" || track.kind === "overlay") && clip.assetId
                         ? api.mediaThumbnailUrl(clip.assetId)
                         : null;
-                    const wavePath =
-                      track.kind === "audio"
-                        ? buildWavePath(peaks, durationSec, startSec, endSec, x, clipY, width)
-                        : null;
+                    const waveform = clip.assetId ? waveforms.get(clip.assetId) ?? null : null;
+                    const wavePath = track.kind === "audio"
+                      ? buildWavePath(
+                          waveform,
+                          safeFps,
+                          clip.sourceStartFrame,
+                          clip.sourceEndFrame,
+                          visualX,
+                          clipY,
+                          visualWidth,
+                          clip.fadeInFrames,
+                          clip.fadeOutFrames,
+                          clip.endFrame - clip.startFrame
+                        )
+                      : null;
+                    const fadeInWidth = Math.min(
+                      visualWidth,
+                      (clip.fadeInFrames / safeFps) * pxPerSec
+                    );
+                    const fadeOutWidth = Math.min(
+                      visualWidth,
+                      (clip.fadeOutFrames / safeFps) * pxPerSec
+                    );
+                    const clipBeatMarkers = buildBeatMarkersForClip(clip);
                     const tileCount = thumbUrl
-                      ? Math.max(1, Math.ceil(width / FILM_TILE_WIDTH))
+                      ? Math.max(1, Math.ceil(visualWidth / FILM_TILE_WIDTH))
                       : 0;
                     return (
                       <g
@@ -614,9 +933,9 @@ export function TimelineViewer({
                       >
                         <rect
                           data-clip-body
-                          x={x}
+                          x={visualX}
                           y={clipY}
-                          width={width}
+                          width={visualWidth}
                           height={CLIP_HEIGHT}
                           rx={3}
                           fill={tone}
@@ -626,14 +945,14 @@ export function TimelineViewer({
                         {thumbUrl ? (
                           <>
                             <clipPath id={`tl-film-${sid}`}>
-                              <rect x={x} y={clipY} width={width} height={CLIP_HEIGHT} rx={3} />
+                              <rect x={visualX} y={clipY} width={visualWidth} height={CLIP_HEIGHT} rx={3} />
                             </clipPath>
                             <g clipPath={`url(#tl-film-${sid})`} pointerEvents="none">
                               {Array.from({ length: tileCount }, (_, tileIndex) => (
                                 <image
                                   key={tileIndex}
                                   href={thumbUrl}
-                                  x={x + tileIndex * FILM_TILE_WIDTH}
+                                  x={visualX + tileIndex * FILM_TILE_WIDTH}
                                   y={clipY}
                                   width={FILM_TILE_WIDTH}
                                   height={CLIP_HEIGHT}
@@ -643,8 +962,8 @@ export function TimelineViewer({
                               {Array.from({ length: Math.max(0, tileCount - 1) }, (_, tileIndex) => (
                                 <line
                                   key={`sep-${tileIndex}`}
-                                  x1={x + (tileIndex + 1) * FILM_TILE_WIDTH}
-                                  x2={x + (tileIndex + 1) * FILM_TILE_WIDTH}
+                                  x1={visualX + (tileIndex + 1) * FILM_TILE_WIDTH}
+                                  x2={visualX + (tileIndex + 1) * FILM_TILE_WIDTH}
                                   y1={clipY}
                                   y2={clipY + CLIP_HEIGHT}
                                   stroke="var(--color-ink)"
@@ -652,9 +971,9 @@ export function TimelineViewer({
                                 />
                               ))}
                               <rect
-                                x={x}
+                                x={visualX}
                                 y={clipY}
-                                width={width}
+                                width={visualWidth}
                                 height={CLIP_HEIGHT}
                                 fill="url(#tl-label-scrim)"
                               />
@@ -669,9 +988,75 @@ export function TimelineViewer({
                             pointerEvents="none"
                           />
                         ) : null}
+                        {track.kind === "audio" && fadeInWidth > 0 ? (
+                          <path
+                            d={buildFadeOverlayPath(visualX, clipY, fadeInWidth, CLIP_HEIGHT, "in")}
+                            fill="var(--color-panel)"
+                            fillOpacity={0.38}
+                            stroke="var(--color-fg)"
+                            strokeOpacity={0.42}
+                            pointerEvents="none"
+                          />
+                        ) : null}
+                        {track.kind === "audio" && fadeOutWidth > 0 ? (
+                          <path
+                            d={buildFadeOverlayPath(
+                              visualX + visualWidth - fadeOutWidth,
+                              clipY,
+                              fadeOutWidth,
+                              CLIP_HEIGHT,
+                              "out"
+                            )}
+                            fill="var(--color-panel)"
+                            fillOpacity={0.38}
+                            stroke="var(--color-fg)"
+                            strokeOpacity={0.42}
+                            pointerEvents="none"
+                          />
+                        ) : null}
+                        {track.kind === "audio" && clipBeatMarkers.length > 0 ? (
+                          <g data-testid="timeline-beat-markers" data-clip-id={clip.clipId}>
+                            {clipBeatMarkers.map((marker) => {
+                              const markerX = (marker.frame / safeFps) * pxPerSec;
+                              const downbeat = marker.kind === "downbeat";
+                              const strong = marker.kind === "strong";
+                              return (
+                                <g
+                                  key={`${marker.kind}-${marker.frame}`}
+                                  transform={`translate(${markerX} 0)`}
+                                  pointerEvents="none"
+                                >
+                                  <line
+                                    y1={clipY + 5}
+                                    y2={clipY + CLIP_HEIGHT - 2}
+                                    stroke={
+                                      downbeat
+                                        ? "var(--color-accent)"
+                                        : strong
+                                          ? "var(--color-warn)"
+                                          : "var(--color-fg)"
+                                    }
+                                    strokeWidth={downbeat ? 1.6 : strong ? 1.2 : 0.75}
+                                    strokeOpacity={downbeat ? 0.95 : strong ? 0.78 : 0.34}
+                                  />
+                                  <path
+                                    d={downbeat ? "M -4 4 L 0 0 L 4 4 L 0 8 Z" : strong ? "M -3 3 L 0 0 L 3 3 L 0 6 Z" : "M -1.5 1.5 A 1.5 1.5 0 1 0 1.5 1.5 A 1.5 1.5 0 1 0 -1.5 1.5"}
+                                    transform={`translate(0 ${clipY + 1})`}
+                                    fill={downbeat ? "var(--color-accent)" : strong ? "var(--color-warn)" : "var(--color-fg)"}
+                                    fillOpacity={downbeat ? 1 : strong ? 0.9 : 0.58}
+                                  >
+                                    <title>
+                                      {downbeat ? "小节强拍" : strong ? "音乐重拍" : "音乐拍点"} · {formatFrameTime(marker.frame, safeFps)}
+                                    </title>
+                                  </path>
+                                </g>
+                              );
+                            })}
+                          </g>
+                        ) : null}
                         {clip.linked && width > 30 ? (
                           <Link2
-                            x={x + 6}
+                            x={visualX + 6}
                             y={clipY + 8}
                             width={12}
                             height={12}
@@ -683,27 +1068,27 @@ export function TimelineViewer({
                         ) : null}
                         {width > 44 ? (
                           <text
-                            x={x + (clip.linked ? 23 : 7)}
+                            x={visualX + (clip.linked ? 23 : 7)}
                             y={thumbUrl ? clipY + CLIP_HEIGHT - 7 : clipY + CLIP_HEIGHT / 2 + 4}
                             fill={thumbUrl ? "var(--color-on-media)" : "var(--color-fg)"}
                             fontSize={11}
                             fontWeight={600}
                             pointerEvents="none"
                           >
-                            {truncateLabel(clip.label, width - (clip.linked ? 30 : 14))}
+                            {truncateLabel(clip.label, visualWidth - (clip.linked ? 30 : 14))}
                           </text>
                         ) : null}
                         <rect
                           data-testid="timeline-clip"
                           data-clip-id={clip.clipId}
-                          x={x}
+                          x={visualX}
                           y={clipY}
-                          width={width}
+                          width={visualWidth}
                           height={CLIP_HEIGHT}
                           rx={3}
                           fill="transparent"
-                          stroke={selected ? "var(--color-focus-ring)" : "var(--color-line)"}
-                          strokeWidth={selected ? 2 : 1}
+                          stroke={selected ? "var(--color-focus-ring)" : "var(--color-line-strong)"}
+                          strokeWidth={selected ? 2.5 : 1.5}
                           role="button"
                           tabIndex={0}
                           aria-disabled={editing || track.locked}
@@ -753,10 +1138,53 @@ export function TimelineViewer({
                         >
                           <title>{clip.label}</title>
                         </rect>
+                        {selected && track.kind === "audio" && onClipFadeChange && !track.locked ? (
+                          <>
+                            <circle
+                              data-testid="timeline-fade-in-handle"
+                              cx={visualX + fadeInWidth}
+                              cy={clipY + 5}
+                              r={4}
+                              fill="var(--color-fg)"
+                              stroke={tone}
+                              strokeWidth={1.5}
+                              role="slider"
+                              aria-label={`${clip.label} 淡入`}
+                              aria-valuemin={0}
+                              aria-valuemax={clip.endFrame - clip.startFrame - clip.fadeOutFrames}
+                              aria-valuenow={clip.fadeInFrames}
+                              style={{ cursor: editing ? "wait" : "ew-resize" }}
+                              onPointerDown={(event) => beginFadeDrag(event, clip, "in")}
+                              onPointerMove={updateFadeDrag}
+                              onPointerUp={finishFadeDrag}
+                              onPointerCancel={cancelFadeDrag}
+                            />
+                            <circle
+                              data-testid="timeline-fade-out-handle"
+                              cx={visualX + visualWidth - fadeOutWidth}
+                              cy={clipY + 5}
+                              r={4}
+                              fill="var(--color-fg)"
+                              stroke={tone}
+                              strokeWidth={1.5}
+                              role="slider"
+                              aria-label={`${clip.label} 淡出`}
+                              aria-valuemin={0}
+                              aria-valuemax={clip.endFrame - clip.startFrame - clip.fadeInFrames}
+                              aria-valuenow={clip.fadeOutFrames}
+                              style={{ cursor: editing ? "wait" : "ew-resize" }}
+                              onPointerDown={(event) => beginFadeDrag(event, clip, "out")}
+                              onPointerMove={updateFadeDrag}
+                              onPointerUp={finishFadeDrag}
+                              onPointerCancel={cancelFadeDrag}
+                            />
+                          </>
+                        ) : null}
                         {selected && editMode === "trim" && onTrimClip && !track.locked ? (
                           <>
                             <rect
                               data-testid="timeline-trim-start"
+                              data-trim-handle
                               x={x - TRIM_HANDLE_WIDTH / 2}
                               y={clipY}
                               width={TRIM_HANDLE_WIDTH}
@@ -776,6 +1204,7 @@ export function TimelineViewer({
                             />
                             <rect
                               data-testid="timeline-trim-end"
+                              data-trim-handle
                               x={x + width - TRIM_HANDLE_WIDTH / 2}
                               y={clipY}
                               width={TRIM_HANDLE_WIDTH}
@@ -838,28 +1267,39 @@ export function TimelineViewer({
             />
           </g>
 
-          {playheadX !== null ? (
-            <g data-testid="timeline-playhead" pointerEvents="none">
-              <line
-                x1={playheadX}
-                x2={playheadX}
-                y1={0}
-                y2={svgHeight}
-                stroke="var(--color-fg)"
-                strokeWidth={1.5}
-              />
-              <rect x={playheadX - 5} y={0} width={10} height={7} rx={2} fill="var(--color-fg)" />
-              <path
-                d={`M ${playheadX - 5} 7 L ${playheadX + 5} 7 L ${playheadX} 12 Z`}
-                fill="var(--color-fg)"
-              />
-            </g>
-          ) : null}
+          <g
+            ref={playheadRef}
+            data-testid="timeline-playhead"
+            visibility="hidden"
+            style={{ willChange: "transform" }}
+          >
+            <rect
+              data-playhead-handle
+              x={-8}
+              y={0}
+              width={16}
+              height={svgHeight}
+              fill="transparent"
+              pointerEvents="all"
+              style={{ cursor: "ew-resize" }}
+            />
+            <line
+              x1={0}
+              x2={0}
+              y1={0}
+              y2={svgHeight}
+              stroke="var(--color-fg)"
+              strokeWidth={1.5}
+            />
+            <rect x={-5} y={0} width={10} height={7} rx={2} fill="var(--color-fg)" />
+            <path d="M -5 7 L 5 7 L 0 12 Z" fill="var(--color-fg)" />
+          </g>
         </svg>
       </div>
     </div>
   );
-}
+  }
+);
 
 function TrackHeader({
   track,
@@ -870,7 +1310,6 @@ function TrackHeader({
   editing: boolean;
   onChange?: (trackId: string, patch: TimelineTrackStatePatch) => void;
 }): ReactElement {
-  const TrackIcon = TRACK_ICON[track.kind];
   const audio = track.kind === "audio";
   const [gain, setGain] = useState(track.gainDb);
   useEffect(() => setGain(track.gainDb), [track.gainDb]);
@@ -882,17 +1321,20 @@ function TrackHeader({
 
   return (
     <div
-      className={`border-b border-line px-2 ${track.locked ? "bg-active/55" : "bg-panel"}`}
+      className={`flex flex-col justify-center border-b border-line-strong px-2 ${
+        track.locked ? "bg-active/55" : "bg-panel"
+      }`}
       style={{ height: TRACK_HEIGHT, marginBottom: TRACK_GAP }}
       data-track-header={track.track_id}
     >
-      <div className="flex h-7 items-center gap-1">
-        <TrackIcon
-          size={14}
-          color={trackTone(track.track_id)}
-          strokeWidth={1.8}
+      <div className="flex h-7 items-center gap-1.5">
+        <span
+          className="grid h-5 min-w-8 place-items-center rounded-sm px-1 text-[10px] font-bold tracking-wide text-white"
+          style={{ backgroundColor: trackTone(track.track_id) }}
           aria-hidden
-        />
+        >
+          {trackBadge(track.track_id)}
+        </span>
         <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-fg-muted">
           {trackLabel(track.track_id)}
         </span>
@@ -974,55 +1416,113 @@ function TrackHeader({
   );
 }
 
-function useTimelinePeaks(src: string | null, sampleCount: number): number[] | null {
-  const [peaks, setPeaks] = useState<number[] | null>(null);
+function useAssetWaveforms(
+  tracks: DrawableTrack[],
+  sampleCount: number
+): Map<string, AssetWaveform> {
+  const assetIds = useMemo(
+    () => [
+      ...new Set(
+        tracks
+          .filter((track) => track.kind === "audio")
+          .flatMap((track) => track.clips)
+          .flatMap((clip) => (clip.assetId ? [clip.assetId] : []))
+      )
+    ],
+    [tracks]
+  );
+  const assetKey = assetIds.join("|");
+  const [waveforms, setWaveforms] = useState<Map<string, AssetWaveform>>(() => new Map());
   useEffect(() => {
-    setPeaks(null);
-    if (!src) {
+    setWaveforms(new Map());
+    if (assetIds.length === 0) {
       return;
     }
-    const container = document.createElement("div");
     let cancelled = false;
-    const wavesurfer = WaveSurfer.create({ container, url: src, height: 0, interact: false });
-    const handleReady = (): void => {
-      if (cancelled) {
-        return;
-      }
-      try {
-        const channels =
-          typeof wavesurfer.exportPeaks === "function"
-            ? wavesurfer.exportPeaks({ maxLength: sampleCount })
-            : [];
-        const first = channels[0];
-        if (first && first.length > 0) {
-          setPeaks(first.map((value) => Math.abs(Number(value))));
+    const instances = assetIds.map((assetId) => {
+      const container = document.createElement("div");
+      const wavesurfer = WaveSurfer.create({
+        container,
+        url: api.mediaProxyUrl(assetId),
+        height: 0,
+        interact: false
+      });
+      const handleReady = (): void => {
+        if (cancelled) {
+          return;
         }
-      } catch {
-        // 解码失败时保留纯色音频块。
-      }
-    };
-    wavesurfer.on("ready", handleReady);
-    wavesurfer.on("decode", handleReady);
+        try {
+          const channels =
+            typeof wavesurfer.exportPeaks === "function"
+              ? wavesurfer.exportPeaks({ maxLength: sampleCount })
+              : [];
+          const peaks = normalizeWavePeaks(channels);
+          if (peaks.length > 1) {
+            setWaveforms((current) => {
+              const next = new Map(current);
+              next.set(assetId, {
+                durationSec: Math.max(0, wavesurfer.getDuration?.() ?? 0),
+                peaks
+              });
+              return next;
+            });
+          }
+        } catch {
+          // 代理尚未生成或浏览器无法解码该音轨时保留纯色素材块。
+        }
+      };
+      wavesurfer.on("ready", handleReady);
+      wavesurfer.on("decode", handleReady);
+      return wavesurfer;
+    });
     return () => {
       cancelled = true;
-      wavesurfer.destroy();
+      for (const wavesurfer of instances) {
+        wavesurfer.destroy();
+      }
     };
-  }, [src, sampleCount]);
-  return peaks;
+  // assetKey 是稳定的素材集合签名；避免纯轨道位置变化触发所有音频重新解码。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [assetKey, sampleCount]);
+  return waveforms;
+}
+
+function normalizeWavePeaks(channels: ArrayLike<ArrayLike<number>>): number[] {
+  const channelList = Array.from(channels);
+  const length = channelList.reduce((maxLength, channel) => Math.max(maxLength, channel.length), 0);
+  const result = new Array<number>(length).fill(0);
+  for (const channel of channelList) {
+    for (let index = 0; index < channel.length; index += 1) {
+      result[index] = Math.max(result[index] ?? 0, Math.abs(Number(channel[index]) || 0));
+    }
+  }
+  return result;
 }
 
 function buildWavePath(
-  peaks: number[] | null,
-  durationSec: number,
-  startSec: number,
-  endSec: number,
+  waveform: AssetWaveform | null,
+  fps: number,
+  sourceStartFrame: number | null,
+  sourceEndFrame: number | null,
   x: number,
   clipY: number,
-  width: number
+  width: number,
+  fadeInFrames: number,
+  fadeOutFrames: number,
+  clipDurationFrames: number
 ): string | null {
-  if (!peaks || peaks.length < 2 || durationSec <= 0 || width <= 0) {
+  if (!waveform || waveform.peaks.length < 2 || fps <= 0 || width <= 0) {
     return null;
   }
+  const peaks = waveform.peaks;
+  const durationSec = waveform.durationSec > 0
+    ? waveform.durationSec
+    : Math.max(0, (sourceEndFrame ?? 0) / fps);
+  if (durationSec <= 0) {
+    return null;
+  }
+  const startSec = Math.max(0, (sourceStartFrame ?? 0) / fps);
+  const endSec = Math.max(startSec, (sourceEndFrame ?? Math.round(durationSec * fps)) / fps);
   const total = peaks.length;
   const i0 = clamp(Math.floor((startSec / durationSec) * total), 0, total - 1);
   const i1 = clamp(Math.ceil((endSec / durationSec) * total), i0 + 1, total);
@@ -1030,18 +1530,68 @@ function buildWavePath(
   if (slice.length < 2) {
     return null;
   }
+  const pointCount = Math.min(slice.length, Math.max(2, Math.ceil(width)));
   const centerY = clipY + CLIP_HEIGHT / 2;
   const half = CLIP_HEIGHT / 2 - 4;
   const top: string[] = [];
   const bottom: string[] = [];
-  for (let index = 0; index < slice.length; index += 1) {
-    const pointX = x + (index / (slice.length - 1)) * width;
-    const amplitude = Math.min(1, slice[index] ?? 0);
+  for (let index = 0; index < pointCount; index += 1) {
+    const ratio = index / (pointCount - 1);
+    const sourceIndex = Math.min(slice.length - 1, Math.round(ratio * (slice.length - 1)));
+    const pointX = x + ratio * width;
+    const envelope = fadeEnvelope(ratio, fadeInFrames, fadeOutFrames, clipDurationFrames);
+    const amplitude = Math.min(1, slice[sourceIndex] ?? 0) * envelope;
     top.push(`${pointX.toFixed(2)} ${(centerY - amplitude * half).toFixed(2)}`);
     bottom.push(`${pointX.toFixed(2)} ${(centerY + amplitude * half).toFixed(2)}`);
   }
   bottom.reverse();
   return `M ${top.join(" L ")} L ${bottom.join(" L ")} Z`;
+}
+
+function fadeEnvelope(
+  ratio: number,
+  fadeInFrames: number,
+  fadeOutFrames: number,
+  durationFrames: number
+): number {
+  if (durationFrames <= 0) {
+    return 1;
+  }
+  const frame = ratio * durationFrames;
+  const fadeIn = fadeInFrames > 0 ? clamp(frame / fadeInFrames, 0, 1) : 1;
+  const fadeOut = fadeOutFrames > 0
+    ? clamp((durationFrames - frame) / fadeOutFrames, 0, 1)
+    : 1;
+  return easeInOutQuad(Math.min(fadeIn, fadeOut));
+}
+
+function buildFadeOverlayPath(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  edge: "in" | "out"
+): string {
+  const points: string[] = [];
+  const count = Math.max(4, Math.ceil(width / 6));
+  for (let index = 0; index <= count; index += 1) {
+    const ratio = index / count;
+    const gain = easeInOutQuad(edge === "in" ? ratio : 1 - ratio);
+    points.push(`${(x + ratio * width).toFixed(2)} ${(y + gain * height).toFixed(2)}`);
+  }
+  return `M ${x.toFixed(2)} ${y.toFixed(2)} L ${points.join(" L ")} L ${(x + width).toFixed(2)} ${y.toFixed(2)} Z`;
+}
+
+function easeInOutQuad(value: number): number {
+  return value < 0.5 ? 2 * value * value : 1 - ((-2 * value + 2) ** 2) / 2;
+}
+
+function clipVisualGeometry(x: number, width: number): { x: number; width: number } {
+  if (width < CLIP_VISUAL_GAP + 3) {
+    return { x, width };
+  }
+  const inset = CLIP_VISUAL_GAP / 2;
+  return { x: x + inset, width: Math.max(2, width - CLIP_VISUAL_GAP) };
 }
 
 function buildSnapCandidates(
@@ -1066,6 +1616,15 @@ function buildSnapCandidates(
   }
   for (const track of tracks) {
     for (const clip of track.clips) {
+      for (const frame of clip.downbeatFrames) {
+        candidates.push({ frame, label: "小节强拍", priority: 0 });
+      }
+      for (const frame of clip.strongBeatFrames) {
+        candidates.push({ frame, label: "音乐强拍", priority: 1 });
+      }
+      for (const frame of clip.beatFrames) {
+        candidates.push({ frame, label: "音乐拍点", priority: 3 });
+      }
       candidates.push(
         {
           frame: clip.startFrame,
@@ -1092,6 +1651,27 @@ function buildSnapCandidates(
     }
   }
   return [...deduped.values()];
+}
+
+function buildBeatMarkersForClip(clip: DrawableClip): BeatMarker[] {
+  const markers = new Map<number, BeatMarker>();
+  const add = (frames: number[], kind: BeatMarker["kind"]): void => {
+    const priority = kind === "downbeat" ? 0 : kind === "strong" ? 1 : 2;
+    for (const frame of frames) {
+      if (frame < clip.startFrame || frame > clip.endFrame) {
+        continue;
+      }
+      const current = markers.get(frame);
+      const currentPriority = current?.kind === "downbeat" ? 0 : current?.kind === "strong" ? 1 : 2;
+      if (!current || priority < currentPriority) {
+        markers.set(frame, { frame, kind });
+      }
+    }
+  };
+  add(clip.beatFrames, "beat");
+  add(clip.strongBeatFrames, "strong");
+  add(clip.downbeatFrames, "downbeat");
+  return [...markers.values()].sort((left, right) => left.frame - right.frame);
 }
 
 function snapMovingClip(
@@ -1226,19 +1806,54 @@ function truncateLabel(label: string, maxWidth: number): string {
 }
 
 function normalizeTracks(timeline: TimelineJson): DrawableTrack[] {
-  return timeline.tracks.map((track) => ({
-    track_id: track.track_id,
-    track_type: typeof track.track_type === "string" ? track.track_type : null,
-    kind: trackKind(track.track_id),
-    muted: track.muted === true,
-    solo: track.solo === true,
-    locked: track.locked === true,
-    gainDb: typeof track.gain_db === "number" ? track.gain_db : 0,
-    clips: (track.clips ?? []).flatMap((clip) => {
-      const normalized = normalizeClip(track.track_id, clip);
-      return normalized ? [normalized] : [];
-    })
-  }));
+  const sourceTracks = [...timeline.tracks];
+  for (const trackId of ["visual_base", "bgm", "sfx"]) {
+    if (!sourceTracks.some((track) => track.track_id === trackId)) {
+      sourceTracks.push({
+        track_id: trackId,
+        track_type: trackId === "visual_base" ? "primary_visual" : "audio",
+        clips: []
+      });
+    }
+  }
+  return sourceTracks
+    .map((track) => ({
+      track_id: track.track_id,
+      track_type: typeof track.track_type === "string" ? track.track_type : null,
+      kind: trackKind(track.track_id),
+      muted: track.muted === true,
+      solo: track.solo === true,
+      locked: track.locked === true,
+      gainDb: typeof track.gain_db === "number" ? track.gain_db : 0,
+      clips: (track.clips ?? []).flatMap((clip) => {
+        const normalized = normalizeClip(track.track_id, clip);
+        return normalized ? [normalized] : [];
+      })
+    }))
+    .filter(
+      (track) =>
+        ["visual_base", "bgm", "sfx"].includes(track.track_id) ||
+        track.clips.length > 0 ||
+        track.muted ||
+        track.solo ||
+        track.locked ||
+        track.gainDb !== 0
+    )
+    .sort((left, right) => trackOrder(left.track_id) - trackOrder(right.track_id));
+}
+
+function trackOrder(trackId: string): number {
+  const order = [
+    "visual_base",
+    "visual_overlay",
+    "original_audio",
+    "voiceover",
+    "bgm",
+    "sfx",
+    "subtitles"
+  ];
+  const index = order.indexOf(trackId);
+  return index >= 0 ? index : order.length;
 }
 
 function normalizeClip(trackId: string, clip: TimelineClipJson): DrawableClip | null {
@@ -1253,6 +1868,23 @@ function normalizeClip(trackId: string, clip: TimelineClipJson): DrawableClip | 
     trackId === "subtitles"
       ? `${clip.text ?? clip.timeline_clip_id}`.trim()
       : `${clip.asset_id ?? clip.timeline_clip_id}`.trim();
+  const beatGrid = (clip.effects ?? []).find((effect) => effect.kind === "beat_grid");
+  const timelineStartFrame = clip.timeline_start_frame;
+  const sourceStartFrame = typeof clip.source_start_frame === "number" ? clip.source_start_frame : 0;
+  const sourceEndFrame = typeof clip.source_end_frame === "number"
+    ? clip.source_end_frame
+    : sourceStartFrame + clip.timeline_end_frame - clip.timeline_start_frame;
+  const playbackRate =
+    typeof clip.playback_rate === "number" && clip.playback_rate > 0 ? clip.playback_rate : 1;
+  const mapBeatFrames = (value: unknown): number[] =>
+    effectFrameArray(value).flatMap((sourceFrame) => {
+      if (sourceFrame < sourceStartFrame || sourceFrame > sourceEndFrame) {
+        return [];
+      }
+      return [
+        timelineStartFrame + Math.round((sourceFrame - sourceStartFrame) / playbackRate)
+      ];
+    });
   return {
     clipId: clip.timeline_clip_id,
     trackId,
@@ -1261,14 +1893,33 @@ function normalizeClip(trackId: string, clip: TimelineClipJson): DrawableClip | 
     label,
     assetId: typeof clip.asset_id === "string" ? clip.asset_id : null,
     assetKind: typeof clip.asset_kind === "string" ? clip.asset_kind : null,
-    sourceStartFrame: typeof clip.source_start_frame === "number" ? clip.source_start_frame : null,
-    sourceEndFrame: typeof clip.source_end_frame === "number" ? clip.source_end_frame : null,
-    playbackRate:
-      typeof clip.playback_rate === "number" && clip.playback_rate > 0 ? clip.playback_rate : 1,
+    sourceStartFrame,
+    sourceEndFrame,
+    playbackRate,
     gainDb: typeof clip.gain_db === "number" ? clip.gain_db : 0,
+    fadeInFrames:
+      typeof clip.fade_in_frames === "number" && clip.fade_in_frames > 0
+        ? Math.round(clip.fade_in_frames)
+        : 0,
+    fadeOutFrames:
+      typeof clip.fade_out_frames === "number" && clip.fade_out_frames > 0
+        ? Math.round(clip.fade_out_frames)
+        : 0,
     linked: clip.linked === true,
-    parentBlockId: typeof clip.parent_block_id === "string" ? clip.parent_block_id : null
+    parentBlockId: typeof clip.parent_block_id === "string" ? clip.parent_block_id : null,
+    beatFrames: mapBeatFrames(beatGrid?.beat_frames),
+    strongBeatFrames: mapBeatFrames(beatGrid?.strong_beat_frames),
+    downbeatFrames: mapBeatFrames(beatGrid?.downbeat_frames)
   };
+}
+
+function effectFrameArray(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((frame) =>
+    typeof frame === "number" && Number.isInteger(frame) && frame >= 0 ? [frame] : []
+  );
 }
 
 function trackKind(trackId: string): TrackKind {
@@ -1296,6 +1947,20 @@ function trackLabel(trackId: string): string {
     subtitles: "字幕"
   };
   return labels[trackId] ?? trackId;
+}
+
+function trackBadge(trackId: string): string {
+  const badges: Record<string, string> = {
+    visual_base: "V1",
+    visual_primary: "V1",
+    visual_overlay: "V2",
+    original_audio: "A1",
+    voiceover: "A2",
+    bgm: "A1",
+    sfx: "A2",
+    subtitles: "T1"
+  };
+  return badges[trackId] ?? "·";
 }
 
 function trackTone(trackId: string): string {
