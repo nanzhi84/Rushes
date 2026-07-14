@@ -128,15 +128,14 @@ func mergePatchDifference(source, target any) (any, bool) {
 }
 
 type ContextManifest struct {
-	WindowID             string
-	WindowNumber         int
-	ReferenceHash        string
-	CurrentHash          string
-	HistoryVersion       int
-	HistoryItems         int
-	HistoryTokenEstimate int
-	HasWorldStatePatch   bool
-	NeedsCompaction      bool
+	WindowID           string
+	WindowNumber       int
+	ReferenceHash      string
+	CurrentHash        string
+	HistoryVersion     int
+	HistoryItems       int
+	HasWorldStatePatch bool
+	NeedsCompaction    bool
 }
 
 type contextHistoryItem struct {
@@ -248,8 +247,8 @@ func (manager *ContextManager) build(
 	manifest := ContextManifest{
 		WindowID: checkpoint.WindowID, WindowNumber: checkpoint.WindowNumber,
 		ReferenceHash: baseHash, CurrentHash: currentHash,
-		HistoryVersion: checkpoint.HistoryVersion + len(history),
-		HistoryItems:   len(history), HistoryTokenEstimate: historyTokens,
+		HistoryVersion:     checkpoint.HistoryVersion + len(history),
+		HistoryItems:       len(history),
 		HasWorldStatePatch: len(patch) > 0,
 	}
 	manifest.NeedsCompaction = len(history) > manager.historyItemLimit ||

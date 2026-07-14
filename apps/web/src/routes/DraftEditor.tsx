@@ -1600,15 +1600,6 @@ function normalizeConsoleRole(role: string): ConsoleMessageRole {
   return "system";
 }
 
-function scrollToMessage(messageId: string): void {
-  const selector = `[data-console-message-id="${escapeAttributeValue(messageId)}"]`;
-  document.querySelector(selector)?.scrollIntoView({ block: "center", behavior: "smooth" });
-}
-
-function escapeAttributeValue(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-}
-
 function formatSeconds(value: number): string {
   return `${value.toFixed(2)}s`;
 }

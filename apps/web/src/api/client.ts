@@ -53,7 +53,6 @@ export type TimelineClipJson = {
   timeline_start_frame?: number;
   timeline_end_frame?: number;
   asset_id?: string;
-  clip_id?: string | null;
   role?: string;
   text?: string;
   source_start_frame?: number;
@@ -62,7 +61,6 @@ export type TimelineClipJson = {
   gain_db?: number;
   fade_in_frames?: number;
   fade_out_frames?: number;
-  lock_policy?: string;
   asset_kind?: string;
   parent_block_id?: string;
   linked?: boolean;

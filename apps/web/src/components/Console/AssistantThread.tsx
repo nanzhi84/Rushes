@@ -301,7 +301,6 @@ function MessageRow({
     const otherParts = dataParts.filter((part) => part.data.kind !== "decision");
     return (
       <div
-        data-console-message-id={message.id}
         className={`${highlightClass(highlighted)} w-full space-y-0.5`}
       >
         {otherParts.map((part) => (
@@ -326,7 +325,6 @@ function MessageRow({
   if (message.role === "user") {
     return (
       <article
-        data-console-message-id={message.id}
         data-message-kind={message.metadata.messageKind ?? undefined}
         className="flex w-full justify-end"
       >
@@ -349,7 +347,6 @@ function MessageRow({
   const narration = isNarration(message);
   return (
     <article
-      data-console-message-id={message.id}
       data-message-kind={message.metadata.messageKind ?? undefined}
       data-streaming={streaming ? "true" : undefined}
       className={`${highlightClass(highlighted)} ${

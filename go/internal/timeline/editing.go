@@ -437,7 +437,6 @@ func insertSubtitle(document *Document, operation map[string]any) error {
 		Text:               text,
 		TimelineStartFrame: start,
 		TimelineEndFrame:   end,
-		LockPolicy:         "free",
 	})
 	sortTrack(track)
 	return nil

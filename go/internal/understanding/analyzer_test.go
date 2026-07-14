@@ -147,7 +147,7 @@ func TestMiniLoopExtractsFramesCallsVLMAndEmitsDegradedSummary(t *testing.T) {
 	}
 	vision := &visionModel{}
 	notes := []string{}
-	summary, err := NewAnalyzer(vision).Analyze(t.Context(), database, asset, "产品", func(note string) {
+	summary, err := NewAnalyzer(vision).AnalyzeWithOptions(t.Context(), database, asset, AnalyzeOptions{Focus: "产品"}, func(note string) {
 		notes = append(notes, note)
 	})
 	if err != nil {
@@ -229,7 +229,7 @@ func TestVideoAnalysisDegradesInsteadOfFailingOnVisionProviderError(t *testing.T
 		t.Fatal(err)
 	}
 	asset, _ := storage.GetAsset(t.Context(), database.Read(), "degraded_video")
-	summary, err := NewAnalyzer(&failingVisionModel{}).Analyze(t.Context(), database, asset, "", nil)
+	summary, err := NewAnalyzer(&failingVisionModel{}).AnalyzeWithOptions(t.Context(), database, asset, AnalyzeOptions{Focus: ""}, nil)
 	if err != nil || summary.Model != "deterministic-local" ||
 		!containsStringValue(summary.Degraded, "visual_summary_unavailable") {
 		t.Fatalf("summary=%#v err=%v", summary, err)
@@ -402,7 +402,7 @@ func TestMiniLoopHonorsCancelledContext(t *testing.T) {
 	t.Cleanup(func() { _ = database.Close() })
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	_, err = NewAnalyzer(nil).Analyze(ctx, database, storage.Asset{ID: "missing"}, "", nil)
+	_, err = NewAnalyzer(nil).AnalyzeWithOptions(ctx, database, storage.Asset{ID: "missing"}, AnalyzeOptions{Focus: ""}, nil)
 	if err == nil {
 		t.Fatal("取消 context 应终止理解")
 	}
@@ -434,14 +434,14 @@ func TestStaticAndAudioKindsDegradeDeterministically(t *testing.T) {
 			t.Fatal(err)
 		}
 		asset, _ := storage.GetAsset(t.Context(), database.Read(), item.id)
-		summary, err := NewAnalyzer(nil).Analyze(t.Context(), database, asset, "", nil)
+		summary, err := NewAnalyzer(nil).AnalyzeWithOptions(t.Context(), database, asset, AnalyzeOptions{Focus: ""}, nil)
 		if err != nil || summary.SemanticRole != item.expected || summary.Model != "deterministic-local" || summary.Segments[0].EndSec != 1 {
 			t.Fatalf("item=%s summary=%#v err=%v", item.id, summary, err)
 		}
 	}
 
 	image, _ := storage.GetAsset(t.Context(), database.Read(), "image")
-	if _, err := NewAnalyzer(&failingVisionModel{}).Analyze(t.Context(), database, image, "失败", nil); err == nil {
+	if _, err := NewAnalyzer(&failingVisionModel{}).AnalyzeWithOptions(t.Context(), database, image, AnalyzeOptions{Focus: "失败"}, nil); err == nil {
 		t.Fatal("vision failure should propagate")
 	}
 	if _, err := extractFrames(t.Context(), database.Paths, "/missing", "image", 1); err == nil {

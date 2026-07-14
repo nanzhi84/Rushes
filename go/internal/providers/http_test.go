@@ -65,13 +65,13 @@ func TestProviderConfigValidation(t *testing.T) {
 	}
 }
 
-func TestQwenThreeTierAssembly(t *testing.T) {
+func TestQwenTierAssembly(t *testing.T) {
 	t.Parallel()
 	tiers, err := NewQwenTiers(t.Context(), QwenTierConfig{APIKey: "test-key"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tiers.Planner == nil || tiers.Chat == nil || tiers.Vision == nil {
+	if tiers.Chat == nil || tiers.Vision == nil {
 		t.Fatalf("tiers=%#v", tiers)
 	}
 }

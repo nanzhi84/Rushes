@@ -46,7 +46,6 @@ type TimelineClipJson = {
   timeline_end_frame?: number;
   asset_id?: string;
   asset_kind?: string;
-  clip_id?: string | null;
   role?: string;
   text?: string;
   source_start_frame?: number;
@@ -55,7 +54,6 @@ type TimelineClipJson = {
   gain_db?: number;
   fade_in_frames?: number;
   fade_out_frames?: number;
-  lock_policy?: string;
   parent_block_id?: string;
   linked?: boolean;
   effects?: Array<Record<string, unknown>>;

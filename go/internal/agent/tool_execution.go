@@ -905,7 +905,7 @@ func (service *Service) toolBuildBeatMix(
 		TimelineClipID: bgmClipID, TrackID: "bgm", AssetID: bgmAsset.ID,
 		AssetKind: "audio", Role: "bgm", TimelineStartFrame: 0,
 		TimelineEndFrame: targetFrames, SourceStartFrame: 0, SourceEndFrame: targetFrames,
-		PlaybackRate: 1, LockPolicy: "free", Effects: []map[string]any{beatGridEffect(grid, waveform)},
+		PlaybackRate: 1, Effects: []map[string]any{beatGridEffect(grid, waveform)},
 	})
 
 	sfxClipID := ""
@@ -951,7 +951,7 @@ func (service *Service) toolBuildBeatMix(
 			AssetKind: "audio", Role: "sfx", TimelineStartFrame: sfxStartFrame,
 			TimelineEndFrame: sfxStartFrame + sfx.DurationFrames,
 			SourceStartFrame: 0, SourceEndFrame: sfx.DurationFrames,
-			PlaybackRate: 1, GainDB: gain, LockPolicy: "free",
+			PlaybackRate: 1, GainDB: gain,
 		})
 	}
 

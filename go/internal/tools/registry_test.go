@@ -78,7 +78,7 @@ func TestUnderstandResultJSONRemainsBackwardCompatible(t *testing.T) {
 	}
 }
 
-func TestCoreInferToolRegistryAndTypedResults(t *testing.T) {
+func TestCoreInferToolRegistry(t *testing.T) {
 	t.Parallel()
 	database, err := storage.Open(t.Context(), t.TempDir())
 	if err != nil {
@@ -97,19 +97,10 @@ func TestCoreInferToolRegistryAndTypedResults(t *testing.T) {
 	if len(registry.Specs(true)) != 21 {
 		t.Fatalf("all tools=%d", len(registry.Specs(true)))
 	}
-	typed := map[string]bool{}
 	for _, spec := range registry.Specs(true) {
-		if spec.TypedResult {
-			typed[spec.Name] = true
-		}
 		info, infoErr := spec.Implementation.Info(t.Context())
 		if infoErr != nil || info.Name != spec.Name || info.Desc == "" {
 			t.Fatalf("spec=%s info=%#v err=%v", spec.Name, info, infoErr)
-		}
-	}
-	for _, expected := range []string{"asset.list_assets", "understand.materials", "media.search_shots", "audio.analyze_beats", "audio.analyze_speech_pauses", "speech.inspect", "render.inspect_preview"} {
-		if !typed[expected] {
-			t.Fatalf("%s 缺少结构化 result model", expected)
 		}
 	}
 	if got := len(registry.EinoTools(false, false)); got != 18 {
@@ -233,13 +224,13 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 	}
 
 	registry := &Registry{database: database, executor: failingExecutor{}, specs: map[string]Spec{}}
-	if err := addTool[cleanInput, ToolResult](registry, "clean", "clean", nil, ExposureLLM, false, false); err != nil {
+	if err := addTool[cleanInput, ToolResult](registry, "clean", "clean", nil, ExposureLLM, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := addTool[cleanInput, ToolResult](registry, "clean", "duplicate", nil, ExposureLLM, false, false); err == nil {
+	if err := addTool[cleanInput, ToolResult](registry, "clean", "duplicate", nil, ExposureLLM, false); err == nil {
 		t.Fatal("duplicate tool should fail")
 	}
-	if err := addTool[prohibitedPathInput, ToolResult](registry, "bad", "bad", nil, ExposureLLM, false, false); err == nil {
+	if err := addTool[prohibitedPathInput, ToolResult](registry, "bad", "bad", nil, ExposureLLM, false); err == nil {
 		t.Fatal("prohibited field should fail")
 	}
 

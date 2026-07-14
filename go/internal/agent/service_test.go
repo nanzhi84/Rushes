@@ -378,7 +378,7 @@ func TestServiceRunsProductionReactAgentAndPersistsStreamedReply(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	if !service.UsesEino() {
+	if service.react == nil {
 		t.Fatal("配置模型后未创建 react.Agent")
 	}
 	_, stream, unsubscribe := service.Hub().Subscribe("draft_react")

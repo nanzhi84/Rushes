@@ -113,8 +113,6 @@ func (service *Service) SetSpeechRecognizer(recognizer contracts.SpeechRecognize
 	service.speechRecognizer = recognizer
 }
 
-func (service *Service) UsesEino() bool { return service.react != nil }
-
 func (service *Service) Close() {
 	service.cancel()
 	service.bridgeWG.Wait()

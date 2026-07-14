@@ -23,7 +23,6 @@ type Progress struct {
 
 type CommandError struct {
 	Name   string
-	Args   []string
 	Stderr string
 	Err    error
 }
@@ -45,8 +44,7 @@ func RunCommand(ctx context.Context, name string, args ...string) (CommandResult
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {
 		return CommandResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}, &CommandError{
-			Name: name, Args: append([]string(nil), args...),
-			Stderr: stderrSummary(stderr.String()), Err: err,
+			Name: name, Stderr: stderrSummary(stderr.String()), Err: err,
 		}
 	}
 	return CommandResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}, nil
@@ -101,8 +99,7 @@ func RunFFmpegProgress(
 	}
 	if waitErr != nil {
 		return &CommandError{
-			Name: ffmpeg, Args: progressArgs,
-			Stderr: stderrSummary(stderr.String()), Err: waitErr,
+			Name: ffmpeg, Stderr: stderrSummary(stderr.String()), Err: waitErr,
 		}
 	}
 	return nil

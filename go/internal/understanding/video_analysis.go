@@ -54,7 +54,6 @@ type videoSpan struct {
 }
 
 type sampledSegmentFrame struct {
-	Span  videoSpan
 	JPEG  []byte
 	Label string
 }
@@ -443,7 +442,7 @@ func extractSegmentFrames(
 			continue
 		}
 		samples = append(samples, sampledSegmentFrame{
-			Span: span, JPEG: jpeg,
+			JPEG:  jpeg,
 			Label: fmt.Sprintf("%s %.2f–%.2f 秒，代表帧 %.2f 秒", span.ID, span.StartSec, span.EndSec, timestamp),
 		})
 	}
