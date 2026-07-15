@@ -153,6 +153,28 @@ func MaterialSummaryByFingerprint(
 	return summary, nil
 }
 
+func MaterialSummaryByID(
+	ctx context.Context,
+	query Querier,
+	summaryID string,
+) (map[string]any, error) {
+	var raw string
+	err := query.QueryRowContext(ctx, `
+		SELECT summary_json FROM material_summaries
+		WHERE summary_id=? AND status='ready'`, summaryID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var summary map[string]any
+	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+		return nil, err
+	}
+	return summary, nil
+}
+
 // BestMaterialSummary is quality-monotonic: a later focused or shallow run is
 // retained, but cannot hide an older summary with richer semantic evidence.
 func BestMaterialSummary(ctx context.Context, query Querier, assetID string) (map[string]any, error) {

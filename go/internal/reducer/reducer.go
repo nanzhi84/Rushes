@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
@@ -648,22 +649,102 @@ func applyAssetEvent(ctx context.Context, state *applyState, event contracts.Eve
 			hash, stringFrom(event.Payload["ingest_status"], "ready"), assetID)
 		return err
 	case "MaterialUnderstandingStarted":
-		_, err := state.tx.ExecContext(ctx, "UPDATE assets SET understanding_status='running' WHERE asset_id=?", assetID)
-		return err
-	case "MaterialUnderstandingCompleted":
-		_, err := state.tx.ExecContext(ctx, "UPDATE assets SET understanding_status='ready' WHERE asset_id=?", assetID)
-		return err
-	case "MaterialUnderstandingFailed":
-		if boolFrom(event.Payload["cancelled"], false) {
-			_, err := state.tx.ExecContext(ctx,
-				"UPDATE assets SET understanding_status='none', failure_json=NULL WHERE asset_id=?", assetID)
+		ready, err := hasReadyMaterialSummary(ctx, state.tx, assetID)
+		if err != nil {
 			return err
 		}
-		_, err := state.tx.ExecContext(ctx, "UPDATE assets SET understanding_status='failed', failure_json=? WHERE asset_id=?",
-			nullableJSON(event.Payload["failure"]), assetID)
+		status := "running"
+		if ready {
+			status = "ready"
+		}
+		_, err = state.tx.ExecContext(ctx,
+			"UPDATE assets SET understanding_status=?, failure_json=NULL WHERE asset_id=?", status, assetID)
 		return err
+	case "MaterialUnderstandingCompleted":
+		_, err := state.tx.ExecContext(ctx,
+			"UPDATE assets SET understanding_status='ready', failure_json=NULL WHERE asset_id=?", assetID)
+		return err
+	case "MaterialUnderstandingFailed":
+		return reconcileUnderstandingAsset(ctx, state.tx, assetID,
+			event.Payload["failure"], boolFrom(event.Payload["cancelled"], false), true)
 	}
 	return nil
+}
+
+func hasReadyMaterialSummary(ctx context.Context, tx *sql.Tx, assetID string) (bool, error) {
+	var ready bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM material_summaries WHERE asset_id=? AND status='ready'
+		)`, assetID).Scan(&ready)
+	return ready, err
+}
+
+func reconcileUnderstandingAsset(
+	ctx context.Context,
+	tx *sql.Tx,
+	assetID string,
+	eventFailure any,
+	eventCancelled bool,
+	useEventFallback bool,
+) error {
+	ready, err := hasReadyMaterialSummary(ctx, tx, assetID)
+	if err != nil {
+		return err
+	}
+	if ready {
+		_, err = tx.ExecContext(ctx,
+			"UPDATE assets SET understanding_status='ready', failure_json=NULL WHERE asset_id=?", assetID)
+		return err
+	}
+	var active bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM jobs j
+			WHERE j.kind='understand' AND j.status IN ('pending','running')
+			AND (j.asset_id=? OR EXISTS(
+				SELECT 1 FROM json_each(j.payload_json, '$.asset_ids') item WHERE item.value=?
+			))
+		)`, assetID, assetID).Scan(&active)
+	if err != nil {
+		return err
+	}
+	if active {
+		_, err = tx.ExecContext(ctx,
+			"UPDATE assets SET understanding_status='running', failure_json=NULL WHERE asset_id=?", assetID)
+		return err
+	}
+	if useEventFallback && !eventCancelled {
+		_, err = tx.ExecContext(ctx,
+			"UPDATE assets SET understanding_status='failed', failure_json=? WHERE asset_id=?",
+			nullableJSON(eventFailure), assetID)
+		return err
+	}
+	var failedError sql.NullString
+	err = tx.QueryRowContext(ctx, `
+		SELECT j.error_json FROM jobs j
+		WHERE j.kind='understand' AND j.status='failed'
+		AND (j.asset_id=? OR EXISTS(
+			SELECT 1 FROM json_each(j.payload_json, '$.asset_ids') item WHERE item.value=?
+		))
+		ORDER BY j.finished_at DESC, j.created_at DESC, j.rowid DESC LIMIT 1`,
+		assetID, assetID,
+	).Scan(&failedError)
+	if err == nil {
+		var failure any
+		if failedError.Valid {
+			failure = failedError.String
+		}
+		_, err = tx.ExecContext(ctx,
+			"UPDATE assets SET understanding_status='failed', failure_json=? WHERE asset_id=?", failure, assetID)
+		return err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err = tx.ExecContext(ctx,
+		"UPDATE assets SET understanding_status='none', failure_json=NULL WHERE asset_id=?", assetID)
+	return err
 }
 
 func applyAssetLinked(ctx context.Context, state *applyState, event contracts.Event) error {
@@ -954,12 +1035,14 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 		"JobEnqueued": "pending", "JobProgress": "running",
 		"JobSucceeded": "succeeded", "JobFailed": "failed", "JobCancelled": "cancelled",
 	}[event.Type]
+	var currentKind string
+	var currentAssetID sql.NullString
 	if event.Type != "JobEnqueued" {
 		var currentStatus string
 		var currentWorkerID, currentStartedAt sql.NullString
 		if err := state.tx.QueryRowContext(ctx,
-			"SELECT status, worker_id, started_at FROM jobs WHERE job_id=?", jobID,
-		).Scan(&currentStatus, &currentWorkerID, &currentStartedAt); err != nil {
+			"SELECT status, kind, worker_id, started_at, asset_id FROM jobs WHERE job_id=?", jobID,
+		).Scan(&currentStatus, &currentKind, &currentWorkerID, &currentStartedAt, &currentAssetID); err != nil {
 			return err
 		}
 		if currentStatus == "cancelled" && event.Type != "JobCancelled" {
@@ -1009,22 +1092,75 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 		if err != nil {
 			return err
 		}
-		if event.Type == "JobFailed" {
-			assetID := stringFrom(event.Payload["asset_id"], "")
-			if assetID != "" {
+		if event.Type == "JobFailed" && currentKind == "ingest" {
+			if currentAssetID.Valid && currentAssetID.String != "" {
 				if _, err := state.tx.ExecContext(ctx, `
 					UPDATE assets SET ingest_status='failed', usable=0, failure_json=?
-					WHERE asset_id=?`, nullableJSON(event.Payload["error"]), assetID); err != nil {
+					WHERE asset_id=?`, nullableJSON(event.Payload["error"]), currentAssetID.String); err != nil {
 					return err
 				}
 			}
 		}
+	}
+	if err := reconcileUnderstandJobAssets(ctx, state.tx, jobID); err != nil {
+		return err
 	}
 	draftID := stringFrom(event.Payload["requested_by_draft_id"], event.DraftID)
 	if draftID == "" {
 		return nil
 	}
 	return updateRunningJobs(ctx, state, draftID, jobID, status, event)
+}
+
+func reconcileUnderstandJobAssets(ctx context.Context, tx *sql.Tx, jobID string) error {
+	var kind, payloadJSON string
+	var outerAssetID sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		"SELECT kind, payload_json, asset_id FROM jobs WHERE job_id=?", jobID,
+	).Scan(&kind, &payloadJSON, &outerAssetID); err != nil {
+		return err
+	}
+	if kind != "understand" {
+		return nil
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		return fmt.Errorf("understand job %s payload 无效: %w", jobID, err)
+	}
+	assetIDs := reducerStringSlice(payload["asset_ids"])
+	if len(assetIDs) == 0 && outerAssetID.Valid {
+		assetIDs = []string{outerAssetID.String}
+	}
+	seen := map[string]struct{}{}
+	for _, assetID := range assetIDs {
+		assetID = strings.TrimSpace(assetID)
+		if assetID == "" {
+			continue
+		}
+		if _, duplicate := seen[assetID]; duplicate {
+			continue
+		}
+		seen[assetID] = struct{}{}
+		if err := reconcileUnderstandingAsset(ctx, tx, assetID, nil, false, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reducerStringSlice(value any) []string {
+	result := []string{}
+	switch typed := value.(type) {
+	case []string:
+		return append(result, typed...)
+	case []any:
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				result = append(result, text)
+			}
+		}
+	}
+	return result
 }
 
 func updateRunningJobs(

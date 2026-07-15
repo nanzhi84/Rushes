@@ -415,6 +415,200 @@ func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
 	}
 }
 
+func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	fontSource := filepath.Join(database.Paths.Temporary, "understand-retry.otf")
+	if err := os.WriteFile(fontSource, []byte("font fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	assetIDs := []string{"asset-retry-1", "asset-retry-2"}
+	for _, assetID := range assetIDs {
+		apply(t, database, []contracts.Event{{
+			Type: "AssetImported", Payload: map[string]any{
+				"asset_id": assetID, "job_id": "import-" + assetID,
+				"storage_mode": "reference", "reference_path": fontSource,
+				"kind": "font", "source": "local_path", "filename": assetID + ".otf",
+				"hash": assetID, "size": 1, "ingest_status": "ready", "usable": true,
+			},
+		}}, contracts.ActorUser, now)
+	}
+	registry := NewRegistry()
+	if err := RegisterUnderstand(registry, database, nil); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := registry.Require("understand")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := Job{ID: "understand-retry", Payload: map[string]any{
+		"asset_ids": assetIDs, "focus": "字体可用性", "depth": "scan",
+	}}
+	reportErr := errors.New("进度写入失败")
+	firstProgress := []float64{}
+	firstResult, err := handler(t.Context(), job, func(_ context.Context, _ Job, progress float64) error {
+		firstProgress = append(firstProgress, progress)
+		return reportErr
+	})
+	if !errors.Is(err, reportErr) || firstResult != nil || !reflect.DeepEqual(firstProgress, []float64{0.5}) {
+		t.Fatalf("first result=%#v progress=%v err=%v", firstResult, firstProgress, err)
+	}
+	for index, assetID := range assetIDs {
+		var count int
+		if err := database.Read().QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM material_summaries WHERE asset_id=?", assetID,
+		).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		want := 0
+		if index == 0 {
+			want = 1
+		}
+		if count != want {
+			t.Fatalf("第一次 reporter 失败后 %s summaries=%d want=%d", assetID, count, want)
+		}
+	}
+
+	retryProgress := []float64{}
+	retryResult, err := handler(t.Context(), job, func(_ context.Context, _ Job, progress float64) error {
+		retryProgress = append(retryProgress, progress)
+		return nil
+	})
+	if err != nil || retryResult["status"] != "completed" ||
+		!reflect.DeepEqual(retryProgress, []float64{0.5, 1.0}) ||
+		!reflect.DeepEqual(retryResult["asset_ids"], assetIDs) ||
+		!reflect.DeepEqual(retryResult["analyzed_asset_ids"], assetIDs) ||
+		!reflect.DeepEqual(retryResult["cache_hit_asset_ids"], []string{}) {
+		t.Fatalf("retry result=%#v progress=%v err=%v", retryResult, retryProgress, err)
+	}
+
+	// 同一 job 再次执行必须重放相同有序结果，不能新增摘要或领域事件。
+	replayProgress := []float64{}
+	replayResult, err := handler(t.Context(), job, func(_ context.Context, _ Job, progress float64) error {
+		replayProgress = append(replayProgress, progress)
+		return nil
+	})
+	if err != nil || !reflect.DeepEqual(replayProgress, []float64{0.5, 1.0}) ||
+		!reflect.DeepEqual(replayResult["analyzed_asset_ids"], assetIDs) {
+		t.Fatalf("replay result=%#v progress=%v err=%v", replayResult, replayProgress, err)
+	}
+	var summaries int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM material_summaries WHERE asset_id IN (?, ?)`, assetIDs[0], assetIDs[1],
+	).Scan(&summaries); err != nil || summaries != 2 {
+		t.Fatalf("summaries=%d err=%v", summaries, err)
+	}
+	for _, item := range []struct {
+		eventType string
+		want      int
+	}{
+		{eventType: "MaterialUnderstandingStarted", want: 2},
+		{eventType: "MaterialUnderstandingCompleted", want: 2},
+		{eventType: "MaterialUnderstandingFailed", want: 0},
+	} {
+		var count int
+		if err := database.Read().QueryRowContext(t.Context(), `
+			SELECT COUNT(*) FROM event_log
+			WHERE event_type=? AND json_extract(payload_json, '$.payload.job_id')=?`,
+			item.eventType, job.ID,
+		).Scan(&count); err != nil || count != item.want {
+			t.Fatalf("%s count=%d want=%d err=%v", item.eventType, count, item.want, err)
+		}
+	}
+}
+
+func TestUnderstandRunnerRetriesKeepAssetRunningUntilFinalFailure(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	clock := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	const (
+		draftID = "draft-understand-runner-retry"
+		assetID = "asset-understand-runner-retry"
+		jobID   = "job-understand-runner-retry"
+	)
+	createDraft(t, database, draftID, clock)
+	missingSource := filepath.Join(database.Paths.Temporary, "missing-understand-retry.png")
+	apply(t, database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "import-" + assetID,
+			"storage_mode": "reference", "reference_path": missingSource,
+			"kind": "image", "source": "local_path", "filename": "missing.png",
+			"hash": "missing-understand-retry", "size": 1,
+			"ingest_status": "ready", "usable": true,
+		}},
+		{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{"asset_id": assetID}},
+		{Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
+			"job_id": jobID, "kind": "understand", "requested_by_draft_id": draftID,
+			"idempotency_key": jobID, "job_payload": map[string]any{"asset_ids": []string{assetID}},
+			"max_retries": 2, "next_run_at": clock.Format(time.RFC3339Nano),
+		}},
+	}, contracts.ActorAgent, clock)
+	registry := NewRegistry()
+	if err := RegisterUnderstand(registry, database, nil); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewRunner(RunnerConfig{
+		Database: database, Registry: registry, WorkerID: "understand-retry-worker",
+		Now: func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := range 3 {
+		worked, runErr := runner.RunOnce(t.Context())
+		if runErr != nil || !worked {
+			t.Fatalf("attempt=%d worked=%v err=%v", attempt, worked, runErr)
+		}
+		job, err := GetJob(t.Context(), database, jobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt < 2 {
+			if job.Status != "pending" || job.Attempts != attempt+1 ||
+				asset.UnderstandingStatus != "running" || len(asset.Failure) != 0 {
+				t.Fatalf("attempt=%d job=%#v asset_status=%s failure=%#v",
+					attempt, job, asset.UnderstandingStatus, asset.Failure)
+			}
+			clock = clock.Add(time.Duration(attempt+2) * time.Second)
+		} else if job.Status != "failed" || job.Attempts != 2 ||
+			asset.UnderstandingStatus != "failed" || len(asset.Failure) == 0 {
+			t.Fatalf("terminal job=%#v asset_status=%s failure=%#v",
+				job, asset.UnderstandingStatus, asset.Failure)
+		}
+	}
+	for _, eventType := range []string{
+		"MaterialUnderstandingStarted", "MaterialUnderstandingFailed",
+	} {
+		rows, err := database.Read().QueryContext(t.Context(), `
+			SELECT CAST(json_extract(payload_json, '$.payload.attempt') AS INTEGER)
+			FROM event_log WHERE event_type=?
+			AND json_extract(payload_json, '$.payload.job_id')=? ORDER BY event_id`, eventType, jobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		attempts := []int{}
+		for rows.Next() {
+			var attempt int
+			if err := rows.Scan(&attempt); err != nil {
+				_ = rows.Close()
+				t.Fatal(err)
+			}
+			attempts = append(attempts, attempt)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(attempts, []int{0, 1, 2}) {
+			t.Fatalf("%s attempts=%v want=[0 1 2]", eventType, attempts)
+		}
+	}
+}
+
 func TestRunnerLoopRegistryAndTerminalFailureBranches(t *testing.T) {
 	t.Parallel()
 	if _, err := NewRunner(RunnerConfig{}); err == nil {

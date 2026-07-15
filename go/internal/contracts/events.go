@@ -28,9 +28,10 @@ const (
 )
 
 type EventSpec struct {
-	Mode       VersionMode
-	MergeKeys  []string
-	DraftScope bool
+	Mode              VersionMode
+	MergeKeys         []string
+	OptionalMergeKeys []string
+	DraftScope        bool
 }
 
 // EventRegistry 是 Go 精简核心与前端仍在使用的生命周期契约。
@@ -43,9 +44,9 @@ var EventRegistry = map[string]EventSpec{
 	"AssetProbed":                    {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
 	"AssetLinked":                    {Mode: VersionMerge, MergeKeys: []string{"draft_id", "asset_id"}, DraftScope: true},
 	"AssetUnlinked":                  {Mode: VersionMerge, MergeKeys: []string{"draft_id", "asset_id"}, DraftScope: true},
-	"MaterialUnderstandingStarted":   {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
-	"MaterialUnderstandingCompleted": {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
-	"MaterialUnderstandingFailed":    {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
+	"MaterialUnderstandingStarted":   {Mode: VersionMerge, MergeKeys: []string{"asset_id"}, OptionalMergeKeys: []string{"job_id", "attempt"}},
+	"MaterialUnderstandingCompleted": {Mode: VersionMerge, MergeKeys: []string{"asset_id"}, OptionalMergeKeys: []string{"job_id", "attempt"}},
+	"MaterialUnderstandingFailed":    {Mode: VersionMerge, MergeKeys: []string{"asset_id"}, OptionalMergeKeys: []string{"job_id", "attempt"}},
 	"DecisionCreated":                {Mode: VersionStrict, MergeKeys: []string{"decision_id"}, DraftScope: true},
 	"DecisionAnswered":               {Mode: VersionStrict, MergeKeys: []string{"decision_id"}, DraftScope: true},
 	"ConversationContextCleared":     {Mode: VersionStrict, DraftScope: true},
@@ -124,9 +125,14 @@ func (event Event) MergeKey() (string, error) {
 	if spec.Mode != VersionMerge || len(spec.MergeKeys) == 0 {
 		return "", nil
 	}
-	parts := make([]string, 0, len(spec.MergeKeys))
+	parts := make([]string, 0, len(spec.MergeKeys)+len(spec.OptionalMergeKeys))
 	for _, key := range spec.MergeKeys {
 		parts = append(parts, key+"="+valueForKey(event, key))
+	}
+	for _, key := range spec.OptionalMergeKeys {
+		if value := valueForKey(event, key); value != "" {
+			parts = append(parts, key+"="+value)
+		}
 	}
 	return strings.Join(parts, "\x1f"), nil
 }

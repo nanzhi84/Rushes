@@ -49,6 +49,7 @@ func RegisterUnderstand(
 			}
 			if summaryExists != 0 {
 				completedIDs = append(completedIDs, assetID)
+				analyzedIDs = append(analyzedIDs, assetID)
 				if err := report(ctx, job, float64(index+1)/float64(len(assetIDs))); err != nil {
 					return nil, err
 				}
@@ -77,26 +78,30 @@ func RegisterUnderstand(
 				}
 			}
 			if _, err := reducer.Apply(ctx, database, []contracts.Event{{
-				Type: "MaterialUnderstandingStarted", Payload: map[string]any{"asset_id": assetID, "job_id": job.ID},
+				Type: "MaterialUnderstandingStarted", Payload: map[string]any{
+					"asset_id": assetID, "job_id": job.ID, "attempt": job.Attempts,
+				},
 			}}, reducer.Options{Actor: contracts.ActorJob}); err != nil {
 				return nil, err
 			}
 			summary, err := analyzer.AnalyzeWithOptions(ctx, database, asset, options, func(string) {})
 			if err != nil {
-				_, _ = reducer.Apply(context.WithoutCancel(ctx), database, []contracts.Event{{
+				_, failureErr := reducer.Apply(context.WithoutCancel(ctx), database, []contracts.Event{{
 					Type: "MaterialUnderstandingFailed", Payload: map[string]any{
-						"asset_id": assetID, "job_id": job.ID, "cancelled": errors.Is(err, context.Canceled),
-						"failure": map[string]any{"message": err.Error()},
+						"asset_id": assetID, "job_id": job.ID, "attempt": job.Attempts,
+						"cancelled": errors.Is(err, context.Canceled),
+						"failure":   map[string]any{"message": err.Error()},
 					},
 				}}, reducer.Options{Actor: contracts.ActorJob})
-				return nil, err
+				return nil, errors.Join(fmt.Errorf("素材 %s 理解失败: %w", assetID, err), failureErr)
 			}
 			var summaryMap map[string]any
 			data, _ := json.Marshal(summary)
 			_ = json.Unmarshal(data, &summaryMap)
 			result, err := reducer.Apply(ctx, database, []contracts.Event{{
 				Type: "MaterialUnderstandingCompleted", Payload: map[string]any{
-					"asset_id": assetID, "job_id": job.ID, "summary_id": summaryID,
+					"asset_id": assetID, "job_id": job.ID, "attempt": job.Attempts,
+					"summary_id": summaryID,
 				},
 			}}, reducer.Options{
 				Actor: contracts.ActorJob,

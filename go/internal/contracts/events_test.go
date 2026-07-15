@@ -135,3 +135,54 @@ func TestMergeKeyNumericRepresentations(t *testing.T) {
 		}
 	}
 }
+
+func TestMaterialUnderstandingMergeKeysKeepLegacyEventsAndIsolateJobs(t *testing.T) {
+	t.Parallel()
+
+	for _, eventType := range []string{
+		"MaterialUnderstandingStarted",
+		"MaterialUnderstandingCompleted",
+		"MaterialUnderstandingFailed",
+	} {
+		legacyJSON := []byte(`{"event":"` + eventType + `","actor":"job","payload":{"asset_id":"asset-1"}}`)
+		legacy, err := ParseEvent(legacyJSON)
+		if err != nil {
+			t.Fatalf("旧事件 %s 不应因缺少 job_id 而无法解析: %v", eventType, err)
+		}
+		key, err := legacy.MergeKey()
+		if err != nil || key != "asset_id=asset-1" {
+			t.Fatalf("旧事件 %s key=%q err=%v", eventType, key, err)
+		}
+
+		first := legacy
+		first.Payload = map[string]any{"asset_id": "asset-1", "job_id": "job-1"}
+		second := legacy
+		second.Payload = map[string]any{"asset_id": "asset-1", "job_id": "job-2"}
+		firstKey, firstErr := first.MergeKey()
+		secondKey, secondErr := second.MergeKey()
+		if firstErr != nil || secondErr != nil || firstKey == secondKey {
+			t.Fatalf("%s 的不同 job 必须使用不同 merge key: first=%q second=%q err=%v/%v",
+				eventType, firstKey, secondKey, firstErr, secondErr)
+		}
+		if firstKey != "asset_id=asset-1\x1fjob_id=job-1" ||
+			secondKey != "asset_id=asset-1\x1fjob_id=job-2" {
+			t.Fatalf("%s 新 merge key 不稳定: first=%q second=%q", eventType, firstKey, secondKey)
+		}
+
+		firstAttempt := legacy
+		firstAttempt.Payload = map[string]any{"asset_id": "asset-1", "job_id": "job-retry", "attempt": 0}
+		secondAttempt := legacy
+		secondAttempt.Payload = map[string]any{"asset_id": "asset-1", "job_id": "job-retry", "attempt": 1}
+		firstAttemptKey, firstAttemptErr := firstAttempt.MergeKey()
+		secondAttemptKey, secondAttemptErr := secondAttempt.MergeKey()
+		if firstAttemptErr != nil || secondAttemptErr != nil || firstAttemptKey == secondAttemptKey {
+			t.Fatalf("%s 的不同 attempt 必须使用不同 merge key: first=%q second=%q err=%v/%v",
+				eventType, firstAttemptKey, secondAttemptKey, firstAttemptErr, secondAttemptErr)
+		}
+		if firstAttemptKey != "asset_id=asset-1\x1fjob_id=job-retry\x1fattempt=0" ||
+			secondAttemptKey != "asset_id=asset-1\x1fjob_id=job-retry\x1fattempt=1" {
+			t.Fatalf("%s attempt merge key 不稳定: first=%q second=%q",
+				eventType, firstAttemptKey, secondAttemptKey)
+		}
+	}
+}

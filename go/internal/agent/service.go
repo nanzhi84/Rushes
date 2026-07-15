@@ -340,6 +340,9 @@ func (service *Service) continueAfterJobObservation(
 	}
 	status := "成功"
 	nextAction := "读取真实产物；如果是预览则调用 render.inspect_preview 做质检，然后继续原任务。"
+	if succeeded && kind == "understand" {
+		nextAction = "优先读取紧邻本消息前的【本次后台素材理解结果（SQLite 持久化事实）】定向证据；assets.material_catalog 只作常驻目录补充且可能截断。依据其中的 overall 与 semantic_tags 继续原任务，需要逐镜头细节时再调用 media.search_shots。不要重复调用 understand.materials，也不要只报告后台完成。"
+	}
 	if !succeeded {
 		status = "失败"
 		nextAction = "先读取失败信息并诊断；能用现有工具修复时立即修复并重试，不要把失败说成完成。"
@@ -355,6 +358,13 @@ func (service *Service) continueAfterJobObservation(
 	messages, err := service.modelMessages(ctx, item.DraftID)
 	if err != nil {
 		return "", err
+	}
+	if succeeded && kind == "understand" {
+		evidence, evidenceErr := service.understandJobEvidenceMessage(ctx, item.DraftID, jobID)
+		if evidenceErr != nil {
+			return "", evidenceErr
+		}
+		messages = append(messages, evidence)
 	}
 	messages = append(messages, schema.UserMessage(prompt))
 	return service.streamAgent(ctx, item.DraftID, messageID, messages)
@@ -660,10 +670,12 @@ func (service *Service) fallbackFullMainline(ctx context.Context, draftID string
 		}
 	}
 	if len(understandIDs) > 0 {
-		if _, err := service.executeReported(ctx, draftID, "understand.materials", rushestools.UnderstandInput{
-			AssetIDs: understandIDs, Depth: "scan", Focus: "混剪可用画面",
-		}); err != nil {
-			return "", err
+		for _, assetID := range understandIDs {
+			if _, err := service.executeReported(ctx, draftID, "understand.materials", rushestools.UnderstandInput{
+				AssetIDs: []string{assetID}, Depth: "scan", Focus: "混剪可用画面",
+			}); err != nil {
+				return "", err
+			}
 		}
 	}
 	clips := make([]rushestools.ComposeClip, 0, len(visualAssets))

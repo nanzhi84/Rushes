@@ -100,6 +100,7 @@ type UnderstandInput struct {
 	Focus            string   `json:"focus,omitempty"`
 	MaxStepsPerAsset int      `json:"max_steps_per_asset,omitempty"`
 	ForceRefresh     bool     `json:"force_refresh,omitempty" jsonschema_description:"仅当用户明确要求重新分析时设为 true；默认复用相同素材与参数的持久化结果"`
+	RefreshNonce     string   `json:"refresh_nonce,omitempty" jsonschema_description:"仅当用户在旧强制任务终态后明确要求再次重跑完全相同的分析时提供新的短标识；同一标识重复调用仍幂等复用同一 job"`
 }
 
 // MaterialEvidence 是模型可直接用于选择源素材区间的紧凑时间证据。
@@ -153,6 +154,7 @@ type UnderstandResult struct {
 	Summaries        []MaterialUnderstandingSummary `json:"summaries,omitempty"`
 	CacheHitAssetIDs []string                       `json:"cache_hit_asset_ids,omitempty"`
 	AnalyzedAssetIDs []string                       `json:"analyzed_asset_ids,omitempty"`
+	UsageNote        string                         `json:"usage_note,omitempty"`
 }
 
 type ShotSearchInput struct {
