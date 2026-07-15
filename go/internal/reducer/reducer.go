@@ -816,14 +816,17 @@ func applyDecisionAnswered(ctx context.Context, state *applyState, event contrac
 		UPDATE decisions SET status='answered', answer_json=?,
 		pending_tool_call_status=CASE WHEN pending_tool_call_json IS NULL THEN pending_tool_call_status ELSE 'replayed' END,
 		consumed_at=COALESCE(?, consumed_at), replayed_tool_call_id=COALESCE(?, replayed_tool_call_id)
-		WHERE decision_id=?`, mustJSON(answer), nullableString(event.Payload["consumed_at"]),
-		nullableString(event.Payload["replayed_tool_call_id"]), decisionID)
+		WHERE decision_id=? AND status='pending'
+		AND (?='' OR (scope_type='draft' AND draft_id=?))`,
+		mustJSON(answer), nullableString(event.Payload["consumed_at"]),
+		nullableString(event.Payload["replayed_tool_call_id"]), decisionID,
+		event.DraftID, nullableText(event.DraftID))
 	if err != nil {
 		return err
 	}
 	rows, _ := result.RowsAffected()
 	if rows != 1 {
-		return fmt.Errorf("决策不存在: %s", decisionID)
+		return fmt.Errorf("决策不存在、不属于当前草稿或已不在待回答状态: %s", decisionID)
 	}
 	if event.DraftID != "" {
 		if err := state.touch(ctx, event.DraftID); err != nil {

@@ -21,7 +21,7 @@ func locateClip(document *Document, clipID string) (clipLocation, error) {
 			}
 		}
 	}
-	return clipLocation{}, fmt.Errorf("clip 不存在: %s", clipID)
+	return clipLocation{}, &SemanticError{Kind: SemanticClipNotFound, ClipID: clipID}
 }
 
 func editableLocation(document *Document, operation map[string]any) (clipLocation, error) {
@@ -34,7 +34,10 @@ func editableLocation(document *Document, operation map[string]any) (clipLocatio
 		return clipLocation{}, err
 	}
 	if document.Tracks[location.trackIndex].Locked {
-		return clipLocation{}, fmt.Errorf("轨道 %s 已锁定", document.Tracks[location.trackIndex].TrackID)
+		return clipLocation{}, &SemanticError{
+			Kind: SemanticTrackLocked, TrackID: document.Tracks[location.trackIndex].TrackID,
+			ClipID: id,
+		}
 	}
 	return location, nil
 }
@@ -127,7 +130,7 @@ func setClipLinked(document *Document, operation map[string]any) error {
 		return errors.New("没有可与该片段联动的同源音画片段")
 	}
 	if document.Tracks[candidate.trackIndex].Locked {
-		return fmt.Errorf("轨道 %s 已锁定", document.Tracks[candidate.trackIndex].TrackID)
+		return trackLockedError(document.Tracks[candidate.trackIndex].TrackID)
 	}
 	groupID := selected.ParentBlockID
 	if groupID == "" {
@@ -204,7 +207,7 @@ func moveClip(document *Document, operation map[string]any) error {
 		return fmt.Errorf("目标轨道不存在: %s", targetTrackID)
 	}
 	if targetTrack.Locked {
-		return fmt.Errorf("轨道 %s 已锁定", targetTrackID)
+		return trackLockedError(targetTrackID)
 	}
 	sourceTrack := &document.Tracks[location.trackIndex]
 	moving := sourceTrack.Clips[location.clipIndex]
@@ -310,7 +313,12 @@ func trimClipEdge(document *Document, operation map[string]any) error {
 	}
 	selected := document.Tracks[location.trackIndex].Clips[location.clipIndex]
 	if frame <= selected.TimelineStartFrame || frame >= selected.TimelineEndFrame {
-		return errors.New("裁剪点必须位于片段内部")
+		return &SemanticError{
+			Kind: SemanticFrameRange, ClipID: selected.TimelineClipID, ProvidedFrame: frame,
+			TimelineStartFrame: selected.TimelineStartFrame, TimelineEndFrame: selected.TimelineEndFrame,
+			SourceStartFrame: selected.SourceStartFrame, SourceEndFrame: selected.SourceEndFrame,
+			Message: "裁剪点必须位于片段内部",
+		}
 	}
 	members := []clipLocation{location}
 	if selected.Linked && selected.ParentBlockID != "" {
@@ -320,7 +328,7 @@ func trimClipEdge(document *Document, operation map[string]any) error {
 	for _, member := range members {
 		track := document.Tracks[member.trackIndex]
 		if track.Locked {
-			return fmt.Errorf("轨道 %s 已锁定", track.TrackID)
+			return trackLockedError(track.TrackID)
 		}
 		if track.TrackID == "visual_base" {
 			hasPrimary = true
@@ -375,7 +383,7 @@ func deleteClip(document *Document, operation map[string]any) error {
 	for _, member := range members {
 		track := document.Tracks[member.trackIndex]
 		if track.Locked {
-			return fmt.Errorf("轨道 %s 已锁定", track.TrackID)
+			return trackLockedError(track.TrackID)
 		}
 		if track.TrackID == "visual_base" {
 			hasPrimary = true
@@ -412,8 +420,11 @@ func deleteClip(document *Document, operation map[string]any) error {
 
 func insertSubtitle(document *Document, operation map[string]any) error {
 	track := trackByID(document, "subtitles")
-	if track == nil || track.Locked {
-		return errors.New("字幕轨不存在或已锁定")
+	if track == nil {
+		return errors.New("字幕轨不存在")
+	}
+	if track.Locked {
+		return trackLockedError(track.TrackID)
 	}
 	start, startErr := frameValue(operation, "start_frame")
 	end, endErr := frameValue(operation, "end_frame")
@@ -444,8 +455,11 @@ func insertSubtitle(document *Document, operation map[string]any) error {
 
 func insertIntoPrimary(document *Document, moving Clip, targetFrame int) error {
 	primary := trackByID(document, "visual_base")
-	if primary == nil || primary.Locked {
-		return errors.New("主视觉轨不存在或已锁定")
+	if primary == nil {
+		return errors.New("主视觉轨不存在")
+	}
+	if primary.Locked {
+		return trackLockedError(primary.TrackID)
 	}
 	targetFrame = clampInt(targetFrame, 0, document.DurationFrames)
 	duration := moving.TimelineEndFrame - moving.TimelineStartFrame
@@ -476,8 +490,11 @@ func insertIntoPrimary(document *Document, moving Clip, targetFrame int) error {
 
 func overwritePrimary(document *Document, moving Clip, targetFrame int) error {
 	primary := trackByID(document, "visual_base")
-	if primary == nil || primary.Locked {
-		return errors.New("主视觉轨不存在或已锁定")
+	if primary == nil {
+		return errors.New("主视觉轨不存在")
+	}
+	if primary.Locked {
+		return trackLockedError(primary.TrackID)
 	}
 	duration := moving.TimelineEndFrame - moving.TimelineStartFrame
 	if duration > document.DurationFrames {
@@ -579,7 +596,10 @@ func ensureRippleUnlocked(document *Document, boundary int, exceptTrackID string
 		}
 		for _, clip := range track.Clips {
 			if clip.TimelineEndFrame > boundary {
-				return fmt.Errorf("轨道 %s 已锁定，不能执行波纹编辑", track.TrackID)
+				return &SemanticError{
+					Kind: SemanticTrackLocked, TrackID: track.TrackID,
+					Message: fmt.Sprintf("轨道 %s 已锁定，不能执行波纹编辑", track.TrackID),
+				}
 			}
 		}
 	}

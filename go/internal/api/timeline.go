@@ -66,7 +66,11 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 			return
 		}
 		toolName = "timeline.apply_patches"
-		toolInput = tools.TimelinePatchBatchInput{Ops: operations}
+		typedOperations := make([]tools.TimelineOp, len(operations))
+		for index := range operations {
+			typedOperations[index] = tools.TimelineOp(operations[index])
+		}
+		toolInput = tools.TimelinePatchBatchInput{Ops: typedOperations}
 	}
 	raw, err := server.agent.ExecuteTool(ctx, toolName, toolInput)
 	if err != nil {

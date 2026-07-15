@@ -235,12 +235,164 @@ func TestMaterialCatalogKeepsAudioRoleAndStopsAtBudget(t *testing.T) {
 			ID: strings.Repeat("oversized-asset", 1000), Filename: strings.Repeat("x", 13000),
 			Kind: "video", UnderstandingStatus: "none", Probe: map[string]any{"duration_sec": 60.0},
 		},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if available != 2 || len(items) != 1 || items[0]["suggested_role"] != "bgm" {
 		t.Fatalf("budget catalog=%#v available=%d", items, available)
+	}
+}
+
+func TestContextBuilderShowsPlanHintAndDeduplicatesAudioRoles(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_plan_hint")
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO assets(
+			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
+			probe_json,ingest_status,understanding_status,usable
+		) VALUES('audio_plan_hint','reference','/tmp/plan-bgm.wav','audio','local_path',
+			'plan-bgm.wav','audio_plan_hint',1,'{"duration_sec":30}','ready','none',1);
+		INSERT INTO draft_asset_links(draft_id,asset_id,linked_at)
+		VALUES('draft_plan_hint','audio_plan_hint','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := NewContextBuilder(database).Snapshot(t.Context(), "draft_plan_hint")
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := snapshot.Sections["draft"].(map[string]any)
+	plan := draft["content_plan"].(map[string]any)
+	if plan["_hint"] != "尚未建立创作计划" {
+		t.Fatalf("draft=%#v", draft)
+	}
+	audioRoles := worldStateObjectSlice(snapshot.Sections["assets"].(map[string]any)["audio_roles"])
+	if len(audioRoles) != 1 || len(audioRoles[0]) != 2 ||
+		audioRoles[0]["asset_id"] != "audio_plan_hint" || audioRoles[0]["suggested_role"] != "bgm" {
+		t.Fatalf("audio_roles=%#v", audioRoles)
+	}
+}
+
+func TestMaterialCatalogPrioritizesUsedAndTranscriptAssetsWithStableOutput(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	const transcriptID = "asset_catalog_119"
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO assets(
+			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
+			probe_json,ingest_status,understanding_status,usable
+		) VALUES(?, 'reference', '/tmp/transcript.mp4', 'video', 'local_path',
+			'transcript.mp4', ?, 1, '{"duration_sec":10}', 'ready', 'none', 1);
+		INSERT INTO transcripts(
+			transcript_id,asset_id,provider_id,raw_preserved,utterances_json,vad_segments_json
+		) VALUES('transcript_catalog_119', ?, 'fixture', 0,
+			'[{"utterance_id":"utt_119","text":"关键台词"}]', '[]')`,
+		transcriptID, transcriptID, transcriptID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	assets := make([]storage.Asset, 0, 120)
+	for index := 0; index < 120; index++ {
+		assets = append(assets, storage.Asset{
+			ID:       fmt.Sprintf("asset_catalog_%03d", index),
+			Filename: strings.Repeat(fmt.Sprintf("素材%03d", index), 20) + ".mp4",
+			Kind:     "video", UnderstandingStatus: "none",
+			Probe: map[string]any{"duration_sec": 10.0},
+		})
+	}
+	used := map[string]struct{}{"asset_catalog_118": {}}
+	builder := NewContextBuilder(database)
+	first, available, err := builder.materialCatalogContext(t.Context(), assets, used)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := builder.materialCatalogContext(t.Context(), assets, used)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstJSON, _ := json.Marshal(first)
+	secondJSON, _ := json.Marshal(second)
+	if available != 120 || string(firstJSON) != string(secondJSON) {
+		t.Fatalf("available=%d stable=%v", available, string(firstJSON) == string(secondJSON))
+	}
+	foundUsed, foundTranscript := false, false
+	lastID := ""
+	for _, item := range first {
+		id := item["asset_id"].(string)
+		if lastID != "" && id < lastID {
+			t.Fatalf("catalog output lost linked order: %s before %s", lastID, id)
+		}
+		lastID = id
+		foundUsed = foundUsed || id == "asset_catalog_118"
+		foundTranscript = foundTranscript || id == transcriptID && item["transcript_provider"] == "fixture"
+	}
+	if !foundUsed || !foundTranscript || len(first) >= available {
+		t.Fatalf("used=%v transcript=%v included=%d available=%d", foundUsed, foundTranscript, len(first), available)
+	}
+}
+
+func TestRecentEditHistoryMapProducesIncrementalMergePatches(t *testing.T) {
+	t.Parallel()
+	batches := []storage.TimelineEditBatch{
+		{Sequence: 10, Actor: "agent", Origin: "tool", Operations: []map[string]any{{"kind": "adjust_gain", "timeline_clip_id": "clip_a", "gain_db": -3}}},
+		{Sequence: 11, Actor: "user", Origin: "manual", Operations: []map[string]any{{"kind": "move_clip", "timeline_clip_id": "clip_b", "target_frame": 30}}},
+	}
+	baseHistory := compressTimelineEditHistoryMap(batches[:1], contextRecentEditLimit)
+	currentHistory := compressTimelineEditHistoryMap(batches, contextRecentEditLimit)
+	base := NewWorldStateSnapshot(map[string]any{"recent_edit_history": baseHistory})
+	current := NewWorldStateSnapshot(map[string]any{"recent_edit_history": currentHistory})
+	patch, err := base.MergePatchTo(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyPatch := patch["sections"].(map[string]any)["recent_edit_history"].(map[string]any)
+	if len(historyPatch) != 1 || historyPatch["b00000000000000000011-o00000000000000000000"] == nil {
+		t.Fatalf("incremental history patch=%#v", historyPatch)
+	}
+
+	evicted := NewWorldStateSnapshot(map[string]any{"recent_edit_history": map[string]any{}})
+	deletePatch, err := current.MergePatchTo(evicted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted := deletePatch["sections"].(map[string]any)["recent_edit_history"].(map[string]any)
+	for key := range currentHistory {
+		if value, exists := deleted[key]; !exists || value != nil {
+			t.Fatalf("eviction missing null for %s: %#v", key, deleted)
+		}
+	}
+	rebuilt := applyMergePatch(current.Sections["recent_edit_history"], deleted)
+	if !reflect.DeepEqual(rebuilt, map[string]any{}) {
+		t.Fatalf("rebuilt=%#v", rebuilt)
+	}
+}
+
+func TestRecentEditHistoryKeepsNewestOperationsAcrossThousandBoundary(t *testing.T) {
+	t.Parallel()
+	operations := make([]map[string]any, 0, 1010)
+	for index := range 1010 {
+		operations = append(operations, map[string]any{
+			"kind":             "custom_edit",
+			"timeline_clip_id": fmt.Sprintf("clip_%04d_%s", index, strings.Repeat("x", 180)),
+			"detail_a":         strings.Repeat("甲", 500),
+			"detail_b":         strings.Repeat("乙", 500),
+		})
+	}
+	history := compressTimelineEditHistoryMap([]storage.TimelineEditBatch{{
+		Sequence: 42, Actor: "agent", Origin: "tool", Operations: operations,
+	}}, contextRecentEditLimit)
+	if len(history) == 0 || len(history) >= contextRecentEditLimit {
+		t.Fatalf("fixture must trigger rune eviction: retained=%d", len(history))
+	}
+	latestKey := timelineEditHistoryKey(42, 1009)
+	if history[latestKey] == nil {
+		t.Fatalf("latest operation was evicted across 999 boundary: entries=%d", len(history))
+	}
+	for index := 990; index < 990+contextRecentEditLimit-len(history); index++ {
+		if history[timelineEditHistoryKey(42, index)] != nil {
+			t.Fatalf("older operation %d survived before newer entries", index)
+		}
 	}
 }
 

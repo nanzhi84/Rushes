@@ -96,9 +96,8 @@ func (builder *ContextBuilder) buildSnapshotMap(
 		if asset.Kind == "audio" {
 			duration, _ := numericValue(asset.Probe["duration_sec"])
 			audioRoles = append(audioRoles, map[string]any{
-				"asset_id": asset.ID, "filename": asset.Filename,
+				"asset_id":       asset.ID,
 				"suggested_role": understanding.ClassifyAudioRole(asset.Filename, duration),
-				"duration_sec":   duration,
 			})
 		}
 	}
@@ -113,6 +112,8 @@ func (builder *ContextBuilder) buildSnapshotMap(
 	}
 	if len(draft.ContentPlan) > 0 {
 		draftContext["content_plan"] = draft.ContentPlan
+	} else {
+		draftContext["content_plan"] = map[string]any{"_hint": "尚未建立创作计划"}
 	}
 	if draft.PendingDecisionID != nil {
 		draftContext["pending_decision_id"] = *draft.PendingDecisionID
@@ -136,12 +137,16 @@ func (builder *ContextBuilder) buildSnapshotMap(
 		snapshot["conversation_reset"] = true
 	}
 
+	usedAssetSet := map[string]struct{}{}
 	if draft.TimelineCurrentVersion != nil {
 		document, timelineErr := timeline.Latest(ctx, builder.database, draftID)
 		if timelineErr != nil {
 			return nil, timelineErr
 		}
 		timelineSnapshot, usedAssetIDs := buildTimelineContext(document)
+		for _, assetID := range usedAssetIDs {
+			usedAssetSet[assetID] = struct{}{}
+		}
 		timelineSnapshot["validated"] = draft.TimelineValidated
 		timelineSnapshot["beat_alignment"] = beatAlignmentData(document)
 		usedAssets := make([]map[string]any, 0, len(usedAssetIDs))
@@ -160,7 +165,7 @@ func (builder *ContextBuilder) buildSnapshotMap(
 		snapshot["assets"].(map[string]any)["used_by_timeline"] = usedAssets
 	}
 
-	materialCatalog, catalogAvailable, err := builder.materialCatalogContext(ctx, assets)
+	materialCatalog, catalogAvailable, err := builder.materialCatalogContext(ctx, assets, usedAssetSet)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +181,7 @@ func (builder *ContextBuilder) buildSnapshotMap(
 	if err != nil {
 		return nil, err
 	}
-	snapshot["recent_edit_history"] = compressTimelineEditBatches(batches, contextRecentEditLimit)
+	snapshot["recent_edit_history"] = compressTimelineEditHistoryMap(batches, contextRecentEditLimit)
 
 	// 最后一层递归清洗避免旧日志或外部输入把已废弃的版本字段重新带回模型。
 	return sanitizeContextMap(snapshot), nil
@@ -188,10 +193,16 @@ func (builder *ContextBuilder) buildSnapshotMap(
 func (builder *ContextBuilder) materialCatalogContext(
 	ctx context.Context,
 	assets []storage.Asset,
+	usedAssetIDs map[string]struct{},
 ) ([]map[string]any, int, error) {
-	items := make([]map[string]any, 0, len(assets))
-	usedRunes := 2
-	for _, asset := range assets {
+	type candidate struct {
+		linkedIndex int
+		priority    int
+		item        map[string]any
+		base        map[string]any
+	}
+	candidates := make([]candidate, 0, len(assets))
+	for linkedIndex, asset := range assets {
 		durationSec, _ := numericValue(asset.Probe["duration_sec"])
 		relDir := ""
 		if asset.RelDir != nil {
@@ -214,6 +225,7 @@ func (builder *ContextBuilder) materialCatalogContext(
 			}
 		}
 		item := cloneContextMap(base)
+		hasTranscript := false
 		raw, summaryErr := storage.BestMaterialSummary(ctx, builder.database.Read(), asset.ID)
 		if summaryErr == nil {
 			encoded, _ := json.Marshal(raw)
@@ -238,30 +250,64 @@ func (builder *ContextBuilder) materialCatalogContext(
 		if transcript, transcriptErr := storage.LatestTranscript(
 			ctx, builder.database.Read(), asset.ID,
 		); transcriptErr == nil {
+			hasTranscript = true
 			item["speech_searchable"] = true
 			item["utterance_count"] = len(transcript.Utterances)
 			item["transcript_provider"] = transcript.ProviderID
 		} else if !errors.Is(transcriptErr, storage.ErrNotFound) {
 			return nil, 0, transcriptErr
 		}
+		priority := 3
+		if _, used := usedAssetIDs[asset.ID]; used {
+			priority = 0
+		} else if hasTranscript || asset.Kind == "audio" && base["suggested_role"] == "bgm" {
+			priority = 1
+		} else if asset.UnderstandingStatus == "ready" {
+			priority = 2
+		}
+		candidates = append(candidates, candidate{
+			linkedIndex: linkedIndex, priority: priority, item: item, base: base,
+		})
+	}
+	sort.SliceStable(candidates, func(left, right int) bool {
+		if candidates[left].priority == candidates[right].priority {
+			return candidates[left].linkedIndex < candidates[right].linkedIndex
+		}
+		return candidates[left].priority < candidates[right].priority
+	})
+	selected := make([]candidate, 0, len(candidates))
+	usedRunes := 2
+	for _, entry := range candidates {
+		item := entry.item
 		encoded, err := json.Marshal(item)
 		if err != nil {
 			return nil, 0, err
 		}
-		itemRunes := len([]rune(string(encoded)))
-		if len(items) > 0 {
+		itemRunes := utf8.RuneCount(encoded)
+		if len(selected) > 0 {
 			itemRunes++
 		}
 		if usedRunes+itemRunes > contextMaterialCatalogRuneBudget {
-			encoded, _ = json.Marshal(base)
-			itemRunes = len([]rune(string(encoded))) + 1
-			item = base
+			item = entry.base
+			encoded, _ = json.Marshal(item)
+			itemRunes = utf8.RuneCount(encoded)
+			if len(selected) > 0 {
+				itemRunes++
+			}
 		}
 		if usedRunes+itemRunes > contextMaterialCatalogRuneBudget {
-			break
+			continue
 		}
-		items = append(items, item)
+		entry.item = item
+		selected = append(selected, entry)
 		usedRunes += itemRunes
+	}
+	sort.Slice(selected, func(left, right int) bool {
+		return selected[left].linkedIndex < selected[right].linkedIndex
+	})
+	items := make([]map[string]any, 0, len(selected))
+	for _, entry := range selected {
+		items = append(items, entry.item)
 	}
 	return items, len(assets), nil
 }
@@ -460,11 +506,58 @@ func compressTimelineEditBatches(
 	batches []storage.TimelineEditBatch,
 	limit int,
 ) []map[string]any {
+	entries := compressTimelineEditEntries(batches, limit)
+	result := make([]map[string]any, 0, len(entries))
+	for _, entry := range entries {
+		clean := cloneContextMap(entry)
+		delete(clean, "_history_key")
+		result = append(result, clean)
+	}
+	return result
+}
+
+func compressTimelineEditHistoryMap(
+	batches []storage.TimelineEditBatch,
+	limit int,
+) map[string]any {
+	entries := compressTimelineEditEntries(batches, limit)
+	result := make(map[string]any, len(entries))
+	keys := make([]string, 0, len(entries))
+	for index, entry := range entries {
+		key, _ := entry["_history_key"].(string)
+		if key == "" {
+			key = timelineEditHistoryKey(int64(index+1), 0)
+		}
+		clean := cloneContextMap(entry)
+		delete(clean, "_history_key")
+		result[key] = clean
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for len(keys) > 0 {
+		encoded, err := json.Marshal(result)
+		if err == nil && utf8.RuneCount(encoded) <= contextRecentEditRuneBudget {
+			break
+		}
+		delete(result, keys[0])
+		keys = keys[1:]
+	}
+	return result
+}
+
+func compressTimelineEditEntries(
+	batches []storage.TimelineEditBatch,
+	limit int,
+) []map[string]any {
 	entries := make([]map[string]any, 0)
 	coalesced := map[string]int{}
 	inserted := map[string]int{}
-	for _, batch := range batches {
-		for _, rawOperation := range batch.Operations {
+	for batchIndex, batch := range batches {
+		sequence := batch.Sequence
+		if sequence <= 0 {
+			sequence = int64(batchIndex + 1)
+		}
+		for operationIndex, rawOperation := range batch.Operations {
 			operation := summarizeTimelineEditOperation(rawOperation)
 			kind, _ := operation["kind"].(string)
 			target := operationTarget(operation)
@@ -483,7 +576,10 @@ func compressTimelineEditBatches(
 				}
 			}
 			entry := map[string]any{
-				"actor": batch.Actor, "origin": batch.Origin, "op": operation,
+				"_history_key": timelineEditHistoryKey(sequence, operationIndex),
+				"actor":        batch.Actor,
+				"origin":       batch.Origin,
+				"op":           operation,
 			}
 			key := coalesceOperationKey(kind, operation, target)
 			if key != "" {
@@ -505,6 +601,10 @@ func compressTimelineEditBatches(
 		entries = entries[len(entries)-limit:]
 	}
 	return boundRecentEditHistory(entries, contextRecentEditRuneBudget)
+}
+
+func timelineEditHistoryKey(sequence int64, operationIndex int) string {
+	return fmt.Sprintf("b%020d-o%020d", sequence, operationIndex)
 }
 
 func summarizeTimelineEditOperation(raw map[string]any) map[string]any {
@@ -628,6 +728,9 @@ func boundRecentEditHistory(entries []map[string]any, budget int) []map[string]a
 func minimalEditHistoryEntry(entry map[string]any) map[string]any {
 	result := map[string]any{
 		"actor": entry["actor"], "origin": entry["origin"],
+	}
+	if key, ok := entry["_history_key"].(string); ok {
+		result["_history_key"] = key
 	}
 	operation, _ := entry["op"].(map[string]any)
 	minimalOperation := map[string]any{"kind": operation["kind"]}

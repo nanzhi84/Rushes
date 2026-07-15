@@ -61,6 +61,43 @@ func TestTimelineApplyPatchInfoCompilesCatalogToOneOf(t *testing.T) {
 	t.Logf("timeline.apply_patch parameters schema bytes=%d", len(encoded))
 }
 
+func TestTimelineApplyPatchesInfoCompilesCatalogToOneOf(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var applyPatches Spec
+	for _, spec := range registry.Specs(true) {
+		if spec.Name == "timeline.apply_patches" {
+			applyPatches = spec
+			break
+		}
+	}
+	if applyPatches.Implementation == nil {
+		t.Fatal("timeline.apply_patches 未注册")
+	}
+	info, err := applyPatches.Implementation.Info(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parameters, err := info.ToJSONSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	opsSchema, exists := parameters.Properties.Get("ops")
+	if !exists || opsSchema.Type != "array" || opsSchema.Items == nil {
+		t.Fatalf("timeline.apply_patches ops schema=%#v", opsSchema)
+	}
+	assertTimelineOpCatalogSchema(t, opsSchema.Items)
+}
+
 // 这个快照测试有意锁定 Eino v0.9.12 与 jsonschema v1.0.3 的自定义类型反射链。
 // 升级任一依赖时，必须先确认 TimelineOp{} 仍被反射为主动 oneOf，而不是普通 map。
 func TestTimelineOpReflectionSnapshotPinsOneOf(t *testing.T) {

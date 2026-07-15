@@ -38,6 +38,20 @@ export type ModelRetryState = {
   nextDelayMs: number | null;
 };
 
+export type TokenUsage = {
+  model_calls: number;
+  prompt_tokens: number;
+  cached_prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+};
+
+export type TurnEndedEvent = {
+  outcome: string;
+  reason: string | null;
+  token_usage?: TokenUsage;
+};
+
 export type TurnStreamState = {
   items: TurnStreamItem[];
   turnActive: boolean;
@@ -74,12 +88,12 @@ export type TurnStreamEvent =
       completed?: number;
       total?: number;
     }
-  | { type: "turn_ended"; outcome: string; reason: string | null }
+  | ({ type: "turn_ended" } & TurnEndedEvent)
   | { type: "turn_error"; message: string }
   | { type: string; [key: string]: unknown };
 
 export type UseTurnStreamOptions = {
-  onTurnEnded?: (event: { outcome: string; reason: string | null }) => void;
+  onTurnEnded?: (event: TurnEndedEvent) => void;
   onTurnError?: (message: string) => void;
 };
 
@@ -233,10 +247,7 @@ export function useTurnStream(
       }
       dispatch(event);
       if (event.type === "turn_ended") {
-        optionsRef.current.onTurnEnded?.({
-          outcome: typeof event.outcome === "string" ? event.outcome : "finished",
-          reason: typeof event.reason === "string" ? event.reason : null
-        });
+        optionsRef.current.onTurnEnded?.(normalizeTurnEndedEvent(event));
       } else if (event.type === "turn_error") {
         optionsRef.current.onTurnError?.(
           typeof event.message === "string" ? event.message : "本轮出错"
@@ -251,6 +262,32 @@ export function useTurnStream(
   }, [documentVisible, draftId]);
 
   return state;
+}
+
+export function normalizeTurnEndedEvent(event: TurnStreamEvent): TurnEndedEvent {
+  const raw = event as Record<string, unknown>;
+  const result: TurnEndedEvent = {
+    outcome: typeof raw.outcome === "string" ? raw.outcome : "finished",
+    reason: typeof raw.reason === "string" ? raw.reason : null
+  };
+  if (event.type !== "turn_ended" || !isTokenUsage(raw.token_usage)) {
+    return result;
+  }
+  return { ...result, token_usage: raw.token_usage };
+}
+
+function isTokenUsage(value: unknown): value is TokenUsage {
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+  const usage = value as Record<string, unknown>;
+  return [
+    "model_calls",
+    "prompt_tokens",
+    "cached_prompt_tokens",
+    "completion_tokens",
+    "total_tokens"
+  ].every((key) => typeof usage[key] === "number" && Number.isFinite(usage[key]));
 }
 
 function appendDelta(

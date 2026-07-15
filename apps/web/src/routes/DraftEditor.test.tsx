@@ -592,6 +592,29 @@ describe("DraftEditorView", () => {
     });
   });
 
+  it.each([
+    ["approve_content_plan", "确认内容计划？"],
+    ["approve_speech_cut", "确认口播首剪 EDL？"],
+    ["approve_rough_cut", "确认卡点首剪 EDL？"]
+  ] as const)("%s 决策类型渲染为可回答卡片", async (type, question) => {
+    const answerRequests: Array<{ body: unknown }> = [];
+    renderEditor(
+      mockFetch({
+        decision: editingStyleDecision({ type, question }),
+        onAnswer: (_url, init) => {
+          answerRequests.push({ body: JSON.parse(String(init?.body)) });
+        }
+      })
+    );
+
+    expect(await screen.findByText(question)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /快节奏/ }));
+    await waitFor(() => expect(answerRequests).toHaveLength(1));
+    expect(answerRequests[0]?.body).toMatchObject({
+      answer: { option_id: "fast", answered_via: "button" }
+    });
+  });
+
   it("当前确认项与同一条 SSE 事件只渲染一个问答面板", async () => {
     const decision = editingStyleDecision();
     const fetchMock = mockFetch({ decision });

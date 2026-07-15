@@ -30,6 +30,7 @@ func TestTurnBudgetMessageModifierInjectsOnlyWhenConvergenceIsRequired(t *testin
 		case call == 26:
 			if !strings.Contains(prompt, "工具预算提醒") ||
 				!strings.Contains(prompt, "剩余 5 次") ||
+				!strings.Contains(prompt, "plan.update 固化") ||
 				strings.Contains(prompt, "禁止再调工具") {
 				t.Fatalf("model call 26 prompt=%q", prompt)
 			}
@@ -49,6 +50,7 @@ func TestTurnBudgetInstructionCoversRemainingBranches(t *testing.T) {
 	t.Parallel()
 	if turnBudgetInstruction(6) != "" ||
 		!strings.Contains(turnBudgetInstruction(5), "剩余 5 次") ||
+		!strings.Contains(turnBudgetInstruction(5), "plan.update 固化") ||
 		!strings.Contains(turnBudgetInstruction(1), "剩余 1 次") ||
 		!strings.Contains(turnBudgetInstruction(0), "禁止再调工具") ||
 		!strings.Contains(turnBudgetInstruction(-1), "禁止再调工具") {
@@ -57,5 +59,8 @@ func TestTurnBudgetInstructionCoversRemainingBranches(t *testing.T) {
 	state := newTurnBudgetState(-1)
 	if remaining := state.beginModelCall(); remaining != 0 {
 		t.Fatalf("negative budget remaining=%d", remaining)
+	}
+	if remaining := state.remainingToolRounds(); remaining != 0 {
+		t.Fatalf("negative budget snapshot=%d", remaining)
 	}
 }
