@@ -155,8 +155,10 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 	})
 
 	var understood rushestools.UnderstandResult
+	// 该工具级质量验收没有启动 worker；显式 8 步的单素材 scan 与原 deep 使用同一分析步数，
+	// 多素材/deep 的 queued→worker→bridge 链路由 internal/integration 独立验收。
 	invokeRegisteredTool(t, service, ctx, "understand.materials", rushestools.UnderstandInput{
-		AssetIDs: assetIDs[:1], Depth: "deep", Focus: "口播 A-roll；主体、表达主题和可剪辑语义",
+		AssetIDs: assetIDs[:1], Depth: "scan", Focus: "口播 A-roll；主体、表达主题和可剪辑语义",
 		MaxStepsPerAsset: 8,
 	}, &understood)
 	if understood.Status != "completed" || len(understood.Summaries) != 1 {
@@ -212,7 +214,7 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 		var onDemand rushestools.UnderstandResult
 		invokeRegisteredTool(t, service, ctx, "understand.materials", rushestools.UnderstandInput{
 			AssetIDs: []string{discovery.UnderstandingCandidates[0].AssetID},
-			Depth:    "deep", Focus: query.query, MaxStepsPerAsset: 8,
+			Depth:    "scan", Focus: query.query, MaxStepsPerAsset: 8,
 		}, &onDemand)
 		if onDemand.Status != "completed" || len(onDemand.Summaries) != 1 {
 			t.Fatalf("query=%q on-demand understanding=%#v", query.query, onDemand)

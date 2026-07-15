@@ -365,6 +365,347 @@ func TestMaterialSummaryRowsAllocateMonotonicVersions(t *testing.T) {
 	}
 }
 
+func TestMaterialUnderstandingRefreshLifecycleKeepsUsableSummary(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	result, err := Apply(t.Context(), database, []contracts.Event{{
+		Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset-refresh", "job_id": "job-import-refresh",
+			"filename": "refresh.otf", "ingest_status": "ready",
+			"understanding_status": "none", "usable": true,
+		},
+	}}, Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("import result=%#v err=%v", result, err)
+	}
+	applyMaterial := func(event contracts.Event, rows ResultRows) {
+		t.Helper()
+		result, err := Apply(t.Context(), database, []contracts.Event{event}, Options{
+			Actor: contracts.ActorJob, ResultRows: rows,
+		})
+		if err != nil || result.Status != StatusApplied {
+			t.Fatalf("event=%s payload=%#v result=%#v err=%v", event.Type, event.Payload, result, err)
+		}
+	}
+	assertAsset := func(wantStatus string, wantFailure bool) {
+		t.Helper()
+		asset, err := storage.GetAsset(t.Context(), database.Read(), "asset-refresh")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if asset.UnderstandingStatus != wantStatus || (len(asset.Failure) != 0) != wantFailure {
+			t.Fatalf("asset status=%s failure=%#v want status=%s failure=%v",
+				asset.UnderstandingStatus, asset.Failure, wantStatus, wantFailure)
+		}
+	}
+
+	applyMaterial(contracts.Event{Type: "MaterialUnderstandingStarted", Payload: map[string]any{
+		"asset_id": "asset-refresh", "job_id": "job-scan-1", "attempt": 0,
+	}}, ResultRows{})
+	assertAsset("running", false)
+	applyMaterial(contracts.Event{Type: "MaterialUnderstandingFailed", Payload: map[string]any{
+		"asset_id": "asset-refresh", "job_id": "job-scan-1", "attempt": 0,
+		"failure": map[string]any{"message": "首次理解失败"},
+	}}, ResultRows{})
+	assertAsset("failed", true)
+
+	// 同一 job 的下一 attempt 必须拥有独立 merge key，开始时清掉旧失败；取消后回到 none。
+	applyMaterial(contracts.Event{Type: "MaterialUnderstandingStarted", Payload: map[string]any{
+		"asset_id": "asset-refresh", "job_id": "job-scan-1", "attempt": 1,
+	}}, ResultRows{})
+	assertAsset("running", false)
+	applyMaterial(contracts.Event{Type: "MaterialUnderstandingFailed", Payload: map[string]any{
+		"asset_id": "asset-refresh", "job_id": "job-scan-1", "attempt": 1, "cancelled": true,
+		"failure": map[string]any{"message": "用户取消"},
+	}}, ResultRows{})
+	assertAsset("none", false)
+
+	// Completed 与摘要在同一个 reducer 事务内提交，并清除此前的失败。
+	applyMaterial(contracts.Event{Type: "MaterialUnderstandingFailed", Payload: map[string]any{
+		"asset_id": "asset-refresh", "job_id": "job-scan-3",
+		"failure": map[string]any{"message": "稍后重试"},
+	}}, ResultRows{})
+	assertAsset("failed", true)
+	applyMaterial(contracts.Event{Type: "MaterialUnderstandingCompleted", Payload: map[string]any{
+		"asset_id": "asset-refresh", "job_id": "job-scan-4", "summary_id": "summary-refresh-1",
+	}}, ResultRows{MaterialSummaries: []MaterialSummaryRow{{
+		ID: "summary-refresh-1", AssetID: "asset-refresh", Version: 0,
+		Status: "ready", Summary: map[string]any{"overall": "已有可用摘要"},
+	}}})
+	assertAsset("ready", false)
+
+	// 已有 ready 摘要时，刷新开始或失败都不能把素材降级为不可用状态。
+	applyMaterial(contracts.Event{Type: "MaterialUnderstandingStarted", Payload: map[string]any{
+		"asset_id": "asset-refresh", "job_id": "job-refresh-1",
+	}}, ResultRows{})
+	assertAsset("ready", false)
+	applyMaterial(contracts.Event{Type: "MaterialUnderstandingFailed", Payload: map[string]any{
+		"asset_id": "asset-refresh", "job_id": "job-refresh-1",
+		"failure": map[string]any{"message": "刷新失败"},
+	}}, ResultRows{})
+	assertAsset("ready", false)
+
+	var summaries int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM material_summaries WHERE asset_id='asset-refresh' AND status='ready'`,
+	).Scan(&summaries); err != nil || summaries != 1 {
+		t.Fatalf("ready summaries=%d err=%v", summaries, err)
+	}
+}
+
+func TestUnderstandJobStateReconciliationAcrossConcurrentJobs(t *testing.T) {
+	t.Parallel()
+	const (
+		draftID = "draft-understand-concurrency"
+		assetID = "asset-understand-concurrency"
+	)
+	database := openTestDB(t)
+	apply := func(events []contracts.Event, rows ResultRows) {
+		t.Helper()
+		result, err := Apply(t.Context(), database, events, Options{Actor: contracts.ActorJob, ResultRows: rows})
+		if err != nil || result.Status != StatusApplied {
+			t.Fatalf("events=%#v result=%#v err=%v", events, result, err)
+		}
+	}
+	apply([]contracts.Event{
+		{Type: "DraftCreated", DraftID: draftID, Payload: map[string]any{"name": "并发理解"}},
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "import-" + assetID,
+			"filename": "parallel.mov", "kind": "video", "ingest_status": "ready", "usable": true,
+		}},
+		{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{"asset_id": assetID}},
+	}, ResultRows{})
+	assertAsset := func(wantStatus string, wantFailure string) {
+		t.Helper()
+		asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if asset.UnderstandingStatus != wantStatus || stringFrom(asset.Failure["message"], "") != wantFailure {
+			t.Fatalf("asset status=%s failure=%#v want=%s/%q",
+				asset.UnderstandingStatus, asset.Failure, wantStatus, wantFailure)
+		}
+	}
+	enqueue := func(jobID string) {
+		t.Helper()
+		apply([]contracts.Event{{Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
+			"job_id": jobID, "kind": "understand", "requested_by_draft_id": draftID,
+			"idempotency_key": jobID, "job_payload": map[string]any{"asset_ids": []string{assetID}},
+		}}}, ResultRows{})
+	}
+	terminal := func(eventType, jobID string, payload map[string]any) {
+		t.Helper()
+		payload["job_id"] = jobID
+		payload["kind"] = "understand"
+		payload["requested_by_draft_id"] = draftID
+		apply([]contracts.Event{{Type: eventType, DraftID: draftID, Payload: payload}}, ResultRows{})
+	}
+
+	enqueue("job-understand-a")
+	enqueue("job-understand-b")
+	assertAsset("running", "")
+	terminal("JobProgress", "job-understand-a", map[string]any{"progress": 0.2})
+	terminal("JobFailed", "job-understand-a", map[string]any{
+		"error": map[string]any{"message": "A 最终失败"},
+	})
+	// A 的失败不能覆盖仍 pending 的 B。
+	assertAsset("running", "")
+	terminal("JobCancelled", "job-understand-b", map[string]any{})
+	// B 取消后应恢复已有的 A 失败，而不是错误回到 none。
+	assertAsset("failed", "A 最终失败")
+
+	enqueue("job-understand-success")
+	apply([]contracts.Event{{Type: "MaterialUnderstandingCompleted", Payload: map[string]any{
+		"asset_id": assetID, "job_id": "job-understand-success", "attempt": 0,
+		"summary_id": "summary-understand-concurrency",
+	}}}, ResultRows{MaterialSummaries: []MaterialSummaryRow{{
+		ID: "summary-understand-concurrency", AssetID: assetID, Status: "ready",
+		Summary: map[string]any{"overall": "并发中的成功摘要"},
+	}}})
+	terminal("JobSucceeded", "job-understand-success", map[string]any{
+		"result": map[string]any{"status": "completed"},
+	})
+	assertAsset("ready", "")
+
+	enqueue("job-understand-late-failure")
+	terminal("JobFailed", "job-understand-late-failure", map[string]any{
+		"error": map[string]any{"message": "晚到失败"},
+	})
+	// ready 摘要必须压过任何晚到失败。
+	assertAsset("ready", "")
+}
+
+func TestAggregateUnderstandJobReconcilesEveryPayloadAsset(t *testing.T) {
+	t.Parallel()
+	const draftID = "draft-understand-aggregate-state"
+	database := openTestDB(t)
+	assetIDs := []string{"asset-aggregate-one", "asset-aggregate-two"}
+	events := []contracts.Event{{
+		Type: "DraftCreated", DraftID: draftID, Payload: map[string]any{"name": "聚合理解"},
+	}}
+	for _, assetID := range assetIDs {
+		events = append(events,
+			contracts.Event{Type: "AssetImported", Payload: map[string]any{
+				"asset_id": assetID, "job_id": "import-" + assetID,
+				"filename": assetID + ".mov", "kind": "video", "ingest_status": "ready", "usable": true,
+			}},
+			contracts.Event{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{"asset_id": assetID}},
+		)
+	}
+	result, err := Apply(t.Context(), database, events, Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("fixture result=%#v err=%v", result, err)
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
+			"job_id": "job-understand-aggregate", "kind": "understand",
+			"requested_by_draft_id": draftID, "idempotency_key": "understand-aggregate",
+			"job_payload": map[string]any{"asset_ids": []any{assetIDs[0], 42, assetIDs[1]}},
+		},
+	}}, Options{Actor: contracts.ActorAgent})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("enqueue result=%#v err=%v", result, err)
+	}
+	var outerAsset sql.NullString
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT asset_id FROM jobs WHERE job_id='job-understand-aggregate'",
+	).Scan(&outerAsset); err != nil || outerAsset.Valid {
+		t.Fatalf("aggregate outer asset=%#v err=%v", outerAsset, err)
+	}
+	for _, assetID := range assetIDs {
+		asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
+		if err != nil || asset.UnderstandingStatus != "running" {
+			t.Fatalf("asset=%s status=%s err=%v", assetID, asset.UnderstandingStatus, err)
+		}
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobCancelled", DraftID: draftID, Payload: map[string]any{
+			"job_id": "job-understand-aggregate", "kind": "understand",
+			"requested_by_draft_id": draftID,
+		},
+	}}, Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("cancel result=%#v err=%v", result, err)
+	}
+	for _, assetID := range assetIDs {
+		asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
+		if err != nil || asset.UnderstandingStatus != "none" || len(asset.Failure) != 0 {
+			t.Fatalf("asset=%s status=%s failure=%#v err=%v",
+				assetID, asset.UnderstandingStatus, asset.Failure, err)
+		}
+	}
+}
+
+func TestInlineUnderstandingFailureUsesCurrentErrorOverHistoricalJob(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	const assetID = "asset-inline-current-failure"
+	result, err := Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "import-" + assetID,
+			"filename": "inline.png", "kind": "image", "ingest_status": "ready", "usable": true,
+		}},
+		{Type: "JobEnqueued", Payload: map[string]any{
+			"job_id": "job-old-understand-failure", "kind": "understand",
+			"idempotency_key": "job-old-understand-failure",
+			"job_payload":     map[string]any{"asset_ids": []string{assetID}},
+		}},
+	}, Options{Actor: contracts.ActorAgent})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("setup result=%#v err=%v", result, err)
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobFailed", Payload: map[string]any{
+			"job_id": "job-old-understand-failure",
+			"error":  map[string]any{"message": "旧后台错误"},
+		},
+	}}, Options{Actor: contracts.ActorJob})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("old failure result=%#v err=%v", result, err)
+	}
+	result, err = Apply(t.Context(), database, []contracts.Event{
+		{Type: "MaterialUnderstandingStarted", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "inline-current-run",
+		}},
+		{Type: "MaterialUnderstandingFailed", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "inline-current-run",
+			"failure": map[string]any{"message": "本次内联错误"},
+		}},
+	}, Options{Actor: contracts.ActorAgent})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("inline failure result=%#v err=%v", result, err)
+	}
+	asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
+	if err != nil || asset.UnderstandingStatus != "failed" ||
+		stringFrom(asset.Failure["message"], "") != "本次内联错误" {
+		t.Fatalf("asset=%#v err=%v", asset, err)
+	}
+}
+
+func TestJobFailureOnlyUsesPersistedIngestKindAndAsset(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	assets := []string{"asset-ingest", "asset-decoy", "asset-understand"}
+	events := make([]contracts.Event, 0, len(assets)+2)
+	for _, assetID := range assets {
+		events = append(events, contracts.Event{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "import-" + assetID,
+			"filename": assetID + ".otf", "ingest_status": "ready",
+			"understanding_status": "ready", "usable": true,
+		}})
+	}
+	events = append(events,
+		contracts.Event{Type: "JobEnqueued", Payload: map[string]any{
+			"job_id": "job-ingest", "kind": "ingest", "asset_id": "asset-ingest",
+			"idempotency_key": "job-ingest",
+		}},
+		contracts.Event{Type: "JobEnqueued", Payload: map[string]any{
+			"job_id": "job-understand", "kind": "understand", "asset_id": "asset-understand",
+			"idempotency_key": "job-understand",
+		}},
+	)
+	result, err := Apply(t.Context(), database, events, Options{Actor: contracts.ActorAgent})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("setup result=%#v err=%v", result, err)
+	}
+
+	// payload 故意提供错误 kind/asset_id，reducer 必须以 jobs 表中的事实为准。
+	result, err = Apply(t.Context(), database, []contracts.Event{
+		{Type: "JobFailed", Payload: map[string]any{
+			"job_id": "job-understand", "kind": "ingest", "asset_id": "asset-decoy",
+			"error": map[string]any{"message": "理解任务失败"},
+		}},
+		{Type: "JobFailed", Payload: map[string]any{
+			"job_id": "job-ingest", "kind": "understand", "asset_id": "asset-decoy",
+			"error": map[string]any{"message": "导入任务失败"},
+		}},
+	}, Options{Actor: contracts.ActorJob})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("fail result=%#v err=%v", result, err)
+	}
+
+	for _, item := range []struct {
+		assetID     string
+		wantIngest  string
+		wantUsable  bool
+		wantFailure bool
+	}{
+		{assetID: "asset-ingest", wantIngest: "failed", wantUsable: false, wantFailure: true},
+		{assetID: "asset-decoy", wantIngest: "ready", wantUsable: true, wantFailure: false},
+		{assetID: "asset-understand", wantIngest: "ready", wantUsable: true, wantFailure: true},
+	} {
+		asset, err := storage.GetAsset(t.Context(), database.Read(), item.assetID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if asset.IngestStatus != item.wantIngest || asset.Usable != item.wantUsable ||
+			(len(asset.Failure) != 0) != item.wantFailure {
+			t.Fatalf("%s ingest=%s usable=%v failure=%#v", item.assetID,
+				asset.IngestStatus, asset.Usable, asset.Failure)
+		}
+	}
+}
+
 func TestDraftLifecycleCopyAssetUnlinkAndJobCancellation(t *testing.T) {
 	t.Parallel()
 	database := openTestDB(t)

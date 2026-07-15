@@ -214,7 +214,7 @@ func registerAssetList(registry *Registry) error {
 }
 
 func registerUnderstand(registry *Registry) error {
-	return addTool[UnderstandInput, UnderstandResult](registry, "understand.materials", "幂等理解所选素材并生成可检索的逐镜头时间证据；相同素材和参数默认直接复用持久化结果，只有用户明确要求重新分析时才设置 force_refresh=true", nil, ExposureLLM, false)
+	return addTool[UnderstandInput, UnderstandResult](registry, "understand.materials", "幂等理解所选素材并生成可检索的逐镜头时间证据；相同素材和参数默认直接复用持久化结果，只有用户明确要求重新分析时才设置 force_refresh=true；旧强制任务终态后再次重跑完全相同分析才更换 refresh_nonce；多素材、deep 或 force_refresh 可能返回 queued，后台完成后会自动续跑当前任务，不要轮询", nil, ExposureLLM, false)
 }
 
 func registerShotSearch(registry *Registry) error {
