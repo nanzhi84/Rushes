@@ -333,6 +333,8 @@ func TestContextCompactionHandlesBeatGridAndMalformedStoredSummary(t *testing.T)
 	}
 	waveform, ok := grid["waveform"].(map[string]any)
 	if !ok || waveform["sample_interval_frames"] != 15 ||
+		waveform["point_count"] != 3 || waveform["loudness_min"] != 4 ||
+		waveform["loudness_mean"] != 31.3 || waveform["loudness_max"] != 72 ||
 		!reflect.DeepEqual(waveform["sample_frames"], []int{0, 15, 30}) ||
 		!reflect.DeepEqual(waveform["samples"], []int{4, 72, 18}) {
 		t.Fatalf("waveform=%#v", waveform)
@@ -349,6 +351,54 @@ func TestContextCompactionHandlesBeatGridAndMalformedStoredSummary(t *testing.T)
 		"samples":                []int{20},
 	}) != nil {
 		t.Fatal("坐标和值数量不一致的波形不应进入上下文")
+	}
+}
+
+func TestCompactWaveformContextKeepsBoundedResidentEnvelope(t *testing.T) {
+	t.Parallel()
+	frames := make([]int, 200)
+	samples := make([]int, 200)
+	for index := range frames {
+		frames[index] = index * 15
+		samples[index] = 50
+	}
+	samples[1] = 0
+	samples[198] = 100
+	waveform := compactWaveformContext(map[string]any{
+		"sample_interval_frames": 15,
+		"sample_frames":          frames,
+		"samples":                samples,
+		"encoding":               "rms_db_-60_0_to_0_100",
+		"floor_db":               -60,
+		"ceiling_db":             0,
+	})
+	if waveform == nil || waveform["point_count"] != 200 ||
+		waveform["loudness_min"] != 0 || waveform["loudness_mean"] != 50.0 ||
+		waveform["loudness_max"] != 100 {
+		t.Fatalf("waveform=%#v", waveform)
+	}
+	residentFrames, framesOK := waveform["sample_frames"].([]int)
+	residentSamples, samplesOK := waveform["samples"].([]int)
+	if !framesOK || !samplesOK || len(residentFrames) != contextResidentWaveformPoints ||
+		len(residentSamples) != contextResidentWaveformPoints ||
+		reflect.DeepEqual(residentFrames, frames) || reflect.DeepEqual(residentSamples, samples) {
+		t.Fatalf("resident frames=%#v samples=%#v", residentFrames, residentSamples)
+	}
+	for index, frame := range residentFrames {
+		if frame < 0 || index > 0 && frame <= residentFrames[index-1] ||
+			residentSamples[index] < 0 || residentSamples[index] > 100 {
+			t.Fatalf("invalid resident point %d: frame=%d sample=%d", index, frame, residentSamples[index])
+		}
+	}
+	if _, exists := waveform["encoding"]; exists {
+		t.Fatalf("resident summary must omit full-wave metadata: %#v", waveform)
+	}
+	raw, err := json.Marshal(waveform)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runes := len([]rune(string(raw))); runes >= 350 {
+		t.Fatalf("resident waveform too large: runes=%d json=%s", runes, raw)
 	}
 }
 

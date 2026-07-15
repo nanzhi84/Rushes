@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
@@ -17,11 +18,13 @@ import (
 )
 
 const (
-	worldStateSchemaVersion      = 1
-	contextHistorySoftTokenLimit = 18000
-	contextHistoryItemLimit      = 48
-	contextHistoryReadLimit      = 5000
-	contextCompactionRuneBudget  = 48000
+	worldStateSchemaVersion           = 1
+	contextHistorySoftTokenLimit      = 18000
+	contextHistoryItemLimit           = 48
+	contextHistoryReadLimit           = 5000
+	contextCompactionRuneBudget       = 48000
+	contextWorldStatePatchRebaseFloor = 2000
+	contextWorldStatePatchRebaseRatio = 0.5
 )
 
 // WorldStateSnapshot is the objective, typed state supplied to the model.
@@ -239,6 +242,23 @@ func (manager *ContextManager) build(
 	if err != nil {
 		return ContextBuild{}, err
 	}
+	shouldRebase, err := shouldRebaseWorldStatePatch(base, patch)
+	if err != nil {
+		return ContextBuild{}, err
+	}
+	if shouldRebase {
+		checkpoint, err = manager.newCheckpoint(
+			ctx, draftID, snapshot, checkpoint.WindowNumber+1,
+			checkpoint.HistoryVersion, checkpoint.Summary,
+			checkpoint.CompactedThroughMessageID,
+		)
+		if err != nil {
+			return ContextBuild{}, err
+		}
+		base = snapshot
+		baseHash = currentHash
+		patch = nil
+	}
 	messages, err := renderContextMessages(base, snapshot, patch, checkpoint, history)
 	if err != nil {
 		return ContextBuild{}, err
@@ -257,6 +277,27 @@ func (manager *ContextManager) build(
 		Messages: messages, Snapshot: snapshot, Checkpoint: checkpoint,
 		Manifest: manifest, history: history,
 	}, nil
+}
+
+func shouldRebaseWorldStatePatch(
+	base WorldStateSnapshot,
+	patch map[string]any,
+) (bool, error) {
+	if len(patch) == 0 {
+		return false, nil
+	}
+	baseRaw, err := base.Marshal()
+	if err != nil {
+		return false, err
+	}
+	patchRaw, err := json.Marshal(patch)
+	if err != nil {
+		return false, err
+	}
+	baseRunes := utf8.RuneCount(baseRaw)
+	patchRunes := utf8.RuneCount(patchRaw)
+	return patchRunes >= contextWorldStatePatchRebaseFloor &&
+		float64(patchRunes) >= float64(baseRunes)*contextWorldStatePatchRebaseRatio, nil
 }
 
 // selectContextRows prevents messages queued after the currently executing
@@ -452,7 +493,27 @@ func approximateTokens(value string) int {
 	if value == "" {
 		return 0
 	}
-	return (len([]byte(value)) + 3) / 4
+	cjkTokens := 0
+	otherBytes := 0
+	for len(value) > 0 {
+		r, size := utf8.DecodeRuneInString(value)
+		if isCJKTokenRune(r) {
+			cjkTokens++
+		} else {
+			otherBytes += size
+		}
+		value = value[size:]
+	}
+	return cjkTokens + (otherBytes+3)/4
+}
+
+func isCJKTokenRune(value rune) bool {
+	return value >= 0x3000 && value <= 0x303f ||
+		value >= 0x3040 && value <= 0x30ff ||
+		value >= 0x3400 && value <= 0x4dbf ||
+		value >= 0x4e00 && value <= 0x9fff ||
+		value >= 0xf900 && value <= 0xfaff ||
+		value >= 0xff00 && value <= 0xffef
 }
 
 // CompactionSource returns only the history that may be replaced. During a
