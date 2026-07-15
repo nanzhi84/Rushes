@@ -2081,9 +2081,9 @@ func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
 	if len(fallbackCuts) != 4 || fallbackCuts[3] != 60 {
 		t.Fatalf("full beat fallback cuts=%v", fallbackCuts)
 	}
-	// 真实素材回归：三段视频总长足够覆盖 900 帧，但均分切点会让最后
-	// 一段超过第三条素材的 303 帧容量。自动规划必须在真实拍点上移动
-	// 前两刀，而不是错误报告素材不足。
+	// 真实素材回归：三段视频总长足够覆盖 900 帧，但旧规划在真实
+	// 四拍网格上会选出 [306,570,900]，最后一段 330 帧超过第三条
+	// 素材的 303 帧容量。自动规划必须在真实拍点上移动前两刀。
 	capacityBeatFrames := []int{
 		89, 100, 110, 121, 132, 143, 154, 173, 183, 194, 204, 214, 224, 235,
 		245, 255, 265, 276, 286, 296, 306, 317, 327, 340, 353, 366, 379, 392,
@@ -2091,19 +2091,37 @@ func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
 		600, 615, 630, 645, 660, 675, 690, 705, 720, 735, 750, 765, 780, 795,
 		810, 825, 840, 855, 870, 884,
 	}
-	capacityCuts := chooseCapacityAwareBeatMixCuts(nil, capacityBeatFrames, 900, []int{325, 327, 303})
+	capacityFourBeatFrames := []int{89, 132, 183, 224, 265, 306, 353, 405, 460, 513, 570, 630, 690, 750, 810, 870}
+	capacities := []int{325, 327, 303}
+	legacyCuts := chooseAllBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, len(capacities))
+	if !reflect.DeepEqual(legacyCuts, []int{306, 570, 900}) {
+		t.Fatalf("legacy cuts=%v", legacyCuts)
+	}
+	if legacyCuts[2]-legacyCuts[1] <= capacities[2] {
+		t.Fatalf("legacy planner unexpectedly fits capacities: cuts=%v capacities=%v", legacyCuts, capacities)
+	}
+	capacityCuts := chooseCapacityAwareBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, capacities)
+	if !reflect.DeepEqual(capacityCuts, []int{306, 630, 900}) {
+		t.Fatalf("capacity-aware cuts=%v", capacityCuts)
+	}
+	if repeated := chooseCapacityAwareBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, capacities); !reflect.DeepEqual(repeated, capacityCuts) {
+		t.Fatalf("capacity-aware planner is not deterministic: first=%v repeated=%v", capacityCuts, repeated)
+	}
 	if len(capacityCuts) != 3 || capacityCuts[2] != 900 {
 		t.Fatalf("capacity-aware cuts=%v", capacityCuts)
 	}
 	previous := 0
 	for index, cut := range capacityCuts {
-		if duration := cut - previous; duration <= 0 || duration > []int{325, 327, 303}[index] {
+		if duration := cut - previous; duration <= 0 || duration > capacities[index] {
 			t.Fatalf("capacity-aware segment=%d duration=%d cuts=%v", index, duration, capacityCuts)
 		}
 		if cut != 900 && !containsFrame(capacityBeatFrames, cut) {
 			t.Fatalf("capacity-aware cut not on beat: %v", capacityCuts)
 		}
 		previous = cut
+	}
+	if fallback := chooseCapacityAwareBeatMixCuts([]int{296, 585}, capacityBeatFrames, 900, capacities); !reflect.DeepEqual(fallback, []int{296, 600, 900}) {
+		t.Fatalf("capacity-aware full-beat fallback=%v", fallback)
 	}
 	if cuts, ok := distributeCapacityAwareBeatMixCuts([]int{30, 60}, 100, []int{30, 30, 30}); ok || cuts != nil {
 		t.Fatalf("insufficient capacity cuts=%v ok=%v", cuts, ok)
