@@ -72,16 +72,6 @@ func NewAnalyzer(vision model.ToolCallingChatModel) *Analyzer {
 	return &Analyzer{vision: vision}
 }
 
-func (analyzer *Analyzer) Analyze(
-	ctx context.Context,
-	database *storage.DB,
-	asset storage.Asset,
-	focus string,
-	progress ProgressFunc,
-) (Summary, error) {
-	return analyzer.AnalyzeWithOptions(ctx, database, asset, AnalyzeOptions{Focus: focus}, progress)
-}
-
 func (analyzer *Analyzer) AnalyzeWithOptions(
 	ctx context.Context,
 	database *storage.DB,

@@ -2,7 +2,6 @@ package contracts
 
 import (
 	"encoding/json"
-	"reflect"
 	"testing"
 )
 
@@ -67,20 +66,6 @@ func TestEventMergeKeyAndDecisionWorkspaceMode(t *testing.T) {
 	spec, _ := workspace.Spec()
 	if spec.Mode != VersionMerge {
 		t.Fatalf("workspace decision mode=%s", spec.Mode)
-	}
-}
-
-func TestRegisteredEventNamesStable(t *testing.T) {
-	t.Parallel()
-
-	names := RegisteredEventNames()
-	if len(names) == 0 || reflect.DeepEqual(names, append([]string(nil), names[1:]...)) {
-		t.Fatal("注册表名称异常")
-	}
-	for index := 1; index < len(names); index++ {
-		if names[index-1] >= names[index] {
-			t.Fatal("事件名必须稳定排序")
-		}
 	}
 }
 

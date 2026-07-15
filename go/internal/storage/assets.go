@@ -130,25 +130,6 @@ func ListAssetJobs(ctx context.Context, query Querier, assetID string) ([]JobSum
 	return jobs, rows.Err()
 }
 
-func LatestMaterialSummary(ctx context.Context, query Querier, assetID string) (map[string]any, error) {
-	var raw string
-	err := query.QueryRowContext(ctx, `
-		SELECT summary_json FROM material_summaries
-		WHERE asset_id=? AND status='ready'
-		ORDER BY version DESC LIMIT 1`, assetID).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	var summary map[string]any
-	if err := json.Unmarshal([]byte(raw), &summary); err != nil {
-		return nil, err
-	}
-	return summary, nil
-}
-
 func MaterialSummaryByFingerprint(
 	ctx context.Context,
 	query Querier,

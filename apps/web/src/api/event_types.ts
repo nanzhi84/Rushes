@@ -1,7 +1,7 @@
 // 领域 SSE 事件名单的前端单一来源；与 go/internal/contracts.EventRegistry 对齐。
 // 回合流的 8 种 type 属于独立 turn-stream，不得混入领域事件。
 
-export const ALL_EVENT_TYPES = [
+const ALL_EVENT_TYPES = [
   "DraftCreated",
   "DraftRenamed",
   "DraftCopied",
@@ -30,7 +30,7 @@ export const ALL_EVENT_TYPES = [
   "PreviewViewed"
 ] as const;
 
-export type EventType = (typeof ALL_EVENT_TYPES)[number];
+type EventType = (typeof ALL_EVENT_TYPES)[number];
 
 const DRAFT_LIFECYCLE_EVENTS = [
   "DraftCreated",
@@ -58,7 +58,7 @@ const PREVIEW_EVENTS = [
   "PreviewViewed"
 ] as const satisfies readonly EventType[];
 
-export const JOB_EVENT_TYPES = [
+const JOB_EVENT_TYPES = [
   "JobEnqueued",
   "JobProgress",
   "JobSucceeded",

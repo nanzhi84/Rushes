@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -137,7 +138,7 @@ func TestMediaRangesAcrossSourceProxyThumbnailPreviewAndExport(t *testing.T) {
 	server, handler := testServer(t, root, 0)
 	createDraftThroughAPI(t, handler, "draft_media")
 	store := media.NewObjectStore(server.database.Paths)
-	object, err := store.PutBytes(t.Context(), []byte("0123456789"))
+	object, err := store.Put(t.Context(), bytes.NewReader([]byte("0123456789")))
 	if err != nil {
 		t.Fatal(err)
 	}

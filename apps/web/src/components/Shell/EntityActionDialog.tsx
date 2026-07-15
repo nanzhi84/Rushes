@@ -8,7 +8,7 @@ import { queryKeys } from "../../app/query_client";
 import type { EntityDialogState } from "../../state/ui_store";
 
 /** 对话框只需要草稿的 id 与名字；DraftListItem/DraftRecord 都结构兼容。 */
-export type DraftDialogEntry = { draft_id: string; name: string };
+type DraftDialogEntry = { draft_id: string; name: string };
 
 type EntityActionDialogProps = {
   dialog: EntityDialogState | null;

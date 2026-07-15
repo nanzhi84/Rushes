@@ -1,7 +1,6 @@
 package media
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -34,10 +33,6 @@ func (store ObjectStore) PutFile(ctx context.Context, source string) (ObjectRef,
 	}
 	defer func() { _ = file.Close() }()
 	return store.Put(ctx, file)
-}
-
-func (store ObjectStore) PutBytes(ctx context.Context, data []byte) (ObjectRef, error) {
-	return store.Put(ctx, bytes.NewReader(data))
 }
 
 func (store ObjectStore) Put(ctx context.Context, reader io.Reader) (ObjectRef, error) {

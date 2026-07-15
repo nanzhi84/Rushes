@@ -149,10 +149,6 @@ func estimateBPM(seconds []float64) float64 {
 	return math.Round((60/median)*100) / 100
 }
 
-func everyNthBeat(frames []int, step int) []int {
-	return everyNthBeatFrom(frames, step, 0)
-}
-
 func everyNthBeatFrom(frames []int, step, phase int) []int {
 	if len(frames) == 0 || step <= 0 {
 		return []int{}

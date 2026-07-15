@@ -44,7 +44,6 @@ type Clip struct {
 	TrackID            string           `json:"track_id"`
 	AssetID            string           `json:"asset_id,omitempty"`
 	AssetKind          string           `json:"asset_kind,omitempty"`
-	ClipID             *string          `json:"clip_id,omitempty"`
 	Role               string           `json:"role,omitempty"`
 	Text               string           `json:"text,omitempty"`
 	TimelineStartFrame int              `json:"timeline_start_frame"`
@@ -55,7 +54,6 @@ type Clip struct {
 	GainDB             float64          `json:"gain_db,omitempty"`
 	FadeInFrames       int              `json:"fade_in_frames,omitempty"`
 	FadeOutFrames      int              `json:"fade_out_frames,omitempty"`
-	LockPolicy         string           `json:"lock_policy,omitempty"`
 	ParentBlockID      string           `json:"parent_block_id,omitempty"`
 	Linked             bool             `json:"linked,omitempty"`
 	Effects            []map[string]any `json:"effects,omitempty"`
@@ -110,7 +108,7 @@ func ComposeInitial(draftID string, version int, selections []Selection) (Docume
 			Role:      selection.Role, TimelineStartFrame: cursor, TimelineEndFrame: cursor + duration,
 			SourceStartFrame: selection.SourceStartFrame,
 			SourceEndFrame:   selection.SourceEndFrame,
-			PlaybackRate:     1, LockPolicy: "free", ParentBlockID: parentBlockID,
+			PlaybackRate:     1, ParentBlockID: parentBlockID,
 			Linked: selection.HasAudio,
 		})
 		if selection.HasAudio {
@@ -119,7 +117,7 @@ func ComposeInitial(draftID string, version int, selections []Selection) (Docume
 				AssetID: selection.AssetID, AssetKind: selection.AssetKind,
 				Role: "original_audio", TimelineStartFrame: cursor, TimelineEndFrame: cursor + duration,
 				SourceStartFrame: selection.SourceStartFrame, SourceEndFrame: selection.SourceEndFrame,
-				PlaybackRate: 1, LockPolicy: "free", ParentBlockID: parentBlockID, Linked: true,
+				PlaybackRate: 1, ParentBlockID: parentBlockID, Linked: true,
 			})
 		}
 		cursor += duration
@@ -729,7 +727,7 @@ func insertClip(document *Document, operation map[string]any) error {
 		Role:               valueOr(stringValue(operation["role"]), "b_roll"),
 		TimelineStartFrame: startFrame, TimelineEndFrame: startFrame + duration,
 		SourceStartFrame: start, SourceEndFrame: end,
-		PlaybackRate: 1, LockPolicy: "free",
+		PlaybackRate: 1,
 	}
 	if rawMetadata, provided := operation["metadata"]; provided {
 		metadata, ok := rawMetadata.(map[string]any)
@@ -757,7 +755,6 @@ func insertClip(document *Document, operation map[string]any) error {
 			SourceStartFrame:   clip.SourceStartFrame,
 			SourceEndFrame:     clip.SourceEndFrame,
 			PlaybackRate:       clip.PlaybackRate,
-			LockPolicy:         "free",
 			ParentBlockID:      parentBlockID,
 			Linked:             true,
 		})
@@ -813,7 +810,6 @@ func syncOriginalAudio(document *Document, operation map[string]any) error {
 			SourceStartFrame:   visual.SourceStartFrame,
 			SourceEndFrame:     visual.SourceEndFrame,
 			PlaybackRate:       effectiveRate(*visual),
-			LockPolicy:         "free",
 			ParentBlockID:      parentBlockID,
 			Linked:             true,
 		})

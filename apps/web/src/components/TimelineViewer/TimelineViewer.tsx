@@ -29,7 +29,7 @@ export type TimelineJson = {
   tracks: TimelineTrackJson[];
 };
 
-export type TimelineTrackJson = {
+type TimelineTrackJson = {
   track_id: string;
   track_type?: string;
   clips?: TimelineClipJson[];
@@ -39,14 +39,13 @@ export type TimelineTrackJson = {
   gain_db?: number;
 };
 
-export type TimelineClipJson = {
+type TimelineClipJson = {
   timeline_clip_id?: string;
   track_id?: string;
   timeline_start_frame?: number;
   timeline_end_frame?: number;
   asset_id?: string;
   asset_kind?: string;
-  clip_id?: string | null;
   role?: string;
   text?: string;
   source_start_frame?: number;
@@ -55,7 +54,6 @@ export type TimelineClipJson = {
   gain_db?: number;
   fade_in_frames?: number;
   fade_out_frames?: number;
-  lock_policy?: string;
   parent_block_id?: string;
   linked?: boolean;
   effects?: Array<Record<string, unknown>>;

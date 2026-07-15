@@ -33,8 +33,10 @@ func TestOpenMigratesSchemaAndCreatesWorkspace(t *testing.T) {
 	if version != schemaVersion {
 		t.Fatalf("user_version=%d", version)
 	}
-	count, err := CountTables(t.Context(), database.Read())
-	if err != nil {
+	var count int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 15 {

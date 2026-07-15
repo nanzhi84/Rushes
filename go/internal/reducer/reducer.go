@@ -46,7 +46,6 @@ type Result struct {
 	AppliedEvents      []AppliedEvent
 	DraftStateVersions map[string]int
 	Conflict           *VersionConflict
-	ValidationReason   string
 	SkippedEvents      int
 }
 
@@ -198,7 +197,7 @@ func Apply(
 	touched := sortedKeys(state.touched)
 	if options.Validate != nil {
 		if err := options.Validate(ctx, tx, touched); err != nil {
-			return Result{Status: StatusValidationFailed, ValidationReason: err.Error()}, nil
+			return Result{Status: StatusValidationFailed}, nil
 		}
 	}
 	if err := persistResultRows(ctx, tx, options.ResultRows, state.createdAt); err != nil {

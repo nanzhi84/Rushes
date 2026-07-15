@@ -73,7 +73,7 @@ export function storeAuthToken(token: string): void {
   window.dispatchEvent(new Event(AUTH_CHANGED_EVENT));
 }
 
-export function clearAuthToken(): void {
+function clearAuthToken(): void {
   try {
     window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
   } catch {
@@ -124,7 +124,7 @@ export async function apiFetch<T>(path: string, options: ApiFetchOptions = {}): 
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
-export function createApiEventSource(path: string): EventSource {
+function createApiEventSource(path: string): EventSource {
   const token = getAuthToken();
   if (!token) {
     handleUnauthorized();
@@ -173,7 +173,7 @@ function releaseApiEventSource(path: string): void {
   }
 }
 
-export function handleUnauthorized(): void {
+function handleUnauthorized(): void {
   clearAuthToken();
   if (window.location.pathname !== "/") {
     window.history.pushState(null, document.title, "/");

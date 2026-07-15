@@ -27,17 +27,18 @@ jobs:
           go-version-file: ${{ env.GO_VERSION_FILE }}
           cache-dependency-path: go/go.sum
           check-latest: true
-      - name: Install ffmpeg (Linux)
+      - name: Install ffmpeg and aubio (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.sources /etc/apt/sources.list.d/azure-cli.list
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
-      - name: Install ffmpeg (macOS)
+          sudo apt-get install -y ffmpeg aubio-tools
+      - name: Install ffmpeg and aubio (macOS)
         if: runner.os == 'macOS'
         run: |
           brew list ffmpeg-full >/dev/null 2>&1 || brew install ffmpeg-full
           echo "$(brew --prefix ffmpeg-full)/bin" >> "$GITHUB_PATH"
+          brew list aubio >/dev/null 2>&1 || brew install aubio
       - name: Test with race detector
         working-directory: go
         run: go test -race ./...
@@ -60,11 +61,11 @@ jobs:
           node-version: 24
           cache: pnpm
           cache-dependency-path: apps/web/pnpm-lock.yaml
-      - name: Install ffmpeg
+      - name: Install ffmpeg and aubio
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.sources /etc/apt/sources.list.d/azure-cli.list
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg aubio-tools
       - name: Install web dependencies for contract generation
         run: pnpm --dir apps/web install --frozen-lockfile
       - name: Verify generated contracts and SSE golden frames
@@ -128,11 +129,11 @@ jobs:
           cache-dependency-path: |
             apps/web/pnpm-lock.yaml
             e2e/pnpm-lock.yaml
-      - name: Install ffmpeg
+      - name: Install ffmpeg and aubio
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.sources /etc/apt/sources.list.d/azure-cli.list
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg aubio-tools
       - run: pnpm --dir apps/web install --frozen-lockfile
       - run: pnpm --dir e2e install --frozen-lockfile
       - run: pnpm --dir e2e exec playwright install chromium --with-deps

@@ -40,7 +40,7 @@ func TestQwenGenerateStreamToolAndReact(t *testing.T) {
 	ctx := t.Context()
 	chatModel, err := providers.NewQwen(ctx, providers.QwenConfig{
 		APIKey:  key,
-		Model:   envOr("RUSHES_LLM_MODEL", providers.DefaultPlannerModel),
+		Model:   envOr("RUSHES_LLM_MODEL", providers.DefaultChatModel),
 		Timeout: 180 * time.Second,
 	})
 	if err != nil {

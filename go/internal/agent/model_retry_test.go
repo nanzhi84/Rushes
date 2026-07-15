@@ -309,22 +309,6 @@ func TestTerminalFailureReplyClassifiesTimeoutWithoutAnotherModelCall(t *testing
 	}
 }
 
-func TestForwardModelStreamPropagatesEOF(t *testing.T) {
-	t.Parallel()
-	source := schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("尾部", nil)})
-	stream := forwardModelStream(schema.AssistantMessage("首部", nil), source)
-	defer stream.Close()
-	for _, expected := range []string{"首部", "尾部"} {
-		message, err := stream.Recv()
-		if err != nil || message.Content != expected {
-			t.Fatalf("message=%#v err=%v", message, err)
-		}
-	}
-	if _, err := stream.Recv(); !errors.Is(err, io.EOF) {
-		t.Fatalf("EOF=%v", err)
-	}
-}
-
 func TestModelRetryHelpersCoverTimeoutKindsAndBackoff(t *testing.T) {
 	t.Parallel()
 	timeoutErr := &modelResponseTimeoutError{Retries: 5, LastErr: context.DeadlineExceeded}

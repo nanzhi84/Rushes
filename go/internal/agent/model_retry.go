@@ -187,30 +187,6 @@ func (retry *timeoutRetryChatModel) nextAttempt(
 	return retryAttempt, compactModelRetryInput(input, retryAttempt), nil
 }
 
-func forwardModelStream(
-	first *schema.Message,
-	source *schema.StreamReader[*schema.Message],
-) *schema.StreamReader[*schema.Message] {
-	reader, writer := schema.Pipe[*schema.Message](1)
-	go func() {
-		defer writer.Close()
-		defer source.Close()
-		if writer.Send(first, nil) {
-			return
-		}
-		for {
-			chunk, err := source.Recv()
-			if errors.Is(err, io.EOF) {
-				return
-			}
-			if writer.Send(chunk, err) || err != nil {
-				return
-			}
-		}
-	}()
-	return reader
-}
-
 func modelRetryDelay(attempt int) time.Duration {
 	if attempt <= 1 {
 		return 250 * time.Millisecond

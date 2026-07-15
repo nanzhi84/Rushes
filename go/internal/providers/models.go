@@ -13,7 +13,6 @@ import (
 
 const (
 	DefaultDashScopeBaseURL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-	DefaultPlannerModel     = "qwen3.7-max"
 	DefaultChatModel        = "qwen3.7-max"
 	DefaultVisionModel      = "qwen3.7-plus"
 	defaultAgentTimeout     = 120 * time.Second
@@ -28,35 +27,23 @@ type QwenConfig struct {
 }
 
 type QwenTierConfig struct {
-	APIKey       string
-	BaseURL      string
-	PlannerModel string
-	ChatModel    string
-	VisionModel  string
+	APIKey      string
+	BaseURL     string
+	ChatModel   string
+	VisionModel string
 }
 
 type QwenTiers struct {
-	Planner model.ToolCallingChatModel
-	Chat    model.ToolCallingChatModel
-	Vision  model.ToolCallingChatModel
+	Chat   model.ToolCallingChatModel
+	Vision model.ToolCallingChatModel
 }
 
 func NewQwenTiers(ctx context.Context, config QwenTierConfig) (QwenTiers, error) {
-	if config.PlannerModel == "" {
-		config.PlannerModel = DefaultPlannerModel
-	}
 	if config.ChatModel == "" {
 		config.ChatModel = DefaultChatModel
 	}
 	if config.VisionModel == "" {
 		config.VisionModel = DefaultVisionModel
-	}
-	planner, err := NewQwen(ctx, QwenConfig{
-		APIKey: config.APIKey, BaseURL: config.BaseURL, Model: config.PlannerModel,
-		Timeout: defaultAgentTimeout, EnableThinking: true,
-	})
-	if err != nil {
-		return QwenTiers{}, err
 	}
 	chat, err := NewQwen(ctx, QwenConfig{
 		APIKey: config.APIKey, BaseURL: config.BaseURL, Model: config.ChatModel,
@@ -72,7 +59,7 @@ func NewQwenTiers(ctx context.Context, config QwenTierConfig) (QwenTiers, error)
 	if err != nil {
 		return QwenTiers{}, err
 	}
-	return QwenTiers{Planner: planner, Chat: chat, Vision: vision}, nil
+	return QwenTiers{Chat: chat, Vision: vision}, nil
 }
 
 func NewQwen(ctx context.Context, cfg QwenConfig) (model.ToolCallingChatModel, error) {

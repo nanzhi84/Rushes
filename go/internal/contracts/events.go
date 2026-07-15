@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -18,9 +17,13 @@ const (
 type Actor string
 
 const (
-	ActorUser   Actor = "user"
-	ActorAgent  Actor = "agent"
-	ActorJob    Actor = "job"
+	ActorUser  Actor = "user"
+	ActorAgent Actor = "agent"
+	ActorJob   Actor = "job"
+	// ActorSystem 现在没有任何发射方，但必须保留为受理值：旧 Python 后端写过
+	// actor="system" 的事件，SSE 重放会对 event_log 里的历史行做 ParseEvent +
+	// Validate，校验失败的行会被静默丢弃（见 api/sse.go）。删掉它等于让旧工作区
+	// 丢失这部分历史。schemaV3 清理 TimelineVersionRestored 就是被同类问题咬过。
 	ActorSystem Actor = "system"
 )
 
@@ -138,15 +141,6 @@ func ParseEvent(data []byte) (Event, error) {
 		return Event{}, err
 	}
 	return event, event.Validate()
-}
-
-func RegisteredEventNames() []string {
-	names := make([]string, 0, len(EventRegistry))
-	for name := range EventRegistry {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }
 
 func RoutesToWorkspace(event Event) bool {

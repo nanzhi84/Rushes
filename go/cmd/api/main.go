@@ -61,9 +61,8 @@ func run() error {
 	if key := os.Getenv("RUSHES_DASHSCOPE_API_KEY"); key != "" {
 		tiers, err = providers.NewQwenTiers(context.Background(), providers.QwenTierConfig{
 			APIKey: key, BaseURL: os.Getenv("RUSHES_DASHSCOPE_BASE_URL"),
-			PlannerModel: os.Getenv("RUSHES_QWEN_PLANNER_MODEL"),
-			ChatModel:    os.Getenv("RUSHES_QWEN_CHAT_MODEL"),
-			VisionModel:  os.Getenv("RUSHES_QWEN_VISION_MODEL"),
+			ChatModel:   os.Getenv("RUSHES_QWEN_CHAT_MODEL"),
+			VisionModel: os.Getenv("RUSHES_QWEN_VISION_MODEL"),
 		})
 		if err != nil {
 			return err

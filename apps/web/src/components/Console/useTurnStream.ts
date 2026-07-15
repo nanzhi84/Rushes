@@ -3,7 +3,7 @@ import { useDocumentVisibility } from "../../app/use_document_visibility";
 import { acquireApiEventSource } from "../../auth";
 
 // text_delta 阶段是 assistant；完成后区分叙述、正式回复和后台观察。
-export type TurnStreamMessageKind = "assistant" | "narration" | "reply" | "observation";
+type TurnStreamMessageKind = "assistant" | "narration" | "reply" | "observation";
 
 export type StreamMessageItem = {
   type: "message";
