@@ -30,10 +30,12 @@ type serviceToolModel struct {
 	tools []*schema.ToolInfo
 }
 
-type thirtyToolExecutionsModel struct {
-	mu             sync.Mutex
-	modelCalls     int
-	toolExecutions int
+type toolRoundBudgetModel struct {
+	mu           sync.Mutex
+	targetRounds int
+	modelCalls   int
+	toolRounds   int
+	prompts      []string
 }
 
 type selfRepairServiceModel struct {
@@ -213,11 +215,11 @@ func (modelValue *serviceToolModel) Stream(
 	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
-func (modelValue *thirtyToolExecutionsModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+func (modelValue *toolRoundBudgetModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return modelValue, nil
 }
 
-func (modelValue *thirtyToolExecutionsModel) Generate(
+func (modelValue *toolRoundBudgetModel) Generate(
 	_ context.Context,
 	messages []*schema.Message,
 	_ ...model.Option,
@@ -225,21 +227,29 @@ func (modelValue *thirtyToolExecutionsModel) Generate(
 	modelValue.mu.Lock()
 	defer modelValue.mu.Unlock()
 	modelValue.modelCalls++
-	if len(messages) > 0 && messages[len(messages)-1].Role == schema.Tool {
-		modelValue.toolExecutions++
+	if len(messages) == 0 || messages[0].Role != schema.System {
+		return nil, errors.New("工具预算测试缺少系统提示")
 	}
-	if modelValue.toolExecutions < maxToolExecutionsPerTurn {
+	modelValue.prompts = append(modelValue.prompts, messages[0].Content)
+	if len(messages) > 0 && messages[len(messages)-1].Role == schema.Tool {
+		modelValue.toolRounds++
+	}
+	targetRounds := modelValue.targetRounds
+	if targetRounds <= 0 {
+		targetRounds = maxToolRoundsPerTurn
+	}
+	if modelValue.toolRounds < targetRounds {
 		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID: randomID("thirty_step_call"),
+			ID: randomID("budget_round_call"),
 			Function: schema.FunctionCall{
 				Name: "asset.list_assets", Arguments: `{}`,
 			},
 		}}), nil
 	}
-	return schema.AssistantMessage("30 次工具执行完成。", nil), nil
+	return schema.AssistantMessage(fmt.Sprintf("%d 次工具往返完成。", targetRounds), nil), nil
 }
 
-func (modelValue *thirtyToolExecutionsModel) Stream(
+func (modelValue *toolRoundBudgetModel) Stream(
 	ctx context.Context,
 	messages []*schema.Message,
 	options ...model.Option,
@@ -251,10 +261,10 @@ func (modelValue *thirtyToolExecutionsModel) Stream(
 	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
-func (modelValue *thirtyToolExecutionsModel) counts() (int, int) {
+func (modelValue *toolRoundBudgetModel) snapshot() (int, int, []string) {
 	modelValue.mu.Lock()
 	defer modelValue.mu.Unlock()
-	return modelValue.modelCalls, modelValue.toolExecutions
+	return modelValue.modelCalls, modelValue.toolRounds, append([]string(nil), modelValue.prompts...)
 }
 
 func (modelValue *selfRepairServiceModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
@@ -427,49 +437,114 @@ done:
 	}
 }
 
-func TestReactAgentAllowsThirtyToolExecutionsAndFinalReply(t *testing.T) {
+func TestReactAgentMakesBudgetVisibleAndAllowsFortyToolRounds(t *testing.T) {
 	t.Parallel()
+	if maxToolRoundsPerTurn != 40 || maxReActStepsPerTurn != 81 {
+		t.Fatalf(
+			"budget policy hard=%d steps=%d",
+			maxToolRoundsPerTurn, maxReActStepsPerTurn,
+		)
+	}
 	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_thirty_steps")
-	insertAgentMessage(t, database, "draft_thirty_steps", "user_thirty_steps", "连续执行三十步")
-	modelValue := &thirtyToolExecutionsModel{}
+	createAgentDraft(t, database, "draft_tool_round_budget")
+	insertAgentMessage(t, database, "draft_tool_round_budget", "user_tool_round_budget", "连续执行多轮工具")
+	modelValue := &toolRoundBudgetModel{}
 	service, err := NewService(t.Context(), database, modelValue)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	_, stream, unsubscribe := service.Hub().Subscribe("draft_thirty_steps")
+	_, stream, unsubscribe := service.Hub().Subscribe("draft_tool_round_budget")
 	defer unsubscribe()
 	if !service.Queue().EnqueueUserMessage(
-		"draft_thirty_steps", "user_thirty_steps", "连续执行三十步",
+		"draft_tool_round_budget", "user_tool_round_budget", "连续执行多轮工具",
 	) {
 		t.Fatal("enqueue 失败")
 	}
-	service.Queue().JoinDraft("draft_thirty_steps")
+	service.Queue().JoinDraft("draft_tool_round_budget")
 	completed := ""
 	for {
 		select {
 		case event := <-stream:
 			switch event["type"] {
 			case "turn_error":
-				t.Fatal("30 次工具执行不应触发步数上限")
+				t.Fatal("40 次工具往返不应触发步数上限")
 			case "message_completed":
 				completed, _ = event["content"].(string)
 			case "turn_ended":
-				modelCalls, toolExecutions := modelValue.counts()
-				if event["outcome"] != "finished" || completed != "30 次工具执行完成。" ||
-					modelCalls != maxToolExecutionsPerTurn+1 ||
-					toolExecutions != maxToolExecutionsPerTurn {
+				modelCalls, toolRounds, prompts := modelValue.snapshot()
+				if event["outcome"] != "finished" || completed != "40 次工具往返完成。" ||
+					modelCalls != 41 || toolRounds != 40 || len(prompts) != 41 {
 					t.Fatalf(
-						"completed=%q event=%#v model_calls=%d tool_executions=%d",
-						completed, event, modelCalls, toolExecutions,
+						"completed=%q event=%#v model_calls=%d tool_rounds=%d prompts=%d",
+						completed, event, modelCalls, toolRounds, len(prompts),
 					)
+				}
+				for index := 0; index < 35; index++ {
+					if prompts[index] != systemPrompt {
+						t.Fatalf("model call %d unexpectedly contains budget noise", index+1)
+					}
+				}
+				if !strings.Contains(prompts[35], "工具预算提醒") ||
+					!strings.Contains(prompts[35], "剩余 5 次") ||
+					strings.Contains(prompts[35], "禁止再调工具") {
+					t.Fatalf("model call 36 prompt=%q", prompts[35])
+				}
+				for index := 40; index < len(prompts); index++ {
+					if !strings.Contains(prompts[index], "最后一次生成机会") ||
+						!strings.Contains(prompts[index], "禁止再调工具") {
+						t.Fatalf("model call %d prompt=%q", index+1, prompts[index])
+					}
 				}
 				return
 			}
 		case <-time.After(5 * time.Second):
-			t.Fatal("30 次工具执行后没有生成最终回复")
+			t.Fatal("40 次工具往返后没有生成最终回复")
 		}
+	}
+}
+
+func TestReactAgentThirtyRoundFixtureWarnsOnCallsTwentySixAndThirtyOne(t *testing.T) {
+	t.Parallel()
+	const fixtureRounds = 30
+	database := agentTestDatabase(t)
+	const draftID = "draft_thirty_round_fixture"
+	createAgentDraft(t, database, draftID)
+	modelValue := &toolRoundBudgetModel{targetRounds: fixtureRounds}
+	service, err := NewService(t.Context(), database, modelValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := withTurnBudgetState(t.Context(), newTurnBudgetState(fixtureRounds))
+	ctx = rushestools.WithDraftID(ctx, draftID)
+	response, err := service.react.Generate(ctx, []*schema.Message{
+		schema.UserMessage("执行三十轮工具后收敛"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	modelCalls, toolRounds, prompts := modelValue.snapshot()
+	if response.Content != "30 次工具往返完成。" || modelCalls != 31 ||
+		toolRounds != 30 || len(prompts) != 31 {
+		t.Fatalf(
+			"response=%q model_calls=%d tool_rounds=%d prompts=%d",
+			response.Content, modelCalls, toolRounds, len(prompts),
+		)
+	}
+	for index := 0; index < 25; index++ {
+		if prompts[index] != systemPrompt {
+			t.Fatalf("model call %d unexpectedly contains budget noise", index+1)
+		}
+	}
+	if !strings.Contains(prompts[25], "工具预算提醒") ||
+		!strings.Contains(prompts[25], "剩余 5 次") ||
+		strings.Contains(prompts[25], "禁止再调工具") {
+		t.Fatalf("model call 26 prompt=%q", prompts[25])
+	}
+	if !strings.Contains(prompts[30], "最后一次生成机会") ||
+		!strings.Contains(prompts[30], "禁止再调工具") {
+		t.Fatalf("model call 31 prompt=%q", prompts[30])
 	}
 }
 
