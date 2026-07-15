@@ -7,11 +7,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
+	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
 
 func TestContextManagerKeepsReferenceSnapshotAndInjectsObjectiveMergePatch(t *testing.T) {
@@ -61,6 +63,7 @@ func TestContextManagerKeepsReferenceSnapshotAndInjectsObjectiveMergePatch(t *te
 		t.Fatal(err)
 	}
 	if !second.Manifest.HasWorldStatePatch || second.Manifest.WindowID != first.Manifest.WindowID ||
+		second.Manifest.WindowNumber != 1 ||
 		second.Manifest.ReferenceHash != first.Manifest.ReferenceHash {
 		t.Fatalf("second manifest=%#v first=%#v", second.Manifest, first.Manifest)
 	}
@@ -87,6 +90,146 @@ func TestContextManagerKeepsReferenceSnapshotAndInjectsObjectiveMergePatch(t *te
 	currentMap, _ := second.Snapshot.Map()
 	if reconstructed := applyMergePatch(baseMap, patch); !reflect.DeepEqual(reconstructed, currentMap) {
 		t.Fatalf("merge patch cannot reconstruct current\npatch=%#v\nwant=%#v\ngot=%#v", patch, currentMap, reconstructed)
+	}
+}
+
+func TestContextManagerRebasesOversizedWorldStatePatch(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	const draftID = "draft_context_large_patch"
+	createAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	selections := make([]timeline.Selection, 0, 51)
+	for index := 0; index < 51; index++ {
+		selections = append(selections, timeline.Selection{
+			AssetID: fmt.Sprintf("asset_large_%02d", index), AssetKind: "video",
+			SourceStartFrame: 0, SourceEndFrame: 30, Role: "b_roll",
+		})
+	}
+	document, err := timeline.ComposeInitial(draftID, 1, selections)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted, persistErr := service.persistTimeline(
+		t.Context(), draftID, document, "large_context_fixture",
+	); persistErr != nil || persisted.Status != "succeeded" {
+		t.Fatalf("persist initial=%#v err=%v", persisted, persistErr)
+	}
+
+	manager := NewContextManager(database)
+	first, err := manager.Build(t.Context(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Version = 2
+	document.TimelineID = draftID + ":v2"
+	document.Tracks[0].Clips[0].GainDB = -6
+	if persisted, persistErr := service.persistTimeline(
+		t.Context(), draftID, document, "large_context_edit",
+	); persistErr != nil || persisted.Status != "succeeded" {
+		t.Fatalf("persist edit=%#v err=%v", persisted, persistErr)
+	}
+
+	second, err := manager.Build(t.Context(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Manifest.WindowNumber != 1 || second.Manifest.WindowNumber != 2 ||
+		second.Manifest.WindowID == first.Manifest.WindowID || second.Manifest.HasWorldStatePatch ||
+		second.Manifest.ReferenceHash != second.Manifest.CurrentHash {
+		t.Fatalf("first=%#v second=%#v", first.Manifest, second.Manifest)
+	}
+	stored, err := storage.GetAgentContextCheckpoint(t.Context(), database.Read(), draftID)
+	if err != nil || stored.BaseSnapshotHash != second.Manifest.ReferenceHash ||
+		stored.WindowID != second.Manifest.WindowID || stored.WindowNumber != 2 {
+		t.Fatalf("stored=%#v second=%#v err=%v", stored, second.Manifest, err)
+	}
+	storedBase, err := WorldStateSnapshotFromMap(stored.BaseSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedHash, err := storedBase.Hash()
+	if err != nil || storedHash != second.Manifest.CurrentHash {
+		t.Fatalf("stored hash=%s current=%s err=%v", storedHash, second.Manifest.CurrentHash, err)
+	}
+	third, err := manager.Build(t.Context(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Manifest.WindowID != second.Manifest.WindowID || third.Manifest.WindowNumber != 2 ||
+		third.Manifest.HasWorldStatePatch {
+		t.Fatalf("rebase must be idempotent: second=%#v third=%#v", second.Manifest, third.Manifest)
+	}
+}
+
+func TestContextManagerKeepsSmallTimelinePatchIncremental(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	const draftID = "draft_context_small_patch"
+	createAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+		AssetID: "asset_small", AssetKind: "video",
+		SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted, persistErr := service.persistTimeline(
+		t.Context(), draftID, document, "small_context_fixture",
+	); persistErr != nil || persisted.Status != "succeeded" {
+		t.Fatalf("persist initial=%#v err=%v", persisted, persistErr)
+	}
+	manager := NewContextManager(database)
+	first, err := manager.Build(t.Context(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Version = 2
+	document.TimelineID = draftID + ":v2"
+	document.Tracks[0].Clips[0].GainDB = -3
+	if persisted, persistErr := service.persistTimeline(
+		t.Context(), draftID, document, "small_context_edit",
+	); persistErr != nil || persisted.Status != "succeeded" {
+		t.Fatalf("persist edit=%#v err=%v", persisted, persistErr)
+	}
+	base, err := WorldStateSnapshotFromMap(first.Checkpoint.BaseSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := manager.builder.Snapshot(t.Context(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, err := base.MergePatchTo(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runes := utf8.RuneCount(raw); runes >= contextWorldStatePatchRebaseFloor {
+		t.Fatalf("small patch runes=%d patch=%s", runes, raw)
+	}
+	second, err := manager.Build(t.Context(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Manifest.WindowID != first.Manifest.WindowID || second.Manifest.WindowNumber != 1 ||
+		!second.Manifest.HasWorldStatePatch ||
+		second.Manifest.ReferenceHash != first.Manifest.ReferenceHash ||
+		second.Manifest.ReferenceHash == second.Manifest.CurrentHash {
+		t.Fatalf("first=%#v second=%#v", first.Manifest, second.Manifest)
 	}
 }
 
@@ -164,6 +307,76 @@ func TestServiceCompactionReplacesHistoryAndPreservesPendingUser(t *testing.T) {
 	visible, err := storage.ListMessages(t.Context(), database.Read(), draftID, 200)
 	if err != nil || len(visible) != 51 {
 		t.Fatalf("visible history must remain intact: len=%d err=%v", len(visible), err)
+	}
+}
+
+func TestCJKHistoryTriggersCompactionAndPreservesAssistantBoundary(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	const draftID = "draft_context_cjk_compaction"
+	createAgentDraft(t, database, draftID)
+	content := strings.Repeat("中", contextHistorySoftTokenLimit+1)
+	legacyEstimate := (len([]byte(content)) + 3) / 4
+	if legacyEstimate >= contextHistorySoftTokenLimit {
+		t.Fatalf("fixture must stay below legacy estimate: %d", legacyEstimate)
+	}
+	insertContextMessage(t, database, storage.Message{
+		ID: "assistant_cjk", DraftID: draftID,
+		Role: "assistant", Kind: "reply", Content: content,
+	})
+	insertContextMessage(t, database, storage.Message{
+		ID: "user_cjk_pending", DraftID: draftID,
+		Role: "user", Kind: "user", Content: "保留在压缩摘要外",
+	})
+	build, err := NewContextManager(database).Build(t.Context(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !build.Manifest.NeedsCompaction {
+		t.Fatalf("CJK history should compact: %#v", build.Manifest)
+	}
+	_, through, ok := build.CompactionSource(true)
+	if !ok || through == nil || *through != "assistant_cjk" {
+		t.Fatalf("through=%v ok=%v", through, ok)
+	}
+	chatModel := &decisionContinuationModel{}
+	service, err := NewService(t.Context(), database, chatModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	messages, err := service.modelMessages(t.Context(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 3 || messages[1].Extra["context_phase"] != "compaction_replacement" ||
+		!strings.Contains(messages[1].Content, "DECISION-CONTINUED") ||
+		messages[2].Role != schema.User || messages[2].Content != "保留在压缩摘要外" {
+		t.Fatalf("messages=%#v", messages)
+	}
+	checkpoint, err := storage.GetAgentContextCheckpoint(t.Context(), database.Read(), draftID)
+	if err != nil || checkpoint.WindowNumber != 2 || checkpoint.CompactedThroughMessageID == nil ||
+		*checkpoint.CompactedThroughMessageID != "assistant_cjk" {
+		t.Fatalf("checkpoint=%#v err=%v", checkpoint, err)
+	}
+}
+
+func TestApproximateTokensCalibratesCJKAndPreservesASCIIEstimate(t *testing.T) {
+	t.Parallel()
+	cjk := strings.Repeat("中文、かな。Ａ", 100)
+	cjkRunes := utf8.RuneCountInString(cjk)
+	cjkTokens := approximateTokens(cjk)
+	if cjkTokens < cjkRunes || cjkTokens > cjkRunes+cjkRunes/10 {
+		t.Fatalf("CJK tokens=%d runes=%d", cjkTokens, cjkRunes)
+	}
+	ascii := strings.Repeat("abcd", 37) + "x"
+	asciiWant := (len([]byte(ascii)) + 3) / 4
+	if got := approximateTokens(ascii); got != asciiWant {
+		t.Fatalf("ASCII tokens=%d want=%d", got, asciiWant)
+	}
+	if got, want := approximateTokens(cjk+ascii),
+		approximateTokens(cjk)+approximateTokens(ascii); got != want {
+		t.Fatalf("mixed tokens=%d want=%d", got, want)
 	}
 }
 
@@ -318,6 +531,24 @@ func TestContextManagerDefensiveBranchesAndCompactionBudget(t *testing.T) {
 	}
 	if _, err := valid.MergePatchTo(bad); err == nil {
 		t.Fatal("bad target merge patch must fail")
+	}
+	if rebased, err := shouldRebaseWorldStatePatch(valid, nil); err != nil || rebased {
+		t.Fatalf("empty patch rebased=%v err=%v", rebased, err)
+	}
+	if _, err := shouldRebaseWorldStatePatch(bad, map[string]any{"changed": true}); err == nil {
+		t.Fatal("bad base rebase sizing must fail")
+	}
+	if _, err := shouldRebaseWorldStatePatch(
+		valid, map[string]any{"bad": make(chan int)},
+	); err == nil {
+		t.Fatal("bad patch rebase sizing must fail")
+	}
+	largeBase := NewWorldStateSnapshot(map[string]any{
+		"large": strings.Repeat("基", 10000),
+	})
+	ratioPatch := map[string]any{"small": strings.Repeat("补", 2100)}
+	if rebased, err := shouldRebaseWorldStatePatch(largeBase, ratioPatch); err != nil || rebased {
+		t.Fatalf("sub-ratio patch rebased=%v err=%v", rebased, err)
 	}
 	if got := applyMergePatch(42, map[string]any{"name": "value"}); !reflect.DeepEqual(got, map[string]any{"name": "value"}) {
 		t.Fatalf("non-object target=%#v", got)

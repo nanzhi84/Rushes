@@ -257,7 +257,7 @@ func (service *Service) toolEditTalkingHead(
 	}
 	semanticDeleteRanges = append(semanticDeleteRanges, removedWordRanges...)
 	semanticDeleteRanges = mergeTalkingHeadRanges(semanticDeleteRanges)
-	effectivePauses, effectivePauseRanges, redundantPauses := resolveTalkingHeadPauseRanges(
+	effectivePauses, _, redundantPauses := resolveTalkingHeadPauseRanges(
 		removedPauses, semanticDeleteRanges, minTalkingHeadPauseResidualFrames,
 	)
 	if len(removedPauses) > 0 && len(effectivePauses) == 0 && len(redundantPauses) > 0 {

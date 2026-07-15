@@ -225,7 +225,7 @@ type AudioBeatAnalysisInput struct {
 
 type AudioWaveformEnvelope struct {
 	SampleIntervalFrames int     `json:"sample_interval_frames"`
-	SampleFrames         []int   `json:"sample_frames" jsonschema_description:"与 samples 一一对应的时间线窗口起始帧；第 i 个响度值位于 sample_frames[i]"`
+	SampleFrames         []int   `json:"sample_frames" jsonschema_description:"与 samples 一一对应、按 timeline_fps 标尺表示的素材内 RMS 窗口起始帧，第 i 个响度值位于 sample_frames[i]；audio.analyze_beats 返回本次请求的完整压缩波形，WorldState 只常驻最多 24 点摘要"`
 	Samples              []int   `json:"samples"`
 	Encoding             string  `json:"encoding"`
 	FloorDB              float64 `json:"floor_db"`

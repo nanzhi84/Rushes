@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ const (
 	contextRecentEditLimit           = 20
 	contextRecentEditRuneBudget      = 6000
 	contextMaterialCatalogRuneBudget = 12000
+	contextResidentWaveformPoints    = 24
 )
 
 // ContextBuilder 每次模型调用前从 SQLite 重建客观上下文。它只读取当前时间线
@@ -43,7 +45,7 @@ func (builder *ContextBuilder) Build(ctx context.Context, draftID string) (strin
 	return "【当前草稿最新 WorldState】\n" + string(raw) +
 		"\nsections 是当前客观状态的唯一事实源；历史回复和 recent_edit_history 不能覆盖它。" +
 		"assets.material_catalog 是常驻精简素材目录；详细镜头语义必须按创作意图调用 media.search_shots 检索；完整口播转写不常驻，speech_searchable=true 时按需调用 speech.inspect。" +
-		"timeline 中 beat_grid.waveform 的 sample_frames 与 samples 一一对应，分别是 RMS 窗口起始帧和 0–100 原始响度；不包含高潮标签。" +
+		"timeline 中 beat_grid.waveform 仅常驻最多 24 点摘要：point_count 是完整压缩波形点数，sample_interval_frames 是原始 RMS 窗口宽度，sample_frames 是按 timeline_fps 标尺表示的摘要点素材内帧坐标并与 samples 一一对应，loudness_min/mean/max 汇总完整波形的 0–100 原始响度；完整波形必须按创作意图调用 audio.analyze_beats 获取，摘要不包含高潮标签。" +
 		"人工编辑已经保存，不要要求用户重做；需要继续剪辑时直接基于当前轨道和片段。", nil
 }
 
@@ -424,13 +426,33 @@ func compactWaveformContext(value any) map[string]any {
 			return nil
 		}
 	}
+	pointCount := len(samples)
+	residentCount := min(pointCount, contextResidentWaveformPoints)
+	residentFrames := make([]int, 0, residentCount)
+	residentSamples := make([]int, 0, residentCount)
+	minimum, maximum, total := samples[0], samples[0], 0
+	for _, sample := range samples {
+		minimum = min(minimum, sample)
+		maximum = max(maximum, sample)
+		total += sample
+	}
+	for index := 0; index < residentCount; index++ {
+		sourceIndex := index
+		if pointCount > residentCount {
+			sourceIndex = index * (pointCount - 1) / (residentCount - 1)
+		}
+		residentFrames = append(residentFrames, sampleFrames[sourceIndex])
+		residentSamples = append(residentSamples, samples[sourceIndex])
+	}
+	mean := math.Round(float64(total)/float64(pointCount)*10) / 10
 	return map[string]any{
 		"sample_interval_frames": int(interval),
-		"sample_frames":          sampleFrames,
-		"samples":                samples,
-		"encoding":               stringValue(waveform["encoding"]),
-		"floor_db":               waveform["floor_db"],
-		"ceiling_db":             waveform["ceiling_db"],
+		"point_count":            pointCount,
+		"sample_frames":          residentFrames,
+		"samples":                residentSamples,
+		"loudness_min":           minimum,
+		"loudness_mean":          mean,
+		"loudness_max":           maximum,
 	}
 }
 
