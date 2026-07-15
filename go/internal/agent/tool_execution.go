@@ -1582,6 +1582,9 @@ func (service *Service) toolApplyPatch(
 	operation := operations[0]
 	document, err := timeline.ApplyPatch(current, operation)
 	if err != nil {
+		if failure, ok := timelineOpFailureAt(err, operation, 0); ok {
+			return failure, nil
+		}
 		return rushestools.ToolResult{}, err
 	}
 	attachedBeatGrids, beatWarnings := service.attachMissingBGMBeatGrids(ctx, draftID, &document)
@@ -1634,6 +1637,9 @@ func (service *Service) toolApplyPatches(
 	for index, operation := range plannedOperations {
 		document, err = timeline.ApplyPatch(document, operation)
 		if err != nil {
+			if failure, ok := timelineOpFailureAt(err, operation, index+1); ok {
+				return failure, nil
+			}
 			message := fmt.Sprintf("第 %d 个时间线补丁失败: %v", index+1, err)
 			return rushestools.ToolResult{
 				Status: "failed", Observation: message,

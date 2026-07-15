@@ -295,7 +295,7 @@ func TestGenericBGMInsertAutomaticallyAttachesBeatGrid(t *testing.T) {
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_generic_bgm")
 	output, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: map[string]any{
-		"kind": "insert_clip", "track_id": "bgm", "asset_id": "generic_bgm", "asset_kind": "audio",
+		"kind": "insert_clip", "track_id": "bgm", "asset_id": "generic_bgm",
 		"role": "bgm", "timeline_start_frame": 0, "source_start_frame": 0, "source_end_frame": 60,
 	}})
 	if err != nil {
@@ -306,7 +306,8 @@ func TestGenericBGMInsertAutomaticallyAttachesBeatGrid(t *testing.T) {
 		t.Fatalf("tool result=%#v", toolResult)
 	}
 	latest, err := timeline.Latest(t.Context(), database, "draft_generic_bgm")
-	if err != nil || len(latest.Tracks[4].Clips) != 1 || !hasBeatGrid(latest.Tracks[4].Clips[0].Effects) {
+	if err != nil || len(latest.Tracks[4].Clips) != 1 || latest.Tracks[4].Clips[0].AssetKind != "audio" ||
+		!hasBeatGrid(latest.Tracks[4].Clips[0].Effects) {
 		t.Fatalf("latest=%#v err=%v", latest, err)
 	}
 }

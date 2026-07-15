@@ -41,15 +41,15 @@ func (service *Service) enrichTimelineOperations(
 		}
 		switch stringValue(operation["kind"]) {
 		case "insert_clip":
-			if valueOr(stringValue(operation["track_id"]), "visual_base") != "visual_base" {
-				break
-			}
 			asset, exists := assetByID[stringValue(operation["asset_id"])]
 			if !exists {
 				break
 			}
 			if stringValue(operation["asset_kind"]) == "" {
 				operation["asset_kind"] = asset.Kind
+			}
+			if valueOr(stringValue(operation["track_id"]), "visual_base") != "visual_base" {
+				break
 			}
 			if _, explicit := operation["include_original_audio"]; !explicit {
 				hasAudio, _ := asset.Probe["has_audio"].(bool)
