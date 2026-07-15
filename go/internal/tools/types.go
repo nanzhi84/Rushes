@@ -448,6 +448,11 @@ type DecisionAnswerInput struct {
 	Payload    map[string]any `json:"payload,omitempty"`
 }
 
+type PlanUpdateInput struct {
+	Plan  map[string]any `json:"plan" jsonschema:"required" jsonschema_description:"要写入持久创作计划本的 JSON 对象；默认按 RFC 7396 增量合并，值为 null 时删除对应键"`
+	Reset *bool          `json:"reset,omitempty" jsonschema_description:"设为 true 时先清空现有计划，再按 RFC 7396 写入 plan；对象属性 null 仍表示删除；默认 false"`
+}
+
 type ComposeClip struct {
 	AssetID          string `json:"asset_id" jsonschema:"required"`
 	SourceStartFrame int    `json:"source_start_frame"`

@@ -94,11 +94,20 @@ type AgentContextCheckpointRow struct {
 	CompactedThroughMessageID *string
 }
 
+// DraftPlanUpdateRow persists the model's private cross-turn creative plan.
+// Like AgentContextCheckpointRow it is bookkeeping, not a domain event: updating
+// it must not bump draft state_version or emit domain SSE events.
+type DraftPlanUpdateRow struct {
+	DraftID     string
+	ContentPlan map[string]any
+}
+
 type ResultRows struct {
 	Message                *MessageRow
 	MaterialSummaries      []MaterialSummaryRow
 	Transcripts            []TranscriptRow
 	AgentContextCheckpoint *AgentContextCheckpointRow
+	DraftPlanUpdate        *DraftPlanUpdateRow
 }
 
 type ValidationHook func(context.Context, *sql.Tx, []string) error
@@ -1135,6 +1144,29 @@ func persistResultRows(
 			return err
 		}
 	}
+	if plan := rows.DraftPlanUpdate; plan != nil {
+		if plan.DraftID == "" || plan.ContentPlan == nil {
+			return errors.New("草稿创作计划更新字段不完整")
+		}
+		encoded, err := json.Marshal(plan.ContentPlan)
+		if err != nil {
+			return fmt.Errorf("草稿创作计划无法编码: %w", err)
+		}
+		result, err := tx.ExecContext(ctx,
+			"UPDATE drafts SET content_plan_json=? WHERE draft_id=?",
+			string(encoded), plan.DraftID,
+		)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return fmt.Errorf("草稿创作计划更新未找到草稿 %s", plan.DraftID)
+		}
+	}
 	return nil
 }
 
@@ -1220,7 +1252,8 @@ func emptyTimeline(draftID string, version int) map[string]any {
 
 func emptyResultRows(rows ResultRows) bool {
 	return rows.Message == nil && len(rows.MaterialSummaries) == 0 &&
-		len(rows.Transcripts) == 0 && rows.AgentContextCheckpoint == nil
+		len(rows.Transcripts) == 0 && rows.AgentContextCheckpoint == nil &&
+		rows.DraftPlanUpdate == nil
 }
 
 func sortedKeys(values map[string]struct{}) []string {

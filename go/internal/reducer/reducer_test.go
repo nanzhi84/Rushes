@@ -173,6 +173,54 @@ func TestValidationFailureRollsBackEventsAndSideRows(t *testing.T) {
 	}
 }
 
+func TestPostPersistFailureRollsBackDraftPlanAndDomainChanges(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft-plan-rollback")
+	before, err := storage.GetDraft(t.Context(), database.Read(), "draft-plan-rollback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var eventsBefore int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM event_log").Scan(&eventsBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	baseVersion := before.StateVersion
+	_, err = Apply(t.Context(), database, []contracts.Event{{
+		Type: "DraftRenamed", DraftID: before.ID, BaseVersion: &baseVersion,
+		Payload: map[string]any{
+			"name": "不应提交的新名称",
+			"bad":  make(chan int),
+		},
+	}}, Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: ResultRows{DraftPlanUpdate: &DraftPlanUpdateRow{
+			DraftID: before.ID, ContentPlan: map[string]any{"should": "rollback"},
+		}},
+	})
+	if err == nil {
+		t.Fatal("appendEvents JSON 编码失败应回滚整个事务")
+	}
+	after, lookupErr := storage.GetDraft(t.Context(), database.Read(), before.ID)
+	if lookupErr != nil {
+		t.Fatal(lookupErr)
+	}
+	if after.Name != before.Name || after.StateVersion != before.StateVersion ||
+		after.UpdatedAt != before.UpdatedAt || len(after.ContentPlan) != 0 {
+		t.Fatalf("post-persist failure did not roll back: before=%#v after=%#v", before, after)
+	}
+	var eventsAfter int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM event_log").Scan(&eventsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if eventsAfter != eventsBefore {
+		t.Fatalf("event_log count=%d want=%d", eventsAfter, eventsBefore)
+	}
+}
+
 func TestResultRowsCommitWithReducer(t *testing.T) {
 	t.Parallel()
 	database := openTestDB(t)
@@ -206,6 +254,72 @@ func TestResultRowsCommitWithReducer(t *testing.T) {
 		if err := database.Read().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("%s count=%d err=%v", table, count, err)
 		}
+	}
+}
+
+func TestDraftPlanResultRowCommitsWithoutDomainEventOrVersion(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft-plan")
+	before, err := storage.GetDraft(t.Context(), database.Read(), "draft-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var eventsBefore int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM event_log").Scan(&eventsBefore); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: ResultRows{DraftPlanUpdate: &DraftPlanUpdateRow{
+			DraftID: "draft-plan",
+			ContentPlan: map[string]any{
+				"story": map[string]any{"pace": "fast"}, "locked": true,
+			},
+		}},
+	})
+	if err != nil || result.Status != StatusApplied || len(result.AppliedEvents) != 0 ||
+		len(result.DraftStateVersions) != 0 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	after, err := storage.GetDraft(t.Context(), database.Read(), "draft-plan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	story, _ := after.ContentPlan["story"].(map[string]any)
+	if story["pace"] != "fast" || after.ContentPlan["locked"] != true {
+		t.Fatalf("content plan=%#v", after.ContentPlan)
+	}
+	if after.StateVersion != before.StateVersion || after.UpdatedAt != before.UpdatedAt {
+		t.Fatalf("plan bookkeeping changed domain version: before=%#v after=%#v", before, after)
+	}
+	var eventsAfter int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM event_log").Scan(&eventsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if eventsAfter != eventsBefore {
+		t.Fatalf("event_log count=%d want=%d", eventsAfter, eventsBefore)
+	}
+
+	invalidRows := []*DraftPlanUpdateRow{
+		{DraftID: "", ContentPlan: map[string]any{}},
+		{DraftID: "draft-plan", ContentPlan: nil},
+		{DraftID: "missing", ContentPlan: map[string]any{}},
+		{DraftID: "draft-plan", ContentPlan: map[string]any{"bad": make(chan int)}},
+	}
+	for index, row := range invalidRows {
+		if _, err := Apply(t.Context(), database, nil, Options{
+			Actor: contracts.ActorAgent, ResultRows: ResultRows{DraftPlanUpdate: row},
+		}); err == nil {
+			t.Errorf("invalid row %d should fail: %#v", index, row)
+		}
+	}
+	unchanged, err := storage.GetDraft(t.Context(), database.Read(), "draft-plan")
+	if err != nil || unchanged.ContentPlan["locked"] != true {
+		t.Fatalf("invalid row changed plan=%#v err=%v", unchanged.ContentPlan, err)
 	}
 }
 

@@ -712,13 +712,21 @@ func operationTarget(operation map[string]any) string {
 func sanitizeContextMap(input map[string]any) map[string]any {
 	result := make(map[string]any, len(input))
 	for key, value := range input {
-		if key == "timeline_version" || key == "timeline_revision" || key == "version" ||
-			key == "timeline_id" || key == "draft_id" {
+		if isReservedContextKey(key) {
 			continue
 		}
 		result[key] = sanitizeContextValue(value)
 	}
 	return result
+}
+
+func isReservedContextKey(key string) bool {
+	switch key {
+	case "timeline_version", "timeline_revision", "version", "timeline_id", "draft_id":
+		return true
+	default:
+		return false
+	}
 }
 
 func sanitizeContextValue(value any) any {

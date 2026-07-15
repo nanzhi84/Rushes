@@ -149,6 +149,9 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		"timeline.compose_initial": {
 			"video/image", "不能传 audio/font", "asset.list_assets", "duration_frames", "timeline_fps",
 		},
+		"plan.update": {
+			"RFC 7396", "reset=true", "跨回合",
+		},
 		"timeline.apply_patch": {
 			"op.oneOf", "timeline.inspect",
 		},
@@ -190,10 +193,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := registry.Specs(false)
-	if len(core) != 19 {
+	if len(core) != 20 {
 		t.Fatalf("core tools=%d", len(core))
 	}
-	if len(registry.Specs(true)) != 21 {
+	if len(registry.Specs(true)) != 22 {
 		t.Fatalf("all tools=%d", len(registry.Specs(true)))
 	}
 	for _, spec := range registry.Specs(true) {
@@ -202,10 +205,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 			t.Fatalf("spec=%s info=%#v err=%v", spec.Name, info, infoErr)
 		}
 	}
-	if got := len(registry.EinoTools(false, false)); got != 18 {
+	if got := len(registry.EinoTools(false, false)); got != 19 {
 		t.Fatalf("LLM core tools=%d", got)
 	}
-	if got := len(registry.EinoTools(false, true)); got != 19 {
+	if got := len(registry.EinoTools(false, true)); got != 20 {
 		t.Fatalf("含 harness core tools=%d", got)
 	}
 
@@ -226,6 +229,55 @@ func TestCoreInferToolRegistry(t *testing.T) {
 	var result AssetListResult
 	if err := json.Unmarshal([]byte(raw), &result); err != nil || result.DraftID != "draft_tools" {
 		t.Fatalf("result=%s err=%v", raw, err)
+	}
+}
+
+func TestPlanUpdateIsAlwaysAvailableWithTypedSchema(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	insertToolDraft(t, database, "draft_plan_schema")
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var planUpdate Spec
+	for _, spec := range registry.Specs(true) {
+		if spec.Name == "plan.update" {
+			planUpdate = spec
+			break
+		}
+	}
+	if planUpdate.Implementation == nil || planUpdate.Exposure != ExposureLLM ||
+		planUpdate.Optional || len(planUpdate.Requires) != 0 ||
+		planUpdate.InputType != reflect.TypeFor[PlanUpdateInput]() {
+		t.Fatalf("plan.update spec=%#v", planUpdate)
+	}
+	if prohibitedField(reflect.TypeFor[PlanUpdateInput]()) != "" {
+		t.Fatal("PlanUpdateInput 顶层字段不应触发 PolicyGate")
+	}
+	info, err := planUpdate.Implementation.Info(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parameters, err := info.ToJSONSchema()
+	if err != nil || parameters == nil || parameters.Properties == nil {
+		t.Fatalf("parameters=%#v err=%v", parameters, err)
+	}
+	planSchema, planExists := parameters.Properties.Get("plan")
+	resetSchema, resetExists := parameters.Properties.Get("reset")
+	if !planExists || planSchema.Type != "object" || !containsString(parameters.Required, "plan") {
+		t.Fatalf("plan schema=%#v required=%v", planSchema, parameters.Required)
+	}
+	if !resetExists || resetSchema.Type != "boolean" || containsString(parameters.Required, "reset") {
+		t.Fatalf("reset schema=%#v required=%v", resetSchema, parameters.Required)
+	}
+	allowed, err := registry.Allowed(WithDraftID(t.Context(), "draft_plan_schema"), false)
+	if err != nil || !containsSpec(allowed, "plan.update") {
+		t.Fatalf("allowed=%#v err=%v", allowed, err)
 	}
 }
 

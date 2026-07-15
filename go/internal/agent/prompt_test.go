@@ -37,6 +37,7 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 		"core": {coreSystemPrompt, []string{
 			"唯一客观事实", "目标明确就直接执行", "整数帧", "不可原样重试",
 			"即时预览", "用户反馈可以推翻旧的节奏或镜头结论",
+			"draft.content_plan", "plan.update", "RFC 7396", "不是日志或转写",
 		}},
 		"audio": {audioTrackPlaybook, []string{"持续音乐", "短时点缀", "叠加"}},
 		"beat":  {beatEditingPlaybook, []string{"节拍与完整动态证据", "可核验镜头", "卡点重剪"}},

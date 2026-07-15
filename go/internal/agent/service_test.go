@@ -1336,7 +1336,7 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 		_ = interfaceString(value)
 	}
 	for _, name := range []string{
-		"asset.list_assets", "understand.materials", "media.search_shots", "audio.analyze_beats", "audio.analyze_speech_pauses", "timeline.compose_initial", "timeline.apply_patch", "timeline.apply_patches", "timeline.recut_to_beats",
+		"asset.list_assets", "understand.materials", "media.search_shots", "audio.analyze_beats", "audio.analyze_speech_pauses", "plan.update", "timeline.compose_initial", "timeline.apply_patch", "timeline.apply_patches", "timeline.recut_to_beats",
 		"timeline.validate", "timeline.inspect", "render.preview",
 		"render.final_mp4", "render.status", "render.inspect_preview",
 	} {
@@ -1357,11 +1357,22 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	if patchInput.Op["kind"] != "delete_clip" || patchInput.Op["clip_id"] != "clip_replay" {
 		t.Fatalf("replayed timeline op=%#v", patchInput.Op)
 	}
+	replayedPlan, err := replayInput("plan.update", map[string]any{
+		"plan": map[string]any{"style": "cinematic"}, "reset": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planInput, ok := replayedPlan.(rushestools.PlanUpdateInput)
+	if !ok || planInput.Plan["style"] != "cinematic" || planInput.Reset == nil || !*planInput.Reset {
+		t.Fatalf("replayed plan input=%#v type=%T", replayedPlan, replayedPlan)
+	}
 	if _, err := replayInput("missing", map[string]any{}); err == nil {
 		t.Fatal("unknown replay should fail")
 	}
 	for _, value := range []any{
 		&rushestools.AssetListInput{}, &rushestools.UnderstandInput{}, &rushestools.ShotSearchInput{}, &rushestools.AudioBeatAnalysisInput{}, &rushestools.SpeechPauseAnalysisInput{}, &rushestools.ComposeInitialInput{},
+		&rushestools.PlanUpdateInput{},
 		&rushestools.TimelinePatchInput{}, &rushestools.TimelinePatchBatchInput{}, &rushestools.TimelineBeatRecutInput{}, &rushestools.TimelineInspectInput{},
 		&rushestools.RenderInspectInput{}, "unchanged",
 	} {
@@ -2388,6 +2399,7 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 		"audio.analyze_speech_pauses": rushestools.SpeechPauseAnalysisInput{AssetID: "asset"},
 		"interaction.ask_user":        rushestools.AskUserInput{Question: "?"},
 		"decision.answer":             rushestools.DecisionAnswerInput{DecisionID: "decision"},
+		"plan.update":                 rushestools.PlanUpdateInput{Plan: map[string]any{"status": "closed-db"}},
 		"timeline.compose_initial":    rushestools.ComposeInitialInput{},
 		"timeline.apply_patch":        rushestools.TimelinePatchInput{Op: map[string]any{"kind": "noop"}},
 		"timeline.apply_patches":      rushestools.TimelinePatchBatchInput{Ops: []map[string]any{{"kind": "noop"}}},

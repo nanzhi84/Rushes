@@ -58,6 +58,8 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 		}, map[string]any{"tool_name": confirmation.ToolName, "arguments": confirmation.Arguments})
 	case "decision.answer":
 		return service.toolDecisionAnswer(ctx, draftID, input.(rushestools.DecisionAnswerInput))
+	case "plan.update":
+		return service.toolPlanUpdate(ctx, draftID, input.(rushestools.PlanUpdateInput))
 	case "timeline.compose_initial":
 		return service.toolComposeInitial(ctx, draftID, input.(rushestools.ComposeInitialInput))
 	case "timeline.apply_patch":
