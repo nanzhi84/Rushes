@@ -26,9 +26,10 @@ import (
 
 const (
 	// Eino 的 ReAct 图会把一次模型节点和一次工具节点分别计为一个 step。
-	// 预留最后一次模型节点，确保执行完 30 次工具后仍能生成面向用户的终态回复。
-	maxToolExecutionsPerTurn = 30
-	maxReActStepsPerTurn     = maxToolExecutionsPerTurn*2 + 1
+	// 单个工具节点会执行该 assistant 消息中的全部 tool_calls，因此这里限制
+	// 的是模型与工具的往返轮数。预留最后一次模型节点生成终态回复。
+	maxToolRoundsPerTurn = 40
+	maxReActStepsPerTurn = maxToolRoundsPerTurn*2 + 1
 )
 
 type Service struct {
@@ -84,14 +85,11 @@ func NewServiceWithModels(
 				UnknownToolsHandler: unknownToolRecoveryHandler,
 				ToolCallMiddlewares: []compose.ToolMiddleware{newToolRecoveryMiddleware()},
 			},
-			// 一次真实剪辑常见链路会经历 list → understand → search → recut →
-			// validate → render → inspect。这里按产品语义允许最多 30 次工具执行，
-			// 再换算成 Eino 的模型/工具双节点计步预算。
+			// 多主题口播可能需要 30 轮以上的模型/工具往返，因此将真实预算
+			// 保留到 40 轮；最后 5 轮由 MessageModifier 注入收敛提醒。
 			MaxStep:               maxReActStepsPerTurn,
 			StreamToolCallChecker: FullStreamToolCallChecker,
-			MessageModifier: func(_ context.Context, messages []*schema.Message) []*schema.Message {
-				return append([]*schema.Message{schema.SystemMessage(systemPrompt)}, messages...)
-			},
+			MessageModifier:       turnBudgetMessageModifier,
 		})
 		if err != nil {
 			cancel()
@@ -131,6 +129,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	}
 	recoveryState := newToolRecoveryState()
 	ctx = withToolRecoveryState(ctx, recoveryState)
+	ctx = withTurnBudgetState(ctx, newTurnBudgetState(maxToolRoundsPerTurn))
 	ctx = service.withModelRetryReporting(ctx, item.DraftID)
 	ctx = rushestools.WithReporter(ctx, service.toolReporter(ctx, item.DraftID))
 	content, err := service.turnContent(ctx, item, messageID)
