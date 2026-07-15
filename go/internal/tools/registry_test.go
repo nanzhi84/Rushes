@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,6 +76,104 @@ func TestUnderstandResultJSONRemainsBackwardCompatible(t *testing.T) {
 	}
 	if decoded.Status != "completed" || decoded.Summaries != nil {
 		t.Fatalf("旧 JSON 无法兼容解码: %#v", decoded)
+	}
+}
+
+func TestAssetManifestModelFacingFieldsHaveDescriptions(t *testing.T) {
+	t.Parallel()
+	typeValue := reflect.TypeFor[AssetManifest]()
+	modelFacingFields := 0
+	for index := 0; index < typeValue.NumField(); index++ {
+		field := typeValue.Field(index)
+		if field.PkgPath != "" {
+			continue
+		}
+		jsonName := strings.Split(field.Tag.Get("json"), ",")[0]
+		if jsonName == "-" {
+			continue
+		}
+		modelFacingFields++
+		if jsonName == "" {
+			t.Errorf("AssetManifest.%s 缺少 json 字段名", field.Name)
+		}
+		if description := strings.TrimSpace(field.Tag.Get("jsonschema_description")); description == "" {
+			t.Errorf("AssetManifest.%s(%s) 缺少 jsonschema_description", field.Name, jsonName)
+		}
+	}
+	if modelFacingFields != 11 {
+		t.Fatalf("AssetManifest 面向模型的 JSON 字段数=%d want=11", modelFacingFields)
+	}
+}
+
+func TestAudioWaveformSampleFramesDescriptionRetainsContextSemantics(t *testing.T) {
+	t.Parallel()
+	field, exists := reflect.TypeFor[AudioWaveformEnvelope]().FieldByName("SampleFrames")
+	if !exists {
+		t.Fatal("AudioWaveformEnvelope.SampleFrames missing")
+	}
+	description := field.Tag.Get("jsonschema_description")
+	for _, fragment := range []string{"timeline_fps", "一一对应", "完整压缩波形", "WorldState", "24 点摘要"} {
+		if !strings.Contains(description, fragment) {
+			t.Errorf("SampleFrames description 丢失 %q: %q", fragment, description)
+		}
+	}
+}
+
+func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptions := make(map[string]string)
+	for _, spec := range registry.Specs(true) {
+		if spec.Exposure == ExposureLLM {
+			descriptions[spec.Name] = spec.Description
+		}
+	}
+	want := map[string][]string{
+		"asset.list_assets": {
+			"当前草稿", "可用素材",
+		},
+		"understand.materials": {
+			"默认直接复用持久化结果", "force_refresh=true",
+		},
+		"media.search_shots": {
+			"understanding_candidates", "understand.materials", "禁止把候选文件臆造为 shot_id",
+		},
+		"timeline.compose_initial": {
+			"video/image", "不能传 audio/font", "asset.list_assets", "duration_frames", "timeline_fps",
+		},
+		"timeline.apply_patch": {
+			"move_clip/reorder_clip", "target_frame", "timeline.inspect", "整数帧",
+		},
+		"timeline.apply_patches": {
+			"insert_clip", "delete_clip", "同一次调用", "BGM/SFX", "timeline.recut_to_beats",
+		},
+		"timeline.recut_to_beats": {
+			"shot_ids", "cut_frames 可多于视频素材数", "use_all_video_assets=true",
+			"cover_entire_bgm=true", "SFX 始终独立分轨", "禁止用 compose_initial",
+		},
+		"timeline.inspect": {
+			"完整 track/clip ID", "timeline_exists=false",
+		},
+	}
+	for toolName, fragments := range want {
+		description, exists := descriptions[toolName]
+		if !exists {
+			t.Errorf("LLM 工具未注册: %s", toolName)
+			continue
+		}
+		for _, fragment := range fragments {
+			if !strings.Contains(description, fragment) {
+				t.Errorf("%s Description 丢失其应承载的契约 %q: %q", toolName, fragment, description)
+			}
+		}
 	}
 }
 

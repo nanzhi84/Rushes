@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -481,7 +482,7 @@ func TestReactAgentMakesBudgetVisibleAndAllowsFortyToolRounds(t *testing.T) {
 					)
 				}
 				for index := 0; index < 35; index++ {
-					if prompts[index] != systemPrompt {
+					if prompts[index] != coreSystemPrompt {
 						t.Fatalf("model call %d unexpectedly contains budget noise", index+1)
 					}
 				}
@@ -533,7 +534,7 @@ func TestReactAgentThirtyRoundFixtureWarnsOnCallsTwentySixAndThirtyOne(t *testin
 		)
 	}
 	for index := 0; index < 25; index++ {
-		if prompts[index] != systemPrompt {
+		if prompts[index] != coreSystemPrompt {
 			t.Fatalf("model call %d unexpectedly contains budget noise", index+1)
 		}
 	}
@@ -1206,8 +1207,15 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	if service.Tools() == nil {
 		t.Fatal("registry missing")
 	}
-	if _, err := service.ExecuteTool(ctx, "timeline.validate", rushestools.TimelineValidateInput{}); err != nil {
+	validatedRaw, err := service.ExecuteTool(ctx, "timeline.validate", rushestools.TimelineValidateInput{})
+	if err != nil {
 		t.Fatal(err)
+	}
+	validated := validatedRaw.(rushestools.ToolResult)
+	beatAlignment := validated.Data["beat_alignment"].(map[string]any)
+	if beatAlignment["beat_grid_present"] != false ||
+		!strings.Contains(validated.Observation, "不能证明画面切点已卡点") {
+		t.Fatalf("validate without beat grid=%#v", validated)
 	}
 	if inspected, err := service.ExecuteTool(ctx, "timeline.inspect", rushestools.TimelineInspectInput{}); err != nil || inspected.(rushestools.ToolResult).Status != "succeeded" {
 		t.Fatalf("inspect=%#v err=%v", inspected, err)
@@ -1433,6 +1441,18 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	if err != nil || len(filtered.Assets) != 1 || filtered.Assets[0].AssetID != "c" {
 		t.Fatalf("filtered=%#v err=%v", filtered, err)
 	}
+	for _, fragment := range []string{
+		"asset_id", "filename", "kind", "rel_dir", "suggested_role", "suggested_visual_role",
+		"duration_frames", "timeline_fps", "usable=false", "ingest_status", "understanding_status",
+	} {
+		if !strings.Contains(filtered.UsageNote, fragment) {
+			t.Fatalf("asset usage note missing %q: %q", fragment, filtered.UsageNote)
+		}
+	}
+	encodedAssetResult, err := json.Marshal(filtered)
+	if err != nil || !strings.Contains(string(encodedAssetResult), `"usage_note":"asset_id`) {
+		t.Fatalf("asset result 未把字段口径序列化给模型: %s err=%v", encodedAssetResult, err)
+	}
 	audio, err := service.toolListAssets(ctx, "draft_assets_filter", rushestools.AssetListInput{Kind: "audio"})
 	if err != nil || len(audio.Assets) != 1 || audio.Assets[0].SuggestedRole != "sfx" {
 		t.Fatalf("audio role=%#v err=%v", audio, err)
@@ -1470,6 +1490,28 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	objectiveContext, err = service.contextManager.builder.Build(t.Context(), "draft_assets_filter")
 	if err != nil || !strings.Contains(objectiveContext, `"validated":false`) {
 		t.Fatalf("unvalidated objective context=%q err=%v", objectiveContext, err)
+	}
+}
+
+func TestAudioBeatPhaseNoteWarnsThatBeatEvidenceIsNotCreativeJudgment(t *testing.T) {
+	t.Parallel()
+	if !strings.Contains(audioBeatPhaseNote, "高潮") ||
+		!strings.Contains(audioBeatPhaseNote, "不能自动等同") ||
+		!strings.Contains(audioBeatPhaseNote, "好剪辑") {
+		t.Fatalf("phase note missing creative-judgment warning: %q", audioBeatPhaseNote)
+	}
+	for _, fragment := range []string{
+		"sample_frames", "samples 一一对应", "timeline_fps", "完整压缩波形", "WorldState", "24 点摘要",
+	} {
+		if !strings.Contains(audioWaveformUsageNote, fragment) {
+			t.Fatalf("waveform usage note missing %q: %q", fragment, audioWaveformUsageNote)
+		}
+	}
+	encodedWaveformResult, err := json.Marshal(rushestools.AudioBeatAnalysisResult{
+		WaveformUsageNote: audioWaveformUsageNote,
+	})
+	if err != nil || !strings.Contains(string(encodedWaveformResult), `"waveform_usage_note":"waveform.sample_frames`) {
+		t.Fatalf("waveform result 未把字段口径序列化给模型: %s err=%v", encodedWaveformResult, err)
 	}
 }
 
@@ -1521,7 +1563,9 @@ func TestAudioBeatAnalysisToolReturnsIntegerFrameGrid(t *testing.T) {
 		len(beats.EveryTwoBeatFrames) < 2 || beats.TimelineFPS != 30 ||
 		beats.Waveform.SampleIntervalFrames <= 0 || len(beats.Waveform.Samples) == 0 ||
 		len(beats.Waveform.SampleFrames) != len(beats.Waveform.Samples) ||
-		len(beats.Waveform.Samples) > 32 || beats.Waveform.Encoding != media.WaveformEncoding {
+		len(beats.Waveform.Samples) > 32 || beats.Waveform.Encoding != media.WaveformEncoding ||
+		!strings.Contains(beats.PhaseNote, "不能自动等同于高潮或好剪辑") ||
+		beats.WaveformUsageNote != audioWaveformUsageNote {
 		t.Fatalf("beats=%#v", beats)
 	}
 }

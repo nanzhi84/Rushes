@@ -99,6 +99,14 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 		len(first.SimilarPairs) != 1 || len(first.Pauses) != 0 {
 		t.Fatalf("first=%#v", first)
 	}
+	for _, required := range []string{
+		"repetition_decisions", "按可安全删除时长从长到短", "previous_context",
+		"pause_decisions", "short_fragment_decisions",
+	} {
+		if !strings.Contains(first.UsageNote, required) {
+			t.Fatalf("usage note missing %q: %s", required, first.UsageNote)
+		}
+	}
 	second, err := service.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_sidecar", Query: "第一句", MaxUtterances: 1,
 	})
@@ -257,6 +265,27 @@ func TestRankSpeechPauseEvidenceSurfacesLongestCandidatesAndReportsTruncation(t 
 		ranked[2].PauseID != "middle_long" {
 		t.Fatalf("ranked=%#v total=%d truncated=%v", ranked, total, truncated)
 	}
+	many := make([]rushestools.SpeechPauseEvidence, 150)
+	for index := range many {
+		many[index] = rushestools.SpeechPauseEvidence{
+			PauseID: fmt.Sprintf("pause_%03d", index), DeleteDurationFrames: index + 1,
+		}
+	}
+	defaultRanked, defaultTotal, defaultTruncated := rankSpeechPauseEvidence(
+		append([]rushestools.SpeechPauseEvidence(nil), many...), 0,
+	)
+	if defaultTotal != 150 || !defaultTruncated || len(defaultRanked) != 24 {
+		t.Fatalf(
+			"default ranked=%d total=%d truncated=%v",
+			len(defaultRanked), defaultTotal, defaultTruncated,
+		)
+	}
+	capped, cappedTotal, cappedTruncated := rankSpeechPauseEvidence(
+		append([]rushestools.SpeechPauseEvidence(nil), many...), 101,
+	)
+	if cappedTotal != 150 || !cappedTruncated || len(capped) != 100 {
+		t.Fatalf("capped ranked=%d total=%d truncated=%v", len(capped), cappedTotal, cappedTruncated)
+	}
 }
 
 func TestIntraUtteranceSpeechRepetitionsExposeRepeatedTakesAndAdjacentWords(t *testing.T) {
@@ -282,6 +311,9 @@ func TestIntraUtteranceSpeechRepetitionsExposeRepeatedTakesAndAdjacentWords(t *t
 		if evidence.RepetitionID == "" {
 			t.Fatalf("句内重复证据必须提供稳定 repetition_id: %#v", evidence)
 		}
+		if !strings.Contains(evidence.Evidence, "判断") {
+			t.Fatalf("句内重复证据必须引导模型结合上下文判断: %#v", evidence)
+		}
 		switch evidence.Kind {
 		case "repeated_phrase":
 			if evidence.MatchedCharacters >= 8 && evidence.EarlierStartWordID == "w_early_this" &&
@@ -297,6 +329,30 @@ func TestIntraUtteranceSpeechRepetitionsExposeRepeatedTakesAndAdjacentWords(t *t
 	}
 	if !phraseFound || !adjacentFound {
 		t.Fatalf("句内重复证据不完整: %#v", got)
+	}
+}
+
+func TestSpeechInspectResultSerializesDecisionEvidenceBeforeUtterances(t *testing.T) {
+	t.Parallel()
+	encoded, err := json.Marshal(rushestools.SpeechInspectResult{
+		Repetitions:    []rushestools.SpeechRepetitionEvidence{{RepetitionID: "repeat_1"}},
+		ShortFragments: []rushestools.SpeechFragmentEvidence{{FragmentID: "fragment_1"}},
+		Pauses:         []rushestools.SpeechPauseEvidence{{PauseID: "pause_1"}},
+		Utterances:     []rushestools.SpeechUtteranceEvidence{{UtteranceID: "utterance_1"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	utterancesAt := strings.Index(text, `"utterances"`)
+	if utterancesAt < 0 {
+		t.Fatalf("serialized result missing utterances: %s", text)
+	}
+	for _, field := range []string{`"intra_utterance_repetitions"`, `"short_speech_fragments"`, `"pauses"`} {
+		at := strings.Index(text, field)
+		if at < 0 || at >= utterancesAt {
+			t.Fatalf("decision evidence %s must precede utterances: %s", field, text)
+		}
 	}
 }
 

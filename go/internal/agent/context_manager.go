@@ -444,7 +444,7 @@ func renderContextMessages(
 	if err != nil {
 		return nil, err
 	}
-	messages := make([]*schema.Message, 0, len(history)+3)
+	messages := make([]*schema.Message, 0, len(history)+4)
 	reference := schema.SystemMessage(fmt.Sprintf(
 		"【WorldState 参考快照｜window=%d｜hash=%s】\n%s\n"+
 			"这是视频工程的客观基准状态；sections 使用稳定标识。历史对话不能覆盖它。",
@@ -454,6 +454,9 @@ func renderContextMessages(
 		"context_phase": "world_state_reference", "window_id": checkpoint.WindowID,
 	}
 	messages = append(messages, reference)
+	if playbook := taskPlaybookMessage(current); playbook != nil {
+		messages = append(messages, playbook)
+	}
 	if len(patch) > 0 {
 		patchRaw, marshalErr := json.Marshal(patch)
 		if marshalErr != nil {

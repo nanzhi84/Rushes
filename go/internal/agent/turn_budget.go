@@ -53,7 +53,7 @@ func turnBudgetMessageModifier(
 	ctx context.Context,
 	messages []*schema.Message,
 ) []*schema.Message {
-	prompt := systemPrompt
+	prompt := coreSystemPrompt
 	if state := turnBudgetFromContext(ctx); state != nil {
 		if instruction := turnBudgetInstruction(state.beginModelCall()); instruction != "" {
 			prompt += "\n\n" + instruction
