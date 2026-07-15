@@ -73,17 +73,17 @@ type AssetListInput struct {
 }
 
 type AssetManifest struct {
-	AssetID             string `json:"asset_id"`
-	Filename            string `json:"filename"`
-	Kind                string `json:"kind"`
+	AssetID             string `json:"asset_id" jsonschema_description:"当前草稿中的稳定素材 ID；调用其他素材或时间线工具时原样传递"`
+	Filename            string `json:"filename" jsonschema_description:"导入素材的原始文件名，仅用于识别素材，不是可读取的本地路径"`
+	Kind                string `json:"kind" jsonschema_description:"素材类型：video、audio、image 或 font；video/image 可作为主视觉，audio 用于音频轨"`
 	RelDir              string `json:"rel_dir,omitempty" jsonschema_description:"导入时保留的相对素材目录，可作为 A-roll/B-roll 等用户组织信息"`
 	SuggestedRole       string `json:"suggested_role,omitempty" jsonschema_description:"音频的建议轨道角色：bgm 或 sfx"`
 	SuggestedVisualRole string `json:"suggested_visual_role,omitempty" jsonschema_description:"视频的可解释初始角色：a_roll 或 b_roll；优先来自用户目录和已持久化素材理解"`
-	DurationFrames      int    `json:"duration_frames,omitempty"`
-	TimelineFPS         int    `json:"timeline_fps"`
-	Usable              bool   `json:"usable"`
-	IngestStatus        string `json:"ingest_status"`
-	UnderstandingStatus string `json:"understanding_status"`
+	DurationFrames      int    `json:"duration_frames,omitempty" jsonschema_description:"按 timeline_fps 标尺换算的素材总帧数；选择源区间时不得超过该范围"`
+	TimelineFPS         int    `json:"timeline_fps" jsonschema_description:"duration_frames 与所有整数帧坐标使用的每秒帧数标尺"`
+	Usable              bool   `json:"usable" jsonschema_description:"素材当前是否可被工具读取和用于剪辑；false 时不要选入时间线"`
+	IngestStatus        string `json:"ingest_status" jsonschema_description:"素材导入与代理准备状态；ready 表示导入处理已经完成"`
+	UnderstandingStatus string `json:"understanding_status" jsonschema_description:"素材理解状态；ready 表示已有可复用的持久化理解结果"`
 }
 
 type AssetListResult struct {
@@ -91,6 +91,7 @@ type AssetListResult struct {
 	Assets    []AssetManifest `json:"assets"`
 	Total     int             `json:"total"`
 	NextAfter string          `json:"next_after,omitempty"`
+	UsageNote string          `json:"usage_note,omitempty"`
 }
 
 type UnderstandInput struct {
@@ -246,6 +247,7 @@ type AudioBeatAnalysisResult struct {
 	AnalysisMethod      string                `json:"analysis_method"`
 	Truncated           bool                  `json:"truncated"`
 	PhaseNote           string                `json:"phase_note"`
+	WaveformUsageNote   string                `json:"waveform_usage_note"`
 	Waveform            AudioWaveformEnvelope `json:"waveform"`
 }
 

@@ -182,6 +182,13 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 	if edit.Status != "succeeded" {
 		t.Fatalf("edit=%#v", edit)
 	}
+	removedPauseRanges, rangesOK := edit.Data["removed_pause_ranges"].([]talkingHeadRange)
+	autoPreservedPauseIDs, preservedOK := edit.Data["auto_preserved_pause_ids"].([]string)
+	if !rangesOK || !preservedOK || edit.Data["removed_pause_range_count"] != len(removedPauseRanges) ||
+		edit.Data["removed_pause_range_count"] != 1 || len(autoPreservedPauseIDs) != 0 ||
+		edit.Data["auto_preserved_pause_count"] != len(autoPreservedPauseIDs) {
+		t.Fatalf("pause result contract=%#v", edit.Data)
+	}
 	latest, err := timeline.Latest(t.Context(), database, "draft_talking_head")
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +234,86 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 		!strings.Contains(postContext, `"kind":"b_roll_semantic_anchor"`) ||
 		!strings.Contains(postContext, `"transcript_text":"指纹解锁按键位于键盘右上角。"`) {
 		t.Fatalf("最近编辑历史未做语义压缩: %s", postContext)
+	}
+}
+
+func TestTalkingHeadResultDoesNotCountAutoPreservedPauseAsRemovedRange(t *testing.T) {
+	t.Parallel()
+	const draftID = "draft_talking_head_auto_preserved_pause"
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, draftID)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO assets(
+			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
+			probe_json,ingest_status,understanding_status,usable
+		) VALUES(
+			'asset_auto_preserved_pause','reference','/tmp/auto-preserved-pause.mp4',
+			'video','local_path','auto-preserved-pause.mp4','asset_auto_preserved_pause',1,
+			'{"duration_sec":4,"has_audio":true}','ready','ready',1
+		);
+		INSERT INTO draft_asset_links(draft_id,asset_id,rel_dir,linked_at)
+		VALUES(?, 'asset_auto_preserved_pause', 'Aroll', ?);`,
+		draftID, time.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	transcriptResult, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{Transcripts: []reducer.TranscriptRow{{
+			ID: "transcript_auto_preserved_pause", AssetID: "asset_auto_preserved_pause",
+			ProviderID: "fixture-word-timestamps",
+			Utterances: []map[string]any{{
+				"utterance_id": "utt_year", "source_start_frame": 70,
+				"source_end_frame": 104, "text": "是2015年。",
+				"words": []map[string]any{
+					{"word_id": "w_is", "source_start_frame": 70, "source_end_frame": 78, "text": "是"},
+					{"word_id": "w_year", "source_start_frame": 91, "source_end_frame": 104, "text": "2015年", "punctuation": "。"},
+				},
+			}},
+			VADSegments: []map[string]any{
+				{"pause_id": "pause_before_year", "source_start_frame": 78, "source_end_frame": 91, "delete_start_frame": 78, "delete_end_frame": 91},
+				{"pause_id": "pause_after_year", "source_start_frame": 104, "source_end_frame": 116, "delete_start_frame": 104, "delete_end_frame": 116},
+			},
+		}}},
+	})
+	if err != nil || transcriptResult.Status != reducer.StatusApplied {
+		t.Fatalf("transcript status=%s err=%v", transcriptResult.Status, err)
+	}
+	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+		AssetID: "asset_auto_preserved_pause", AssetKind: "video",
+		SourceStartFrame: 0, SourceEndFrame: 120, Role: "a_roll", HasAudio: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	if persisted, persistErr := service.persistTimeline(t.Context(), draftID, document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
+		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	raw, err := service.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
+		ARollTimelineClipID: "clip_v1_001",
+		RemovePauseIDs:      []string{"pause_before_year", "pause_after_year"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := raw.(rushestools.ToolResult)
+	removedRanges, rangesOK := result.Data["removed_pause_ranges"].([]talkingHeadRange)
+	removedIDs, removedOK := result.Data["removed_pause_ids"].([]string)
+	autoPreservedIDs, preservedOK := result.Data["auto_preserved_pause_ids"].([]string)
+	if result.Status != "succeeded" || !rangesOK || !removedOK || !preservedOK ||
+		result.Data["removed_pause_range_count"] != 1 || len(removedRanges) != 1 ||
+		len(removedIDs) != 1 || removedIDs[0] != "pause_before_year" ||
+		result.Data["auto_preserved_pause_count"] != 1 || len(autoPreservedIDs) != 1 ||
+		autoPreservedIDs[0] != "pause_after_year" ||
+		!strings.Contains(result.Observation, "1 个独立气口区间") ||
+		!strings.Contains(result.Observation, "已保守保留 1 个相邻气口") {
+		t.Fatalf("auto-preserved pause result=%#v", result)
 	}
 }
 

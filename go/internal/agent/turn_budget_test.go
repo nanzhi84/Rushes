@@ -12,7 +12,7 @@ func TestTurnBudgetMessageModifierInjectsOnlyWhenConvergenceIsRequired(t *testin
 	const fixtureToolRoundBudget = 30
 	input := []*schema.Message{schema.UserMessage("继续剪辑")}
 	withoutState := turnBudgetMessageModifier(t.Context(), input)
-	if len(withoutState) != 2 || withoutState[0].Content != systemPrompt ||
+	if len(withoutState) != 2 || withoutState[0].Content != coreSystemPrompt ||
 		len(input) != 1 || input[0].Content != "继续剪辑" {
 		t.Fatalf("without state=%#v input=%#v", withoutState, input)
 	}
@@ -24,7 +24,7 @@ func TestTurnBudgetMessageModifierInjectsOnlyWhenConvergenceIsRequired(t *testin
 		prompt := messages[0].Content
 		switch {
 		case call <= 25:
-			if prompt != systemPrompt {
+			if prompt != coreSystemPrompt {
 				t.Fatalf("model call %d must add zero budget bytes", call)
 			}
 		case call == 26:

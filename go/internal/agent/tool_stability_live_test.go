@@ -25,6 +25,7 @@ type liveToolEvalCase struct {
 	Name     string
 	Prompt   string
 	Expected []string
+	Snapshot WorldStateSnapshot
 }
 
 type liveToolEvalFailure struct {
@@ -105,7 +106,8 @@ func TestLiveToolCallingStability(t *testing.T) {
 		for run := 1; run <= runs; run++ {
 			report.Schema.Total++
 			call, callErr := liveGenerateToolCall(
-				t.Context(), bound, evalCase.Prompt, true, evalCase.Expected[0],
+				t.Context(), bound, evalCase.Prompt, evalCase.Snapshot,
+				true, evalCase.Expected[0],
 			)
 			if callErr == nil {
 				callErr = validateLiveToolArguments(specs[evalCase.Expected[0]], call.Function.Arguments)
@@ -129,7 +131,9 @@ func TestLiveToolCallingStability(t *testing.T) {
 	for _, evalCase := range liveRoutingCases() {
 		for run := 1; run <= runs; run++ {
 			report.Routing.Total++
-			call, callErr := liveGenerateToolCall(t.Context(), boundAll, evalCase.Prompt, false, "")
+			call, callErr := liveGenerateToolCall(
+				t.Context(), boundAll, evalCase.Prompt, evalCase.Snapshot, false, "",
+			)
 			if callErr == nil && containsToolName(evalCase.Expected, call.Function.Name) {
 				callErr = validateLiveToolArguments(specs[call.Function.Name], call.Function.Arguments)
 			}
@@ -159,7 +163,7 @@ func TestLiveToolCallingStability(t *testing.T) {
 }
 
 func liveSchemaCases() []liveToolEvalCase {
-	return []liveToolEvalCase{
+	cases := []liveToolEvalCase{
 		{Name: "asset_list", Prompt: "请调用工具列出当前草稿最多 50 个可用素材。", Expected: []string{"asset.list_assets"}},
 		{Name: "understand", Prompt: "请深度理解 asset_video_1 和 asset_video_2，重点关注人物动作，每个素材最多 8 段证据。", Expected: []string{"understand.materials"}},
 		{Name: "shot_search", Prompt: "请只检索适合覆盖‘指纹解锁位于键盘右上角’这句口播的 B-roll 镜头，最多返回 8 个。", Expected: []string{"media.search_shots"}},
@@ -181,11 +185,15 @@ func liveSchemaCases() []liveToolEvalCase {
 		{Name: "inspect_preview", Prompt: "请检查预览 preview_123 的解码、黑帧、静帧、静音和响度。", Expected: []string{"render.inspect_preview"}},
 		{Name: "confirm", Prompt: "请为危险的时间线清空操作创建确认：工具 timeline.apply_patch，参数是移除 visual_base 轨道所有片段。", Expected: []string{"interaction.confirm_action"}},
 	}
+	for index := range cases {
+		cases[index].Snapshot = liveSnapshotForSchemaCase(cases[index].Name)
+	}
+	return cases
 }
 
 func liveRoutingCases() []liveToolEvalCase {
 	const contextPrefix = `已读取当前客观状态：timeline_fps=30；A-roll asset_aroll_1 已有持久化逐句索引，主视频 clip 为 clip_v1_001；B-roll asset_video_1、asset_video_2 已完成逐镜头理解；BGM asset_bgm_1；SFX asset_sfx_1；当前时间线存在且已验证，预览为 preview_123。`
-	return []liveToolEvalCase{
+	cases := []liveToolEvalCase{
 		{Name: "route_list", Prompt: contextPrefix + "\n用户：列出当前草稿的所有素材。", Expected: []string{"asset.list_assets"}},
 		{Name: "route_understand", Prompt: contextPrefix + "\n用户：素材 ID 已确认，请立即深度理解 asset_video_1 的动作和可剪区间。", Expected: []string{"understand.materials"}},
 		{Name: "route_shot_search", Prompt: contextPrefix + "\nspeech.inspect 已返回 utt_fingerprint_1，文本是‘指纹解锁位于键盘右上角’。用户：不用再读取台词，只调用镜头检索找合适的 B-roll，暂时不剪。", Expected: []string{"media.search_shots"}},
@@ -196,6 +204,8 @@ func liveRoutingCases() []liveToolEvalCase {
 		{Name: "route_patch", Prompt: contextPrefix + "\n用户：已取得真实 ID，只把 clip_v1_001 音量调到 -6dB。", Expected: []string{"timeline.apply_patch"}},
 		{Name: "route_batch", Prompt: contextPrefix + "\n用户：已取得真实 ID，一次将 clip_v1_001 和 clip_v1_002 的淡出设为 8 帧。", Expected: []string{"timeline.apply_patches"}},
 		{Name: "route_recut", Prompt: contextPrefix + "\n节拍分析已完成，asset_bgm_1 的完整可用长度正好是 1440 帧；音效 asset_sfx_1 已确定从 900 帧开始、持续 45 帧、增益 -12dB，所有创作选择都已确定，无需提问。用户：现在直接覆盖整首 BGM 完成卡点重剪。", Expected: []string{"timeline.recut_to_beats"}},
+		{Name: "route_recut_after_recoverable_failure", Prompt: contextPrefix + "\n上一工具结果：{\"status\":\"failed\",\"observation\":\"所选镜头无法覆盖对应节拍片段，或其源区间已被重复使用\",\"data\":{\"shot_id\":\"shot_video_2\",\"required_frames\":120,\"shot_duration_frames\":80,\"recovery\":\"用 media.search_shots 按该片段 min_duration_frames 重新检索，且不要重复传同一 shot_id\"}}。检索已经完成，新候选 shot_video_2b 长 180 帧；原用户目标仍是用既定 BGM、节拍和其余镜头覆盖整首音乐完成卡点成片。请选择下一步工具。", Expected: []string{"timeline.recut_to_beats"}},
+		{Name: "route_batch_after_single_patch_failure", Prompt: contextPrefix + "\n上一工具结果：{\"status\":\"failed\",\"observation\":\"时间线补丁字段预校验失败：时间线补丁 trim_clip_edge 的字段 timeline_frame 缺少必填字段\",\"data\":{\"op_kind\":\"trim_clip_edge\",\"invalid_field\":\"timeline_frame\",\"expected_schema\":{\"required\":[\"kind\",\"timeline_clip_id\",\"timeline_frame\",\"edge\"]},\"correct_example\":{\"kind\":\"trim_clip_edge\",\"timeline_clip_id\":\"clip_v1_001\",\"timeline_frame\":75,\"edge\":\"end\"},\"recovery\":\"只修正当前 op 的字段名与类型后重新调用；不要原样重发失败参数。\"}}。字段错误已明确；原用户目标仍是把 clip_v1_001 的结尾裁到 75 帧、clip_v1_002 的结尾裁到 90 帧，两个真实 ID 均已确认。请选择下一步工具。", Expected: []string{"timeline.apply_patches"}},
 		{Name: "route_talking_head_edit", Prompt: contextPrefix + "\n逐句和镜头证据已读取，我已选定删除 utt_repeat_1、pause_2，并用 shot_keyboard_1 覆盖 utt_fingerprint_1。请一次原子应用口播剪辑。", Expected: []string{"timeline.edit_talking_head"}},
 		{Name: "route_validate", Prompt: contextPrefix + "\n用户：校验时间线和卡点对齐。", Expected: []string{"timeline.validate"}},
 		{Name: "route_preview", Prompt: contextPrefix + "\n用户：生成一个可分享的预览。", Expected: []string{"render.preview"}},
@@ -203,12 +213,18 @@ func liveRoutingCases() []liveToolEvalCase {
 		{Name: "route_export", Prompt: contextPrefix + "\n用户：导出最终 MP4，不要只生成预览。", Expected: []string{"render.final_mp4"}},
 		{Name: "route_status", Prompt: contextPrefix + "\n用户：查看当前渲染任务的状态。", Expected: []string{"render.status"}},
 	}
+	snapshot := liveFullTaskSnapshot()
+	for index := range cases {
+		cases[index].Snapshot = snapshot
+	}
+	return cases
 }
 
 func liveGenerateToolCall(
 	parent context.Context,
 	chat model.ToolCallingChatModel,
 	prompt string,
+	snapshot WorldStateSnapshot,
 	forced bool,
 	allowedName string,
 ) (schema.ToolCall, error) {
@@ -219,10 +235,12 @@ func liveGenerateToolCall(
 		if forced {
 			options = append(options, model.WithToolChoice(schema.ToolChoiceForced, allowedName))
 		}
-		response, err := chat.Generate(ctx, []*schema.Message{
-			schema.SystemMessage(systemPrompt),
-			schema.UserMessage(prompt),
-		}, options...)
+		messages := []*schema.Message{schema.SystemMessage(coreSystemPrompt)}
+		if playbook := taskPlaybookMessage(snapshot); playbook != nil {
+			messages = append(messages, playbook)
+		}
+		messages = append(messages, schema.UserMessage(prompt))
+		response, err := chat.Generate(ctx, messages, options...)
 		cancel()
 		if err == nil && response != nil && len(response.ToolCalls) > 0 {
 			return response.ToolCalls[0], nil
@@ -237,6 +255,50 @@ func liveGenerateToolCall(
 		}
 	}
 	return schema.ToolCall{}, lastErr
+}
+
+func liveSnapshotForSchemaCase(name string) WorldStateSnapshot {
+	assets := map[string]any{
+		"audio_roles":      []any{},
+		"material_catalog": []any{},
+	}
+	sections := map[string]any{"assets": assets, "timeline": nil}
+	switch name {
+	case "beats", "beat_recut":
+		assets["audio_roles"] = []any{map[string]any{
+			"asset_id": "asset_bgm_1", "suggested_role": "bgm",
+		}}
+		assets["material_catalog"] = []any{map[string]any{
+			"asset_id": "asset_bgm_1", "suggested_role": "bgm",
+		}}
+	case "speech_inspect", "talking_head_edit":
+		assets["material_catalog"] = []any{map[string]any{
+			"asset_id": "asset_aroll_1", "transcript_provider": "qwen_asr",
+		}}
+		sections["timeline"] = map[string]any{"track_count": 1}
+	case "single_patch", "batch_patch", "validate", "inspect", "preview", "final",
+		"status", "inspect_preview", "confirm":
+		sections["timeline"] = map[string]any{"track_count": 1}
+	}
+	return NewWorldStateSnapshot(sections)
+}
+
+func liveFullTaskSnapshot() WorldStateSnapshot {
+	return NewWorldStateSnapshot(map[string]any{
+		"assets": map[string]any{
+			"audio_roles": []any{
+				map[string]any{"asset_id": "asset_bgm_1", "suggested_role": "bgm"},
+				map[string]any{"asset_id": "asset_sfx_1", "suggested_role": "sfx"},
+			},
+			"material_catalog": []any{
+				map[string]any{"asset_id": "asset_bgm_1", "suggested_role": "bgm"},
+				map[string]any{
+					"asset_id": "asset_aroll_1", "transcript_provider": "qwen_asr",
+				},
+			},
+		},
+		"timeline": map[string]any{"track_count": 3},
+	})
 }
 
 func validateLiveToolArguments(spec rushestools.Spec, raw string) error {

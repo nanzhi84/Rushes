@@ -20,6 +20,12 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
+const audioBeatPhaseNote = "强拍来自频谱通量瞬态；每 4 拍网格以强拍贴合度推断 4/4 小节相位，仍可由剪辑者微调；拍点、强拍和 downbeat 只是音频结构证据，不能自动等同于高潮或好剪辑。"
+
+const audioWaveformUsageNote = "waveform.sample_frames 与 samples 一一对应；前者是按 timeline_fps 标尺表示的素材内 RMS 窗口起始帧，后者是该点 0-100 原始响度。本结果返回本次请求的完整压缩波形；WorldState 只常驻最多 24 点摘要。"
+
+const assetListUsageNote = "asset_id 是后续调用使用的稳定素材 ID；filename 只用于识别素材，不是本地路径；kind 决定 video/audio/image/font 类型。duration_frames 的标尺是 timeline_fps；usable=false 的素材不可用于剪辑，ingest_status 与 understanding_status 分别表示导入和素材理解状态。rel_dir 与 suggested_visual_role 用于识别 A-roll/B-roll，音频按 suggested_role 区分 bgm/sfx。"
+
 func (service *Service) ExecuteTool(ctx context.Context, name string, input any) (any, error) {
 	draftID, err := rushestools.DraftID(ctx)
 	if err != nil {
@@ -144,8 +150,9 @@ func (service *Service) toolAnalyzeAudioBeats(
 		DownbeatFrames: grid.DownbeatFrames, EveryTwoBeatFrames: grid.EveryTwoBeatFrames,
 		EveryFourBeatFrames: grid.EveryFourBeatFrames, AnalysisMethod: grid.AnalysisMethod,
 		BarPhase: grid.BarPhase, Truncated: grid.Truncated,
-		PhaseNote: "强拍来自频谱通量瞬态；每 4 拍网格以强拍贴合度推断 4/4 小节相位，仍可由剪辑者微调。",
-		Waveform:  waveformToolValue(waveform),
+		PhaseNote:         audioBeatPhaseNote,
+		WaveformUsageNote: audioWaveformUsageNote,
+		Waveform:          waveformToolValue(waveform),
 	}, nil
 }
 
@@ -1274,7 +1281,9 @@ func (service *Service) toolListAssets(
 	if err != nil {
 		return rushestools.AssetListResult{}, err
 	}
-	result := rushestools.AssetListResult{DraftID: draftID, Assets: []rushestools.AssetManifest{}}
+	result := rushestools.AssetListResult{
+		DraftID: draftID, Assets: []rushestools.AssetManifest{}, UsageNote: assetListUsageNote,
+	}
 	for _, asset := range assets {
 		if input.Kind != "" && asset.Kind != input.Kind || input.After != "" && asset.ID <= input.After {
 			continue
