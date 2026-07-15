@@ -45,7 +45,7 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 	builders := []func(*Registry) error{
 		registerAssetImport, registerAssetList, registerUnderstand, registerShotSearch, registerAudioBeatAnalysis,
 		registerSpeechPauseAnalysis, registerSpeechInspect, registerAskUser,
-		registerDecisionAnswer, registerComposeInitial, registerApplyPatch, registerApplyPatchBatch,
+		registerDecisionAnswer, registerPlanUpdate, registerComposeInitial, registerApplyPatch, registerApplyPatchBatch,
 		registerBeatRecut, registerTalkingHeadEdit,
 		registerTimelineValidate, registerTimelineInspect, registerRenderPreview,
 		registerRenderFinal, registerRenderStatus, registerInspectPreview,
@@ -259,6 +259,15 @@ func registerAskUser(registry *Registry) error {
 
 func registerDecisionAnswer(registry *Registry) error {
 	return addTool[DecisionAnswerInput, ToolResult](registry, "decision.answer", "提交结构化决策答案", nil, ExposureLLM, false)
+}
+
+func registerPlanUpdate(registry *Registry) error {
+	return addTool[PlanUpdateInput, ToolResult](
+		registry,
+		"plan.update",
+		"以 RFC 7396 语义增量合并 plan；reset=true 时先清空旧计划再应用该对象，用于在跨回合继续工作前保存已确定的计划结构",
+		nil, ExposureLLM, false,
+	)
 }
 
 func registerComposeInitial(registry *Registry) error {

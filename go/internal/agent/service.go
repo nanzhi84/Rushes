@@ -749,6 +749,8 @@ func replayInput(name string, arguments map[string]any) (any, error) {
 		return decode(&rushestools.AudioBeatAnalysisInput{})
 	case "audio.analyze_speech_pauses":
 		return decode(&rushestools.SpeechPauseAnalysisInput{})
+	case "plan.update":
+		return decode(&rushestools.PlanUpdateInput{})
 	case "timeline.compose_initial":
 		return decode(&rushestools.ComposeInitialInput{})
 	case "timeline.apply_patch":
@@ -785,6 +787,8 @@ func reflectValue(value any) any {
 	case *rushestools.AudioBeatAnalysisInput:
 		return *typed
 	case *rushestools.SpeechPauseAnalysisInput:
+		return *typed
+	case *rushestools.PlanUpdateInput:
 		return *typed
 	case *rushestools.ComposeInitialInput:
 		return *typed
