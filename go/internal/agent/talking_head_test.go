@@ -273,7 +273,7 @@ func TestTalkingHeadAssignmentResolvesUniqueAnchorTextToWordFrames(t *testing.T)
 		},
 		utterances, words, map[string]struct{}{}, map[string]struct{}{"w2": {}}, clip,
 	)
-	if err == nil || !strings.Contains(err.Error(), "已删除") {
+	if err == nil || !strings.Contains(err.Error(), "本次将删除") {
 		t.Fatalf("removed anchor err=%v", err)
 	}
 }
@@ -646,6 +646,50 @@ func TestTalkingHeadOrphanSpeechFragmentsExposeAdjacentPauseEvidence(t *testing.
 	)
 	if len(fragments) != 1 || fragments[0]["retained_text"] != "自己" {
 		t.Fatalf("不足 0.8 秒的单词语音岛必须显式解决: %#v", fragments)
+	}
+}
+
+func TestProtectTalkingHeadOrphanFragmentsRetractsOnlyAdjacentPause(t *testing.T) {
+	t.Parallel()
+	utterance := speechUtterance{
+		ID: "utt_year", StartFrame: 70, EndFrame: 104, Text: "是2015年。",
+		Words: []speechWord{
+			{ID: "w_is", StartFrame: 70, EndFrame: 78, Text: "是"},
+			{ID: "w_year", StartFrame: 91, EndFrame: 104, Text: "2015年", Punctuation: "。"},
+		},
+	}
+	pauses := []speechPause{
+		{ID: "pause_before_year", DeleteStart: 78, DeleteEnd: 91},
+		{ID: "pause_after_year", DeleteStart: 104, DeleteEnd: 116},
+	}
+	effective, pauseRanges, deletions, autoPreserved, orphans := protectTalkingHeadOrphanFragments(
+		nil, pauses, pauses,
+		[]talkingHeadRange{{Start: 70, End: 78}, {Start: 91, End: 104}},
+		[]speechUtterance{utterance}, map[string]struct{}{}, map[string]struct{}{},
+		timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 120},
+	)
+	if len(orphans) != 0 || len(effective) != 1 || effective[0].ID != "pause_before_year" ||
+		len(autoPreserved) != 1 || autoPreserved[0].ID != "pause_after_year" ||
+		len(pauseRanges) != 1 || pauseRanges[0] != (talkingHeadRange{Start: 78, End: 91}) ||
+		len(deletions) != 1 || deletions[0] != (talkingHeadRange{Start: 78, End: 91}) {
+		t.Fatalf(
+			"effective=%#v pauseRanges=%#v deletions=%#v autoPreserved=%#v orphans=%#v",
+			effective, pauseRanges, deletions, autoPreserved, orphans,
+		)
+	}
+
+	semanticOnlyUtterance := speechUtterance{
+		ID: "utt_self", StartFrame: 120, EndFrame: 139, Text: "自己",
+		Words: []speechWord{{ID: "w_self", StartFrame: 120, EndFrame: 139, Text: "自己"}},
+	}
+	_, _, _, autoPreserved, orphans = protectTalkingHeadOrphanFragments(
+		[]talkingHeadRange{{Start: 0, End: 120}, {Start: 139, End: 170}}, nil, nil,
+		[]talkingHeadRange{{Start: 120, End: 139}}, []speechUtterance{semanticOnlyUtterance},
+		map[string]struct{}{}, map[string]struct{}{},
+		timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 200},
+	)
+	if len(autoPreserved) != 0 || len(orphans) != 1 || orphans[0]["retained_text"] != "自己" {
+		t.Fatalf("纯语义删除不能由工具擅自改写: autoPreserved=%#v orphans=%#v", autoPreserved, orphans)
 	}
 }
 

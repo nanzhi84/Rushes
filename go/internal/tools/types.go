@@ -467,11 +467,11 @@ type TimelinePatchBatchInput struct {
 
 type TalkingHeadBrollAssignment struct {
 	ShotID           string `json:"shot_id" jsonschema:"required" jsonschema_description:"media.search_shots 返回的 b_roll shot_id"`
-	StartUtteranceID string `json:"start_utterance_id,omitempty" jsonschema_description:"B-roll 覆盖语义的起始 utterance_id；与 start_word_id 二选一"`
-	EndUtteranceID   string `json:"end_utterance_id,omitempty" jsonschema_description:"结束 utterance_id；省略时只覆盖起始句"`
-	AnchorText       string `json:"anchor_text,omitempty" jsonschema_description:"在 utterance 范围内原样摘录的唯一连续台词短语；短 B-roll 已能从转写确定具体语义但尚未查询 word_id 时使用，工具只负责把该短语确定性映射为词级帧范围"`
-	StartWordID      string `json:"start_word_id,omitempty" jsonschema_description:"词级 B-roll 语义锚点起始 word_id；镜头短于整句或只覆盖具体短语时使用，与 start_utterance_id 二选一"`
-	EndWordID        string `json:"end_word_id,omitempty" jsonschema_description:"词级语义锚点结束 word_id；省略时只覆盖起始词"`
+	StartUtteranceID string `json:"start_utterance_id,omitempty" jsonschema_description:"B-roll 覆盖语义的起始 utterance_id；与 start_word_id 二选一，且该句在本次所有 remove 决定展开后必须仍被保留"`
+	EndUtteranceID   string `json:"end_utterance_id,omitempty" jsonschema_description:"结束 utterance_id；省略时只覆盖起始句，且不能同时属于本次删除范围"`
+	AnchorText       string `json:"anchor_text,omitempty" jsonschema_description:"从 speech.inspect 返回的 utterance 原文逐字复制的唯一连续短语；其中每个词在本次 remove_word_ranges、repetition_decisions、short_fragment_decisions 展开后都必须保留，不能把将删除的卡壳或重说词放进锚点"`
+	StartWordID      string `json:"start_word_id,omitempty" jsonschema_description:"词级 B-roll 语义锚点起始 word_id；与 start_utterance_id 二选一，且该词不能被本次任何删除决定覆盖"`
+	EndWordID        string `json:"end_word_id,omitempty" jsonschema_description:"词级语义锚点结束 word_id；省略时只覆盖起始词，整段连续 word_id 都必须在本次编辑后保留"`
 }
 
 type TalkingHeadWordRange struct {

@@ -274,20 +274,35 @@ func (service *Service) toolEditTalkingHead(
 		}
 	}
 	removedPauses = effectivePauses
-	sourceDeleteRanges := append([]talkingHeadRange(nil), semanticDeleteRanges...)
-	sourceDeleteRanges = append(sourceDeleteRanges, effectivePauseRanges...)
-	sourceDeleteRanges = mergeTalkingHeadRanges(sourceDeleteRanges)
 	retainedSpeech := talkingHeadRetainedSpeechRanges(
 		utterances, removedIDSet, removedWordIDSet, selectedClip,
 	)
-	sourceDeleteRanges = bridgeTalkingHeadRanges(
-		sourceDeleteRanges, retainedSpeech, pauses, maxTalkingHeadUnvoicedBridgeFrames,
-	)
-	sourceDeleteRanges = absorbTalkingHeadEdgeSlivers(
-		sourceDeleteRanges, retainedSpeech,
-		selectedClip.SourceStartFrame, selectedClip.SourceEndFrame,
-		maxTalkingHeadUnvoicedBridgeFrames,
-	)
+	removedPauses, effectivePauseRanges, sourceDeleteRanges, autoPreservedPauses, orphanFragments :=
+		protectTalkingHeadOrphanFragments(
+			semanticDeleteRanges, removedPauses, pauses, retainedSpeech, utterances,
+			removedIDSet, removedWordIDSet, selectedClip,
+		)
+	if len(sourceDeleteRanges) == 0 && len(input.BrollAssignments) == 0 {
+		message := "本次没有可安全应用的实际编辑"
+		recovery := "重新读取 speech.inspect，只提交会产生实际时间线变化的删除项。"
+		if len(autoPreservedPauses) > 0 {
+			message = "所选气口均会制造孤立语音，本次没有可安全应用的实际编辑"
+			recovery = "结合保留台词重新决定相邻语义是否也应删除；若台词应保留，则无需继续删除这些气口。"
+		}
+		return failed(message, map[string]any{
+			"auto_preserved_pause_ids": speechPauseIDs(autoPreservedPauses),
+			"redundant_pause_ids":      speechPauseIDs(redundantPauses),
+			"recovery":                 recovery,
+		})
+	}
+	if len(orphanFragments) > 0 {
+		return failed("组合删除会把保留语音夹成不足 0.8 秒的孤立碎片", map[string]any{
+			"orphan_fragments":                 orphanFragments,
+			"auto_preserved_pause_ids":         speechPauseIDs(autoPreservedPauses),
+			"minimum_retained_fragment_frames": minTalkingHeadRetainedFragmentFrames,
+			"recovery":                         "剩余孤片两侧没有可机械撤回的气口。逐项查看 retained_text：若该词应保留，撤回相邻语义删除；若它本身是口误，则用 speech.inspect(include_words=true) 取得连续 word_id 后明确删除。不要原样重试。",
+		})
+	}
 	unresolvedPauses := []rushestools.SpeechPauseEvidence{}
 	if speechCleanupRequested {
 		unresolvedPauses = unresolvedTalkingHeadPauseDecisions(
@@ -333,18 +348,6 @@ func (service *Service) toolEditTalkingHead(
 	// 未处理候选属于供模型继续判断的内容证据，不是参数非法或时间线
 	// 不变量错误。局部修正不应为了当前目标以外的候选被迫失败；全量
 	// 口播任务仍会在成功结果中拿到这些证据，并可自主决定是否继续编辑。
-	if fragments := talkingHeadOrphanSpeechFragments(
-		sourceDeleteRanges, retainedSpeech, utterances,
-		removedIDSet, removedWordIDSet, removedPauses,
-		selectedClip.SourceStartFrame, selectedClip.SourceEndFrame,
-		minTalkingHeadRetainedFragmentFrames,
-	); len(fragments) > 0 {
-		return failed("组合删除会把保留语音夹成不足半秒的孤立碎片", map[string]any{
-			"orphan_fragments":                 fragments,
-			"minimum_retained_fragment_frames": minTalkingHeadRetainedFragmentFrames,
-			"recovery":                         "逐项查看 retained_text 与 adjacent_pause_ids：若该词应保留，至少从相邻气口中撤回一个；若它本身是口误，则用 speech.inspect(include_words=true) 取得连续 word_id 后明确删除。不要原样重试。",
-		})
-	}
 	deleteRanges := make([]talkingHeadRange, 0, len(sourceDeleteRanges))
 	for _, sourceRange := range sourceDeleteRanges {
 		start, end, ok := mapSourceRangeToTimelineClip(selectedClip, sourceRange.Start, sourceRange.End)
@@ -545,6 +548,7 @@ func (service *Service) toolEditTalkingHead(
 		"removed_word_count":           len(removedWordIDs),
 		"removed_pause_count":          len(effectivePauseRanges),
 		"removed_pause_evidence_count": len(removedPauses),
+		"auto_preserved_pause_count":   len(autoPreservedPauses),
 		"b_roll_assignment_count":      len(inserted),
 	}
 	result, err := service.persistTimeline(
@@ -557,6 +561,12 @@ func (service *Service) toolEditTalkingHead(
 		"已原子完成口播剪辑：删除 %d 句、%d 个词级片段、%d 个独立气口区间，添加 %d 段独立 B-roll 叠加；主视频原声保持联动。",
 		len(removedUtterances), len(removedWordIDs), len(effectivePauseRanges), len(inserted),
 	)
+	if len(autoPreservedPauses) > 0 {
+		result.Observation += fmt.Sprintf(
+			" 为避免保留台词变成不足 0.8 秒的孤片，已保守保留 %d 个相邻气口。",
+			len(autoPreservedPauses),
+		)
+	}
 	result.Data["a_roll_asset_id"] = asset.ID
 	result.Data["removed_utterance_ids"] = append([]string(nil), input.RemoveUtteranceIDs...)
 	result.Data["removed_word_ids"] = append([]string(nil), removedWordIDs...)
@@ -569,6 +579,8 @@ func (service *Service) toolEditTalkingHead(
 	result.Data["removed_pause_range_count"] = len(effectivePauseRanges)
 	result.Data["removed_pause_evidence_count"] = len(removedPauses)
 	result.Data["redundant_pause_ids"] = speechPauseIDs(redundantPauses)
+	result.Data["auto_preserved_pause_ids"] = speechPauseIDs(autoPreservedPauses)
+	result.Data["auto_preserved_pause_count"] = len(autoPreservedPauses)
 	result.Data["preserved_speech_fragment_ids"] = append([]string(nil), input.PreserveSpeechFragmentIDs...)
 	result.Data["preserved_speech_fragment_reasons"] = input.PreserveSpeechFragmentReasons
 	attachTalkingHeadUnreviewedEvidence(
@@ -791,6 +803,130 @@ func resolveTalkingHeadPauseRanges(
 		residualRanges = append(residualRanges, kept...)
 	}
 	return effective, mergeTalkingHeadRanges(residualRanges), redundant
+}
+
+// protectTalkingHeadOrphanFragments conservatively retracts only pause deletions
+// when they are the mechanical reason retained speech would become a sub-0.8s
+// island. Semantic removals remain model decisions and are never changed here.
+func protectTalkingHeadOrphanFragments(
+	semanticDeletions []talkingHeadRange,
+	selectedPauses []speechPause,
+	detectedPauses []speechPause,
+	retainedSpeech []talkingHeadRange,
+	utterances []speechUtterance,
+	removedUtterances map[string]struct{},
+	removedWords map[string]struct{},
+	clip timeline.Clip,
+) (
+	effectivePauses []speechPause,
+	effectivePauseRanges []talkingHeadRange,
+	sourceDeleteRanges []talkingHeadRange,
+	autoPreservedPauses []speechPause,
+	orphanFragments []map[string]any,
+) {
+	remaining := append([]speechPause(nil), selectedPauses...)
+	autoPreservedIDs := map[string]struct{}{}
+	finalizeAutoPreserved := func() []speechPause {
+		result := make([]speechPause, 0, len(autoPreservedIDs))
+		for _, pause := range selectedPauses {
+			if _, preserved := autoPreservedIDs[pause.ID]; preserved {
+				result = append(result, pause)
+			}
+		}
+		return result
+	}
+
+	for attempt := 0; attempt <= len(selectedPauses); attempt++ {
+		effectivePauses, effectivePauseRanges, _ = resolveTalkingHeadPauseRanges(
+			remaining, semanticDeletions, minTalkingHeadPauseResidualFrames,
+		)
+		sourceDeleteRanges = append([]talkingHeadRange(nil), semanticDeletions...)
+		sourceDeleteRanges = append(sourceDeleteRanges, effectivePauseRanges...)
+		sourceDeleteRanges = mergeTalkingHeadRanges(sourceDeleteRanges)
+
+		bridgePauses := make([]speechPause, 0, len(detectedPauses))
+		for _, pause := range detectedPauses {
+			if _, preserved := autoPreservedIDs[pause.ID]; !preserved {
+				bridgePauses = append(bridgePauses, pause)
+			}
+		}
+		sourceDeleteRanges = bridgeTalkingHeadRanges(
+			sourceDeleteRanges, retainedSpeech, bridgePauses, maxTalkingHeadUnvoicedBridgeFrames,
+		)
+		sourceDeleteRanges = absorbTalkingHeadEdgeSlivers(
+			sourceDeleteRanges, retainedSpeech,
+			clip.SourceStartFrame, clip.SourceEndFrame, maxTalkingHeadUnvoicedBridgeFrames,
+		)
+		orphanFragments = talkingHeadOrphanSpeechFragments(
+			sourceDeleteRanges, retainedSpeech, utterances,
+			removedUtterances, removedWords, effectivePauses,
+			clip.SourceStartFrame, clip.SourceEndFrame, minTalkingHeadRetainedFragmentFrames,
+		)
+		if len(orphanFragments) == 0 {
+			return effectivePauses, effectivePauseRanges, sourceDeleteRanges,
+				finalizeAutoPreserved(), nil
+		}
+
+		effectiveByID := make(map[string]speechPause, len(effectivePauses))
+		for _, pause := range effectivePauses {
+			effectiveByID[pause.ID] = pause
+		}
+		preserveNow := map[string]struct{}{}
+		for _, fragment := range orphanFragments {
+			adjacentPauseIDs, _ := fragment["adjacent_pause_ids"].([]string)
+			bestFound := false
+			bestCost := 0
+			bestPause := speechPause{}
+			for _, pauseID := range adjacentPauseIDs {
+				pause, exists := effectiveByID[pauseID]
+				if !exists {
+					continue
+				}
+				cost := talkingHeadPauseResidualFrames(pause, semanticDeletions)
+				if !bestFound || cost < bestCost || (cost == bestCost && pause.ID < bestPause.ID) {
+					bestFound = true
+					bestCost = cost
+					bestPause = pause
+				}
+			}
+			if bestFound {
+				preserveNow[bestPause.ID] = struct{}{}
+			}
+		}
+		if len(preserveNow) == 0 {
+			return effectivePauses, effectivePauseRanges, sourceDeleteRanges,
+				finalizeAutoPreserved(), orphanFragments
+		}
+
+		next := make([]speechPause, 0, len(remaining)-len(preserveNow))
+		for _, pause := range remaining {
+			if _, preserve := preserveNow[pause.ID]; preserve {
+				autoPreservedIDs[pause.ID] = struct{}{}
+				continue
+			}
+			next = append(next, pause)
+		}
+		if len(next) == len(remaining) {
+			return effectivePauses, effectivePauseRanges, sourceDeleteRanges,
+				finalizeAutoPreserved(), orphanFragments
+		}
+		remaining = next
+	}
+
+	return effectivePauses, effectivePauseRanges, sourceDeleteRanges,
+		finalizeAutoPreserved(), orphanFragments
+}
+
+func talkingHeadPauseResidualFrames(pause speechPause, semanticDeletions []talkingHeadRange) int {
+	frames := 0
+	for _, residual := range subtractTalkingHeadRanges(
+		talkingHeadRange{Start: pause.DeleteStart, End: pause.DeleteEnd}, semanticDeletions,
+	) {
+		if duration := residual.End - residual.Start; duration >= minTalkingHeadPauseResidualFrames {
+			frames += duration
+		}
+	}
+	return frames
 }
 
 func subtractTalkingHeadRanges(
@@ -1154,6 +1290,7 @@ func talkingHeadAnchorTextSourceRange(
 	}
 	type wordSpan struct{ Start, End int }
 	matches := map[wordSpan]struct{}{}
+	blockedMatch := false
 	for offset := 0; offset+len(target) <= len(characters); offset++ {
 		matched := true
 		for index := range target {
@@ -1168,6 +1305,7 @@ func talkingHeadAnchorTextSourceRange(
 		span := wordSpan{Start: owners[offset], End: owners[offset+len(target)-1]}
 		for index := span.Start; index <= span.End; index++ {
 			if blocked[index] {
+				blockedMatch = true
 				matched = false
 				break
 			}
@@ -1177,6 +1315,9 @@ func talkingHeadAnchorTextSourceRange(
 		}
 	}
 	if len(matches) == 0 {
+		if blockedMatch {
+			return talkingHeadRange{}, errors.New("anchor_text 包含本次将删除的词或 utterance；请改用删除后仍连续保留的原文，或改传保留的 word_id")
+		}
 		return talkingHeadRange{}, errors.New("anchor_text 不存在、已删除，或没有连续落在指定 utterance 范围内")
 	}
 	if len(matches) > 1 {

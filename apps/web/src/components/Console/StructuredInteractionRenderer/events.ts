@@ -159,6 +159,7 @@ const SILENT_EVENTS = new Set([
   "AssetImported",
   "AssetProbed",
   "AssetLinked",
+  "AssetUnlinked",
   "ProxyGenerated",
   "MaterialUnderstandingStarted",
   "MaterialUnderstandingCompleted",

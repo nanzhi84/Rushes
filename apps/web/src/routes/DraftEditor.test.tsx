@@ -945,6 +945,20 @@ describe("DraftEditorView", () => {
     });
   });
 
+  it("AssetUnlinked 属于已知素材生命周期事件且不进入对话区", () => {
+    const payload = {
+      event_id: 100,
+      event: {
+        event: "AssetUnlinked",
+        draft_id: "draft_1",
+        payload: { asset_id: "asset_1" }
+      }
+    };
+
+    expect(itemFromEvent(payload)).toBeNull();
+    expect(reduceStructuredInteractionItems([], payload)).toEqual([]);
+  });
+
   it("素材 ingest job 事件不在对话区产进度行", () => {
     let items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "ingest"));
     items = reduceStructuredInteractionItems(items, jobEventPayload("JobSucceeded", "ingest"));
