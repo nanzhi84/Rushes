@@ -2081,6 +2081,48 @@ func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
 	if len(fallbackCuts) != 4 || fallbackCuts[3] != 60 {
 		t.Fatalf("full beat fallback cuts=%v", fallbackCuts)
 	}
+	// 真实素材回归：三段视频总长足够覆盖 900 帧，但均分切点会让最后
+	// 一段超过第三条素材的 303 帧容量。自动规划必须在真实拍点上移动
+	// 前两刀，而不是错误报告素材不足。
+	capacityBeatFrames := []int{
+		89, 100, 110, 121, 132, 143, 154, 173, 183, 194, 204, 214, 224, 235,
+		245, 255, 265, 276, 286, 296, 306, 317, 327, 340, 353, 366, 379, 392,
+		405, 421, 434, 447, 460, 473, 486, 500, 513, 528, 542, 556, 570, 585,
+		600, 615, 630, 645, 660, 675, 690, 705, 720, 735, 750, 765, 780, 795,
+		810, 825, 840, 855, 870, 884,
+	}
+	capacityCuts := chooseCapacityAwareBeatMixCuts(nil, capacityBeatFrames, 900, []int{325, 327, 303})
+	if len(capacityCuts) != 3 || capacityCuts[2] != 900 {
+		t.Fatalf("capacity-aware cuts=%v", capacityCuts)
+	}
+	previous := 0
+	for index, cut := range capacityCuts {
+		if duration := cut - previous; duration <= 0 || duration > []int{325, 327, 303}[index] {
+			t.Fatalf("capacity-aware segment=%d duration=%d cuts=%v", index, duration, capacityCuts)
+		}
+		if cut != 900 && !containsFrame(capacityBeatFrames, cut) {
+			t.Fatalf("capacity-aware cut not on beat: %v", capacityCuts)
+		}
+		previous = cut
+	}
+	if cuts, ok := distributeCapacityAwareBeatMixCuts([]int{30, 60}, 100, []int{30, 30, 30}); ok || cuts != nil {
+		t.Fatalf("insufficient capacity cuts=%v ok=%v", cuts, ok)
+	}
+	if cuts := chooseCapacityAwareBeatMixCuts(nil, nil, 0, nil); cuts != nil {
+		t.Fatalf("invalid capacity-aware cuts=%v", cuts)
+	}
+	if cuts, ok := distributeCapacityAwareBeatMixCuts(nil, 30, []int{30}); !ok || !reflect.DeepEqual(cuts, []int{30}) {
+		t.Fatalf("single capacity cuts=%v ok=%v", cuts, ok)
+	}
+	if cuts, ok := distributeCapacityAwareBeatMixCuts(nil, 31, []int{30}); ok || cuts != nil {
+		t.Fatalf("single short capacity cuts=%v ok=%v", cuts, ok)
+	}
+	if cuts, ok := distributeCapacityAwareBeatMixCuts([]int{10}, 20, []int{0, 20}); ok || cuts != nil {
+		t.Fatalf("zero capacity cuts=%v ok=%v", cuts, ok)
+	}
+	if cuts, ok := distributeCapacityAwareBeatMixCuts([]int{10}, 20, []int{10, 10, 10}); ok || cuts != nil {
+		t.Fatalf("insufficient beat candidates cuts=%v ok=%v", cuts, ok)
+	}
 	if candidates := beatCandidatesWithin([]int{-1, 0, 10, 10, 20, 30}, 30); !reflect.DeepEqual(candidates, []int{10, 20}) {
 		t.Fatalf("candidates=%v", candidates)
 	}

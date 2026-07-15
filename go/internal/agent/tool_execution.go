@@ -766,8 +766,12 @@ func (service *Service) toolBuildBeatMix(
 				grid.EveryFourBeatFrames, grid.BeatFrames, targetFrames, len(input.ShotIDs),
 			)
 		} else if input.UseAllVideoAssets {
-			cutFrames = chooseAllBeatMixCuts(
-				grid.EveryFourBeatFrames, grid.BeatFrames, targetFrames, len(videoSources),
+			capacities := make([]int, 0, len(videoSources))
+			for _, source := range videoSources {
+				capacities = append(capacities, source.availableFrame)
+			}
+			cutFrames = chooseCapacityAwareBeatMixCuts(
+				grid.EveryFourBeatFrames, grid.BeatFrames, targetFrames, capacities,
 			)
 		} else {
 			cutFrames = chooseBeatMixCuts(
@@ -1222,6 +1226,104 @@ func chooseAllBeatMixCuts(everyFour, everyBeat []int, targetFrames, clipCount in
 		candidates = beatCandidatesWithin(everyBeat, targetFrames)
 	}
 	return distributeBeatMixCuts(candidates, targetFrames, clipCount)
+}
+
+// chooseCapacityAwareBeatMixCuts keeps one automatic segment per requested
+// video while moving the cuts onto real beat markers that each source can
+// actually cover. Equal-duration cuts can reject an otherwise feasible mix
+// when the final short source is a few frames below the average segment size.
+// Prefer the sparser four-beat grid, then fall back to the full beat grid. If
+// neither grid has a capacity-feasible assignment, preserve the prior planner
+// result so the existing source-selection failure remains specific and useful.
+func chooseCapacityAwareBeatMixCuts(
+	everyFour, everyBeat []int,
+	targetFrames int,
+	capacities []int,
+) []int {
+	if targetFrames <= 0 || len(capacities) == 0 {
+		return nil
+	}
+	for _, grid := range [][]int{everyFour, everyBeat} {
+		candidates := beatCandidatesWithin(grid, targetFrames)
+		if cuts, ok := distributeCapacityAwareBeatMixCuts(candidates, targetFrames, capacities); ok {
+			return cuts
+		}
+	}
+	return chooseAllBeatMixCuts(everyFour, everyBeat, targetFrames, len(capacities))
+}
+
+func distributeCapacityAwareBeatMixCuts(
+	candidates []int,
+	targetFrames int,
+	capacities []int,
+) ([]int, bool) {
+	if targetFrames <= 0 || len(capacities) == 0 {
+		return nil, false
+	}
+	totalCapacity := 0
+	for _, capacity := range capacities {
+		if capacity <= 0 {
+			return nil, false
+		}
+		totalCapacity += capacity
+	}
+	if totalCapacity < targetFrames || len(capacities) > len(candidates)+1 {
+		return nil, false
+	}
+	if len(capacities) == 1 {
+		if capacities[0] < targetFrames {
+			return nil, false
+		}
+		return []int{targetFrames}, true
+	}
+
+	type state struct {
+		segment int
+		cursor  int
+	}
+	failed := map[state]struct{}{}
+	var solve func(segment, cursor int) ([]int, bool)
+	solve = func(segment, cursor int) ([]int, bool) {
+		if segment == len(capacities)-1 {
+			if targetFrames-cursor > 0 && targetFrames-cursor <= capacities[segment] {
+				return []int{targetFrames}, true
+			}
+			return nil, false
+		}
+		key := state{segment: segment, cursor: cursor}
+		if _, known := failed[key]; known {
+			return nil, false
+		}
+		remainingCapacity := 0
+		for _, capacity := range capacities[segment+1:] {
+			remainingCapacity += capacity
+		}
+		minimumCut := max(cursor+1, targetFrames-remainingCapacity)
+		maximumCut := min(cursor+capacities[segment], targetFrames-1)
+		idealCut := int(math.Round(float64(targetFrames*(segment+1)) / float64(len(capacities))))
+		options := make([]int, 0)
+		for _, candidate := range candidates {
+			if candidate >= minimumCut && candidate <= maximumCut {
+				options = append(options, candidate)
+			}
+		}
+		sort.SliceStable(options, func(left, right int) bool {
+			leftDistance := absInt(options[left] - idealCut)
+			rightDistance := absInt(options[right] - idealCut)
+			if leftDistance == rightDistance {
+				return options[left] < options[right]
+			}
+			return leftDistance < rightDistance
+		})
+		for _, candidate := range options {
+			if suffix, ok := solve(segment+1, candidate); ok {
+				return append([]int{candidate}, suffix...), true
+			}
+		}
+		failed[key] = struct{}{}
+		return nil, false
+	}
+	return solve(0, 0)
 }
 
 func distributeBeatMixCuts(candidates []int, targetFrames, maxClips int) []int {
