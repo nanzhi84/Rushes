@@ -80,6 +80,13 @@ test("Go 主线：导入、理解、时间线、预览、确认与最终导出",
     .getByLabel("Diffusion Studio 代理预览")
     .or(page.getByRole("region", { name: "Video Player" }));
   await expect(initialPreview).toBeVisible({ timeout: 60_000 });
+  // 先确认初版时间线的后台预览已落库，再提交手工裁剪。否则渲染 v1
+  // 与创建 v2 并发时，Reducer 会正确拒绝把旧预览设为当前预览，导致
+  // 用例依赖机器快慢而随机失败。
+  const renderedInitial = await waitForDraft(request, draftAId, (draft) =>
+    Boolean(draft.preview_current_id)
+  );
+  expect(renderedInitial.preview_current_id).toBeTruthy();
 
   // 回归“素材中段取片”：Diffusion Core 的 delay 必须扣掉 source_start_frame。
   // 旧实现同时把 source start 算入 delay/range，在时间线 0 帧会没有活跃 clip，画布稳定黑屏。
@@ -135,11 +142,6 @@ test("Go 主线：导入、理解、时间线、预览、确认与最终导出",
     .poll(async () => Number(await previewProgress.inputValue()), { timeout: 5_000 })
     .toBeGreaterThan(previewStart + 0.1);
   await page.getByRole("button", { name: "暂停", exact: true }).click();
-  const afterPreview = await waitForDraft(request, draftAId, (draft) =>
-    Boolean(draft.preview_current_id)
-  );
-  expect(afterPreview.preview_current_id).toBeTruthy();
-
   await page.getByLabel("消息输入").fill("导出成片");
   await page.getByRole("button", { name: "发送" }).click();
   const currentDecision = page.getByRole("region", { name: /个问题待回答/ });

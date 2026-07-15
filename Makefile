@@ -33,6 +33,7 @@ web:
 	$(PNPM) --dir apps/web build
 
 e2e:
+	cd go && go test -race -tags=e2e_scaffold ./internal/agent ./internal/api
 	$(PNPM) --dir e2e exec playwright test
 
 check: contracts test coverage lint web e2e

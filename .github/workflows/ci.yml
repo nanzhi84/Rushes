@@ -137,7 +137,7 @@ jobs:
       - run: pnpm --dir apps/web install --frozen-lockfile
       - run: pnpm --dir e2e install --frozen-lockfile
       - run: pnpm --dir e2e exec playwright install chromium --with-deps
-      - run: pnpm --dir e2e exec playwright test
+      - run: make PNPM=pnpm e2e
       - name: Upload Playwright report
         if: failure()
         uses: actions/upload-artifact@v4
