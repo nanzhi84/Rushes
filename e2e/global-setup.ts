@@ -91,11 +91,11 @@ function cleanWorkspace(): void {
 
 function buildGoBinaries(): void {
   mkdirSync(BIN_DIR, { recursive: true });
-  execFileSync("go", ["build", "-o", path.join(BIN_DIR, "rushes-api"), "./cmd/api"], {
+  execFileSync("go", ["build", "-tags=e2e_scaffold", "-o", path.join(BIN_DIR, "rushes-api"), "./cmd/api"], {
     cwd: path.join(REPO_ROOT, "go"),
     stdio: "inherit"
   });
-  execFileSync("go", ["build", "-o", path.join(BIN_DIR, "rushes-worker"), "./cmd/worker"], {
+  execFileSync("go", ["build", "-tags=e2e_scaffold", "-o", path.join(BIN_DIR, "rushes-worker"), "./cmd/worker"], {
     cwd: path.join(REPO_ROOT, "go"),
     stdio: "inherit"
   });

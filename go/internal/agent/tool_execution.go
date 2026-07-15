@@ -1359,13 +1359,6 @@ func (service *Service) toolUnderstand(
 	cacheHitAssetIDs := make([]string, 0, len(input.AssetIDs))
 	analyzedAssetIDs := make([]string, 0, len(input.AssetIDs))
 	for index, assetID := range input.AssetIDs {
-		if input.Focus == "e2e_cancel" && index > 0 {
-			select {
-			case <-ctx.Done():
-				return rushestools.UnderstandResult{}, ctx.Err()
-			case <-time.After(30 * time.Second):
-			}
-		}
 		if err := ctx.Err(); err != nil {
 			return rushestools.UnderstandResult{}, err
 		}

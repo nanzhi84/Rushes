@@ -50,6 +50,16 @@ type failingServiceModel struct{}
 
 type emptyServiceModel struct{}
 
+type blockingFallbackScaffold struct{}
+
+func (blockingFallbackScaffold) TryHandle(
+	ctx context.Context,
+	_, _, _ string,
+) (string, bool, error) {
+	<-ctx.Done()
+	return "", true, ctx.Err()
+}
+
 type terminatingFailureLoopModel struct {
 	mu    sync.Mutex
 	calls int
@@ -802,9 +812,10 @@ func TestServiceCancellationPropagatesToTurnContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
+	service.fallbackScaffold = blockingFallbackScaffold{}
 	_, stream, unsubscribe := service.Hub().Subscribe("draft_cancel")
 	defer unsubscribe()
-	service.Queue().EnqueueUserMessage("draft_cancel", "msg", "E2E_BLOCK_UNTIL_CANCEL")
+	service.Queue().EnqueueUserMessage("draft_cancel", "msg", "等待取消")
 	for {
 		event := <-stream
 		if event["type"] == "turn_started" {
@@ -879,66 +890,6 @@ func TestJobObservationBridgeWakesAgentForWaitedTerminalJob(t *testing.T) {
 			}
 		case <-deadline:
 			t.Fatal("job observation 未唤醒 Agent")
-		}
-	}
-}
-
-func TestUnderstandingMiniLoopCancellationKeepsCompletedSummaryAndResetsPendingAsset(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg 未安装")
-	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_understand_cancel")
-	source := filepath.Join(database.Paths.Temporary, "understand-cancel.mp4")
-	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", source); err != nil {
-		t.Fatal(err)
-	}
-	events := []contracts.Event{}
-	for index, assetID := range []string{"ready_asset", "slow_asset"} {
-		events = append(events,
-			contracts.Event{Type: "AssetImported", Payload: map[string]any{
-				"asset_id": assetID, "job_id": "job_asset_" + assetID,
-				"storage_mode": "reference", "reference_path": source, "kind": "video",
-				"source": "local_path", "filename": assetID + ".mp4", "hash": assetID,
-				"size": index + 1, "probe": map[string]any{"duration_sec": 1}, "ingest_status": "ready",
-			}},
-			contracts.Event{Type: "AssetLinked", DraftID: "draft_understand_cancel", Payload: map[string]any{"asset_id": assetID}},
-		)
-	}
-	result, err := reducer.Apply(t.Context(), database, events, reducer.Options{Actor: contracts.ActorUser})
-	if err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("assets status=%s err=%v", result.Status, err)
-	}
-	service, err := NewService(t.Context(), database, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(service.Close)
-	_, stream, unsubscribe := service.Hub().Subscribe("draft_understand_cancel")
-	defer unsubscribe()
-	service.Queue().EnqueueUserMessage("draft_understand_cancel", "message", "E2E_CANCEL_UNDERSTANDING")
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case event := <-stream:
-			completed, _ := event["completed"].(int)
-			if event["type"] == "subagent_progress" && completed == 1 {
-				if !service.Queue().RequestStop("draft_understand_cancel") {
-					t.Fatal("理解进行中取消失败")
-				}
-				service.Queue().JoinDraft("draft_understand_cancel")
-				ready, _ := storage.GetAsset(t.Context(), database.Read(), "ready_asset")
-				slow, _ := storage.GetAsset(t.Context(), database.Read(), "slow_asset")
-				if ready.UnderstandingStatus != "ready" || slow.UnderstandingStatus != "none" {
-					t.Fatalf("ready=%s slow=%s", ready.UnderstandingStatus, slow.UnderstandingStatus)
-				}
-				if _, err := storage.BestMaterialSummary(t.Context(), database.Read(), "ready_asset"); err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-		case <-deadline:
-			t.Fatal("等待理解 1/2 超时")
 		}
 	}
 }

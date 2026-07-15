@@ -42,6 +42,7 @@ type Service struct {
 	analyzer         *understanding.Analyzer
 	speechRecognizer contracts.SpeechRecognizer
 	contextManager   *ContextManager
+	fallbackScaffold fallbackScaffold
 	cancel           context.CancelFunc
 	bridgeWG         sync.WaitGroup
 }
@@ -70,6 +71,7 @@ func NewServiceWithModels(
 		chatModel: chatModel, analyzer: understanding.NewAnalyzer(visionModel),
 		contextManager: NewContextManager(database),
 	}
+	service.fallbackScaffold = newFallbackScaffold(service)
 	registry, err := rushestools.NewRegistry(database, service)
 	if err != nil {
 		cancel()
@@ -427,30 +429,13 @@ func (service *Service) fallbackTurn(
 	ctx context.Context,
 	draftID, messageID, content string,
 ) (string, error) {
-	if strings.Contains(content, "E2E_BLOCK_UNTIL_CANCEL") {
-		<-ctx.Done()
-		return "", ctx.Err()
+	if service.fallbackScaffold != nil {
+		reply, handled, err := service.fallbackScaffold.TryHandle(ctx, draftID, messageID, content)
+		if handled || err != nil {
+			return reply, err
+		}
 	}
-	if strings.Contains(content, "E2E_CANCEL_UNDERSTANDING") {
-		listed, err := service.toolListAssets(ctx, draftID, rushestools.AssetListInput{OnlyUsable: boolPointer(true)})
-		if err != nil {
-			return "", err
-		}
-		assetIDs := make([]string, 0, len(listed.Assets))
-		for _, asset := range listed.Assets {
-			assetIDs = append(assetIDs, asset.AssetID)
-		}
-		reporter := service.toolReporter(ctx, draftID)
-		input := rushestools.UnderstandInput{AssetIDs: assetIDs, Depth: "deep", Focus: "e2e_cancel"}
-		reporter("understand.materials", "started", input, nil, nil)
-		output, executeErr := service.ExecuteTool(ctx, "understand.materials", input)
-		reporter("understand.materials", "finished", input, output, executeErr)
-		if executeErr != nil {
-			return "", executeErr
-		}
-		return "素材理解已完成。", nil
-	}
-	if strings.Contains(content, "E2E_FULL_MAINLINE") || strings.Contains(content, "混剪") {
+	if strings.Contains(content, "混剪") {
 		return service.fallbackFullMainline(ctx, draftID)
 	}
 	if strings.Contains(content, "导出") {
