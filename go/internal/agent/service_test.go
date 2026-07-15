@@ -1344,6 +1344,19 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 			t.Fatalf("replay %s: %v", name, err)
 		}
 	}
+	replayed, err := replayInput("timeline.apply_patch", map[string]any{
+		"op": map[string]any{"kind": "delete_clip", "clip_id": "clip_replay"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	patchInput, ok := replayed.(rushestools.TimelinePatchInput)
+	if !ok || reflect.TypeOf(patchInput.Op) != reflect.TypeFor[rushestools.TimelineOp]() {
+		t.Fatalf("replayed timeline patch type=%T op=%T", replayed, patchInput.Op)
+	}
+	if patchInput.Op["kind"] != "delete_clip" || patchInput.Op["clip_id"] != "clip_replay" {
+		t.Fatalf("replayed timeline op=%#v", patchInput.Op)
+	}
 	if _, err := replayInput("missing", map[string]any{}); err == nil {
 		t.Fatal("unknown replay should fail")
 	}

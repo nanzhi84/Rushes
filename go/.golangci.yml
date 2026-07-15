@@ -78,6 +78,7 @@ linters:
           allow:
             - $gostd
             - github.com/cloudwego/eino
+            - github.com/eino-contrib/jsonschema
             - github.com/nanzhi84/Rushes/go/internal/contracts
             - github.com/nanzhi84/Rushes/go/internal/media
             - github.com/nanzhi84/Rushes/go/internal/providers

@@ -16,6 +16,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
+	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -311,6 +312,11 @@ func validateLiveToolArguments(spec rushestools.Spec, raw string) error {
 	if err := decoder.Decode(target.Interface()); err != nil {
 		return fmt.Errorf("参数不符合 Go schema: %w", err)
 	}
+	if input, ok := target.Elem().Interface().(rushestools.TimelinePatchInput); ok {
+		if err := validateLiveTimelineOp(input.Op); err != nil {
+			return fmt.Errorf("参数不符合 op.oneOf: %w", err)
+		}
+	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(raw), &object); err != nil {
 		return err
@@ -327,6 +333,61 @@ func validateLiveToolArguments(spec rushestools.Spec, raw string) error {
 		}
 	}
 	return nil
+}
+
+func validateLiveTimelineOp(operation rushestools.TimelineOp) error {
+	plain := map[string]any(operation)
+	if err := timeline.ValidateOpFields(plain); err != nil {
+		return err
+	}
+	kind, _ := plain["kind"].(string)
+	spec, exists := timeline.LookupOpSpec(kind)
+	if !exists {
+		return fmt.Errorf("未知 kind %q", kind)
+	}
+	allowed := map[string]bool{"kind": true}
+	for _, field := range spec.Fields {
+		if field.Injected {
+			continue
+		}
+		allowed[field.Name] = true
+		for _, alias := range field.Aliases {
+			allowed[alias] = true
+		}
+	}
+	for name := range plain {
+		if !allowed[name] {
+			return fmt.Errorf("kind %s 不公开字段 %s", kind, name)
+		}
+	}
+	return nil
+}
+
+func TestValidateLiveToolArgumentsChecksTimelineOpOneOfContract(t *testing.T) {
+	t.Parallel()
+	spec := rushestools.Spec{InputType: reflect.TypeFor[rushestools.TimelinePatchInput]()}
+	valid := []string{
+		`{"op":{"kind":"trim_clip_edge","timeline_clip_id":"clip_1","timeline_frame":75,"edge":"end"}}`,
+		`{"op":{"kind":"delete_clip","clip_id":"clip_1"}}`,
+		`{"op":{"kind":"sync_original_audio"}}`,
+		`{"op":{"kind":"set_track_state","track_id":"bgm","muted":true}}`,
+	}
+	for _, raw := range valid {
+		if err := validateLiveToolArguments(spec, raw); err != nil {
+			t.Errorf("合法参数被拒绝 raw=%s err=%v", raw, err)
+		}
+	}
+	invalid := []string{
+		`{"op":{"kind":"trim_clip_edge","timeline_clip_id":"clip_1","target_frame":75,"edge":"end"}}`,
+		`{"op":{"kind":"delete_clip","clip_id":"clip_1","target_frame":75}}`,
+		`{"op":{"kind":"insert_clip","asset_id":"asset_1","source_start_frame":0,"source_end_frame":90,"asset_kind":"video"}}`,
+		`{"op":{"kind":"set_track_state","track_id":"bgm"}}`,
+	}
+	for _, raw := range invalid {
+		if err := validateLiveToolArguments(spec, raw); err == nil {
+			t.Errorf("非法参数错误通过 raw=%s", raw)
+		}
+	}
 }
 
 func liveEvalRuns() int {

@@ -1584,7 +1584,7 @@ func (service *Service) toolApplyPatch(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	operations, err := service.enrichTimelineOperations(ctx, draftID, []map[string]any{input.Op})
+	operations, err := service.enrichTimelineOperations(ctx, draftID, []map[string]any{map[string]any(input.Op)})
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
