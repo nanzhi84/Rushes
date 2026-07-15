@@ -33,6 +33,18 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 	if err != nil {
 		return nil, err
 	}
+	release, blockingDecisionID := beginTurnToolCall(ctx)
+	defer release()
+	if blockingDecisionID != "" {
+		return rushestools.ToolResult{
+			Status:      "waiting",
+			Observation: "本回合已经创建阻塞决策卡；必须停止调用工具并等待真实用户回答。",
+			Data: map[string]any{
+				"decision_id": blockingDecisionID, "blocked_tool": name,
+				"turn_should_end": true, "current_turn_unchanged": true,
+			},
+		}, nil
+	}
 	switch name {
 	case "asset.import_local_file":
 		return nil, errors.New("本地导入仅由已确认的 REST 文件选择流程执行")
@@ -504,7 +516,11 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 		)
 	}
 
-	result, err := service.toolApplyPatches(ctx, draftID, rushestools.TimelinePatchBatchInput{Ops: operations})
+	typedOperations := make([]rushestools.TimelineOp, len(operations))
+	for index := range operations {
+		typedOperations[index] = rushestools.TimelineOp(operations[index])
+	}
+	result, err := service.toolApplyPatches(ctx, draftID, rushestools.TimelinePatchBatchInput{Ops: typedOperations})
 	if err != nil || result.Status != "succeeded" {
 		return result, err
 	}
@@ -1899,10 +1915,19 @@ func (service *Service) toolComposeInitial(
 		return rushestools.ToolResult{}, err
 	}
 	selections := make([]timeline.Selection, 0, len(input.Clips))
-	for _, clip := range input.Clips {
+	for index, clip := range input.Clips {
 		asset, assetErr := storage.GetAsset(ctx, service.database.Read(), clip.AssetID)
 		if assetErr != nil {
-			return rushestools.ToolResult{}, assetErr
+			return composeInitialFailure(index, clip, storage.Asset{}, assetErr.Error()), nil
+		}
+		durationSec, _ := numericValue(asset.Probe["duration_sec"])
+		durationFrames := int(math.Round(durationSec * timeline.DefaultFPS))
+		if asset.Kind != "video" && asset.Kind != "image" {
+			return composeInitialFailure(index, clip, asset, "主视觉轨只支持 video/image 素材"), nil
+		}
+		if clip.SourceStartFrame < 0 || clip.SourceEndFrame <= clip.SourceStartFrame ||
+			durationFrames > 0 && clip.SourceEndFrame > durationFrames {
+			return composeInitialFailure(index, clip, asset, "源帧范围无效或超出素材时长"), nil
 		}
 		hasAudio, _ := asset.Probe["has_audio"].(bool)
 		selections = append(selections, timeline.Selection{
@@ -1913,11 +1938,48 @@ func (service *Service) toolComposeInitial(
 	}
 	document, err := timeline.ComposeInitial(draftID, version, selections)
 	if err != nil {
-		return rushestools.ToolResult{}, err
+		return rushestools.ToolResult{
+			Status: "failed", Observation: "初版时间线参数校验失败，当前时间线未更新",
+			Data: map[string]any{
+				"error_code": "compose_initial_invalid", "reason": err.Error(),
+				"current_timeline_unchanged": true,
+				"recovery":                   "根据 failed_clip 与 asset_facts 修正源帧范围或素材类型后重试。",
+			},
+		}, nil
 	}
 	return service.persistTimeline(ctx, draftID, document, "compose_initial", []map[string]any{{
 		"kind": "compose_initial", "clip_count": len(input.Clips),
 	}})
+}
+
+func composeInitialFailure(
+	index int,
+	clip rushestools.ComposeClip,
+	asset storage.Asset,
+	reason string,
+) rushestools.ToolResult {
+	durationSec, _ := numericValue(asset.Probe["duration_sec"])
+	assetID := asset.ID
+	if assetID == "" {
+		assetID = clip.AssetID
+	}
+	return rushestools.ToolResult{
+		Status:      "failed",
+		Observation: fmt.Sprintf("初版时间线第 %d 个片段参数无效，当前时间线未更新", index+1),
+		Data: map[string]any{
+			"error_code": "compose_initial_invalid", "failed_clip_index": index + 1,
+			"failed_clip": map[string]any{
+				"asset_id": clip.AssetID, "source_start_frame": clip.SourceStartFrame,
+				"source_end_frame": clip.SourceEndFrame, "role": clip.Role,
+			},
+			"asset_facts": map[string]any{
+				"asset_id": assetID, "kind": asset.Kind,
+				"duration_frames": int(math.Round(durationSec * timeline.DefaultFPS)),
+			},
+			"reason": reason, "current_timeline_unchanged": true,
+			"recovery": "改用 video/image 素材，并把 source_start_frame/source_end_frame 限制在 duration_frames 内。",
+		},
+	}
 }
 
 func (service *Service) toolApplyPatch(
@@ -1936,7 +1998,7 @@ func (service *Service) toolApplyPatch(
 	operation := operations[0]
 	document, err := timeline.ApplyPatch(current, operation)
 	if err != nil {
-		if failure, ok := timelineOpFailureAt(err, operation, 0); ok {
+		if failure, ok := timelineOpFailureAt(err, operation, 0, current); ok {
 			return failure, nil
 		}
 		return rushestools.ToolResult{}, err
@@ -1982,16 +2044,21 @@ func (service *Service) toolApplyPatches(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	enrichedOperations, err := service.enrichTimelineOperations(ctx, draftID, input.Ops)
+	operations := make([]map[string]any, len(input.Ops))
+	for index := range input.Ops {
+		operations[index] = map[string]any(input.Ops[index])
+	}
+	enrichedOperations, err := service.enrichTimelineOperations(ctx, draftID, operations)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
 	plannedOperations, preservedAudio := prepareTimelineBatch(current, enrichedOperations)
 	document := current
 	for index, operation := range plannedOperations {
+		beforeOperation := document
 		document, err = timeline.ApplyPatch(document, operation)
 		if err != nil {
-			if failure, ok := timelineOpFailureAt(err, operation, index+1); ok {
+			if failure, ok := timelineOpFailureAt(err, operation, index+1, beforeOperation); ok {
 				return failure, nil
 			}
 			message := fmt.Sprintf("第 %d 个时间线补丁失败: %v", index+1, err)
@@ -2298,6 +2365,7 @@ func (service *Service) toolAskUser(
 	input rushestools.AskUserInput,
 	pending map[string]any,
 ) (rushestools.ToolResult, error) {
+	decisionType := normalizeDecisionType(input.DecisionType)
 	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
@@ -2305,9 +2373,10 @@ func (service *Service) toolAskUser(
 	decisionID := randomID("decision")
 	options := make([]map[string]any, 0, len(input.Options))
 	for _, option := range input.Options {
-		options = append(options, map[string]any{
+		storedOption := map[string]any{
 			"option_id": option.OptionID, "label": option.Label, "description": option.Description,
-		})
+		}
+		options = append(options, storedOption)
 	}
 	blocking := true
 	if input.Blocking != nil {
@@ -2326,17 +2395,34 @@ func (service *Service) toolAskUser(
 	result, err := reducer.Apply(ctx, service.database, []contracts.Event{{
 		Type: "DecisionCreated", DraftID: draftID,
 		Payload: map[string]any{
-			"decision_id": decisionID, "scope_type": "draft", "type": "generic",
+			"decision_id": decisionID, "scope_type": "draft", "type": decisionType,
 			"question": input.Question, "options": options, "blocking": blocking,
 			"allow_free_text": allowFreeText, "pending_tool_call": pendingPayload,
 			"pending_tool_call_status": pendingStatus,
+			"created_by_tool_call_id":  nullableToolCallID(ctx),
 		},
 	}}, reducer.Options{Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion})
 	if err != nil || result.Status != reducer.StatusApplied {
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("reducer status: %s", result.Status))
 	}
+	markDecisionCreatedThisTurn(ctx, decisionID, blocking)
+	if !blocking {
+		return rushestools.ToolResult{
+			Status:      "succeeded",
+			Observation: "已创建非阻塞决策卡；当前任务可以继续执行。",
+			Data: map[string]any{
+				"decision_id": decisionID, "decision_type": decisionType,
+				"turn_should_end": false,
+			},
+		}, nil
+	}
 	return rushestools.ToolResult{
-		Status: "waiting", Observation: "等待用户回答", Data: map[string]any{"decision_id": decisionID},
+		Status:      "waiting",
+		Observation: "已创建决策卡。本回合必须停止调用工具；等待真实用户回答后，系统会自动继续。",
+		Data: map[string]any{
+			"decision_id": decisionID, "decision_type": decisionType,
+			"turn_should_end": true,
+		},
 	}, nil
 }
 
@@ -2345,7 +2431,31 @@ func (service *Service) toolDecisionAnswer(
 	draftID string,
 	input rushestools.DecisionAnswerInput,
 ) (rushestools.ToolResult, error) {
+	if decisionCreatedThisTurn(ctx, input.DecisionID) {
+		return rushestools.ToolResult{
+			Status:      "failed",
+			Observation: "不能回答本回合由 interaction.ask_user 刚创建的决策；请结束本回合并等待真实用户回答。",
+			Data: map[string]any{
+				"decision_id": input.DecisionID, "current_turn_unchanged": true,
+				"turn_should_end": true,
+			},
+		}, nil
+	}
 	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	decision, err := storage.GetDecision(ctx, service.database.Read(), input.DecisionID)
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	if decision.DraftID == nil || *decision.DraftID != draftID || decision.ScopeType != "draft" {
+		return rushestools.ToolResult{}, errors.New("决策不属于当前草稿")
+	}
+	if decision.Status != "pending" {
+		return rushestools.ToolResult{}, errors.New("决策已不在待回答状态")
+	}
+	answer, err := AdjudicateDecisionAnswer(decision, input.OptionID, input.FreeText, input.Payload)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -2353,16 +2463,74 @@ func (service *Service) toolDecisionAnswer(
 		Type: "DecisionAnswered", DraftID: draftID,
 		Payload: map[string]any{
 			"decision_id": input.DecisionID, "scope_type": "draft",
-			"answer": map[string]any{
-				"option_id": input.OptionID, "free_text": input.FreeText,
-				"payload": input.Payload, "answered_via": "agent",
-			},
+			"answer": answer,
 		},
 	}}, reducer.Options{Actor: contracts.ActorUser, BaseVersion: &draft.StateVersion})
 	if err != nil || result.Status != reducer.StatusApplied {
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("reducer status: %s", result.Status))
 	}
 	return rushestools.ToolResult{Status: "succeeded", Observation: "决策已回答"}, nil
+}
+
+// DecisionAnswerError reports a stable API reason for rejected answer content.
+type DecisionAnswerError struct {
+	Reason  string
+	Message string
+}
+
+func (err *DecisionAnswerError) Error() string { return err.Message }
+
+// AdjudicateDecisionAnswer is the single answer-content gate used by Agent and REST.
+// Server-owned option payload fields always win over untrusted caller fields.
+func AdjudicateDecisionAnswer(
+	decision storage.Decision,
+	optionValue string,
+	freeTextValue string,
+	payload map[string]any,
+) (map[string]any, error) {
+	optionID := strings.TrimSpace(optionValue)
+	freeText := strings.TrimSpace(freeTextValue)
+	if optionID == "" && freeText == "" {
+		return nil, &DecisionAnswerError{
+			Reason: "decision_answer_empty", Message: "决策答案必须提供 option_id 或 free_text",
+		}
+	}
+	answerPayload := payload
+	if optionID != "" {
+		option, exists := decisionOption(decision, optionID)
+		if !exists {
+			return nil, &DecisionAnswerError{
+				Reason: "decision_option_not_found", Message: "option_id 不属于该决策的可选项",
+			}
+		}
+		if optionPayload, ok := option["payload"].(map[string]any); ok {
+			answerPayload = make(map[string]any, len(payload)+len(optionPayload))
+			for key, value := range payload {
+				answerPayload[key] = value
+			}
+			for key, value := range optionPayload {
+				answerPayload[key] = value
+			}
+		}
+	}
+	if freeText != "" && !decision.AllowFreeText {
+		return nil, &DecisionAnswerError{
+			Reason: "decision_free_text_not_allowed", Message: "该决策不允许自由文本答案",
+		}
+	}
+	return map[string]any{
+		"option_id": optionID, "free_text": freeText,
+		"payload": answerPayload, "answered_via": "agent",
+	}, nil
+}
+
+func decisionOption(decision storage.Decision, optionID string) (map[string]any, bool) {
+	for _, option := range decision.Options {
+		if interfaceString(option["option_id"]) == optionID {
+			return option, true
+		}
+	}
+	return nil, false
 }
 
 func (service *Service) toolEnqueueRender(

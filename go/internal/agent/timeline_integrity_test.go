@@ -135,7 +135,7 @@ func TestApplyPatchesAtomicallyReplacesPrimaryWithoutChangingBGMOrSFX(t *testing
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_atomic_primary")
-	output, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []map[string]any{
+	output, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{
 		{"kind": "delete_clip", "timeline_clip_id": "clip_v1_001"},
 		{"kind": "delete_clip", "timeline_clip_id": "clip_v1_002"},
 		{"kind": "insert_clip", "track_id": "visual_base", "asset_id": "new_a", "asset_kind": "video", "source_start_frame": 0, "source_end_frame": 20},
@@ -153,7 +153,7 @@ func TestApplyPatchesAtomicallyReplacesPrimaryWithoutChangingBGMOrSFX(t *testing
 		latest.Tracks[6].Clips[0].TimelineStartFrame != 40 {
 		t.Fatalf("latest=%#v err=%v", latest, err)
 	}
-	failed, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []map[string]any{{
+	failed, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "delete_clip", "timeline_clip_id": latest.Tracks[0].Clips[0].TimelineClipID,
 	}}})
 	if err != nil || failed.(rushestools.ToolResult).Status != "failed" {

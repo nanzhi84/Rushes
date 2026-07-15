@@ -168,6 +168,7 @@ func newToolRecoveryMiddleware() compose.ToolMiddleware {
 						return &compose.ToolOutput{Result: blockedToolCallOutput(input, decision)}, nil
 					}
 				}
+				ctx = rushestools.WithToolCallID(ctx, input.CallID)
 
 				// registry reporter 位于工具实现内部；若直接重放 next，每次内部重试都会
 				// 在消息流和数据库里生成一条失败工具记录。保留第一次 started 以持续
@@ -312,6 +313,9 @@ func decorateToolFailure(
 		})
 	}
 	data["harness_recovery"] = recoveryMetadata(decision, executionAttempts)
+	if budget := turnBudgetFromContext(ctx); budget != nil {
+		data["remaining_tool_rounds"] = budget.remainingToolRounds()
+	}
 	payload["data"] = data
 	encoded, err := json.Marshal(payload)
 	if err != nil {

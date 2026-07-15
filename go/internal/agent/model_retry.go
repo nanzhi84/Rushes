@@ -95,6 +95,7 @@ func (retry *timeoutRetryChatModel) Generate(
 	for completedRetries := 0; ; {
 		response, err := retry.inner.Generate(ctx, messages, options...)
 		if err == nil {
+			recordModelResponseUsage(ctx, response)
 			return response, nil
 		}
 		completedRetries, messages, err = retry.nextAttempt(ctx, input, completedRetries, err)
@@ -128,6 +129,9 @@ func (retry *timeoutRetryChatModel) Stream(
 		// 并重试；成功时仍按原始 chunk 顺序交给 ReAct，语义不会改变。
 		buffered, receiveErr := bufferCompleteModelStream(stream)
 		if receiveErr == nil {
+			if response, concatErr := schema.ConcatMessages(buffered); concatErr == nil {
+				recordModelResponseUsage(ctx, response)
+			}
 			return schema.StreamReaderFromArray(buffered), nil
 		}
 		completedRetries, messages, receiveErr = retry.nextAttempt(
@@ -136,6 +140,15 @@ func (retry *timeoutRetryChatModel) Stream(
 		if receiveErr != nil {
 			return nil, receiveErr
 		}
+	}
+}
+
+func recordModelResponseUsage(ctx context.Context, response *schema.Message) {
+	if response == nil || response.ResponseMeta == nil || response.ResponseMeta.Usage == nil {
+		return
+	}
+	if state := turnBudgetFromContext(ctx); state != nil {
+		state.recordUsage(response.ResponseMeta.Usage)
 	}
 }
 

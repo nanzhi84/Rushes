@@ -11,6 +11,7 @@ const (
 	draftIDKey                contextKey = "rushes_draft_id"
 	reporterKey               contextKey = "rushes_tool_reporter"
 	timelineMutationOriginKey contextKey = "rushes_timeline_mutation_origin"
+	toolCallIDKey             contextKey = "rushes_tool_call_id"
 )
 
 type Executor interface {
@@ -42,6 +43,17 @@ func TimelineMutationOrigin(ctx context.Context) string {
 	return value
 }
 
+// WithToolCallID carries the model tool-call identity through middleware into
+// the reducer-backed executor. Direct REST and test calls intentionally leave it empty.
+func WithToolCallID(ctx context.Context, toolCallID string) context.Context {
+	return context.WithValue(ctx, toolCallIDKey, toolCallID)
+}
+
+func ToolCallID(ctx context.Context) string {
+	value, _ := ctx.Value(toolCallIDKey).(string)
+	return value
+}
+
 func WithReporter(ctx context.Context, reporter Reporter) context.Context {
 	return context.WithValue(ctx, reporterKey, reporter)
 }
@@ -66,10 +78,10 @@ type AssetImportInput struct {
 }
 
 type AssetListInput struct {
-	Kind       string `json:"kind,omitempty"`
-	OnlyUsable *bool  `json:"only_usable,omitempty"`
-	Limit      int    `json:"limit,omitempty"`
-	After      string `json:"after,omitempty"`
+	Kind       string `json:"kind,omitempty" jsonschema_description:"可选素材类型筛选：video、audio、image 或 font"`
+	OnlyUsable *bool  `json:"only_usable,omitempty" jsonschema_description:"是否只返回当前可用于剪辑的素材；默认 false，设为 true 可排除导入失败或不可读素材"`
+	Limit      int    `json:"limit,omitempty" jsonschema_description:"单页返回数量，默认 50，上限 200"`
+	After      string `json:"after,omitempty" jsonschema_description:"上一页 next_after 返回的游标；首次读取时省略"`
 }
 
 type AssetManifest struct {
@@ -95,10 +107,10 @@ type AssetListResult struct {
 }
 
 type UnderstandInput struct {
-	AssetIDs         []string `json:"asset_ids" jsonschema:"required"`
-	Depth            string   `json:"depth,omitempty" jsonschema_description:"scan 或 deep"`
-	Focus            string   `json:"focus,omitempty"`
-	MaxStepsPerAsset int      `json:"max_steps_per_asset,omitempty"`
+	AssetIDs         []string `json:"asset_ids" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的一个或多个素材 ID；不要传文件名或本地路径"`
+	Depth            string   `json:"depth,omitempty" jsonschema_description:"scan 做低成本广度扫描，deep 做逐镜头深度理解；默认 scan，多素材或 deep 可能异步排队并在完成后自动续跑"`
+	Focus            string   `json:"focus,omitempty" jsonschema_description:"可选创作关注点，例如产品特写、人物动作或可用于高潮的镜头；会进入视觉分析提示与缓存键"`
+	MaxStepsPerAsset int      `json:"max_steps_per_asset,omitempty" jsonschema_description:"每个素材的最大分析步骤数；0 使用服务端默认值，数值越大成本和延迟越高"`
 	ForceRefresh     bool     `json:"force_refresh,omitempty" jsonschema_description:"仅当用户明确要求重新分析时设为 true；默认复用相同素材与参数的持久化结果"`
 	RefreshNonce     string   `json:"refresh_nonce,omitempty" jsonschema_description:"仅当用户在旧强制任务终态后明确要求再次重跑完全相同的分析时提供新的短标识；同一标识重复调用仍幂等复用同一 job"`
 }
@@ -221,7 +233,7 @@ type ShotSearchResult struct {
 }
 
 type AudioBeatAnalysisInput struct {
-	AssetID        string `json:"asset_id" jsonschema:"required"`
+	AssetID        string `json:"asset_id" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的 audio 素材 ID；带原声的视频不作为 BGM 节拍源"`
 	MaxBeats       int    `json:"max_beats,omitempty" jsonschema_description:"最多返回的节拍点，默认 512，上限 2000"`
 	WaveformPoints int    `json:"waveform_points,omitempty" jsonschema_description:"压缩 RMS 波形的最大采样点数，默认 96，可选范围 [16,256]"`
 }
@@ -431,23 +443,24 @@ type SpeechInspectResult struct {
 }
 
 type DecisionOptionInput struct {
-	OptionID    string `json:"option_id" jsonschema:"required"`
-	Label       string `json:"label" jsonschema:"required"`
-	Description string `json:"description,omitempty"`
+	OptionID    string `json:"option_id" jsonschema:"required" jsonschema_description:"稳定选项 ID；用户回答后会原样回传，不要用展示文案充当 ID"`
+	Label       string `json:"label" jsonschema:"required" jsonschema_description:"决策卡上显示给用户的简体中文选项名称"`
+	Description string `json:"description,omitempty" jsonschema_description:"可选的简体中文影响或取舍说明，帮助用户理解该选项"`
 }
 
 type AskUserInput struct {
-	Question      string                `json:"question" jsonschema:"required"`
-	Options       []DecisionOptionInput `json:"options,omitempty"`
-	AllowFreeText *bool                 `json:"allow_free_text,omitempty"`
-	Blocking      *bool                 `json:"blocking,omitempty"`
+	Question      string                `json:"question" jsonschema:"required" jsonschema_description:"要显示给用户的简体中文问题；首剪审批时应包含可核对的文本化 EDL 草案"`
+	Options       []DecisionOptionInput `json:"options,omitempty" jsonschema_description:"可选的结构化选择；需要用户确认首剪方案时至少提供确认与修改两个选项"`
+	AllowFreeText *bool                 `json:"allow_free_text,omitempty" jsonschema_description:"是否允许用户补充自由文本，默认 true"`
+	Blocking      *bool                 `json:"blocking,omitempty" jsonschema_description:"是否阻塞后续工具执行，默认 true；false 只收集非阻塞偏好，不应停止当前任务"`
+	DecisionType  string                `json:"decision_type,omitempty" jsonschema_description:"决策场景：approve_content_plan、approve_speech_cut、approve_rough_cut；其他值按 generic 处理"`
 }
 
 type DecisionAnswerInput struct {
-	DecisionID string         `json:"decision_id" jsonschema:"required"`
-	OptionID   string         `json:"option_id,omitempty"`
-	FreeText   string         `json:"free_text,omitempty"`
-	Payload    map[string]any `json:"payload,omitempty"`
+	DecisionID string         `json:"decision_id" jsonschema:"required" jsonschema_description:"已有待答决策的 decision_id；不能回答本回合由 interaction.ask_user 刚创建的决策，必须等待真实用户"`
+	OptionID   string         `json:"option_id,omitempty" jsonschema_description:"从该决策 options 中选择的 option_id；与用户自由文本至少提供一项"`
+	FreeText   string         `json:"free_text,omitempty" jsonschema_description:"用户明确提供的自由文本答案；不得由模型代替用户编造"`
+	Payload    map[string]any `json:"payload,omitempty" jsonschema_description:"可选结构化补充数据；仅透传真实用户或受信任上游已给出的字段"`
 }
 
 type PlanUpdateInput struct {
@@ -456,14 +469,14 @@ type PlanUpdateInput struct {
 }
 
 type ComposeClip struct {
-	AssetID          string `json:"asset_id" jsonschema:"required"`
-	SourceStartFrame int    `json:"source_start_frame"`
-	SourceEndFrame   int    `json:"source_end_frame" jsonschema:"required"`
-	Role             string `json:"role" jsonschema:"required"`
+	AssetID          string `json:"asset_id" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的 video 或 image 素材 ID"`
+	SourceStartFrame int    `json:"source_start_frame" jsonschema_description:"素材入点整数帧，默认 0，必须小于 source_end_frame"`
+	SourceEndFrame   int    `json:"source_end_frame" jsonschema:"required" jsonschema_description:"素材出点整数帧，不得超过素材 duration_frames"`
+	Role             string `json:"role" jsonschema:"required" jsonschema_description:"片段视觉角色：a_roll 作为主叙事，b_roll 作为补充画面"`
 }
 
 type ComposeInitialInput struct {
-	Clips []ComposeClip `json:"clips" jsonschema:"required"`
+	Clips []ComposeClip `json:"clips" jsonschema:"required" jsonschema_description:"按成片顺序排列的主视觉片段；整片首剪前先用 interaction.ask_user 呈现文本化 EDL 并取得用户确认"`
 }
 
 type TimelinePatchInput struct {
@@ -471,7 +484,7 @@ type TimelinePatchInput struct {
 }
 
 type TimelinePatchBatchInput struct {
-	Ops []map[string]any `json:"ops" jsonschema:"required" jsonschema_description:"按顺序原子应用的时间线语义补丁；卡点剪辑或同时修改多个 clip 时优先用此工具，整批只写入一次当前时间线"`
+	Ops []TimelineOp `json:"ops" jsonschema:"required" jsonschema_description:"按顺序原子应用的时间线语义补丁；每项从 oneOf 选择 kind 和字段；卡点剪辑或同时修改多个 clip 时优先用此工具，整批只写入一次当前时间线"`
 }
 
 type TalkingHeadBrollAssignment struct {
@@ -549,8 +562,8 @@ type RenderFinalInput struct{}
 type RenderStatusInput struct{}
 
 type RenderInspectInput struct {
-	PreviewID string   `json:"preview_id" jsonschema:"required"`
-	Checks    []string `json:"checks,omitempty"`
+	PreviewID string   `json:"preview_id" jsonschema:"required" jsonschema_description:"render.preview 成功产物返回的 preview_id"`
+	Checks    []string `json:"checks,omitempty" jsonschema_description:"要执行的检查项：decode、black、freeze、silence、loudness；省略时执行全部支持项"`
 }
 
 type PreviewInspectionResult struct {
@@ -560,7 +573,7 @@ type PreviewInspectionResult struct {
 }
 
 type ConfirmActionInput struct {
-	Question  string         `json:"question" jsonschema:"required"`
-	ToolName  string         `json:"tool_name" jsonschema:"required"`
-	Arguments map[string]any `json:"arguments" jsonschema:"required"`
+	Question  string         `json:"question" jsonschema:"required" jsonschema_description:"向用户说明破坏性动作与影响的简体中文确认问题"`
+	ToolName  string         `json:"tool_name" jsonschema:"required" jsonschema_description:"用户确认后才允许重放的已注册工具名"`
+	Arguments map[string]any `json:"arguments" jsonschema:"required" jsonschema_description:"用户确认后原样重放给目标工具的参数对象"`
 }

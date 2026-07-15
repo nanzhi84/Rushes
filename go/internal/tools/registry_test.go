@@ -105,6 +105,55 @@ func TestAssetManifestModelFacingFieldsHaveDescriptions(t *testing.T) {
 	}
 }
 
+func TestLLMToolInputFieldsHaveDescriptions(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, spec := range registry.Specs(true) {
+		if spec.Exposure != ExposureLLM {
+			continue
+		}
+		assertInputFieldDescriptions(t, spec.Name, spec.InputType, map[reflect.Type]bool{})
+	}
+}
+
+func assertInputFieldDescriptions(t *testing.T, path string, input reflect.Type, seen map[reflect.Type]bool) {
+	t.Helper()
+	for input.Kind() == reflect.Pointer || input.Kind() == reflect.Slice || input.Kind() == reflect.Array {
+		input = input.Elem()
+	}
+	if input.Kind() != reflect.Struct || seen[input] {
+		return
+	}
+	seen[input] = true
+	for index := range input.NumField() {
+		field := input.Field(index)
+		if field.PkgPath != "" {
+			continue
+		}
+		jsonName := strings.Split(field.Tag.Get("json"), ",")[0]
+		if jsonName == "-" {
+			continue
+		}
+		if jsonName == "" {
+			jsonName = field.Name
+		}
+		fieldPath := path + "." + jsonName
+		if strings.TrimSpace(field.Tag.Get("jsonschema_description")) == "" {
+			t.Errorf("%s 缺少 jsonschema_description", fieldPath)
+		}
+		assertInputFieldDescriptions(t, fieldPath, field.Type, seen)
+	}
+}
+
 func TestAudioWaveformSampleFramesDescriptionRetainsContextSemantics(t *testing.T) {
 	t.Parallel()
 	field, exists := reflect.TypeFor[AudioWaveformEnvelope]().FieldByName("SampleFrames")
@@ -278,6 +327,16 @@ func TestPlanUpdateIsAlwaysAvailableWithTypedSchema(t *testing.T) {
 	allowed, err := registry.Allowed(WithDraftID(t.Context(), "draft_plan_schema"), false)
 	if err != nil || !containsSpec(allowed, "plan.update") {
 		t.Fatalf("allowed=%#v err=%v", allowed, err)
+	}
+}
+
+func TestDecisionAnswerSchemaRequiresAnAnswerForm(t *testing.T) {
+	t.Parallel()
+	schema := (DecisionAnswerInput{}).JSONSchema()
+	if !containsString(schema.Required, "decision_id") || len(schema.AnyOf) != 2 ||
+		!containsString(schema.AnyOf[0].Required, "option_id") ||
+		!containsString(schema.AnyOf[1].Required, "free_text") {
+		t.Fatalf("decision answer schema=%#v", schema)
 	}
 }
 

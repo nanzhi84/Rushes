@@ -37,15 +37,15 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 		"core": {coreSystemPrompt, []string{
 			"唯一客观事实", "目标明确就直接执行", "整数帧", "不可原样重试",
 			"即时预览", "用户反馈可以推翻旧的节奏或镜头结论",
-			"draft.content_plan", "plan.update", "RFC 7396", "不是日志或转写",
+			"draft.content_plan", "plan.update", "RFC 7396", "不是日志或转写", "文本化 EDL 草案",
 		}},
 		"audio": {audioTrackPlaybook, []string{"持续音乐", "短时点缀", "叠加"}},
-		"beat":  {beatEditingPlaybook, []string{"节拍与完整动态证据", "可核验镜头", "卡点重剪"}},
+		"beat":  {beatEditingPlaybook, []string{"节拍与完整动态证据", "可核验镜头", "approve_rough_cut", "卡点重剪"}},
 		"timeline": {timelineEditingPlaybook, []string{
-			"两个或更多片段", "原子批次", "校验、渲染或状态查询时直接执行",
+			"两个或更多片段", "原子批次", "approve_content_plan", "已有首剪后的增量修改不重复审批",
 		}},
 		"talking_head": {talkingHeadPlaybook, []string{
-			"已有时间线", "尚无时间线", "建立初版", "逐句语音证据", "词级标识",
+			"已有时间线", "尚无时间线", "建立初版", "逐句语音证据", "词级标识", "approve_speech_cut",
 		}},
 	} {
 		for _, fragment := range check.fragments {

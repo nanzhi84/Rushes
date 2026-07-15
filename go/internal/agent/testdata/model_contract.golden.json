@@ -1,0 +1,3045 @@
+{
+  "tools": [
+    {
+      "name": "asset.list_assets",
+      "description": "列出当前草稿可用素材",
+      "parameters": {
+        "properties": {
+          "kind": {
+            "description": "可选素材类型筛选：video、audio、image 或 font",
+            "type": "string"
+          },
+          "only_usable": {
+            "description": "是否只返回当前可用于剪辑的素材；默认 false，设为 true 可排除导入失败或不可读素材",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "单页返回数量，默认 50，上限 200",
+            "type": "integer"
+          },
+          "after": {
+            "description": "上一页 next_after 返回的游标；首次读取时省略",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
+      "name": "audio.analyze_beats",
+      "description": "读取音频的 BPM、普通拍点、强瞬态、推断小节第一拍和按时间顺序压缩的 RMS 波形。拍点坐标使用整数帧；波形使用固定 0-100 编码并返回采样间隔，不标注高潮、低潮或剪辑好坏",
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "asset.list_assets 返回的 audio 素材 ID；带原声的视频不作为 BGM 节拍源",
+            "type": "string"
+          },
+          "max_beats": {
+            "description": "最多返回的节拍点，默认 512，上限 2000",
+            "type": "integer"
+          },
+          "waveform_points": {
+            "description": "压缩 RMS 波形的最大采样点数，默认 96，可选范围 [16,256]",
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "asset_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "audio.analyze_speech_pauses",
+      "description": "分析音频或视频内音轨的停顿/气口，返回源素材整数帧；传 timeline_clip_id 时同时映射为当前时间线帧，可用于剪口播。结果是 RMS 静音候选，不会把语义停顿或口头禅误报成已确认删除项",
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "音频或带音轨的视频素材 ID；与 timeline_clip_id 至少传一个",
+            "type": "string"
+          },
+          "timeline_clip_id": {
+            "description": "可选；时间线中的视频或音频 clip ID。传入后返回可直接用于 delete_range 的时间线帧范围",
+            "type": "string"
+          },
+          "threshold_db": {
+            "description": "静音阈值 dB，默认 -35，范围 [-80,-10]",
+            "type": "number"
+          },
+          "min_pause_frames": {
+            "description": "最短气口帧数，默认约 0.18 秒",
+            "type": "integer"
+          },
+          "keep_edge_frames": {
+            "description": "每个气口两侧保留帧数，默认约 0.06 秒，避免吃字",
+            "type": "integer"
+          },
+          "max_pauses": {
+            "description": "最多返回候选气口，默认 200，上限 1000",
+            "type": "integer"
+          },
+          "include_boundaries": {
+            "description": "是否包含素材首尾静音，默认 false",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
+      "name": "decision.answer",
+      "description": "提交结构化决策答案",
+      "parameters": {
+        "anyOf": [
+          {
+            "required": [
+              "option_id"
+            ]
+          },
+          {
+            "required": [
+              "free_text"
+            ]
+          }
+        ],
+        "properties": {
+          "decision_id": {
+            "description": "已有待答决策的 decision_id；不能回答本回合由 interaction.ask_user 刚创建的决策，必须等待真实用户",
+            "type": "string"
+          },
+          "option_id": {
+            "description": "从该决策 options 中选择的 option_id；与用户自由文本至少提供一项",
+            "type": "string"
+          },
+          "free_text": {
+            "description": "用户明确提供的自由文本答案；不得由模型代替用户编造",
+            "type": "string"
+          },
+          "payload": {
+            "description": "可选结构化补充数据；仅透传真实用户或受信任上游已给出的字段",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "decision_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "interaction.ask_user",
+      "description": "通过结构化决策卡向用户提问",
+      "parameters": {
+        "properties": {
+          "question": {
+            "description": "要显示给用户的简体中文问题；首剪审批时应包含可核对的文本化 EDL 草案",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "properties": {
+                "option_id": {
+                  "description": "稳定选项 ID；用户回答后会原样回传，不要用展示文案充当 ID",
+                  "type": "string"
+                },
+                "label": {
+                  "description": "决策卡上显示给用户的简体中文选项名称",
+                  "type": "string"
+                },
+                "description": {
+                  "description": "可选的简体中文影响或取舍说明，帮助用户理解该选项",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "option_id",
+                "label"
+              ],
+              "type": "object"
+            },
+            "description": "可选的结构化选择；需要用户确认首剪方案时至少提供确认与修改两个选项",
+            "type": "array"
+          },
+          "allow_free_text": {
+            "description": "是否允许用户补充自由文本，默认 true",
+            "type": "boolean"
+          },
+          "blocking": {
+            "description": "是否阻塞后续工具执行，默认 true；false 只收集非阻塞偏好，不应停止当前任务",
+            "type": "boolean"
+          },
+          "decision_type": {
+            "description": "决策场景：approve_content_plan、approve_speech_cut、approve_rough_cut；其他值按 generic 处理",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "question"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "interaction.confirm_action",
+      "description": "为破坏性动作创建确认决策",
+      "parameters": {
+        "properties": {
+          "question": {
+            "description": "向用户说明破坏性动作与影响的简体中文确认问题",
+            "type": "string"
+          },
+          "tool_name": {
+            "description": "用户确认后才允许重放的已注册工具名",
+            "type": "string"
+          },
+          "arguments": {
+            "description": "用户确认后原样重放给目标工具的参数对象",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "question",
+          "tool_name",
+          "arguments"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "media.search_shots",
+      "description": "像检索代码一样按创作意图搜索已理解视频中的镜头级源区间；返回稳定 shot_id、精确源帧、语义、匹配证据和剪辑提示。若更匹配的文件尚未理解，understanding_candidates 会返回文件名与 asset_id；先对候选调用 understand.materials，再用同一意图重搜，禁止把候选文件臆造为 shot_id",
+      "parameters": {
+        "properties": {
+          "query": {
+            "description": "创作意图或画面语义，例如 夜晚火焰人物快速动作，适合高潮强拍",
+            "type": "string"
+          },
+          "asset_ids": {
+            "items": {
+              "type": "string"
+            },
+            "description": "可选；只检索这些视频素材",
+            "type": "array"
+          },
+          "semantic_roles": {
+            "items": {
+              "type": "string"
+            },
+            "description": "可选；只检索 a_roll 或 b_roll 镜头，可同时传多个",
+            "type": "array"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "description": "可选；主体、动作、场景或氛围标签，任一匹配即可",
+            "type": "array"
+          },
+          "min_duration_frames": {
+            "description": "镜头源区间最短帧数",
+            "type": "integer"
+          },
+          "max_duration_frames": {
+            "description": "镜头源区间最长帧数；0 表示不限",
+            "type": "integer"
+          },
+          "exclude_used": {
+            "description": "排除与当前时间线已使用源区间重叠的镜头",
+            "type": "boolean"
+          },
+          "limit": {
+            "description": "返回数量，默认 20，上限 100",
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
+      "name": "plan.update",
+      "description": "以 RFC 7396 语义增量合并 plan；reset=true 时先清空旧计划再应用该对象，用于在跨回合继续工作前保存已确定的计划结构",
+      "parameters": {
+        "properties": {
+          "plan": {
+            "description": "要写入持久创作计划本的 JSON 对象；默认按 RFC 7396 增量合并，值为 null 时删除对应键",
+            "type": "object"
+          },
+          "reset": {
+            "description": "设为 true 时先清空现有计划，再按 RFC 7396 写入 plan；对象属性 null 仍表示删除；默认 false",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "plan"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "render.final_mp4",
+      "description": "排队导出最终 MP4",
+      "parameters": {
+        "properties": {},
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
+      "name": "render.inspect_preview",
+      "description": "检查预览的流、解码、黑帧、静帧、静音和响度",
+      "parameters": {
+        "properties": {
+          "preview_id": {
+            "description": "render.preview 成功产物返回的 preview_id",
+            "type": "string"
+          },
+          "checks": {
+            "items": {
+              "type": "string"
+            },
+            "description": "要执行的检查项：decode、black、freeze、silence、loudness；省略时执行全部支持项",
+            "type": "array"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "preview_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "render.preview",
+      "description": "排队渲染当前已验证时间线预览",
+      "parameters": {
+        "properties": {},
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
+      "name": "render.status",
+      "description": "读取渲染任务与产物状态",
+      "parameters": {
+        "properties": {},
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
+      "name": "speech.inspect",
+      "description": "建立或复用带整数帧坐标的口播索引，并像 grep 一样按台词语义或源帧范围读取逐句 ASR、气口和相似台词证据。要检查句内卡壳、重复词或半句重说时设置 include_words=true，取得稳定 word_id 与词级帧。工具只提供可核验信息，不决定哪些内容应删除；完整转写持久化在本地，后续调用默认命中缓存",
+      "parameters": {
+        "properties": {
+          "asset_id": {
+            "description": "带声音的视频或音频素材 ID；与 timeline_clip_id 至少传一个",
+            "type": "string"
+          },
+          "timeline_clip_id": {
+            "description": "当前时间线 A-roll clip ID；传入后返回映射后的时间线帧",
+            "type": "string"
+          },
+          "query": {
+            "description": "像 grep 一样检索台词语义；省略时返回时间顺序的口播索引",
+            "type": "string"
+          },
+          "source_start_frame": {
+            "description": "可选源素材检索起点帧",
+            "type": "integer"
+          },
+          "source_end_frame": {
+            "description": "可选源素材检索终点帧",
+            "type": "integer"
+          },
+          "max_utterances": {
+            "description": "最多返回逐句证据，默认 80，上限 240",
+            "type": "integer"
+          },
+          "include_words": {
+            "description": "需要精确检查或删除句内口误、卡壳、重复词时设为 true；返回稳定 word_id 与词级源帧",
+            "type": "boolean"
+          },
+          "max_words": {
+            "description": "include_words=true 时最多返回的词级证据，默认 400，上限 2000",
+            "type": "integer"
+          },
+          "include_pauses": {
+            "description": "是否返回带稳定 pause_id 的气口候选，默认 true",
+            "type": "boolean"
+          },
+          "max_pauses": {
+            "description": "最多返回按可删除时长降序排列的气口证据，默认 24，上限 100；用源帧窗口可继续局部检索",
+            "type": "integer"
+          },
+          "include_similar": {
+            "description": "是否返回相似台词对的客观相似度证据，默认 true",
+            "type": "boolean"
+          },
+          "language": {
+            "description": "可选 ASR 语言，例如 zh、en；混合语言时省略",
+            "type": "string"
+          },
+          "force_refresh": {
+            "description": "默认复用持久化转写；只有用户明确要求重新转写时设为 true",
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
+      "name": "timeline.apply_patch",
+      "description": "对当前时间线应用一个语义补丁；从 op.oneOf 选择 kind 和字段，编辑片段前先用 timeline.inspect 读取真实 ID",
+      "parameters": {
+        "properties": {
+          "op": {
+            "oneOf": [
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "trim_clip",
+                    "description": "修改片段源区间，并按播放速率重算时长",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "source_start_frame": {
+                    "description": "新的素材入点，使用整数帧",
+                    "examples": [
+                      0
+                    ],
+                    "type": "integer"
+                  },
+                  "source_end_frame": {
+                    "description": "新的素材出点，须大于 source_start_frame",
+                    "examples": [
+                      150
+                    ],
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "source_start_frame",
+                  "source_end_frame"
+                ],
+                "title": "trim_clip",
+                "description": "修改片段源区间，并按播放速率重算时长",
+                "examples": [
+                  {
+                    "kind": "trim_clip",
+                    "source_end_frame": 150,
+                    "source_start_frame": 0,
+                    "timeline_clip_id": "clip_v1_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "split_clip",
+                    "description": "在片段内部的时间线帧处切分片段",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "split_frame": {
+                    "description": "切点的时间线整数帧",
+                    "examples": [
+                      75
+                    ],
+                    "type": "integer"
+                  },
+                  "new_timeline_clip_id": {
+                    "description": "可选的右侧新片段 ID",
+                    "examples": [
+                      "clip_v2_002"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "split_frame"
+                ],
+                "title": "split_clip",
+                "description": "在片段内部的时间线帧处切分片段",
+                "examples": [
+                  {
+                    "kind": "split_clip",
+                    "new_timeline_clip_id": "clip_v2_002",
+                    "split_frame": 75,
+                    "timeline_clip_id": "clip_v1_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "reorder_clip",
+                    "description": "按目标时间线位置重排主视觉片段",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "target_frame": {
+                    "description": "目标时间线整数帧",
+                    "examples": [
+                      150
+                    ],
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "target_frame"
+                ],
+                "title": "reorder_clip",
+                "description": "按目标时间线位置重排主视觉片段",
+                "examples": [
+                  {
+                    "kind": "reorder_clip",
+                    "target_frame": 150,
+                    "timeline_clip_id": "clip_v1_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "move_clip",
+                    "description": "把片段移动到目标时间线位置或兼容轨道",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "target_frame": {
+                    "description": "目标时间线整数帧",
+                    "examples": [
+                      150
+                    ],
+                    "type": "integer"
+                  },
+                  "mode": {
+                    "description": "移动模式：insert 或 overwrite，默认 insert",
+                    "examples": [
+                      "insert"
+                    ],
+                    "type": "string"
+                  },
+                  "target_track_id": {
+                    "description": "目标轨道 ID，默认保持原轨道",
+                    "examples": [
+                      "visual_overlay"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "target_frame"
+                ],
+                "title": "move_clip",
+                "description": "把片段移动到目标时间线位置或兼容轨道",
+                "examples": [
+                  {
+                    "kind": "move_clip",
+                    "mode": "insert",
+                    "target_frame": 150,
+                    "target_track_id": "visual_overlay",
+                    "timeline_clip_id": "clip_v1_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "trim_clip_edge",
+                    "description": "按时间线帧裁剪片段起始或结束边缘",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "timeline_frame": {
+                    "description": "裁剪点的时间线整数帧；不是 target_frame",
+                    "examples": [
+                      75
+                    ],
+                    "type": "integer"
+                  },
+                  "edge": {
+                    "description": "要裁剪的边缘：start 或 end",
+                    "examples": [
+                      "end"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "timeline_frame",
+                  "edge"
+                ],
+                "title": "trim_clip_edge",
+                "description": "按时间线帧裁剪片段起始或结束边缘",
+                "examples": [
+                  {
+                    "edge": "end",
+                    "kind": "trim_clip_edge",
+                    "timeline_clip_id": "clip_v1_001",
+                    "timeline_frame": 75
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "delete_clip",
+                    "description": "删除片段及其联动组",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind"
+                ],
+                "title": "delete_clip",
+                "description": "删除片段及其联动组",
+                "examples": [
+                  {
+                    "kind": "delete_clip",
+                    "timeline_clip_id": "clip_v1_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "muted"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "solo"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "locked"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "gain_db"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "set_track_state",
+                    "description": "更新轨道的静音、独奏、锁定或音量状态",
+                    "type": "string"
+                  },
+                  "track_id": {
+                    "description": "目标轨道 ID",
+                    "examples": [
+                      "bgm"
+                    ],
+                    "type": "string"
+                  },
+                  "muted": {
+                    "description": "是否静音",
+                    "examples": [
+                      false
+                    ],
+                    "type": "boolean"
+                  },
+                  "solo": {
+                    "description": "是否独奏",
+                    "examples": [
+                      false
+                    ],
+                    "type": "boolean"
+                  },
+                  "locked": {
+                    "description": "是否锁定",
+                    "examples": [
+                      false
+                    ],
+                    "type": "boolean"
+                  },
+                  "gain_db": {
+                    "description": "音频轨音量，范围 [-60,12] dB",
+                    "examples": [
+                      0
+                    ],
+                    "type": "number"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "track_id"
+                ],
+                "title": "set_track_state",
+                "description": "更新轨道的静音、独奏、锁定或音量状态",
+                "examples": [
+                  {
+                    "gain_db": 0,
+                    "kind": "set_track_state",
+                    "locked": false,
+                    "muted": false,
+                    "solo": false,
+                    "track_id": "bgm"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "set_clip_linked",
+                    "description": "设置片段是否参与音画联动",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "linked": {
+                    "description": "是否启用联动",
+                    "examples": [
+                      true
+                    ],
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "linked"
+                ],
+                "title": "set_clip_linked",
+                "description": "设置片段是否参与音画联动",
+                "examples": [
+                  {
+                    "kind": "set_clip_linked",
+                    "linked": true,
+                    "timeline_clip_id": "clip_v1_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "insert_subtitle",
+                    "description": "在字幕轨插入一条字幕",
+                    "type": "string"
+                  },
+                  "start_frame": {
+                    "description": "字幕开始的时间线整数帧",
+                    "examples": [
+                      0
+                    ],
+                    "type": "integer"
+                  },
+                  "end_frame": {
+                    "description": "字幕结束的时间线整数帧",
+                    "examples": [
+                      90
+                    ],
+                    "type": "integer"
+                  },
+                  "text": {
+                    "description": "非空字幕文字",
+                    "examples": [
+                      "示例字幕"
+                    ],
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "可选字幕片段 ID，缺省时自动生成",
+                    "examples": [
+                      "subtitle_v2_001"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "start_frame",
+                  "end_frame",
+                  "text"
+                ],
+                "title": "insert_subtitle",
+                "description": "在字幕轨插入一条字幕",
+                "examples": [
+                  {
+                    "end_frame": 90,
+                    "kind": "insert_subtitle",
+                    "start_frame": 0,
+                    "text": "示例字幕",
+                    "timeline_clip_id": "subtitle_v2_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "delete_range",
+                    "description": "从所有轨道波纹删除一段时间线范围",
+                    "type": "string"
+                  },
+                  "start_frame": {
+                    "description": "删除范围开始的时间线整数帧",
+                    "examples": [
+                      30
+                    ],
+                    "type": "integer"
+                  },
+                  "end_frame": {
+                    "description": "删除范围结束的时间线整数帧",
+                    "examples": [
+                      60
+                    ],
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "start_frame",
+                  "end_frame"
+                ],
+                "title": "delete_range",
+                "description": "从所有轨道波纹删除一段时间线范围",
+                "examples": [
+                  {
+                    "end_frame": 60,
+                    "kind": "delete_range",
+                    "start_frame": 30
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "insert_clip",
+                    "description": "把素材片段插入指定轨道",
+                    "type": "string"
+                  },
+                  "asset_id": {
+                    "description": "要插入的素材 ID",
+                    "examples": [
+                      "asset_001"
+                    ],
+                    "type": "string"
+                  },
+                  "source_start_frame": {
+                    "description": "素材入点整数帧",
+                    "examples": [
+                      0
+                    ],
+                    "type": "integer"
+                  },
+                  "source_end_frame": {
+                    "description": "素材出点整数帧",
+                    "examples": [
+                      150
+                    ],
+                    "type": "integer"
+                  },
+                  "track_id": {
+                    "description": "目标轨道 ID，默认 visual_base",
+                    "examples": [
+                      "visual_base"
+                    ],
+                    "type": "string"
+                  },
+                  "timeline_start_frame": {
+                    "description": "非主视觉片段的时间线起点整数帧",
+                    "examples": [
+                      0
+                    ],
+                    "type": "integer"
+                  },
+                  "role": {
+                    "description": "片段角色，默认 b_roll",
+                    "examples": [
+                      "b_roll"
+                    ],
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "可选片段 ID，缺省时自动生成",
+                    "examples": [
+                      "clip_v2_001"
+                    ],
+                    "type": "string"
+                  },
+                  "parent_block_id": {
+                    "description": "可选联动组 ID",
+                    "examples": [
+                      "link_clip_v2_001"
+                    ],
+                    "type": "string"
+                  },
+                  "metadata": {
+                    "description": "可选片段元数据对象",
+                    "examples": [
+                      {
+                        "source": "catalog_example"
+                      }
+                    ],
+                    "type": "object"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "asset_id",
+                  "source_start_frame",
+                  "source_end_frame"
+                ],
+                "title": "insert_clip",
+                "description": "把素材片段插入指定轨道",
+                "examples": [
+                  {
+                    "asset_id": "asset_001",
+                    "kind": "insert_clip",
+                    "metadata": {
+                      "source": "catalog_example"
+                    },
+                    "parent_block_id": "link_clip_v2_001",
+                    "role": "b_roll",
+                    "source_end_frame": 150,
+                    "source_start_frame": 0,
+                    "timeline_clip_id": "clip_v2_001",
+                    "timeline_start_frame": 0,
+                    "track_id": "visual_base"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "sync_original_audio",
+                    "description": "根据最新主视觉片段原子重建原声音轨",
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind"
+                ],
+                "title": "sync_original_audio",
+                "description": "根据最新主视觉片段原子重建原声音轨",
+                "examples": [
+                  {
+                    "kind": "sync_original_audio"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "replace_clip",
+                    "description": "保持片段帧范围并替换素材",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "asset_id": {
+                    "description": "替换后的素材 ID",
+                    "examples": [
+                      "asset_002"
+                    ],
+                    "type": "string"
+                  },
+                  "role": {
+                    "description": "可选的新片段角色",
+                    "examples": [
+                      "b_roll"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "asset_id"
+                ],
+                "title": "replace_clip",
+                "description": "保持片段帧范围并替换素材",
+                "examples": [
+                  {
+                    "asset_id": "asset_002",
+                    "kind": "replace_clip",
+                    "role": "b_roll",
+                    "timeline_clip_id": "clip_v1_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "set_playback_rate",
+                    "description": "设置片段播放速率并重算时长",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "playback_rate": {
+                    "description": "播放速率，范围 (0,8]",
+                    "examples": [
+                      1.25
+                    ],
+                    "type": "number"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "playback_rate"
+                ],
+                "title": "set_playback_rate",
+                "description": "设置片段播放速率并重算时长",
+                "examples": [
+                  {
+                    "kind": "set_playback_rate",
+                    "playback_rate": 1.25,
+                    "timeline_clip_id": "clip_v1_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "adjust_gain",
+                    "description": "调整片段音量",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "gain_db": {
+                    "description": "片段音量，范围 [-60,12] dB",
+                    "examples": [
+                      -3
+                    ],
+                    "type": "number"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "gain_db"
+                ],
+                "title": "adjust_gain",
+                "description": "调整片段音量",
+                "examples": [
+                  {
+                    "gain_db": -3,
+                    "kind": "adjust_gain",
+                    "timeline_clip_id": "clip_v1_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "set_clip_fades",
+                    "description": "设置音频或带声视频片段的淡入淡出",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "fade_in_frames": {
+                    "description": "淡入时长整数帧",
+                    "examples": [
+                      15
+                    ],
+                    "type": "integer"
+                  },
+                  "fade_out_frames": {
+                    "description": "淡出时长整数帧",
+                    "examples": [
+                      15
+                    ],
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "fade_in_frames",
+                  "fade_out_frames"
+                ],
+                "title": "set_clip_fades",
+                "description": "设置音频或带声视频片段的淡入淡出",
+                "examples": [
+                  {
+                    "fade_in_frames": 15,
+                    "fade_out_frames": 15,
+                    "kind": "set_clip_fades",
+                    "timeline_clip_id": "clip_v1_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "allOf": [
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "timeline_clip_id"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "clip_id"
+                        ]
+                      }
+                    ]
+                  }
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "edit_subtitle_text",
+                    "description": "修改字幕片段文字",
+                    "type": "string"
+                  },
+                  "timeline_clip_id": {
+                    "description": "目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "clip_id": {
+                    "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                    "examples": [
+                      "clip_v1_001"
+                    ],
+                    "type": "string"
+                  },
+                  "text": {
+                    "description": "新的非空字幕文字",
+                    "examples": [
+                      "修改后的字幕"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "text"
+                ],
+                "title": "edit_subtitle_text",
+                "description": "修改字幕片段文字",
+                "examples": [
+                  {
+                    "kind": "edit_subtitle_text",
+                    "text": "修改后的字幕",
+                    "timeline_clip_id": "clip_v1_001"
+                  }
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "kind": {
+                    "const": "remove_track_clips",
+                    "description": "清空非主视觉且未锁定轨道的全部片段",
+                    "type": "string"
+                  },
+                  "track_id": {
+                    "description": "要清空的轨道 ID",
+                    "examples": [
+                      "sfx"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "track_id"
+                ],
+                "title": "remove_track_clips",
+                "description": "清空非主视觉且未锁定轨道的全部片段",
+                "examples": [
+                  {
+                    "kind": "remove_track_clips",
+                    "track_id": "sfx"
+                  }
+                ],
+                "type": "object"
+              }
+            ],
+            "description": "从 op.oneOf 选择一种扁平补丁，按所选 kind 提供字段",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "op"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "timeline.apply_patches",
+      "description": "原子应用多个时间线语义补丁，整批只写入一次当前时间线；整批替换主视频时把新 insert_clip 和旧 delete_clip 放在同一次调用，工具会规划安全执行顺序，并默认保护未被本批直接编辑的 BGM/SFX；卡点剪辑必须改用 timeline.recut_to_beats",
+      "parameters": {
+        "properties": {
+          "ops": {
+            "items": {
+              "oneOf": [
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "trim_clip",
+                      "description": "修改片段源区间，并按播放速率重算时长",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "source_start_frame": {
+                      "description": "新的素材入点，使用整数帧",
+                      "examples": [
+                        0
+                      ],
+                      "type": "integer"
+                    },
+                    "source_end_frame": {
+                      "description": "新的素材出点，须大于 source_start_frame",
+                      "examples": [
+                        150
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "source_start_frame",
+                    "source_end_frame"
+                  ],
+                  "title": "trim_clip",
+                  "description": "修改片段源区间，并按播放速率重算时长",
+                  "examples": [
+                    {
+                      "kind": "trim_clip",
+                      "source_end_frame": 150,
+                      "source_start_frame": 0,
+                      "timeline_clip_id": "clip_v1_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "split_clip",
+                      "description": "在片段内部的时间线帧处切分片段",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "split_frame": {
+                      "description": "切点的时间线整数帧",
+                      "examples": [
+                        75
+                      ],
+                      "type": "integer"
+                    },
+                    "new_timeline_clip_id": {
+                      "description": "可选的右侧新片段 ID",
+                      "examples": [
+                        "clip_v2_002"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "split_frame"
+                  ],
+                  "title": "split_clip",
+                  "description": "在片段内部的时间线帧处切分片段",
+                  "examples": [
+                    {
+                      "kind": "split_clip",
+                      "new_timeline_clip_id": "clip_v2_002",
+                      "split_frame": 75,
+                      "timeline_clip_id": "clip_v1_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "reorder_clip",
+                      "description": "按目标时间线位置重排主视觉片段",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "target_frame": {
+                      "description": "目标时间线整数帧",
+                      "examples": [
+                        150
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "target_frame"
+                  ],
+                  "title": "reorder_clip",
+                  "description": "按目标时间线位置重排主视觉片段",
+                  "examples": [
+                    {
+                      "kind": "reorder_clip",
+                      "target_frame": 150,
+                      "timeline_clip_id": "clip_v1_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "move_clip",
+                      "description": "把片段移动到目标时间线位置或兼容轨道",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "target_frame": {
+                      "description": "目标时间线整数帧",
+                      "examples": [
+                        150
+                      ],
+                      "type": "integer"
+                    },
+                    "mode": {
+                      "description": "移动模式：insert 或 overwrite，默认 insert",
+                      "examples": [
+                        "insert"
+                      ],
+                      "type": "string"
+                    },
+                    "target_track_id": {
+                      "description": "目标轨道 ID，默认保持原轨道",
+                      "examples": [
+                        "visual_overlay"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "target_frame"
+                  ],
+                  "title": "move_clip",
+                  "description": "把片段移动到目标时间线位置或兼容轨道",
+                  "examples": [
+                    {
+                      "kind": "move_clip",
+                      "mode": "insert",
+                      "target_frame": 150,
+                      "target_track_id": "visual_overlay",
+                      "timeline_clip_id": "clip_v1_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "trim_clip_edge",
+                      "description": "按时间线帧裁剪片段起始或结束边缘",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "timeline_frame": {
+                      "description": "裁剪点的时间线整数帧；不是 target_frame",
+                      "examples": [
+                        75
+                      ],
+                      "type": "integer"
+                    },
+                    "edge": {
+                      "description": "要裁剪的边缘：start 或 end",
+                      "examples": [
+                        "end"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "timeline_frame",
+                    "edge"
+                  ],
+                  "title": "trim_clip_edge",
+                  "description": "按时间线帧裁剪片段起始或结束边缘",
+                  "examples": [
+                    {
+                      "edge": "end",
+                      "kind": "trim_clip_edge",
+                      "timeline_clip_id": "clip_v1_001",
+                      "timeline_frame": 75
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "delete_clip",
+                      "description": "删除片段及其联动组",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind"
+                  ],
+                  "title": "delete_clip",
+                  "description": "删除片段及其联动组",
+                  "examples": [
+                    {
+                      "kind": "delete_clip",
+                      "timeline_clip_id": "clip_v1_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "muted"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "solo"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "locked"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "gain_db"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "set_track_state",
+                      "description": "更新轨道的静音、独奏、锁定或音量状态",
+                      "type": "string"
+                    },
+                    "track_id": {
+                      "description": "目标轨道 ID",
+                      "examples": [
+                        "bgm"
+                      ],
+                      "type": "string"
+                    },
+                    "muted": {
+                      "description": "是否静音",
+                      "examples": [
+                        false
+                      ],
+                      "type": "boolean"
+                    },
+                    "solo": {
+                      "description": "是否独奏",
+                      "examples": [
+                        false
+                      ],
+                      "type": "boolean"
+                    },
+                    "locked": {
+                      "description": "是否锁定",
+                      "examples": [
+                        false
+                      ],
+                      "type": "boolean"
+                    },
+                    "gain_db": {
+                      "description": "音频轨音量，范围 [-60,12] dB",
+                      "examples": [
+                        0
+                      ],
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "track_id"
+                  ],
+                  "title": "set_track_state",
+                  "description": "更新轨道的静音、独奏、锁定或音量状态",
+                  "examples": [
+                    {
+                      "gain_db": 0,
+                      "kind": "set_track_state",
+                      "locked": false,
+                      "muted": false,
+                      "solo": false,
+                      "track_id": "bgm"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "set_clip_linked",
+                      "description": "设置片段是否参与音画联动",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "linked": {
+                      "description": "是否启用联动",
+                      "examples": [
+                        true
+                      ],
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "linked"
+                  ],
+                  "title": "set_clip_linked",
+                  "description": "设置片段是否参与音画联动",
+                  "examples": [
+                    {
+                      "kind": "set_clip_linked",
+                      "linked": true,
+                      "timeline_clip_id": "clip_v1_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "kind": {
+                      "const": "insert_subtitle",
+                      "description": "在字幕轨插入一条字幕",
+                      "type": "string"
+                    },
+                    "start_frame": {
+                      "description": "字幕开始的时间线整数帧",
+                      "examples": [
+                        0
+                      ],
+                      "type": "integer"
+                    },
+                    "end_frame": {
+                      "description": "字幕结束的时间线整数帧",
+                      "examples": [
+                        90
+                      ],
+                      "type": "integer"
+                    },
+                    "text": {
+                      "description": "非空字幕文字",
+                      "examples": [
+                        "示例字幕"
+                      ],
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "可选字幕片段 ID，缺省时自动生成",
+                      "examples": [
+                        "subtitle_v2_001"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "start_frame",
+                    "end_frame",
+                    "text"
+                  ],
+                  "title": "insert_subtitle",
+                  "description": "在字幕轨插入一条字幕",
+                  "examples": [
+                    {
+                      "end_frame": 90,
+                      "kind": "insert_subtitle",
+                      "start_frame": 0,
+                      "text": "示例字幕",
+                      "timeline_clip_id": "subtitle_v2_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "kind": {
+                      "const": "delete_range",
+                      "description": "从所有轨道波纹删除一段时间线范围",
+                      "type": "string"
+                    },
+                    "start_frame": {
+                      "description": "删除范围开始的时间线整数帧",
+                      "examples": [
+                        30
+                      ],
+                      "type": "integer"
+                    },
+                    "end_frame": {
+                      "description": "删除范围结束的时间线整数帧",
+                      "examples": [
+                        60
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "start_frame",
+                    "end_frame"
+                  ],
+                  "title": "delete_range",
+                  "description": "从所有轨道波纹删除一段时间线范围",
+                  "examples": [
+                    {
+                      "end_frame": 60,
+                      "kind": "delete_range",
+                      "start_frame": 30
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "kind": {
+                      "const": "insert_clip",
+                      "description": "把素材片段插入指定轨道",
+                      "type": "string"
+                    },
+                    "asset_id": {
+                      "description": "要插入的素材 ID",
+                      "examples": [
+                        "asset_001"
+                      ],
+                      "type": "string"
+                    },
+                    "source_start_frame": {
+                      "description": "素材入点整数帧",
+                      "examples": [
+                        0
+                      ],
+                      "type": "integer"
+                    },
+                    "source_end_frame": {
+                      "description": "素材出点整数帧",
+                      "examples": [
+                        150
+                      ],
+                      "type": "integer"
+                    },
+                    "track_id": {
+                      "description": "目标轨道 ID，默认 visual_base",
+                      "examples": [
+                        "visual_base"
+                      ],
+                      "type": "string"
+                    },
+                    "timeline_start_frame": {
+                      "description": "非主视觉片段的时间线起点整数帧",
+                      "examples": [
+                        0
+                      ],
+                      "type": "integer"
+                    },
+                    "role": {
+                      "description": "片段角色，默认 b_roll",
+                      "examples": [
+                        "b_roll"
+                      ],
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "可选片段 ID，缺省时自动生成",
+                      "examples": [
+                        "clip_v2_001"
+                      ],
+                      "type": "string"
+                    },
+                    "parent_block_id": {
+                      "description": "可选联动组 ID",
+                      "examples": [
+                        "link_clip_v2_001"
+                      ],
+                      "type": "string"
+                    },
+                    "metadata": {
+                      "description": "可选片段元数据对象",
+                      "examples": [
+                        {
+                          "source": "catalog_example"
+                        }
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "asset_id",
+                    "source_start_frame",
+                    "source_end_frame"
+                  ],
+                  "title": "insert_clip",
+                  "description": "把素材片段插入指定轨道",
+                  "examples": [
+                    {
+                      "asset_id": "asset_001",
+                      "kind": "insert_clip",
+                      "metadata": {
+                        "source": "catalog_example"
+                      },
+                      "parent_block_id": "link_clip_v2_001",
+                      "role": "b_roll",
+                      "source_end_frame": 150,
+                      "source_start_frame": 0,
+                      "timeline_clip_id": "clip_v2_001",
+                      "timeline_start_frame": 0,
+                      "track_id": "visual_base"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "kind": {
+                      "const": "sync_original_audio",
+                      "description": "根据最新主视觉片段原子重建原声音轨",
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind"
+                  ],
+                  "title": "sync_original_audio",
+                  "description": "根据最新主视觉片段原子重建原声音轨",
+                  "examples": [
+                    {
+                      "kind": "sync_original_audio"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "replace_clip",
+                      "description": "保持片段帧范围并替换素材",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "asset_id": {
+                      "description": "替换后的素材 ID",
+                      "examples": [
+                        "asset_002"
+                      ],
+                      "type": "string"
+                    },
+                    "role": {
+                      "description": "可选的新片段角色",
+                      "examples": [
+                        "b_roll"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "asset_id"
+                  ],
+                  "title": "replace_clip",
+                  "description": "保持片段帧范围并替换素材",
+                  "examples": [
+                    {
+                      "asset_id": "asset_002",
+                      "kind": "replace_clip",
+                      "role": "b_roll",
+                      "timeline_clip_id": "clip_v1_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "set_playback_rate",
+                      "description": "设置片段播放速率并重算时长",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "playback_rate": {
+                      "description": "播放速率，范围 (0,8]",
+                      "examples": [
+                        1.25
+                      ],
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "playback_rate"
+                  ],
+                  "title": "set_playback_rate",
+                  "description": "设置片段播放速率并重算时长",
+                  "examples": [
+                    {
+                      "kind": "set_playback_rate",
+                      "playback_rate": 1.25,
+                      "timeline_clip_id": "clip_v1_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "adjust_gain",
+                      "description": "调整片段音量",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "gain_db": {
+                      "description": "片段音量，范围 [-60,12] dB",
+                      "examples": [
+                        -3
+                      ],
+                      "type": "number"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "gain_db"
+                  ],
+                  "title": "adjust_gain",
+                  "description": "调整片段音量",
+                  "examples": [
+                    {
+                      "gain_db": -3,
+                      "kind": "adjust_gain",
+                      "timeline_clip_id": "clip_v1_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "set_clip_fades",
+                      "description": "设置音频或带声视频片段的淡入淡出",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "fade_in_frames": {
+                      "description": "淡入时长整数帧",
+                      "examples": [
+                        15
+                      ],
+                      "type": "integer"
+                    },
+                    "fade_out_frames": {
+                      "description": "淡出时长整数帧",
+                      "examples": [
+                        15
+                      ],
+                      "type": "integer"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "fade_in_frames",
+                    "fade_out_frames"
+                  ],
+                  "title": "set_clip_fades",
+                  "description": "设置音频或带声视频片段的淡入淡出",
+                  "examples": [
+                    {
+                      "fade_in_frames": 15,
+                      "fade_out_frames": 15,
+                      "kind": "set_clip_fades",
+                      "timeline_clip_id": "clip_v1_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "allOf": [
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "timeline_clip_id"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "clip_id"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "kind": {
+                      "const": "edit_subtitle_text",
+                      "description": "修改字幕片段文字",
+                      "type": "string"
+                    },
+                    "timeline_clip_id": {
+                      "description": "目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "clip_id": {
+                      "description": "兼容别名，对应 timeline_clip_id；目标时间线片段 ID；兼容别名 clip_id",
+                      "examples": [
+                        "clip_v1_001"
+                      ],
+                      "type": "string"
+                    },
+                    "text": {
+                      "description": "新的非空字幕文字",
+                      "examples": [
+                        "修改后的字幕"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "text"
+                  ],
+                  "title": "edit_subtitle_text",
+                  "description": "修改字幕片段文字",
+                  "examples": [
+                    {
+                      "kind": "edit_subtitle_text",
+                      "text": "修改后的字幕",
+                      "timeline_clip_id": "clip_v1_001"
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "kind": {
+                      "const": "remove_track_clips",
+                      "description": "清空非主视觉且未锁定轨道的全部片段",
+                      "type": "string"
+                    },
+                    "track_id": {
+                      "description": "要清空的轨道 ID",
+                      "examples": [
+                        "sfx"
+                      ],
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "track_id"
+                  ],
+                  "title": "remove_track_clips",
+                  "description": "清空非主视觉且未锁定轨道的全部片段",
+                  "examples": [
+                    {
+                      "kind": "remove_track_clips",
+                      "track_id": "sfx"
+                    }
+                  ],
+                  "type": "object"
+                }
+              ],
+              "description": "从 oneOf 选择一种扁平时间线语义补丁；kind 与字段由同一 Catalog 约束",
+              "type": "object"
+            },
+            "description": "按顺序原子应用的时间线语义补丁；每项从 oneOf 选择 kind 和字段；卡点剪辑或同时修改多个 clip 时优先用此工具，整批只写入一次当前时间线",
+            "type": "array"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "ops"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "timeline.compose_initial",
+      "description": "按整数帧源区间组装时间线；只传入 video/image 主视觉素材，不能传 audio/font；先从 asset.list_assets 读取 kind、duration_frames 与 timeline_fps",
+      "parameters": {
+        "properties": {
+          "clips": {
+            "items": {
+              "properties": {
+                "asset_id": {
+                  "description": "asset.list_assets 返回的 video 或 image 素材 ID",
+                  "type": "string"
+                },
+                "source_start_frame": {
+                  "description": "素材入点整数帧，默认 0，必须小于 source_end_frame",
+                  "type": "integer"
+                },
+                "source_end_frame": {
+                  "description": "素材出点整数帧，不得超过素材 duration_frames",
+                  "type": "integer"
+                },
+                "role": {
+                  "description": "片段视觉角色：a_roll 作为主叙事，b_roll 作为补充画面",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "asset_id",
+                "source_start_frame",
+                "source_end_frame",
+                "role"
+              ],
+              "type": "object"
+            },
+            "description": "按成片顺序排列的主视觉片段；整片首剪前先用 interaction.ask_user 呈现文本化 EDL 并取得用户确认",
+            "type": "array"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "clips"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "timeline.edit_talking_head",
+      "description": "按模型已经选定的 utterance_id、pause/repetition/fragment 决定、连续 word_id 范围和 b_roll shot_id 原子剪辑口播。模型结合两侧原文自主选择 remove/preserve；工具只校验稳定 ID 与合法范围、波纹删除整句/句内卡壳/气口，并把 B-roll 放到独立叠加轨。B-roll 的 utterance、anchor_text 或 word_id 必须以本次全部删除决定展开后的保留台词为准：anchor_text 要从 speech.inspect 原文逐字复制，不能包含同次将删除的卡壳、重复词或短片段。短镜头可用保留 utterance 内的唯一连续 anchor_text，或直接使用保留的 start/end_word_id。若删气口会把保留台词夹成不足 0.8 秒的孤立碎片，工具会保守撤回最短的相邻气口删除并在 auto_preserved_pause_ids 中报告；纯语义删除造成的孤片仍会失败。未处理的内容候选作为非阻塞证据随成功结果返回，工具不替模型判断内容好坏",
+      "parameters": {
+        "properties": {
+          "a_roll_timeline_clip_id": {
+            "description": "timeline.inspect 返回的 A-roll 主视频 clip ID",
+            "type": "string"
+          },
+          "remove_utterance_ids": {
+            "items": {
+              "type": "string"
+            },
+            "description": "模型根据 ASR 语义自行判断后选择删除的 utterance_id，例如语义重复或口误",
+            "type": "array"
+          },
+          "remove_word_ranges": {
+            "items": {
+              "properties": {
+                "start_word_id": {
+                  "description": "speech.inspect(include_words=true) 返回的起始 word_id",
+                  "type": "string"
+                },
+                "end_word_id": {
+                  "description": "连续删除范围的结束 word_id；省略时只删除起始词",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "start_word_id"
+              ],
+              "type": "object"
+            },
+            "description": "模型根据词级 ASR 证据选择的连续句内删除范围；用于卡壳、重复词或半句重说，不能猜 word_id",
+            "type": "array"
+          },
+          "remove_pause_ids": {
+            "items": {
+              "type": "string"
+            },
+            "description": "模型根据 speech.inspect 证据自行选择删除的 pause_id",
+            "type": "array"
+          },
+          "pause_decisions": {
+            "items": {
+              "properties": {
+                "pause_id": {
+                  "description": "speech.inspect.pauses 返回的稳定 pause_id",
+                  "type": "string"
+                },
+                "action": {
+                  "description": "模型结合 previous_context、next_context 与 joined_context 后的明确决定：remove 或 preserve；工具不会替模型判断是气口还是正常表达停顿",
+                  "type": "string"
+                },
+                "reason": {
+                  "description": "简述为何删除该气口，或为何它属于应保留的正常表达停顿",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "pause_id",
+                "action"
+              ],
+              "type": "object"
+            },
+            "description": "对 speech.inspect 返回的显著气口候选逐项给出 remove/preserve 决定；remove 会自动加入删除项，preserve 只记录模型判断",
+            "type": "array"
+          },
+          "repetition_decisions": {
+            "items": {
+              "properties": {
+                "repetition_id": {
+                  "description": "speech.inspect.intra_utterance_repetitions 返回的 repetition_id",
+                  "type": "string"
+                },
+                "action": {
+                  "description": "模型结合 context_text 后的明确决定：remove_earlier、remove_later 或 preserve；工具不会替模型判断重复词是卡壳、数字拆词还是正常叠词",
+                  "type": "string"
+                },
+                "reason": {
+                  "description": "简述结合上下文选择删除前一段、后一段或保留的理由",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "repetition_id",
+                "action"
+              ],
+              "type": "object"
+            },
+            "description": "对 speech.inspect 返回的每个 intra_utterance_repetitions 候选一次性给出 remove_earlier/remove_later/preserve 决定；删除动作会自动解析候选自带的精确连续 word_id 范围",
+            "type": "array"
+          },
+          "short_fragment_decisions": {
+            "items": {
+              "properties": {
+                "fragment_id": {
+                  "description": "speech.inspect.short_speech_fragments 返回的 fragment_id",
+                  "type": "string"
+                },
+                "action": {
+                  "description": "模型结合 text、previous_context、next_context、joined_context 后的明确决定：remove 或 preserve",
+                  "type": "string"
+                },
+                "reason": {
+                  "description": "保留 restart_prefix_before_repeated_take 时必填：至少 20 字，原样引用 fragment.text 与 restart_anchor_text，并解释拼接语义；其他决定可简短说明",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "fragment_id",
+                "action"
+              ],
+              "type": "object"
+            },
+            "description": "对 speech.inspect 返回的每个 short_speech_fragments 候选一次性给出 remove/preserve 决定；remove 会自动解析为该候选的精确连续 word_id 范围，避免在失败后逐个补参数",
+            "type": "array"
+          },
+          "preserve_speech_fragment_ids": {
+            "items": {
+              "type": "string"
+            },
+            "description": "speech.inspect 返回且模型判断应保留的短语音片段 fragment_id；兼容旧调用，优先使用 short_fragment_decisions 一次性提交全部决定",
+            "type": "array"
+          },
+          "preserve_speech_fragment_reasons": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "按 fragment_id 给出具体保留理由；对于 restart_prefix_before_repeated_take 必填，至少 20 字且必须原样引用 fragment.text 与 restart_anchor_text，解释 joined_context 为何语法和语义完整，不能只写正常、衔接或保留",
+            "type": "object"
+          },
+          "b_roll_assignments": {
+            "items": {
+              "properties": {
+                "shot_id": {
+                  "description": "media.search_shots 返回的 b_roll shot_id",
+                  "type": "string"
+                },
+                "start_utterance_id": {
+                  "description": "B-roll 覆盖语义的起始 utterance_id；与 start_word_id 二选一，且该句在本次所有 remove 决定展开后必须仍被保留",
+                  "type": "string"
+                },
+                "end_utterance_id": {
+                  "description": "结束 utterance_id；省略时只覆盖起始句，且不能同时属于本次删除范围",
+                  "type": "string"
+                },
+                "anchor_text": {
+                  "description": "从 speech.inspect 返回的 utterance 原文逐字复制的唯一连续短语；其中每个词在本次 remove_word_ranges、repetition_decisions、short_fragment_decisions 展开后都必须保留，不能把将删除的卡壳或重说词放进锚点",
+                  "type": "string"
+                },
+                "start_word_id": {
+                  "description": "词级 B-roll 语义锚点起始 word_id；与 start_utterance_id 二选一，且该词不能被本次任何删除决定覆盖",
+                  "type": "string"
+                },
+                "end_word_id": {
+                  "description": "词级语义锚点结束 word_id；省略时只覆盖起始词，整段连续 word_id 都必须在本次编辑后保留",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "shot_id"
+              ],
+              "type": "object"
+            },
+            "description": "模型自行选择的台词语义与 B-roll 镜头对应关系",
+            "type": "array"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "a_roll_timeline_clip_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "timeline.inspect",
+      "description": "读取可编辑的时间线摘要与完整 track/clip ID、素材、角色和帧范围；尚无时间线时返回 timeline_exists=false，而不是失败",
+      "parameters": {
+        "properties": {},
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
+      "name": "timeline.recut_to_beats",
+      "description": "从空时间线或已有时间线原子完成卡点混剪：传 bgm_asset_id 后按真实拍点重建主视频；优先传 media.search_shots 返回的有序 shot_ids，工具会解析精确源帧。cut_frames 可多于视频素材数，同一素材会使用不同且不重叠的源区间；use_all_video_assets=true 表示每个素材至少一次；cover_entire_bgm=true 覆盖整首音乐；SFX 始终独立分轨。禁止用 compose_initial 加几十个低层补丁替代",
+      "parameters": {
+        "properties": {
+          "bgm_asset_id": {
+            "description": "BGM 音频素材 ID；新建、重建或当前时间线没有 BGM 时传此字段。可从 audio.analyze_beats 的 asset_id 原样取得",
+            "type": "string"
+          },
+          "bgm_timeline_clip_id": {
+            "description": "兼容已有时间线局部重剪；timeline.inspect 返回的 BGM clip ID。完整重剪优先传 bgm_asset_id",
+            "type": "string"
+          },
+          "target_duration_frames": {
+            "description": "目标成片总帧数。用户给出秒数时乘以 timeline_fps；要求覆盖整首 BGM 时可省略并设置 cover_entire_bgm=true",
+            "type": "integer"
+          },
+          "cover_entire_bgm": {
+            "description": "用户要求覆盖整首音乐时必须为 true；工具会以 BGM 的完整可用帧数重建主视频并铺满音乐",
+            "type": "boolean"
+          },
+          "video_asset_ids": {
+            "items": {
+              "type": "string"
+            },
+            "description": "可选的主视频素材顺序；省略时先保留当前主视频素材顺序，再自动补入草稿内其余可用视频",
+            "type": "array"
+          },
+          "use_all_video_assets": {
+            "description": "用户要求每个/全部视频素材都用上时必须为 true；语义是每个素材至少一次，额外片段可从同一素材的其他不重叠镜头区间取得",
+            "type": "boolean"
+          },
+          "shot_ids": {
+            "items": {
+              "type": "string"
+            },
+            "description": "media.search_shots 返回的有序镜头 ID；与 cut_frames 一一对应，工具会从持久化理解摘要解析精确源帧，禁止猜测",
+            "type": "array"
+          },
+          "cut_frames": {
+            "items": {
+              "type": "integer"
+            },
+            "description": "可选的累计结束帧；完整重剪会逐项校验其属于真实 beat_frames。可多于视频素材数，同一素材会使用不同且不重叠的源区间；传 shot_ids 时数量必须一致",
+            "type": "array"
+          },
+          "sfx": {
+            "properties": {
+              "asset_id": {
+                "description": "作为点缀的音效素材 ID",
+                "type": "string"
+              },
+              "start_frame": {
+                "description": "音效在时间线上的起始整数帧；由模型结合波形、拍点和创作意图自主选择",
+                "type": "integer"
+              },
+              "duration_frames": {
+                "description": "短音效时长，通常为 30 到 60 帧",
+                "type": "integer"
+              },
+              "gain_db": {
+                "description": "音效增益，省略时为 -12 dB",
+                "type": "number"
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "asset_id",
+              "start_frame",
+              "duration_frames"
+            ],
+            "description": "可选的音效点缀；传入时由模型显式选择 start_frame，工具只校验范围、时长、增益与素材合法性，并始终写入独立 sfx 轨",
+            "type": "object"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
+      "name": "timeline.validate",
+      "description": "验证当前时间线不变量",
+      "parameters": {
+        "properties": {},
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
+      "name": "understand.materials",
+      "description": "幂等理解所选素材并生成可检索的逐镜头时间证据；相同素材和参数默认直接复用持久化结果，只有用户明确要求重新分析时才设置 force_refresh=true；旧强制任务终态后再次重跑完全相同分析才更换 refresh_nonce；多素材、deep 或 force_refresh 可能返回 queued，后台完成后会自动续跑当前任务，不要轮询",
+      "parameters": {
+        "properties": {
+          "asset_ids": {
+            "items": {
+              "type": "string"
+            },
+            "description": "asset.list_assets 返回的一个或多个素材 ID；不要传文件名或本地路径",
+            "type": "array"
+          },
+          "depth": {
+            "description": "scan 做低成本广度扫描，deep 做逐镜头深度理解；默认 scan，多素材或 deep 可能异步排队并在完成后自动续跑",
+            "type": "string"
+          },
+          "focus": {
+            "description": "可选创作关注点，例如产品特写、人物动作或可用于高潮的镜头；会进入视觉分析提示与缓存键",
+            "type": "string"
+          },
+          "max_steps_per_asset": {
+            "description": "每个素材的最大分析步骤数；0 使用服务端默认值，数值越大成本和延迟越高",
+            "type": "integer"
+          },
+          "force_refresh": {
+            "description": "仅当用户明确要求重新分析时设为 true；默认复用相同素材与参数的持久化结果",
+            "type": "boolean"
+          },
+          "refresh_nonce": {
+            "description": "仅当用户在旧强制任务终态后明确要求再次重跑完全相同的分析时提供新的短标识；同一标识重复调用仍幂等复用同一 job",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "asset_ids"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "prompts": {
+    "core": "你是 Rushes 本地视频剪辑 Agent，职责是实际修改当前草稿并交付结果，而不是只给建议。\n\n上下文协议：系统消息定义能力与安全边界；最新用户消息给出当前创作意图，也可以纠正旧判断；【WorldState 参考快照】应用其后的当前增量后，才是素材、时间线、任务和错误的唯一客观事实。历史回复与压缩交接只能延续目标和决定，不能覆盖客观状态。素材目录是常驻的精简索引，不是完整镜头或转写内容。\n\ndraft.content_plan 是你的持久创作计划本，用 plan.update 维护（默认 RFC 7396 增量，reset=true 整体重写）；只记提炼后的意图与决定，不是日志或转写存放处。\n\n通用规则：\n1. 只通过已注册能力完成理解、编辑、验证、预览、质检和导出；不得编造文件、素材、时间线、任务或产物。\n2. 目标明确就直接执行；简单增量修改不要打断。首次整片首剪是高影响例外：执行前用 interaction.ask_user 展示可核对的文本化 EDL 草案，等待用户确认或修改；获得答案后自动继续原任务。\n3. 精确时间坐标统一使用整数帧；编辑操作必须是带 kind 的扁平对象，禁止自行换算或传递秒字段。\n4. 失败后先读 observation、recovery 和最新状态，再调整参数或补取证据；不可原样重试，也不可删除用户要求来绕过错误。恢复预算耗尽时停止调用，并如实说明已完成、未完成及下一步。\n5. 浏览器编辑代理负责即时预览，普通移动、裁剪和分割不触发离线渲染。只有用户明确需要可分享预览或离线画质检查时才生成预览并质检；最终导出读取原素材。\n6. 用户反馈可以推翻旧的节奏或镜头结论。应从当前状态和本轮证据继续，不复用已过期判断；除非用户明确要求，不从头重做，也不删除已有素材、时间线或已完成理解。",
+    "audio_track_playbook": "【音频分轨】\n把持续音乐与短时点缀视为两种并行职责：前者保持在音乐底轨，后者叠加到音效轨；不能把点缀接在音乐尾部冒充连续配乐。",
+    "beat_editing_playbook": "【卡点工作流】\n先取得本轮音乐的节拍与完整动态证据，再按创作意图取得可核验镜头。首次整片卡点剪辑先用 decision_type=approve_rough_cut 的决策卡展示“镜头顺序 × 拍点 × 时长”表，确认后交给卡点重剪高层能力一次完成。拍点强弱只是声音证据，不直接代表高潮或剪法。高层调用失败时依据返回的新证据修正同一路径，不改用初版组装或成串低层编辑。",
+    "timeline_editing_playbook": "【时间线编辑】\n选择或修改片段前先读取现有轨道与稳定片段标识；仅做校验、渲染或状态查询时直接执行对应目标。首次建立初版时间线前用 decision_type=approve_content_plan 的决策卡展示片段顺序、源区间、目标时长和取舍理由；已有首剪后的增量修改不重复审批。普通编辑涉及两个或更多片段时，合成一个原子批次；整体替换也把新增与移除放进该批次。提交后检查结构和节奏诊断，结构合法不能单独证明卡点已完成。",
+    "talking_head_playbook": "【口播工作流】\n已有时间线时先确认当前主讲片段；尚无时间线时先按素材角色选择主讲视频并建立初版，再读取逐句语音证据。需要精确剪词时继续读取词级标识。模型结合完整上下文判断停顿、重复和残句。首次整片口播剪辑先用 decision_type=approve_speech_cut 的决策卡逐句列出保留/删除及一句理由；已有首剪后的增量修改不重复审批。配画面前按台词意图取得可验证镜头，语义尚未就绪就先理解再重搜；短镜头可锚定编辑后仍保留的连续原文，不必硬盖整句。最后把内容决定与覆盖锚点交给口播高层编辑一次执行；失败时保留用户要求，并按返回的具体关系修正。"
+  }
+}

@@ -28,8 +28,10 @@ const (
 	// Eino 的 ReAct 图会把一次模型节点和一次工具节点分别计为一个 step。
 	// 单个工具节点会执行该 assistant 消息中的全部 tool_calls，因此这里限制
 	// 的是模型与工具的往返轮数。预留最后一次模型节点生成终态回复。
-	maxToolRoundsPerTurn = 40
-	maxReActStepsPerTurn = maxToolRoundsPerTurn*2 + 1
+	maxToolRoundsPerTurn               = 40
+	maxReActStepsPerTurn               = maxToolRoundsPerTurn*2 + 1
+	contextCompactionSummaryRuneLimit  = 4000
+	contextCompactionFallbackRuneLimit = 3000
 )
 
 type Service struct {
@@ -78,6 +80,7 @@ func NewServiceWithModels(
 		return nil, err
 	}
 	service.tools = registry
+	recordModelToolSchemaSize(ctx, registry)
 	if chatModel != nil {
 		service.react, err = react.NewAgent(ctx, &react.AgentConfig{
 			ToolCallingModel: chatModel,
@@ -131,14 +134,14 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	}
 	recoveryState := newToolRecoveryState()
 	ctx = withToolRecoveryState(ctx, recoveryState)
-	ctx = withTurnBudgetState(ctx, newTurnBudgetState(maxToolRoundsPerTurn))
+	ctx = withTurnInteractionState(ctx, newTurnInteractionState())
+	turnBudget := newTurnBudgetState(maxToolRoundsPerTurn)
+	ctx = withTurnBudgetState(ctx, turnBudget)
 	ctx = service.withModelRetryReporting(ctx, item.DraftID)
 	ctx = rushestools.WithReporter(ctx, service.toolReporter(ctx, item.DraftID))
 	content, err := service.turnContent(ctx, item, messageID)
 	if errors.Is(err, context.Canceled) {
-		service.hub.Record(item.DraftID, StreamEvent{
-			"type": "turn_ended", "outcome": "cancelled", "reason": "user_cancelled",
-		})
+		service.recordTurnEnded(item.DraftID, "cancelled", "user_cancelled", turnBudget)
 		return err
 	}
 	outcome := "finished"
@@ -183,10 +186,16 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 			"kind": messageKind, "content": content,
 		})
 	}
-	service.hub.Record(item.DraftID, StreamEvent{
-		"type": "turn_ended", "outcome": outcome, "reason": reason,
-	})
+	service.recordTurnEnded(item.DraftID, outcome, reason, turnBudget)
 	return nil
+}
+
+func (service *Service) recordTurnEnded(draftID, outcome string, reason any, turnBudget *turnBudgetState) {
+	turnEnded := StreamEvent{"type": "turn_ended", "outcome": outcome, "reason": reason}
+	if usage := turnBudget.usageSnapshot(); usage != nil {
+		turnEnded["token_usage"] = usage
+	}
+	service.hub.Record(draftID, turnEnded)
 }
 
 func (service *Service) withModelRetryReporting(ctx context.Context, draftID string) context.Context {
@@ -512,22 +521,47 @@ func (service *Service) compactModelContext(
 	if !ok {
 		return nil
 	}
-	summary := deterministicContextSummary(source)
-	if service.chatModel != nil {
-		response, err := service.chatModel.Generate(ctx, []*schema.Message{
-			schema.SystemMessage(contextCompactionPrompt),
-			schema.UserMessage(source),
-		}, model.WithToolChoice(schema.ToolChoiceForbidden))
-		if err == nil && response != nil && strings.TrimSpace(response.Content) != "" {
-			summary = truncateRunes(strings.TrimSpace(response.Content), 12000)
-		}
-	}
+	summary := service.contextSummary(ctx, draftID, source)
 	return service.contextManager.ReplaceHistory(ctx, draftID, build, summary, through)
+}
+
+func (service *Service) contextSummary(ctx context.Context, draftID, source string) string {
+	summary := deterministicContextSummary(source)
+	if service.chatModel == nil {
+		return summary
+	}
+	response, err := service.chatModel.Generate(ctx, []*schema.Message{
+		schema.SystemMessage(contextCompactionPrompt),
+		schema.UserMessage(source),
+	}, model.WithToolChoice(schema.ToolChoiceForbidden))
+	if err != nil || response == nil || strings.TrimSpace(response.Content) == "" {
+		reason := "模型返回空摘要"
+		if err != nil {
+			reason = truncateText(err.Error(), 500)
+		}
+		service.hub.Record(draftID, StreamEvent{
+			"type": "context_compaction_failed", "reason": reason,
+			"fallback": "deterministic_bounded_summary",
+		})
+		return summary
+	}
+	return truncateRunes(strings.TrimSpace(response.Content), contextCompactionSummaryRuneLimit)
 }
 
 func deterministicContextSummary(source string) string {
 	return "自动语义压缩不可用时保留的有界历史交接；其中状态描述可能过期，" +
-		"必须以当前 WorldState 为准。\n" + truncateRunes(strings.TrimSpace(source), 8000)
+		"必须以当前 WorldState 为准。\n" + tailRunes(strings.TrimSpace(source), contextCompactionFallbackRuneLimit)
+}
+
+func tailRunes(value string, limit int) string {
+	runes := []rune(value)
+	if limit <= 0 {
+		return ""
+	}
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[len(runes)-limit:])
 }
 
 const contextCompactionPrompt = `你是 Rushes 的上下文压缩器。禁止调用工具，只输出简体中文交接摘要。
@@ -537,6 +571,7 @@ const contextCompactionPrompt = `你是 Rushes 的上下文压缩器。禁止调
 3. 已完成进展（只写语义结论，不复制整条时间线）；
 4. 未完成事项和下一步；
 5. 仍需保留的关键 ID、错误证据或用户纠正。
+draft.content_plan 已持久保存的决定不要重复写入摘要；只保留计划外的新决定或冲突。
 不要把历史回复里的素材、时间线、响度或节拍判断写成当前事实；这些客观信息会由最新 WorldState 单独注入。删除寒暄、重复工具日志、已被用户推翻的判断和冗余过程。`
 
 func (service *Service) toolReporter(ctx context.Context, draftID string) rushestools.Reporter {

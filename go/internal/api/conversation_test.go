@@ -104,6 +104,48 @@ func TestDecisionAnswerReplaysPendingToolCall(t *testing.T) {
 	}
 }
 
+func TestDecisionAnswerRESTValidatesAnswerContent(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name          string
+		answer        map[string]any
+		allowFreeText bool
+		reason        string
+	}{
+		{"empty", map[string]any{"answered_via": "button"}, true, "decision_answer_empty"},
+		{"unknown option", map[string]any{"answered_via": "button", "option_id": "missing"}, true, "decision_option_not_found"},
+		{"free text disabled", map[string]any{"answered_via": "text", "free_text": "自定义"}, false, "decision_free_text_not_allowed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			server, handler := testServer(t, t.TempDir(), 0)
+			draftID := "draft_rest_" + strings.ReplaceAll(test.name, " ", "_")
+			createDraftThroughAPI(t, handler, draftID)
+			ctx := tools.WithDraftID(t.Context(), draftID)
+			result, err := server.agent.ExecuteTool(ctx, "interaction.ask_user", tools.AskUserInput{
+				Question: "选择方案？", AllowFreeText: &test.allowFreeText,
+				Options: []tools.DecisionOptionInput{{OptionID: "known", Label: "已知选项"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			decisionID := result.(tools.ToolResult).Data["decision_id"].(string)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, apiRequest(t, http.MethodPost,
+				"/api/decisions/"+decisionID+"/answer", map[string]any{
+					"draft_id": draftID, "answer": test.answer,
+				}))
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), test.reason) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+			stored, err := storageCurrentDecisionByID(t, server, decisionID)
+			if err != nil || stored.Status != "pending" {
+				t.Fatalf("invalid REST answer changed decision: %#v err=%v", stored, err)
+			}
+		})
+	}
+}
+
 func TestClearConversationHidesHistoryAndPreservesObjectiveState(t *testing.T) {
 	t.Parallel()
 	server, handler := testServer(t, t.TempDir(), 0)

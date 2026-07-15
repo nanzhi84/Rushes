@@ -399,7 +399,7 @@ func trimClip(document *Document, operation map[string]any) error {
 	for _, member := range members {
 		track := &document.Tracks[member.trackIndex]
 		if track.Locked {
-			return fmt.Errorf("轨道 %s 已锁定", track.TrackID)
+			return trackLockedError(track.TrackID)
 		}
 		clip := &track.Clips[member.clipIndex]
 		clip.SourceStartFrame = start
@@ -438,10 +438,10 @@ func splitClip(document *Document, operation map[string]any) error {
 		track := document.Tracks[member.trackIndex]
 		clip := track.Clips[member.clipIndex]
 		if track.Locked {
-			return fmt.Errorf("轨道 %s 已锁定", track.TrackID)
+			return trackLockedError(track.TrackID)
 		}
 		if splitFrame <= clip.TimelineStartFrame || splitFrame >= clip.TimelineEndFrame {
-			return errors.New("联动片段未覆盖同一个切点")
+			return clipFrameRangeError(clip, splitFrame, "联动片段未覆盖同一个切点")
 		}
 	}
 	selectedID := selected.TimelineClipID
@@ -475,14 +475,19 @@ func splitClip(document *Document, operation map[string]any) error {
 }
 
 func splitClipValue(clip Clip, splitFrame int, leftGroupID, rightGroupID string) (Clip, Clip, error) {
-	if clip.AssetID == "" || splitFrame <= clip.TimelineStartFrame || splitFrame >= clip.TimelineEndFrame {
+	if clip.AssetID == "" {
 		return Clip{}, Clip{}, errors.New("split_clip 切点必须位于可分割素材片段内部")
+	}
+	if splitFrame <= clip.TimelineStartFrame || splitFrame >= clip.TimelineEndFrame {
+		return Clip{}, Clip{}, clipFrameRangeError(
+			clip, splitFrame, "split_clip 切点必须位于可分割素材片段内部",
+		)
 	}
 	sourceSplit := clip.SourceStartFrame + int(math.Round(
 		float64(splitFrame-clip.TimelineStartFrame)*effectiveRate(clip),
 	))
 	if sourceSplit <= clip.SourceStartFrame || sourceSplit >= clip.SourceEndFrame {
-		return Clip{}, Clip{}, errors.New("split_clip 源切点无效")
+		return Clip{}, Clip{}, clipFrameRangeError(clip, splitFrame, "split_clip 源切点无效")
 	}
 	left := clip
 	left.TimelineEndFrame = splitFrame
@@ -514,11 +519,18 @@ func reorderClip(document *Document, operation map[string]any) error {
 		return err
 	}
 	if targetFrame < 0 || targetFrame > document.DurationFrames {
-		return errors.New("reorder_clip target_frame 超出时间线")
+		return &SemanticError{
+			Kind: SemanticFrameRange, ClipID: id, ProvidedFrame: targetFrame,
+			TimelineStartFrame: 0, TimelineEndFrame: document.DurationFrames,
+			Message: "reorder_clip target_frame 必须位于当前时间线范围内",
+		}
 	}
 	track := trackByID(document, "visual_base")
-	if track == nil || track.Locked {
-		return errors.New("reorder_clip 缺少主视觉轨或轨道已锁定")
+	if track == nil {
+		return errors.New("reorder_clip 缺少主视觉轨")
+	}
+	if track.Locked {
+		return trackLockedError(track.TrackID)
 	}
 	for _, clip := range track.Clips {
 		if !clip.Linked || clip.ParentBlockID == "" {
@@ -527,7 +539,7 @@ func reorderClip(document *Document, operation map[string]any) error {
 		for _, member := range linkedGroup(document, clip.ParentBlockID) {
 			memberTrack := document.Tracks[member.trackIndex]
 			if memberTrack.TrackID != "visual_base" && memberTrack.Locked {
-				return fmt.Errorf("联动轨道 %s 已锁定", memberTrack.TrackID)
+				return trackLockedError(memberTrack.TrackID)
 			}
 		}
 	}
@@ -545,7 +557,7 @@ func reorderClip(document *Document, operation map[string]any) error {
 		}
 	}
 	if clipIndex < 0 {
-		return fmt.Errorf("clip 不存在或不在主视觉轨: %s", id)
+		return &SemanticError{Kind: SemanticClipNotFound, ClipID: id}
 	}
 	clips = append(clips[:clipIndex], clips[clipIndex+1:]...)
 	insertAt := len(clips)
@@ -695,8 +707,11 @@ func insertClip(document *Document, operation map[string]any) error {
 		return errors.New("insert_clip 参数无效")
 	}
 	track := trackByID(document, valueOr(stringValue(operation["track_id"]), "visual_base"))
-	if track == nil || track.Locked {
-		return errors.New("insert_clip track 不存在或已锁定")
+	if track == nil {
+		return errors.New("insert_clip track 不存在")
+	}
+	if track.Locked {
+		return trackLockedError(track.TrackID)
 	}
 	duration := end - start
 	startFrame := document.DurationFrames
@@ -741,8 +756,11 @@ func insertClip(document *Document, operation map[string]any) error {
 	}
 	if includeOriginalAudio {
 		originalAudio := trackByID(document, "original_audio")
-		if originalAudio == nil || originalAudio.Locked {
-			return errors.New("原声音轨不存在或已锁定，不能插入带声主视频")
+		if originalAudio == nil {
+			return errors.New("原声音轨不存在，不能插入带声主视频")
+		}
+		if originalAudio.Locked {
+			return trackLockedError(originalAudio.TrackID)
 		}
 		parentBlockID := valueOr(stringValue(operation["parent_block_id"]), "link_"+clip.TimelineClipID)
 		clip.Linked = true
@@ -777,7 +795,10 @@ func syncOriginalAudio(document *Document, operation map[string]any) error {
 		return errors.New("缺少主视觉轨或原声音轨")
 	}
 	if primary.Locked || originalAudio.Locked {
-		return errors.New("主视觉轨或原声音轨已锁定")
+		if primary.Locked {
+			return trackLockedError(primary.TrackID)
+		}
+		return trackLockedError(originalAudio.TrackID)
 	}
 	audioAssetIDs, err := stringSetValue(operation["audio_asset_ids"])
 	if err != nil {
@@ -856,7 +877,7 @@ func setPlaybackRate(document *Document, operation map[string]any) error {
 	for _, member := range members {
 		track := &document.Tracks[member.trackIndex]
 		if track.Locked {
-			return fmt.Errorf("轨道 %s 已锁定", track.TrackID)
+			return trackLockedError(track.TrackID)
 		}
 		clip := &track.Clips[member.clipIndex]
 		clip.PlaybackRate = rate
@@ -903,8 +924,11 @@ func clampClipFades(document *Document) {
 
 func removeTrackClips(document *Document, trackID string) error {
 	track := trackByID(document, trackID)
-	if track == nil || trackID == "visual_base" || track.Locked {
-		return errors.New("不能清空不存在、锁定的轨道或主视觉轨")
+	if track == nil || trackID == "visual_base" {
+		return errors.New("不能清空不存在的轨道或主视觉轨")
+	}
+	if track.Locked {
+		return trackLockedError(track.TrackID)
 	}
 	track.Clips = []Clip{}
 	return nil

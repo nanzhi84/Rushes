@@ -131,10 +131,59 @@ func timelineOpFailureAt(
 	err error,
 	operation map[string]any,
 	failedIndex int,
+	document timeline.Document,
 ) (rushestools.ToolResult, bool) {
 	fieldErr, ok := timelineOpFieldError(err)
-	if !ok {
+	if ok {
+		return timelineOpFieldFailure(fieldErr, operation, failedIndex), true
+	}
+	var semanticErr *timeline.SemanticError
+	if !errors.As(err, &semanticErr) {
 		return rushestools.ToolResult{}, false
 	}
-	return timelineOpFieldFailure(fieldErr, operation, failedIndex), true
+	data := map[string]any{
+		"error_code":                 "timeline_op_semantic_error",
+		"semantic_error_kind":        semanticErr.Kind,
+		"failed_op":                  operation,
+		"reason":                     semanticErr.Error(),
+		"current_timeline_unchanged": true,
+		"recovery":                   "根据当前时间线事实修正 failed_op 后重新调用；不要猜测 clip ID 或帧范围。",
+	}
+	if failedIndex > 0 {
+		data["failed_op_index"] = failedIndex
+	}
+	if spec, exists := timeline.LookupOpSpec(interfaceString(operation["kind"])); exists {
+		data["expected_schema"] = timelineOpExpectedSchema(*spec)
+		data["correct_example"] = timeline.CorrectOpExample(*spec)
+	}
+	switch semanticErr.Kind {
+	case timeline.SemanticClipNotFound:
+		data["available_timeline_clip_ids"] = timelineClipIDsByTrack(document)
+	case timeline.SemanticFrameRange:
+		data["actual_clip_range"] = map[string]any{
+			"timeline_clip_id":     semanticErr.ClipID,
+			"timeline_start_frame": semanticErr.TimelineStartFrame,
+			"timeline_end_frame":   semanticErr.TimelineEndFrame,
+			"source_start_frame":   semanticErr.SourceStartFrame,
+			"source_end_frame":     semanticErr.SourceEndFrame,
+			"provided_frame":       semanticErr.ProvidedFrame,
+		}
+	case timeline.SemanticTrackLocked:
+		data["locked_track_id"] = semanticErr.TrackID
+	}
+	return rushestools.ToolResult{
+		Status: "failed", Observation: "时间线补丁语义校验失败：" + semanticErr.Error(), Data: data,
+	}, true
+}
+
+func timelineClipIDsByTrack(document timeline.Document) map[string][]string {
+	result := make(map[string][]string, len(document.Tracks))
+	for _, track := range document.Tracks {
+		ids := make([]string, 0, len(track.Clips))
+		for _, clip := range track.Clips {
+			ids = append(ids, clip.TimelineClipID)
+		}
+		result[track.TrackID] = ids
+	}
+	return result
 }

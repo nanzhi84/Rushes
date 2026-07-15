@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agent"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -94,10 +95,29 @@ func (server *Server) AnswerDecisionApiDecisionsDecisionIdAnswerPost(
 		server.internalError(writer, err)
 		return
 	}
-	answer := map[string]any{
-		"answered_via": payload.Answer.AnsweredVia, "option_id": payload.Answer.OptionId,
-		"free_text": payload.Answer.FreeText, "payload": payload.Answer.Payload,
+	optionID := ""
+	if payload.Answer.OptionId != nil {
+		optionID = *payload.Answer.OptionId
 	}
+	freeText := ""
+	if payload.Answer.FreeText != nil {
+		freeText = *payload.Answer.FreeText
+	}
+	answerPayload := map[string]any(nil)
+	if payload.Answer.Payload != nil {
+		answerPayload = *payload.Answer.Payload
+	}
+	answer, err := agent.AdjudicateDecisionAnswer(decision, optionID, freeText, answerPayload)
+	if err != nil {
+		var answerErr *agent.DecisionAnswerError
+		if errors.As(err, &answerErr) {
+			writeBadRequest(writer, answerErr.Reason)
+			return
+		}
+		server.internalError(writer, err)
+		return
+	}
+	answer["answered_via"] = payload.Answer.AnsweredVia
 	replayID := ""
 	consumedAt := ""
 	if decision.PendingToolCall != nil {

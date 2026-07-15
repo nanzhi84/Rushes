@@ -1000,21 +1000,21 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	batchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []map[string]any{
+	batchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{
 		{"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -3.0},
 		{"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 1.25},
 	}})
 	if err != nil || batchRaw.(rushestools.ToolResult).Status != "succeeded" {
 		t.Fatalf("batch=%#v err=%v", batchRaw, err)
 	}
-	failedBatchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []map[string]any{{
+	failedBatchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "insert_clip", "track_id": "sfx", "timeline_start_frame": 1000,
 		"asset_id": "missing", "asset_kind": "audio", "source_start_frame": 0, "source_end_frame": 30,
 	}}})
 	if err != nil || failedBatchRaw.(rushestools.ToolResult).Status != "failed" {
 		t.Fatalf("failed batch=%#v err=%v", failedBatchRaw, err)
 	}
-	invalidBatchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []map[string]any{
+	invalidBatchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{
 		{
 			"kind": "insert_clip", "track_id": "sfx", "timeline_start_frame": 20,
 			"asset_id": "sfx", "asset_kind": "audio", "source_start_frame": 0, "source_end_frame": 20,
@@ -1180,7 +1180,8 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 		Question: "继续？", Options: []rushestools.DecisionOptionInput{{OptionID: "yes", Label: "继续"}},
 		AllowFreeText: &allowFreeText, Blocking: &blocking,
 	})
-	if err != nil || waiting.(rushestools.ToolResult).Status != "waiting" {
+	if err != nil || waiting.(rushestools.ToolResult).Status != "succeeded" ||
+		waiting.(rushestools.ToolResult).Data["turn_should_end"] != false {
 		t.Fatalf("waiting=%#v err=%v", waiting, err)
 	}
 	decisionID := waiting.(rushestools.ToolResult).Data["decision_id"].(string)
@@ -2413,7 +2414,7 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 		"plan.update":                 rushestools.PlanUpdateInput{Plan: map[string]any{"status": "closed-db"}},
 		"timeline.compose_initial":    rushestools.ComposeInitialInput{},
 		"timeline.apply_patch":        rushestools.TimelinePatchInput{Op: map[string]any{"kind": "noop"}},
-		"timeline.apply_patches":      rushestools.TimelinePatchBatchInput{Ops: []map[string]any{{"kind": "noop"}}},
+		"timeline.apply_patches":      rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{"kind": "noop"}}},
 		"timeline.recut_to_beats":     rushestools.TimelineBeatRecutInput{CutFrames: []int{30}, BGMTimelineClipID: "bgm"},
 		"timeline.validate":           rushestools.TimelineValidateInput{},
 		"timeline.inspect":            rushestools.TimelineInspectInput{},

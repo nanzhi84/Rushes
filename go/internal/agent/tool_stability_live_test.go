@@ -45,11 +45,20 @@ type liveToolEvalMetric struct {
 }
 
 type liveToolEvalReport struct {
-	GeneratedAt string                `json:"generated_at"`
-	Model       string                `json:"model"`
-	Schema      liveToolEvalMetric    `json:"schema"`
-	Routing     liveToolEvalMetric    `json:"routing"`
-	Failures    []liveToolEvalFailure `json:"failures,omitempty"`
+	GeneratedAt     string                        `json:"generated_at"`
+	Model           string                        `json:"model"`
+	Schema          liveToolEvalMetric            `json:"schema"`
+	Routing         liveToolEvalMetric            `json:"routing"`
+	RoutingVariants map[string]liveToolEvalMetric `json:"routing_variants,omitempty"`
+	PerKind         map[string]liveToolEvalMetric `json:"timeline_op_per_kind,omitempty"`
+	Budget          liveToolEvalMetric            `json:"budget_zero_tool_calls"`
+	Failures        []liveToolEvalFailure         `json:"failures,omitempty"`
+}
+
+type liveRoutingVariant struct {
+	Name            string
+	Case            liveToolEvalCase
+	IncludePlaybook bool
 }
 
 func TestLiveToolCallingStability(t *testing.T) {
@@ -149,6 +158,81 @@ func TestLiveToolCallingStability(t *testing.T) {
 			})
 		}
 	}
+
+	report.RoutingVariants = map[string]liveToolEvalMetric{}
+	for _, variant := range liveRoutingAblationCases() {
+		metric := liveToolEvalMetric{}
+		for run := 1; run <= runs; run++ {
+			metric.Total++
+			call, callErr := liveGenerateToolCallWithPlaybook(
+				t.Context(), boundAll, variant.Case.Prompt, variant.Case.Snapshot,
+				false, "", variant.IncludePlaybook,
+			)
+			if callErr == nil && containsToolName(variant.Case.Expected, call.Function.Name) {
+				callErr = validateLiveToolArguments(specs[call.Function.Name], call.Function.Arguments)
+			}
+			if callErr == nil && containsToolName(variant.Case.Expected, call.Function.Name) {
+				metric.Succeeded++
+				continue
+			}
+			report.Failures = append(report.Failures, liveToolEvalFailure{
+				Suite: "routing_variant:" + variant.Name, Case: variant.Case.Name, Run: run,
+				Expected: strings.Join(variant.Case.Expected, "|"), Actual: call.Function.Name,
+				Error: errorText(callErr),
+			})
+		}
+		metric.Rate = ratio(metric.Succeeded, metric.Total)
+		report.RoutingVariants[variant.Name+":"+variant.Case.Name] = metric
+	}
+
+	report.PerKind = map[string]liveToolEvalMetric{}
+	applyPatch := toolInfos["timeline.apply_patch"]
+	boundPatch, err := tiers.Chat.WithTools([]*schema.ToolInfo{applyPatch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, opSpec := range timeline.Catalog {
+		metric := liveToolEvalMetric{}
+		example, _ := json.Marshal(timeline.CorrectOpExample(opSpec))
+		for run := 1; run <= runs; run++ {
+			metric.Total++
+			call, callErr := liveGenerateToolCall(
+				t.Context(), boundPatch,
+				fmt.Sprintf("只调用 timeline.apply_patch，并严格按以下意图构造 %s：%s", opSpec.Kind, example),
+				liveSnapshotForSchemaCase("single_patch"), true, "timeline.apply_patch",
+			)
+			var decoded rushestools.TimelinePatchInput
+			if callErr == nil {
+				callErr = json.Unmarshal([]byte(call.Function.Arguments), &decoded)
+			}
+			if callErr == nil {
+				callErr = validateLiveTimelineOp(decoded.Op)
+			}
+			if callErr == nil && decoded.Op["kind"] == opSpec.Kind {
+				metric.Succeeded++
+				continue
+			}
+			report.Failures = append(report.Failures, liveToolEvalFailure{
+				Suite: "timeline_op_per_kind", Case: opSpec.Kind, Run: run,
+				Expected: opSpec.Kind, Actual: fmt.Sprint(decoded.Op["kind"]), Error: errorText(callErr),
+			})
+		}
+		metric.Rate = ratio(metric.Succeeded, metric.Total)
+		report.PerKind[opSpec.Kind] = metric
+	}
+
+	for run := 1; run <= runs; run++ {
+		report.Budget.Total++
+		if budgetErr := liveGenerateNoToolCall(t.Context(), boundAll); budgetErr == nil {
+			report.Budget.Succeeded++
+		} else {
+			report.Failures = append(report.Failures, liveToolEvalFailure{
+				Suite: "budget", Case: "remaining_zero", Run: run,
+				Expected: "no_tool_calls", Error: budgetErr.Error(),
+			})
+		}
+	}
+	report.Budget.Rate = ratio(report.Budget.Succeeded, report.Budget.Total)
 	report.Schema.Rate = ratio(report.Schema.Succeeded, report.Schema.Total)
 	report.Routing.Rate = ratio(report.Routing.Succeeded, report.Routing.Total)
 	writeLiveToolEvalReport(t, report)
@@ -231,6 +315,18 @@ func liveGenerateToolCall(
 	forced bool,
 	allowedName string,
 ) (schema.ToolCall, error) {
+	return liveGenerateToolCallWithPlaybook(parent, chat, prompt, snapshot, forced, allowedName, true)
+}
+
+func liveGenerateToolCallWithPlaybook(
+	parent context.Context,
+	chat model.ToolCallingChatModel,
+	prompt string,
+	snapshot WorldStateSnapshot,
+	forced bool,
+	allowedName string,
+	includePlaybook bool,
+) (schema.ToolCall, error) {
 	var lastErr error
 	for attempt := 1; attempt <= 3; attempt++ {
 		ctx, cancel := context.WithTimeout(parent, 90*time.Second)
@@ -239,7 +335,7 @@ func liveGenerateToolCall(
 			options = append(options, model.WithToolChoice(schema.ToolChoiceForced, allowedName))
 		}
 		messages := []*schema.Message{schema.SystemMessage(coreSystemPrompt)}
-		if playbook := taskPlaybookMessage(snapshot); playbook != nil {
+		if playbook := taskPlaybookMessage(snapshot); includePlaybook && playbook != nil {
 			messages = append(messages, playbook)
 		}
 		messages = append(messages, schema.UserMessage(prompt))
@@ -258,6 +354,77 @@ func liveGenerateToolCall(
 		}
 	}
 	return schema.ToolCall{}, lastErr
+}
+
+func liveGenerateNoToolCall(parent context.Context, chat model.ToolCallingChatModel) error {
+	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
+	defer cancel()
+	response, err := chat.Generate(ctx, []*schema.Message{
+		schema.SystemMessage(coreSystemPrompt + "\n\n" + turnBudgetInstruction(0)),
+		schema.UserMessage("时间预算已经耗尽。请总结当前状态，不要继续执行任何工具。"),
+	})
+	if err != nil {
+		return err
+	}
+	if response != nil && len(response.ToolCalls) > 0 {
+		return fmt.Errorf("remaining=0 时仍调用工具 %s", response.ToolCalls[0].Function.Name)
+	}
+	return nil
+}
+
+func liveRoutingAblationCases() []liveRoutingVariant {
+	fullByName := map[string]liveToolEvalCase{}
+	for _, evalCase := range liveRoutingCases() {
+		fullByName[evalCase.Name] = evalCase
+	}
+	minimal := map[string]WorldStateSnapshot{
+		"route_beats":             liveSnapshotForSchemaCase("beats"),
+		"route_talking_head_edit": liveSnapshotForSchemaCase("talking_head_edit"),
+		"route_patch":             liveSnapshotForSchemaCase("single_patch"),
+		"route_plan_update": NewWorldStateSnapshot(map[string]any{
+			"assets":   map[string]any{"audio_roles": []any{}, "material_catalog": []any{}},
+			"timeline": nil,
+		}),
+	}
+	variants := make([]liveRoutingVariant, 0, len(minimal)*3+2)
+	for name, snapshot := range minimal {
+		evalCase := fullByName[name]
+		variants = append(variants,
+			liveRoutingVariant{Name: "full", Case: evalCase, IncludePlaybook: true},
+			liveRoutingVariant{Name: "minimal", Case: liveToolEvalCase{
+				Name: evalCase.Name, Prompt: evalCase.Prompt, Expected: evalCase.Expected, Snapshot: snapshot,
+			}, IncludePlaybook: true},
+			liveRoutingVariant{Name: "no_playbook", Case: evalCase, IncludePlaybook: false},
+		)
+	}
+	variants = append(variants,
+		liveRoutingVariant{Name: "plan_activation_exploratory", IncludePlaybook: true, Case: liveToolEvalCase{
+			Name: "interrupted_multi_topic", Expected: []string{"plan.update"},
+			Prompt:   "多主题剪辑做到一半时用户要求先暂停。已确定但未执行：第二主题保留访谈开头，第三主题改成快节奏。请先固化这些决定供下回合继续。",
+			Snapshot: liveFullTaskSnapshot(),
+		}},
+		liveRoutingVariant{Name: "first_cut_approval", IncludePlaybook: true, Case: liveToolEvalCase{
+			Name: "first_cut_requires_edl", Expected: []string{"interaction.ask_user"},
+			Prompt: "WorldState 已确认尚无时间线；逐句证据也已读取：utt_1=开场介绍（保留），" +
+				"utt_2=重复口误（删除），utt_3=核心结论（保留）。素材和目标均已明确，" +
+				"请制作第一次完整口播首剪；任何编辑或补取证据前，先展示文本化 EDL 草案让我确认。",
+			Snapshot: NewWorldStateSnapshot(map[string]any{
+				"assets": map[string]any{
+					"audio_roles": []any{},
+					"material_catalog": []any{map[string]any{
+						"asset_id": "asset_aroll_1", "transcript_provider": "qwen_asr",
+					}},
+				},
+				"timeline": nil,
+			}),
+		}},
+		liveRoutingVariant{Name: "incremental_edit", IncludePlaybook: true, Case: liveToolEvalCase{
+			Name: "incremental_edit_skips_edl", Expected: []string{"timeline.apply_patch"},
+			Prompt:   "首剪已经确认并完成。只把真实片段 clip_v1_001 的音量调整到 -6dB，不要再次询问。",
+			Snapshot: liveSnapshotForSchemaCase("single_patch"),
+		}},
+	)
+	return variants
 }
 
 func liveSnapshotForSchemaCase(name string) WorldStateSnapshot {
@@ -317,6 +484,13 @@ func validateLiveToolArguments(spec rushestools.Spec, raw string) error {
 	if input, ok := target.Elem().Interface().(rushestools.TimelinePatchInput); ok {
 		if err := validateLiveTimelineOp(input.Op); err != nil {
 			return fmt.Errorf("参数不符合 op.oneOf: %w", err)
+		}
+	}
+	if input, ok := target.Elem().Interface().(rushestools.TimelinePatchBatchInput); ok {
+		for index, operation := range input.Ops {
+			if err := validateLiveTimelineOp(operation); err != nil {
+				return fmt.Errorf("ops[%d] 不符合 oneOf: %w", index, err)
+			}
 		}
 	}
 	var object map[string]json.RawMessage

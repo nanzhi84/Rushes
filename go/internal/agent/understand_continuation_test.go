@@ -20,7 +20,7 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 	)
 	database := agentTestDatabase(t)
 	createAgentDraft(t, database, draftID)
-	events := make([]contracts.Event, 0, 160)
+	events := make([]contracts.Event, 0, 240)
 	for index := range 80 {
 		fillerID := fmt.Sprintf("asset_filler_%03d_%s", index, strings.Repeat("x", 72))
 		events = append(events,
@@ -30,6 +30,9 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 				"hash": "hash_" + fillerID, "ingest_status": "ready", "usable": true,
 			}},
 			contracts.Event{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{
+				"asset_id": fillerID,
+			}},
+			contracts.Event{Type: "MaterialUnderstandingCompleted", Payload: map[string]any{
 				"asset_id": fillerID,
 			}},
 		)

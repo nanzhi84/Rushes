@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { INITIAL_STATE, reduceTurnStream } from "./useTurnStream";
+import { INITIAL_STATE, normalizeTurnEndedEvent, reduceTurnStream } from "./useTurnStream";
 import type { TurnStreamEvent, TurnStreamState } from "./useTurnStream";
 
 function apply(events: TurnStreamEvent[]): TurnStreamState {
@@ -7,6 +7,21 @@ function apply(events: TurnStreamEvent[]): TurnStreamState {
 }
 
 describe("reduceTurnStream · subagent_progress", () => {
+  it("原样转发回合终态 token usage，并兼容旧事件", () => {
+    const token_usage = {
+      model_calls: 2,
+      prompt_tokens: 100,
+      cached_prompt_tokens: 40,
+      completion_tokens: 20,
+      total_tokens: 120
+    };
+    expect(normalizeTurnEndedEvent({
+      type: "turn_ended", outcome: "finished", reason: null, token_usage
+    })).toEqual({ outcome: "finished", reason: null, token_usage });
+    expect(normalizeTurnEndedEvent({
+      type: "turn_ended", outcome: "cancelled", reason: "用户取消"
+    })).toEqual({ outcome: "cancelled", reason: "用户取消" });
+  });
   it("显示模型超时重试，并在模型恢复产出后清空", () => {
     const retrying = apply([
       { type: "turn_started", turn_id: "turn_1" },
