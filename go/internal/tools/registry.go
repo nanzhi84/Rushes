@@ -266,7 +266,7 @@ func registerComposeInitial(registry *Registry) error {
 }
 
 func registerApplyPatch(registry *Registry) error {
-	return addTool[TimelinePatchInput, ToolResult](registry, "timeline.apply_patch", "对当前时间线应用一个语义补丁；支持 trim_clip、split_clip、reorder_clip、move_clip、trim_clip_edge、delete_clip、set_track_state、set_clip_linked、insert_subtitle、delete_range、insert_clip、replace_clip、set_playback_rate、adjust_gain、set_clip_fades、edit_subtitle_text、remove_track_clips、sync_original_audio；带原声视频插入主视觉时会自动建立音画联动；原声缺失或错位时用 sync_original_audio 从最新主视觉原子重建；set_clip_fades 使用 fade_in_frames/fade_out_frames；move_clip/reorder_clip 的位置字段必须是 target_frame；trim_clip 主视觉会自动 ripple 后续片段，不要再逐段 move；先用 timeline.inspect 获取真实 ID；所有位置只接受整数帧", []string{"timeline_exists"}, ExposureLLM, false)
+	return addTool[TimelinePatchInput, ToolResult](registry, "timeline.apply_patch", "对当前时间线应用一个语义补丁；从 op.oneOf 选择 kind 和字段，编辑片段前先用 timeline.inspect 读取真实 ID", []string{"timeline_exists"}, ExposureLLM, false)
 }
 
 func registerApplyPatchBatch(registry *Registry) error {

@@ -1,0 +1,301 @@
+package tools
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+
+	"github.com/eino-contrib/jsonschema"
+	"github.com/nanzhi84/Rushes/go/internal/storage"
+	"github.com/nanzhi84/Rushes/go/internal/timeline"
+)
+
+func TestTimelineApplyPatchInfoCompilesCatalogToOneOf(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var applyPatch Spec
+	for _, spec := range registry.Specs(true) {
+		if spec.Name == "timeline.apply_patch" {
+			applyPatch = spec
+			break
+		}
+	}
+	if applyPatch.Implementation == nil {
+		t.Fatal("timeline.apply_patch 未注册")
+	}
+	info, err := applyPatch.Implementation.Info(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parameters, err := info.ToJSONSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parameters == nil || parameters.Properties == nil {
+		t.Fatalf("parameters schema 缺少 properties: %#v", parameters)
+	}
+	if !containsString(parameters.Required, "op") {
+		t.Fatalf("timeline.apply_patch parameters.required=%v want op", parameters.Required)
+	}
+	opSchema, exists := parameters.Properties.Get("op")
+	if !exists {
+		t.Fatal("timeline.apply_patch parameters 缺少 op")
+	}
+	assertTimelineOpCatalogSchema(t, opSchema)
+	encoded, err := json.Marshal(parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("timeline.apply_patch parameters schema bytes=%d", len(encoded))
+}
+
+// 这个快照测试有意锁定 Eino v0.9.12 与 jsonschema v1.0.3 的自定义类型反射链。
+// 升级任一依赖时，必须先确认 TimelineOp{} 仍被反射为主动 oneOf，而不是普通 map。
+func TestTimelineOpReflectionSnapshotPinsOneOf(t *testing.T) {
+	t.Parallel()
+	reflector := jsonschema.Reflector{Anonymous: true, DoNotReference: true}
+	reflected := reflector.Reflect(TimelineOp{})
+	assertTimelineOpCatalogSchema(t, reflected)
+	assertGoModDependencyVersion(t, "github.com/cloudwego/eino", "v0.9.12")
+	assertGoModDependencyVersion(t, "github.com/eino-contrib/jsonschema", "v1.0.3")
+}
+
+func TestTimelineOpSchemaCallsDoNotShareMutableExamples(t *testing.T) {
+	t.Parallel()
+	first := (TimelineOp{}).JSONSchema()
+	insert := timelineOpBranchByKind(t, first, "insert_clip")
+	metadata, exists := insert.Properties.Get("metadata")
+	if !exists || len(metadata.Examples) != 1 {
+		t.Fatalf("insert_clip.metadata examples=%#v", metadata)
+	}
+	firstExample, ok := metadata.Examples[0].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata example type=%T", metadata.Examples[0])
+	}
+	firstExample["source"] = "mutated"
+
+	second := (TimelineOp{}).JSONSchema()
+	metadata, exists = timelineOpBranchByKind(t, second, "insert_clip").Properties.Get("metadata")
+	if !exists || metadata.Examples[0].(map[string]any)["source"] != "catalog_example" {
+		t.Fatalf("不同 schema 调用共享了可变示例: %#v", metadata)
+	}
+}
+
+func TestTimelinePatchInputJSONKeepsNamedMapRuntimeSemantics(t *testing.T) {
+	t.Parallel()
+	var decoded TimelinePatchInput
+	if err := json.Unmarshal([]byte(`{"op":{"kind":"delete_clip","clip_id":"clip_1"}}`), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Op["kind"] != "delete_clip" || decoded.Op["clip_id"] != "clip_1" {
+		t.Fatalf("decoded op=%#v", decoded.Op)
+	}
+	if err := timeline.ValidateOpFields(map[string]any(decoded.Op)); err != nil {
+		t.Fatalf("命名 map 未保留运行时语义: %v", err)
+	}
+}
+
+func assertTimelineOpCatalogSchema(t *testing.T, schema *jsonschema.Schema) {
+	t.Helper()
+	if len(timeline.Catalog) != 18 {
+		t.Fatalf("timeline.Catalog kinds=%d want=18", len(timeline.Catalog))
+	}
+	if schema == nil || schema.Type != "object" {
+		t.Fatalf("TimelineOp root=%#v want object", schema)
+	}
+	if len(schema.OneOf) != len(timeline.Catalog) {
+		t.Fatalf("op.oneOf branches=%d want=%d", len(schema.OneOf), len(timeline.Catalog))
+	}
+
+	seenKinds := make(map[string]bool, len(timeline.Catalog))
+	for index, spec := range timeline.Catalog {
+		branch := schema.OneOf[index]
+		if branch == nil || branch.Type != "object" || branch.Properties == nil {
+			t.Fatalf("branch[%d]=%#v want object properties", index, branch)
+		}
+		kindSchema, exists := branch.Properties.Get("kind")
+		if !exists {
+			t.Fatalf("branch[%d] 缺少 kind", index)
+		}
+		kind, ok := kindSchema.Const.(string)
+		if !ok || kind == "" {
+			t.Fatalf("branch[%d] kind.const=%#v", index, kindSchema.Const)
+		}
+		if kind != spec.Kind {
+			t.Fatalf("branch[%d] kind=%q want=%q", index, kind, spec.Kind)
+		}
+		if seenKinds[kind] {
+			t.Fatalf("kind.const 重复: %s", kind)
+		}
+		seenKinds[kind] = true
+		if !containsString(branch.Required, "kind") {
+			t.Errorf("%s 未要求 kind", kind)
+		}
+		assertFalseSchema(t, kind, branch.AdditionalProperties)
+
+		expectedPropertyCount := 1
+		for _, field := range spec.Fields {
+			if field.Injected {
+				if _, exposed := branch.Properties.Get(field.Name); exposed {
+					t.Errorf("%s 暴露服务端注入字段 %s", kind, field.Name)
+				}
+				continue
+			}
+			expectedPropertyCount += 1 + len(field.Aliases)
+			property, exists := branch.Properties.Get(field.Name)
+			if !exists {
+				t.Errorf("%s 缺少字段 %s", kind, field.Name)
+				continue
+			}
+			if property.Type != expectedTimelineOpJSONType(field.Type) {
+				t.Errorf("%s.%s type=%q want=%q", kind, field.Name, property.Type, expectedTimelineOpJSONType(field.Type))
+			}
+			for _, alias := range field.Aliases {
+				if _, exists := branch.Properties.Get(alias); !exists {
+					t.Errorf("%s.%s 缺少兼容别名 %s", kind, field.Name, alias)
+				}
+			}
+			if !field.Required {
+				continue
+			}
+			if len(field.Aliases) == 0 {
+				if !containsString(branch.Required, field.Name) {
+					t.Errorf("%s 未要求字段 %s", kind, field.Name)
+				}
+				continue
+			}
+			alternatives := append([]string{field.Name}, field.Aliases...)
+			if !hasRequiredAlternatives(branch.AllOf, alternatives) {
+				t.Errorf("%s 缺少 %v 的 required anyOf", kind, alternatives)
+			}
+		}
+		if branch.Properties.Len() != expectedPropertyCount {
+			t.Errorf("%s properties=%d want=%d", kind, branch.Properties.Len(), expectedPropertyCount)
+		}
+		if len(spec.RequireAny) > 0 && !hasRequiredAlternatives(branch.AllOf, spec.RequireAny) {
+			t.Errorf("%s 缺少 RequireAny %v", kind, spec.RequireAny)
+		}
+	}
+
+	trimEdge := timelineOpBranchByKind(t, schema, "trim_clip_edge")
+	if _, exists := trimEdge.Properties.Get("timeline_frame"); !exists {
+		t.Error("trim_clip_edge 缺少 timeline_frame")
+	}
+	if _, exists := trimEdge.Properties.Get("target_frame"); exists {
+		t.Error("trim_clip_edge 错误暴露 target_frame")
+	}
+	for _, injected := range []string{"asset_kind", "include_original_audio", "audio_asset_ids"} {
+		for _, branch := range schema.OneOf {
+			if _, exists := branch.Properties.Get(injected); exists {
+				t.Errorf("op.oneOf 暴露服务端注入字段 %s", injected)
+			}
+		}
+	}
+}
+
+func timelineOpBranchByKind(t *testing.T, schema *jsonschema.Schema, kind string) *jsonschema.Schema {
+	t.Helper()
+	for _, branch := range schema.OneOf {
+		if branch == nil || branch.Properties == nil {
+			continue
+		}
+		kindSchema, exists := branch.Properties.Get("kind")
+		if exists && kindSchema.Const == kind {
+			return branch
+		}
+	}
+	t.Fatalf("oneOf 缺少 kind=%s", kind)
+	return nil
+}
+
+func hasRequiredAlternatives(constraints []*jsonschema.Schema, names []string) bool {
+	want := make(map[string]bool, len(names))
+	for _, name := range names {
+		want[name] = true
+	}
+	for _, constraint := range constraints {
+		if constraint == nil || len(constraint.AnyOf) != len(want) {
+			continue
+		}
+		seen := make(map[string]bool, len(want))
+		valid := true
+		for _, alternative := range constraint.AnyOf {
+			if alternative == nil || len(alternative.Required) != 1 || !want[alternative.Required[0]] {
+				valid = false
+				break
+			}
+			seen[alternative.Required[0]] = true
+		}
+		if valid && len(seen) == len(want) {
+			return true
+		}
+	}
+	return false
+}
+
+func assertFalseSchema(t *testing.T, kind string, schema *jsonschema.Schema) {
+	t.Helper()
+	encoded, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != "false" {
+		t.Errorf("%s additionalProperties=%s want=false", kind, encoded)
+	}
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func expectedTimelineOpJSONType(fieldType timeline.OpFieldType) string {
+	switch fieldType {
+	case timeline.OpFieldString:
+		return "string"
+	case timeline.OpFieldInteger:
+		return "integer"
+	case timeline.OpFieldNumber:
+		return "number"
+	case timeline.OpFieldBoolean:
+		return "boolean"
+	case timeline.OpFieldObject:
+		return "object"
+	case timeline.OpFieldStringArray:
+		return "array"
+	default:
+		return ""
+	}
+}
+
+func assertGoModDependencyVersion(t *testing.T, path, want string) {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("无法定位 timeline_op_schema_test.go")
+	}
+	contents, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "..", "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	needle := "\t" + path + " " + want + "\n"
+	if !strings.Contains(string(contents), needle) {
+		t.Fatalf("go.mod 未直接锁定 %s %s", path, want)
+	}
+}

@@ -150,7 +150,7 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 			"video/image", "不能传 audio/font", "asset.list_assets", "duration_frames", "timeline_fps",
 		},
 		"timeline.apply_patch": {
-			"move_clip/reorder_clip", "target_frame", "timeline.inspect", "整数帧",
+			"op.oneOf", "timeline.inspect",
 		},
 		"timeline.apply_patches": {
 			"insert_clip", "delete_clip", "同一次调用", "BGM/SFX", "timeline.recut_to_beats",

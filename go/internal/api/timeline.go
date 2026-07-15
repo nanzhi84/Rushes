@@ -58,7 +58,7 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 		"manual",
 	)
 	toolName := "timeline.apply_patch"
-	var toolInput any = tools.TimelinePatchInput{Op: payload.Op}
+	var toolInput any = tools.TimelinePatchInput{Op: tools.TimelineOp(payload.Op)}
 	if kind, _ := payload.Op["kind"].(string); kind == "batch" {
 		operations, valid := timelinePatchOperations(payload.Op["ops"])
 		if !valid || len(operations) == 0 || len(operations) > 100 {

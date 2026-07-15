@@ -6,6 +6,7 @@ require (
 	github.com/cloudwego/eino v0.9.12
 	github.com/cloudwego/eino-ext/components/model/ark v0.1.68
 	github.com/cloudwego/eino-ext/components/model/qwen v0.1.9
+	github.com/eino-contrib/jsonschema v1.0.3
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/oapi-codegen/runtime v1.4.2
 	modernc.org/sqlite v1.53.0
@@ -21,7 +22,6 @@ require (
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/cloudwego/eino-ext/libs/acl/openai v0.1.17 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/eino-contrib/jsonschema v1.0.3 // indirect
 	github.com/evanphx/json-patch v0.5.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/goph/emperror v0.17.2 // indirect

@@ -460,7 +460,7 @@ type ComposeInitialInput struct {
 }
 
 type TimelinePatchInput struct {
-	Op map[string]any `json:"op" jsonschema:"required" jsonschema_description:"扁平的时间线语义补丁对象，必须包含 kind；删除片段示例 {\"kind\":\"delete_clip\",\"timeline_clip_id\":\"clip_v1_011\"}；裁剪时间线边缘示例 {\"kind\":\"trim_clip_edge\",\"timeline_clip_id\":\"clip_v1_011\",\"edge\":\"end\",\"timeline_frame\":123}，注意字段是 timeline_frame 不是 target_frame；添加 BGM 示例 {\"kind\":\"insert_clip\",\"track_id\":\"bgm\",\"timeline_start_frame\":0,\"asset_id\":\"asset_id\",\"asset_kind\":\"audio\",\"source_start_frame\":0,\"source_end_frame\":1440,\"role\":\"bgm\"}；禁止传 remove_clip 等嵌套对象；所有位置和范围必须使用整数帧字段，禁止使用秒字段"`
+	Op TimelineOp `json:"op" jsonschema:"required" jsonschema_description:"从 op.oneOf 选择一种扁平补丁，按所选 kind 提供字段"`
 }
 
 type TimelinePatchBatchInput struct {
