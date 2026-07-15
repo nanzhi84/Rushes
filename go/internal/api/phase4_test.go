@@ -76,6 +76,16 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 		!strings.Contains(patched.Body.String(), `"clip_v1_001_split_30"`) {
 		t.Fatalf("patch status=%d body=%s", patched.Code, patched.Body.String())
 	}
+	invalidPatch := httptest.NewRecorder()
+	handler.ServeHTTP(invalidPatch, apiRequest(t, http.MethodPost,
+		"/api/drafts/draft_timeline_api/timeline/patch", map[string]any{"op": map[string]any{
+			"kind": "trim_clip_edge", "timeline_clip_id": "clip_v1_001",
+			"target_frame": 10, "edge": "end",
+		}}))
+	if invalidPatch.Code != http.StatusBadRequest ||
+		!strings.Contains(invalidPatch.Body.String(), "timeline_patch_validation_failed") {
+		t.Fatalf("invalid patch status=%d body=%s", invalidPatch.Code, invalidPatch.Body.String())
+	}
 	var renderJobs int
 	if err := server.database.Read().QueryRowContext(t.Context(), `
 		SELECT COUNT(*) FROM jobs WHERE draft_id='draft_timeline_api' AND kind='render_preview'`,

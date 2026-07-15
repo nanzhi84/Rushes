@@ -279,6 +279,9 @@ func Validate(document Document) ValidationReport {
 }
 
 func ApplyPatch(document Document, operation map[string]any) (Document, error) {
+	if err := ValidateOpFields(operation); err != nil {
+		return Document{}, err
+	}
 	copy, err := clone(document)
 	if err != nil {
 		return Document{}, err
