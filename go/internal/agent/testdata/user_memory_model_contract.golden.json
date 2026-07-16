@@ -2,7 +2,7 @@
   "cases": [
     {
       "name": "stores_stable_preference",
-      "prompt": "以后我所有视频的成片节奏都要快一点，请记住这个长期偏好。",
+      "prompt": "以后我的视频节奏都要快一点。",
       "snapshot_sections": {
         "draft": {
           "draft_id": "draft_memory_store",
@@ -77,7 +77,7 @@
     },
     {
       "name": "uses_injected_preference_without_asking",
-      "prompt": "帮我剪个片，直接开始。",
+      "prompt": "帮我剪个片。",
       "snapshot_sections": {
         "draft": {
           "draft_id": "draft_memory_use",

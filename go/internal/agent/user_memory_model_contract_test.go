@@ -166,6 +166,62 @@ func TestUserMemoryModelContractGolden(t *testing.T) {
 	}
 }
 
+func TestUserMemoryModelContractRejectsMemoryPollution(t *testing.T) {
+	evalCase := loadUserMemoryModelEvalCases(t)[0]
+	database := agentTestDatabase(t)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	_, specs, err := userMemoryEvalToolContracts(t.Context(), service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := `{"entries":[{"key":"pacing","kind":"preference","statement":"用户长期偏好视频节奏快一点"}]}`
+	tests := []struct {
+		name  string
+		calls []schema.ToolCall
+	}{
+		{
+			name: "extra entry",
+			calls: []schema.ToolCall{memoryEvalToolCall(`{"entries":[` +
+				`{"key":"pacing","kind":"preference","statement":"用户长期偏好视频节奏快一点"},` +
+				`{"key":"subtitle_style","kind":"preference","statement":"用户偏好花字"}]}`)},
+		},
+		{
+			name: "remove alongside write",
+			calls: []schema.ToolCall{memoryEvalToolCall(`{"entries":[` +
+				`{"key":"pacing","kind":"preference","statement":"用户长期偏好视频节奏快一点"}],` +
+				`"remove_keys":["subtitle_style"]}`)},
+		},
+		{
+			name:  "second update",
+			calls: []schema.ToolCall{memoryEvalToolCall(valid), memoryEvalToolCall(valid)},
+		},
+		{
+			name: "unbound tool",
+			calls: []schema.ToolCall{{
+				ID: "unbound", Function: schema.FunctionCall{Name: "interaction.ask_user", Arguments: `{}`},
+			}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := schema.AssistantMessage("", test.calls)
+			if err := validateUserMemoryModelResponse(evalCase, response, specs); err == nil {
+				t.Fatal("污染响应错误通过用户记忆模型合同")
+			}
+		})
+	}
+}
+
+func memoryEvalToolCall(arguments string) schema.ToolCall {
+	return schema.ToolCall{
+		ID: "memory_eval", Function: schema.FunctionCall{Name: "memory.update", Arguments: arguments},
+	}
+}
+
 func loadUserMemoryModelEvalCases(t *testing.T) []userMemoryModelEvalCase {
 	t.Helper()
 	path := filepath.Join("testdata", "user_memory_model_contract.golden.json")
@@ -261,10 +317,14 @@ func validateUserMemoryModelResponse(
 	if response == nil {
 		return fmt.Errorf("模型返回 nil")
 	}
+	available := stringSet(evalCase.AvailableTools)
 	forbidden := stringSet(evalCase.ForbiddenTools)
-	var requiredCall *schema.ToolCall
+	requiredCalls := []*schema.ToolCall{}
 	for index := range response.ToolCalls {
 		call := &response.ToolCalls[index]
+		if !available[call.Function.Name] {
+			return fmt.Errorf("调用了未绑定工具 %s", call.Function.Name)
+		}
 		if forbidden[call.Function.Name] {
 			return fmt.Errorf("调用了禁止工具 %s", call.Function.Name)
 		}
@@ -275,41 +335,46 @@ func validateUserMemoryModelResponse(
 		if err := validateLiveToolArguments(spec, call.Function.Arguments); err != nil {
 			return fmt.Errorf("%s 参数无效: %w", call.Function.Name, err)
 		}
-		if requiredCall == nil && call.Function.Name == evalCase.RequiredTool {
-			requiredCall = call
+		if call.Function.Name == evalCase.RequiredTool {
+			requiredCalls = append(requiredCalls, call)
 		}
 	}
-	if evalCase.RequiredTool != "" && requiredCall == nil {
+	if evalCase.RequiredTool != "" && len(requiredCalls) == 0 {
 		return fmt.Errorf("没有调用必需工具 %s；%s", evalCase.RequiredTool, userMemoryResponseSummary(response))
 	}
 	if evalCase.ExpectedMemory != nil {
+		if len(requiredCalls) != 1 {
+			return fmt.Errorf("memory.update 必须恰好调用一次，实际 %d 次", len(requiredCalls))
+		}
 		var input rushestools.MemoryUpdateInput
-		if err := json.Unmarshal([]byte(requiredCall.Function.Arguments), &input); err != nil {
+		if err := json.Unmarshal([]byte(requiredCalls[0].Function.Arguments), &input); err != nil {
 			return fmt.Errorf("解析 memory.update: %w", err)
 		}
-		matched := false
-		for _, entry := range input.Entries {
-			if entry.Key == evalCase.ExpectedMemory.Key &&
-				entry.Kind == evalCase.ExpectedMemory.Kind &&
-				strings.Contains(entry.Statement, evalCase.ExpectedMemory.StatementContains) {
-				matched = true
-				break
-			}
+		if len(input.Entries) != 1 || len(input.RemoveKeys) != 0 {
+			return fmt.Errorf(
+				"memory.update 只能写入一条预期记忆且不得删除，entries=%d remove_keys=%d",
+				len(input.Entries), len(input.RemoveKeys),
+			)
 		}
-		if !matched {
-			return fmt.Errorf("memory.update 未写入预期长期记忆: %s", requiredCall.Function.Arguments)
+		entry := input.Entries[0]
+		if entry.Key != evalCase.ExpectedMemory.Key ||
+			entry.Kind != evalCase.ExpectedMemory.Kind ||
+			!strings.Contains(entry.Statement, evalCase.ExpectedMemory.StatementContains) {
+			return fmt.Errorf("memory.update 未精确写入预期长期记忆: %s", requiredCalls[0].Function.Arguments)
 		}
 	}
 	if len(evalCase.ArgumentContainsAny) > 0 {
-		matched := false
-		for _, fragment := range evalCase.ArgumentContainsAny {
-			if strings.Contains(requiredCall.Function.Arguments, fragment) {
-				matched = true
-				break
+		for _, call := range requiredCalls {
+			matched := false
+			for _, fragment := range evalCase.ArgumentContainsAny {
+				if strings.Contains(call.Function.Arguments, fragment) {
+					matched = true
+					break
+				}
 			}
-		}
-		if !matched {
-			return fmt.Errorf("%s 参数没有体现注入偏好: %s", evalCase.RequiredTool, requiredCall.Function.Arguments)
+			if !matched {
+				return fmt.Errorf("%s 参数没有体现注入偏好: %s", evalCase.RequiredTool, call.Function.Arguments)
+			}
 		}
 	}
 	return nil
