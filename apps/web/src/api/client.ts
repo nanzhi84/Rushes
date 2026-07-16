@@ -111,6 +111,7 @@ export type MessageRecord = Schemas["MessageRecord"];
 type MessagesResponse = Schemas["MessagesResponse"];
 export type MessageQueuedResponse = Schemas["MessageQueuedResponse"];
 export type TurnCancelResponse = Schemas["TurnCancelResponse"];
+export type JobCancelResponse = Schemas["JobCancelResponse"];
 export type ConversationClearResponse = Schemas["ConversationClearResponse"];
 export type CurrentDecisionResponse = Schemas["CurrentDecisionResponse"];
 export type PendingDecisionsResponse = Schemas["PendingDecisionsResponse"];
@@ -225,6 +226,13 @@ export const api = {
     return apiFetch<TurnCancelResponse>(`${draftPath(draftId)}/turn/cancel`, {
       method: "POST",
       headers: JSON_MUTATION_HEADERS
+    });
+  },
+
+  cancelJob(jobId: string, reason?: string): Promise<JobCancelResponse> {
+    return apiFetch<JobCancelResponse>(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+      body: reason ? { reason } : {}
     });
   },
 

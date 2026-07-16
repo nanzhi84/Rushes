@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,8 +40,8 @@ func TestOpenMigratesSchemaAndCreatesWorkspace(t *testing.T) {
 		WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 15 {
-		t.Fatalf("业务表数=%d want=15", count)
+	if count != 18 {
+		t.Fatalf("业务表数=%d want=18", count)
 	}
 	batches, err := ListTimelineEditBatches(t.Context(), database.Read(), "missing", 20)
 	if err != nil || len(batches) != 0 {
@@ -145,5 +146,89 @@ func TestOpenMigratesTimelineHistoryAndAllowsFutureSnapshots(t *testing.T) {
 		if name == "parent_version" {
 			t.Fatal("迁移后不应保留版本父链字段")
 		}
+	}
+}
+
+func TestV8MigrationStartsAgentBridgeAfterHistoricalEvents(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	database, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO drafts(draft_id,name,created_at,updated_at)
+		VALUES('draft_bridge_migrate','draft',?,?);
+		INSERT INTO event_log(event_type,actor,draft_id,payload_json,created_at)
+		VALUES('JobSucceeded','job','draft_bridge_migrate',?,?);
+		DROP TABLE agent_job_observations;
+		DROP TABLE agent_job_observation_suppressions;
+		DROP TABLE agent_job_bridge_state;
+		PRAGMA user_version = 7`, now, now,
+		`{"event":"JobSucceeded","draft_id":"draft_bridge_migrate","payload":{"job_id":"historical_job","kind":"render_preview"}}`, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	var cursor, maxEventID int64
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT last_event_id FROM agent_job_bridge_state WHERE consumer_id='agent'`,
+	).Scan(&cursor); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(), `SELECT COALESCE(MAX(event_id),0) FROM event_log`).Scan(&maxEventID); err != nil {
+		t.Fatal(err)
+	}
+	if cursor != maxEventID || cursor == 0 {
+		t.Fatalf("bridge cursor=%d max_event_id=%d", cursor, maxEventID)
+	}
+	var observations int
+	if err := database.Read().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM agent_job_observations`).Scan(&observations); err != nil || observations != 0 {
+		t.Fatalf("historical observations=%d err=%v", observations, err)
+	}
+}
+
+func TestV10MigrationIndexesOnlyUndeliveredAgentObservations(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	database, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		DROP INDEX ix_agent_job_observations_undelivered_event;
+		PRAGMA user_version = 9`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+
+	var plan string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		EXPLAIN QUERY PLAN
+		SELECT event_id,job_id,draft_id,event_json,claim_token
+		FROM agent_job_observations
+		WHERE delivered_at IS NULL AND event_id>?
+		ORDER BY event_id LIMIT ?`, 0, 100,
+	).Scan(new(int), new(int), new(int), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan, "ix_agent_job_observations_undelivered_event") {
+		t.Fatalf("未交付扫描未使用 partial index: %s", plan)
 	}
 }

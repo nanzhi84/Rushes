@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -40,6 +41,18 @@ func RegisterUnderstand(
 		cacheHitIDs := []string{}
 		analyzedIDs := []string{}
 		for index, assetID := range assetIDs {
+			asset, err := storage.GetAsset(ctx, database.Read(), assetID)
+			if err != nil {
+				return nil, err
+			}
+			reportCompleted := func(stage string) error {
+				return report(ctx, job, ProgressUpdate{
+					Progress:       float64(index+1) / float64(len(assetIDs)),
+					CurrentAssetID: assetID, Done: index + 1, Total: len(assetIDs),
+					Stage:  stage,
+					Detail: fmt.Sprintf("理解素材 %d/%d：%s 已完成", index+1, len(assetIDs), asset.Filename),
+				})
+			}
 			summaryID := fmt.Sprintf("summary_%s_%s", assetID, job.ID)
 			var summaryExists int
 			if err := database.Read().QueryRowContext(ctx,
@@ -50,14 +63,10 @@ func RegisterUnderstand(
 			if summaryExists != 0 {
 				completedIDs = append(completedIDs, assetID)
 				analyzedIDs = append(analyzedIDs, assetID)
-				if err := report(ctx, job, float64(index+1)/float64(len(assetIDs))); err != nil {
+				if err := reportCompleted("already_completed"); err != nil {
 					return nil, err
 				}
 				continue
-			}
-			asset, err := storage.GetAsset(ctx, database.Read(), assetID)
-			if err != nil {
-				return nil, err
 			}
 			options := understanding.NormalizeAnalyzeOptions(asset, understanding.AnalyzeOptions{
 				Focus: focus, Depth: depth, MaxStepsPerAsset: maxSteps,
@@ -69,7 +78,7 @@ func RegisterUnderstand(
 				); cacheErr == nil {
 					completedIDs = append(completedIDs, assetID)
 					cacheHitIDs = append(cacheHitIDs, assetID)
-					if err := report(ctx, job, float64(index+1)/float64(len(assetIDs))); err != nil {
+					if err := reportCompleted("cache_hit"); err != nil {
 						return nil, err
 					}
 					continue
@@ -81,15 +90,34 @@ func RegisterUnderstand(
 				Type: "MaterialUnderstandingStarted", Payload: map[string]any{
 					"asset_id": assetID, "job_id": job.ID, "attempt": job.Attempts,
 				},
-			}}, reducer.Options{Actor: contracts.ActorJob}); err != nil {
+			}}, claimedJobOptions(job, reducer.Options{})); err != nil {
 				return nil, err
 			}
-			summary, err := analyzer.AnalyzeWithOptions(ctx, database, asset, options, func(string) {})
+			var progressErr error
+			analyzeCtx, cancelAnalyze := context.WithCancel(ctx)
+			summary, err := analyzer.AnalyzeWithOptions(analyzeCtx, database, asset, options, func(note string) {
+				if progressErr != nil {
+					return
+				}
+				stage, message := understandingProgressDetail(note)
+				progressErr = report(ctx, job, ProgressUpdate{
+					Progress:       (float64(index) + understandingStageProgress(stage)) / float64(len(assetIDs)),
+					CurrentAssetID: assetID, Done: index, Total: len(assetIDs), Stage: stage,
+					Detail: fmt.Sprintf("理解素材 %d/%d：%s %s", index+1, len(assetIDs), asset.Filename, message),
+				})
+				if progressErr != nil {
+					cancelAnalyze()
+				}
+			})
+			cancelAnalyze()
+			if progressErr != nil {
+				err = progressErr
+			}
 			if err != nil {
 				_, failureErr := reducer.Apply(context.WithoutCancel(ctx), database, []contracts.Event{{
 					Type: "MaterialUnderstandingFailed", Payload: map[string]any{
 						"asset_id": assetID, "job_id": job.ID, "attempt": job.Attempts,
-						"cancelled": errors.Is(err, context.Canceled),
+						"cancelled": errors.Is(err, context.Canceled) || errors.Is(err, reducer.ErrJobCancelled),
 						"failure":   map[string]any{"message": err.Error()},
 					},
 				}}, reducer.Options{Actor: contracts.ActorJob})
@@ -103,21 +131,20 @@ func RegisterUnderstand(
 					"asset_id": assetID, "job_id": job.ID, "attempt": job.Attempts,
 					"summary_id": summaryID,
 				},
-			}}, reducer.Options{
-				Actor: contracts.ActorJob,
+			}}, claimedJobOptions(job, reducer.Options{
 				ResultRows: reducer.ResultRows{MaterialSummaries: []reducer.MaterialSummaryRow{{
 					ID: summaryID, AssetID: assetID, Version: 0, Focus: understandStringPointer(options.Focus),
 					Status: "ready", Summary: summaryMap,
 					Model: understandStringPointer(summary.Model), Fingerprint: understandStringPointer(fingerprint),
 					PromptVersion: understandStringPointer(understanding.PromptVersion),
 				}}},
-			})
+			}))
 			if err != nil || result.Status != reducer.StatusApplied {
 				return nil, errors.Join(err, fmt.Errorf("understand reducer status: %s", result.Status))
 			}
 			completedIDs = append(completedIDs, assetID)
 			analyzedIDs = append(analyzedIDs, assetID)
-			if err := report(ctx, job, float64(index+1)/float64(len(assetIDs))); err != nil {
+			if err := reportCompleted("completed"); err != nil {
 				return nil, err
 			}
 		}
@@ -126,6 +153,38 @@ func RegisterUnderstand(
 			"analyzed_asset_ids": analyzedIDs, "status": "completed",
 		}, nil
 	})
+}
+
+func understandingProgressDetail(note string) (string, string) {
+	stage, message, found := strings.Cut(note, "：")
+	if !found {
+		stage, message = "analyze", note
+	}
+	stage = strings.TrimSpace(stage)
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "正在分析"
+	}
+	return stage, message
+}
+
+func understandingStageProgress(stage string) float64 {
+	switch stage {
+	case "audio_probe":
+		return 0.1
+	case "scene_detect":
+		return 0.15
+	case "scene_verify":
+		return 0.35
+	case "view_frames":
+		return 0.55
+	case "transcribe":
+		return 0.8
+	case "emit_summary":
+		return 0.95
+	default:
+		return 0.5
+	}
 }
 
 func stringSlice(value any) []string {

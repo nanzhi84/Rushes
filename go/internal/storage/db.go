@@ -227,6 +227,57 @@ func (database *DB) Migrate(ctx context.Context) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		version = 7
+	}
+	if version < 8 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV8); err != nil {
+			return fmt.Errorf("应用 schema v8: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 8"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 8
+	}
+	if version < 9 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV9); err != nil {
+			return fmt.Errorf("应用 schema v9: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 9"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 9
+	}
+	if version < 10 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV10); err != nil {
+			return fmt.Errorf("应用 schema v10: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 10"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

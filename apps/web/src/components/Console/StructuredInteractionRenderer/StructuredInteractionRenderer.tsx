@@ -5,11 +5,13 @@ import {
   ChevronRight,
   CircleAlert,
   CircleHelp,
-  LoaderCircle
+  LoaderCircle,
+  X
 } from "lucide-react";
 import type { Decision, DecisionAnswer, DecisionOption } from "../../../api/client";
 import type {
   AnswerDecisionHandler,
+  CancelJobHandler,
   DecisionInteractionItem,
   ErrorInteractionItem,
   PreviewInteractionItem,
@@ -23,11 +25,15 @@ import { formatElapsedTime, useElapsedSeconds } from "../useElapsedTime";
 export function StructuredInteractionRenderer({
   item,
   onAnswerDecision,
-  answerPending = false
+  answerPending = false,
+  onCancelJob,
+  cancelPendingJobId = null
 }: {
   item: StructuredInteractionItem;
   onAnswerDecision: AnswerDecisionHandler;
   answerPending?: boolean;
+  onCancelJob?: CancelJobHandler;
+  cancelPendingJobId?: string | null;
 }): ReactElement {
   switch (item.kind) {
     case "decision":
@@ -39,7 +45,13 @@ export function StructuredInteractionRenderer({
         />
       );
     case "progress":
-      return <ProgressRow item={item} />;
+      return (
+        <ProgressRow
+          item={item}
+          onCancelJob={onCancelJob}
+          cancelPending={cancelPendingJobId === item.job_id}
+        />
+      );
     case "error":
       return <ErrorRow item={item} />;
     case "preview":
@@ -285,7 +297,15 @@ function DecisionQuestion({
   );
 }
 
-function ProgressRow({ item }: { item: ProgressInteractionItem }): ReactElement {
+function ProgressRow({
+  item,
+  onCancelJob,
+  cancelPending
+}: {
+  item: ProgressInteractionItem;
+  onCancelJob?: CancelJobHandler;
+  cancelPending: boolean;
+}): ReactElement {
   const view = progressRowView(item);
   const elapsedSeconds = useElapsedSeconds(view.active);
   return (
@@ -308,7 +328,24 @@ function ProgressRow({ item }: { item: ProgressInteractionItem }): ReactElement 
             已用 {formatElapsedTime(elapsedSeconds)}
           </time>
         ) : null}
+        {view.active && onCancelJob ? (
+          <button
+            className="grid size-5 shrink-0 place-items-center rounded-sm text-fg-faint hover:bg-hover hover:text-danger disabled:cursor-wait disabled:opacity-40"
+            type="button"
+            aria-label={`取消${item.job_kind}`}
+            title={`取消${item.job_kind}`}
+            disabled={cancelPending}
+            onClick={() => onCancelJob(item.job_id)}
+          >
+            <X size={12} strokeWidth={1.8} aria-hidden />
+          </button>
+        ) : null}
       </div>
+      {item.detail ? (
+        <p className="ml-3 mt-0.5 truncate text-2xs text-fg-faint" title={item.detail}>
+          {item.detail}
+        </p>
+      ) : null}
       <div
         className="ml-3 mt-1 h-px overflow-hidden bg-line"
         role="progressbar"

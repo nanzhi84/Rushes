@@ -823,7 +823,7 @@ describe("DraftEditorView", () => {
     expect(screen.getByText(/00:00/)).toBeTruthy();
   });
 
-  it("JobProgress SSE 更新进度条", async () => {
+  it("JobProgress SSE 显示素材明细并可取消当前 job", async () => {
     const fetchMock = mockFetch({ decision: null });
     renderEditor(fetchMock);
 
@@ -833,12 +833,36 @@ describe("DraftEditorView", () => {
 
     const progress = await screen.findByRole("progressbar", { name: "理解素材 进度" });
     expect(progress.getAttribute("aria-valuenow")).toBe("42");
+    expect(screen.getByText("理解素材 2/5：采访.mp4 正在调用 VLM")).toBeTruthy();
 
     act(() => {
       draftEventsSource().emit("JobProgress", jobProgressPayload(0.8));
     });
-
     await waitFor(() => expect(progress.getAttribute("aria-valuenow")).toBe("80"));
+
+    fireEvent.click(screen.getByRole("button", { name: "取消理解素材" }));
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/jobs/job_1/cancel",
+        expect.objectContaining({ method: "POST" })
+      )
+    );
+    await screen.findByText("已取消");
+    expect(screen.queryByRole("button", { name: "取消理解素材" })).toBeNull();
+  });
+
+  it.each([
+    ["conflict", "任务状态已变化，无法取消；已刷新当前状态。"],
+    ["network", "取消任务失败：网络不可用"]
+  ] as const)("job 取消失败会显示错误：%s", async (cancelFailure, message) => {
+    const fetchMock = mockFetch({ decision: null, cancelFailure });
+    renderEditor(fetchMock);
+    act(() => {
+      draftEventsSource().emit("JobProgress", jobProgressPayload(0.42));
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "取消理解素材" }));
+    expect((await screen.findByRole("alert")).textContent).toContain(message);
+    expect(screen.getByRole("button", { name: "取消理解素材" })).toBeTruthy();
   });
 
   it("未知 kind 渲染 JSON 兜底", () => {
@@ -1009,27 +1033,38 @@ describe("DraftEditorView", () => {
     expect(items[0]).toMatchObject({ job_id: "job_1", status: "succeeded" });
   });
 
-  it("同类重复渲染 job 只保留最新进度行", () => {
+  it("同类并发渲染 job 独立显示并取消各自的 job_id", () => {
     let items = reduceStructuredInteractionItems(
       [],
       jobEventPayload("JobEnqueued", "render_preview", "job_preview_1")
     );
     items = reduceStructuredInteractionItems(
       items,
-      jobEventPayload("JobSucceeded", "render_preview", "job_preview_1")
-    );
-    items = reduceStructuredInteractionItems(
-      items,
       jobEventPayload("JobEnqueued", "render_preview", "job_preview_2")
     );
 
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({
-      kind: "progress",
-      job_id: "job_preview_2",
-      job_kind: "渲染预览",
-      status: "queued"
-    });
+    expect(items).toMatchObject([
+      { kind: "progress", job_id: "job_preview_1", job_kind: "渲染预览", status: "queued" },
+      { kind: "progress", job_id: "job_preview_2", job_kind: "渲染预览", status: "queued" }
+    ]);
+
+    const onCancelJob = vi.fn();
+    render(
+      <>
+        {items.map((item) => (
+          <StructuredInteractionRenderer
+            key={item.id}
+            item={item}
+            onAnswerDecision={vi.fn()}
+            onCancelJob={onCancelJob}
+          />
+        ))}
+      </>
+    );
+    const cancelButtons = screen.getAllByRole("button", { name: "取消渲染预览" });
+    fireEvent.click(cancelButtons[0]);
+    fireEvent.click(cancelButtons[1]);
+    expect(onCancelJob.mock.calls).toEqual([["job_preview_1"], ["job_preview_2"]]);
   });
 
   it("进度行终态 succeeded 显示已完成而非停在处理中", () => {
@@ -1265,6 +1300,7 @@ function mockFetch({
   materials = [],
   onAnswer,
   costs,
+  cancelFailure
 }: {
   decision: Decision | null;
   timeline?: boolean;
@@ -1272,6 +1308,7 @@ function mockFetch({
   materials?: Array<Record<string, unknown>>;
   onAnswer?: (url: string, init: RequestInit | undefined) => void;
   costs?: number;
+  cancelFailure?: "conflict" | "network";
 }): FetchMock {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -1329,6 +1366,15 @@ function mockFetch({
     }
     if (url.endsWith("/materials")) {
       return jsonResponse({ draft_id: "draft_1", assets: materials, invalidated_asset_ids: [] });
+    }
+    if (url === "/api/jobs/job_1/cancel") {
+      if (cancelFailure === "network") {
+        throw new Error("网络不可用");
+      }
+      if (cancelFailure === "conflict") {
+        return jsonResponse({ detail: { reason: "job_not_cancellable" } }, 409);
+      }
+      return jsonResponse({ job_id: "job_1", status: "cancelled", event_ids: [1] });
     }
     return jsonResponse({});
   });
@@ -1519,7 +1565,12 @@ function jobProgressPayload(progress: number): DomainSsePayload {
         requested_by_draft_id: "draft_1",
         job_id: "job_1",
         kind: "understand",
-        progress
+        progress,
+        current_asset_id: "asset_2",
+        done: 1,
+        total: 5,
+        stage: "view_frames",
+        detail: "理解素材 2/5：采访.mp4 正在调用 VLM"
       }
     }
   };

@@ -36,7 +36,7 @@ func renderHandler(database *storage.DB, final bool) Handler {
 		if err != nil {
 			return nil, err
 		}
-		if err := report(ctx, job, 0.05); err != nil {
+		if err := report(ctx, job, Progress(0.05)); err != nil {
 			return nil, err
 		}
 		profile := media.PreviewProfile
@@ -53,7 +53,7 @@ func renderHandler(database *storage.DB, final bool) Handler {
 			if renderedDuration := float64(document.DurationFrames) / float64(document.FPS); renderedDuration > 0 {
 				fraction += min(progress.OutTime.Seconds()/renderedDuration, 1) * 0.8
 			}
-			_ = report(ctx, job, fraction)
+			_ = report(ctx, job, Progress(fraction))
 		})
 		if err != nil {
 			return nil, err
@@ -73,11 +73,11 @@ func renderHandler(database *storage.DB, final bool) Handler {
 		}
 		result, err := reducer.Apply(ctx, database, []contracts.Event{{
 			Type: eventType, DraftID: draftID, Payload: payload,
-		}}, reducer.Options{Actor: contracts.ActorJob})
+		}}, claimedJobOptions(job, reducer.Options{}))
 		if err != nil || result.Status != reducer.StatusApplied {
 			return nil, errors.Join(err, fmt.Errorf("render reducer status: %s", result.Status))
 		}
-		if err := report(ctx, job, 0.98); err != nil {
+		if err := report(ctx, job, Progress(0.98)); err != nil {
 			return nil, err
 		}
 		return map[string]any{

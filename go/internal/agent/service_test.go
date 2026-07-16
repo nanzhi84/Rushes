@@ -1048,6 +1048,506 @@ func TestJobObservationBridgeWakesAgentForWaitedTerminalJob(t *testing.T) {
 	}
 }
 
+func TestJobObservationBridgeRecoversBacklogAfterServiceRestart(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_bridge_restart")
+	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
+		{Type: "JobEnqueued", DraftID: "draft_bridge_restart", Payload: map[string]any{
+			"job_id": "job_restart", "kind": "render_preview",
+			"requested_by_draft_id": "draft_bridge_restart",
+		}},
+		{Type: "JobSucceeded", DraftID: "draft_bridge_restart", Payload: map[string]any{
+			"job_id": "job_restart", "kind": "render_preview",
+			"requested_by_draft_id": "draft_bridge_restart",
+			"result":                map[string]any{"preview_id": "restart_preview"},
+		}},
+	}, reducer.Options{Actor: contracts.ActorJob})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("apply status=%s err=%v", result.Status, err)
+	}
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		messages, listErr := storage.ListMessages(t.Context(), database.Read(), "draft_bridge_restart", 20)
+		if listErr == nil && len(messages) == 1 && strings.Contains(messages[0].Content, "job_restart 已完成") {
+			var cursor, terminalEventID int64
+			if err := database.Read().QueryRowContext(t.Context(), `
+				SELECT last_event_id FROM agent_job_bridge_state WHERE consumer_id='agent'`,
+			).Scan(&cursor); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.Read().QueryRowContext(t.Context(), `
+				SELECT event_id FROM event_log WHERE event_type='JobSucceeded'
+				AND json_extract(payload_json,'$.payload.job_id')='job_restart'`,
+			).Scan(&terminalEventID); err != nil || cursor < terminalEventID {
+				t.Fatalf("cursor=%d terminal=%d err=%v", cursor, terminalEventID, err)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("service 重启后没有补扫 terminal backlog")
+}
+
+func TestJobObservationBridgeReplaysCommittedUndeliveredObservation(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_bridge_outbox")
+	event := map[string]any{
+		"event": "JobSucceeded", "draft_id": "draft_bridge_outbox",
+		"payload": map[string]any{
+			"job_id": "job_outbox", "kind": "render_preview",
+			"requested_by_draft_id": "draft_bridge_outbox",
+		},
+	}
+	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{
+			AgentJobBridgeCursor: &reducer.AgentJobBridgeCursorRow{
+				ConsumerID: agentJobBridgeConsumerID, LastEventID: 99,
+			},
+			AgentJobObservations: []reducer.AgentJobObservationRow{{
+				JobID: "job_outbox", EventID: 99, DraftID: "draft_bridge_outbox",
+				Event: event, ClaimToken: "claim_outbox",
+			}},
+		},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("seed status=%s err=%v", result.Status, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	seen := make(chan string, 1)
+	service := &Service{database: database, hub: NewTurnStreamHub(0), bridgeInflight: map[string]struct{}{}}
+	queue := NewTurnQueue(ctx, func(runCtx context.Context, item QueueItem) error {
+		seen <- item.ItemID
+		return service.runTurn(runCtx, item)
+	})
+	defer queue.Close()
+	service.queue = queue
+	if cursor := service.bridgeIteration(t.Context(), 99); cursor != 99 {
+		t.Fatalf("cursor=%d", cursor)
+	}
+	queue.JoinDraft("draft_bridge_outbox")
+	select {
+	case jobID := <-seen:
+		if jobID != "job_outbox" {
+			t.Fatalf("job_id=%s", jobID)
+		}
+	default:
+		t.Fatal("committed pending observation was not replayed")
+	}
+	var deliveredAt *string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT delivered_at FROM agent_job_observations WHERE job_id='job_outbox'`,
+	).Scan(&deliveredAt); err != nil || deliveredAt == nil || *deliveredAt == "" {
+		t.Fatalf("delivered_at=%v err=%v", deliveredAt, err)
+	}
+}
+
+func TestJobObservationBridgeRetriesObservationAfterRunnerFailure(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_bridge_retry")
+	event := map[string]any{
+		"event": "JobSucceeded", "draft_id": "draft_bridge_retry",
+		"payload": map[string]any{
+			"job_id": "job_retry", "kind": "render_preview",
+			"requested_by_draft_id": "draft_bridge_retry",
+		},
+	}
+	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{
+			AgentJobBridgeCursor: &reducer.AgentJobBridgeCursorRow{
+				ConsumerID: agentJobBridgeConsumerID, LastEventID: 99,
+			},
+			AgentJobObservations: []reducer.AgentJobObservationRow{{
+				JobID: "job_retry", EventID: 99, DraftID: "draft_bridge_retry",
+				Event: event, ClaimToken: "claim_retry",
+			}},
+		},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("seed status=%s err=%v", result.Status, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var calls int
+	service := &Service{database: database, hub: NewTurnStreamHub(0), bridgeInflight: map[string]struct{}{}}
+	queue := NewTurnQueue(ctx, func(runCtx context.Context, item QueueItem) error {
+		calls++
+		if calls == 1 {
+			return errors.New("transient runner failure")
+		}
+		return service.runTurn(runCtx, item)
+	})
+	defer queue.Close()
+	service.queue = queue
+	service.dispatchPendingJobObservations(t.Context())
+	queue.JoinDraft("draft_bridge_retry")
+	var deliveredAt *string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT delivered_at FROM agent_job_observations WHERE job_id='job_retry'`,
+	).Scan(&deliveredAt); err != nil || deliveredAt != nil {
+		t.Fatalf("失败后 observation 不应确认: delivered_at=%v err=%v", deliveredAt, err)
+	}
+	service.dispatchPendingJobObservations(t.Context())
+	queue.JoinDraft("draft_bridge_retry")
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT delivered_at FROM agent_job_observations WHERE job_id='job_retry'`,
+	).Scan(&deliveredAt); err != nil || deliveredAt == nil || *deliveredAt == "" {
+		t.Fatalf("重放成功后 observation 应确认: delivered_at=%v err=%v", deliveredAt, err)
+	}
+	if calls != 2 {
+		t.Fatalf("runner calls=%d want=2", calls)
+	}
+}
+
+func TestJobObservationBridgeSuppressesUserCancelledTurns(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		name := "running"
+		if pending {
+			name = "pending"
+		}
+		t.Run(name, func(t *testing.T) {
+			database := agentTestDatabase(t)
+			draftID := "draft_bridge_cancel_" + name
+			jobID := "job_bridge_cancel_" + name
+			createAgentDraft(t, database, draftID)
+			event := map[string]any{
+				"event": "JobSucceeded", "draft_id": draftID,
+				"payload": map[string]any{
+					"job_id": jobID, "kind": "render_preview",
+					"requested_by_draft_id": draftID,
+				},
+			}
+			result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+				Actor: contracts.ActorAgent,
+				ResultRows: reducer.ResultRows{AgentJobObservations: []reducer.AgentJobObservationRow{{
+					JobID: jobID, EventID: 1, DraftID: draftID,
+					Event: event, ClaimToken: "claim_" + jobID,
+				}}},
+			})
+			if err != nil || result.Status != reducer.StatusApplied {
+				t.Fatalf("seed status=%s err=%v", result.Status, err)
+			}
+
+			queueCtx, cancelQueue := context.WithCancel(t.Context())
+			defer cancelQueue()
+			started := make(chan struct{}, 1)
+			var mu sync.Mutex
+			calls := 0
+			service := &Service{database: database, hub: NewTurnStreamHub(0), bridgeInflight: map[string]struct{}{}}
+			queue := NewTurnQueue(queueCtx, func(runCtx context.Context, _ QueueItem) error {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+				started <- struct{}{}
+				<-runCtx.Done()
+				return runCtx.Err()
+			})
+			if pending {
+				queue.workers[draftID] = &draftWorker{queue: make(chan QueueItem, 1)}
+			}
+			service.queue = queue
+			t.Cleanup(queue.Close)
+
+			service.dispatchPendingJobObservations(t.Context())
+			if pending {
+				cancelled := make(chan bool, 1)
+				go func() { cancelled <- queue.CancelAndJoinDraft(draftID) }()
+				deadline := time.Now().Add(time.Second)
+				for {
+					worker := queue.workers[draftID]
+					worker.mu.Lock()
+					canceling := worker.canceling
+					worker.mu.Unlock()
+					if canceling {
+						go queue.runWorker(worker)
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("取消屏障未建立")
+					}
+					time.Sleep(time.Millisecond)
+				}
+				if !<-cancelled {
+					t.Fatal("pending observation 应被取消")
+				}
+			} else {
+				<-started
+				if !queue.CancelAndJoinDraft(draftID) {
+					t.Fatal("running observation 应被取消")
+				}
+			}
+
+			for range 3 {
+				service.dispatchPendingJobObservations(t.Context())
+				queue.JoinDraft(draftID)
+			}
+			mu.Lock()
+			callCount := calls
+			mu.Unlock()
+			if callCount != 1 {
+				t.Fatalf("cancelled observation replayed: calls=%d", callCount)
+			}
+			var deliveredAt *string
+			if err := database.Read().QueryRowContext(t.Context(), `
+				SELECT delivered_at FROM agent_job_observations WHERE job_id=?`, jobID,
+			).Scan(&deliveredAt); err != nil || deliveredAt == nil || *deliveredAt == "" {
+				t.Fatalf("delivered_at=%v err=%v", deliveredAt, err)
+			}
+		})
+	}
+}
+
+func TestJobObservationBridgeHonorsPersistentTurnCancellationSuppression(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	draftID := "draft_bridge_persistent_suppression"
+	jobID := "job_bridge_persistent_suppression"
+	createAgentDraft(t, database, draftID)
+	event := map[string]any{
+		"event": "JobSucceeded", "draft_id": draftID,
+		"payload": map[string]any{
+			"job_id": jobID, "kind": "render_preview",
+			"requested_by_draft_id": draftID,
+		},
+	}
+	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{
+			AgentJobObservations: []reducer.AgentJobObservationRow{{
+				JobID: jobID, EventID: 1, DraftID: draftID,
+				Event: event, ClaimToken: "claim_" + jobID,
+			}},
+			AgentJobObservationSuppressions: []reducer.AgentJobObservationSuppressionRow{{JobID: jobID}},
+		},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("seed status=%s err=%v", result.Status, err)
+	}
+	var calls int
+	queue := NewTurnQueue(t.Context(), func(context.Context, QueueItem) error {
+		calls++
+		return nil
+	})
+	t.Cleanup(queue.Close)
+	service := &Service{
+		database: database, queue: queue, hub: NewTurnStreamHub(0),
+		bridgeInflight: map[string]struct{}{},
+	}
+	barrier, _ := queue.BeginDraftCancellation(draftID)
+	service.dispatchPendingJobObservations(t.Context())
+	barrier.Release()
+	service.dispatchPendingJobObservations(t.Context())
+	queue.JoinDraft(draftID)
+	if calls != 0 {
+		t.Fatalf("被持久抑制的 observation 不应续跑: calls=%d", calls)
+	}
+	var deliveredAt *string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT delivered_at FROM agent_job_observations WHERE job_id=?`, jobID,
+	).Scan(&deliveredAt); err != nil || deliveredAt == nil || *deliveredAt == "" {
+		t.Fatalf("delivered_at=%v err=%v", deliveredAt, err)
+	}
+}
+
+func TestJobObservationBridgeReleasesInflightAndHandlesClosedDependencies(t *testing.T) {
+	database := agentTestDatabase(t)
+	draftID := "draft_bridge_failure_paths"
+	createAgentDraft(t, database, draftID)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	queue := NewTurnQueue(t.Context(), func(context.Context, QueueItem) error {
+		close(started)
+		<-release
+		return nil
+	})
+	service := &Service{database: database, queue: queue, hub: NewTurnStreamHub(0)}
+	observation := bridgeObservation{
+		eventID: 1, draftID: draftID, jobID: "job_inflight", claimToken: "claim_inflight",
+		event: map[string]any{
+			"event":   "JobSucceeded",
+			"payload": map[string]any{"job_id": "job_inflight", "kind": "render_preview"},
+		},
+	}
+	if !service.dispatchJobObservation(t.Context(), observation) {
+		t.Fatal("首个 observation 应入队")
+	}
+	<-started
+	if service.dispatchJobObservation(t.Context(), observation) {
+		t.Fatal("同一 job 的 inflight observation 不应重复入队")
+	}
+	close(release)
+	queue.JoinDraft(draftID)
+	service.bridgeMu.Lock()
+	inflight := len(service.bridgeInflight)
+	service.bridgeMu.Unlock()
+	if inflight != 0 {
+		t.Fatalf("消费后 inflight 未释放: %d", inflight)
+	}
+	queue.Close()
+	observation.jobID = "job_closed_queue"
+	observation.claimToken = "claim_closed_queue"
+	if service.dispatchJobObservation(t.Context(), observation) {
+		t.Fatal("已关闭队列不应接受 observation")
+	}
+	service.bridgeMu.Lock()
+	inflight = len(service.bridgeInflight)
+	service.bridgeMu.Unlock()
+	if inflight != 0 {
+		t.Fatalf("拒绝入队后 inflight 未释放: %d", inflight)
+	}
+
+	closedDatabase := agentTestDatabase(t)
+	if err := closedDatabase.Close(); err != nil {
+		t.Fatal(err)
+	}
+	closedService := &Service{database: closedDatabase, bridgeInflight: map[string]struct{}{}}
+	if closedService.jobObservationSuppressed(t.Context(), "job") {
+		t.Fatal("存储不可用时不得把 observation 误判为已抑制")
+	}
+	closedService.markJobObservationDelivered(t.Context(), "job", "claim")
+	if page, _, scanned := closedService.pendingJobObservationPage(t.Context(), 9); page != nil || scanned != -1 {
+		t.Fatalf("存储不可用时 page=%v scanned=%d", page, scanned)
+	}
+	closedService.startJobObservationBridge(t.Context())
+	if cursor := closedService.bridgeIteration(t.Context(), 9); cursor != 9 {
+		t.Fatalf("存储不可用时 cursor=%d", cursor)
+	}
+}
+
+func TestJobObservationBridgeScansPastInflightPage(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_bridge_page")
+	observations := make([]reducer.AgentJobObservationRow, 0, 101)
+	for index := 1; index <= 101; index++ {
+		jobID := fmt.Sprintf("job_page_%03d", index)
+		observations = append(observations, reducer.AgentJobObservationRow{
+			JobID: jobID, EventID: int64(index), DraftID: "draft_bridge_page",
+			ClaimToken: "claim_" + jobID,
+			Event: map[string]any{
+				"event": "JobSucceeded", "draft_id": "draft_bridge_page",
+				"payload": map[string]any{
+					"job_id": jobID, "kind": "render_preview",
+					"requested_by_draft_id": "draft_bridge_page",
+				},
+			},
+		})
+	}
+	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor:      contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{AgentJobObservations: observations},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("seed status=%s err=%v", result.Status, err)
+	}
+
+	queueCtx, cancelQueue := context.WithCancel(t.Context())
+	service := &Service{database: database, hub: NewTurnStreamHub(0), bridgeInflight: map[string]struct{}{}}
+	queue := NewTurnQueue(queueCtx, func(runCtx context.Context, _ QueueItem) error {
+		<-runCtx.Done()
+		return runCtx.Err()
+	})
+	service.queue = queue
+	t.Cleanup(func() {
+		cancelQueue()
+		queue.Close()
+	})
+
+	service.dispatchPendingJobObservations(t.Context())
+	service.dispatchPendingJobObservations(t.Context())
+	service.bridgeMu.Lock()
+	_, scheduled := service.bridgeInflight["job_page_101"]
+	inflightCount := len(service.bridgeInflight)
+	service.bridgeMu.Unlock()
+	if !scheduled || inflightCount != 101 {
+		t.Fatalf("job 101 scheduled=%v inflight=%d", scheduled, inflightCount)
+	}
+}
+
+func TestJobObservationBridgeDeduplicatesJobAndSplitsCancellationReason(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_bridge_cancel")
+	for _, item := range []struct {
+		id, reason string
+	}{{"job_turn_cancel", "turn_cancelled"}, {"job_manual_cancel", "user_cancelled"}} {
+		if _, err := reducer.Apply(t.Context(), database, []contracts.Event{
+			{Type: "JobEnqueued", DraftID: "draft_bridge_cancel", Payload: map[string]any{
+				"job_id": item.id, "kind": "understand",
+				"requested_by_draft_id": "draft_bridge_cancel",
+			}},
+			{Type: "JobCancelled", DraftID: "draft_bridge_cancel", Payload: map[string]any{
+				"job_id": item.id, "kind": "understand", "reason": item.reason,
+				"requested_by_draft_id": "draft_bridge_cancel",
+			}},
+		}, reducer.Options{Actor: contracts.ActorUser}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	draftBefore, err := storage.GetDraft(t.Context(), database.Read(), "draft_bridge_cancel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var eventCountBefore int
+	if err := database.Read().QueryRowContext(t.Context(), "SELECT COUNT(*) FROM event_log").Scan(&eventCountBefore); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	var mu sync.Mutex
+	observed := []string{}
+	service := &Service{database: database, hub: NewTurnStreamHub(0), bridgeInflight: map[string]struct{}{}}
+	queue := NewTurnQueue(ctx, func(runCtx context.Context, item QueueItem) error {
+		mu.Lock()
+		observed = append(observed, item.ItemID)
+		mu.Unlock()
+		return service.runTurn(runCtx, item)
+	})
+	defer queue.Close()
+	service.queue = queue
+	cursor := service.bridgeIteration(t.Context(), 0)
+	queue.JoinDraft("draft_bridge_cancel")
+	_ = service.bridgeIteration(t.Context(), 0)
+	queue.JoinDraft("draft_bridge_cancel")
+	mu.Lock()
+	observedCopy := append([]string(nil), observed...)
+	mu.Unlock()
+	if cursor == 0 || !reflect.DeepEqual(observedCopy, []string{"job_manual_cancel"}) {
+		t.Fatalf("cursor=%d observed=%v", cursor, observedCopy)
+	}
+	draftAfter, err := storage.GetDraft(t.Context(), database.Read(), "draft_bridge_cancel")
+	if err != nil || draftAfter.StateVersion != draftBefore.StateVersion {
+		t.Fatalf("bridge bookkeeping changed state_version: before=%d after=%d err=%v",
+			draftBefore.StateVersion, draftAfter.StateVersion, err)
+	}
+	var eventCountAfter int
+	if err := database.Read().QueryRowContext(t.Context(), "SELECT COUNT(*) FROM event_log").Scan(&eventCountAfter); err != nil || eventCountAfter != eventCountBefore {
+		t.Fatalf("bridge bookkeeping emitted events: before=%d after=%d err=%v",
+			eventCountBefore, eventCountAfter, err)
+	}
+	content, err := service.continueAfterJobObservation(t.Context(), QueueItem{
+		DraftID: "draft_bridge_cancel", Kind: QueueJobObservation, ItemID: "job_manual_cancel",
+		Payload: map[string]any{"job_id": "job_manual_cancel", "event": map[string]any{
+			"event": "JobCancelled", "payload": map[string]any{
+				"job_id": "job_manual_cancel", "kind": "understand", "reason": "user_cancelled",
+			},
+		}},
+	}, "message")
+	if err != nil || content != "后台任务已被取消：understand（job_id：job_manual_cancel）。" {
+		t.Fatalf("content=%q err=%v", content, err)
+	}
+}
+
 func TestUnderstandingRepeatedRunsAllocateNewSummaryVersion(t *testing.T) {
 	t.Parallel()
 	database := agentTestDatabase(t)

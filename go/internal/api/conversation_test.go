@@ -5,16 +5,60 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agent"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/tools"
 )
+
+type cancellationBlockingModel struct {
+	mu      sync.Mutex
+	blocked bool
+	started chan struct{}
+	release chan struct{}
+}
+
+func (stub *cancellationBlockingModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return stub, nil
+}
+
+func (stub *cancellationBlockingModel) waitFirstCall() {
+	stub.mu.Lock()
+	block := !stub.blocked
+	stub.blocked = true
+	stub.mu.Unlock()
+	if block {
+		close(stub.started)
+		<-stub.release // 模拟不响应 context 取消的 provider。
+	}
+}
+
+func (stub *cancellationBlockingModel) Generate(
+	context.Context,
+	[]*schema.Message,
+	...model.Option,
+) (*schema.Message, error) {
+	stub.waitFirstCall()
+	return schema.AssistantMessage("已完成", nil), nil
+}
+
+func (stub *cancellationBlockingModel) Stream(
+	context.Context,
+	[]*schema.Message,
+	...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	stub.waitFirstCall()
+	return schema.StreamReaderFromArray([]*schema.Message{schema.AssistantMessage("已完成", nil)}), nil
+}
 
 func TestMessageQueueTurnStreamHistoryAndCancel(t *testing.T) {
 	t.Parallel()
@@ -57,6 +101,273 @@ func TestMessageQueueTurnStreamHistoryAndCancel(t *testing.T) {
 		"/api/drafts/draft_conversation/turn/cancel", nil))
 	if cancelIdle.Code != http.StatusOK || !strings.Contains(cancelIdle.Body.String(), `"status":"idle"`) {
 		t.Fatalf("cancel idle status=%d body=%s", cancelIdle.Code, cancelIdle.Body.String())
+	}
+}
+
+func TestCancelCurrentTurnCancelsAllWaitedJobsWithoutActiveAgentTurn(t *testing.T) {
+	t.Parallel()
+	server, handler := testServer(t, t.TempDir(), 0)
+	createDraftThroughAPI(t, handler, "draft_cancel_jobs")
+	now := time.Now().UTC()
+	events := make([]contracts.Event, 0, 4)
+	for _, item := range []struct {
+		id, kind string
+	}{
+		{"job_understand", "understand"},
+		{"job_preview", "render_preview"},
+		{"job_final", "render_final"},
+		{"job_ingest", "ingest"},
+	} {
+		events = append(events, contracts.Event{
+			Type: "JobEnqueued", DraftID: "draft_cancel_jobs", Payload: map[string]any{
+				"job_id": item.id, "kind": item.kind, "idempotency_key": item.id,
+				"requested_by_draft_id": "draft_cancel_jobs",
+				"next_run_at":           now.Format(time.RFC3339Nano),
+			},
+		})
+	}
+	result, err := reducer.Apply(t.Context(), server.database, events, reducer.Options{
+		Actor: contracts.ActorAgent, CreatedAt: now,
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("enqueue status=%s err=%v", result.Status, err)
+	}
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, apiRequest(t, http.MethodPost,
+		"/api/drafts/draft_cancel_jobs/turn/cancel", nil))
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"requested":true`) ||
+		!strings.Contains(response.Body.String(), `"status":"requested"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, item := range []struct {
+		id, want string
+	}{
+		{"job_understand", "cancelled"},
+		{"job_preview", "cancelled"},
+		{"job_final", "cancelled"},
+		{"job_ingest", "pending"},
+	} {
+		var status string
+		if err := server.database.Read().QueryRowContext(t.Context(),
+			"SELECT status FROM jobs WHERE job_id=?", item.id,
+		).Scan(&status); err != nil || status != item.want {
+			t.Fatalf("job=%s status=%s want=%s err=%v", item.id, status, item.want, err)
+		}
+	}
+	var cancellationCount int
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM event_log
+		WHERE event_type='JobCancelled'
+		  AND json_extract(payload_json,'$.payload.reason')='turn_cancelled'`,
+	).Scan(&cancellationCount); err != nil || cancellationCount != 3 {
+		t.Fatalf("turn cancellations=%d err=%v", cancellationCount, err)
+	}
+}
+
+func TestTurnCancellationCleanupSurvivesRequestCancellation(t *testing.T) {
+	t.Parallel()
+	server, _ := testServer(t, t.TempDir(), 0)
+	createDraftThroughAPI(t, server.Handler(), "draft_cancel_disconnected")
+	now := time.Now().UTC()
+	result, err := reducer.Apply(t.Context(), server.database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft_cancel_disconnected", Payload: map[string]any{
+			"job_id": "job_disconnected", "kind": "understand",
+			"idempotency_key":       "job_disconnected",
+			"requested_by_draft_id": "draft_cancel_disconnected",
+			"next_run_at":           now.Format(time.RFC3339Nano),
+		},
+	}}, reducer.Options{Actor: contracts.ActorAgent, CreatedAt: now})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("enqueue status=%s err=%v", result.Status, err)
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(t.Context())
+	cancelRequest()
+	cleanupCtx, cancelCleanup := turnCancellationContext(requestCtx)
+	defer cancelCleanup()
+	boundary, err := server.turnCancellationJobBoundary(cleanupCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.cancelTurnJobs(cleanupCtx, "draft_cancel_disconnected", boundary); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := server.database.Read().QueryRowContext(t.Context(),
+		"SELECT status FROM jobs WHERE job_id='job_disconnected'",
+	).Scan(&status); err != nil || status != "cancelled" {
+		t.Fatalf("status=%s err=%v", status, err)
+	}
+}
+
+func TestTurnCancellationBoundaryProtectsJobsCreatedAfterBarrier(t *testing.T) {
+	t.Parallel()
+	server, _ := testServer(t, t.TempDir(), 0)
+	createDraftThroughAPI(t, server.Handler(), "draft_cancel_boundary")
+	now := time.Now().UTC()
+	enqueue := func(jobID string, createdAt time.Time) {
+		t.Helper()
+		result, err := reducer.Apply(t.Context(), server.database, []contracts.Event{{
+			Type: "JobEnqueued", DraftID: "draft_cancel_boundary", Payload: map[string]any{
+				"job_id": jobID, "kind": "understand", "idempotency_key": jobID,
+				"requested_by_draft_id": "draft_cancel_boundary",
+				"next_run_at":           createdAt.Format(time.RFC3339Nano),
+			},
+		}}, reducer.Options{Actor: contracts.ActorAgent, CreatedAt: createdAt})
+		if err != nil || result.Status != reducer.StatusApplied {
+			t.Fatalf("job=%s status=%s err=%v", jobID, result.Status, err)
+		}
+	}
+	enqueue("job_before_boundary", now)
+	boundary, err := server.turnCancellationJobBoundary(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.suppressTurnJobObservations(
+		t.Context(), "draft_cancel_boundary", boundary,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.cancelTurnJobs(t.Context(), "draft_cancel_boundary", boundary); err != nil {
+		t.Fatal(err)
+	}
+	enqueue("job_after_boundary", now.Add(time.Second))
+	if _, err := server.cancelTurnJobs(t.Context(), "draft_cancel_boundary", boundary); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct{ jobID, want string }{
+		{"job_before_boundary", "cancelled"},
+		{"job_after_boundary", "pending"},
+	} {
+		var status string
+		if err := server.database.Read().QueryRowContext(t.Context(),
+			"SELECT status FROM jobs WHERE job_id=?", test.jobID,
+		).Scan(&status); err != nil || status != test.want {
+			t.Fatalf("job=%s status=%s want=%s err=%v", test.jobID, status, test.want, err)
+		}
+	}
+	var suppressedAfter int
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM agent_job_observation_suppressions WHERE job_id='job_after_boundary'`,
+	).Scan(&suppressedAfter); err != nil || suppressedAfter != 0 {
+		t.Fatalf("后续 job 不应被抑制: count=%d err=%v", suppressedAfter, err)
+	}
+	createDraftThroughAPI(t, server.Handler(), "draft_cancel_empty")
+	if err := server.suppressTurnJobObservations(t.Context(), "draft_cancel_empty", boundary); err != nil {
+		t.Fatalf("空集合 suppression 应静默成功: %v", err)
+	}
+	cancelledCtx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := server.suppressTurnJobObservations(cancelledCtx, "draft_cancel_boundary", boundary); err == nil {
+		t.Fatal("已取消 context 的 suppression 查询应失败")
+	}
+	if _, err := server.cancelTurnJobs(cancelledCtx, "draft_cancel_boundary", boundary); err == nil {
+		t.Fatal("已取消 context 的 job 查询应失败")
+	}
+}
+
+func TestCancelCurrentTurnReturnsBoundedAndProtectsLaterJobs(t *testing.T) {
+	database, err := storage.Open(t.Context(), filepath.Join(t.TempDir(), "workspace"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	blockingModel := &cancellationBlockingModel{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	service, err := agent.NewService(t.Context(), database, blockingModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(blockingModel.release) })
+		service.Close()
+	})
+	server, err := NewServer(Config{
+		Database: database, Token: testToken, Port: 8000,
+		FSRoots: []string{t.TempDir()}, Agent: service,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := server.Handler()
+	createDraftThroughAPI(t, handler, "draft_bounded_cancel")
+
+	queued := httptest.NewRecorder()
+	handler.ServeHTTP(queued, apiRequest(t, http.MethodPost,
+		"/api/drafts/draft_bounded_cancel/messages", map[string]any{
+			"message_id": "blocked_message", "content": "开始处理",
+		}))
+	if queued.Code != http.StatusAccepted {
+		t.Fatalf("queue status=%d body=%s", queued.Code, queued.Body.String())
+	}
+	select {
+	case <-blockingModel.started:
+	case <-time.After(time.Second):
+		t.Fatal("阻塞模型未启动")
+	}
+	now := time.Now().UTC()
+	result, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft_bounded_cancel", Payload: map[string]any{
+			"job_id": "job_before_cancel", "kind": "understand",
+			"idempotency_key": "job_before_cancel", "requested_by_draft_id": "draft_bounded_cancel",
+			"next_run_at": now.Format(time.RFC3339Nano),
+		},
+	}}, reducer.Options{Actor: contracts.ActorAgent, CreatedAt: now})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("enqueue status=%s err=%v", result.Status, err)
+	}
+
+	response := httptest.NewRecorder()
+	startedAt := time.Now()
+	handler.ServeHTTP(response, apiRequest(t, http.MethodPost,
+		"/api/drafts/draft_bounded_cancel/turn/cancel", nil))
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
+		t.Fatalf("取消端点等待失控: %s", elapsed)
+	}
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"requested":true`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var status string
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT status FROM jobs WHERE job_id='job_before_cancel'",
+	).Scan(&status); err != nil || status != "cancelled" {
+		t.Fatalf("status=%s err=%v", status, err)
+	}
+	if !service.Queue().EnqueueUserMessage("draft_bounded_cancel", "after_timeout", "继续") {
+		t.Fatal("旧 runner 永久阻塞时，新执行代仍应可入队")
+	}
+	service.Queue().JoinDraft("draft_bounded_cancel")
+	later := now.Add(time.Second)
+	result, err = reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft_bounded_cancel", Payload: map[string]any{
+			"job_id": "job_after_cancel", "kind": "understand",
+			"idempotency_key": "job_after_cancel", "requested_by_draft_id": "draft_bounded_cancel",
+			"next_run_at": later.Format(time.RFC3339Nano),
+		},
+	}}, reducer.Options{Actor: contracts.ActorAgent, CreatedAt: later})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("later enqueue status=%s err=%v", result.Status, err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT status FROM jobs WHERE job_id='job_after_cancel'",
+	).Scan(&status); err != nil || status != "pending" {
+		t.Fatalf("later status=%s err=%v", status, err)
+	}
+	closed := make(chan struct{})
+	go func() {
+		service.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("旧 runner 永久阻塞时 Service.Close 不应等待封存代")
 	}
 }
 

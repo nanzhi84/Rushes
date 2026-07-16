@@ -103,15 +103,54 @@ type DraftPlanUpdateRow struct {
 	ContentPlan map[string]any
 }
 
+// AgentJobBridgeCursorRow and AgentJobObservationRow are persistent bridge
+// bookkeeping. Keeping them in ResultRows makes cursor advancement and the
+// job-level idempotency guard one reducer transaction.
+type AgentJobBridgeCursorRow struct {
+	ConsumerID  string
+	LastEventID int64
+}
+
+type AgentJobObservationRow struct {
+	JobID      string
+	EventID    int64
+	DraftID    string
+	Event      map[string]any
+	ClaimToken string
+	CreatedAt  string
+}
+
+type AgentJobObservationDeliveryRow struct {
+	JobID      string
+	ClaimToken string
+}
+
+type AgentJobObservationSuppressionRow struct {
+	JobID string
+}
+
 type ResultRows struct {
-	Message                *MessageRow
-	MaterialSummaries      []MaterialSummaryRow
-	Transcripts            []TranscriptRow
-	AgentContextCheckpoint *AgentContextCheckpointRow
-	DraftPlanUpdate        *DraftPlanUpdateRow
+	Message                         *MessageRow
+	MaterialSummaries               []MaterialSummaryRow
+	Transcripts                     []TranscriptRow
+	AgentContextCheckpoint          *AgentContextCheckpointRow
+	DraftPlanUpdate                 *DraftPlanUpdateRow
+	AgentJobBridgeCursor            *AgentJobBridgeCursorRow
+	AgentJobObservations            []AgentJobObservationRow
+	AgentJobObservationDelivery     *AgentJobObservationDeliveryRow
+	AgentJobObservationSuppressions []AgentJobObservationSuppressionRow
 }
 
 type ValidationHook func(context.Context, *sql.Tx, []string) error
+
+// JobClaim fences worker-owned result writes in the same transaction as their
+// domain events and result rows. A cancellation or re-claim committed first
+// therefore prevents stale artifacts from becoming visible.
+type JobClaim struct {
+	JobID     string
+	WorkerID  string
+	StartedAt string
+}
 
 type Options struct {
 	BaseVersion *int
@@ -119,6 +158,7 @@ type Options struct {
 	CreatedAt   time.Time
 	ResultRows  ResultRows
 	Validate    ValidationHook
+	JobClaim    *JobClaim
 }
 
 type applyState struct {
@@ -181,6 +221,11 @@ func Apply(
 		createdAt:        createdAt.Format(time.RFC3339Nano),
 		originalVersions: map[string]int{},
 		touched:          map[string]struct{}{},
+	}
+	if options.JobClaim != nil {
+		if err := validateJobClaim(ctx, tx, *options.JobClaim); err != nil {
+			return Result{}, err
+		}
 	}
 
 	if conflict, err := preflightStrict(ctx, state, normalized); err != nil {
@@ -255,6 +300,27 @@ func Apply(
 		Status: StatusApplied, AppliedEvents: applied, DraftStateVersions: versions,
 		SkippedEvents: state.skipped,
 	}, nil
+}
+
+func validateJobClaim(ctx context.Context, tx *sql.Tx, claim JobClaim) error {
+	if claim.JobID == "" || claim.WorkerID == "" || claim.StartedAt == "" {
+		return errors.New("job claim 字段不完整")
+	}
+	var status string
+	var workerID, startedAt sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		"SELECT status,worker_id,started_at FROM jobs WHERE job_id=?", claim.JobID,
+	).Scan(&status, &workerID, &startedAt); err != nil {
+		return err
+	}
+	if status == "cancelled" {
+		return ErrJobCancelled
+	}
+	if status != "running" || !workerID.Valid || !startedAt.Valid ||
+		workerID.String != claim.WorkerID || startedAt.String != claim.StartedAt {
+		return ErrJobClaimLost
+	}
+	return nil
 }
 
 func preflightStrict(
@@ -1301,6 +1367,71 @@ func persistResultRows(
 			return fmt.Errorf("草稿创作计划更新未找到草稿 %s", plan.DraftID)
 		}
 	}
+	for _, observation := range rows.AgentJobObservations {
+		if observation.JobID == "" || observation.EventID < 1 ||
+			observation.DraftID == "" || observation.Event == nil || observation.ClaimToken == "" {
+			return errors.New("agent job observation 字段不完整")
+		}
+		createdAt := observation.CreatedAt
+		if createdAt == "" {
+			createdAt = defaultCreatedAt
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO agent_job_observations(
+				job_id,event_id,draft_id,event_json,claim_token,created_at
+			) VALUES(?,?,?,?,?,?) ON CONFLICT(job_id) DO NOTHING`,
+			observation.JobID, observation.EventID, observation.DraftID,
+			mustJSON(observation.Event), observation.ClaimToken, createdAt,
+		); err != nil {
+			return err
+		}
+	}
+	for _, suppression := range rows.AgentJobObservationSuppressions {
+		if suppression.JobID == "" {
+			return errors.New("agent job observation suppression 缺少 job_id")
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO agent_job_observation_suppressions(job_id,created_at)
+			VALUES(?,?) ON CONFLICT(job_id) DO NOTHING`,
+			suppression.JobID, defaultCreatedAt,
+		); err != nil {
+			return err
+		}
+	}
+	if delivery := rows.AgentJobObservationDelivery; delivery != nil {
+		if delivery.JobID == "" || delivery.ClaimToken == "" {
+			return errors.New("agent job observation delivery 字段不完整")
+		}
+		result, err := tx.ExecContext(ctx, `
+			UPDATE agent_job_observations SET delivered_at=?
+			WHERE job_id=? AND claim_token=? AND delivered_at IS NULL`,
+			defaultCreatedAt, delivery.JobID, delivery.ClaimToken)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected != 1 {
+			return errors.New("agent job observation 已交付或 claim token 不匹配")
+		}
+	}
+	if cursor := rows.AgentJobBridgeCursor; cursor != nil {
+		if cursor.ConsumerID == "" || cursor.LastEventID < 0 {
+			return errors.New("agent job bridge cursor 字段不完整")
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO agent_job_bridge_state(consumer_id,last_event_id,updated_at)
+			VALUES(?,?,?)
+			ON CONFLICT(consumer_id) DO UPDATE SET
+				last_event_id=MAX(agent_job_bridge_state.last_event_id,excluded.last_event_id),
+				updated_at=excluded.updated_at`,
+			cursor.ConsumerID, cursor.LastEventID, defaultCreatedAt,
+		); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1387,7 +1518,9 @@ func emptyTimeline(draftID string, version int) map[string]any {
 func emptyResultRows(rows ResultRows) bool {
 	return rows.Message == nil && len(rows.MaterialSummaries) == 0 &&
 		len(rows.Transcripts) == 0 && rows.AgentContextCheckpoint == nil &&
-		rows.DraftPlanUpdate == nil
+		rows.DraftPlanUpdate == nil && rows.AgentJobBridgeCursor == nil &&
+		len(rows.AgentJobObservations) == 0 && rows.AgentJobObservationDelivery == nil &&
+		len(rows.AgentJobObservationSuppressions) == 0
 }
 
 func sortedKeys(values map[string]struct{}) []string {

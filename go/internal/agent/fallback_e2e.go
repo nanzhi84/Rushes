@@ -73,22 +73,17 @@ func (scaffold *e2eFallbackScaffold) cancelDuringUnderstanding(
 	defer func() {
 		reporter("understand.materials", "finished", logicalInput, output, resultErr)
 	}()
-	for index, asset := range listed.Assets {
-		input := rushestools.UnderstandInput{
-			AssetIDs: []string{asset.AssetID}, Depth: "scan", MaxStepsPerAsset: 8,
-		}
-		output, resultErr = scaffold.service.ExecuteTool(ctx, "understand.materials", input)
-		if resultErr != nil {
-			return "", resultErr
-		}
-		if index == 0 {
-			select {
-			case <-ctx.Done():
-				resultErr = ctx.Err()
-				return "", resultErr
-			case <-time.After(30 * time.Second):
-			}
-		}
+	output, resultErr = scaffold.service.ExecuteTool(ctx, "understand.materials", logicalInput)
+	if resultErr != nil {
+		return "", resultErr
+	}
+	// Keep the synthetic Agent turn alive while the real async job runs so E2E
+	// can exercise both the per-job cancel action and whole-turn cancellation.
+	select {
+	case <-ctx.Done():
+		resultErr = ctx.Err()
+		return "", resultErr
+	case <-time.After(30 * time.Second):
 	}
 	return "素材理解已完成。", nil
 }

@@ -6,7 +6,20 @@ import (
 	"sort"
 )
 
-type ProgressReporter func(context.Context, Job, float64) error
+type ProgressUpdate struct {
+	Progress       float64
+	CurrentAssetID string
+	Done           int
+	Total          int
+	Stage          string
+	Detail         string
+}
+
+func Progress(value float64) ProgressUpdate {
+	return ProgressUpdate{Progress: value}
+}
+
+type ProgressReporter func(context.Context, Job, ProgressUpdate) error
 
 type Handler func(context.Context, Job, ProgressReporter) (map[string]any, error)
 

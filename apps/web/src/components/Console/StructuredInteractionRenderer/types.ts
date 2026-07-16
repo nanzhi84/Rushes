@@ -25,6 +25,11 @@ export type ProgressInteractionItem = {
   job_kind: string;
   progress: number | null;
   status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  current_asset_id?: string;
+  done?: number;
+  total?: number;
+  stage?: string;
+  detail?: string;
 };
 
 export type ErrorInteractionItem = {
@@ -74,3 +79,4 @@ export type DomainSseEvent = {
 };
 
 export type AnswerDecisionHandler = (decisionId: string, answer: DecisionAnswer) => void;
+export type CancelJobHandler = (jobId: string) => void;

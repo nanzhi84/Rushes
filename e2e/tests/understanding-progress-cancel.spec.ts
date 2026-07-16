@@ -19,7 +19,7 @@ const API_URL = `http://127.0.0.1:${process.env.RUSHES_E2E_API_PORT ?? "18001"}`
 const TOKEN = "e2e-token";
 const TRIGGER = "E2E_CANCEL_UNDERSTANDING";
 
-test("素材理解静默执行，可停止整轮并保留已完成摘要", async ({ page, request }) => {
+test("异步素材理解显示真实进度，可取消 job 并停止 worker", async ({ page, request }) => {
   await page.goto(`/#t=${TOKEN}`);
   await page.getByRole("button", { name: "开始创作", exact: true }).click();
   await expect(page).toHaveURL(/\/drafts\//);
@@ -39,21 +39,23 @@ test("素材理解静默执行，可停止整轮并保留已完成摘要", async
   await page.getByLabel("消息输入").fill(TRIGGER);
   await page.getByRole("button", { name: "发送" }).click();
 
-  await expect(page.getByRole("status", { name: /素材理解中/ })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "取消素材理解" })).toHaveCount(0);
-  await expect(page.getByText("摘要已完成", { exact: false })).toBeVisible({
-    timeout: 30_000
-  });
+  const cancel = page.getByRole("button", { name: "取消理解素材" });
+  await expect(cancel).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByText(/理解素材 \d+\/\d+：understanding-cancel-.*\.mp4/)).toBeVisible();
+  await cancel.click();
+
+  await expect(page.getByText("已取消", { exact: true })).toBeVisible();
+  await expect(cancel).toHaveCount(0);
   await page.getByRole("button", { name: "停止当前任务" }).click();
 
   await expect(page.getByLabel("消息输入")).toBeEnabled();
 
   const materials = await waitForSettledMaterials(request, draftId, imported.asset_ids);
   const finalStatuses = imported.asset_ids.map((id) => statusOf(materials, id)).sort();
-  expect(finalStatuses).toEqual(["none", "ready"]);
+  expect(finalStatuses.every((status) => status === "none" || status === "ready")).toBe(true);
+  expect(finalStatuses).toContain("none");
   expect(materials.assets.some((asset) => asset.understanding_status === "running")).toBe(false);
 
-  await expect(page.getByLabel("理解状态：已理解")).toBeVisible();
   await expect(page.getByLabel("理解状态：理解中")).toHaveCount(0);
 });
 
@@ -67,7 +69,7 @@ async function waitForSettledMaterials(
   while (Date.now() < deadline) {
     latest = await apiGet<MaterialsResponse>(request, `/api/drafts/${draftId}/materials`);
     const selected = latest.assets.filter((asset) => assetIds.includes(asset.asset_id));
-    if (selected.some((asset) => asset.understanding_status === "ready") &&
+    if (selected.length === assetIds.length &&
       selected.every((asset) => asset.understanding_status !== "running")) {
       return latest;
     }

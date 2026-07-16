@@ -105,6 +105,20 @@ describe("draft api client functions", () => {
     expect(init?.body).toBe(JSON.stringify({ draft_ids: ["draft_1", "draft_2"], confirm: true }));
   });
 
+  it("cancelJob 调用 job 取消端点并提交原因", async () => {
+    const fetchMock = vi.fn(async (..._args: unknown[]) =>
+      jsonResponse({ event_ids: [9], job_id: "job/1", status: "cancelled" })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.cancelJob("job/1", "user_cancelled");
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/jobs/job%2F1/cancel");
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(init).toMatchObject({ method: "POST" });
+    expect(init?.body).toBe(JSON.stringify({ reason: "user_cancelled" }));
+  });
+
 });
 
 function jsonResponse(payload: unknown): Response {

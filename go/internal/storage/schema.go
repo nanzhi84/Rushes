@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 7
+const schemaVersion = 10
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -293,4 +293,47 @@ FROM timeline_versions;
 
 DROP TABLE timeline_versions;
 ALTER TABLE timeline_versions_v7 RENAME TO timeline_versions;
+`
+
+// schemaV8 persists the Agent job-observation bridge cursor and its job-level
+// idempotency guard. These tables are infrastructure bookkeeping: they must not
+// change draft state_version or appear in the domain event stream.
+const schemaV8 = `
+CREATE TABLE IF NOT EXISTS agent_job_bridge_state (
+    consumer_id TEXT PRIMARY KEY,
+    last_event_id INTEGER NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_job_observations (
+    job_id TEXT PRIMARY KEY,
+    event_id INTEGER NOT NULL UNIQUE,
+    draft_id TEXT NOT NULL REFERENCES drafts(draft_id) ON DELETE CASCADE,
+    event_json TEXT NOT NULL,
+    claim_token TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_job_observation_suppressions (
+    job_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO agent_job_bridge_state(consumer_id, last_event_id, updated_at)
+VALUES(
+    'agent',
+    (SELECT COALESCE(MAX(event_id), 0) FROM event_log),
+    strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+);
+`
+
+const schemaV9 = `
+ALTER TABLE agent_job_observations ADD COLUMN delivered_at TEXT;
+`
+
+// schemaV10 keeps the idle Agent bridge poll proportional to the undelivered
+// backlog instead of all historical observations.
+const schemaV10 = `
+CREATE INDEX IF NOT EXISTS ix_agent_job_observations_undelivered_event
+ON agent_job_observations(event_id) WHERE delivered_at IS NULL;
 `

@@ -60,7 +60,7 @@ var EventRegistry = map[string]EventSpec{
 	"JobFailed":                      {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
 	"JobCancelled":                   {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
 	"ProxyGenerated":                 {Mode: VersionMerge, MergeKeys: []string{"asset_id", "proxy_object_hash"}},
-	"JobProgress":                    {Mode: VersionMerge, MergeKeys: []string{"job_id", "progress"}},
+	"JobProgress":                    {Mode: VersionMerge, MergeKeys: []string{"job_id", "progress"}, OptionalMergeKeys: []string{"update_id"}},
 	"PreviewViewed":                  {Mode: VersionMerge, MergeKeys: []string{"preview_id"}, DraftScope: true},
 }
 
