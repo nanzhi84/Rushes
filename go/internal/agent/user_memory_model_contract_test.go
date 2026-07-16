@@ -189,6 +189,11 @@ func TestUserMemoryModelContractRejectsMemoryPollution(t *testing.T) {
 				`{"key":"pacing","kind":"preference","statement":"用户不喜欢快节奏，应该慢一点"}]}`)},
 		},
 		{
+			name: "rejected memory",
+			calls: []schema.ToolCall{memoryEvalToolCall(`{"entries":[` +
+				`{"key":"pacing","kind":"preference","statement":"用户拒绝快节奏，希望舒缓处理"}]}`)},
+		},
+		{
 			name: "extra entry",
 			calls: []schema.ToolCall{memoryEvalToolCall(`{"entries":[` +
 				`{"key":"pacing","kind":"preference","statement":"用户长期偏好视频节奏快一点"},` +
@@ -229,6 +234,18 @@ func TestUserMemoryModelContractRejectsMemoryPollution(t *testing.T) {
 		}})
 		if err := validateUserMemoryModelResponse(useCase, response, specs); err == nil {
 			t.Fatal("反向节奏计划错误通过用户记忆模型合同")
+		}
+	})
+	t.Run("cross field plan", func(t *testing.T) {
+		useCase := loadUserMemoryModelEvalCases(t)[2]
+		response := schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "cross_field_plan",
+			Function: schema.FunctionCall{
+				Name: "plan.update", Arguments: `{"plan":{"rhythm":"slow","note":"快只是反例"}}`,
+			},
+		}})
+		if err := validateUserMemoryModelResponse(useCase, response, specs); err == nil {
+			t.Fatal("跨字段拼接的伪快节奏计划错误通过用户记忆模型合同")
 		}
 	})
 }
@@ -391,7 +408,11 @@ func validateUserMemoryModelResponse(
 	}
 	if evalCase.RequiredToolSemantic != "" {
 		for _, call := range requiredCalls {
-			if err := validateUserMemorySemantic(evalCase.RequiredToolSemantic, call.Function.Arguments); err != nil {
+			if err := validateRequiredToolSemantic(
+				evalCase.RequiredToolSemantic,
+				call.Function.Name,
+				call.Function.Arguments,
+			); err != nil {
 				return fmt.Errorf("%s 参数没有体现注入偏好: %w", evalCase.RequiredTool, err)
 			}
 		}
@@ -402,7 +423,7 @@ func validateUserMemoryModelResponse(
 func validateUserMemorySemantic(semantic, value string) error {
 	switch semantic {
 	case "fast_pacing":
-		if hasPositiveFastPacing(value) {
+		if hasPositiveFastPacingPhrase(value) {
 			return nil
 		}
 		return fmt.Errorf("缺少无反向限定的快节奏语义: %s", truncateText(value, 240))
@@ -411,36 +432,68 @@ func validateUserMemorySemantic(semantic, value string) error {
 	}
 }
 
-func hasPositiveFastPacing(value string) bool {
-	negative := []string{
-		"不喜欢快", "不爱快", "不要快", "避免快", "不能快", "别太快", "太快",
-		"快不是", "快并非", "快不适合", "快不喜欢",
-		"偏慢", "慢节奏", "节奏慢", "慢一点", "放慢", "慢剪",
-		"不要紧凑", "不紧凑", "降低切点密度", "低切点密度", "不要高密度", "避免高密度",
+func validateRequiredToolSemantic(semantic, toolName, arguments string) error {
+	if semantic != "fast_pacing" {
+		return fmt.Errorf("未知评测语义 %q", semantic)
 	}
+	if toolName != "plan.update" {
+		return fmt.Errorf("工具 %s 不支持 %s 语义评测", toolName, semantic)
+	}
+	var input rushestools.PlanUpdateInput
+	if err := json.Unmarshal([]byte(arguments), &input); err != nil {
+		return fmt.Errorf("解析 plan.update: %w", err)
+	}
+	values := collectStringValues(input.Plan)
+	if input.Contract != nil && strings.TrimSpace(input.Contract.Rhythm) != "" {
+		values = append(values, input.Contract.Rhythm)
+	}
+	for _, value := range values {
+		if hasPositiveFastPacingPhrase(value) {
+			return nil
+		}
+	}
+	return fmt.Errorf("plan 的单个语义值均未表达无反向限定的快节奏: %s", truncateText(arguments, 240))
+}
+
+func hasPositiveFastPacingPhrase(value string) bool {
+	negative := []string{"不", "拒绝", "禁止", "避免", "慢", "舒缓", "降低", "减少", "低密度", "太快"}
 	for _, fragment := range negative {
 		if strings.Contains(value, fragment) {
 			return false
 		}
 	}
-	domains := []string{"节奏", "切点", `"rhythm"`, `"cut_density`}
-	hasDomain := false
-	for _, fragment := range domains {
-		if strings.Contains(value, fragment) {
-			hasDomain = true
-			break
-		}
+	positive := []string{
+		"快节奏", "节奏偏快", "节奏加快", "加快节奏", "节奏更快", "节奏要快", "节奏都要快",
+		"节奏快", "节奏偏好快", "紧凑节奏", "节奏紧凑", "高切点密度", "切点密度高",
+		"提高切点密度", "切点密度偏高", "切点密度可高", "高密度切点",
 	}
-	if !hasDomain {
-		return false
-	}
-	positive := []string{"快", "紧凑", "高密度", "密度高", "提高密度"}
 	for _, fragment := range positive {
 		if strings.Contains(value, fragment) {
 			return true
 		}
 	}
 	return false
+}
+
+func collectStringValues(value any) []string {
+	switch typed := value.(type) {
+	case string:
+		return []string{typed}
+	case map[string]any:
+		values := []string{}
+		for _, child := range typed {
+			values = append(values, collectStringValues(child)...)
+		}
+		return values
+	case []any:
+		values := []string{}
+		for _, child := range typed {
+			values = append(values, collectStringValues(child)...)
+		}
+		return values
+	default:
+		return nil
+	}
 }
 
 func userMemoryResponseSummary(response *schema.Message) string {
