@@ -13,12 +13,24 @@ import (
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-const contentPlanRuneLimit = 8000
+const (
+	contentPlanRuneLimit  = 8000
+	planUpdateMaxAttempts = 3
+)
 
 func (service *Service) toolPlanUpdate(
 	ctx context.Context,
 	draftID string,
 	input rushestools.PlanUpdateInput,
+) (rushestools.ToolResult, error) {
+	return service.toolPlanUpdateWithBeforeApply(ctx, draftID, input, nil)
+}
+
+func (service *Service) toolPlanUpdateWithBeforeApply(
+	ctx context.Context,
+	draftID string,
+	input rushestools.PlanUpdateInput,
+	beforeApply func(attempt int) error,
 ) (rushestools.ToolResult, error) {
 	if input.Plan == nil {
 		return planUpdateFailure("plan.update 缺少 plan 对象", map[string]any{
@@ -50,64 +62,89 @@ func (service *Service) toolPlanUpdate(
 		), nil
 	}
 
-	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
-	if err != nil {
-		return rushestools.ToolResult{}, err
-	}
 	reset := input.Reset != nil && *input.Reset
-	updated := mergeContentPlan(nil, patch)
 	mode := "reset"
 	if !reset {
-		updated = mergeContentPlan(draft.ContentPlan, patch)
 		mode = "merge"
 	}
-	if key := reservedContentPlanKey(updated); key != "" {
-		return planUpdateFailure(
-			fmt.Sprintf("现有创作计划本含保留键 %q；请用 reset=true 写入不含保留键的干净计划", key),
-			map[string]any{"reason": "stored_reserved_key", "reserved_key": key},
-		), nil
-	}
-	if contract, contractErr := contentPlanContract(updated); contractErr != nil {
-		return planUpdateFailure(contractErr.Error(), map[string]any{"reason": "contract_invalid"}), nil
-	} else if contract != nil {
-		updated["contract"] = contract
-	}
-	encoded, err := json.Marshal(updated)
-	if err != nil {
-		return planUpdateFailure("创作计划本只能包含可编码为 JSON 的内容", map[string]any{
-			"reason": "plan_not_json",
-		}), nil
-	}
-	runes := utf8.RuneCount(encoded)
-	if runes > contentPlanRuneLimit {
-		return planUpdateFailure(
-			"创作计划本超出 8000 字上限；请只记纲要，细节留在对应工具按需检索",
-			map[string]any{
-				"reason": "plan_too_large", "plan_runes": runes,
-				"limit_runes": contentPlanRuneLimit, "current_plan_unchanged": true,
-			},
-		), nil
-	}
 
-	result, err := reducer.Apply(ctx, service.database, nil, reducer.Options{
-		Actor: contracts.ActorAgent,
-		ResultRows: reducer.ResultRows{DraftPlanUpdate: &reducer.DraftPlanUpdateRow{
-			DraftID: draftID, ContentPlan: updated,
-		}},
-	})
-	if err != nil {
-		return rushestools.ToolResult{}, err
+	for attempt := 1; attempt <= planUpdateMaxAttempts; attempt++ {
+		draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
+		if err != nil {
+			return rushestools.ToolResult{}, err
+		}
+		updated := mergeContentPlan(nil, patch)
+		if !reset {
+			updated = mergeContentPlan(draft.ContentPlan, patch)
+		}
+		if key := reservedContentPlanKey(updated); key != "" {
+			return planUpdateFailure(
+				fmt.Sprintf("现有创作计划本含保留键 %q；请用 reset=true 写入不含保留键的干净计划", key),
+				map[string]any{"reason": "stored_reserved_key", "reserved_key": key},
+			), nil
+		}
+		if contract, contractErr := contentPlanContract(updated); contractErr != nil {
+			return planUpdateFailure(contractErr.Error(), map[string]any{"reason": "contract_invalid"}), nil
+		} else if contract != nil {
+			updated["contract"] = contract
+		}
+		encoded, err := json.Marshal(updated)
+		if err != nil {
+			return planUpdateFailure("创作计划本只能包含可编码为 JSON 的内容", map[string]any{
+				"reason": "plan_not_json",
+			}), nil
+		}
+		runes := utf8.RuneCount(encoded)
+		if runes > contentPlanRuneLimit {
+			return planUpdateFailure(
+				"创作计划本超出 8000 字上限；请只记纲要，细节留在对应工具按需检索",
+				map[string]any{
+					"reason": "plan_too_large", "plan_runes": runes,
+					"limit_runes": contentPlanRuneLimit, "current_plan_unchanged": true,
+				},
+			), nil
+		}
+		expectedPlanHash, err := reducer.ContentPlanHash(draft.ContentPlan)
+		if err != nil {
+			return rushestools.ToolResult{}, err
+		}
+		if beforeApply != nil {
+			if err := beforeApply(attempt); err != nil {
+				return rushestools.ToolResult{}, err
+			}
+		}
+
+		result, err := reducer.Apply(ctx, service.database, nil, reducer.Options{
+			Actor: contracts.ActorAgent,
+			ResultRows: reducer.ResultRows{DraftPlanUpdate: &reducer.DraftPlanUpdateRow{
+				DraftID: draftID, ContentPlan: updated, ExpectedPlanHash: expectedPlanHash,
+			}},
+		})
+		if err != nil {
+			return rushestools.ToolResult{}, err
+		}
+		if result.Status == reducer.StatusVersionConflict {
+			continue
+		}
+		if result.Status != reducer.StatusApplied {
+			return rushestools.ToolResult{}, fmt.Errorf("创作计划本写入状态异常: %s", result.Status)
+		}
+		return rushestools.ToolResult{
+			Status:      "succeeded",
+			Observation: "已更新持久创作计划本；下一个用户回合重建 WorldState 后会从 draft.content_plan 读取最新内容",
+			Data: map[string]any{
+				"mode": mode, "plan_runes": runes,
+			},
+		}, nil
 	}
-	if result.Status != reducer.StatusApplied {
-		return rushestools.ToolResult{}, fmt.Errorf("创作计划本写入状态异常: %s", result.Status)
-	}
-	return rushestools.ToolResult{
-		Status:      "succeeded",
-		Observation: "已更新持久创作计划本；下一个用户回合重建 WorldState 后会从 draft.content_plan 读取最新内容",
-		Data: map[string]any{
-			"mode": mode, "plan_runes": runes,
+	return planUpdateFailure(
+		"创作计划本连续发生并发冲突；请重新读取 WorldState 后再重试 plan.update",
+		map[string]any{
+			"reason":                 "plan_conflict",
+			"current_plan_unchanged": false,
+			"recovery":               "重新读取 WorldState 后重试 plan.update",
 		},
-	}, nil
+	), nil
 }
 
 func canonicalContentPlanValue(input any) (map[string]any, error) {

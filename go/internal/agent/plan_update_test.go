@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
@@ -219,6 +220,149 @@ func TestPlanUpdateRFC7396MergeDeleteAndReset(t *testing.T) {
 	}
 	if initial["b"] != 2 || patch["b"] != 3 {
 		t.Fatalf("plan.update mutated inputs initial=%#v patch=%#v", initial, patch)
+	}
+}
+
+func TestPlanUpdateRetriesConcurrentMergesWithoutLostUpdates(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		patches [2]map[string]any
+		assert  func(*testing.T, map[string]any)
+	}{
+		{
+			name: "different top-level keys",
+			patches: [2]map[string]any{
+				{"alpha": "one"},
+				{"beta": "two"},
+			},
+			assert: func(t *testing.T, plan map[string]any) {
+				t.Helper()
+				if plan["alpha"] != "one" || plan["beta"] != "two" {
+					t.Fatalf("concurrent different-key plan=%#v", plan)
+				}
+			},
+		},
+		{
+			name: "same object key",
+			patches: [2]map[string]any{
+				{"story": map[string]any{"pace": "fast"}},
+				{"story": map[string]any{"tone": "warm"}},
+			},
+			assert: func(t *testing.T, plan map[string]any) {
+				t.Helper()
+				story, _ := plan["story"].(map[string]any)
+				if story["pace"] != "fast" || story["tone"] != "warm" {
+					t.Fatalf("concurrent same-key plan=%#v", plan)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			database := agentTestDatabase(t)
+			const draftID = "draft_plan_concurrent"
+			createAgentDraft(t, database, draftID)
+			service, err := NewService(t.Context(), database, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(service.Close)
+
+			ready := make(chan struct{}, 2)
+			release := make(chan struct{})
+			type callResult struct {
+				result rushestools.ToolResult
+				err    error
+			}
+			results := make(chan callResult, len(test.patches))
+			ctx := t.Context()
+			for _, patch := range test.patches {
+				patch := patch
+				go func() {
+					result, err := service.toolPlanUpdateWithBeforeApply(
+						ctx, draftID, rushestools.PlanUpdateInput{Plan: patch},
+						func(attempt int) error {
+							if attempt == 1 {
+								ready <- struct{}{}
+								<-release
+							}
+							return nil
+						},
+					)
+					results <- callResult{result: result, err: err}
+				}()
+			}
+			for index := 0; index < len(test.patches); index++ {
+				select {
+				case <-ready:
+				case <-time.After(5 * time.Second):
+					close(release)
+					t.Fatal("concurrent plan.update did not reach first-attempt barrier")
+				}
+			}
+			close(release)
+			for index := 0; index < len(test.patches); index++ {
+				select {
+				case call := <-results:
+					if call.err != nil || call.result.Status != "succeeded" {
+						t.Fatalf("concurrent result=%#v err=%v", call.result, call.err)
+					}
+				case <-time.After(5 * time.Second):
+					t.Fatal("concurrent plan.update did not finish")
+				}
+			}
+			stored, err := storage.GetDraft(t.Context(), database.Read(), draftID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.assert(t, stored.ContentPlan)
+		})
+	}
+}
+
+func TestPlanUpdateReturnsStructuredFailureAfterThreeConflicts(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	const draftID = "draft_plan_conflicts"
+	createAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	attempts := 0
+	result, err := service.toolPlanUpdateWithBeforeApply(
+		t.Context(), draftID,
+		rushestools.PlanUpdateInput{Plan: map[string]any{"tool": "must-not-stick"}},
+		func(attempt int) error {
+			attempts++
+			external, err := json.Marshal(map[string]any{"external_attempt": attempt})
+			if err != nil {
+				return err
+			}
+			_, err = database.Write().ExecContext(t.Context(),
+				"UPDATE drafts SET content_plan_json=? WHERE draft_id=?", string(external), draftID,
+			)
+			return err
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempts != planUpdateMaxAttempts || result.Status != "failed" ||
+		result.Data["reason"] != "plan_conflict" || result.Data["error_code"] != "plan_conflict" ||
+		result.Data["current_plan_unchanged"] != false ||
+		!strings.Contains(result.Data["recovery"].(string), "WorldState") {
+		t.Fatalf("attempts=%d result=%#v", attempts, result)
+	}
+	stored, err := storage.GetDraft(t.Context(), database.Read(), draftID)
+	if err != nil || stored.ContentPlan["external_attempt"] != float64(planUpdateMaxAttempts) {
+		t.Fatalf("stored plan=%#v err=%v", stored.ContentPlan, err)
+	}
+	if _, exists := stored.ContentPlan["tool"]; exists {
+		t.Fatalf("conflicted tool write leaked into plan: %#v", stored.ContentPlan)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -181,6 +182,10 @@ func TestPostPersistFailureRollsBackDraftPlanAndDomainChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	expectedPlanHash, err := ContentPlanHash(before.ContentPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var eventsBefore int
 	if err := database.Read().QueryRowContext(t.Context(),
 		"SELECT COUNT(*) FROM event_log").Scan(&eventsBefore); err != nil {
@@ -198,6 +203,7 @@ func TestPostPersistFailureRollsBackDraftPlanAndDomainChanges(t *testing.T) {
 		Actor: contracts.ActorAgent,
 		ResultRows: ResultRows{DraftPlanUpdate: &DraftPlanUpdateRow{
 			DraftID: before.ID, ContentPlan: map[string]any{"should": "rollback"},
+			ExpectedPlanHash: expectedPlanHash,
 		}},
 	})
 	if err == nil {
@@ -265,6 +271,10 @@ func TestDraftPlanResultRowCommitsWithoutDomainEventOrVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	emptyPlanHash, err := ContentPlanHash(before.ContentPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var eventsBefore int
 	if err := database.Read().QueryRowContext(t.Context(),
 		"SELECT COUNT(*) FROM event_log").Scan(&eventsBefore); err != nil {
@@ -278,6 +288,7 @@ func TestDraftPlanResultRowCommitsWithoutDomainEventOrVersion(t *testing.T) {
 			ContentPlan: map[string]any{
 				"story": map[string]any{"pace": "fast"}, "locked": true,
 			},
+			ExpectedPlanHash: emptyPlanHash,
 		}},
 	})
 	if err != nil || result.Status != StatusApplied || len(result.AppliedEvents) != 0 ||
@@ -304,11 +315,31 @@ func TestDraftPlanResultRowCommitsWithoutDomainEventOrVersion(t *testing.T) {
 		t.Fatalf("event_log count=%d want=%d", eventsAfter, eventsBefore)
 	}
 
+	conflictResult, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: ResultRows{DraftPlanUpdate: &DraftPlanUpdateRow{
+			DraftID: "draft-plan", ContentPlan: map[string]any{"lost": true},
+			ExpectedPlanHash: emptyPlanHash,
+		}},
+	})
+	if err != nil || conflictResult.Status != StatusVersionConflict {
+		t.Fatalf("conflict result=%#v err=%v", conflictResult, err)
+	}
+	afterConflict, err := storage.GetDraft(t.Context(), database.Read(), "draft-plan")
+	if err != nil || !reflect.DeepEqual(afterConflict, after) {
+		t.Fatalf("plan conflict changed draft: before=%#v after=%#v err=%v", after, afterConflict, err)
+	}
+	currentPlanHash, err := ContentPlanHash(after.ContentPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	invalidRows := []*DraftPlanUpdateRow{
-		{DraftID: "", ContentPlan: map[string]any{}},
-		{DraftID: "draft-plan", ContentPlan: nil},
-		{DraftID: "missing", ContentPlan: map[string]any{}},
-		{DraftID: "draft-plan", ContentPlan: map[string]any{"bad": make(chan int)}},
+		{DraftID: "", ContentPlan: map[string]any{}, ExpectedPlanHash: currentPlanHash},
+		{DraftID: "draft-plan", ContentPlan: nil, ExpectedPlanHash: currentPlanHash},
+		{DraftID: "draft-plan", ContentPlan: map[string]any{}},
+		{DraftID: "missing", ContentPlan: map[string]any{}, ExpectedPlanHash: currentPlanHash},
+		{DraftID: "draft-plan", ContentPlan: map[string]any{"bad": make(chan int)}, ExpectedPlanHash: currentPlanHash},
 	}
 	for index, row := range invalidRows {
 		if _, err := Apply(t.Context(), database, nil, Options{
