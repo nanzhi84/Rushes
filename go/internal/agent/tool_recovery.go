@@ -484,7 +484,7 @@ func (service *Service) terminalFailureReply(
 		)
 		for _, delta := range runeChunks(content, 12) {
 			service.hub.Record(draftID, StreamEvent{
-				"type": "text_delta", "message_id": messageID,
+				"type": TurnStreamTextDelta, "message_id": messageID,
 				"kind": "assistant", "delta": delta,
 			})
 		}
@@ -524,7 +524,7 @@ func (service *Service) terminalFailureReply(
 	}
 	for _, delta := range runeChunks(content, 12) {
 		service.hub.Record(draftID, StreamEvent{
-			"type": "text_delta", "message_id": messageID,
+			"type": TurnStreamTextDelta, "message_id": messageID,
 			"kind": "assistant", "delta": delta,
 		})
 	}

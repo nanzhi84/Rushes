@@ -1641,7 +1641,7 @@ func (service *Service) runUnderstandInline(
 		summary, analyzeErr := service.analyzer.AnalyzeWithOptions(
 			ctx, service.database, asset, prepared.Options, func(note string) {
 				service.hub.Record(draftID, StreamEvent{
-					"type": "subagent_progress", "tool": "understand.materials",
+					"type": TurnStreamSubagentProgress, "tool": "understand.materials",
 					"asset_id": asset.ID, "note": note, "completed": index, "total": len(request.Assets),
 				})
 			},
@@ -1683,7 +1683,7 @@ func (service *Service) runUnderstandInline(
 		summaries = append(summaries, bestSummary)
 		analyzedAssetIDs = append(analyzedAssetIDs, asset.ID)
 		service.hub.Record(draftID, StreamEvent{
-			"type": "subagent_progress", "tool": "understand.materials",
+			"type": TurnStreamSubagentProgress, "tool": "understand.materials",
 			"asset_id": asset.ID, "note": "摘要已完成", "completed": index + 1, "total": len(request.Assets),
 		})
 	}

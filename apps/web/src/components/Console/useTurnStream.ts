@@ -62,7 +62,21 @@ export type TurnStreamState = {
 };
 
 // 服务端统一发送 event: turn_stream；事件 type 由 go/internal/agent 定义。
+export const KNOWN_TURN_STREAM_TYPES = [
+  "turn_started",
+  "text_delta",
+  "message_completed",
+  "tool_step_started",
+  "tool_step_finished",
+  "model_retry",
+  "subagent_progress",
+  "context_compaction_failed",
+  "turn_ended",
+  "turn_error"
+] as const;
+
 export type TurnStreamEvent =
+  | { type: "local_reset" }
   | { type: "turn_started"; turn_id?: string }
   | { type: "text_delta"; message_id: string; kind?: string; delta?: string }
   | {
@@ -88,9 +102,9 @@ export type TurnStreamEvent =
       completed?: number;
       total?: number;
     }
+  | { type: "context_compaction_failed"; reason?: string; fallback?: string }
   | ({ type: "turn_ended" } & TurnEndedEvent)
-  | { type: "turn_error"; message: string }
-  | { type: string; [key: string]: unknown };
+  | { type: "turn_error"; message: string };
 
 export type UseTurnStreamOptions = {
   onTurnEnded?: (event: TurnEndedEvent) => void;
@@ -215,6 +229,18 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
         subagentProgress: upsertProgress(state.subagentProgress, { asset_id: event.asset_id, note })
       };
     }
+    case "context_compaction_failed":
+      return {
+        ...state,
+        turnActive: true,
+        modelRetry: null,
+        items: upsertMessage(state.items, {
+          type: "message",
+          message_id: "context_compaction_failed",
+          kind: "observation",
+          text: "上下文压缩降级：本轮使用确定性摘要"
+        })
+      };
     case "turn_ended":
       // 封口：本回合结束，历史消息会被 refetch 接管；流式 buffer 交给 message_id 去重清理。
       return { ...state, turnActive: false, modelRetry: null, subagentProgress: [] };

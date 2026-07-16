@@ -8,6 +8,36 @@ import (
 
 const DefaultSubscriberQueueLimit = 1024
 
+const (
+	TurnStreamTurnStarted             = "turn_started"
+	TurnStreamTextDelta               = "text_delta"
+	TurnStreamMessageCompleted        = "message_completed"
+	TurnStreamToolStepStarted         = "tool_step_started"
+	TurnStreamToolStepFinished        = "tool_step_finished"
+	TurnStreamModelRetry              = "model_retry"
+	TurnStreamSubagentProgress        = "subagent_progress"
+	TurnStreamContextCompactionFailed = "context_compaction_failed"
+	TurnStreamTurnEnded               = "turn_ended"
+	TurnStreamTurnError               = "turn_error"
+)
+
+var knownTurnStreamTypes = []string{
+	TurnStreamTurnStarted,
+	TurnStreamTextDelta,
+	TurnStreamMessageCompleted,
+	TurnStreamToolStepStarted,
+	TurnStreamToolStepFinished,
+	TurnStreamModelRetry,
+	TurnStreamSubagentProgress,
+	TurnStreamContextCompactionFailed,
+	TurnStreamTurnEnded,
+	TurnStreamTurnError,
+}
+
+func KnownTurnStreamTypes() []string {
+	return append([]string(nil), knownTurnStreamTypes...)
+}
+
 type StreamEvent map[string]any
 
 type TurnStreamHub struct {
@@ -44,6 +74,10 @@ func (hub *TurnStreamHub) Record(draftID string, event StreamEvent) {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()
 	frozen := cloneEvent(event)
+	typeName, ok := frozen["type"].(string)
+	if !ok || !knownTurnStreamType(typeName) {
+		panic(fmt.Sprintf("未注册 turn stream 事件 %q", typeName))
+	}
 	hub.buffers[draftID] = append(hub.buffers[draftID], frozen)
 	for subscriber := range hub.subs[draftID] {
 		select {
@@ -53,10 +87,18 @@ func (hub *TurnStreamHub) Record(draftID string, event StreamEvent) {
 			close(subscriber)
 		}
 	}
-	typeName, _ := frozen["type"].(string)
-	if typeName == "turn_ended" || typeName == "turn_error" {
+	if typeName == TurnStreamTurnEnded || typeName == TurnStreamTurnError {
 		delete(hub.buffers, draftID)
 	}
+}
+
+func knownTurnStreamType(typeName string) bool {
+	for _, known := range knownTurnStreamTypes {
+		if typeName == known {
+			return true
+		}
+	}
+	return false
 }
 
 func (hub *TurnStreamHub) Snapshot(draftID string) []StreamEvent {
