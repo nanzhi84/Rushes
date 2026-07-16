@@ -14,7 +14,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
 
-func TestUnderstandingMiniLoopCancellationKeepsCompletedSummaryAndResetsPendingAsset(t *testing.T) {
+func TestUnderstandingAsyncScaffoldEnqueuesCancellableMultiAssetJob(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")
 	}
@@ -45,31 +45,38 @@ func TestUnderstandingMiniLoopCancellationKeepsCompletedSummaryAndResetsPendingA
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	_, stream, unsubscribe := service.Hub().Subscribe("draft_understand_cancel")
-	defer unsubscribe()
 	service.Queue().EnqueueUserMessage("draft_understand_cancel", "message", e2eCancelUnderstandingMarker)
-	deadline := time.After(10 * time.Second)
-	for {
-		select {
-		case event := <-stream:
-			completed, _ := event["completed"].(int)
-			if event["type"] == "subagent_progress" && completed == 1 {
-				if !service.Queue().RequestStop("draft_understand_cancel") {
-					t.Fatal("理解进行中取消失败")
-				}
-				service.Queue().JoinDraft("draft_understand_cancel")
-				ready, _ := storage.GetAsset(t.Context(), database.Read(), "ready_asset")
-				slow, _ := storage.GetAsset(t.Context(), database.Read(), "slow_asset")
-				if ready.UnderstandingStatus != "ready" || slow.UnderstandingStatus != "none" {
-					t.Fatalf("ready=%s slow=%s", ready.UnderstandingStatus, slow.UnderstandingStatus)
-				}
-				if _, err := storage.BestMaterialSummary(t.Context(), database.Read(), "ready_asset"); err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-		case <-deadline:
-			t.Fatal("等待理解 1/2 超时")
+	deadline := time.Now().Add(10 * time.Second)
+	jobID := ""
+	for time.Now().Before(deadline) {
+		if err := database.Read().QueryRowContext(t.Context(), `
+			SELECT job_id FROM jobs WHERE kind='understand'
+			AND requested_by_draft_id='draft_understand_cancel'
+			AND status IN ('pending','running')`,
+		).Scan(&jobID); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if jobID == "" {
+		t.Fatal("未入队多素材 understand job")
+	}
+	if _, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobCancelled", DraftID: "draft_understand_cancel", Payload: map[string]any{
+			"job_id": jobID, "kind": "understand", "reason": "turn_cancelled",
+			"requested_by_draft_id": "draft_understand_cancel",
+		},
+	}}, reducer.Options{Actor: contracts.ActorUser}); err != nil {
+		t.Fatal(err)
+	}
+	if !service.Queue().RequestStop("draft_understand_cancel") {
+		t.Fatal("理解进行中取消 Agent 回合失败")
+	}
+	service.Queue().JoinDraft("draft_understand_cancel")
+	for _, assetID := range []string{"ready_asset", "slow_asset"} {
+		asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
+		if err != nil || asset.UnderstandingStatus != "none" {
+			t.Fatalf("asset=%s status=%s err=%v", assetID, asset.UnderstandingStatus, err)
 		}
 	}
 }

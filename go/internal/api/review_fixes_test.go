@@ -89,6 +89,13 @@ func TestAdvertisedLifecycleCostDeleteAndCancelRoutesDoNotFallBack(t *testing.T)
 	if cancelled.Code != http.StatusOK || !strings.Contains(cancelled.Body.String(), `"status":"cancelled"`) {
 		t.Fatalf("cancel=%d body=%s", cancelled.Code, cancelled.Body.String())
 	}
+	var cancelReason string
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT json_extract(payload_json,'$.payload.reason') FROM event_log
+		WHERE event_type='JobCancelled' AND json_extract(payload_json,'$.payload.job_id')=?`,
+		*mutation.JobId).Scan(&cancelReason); err != nil || cancelReason != "user_cancelled" {
+		t.Fatalf("cancel reason=%q err=%v", cancelReason, err)
+	}
 	idempotentCancel := httptest.NewRecorder()
 	handler.ServeHTTP(idempotentCancel, apiRequest(t, http.MethodPost, "/api/jobs/"+*mutation.JobId+"/cancel", nil))
 	if idempotentCancel.Code != http.StatusOK || !strings.Contains(idempotentCancel.Body.String(), `"event_ids":[]`) {

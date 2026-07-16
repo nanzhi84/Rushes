@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -56,6 +57,9 @@ func NewRunner(config RunnerConfig) (*Runner, error) {
 	if config.HeartbeatTimeout <= 0 {
 		config.HeartbeatTimeout = 60 * time.Second
 	}
+	if config.HeartbeatInterval > config.HeartbeatTimeout/2 {
+		return nil, errors.New("worker heartbeat interval 必须不超过 timeout 的一半")
+	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
@@ -75,6 +79,11 @@ func (runner *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("恢复超时 job: %w", err)
 	}
 	var group sync.WaitGroup
+	group.Add(1)
+	go func() {
+		defer group.Done()
+		runner.recoverLoop(ctx)
+	}()
 	for range runner.concurrency {
 		group.Add(1)
 		go func() {
@@ -85,6 +94,22 @@ func (runner *Runner) Run(ctx context.Context) error {
 	<-ctx.Done()
 	group.Wait()
 	return nil
+}
+
+func (runner *Runner) recoverLoop(ctx context.Context) {
+	ticker := time.NewTicker(runner.heartbeatTimeout)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if _, err := RecoverStale(ctx, runner.database, runner.now(), runner.heartbeatTimeout); err != nil &&
+				!errors.Is(err, context.Canceled) {
+				runner.logger.Error("周期恢复超时 job 失败", "error", err)
+			}
+		}
+	}
 }
 
 func (runner *Runner) loop(ctx context.Context) {
@@ -119,7 +144,7 @@ func (runner *Runner) RunOnce(ctx context.Context) (bool, error) {
 	handler, handlerErr := runner.registry.Require(job.Kind)
 	var result map[string]any
 	if handlerErr == nil {
-		result, handlerErr = handler(jobCtx, *job, runner.reportProgress)
+		result, handlerErr = invokeHandler(handler, jobCtx, *job, runner.newProgressReporter())
 	}
 	cancel()
 	<-heartbeatDone
@@ -177,17 +202,89 @@ func (runner *Runner) heartbeat(
 	}
 }
 
-func (runner *Runner) reportProgress(ctx context.Context, job Job, progress float64) error {
-	progress = max(0, min(progress, 1))
-	_, err := reducer.Apply(ctx, runner.database, []contracts.Event{{
-		Type: "JobProgress", DraftID: value(job.DraftID),
-		Payload: map[string]any{
+func (runner *Runner) newProgressReporter() ProgressReporter {
+	var sent bool
+	var sequence int64
+	var lastAt time.Time
+	var lastProgress float64
+	var lastMetadata ProgressUpdate
+	return func(ctx context.Context, job Job, update ProgressUpdate) error {
+		update.Progress = max(0, min(update.Progress, 1))
+		now := runner.now()
+		metadataChanged := progressHasMetadata(update) && !progressMetadataEqual(update, lastMetadata)
+		if sent && update.Progress != 1 && now.Sub(lastAt) < time.Second &&
+			math.Abs(update.Progress-lastProgress) < 0.01 &&
+			!metadataChanged {
+			return nil
+		}
+		payload := map[string]any{
 			"job_id": job.ID, "kind": job.Kind, "asset_id": value(job.AssetID),
-			"requested_by_draft_id": value(job.RequestedByDraftID), "progress": progress,
+			"requested_by_draft_id": value(job.RequestedByDraftID), "progress": update.Progress,
 			"worker_id": value(job.WorkerID), "started_at": value(job.StartedAt),
-		},
-	}}, reducer.Options{Actor: contracts.ActorJob})
-	return err
+			"update_id": fmt.Sprintf("%s:%s:%d", job.ID, value(job.StartedAt), sequence+1),
+		}
+		if update.CurrentAssetID != "" {
+			payload["current_asset_id"] = update.CurrentAssetID
+		}
+		if update.Total > 0 {
+			payload["done"] = update.Done
+			payload["total"] = update.Total
+		}
+		if update.Stage != "" {
+			payload["stage"] = update.Stage
+		}
+		if update.Detail != "" {
+			payload["detail"] = update.Detail
+		}
+		_, err := reducer.Apply(ctx, runner.database, []contracts.Event{{
+			Type: "JobProgress", DraftID: value(job.DraftID), Payload: payload,
+		}}, reducer.Options{Actor: contracts.ActorJob})
+		if err == nil {
+			sequence++
+			sent = true
+			lastAt = now
+			lastProgress = update.Progress
+			if progressHasMetadata(update) {
+				lastMetadata = update
+			}
+		}
+		return err
+	}
+}
+
+func progressMetadataEqual(left, right ProgressUpdate) bool {
+	return left.CurrentAssetID == right.CurrentAssetID && left.Done == right.Done &&
+		left.Total == right.Total && left.Stage == right.Stage && left.Detail == right.Detail
+}
+
+func progressHasMetadata(update ProgressUpdate) bool {
+	return update.CurrentAssetID != "" || update.Done != 0 || update.Total != 0 ||
+		update.Stage != "" || update.Detail != ""
+}
+
+func invokeHandler(
+	handler Handler,
+	ctx context.Context,
+	job Job,
+	report ProgressReporter,
+) (result map[string]any, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("job handler panic: %v", recovered)
+			result = nil
+		}
+	}()
+	return handler(ctx, job, report)
+}
+
+func claimedJobOptions(job Job, options reducer.Options) reducer.Options {
+	options.Actor = contracts.ActorJob
+	if job.WorkerID != nil && job.StartedAt != nil {
+		options.JobClaim = &reducer.JobClaim{
+			JobID: job.ID, WorkerID: *job.WorkerID, StartedAt: *job.StartedAt,
+		}
+	}
+	return options
 }
 
 func (runner *Runner) emitTerminal(

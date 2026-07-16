@@ -13,6 +13,7 @@ import {
 } from "./StructuredInteractionRenderer";
 import type {
   AnswerDecisionHandler,
+  CancelJobHandler,
   DecisionInteractionItem
 } from "./StructuredInteractionRenderer";
 import type {
@@ -48,7 +49,9 @@ export function AssistantThread({
   highlightedMessageId = null,
   streamItems = [],
   modelRetry = null,
-  subagentProgress = []
+  subagentProgress = [],
+  onCancelJob,
+  cancelPendingJobId = null
 }: {
   runtime: ConsoleExternalStoreRuntime;
   onAnswerDecision: AnswerDecisionHandler;
@@ -57,6 +60,8 @@ export function AssistantThread({
   streamItems?: TurnStreamItem[];
   modelRetry?: ModelRetryState | null;
   subagentProgress?: SubagentProgressEntry[];
+  onCancelJob?: CancelJobHandler;
+  cancelPendingJobId?: string | null;
 }): ReactElement {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const followLatestRef = useRef(true);
@@ -168,6 +173,8 @@ export function AssistantThread({
                   onAnswerDecision={onAnswerDecision}
                   answerPending={answerPending}
                   highlighted={highlightedMessageId === block.message.id}
+                  onCancelJob={onCancelJob}
+                  cancelPendingJobId={cancelPendingJobId}
                 />
               )
             )}
@@ -181,6 +188,8 @@ export function AssistantThread({
                   answerPending={answerPending}
                   highlighted={highlightedMessageId === block.message.message_id}
                   streaming={block.message.kind === "assistant"}
+                  onCancelJob={onCancelJob}
+                  cancelPendingJobId={cancelPendingJobId}
                 />
               ) : (
                 <ToolActivityGroup
@@ -202,6 +211,8 @@ export function AssistantThread({
                 onAnswerDecision={onAnswerDecision}
                 answerPending={answerPending}
                 highlighted={highlightedMessageId === structuredMessage.id}
+                onCancelJob={onCancelJob}
+                cancelPendingJobId={cancelPendingJobId}
               />
             ) : null}
           </div>
@@ -275,13 +286,17 @@ function MessageRow({
   onAnswerDecision,
   answerPending,
   highlighted,
-  streaming = false
+  streaming = false,
+  onCancelJob,
+  cancelPendingJobId
 }: {
   message: ConsoleAssistantMessage;
   onAnswerDecision: AnswerDecisionHandler;
   answerPending: boolean;
   highlighted: boolean;
   streaming?: boolean;
+  onCancelJob?: CancelJobHandler;
+  cancelPendingJobId?: string | null;
 }): ReactElement {
   if (message.metadata.consoleRole === "system_observation") {
     return <BackgroundActivityGroup messages={[message]} />;
@@ -309,6 +324,8 @@ function MessageRow({
             item={part.data}
             onAnswerDecision={onAnswerDecision}
             answerPending={answerPending}
+            onCancelJob={onCancelJob}
+            cancelPendingJobId={cancelPendingJobId}
           />
         ))}
         {decisionItems.length > 0 ? (

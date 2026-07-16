@@ -58,9 +58,10 @@ func (server *Server) CancelJobApiJobsJobIdCancelPost(
 	if assetID.Valid {
 		eventPayload["asset_id"] = assetID.String
 	}
-	if payload.Reason != nil {
-		eventPayload["reason"] = *payload.Reason
-	}
+	// turn_cancelled is an internal control reason reserved for the turn
+	// cancellation endpoint. A single-job cancellation always uses the public
+	// user cancellation semantic, regardless of client-supplied display text.
+	eventPayload["reason"] = "user_cancelled"
 	result, err := reducer.Apply(request.Context(), server.database, []contracts.Event{{
 		Type: "JobCancelled", DraftID: eventDraftID, Payload: eventPayload,
 	}}, reducer.Options{Actor: contracts.ActorUser})

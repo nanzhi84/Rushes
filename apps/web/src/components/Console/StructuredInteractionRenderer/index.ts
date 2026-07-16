@@ -10,6 +10,7 @@ export {
 } from "./events";
 export type {
   AnswerDecisionHandler,
+  CancelJobHandler,
   DecisionInteractionItem,
   DomainSsePayload,
   StructuredInteractionItem

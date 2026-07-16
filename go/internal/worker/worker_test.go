@@ -119,7 +119,7 @@ func TestRunnerRetriesThenEmitsTerminalEvent(t *testing.T) {
 	clock := now
 	runner, err := NewRunner(RunnerConfig{
 		Database: database, Registry: registry, WorkerID: "runner",
-		HeartbeatInterval: time.Hour, Now: func() time.Time { return clock },
+		HeartbeatInterval: 10 * time.Second, Now: func() time.Time { return clock },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -146,6 +146,271 @@ func TestRunnerRetriesThenEmitsTerminalEvent(t *testing.T) {
 	}
 	if succeeded != 1 {
 		t.Fatalf("JobSucceeded=%d", succeeded)
+	}
+}
+
+func TestRunnerRecoversHandlerPanicThroughRetryPolicy(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+	createDraft(t, database, "draft_panic_retry", now)
+	apply(t, database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft_panic_retry", Payload: map[string]any{
+			"job_id": "job_panic", "kind": "panic_once", "idempotency_key": "panic_once",
+			"max_retries": 1, "next_run_at": now.Format(time.RFC3339Nano),
+		},
+	}}, contracts.ActorSystem, now)
+	registry := NewRegistry()
+	calls := 0
+	if err := registry.Register("panic_once", func(
+		context.Context, Job, ProgressReporter,
+	) (map[string]any, error) {
+		calls++
+		if calls == 1 {
+			panic("transient panic")
+		}
+		return map[string]any{"recovered": true}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock := now
+	runner, err := NewRunner(RunnerConfig{
+		Database: database, Registry: registry, WorkerID: "panic-worker",
+		HeartbeatInterval: 10 * time.Second, Now: func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := runner.RunOnce(t.Context()); err != nil || !worked {
+		t.Fatalf("panic run worked=%v err=%v", worked, err)
+	}
+	stored, err := GetJob(t.Context(), database, "job_panic")
+	var failure string
+	if scanErr := database.Read().QueryRowContext(t.Context(),
+		"SELECT error_json FROM jobs WHERE job_id='job_panic'",
+	).Scan(&failure); scanErr != nil {
+		t.Fatal(scanErr)
+	}
+	if err != nil || stored.Status != "pending" || stored.Attempts != 1 ||
+		!strings.Contains(failure, "transient panic") {
+		t.Fatalf("after panic=%#v err=%v", stored, err)
+	}
+	clock = now.Add(time.Second)
+	if worked, err := runner.RunOnce(t.Context()); err != nil || !worked {
+		t.Fatalf("retry worked=%v err=%v", worked, err)
+	}
+	stored, err = GetJob(t.Context(), database, "job_panic")
+	if err != nil || stored.Status != "succeeded" || calls != 2 {
+		t.Fatalf("after recovery=%#v calls=%d err=%v", stored, calls, err)
+	}
+}
+
+func TestProgressReporterThrottlesAndForwardsOptionalDetail(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	now := time.Date(2026, 7, 15, 13, 0, 0, 0, time.UTC)
+	createDraft(t, database, "draft_progress_throttle", now)
+	apply(t, database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft_progress_throttle", Payload: map[string]any{
+			"job_id": "job_progress", "kind": "understand", "idempotency_key": "progress",
+			"next_run_at": now.Format(time.RFC3339Nano),
+		},
+	}}, contracts.ActorSystem, now)
+	job, err := Claim(t.Context(), database, "progress-worker", now)
+	if err != nil || job == nil {
+		t.Fatalf("claim=%#v err=%v", job, err)
+	}
+	runner, err := NewRunner(RunnerConfig{
+		Database: database, Registry: NewRegistry(), Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := runner.newProgressReporter()
+	updates := []ProgressUpdate{
+		{Progress: 0},
+		{Progress: 0.005},
+		{Progress: 0.009},
+		{Progress: 0.01, CurrentAssetID: "asset_detail", Done: 1, Total: 5,
+			Stage: "view_frames", Detail: "理解素材 2/5：采访.mp4 正在调用 VLM"},
+		{Progress: 0.015},
+		{Progress: 1},
+	}
+	for _, update := range updates {
+		if err := report(t.Context(), *job, update); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM event_log WHERE event_type='JobProgress'
+		AND json_extract(payload_json,'$.payload.job_id')='job_progress'`,
+	).Scan(&count); err != nil || count != 3 {
+		t.Fatalf("progress events=%d want=3 err=%v", count, err)
+	}
+	var detail, stage, assetID string
+	var done, total int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT
+			json_extract(payload_json,'$.payload.detail'),
+			json_extract(payload_json,'$.payload.stage'),
+			json_extract(payload_json,'$.payload.current_asset_id'),
+			json_extract(payload_json,'$.payload.done'),
+			json_extract(payload_json,'$.payload.total')
+		FROM event_log WHERE event_type='JobProgress'
+		AND json_extract(payload_json,'$.payload.current_asset_id')='asset_detail'`,
+	).Scan(&detail, &stage, &assetID, &done, &total); err != nil ||
+		detail != "理解素材 2/5：采访.mp4 正在调用 VLM" || stage != "view_frames" ||
+		assetID != "asset_detail" || done != 1 || total != 5 {
+		t.Fatalf("detail=%q stage=%q asset=%q done=%d total=%d err=%v",
+			detail, stage, assetID, done, total, err)
+	}
+}
+
+func TestProgressReporterKeepsSameProgressWithNewDetail(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	now := time.Date(2026, 7, 15, 13, 0, 0, 0, time.UTC)
+	createDraft(t, database, "draft_progress_detail", now)
+	apply(t, database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft_progress_detail", Payload: map[string]any{
+			"job_id": "job_progress_detail", "kind": "understand", "idempotency_key": "detail",
+			"next_run_at": now.Format(time.RFC3339Nano),
+		},
+	}}, contracts.ActorSystem, now)
+	job, err := Claim(t.Context(), database, "progress-worker", now)
+	if err != nil || job == nil {
+		t.Fatalf("claim=%#v err=%v", job, err)
+	}
+	runner, err := NewRunner(RunnerConfig{
+		Database: database, Registry: NewRegistry(), Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := runner.newProgressReporter()
+	if err := report(t.Context(), *job, ProgressUpdate{Progress: 0.55, Detail: "抽取代表帧"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := report(t.Context(), *job, ProgressUpdate{Progress: 0.55, Detail: "调用 VLM"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := database.Read().QueryContext(t.Context(), `
+		SELECT json_extract(payload_json,'$.payload.detail') FROM event_log
+		WHERE event_type='JobProgress' ORDER BY event_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	details := []string{}
+	for rows.Next() {
+		var detail string
+		if err := rows.Scan(&detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	if !reflect.DeepEqual(details, []string{"抽取代表帧", "调用 VLM"}) {
+		t.Fatalf("details=%v", details)
+	}
+}
+
+func TestRunnerPeriodicallyRecoversJobsThatBecomeStale(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	now := time.Now().UTC()
+	createDraft(t, database, "draft_periodic_recovery", now)
+	apply(t, database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft_periodic_recovery", Payload: map[string]any{
+			"job_id": "job_periodic", "kind": "noop", "idempotency_key": "periodic",
+			"next_run_at": now.Format(time.RFC3339Nano),
+		},
+	}}, contracts.ActorSystem, now)
+	if job, err := Claim(t.Context(), database, "dead-worker", now); err != nil || job == nil {
+		t.Fatalf("dead claim=%#v err=%v", job, err)
+	}
+	registry := NewRegistry()
+	if err := registry.Register("noop", func(
+		context.Context, Job, ProgressReporter,
+	) (map[string]any, error) {
+		return map[string]any{"recovered": true}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewRunner(RunnerConfig{
+		Database: database, Registry: registry, WorkerID: "replacement-worker",
+		Concurrency: 1, PollInterval: 2 * time.Millisecond,
+		HeartbeatInterval: 5 * time.Millisecond, HeartbeatTimeout: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	if err := runner.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := GetJob(t.Context(), database, "job_periodic")
+	if err != nil || stored.Status != "succeeded" {
+		t.Fatalf("periodically recovered job=%#v err=%v", stored, err)
+	}
+}
+
+func TestRunnerRecoversAfterTransientTerminalEventWriteFailure(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	now := time.Date(2026, 7, 15, 14, 0, 0, 0, time.UTC)
+	createDraft(t, database, "draft_terminal_recovery", now)
+	apply(t, database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft_terminal_recovery", Payload: map[string]any{
+			"job_id": "job_terminal", "kind": "noop", "idempotency_key": "terminal",
+			"next_run_at": now.Format(time.RFC3339Nano),
+		},
+	}}, contracts.ActorSystem, now)
+	registry := NewRegistry()
+	if err := registry.Register("noop", func(
+		context.Context, Job, ProgressReporter,
+	) (map[string]any, error) {
+		return map[string]any{"ok": true}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock := now
+	runner, err := NewRunner(RunnerConfig{
+		Database: database, Registry: registry, WorkerID: "terminal-worker",
+		HeartbeatInterval: 10 * time.Second, HeartbeatTimeout: time.Minute,
+		Now: func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		CREATE TRIGGER fail_job_terminal
+		BEFORE INSERT ON event_log WHEN NEW.event_type='JobSucceeded'
+		BEGIN SELECT RAISE(ABORT,'transient terminal failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := runner.RunOnce(t.Context()); err == nil || !worked ||
+		!strings.Contains(err.Error(), "transient terminal failure") {
+		t.Fatalf("first worked=%v err=%v", worked, err)
+	}
+	stored, err := GetJob(t.Context(), database, "job_terminal")
+	if err != nil || stored.Status != "running" {
+		t.Fatalf("after transient failure=%#v err=%v", stored, err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), "DROP TRIGGER fail_job_terminal"); err != nil {
+		t.Fatal(err)
+	}
+	clock = now.Add(2 * time.Minute)
+	if recovered, err := RecoverStale(t.Context(), database, clock, time.Minute); err != nil || recovered != 1 {
+		t.Fatalf("recovered=%d err=%v", recovered, err)
+	}
+	if worked, err := runner.RunOnce(t.Context()); err != nil || !worked {
+		t.Fatalf("second worked=%v err=%v", worked, err)
+	}
+	stored, err = GetJob(t.Context(), database, "job_terminal")
+	if err != nil || stored.Status != "succeeded" {
+		t.Fatalf("after terminal recovery=%#v err=%v", stored, err)
 	}
 }
 
@@ -188,7 +453,7 @@ func TestIngestHandlerProducesProbeThumbnailProxyAndProgress(t *testing.T) {
 	}
 	runner, err := NewRunner(RunnerConfig{
 		Database: database, Registry: registry, WorkerID: "ingest",
-		HeartbeatInterval: time.Hour,
+		HeartbeatInterval: 10 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +541,7 @@ func TestRenderWorkerCreatesPreviewWithRenderSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner, err := NewRunner(RunnerConfig{
-		Database: database, Registry: registry, WorkerID: "render", HeartbeatInterval: time.Hour,
+		Database: database, Registry: registry, WorkerID: "render", HeartbeatInterval: 10 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -363,34 +628,39 @@ func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
 		t.Fatal(err)
 	}
 	progress := []float64{}
+	progressUpdates := []ProgressUpdate{}
 	result, err := handler(t.Context(), Job{
 		ID: "understand_job", Payload: map[string]any{
 			"asset_ids": []any{"asset_u1", 42, "asset_u2"}, "focus": "人物",
 		},
-	}, func(_ context.Context, _ Job, value float64) error {
-		progress = append(progress, value)
+	}, func(_ context.Context, _ Job, update ProgressUpdate) error {
+		progress = append(progress, update.Progress)
+		progressUpdates = append(progressUpdates, update)
 		return nil
 	})
-	if err != nil || result["status"] != "completed" || len(progress) != 2 {
+	if err != nil || result["status"] != "completed" || len(progress) < 2 || progress[len(progress)-1] != 1 {
 		t.Fatalf("result=%#v progress=%v err=%v", result, progress, err)
+	}
+	if !containsProgressDetail(progressUpdates, "asset_u1", "view_frames", "asset_u1.mp4") {
+		t.Fatalf("missing asset progress detail: %#v", progressUpdates)
 	}
 	retryProgress := []float64{}
 	result, err = handler(t.Context(), Job{
 		ID: "understand_job", Payload: map[string]any{
 			"asset_ids": []any{"asset_u1", "asset_u2"}, "focus": "人物",
 		},
-	}, func(_ context.Context, _ Job, value float64) error {
-		retryProgress = append(retryProgress, value)
+	}, func(_ context.Context, _ Job, update ProgressUpdate) error {
+		retryProgress = append(retryProgress, update.Progress)
 		return nil
 	})
-	if err != nil || result["status"] != "completed" || len(retryProgress) != 2 {
+	if err != nil || result["status"] != "completed" || len(retryProgress) != 2 || retryProgress[1] != 1 {
 		t.Fatalf("retry result=%#v progress=%v err=%v", result, retryProgress, err)
 	}
 	cacheResult, err := handler(t.Context(), Job{
 		ID: "understand_cache_hit", Payload: map[string]any{
 			"asset_ids": []string{"asset_u1"}, "focus": "人物",
 		},
-	}, func(context.Context, Job, float64) error { return nil })
+	}, func(context.Context, Job, ProgressUpdate) error { return nil })
 	if err != nil || !reflect.DeepEqual(cacheResult["cache_hit_asset_ids"], []string{"asset_u1"}) ||
 		len(cacheResult["analyzed_asset_ids"].([]string)) != 0 {
 		t.Fatalf("cache result=%#v err=%v", cacheResult, err)
@@ -408,7 +678,7 @@ func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
 		}
 	}
 	assetID := "asset_u1"
-	if _, err := handler(t.Context(), Job{ID: "by_asset", AssetID: &assetID}, func(context.Context, Job, float64) error { return nil }); err != nil {
+	if _, err := handler(t.Context(), Job{ID: "by_asset", AssetID: &assetID}, func(context.Context, Job, ProgressUpdate) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := database.Read().QueryContext(t.Context(), `
@@ -428,7 +698,7 @@ func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
 	if len(versions) != 2 || versions[0] != 1 || versions[1] != 2 {
 		t.Fatalf("summary versions=%v", versions)
 	}
-	if _, err := handler(t.Context(), Job{ID: "missing", Payload: map[string]any{}}, func(context.Context, Job, float64) error { return nil }); err == nil {
+	if _, err := handler(t.Context(), Job{ID: "missing", Payload: map[string]any{}}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
 		t.Fatal("missing assets should fail")
 	}
 	if got := stringSlice([]string{"a", "b"}); len(got) != 2 {
@@ -476,14 +746,15 @@ func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
 	}}
 	reportErr := errors.New("进度写入失败")
 	firstProgress := []float64{}
-	firstResult, err := handler(t.Context(), job, func(_ context.Context, _ Job, progress float64) error {
-		firstProgress = append(firstProgress, progress)
+	firstResult, err := handler(t.Context(), job, func(_ context.Context, _ Job, update ProgressUpdate) error {
+		firstProgress = append(firstProgress, update.Progress)
 		return reportErr
 	})
-	if !errors.Is(err, reportErr) || firstResult != nil || !reflect.DeepEqual(firstProgress, []float64{0.5}) {
+	if !errors.Is(err, reportErr) || firstResult != nil || len(firstProgress) != 1 ||
+		firstProgress[0] <= 0 || firstProgress[0] >= 0.5 {
 		t.Fatalf("first result=%#v progress=%v err=%v", firstResult, firstProgress, err)
 	}
-	for index, assetID := range assetIDs {
+	for _, assetID := range assetIDs {
 		var count int
 		if err := database.Read().QueryRowContext(t.Context(),
 			"SELECT COUNT(*) FROM material_summaries WHERE asset_id=?", assetID,
@@ -491,21 +762,18 @@ func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := 0
-		if index == 0 {
-			want = 1
-		}
 		if count != want {
 			t.Fatalf("第一次 reporter 失败后 %s summaries=%d want=%d", assetID, count, want)
 		}
 	}
 
 	retryProgress := []float64{}
-	retryResult, err := handler(t.Context(), job, func(_ context.Context, _ Job, progress float64) error {
-		retryProgress = append(retryProgress, progress)
+	retryResult, err := handler(t.Context(), job, func(_ context.Context, _ Job, update ProgressUpdate) error {
+		retryProgress = append(retryProgress, update.Progress)
 		return nil
 	})
 	if err != nil || retryResult["status"] != "completed" ||
-		!reflect.DeepEqual(retryProgress, []float64{0.5, 1.0}) ||
+		len(retryProgress) < 2 || retryProgress[len(retryProgress)-1] != 1 ||
 		!reflect.DeepEqual(retryResult["asset_ids"], assetIDs) ||
 		!reflect.DeepEqual(retryResult["analyzed_asset_ids"], assetIDs) ||
 		!reflect.DeepEqual(retryResult["cache_hit_asset_ids"], []string{}) {
@@ -514,8 +782,8 @@ func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
 
 	// 同一 job 再次执行必须重放相同有序结果，不能新增摘要或领域事件。
 	replayProgress := []float64{}
-	replayResult, err := handler(t.Context(), job, func(_ context.Context, _ Job, progress float64) error {
-		replayProgress = append(replayProgress, progress)
+	replayResult, err := handler(t.Context(), job, func(_ context.Context, _ Job, update ProgressUpdate) error {
+		replayProgress = append(replayProgress, update.Progress)
 		return nil
 	})
 	if err != nil || !reflect.DeepEqual(replayProgress, []float64{0.5, 1.0}) ||
@@ -534,7 +802,7 @@ func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
 	}{
 		{eventType: "MaterialUnderstandingStarted", want: 2},
 		{eventType: "MaterialUnderstandingCompleted", want: 2},
-		{eventType: "MaterialUnderstandingFailed", want: 0},
+		{eventType: "MaterialUnderstandingFailed", want: 1},
 	} {
 		var count int
 		if err := database.Read().QueryRowContext(t.Context(), `
@@ -644,6 +912,12 @@ func TestRunnerLoopRegistryAndTerminalFailureBranches(t *testing.T) {
 		t.Fatal("nil runner config should fail")
 	}
 	database := testDatabase(t)
+	if _, err := NewRunner(RunnerConfig{
+		Database: database, Registry: NewRegistry(),
+		HeartbeatInterval: time.Minute, HeartbeatTimeout: time.Minute,
+	}); err == nil {
+		t.Fatal("unsafe heartbeat interval should fail")
+	}
 	registry := NewRegistry()
 	if err := registry.Register("", func(context.Context, Job, ProgressReporter) (map[string]any, error) { return nil, nil }); err == nil {
 		t.Fatal("empty kind should fail")
@@ -652,10 +926,10 @@ func TestRunnerLoopRegistryAndTerminalFailureBranches(t *testing.T) {
 		t.Fatal("nil handler should fail")
 	}
 	handler := func(ctx context.Context, job Job, report ProgressReporter) (map[string]any, error) {
-		if err := report(ctx, job, -1); err != nil {
+		if err := report(ctx, job, Progress(-1)); err != nil {
 			return nil, err
 		}
-		if err := report(ctx, job, 2); err != nil {
+		if err := report(ctx, job, Progress(2)); err != nil {
 			return nil, err
 		}
 		time.Sleep(3 * time.Millisecond)
@@ -766,7 +1040,7 @@ func TestRunnerPreservesCancellationAgainstLateProgressAndSuccess(t *testing.T) 
 	) (map[string]any, error) {
 		close(started)
 		<-release
-		if err := report(ctx, job, 0.5); err != nil {
+		if err := report(ctx, job, Progress(0.5)); err != nil {
 			return nil, err
 		}
 		return map[string]any{"late": true}, nil
@@ -782,7 +1056,7 @@ func TestRunnerPreservesCancellationAgainstLateProgressAndSuccess(t *testing.T) 
 	}}, contracts.ActorUser, now)
 	runner, err := NewRunner(RunnerConfig{
 		Database: database, Registry: registry, WorkerID: "cancel-running",
-		HeartbeatInterval: time.Hour,
+		HeartbeatInterval: 10 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -826,6 +1100,154 @@ func TestRunnerPreservesCancellationAgainstLateProgressAndSuccess(t *testing.T) 
 		AND event_type IN ('JobProgress','JobSucceeded','JobFailed')`,
 	).Scan(&lateEvents); err != nil || lateEvents != 0 {
 		t.Fatalf("late events=%d err=%v", lateEvents, err)
+	}
+}
+
+func TestCancelledJobClaimFencesAllWorkerResults(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	now := time.Now().UTC()
+	const (
+		draftID = "draft_claim_fence"
+		assetID = "asset_claim_fence"
+		jobID   = "job_claim_fence"
+	)
+	createDraft(t, database, draftID, now)
+	apply(t, database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "import_claim_fence",
+			"storage_mode": "reference", "reference_path": "/tmp/claim-fence.mp4",
+			"kind": "video", "source": "local", "filename": "claim-fence.mp4",
+			"hash": "claim-fence", "size": 1, "ingest_status": "ready", "usable": true,
+		}},
+		{Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
+			"job_id": jobID, "kind": "understand", "requested_by_draft_id": draftID,
+			"idempotency_key": jobID, "next_run_at": now.Format(time.RFC3339Nano),
+		}},
+	}, contracts.ActorUser, now)
+	job, err := Claim(t.Context(), database, "claim-fence-worker", now)
+	if err != nil || job == nil || job.ID != jobID {
+		t.Fatalf("claim=%#v err=%v", job, err)
+	}
+	if _, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobCancelled", DraftID: draftID, Payload: map[string]any{
+			"job_id": jobID, "kind": "understand", "reason": "user_cancelled",
+			"requested_by_draft_id": draftID,
+		},
+	}}, reducer.Options{Actor: contracts.ActorUser}); err != nil {
+		t.Fatal(err)
+	}
+
+	resultRows := reducer.ResultRows{MaterialSummaries: []reducer.MaterialSummaryRow{{
+		ID: "summary_claim_fence", AssetID: assetID, Status: "ready",
+		Summary: map[string]any{"description": "late"},
+	}}}
+	for _, events := range [][]contracts.Event{
+		{{Type: "MaterialUnderstandingCompleted", Payload: map[string]any{
+			"asset_id": assetID, "job_id": jobID, "attempt": 0,
+			"summary_id": "summary_claim_fence",
+		}}},
+		{{Type: "PreviewRendered", DraftID: draftID, Payload: map[string]any{
+			"artifact_id": "preview_claim_fence", "timeline_version": 1,
+			"object_hash": "preview-claim-fence", "object_size": 1,
+		}}},
+		{{Type: "ExportCompleted", DraftID: draftID, Payload: map[string]any{
+			"artifact_id": "export_claim_fence", "timeline_version": 1,
+			"object_hash": "export-claim-fence", "object_size": 1,
+		}}},
+	} {
+		rows := reducer.ResultRows{}
+		if events[0].Type == "MaterialUnderstandingCompleted" {
+			rows = resultRows
+		}
+		if _, err := reducer.Apply(t.Context(), database, events,
+			claimedJobOptions(*job, reducer.Options{ResultRows: rows})); !errors.Is(err, reducer.ErrJobCancelled) {
+			t.Fatalf("event=%s err=%v want ErrJobCancelled", events[0].Type, err)
+		}
+	}
+
+	assertEmpty := func(query string, args ...any) {
+		t.Helper()
+		var count int
+		if err := database.Read().QueryRowContext(t.Context(), query, args...).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("late result count=%d err=%v query=%s", count, err, query)
+		}
+	}
+	assertEmpty("SELECT COUNT(*) FROM material_summaries WHERE summary_id='summary_claim_fence'")
+	assertEmpty("SELECT COUNT(*) FROM previews WHERE preview_id='preview_claim_fence'")
+	assertEmpty("SELECT COUNT(*) FROM exports WHERE export_id='export_claim_fence'")
+	assertEmpty(`SELECT COUNT(*) FROM event_log WHERE event_type IN
+		('MaterialUnderstandingCompleted','PreviewRendered','ExportCompleted')
+		AND (json_extract(payload_json,'$.payload.job_id')=?
+			OR json_extract(payload_json,'$.payload.artifact_id') IN
+				('preview_claim_fence','export_claim_fence'))`, jobID)
+}
+
+func TestRunningJobCancellationStopsHandlerOnHeartbeat(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	now := time.Now().UTC()
+	createDraft(t, database, "draft_heartbeat_cancel", now)
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	registry := NewRegistry()
+	if err := registry.Register("blocking", func(
+		ctx context.Context,
+		_ Job,
+		_ ProgressReporter,
+	) (map[string]any, error) {
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return nil, ctx.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	apply(t, database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft_heartbeat_cancel", Payload: map[string]any{
+			"job_id": "job_heartbeat_cancel", "kind": "blocking",
+			"requested_by_draft_id": "draft_heartbeat_cancel",
+			"idempotency_key":       "heartbeat-cancel",
+			"next_run_at":           now.Format(time.RFC3339Nano),
+		},
+	}}, contracts.ActorUser, now)
+	runner, err := NewRunner(RunnerConfig{
+		Database: database, Registry: registry, WorkerID: "heartbeat-worker",
+		HeartbeatInterval: 5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan error, 1)
+	go func() {
+		_, runErr := runner.RunOnce(t.Context())
+		finished <- runErr
+	}()
+	<-started
+	if _, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobCancelled", DraftID: "draft_heartbeat_cancel", Payload: map[string]any{
+			"job_id": "job_heartbeat_cancel", "kind": "blocking", "reason": "turn_cancelled",
+			"requested_by_draft_id": "draft_heartbeat_cancel",
+		},
+	}}, reducer.Options{Actor: contracts.ActorUser}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("job 取消后 heartbeat 没有停止 handler")
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatalf("cancelled runner err=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled runner 没有结束")
+	}
+	job, err := GetJob(t.Context(), database, "job_heartbeat_cancel")
+	if err != nil || job.Status != "cancelled" {
+		t.Fatalf("job=%#v err=%v", job, err)
 	}
 }
 
@@ -962,7 +1384,7 @@ func TestWorkerHandlerFailureSemantics(t *testing.T) {
 	}
 	if _, err := understand(t.Context(), Job{ID: "understand_missing", Payload: map[string]any{
 		"asset_ids": []string{"asset_missing_source"},
-	}}, func(context.Context, Job, float64) error { return nil }); err == nil {
+	}}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
 		t.Fatal("缺失源文件应触发理解失败")
 	}
 	var failed int
@@ -972,7 +1394,7 @@ func TestWorkerHandlerFailureSemantics(t *testing.T) {
 	reportErr := errors.New("report failed")
 	if _, err := understand(t.Context(), Job{ID: "understand_report", Payload: map[string]any{
 		"asset_ids": []string{"asset_font"},
-	}}, func(context.Context, Job, float64) error { return reportErr }); !errors.Is(err, reportErr) {
+	}}, func(context.Context, Job, ProgressUpdate) error { return reportErr }); !errors.Is(err, reportErr) {
 		t.Fatalf("understand report err=%v", err)
 	}
 	duplicate := NewRegistry()
@@ -991,26 +1413,26 @@ func TestWorkerHandlerFailureSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ingest(t.Context(), Job{ID: "missing_asset"}, func(context.Context, Job, float64) error { return nil }); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := ingest(t.Context(), Job{ID: "missing_asset"}, func(context.Context, Job, ProgressUpdate) error { return nil }); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("missing ingest err=%v", err)
 	}
 	invalidAssetID := "asset_invalid_media"
-	if _, err := ingest(t.Context(), Job{ID: "report_first", AssetID: &invalidAssetID}, func(context.Context, Job, float64) error { return reportErr }); !errors.Is(err, reportErr) {
+	if _, err := ingest(t.Context(), Job{ID: "report_first", AssetID: &invalidAssetID}, func(context.Context, Job, ProgressUpdate) error { return reportErr }); !errors.Is(err, reportErr) {
 		t.Fatalf("ingest first report err=%v", err)
 	}
-	if _, err := ingest(t.Context(), Job{ID: "probe_invalid", AssetID: &invalidAssetID}, func(context.Context, Job, float64) error { return nil }); err == nil {
+	if _, err := ingest(t.Context(), Job{ID: "probe_invalid", AssetID: &invalidAssetID}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
 		t.Fatal("非法媒体应在 probe 阶段失败")
 	}
 
-	if _, err := renderHandler(database, false)(t.Context(), Job{}, func(context.Context, Job, float64) error { return nil }); err == nil {
+	if _, err := renderHandler(database, false)(t.Context(), Job{}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
 		t.Fatal("无 draft_id 的 render job 应失败")
 	}
 	draftID := "draft_handler_failures"
-	if _, err := renderHandler(database, false)(t.Context(), Job{DraftID: &draftID, Payload: map[string]any{}}, func(context.Context, Job, float64) error { return nil }); err == nil || !strings.Contains(err.Error(), "timeline_version") {
+	if _, err := renderHandler(database, false)(t.Context(), Job{DraftID: &draftID, Payload: map[string]any{}}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil || !strings.Contains(err.Error(), "timeline_version") {
 		t.Fatalf("缺少 timeline_version render err=%v", err)
 	}
 	for _, invalidVersion := range []any{0, -1, 1.5, "1"} {
-		if _, err := renderHandler(database, false)(t.Context(), Job{DraftID: &draftID, Payload: map[string]any{"timeline_version": invalidVersion}}, func(context.Context, Job, float64) error { return nil }); err == nil {
+		if _, err := renderHandler(database, false)(t.Context(), Job{DraftID: &draftID, Payload: map[string]any{"timeline_version": invalidVersion}}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
 			t.Fatalf("非法 timeline_version=%#v 应失败", invalidVersion)
 		}
 	}
@@ -1023,8 +1445,32 @@ func TestWorkerHandlerFailureSemantics(t *testing.T) {
 	apply(t, database, []contracts.Event{{Type: "TimelineVersionCreated", DraftID: draftID, BaseVersion: &base, Payload: map[string]any{
 		"timeline_version": 1, "document_json": documentMap,
 	}}}, contracts.ActorAgent, now)
-	if _, err := renderHandler(database, false)(t.Context(), Job{DraftID: &draftID, Payload: map[string]any{"timeline_version": 1}}, func(context.Context, Job, float64) error { return reportErr }); !errors.Is(err, reportErr) {
+	if _, err := renderHandler(database, false)(t.Context(), Job{DraftID: &draftID, Payload: map[string]any{"timeline_version": 1}}, func(context.Context, Job, ProgressUpdate) error { return reportErr }); !errors.Is(err, reportErr) {
 		t.Fatalf("render report err=%v", err)
+	}
+}
+
+func TestUnderstandingProgressMappingCoversEveryAnalyzerStage(t *testing.T) {
+	for stage, want := range map[string]float64{
+		"audio_probe": 0.1, "scene_detect": 0.15, "scene_verify": 0.35,
+		"view_frames": 0.55, "transcribe": 0.8, "emit_summary": 0.95,
+		"unknown": 0.5,
+	} {
+		if got := understandingStageProgress(stage); got != want {
+			t.Fatalf("stage=%s progress=%v want=%v", stage, got, want)
+		}
+	}
+	for _, test := range []struct {
+		note, wantStage, wantMessage string
+	}{
+		{"view_frames：抽取代表帧", "view_frames", "抽取代表帧"},
+		{"无阶段说明", "analyze", "无阶段说明"},
+		{"scene_verify：", "scene_verify", "正在分析"},
+	} {
+		stage, message := understandingProgressDetail(test.note)
+		if stage != test.wantStage || message != test.wantMessage {
+			t.Fatalf("note=%q stage=%q message=%q", test.note, stage, message)
+		}
 	}
 }
 
@@ -1071,7 +1517,7 @@ func TestWorkerDatabaseAndSerializationFailures(t *testing.T) {
 	if _, err := runner.RunOnce(t.Context()); err == nil {
 		t.Fatal("closed RunOnce should fail claim")
 	}
-	if err := runner.reportProgress(t.Context(), Job{ID: "job"}, 0.5); err == nil {
+	if err := runner.newProgressReporter()(t.Context(), Job{ID: "job"}, Progress(0.5)); err == nil {
 		t.Fatal("closed progress should fail")
 	}
 	if err := runner.emitTerminal(t.Context(), Job{ID: "job"}, "JobFailed", nil, nil); err == nil {
@@ -1100,6 +1546,16 @@ func testDatabase(t *testing.T) *storage.DB {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	return database
+}
+
+func containsProgressDetail(updates []ProgressUpdate, assetID, stage, filename string) bool {
+	for _, update := range updates {
+		if update.CurrentAssetID == assetID && update.Stage == stage &&
+			strings.Contains(update.Detail, filename) {
+			return true
+		}
+	}
+	return false
 }
 
 func createDraft(t *testing.T, database *storage.DB, draftID string, now time.Time) {

@@ -48,6 +48,10 @@ type Service struct {
 	fallbackScaffold fallbackScaffold
 	cancel           context.CancelFunc
 	bridgeWG         sync.WaitGroup
+	bridgeMu         sync.Mutex
+	bridgeInflight   map[string]struct{}
+	bridgeDispatchMu sync.Mutex
+	bridgeScanCursor int64
 }
 
 func NewService(
@@ -73,6 +77,7 @@ func NewServiceWithModels(
 		database: database, hub: NewTurnStreamHub(0), cancel: cancel,
 		chatModel: chatModel, analyzer: understanding.NewAnalyzer(visionModel),
 		contextManager: NewContextManager(database),
+		bridgeInflight: map[string]struct{}{},
 	}
 	service.fallbackScaffold = newFallbackScaffold(service)
 	registry, err := rushestools.NewRegistry(database, service)
@@ -169,11 +174,15 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		if item.Kind == QueueJobObservation && service.react == nil {
 			messageKind = "observation"
 		}
+		resultRows := reducer.ResultRows{Message: &reducer.MessageRow{
+			ID: messageID, DraftID: item.DraftID, Role: "assistant", Kind: messageKind, Content: content,
+		}}
+		if delivery := observationDelivery(item); delivery != nil {
+			resultRows.AgentJobObservationDelivery = delivery
+		}
 		result, applyErr := reducer.Apply(ctx, service.database, nil, reducer.Options{
-			Actor: contracts.ActorAgent,
-			ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
-				ID: messageID, DraftID: item.DraftID, Role: "assistant", Kind: messageKind, Content: content,
-			}},
+			Actor:      contracts.ActorAgent,
+			ResultRows: resultRows,
 		})
 		if applyErr != nil {
 			service.hub.Record(item.DraftID, StreamEvent{"type": "turn_error", "message": applyErr.Error()})
@@ -186,9 +195,31 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 			"type": "message_completed", "message_id": messageID,
 			"kind": messageKind, "content": content,
 		})
+	} else if delivery := observationDelivery(item); delivery != nil {
+		result, applyErr := reducer.Apply(ctx, service.database, nil, reducer.Options{
+			Actor:      contracts.ActorAgent,
+			ResultRows: reducer.ResultRows{AgentJobObservationDelivery: delivery},
+		})
+		if applyErr != nil {
+			return applyErr
+		}
+		if result.Status != reducer.StatusApplied {
+			return fmt.Errorf("job observation delivery reducer status: %s", result.Status)
+		}
 	}
 	service.recordTurnEnded(item.DraftID, outcome, reason, turnBudget)
 	return nil
+}
+
+func observationDelivery(item QueueItem) *reducer.AgentJobObservationDeliveryRow {
+	if item.Kind != QueueJobObservation {
+		return nil
+	}
+	claimToken, _ := item.Payload["claim_token"].(string)
+	if claimToken == "" {
+		return nil
+	}
+	return &reducer.AgentJobObservationDeliveryRow{JobID: item.ItemID, ClaimToken: claimToken}
 }
 
 func (service *Service) recordTurnEnded(draftID, outcome string, reason any, turnBudget *turnBudgetState) {
@@ -331,8 +362,11 @@ func (service *Service) continueAfterJobObservation(
 		kind = "后台"
 	}
 	succeeded := eventType == "JobSucceeded"
+	cancelled := eventType == "JobCancelled"
 	terminalDetails := payload["result"]
-	if !succeeded {
+	if cancelled {
+		terminalDetails = map[string]any{"reason": payload["reason"]}
+	} else if !succeeded {
 		terminalDetails = payload["error"]
 		if terminalDetails == nil {
 			terminalDetails = payload["failure"]
@@ -342,6 +376,9 @@ func (service *Service) continueAfterJobObservation(
 	if service.react == nil {
 		if succeeded {
 			return fmt.Sprintf("%s 任务 %s 已完成。", kind, jobID), nil
+		}
+		if cancelled {
+			return fmt.Sprintf("后台任务已被取消：%s（job_id：%s）。", kind, jobID), nil
 		}
 		return fmt.Sprintf("%s 任务 %s 失败：%s", kind, jobID, details), nil
 	}
@@ -367,6 +404,10 @@ func (service *Service) continueAfterJobObservation(
 	if !succeeded {
 		status = "失败"
 		nextAction = "先读取失败信息并诊断；能用现有工具修复时立即修复并重试，不要把失败说成完成。"
+	}
+	if cancelled {
+		status = "已取消"
+		nextAction = "明确说明后台任务已被取消；保留现有成果，不要自动重试，也不要把取消说成失败。"
 	}
 	prompt := fmt.Sprintf(
 		"你等待的后台任务已到终态。\n任务：%s\njob_id：%s\n状态：%s\n终态详情：%s%s\n这是原任务的自动续跑，不是新的用户请求。%s 不要重复询问已经回答的问题，也不要仅回复泛化的“后台已完成”。",

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -112,6 +114,394 @@ func TestTurnQueueHelpersCloseAndRejectedItems(t *testing.T) {
 	}
 	nilRunner.JoinDraft("draft")
 	nilRunner.Close()
+
+	var nilBarrier *DraftCancellationBarrier
+	if !nilBarrier.Wait(t.Context()) {
+		t.Fatal("nil barrier 应视为已完成")
+	}
+	nilBarrier.Release()
+	nilBarrier.Abandon()
+}
+
+func TestTurnQueueCloseLinearizesBeforeLaterEnqueue(t *testing.T) {
+	runs := make(chan QueueItem, 1)
+	queue := NewTurnQueue(t.Context(), func(_ context.Context, item QueueItem) error {
+		runs <- item
+		return nil
+	})
+	queue.Close()
+
+	const attempts = 32
+	results := make(chan bool, attempts)
+	for index := range attempts {
+		go func() {
+			results <- queue.EnqueueUserMessage("draft", fmt.Sprintf("late_%d", index), "no")
+		}()
+	}
+	for range attempts {
+		if <-results {
+			t.Fatal("Close 返回后不得接受新 turn")
+		}
+	}
+	select {
+	case item := <-runs:
+		t.Fatalf("Close 返回后 runner 不应启动: %#v", item)
+	default:
+	}
+	queue.mu.Lock()
+	workerCount := len(queue.workers)
+	leaseCount := len(queue.cancelLeases)
+	queue.mu.Unlock()
+	if workerCount != 0 || leaseCount != 0 {
+		t.Fatalf("Close 后遗留队列状态: workers=%d leases=%d", workerCount, leaseCount)
+	}
+	if barrier, requested := queue.BeginDraftCancellation("draft"); barrier != nil || requested {
+		t.Fatalf("Close 后不得创建取消屏障: barrier=%v requested=%v", barrier, requested)
+	}
+}
+
+func TestDraftCancellationAbandonDrainsProducerBlockedBeforeSend(t *testing.T) {
+	queue := NewTurnQueue(t.Context(), nil)
+	worker := newDraftWorker()
+	queue.workers["draft"] = worker
+	consumed := make(chan string, cap(worker.queue)+1)
+
+	for index := range cap(worker.queue) {
+		itemID := fmt.Sprintf("queued_%d", index)
+		if !queue.Enqueue(QueueItem{
+			DraftID: "draft", ItemID: itemID,
+			onConsumed: func(error) { consumed <- itemID },
+		}) {
+			t.Fatalf("填充队列失败: index=%d", index)
+		}
+	}
+	blockedResult := make(chan bool, 1)
+	go func() {
+		blockedResult <- queue.Enqueue(QueueItem{
+			DraftID: "draft", ItemID: "blocked_producer",
+			onConsumed: func(error) { consumed <- "blocked_producer" },
+		})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		worker.mu.Lock()
+		pending := worker.pendingCount
+		worker.mu.Unlock()
+		if pending == cap(worker.queue)+1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("producer 未进入 send 前窗口: pending=%d", pending)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	barrier, requested := queue.BeginDraftCancellation("draft")
+	if barrier == nil || !requested {
+		t.Fatalf("barrier=%v requested=%v", barrier, requested)
+	}
+	barrier.Abandon()
+	if <-blockedResult {
+		t.Fatal("封存旧 worker 后阻塞的 producer 不应入队成功")
+	}
+	if !barrier.Wait(t.Context()) {
+		t.Fatal("封存应清理全部已接受任务")
+	}
+	for range cap(worker.queue) + 1 {
+		<-consumed
+	}
+	worker.mu.Lock()
+	pending := worker.pendingCount
+	worker.mu.Unlock()
+	queue.mu.Lock()
+	workerCount := len(queue.workers)
+	leaseCount := len(queue.cancelLeases)
+	queue.mu.Unlock()
+	if pending != 0 || len(worker.queue) != 0 || workerCount != 0 || leaseCount != 0 {
+		t.Fatalf("封存清理不完整: pending=%d queued=%d workers=%d leases=%d",
+			pending, len(worker.queue), workerCount, leaseCount)
+	}
+	queue.Close()
+}
+
+func TestCancelAndJoinDraftCancelsAcceptedItemBeforeWorkerStarts(t *testing.T) {
+	runErr := make(chan error, 1)
+	queue := NewTurnQueue(t.Context(), func(ctx context.Context, _ QueueItem) error {
+		err := ctx.Err()
+		runErr <- err
+		return err
+	})
+	worker := &draftWorker{queue: make(chan QueueItem, 1)}
+	queue.workers["draft"] = worker
+	if !queue.EnqueueUserMessage("draft", "message", "hello") {
+		t.Fatal("消息应被接受")
+	}
+
+	result := make(chan bool, 1)
+	go func() { result <- queue.CancelAndJoinDraft("draft") }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		worker.mu.Lock()
+		canceling := worker.canceling
+		worker.mu.Unlock()
+		if canceling {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("取消屏障未建立")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if queue.EnqueueUserMessage("draft", "late", "late") {
+		t.Fatal("取消屏障期间不应接受新消息")
+	}
+	go queue.runWorker(worker)
+	if !<-result {
+		t.Fatal("已接受但未启动的消息应报告取消成功")
+	}
+	if err := <-runErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("runner context error=%v", err)
+	}
+	if queue.IsBusy("draft") {
+		t.Fatal("取消等待返回后队列应为空闲")
+	}
+	queue.Close()
+}
+
+func TestCancelAndJoinDraftAbandonsRunnerThatIgnoresCancellation(t *testing.T) {
+	started := make(chan struct{})
+	releaseRunner := make(chan struct{})
+	queue := NewTurnQueue(t.Context(), func(_ context.Context, item QueueItem) error {
+		if item.ItemID == "blocked" {
+			close(started)
+			<-releaseRunner
+		}
+		return nil
+	})
+	defer func() {
+		close(releaseRunner)
+		queue.Close()
+	}()
+	if !queue.EnqueueUserMessage("draft", "blocked", "hello") {
+		t.Fatal("消息应被接受")
+	}
+	<-started
+
+	start := time.Now()
+	if !queue.CancelAndJoinDraft("draft") {
+		t.Fatal("运行中的消息应报告取消成功")
+	}
+	if elapsed := time.Since(start); elapsed > 2*cancelAndJoinDraftTimeout {
+		t.Fatalf("取消等待无界: elapsed=%s", elapsed)
+	}
+	if !queue.EnqueueUserMessage("draft", "fresh", "hello") {
+		t.Fatal("超时封存旧 worker 后应接受新消息")
+	}
+}
+
+func TestDraftCancellationBarrierHasBoundedWaitAndExplicitRelease(t *testing.T) {
+	started := make(chan struct{}, 1)
+	releaseRunner := make(chan struct{})
+	var releaseOnce sync.Once
+	runs := make(chan string, 2)
+	queue := NewTurnQueue(t.Context(), func(_ context.Context, item QueueItem) error {
+		runs <- item.ItemID
+		if item.ItemID == "blocked" {
+			started <- struct{}{}
+			<-releaseRunner // 模拟不响应 context 取消的 provider。
+		}
+		return nil
+	})
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseRunner) })
+		queue.Close()
+	})
+	if !queue.EnqueueUserMessage("draft", "blocked", "hello") {
+		t.Fatal("首个 turn 应入队")
+	}
+	<-started
+
+	barrier, requested := queue.BeginDraftCancellation("draft")
+	if barrier == nil || !requested {
+		t.Fatalf("barrier=%v requested=%v", barrier, requested)
+	}
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancelWait()
+	if barrier.Wait(waitCtx) {
+		t.Fatal("忽略取消的 runner 不应让有界等待提前成功")
+	}
+	if queue.EnqueueUserMessage("draft", "too_early", "no") {
+		t.Fatal("清理完成前不得接受新 turn")
+	}
+
+	releaseOnce.Do(func() { close(releaseRunner) })
+	if !barrier.Wait(t.Context()) {
+		t.Fatal("runner 退出后屏障应可完成")
+	}
+	if queue.EnqueueUserMessage("draft", "before_release", "no") {
+		t.Fatal("等待完成但显式释放前仍应保持屏障")
+	}
+	barrier.Release()
+	barrier.Release()
+	if !queue.EnqueueUserMessage("draft", "after_release", "ok") {
+		t.Fatal("释放屏障后应接受新 turn")
+	}
+	queue.JoinDraft("draft")
+	close(runs)
+	var seen []string
+	for itemID := range runs {
+		seen = append(seen, itemID)
+	}
+	if strings.Join(seen, ",") != "blocked,after_release" {
+		t.Fatalf("runs=%v", seen)
+	}
+}
+
+func TestTurnQueueCloseDoesNotWaitForRunnerCapturedBeforeAbandon(t *testing.T) {
+	started := make(chan struct{})
+	releaseRunner := make(chan struct{})
+	var releaseOnce sync.Once
+	queue := NewTurnQueue(t.Context(), func(context.Context, QueueItem) error {
+		close(started)
+		<-releaseRunner
+		return nil
+	})
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseRunner) }) })
+	if !queue.EnqueueUserMessage("draft", "blocked", "hello") {
+		t.Fatal("turn 应入队")
+	}
+	<-started
+	barrier, requested := queue.BeginDraftCancellation("draft")
+	if barrier == nil || !requested {
+		t.Fatalf("barrier=%v requested=%v", barrier, requested)
+	}
+	closed := make(chan struct{})
+	go func() {
+		queue.Close()
+		close(closed)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		queue.mu.Lock()
+		closing := queue.closed
+		queue.mu.Unlock()
+		if closing {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Close 未进入关闭临界区")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	barrier.Abandon()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close 不应等待忽略取消的旧 runner")
+	}
+	select {
+	case <-queue.closeDone:
+	default:
+		t.Fatal("Close 返回前清理协调器必须退出")
+	}
+	releaseOnce.Do(func() { close(releaseRunner) })
+}
+
+func TestTurnQueueCloseBoundsBlockedProducerCallback(t *testing.T) {
+	queue := NewTurnQueue(t.Context(), nil)
+	worker := newDraftWorker()
+	queue.workers["draft"] = worker
+	for index := range cap(worker.queue) {
+		if !queue.Enqueue(QueueItem{DraftID: "draft", ItemID: fmt.Sprintf("queued_%d", index)}) {
+			t.Fatalf("填充队列失败: index=%d", index)
+		}
+	}
+
+	callbackStarted := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	producerDone := make(chan bool, 1)
+	go func() {
+		producerDone <- queue.Enqueue(QueueItem{
+			DraftID: "draft", ItemID: "blocked_producer",
+			onConsumed: func(error) {
+				close(callbackStarted)
+				<-releaseCallback
+			},
+		})
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		worker.mu.Lock()
+		pending := worker.pendingCount
+		worker.mu.Unlock()
+		if pending == cap(worker.queue)+1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("producer 未进入 send 前窗口: pending=%d", pending)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		queue.Close()
+		close(closed)
+	}()
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("关闭未唤醒阻塞 producer")
+	}
+	select {
+	case <-closed:
+	case <-time.After(2 * cancelAndJoinDraftTimeout):
+		t.Fatal("Close 被 producer 回调无界阻塞")
+	}
+	if queue.EnqueueUserMessage("draft", "after_close", "no") {
+		t.Fatal("Close 返回后不得接受新 turn")
+	}
+
+	close(releaseCallback)
+	if <-producerDone {
+		t.Fatal("关闭唤醒的 producer 不应入队成功")
+	}
+	select {
+	case <-queue.closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("回调返回后关闭清理应完成")
+	}
+}
+
+func TestDraftCancellationBarrierCoversIdleDraft(t *testing.T) {
+	queue := NewTurnQueue(t.Context(), nil)
+	t.Cleanup(queue.Close)
+	for index := range 100 {
+		draftID := fmt.Sprintf("idle_%d", index)
+		barrier, requested := queue.BeginDraftCancellation(draftID)
+		if barrier == nil || requested {
+			t.Fatalf("barrier=%v requested=%v", barrier, requested)
+		}
+		if !barrier.Wait(t.Context()) {
+			t.Fatal("空闲草稿屏障应立即完成")
+		}
+		if queue.EnqueueUserMessage(draftID, "during_cleanup", "no") {
+			t.Fatal("空闲草稿的清理窗口也必须阻止新 turn")
+		}
+		barrier.Release()
+	}
+	queue.mu.Lock()
+	workerCount := len(queue.workers)
+	leaseCount := len(queue.cancelLeases)
+	queue.mu.Unlock()
+	if workerCount != 0 || leaseCount != 0 {
+		t.Fatalf("空闲取消遗留状态: workers=%d leases=%d", workerCount, leaseCount)
+	}
+	if !queue.EnqueueUserMessage("idle", "after_cleanup", "ok") {
+		t.Fatal("清理后应恢复入队")
+	}
+	queue.JoinDraft("idle")
 }
 
 func TestTurnStreamHubSnapshotAllTypesAndSlowSubscriber(t *testing.T) {

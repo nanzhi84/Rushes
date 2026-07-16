@@ -124,6 +124,8 @@ export function itemFromEvent(payload: DomainSsePayload): StructuredInteractionI
       return progressEventItem(event, "succeeded");
     case "JobFailed":
       return errorEventItem(event);
+    case "JobCancelled":
+      return progressEventItem(event, "cancelled");
     case "PreviewRendered":
       return {
         kind: "preview",
@@ -295,13 +297,23 @@ function progressEventItem(
   if (kind === null) {
     return null;
   }
+  const currentAssetId = stringValue(eventField(event, "current_asset_id"));
+  const done = integerValue(eventField(event, "done"));
+  const total = integerValue(eventField(event, "total"));
+  const stage = stringValue(eventField(event, "stage"));
+  const detail = stringValue(eventField(event, "detail"));
   return {
     kind: "progress",
     id: progressItemId(jobId),
     job_id: jobId,
     job_kind: JOB_KIND_LABELS[kind] ?? kind,
     progress: normalizeProgress(eventField(event, "progress")),
-    status
+    status,
+    ...(currentAssetId ? { current_asset_id: currentAssetId } : {}),
+    ...(done !== null ? { done } : {}),
+    ...(total !== null ? { total } : {}),
+    ...(stage ? { stage } : {}),
+    ...(detail ? { detail } : {})
   };
 }
 
@@ -344,16 +356,10 @@ function upsertProgress(
   item: ProgressInteractionItem
 ): StructuredInteractionItem[] {
   const previous = items.find(
-    (existing) =>
-      existing.kind === "progress" &&
-      (existing.job_id === item.job_id || existing.job_kind === item.job_kind)
+    (existing) => existing.kind === "progress" && existing.job_id === item.job_id
   );
   const withoutPrevious = items.filter(
-    (existing) =>
-      !(
-        existing.kind === "progress" &&
-        (existing.job_id === item.job_id || existing.job_kind === item.job_kind)
-      )
+    (existing) => !(existing.kind === "progress" && existing.job_id === item.job_id)
   );
   return [...withoutPrevious, previous ? mergeItem(previous, item) : item];
 }
@@ -392,6 +398,13 @@ function mergeItem(
     };
   }
   if (previous.kind === "progress" && next.kind === "progress") {
+    if (
+      previous.job_id === next.job_id &&
+      ["succeeded", "failed", "cancelled"].includes(previous.status) &&
+      ["queued", "running"].includes(next.status)
+    ) {
+      return previous;
+    }
     return {
       ...previous,
       ...next,
@@ -428,6 +441,10 @@ function stringValue(value: unknown): string | null {
 
 function booleanValue(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
+}
+
+function integerValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {

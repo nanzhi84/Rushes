@@ -23,7 +23,7 @@ func RegisterIngest(registry *Registry, database *storage.DB) error {
 		if err != nil {
 			return nil, err
 		}
-		if err := report(ctx, job, 0.05); err != nil {
+		if err := report(ctx, job, Progress(0.05)); err != nil {
 			return nil, err
 		}
 		probe := media.Probe{}
@@ -33,7 +33,7 @@ func RegisterIngest(registry *Registry, database *storage.DB) error {
 				return nil, err
 			}
 		}
-		if err := report(ctx, job, 0.2); err != nil {
+		if err := report(ctx, job, Progress(0.2)); err != nil {
 			return nil, err
 		}
 		thumbnail, err := media.GenerateThumbnail(ctx, store, source, kind)
@@ -55,10 +55,10 @@ func RegisterIngest(registry *Registry, database *storage.DB) error {
 		}
 		if _, err := reducer.Apply(ctx, database, []contracts.Event{{
 			Type: "AssetProbed", Payload: assetPayload,
-		}}, reducer.Options{Actor: contracts.ActorJob, CreatedAt: time.Now().UTC()}); err != nil {
+		}}, claimedJobOptions(job, reducer.Options{CreatedAt: time.Now().UTC()})); err != nil {
 			return nil, err
 		}
-		if err := report(ctx, job, 0.45); err != nil {
+		if err := report(ctx, job, Progress(0.45)); err != nil {
 			return nil, err
 		}
 		proxy, err := media.GenerateProxy(ctx, store, source, kind, func(progress media.Progress) {
@@ -66,7 +66,7 @@ func RegisterIngest(registry *Registry, database *storage.DB) error {
 			if probe.DurationSec > 0 {
 				fraction += min(progress.OutTime.Seconds()/probe.DurationSec, 1) * 0.45
 			}
-			_ = report(ctx, job, fraction)
+			_ = report(ctx, job, Progress(fraction))
 		})
 		if err != nil {
 			return nil, err
@@ -82,11 +82,11 @@ func RegisterIngest(registry *Registry, database *storage.DB) error {
 					"asset_id": assetID, "proxy_object_hash": proxy.Hash,
 					"proxy_object_size": proxy.Size, "ingest_status": "ready",
 				},
-			}}, reducer.Options{Actor: contracts.ActorJob, CreatedAt: time.Now().UTC()}); err != nil {
+			}}, claimedJobOptions(job, reducer.Options{CreatedAt: time.Now().UTC()})); err != nil {
 				return nil, err
 			}
 		}
-		if err := report(ctx, job, 0.99); err != nil {
+		if err := report(ctx, job, Progress(0.99)); err != nil {
 			return nil, err
 		}
 		return result, nil

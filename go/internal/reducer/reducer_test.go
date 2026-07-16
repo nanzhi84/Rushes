@@ -1237,3 +1237,15 @@ func TestReducerMissingPreviewRollback(t *testing.T) {
 		t.Fatalf("event=%s result=%#v err=%v", event.Type, result, err)
 	}
 }
+
+func TestAgentJobObservationSuppressionRequiresJobID(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	result, err := Apply(t.Context(), database, nil, Options{
+		Actor:      contracts.ActorAgent,
+		ResultRows: ResultRows{AgentJobObservationSuppressions: []AgentJobObservationSuppressionRow{{}}},
+	})
+	if err == nil || result.Status == StatusApplied {
+		t.Fatalf("空 job_id suppression 应失败: result=%#v err=%v", result, err)
+	}
+}

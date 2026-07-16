@@ -302,6 +302,25 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     mutationFn: () => api.cancelTurn(draftId)
   });
 
+  const cancelJob = useMutation({
+    mutationFn: (jobId: string) => api.cancelJob(jobId, "user_cancelled"),
+    onMutate: () => setConversationError(null),
+    onSuccess: async (_response, jobId) => {
+      setStructuredItems((current) =>
+        current.map((item) =>
+          item.kind === "progress" && item.job_id === jobId
+            ? { ...item, status: "cancelled" }
+            : item
+        )
+      );
+      await queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) });
+    },
+    onError: async (error) => {
+      setConversationError(jobCancelErrorMessage(error));
+      await queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) });
+    }
+  });
+
   const clearConversation = useMutation({
     mutationFn: () => api.clearDraftConversation(draftId),
     onMutate: () => setConversationError(null),
@@ -828,6 +847,8 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             streamItems={streamItems}
             modelRetry={modelRetry}
             subagentProgress={subagentProgress}
+            onCancelJob={(jobId) => cancelJob.mutate(jobId)}
+            cancelPendingJobId={cancelJob.isPending ? (cancelJob.variables ?? null) : null}
           />
 
           {sideDecisionItem ? (
@@ -1627,6 +1648,14 @@ function conversationClearErrorMessage(error: unknown): string {
     return "当前任务仍在运行，请先停止或等待本轮结束后再清空对话。";
   }
   return reason === "API 请求失败：409" ? "当前任务仍在运行，暂时不能清空对话。" : reason;
+}
+
+function jobCancelErrorMessage(error: unknown): string {
+  const reason = timelinePatchErrorMessage(error);
+  if (reason === "job_not_cancellable" || reason === "API 请求失败：409") {
+    return "任务状态已变化，无法取消；已刷新当前状态。";
+  }
+  return `取消任务失败：${reason}`;
 }
 
 function formatTimecode(sec: number): string {
