@@ -20,21 +20,21 @@ type userMemoryModelContractGolden struct {
 }
 
 type userMemoryModelEvalCase struct {
-	Name                string                   `json:"name"`
-	Prompt              string                   `json:"prompt"`
-	SnapshotSections    map[string]any           `json:"snapshot_sections"`
-	AvailableTools      []string                 `json:"available_tools"`
-	RequiredTool        string                   `json:"required_tool"`
-	ForbiddenTools      []string                 `json:"forbidden_tools"`
-	ExpectedMemory      *userMemoryExpectedEntry `json:"expected_memory,omitempty"`
-	ArgumentContainsAny []string                 `json:"argument_contains_any,omitempty"`
-	MockResponse        userMemoryMockResponse   `json:"mock_response"`
+	Name                 string                   `json:"name"`
+	Prompt               string                   `json:"prompt"`
+	SnapshotSections     map[string]any           `json:"snapshot_sections"`
+	AvailableTools       []string                 `json:"available_tools"`
+	RequiredTool         string                   `json:"required_tool"`
+	ForbiddenTools       []string                 `json:"forbidden_tools"`
+	ExpectedMemory       *userMemoryExpectedEntry `json:"expected_memory,omitempty"`
+	RequiredToolSemantic string                   `json:"required_tool_semantic,omitempty"`
+	MockResponse         userMemoryMockResponse   `json:"mock_response"`
 }
 
 type userMemoryExpectedEntry struct {
-	Key               string `json:"key"`
-	Kind              string `json:"kind"`
-	StatementContains string `json:"statement_contains"`
+	Key      string `json:"key"`
+	Kind     string `json:"kind"`
+	Semantic string `json:"semantic"`
 }
 
 type userMemoryMockResponse struct {
@@ -184,6 +184,11 @@ func TestUserMemoryModelContractRejectsMemoryPollution(t *testing.T) {
 		calls []schema.ToolCall
 	}{
 		{
+			name: "opposite memory",
+			calls: []schema.ToolCall{memoryEvalToolCall(`{"entries":[` +
+				`{"key":"pacing","kind":"preference","statement":"用户不喜欢快节奏，应该慢一点"}]}`)},
+		},
+		{
 			name: "extra entry",
 			calls: []schema.ToolCall{memoryEvalToolCall(`{"entries":[` +
 				`{"key":"pacing","kind":"preference","statement":"用户长期偏好视频节奏快一点"},` +
@@ -214,6 +219,18 @@ func TestUserMemoryModelContractRejectsMemoryPollution(t *testing.T) {
 			}
 		})
 	}
+	t.Run("opposite plan", func(t *testing.T) {
+		useCase := loadUserMemoryModelEvalCases(t)[2]
+		response := schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "opposite_plan",
+			Function: schema.FunctionCall{
+				Name: "plan.update", Arguments: `{"plan":{"rhythm":"不要快节奏，改成慢剪"}}`,
+			},
+		}})
+		if err := validateUserMemoryModelResponse(useCase, response, specs); err == nil {
+			t.Fatal("反向节奏计划错误通过用户记忆模型合同")
+		}
+	})
 }
 
 func memoryEvalToolCall(arguments string) schema.ToolCall {
@@ -256,8 +273,16 @@ func loadUserMemoryModelEvalCases(t *testing.T) []userMemoryModelEvalCase {
 				t.Fatalf("%s 的 mock 调用了未绑定工具 %s", evalCase.Name, call.Name)
 			}
 		}
-		if evalCase.ExpectedMemory != nil && evalCase.RequiredTool != "memory.update" {
-			t.Fatalf("%s 声明 expected_memory 但没有要求 memory.update", evalCase.Name)
+		if evalCase.ExpectedMemory != nil {
+			if evalCase.RequiredTool != "memory.update" {
+				t.Fatalf("%s 声明 expected_memory 但没有要求 memory.update", evalCase.Name)
+			}
+			if evalCase.ExpectedMemory.Semantic == "" {
+				t.Fatalf("%s 的 expected_memory 缺少 semantic", evalCase.Name)
+			}
+		}
+		if evalCase.RequiredToolSemantic != "" && evalCase.RequiredTool == "" {
+			t.Fatalf("%s 声明 required_tool_semantic 但没有 required_tool", evalCase.Name)
 		}
 	}
 	return golden.Cases
@@ -357,27 +382,65 @@ func validateUserMemoryModelResponse(
 			)
 		}
 		entry := input.Entries[0]
-		if entry.Key != evalCase.ExpectedMemory.Key ||
-			entry.Kind != evalCase.ExpectedMemory.Kind ||
-			!strings.Contains(entry.Statement, evalCase.ExpectedMemory.StatementContains) {
+		if entry.Key != evalCase.ExpectedMemory.Key || entry.Kind != evalCase.ExpectedMemory.Kind {
 			return fmt.Errorf("memory.update 未精确写入预期长期记忆: %s", requiredCalls[0].Function.Arguments)
 		}
+		if err := validateUserMemorySemantic(evalCase.ExpectedMemory.Semantic, entry.Statement); err != nil {
+			return fmt.Errorf("memory.update 记忆语义错误: %w", err)
+		}
 	}
-	if len(evalCase.ArgumentContainsAny) > 0 {
+	if evalCase.RequiredToolSemantic != "" {
 		for _, call := range requiredCalls {
-			matched := false
-			for _, fragment := range evalCase.ArgumentContainsAny {
-				if strings.Contains(call.Function.Arguments, fragment) {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				return fmt.Errorf("%s 参数没有体现注入偏好: %s", evalCase.RequiredTool, call.Function.Arguments)
+			if err := validateUserMemorySemantic(evalCase.RequiredToolSemantic, call.Function.Arguments); err != nil {
+				return fmt.Errorf("%s 参数没有体现注入偏好: %w", evalCase.RequiredTool, err)
 			}
 		}
 	}
 	return nil
+}
+
+func validateUserMemorySemantic(semantic, value string) error {
+	switch semantic {
+	case "fast_pacing":
+		if hasPositiveFastPacing(value) {
+			return nil
+		}
+		return fmt.Errorf("缺少无反向限定的快节奏语义: %s", truncateText(value, 240))
+	default:
+		return fmt.Errorf("未知评测语义 %q", semantic)
+	}
+}
+
+func hasPositiveFastPacing(value string) bool {
+	negative := []string{
+		"不喜欢快", "不爱快", "不要快", "避免快", "不能快", "别太快", "太快",
+		"快不是", "快并非", "快不适合", "快不喜欢",
+		"偏慢", "慢节奏", "节奏慢", "慢一点", "放慢", "慢剪",
+		"不要紧凑", "不紧凑", "降低切点密度", "低切点密度", "不要高密度", "避免高密度",
+	}
+	for _, fragment := range negative {
+		if strings.Contains(value, fragment) {
+			return false
+		}
+	}
+	domains := []string{"节奏", "切点", `"rhythm"`, `"cut_density`}
+	hasDomain := false
+	for _, fragment := range domains {
+		if strings.Contains(value, fragment) {
+			hasDomain = true
+			break
+		}
+	}
+	if !hasDomain {
+		return false
+	}
+	positive := []string{"快", "紧凑", "高密度", "密度高", "提高密度"}
+	for _, fragment := range positive {
+		if strings.Contains(value, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func userMemoryResponseSummary(response *schema.Message) string {

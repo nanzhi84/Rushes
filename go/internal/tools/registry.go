@@ -460,7 +460,7 @@ func registerPlanUpdate(registry *Registry) error {
 	return addTool[PlanUpdateInput, ToolResult](
 		registry,
 		"plan.update",
-		"以 RFC 7396 语义增量合并 plan；reset=true 时先清空旧计划再应用该对象，用于在跨回合继续工作前保存已确定的计划结构；已有可用素材但用户只给出宽泛剪辑请求时，结合素材证据、user_memory 与安全默认值先写入可回滚首剪计划，不要追问可逆创作细节",
+		"以 RFC 7396 语义增量合并 plan；reset=true 时先清空旧计划再应用该对象，用于在跨回合继续工作前保存已确定的计划结构；素材可用但请求宽泛时，用此工具记录基于长期画像作出的首剪默认决定并继续执行，不要转去追问可回滚细节",
 		nil, ExposureLLM, false,
 	)
 }

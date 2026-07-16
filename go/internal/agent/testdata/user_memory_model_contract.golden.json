@@ -28,7 +28,7 @@
       "expected_memory": {
         "key": "pacing",
         "kind": "preference",
-        "statement_contains": "快"
+        "semantic": "fast_pacing"
       },
       "mock_response": {
         "tool_calls": [
@@ -114,11 +114,7 @@
       "forbidden_tools": [
         "interaction.ask_user"
       ],
-      "argument_contains_any": [
-        "快",
-        "紧凑",
-        "高密度"
-      ],
+      "required_tool_semantic": "fast_pacing",
       "mock_response": {
         "tool_calls": [
           {
