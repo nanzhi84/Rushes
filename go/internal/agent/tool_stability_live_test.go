@@ -62,6 +62,86 @@ type liveRoutingVariant struct {
 	IncludePlaybook bool
 }
 
+func TestLiveUserMemoryModelContract(t *testing.T) {
+	if os.Getenv("RUSHES_LIVE_TOOL_EVAL") != "1" {
+		t.Skip("设置 RUSHES_LIVE_TOOL_EVAL=1 才运行真实用户记忆模型合同评测")
+	}
+	key := strings.TrimSpace(os.Getenv("RUSHES_DASHSCOPE_API_KEY"))
+	if key == "" {
+		t.Fatal("真实用户记忆评测缺少 RUSHES_DASHSCOPE_API_KEY")
+	}
+	modelName := strings.TrimSpace(os.Getenv("RUSHES_QWEN_CHAT_MODEL"))
+	if modelName == "" {
+		modelName = providers.DefaultChatModel
+	}
+	tiers, err := providers.NewQwenTiers(t.Context(), providers.QwenTierConfig{
+		APIKey: key, BaseURL: os.Getenv("RUSHES_DASHSCOPE_BASE_URL"), ChatModel: modelName,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database := agentTestDatabase(t)
+	service, err := NewServiceWithModels(t.Context(), database, tiers.Chat, tiers.Vision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	toolInfos, specs, err := userMemoryEvalToolContracts(t.Context(), service)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runs := liveEvalRuns()
+	metrics := map[string]liveToolEvalMetric{}
+	failures := []liveToolEvalFailure{}
+	for _, evalCase := range loadUserMemoryModelEvalCases(t) {
+		infos := make([]*schema.ToolInfo, 0, len(evalCase.AvailableTools))
+		for _, name := range evalCase.AvailableTools {
+			info := toolInfos[name]
+			if info == nil {
+				t.Fatalf("评测工具未注册: %s", name)
+			}
+			infos = append(infos, info)
+		}
+		bound, err := tiers.Chat.WithTools(infos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metric := liveToolEvalMetric{}
+		for run := 1; run <= runs; run++ {
+			metric.Total++
+			response, responseErr := liveGenerateUserMemoryResponse(t.Context(), bound, evalCase)
+			if responseErr == nil {
+				responseErr = validateUserMemoryModelResponse(evalCase, response, specs)
+			}
+			if responseErr == nil {
+				metric.Succeeded++
+				continue
+			}
+			failures = append(failures, liveToolEvalFailure{
+				Suite: "user_memory_model_contract", Case: evalCase.Name, Run: run,
+				Expected: userMemoryExpectedBehavior(evalCase),
+				Actual:   userMemoryResponseSummary(response),
+				Error:    responseErr.Error(),
+			})
+		}
+		metric.Rate = ratio(metric.Succeeded, metric.Total)
+		metrics[evalCase.Name] = metric
+	}
+
+	for _, evalCase := range loadUserMemoryModelEvalCases(t) {
+		metric := metrics[evalCase.Name]
+		t.Logf(
+			"USER_MEMORY_MODEL_RESULT model=%s case=%s succeeded=%d/%d rate=%.2f%%",
+			modelName, evalCase.Name, metric.Succeeded, metric.Total, metric.Rate*100,
+		)
+		if metric.Rate < liveToolStabilityTarget {
+			encoded, _ := json.Marshal(failures)
+			t.Fatalf("真实用户记忆模型合同低于 %.0f%%: %s", liveToolStabilityTarget*100, encoded)
+		}
+	}
+}
+
 func TestLiveToolCallingStability(t *testing.T) {
 	if os.Getenv("RUSHES_LIVE_TOOL_EVAL") != "1" {
 		t.Skip("设置 RUSHES_LIVE_TOOL_EVAL=1 才运行真实模型工具稳定性评测")
@@ -323,6 +403,46 @@ func liveGenerateToolCall(
 	allowedName string,
 ) (schema.ToolCall, error) {
 	return liveGenerateToolCallWithPlaybook(parent, chat, prompt, snapshot, forced, allowedName, true)
+}
+
+func liveGenerateUserMemoryResponse(
+	parent context.Context,
+	chat model.ToolCallingChatModel,
+	evalCase userMemoryModelEvalCase,
+) (*schema.Message, error) {
+	messages, err := userMemoryEvalMessages(evalCase)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		ctx, cancel := context.WithTimeout(parent, 90*time.Second)
+		response, generateErr := chat.Generate(ctx, messages)
+		cancel()
+		if generateErr == nil && response != nil {
+			return response, nil
+		}
+		if generateErr != nil {
+			lastErr = generateErr
+		} else {
+			lastErr = errors.New("模型返回 nil")
+		}
+		if attempt < 3 {
+			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
+		}
+	}
+	return nil, lastErr
+}
+
+func userMemoryExpectedBehavior(evalCase userMemoryModelEvalCase) string {
+	parts := []string{}
+	if evalCase.RequiredTool != "" {
+		parts = append(parts, "required="+evalCase.RequiredTool)
+	}
+	if len(evalCase.ForbiddenTools) > 0 {
+		parts = append(parts, "forbidden="+strings.Join(evalCase.ForbiddenTools, "|"))
+	}
+	return strings.Join(parts, ",")
 }
 
 func liveGenerateToolCallWithPlaybook(

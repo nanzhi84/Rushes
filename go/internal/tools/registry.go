@@ -449,7 +449,7 @@ func registerSpeechInspect(registry *Registry) error {
 }
 
 func registerAskUser(registry *Registry) error {
-	return addTool[AskUserInput, ToolResult](registry, "interaction.ask_user", "仅在缺少会实质改变成片目标、且无法从素材或上下文安全推断的关键决策时，通过简短结构化决策卡向用户提问；可逆剪辑细节必须自主决定", nil, ExposureLLM, false)
+	return addTool[AskUserInput, ToolResult](registry, "interaction.ask_user", "仅在缺少会实质改变成片目标、且无法从素材或上下文安全推断的关键决策时，通过简短结构化决策卡向用户提问；已有可用素材时，成片类型、时长、风格和节奏等可逆首剪细节必须结合 user_memory 与安全默认值自主决定，不得用此工具追问", nil, ExposureLLM, false)
 }
 
 func registerDecisionAnswer(registry *Registry) error {
@@ -460,7 +460,7 @@ func registerPlanUpdate(registry *Registry) error {
 	return addTool[PlanUpdateInput, ToolResult](
 		registry,
 		"plan.update",
-		"以 RFC 7396 语义增量合并 plan；reset=true 时先清空旧计划再应用该对象，用于在跨回合继续工作前保存已确定的计划结构",
+		"以 RFC 7396 语义增量合并 plan；reset=true 时先清空旧计划再应用该对象，用于在跨回合继续工作前保存已确定的计划结构；素材可用但请求宽泛时，用此工具记录基于长期画像作出的首剪默认决定并继续执行，不要转去追问可回滚细节",
 		nil, ExposureLLM, false,
 	)
 }

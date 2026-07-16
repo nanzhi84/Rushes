@@ -1,0 +1,128 @@
+{
+  "cases": [
+    {
+      "name": "stores_stable_preference",
+      "prompt": "以后我的视频节奏都要快一点。",
+      "snapshot_sections": {
+        "draft": {
+          "draft_id": "draft_memory_store",
+          "content_plan": {}
+        },
+        "assets": {
+          "audio_roles": [],
+          "material_catalog": []
+        },
+        "timeline": null,
+        "user_memory": {
+          "entries": [],
+          "total": 0,
+          "truncated": false
+        }
+      },
+      "available_tools": [
+        "memory.update",
+        "plan.update"
+      ],
+      "required_tool": "memory.update",
+      "forbidden_tools": [],
+      "expected_memory": {
+        "key": "pacing",
+        "kind": "preference",
+        "semantic": "fast_pacing"
+      },
+      "mock_response": {
+        "tool_calls": [
+          {
+            "name": "memory.update",
+            "arguments": "{\"entries\":[{\"key\":\"pacing\",\"kind\":\"preference\",\"statement\":\"用户长期偏好成片节奏偏快\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "does_not_store_one_off_request",
+      "prompt": "这个片子的结尾快一点。",
+      "snapshot_sections": {
+        "draft": {
+          "draft_id": "draft_memory_one_off",
+          "content_plan": {}
+        },
+        "assets": {
+          "audio_roles": [],
+          "material_catalog": []
+        },
+        "timeline": null,
+        "user_memory": {
+          "entries": [],
+          "total": 0,
+          "truncated": false
+        }
+      },
+      "available_tools": [
+        "memory.update",
+        "plan.update"
+      ],
+      "required_tool": "",
+      "forbidden_tools": [
+        "memory.update"
+      ],
+      "mock_response": {
+        "tool_calls": [
+          {
+            "name": "plan.update",
+            "arguments": "{\"plan\":{\"ending_pacing\":\"本片结尾加快\"}}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "uses_injected_preference_without_asking",
+      "prompt": "帮我剪个片。",
+      "snapshot_sections": {
+        "draft": {
+          "draft_id": "draft_memory_use",
+          "content_plan": {}
+        },
+        "assets": {
+          "audio_roles": [],
+          "material_catalog": [
+            {
+              "asset_id": "asset_video_1",
+              "kind": "video",
+              "status": "ready"
+            }
+          ]
+        },
+        "timeline": null,
+        "user_memory": {
+          "entries": [
+            {
+              "key": "pacing",
+              "kind": "preference",
+              "statement": "成片节奏偏快，切点密度可高于默认"
+            }
+          ],
+          "total": 1,
+          "truncated": false
+        }
+      },
+      "available_tools": [
+        "plan.update",
+        "interaction.ask_user"
+      ],
+      "required_tool": "plan.update",
+      "forbidden_tools": [
+        "interaction.ask_user"
+      ],
+      "required_tool_semantic": "fast_pacing",
+      "mock_response": {
+        "tool_calls": [
+          {
+            "name": "plan.update",
+            "arguments": "{\"plan\":{\"rhythm\":\"快节奏、高切点密度\"}}"
+          }
+        ]
+      }
+    }
+  ]
+}
