@@ -79,6 +79,21 @@ func (barrier *DraftCancellationBarrier) Wait(ctx context.Context) bool {
 	}
 }
 
+// WaitForDrainOrQueueClose is used by background cleanup after a bounded
+// request timeout. It avoids leaking a waiter if the service shuts down while
+// a provider keeps ignoring cancellation.
+func (barrier *DraftCancellationBarrier) WaitForDrainOrQueueClose() bool {
+	if barrier == nil {
+		return true
+	}
+	select {
+	case <-barrier.done:
+		return true
+	case <-barrier.queue.ctx.Done():
+		return false
+	}
+}
+
 // Release reopens the draft for new turns. Callers must keep the barrier until
 // any state produced by the cancelled turns has been cleaned up.
 func (barrier *DraftCancellationBarrier) Release() {

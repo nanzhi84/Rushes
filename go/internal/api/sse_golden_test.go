@@ -26,6 +26,29 @@ func TestDomainSSEFrameGolden(t *testing.T) {
 	}
 }
 
+func TestTimelineVersionRestoredSSEFrameGolden(t *testing.T) {
+	t.Parallel()
+	event := contracts.Event{
+		Type: "TimelineVersionRestored", Actor: contracts.ActorUser, DraftID: "draft_1",
+		Payload: map[string]any{
+			"checkpoint_id": "rewind_1", "restore_checkpoint_id": "rewind_2", "mode": "both",
+			"source_version": 2, "timeline_version": 4,
+		},
+		CreatedAt: "2026-07-16T00:00:00Z",
+	}
+	actual, err := encodeSSE(43, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := os.ReadFile("testdata/timeline_restored_sse.golden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual != string(expected)+"\n" {
+		t.Fatalf("TimelineVersionRestored SSE 漂移\n--- expected ---\n%s--- actual ---\n%s", expected, actual)
+	}
+}
+
 func TestLastEventIDHeaderQueryAndInvalidFallback(t *testing.T) {
 	t.Parallel()
 	request := apiRequest(t, "GET", "/api/events?last_event_id=7", nil)

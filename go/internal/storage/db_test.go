@@ -40,8 +40,8 @@ func TestOpenMigratesSchemaAndCreatesWorkspace(t *testing.T) {
 		WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 18 {
-		t.Fatalf("业务表数=%d want=18", count)
+	if count != 21 {
+		t.Fatalf("业务表数=%d want=21", count)
 	}
 	batches, err := ListTimelineEditBatches(t.Context(), database.Read(), "missing", 20)
 	if err != nil || len(batches) != 0 {
@@ -98,6 +98,11 @@ func TestOpenMigratesTimelineHistoryAndAllowsFutureSnapshots(t *testing.T) {
 		VALUES('TimelineVersionRestored','user','draft_migrate','{}',?)`, now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := legacy.Exec(`
+		INSERT INTO messages(message_id,draft_id,role,kind,content,created_at)
+		VALUES('message_migrate','draft_migrate','user','user','现网单版本草稿',?)`, now); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := legacy.Exec("PRAGMA user_version = 1"); err != nil {
 		t.Fatal(err)
 	}
@@ -136,6 +141,7 @@ func TestOpenMigratesTimelineHistoryAndAllowsFutureSnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = columns.Close() }()
+	parentColumn := false
 	for columns.Next() {
 		var cid, notNull, primaryKey int
 		var name, kind string
@@ -144,8 +150,21 @@ func TestOpenMigratesTimelineHistoryAndAllowsFutureSnapshots(t *testing.T) {
 			t.Fatal(err)
 		}
 		if name == "parent_version" {
-			t.Fatal("迁移后不应保留版本父链字段")
+			parentColumn = true
 		}
+	}
+	if !parentColumn {
+		t.Fatal("迁移后缺少版本父链字段")
+	}
+	var rewoundAt, rewindCheckpointID *string
+	if err := database.Read().QueryRow(`
+		SELECT rewound_at,rewind_checkpoint_id FROM messages WHERE message_id='message_migrate'`,
+	).Scan(&rewoundAt, &rewindCheckpointID); err != nil || rewoundAt != nil || rewindCheckpointID != nil {
+		t.Fatalf("现网消息迁移结果 rewound_at=%v checkpoint=%v err=%v", rewoundAt, rewindCheckpointID, err)
+	}
+	checkpoints, err := ListRewindCheckpoints(t.Context(), database.Read(), "draft_migrate", 50)
+	if err != nil || len(checkpoints) != 0 {
+		t.Fatalf("现网草稿检查点表不可用: checkpoints=%#v err=%v", checkpoints, err)
 	}
 }
 

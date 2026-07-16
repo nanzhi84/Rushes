@@ -119,6 +119,9 @@ func TestTurnQueueHelpersCloseAndRejectedItems(t *testing.T) {
 	if !nilBarrier.Wait(t.Context()) {
 		t.Fatal("nil barrier 应视为已完成")
 	}
+	if !nilBarrier.WaitForDrainOrQueueClose() {
+		t.Fatal("nil barrier 后台等待应视为已完成")
+	}
 	nilBarrier.Release()
 	nilBarrier.Abandon()
 }

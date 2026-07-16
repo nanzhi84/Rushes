@@ -68,6 +68,7 @@ export function reduceStructuredInteractionItems(
 
 const SILENT_TIMELINE_EVENTS = new Set([
   "TimelineVersionCreated",
+  "TimelineVersionRestored",
   "TimelineValidated",
   "TimelineValidationFailed"
 ]);

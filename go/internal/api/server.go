@@ -43,6 +43,8 @@ type Server struct {
 	pickerMu     sync.Mutex
 	agent        *agent.Service
 	ownsAgent    bool
+	rewindMu     sync.Mutex
+	rewindDrain  map[string]*agent.DraftCancellationBarrier
 }
 
 var _ ServerInterface = (*Server)(nil)
@@ -80,7 +82,7 @@ func NewServer(config Config) (*Server, error) {
 		database: config.Database, token: config.Token, port: config.Port,
 		fsRoots: roots, sseMaxEvents: config.SSEMaxEvents,
 		logger: config.Logger, picker: config.Picker, agent: config.Agent,
-		ownsAgent: ownedAgent,
+		ownsAgent: ownedAgent, rewindDrain: map[string]*agent.DraftCancellationBarrier{},
 	}, nil
 }
 

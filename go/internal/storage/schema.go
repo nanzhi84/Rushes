@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 10
+const schemaVersion = 12
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -336,4 +336,68 @@ ALTER TABLE agent_job_observations ADD COLUMN delivered_at TEXT;
 const schemaV10 = `
 CREATE INDEX IF NOT EXISTS ix_agent_job_observations_undelivered_event
 ON agent_job_observations(event_id) WHERE delivered_at IS NULL;
+`
+
+// schemaV11 restores append-only timeline ancestry and adds user-owned rewind
+// checkpoints. Conversation rewinds are soft markers: hidden messages remain
+// available for audit while model and UI history queries only read the active
+// branch.
+const schemaV11 = `
+UPDATE timeline_versions AS current
+SET parent_version = (
+    SELECT MAX(previous.version)
+    FROM timeline_versions AS previous
+    WHERE previous.draft_id=current.draft_id AND previous.version<current.version
+)
+WHERE parent_version IS NULL;
+
+CREATE TABLE IF NOT EXISTS rewind_checkpoints (
+    checkpoint_id TEXT PRIMARY KEY,
+    draft_id TEXT NOT NULL REFERENCES drafts(draft_id) ON DELETE CASCADE,
+    trigger_kind TEXT NOT NULL,
+    anchor_message_id TEXT REFERENCES messages(message_id) ON DELETE SET NULL,
+    anchor_turn_id TEXT,
+    anchor_event_id INTEGER,
+    timeline_version INTEGER,
+    patch_id TEXT,
+    decision_boundary INTEGER NOT NULL DEFAULT 0,
+    job_boundary INTEGER NOT NULL DEFAULT 0,
+    summary TEXT NOT NULL DEFAULT '',
+    clip_count INTEGER NOT NULL DEFAULT 0,
+    duration_frames INTEGER NOT NULL DEFAULT 0,
+    track_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    CHECK(trigger_kind IN ('user_message','timeline_write','restore'))
+);
+
+CREATE INDEX IF NOT EXISTS ix_rewind_checkpoints_draft
+ON rewind_checkpoints(draft_id, created_at DESC, checkpoint_id DESC);
+
+CREATE INDEX IF NOT EXISTS ix_messages_active_draft
+ON messages(draft_id) WHERE rewound_at IS NULL;
+`
+
+// schemaV12 makes conversation checkpoints branch-aware and makes restore
+// retries reuse the first committed result.
+const schemaV12 = `
+CREATE TABLE IF NOT EXISTS rewind_checkpoint_messages (
+    checkpoint_id TEXT NOT NULL REFERENCES rewind_checkpoints(checkpoint_id) ON DELETE CASCADE,
+    message_id TEXT NOT NULL REFERENCES messages(message_id) ON DELETE CASCADE,
+    PRIMARY KEY(checkpoint_id, message_id)
+);
+
+CREATE TABLE IF NOT EXISTS rewind_restore_requests (
+    draft_id TEXT NOT NULL REFERENCES drafts(draft_id) ON DELETE CASCADE,
+    idempotency_key TEXT NOT NULL,
+    checkpoint_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    timeline_version INTEGER,
+    rewound_message_count INTEGER NOT NULL,
+    cancelled_jobs INTEGER NOT NULL,
+    cancelled_decisions INTEGER NOT NULL,
+    event_ids_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(draft_id, idempotency_key),
+    CHECK(mode IN ('timeline','conversation','both'))
+);
 `

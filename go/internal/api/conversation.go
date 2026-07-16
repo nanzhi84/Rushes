@@ -139,7 +139,14 @@ func (server *Server) ListDraftMessagesApiDraftsDraftIdMessagesGet(
 			Content: row.Content, CreatedAt: row.CreatedAt,
 		})
 	}
-	writeJSON(writer, http.StatusOK, MessagesResponse{DraftId: draftID, Messages: messages})
+	rewoundCount, err := storage.CountRewoundMessages(request.Context(), server.database.Read(), draftID)
+	if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, MessagesResponse{
+		DraftId: draftID, Messages: messages, RewoundMessageCount: rewoundCount,
+	})
 }
 
 func (server *Server) CancelCurrentTurnApiDraftsDraftIdTurnCancelPost(

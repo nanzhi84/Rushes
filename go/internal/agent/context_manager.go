@@ -422,6 +422,12 @@ func normalizeContextHistory(rows []storage.Message) []contextHistoryItem {
 			message.Extra = map[string]any{
 				"context_phase": "final_answer", "historical_narrative": true,
 			}
+		case "system_observation":
+			if row.Kind != "rewind" {
+				continue
+			}
+			message = schema.UserMessage("【系统观察：用户回退】\n" + content)
+			message.Extra = map[string]any{"context_phase": "rewind_observation"}
 		default:
 			continue
 		}

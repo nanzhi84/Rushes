@@ -278,6 +278,88 @@ func (database *DB) Migrate(ctx context.Context) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		version = 10
+	}
+	if version < 11 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := addColumnIfMissing(ctx, tx, "timeline_versions", "parent_version"); err != nil {
+			return fmt.Errorf("应用 schema v11 parent_version: %w", err)
+		}
+		if err := addColumnIfMissing(ctx, tx, "messages", "rewound_at"); err != nil {
+			return fmt.Errorf("应用 schema v11 rewound_at: %w", err)
+		}
+		if err := addColumnIfMissing(ctx, tx, "messages", "rewind_checkpoint_id"); err != nil {
+			return fmt.Errorf("应用 schema v11 rewind_checkpoint_id: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, schemaV11); err != nil {
+			return fmt.Errorf("应用 schema v11: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 11"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 11
+	}
+	if version < 12 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV12); err != nil {
+			return fmt.Errorf("应用 schema v12: %w", err)
+		}
+		// Existing checkpoints predate branch snapshots. Their active prefix is
+		// the only visibility information available during migration.
+		if _, err := tx.ExecContext(ctx, `
+			INSERT OR IGNORE INTO rewind_checkpoint_messages(checkpoint_id,message_id)
+			SELECT checkpoint.checkpoint_id,message.message_id
+			FROM rewind_checkpoints AS checkpoint
+			JOIN messages AS anchor ON anchor.message_id=checkpoint.anchor_message_id
+			JOIN messages AS message ON message.draft_id=checkpoint.draft_id AND message.rowid<=anchor.rowid
+			WHERE message.rewound_at IS NULL`); err != nil {
+			return fmt.Errorf("迁移 rewind checkpoint messages: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 12"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func addColumnIfMissing(
+	ctx context.Context,
+	tx *sql.Tx,
+	table string,
+	column string,
+) error {
+	var exists int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM pragma_table_info(?) WHERE name=?)`, table, column,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 1 {
+		return nil
+	}
+	allowed := map[string]string{
+		"timeline_versions.parent_version": "ALTER TABLE timeline_versions ADD COLUMN parent_version INTEGER",
+		"messages.rewound_at":              "ALTER TABLE messages ADD COLUMN rewound_at TEXT",
+		"messages.rewind_checkpoint_id":    "ALTER TABLE messages ADD COLUMN rewind_checkpoint_id TEXT",
+	}
+	statement, ok := allowed[table+"."+column]
+	if !ok {
+		return fmt.Errorf("不允许的迁移列 %s.%s", table, column)
+	}
+	_, err := tx.ExecContext(ctx, statement)
+	return err
 }
