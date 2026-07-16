@@ -31,7 +31,6 @@ type Draft struct {
 	PreviewCurrentID       *string
 	LastViewedPreviewID    *string
 	ExportCurrentID        *string
-	ScratchMemory          map[string]any
 	MessagesTailRef        *string
 	CreatedAt              string
 	UpdatedAt              string
@@ -41,8 +40,7 @@ const draftColumns = `
 draft_id, name, state_version, status, defaults_json, pending_decision_id,
 running_jobs_json, last_error_json, brief_json, content_plan_json,
 timeline_current_version, timeline_validated, preview_current_id,
-last_viewed_preview_id, export_current_id, scratch_memory_json,
-messages_tail_ref, created_at, updated_at`
+last_viewed_preview_id, export_current_id, messages_tail_ref, created_at, updated_at`
 
 func GetDraft(ctx context.Context, query Querier, draftID string) (Draft, error) {
 	row := query.QueryRowContext(ctx, "SELECT "+draftColumns+" FROM drafts WHERE draft_id=?", draftID)
@@ -53,14 +51,14 @@ type rowScanner interface{ Scan(...any) error }
 
 func scanDraft(row rowScanner) (Draft, error) {
 	var draft Draft
-	var defaults, runningJobs, brief, scratch string
+	var defaults, runningJobs, brief string
 	var pendingDecision, lastError, contentPlan, previewID, lastViewed, exportID, tail sql.NullString
 	var timelineVersion sql.NullInt64
 	var timelineValidated int
 	if err := row.Scan(
 		&draft.ID, &draft.Name, &draft.StateVersion, &draft.Status, &defaults, &pendingDecision,
 		&runningJobs, &lastError, &brief, &contentPlan, &timelineVersion, &timelineValidated,
-		&previewID, &lastViewed, &exportID, &scratch, &tail, &draft.CreatedAt, &draft.UpdatedAt,
+		&previewID, &lastViewed, &exportID, &tail, &draft.CreatedAt, &draft.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Draft{}, ErrNotFound
@@ -72,7 +70,6 @@ func scanDraft(row rowScanner) (Draft, error) {
 	draft.LastError = decodeNullMap(lastError)
 	draft.Brief = decodeMap(brief)
 	draft.ContentPlan = decodeNullMap(contentPlan)
-	draft.ScratchMemory = decodeMap(scratch)
 	draft.PendingDecisionID = stringPointer(pendingDecision)
 	draft.PreviewCurrentID = stringPointer(previewID)
 	draft.LastViewedPreviewID = stringPointer(lastViewed)

@@ -187,6 +187,7 @@ type ResultRows struct {
 	AgentJobObservationSuppressions []AgentJobObservationSuppressionRow
 	UserMemoryUpserts               []UserMemoryRow
 	UserMemoryRemoveKeys            []string
+	UserMemoryClearAll              bool
 	UserMemoryMutationEvidence      *UserMemoryEvidenceRow
 }
 
@@ -349,7 +350,7 @@ func Apply(
 	}
 	var userMemory *UserMemoryOutcome
 	if len(options.ResultRows.UserMemoryUpserts) > 0 ||
-		len(options.ResultRows.UserMemoryRemoveKeys) > 0 {
+		len(options.ResultRows.UserMemoryRemoveKeys) > 0 || options.ResultRows.UserMemoryClearAll {
 		userMemory = &UserMemoryOutcome{}
 	}
 	if err := persistResultRows(ctx, tx, options.ResultRows, state.createdAt, userMemory); err != nil {
@@ -563,8 +564,8 @@ func applyDraftCreated(ctx context.Context, state *applyState, event contracts.E
 	_, err := state.tx.ExecContext(ctx, `
 		INSERT INTO drafts(
 			draft_id, name, state_version, status, defaults_json, running_jobs_json,
-			brief_json, timeline_validated, scratch_memory_json, created_at, updated_at
-		) VALUES(?, ?, ?, ?, ?, '[]', ?, 0, '{}', ?, ?)`,
+			brief_json, timeline_validated, created_at, updated_at
+		) VALUES(?, ?, ?, ?, ?, '[]', ?, 0, ?, ?)`,
 		event.DraftID,
 		stringFrom(event.Payload["name"], "未命名草稿"),
 		intFrom(event.Payload["state_version"], 0),
@@ -619,12 +620,11 @@ func applyDraftCopied(ctx context.Context, state *applyState, event contracts.Ev
 			draft_id, name, state_version, status, defaults_json, pending_decision_id,
 			running_jobs_json, last_error_json, brief_json, content_plan_json,
 			timeline_current_version, timeline_validated, preview_current_id,
-			last_viewed_preview_id, export_current_id, scratch_memory_json,
-			messages_tail_ref, created_at, updated_at
+			last_viewed_preview_id, export_current_id, messages_tail_ref, created_at, updated_at
 		)
 		SELECT ?, ?, 0, 'active', defaults_json, NULL, '[]', NULL, brief_json,
 			content_plan_json, timeline_current_version, timeline_validated, NULL,
-			NULL, NULL, scratch_memory_json, NULL, ?, ?
+			NULL, NULL, NULL, ?, ?
 		FROM drafts WHERE draft_id=?`,
 		event.DraftID, name, state.createdAt, state.createdAt, sourceDraftID,
 	)
@@ -1436,7 +1436,7 @@ func persistResultRows(
 	}
 	userMemory, err := persistUserMemories(
 		ctx, tx, rows.UserMemoryUpserts, rows.UserMemoryRemoveKeys,
-		rows.UserMemoryMutationEvidence, defaultCreatedAt,
+		rows.UserMemoryClearAll, rows.UserMemoryMutationEvidence, defaultCreatedAt,
 	)
 	if err != nil {
 		return err
@@ -1626,17 +1626,46 @@ func persistUserMemories(
 	tx *sql.Tx,
 	upserts []UserMemoryRow,
 	removeKeys []string,
+	clearAll bool,
 	mutationEvidence *UserMemoryEvidenceRow,
 	defaultCreatedAt string,
 ) (UserMemoryOutcome, error) {
 	outcome := UserMemoryOutcome{}
-	if len(upserts) == 0 && len(removeKeys) == 0 {
+	if len(upserts) == 0 && len(removeKeys) == 0 && !clearAll {
 		return outcome, nil
+	}
+	if clearAll && (len(upserts) > 0 || len(removeKeys) > 0) {
+		return outcome, fmt.Errorf("%w: 清空不能与逐条写入或删除并用", ErrUserMemoryInput)
 	}
 	if mutationEvidence != nil {
 		if err := validateUserMemoryEvidence(ctx, tx, *mutationEvidence); err != nil {
 			return outcome, err
 		}
+	}
+	if clearAll {
+		rows, err := tx.QueryContext(ctx, "SELECT memory_key FROM user_memories ORDER BY memory_key ASC")
+		if err != nil {
+			return outcome, err
+		}
+		for rows.Next() {
+			var key string
+			if err := rows.Scan(&key); err != nil {
+				_ = rows.Close()
+				return outcome, err
+			}
+			outcome.RemovedKeys = append(outcome.RemovedKeys, key)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return outcome, err
+		}
+		if err := rows.Close(); err != nil {
+			return outcome, err
+		}
+		if _, err := tx.ExecContext(ctx, "DELETE FROM user_memories"); err != nil {
+			return outcome, err
+		}
+		return outcome, nil
 	}
 
 	upsertKeys := make(map[string]struct{}, len(upserts))
@@ -1902,7 +1931,8 @@ func emptyResultRows(rows ResultRows) bool {
 		rows.DraftPlanUpdate == nil && rows.AgentJobBridgeCursor == nil &&
 		len(rows.AgentJobObservations) == 0 && rows.AgentJobObservationDelivery == nil &&
 		len(rows.AgentJobObservationSuppressions) == 0 &&
-		len(rows.UserMemoryUpserts) == 0 && len(rows.UserMemoryRemoveKeys) == 0
+		len(rows.UserMemoryUpserts) == 0 && len(rows.UserMemoryRemoveKeys) == 0 &&
+		!rows.UserMemoryClearAll
 }
 
 func sortedKeys(values map[string]struct{}) []string {

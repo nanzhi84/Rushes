@@ -796,8 +796,8 @@ func insertToolDraft(t *testing.T, database *storage.DB, draftID string) {
 	_, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO drafts(
 			draft_id,name,state_version,status,defaults_json,running_jobs_json,brief_json,
-			timeline_validated,scratch_memory_json,created_at,updated_at
-		) VALUES(?,?,0,'active','{}','[]','{"goal":""}',0,'{}',?,?)`, draftID, draftID, now, now)
+			timeline_validated,created_at,updated_at
+		) VALUES(?,?,0,'active','{}','[]','{"goal":""}',0,?,?)`, draftID, draftID, now, now)
 	if err != nil {
 		t.Fatal(err)
 	}

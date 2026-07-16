@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 13
+const schemaVersion = 14
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS drafts (
     preview_current_id TEXT,
     last_viewed_preview_id TEXT,
     export_current_id TEXT,
-    scratch_memory_json TEXT NOT NULL DEFAULT '{}',
     messages_tail_ref TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -422,3 +421,8 @@ CREATE TABLE IF NOT EXISTS user_memories (
     last_confirmed_at TEXT NOT NULL
 );
 `
+
+// schemaV14 removes the never-written draft-local scratch memory column. Fresh
+// databases no longer create it in schemaV1, so the migration checks whether
+// the legacy column exists before executing this statement.
+const schemaV14 = `ALTER TABLE drafts DROP COLUMN scratch_memory_json`

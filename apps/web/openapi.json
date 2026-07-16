@@ -851,11 +851,6 @@
             "title": "Running Jobs",
             "type": "array"
           },
-          "scratch_memory": {
-            "additionalProperties": true,
-            "title": "Scratch Memory",
-            "type": "object"
-          },
           "state_version": {
             "title": "State Version",
             "type": "integer"
@@ -905,7 +900,6 @@
           "rough_cut_approved_version",
           "postprocess_plan",
           "export_current_id",
-          "scratch_memory",
           "messages_tail_ref",
           "created_at",
           "updated_at"
@@ -1678,6 +1672,98 @@
           "created_at"
         ],
         "title": "MessageRecord",
+        "type": "object"
+      },
+      "MemoriesResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "memories": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryRecord"
+            },
+            "maxItems": 50,
+            "title": "Memories",
+            "type": "array"
+          }
+        },
+        "required": [
+          "memories"
+        ],
+        "title": "MemoriesResponse",
+        "type": "object"
+      },
+      "MemoryMutationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "deleted_count": {
+            "maximum": 50,
+            "minimum": 0,
+            "title": "Deleted Count",
+            "type": "integer"
+          },
+          "deleted_memory_keys": {
+            "items": {
+              "pattern": "^[a-z0-9_]{2,40}$",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Deleted Memory Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "deleted_count",
+          "deleted_memory_keys"
+        ],
+        "title": "MemoryMutationResponse",
+        "type": "object"
+      },
+      "MemoryRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "preference",
+              "correction",
+              "habit"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_confirmed_at": {
+            "title": "Last Confirmed At",
+            "type": "string"
+          },
+          "memory_key": {
+            "pattern": "^[a-z0-9_]{2,40}$",
+            "title": "Memory Key",
+            "type": "string"
+          },
+          "source_draft_id": {
+            "minLength": 1,
+            "title": "Source Draft Id",
+            "type": "string"
+          },
+          "statement": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Statement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "memory_key",
+          "kind",
+          "statement",
+          "source_draft_id",
+          "created_at",
+          "last_confirmed_at"
+        ],
+        "title": "MemoryRecord",
         "type": "object"
       },
       "MessagesResponse": {
@@ -4612,6 +4698,200 @@
           }
         },
         "summary": "Cancel Job"
+      }
+    },
+    "/api/memories": {
+      "delete": {
+        "operationId": "clear_memories_api_memories_delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryMutationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          }
+        },
+        "summary": "Clear Memories"
+      },
+      "get": {
+        "operationId": "list_memories_api_memories_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoriesResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          }
+        },
+        "summary": "List Memories"
+      }
+    },
+    "/api/memories/{memory_key}": {
+      "delete": {
+        "operationId": "delete_memory_api_memories__memory_key__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_key",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9_]{2,40}$",
+              "title": "Memory Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryMutationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          }
+        },
+        "summary": "Delete Memory"
       }
     },
     "/api/media/export/{export_id}": {
