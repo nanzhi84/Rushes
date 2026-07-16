@@ -249,6 +249,7 @@ const DECISION_TYPES = new Set<Decision["type"]>([
   "approve_content_plan",
   "approve_speech_cut",
   "approve_rough_cut",
+  "critical",
   "subtitle",
   "bgm",
   "export",

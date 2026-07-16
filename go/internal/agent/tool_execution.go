@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
@@ -2444,6 +2445,28 @@ func (service *Service) toolAskUser(
 	pending map[string]any,
 ) (rushestools.ToolResult, error) {
 	decisionType := normalizeDecisionType(input.DecisionType)
+	if len(pending) == 0 {
+		if decisionType != "critical" {
+			return rushestools.ToolResult{
+				Status:      "failed",
+				Observation: "该问题未声明为无法安全推断的关键分歧。可逆的镜头取舍、删保项、气口、B-roll、节奏、字幕、转场、调色和 BGM 等细节必须由 Agent 根据证据自主决定并继续执行，不得创建首剪或 EDL 审批卡。",
+				Data: map[string]any{
+					"autonomous_decision_required": true,
+					"recovery":                     "采用有证据支持的安全默认值继续完成任务；完成后让用户通过增量反馈或 Rewind 调整。",
+				},
+			}, nil
+		}
+		if utf8.RuneCountInString(input.Question) > 240 || len(input.Options) > 3 {
+			return rushestools.ToolResult{
+				Status:      "failed",
+				Observation: "关键决策卡只能聚焦一个核心分歧，问题不得超过 240 个字符，结构化方向不得超过 3 个；不要附带方案清单或逐项审批。",
+				Data: map[string]any{
+					"autonomous_decision_required": false,
+					"recovery":                     "只保留那个无法从素材、上下文或安全默认值推断，且会实质改变成片目标的核心问题。",
+				},
+			}, nil
+		}
+	}
 	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err

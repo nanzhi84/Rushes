@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,9 +10,10 @@ import (
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-func TestNormalizeDecisionTypeMapsApprovalScenarios(t *testing.T) {
+func TestNormalizeDecisionTypeMapsKnownScenarios(t *testing.T) {
 	t.Parallel()
 	for input, want := range map[string]string{
+		"critical":             "critical",
 		"approve_content_plan": "approve_content_plan",
 		"approve_speech_cut":   "approve_speech_cut",
 		"approve_rough_cut":    "approve_rough_cut",
@@ -37,10 +39,10 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 	base = withTurnInteractionState(base, newTurnInteractionState())
 	askContext := rushestools.WithToolCallID(base, "call_ask_1")
 	raw, err := service.ExecuteTool(askContext, "interaction.ask_user", rushestools.AskUserInput{
-		Question:     "确认口播剪辑草案？",
-		DecisionType: "approve_speech_cut",
+		Question:     "当前素材支持两条互相冲突的主线，且无法判断用户目标，请选择核心方向。",
+		DecisionType: "critical",
 		Options: []rushestools.DecisionOptionInput{{
-			OptionID: "confirm", Label: "确认执行",
+			OptionID: "product", Label: "产品体验",
 		}},
 	})
 	if err != nil {
@@ -48,7 +50,7 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 	}
 	waiting := raw.(rushestools.ToolResult)
 	if waiting.Status != "waiting" || waiting.Data["turn_should_end"] != true ||
-		waiting.Data["decision_type"] != "approve_speech_cut" {
+		waiting.Data["decision_type"] != "critical" {
 		t.Fatalf("waiting=%#v", waiting)
 	}
 	decisionID := waiting.Data["decision_id"].(string)
@@ -56,9 +58,15 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Type != "approve_speech_cut" || decision.CreatedByToolCallID == nil ||
+	if decision.Type != "critical" || decision.CreatedByToolCallID == nil ||
 		*decision.CreatedByToolCallID != "call_ask_1" {
 		t.Fatalf("decision=%#v", decision)
+	}
+	directAnswer, err := service.toolDecisionAnswer(askContext, "draft_same_turn_decision", rushestools.DecisionAnswerInput{
+		DecisionID: decisionID, OptionID: "product",
+	})
+	if err != nil || directAnswer.Status != "failed" || directAnswer.Data["turn_should_end"] != true {
+		t.Fatalf("same-turn direct answer=%#v err=%v", directAnswer, err)
 	}
 
 	blockedRaw, err := service.ExecuteTool(base, "plan.update", rushestools.PlanUpdateInput{
@@ -92,6 +100,73 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 	decision, err = storage.GetDecision(t.Context(), database.Read(), decisionID)
 	if err != nil || decision.Status != "pending" {
 		t.Fatalf("same-turn answer changed decision: %#v err=%v", decision, err)
+	}
+}
+
+func TestAdjudicateDecisionAnswerTrustedOptionPayloadWins(t *testing.T) {
+	t.Parallel()
+	answer, err := AdjudicateDecisionAnswer(storage.Decision{
+		Options: []map[string]any{{
+			"option_id": "story",
+			"payload":   map[string]any{"shared": "trusted", "preset": "narrative"},
+		}},
+		AllowFreeText: true,
+	}, " story ", "  保留人物情绪  ", map[string]any{
+		"shared": "caller", "source": "user",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, ok := answer["payload"].(map[string]any)
+	if !ok || payload["shared"] != "trusted" || payload["preset"] != "narrative" ||
+		payload["source"] != "user" || answer["free_text"] != "保留人物情绪" {
+		t.Fatalf("answer=%#v", answer)
+	}
+}
+
+func TestAskUserRejectsCreativeApprovalAndVerboseCriticalQuestion(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_autonomous_editing")
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	ctx := rushestools.WithDraftID(t.Context(), "draft_autonomous_editing")
+	ctx = withTurnInteractionState(ctx, newTurnInteractionState())
+	for name, input := range map[string]rushestools.AskUserInput{
+		"reversible approval": {
+			Question: "请逐项确认口播删保项和 B-roll 方案。", DecisionType: "approve_speech_cut",
+		},
+		"verbose critical": {
+			Question: strings.Repeat("细", 241), DecisionType: "critical",
+		},
+	} {
+		raw, executeErr := service.ExecuteTool(ctx, "interaction.ask_user", input)
+		if executeErr != nil {
+			t.Fatalf("%s: %v", name, executeErr)
+		}
+		result := raw.(rushestools.ToolResult)
+		if result.Status != "failed" {
+			t.Errorf("%s result=%#v", name, result)
+		}
+	}
+
+	var decisionCount int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM decisions WHERE draft_id='draft_autonomous_editing'`).Scan(&decisionCount); err != nil {
+		t.Fatal(err)
+	}
+	if decisionCount != 0 {
+		t.Fatalf("rejected questions created %d decisions", decisionCount)
+	}
+	raw, err := service.ExecuteTool(ctx, "plan.update", rushestools.PlanUpdateInput{
+		Plan: map[string]any{"editing_policy": "autonomous"},
+	})
+	if err != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
+		t.Fatalf("rejected question blocked later work: raw=%#v err=%v", raw, err)
 	}
 }
 
@@ -140,8 +215,9 @@ func TestDecisionAnswerValidatesOwnershipStateAndAnswer(t *testing.T) {
 	ownerContext := rushestools.WithDraftID(t.Context(), "draft_decision_owner")
 	allowFreeText := false
 	raw, err := service.ExecuteTool(ownerContext, "interaction.ask_user", rushestools.AskUserInput{
-		Question: "选择节奏", AllowFreeText: &allowFreeText,
-		Options: []rushestools.DecisionOptionInput{{OptionID: "fast", Label: "快节奏"}},
+		Question: "关键节奏目标存在冲突，请选择方向。", DecisionType: "critical",
+		AllowFreeText: &allowFreeText,
+		Options:       []rushestools.DecisionOptionInput{{OptionID: "fast", Label: "快节奏"}},
 	})
 	if err != nil {
 		t.Fatal(err)

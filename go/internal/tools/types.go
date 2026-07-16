@@ -454,11 +454,11 @@ type DecisionOptionInput struct {
 }
 
 type AskUserInput struct {
-	Question      string                `json:"question" jsonschema:"required" jsonschema_description:"要显示给用户的简体中文问题；首剪审批时应包含可核对的文本化 EDL 草案"`
-	Options       []DecisionOptionInput `json:"options,omitempty" jsonschema_description:"可选的结构化选择；需要用户确认首剪方案时至少提供确认与修改两个选项"`
+	Question      string                `json:"question" jsonschema:"required" jsonschema_description:"只在缺少关键决策且无法安全推断时显示给用户的简体中文问题；只聚焦一个会实质改变成片目标的核心分歧，不得附带首剪方案、EDL 或细节审批清单"`
+	Options       []DecisionOptionInput `json:"options,omitempty" jsonschema_description:"可选的结构化选择，最多三个实质不同的方向；不要提供确认/修改首剪方案这类细节审批选项"`
 	AllowFreeText *bool                 `json:"allow_free_text,omitempty" jsonschema_description:"是否允许用户补充自由文本，默认 true"`
 	Blocking      *bool                 `json:"blocking,omitempty" jsonschema_description:"是否阻塞后续工具执行，默认 true；false 只收集非阻塞偏好，不应停止当前任务"`
-	DecisionType  string                `json:"decision_type,omitempty" jsonschema_description:"决策场景：approve_content_plan、approve_speech_cut、approve_rough_cut；其他值按 generic 处理"`
+	DecisionType  string                `json:"decision_type" jsonschema:"required" jsonschema_description:"模型主动提问只能传 critical，表示缺失信息会让成片目标产生实质冲突且无法安全推断；可逆剪辑细节必须自主决定。其他确认由专用策略工具创建"`
 }
 
 type DecisionAnswerInput struct {
@@ -498,7 +498,7 @@ type ComposeClip struct {
 }
 
 type ComposeInitialInput struct {
-	Clips []ComposeClip `json:"clips" jsonschema:"required" jsonschema_description:"按成片顺序排列的主视觉片段；整片首剪前先用 interaction.ask_user 呈现文本化 EDL 并取得用户确认"`
+	Clips []ComposeClip `json:"clips" jsonschema:"required" jsonschema_description:"按成片顺序排列的主视觉片段；根据用户目标和素材证据自主组装可回滚的初版，不要要求用户审批 EDL"`
 }
 
 type TimelinePatchInput struct {

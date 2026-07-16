@@ -25,6 +25,7 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 	}, "\n")
 	for _, incident := range []string{
 		"压压", "跷跷", "键盘背光", "键帽", "max_pauses 提高到 100",
+		"approve_content_plan", "approve_speech_cut", "approve_rough_cut",
 	} {
 		if strings.Contains(combined, incident) {
 			t.Errorf("prompt/playbook 不应保留事故例句 %q", incident)
@@ -37,15 +38,17 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 		"core": {coreSystemPrompt, []string{
 			"唯一客观事实", "目标明确就直接执行", "整数帧", "不可原样重试",
 			"即时预览", "用户反馈可以推翻旧的节奏或镜头结论",
-			"draft.content_plan", "plan.update", "RFC 7396", "不是日志或转写", "文本化 EDL 草案",
+			"draft.content_plan", "plan.update", "RFC 7396", "不是日志或转写",
+			"可逆创作细节", "Rewind", "decision_type=critical", "不得把首剪方案",
 		}},
 		"audio": {audioTrackPlaybook, []string{"持续音乐", "短时点缀", "叠加"}},
-		"beat":  {beatEditingPlaybook, []string{"节拍与完整动态证据", "可核验镜头", "approve_rough_cut", "卡点重剪"}},
+		"beat":  {beatEditingPlaybook, []string{"节拍与完整动态证据", "可核验镜头", "自主规划", "不要求用户审批", "卡点重剪"}},
 		"timeline": {timelineEditingPlaybook, []string{
-			"两个或更多片段", "原子批次", "approve_content_plan", "已有首剪后的增量修改不重复审批",
+			"两个或更多片段", "原子批次", "自主决定", "直接组装可回滚的初版",
 		}},
 		"talking_head": {talkingHeadPlaybook, []string{
-			"已有时间线", "尚无时间线", "建立初版", "逐句语音证据", "词级标识", "approve_speech_cut",
+			"已有时间线", "尚无时间线", "建立初版", "逐句语音证据", "词级标识",
+			"自主判断", "不向用户逐项审批",
 		}},
 	} {
 		for _, fragment := range check.fragments {

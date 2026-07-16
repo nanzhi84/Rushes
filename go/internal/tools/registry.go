@@ -254,7 +254,7 @@ func registerSpeechInspect(registry *Registry) error {
 }
 
 func registerAskUser(registry *Registry) error {
-	return addTool[AskUserInput, ToolResult](registry, "interaction.ask_user", "通过结构化决策卡向用户提问", nil, ExposureLLM, false)
+	return addTool[AskUserInput, ToolResult](registry, "interaction.ask_user", "仅在缺少会实质改变成片目标、且无法从素材或上下文安全推断的关键决策时，通过简短结构化决策卡向用户提问；可逆剪辑细节必须自主决定", nil, ExposureLLM, false)
 }
 
 func registerDecisionAnswer(registry *Registry) error {

@@ -584,7 +584,8 @@ func (service *Service) fallbackTurn(
 	}
 	if strings.Contains(content, "ASK_USER") {
 		_, err := service.ExecuteTool(ctx, "interaction.ask_user", rushestools.AskUserInput{
-			Question: "请选择剪辑节奏",
+			Question:     "当前素材无法判断整体节奏方向，请选择这次成片的核心节奏。",
+			DecisionType: "critical",
 			Options: []rushestools.DecisionOptionInput{
 				{OptionID: "fast", Label: "快节奏"}, {OptionID: "calm", Label: "舒缓"},
 			},

@@ -217,7 +217,9 @@ func TestDecisionEndpointConflictOwnershipPendingAndNullBranches(t *testing.T) {
 		t.Fatalf("current=%d body=%s", current.Code, current.Body.String())
 	}
 	ctx := tools.WithDraftID(t.Context(), "draft_decision_edges")
-	result, err := server.agent.ExecuteTool(ctx, "interaction.ask_user", tools.AskUserInput{Question: "继续？"})
+	result, err := server.agent.ExecuteTool(ctx, "interaction.ask_user", tools.AskUserInput{
+		Question: "存在关键冲突，是否继续？", DecisionType: "critical",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

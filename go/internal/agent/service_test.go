@@ -650,7 +650,8 @@ func TestDecisionAnswerObservationResumesAgent(t *testing.T) {
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_decision_continue")
 	result, err := service.ExecuteTool(ctx, "interaction.ask_user", rushestools.AskUserInput{
-		Question: "请选择混剪风格",
+		Question:     "当前目标存在无法推断的关键风格冲突，请选择核心方向。",
+		DecisionType: "critical",
 		Options: []rushestools.DecisionOptionInput{{
 			OptionID: "cinematic", Label: "电影感叙事",
 		}},
@@ -684,7 +685,7 @@ func TestDecisionAnswerObservationResumesAgent(t *testing.T) {
 	}
 	service.Queue().JoinDraft("draft_decision_continue")
 	prompt := chatModel.lastPrompt()
-	if !strings.Contains(prompt, "请选择混剪风格") ||
+	if !strings.Contains(prompt, "当前目标存在无法推断的关键风格冲突") ||
 		!strings.Contains(prompt, "电影感叙事") ||
 		!strings.Contains(prompt, "不要重复提出已经回答的问题") {
 		t.Fatalf("续跑提示缺少已回答决策上下文: %q", prompt)
@@ -1832,7 +1833,7 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	allowFreeText, blocking := false, false
 	waiting, err := service.ExecuteTool(ctx, "interaction.ask_user", rushestools.AskUserInput{
 		Question: "继续？", Options: []rushestools.DecisionOptionInput{{OptionID: "yes", Label: "继续"}},
-		AllowFreeText: &allowFreeText, Blocking: &blocking,
+		AllowFreeText: &allowFreeText, Blocking: &blocking, DecisionType: "critical",
 	})
 	if err != nil || waiting.(rushestools.ToolResult).Status != "succeeded" ||
 		waiting.(rushestools.ToolResult).Data["turn_should_end"] != false {
@@ -3071,7 +3072,7 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 		"media.search_shots":          rushestools.ShotSearchInput{},
 		"audio.analyze_beats":         rushestools.AudioBeatAnalysisInput{AssetID: "asset"},
 		"audio.analyze_speech_pauses": rushestools.SpeechPauseAnalysisInput{AssetID: "asset"},
-		"interaction.ask_user":        rushestools.AskUserInput{Question: "?"},
+		"interaction.ask_user":        rushestools.AskUserInput{Question: "?", DecisionType: "critical"},
 		"decision.answer":             rushestools.DecisionAnswerInput{DecisionID: "decision"},
 		"plan.update":                 rushestools.PlanUpdateInput{Plan: map[string]any{"status": "closed-db"}},
 		"timeline.compose_initial":    rushestools.ComposeInitialInput{},

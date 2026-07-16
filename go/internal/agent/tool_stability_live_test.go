@@ -255,7 +255,7 @@ func liveSchemaCases() []liveToolEvalCase {
 		{Name: "beats", Prompt: "请分析 BGM 素材 asset_bgm_1 的节拍，最多返回 512 个拍点。", Expected: []string{"audio.analyze_beats"}},
 		{Name: "speech_pauses", Prompt: "请分析时间线片段 clip_v1_001 的口播气口，阈值 -35dB，最多 100 个候选。", Expected: []string{"audio.analyze_speech_pauses"}},
 		{Name: "speech_inspect", Prompt: "请读取 clip_v1_001 的持久化逐句口播索引，检索‘指纹解锁’，同时返回气口和相似台词证据。", Expected: []string{"speech.inspect"}},
-		{Name: "ask_user", Prompt: "我们还不知道用户要电影感还是快节奏，请发出一张允许自由输入的阻塞性二选一决策卡。", Expected: []string{"interaction.ask_user"}},
+		{Name: "ask_user", Prompt: "用户要求的核心叙事目标存在两种实质冲突，素材和上下文都无法推断，且没有安全默认值。请用 decision_type=critical 发出一张允许自由输入的阻塞性二选一决策卡，只问这个核心分歧。", Expected: []string{"interaction.ask_user"}},
 		{Name: "decision_answer", Prompt: "请提交决策 decision_style_1 的答案 option_id=fast，补充说明为强节奏。", Expected: []string{"decision.answer"}},
 		{Name: "plan_update", Prompt: "请把已确定的创作计划持久记录下来：风格是克制电影感，节奏决定为前缓后快；使用增量合并，不要整体重置。", Expected: []string{"plan.update"}},
 		{Name: "compose", Prompt: "请立即组装初版时间线：asset_video_1 使用源 0到90帧，asset_video_2 使用源 30到120帧，两段都是 b_roll。", Expected: []string{"timeline.compose_initial"}},
@@ -403,11 +403,11 @@ func liveRoutingAblationCases() []liveRoutingVariant {
 			Prompt:   "多主题剪辑做到一半时用户要求先暂停。已确定但未执行：第二主题保留访谈开头，第三主题改成快节奏。请先固化这些决定供下回合继续。",
 			Snapshot: liveFullTaskSnapshot(),
 		}},
-		liveRoutingVariant{Name: "first_cut_approval", IncludePlaybook: true, Case: liveToolEvalCase{
-			Name: "first_cut_requires_edl", Expected: []string{"interaction.ask_user"},
+		liveRoutingVariant{Name: "first_cut_autonomous", IncludePlaybook: true, Case: liveToolEvalCase{
+			Name: "first_cut_executes_without_approval", Expected: []string{"timeline.compose_initial"},
 			Prompt: "WorldState 已确认尚无时间线；逐句证据也已读取：utt_1=开场介绍（保留），" +
 				"utt_2=重复口误（删除），utt_3=核心结论（保留）。素材和目标均已明确，" +
-				"请制作第一次完整口播首剪；任何编辑或补取证据前，先展示文本化 EDL 草案让我确认。",
+				"请直接制作第一次完整口播首剪，不要询问可逆的删保或 B-roll 细节。",
 			Snapshot: NewWorldStateSnapshot(map[string]any{
 				"assets": map[string]any{
 					"audio_roles": []any{},

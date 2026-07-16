@@ -98,6 +98,7 @@ const (
 	ApproveSpeechCut   DecisionType = "approve_speech_cut"
 	AudioMode          DecisionType = "audio_mode"
 	Bgm                DecisionType = "bgm"
+	Critical           DecisionType = "critical"
 	Export             DecisionType = "export"
 	Generic            DecisionType = "generic"
 	MemoryScope        DecisionType = "memory_scope"
@@ -117,6 +118,8 @@ func (e DecisionType) Valid() bool {
 	case AudioMode:
 		return true
 	case Bgm:
+		return true
+	case Critical:
 		return true
 	case Export:
 		return true

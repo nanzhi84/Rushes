@@ -684,6 +684,7 @@ describe("DraftEditorView", () => {
   });
 
   it.each([
+    ["critical", "这次内容主线存在冲突，请选择核心方向。"],
     ["approve_content_plan", "确认内容计划？"],
     ["approve_speech_cut", "确认口播首剪 EDL？"],
     ["approve_rough_cut", "确认卡点首剪 EDL？"]

@@ -434,8 +434,9 @@ func TestDecisionAnswerRESTValidatesAnswerContent(t *testing.T) {
 			createDraftThroughAPI(t, handler, draftID)
 			ctx := tools.WithDraftID(t.Context(), draftID)
 			result, err := server.agent.ExecuteTool(ctx, "interaction.ask_user", tools.AskUserInput{
-				Question: "选择方案？", AllowFreeText: &test.allowFreeText,
-				Options: []tools.DecisionOptionInput{{OptionID: "known", Label: "已知选项"}},
+				Question: "关键目标存在冲突，请选择方案。", DecisionType: "critical",
+				AllowFreeText: &test.allowFreeText,
+				Options:       []tools.DecisionOptionInput{{OptionID: "known", Label: "已知选项"}},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -487,7 +488,9 @@ func TestClearConversationHidesHistoryAndPreservesObjectiveState(t *testing.T) {
 		t.Fatalf("old=%d body=%s", old.Code, old.Body.String())
 	}
 	server.agent.Queue().JoinDraft("draft_clear_context")
-	waiting, err := server.agent.ExecuteTool(ctx, "interaction.ask_user", tools.AskUserInput{Question: "旧问题？"})
+	waiting, err := server.agent.ExecuteTool(ctx, "interaction.ask_user", tools.AskUserInput{
+		Question: "旧的关键问题？", DecisionType: "critical",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

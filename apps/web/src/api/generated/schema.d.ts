@@ -687,7 +687,7 @@ export interface components {
              * Type
              * @enum {string}
              */
-            type: "audio_mode" | "approve_content_plan" | "approve_speech_cut" | "approve_rough_cut" | "subtitle" | "bgm" | "export" | "memory_scope" | "url_import" | "generic";
+            type: "audio_mode" | "approve_content_plan" | "approve_speech_cut" | "approve_rough_cut" | "critical" | "subtitle" | "bgm" | "export" | "memory_scope" | "url_import" | "generic";
         };
         /** DecisionAnswer */
         DecisionAnswer: {

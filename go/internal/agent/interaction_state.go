@@ -77,7 +77,7 @@ func nullableToolCallID(ctx context.Context) any {
 
 func normalizeDecisionType(value string) string {
 	switch value {
-	case "approve_content_plan", "approve_speech_cut", "approve_rough_cut":
+	case "critical", "approve_content_plan", "approve_speech_cut", "approve_rough_cut":
 		return value
 	default:
 		return "generic"
