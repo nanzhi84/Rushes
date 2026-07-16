@@ -3,7 +3,10 @@ package worker
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
+
+	"github.com/nanzhi84/Rushes/go/internal/contracts"
 )
 
 type ProgressUpdate struct {
@@ -57,4 +60,16 @@ func (registry *Registry) Kinds() []string {
 	}
 	sort.Strings(kinds)
 	return kinds
+}
+
+func (registry *Registry) ValidateCatalog() error {
+	registered := registry.Kinds()
+	declared := make([]string, 0, len(contracts.AllJobKindSpecs()))
+	for _, spec := range contracts.AllJobKindSpecs() {
+		declared = append(declared, spec.Kind)
+	}
+	if !slices.Equal(registered, declared) {
+		return fmt.Errorf("job handler 与 kind catalog 不一致: handlers=%v catalog=%v", registered, declared)
+	}
+	return nil
 }

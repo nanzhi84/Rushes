@@ -15,15 +15,11 @@ const agentJobBridgeConsumerID = "agent"
 
 const jobObservationDispatchLimit = 100
 
-var agentWaitedJobKinds = map[string]struct{}{
-	"understand": {}, "render_preview": {}, "render_final": {},
-}
-
 // IsAgentWaitedJobKind is shared with the turn-cancel endpoint so the API and
 // bridge cannot drift on which asynchronous jobs belong to an Agent turn.
 func IsAgentWaitedJobKind(kind string) bool {
-	_, ok := agentWaitedJobKinds[kind]
-	return ok
+	spec, exists := contracts.LookupJobKind(kind)
+	return exists && spec.AgentWaited
 }
 
 type bridgeObservation struct {

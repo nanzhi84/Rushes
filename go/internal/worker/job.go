@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -31,6 +32,25 @@ job_id, kind, status, draft_id, requested_by_draft_id, asset_id,
 payload_json, attempts, max_retries, priority, worker_id, started_at`
 
 func Claim(ctx context.Context, database *storage.DB, workerID string, now time.Time) (*Job, error) {
+	return ClaimMatching(ctx, database, workerID, now, ClaimFilter{})
+}
+
+type ClaimFilter struct {
+	IncludeKinds []string
+	ExcludeKinds []string
+}
+
+func ClaimMatching(
+	ctx context.Context,
+	database *storage.DB,
+	workerID string,
+	now time.Time,
+	filter ClaimFilter,
+) (*Job, error) {
+	if len(filter.IncludeKinds) > 0 && len(filter.ExcludeKinds) > 0 {
+		return nil, errors.New("job claim filter 不能同时 include 与 exclude")
+	}
+	predicate, kindArgs := claimKindPredicate(filter)
 	timestamp := now.UTC().Format(time.RFC3339Nano)
 	tx, err := database.Write().BeginTx(ctx, nil)
 	if err != nil {
@@ -42,32 +62,24 @@ func Claim(ctx context.Context, database *storage.DB, workerID string, now time.
 			_ = tx.Rollback()
 		}
 	}()
-	_, err = tx.ExecContext(ctx, `
+	arguments := []any{workerID, timestamp, timestamp, timestamp}
+	arguments = append(arguments, kindArgs...)
+	row := tx.QueryRowContext(ctx, `
 		UPDATE jobs SET status='running', worker_id=?, started_at=?, heartbeat_at=?
 		WHERE job_id=(
 			SELECT job_id FROM jobs
-			WHERE status='pending' AND next_run_at<=?
+			WHERE status='pending' AND next_run_at<=?`+predicate+`
 			ORDER BY priority, created_at, job_id LIMIT 1
-		) AND status='pending'`, workerID, timestamp, timestamp, timestamp)
-	if err != nil {
-		return nil, err
-	}
-	var changed int
-	if err := tx.QueryRowContext(ctx, "SELECT changes()").Scan(&changed); err != nil {
-		return nil, err
-	}
-	if changed == 0 {
+		) AND status='pending'
+		RETURNING `+jobColumns, arguments...)
+	job, err := scanJob(row)
+	if errors.Is(err, storage.ErrNotFound) {
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
 		committed = true
 		return nil, nil
 	}
-	row := tx.QueryRowContext(ctx, `
-		SELECT `+jobColumns+` FROM jobs
-		WHERE status='running' AND worker_id=? AND started_at=? AND heartbeat_at=?
-		ORDER BY priority, created_at, job_id LIMIT 1`, workerID, timestamp, timestamp)
-	job, err := scanJob(row)
 	if err != nil {
 		return nil, err
 	}
@@ -76,6 +88,24 @@ func Claim(ctx context.Context, database *storage.DB, workerID string, now time.
 	}
 	committed = true
 	return &job, nil
+}
+
+func claimKindPredicate(filter ClaimFilter) (string, []any) {
+	kinds := filter.IncludeKinds
+	operator := "IN"
+	if len(kinds) == 0 {
+		kinds = filter.ExcludeKinds
+		operator = "NOT IN"
+	}
+	if len(kinds) == 0 {
+		return "", nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",")
+	arguments := make([]any, len(kinds))
+	for index, kind := range kinds {
+		arguments[index] = kind
+	}
+	return " AND kind " + operator + " (" + placeholders + ")", arguments
 }
 
 func GetJob(ctx context.Context, database *storage.DB, jobID string) (Job, error) {
@@ -111,6 +141,18 @@ func Heartbeat(ctx context.Context, database *storage.DB, job Job, now time.Time
 		UPDATE jobs SET heartbeat_at=?
 		WHERE job_id=? AND worker_id=? AND started_at=? AND status='running'`,
 		now.UTC().Format(time.RFC3339Nano), job.ID, value(job.WorkerID), value(job.StartedAt))
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
+}
+
+func ReleaseClaim(ctx context.Context, database *storage.DB, job Job) (bool, error) {
+	result, err := database.Write().ExecContext(ctx, `
+		UPDATE jobs SET status='pending', worker_id=NULL, heartbeat_at=NULL, started_at=NULL
+		WHERE job_id=? AND worker_id=? AND started_at=? AND status='running'`,
+		job.ID, value(job.WorkerID), value(job.StartedAt))
 	if err != nil {
 		return false, err
 	}

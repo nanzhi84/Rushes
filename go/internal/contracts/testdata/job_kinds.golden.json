@@ -1,0 +1,28 @@
+{
+  "all": [
+    "ingest",
+    "render_final",
+    "render_preview",
+    "understand"
+  ],
+  "agent_waited": [
+    "render_final",
+    "render_preview",
+    "understand"
+  ],
+  "execution_classes": {
+    "general": [
+      "ingest",
+      "understand"
+    ],
+    "render": [
+      "render_final",
+      "render_preview"
+    ]
+  },
+  "progress_labels": {
+    "render_final": "渲染成片",
+    "render_preview": "渲染预览",
+    "understand": "理解素材"
+  }
+}
