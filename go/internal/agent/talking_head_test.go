@@ -574,21 +574,25 @@ func TestTalkingHeadHelperEdgeBranches(t *testing.T) {
 	fragment := rushestools.SpeechFragmentEvidence{
 		FragmentID: "fragment", StartWordID: "w1", EndWordID: "w2",
 	}
-	fragmentInput, invalidFragments := expandTalkingHeadFragmentDecisions(
+	keepFragment := rushestools.SpeechFragmentEvidence{
+		FragmentID: "keep", StartWordID: "w3", EndWordID: "w4",
+	}
+	fragmentExpansion := expandTalkingHeadFragmentDecisions(
 		rushestools.TalkingHeadEditInput{
-			RemoveWordRanges:          []rushestools.TalkingHeadWordRange{{StartWordID: "w1", EndWordID: "w2"}},
-			PreserveSpeechFragmentIDs: []string{"fragment"},
+			RemoveWordRanges: []rushestools.TalkingHeadWordRange{{StartWordID: "w1", EndWordID: "w2"}},
 			ShortFragmentDecisions: []rushestools.TalkingHeadFragmentDecision{
 				{FragmentID: "fragment", Action: "remove"},
-				{FragmentID: "fragment", Action: "preserve", Reason: "保留"},
+				{FragmentID: "keep", Action: "preserve", Reason: "保留"},
+				{FragmentID: "fragment", Action: "preserve"},
 				{FragmentID: "missing", Action: "remove"},
 			},
 		},
-		map[string]rushestools.SpeechFragmentEvidence{"fragment": fragment},
+		map[string]rushestools.SpeechFragmentEvidence{"fragment": fragment, "keep": keepFragment},
 	)
-	if len(fragmentInput.RemoveWordRanges) != 1 || len(fragmentInput.PreserveSpeechFragmentIDs) != 1 ||
-		len(invalidFragments) != 2 {
-		t.Fatalf("input=%#v invalid=%#v", fragmentInput, invalidFragments)
+	if len(fragmentExpansion.Input.RemoveWordRanges) != 1 ||
+		len(fragmentExpansion.PreservedIDs) != 1 || fragmentExpansion.PreservedIDs[0] != "keep" ||
+		fragmentExpansion.PreservedReasons["keep"] != "保留" || len(fragmentExpansion.Invalid) != 2 {
+		t.Fatalf("expansion=%#v", fragmentExpansion)
 	}
 
 	assertAssignmentError := func(assignment rushestools.TalkingHeadBrollAssignment, removedUtterances, removed map[string]struct{}) {
@@ -898,21 +902,21 @@ func TestExpandTalkingHeadFragmentDecisionsCreatesOneShotWordAndPreserveChoices(
 			FragmentID: "keep_me", StartWordID: "w_keep_start", EndWordID: "w_keep_end",
 		},
 	}
-	input, invalid := expandTalkingHeadFragmentDecisions(rushestools.TalkingHeadEditInput{
+	expansion := expandTalkingHeadFragmentDecisions(rushestools.TalkingHeadEditInput{
 		ShortFragmentDecisions: []rushestools.TalkingHeadFragmentDecision{
 			{FragmentID: "remove_me", Action: "REMOVE"},
 			{FragmentID: "keep_me", Action: "preserve", Reason: "两侧语义完整，应保留"},
 		},
 	}, fragments)
-	if len(invalid) != 0 || len(input.RemoveWordRanges) != 1 ||
-		input.RemoveWordRanges[0].StartWordID != "w_bad_start" ||
-		input.RemoveWordRanges[0].EndWordID != "w_bad_end" ||
-		len(input.PreserveSpeechFragmentIDs) != 1 || input.PreserveSpeechFragmentIDs[0] != "keep_me" ||
-		input.PreserveSpeechFragmentReasons["keep_me"] != "两侧语义完整，应保留" {
-		t.Fatalf("expanded=%#v invalid=%#v", input, invalid)
+	if len(expansion.Invalid) != 0 || len(expansion.Input.RemoveWordRanges) != 1 ||
+		expansion.Input.RemoveWordRanges[0].StartWordID != "w_bad_start" ||
+		expansion.Input.RemoveWordRanges[0].EndWordID != "w_bad_end" ||
+		len(expansion.PreservedIDs) != 1 || expansion.PreservedIDs[0] != "keep_me" ||
+		expansion.PreservedReasons["keep_me"] != "两侧语义完整，应保留" {
+		t.Fatalf("expansion=%#v", expansion)
 	}
 
-	_, invalid = expandTalkingHeadFragmentDecisions(rushestools.TalkingHeadEditInput{
+	invalidExpansion := expandTalkingHeadFragmentDecisions(rushestools.TalkingHeadEditInput{
 		ShortFragmentDecisions: []rushestools.TalkingHeadFragmentDecision{
 			{FragmentID: "remove_me", Action: "remove"},
 			{FragmentID: "remove_me", Action: "preserve"},
@@ -920,8 +924,8 @@ func TestExpandTalkingHeadFragmentDecisionsCreatesOneShotWordAndPreserveChoices(
 			{FragmentID: "keep_me", Action: "guess"},
 		},
 	}, fragments)
-	if len(invalid) != 3 {
-		t.Fatalf("重复、未知与非法 action 均应一次返回: %#v", invalid)
+	if len(invalidExpansion.Invalid) != 3 {
+		t.Fatalf("重复、未知与非法 action 均应一次返回: %#v", invalidExpansion.Invalid)
 	}
 }
 

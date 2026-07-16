@@ -247,7 +247,42 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 	}
 }
 
-func TestModelToolSchemaSizeCoversEveryLLMTool(t *testing.T) {
+const modelToolSchemaTotalBaselineRunes = 45757
+
+var modelToolSchemaBaselineRunes = map[string]int{
+	"asset.list_assets":           435,
+	"audio.analyze_beats":         493,
+	"audio.analyze_speech_pauses": 798,
+	"decision.answer":             566,
+	"interaction.ask_user":        1027,
+	"interaction.confirm_action":  387,
+	"media.search_shots":          917,
+	"plan.update":                 1524,
+	"render.final_mp4":            218,
+	"render.inspect_preview":      452,
+	"render.preview":              220,
+	"render.status":               128,
+	"speech.inspect":              1326,
+	"timeline.apply_patch":        14542,
+	"timeline.apply_patches":      14744,
+	"timeline.compose_initial":    826,
+	"timeline.edit_talking_head":  4056,
+	"timeline.inspect":            195,
+	"timeline.recut_to_beats":     1860,
+	"timeline.validate":           131,
+	"understand.materials":        912,
+}
+
+func modelToolSchemaRuneLimit(baseline int) int {
+	percentLimit := (baseline*110 + 99) / 100
+	absoluteLimit := baseline + 499
+	if percentLimit < absoluteLimit {
+		return percentLimit
+	}
+	return absoluteLimit
+}
+
+func TestModelToolSchemaRuneBudgetCoversEveryLLMTool(t *testing.T) {
 	t.Parallel()
 	database := agentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
@@ -261,8 +296,34 @@ func TestModelToolSchemaSizeCoversEveryLLMTool(t *testing.T) {
 			want++
 		}
 	}
-	bytes, count := modelToolSchemaSize(t.Context(), service.tools)
-	if count != want || bytes <= 0 {
-		t.Fatalf("schema size bytes=%d count=%d want=%d", bytes, count, want)
+	metrics, err := modelToolSchemaSize(t.Context(), service.tools)
+	if err != nil || len(metrics.PerToolRunes) != want || want != len(modelToolSchemaBaselineRunes) {
+		t.Fatalf("schema metrics=%#v count=%d want=%d err=%v", metrics, len(metrics.PerToolRunes), want, err)
+	}
+	if limit := modelToolSchemaRuneLimit(modelToolSchemaTotalBaselineRunes); metrics.TotalRunes > limit {
+		t.Errorf("total schema runes=%d exceeds limit=%d baseline=%d", metrics.TotalRunes, limit, modelToolSchemaTotalBaselineRunes)
+	} else if metrics.TotalRunes < modelToolSchemaTotalBaselineRunes {
+		t.Errorf("total schema runes shrank to %d; lower the reviewed baseline %d in this change", metrics.TotalRunes, modelToolSchemaTotalBaselineRunes)
+	}
+	for name, runes := range metrics.PerToolRunes {
+		baseline, exists := modelToolSchemaBaselineRunes[name]
+		if !exists {
+			t.Errorf("LLM tool %s has no reviewed schema baseline", name)
+			continue
+		}
+		limit := modelToolSchemaRuneLimit(baseline)
+		if runes > limit {
+			t.Errorf("tool %s schema runes=%d exceeds limit=%d baseline=%d", name, runes, limit, baseline)
+		} else if runes < baseline {
+			t.Errorf("tool %s schema runes shrank to %d; lower the reviewed baseline %d in this change", name, runes, baseline)
+		}
+		if baseline+500 <= limit {
+			t.Errorf("tool %s budget would allow an unreviewed 500-rune increase", name)
+		}
+	}
+	for name := range modelToolSchemaBaselineRunes {
+		if _, exists := metrics.PerToolRunes[name]; !exists {
+			t.Errorf("schema baseline for removed or hidden tool %s must be reviewed", name)
+		}
 	}
 }

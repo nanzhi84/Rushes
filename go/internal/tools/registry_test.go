@@ -50,6 +50,73 @@ type prohibitedRevisionInput struct {
 	TimelineRevision int `json:"timeline_revision"`
 }
 
+type prohibitedNestedPath struct {
+	Path string `json:"path"`
+}
+
+type prohibitedNestedInput struct {
+	Items []prohibitedNestedPath `json:"items"`
+}
+
+type prohibitedNestedPointerInput struct {
+	Item *prohibitedNestedPath `json:"item"`
+}
+
+type prohibitedNestedArrayInput struct {
+	Items [1]prohibitedNestedPath `json:"items"`
+}
+
+type ignoredProhibitedNestedInput struct {
+	Ignored prohibitedNestedPath `json:"-"`
+}
+
+type recursiveCleanInput struct {
+	Next  *recursiveCleanInput `json:"next,omitempty"`
+	Value string               `json:"value"`
+}
+
+type recursiveCleanSlice []recursiveCleanSlice
+
+type prohibitedDepth4Input struct {
+	Nested prohibitedDepth4Level1 `json:"nested"`
+}
+
+type prohibitedDepth4Level1 struct {
+	Nested prohibitedDepth4Level2 `json:"nested"`
+}
+
+type prohibitedDepth4Level2 struct {
+	Nested prohibitedDepth4Level3 `json:"nested"`
+}
+
+type prohibitedDepth4Level3 struct {
+	Nested prohibitedNestedPath `json:"nested"`
+}
+
+type allowedDepth5Input struct {
+	Nested allowedDepth5Level1 `json:"nested"`
+}
+
+type allowedDepth5Level1 struct {
+	Nested allowedDepth5Level2 `json:"nested"`
+}
+
+type allowedDepth5Level2 struct {
+	Nested allowedDepth5Level3 `json:"nested"`
+}
+
+type allowedDepth5Level3 struct {
+	Nested allowedDepth5Level4 `json:"nested"`
+}
+
+type allowedDepth5Level4 struct {
+	Nested prohibitedNestedPath `json:"nested"`
+}
+
+type unexportedProhibitedInput struct {
+	path string
+}
+
 type cleanInput struct {
 	Value string `json:"value"`
 }
@@ -167,6 +234,19 @@ func TestRegistryDecodeInputCoversEveryLLMTool(t *testing.T) {
 	talkingHeadInput := talkingHead.(TalkingHeadEditInput)
 	if talkingHeadInput.ARollTimelineClipID != "clip_v1_001" || len(talkingHeadInput.RemoveUtteranceIDs) != 1 {
 		t.Fatalf("talking head input=%#v", talkingHeadInput)
+	}
+	if _, err := registry.DecodeInput("timeline.edit_talking_head", map[string]any{
+		"a_roll_timeline_clip_id":      "clip_v1_001",
+		"preserve_speech_fragment_ids": []any{"legacy_fragment"},
+	}); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("legacy fragment preservation input must be rejected: %v", err)
+	}
+	talkingHeadTool := registry.specs["timeline.edit_talking_head"].Implementation.(einotool.InvokableTool)
+	if _, err := talkingHeadTool.InvokableRun(
+		WithDraftID(t.Context(), "draft"),
+		`{"a_roll_timeline_clip_id":"clip_v1_001","remove_utterance_ids":["utt_1"],"preserve_speech_fragment_ids":["legacy_fragment"]}`,
+	); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("production tool path must reject legacy fragment preservation input: %v", err)
 	}
 	speech, err := registry.DecodeInput("speech.inspect", map[string]any{
 		"timeline_clip_id": "clip_v1_001", "query": "口播",
@@ -570,6 +650,7 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 
 func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 	t.Parallel()
+	_ = unexportedProhibitedInput{}.path
 	if _, err := NewRegistry(nil, fakeExecutor{}); err == nil {
 		t.Fatal("nil database should fail")
 	}
@@ -586,7 +667,16 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 	}
 	if prohibitedField(reflect.TypeFor[prohibitedPathInput]()) != "path" ||
 		prohibitedField(reflect.TypeFor[prohibitedRevisionInput]()) != "timeline_revision" ||
+		prohibitedField(reflect.TypeFor[prohibitedNestedInput]()) != "path" ||
+		prohibitedField(reflect.TypeFor[prohibitedNestedPointerInput]()) != "path" ||
+		prohibitedField(reflect.TypeFor[prohibitedNestedArrayInput]()) != "path" ||
 		prohibitedField(reflect.TypeFor[*prohibitedFrameInput]()) != "" ||
+		prohibitedField(reflect.TypeFor[ignoredProhibitedNestedInput]()) != "" ||
+		prohibitedField(reflect.TypeFor[recursiveCleanInput]()) != "" ||
+		prohibitedField(reflect.TypeFor[recursiveCleanSlice]()) != "" ||
+		prohibitedField(reflect.TypeFor[prohibitedDepth4Input]()) != "path" ||
+		prohibitedField(reflect.TypeFor[allowedDepth5Input]()) != "" ||
+		prohibitedField(reflect.TypeFor[unexportedProhibitedInput]()) != "" ||
 		prohibitedField(reflect.TypeFor[string]()) != "" ||
 		prohibitedField(reflect.TypeFor[cleanInput]()) != "" {
 		t.Fatal("PolicyGate field detection mismatch")
@@ -601,6 +691,9 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 	}
 	if err := addTool[prohibitedPathInput, ToolResult](registry, "bad", "bad", nil, ExposureLLM, false); err == nil {
 		t.Fatal("prohibited field should fail")
+	}
+	if err := addTool[prohibitedNestedInput, ToolResult](registry, "nested_bad", "bad", nil, ExposureLLM, false); err == nil {
+		t.Fatal("nested prohibited field should fail")
 	}
 
 	tool := registry.specs["clean"].Implementation.(einotool.InvokableTool)

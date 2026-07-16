@@ -3,8 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
+	"unicode/utf8"
 
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -16,32 +18,53 @@ func recordModelToolSchemaSize(ctx context.Context, registry *rushestools.Regist
 		return
 	}
 	logModelToolSchemaSizeOnce.Do(func() {
-		bytes, count := modelToolSchemaSize(ctx, registry)
-		slog.Info("模型工具 schema 已加载", "tool_count", count, "schema_bytes", bytes)
+		metrics, err := modelToolSchemaSize(ctx, registry)
+		if err != nil {
+			slog.Warn("模型工具 schema 统计失败", "error", err)
+			return
+		}
+		slog.Info(
+			"模型工具 schema 已加载",
+			"tool_count", len(metrics.PerToolRunes),
+			"schema_runes", metrics.TotalRunes,
+		)
 	})
 }
 
-func modelToolSchemaSize(ctx context.Context, registry *rushestools.Registry) (int, int) {
-	total := 0
-	count := 0
+type modelToolSchemaMetrics struct {
+	TotalRunes   int
+	PerToolRunes map[string]int
+}
+
+type modelToolSchemaPayload struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Parameters  any    `json:"parameters"`
+}
+
+func modelToolSchemaSize(ctx context.Context, registry *rushestools.Registry) (modelToolSchemaMetrics, error) {
+	metrics := modelToolSchemaMetrics{PerToolRunes: map[string]int{}}
 	for _, spec := range registry.Specs(true) {
 		if spec.Exposure != rushestools.ExposureLLM {
 			continue
 		}
 		info, err := spec.Implementation.Info(ctx)
 		if err != nil {
-			continue
+			return modelToolSchemaMetrics{}, fmt.Errorf("%s info: %w", spec.Name, err)
 		}
 		schema, err := info.ToJSONSchema()
 		if err != nil {
-			continue
+			return modelToolSchemaMetrics{}, fmt.Errorf("%s schema: %w", spec.Name, err)
 		}
-		encoded, err := json.Marshal(schema)
+		encoded, err := json.Marshal(modelToolSchemaPayload{
+			Name: spec.Name, Description: spec.Description, Parameters: schema,
+		})
 		if err != nil {
-			continue
+			return modelToolSchemaMetrics{}, fmt.Errorf("%s payload: %w", spec.Name, err)
 		}
-		total += len(encoded)
-		count++
+		runes := utf8.RuneCount(encoded)
+		metrics.PerToolRunes[spec.Name] = runes
+		metrics.TotalRunes += runes
 	}
-	return total, count
+	return metrics, nil
 }

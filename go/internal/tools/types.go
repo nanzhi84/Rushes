@@ -542,16 +542,14 @@ type TalkingHeadPauseDecision struct {
 }
 
 type TalkingHeadEditInput struct {
-	ARollTimelineClipID           string                          `json:"a_roll_timeline_clip_id" jsonschema:"required" jsonschema_description:"timeline.inspect 返回的 A-roll 主视频 clip ID"`
-	RemoveUtteranceIDs            []string                        `json:"remove_utterance_ids,omitempty" jsonschema_description:"模型根据 ASR 语义自行判断后选择删除的 utterance_id，例如语义重复或口误"`
-	RemoveWordRanges              []TalkingHeadWordRange          `json:"remove_word_ranges,omitempty" jsonschema_description:"模型根据词级 ASR 证据选择的连续句内删除范围；用于卡壳、重复词或半句重说，不能猜 word_id"`
-	RemovePauseIDs                []string                        `json:"remove_pause_ids,omitempty" jsonschema_description:"模型根据 speech.inspect 证据自行选择删除的 pause_id"`
-	PauseDecisions                []TalkingHeadPauseDecision      `json:"pause_decisions,omitempty" jsonschema_description:"对 speech.inspect 返回的显著气口候选逐项给出 remove/preserve 决定；remove 会自动加入删除项，preserve 只记录模型判断"`
-	RepetitionDecisions           []TalkingHeadRepetitionDecision `json:"repetition_decisions,omitempty" jsonschema_description:"对 speech.inspect 返回的每个 intra_utterance_repetitions 候选一次性给出 remove_earlier/remove_later/preserve 决定；删除动作会自动解析候选自带的精确连续 word_id 范围"`
-	ShortFragmentDecisions        []TalkingHeadFragmentDecision   `json:"short_fragment_decisions,omitempty" jsonschema_description:"对 speech.inspect 返回的每个 short_speech_fragments 候选一次性给出 remove/preserve 决定；remove 会自动解析为该候选的精确连续 word_id 范围，避免在失败后逐个补参数"`
-	PreserveSpeechFragmentIDs     []string                        `json:"preserve_speech_fragment_ids,omitempty" jsonschema_description:"speech.inspect 返回且模型判断应保留的短语音片段 fragment_id；兼容旧调用，优先使用 short_fragment_decisions 一次性提交全部决定"`
-	PreserveSpeechFragmentReasons map[string]string               `json:"preserve_speech_fragment_reasons,omitempty" jsonschema_description:"按 fragment_id 给出具体保留理由；对于 restart_prefix_before_repeated_take 必填，至少 20 字且必须原样引用 fragment.text 与 restart_anchor_text，解释 joined_context 为何语法和语义完整，不能只写正常、衔接或保留"`
-	BrollAssignments              []TalkingHeadBrollAssignment    `json:"b_roll_assignments,omitempty" jsonschema_description:"模型自行选择的台词语义与 B-roll 镜头对应关系"`
+	ARollTimelineClipID    string                          `json:"a_roll_timeline_clip_id" jsonschema:"required" jsonschema_description:"timeline.inspect 返回的 A-roll 主视频 clip ID"`
+	RemoveUtteranceIDs     []string                        `json:"remove_utterance_ids,omitempty" jsonschema_description:"模型根据 ASR 语义自行判断后选择删除的 utterance_id，例如语义重复或口误"`
+	RemoveWordRanges       []TalkingHeadWordRange          `json:"remove_word_ranges,omitempty" jsonschema_description:"模型根据词级 ASR 证据选择的连续句内删除范围；用于卡壳、重复词或半句重说，不能猜 word_id"`
+	RemovePauseIDs         []string                        `json:"remove_pause_ids,omitempty" jsonschema_description:"模型根据 speech.inspect 证据自行选择删除的 pause_id"`
+	PauseDecisions         []TalkingHeadPauseDecision      `json:"pause_decisions,omitempty" jsonschema_description:"对 speech.inspect 返回的显著气口候选逐项给出 remove/preserve 决定；remove 会自动加入删除项，preserve 只记录模型判断"`
+	RepetitionDecisions    []TalkingHeadRepetitionDecision `json:"repetition_decisions,omitempty" jsonschema_description:"对 speech.inspect 返回的每个 intra_utterance_repetitions 候选一次性给出 remove_earlier/remove_later/preserve 决定；删除动作会自动解析候选自带的精确连续 word_id 范围"`
+	ShortFragmentDecisions []TalkingHeadFragmentDecision   `json:"short_fragment_decisions,omitempty" jsonschema_description:"对 speech.inspect 返回的每个 short_speech_fragments 候选一次性给出 remove/preserve 决定；remove 会自动解析为该候选的精确连续 word_id 范围，避免在失败后逐个补参数"`
+	BrollAssignments       []TalkingHeadBrollAssignment    `json:"b_roll_assignments,omitempty" jsonschema_description:"模型自行选择的台词语义与 B-roll 镜头对应关系"`
 }
 
 type BeatRecutSFXInput struct {

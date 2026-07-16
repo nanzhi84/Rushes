@@ -3099,20 +3099,6 @@
             "description": "对 speech.inspect 返回的每个 short_speech_fragments 候选一次性给出 remove/preserve 决定；remove 会自动解析为该候选的精确连续 word_id 范围，避免在失败后逐个补参数",
             "type": "array"
           },
-          "preserve_speech_fragment_ids": {
-            "items": {
-              "type": "string"
-            },
-            "description": "speech.inspect 返回且模型判断应保留的短语音片段 fragment_id；兼容旧调用，优先使用 short_fragment_decisions 一次性提交全部决定",
-            "type": "array"
-          },
-          "preserve_speech_fragment_reasons": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "description": "按 fragment_id 给出具体保留理由；对于 restart_prefix_before_repeated_take 必填，至少 20 字且必须原样引用 fragment.text 与 restart_anchor_text，解释 joined_context 为何语法和语义完整，不能只写正常、衔接或保留",
-            "type": "object"
-          },
           "b_roll_assignments": {
             "items": {
               "properties": {
