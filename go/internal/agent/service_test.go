@@ -1857,6 +1857,40 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	if err != nil || len(decision.Options) != 2 {
 		t.Fatalf("decision=%#v err=%v", decision, err)
 	}
+	var decisionCountBeforeInvalid int
+	if err := database.Read().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM decisions`).Scan(&decisionCountBeforeInvalid); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []rushestools.ConfirmActionInput{
+		{Question: "未知工具？", ToolName: "missing", Arguments: map[string]any{}},
+		{Question: "嵌套确认？", ToolName: "interaction.confirm_action", Arguments: map[string]any{}},
+		{Question: "错误字段？", ToolName: "timeline.inspect", Arguments: map[string]any{"unknown": true}},
+		{Question: "空参数？", ToolName: "understand.materials", Arguments: nil},
+		{Question: "缺少素材？", ToolName: "understand.materials", Arguments: map[string]any{}},
+		{Question: "空画幅？", ToolName: "render.final_mp4", Arguments: map[string]any{"orientation": nil}},
+		{Question: "片段参数缺失？", ToolName: "timeline.compose_initial", Arguments: map[string]any{"clips": []any{map[string]any{}}}},
+		{Question: "空批量补丁？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{nil}}},
+		{Question: "空补丁？", ToolName: "timeline.apply_patch", Arguments: map[string]any{"op": map[string]any{}}},
+		{Question: "缺少片段？", ToolName: "timeline.apply_patch", Arguments: map[string]any{"op": map[string]any{"kind": "delete_clip"}}},
+		{Question: "未知补丁？", ToolName: "timeline.apply_patch", Arguments: map[string]any{"op": map[string]any{"kind": "unknown"}}},
+		{Question: "补丁附加字段？", ToolName: "timeline.apply_patch", Arguments: map[string]any{"op": map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}}},
+	} {
+		raw, executeErr := service.ExecuteTool(ctx, "interaction.confirm_action", invalid)
+		if executeErr != nil {
+			t.Fatal(executeErr)
+		}
+		result := raw.(rushestools.ToolResult)
+		if result.Status != "validation_failed" || result.Data["error_code"] != "invalid_confirmation_target" || result.Data["recovery"] == nil {
+			t.Fatalf("invalid confirmation=%#v", result)
+		}
+	}
+	var decisionCountAfterInvalid int
+	if err := database.Read().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM decisions`).Scan(&decisionCountAfterInvalid); err != nil {
+		t.Fatal(err)
+	}
+	if decisionCountAfterInvalid != decisionCountBeforeInvalid {
+		t.Fatalf("invalid confirmation created decision: before=%d after=%d", decisionCountBeforeInvalid, decisionCountAfterInvalid)
+	}
 	replayed, err := service.replayPendingTool(ctx, QueueItem{
 		DraftID: "draft_full", Kind: QueueUIObservation,
 		Payload: map[string]any{
@@ -1871,6 +1905,47 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 		"pending_tool_call": decision.PendingToolCall, "answer": map[string]any{"option_id": "cancel"},
 	}}); err != nil || cancelled != "已取消这项操作。" {
 		t.Fatalf("cancelled=%q err=%v", cancelled, err)
+	}
+	if _, err := service.replayPendingTool(ctx, QueueItem{DraftID: "draft_full", Payload: map[string]any{
+		"pending_tool_call": map[string]any{"tool_name": "understand.materials", "arguments": nil},
+		"answer":            map[string]any{"option_id": "confirm"},
+	}}); err == nil {
+		t.Fatal("nil confirmation arguments must fail replay validation")
+	}
+	for _, arguments := range []map[string]any{
+		{"op": map[string]any{}},
+		{"op": map[string]any{"kind": "delete_clip"}},
+		{"op": map[string]any{"kind": "unknown"}},
+		{"op": map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}},
+	} {
+		if _, err := service.replayPendingTool(ctx, QueueItem{DraftID: "draft_full", Payload: map[string]any{
+			"pending_tool_call": map[string]any{"tool_name": "timeline.apply_patch", "arguments": arguments},
+			"answer":            map[string]any{"option_id": "confirm"},
+		}}); err == nil {
+			t.Fatalf("invalid timeline patch must fail replay validation: %#v", arguments)
+		}
+	}
+	beforeNullReplay, err := timeline.Latest(t.Context(), database, "draft_full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, arguments := range map[string]map[string]any{
+		"render.final_mp4":       {"orientation": nil},
+		"timeline.apply_patches": {"ops": []any{nil}},
+	} {
+		if _, err := service.replayPendingTool(ctx, QueueItem{DraftID: "draft_full", Payload: map[string]any{
+			"pending_tool_call": map[string]any{"tool_name": name, "arguments": arguments},
+			"answer":            map[string]any{"option_id": "confirm"},
+		}}); err == nil {
+			t.Fatalf("explicit null must fail replay validation: %s %#v", name, arguments)
+		}
+	}
+	afterNullReplay, err := timeline.Latest(t.Context(), database, "draft_full")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterNullReplay.Version != beforeNullReplay.Version {
+		t.Fatalf("explicit null replay modified timeline: before=%d after=%d", beforeNullReplay.Version, afterNullReplay.Version)
 	}
 	if observed, err := service.replayPendingTool(ctx, QueueItem{DraftID: "draft_full"}); err != nil || observed == "" {
 		t.Fatalf("observed=%q err=%v", observed, err)
@@ -1919,6 +1994,80 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	}
 }
 
+func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T) {
+	database := agentTestDatabase(t)
+	const draftID = "draft_confirmation_preconditions"
+	createAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	arguments := map[string]any{
+		"op": map[string]any{"kind": "delete_clip", "timeline_clip_id": "clip_v1_001"},
+	}
+
+	missingRaw, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
+		Question: "确认删除片段？", ToolName: "timeline.apply_patch", Arguments: arguments,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := missingRaw.(rushestools.ToolResult)
+	if missing.Status != "validation_failed" || missing.Data["error_code"] != "invalid_confirmation_target" ||
+		!strings.Contains(missing.Observation, "timeline_exists") {
+		t.Fatalf("missing timeline confirmation=%#v", missing)
+	}
+	var decisionCount int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM decisions WHERE draft_id=?`, draftID,
+	).Scan(&decisionCount); err != nil || decisionCount != 0 {
+		t.Fatalf("invalid confirmation decision count=%d err=%v", decisionCount, err)
+	}
+
+	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+		AssetID: "asset_confirmation", AssetKind: "video", SourceEndFrame: 30,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.persistTimeline(t.Context(), draftID, document, "confirmation_precondition_fixture"); err != nil {
+		t.Fatal(err)
+	}
+	confirmRaw, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
+		Question: "确认删除片段？", ToolName: "timeline.apply_patch", Arguments: arguments,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirm := confirmRaw.(rushestools.ToolResult)
+	if confirm.Status != "waiting" {
+		t.Fatalf("confirmation=%#v", confirm)
+	}
+	decision, err := storage.GetDecision(t.Context(), database.Read(), confirm.Data["decision_id"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		UPDATE drafts SET timeline_current_version=NULL WHERE draft_id=?`, draftID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.replayPendingTool(ctx, QueueItem{DraftID: draftID, Payload: map[string]any{
+		"pending_tool_call": decision.PendingToolCall,
+		"answer":            map[string]any{"option_id": "confirm"},
+	}}); err == nil || !strings.Contains(err.Error(), "timeline_exists") {
+		t.Fatalf("replay must be rejected by registry precondition guard: %v", err)
+	}
+	var timelineVersions int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?`, draftID,
+	).Scan(&timelineVersions); err != nil || timelineVersions != 1 {
+		t.Fatalf("rejected replay timeline versions=%d err=%v", timelineVersions, err)
+	}
+}
+
 func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	t.Parallel()
 	database := agentTestDatabase(t)
@@ -1950,16 +2099,7 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	for _, value := range []any{"yes", stringPointerValue("pointer"), (*string)(nil), 1} {
 		_ = interfaceString(value)
 	}
-	for _, name := range []string{
-		"asset.list_assets", "understand.materials", "media.search_shots", "audio.analyze_beats", "audio.analyze_speech_pauses", "plan.update", "timeline.compose_initial", "timeline.apply_patch", "timeline.apply_patches", "timeline.recut_to_beats",
-		"timeline.validate", "timeline.inspect", "render.preview",
-		"render.final_mp4", "render.status", "render.inspect_preview",
-	} {
-		if _, err := replayInput(name, map[string]any{}); err != nil && name != "understand.materials" {
-			t.Fatalf("replay %s: %v", name, err)
-		}
-	}
-	replayed, err := replayInput("timeline.apply_patch", map[string]any{
+	replayed, err := service.tools.DecodeInput("timeline.apply_patch", map[string]any{
 		"op": map[string]any{"kind": "delete_clip", "clip_id": "clip_replay"},
 	})
 	if err != nil {
@@ -1972,7 +2112,7 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	if patchInput.Op["kind"] != "delete_clip" || patchInput.Op["clip_id"] != "clip_replay" {
 		t.Fatalf("replayed timeline op=%#v", patchInput.Op)
 	}
-	replayedPlan, err := replayInput("plan.update", map[string]any{
+	replayedPlan, err := service.tools.DecodeInput("plan.update", map[string]any{
 		"plan": map[string]any{"style": "cinematic"}, "reset": true,
 	})
 	if err != nil {
@@ -1982,16 +2122,8 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	if !ok || planInput.Plan["style"] != "cinematic" || planInput.Reset == nil || !*planInput.Reset {
 		t.Fatalf("replayed plan input=%#v type=%T", replayedPlan, replayedPlan)
 	}
-	if _, err := replayInput("missing", map[string]any{}); err == nil {
+	if _, err := service.tools.DecodeInput("missing", map[string]any{}); err == nil {
 		t.Fatal("unknown replay should fail")
-	}
-	for _, value := range []any{
-		&rushestools.AssetListInput{}, &rushestools.UnderstandInput{}, &rushestools.ShotSearchInput{}, &rushestools.AudioBeatAnalysisInput{}, &rushestools.SpeechPauseAnalysisInput{}, &rushestools.ComposeInitialInput{},
-		&rushestools.PlanUpdateInput{},
-		&rushestools.TimelinePatchInput{}, &rushestools.TimelinePatchBatchInput{}, &rushestools.TimelineBeatRecutInput{}, &rushestools.TimelineInspectInput{},
-		&rushestools.RenderInspectInput{}, "unchanged",
-	} {
-		_ = reflectValue(value)
 	}
 	for _, value := range []any{float64(1), float32(2), 3, "bad"} {
 		_, _ = numericValue(value)

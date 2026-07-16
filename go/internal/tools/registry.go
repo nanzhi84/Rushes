@@ -1,10 +1,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"sort"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
+	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
 
 type Exposure string
@@ -69,6 +72,152 @@ func (registry *Registry) Specs(includeOptional bool) []Spec {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
 	return result
+}
+
+func (registry *Registry) DecodeInput(name string, arguments map[string]any) (any, error) {
+	spec, exists := registry.specs[name]
+	if !exists {
+		return nil, fmt.Errorf("工具未注册: %s", name)
+	}
+	if spec.InputType == nil {
+		return nil, fmt.Errorf("工具 %s 缺少输入类型", name)
+	}
+	if arguments == nil {
+		return nil, fmt.Errorf("解码工具 %s 参数: arguments 必须是 JSON 对象", name)
+	}
+	data, err := json.Marshal(arguments)
+	if err != nil {
+		return nil, fmt.Errorf("编码工具 %s 参数: %w", name, err)
+	}
+	target := reflect.New(spec.InputType)
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target.Interface()); err != nil {
+		return nil, fmt.Errorf("解码工具 %s 参数: %w", name, err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("包含多个 JSON 值")
+		}
+		return nil, fmt.Errorf("解码工具 %s 参数: %w", name, err)
+	}
+	var raw any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("解码工具 %s 参数: %w", name, err)
+	}
+	if err := validateRequiredFields(spec.InputType, raw, "arguments"); err != nil {
+		return nil, fmt.Errorf("解码工具 %s 参数: %w", name, err)
+	}
+	return target.Elem().Interface(), nil
+}
+
+func validateRequiredFields(input reflect.Type, value any, path string) error {
+	for input.Kind() == reflect.Pointer {
+		input = input.Elem()
+	}
+	if value == nil {
+		return fmt.Errorf("%s 不允许为 null", path)
+	}
+	if input == reflect.TypeFor[TimelineOp]() {
+		operation, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s 必须是 JSON 对象", path)
+		}
+		if err := validateTimelineOp(operation); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		return nil
+	}
+	switch input.Kind() {
+	case reflect.Struct:
+		object, ok := value.(map[string]any)
+		if !ok {
+			return nil
+		}
+		for index := range input.NumField() {
+			field := input.Field(index)
+			if field.PkgPath != "" {
+				continue
+			}
+			name := strings.Split(field.Tag.Get("json"), ",")[0]
+			if name == "" || name == "-" {
+				continue
+			}
+			fieldValue, exists := object[name]
+			if schemaTagContains(field.Tag.Get("jsonschema"), "required") && (!exists || fieldValue == nil) {
+				return fmt.Errorf("缺少必填字段 %s.%s", path, name)
+			}
+			if exists {
+				if err := validateRequiredFields(field.Type, fieldValue, path+"."+name); err != nil {
+					return err
+				}
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		items, ok := value.([]any)
+		if !ok {
+			return nil
+		}
+		for index, item := range items {
+			if err := validateRequiredFields(input.Elem(), item, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func validateTimelineOp(operation map[string]any) error {
+	if err := timeline.ValidateOpFields(operation); err != nil {
+		return err
+	}
+	kind := operation["kind"].(string)
+	spec, _ := timeline.LookupOpSpec(kind)
+	allowed := map[string]bool{"kind": true}
+	for _, field := range spec.Fields {
+		if field.Injected {
+			continue
+		}
+		allowed[field.Name] = true
+		for _, alias := range field.Aliases {
+			allowed[alias] = true
+		}
+	}
+	for name := range operation {
+		if !allowed[name] {
+			return fmt.Errorf("时间线补丁 %s 包含未声明字段 %s", kind, name)
+		}
+	}
+	return nil
+}
+
+func schemaTagContains(tag, option string) bool {
+	for part := range strings.SplitSeq(tag, ",") {
+		if strings.TrimSpace(part) == option {
+			return true
+		}
+	}
+	return false
+}
+
+func (registry *Registry) ValidateConfirmation(ctx context.Context, name string, arguments map[string]any) error {
+	spec, exists := registry.specs[name]
+	if !exists {
+		return fmt.Errorf("目标工具未注册: %s", name)
+	}
+	if spec.Exposure != ExposureLLM {
+		return fmt.Errorf("目标工具不可由模型确认后执行: %s", name)
+	}
+	if strings.HasPrefix(name, "interaction.") || name == "decision.answer" {
+		return fmt.Errorf("交互类工具不能嵌套确认: %s", name)
+	}
+	if _, err := registry.DecodeInput(name, arguments); err != nil {
+		return fmt.Errorf("目标工具参数无效: %w", err)
+	}
+	if err := registry.guard(ctx, spec); err != nil {
+		return fmt.Errorf("目标工具前置条件不满足: %w", err)
+	}
+	return nil
 }
 
 func (registry *Registry) EinoTools(includeOptional, includeHarness bool) []tool.BaseTool {
