@@ -89,9 +89,9 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 	case "timeline.inspect":
 		return service.toolInspectTimeline(ctx, draftID, input.(rushestools.TimelineInspectInput))
 	case "render.preview":
-		return service.toolEnqueueRender(ctx, draftID, "render_preview")
+		return service.toolEnqueueRender(ctx, draftID, "render_preview", input.(rushestools.RenderPreviewInput).Orientation)
 	case "render.final_mp4":
-		return service.toolEnqueueRender(ctx, draftID, "render_final")
+		return service.toolEnqueueRender(ctx, draftID, "render_final", input.(rushestools.RenderFinalInput).Orientation)
 	case "render.status":
 		return service.toolRenderStatus(ctx, draftID)
 	case "render.inspect_preview":
@@ -1035,8 +1035,9 @@ func (service *Service) toolBuildBeatMix(
 }
 
 type beatMixSourceRange struct {
-	StartFrame int
-	EndFrame   int
+	StartFrame     int
+	EndFrame       int
+	QualityPenalty float64
 }
 
 // latestBeatMixSourceRanges 读取质量最完整的理解摘要中的源帧证据。摘要缺失、损坏或
@@ -1084,24 +1085,40 @@ func beatMixRangesFromUnderstanding(
 		if end <= start {
 			continue
 		}
-		ranges = append(ranges, beatMixSourceRange{StartFrame: start, EndFrame: end})
+		penalty := understandingSegmentQualityPenalty(segment)
+		ranges = append(ranges, beatMixSourceRange{StartFrame: start, EndFrame: end, QualityPenalty: penalty})
 		// analysis_window 是同一长镜头内的理解采样边界。卡点片段可以跨越
 		// 相邻窗口，但不能跨越 VLM 已确认的真实切镜或不可用区间。
 		if continuous != nil && start <= continuous.EndFrame+1 && segment.BoundaryKind == "analysis_window" {
 			continuous.EndFrame = max(continuous.EndFrame, end)
+			continuous.QualityPenalty = max(continuous.QualityPenalty, penalty)
 			continue
 		}
 		flushContinuous()
-		continuous = &beatMixSourceRange{StartFrame: start, EndFrame: end}
+		continuous = &beatMixSourceRange{StartFrame: start, EndFrame: end, QualityPenalty: penalty}
 	}
 	flushContinuous()
 	sort.SliceStable(ranges, func(i, j int) bool {
+		if ranges[i].QualityPenalty != ranges[j].QualityPenalty {
+			return ranges[i].QualityPenalty < ranges[j].QualityPenalty
+		}
 		if ranges[i].StartFrame == ranges[j].StartFrame {
 			return ranges[i].EndFrame < ranges[j].EndFrame
 		}
 		return ranges[i].StartFrame < ranges[j].StartFrame
 	})
 	return ranges
+}
+
+func understandingSegmentQualityPenalty(segment understanding.Segment) float64 {
+	penalty := 0.0
+	if segment.OverexposedRatio != nil && *segment.OverexposedRatio > 0.10 {
+		penalty += min(0.12, (*segment.OverexposedRatio-0.10)*0.15)
+	}
+	if segment.SharpnessScore != nil && *segment.SharpnessScore < 100 {
+		penalty += min(0.10, (100-*segment.SharpnessScore)/1000)
+	}
+	return math.Round(penalty*10000) / 10000
 }
 
 func chooseUnusedBeatMixSourceStart(
@@ -1129,6 +1146,12 @@ func chooseUnusedBeatMixSourceStart(
 	if len(candidates) == 0 {
 		return 0, false
 	}
+	sort.SliceStable(candidates, func(left, right int) bool {
+		if candidates[left].QualityPenalty != candidates[right].QualityPenalty {
+			return candidates[left].QualityPenalty < candidates[right].QualityPenalty
+		}
+		return candidates[left].StartFrame < candidates[right].StartFrame
+	})
 	sortedUsed := append([]beatMixSourceRange(nil), used...)
 	sort.SliceStable(sortedUsed, func(i, j int) bool {
 		return sortedUsed[i].StartFrame < sortedUsed[j].StartFrame
@@ -1136,8 +1159,16 @@ func chooseUnusedBeatMixSourceStart(
 	if rangeOffset < 0 {
 		rangeOffset = -rangeOffset
 	}
-	for step := 0; step < len(candidates); step++ {
-		sourceRange := candidates[(rangeOffset+step)%len(candidates)]
+	preferredCount := 1
+	for preferredCount < len(candidates) && candidates[preferredCount].QualityPenalty == candidates[0].QualityPenalty {
+		preferredCount++
+	}
+	ordered := make([]beatMixSourceRange, 0, len(candidates))
+	for step := 0; step < preferredCount; step++ {
+		ordered = append(ordered, candidates[(rangeOffset+step)%preferredCount])
+	}
+	ordered = append(ordered, candidates[preferredCount:]...)
+	for _, sourceRange := range ordered {
 		cursor := sourceRange.StartFrame
 		for _, occupied := range sortedUsed {
 			if occupied.EndFrame <= cursor || occupied.StartFrame >= sourceRange.EndFrame {
@@ -1860,9 +1891,11 @@ func compactUnderstandingSummary(
 			Actions:   append([]string(nil), segment.Actions...),
 			Setting:   append([]string(nil), segment.Setting...),
 			ShotScale: segment.ShotScale, Composition: segment.Composition,
-			Lighting:  append([]string(nil), segment.Lighting...),
-			Mood:      append([]string(nil), segment.Mood...),
-			EditHints: append([]string(nil), segment.EditHints...),
+			Lighting:         append([]string(nil), segment.Lighting...),
+			Mood:             append([]string(nil), segment.Mood...),
+			EditHints:        append([]string(nil), segment.EditHints...),
+			OverexposedRatio: segment.OverexposedRatio,
+			SharpnessScore:   segment.SharpnessScore,
 		})
 	}
 	return rushestools.MaterialUnderstandingSummary{
@@ -2152,6 +2185,13 @@ func (service *Service) persistTimeline(
 		validationType = "TimelineValidationFailed"
 	}
 	reportMap := map[string]any{"valid": report.Valid, "checks": report.Checks, "issues": report.Issues}
+	contractReport, hasContract, contractErr := service.verifyContentContract(ctx, draftID, document)
+	if contractErr != nil {
+		return rushestools.ToolResult{}, contractErr
+	}
+	if hasContract {
+		reportMap["content_contract"] = contractReport
+	}
 	actor := contracts.ActorAgent
 	origin := rushestools.TimelineMutationOrigin(ctx)
 	if origin == "manual" {
@@ -2186,13 +2226,22 @@ func (service *Service) persistTimeline(
 	if !report.Valid {
 		status = "validation_failed"
 	}
-	return rushestools.ToolResult{
+	toolResult := rushestools.ToolResult{
 		Status: status, Observation: timeline.Inspect(document),
 		Data: map[string]any{
 			"validation_report": reportMap,
 			"beat_alignment":    beatAlignmentData(document),
 		},
-	}, nil
+	}
+	if hasContract {
+		failures := contractFailureItems(contractReport)
+		if len(failures) > 0 {
+			encoded, _ := json.Marshal(failures)
+			toolResult.Observation += " 验收合同未通过项：" + string(encoded)
+			toolResult.Data["contract_failures"] = failures
+		}
+	}
+	return toolResult, nil
 }
 
 func (service *Service) toolValidateTimeline(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
@@ -2206,6 +2255,16 @@ func (service *Service) toolValidateTimeline(ctx context.Context, draftID string
 	}
 	report := timeline.Validate(document)
 	beatAlignment := beatAlignmentData(document)
+	contractReport, hasContract, contractErr := service.verifyContentContract(ctx, draftID, document)
+	if contractErr != nil {
+		return rushestools.ToolResult{}, contractErr
+	}
+	validationReport := map[string]any{
+		"valid": report.Valid, "checks": report.Checks, "issues": report.Issues,
+	}
+	if hasContract {
+		validationReport["content_contract"] = contractReport
+	}
 	eventType := "TimelineValidated"
 	if !report.Valid {
 		eventType = "TimelineValidationFailed"
@@ -2214,7 +2273,7 @@ func (service *Service) toolValidateTimeline(ctx context.Context, draftID string
 		Type: eventType, DraftID: draftID,
 		Payload: map[string]any{
 			"timeline_version":  document.Version,
-			"validation_report": map[string]any{"valid": report.Valid, "checks": report.Checks, "issues": report.Issues},
+			"validation_report": validationReport,
 		},
 	}}, reducer.Options{Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion})
 	if err != nil || result.Status != reducer.StatusApplied {
@@ -2231,13 +2290,25 @@ func (service *Service) toolValidateTimeline(ctx context.Context, draftID string
 			)
 		}
 	}
+	data := map[string]any{
+		"validation_report": validationReport,
+		"beat_alignment":    beatAlignment,
+	}
+	if hasContract {
+		data["content_contract"] = contractReport
+		failures := contractFailureItems(contractReport)
+		data["contract_failures"] = failures
+		if len(failures) == 0 {
+			observation += " 验收合同全部通过。"
+		} else {
+			encoded, _ := json.Marshal(failures)
+			observation += " 验收合同未通过项：" + string(encoded)
+		}
+	}
 	return rushestools.ToolResult{
 		Status:      map[bool]string{true: "succeeded", false: "validation_failed"}[report.Valid],
 		Observation: observation,
-		Data: map[string]any{
-			"validation_report": report,
-			"beat_alignment":    beatAlignment,
-		},
+		Data:        data,
 	}, nil
 }
 
@@ -2276,6 +2347,9 @@ func (service *Service) toolInspectTimeline(
 				"source_start_frame":   clip.SourceStartFrame,
 				"source_end_frame":     clip.SourceEndFrame,
 				"text":                 clip.Text,
+				"fade_in_frames":       clip.FadeInFrames,
+				"fade_out_frames":      clip.FadeOutFrames,
+				"subtitle_style":       clip.SubtitleStyle,
 			}
 			if len(clip.Effects) > 0 {
 				clipData["effects"] = clip.Effects
@@ -2285,10 +2359,14 @@ func (service *Service) toolInspectTimeline(
 			}
 			clips = append(clips, clipData)
 		}
-		tracks = append(tracks, map[string]any{
+		trackData := map[string]any{
 			"track_id": track.TrackID, "track_type": track.TrackType,
 			"muted": track.Muted, "locked": track.Locked, "clips": clips,
-		})
+		}
+		if track.Ducking != nil {
+			trackData["ducking"] = track.Ducking
+		}
+		tracks = append(tracks, trackData)
 	}
 	return rushestools.ToolResult{
 		Status: "succeeded", Observation: timeline.Inspect(document),
@@ -2535,8 +2613,12 @@ func decisionOption(decision storage.Decision, optionID string) (map[string]any,
 
 func (service *Service) toolEnqueueRender(
 	ctx context.Context,
-	draftID, kind string,
+	draftID, kind, orientation string,
 ) (rushestools.ToolResult, error) {
+	orientation, err := normalizeRenderOrientation(orientation)
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
 	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
@@ -2544,7 +2626,7 @@ func (service *Service) toolEnqueueRender(
 	if draft.TimelineCurrentVersion == nil || !draft.TimelineValidated {
 		return rushestools.ToolResult{}, errors.New("当前时间线尚未验证")
 	}
-	baseIdempotencyKey := fmt.Sprintf("%s:%s:%d", kind, draftID, *draft.TimelineCurrentVersion)
+	baseIdempotencyKey := fmt.Sprintf("%s:%s:%d:%s", kind, draftID, *draft.TimelineCurrentVersion, orientation)
 	idempotencyKey := baseIdempotencyKey
 	retryOfJobID := ""
 	if existing, found, err := service.findRenderJob(ctx, kind, baseIdempotencyKey, true); err != nil {
@@ -2557,7 +2639,7 @@ func (service *Service) toolEnqueueRender(
 		idempotencyKey = fmt.Sprintf("%s:retry:%s", baseIdempotencyKey, existing.ID)
 	}
 	jobID := randomID("job")
-	jobPayload := map[string]any{"timeline_version": *draft.TimelineCurrentVersion}
+	jobPayload := map[string]any{"timeline_version": *draft.TimelineCurrentVersion, "orientation": orientation}
 	if retryOfJobID != "" {
 		jobPayload["retry_of_job_id"] = retryOfJobID
 	}
@@ -2579,6 +2661,19 @@ func (service *Service) toolEnqueueRender(
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("reducer status: %s", result.Status))
 	}
 	return renderJobResult(kind, jobID, "pending"), nil
+}
+
+func normalizeRenderOrientation(value string) (string, error) {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return "auto", nil
+	}
+	switch value {
+	case "auto", "portrait", "landscape":
+		return value, nil
+	default:
+		return "", errors.New("orientation 必须是 auto、portrait 或 landscape")
+	}
 }
 
 type renderJobRef struct {
@@ -2646,13 +2741,19 @@ func (service *Service) toolInspectPreview(
 	draftID string,
 	input rushestools.RenderInspectInput,
 ) (rushestools.PreviewInspectionResult, error) {
+	checks, err := normalizePreviewInspectionChecks(input.Checks)
+	if err != nil {
+		return rushestools.PreviewInspectionResult{}, err
+	}
+	input.Checks = checks
 	var hash string
+	var timelineVersion int
 	var width, height sql.NullInt64
 	var fps, duration sql.NullFloat64
-	err := service.database.Read().QueryRowContext(ctx, `
-		SELECT object_hash,render_width,render_height,render_fps,expected_duration_sec
+	err = service.database.Read().QueryRowContext(ctx, `
+		SELECT object_hash,timeline_version,render_width,render_height,render_fps,expected_duration_sec
 		FROM previews WHERE preview_id=? AND draft_id=?`, input.PreviewID, draftID).Scan(
-		&hash, &width, &height, &fps, &duration,
+		&hash, &timelineVersion, &width, &height, &fps, &duration,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return rushestools.PreviewInspectionResult{}, storage.ErrNotFound
@@ -2664,22 +2765,224 @@ func (service *Service) toolInspectPreview(
 	if err != nil {
 		return rushestools.PreviewInspectionResult{}, err
 	}
-	inspection, err := media.InspectVideo(ctx, path, media.ExpectedVideo{
-		Width: int(width.Int64), Height: int(height.Int64),
-		FPS: fps.Float64, DurationSec: duration.Float64,
-	}, input.Checks)
+	document, err := timeline.Get(ctx, service.database, draftID, timelineVersion)
 	if err != nil {
 		return rushestools.PreviewInspectionResult{}, err
 	}
+	expected, err := media.TimelineInspectionIntent(ctx, service.database, document)
+	if err != nil {
+		return rushestools.PreviewInspectionResult{}, err
+	}
+	expected.Width = int(width.Int64)
+	expected.Height = int(height.Int64)
+	expected.FPS = fps.Float64
+	expected.DurationSec = duration.Float64
+	inspection, err := media.InspectVideo(ctx, path, expected, input.Checks)
+	if err != nil {
+		return rushestools.PreviewInspectionResult{}, err
+	}
+	result := rushestools.PreviewInspectionResult{}
+	if containsString(input.Checks, "visual") {
+		frameContext, contextErr := service.previewInspectionFrameContext(
+			ctx, document, understanding.PreviewInspectionFrameNumbers(document),
+		)
+		if contextErr != nil {
+			return rushestools.PreviewInspectionResult{}, contextErr
+		}
+		visual, visualErr := service.analyzer.InspectPreview(
+			ctx, service.database.Paths, path, document, frameContext,
+		)
+		if visualErr != nil {
+			return rushestools.PreviewInspectionResult{}, visualErr
+		}
+		inspection.Degraded = inspection.Degraded || visual.Degraded
+		if visual.Degraded {
+			inspection.Issues = append(inspection.Issues, media.InspectionIssue{
+				Check: "dependencies", Severity: "warning", Message: "未配置视觉模型，已跳过 contact sheet 视觉检查。",
+			})
+		}
+		for _, finding := range visual.Findings {
+			inspection.Issues = append(inspection.Issues, media.InspectionIssue{
+				Check: finding.Check, Severity: finding.Severity, Message: finding.Message, Frames: finding.Frames,
+			})
+		}
+		result.VisualFrameCount = visual.FrameCount
+		result.VisualLatencyMS = visual.LatencyMS
+		result.VisualPromptTokens = visual.PromptTokens
+		result.VisualTotalTokens = visual.TotalTokens
+	}
+	media.FinalizeInspectionSummary(&inspection)
 	issues := make([]map[string]interface{}, 0, len(inspection.Issues))
 	for _, issue := range inspection.Issues {
-		issues = append(issues, map[string]interface{}{
+		item := map[string]interface{}{
 			"check": issue.Check, "severity": issue.Severity, "message": issue.Message,
-		})
+		}
+		if issue.ErrorCode != "" {
+			item["error_code"] = issue.ErrorCode
+		}
+		if len(issue.Frames) > 0 {
+			item["frames"] = issue.Frames
+		}
+		issues = append(issues, item)
 	}
-	return rushestools.PreviewInspectionResult{
-		Summary: inspection.Summary, Degraded: inspection.Degraded, Issues: issues,
-	}, nil
+	result.Summary = inspection.Summary
+	result.Degraded = inspection.Degraded
+	result.Issues = issues
+	return result, nil
+}
+
+func normalizePreviewInspectionChecks(checks []string) ([]string, error) {
+	allowed := map[string]struct{}{
+		"decode": {}, "black": {}, "freeze": {}, "silence": {}, "loudness": {}, "visual": {},
+	}
+	normalized := make([]string, 0, len(checks))
+	seen := make(map[string]struct{}, len(checks))
+	for _, raw := range checks {
+		check := strings.TrimSpace(raw)
+		if check == "" {
+			return nil, errors.New("checks 不能包含空白检查项")
+		}
+		if _, ok := allowed[check]; !ok {
+			return nil, fmt.Errorf("未知的预览质检项 %q；只支持 decode、black、freeze、silence、loudness 或 visual", check)
+		}
+		if _, duplicate := seen[check]; duplicate {
+			continue
+		}
+		seen[check] = struct{}{}
+		normalized = append(normalized, check)
+	}
+	return normalized, nil
+}
+
+func (service *Service) previewInspectionFrameContext(
+	ctx context.Context,
+	document timeline.Document,
+	frames []int,
+) (map[int]string, error) {
+	transcriptCache := map[string]storage.Transcript{}
+	missingTranscript := map[string]struct{}{}
+	result := make(map[int]string, len(frames))
+	for _, frame := range frames {
+		parts := []string{}
+		audioClips := audibleSpeechClipsAtFrame(document, frame)
+		for _, clip := range audioClips {
+			if clip.AssetID == "" {
+				continue
+			}
+			transcript, cached := transcriptCache[clip.AssetID]
+			if !cached {
+				if _, missing := missingTranscript[clip.AssetID]; missing {
+					continue
+				}
+				loaded, err := storage.LatestTranscript(ctx, service.database.Read(), clip.AssetID)
+				if errors.Is(err, storage.ErrNotFound) {
+					missingTranscript[clip.AssetID] = struct{}{}
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				transcript = loaded
+				transcriptCache[clip.AssetID] = loaded
+			}
+			rate := clip.PlaybackRate
+			if rate <= 0 {
+				rate = 1
+			}
+			timelineOffset := float64(frame - clip.TimelineStartFrame)
+			sourceFrame := clip.SourceStartFrame + int(math.Floor(timelineOffset*rate))
+			sourceEndFrame := clip.SourceStartFrame + int(math.Ceil((timelineOffset+1)*rate))
+			sourceEndFrame = max(sourceFrame+1, sourceEndFrame)
+			sourceFrame = max(clip.SourceStartFrame, sourceFrame)
+			sourceEndFrame = min(clip.SourceEndFrame, sourceEndFrame)
+			if sourceEndFrame <= sourceFrame {
+				continue
+			}
+			if text := transcriptTextForSourceRange(transcript.Utterances, sourceFrame, sourceEndFrame); text != "" {
+				parts = append(parts, "同帧台词："+truncatePreviewContextText(text, 512))
+			}
+		}
+		for _, clip := range timelineClipsAtFrame(document, frame, "subtitles") {
+			if text := strings.TrimSpace(clip.Text); text != "" {
+				parts = append(parts, "同帧字幕："+truncatePreviewContextText(text, 256))
+			}
+		}
+		result[frame] = strings.Join(parts, "；")
+	}
+	return result, nil
+}
+
+func audibleSpeechClipsAtFrame(document timeline.Document, frame int) []timeline.Clip {
+	audioTrackIDs := map[string]struct{}{
+		"original_audio": {}, "voiceover": {}, "bgm": {}, "sfx": {},
+	}
+	hasSolo := false
+	for _, track := range document.Tracks {
+		if _, audio := audioTrackIDs[track.TrackID]; audio && track.Solo && !track.Muted {
+			hasSolo = true
+		}
+	}
+	result := []timeline.Clip{}
+	for _, track := range document.Tracks {
+		if track.TrackID != "original_audio" && track.TrackID != "voiceover" {
+			continue
+		}
+		if track.Muted || hasSolo && !track.Solo {
+			continue
+		}
+		if track.TrackID == "original_audio" && len(track.Clips) == 0 {
+			result = append(result, primaryClipsAtFrame(document, frame)...)
+			continue
+		}
+		for _, clip := range track.Clips {
+			if frame >= clip.TimelineStartFrame && frame < clip.TimelineEndFrame {
+				result = append(result, clip)
+			}
+		}
+	}
+	return result
+}
+
+func primaryClipsAtFrame(document timeline.Document, frame int) []timeline.Clip {
+	result := []timeline.Clip{}
+	for _, track := range document.Tracks {
+		if track.TrackID != "visual_base" {
+			continue
+		}
+		for _, clip := range track.Clips {
+			if frame >= clip.TimelineStartFrame && frame < clip.TimelineEndFrame {
+				result = append(result, clip)
+			}
+		}
+	}
+	return result
+}
+
+func truncatePreviewContextText(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+func timelineClipsAtFrame(document timeline.Document, frame int, trackIDs ...string) []timeline.Clip {
+	wanted := map[string]struct{}{}
+	for _, trackID := range trackIDs {
+		wanted[trackID] = struct{}{}
+	}
+	result := []timeline.Clip{}
+	for _, track := range document.Tracks {
+		if _, ok := wanted[track.TrackID]; !ok || track.Muted {
+			continue
+		}
+		for _, clip := range track.Clips {
+			if frame >= clip.TimelineStartFrame && frame < clip.TimelineEndFrame {
+				result = append(result, clip)
+			}
+		}
+	}
+	return result
 }
 
 func numericValue(value any) (float64, bool) {

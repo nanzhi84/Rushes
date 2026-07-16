@@ -803,6 +803,160 @@ func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 	}
 }
 
+func TestCompletedPreviewObservationIncludesStructuredVerificationReport(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg 未安装")
+	}
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_job_report")
+	insertAgentMessage(t, database, "draft_job_report", "user_job_report", "生成预览并按合同检查")
+	chatModel := &decisionContinuationModel{}
+	service, err := NewService(t.Context(), database, chatModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	planResult, err := service.toolPlanUpdate(t.Context(), "draft_job_report", rushestools.PlanUpdateInput{
+		Plan: map[string]any{}, Contract: &rushestools.ContentPlanContract{TargetDurationFrames: 30},
+	})
+	if err != nil || planResult.Status != "succeeded" {
+		t.Fatalf("plan=%#v err=%v", planResult, err)
+	}
+	document, err := timeline.ComposeInitial("draft_job_report", 1, []timeline.Selection{{
+		AssetID: "fixture", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.persistTimeline(t.Context(), "draft_job_report", document, "preview_report_fixture"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(database.Paths.Temporary, "preview-report.mp4")
+	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y",
+		"-f", "lavfi", "-i", "testsrc2=s=64x64:d=1:r=30",
+		"-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+		"-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-c:a", "aac", path,
+	); err != nil {
+		t.Fatal(err)
+	}
+	object, err := media.NewObjectStore(database.Paths).PutFile(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(fakeBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeFFmpeg := filepath.Join(fakeBin, "ffmpeg")
+	fakeScript := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"-v\" ]; then\n  echo 'decoder leaked %s %s' >&2\n  exit 1\nfi\nexit 0\n", object.Hash, object.Path)
+	if err := os.WriteFile(fakeFFmpeg, []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	applyResult, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "PreviewRendered", DraftID: "draft_job_report", Payload: map[string]any{
+			"artifact_id": "preview_report", "timeline_version": 1,
+			"object_hash": object.Hash, "object_size": object.Size,
+			"render_width": 64, "render_height": 64, "render_fps": 30,
+			"expected_duration_sec": 1,
+		},
+	}}, reducer.Options{Actor: contracts.ActorJob})
+	if err != nil || applyResult.Status != reducer.StatusApplied {
+		t.Fatalf("preview status=%s err=%v", applyResult.Status, err)
+	}
+	report, err := service.previewVerificationReport(t.Context(), "draft_job_report", map[string]any{"artifact_id": "preview_report"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedReport, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{`"error_code":"preview_decode_failed"`, "预览视频无法完整解码。"} {
+		if !strings.Contains(string(encodedReport), expected) {
+			t.Fatalf("verification report missing %q: %s", expected, encodedReport)
+		}
+	}
+	if !service.Queue().EnqueueJobObservation("draft_job_report", "job_report", map[string]any{
+		"event": "JobSucceeded",
+		"payload": map[string]any{
+			"job_id": "job_report", "kind": "render_preview",
+			"result": map[string]any{"artifact_id": "preview_report"},
+		},
+	}) {
+		t.Fatal("job observation 未入队")
+	}
+	service.Queue().JoinDraft("draft_job_report")
+	prompt := chatModel.lastPrompt()
+	for _, expected := range []string{
+		"verification_report", "render_inspection", "content_contract", `"pass":true`, "preview_report",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("prompt missing %q: %s", expected, prompt)
+		}
+	}
+	for _, sensitive := range []string{object.Path, object.Hash, "decoder leaked", "ffmpeg"} {
+		if strings.Contains(prompt, sensitive) {
+			t.Fatalf("prompt leaked decode detail %q: %s", sensitive, prompt)
+		}
+	}
+}
+
+func TestCompletedPreviewObservationContinuesWhenAutomaticInspectionFails(t *testing.T) {
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_job_degraded_report")
+	insertAgentMessage(t, database, "draft_job_degraded_report", "user_job_degraded_report", "生成预览")
+	chatModel := &decisionContinuationModel{}
+	service, err := NewService(t.Context(), database, chatModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	document, err := timeline.ComposeInitial("draft_job_degraded_report", 1, []timeline.Selection{{
+		AssetID: "fixture", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.persistTimeline(t.Context(), "draft_job_degraded_report", document, "preview_degraded_fixture"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	missingHash := strings.Repeat("a", 64)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO objects(hash,rel_path,size,created_at) VALUES(?,?,1,?);
+		INSERT INTO previews(preview_id,draft_id,timeline_version,object_hash,quality_json,created_at)
+		VALUES('preview_degraded','draft_job_degraded_report',1,?,'{}',?)`,
+		missingHash, missingHash, now, missingHash, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !service.Queue().EnqueueJobObservation("draft_job_degraded_report", "job_degraded_report", map[string]any{
+		"event": "JobSucceeded",
+		"payload": map[string]any{
+			"job_id": "job_degraded_report", "kind": "render_preview",
+			"result": map[string]any{"artifact_id": "preview_degraded"},
+		},
+	}) {
+		t.Fatal("job observation 未入队")
+	}
+	service.Queue().JoinDraft("draft_job_degraded_report")
+	prompt := chatModel.lastPrompt()
+	for _, expected := range []string{
+		"状态：成功", "verification_report", `"degraded":true`, `"check":"inspection"`,
+		`"error_code":"preview_inspection_unavailable"`, "自动质检暂不可用，请稍后重试。", "preview_degraded",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("prompt missing %q: %s", expected, prompt)
+		}
+	}
+	for _, sensitive := range []string{database.Paths.Objects, missingHash, "ffprobe", "No such file", "no such file"} {
+		if strings.Contains(prompt, sensitive) {
+			t.Fatalf("prompt leaked inspection detail %q: %s", sensitive, prompt)
+		}
+	}
+}
+
 func TestServiceCancellationPropagatesToTurnContext(t *testing.T) {
 	t.Parallel()
 	database := agentTestDatabase(t)
@@ -1104,10 +1258,10 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 		SELECT COUNT(*) FROM jobs WHERE kind='render_preview'`).Scan(&retryJobs); err != nil || retryJobs != 3 {
 		t.Fatalf("render retry jobs=%d err=%v", retryJobs, err)
 	}
-	var timelineRows int
+	var timelineRows, latestTimelineVersion int
 	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*) FROM timeline_versions WHERE draft_id='draft_timeline_tools'`).Scan(&timelineRows); err != nil || timelineRows != 1 {
-		t.Fatalf("timeline rows=%d err=%v", timelineRows, err)
+		SELECT COUNT(*),MAX(version) FROM timeline_versions WHERE draft_id='draft_timeline_tools'`).Scan(&timelineRows, &latestTimelineVersion); err != nil || timelineRows != latestTimelineVersion {
+		t.Fatalf("timeline rows=%d latest=%d err=%v", timelineRows, latestTimelineVersion, err)
 	}
 }
 
@@ -1237,10 +1391,18 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 		t.Fatalf("preview status=%s err=%v", result.Status, err)
 	}
 	preview, err := service.ExecuteTool(ctx, "render.inspect_preview", rushestools.RenderInspectInput{
-		PreviewID: "preview_inspect", Checks: []string{"decode", "duration", "resolution"},
+		PreviewID: "preview_inspect", Checks: []string{"decode"},
 	})
 	if err != nil || preview.(rushestools.PreviewInspectionResult).Summary == "" {
 		t.Fatalf("preview=%#v err=%v", preview, err)
+	}
+	visualPreview, err := service.ExecuteTool(ctx, "render.inspect_preview", rushestools.RenderInspectInput{
+		PreviewID: "preview_inspect", Checks: []string{"visual"},
+	})
+	visualResult := visualPreview.(rushestools.PreviewInspectionResult)
+	if err != nil || !visualResult.Degraded || visualResult.VisualFrameCount == 0 ||
+		len(visualResult.Issues) != 1 || visualResult.Issues[0]["check"] != "dependencies" {
+		t.Fatalf("visual preview=%#v err=%v", visualResult, err)
 	}
 	if _, err := service.ExecuteTool(ctx, "render.inspect_preview", rushestools.RenderInspectInput{PreviewID: "missing"}); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("missing preview err=%v", err)

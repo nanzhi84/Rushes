@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -266,4 +266,31 @@ CREATE TABLE IF NOT EXISTS agent_context_checkpoints (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+`
+
+// schemaV7 允许保留同一草稿的多个不可变时间线快照，使已入队渲染任务
+// 能在当前时间线继续演进后仍读取其 payload 指定的版本。
+const schemaV7 = `
+CREATE TABLE timeline_versions_v7 (
+    timeline_id TEXT PRIMARY KEY,
+    draft_id TEXT NOT NULL REFERENCES drafts(draft_id) ON DELETE CASCADE,
+    version INTEGER NOT NULL,
+    created_by_patch_id TEXT,
+    document_json TEXT NOT NULL,
+    validation_report_json TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(draft_id, version)
+);
+
+INSERT INTO timeline_versions_v7(
+    timeline_id, draft_id, version, created_by_patch_id,
+    document_json, validation_report_json, created_at
+)
+SELECT
+    timeline_id, draft_id, version, created_by_patch_id,
+    document_json, validation_report_json, created_at
+FROM timeline_versions;
+
+DROP TABLE timeline_versions;
+ALTER TABLE timeline_versions_v7 RENAME TO timeline_versions;
 `

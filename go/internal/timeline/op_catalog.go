@@ -64,7 +64,7 @@ func (err *OpFieldError) Error() string {
 	return fmt.Sprintf("时间线补丁 %s 的字段 %s %s", err.Kind, err.Field, err.Reason)
 }
 
-// Catalog 是 ApplyPatch 支持的 18 种语义补丁的单一字段事实源。
+// Catalog 是 ApplyPatch 支持的 19 种语义补丁的单一字段事实源。
 // kind 本身由 OpSpec.Kind 表示，不重复列入 Fields。
 var Catalog = []OpSpec{
 	{
@@ -132,6 +132,16 @@ var Catalog = []OpSpec{
 		},
 	},
 	{
+		Kind:    "set_track_ducking",
+		Summary: "设置 BGM 在人声出现时自动闪避",
+		Fields: []OpField{
+			field("track_id", OpFieldString, true, "只能是 bgm 轨", "bgm"),
+			field("enabled", OpFieldBoolean, true, "是否启用自动闪避", true),
+			field("duck_db", OpFieldNumber, true, "人声出现时的压低量，范围 [-18,-3] dB", -9.0),
+			field("trigger_tracks", OpFieldStringArray, true, "触发轨道，只能选择 voiceover 或 original_audio", []string{"voiceover", "original_audio"}),
+		},
+	},
+	{
 		Kind:    "set_clip_linked",
 		Summary: "设置片段是否参与音画联动",
 		Fields: []OpField{
@@ -146,6 +156,7 @@ var Catalog = []OpSpec{
 			field("start_frame", OpFieldInteger, true, "字幕开始的时间线整数帧", 0),
 			field("end_frame", OpFieldInteger, true, "字幕结束的时间线整数帧", 90),
 			field("text", OpFieldString, true, "非空字幕文字", "示例字幕"),
+			field("style", OpFieldString, false, "字幕样式：default、large_center、top_bar、minimal 或 bold_bottom", "default"),
 			field("timeline_clip_id", OpFieldString, false, "可选字幕片段 ID，缺省时自动生成", "subtitle_v2_001"),
 		},
 	},
@@ -208,7 +219,7 @@ var Catalog = []OpSpec{
 	},
 	{
 		Kind:    "set_clip_fades",
-		Summary: "设置音频或带声视频片段的淡入淡出",
+		Summary: "设置音频或视频片段的音画淡入淡出",
 		Fields: []OpField{
 			clipIDField(),
 			field("fade_in_frames", OpFieldInteger, true, "淡入时长整数帧", 15),
@@ -216,11 +227,13 @@ var Catalog = []OpSpec{
 		},
 	},
 	{
-		Kind:    "edit_subtitle_text",
-		Summary: "修改字幕片段文字",
+		Kind:       "edit_subtitle_text",
+		Summary:    "修改字幕片段文字或样式",
+		RequireAny: []string{"text", "style"},
 		Fields: []OpField{
 			clipIDField(),
-			field("text", OpFieldString, true, "新的非空字幕文字", "修改后的字幕"),
+			field("text", OpFieldString, false, "可选的新字幕文字；提供时必须非空", "修改后的字幕"),
+			field("style", OpFieldString, false, "可选字幕样式：default、large_center、top_bar、minimal 或 bold_bottom", "large_center"),
 		},
 	},
 	{

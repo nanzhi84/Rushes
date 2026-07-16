@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -57,21 +58,31 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 	if root == "" {
 		root = defaultTalkingHeadMaterialRoot
 	}
+	var err error
+	root, err = filepath.Abs(root)
+	if err != nil {
+		t.Fatalf("解析真实口播素材根目录: %v", err)
+	}
 	videoPaths := realTalkingHeadVideos(t, root)
 	report := talkingHeadMaterialReport{
 		GeneratedAt: time.Now().UTC().Format(time.RFC3339Nano), MaterialRoot: root,
-		RoleTotal: len(videoPaths), BrollTotal: 4, Trace: []talkingHeadMaterialTrace{},
+		BrollTotal: 4, Trace: []talkingHeadMaterialTrace{},
 	}
 	for _, path := range videoPaths {
 		relative, _ := filepath.Rel(root, path)
+		relative = strings.ToLower(filepath.ToSlash(relative))
 		expected := ""
 		switch {
-		case strings.Contains(strings.ToLower(relative), "/aroll/"):
+		case strings.Contains("/"+relative, "/aroll/"):
 			expected = "a_roll"
-		case strings.Contains(strings.ToLower(relative), "/broll/"):
+		case strings.Contains("/"+relative, "/broll/"):
 			expected = "b_roll"
 		}
-		if expected != "" && understanding.SuggestVisualRole(filepath.Base(path), filepath.Dir(relative), "") == expected {
+		if expected == "" {
+			continue
+		}
+		report.RoleTotal++
+		if understanding.SuggestVisualRole(filepath.Base(path), filepath.Dir(relative), "") == expected {
 			report.RoleCorrect++
 		}
 	}
@@ -109,7 +120,24 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 			// 避免同目录 SRT 让真实 ASR 验收走捷径。
 			referencePath = filepath.Join(database.Paths.Temporary, "talking-head-live-no-sidecar.mp4")
 			if err := os.Symlink(path, referencePath); err != nil {
-				t.Fatal(err)
+				if linkErr := os.Link(path, referencePath); linkErr != nil {
+					input, openErr := os.Open(path)
+					if openErr != nil {
+						t.Fatal(openErr)
+					}
+					output, createErr := os.Create(referencePath)
+					if createErr != nil {
+						_ = input.Close()
+						t.Fatal(createErr)
+					}
+					_, copyErr := io.Copy(output, input)
+					closeOutputErr := output.Close()
+					closeInputErr := input.Close()
+					if copyErr != nil || closeOutputErr != nil || closeInputErr != nil {
+						_ = os.Remove(referencePath)
+						t.Fatalf("复制无 sidecar 的 A-roll: copy=%v close_output=%v close_input=%v", copyErr, closeOutputErr, closeInputErr)
+					}
+				}
 			}
 		}
 		if _, err := database.Write().ExecContext(t.Context(), `
@@ -223,6 +251,11 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 		invokeRegisteredTool(t, service, ctx, "media.search_shots", rushestools.ShotSearchInput{
 			Query: query.query, SemanticRoles: []string{"b_roll"}, MinDurationFrames: 45, Limit: 5,
 		}, &search)
+		if len(search.Shots) > 0 {
+			t.Logf("BROLL_QUERY query=%q want=%q top=%q terms=%v", query.query, query.want, search.Shots[0].Filename, search.Shots[0].MatchedQueryTerms)
+		} else {
+			t.Logf("BROLL_QUERY query=%q want=%q top=<none>", query.query, query.want)
+		}
 		if len(search.Shots) > 0 && strings.Contains(search.Shots[0].Filename, query.want) {
 			report.BrollCorrect++
 		}

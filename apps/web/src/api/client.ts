@@ -61,6 +61,7 @@ export type TimelineClipJson = {
   gain_db?: number;
   fade_in_frames?: number;
   fade_out_frames?: number;
+  subtitle_style?: "default" | "large_center" | "top_bar" | "minimal" | "bold_bottom";
   asset_kind?: string;
   parent_block_id?: string;
   linked?: boolean;
@@ -76,6 +77,11 @@ export type TimelineTrackJson = {
   solo?: boolean;
   locked?: boolean;
   gain_db?: number;
+  ducking?: {
+    enabled: boolean;
+    duck_db: number;
+    trigger_tracks: string[];
+  };
   [key: string]: unknown;
 };
 

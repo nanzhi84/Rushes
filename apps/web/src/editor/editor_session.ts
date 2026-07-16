@@ -160,26 +160,28 @@ export function applyLocalTimelineOperation(
       });
       break;
     case "set_clip_fades":
-      updateClip(timeline, operation, (clip, track) => {
-        if (trackFamily(track) !== "audio" && clip.asset_kind !== "video") {
-          throw new Error("只有音频片段或带声音的视频片段支持淡入淡出");
-        }
-        const fadeIn = requiredInteger(operation.fade_in_frames, "fade_in_frames");
-        const fadeOut = requiredInteger(operation.fade_out_frames, "fade_out_frames");
-        if (fadeIn < 0 || fadeOut < 0 || fadeIn + fadeOut > clipDuration(clip)) {
-          throw new Error("淡入与淡出必须为非负整数帧，且总和不能超过片段时长");
-        }
-        clip.fade_in_frames = fadeIn;
-        clip.fade_out_frames = fadeOut;
-      });
+      setClipFades(timeline, operation);
       break;
     case "edit_subtitle_text":
       updateClip(timeline, operation, (clip, track) => {
-        const text = String(operation.text ?? "").trim();
-        if (track.track_id !== "subtitles" || !text) {
-          throw new Error("只能给字幕轨设置非空文字");
+        if (track.track_id !== "subtitles") {
+          throw new Error("只能编辑字幕轨文字");
         }
-        clip.text = text;
+        const hasText = Object.prototype.hasOwnProperty.call(operation, "text");
+        const hasStyle = Object.prototype.hasOwnProperty.call(operation, "style");
+        if (!hasText && !hasStyle) {
+          throw new Error("字幕编辑至少需要提供 text 或 style");
+        }
+        if (hasText) {
+          const text = String(operation.text ?? "").trim();
+          if (!text) {
+            throw new Error("字幕文字不能为空");
+          }
+          clip.text = text;
+        }
+        if (Object.prototype.hasOwnProperty.call(operation, "style")) {
+          clip.subtitle_style = requiredSubtitleStyle(operation.style);
+        }
       });
       break;
     case "insert_subtitle":
@@ -714,6 +716,7 @@ function insertSubtitle(timeline: TimelineJson, operation: TimelineOperation): v
   if (start < 0 || end <= start || end > timeline.duration_frames || !text) {
     throw new Error("字幕时间范围或文字无效");
   }
+  const subtitleStyle = optionalSubtitleStyle(operation.style);
   track.clips = [
     ...(track.clips ?? []),
     {
@@ -721,9 +724,29 @@ function insertSubtitle(timeline: TimelineJson, operation: TimelineOperation): v
       track_id: "subtitles",
       timeline_start_frame: start,
       timeline_end_frame: end,
-      text
+      text,
+      subtitle_style: subtitleStyle
     }
   ].sort(byStartFrame);
+}
+
+type SubtitleStyle = NonNullable<TimelineClipJson["subtitle_style"]>;
+
+const subtitleStyles = new Set<SubtitleStyle>([
+  "default", "large_center", "top_bar", "minimal", "bold_bottom"
+]);
+
+function requiredSubtitleStyle(value: unknown): SubtitleStyle {
+  const style = String(value ?? "").trim();
+  if (!subtitleStyles.has(style as SubtitleStyle)) {
+    throw new Error("字幕 style 必须是 default、large_center、top_bar、minimal 或 bold_bottom");
+  }
+  return style as SubtitleStyle;
+}
+
+function optionalSubtitleStyle(value: unknown): SubtitleStyle {
+  const style = String(value ?? "").trim();
+  return style === "" ? "default" : requiredSubtitleStyle(style);
 }
 
 function insertClip(timeline: TimelineJson, operation: TimelineOperation): void {
@@ -758,6 +781,30 @@ function updateClip(
 ): void {
   const located = locateEditableClip(timeline, targetClipId(operation));
   update(located.clip, located.track);
+}
+
+function setClipFades(timeline: TimelineJson, operation: TimelineOperation): void {
+  const located = locateEditableClip(timeline, targetClipId(operation));
+  if (trackFamily(located.track) !== "audio" && located.clip.asset_kind !== "video") {
+    throw new Error("只有音频片段或带声音的视频片段支持淡入淡出");
+  }
+  const fadeIn = requiredInteger(operation.fade_in_frames, "fade_in_frames");
+  const fadeOut = requiredInteger(operation.fade_out_frames, "fade_out_frames");
+  const members = trackFamily(located.track) === "visual" && located.clip.asset_kind === "video"
+    ? [located, ...linkedMembers(timeline, located.clip).filter(
+      (member) => member.track.track_id === "original_audio"
+    )]
+    : [located];
+  for (const member of members) {
+    assertTrackUnlocked(member.track);
+    if (fadeIn < 0 || fadeOut < 0 || fadeIn + fadeOut > clipDuration(member.clip)) {
+      throw new Error("淡入与淡出必须为非负整数帧，且总和不能超过片段时长");
+    }
+  }
+  for (const member of members) {
+    member.clip.fade_in_frames = fadeIn;
+    member.clip.fade_out_frames = fadeOut;
+  }
 }
 
 function linkedMembers(timeline: TimelineJson, clip: TimelineClipJson): LocatedClip[] {

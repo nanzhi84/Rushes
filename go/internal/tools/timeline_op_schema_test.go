@@ -146,8 +146,8 @@ func TestTimelinePatchInputJSONKeepsNamedMapRuntimeSemantics(t *testing.T) {
 
 func assertTimelineOpCatalogSchema(t *testing.T, schema *jsonschema.Schema) {
 	t.Helper()
-	if len(timeline.Catalog) != 18 {
-		t.Fatalf("timeline.Catalog kinds=%d want=18", len(timeline.Catalog))
+	if len(timeline.Catalog) != 19 {
+		t.Fatalf("timeline.Catalog kinds=%d want=19", len(timeline.Catalog))
 	}
 	if schema == nil || schema.Type != "object" {
 		t.Fatalf("TimelineOp root=%#v want object", schema)

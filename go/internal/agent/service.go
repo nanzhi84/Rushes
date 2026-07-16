@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -347,8 +348,19 @@ func (service *Service) continueAfterJobObservation(
 	if succeeded && kind == "render_preview" && service.previewAlreadyInspected(ctx, item.DraftID, terminalDetails) {
 		return "", nil
 	}
+	verificationReport := ""
+	if succeeded && kind == "render_preview" {
+		report, reportErr := service.previewVerificationReport(ctx, item.DraftID, terminalDetails)
+		if reportErr != nil {
+			slog.Warn("预览自动质检失败", "draft_id", item.DraftID, "error", reportErr)
+			report = degradedPreviewVerificationReport(terminalDetails)
+		}
+		if report != nil {
+			verificationReport = "\nverification_report：" + compactJSON(report)
+		}
+	}
 	status := "成功"
-	nextAction := "读取真实产物；如果是预览则调用 render.inspect_preview 做质检，然后继续原任务。"
+	nextAction := "读取真实产物；预览的 verification_report 是证据而不是自动返工裁决，只修订 fail 项；需要构图、B-roll 语义或字幕遮挡检查时再调用 render.inspect_preview 并传 visual。"
 	if succeeded && kind == "understand" {
 		nextAction = "优先读取紧邻本消息前的【本次后台素材理解结果（SQLite 持久化事实）】定向证据；assets.material_catalog 只作常驻目录补充且可能截断。依据其中的 overall 与 semantic_tags 继续原任务，需要逐镜头细节时再调用 media.search_shots。不要重复调用 understand.materials，也不要只报告后台完成。"
 	}
@@ -357,11 +369,12 @@ func (service *Service) continueAfterJobObservation(
 		nextAction = "先读取失败信息并诊断；能用现有工具修复时立即修复并重试，不要把失败说成完成。"
 	}
 	prompt := fmt.Sprintf(
-		"你等待的后台任务已到终态。\n任务：%s\njob_id：%s\n状态：%s\n终态详情：%s\n这是原任务的自动续跑，不是新的用户请求。%s 不要重复询问已经回答的问题，也不要仅回复泛化的“后台已完成”。",
+		"你等待的后台任务已到终态。\n任务：%s\njob_id：%s\n状态：%s\n终态详情：%s%s\n这是原任务的自动续跑，不是新的用户请求。%s 不要重复询问已经回答的问题，也不要仅回复泛化的“后台已完成”。",
 		kind,
 		jobID,
 		status,
 		details,
+		verificationReport,
 		nextAction,
 	)
 	messages, err := service.modelMessages(ctx, item.DraftID)
@@ -377,6 +390,67 @@ func (service *Service) continueAfterJobObservation(
 	}
 	messages = append(messages, schema.UserMessage(prompt))
 	return service.streamAgent(ctx, item.DraftID, messageID, messages)
+}
+
+func (service *Service) previewVerificationReport(
+	ctx context.Context,
+	draftID string,
+	result any,
+) (map[string]any, error) {
+	resultMap, _ := result.(map[string]any)
+	previewID := interfaceString(resultMap["artifact_id"])
+	if previewID == "" {
+		previewID = interfaceString(resultMap["preview_id"])
+	}
+	if previewID == "" {
+		return nil, nil
+	}
+	inspection, err := service.toolInspectPreview(ctx, draftID, rushestools.RenderInspectInput{PreviewID: previewID})
+	if err != nil {
+		return nil, err
+	}
+	var timelineVersion int
+	if err := service.database.Read().QueryRowContext(ctx,
+		"SELECT timeline_version FROM previews WHERE preview_id=? AND draft_id=?", previewID, draftID,
+	).Scan(&timelineVersion); err != nil {
+		return nil, err
+	}
+	document, err := timeline.Get(ctx, service.database, draftID, timelineVersion)
+	if err != nil {
+		return nil, err
+	}
+	contractReport, hasContract, err := service.verifyContentContract(ctx, draftID, document)
+	if err != nil {
+		return nil, err
+	}
+	report := map[string]any{
+		"preview_id":        previewID,
+		"timeline_version":  timelineVersion,
+		"render_inspection": inspection,
+	}
+	if hasContract {
+		report["content_contract"] = contractReport
+	}
+	return report, nil
+}
+
+func degradedPreviewVerificationReport(result any) map[string]any {
+	resultMap, _ := result.(map[string]any)
+	previewID := interfaceString(resultMap["artifact_id"])
+	if previewID == "" {
+		previewID = interfaceString(resultMap["preview_id"])
+	}
+	issue := map[string]any{
+		"check":      "inspection",
+		"severity":   "warning",
+		"error_code": "preview_inspection_unavailable",
+		"message":    "自动质检暂不可用，请稍后重试。",
+	}
+	return map[string]any{
+		"preview_id": previewID,
+		"degraded":   true,
+		"issues":     []map[string]any{issue},
+	}
 }
 
 func (service *Service) previewAlreadyInspected(ctx context.Context, draftID string, result any) bool {
@@ -796,9 +870,9 @@ func replayInput(name string, arguments map[string]any) (any, error) {
 	case "timeline.inspect":
 		return decode(&rushestools.TimelineInspectInput{})
 	case "render.preview":
-		return rushestools.RenderPreviewInput{}, nil
+		return decode(&rushestools.RenderPreviewInput{})
 	case "render.final_mp4":
-		return rushestools.RenderFinalInput{}, nil
+		return decode(&rushestools.RenderFinalInput{})
 	case "render.status":
 		return rushestools.RenderStatusInput{}, nil
 	case "render.inspect_preview":
@@ -831,6 +905,10 @@ func reflectValue(value any) any {
 	case *rushestools.TimelineBeatRecutInput:
 		return *typed
 	case *rushestools.TimelineInspectInput:
+		return *typed
+	case *rushestools.RenderPreviewInput:
+		return *typed
+	case *rushestools.RenderFinalInput:
 		return *typed
 	case *rushestools.RenderInspectInput:
 		return *typed

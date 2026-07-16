@@ -30,13 +30,20 @@ type Document struct {
 }
 
 type Track struct {
-	TrackID   string  `json:"track_id"`
-	TrackType string  `json:"track_type"`
-	Clips     []Clip  `json:"clips"`
-	Muted     bool    `json:"muted,omitempty"`
-	Solo      bool    `json:"solo,omitempty"`
-	Locked    bool    `json:"locked,omitempty"`
-	GainDB    float64 `json:"gain_db,omitempty"`
+	TrackID   string        `json:"track_id"`
+	TrackType string        `json:"track_type"`
+	Clips     []Clip        `json:"clips"`
+	Muted     bool          `json:"muted,omitempty"`
+	Solo      bool          `json:"solo,omitempty"`
+	Locked    bool          `json:"locked,omitempty"`
+	GainDB    float64       `json:"gain_db,omitempty"`
+	Ducking   *TrackDucking `json:"ducking,omitempty"`
+}
+
+type TrackDucking struct {
+	Enabled       bool     `json:"enabled"`
+	DuckDB        float64  `json:"duck_db"`
+	TriggerTracks []string `json:"trigger_tracks"`
 }
 
 type Clip struct {
@@ -54,11 +61,14 @@ type Clip struct {
 	GainDB             float64          `json:"gain_db,omitempty"`
 	FadeInFrames       int              `json:"fade_in_frames,omitempty"`
 	FadeOutFrames      int              `json:"fade_out_frames,omitempty"`
+	SubtitleStyle      string           `json:"subtitle_style,omitempty"`
 	ParentBlockID      string           `json:"parent_block_id,omitempty"`
 	Linked             bool             `json:"linked,omitempty"`
 	Effects            []map[string]any `json:"effects,omitempty"`
 	Metadata           map[string]any   `json:"metadata,omitempty"`
 }
+
+var SubtitleStyleNames = []string{"default", "large_center", "top_bar", "minimal", "bold_bottom"}
 
 type Selection struct {
 	AssetID          string
@@ -164,6 +174,28 @@ func Validate(document Document) ValidationReport {
 		if track.GainDB < -60 || track.GainDB > 12 {
 			add("invalid_track_gain", track.TrackID)
 		}
+		if track.Ducking != nil {
+			if track.TrackID != "bgm" {
+				add("invalid_track_ducking", track.TrackID+" 不是 bgm 轨")
+			}
+			if math.IsNaN(track.Ducking.DuckDB) || math.IsInf(track.Ducking.DuckDB, 0) ||
+				track.Ducking.DuckDB < -18 || track.Ducking.DuckDB > -3 {
+				add("invalid_duck_db", track.TrackID)
+			}
+			seenTriggers := map[string]struct{}{}
+			for _, trigger := range track.Ducking.TriggerTracks {
+				if trigger != "voiceover" && trigger != "original_audio" {
+					add("invalid_ducking_trigger", fmt.Sprintf("%s: %s", track.TrackID, trigger))
+				}
+				if _, duplicate := seenTriggers[trigger]; duplicate {
+					add("duplicate_ducking_trigger", fmt.Sprintf("%s: %s", track.TrackID, trigger))
+				}
+				seenTriggers[trigger] = struct{}{}
+			}
+			if len(track.Ducking.TriggerTracks) == 0 {
+				add("empty_ducking_triggers", track.TrackID)
+			}
+		}
 		for _, clip := range track.Clips {
 			if clip.TimelineClipID == "" {
 				add("missing_clip_id", track.TrackID)
@@ -186,6 +218,14 @@ func Validate(document Document) ValidationReport {
 			}
 			if clip.GainDB < -60 || clip.GainDB > 12 {
 				add("invalid_clip_gain", clip.TimelineClipID)
+			}
+			if clip.SubtitleStyle != "" {
+				if track.TrackID != "subtitles" {
+					add("invalid_subtitle_style_track", clip.TimelineClipID)
+				}
+				if !isSubtitleStyle(clip.SubtitleStyle) {
+					add("invalid_subtitle_style", clip.TimelineClipID)
+				}
 			}
 			clipDuration := clip.TimelineEndFrame - clip.TimelineStartFrame
 			if clip.FadeInFrames < 0 || clip.FadeOutFrames < 0 ||
@@ -302,6 +342,8 @@ func ApplyPatch(document Document, operation map[string]any) (Document, error) {
 		err = deleteClip(&copy, operation)
 	case "set_track_state":
 		err = setTrackState(&copy, operation)
+	case "set_track_ducking":
+		err = setTrackDucking(&copy, operation)
 	case "set_clip_linked":
 		err = setClipLinked(&copy, operation)
 	case "insert_subtitle":
@@ -332,11 +374,20 @@ func ApplyPatch(document Document, operation map[string]any) (Document, error) {
 			if track.TrackID != "subtitles" {
 				return errors.New("只能编辑字幕轨文字")
 			}
-			text := strings.TrimSpace(stringValue(operation["text"]))
-			if text == "" {
-				return errors.New("字幕文字不能为空")
+			if rawText, exists := operation["text"]; exists {
+				text := strings.TrimSpace(stringValue(rawText))
+				if text == "" {
+					return errors.New("字幕文字不能为空")
+				}
+				clip.Text = text
 			}
-			clip.Text = text
+			if style, exists := operation["style"]; exists {
+				styleValue := strings.TrimSpace(stringValue(style))
+				if !isSubtitleStyle(styleValue) {
+					return errors.New("字幕 style 必须是 default、large_center、top_bar、minimal 或 bold_bottom")
+				}
+				clip.SubtitleStyle = styleValue
+			}
 			return nil
 		})
 	case "remove_track_clips":
@@ -351,6 +402,15 @@ func ApplyPatch(document Document, operation map[string]any) (Document, error) {
 	copy.Version++
 	copy.TimelineID = fmt.Sprintf("%s:v%d", copy.DraftID, copy.Version)
 	return copy, nil
+}
+
+func isSubtitleStyle(value string) bool {
+	for _, style := range SubtitleStyleNames {
+		if value == style {
+			return true
+		}
+	}
+	return false
 }
 
 func Inspect(document Document) string {
@@ -892,23 +952,45 @@ func setPlaybackRate(document *Document, operation map[string]any) error {
 }
 
 func setClipFades(document *Document, operation map[string]any) error {
-	return updateEditableClip(document, operation, func(track *Track, clip *Clip) error {
-		if trackFamily(*track) != "audio" && clip.AssetKind != "video" {
-			return errors.New("只有音频片段或带声音的视频片段支持淡入淡出")
+	location, err := editableLocation(document, operation)
+	if err != nil {
+		return err
+	}
+	selectedTrack := &document.Tracks[location.trackIndex]
+	selected := &selectedTrack.Clips[location.clipIndex]
+	if trackFamily(*selectedTrack) != "audio" && selected.AssetKind != "video" {
+		return errors.New("只有音频片段或带声音的视频片段支持淡入淡出")
+	}
+	fadeIn, inErr := frameValue(operation, "fade_in_frames")
+	fadeOut, outErr := frameValue(operation, "fade_out_frames")
+	if inErr != nil || outErr != nil {
+		return errors.Join(inErr, outErr)
+	}
+	members := []clipLocation{location}
+	if trackFamily(*selectedTrack) == "visual" && selected.AssetKind == "video" && selected.Linked && selected.ParentBlockID != "" {
+		for _, member := range linkedGroup(document, selected.ParentBlockID) {
+			if document.Tracks[member.trackIndex].TrackID == "original_audio" {
+				members = append(members, member)
+			}
 		}
-		fadeIn, inErr := frameValue(operation, "fade_in_frames")
-		fadeOut, outErr := frameValue(operation, "fade_out_frames")
-		if inErr != nil || outErr != nil {
-			return errors.Join(inErr, outErr)
+	}
+	for _, member := range members {
+		track := &document.Tracks[member.trackIndex]
+		if track.Locked {
+			return trackLockedError(track.TrackID)
 		}
+		clip := &track.Clips[member.clipIndex]
 		duration := clip.TimelineEndFrame - clip.TimelineStartFrame
 		if fadeIn < 0 || fadeOut < 0 || fadeIn+fadeOut > duration {
 			return errors.New("淡入与淡出必须为非负整数帧，且总和不能超过片段时长")
 		}
+	}
+	for _, member := range members {
+		clip := &document.Tracks[member.trackIndex].Clips[member.clipIndex]
 		clip.FadeInFrames = fadeIn
 		clip.FadeOutFrames = fadeOut
-		return nil
-	})
+	}
+	return nil
 }
 
 func clampClipFades(document *Document) {

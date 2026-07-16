@@ -19,8 +19,8 @@ func TestCatalogCoversAllApplyPatchKinds(t *testing.T) {
 
 	switchKinds := applyPatchSwitchKinds(t)
 	catalogKinds := make(map[string]struct{}, len(Catalog))
-	if len(Catalog) != 18 {
-		t.Fatalf("Catalog 条目数 = %d，期望 18", len(Catalog))
+	if len(Catalog) != 19 {
+		t.Fatalf("Catalog 条目数 = %d，期望 19", len(Catalog))
 	}
 	for _, spec := range Catalog {
 		if _, duplicate := catalogKinds[spec.Kind]; duplicate {
@@ -171,6 +171,12 @@ func TestValidateOpFieldsAliasesAndCompatibility(t *testing.T) {
 			},
 		},
 		{
+			name: "subtitle style only",
+			op: map[string]any{
+				"kind": "edit_subtitle_text", "timeline_clip_id": "subtitle_1", "style": "large_center",
+			},
+		},
+		{
 			name: "unknown compatibility field is tolerated",
 			op: map[string]any{
 				"kind": "delete_clip", "clip_id": "clip_1", "future_metadata": map[string]any{"v": 1},
@@ -231,6 +237,11 @@ func TestValidateOpFieldsReturnsTypedErrors(t *testing.T) {
 			name:     "set track state needs one update",
 			op:       map[string]any{"kind": "set_track_state", "track_id": "bgm"},
 			wantKind: "set_track_state", wantField: "muted", wantSpec: true, wantReason: "至少需要提供一个",
+		},
+		{
+			name:     "subtitle edit needs text or style",
+			op:       map[string]any{"kind": "edit_subtitle_text", "timeline_clip_id": "subtitle_1"},
+			wantKind: "edit_subtitle_text", wantField: "text", wantSpec: true, wantReason: "至少需要提供一个",
 		},
 		{
 			name:     "boolean wrong type",

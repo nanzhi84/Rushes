@@ -12,7 +12,7 @@ import (
 
 // PromptVersion participates in the persistent material-understanding cache key.
 // Bump it whenever the stored semantic shape or VLM instructions materially change.
-const PromptVersion = "go-shot-context-v3"
+const PromptVersion = "go-shot-context-v4"
 
 // NormalizeAnalyzeOptions keeps long videos from being accidentally reduced to a
 // handful of windows by a shallow model-authored max_steps_per_asset value.
@@ -46,6 +46,10 @@ func NormalizeAnalyzeOptions(asset storage.Asset, options AnalyzeOptions) Analyz
 // AnalysisFingerprint makes understanding idempotent across chat clears, process
 // restarts and drafts that reference the same unchanged asset.
 func AnalysisFingerprint(asset storage.Asset, options AnalyzeOptions) string {
+	return analysisFingerprint(asset, options, PromptVersion)
+}
+
+func analysisFingerprint(asset storage.Asset, options AnalyzeOptions, promptVersion string) string {
 	payload := struct {
 		AssetHash string         `json:"asset_hash"`
 		Kind      string         `json:"kind"`
@@ -58,7 +62,7 @@ func AnalysisFingerprint(asset storage.Asset, options AnalyzeOptions) string {
 		Kind:      asset.Kind,
 		MTime:     asset.MTime,
 		Size:      asset.Size,
-		Prompt:    PromptVersion,
+		Prompt:    promptVersion,
 		Options:   options,
 	}
 	encoded, _ := json.Marshal(payload)

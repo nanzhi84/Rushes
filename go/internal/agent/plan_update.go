@@ -31,6 +31,18 @@ func (service *Service) toolPlanUpdate(
 			"reason": "plan_not_json",
 		}), nil
 	}
+	if input.Contract != nil {
+		if input.Contract.MustKeepUtteranceIDs != nil && len(input.Contract.MustKeepUtteranceIDs) == 0 {
+			return planUpdateFailure("must_keep_utterance_ids 不能为空", map[string]any{
+				"reason": "contract_invalid",
+			}), nil
+		}
+		contractMap, contractErr := canonicalContentPlanValue(input.Contract)
+		if contractErr != nil {
+			return planUpdateFailure("验收合同无法编码为 JSON", map[string]any{"reason": "contract_not_json"}), nil
+		}
+		patch["contract"] = contractMap
+	}
 	if key := reservedContentPlanKey(patch); key != "" {
 		return planUpdateFailure(
 			fmt.Sprintf("创作计划本不能使用保留键 %q；该键属于 WorldState 客观状态", key),
@@ -54,6 +66,11 @@ func (service *Service) toolPlanUpdate(
 			fmt.Sprintf("现有创作计划本含保留键 %q；请用 reset=true 写入不含保留键的干净计划", key),
 			map[string]any{"reason": "stored_reserved_key", "reserved_key": key},
 		), nil
+	}
+	if contract, contractErr := contentPlanContract(updated); contractErr != nil {
+		return planUpdateFailure(contractErr.Error(), map[string]any{"reason": "contract_invalid"}), nil
+	} else if contract != nil {
+		updated["contract"] = contract
 	}
 	encoded, err := json.Marshal(updated)
 	if err != nil {
@@ -91,6 +108,18 @@ func (service *Service) toolPlanUpdate(
 			"mode": mode, "plan_runes": runes,
 		},
 	}, nil
+}
+
+func canonicalContentPlanValue(input any) (map[string]any, error) {
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]any{}
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func canonicalContentPlan(input map[string]any) (map[string]any, error) {

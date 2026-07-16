@@ -1,11 +1,13 @@
 package understanding
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/jpeg"
 	"math"
 	"os"
 	"sort"
@@ -19,11 +21,14 @@ import (
 
 const (
 	understandingTimelineFPS = 30
+	frameExtractMaxWidth     = 640
+	frameExtractJPEGQuality  = 4
 	// scdet only proposes candidates. A lower-than-default threshold preserves
 	// recall; the VLM sees frames on both sides and rejects flashes/motion.
 	understandingSceneThreshold = 6.0
 	maxBoundaryCandidates       = 24
 	maxBoundaryCandidatesPerVLM = 8
+	maxSegmentSpansPerVLM       = 8
 	minimumBoundaryDistanceSec  = 0.12
 )
 
@@ -54,8 +59,10 @@ type videoSpan struct {
 }
 
 type sampledSegmentFrame struct {
-	JPEG  []byte
-	Label string
+	SegmentID string
+	JPEG      []byte
+	Label     string
+	Timestamp float64
 }
 
 type boundaryVerificationPayload struct {
@@ -147,13 +154,14 @@ func (analyzer *Analyzer) analyzeVideo(
 	spans := buildVideoSpans(durationSec, boundaries, options)
 	result.Segments = segmentsFromSpans(spans)
 	progress("view_frames：正在按切镜与长镜头窗口抽取代表帧")
-	samples, extractDegraded, extractErr := extractSegmentFrames(ctx, paths, source, spans)
+	samples, extractDegraded, extractErr := extractSegmentFrames(ctx, paths, source, spans, options)
 	if extractErr != nil {
 		return videoAnalysisResult{}, extractErr
 	}
 	if extractDegraded {
 		result.Degraded = append(result.Degraded, "representative_frame_extract_partial")
 	}
+	applyFrameQualityMetrics(&result, samples)
 	if analyzer.vision == nil || len(samples) == 0 {
 		result.Degraded = append(result.Degraded, "visual_understanding_unavailable")
 		return result, nil
@@ -425,28 +433,149 @@ func extractSegmentFrames(
 	paths storage.Paths,
 	source string,
 	spans []videoSpan,
+	options AnalyzeOptions,
 ) ([]sampledSegmentFrame, bool, error) {
-	samples := make([]sampledSegmentFrame, 0, len(spans))
+	samples := make([]sampledSegmentFrame, 0, len(spans)*3)
 	degraded := false
 	for _, span := range spans {
 		if err := ctx.Err(); err != nil {
 			return nil, degraded, err
 		}
-		timestamp := span.StartSec + (span.EndSec-span.StartSec)/2
-		jpeg, err := extractFrameAt(ctx, paths, source, timestamp)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil, degraded, err
+		timestamps := segmentFrameTimestamps(span, options.Depth)
+		for index, timestamp := range timestamps {
+			jpegBytes, err := extractFrameAt(ctx, paths, source, timestamp)
+			if err != nil {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+					return nil, degraded, err
+				}
+				degraded = true
+				continue
 			}
-			degraded = true
-			continue
+			samples = append(samples, sampledSegmentFrame{
+				SegmentID: span.ID, JPEG: jpegBytes, Timestamp: timestamp,
+				Label: segmentFrameLabel(span, timestamps, index, options.Depth),
+			})
 		}
-		samples = append(samples, sampledSegmentFrame{
-			JPEG:  jpeg,
-			Label: fmt.Sprintf("%s %.2f–%.2f 秒，代表帧 %.2f 秒", span.ID, span.StartSec, span.EndSec, timestamp),
-		})
 	}
 	return samples, degraded, nil
+}
+
+func segmentFrameLabel(span videoSpan, timestamps []float64, index int, depth string) string {
+	position := "中帧"
+	if strings.EqualFold(strings.TrimSpace(depth), "deep") {
+		switch {
+		case len(timestamps) == 2 && index == 0:
+			position = "首帧"
+		case len(timestamps) == 2 && index == 1:
+			position = "尾帧"
+		case len(timestamps) >= 3:
+			position = []string{"首帧", "中帧", "尾帧"}[min(index, 2)]
+		}
+	}
+	timestamp := timestamps[index]
+	return fmt.Sprintf("%s %.2f–%.2f 秒，%s %.3f 秒", span.ID, span.StartSec, span.EndSec, position, timestamp)
+}
+
+func segmentFrameTimestamps(span videoSpan, depth string) []float64 {
+	duration := max(0.0, span.EndSec-span.StartSec)
+	middle := span.StartSec + duration/2
+	if !strings.EqualFold(strings.TrimSpace(depth), "deep") || duration <= 0.20 {
+		return []float64{middle}
+	}
+	first := min(span.EndSec-0.001, span.StartSec+0.10)
+	last := max(span.StartSec, span.EndSec-0.10)
+	values := []float64{first, middle, last}
+	if duration <= 0.30 {
+		values = []float64{first, last}
+	}
+	result := make([]float64, 0, len(values))
+	for _, value := range values {
+		value = min(max(span.StartSec, value), max(span.StartSec, span.EndSec-0.001))
+		duplicate := false
+		for _, existing := range result {
+			duplicate = duplicate || math.Abs(existing-value) < 0.0005
+		}
+		if !duplicate {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func applyFrameQualityMetrics(result *videoAnalysisResult, samples []sampledSegmentFrame) {
+	type aggregate struct {
+		overexposed float64
+		sharpness   float64
+		count       int
+	}
+	bySegment := map[string]aggregate{}
+	for _, sample := range samples {
+		overexposed, sharpness, err := frameQualityMetrics(sample.JPEG)
+		if err != nil {
+			continue
+		}
+		value := bySegment[sample.SegmentID]
+		value.overexposed += overexposed
+		value.sharpness += sharpness
+		value.count++
+		bySegment[sample.SegmentID] = value
+	}
+	for index := range result.Segments {
+		value := bySegment[fmt.Sprintf("s%03d", index)]
+		if value.count == 0 {
+			continue
+		}
+		overexposed := math.Round(value.overexposed/float64(value.count)*10000) / 10000
+		sharpness := math.Round(value.sharpness/float64(value.count)*100) / 100
+		result.Segments[index].OverexposedRatio = &overexposed
+		result.Segments[index].SharpnessScore = &sharpness
+	}
+}
+
+func frameQualityMetrics(jpegBytes []byte) (float64, float64, error) {
+	decoded, err := jpeg.Decode(bytes.NewReader(jpegBytes))
+	if err != nil {
+		return 0, 0, err
+	}
+	bounds := decoded.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if width == 0 || height == 0 {
+		return 0, 0, errors.New("空 JPEG 帧")
+	}
+	gray := make([]float64, width*height)
+	overexposed := 0
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			r, g, b, _ := decoded.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
+			luma := 0.2126*float64(r>>8) + 0.7152*float64(g>>8) + 0.0722*float64(b>>8)
+			gray[y*width+x] = luma
+			if luma >= 250 {
+				overexposed++
+			}
+		}
+	}
+	laplacians := make([]float64, 0, max(0, (width-2)*(height-2)))
+	for y := 1; y < height-1; y++ {
+		for x := 1; x < width-1; x++ {
+			index := y*width + x
+			laplacians = append(laplacians, 4*gray[index]-gray[index-1]-gray[index+1]-gray[index-width]-gray[index+width])
+		}
+	}
+	mean := 0.0
+	for _, value := range laplacians {
+		mean += value
+	}
+	if len(laplacians) > 0 {
+		mean /= float64(len(laplacians))
+	}
+	variance := 0.0
+	for _, value := range laplacians {
+		variance += (value - mean) * (value - mean)
+	}
+	if len(laplacians) > 0 {
+		variance /= float64(len(laplacians))
+	}
+	return float64(overexposed) / float64(width*height), variance, nil
 }
 
 func extractFrameAt(ctx context.Context, paths storage.Paths, source string, timestampSec float64) ([]byte, error) {
@@ -463,7 +592,8 @@ func extractFrameAt(ctx context.Context, paths storage.Paths, source string, tim
 	_, err = media.RunCommand(
 		ctx, "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
 		"-ss", fmt.Sprintf("%.6f", max(0, timestampSec)), "-i", source,
-		"-frames:v", "1", "-vf", "scale='min(640,iw)':-2", "-q:v", "4", path,
+		"-frames:v", "1", "-vf", fmt.Sprintf("scale='min(%d,iw)':-2", frameExtractMaxWidth),
+		"-q:v", fmt.Sprintf("%d", frameExtractJPEGQuality), path,
 	)
 	if err != nil {
 		return nil, err
@@ -487,8 +617,44 @@ func (analyzer *Analyzer) describeSegmentFrames(
 	samples []sampledSegmentFrame,
 	focus string,
 ) (string, error) {
+	if len(samples) == 0 {
+		return "", nil
+	}
+	responses := []string{}
+	for start := 0; start < len(samples); {
+		spanCount := 0
+		end := start
+		lastID := ""
+		for end < len(samples) {
+			if samples[end].SegmentID != lastID {
+				if spanCount == maxSegmentSpansPerVLM {
+					break
+				}
+				spanCount++
+				lastID = samples[end].SegmentID
+			}
+			end++
+		}
+		response, err := analyzer.describeSegmentFrameBatch(ctx, samples[start:end], focus)
+		if err != nil {
+			return "", err
+		}
+		if err := validateSegmentDescriptionResponse(response, samples[start:end]); err != nil {
+			return "", err
+		}
+		responses = append(responses, response)
+		start = end
+	}
+	return mergeSegmentDescriptionResponses(responses), nil
+}
+
+func (analyzer *Analyzer) describeSegmentFrameBatch(
+	ctx context.Context,
+	samples []sampledSegmentFrame,
+	focus string,
+) (string, error) {
 	prompt := `你正在为视频剪辑 Agent 建立可检索的逐镜头语义索引。后续每张图都附带 segment id 和确切源时间。
-只描述画面可见事实，但要尽量具体：主体身份或外观、场景、正在发生的动作、景别、构图、光线与色调、情绪氛围，以及适合怎样剪辑。description 必须是一句信息密集的中文检索文本，避免“画面很好看”之类空泛评价。edit_hints 写可执行用途，例如“适合高潮强拍切入”“适合作为环境建立镜头”；不能从静态代表帧确认的运镜、动作峰值或前后事件不要猜测。
+只描述画面可见事实，但要尽量具体：主体身份或外观、场景、正在发生的动作、景别、构图、光线与色调、情绪氛围，以及适合怎样剪辑。description 必须是一句信息密集的中文检索文本，避免“画面很好看”之类空泛评价。一个 segment 有首/中/尾多帧时，可依据帧间构图变化描述段内动作趋势、推近、拉远或横移方向；只有单帧时不要猜测运动。edit_hints 写可执行用途，例如“适合高潮强拍切入”“适合作为环境建立镜头”。
 同时判断整段素材在口播工作流中的客观角色：人物直接面对镜头讲解、采访或连续表达为 a_roll；产品展示、操作演示、环境、细节、对比等用于覆盖讲述内容的画面为 b_roll。只依据可见证据，无法判断时返回空字符串。
 严格只返回 JSON：{"overall":"整体内容、视觉风格与可剪用途摘要","semantic_role":"a_roll|b_roll|","segments":[{"id":"s000","description":"夜晚海滩上红衣女性举起火把，橙色火光照亮人物，中景居中构图，适合高潮切入","tags":["人物","海滩","火光","夜景"],"quality":"usable|soft|dark|blurred","subjects":["红衣女性"],"actions":["举起火把"],"setting":["夜晚海滩"],"shot_scale":"中景","composition":"主体居中","lighting":["橙色火光","低照度"],"mood":["神秘","高能"],"edit_hints":["高潮强拍切入"]}]}。每个 id 必须出现一次。`
 	if strings.TrimSpace(focus) != "" {
@@ -508,6 +674,77 @@ func (analyzer *Analyzer) describeSegmentFrames(
 		return "", err
 	}
 	return strings.TrimSpace(response.Content), nil
+}
+
+func validateSegmentDescriptionResponse(response string, samples []sampledSegmentFrame) error {
+	payload := segmentDescriptionPayload{}
+	if err := decodeJSONObject(response, &payload); err != nil {
+		return fmt.Errorf("逐镜头视觉摘要不是有效 JSON: %w", err)
+	}
+	expected := map[string]struct{}{}
+	for _, sample := range samples {
+		expected[sample.SegmentID] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	for _, segment := range payload.Segments {
+		id := strings.TrimSpace(segment.ID)
+		if _, ok := expected[id]; !ok {
+			return fmt.Errorf("逐镜头视觉摘要包含非预期 segment id %q", id)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			return fmt.Errorf("逐镜头视觉摘要重复 segment id %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+	missing := make([]string, 0)
+	for id := range expected {
+		if _, ok := seen[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) > 0 {
+		sort.Strings(missing)
+		return fmt.Errorf("逐镜头视觉摘要缺少 segment id: %s", strings.Join(missing, "、"))
+	}
+	return nil
+}
+
+func mergeSegmentDescriptionResponses(responses []string) string {
+	if len(responses) == 1 {
+		return strings.TrimSpace(responses[0])
+	}
+	merged := segmentDescriptionPayload{}
+	overallSeen := map[string]struct{}{}
+	roleCounts := map[string]int{}
+	for _, response := range responses {
+		payload := segmentDescriptionPayload{}
+		_ = decodeJSONObject(response, &payload) // 每批已在合并前完成严格完整性校验。
+		overall := strings.TrimSpace(payload.Overall)
+		if overall != "" {
+			if _, exists := overallSeen[overall]; !exists {
+				overallSeen[overall] = struct{}{}
+				if merged.Overall != "" {
+					merged.Overall += "；"
+				}
+				merged.Overall += overall
+			}
+		}
+		role := normalizeVisualRole(payload.SemanticRole)
+		if role != "" {
+			// Each response has already passed segment completeness validation, so
+			// its segment count is the number of distinct shots represented by the
+			// batch. Weight the material-level role by shots rather than requests.
+			roleCounts[role] += len(payload.Segments)
+		}
+		merged.Segments = append(merged.Segments, payload.Segments...)
+	}
+	if roleCounts["a_roll"] >= roleCounts["b_roll"] && roleCounts["a_roll"] > 0 {
+		merged.SemanticRole = "a_roll"
+	} else if roleCounts["b_roll"] > 0 {
+		merged.SemanticRole = "b_roll"
+	}
+	encoded, _ := json.Marshal(merged)
+	return string(encoded)
 }
 
 func applySegmentDescriptions(result *videoAnalysisResult, raw string) {

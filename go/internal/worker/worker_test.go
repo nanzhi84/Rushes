@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -258,6 +259,18 @@ func TestRenderWorkerCreatesPreviewWithRenderSnapshot(t *testing.T) {
 			"next_run_at": now.Format(time.RFC3339Nano),
 		},
 	}}, contracts.ActorAgent, now)
+	document.Version = 2
+	document.DurationFrames = 15
+	document.Tracks[0].Clips[0].TimelineEndFrame = 15
+	document.Tracks[0].Clips[0].SourceEndFrame = 15
+	documentMap, _ = timeline.ToMap(document)
+	if err := database.Read().QueryRowContext(t.Context(), "SELECT state_version FROM drafts WHERE draft_id='draft_render'").Scan(&base); err != nil {
+		t.Fatal(err)
+	}
+	apply(t, database, []contracts.Event{{
+		Type: "TimelineVersionCreated", DraftID: "draft_render", BaseVersion: &base,
+		Payload: map[string]any{"timeline_version": 2, "document_json": documentMap},
+	}}, contracts.ActorAgent, now)
 	registry := NewRegistry()
 	if err := RegisterRender(registry, database); err != nil {
 		t.Fatal(err)
@@ -272,15 +285,19 @@ func TestRenderWorkerCreatesPreviewWithRenderSnapshot(t *testing.T) {
 		t.Fatalf("worked=%v err=%v", worked, err)
 	}
 	var previewID, hash string
+	var timelineVersion int
 	var width, height int
 	var fps, duration float64
 	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT preview_id,object_hash,render_width,render_height,render_fps,expected_duration_sec
-		FROM previews WHERE draft_id='draft_render'`).Scan(&previewID, &hash, &width, &height, &fps, &duration); err != nil {
-		t.Fatal(err)
+		SELECT preview_id,object_hash,timeline_version,render_width,render_height,render_fps,expected_duration_sec
+		FROM previews WHERE draft_id='draft_render'`).Scan(&previewID, &hash, &timelineVersion, &width, &height, &fps, &duration); err != nil {
+		var status string
+		var errorJSON any
+		_ = database.Read().QueryRowContext(t.Context(), "SELECT status,error_json FROM jobs WHERE job_id='job_render'").Scan(&status, &errorJSON)
+		t.Fatalf("preview query err=%v job status=%s error=%v", err, status, errorJSON)
 	}
-	if previewID == "" || len(hash) != 64 || width != 960 || height != 540 || fps != 30 || duration != 1 {
-		t.Fatalf("preview=%s hash=%s snapshot=%dx%d %.2f %.2f", previewID, hash, width, height, fps, duration)
+	if previewID == "" || len(hash) != 64 || timelineVersion != 1 || width != 960 || height != 540 || fps != 30 || duration != 1 {
+		t.Fatalf("preview=%s hash=%s version=%d snapshot=%dx%d %.2f %.2f", previewID, hash, timelineVersion, width, height, fps, duration)
 	}
 	stored, err := GetJob(t.Context(), database, "job_render")
 	if err != nil || stored.Status != "succeeded" {
@@ -290,16 +307,28 @@ func TestRenderWorkerCreatesPreviewWithRenderSnapshot(t *testing.T) {
 		Type: "JobEnqueued", DraftID: "draft_render",
 		Payload: map[string]any{
 			"job_id": "job_render_final", "kind": "render_final", "requested_by_draft_id": "draft_render",
-			"idempotency_key": "render-final:1", "job_payload": map[string]any{"timeline_version": int64(1)},
+			"idempotency_key": "render-final:1:portrait", "job_payload": map[string]any{"timeline_version": int64(1), "orientation": "portrait"},
 			"next_run_at": time.Now().UTC().Format(time.RFC3339Nano),
 		},
 	}}, contracts.ActorAgent, time.Now().UTC())
 	if worked, err := runner.RunOnce(t.Context()); err != nil || !worked {
 		t.Fatalf("final worked=%v err=%v", worked, err)
 	}
-	var exports int
-	if err := database.Read().QueryRow("SELECT COUNT(*) FROM exports WHERE draft_id='draft_render'").Scan(&exports); err != nil || exports != 1 {
-		t.Fatalf("exports=%d err=%v", exports, err)
+	var exportHash string
+	var exportTimelineVersion int
+	if err := database.Read().QueryRow("SELECT object_hash,timeline_version FROM exports WHERE draft_id='draft_render'").Scan(&exportHash, &exportTimelineVersion); err != nil {
+		t.Fatal(err)
+	}
+	if exportTimelineVersion != 1 {
+		t.Fatalf("export timeline_version=%d want=1", exportTimelineVersion)
+	}
+	exportPath, err := database.Paths.ObjectPath(exportHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exportProbe, err := media.ProbeFile(t.Context(), exportPath)
+	if err != nil || exportProbe.Width == nil || exportProbe.Height == nil || *exportProbe.Width != 1080 || *exportProbe.Height != 1920 {
+		t.Fatalf("portrait export probe=%#v err=%v", exportProbe, err)
 	}
 }
 
@@ -977,8 +1006,13 @@ func TestWorkerHandlerFailureSemantics(t *testing.T) {
 		t.Fatal("无 draft_id 的 render job 应失败")
 	}
 	draftID := "draft_handler_failures"
-	if _, err := renderHandler(database, false)(t.Context(), Job{DraftID: &draftID, Payload: map[string]any{}}, func(context.Context, Job, float64) error { return nil }); !errors.Is(err, storage.ErrNotFound) {
-		t.Fatalf("无时间线 render err=%v", err)
+	if _, err := renderHandler(database, false)(t.Context(), Job{DraftID: &draftID, Payload: map[string]any{}}, func(context.Context, Job, float64) error { return nil }); err == nil || !strings.Contains(err.Error(), "timeline_version") {
+		t.Fatalf("缺少 timeline_version render err=%v", err)
+	}
+	for _, invalidVersion := range []any{0, -1, 1.5, "1"} {
+		if _, err := renderHandler(database, false)(t.Context(), Job{DraftID: &draftID, Payload: map[string]any{"timeline_version": invalidVersion}}, func(context.Context, Job, float64) error { return nil }); err == nil {
+			t.Fatalf("非法 timeline_version=%#v 应失败", invalidVersion)
+		}
 	}
 	document := timeline.Empty(draftID, 1)
 	documentMap, err := timeline.ToMap(document)

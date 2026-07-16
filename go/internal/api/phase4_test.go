@@ -100,7 +100,7 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 	}
 	if err := server.database.Read().QueryRowContext(t.Context(), `
 		SELECT COUNT(*) FROM timeline_versions WHERE draft_id='draft_timeline_api'`,
-	).Scan(&timelineRows); err != nil || timelineRows != 1 {
+	).Scan(&timelineRows); err != nil || timelineRows != 2 {
 		t.Fatalf("timeline rows=%d err=%v", timelineRows, err)
 	}
 	var manualBatches, operationCount int
