@@ -247,6 +247,32 @@ func TestBeatAlignmentDataDistinguishesStructureFromBeatSync(t *testing.T) {
 	}
 }
 
+func TestBeatAlignmentDataUsesToleranceAndExcludesContinuousSourceSplits(t *testing.T) {
+	document := timeline.Empty("draft_alignment_tolerance", 1)
+	document.FPS = 30
+	document.DurationFrames = 90
+	document.Tracks[0].Clips = []timeline.Clip{
+		{TrackID: "visual_base", AssetID: "video_a", TimelineStartFrame: 0, TimelineEndFrame: 31, SourceStartFrame: 0, SourceEndFrame: 31},
+		{TrackID: "visual_base", AssetID: "video_b", TimelineStartFrame: 31, TimelineEndFrame: 60, SourceStartFrame: 0, SourceEndFrame: 29},
+		{TrackID: "visual_base", AssetID: "video_b", TimelineStartFrame: 60, TimelineEndFrame: 62, SourceStartFrame: 29, SourceEndFrame: 31},
+		{TrackID: "visual_base", AssetID: "video_c", TimelineStartFrame: 62, TimelineEndFrame: 90, SourceStartFrame: 0, SourceEndFrame: 28},
+	}
+	document.Tracks[4].Clips = []timeline.Clip{{
+		TrackID: "bgm", AssetID: "music", TimelineEndFrame: 90, SourceEndFrame: 90, PlaybackRate: 1,
+		Effects: []map[string]any{{"kind": "beat_grid", "beat_frames": []int{30, 60}}},
+	}}
+
+	alignment := beatAlignmentData(document)
+	if alignment["cut_count"] != 2 || alignment["on_beat_cut_count"] != 1 ||
+		alignment["alignment_ratio"] != 0.5 {
+		t.Fatalf("alignment=%#v", alignment)
+	}
+	offBeat, ok := alignment["off_beat_cut_frames"].([]int)
+	if !ok || len(offBeat) != 1 || offBeat[0] != 62 {
+		t.Fatalf("off-beat cuts=%#v alignment=%#v", offBeat, alignment)
+	}
+}
+
 func TestGenericBGMInsertAutomaticallyAttachesBeatGrid(t *testing.T) {
 	fakeBin := t.TempDir()
 	for name, body := range map[string]string{

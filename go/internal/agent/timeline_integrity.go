@@ -307,8 +307,11 @@ func beatAlignmentData(document timeline.Document) map[string]any {
 		sort.SliceStable(clips, func(i, j int) bool {
 			return clips[i].TimelineStartFrame < clips[j].TimelineStartFrame
 		})
-		for _, clip := range clips {
+		for index, clip := range clips {
 			if clip.TimelineEndFrame > 0 && clip.TimelineEndFrame < document.DurationFrames {
+				if index+1 < len(clips) && clipsHaveContinuousSourceBoundary(clip, clips[index+1]) {
+					continue
+				}
 				cutFrames = append(cutFrames, clip.TimelineEndFrame)
 			}
 		}
@@ -346,6 +349,11 @@ func beatAlignmentData(document timeline.Document) map[string]any {
 		result["warning"] = "BGM 缺少 beat_grid 元数据；结构校验不能证明画面切点已卡音乐节拍"
 	}
 	return result
+}
+
+func clipsHaveContinuousSourceBoundary(previous, next timeline.Clip) bool {
+	return previous.AssetID != "" && previous.AssetID == next.AssetID &&
+		previous.SourceEndFrame == next.SourceStartFrame
 }
 
 func mapEffectFramesToTimeline(clip timeline.Clip, value any) []int {

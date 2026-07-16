@@ -1426,9 +1426,12 @@ func beatCandidatesWithin(frames []int, targetFrames int) []int {
 	return result
 }
 
+// One frame is about 33ms at 30fps, below the perceptible threshold for beat alignment.
+const beatSnapToleranceFrames = 1
+
 func containsFrame(frames []int, target int) bool {
-	index := sort.SearchInts(frames, target)
-	return index < len(frames) && frames[index] == target
+	index := sort.SearchInts(frames, target-beatSnapToleranceFrames)
+	return index < len(frames) && frames[index] <= target+beatSnapToleranceFrames
 }
 
 func absInt(value int) int {
