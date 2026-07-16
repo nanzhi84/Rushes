@@ -8,6 +8,7 @@ type MaterialsResponse = {
     filename: string;
     ingest_status: string;
     usable: boolean;
+    jobs: Array<{ kind: string; status: string }>;
   }>;
 };
 
@@ -179,7 +180,10 @@ async function waitForImportedAsset(
       `/api/drafts/${draftId}/materials`
     );
     const asset = materials.assets.find((item) => item.filename === FIXTURE_NAME);
-    if (asset?.ingest_status === "ready" && asset.usable) {
+    const ingestSucceeded = asset?.jobs.some(
+      (job) => job.kind === "ingest" && job.status === "succeeded"
+    );
+    if (asset?.ingest_status === "ready" && asset.usable && ingestSucceeded) {
       return asset.asset_id;
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
