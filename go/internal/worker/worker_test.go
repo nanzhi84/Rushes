@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,7 +71,7 @@ func TestClaimPriorityHeartbeatRetryAndStaleRecovery(t *testing.T) {
 	}
 	replacement, err := Claim(t.Context(), database, "worker_b", now.Add(time.Second))
 	if err != nil || replacement == nil || replacement.ID != job.ID ||
-		replacement.WorkerID == nil || *replacement.WorkerID != "worker_b" {
+		replacement.WorkerID == nil || *replacement.WorkerID != "worker_b" || replacement.Attempts != 2 {
 		t.Fatalf("replacement=%#v err=%v", replacement, err)
 	}
 	if ok, err := Heartbeat(t.Context(), database, *job, now.Add(2*time.Second)); err != nil || ok {
@@ -89,7 +90,173 @@ func TestClaimPriorityHeartbeatRetryAndStaleRecovery(t *testing.T) {
 	}
 }
 
-func TestRunnerRetriesThenEmitsTerminalEvent(t *testing.T) {
+func TestRecoverStaleIncrementsAttemptsAndDeadLettersExhaustedJobs(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	now := time.Date(2026, 7, 10, 14, 0, 0, 0, time.UTC)
+	createDraft(t, database, "draft_stale_budget", now)
+	for _, job := range []struct {
+		id         string
+		attempts   int
+		maxRetries int
+	}{
+		{id: "job_stale_retry", attempts: 0, maxRetries: 2},
+		{id: "job_stale_exhausted", attempts: 1, maxRetries: 1},
+		{id: "job_stale_cancelled", attempts: 0, maxRetries: 2},
+	} {
+		apply(t, database, []contracts.Event{{
+			Type: "JobEnqueued", DraftID: "draft_stale_budget",
+			Payload: map[string]any{
+				"job_id": job.id, "kind": "render_preview",
+				"requested_by_draft_id": "draft_stale_budget",
+				"idempotency_key":       job.id, "attempts": job.attempts,
+				"max_retries": job.maxRetries, "next_run_at": now.Format(time.RFC3339Nano),
+			},
+		}}, contracts.ActorSystem, now)
+	}
+	apply(t, database, []contracts.Event{{
+		Type: "JobCancelled", DraftID: "draft_stale_budget", Payload: map[string]any{
+			"job_id": "job_stale_cancelled", "kind": "render_preview",
+			"requested_by_draft_id": "draft_stale_budget", "reason": "user_cancelled",
+		},
+	}}, contracts.ActorUser, now)
+	oldHeartbeat := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
+	startedAt := now.Add(-3 * time.Minute).Format(time.RFC3339Nano)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		UPDATE jobs SET status='running', worker_id='dead-worker', started_at=?, heartbeat_at=?
+		WHERE job_id IN ('job_stale_retry','job_stale_exhausted')`, startedAt, oldHeartbeat); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := RecoverStale(t.Context(), database, now, time.Minute)
+	if err != nil || recovered != 2 {
+		t.Fatalf("recovered=%d err=%v", recovered, err)
+	}
+	retry, err := GetJob(t.Context(), database, "job_stale_retry")
+	if err != nil || retry.Status != "pending" || retry.Attempts != 1 ||
+		retry.WorkerID != nil || retry.StartedAt != nil || retry.HeartbeatAt != nil {
+		t.Fatalf("retry=%#v err=%v", retry, err)
+	}
+	exhausted, err := GetJob(t.Context(), database, "job_stale_exhausted")
+	if err != nil || exhausted.Status != "failed" || exhausted.Attempts != 2 {
+		t.Fatalf("exhausted=%#v err=%v", exhausted, err)
+	}
+	cancelled, err := GetJob(t.Context(), database, "job_stale_cancelled")
+	if err != nil || cancelled.Status != "cancelled" || cancelled.Attempts != 0 {
+		t.Fatalf("cancelled=%#v err=%v", cancelled, err)
+	}
+	var failureJSON string
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT error_json FROM jobs WHERE job_id='job_stale_exhausted'",
+	).Scan(&failureJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(failureJSON, `"error_code":"stale_recovery_exhausted"`) ||
+		!strings.Contains(failureJSON, `"worker_id":"dead-worker"`) ||
+		!strings.Contains(failureJSON, oldHeartbeat) {
+		t.Fatalf("failure=%s", failureJSON)
+	}
+	var failedEvents, exhaustedRunning, retryRunning int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM event_log
+		WHERE event_type='JobFailed'
+		AND json_extract(payload_json,'$.payload.job_id')='job_stale_exhausted'`,
+	).Scan(&failedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT
+			SUM(CASE WHEN json_extract(value,'$.job_id')='job_stale_exhausted' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN json_extract(value,'$.job_id')='job_stale_retry' THEN 1 ELSE 0 END)
+		FROM drafts, json_each(drafts.running_jobs_json)
+		WHERE draft_id='draft_stale_budget'`,
+	).Scan(&exhaustedRunning, &retryRunning); err != nil {
+		t.Fatal(err)
+	}
+	if failedEvents != 1 || exhaustedRunning != 0 || retryRunning != 1 {
+		t.Fatalf("failed events=%d exhausted running=%d retry running=%d",
+			failedEvents, exhaustedRunning, retryRunning)
+	}
+}
+
+func TestStaleRecoveryFailureIsAppliedOnlyOnce(t *testing.T) {
+	t.Parallel()
+	database, now, _ := staleRecoveryTerminalFixture(t, "job_stale_once")
+	type recoveryResult struct {
+		count int64
+		err   error
+	}
+	start := make(chan struct{})
+	results := make(chan recoveryResult, 2)
+	for range 2 {
+		go func() {
+			<-start
+			count, err := RecoverStale(t.Context(), database, now, time.Minute)
+			results <- recoveryResult{count: count, err: err}
+		}()
+	}
+	close(start)
+	var recovered int64
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		recovered += result.count
+	}
+	if recovered != 1 {
+		t.Fatalf("recovered=%d", recovered)
+	}
+
+	var failedEvents int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM event_log
+		WHERE event_type='JobFailed'
+		AND json_extract(payload_json,'$.payload.job_id')='job_stale_once'`,
+	).Scan(&failedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if failedEvents != 1 {
+		t.Fatalf("JobFailed events=%d", failedEvents)
+	}
+}
+
+func TestStaleRecoveryFailureCannotOverwriteSuccess(t *testing.T) {
+	t.Parallel()
+	database, now, failure := staleRecoveryTerminalFixture(t, "job_stale_after_success")
+	claim := failure.Payload
+	apply(t, database, []contracts.Event{{
+		Type: "JobSucceeded", DraftID: failure.DraftID, Payload: map[string]any{
+			"job_id": "job_stale_after_success", "kind": "render_preview",
+			"requested_by_draft_id": failure.DraftID,
+			"worker_id":             claim["worker_id"], "started_at": claim["started_at"],
+			"progress": 1.0, "result": map[string]any{"preview_id": "preview_done"},
+		},
+	}}, contracts.ActorJob, now)
+
+	if _, err := reducer.Apply(t.Context(), database, []contracts.Event{failure}, reducer.Options{
+		Actor: contracts.ActorJob, CreatedAt: now.Add(time.Second),
+	}); !errors.Is(err, reducer.ErrJobClaimLost) {
+		t.Fatalf("stale recovery after success err=%v", err)
+	}
+	stored, err := GetJob(t.Context(), database, "job_stale_after_success")
+	if err != nil || stored.Status != "succeeded" {
+		t.Fatalf("stored=%#v err=%v", stored, err)
+	}
+	var failedEvents int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM event_log
+		WHERE event_type='JobFailed'
+		AND json_extract(payload_json,'$.payload.job_id')='job_stale_after_success'`,
+	).Scan(&failedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if failedEvents != 0 {
+		t.Fatalf("JobFailed events=%d", failedEvents)
+	}
+}
+
+func TestRunnerRetriesRenderThenEmitsSingleSuccess(t *testing.T) {
 	t.Parallel()
 	database := testDatabase(t)
 	now := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
@@ -97,13 +264,13 @@ func TestRunnerRetriesThenEmitsTerminalEvent(t *testing.T) {
 	apply(t, database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: "draft_runner",
 		Payload: map[string]any{
-			"job_id": "job_retry", "kind": "unstable", "idempotency_key": "job_retry",
-			"max_retries": 1, "next_run_at": now.Format(time.RFC3339Nano),
+			"job_id": "job_retry", "kind": "render_preview", "idempotency_key": "job_retry",
+			"max_retries": 2, "next_run_at": now.Format(time.RFC3339Nano),
 		},
 	}}, contracts.ActorSystem, now)
 	registry := NewRegistry()
 	calls := 0
-	if err := registry.Register("unstable", func(
+	if err := registry.Register("render_preview", func(
 		_ context.Context,
 		_ Job,
 		_ ProgressReporter,
@@ -146,6 +313,67 @@ func TestRunnerRetriesThenEmitsTerminalEvent(t *testing.T) {
 	}
 	if succeeded != 1 {
 		t.Fatalf("JobSucceeded=%d", succeeded)
+	}
+}
+
+func TestRunnerFailsRenderAfterRetryBudgetWithLastError(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	now := time.Date(2026, 7, 10, 13, 0, 0, 0, time.UTC)
+	createDraft(t, database, "draft_render_failure", now)
+	apply(t, database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: "draft_render_failure",
+		Payload: map[string]any{
+			"job_id": "job_render_failure", "kind": "render_final",
+			"idempotency_key": "job_render_failure", "max_retries": 2,
+			"next_run_at": now.Format(time.RFC3339Nano),
+		},
+	}}, contracts.ActorSystem, now)
+	registry := NewRegistry()
+	calls := 0
+	if err := registry.Register("render_final", func(
+		context.Context, Job, ProgressReporter,
+	) (map[string]any, error) {
+		calls++
+		return nil, fmt.Errorf("render attempt %d failed", calls)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock := now
+	runner, err := NewRunner(RunnerConfig{
+		Database: database, Registry: registry, WorkerID: "render-failure-worker",
+		HeartbeatInterval: 10 * time.Second, Now: func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt, offset := range []time.Duration{0, time.Second, 3 * time.Second} {
+		clock = now.Add(offset)
+		if worked, runErr := runner.RunOnce(t.Context()); runErr != nil || !worked {
+			t.Fatalf("attempt %d worked=%v err=%v", attempt+1, worked, runErr)
+		}
+	}
+	stored, err := GetJob(t.Context(), database, "job_render_failure")
+	if err != nil || stored.Status != "failed" || stored.Attempts != 2 || calls != 3 {
+		t.Fatalf("stored=%#v calls=%d err=%v", stored, calls, err)
+	}
+	var failed, succeeded int
+	var failureJSON string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT
+			SUM(CASE WHEN event_type='JobFailed' THEN 1 ELSE 0 END),
+			SUM(CASE WHEN event_type='JobSucceeded' THEN 1 ELSE 0 END)
+		FROM event_log WHERE draft_id='draft_render_failure'`,
+	).Scan(&failed, &succeeded); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT error_json FROM jobs WHERE job_id='job_render_failure'",
+	).Scan(&failureJSON); err != nil {
+		t.Fatal(err)
+	}
+	if failed != 1 || succeeded != 0 || !strings.Contains(failureJSON, "render attempt 3 failed") {
+		t.Fatalf("failed=%d succeeded=%d failure=%s", failed, succeeded, failureJSON)
 	}
 }
 
@@ -323,7 +551,7 @@ func TestRunnerPeriodicallyRecoversJobsThatBecomeStale(t *testing.T) {
 	apply(t, database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: "draft_periodic_recovery", Payload: map[string]any{
 			"job_id": "job_periodic", "kind": "noop", "idempotency_key": "periodic",
-			"next_run_at": now.Format(time.RFC3339Nano),
+			"max_retries": 2, "next_run_at": now.Format(time.RFC3339Nano),
 		},
 	}}, contracts.ActorSystem, now)
 	if job, err := Claim(t.Context(), database, "dead-worker", now); err != nil || job == nil {
@@ -364,7 +592,7 @@ func TestRunnerRecoversAfterTransientTerminalEventWriteFailure(t *testing.T) {
 	apply(t, database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: "draft_terminal_recovery", Payload: map[string]any{
 			"job_id": "job_terminal", "kind": "noop", "idempotency_key": "terminal",
-			"next_run_at": now.Format(time.RFC3339Nano),
+			"max_retries": 1, "next_run_at": now.Format(time.RFC3339Nano),
 		},
 	}}, contracts.ActorSystem, now)
 	registry := NewRegistry()
@@ -1546,6 +1774,39 @@ func testDatabase(t *testing.T) *storage.DB {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	return database
+}
+
+func staleRecoveryTerminalFixture(
+	t *testing.T,
+	jobID string,
+) (*storage.DB, time.Time, contracts.Event) {
+	t.Helper()
+	database := testDatabase(t)
+	now := time.Date(2026, 7, 10, 15, 0, 0, 0, time.UTC)
+	draftID := "draft_" + jobID
+	createDraft(t, database, draftID, now)
+	apply(t, database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
+			"job_id": jobID, "kind": "render_preview", "idempotency_key": jobID,
+			"max_retries": 0, "next_run_at": now.Format(time.RFC3339Nano),
+		},
+	}}, contracts.ActorSystem, now)
+	startedAt := now.Add(-3 * time.Minute).Format(time.RFC3339Nano)
+	heartbeatAt := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		UPDATE jobs SET status='running', worker_id='dead-worker', started_at=?, heartbeat_at=?
+		WHERE job_id=?`, startedAt, heartbeatAt, jobID); err != nil {
+		t.Fatal(err)
+	}
+	return database, now, contracts.Event{
+		Type: "JobFailed", DraftID: draftID, Payload: map[string]any{
+			"job_id": jobID, "kind": "render_preview", "requested_by_draft_id": draftID,
+			"worker_id": "dead-worker", "started_at": startedAt, "heartbeat_at": heartbeatAt,
+			"attempts": 1, "progress": 1.0, "error": map[string]any{
+				"error_code": "stale_recovery_exhausted", "message": "stale",
+			},
+		},
+	}
 }
 
 func containsProgressDetail(updates []ProgressUpdate, assetID, stage, filename string) bool {
