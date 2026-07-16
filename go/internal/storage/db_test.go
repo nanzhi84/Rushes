@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -136,6 +137,60 @@ func TestOpenMigratesV13WorkspaceAndDropsScratchMemory(t *testing.T) {
 	draft, err := GetDraft(t.Context(), migrated.Read(), "draft_v13")
 	if err != nil || draft.Name != "迁移保留" || version != schemaVersion || scratchColumn != 0 {
 		t.Fatalf("draft=%#v version=%d scratch_column=%d err=%v", draft, version, scratchColumn, err)
+	}
+}
+
+func TestDropColumnMigrationRejectsUnlistedColumnsAndClosedTransactions(t *testing.T) {
+	t.Parallel()
+	database, err := Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	tx, err := database.Write().BeginTx(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dropColumnIfExists(
+		t.Context(), tx, "drafts", "name", "ALTER TABLE drafts DROP COLUMN name",
+	); err == nil || !strings.Contains(err.Error(), "不允许删除迁移列 drafts.name") {
+		t.Fatalf("unlisted drop err=%v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := dropColumnIfExists(t.Context(), tx, "drafts", "scratch_memory_json", schemaV14); !errors.Is(err, sql.ErrTxDone) {
+		t.Fatalf("closed transaction err=%v", err)
+	}
+}
+
+func TestSchemaV14MigrationRollsBackWhenLegacyColumnCannotBeDropped(t *testing.T) {
+	t.Parallel()
+	database, err := Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	if _, err := database.Write().ExecContext(t.Context(), `
+		ALTER TABLE drafts ADD COLUMN scratch_memory_json TEXT NOT NULL DEFAULT '{}';
+		CREATE INDEX drafts_scratch_memory_idx ON drafts(scratch_memory_json);
+		PRAGMA user_version = 13`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Migrate(t.Context()); err == nil {
+		t.Fatal("被索引引用的旧列不应被静默删除")
+	}
+	var version, scratchColumn int
+	if err := database.Read().QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM pragma_table_info('drafts') WHERE name='scratch_memory_json'`,
+	).Scan(&scratchColumn); err != nil {
+		t.Fatal(err)
+	}
+	if version != 13 || scratchColumn != 1 {
+		t.Fatalf("failed migration version=%d scratch_column=%d", version, scratchColumn)
 	}
 }
 

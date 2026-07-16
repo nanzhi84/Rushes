@@ -310,6 +310,15 @@ func TestUserMemoryReducerRejectsAmbiguousMutations(t *testing.T) {
 			want: ErrUserMemoryEvidence,
 		},
 		{
+			name: "invalid created timestamp",
+			rows: ResultRows{UserMemoryUpserts: []UserMemoryRow{{
+				Key: valid.Key, Kind: valid.Kind, Statement: valid.Statement,
+				EvidenceKind: valid.EvidenceKind, EvidenceID: valid.EvidenceID,
+				SourceDraftID: valid.SourceDraftID, CreatedAt: "not-a-time",
+			}}},
+			want: ErrUserMemoryInput,
+		},
+		{
 			name: "invalid timestamp",
 			rows: ResultRows{UserMemoryUpserts: []UserMemoryRow{{
 				Key: valid.Key, Kind: valid.Kind, Statement: valid.Statement,
@@ -328,5 +337,51 @@ func TestUserMemoryReducerRejectsAmbiguousMutations(t *testing.T) {
 				t.Fatalf("err=%v want=%v", err, test.want)
 			}
 		})
+	}
+}
+
+func TestUserMemoryDatabaseFailuresRollBackMutations(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft_memory_failure")
+	seedUserMemoryMessage(t, database, "draft_memory_failure", "message_failure")
+	seed := UserMemoryRow{
+		Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
+		EvidenceKind: storage.UserMemoryEvidenceMessage,
+		EvidenceID:   "message_failure", SourceDraftID: "draft_memory_failure",
+	}
+	if result, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorAgent, ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{seed}},
+	}); err != nil || result.Status != StatusApplied {
+		t.Fatalf("seed result=%#v err=%v", result, err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		CREATE TRIGGER block_user_memory_delete BEFORE DELETE ON user_memories
+		BEGIN SELECT RAISE(ABORT, 'blocked delete'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorUser, ResultRows: ResultRows{UserMemoryClearAll: true},
+	}); err == nil {
+		t.Fatal("clear-all trigger failure should roll back")
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		DROP TRIGGER block_user_memory_delete;
+		CREATE TRIGGER block_user_memory_insert BEFORE INSERT ON user_memories
+		WHEN NEW.memory_key = 'blocked_insert'
+		BEGIN SELECT RAISE(ABORT, 'blocked insert'); END`); err != nil {
+		t.Fatal(err)
+	}
+	blocked := seed
+	blocked.Key = "blocked_insert"
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor:      contracts.ActorAgent,
+		ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{blocked}},
+	}); err == nil {
+		t.Fatal("upsert trigger failure should roll back")
+	}
+	memories, err := storage.ListUserMemories(t.Context(), database.Read())
+	if err != nil || len(memories) != 1 || memories[0].Key != "pacing" {
+		t.Fatalf("memories after failures=%#v err=%v", memories, err)
 	}
 }
