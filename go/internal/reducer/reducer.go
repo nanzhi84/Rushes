@@ -2,6 +2,7 @@ package reducer
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -28,6 +29,7 @@ var (
 	ErrJobNotCancellable      = errors.New("job 当前状态不可取消")
 	ErrJobClaimLost           = errors.New("job 已被其他 worker 重新领取")
 	ErrRewindRestoreDuplicate = errors.New("rewind 恢复请求已提交")
+	errDraftPlanConflict      = errors.New("草稿创作计划发生并发冲突")
 )
 
 type VersionConflict struct {
@@ -100,8 +102,20 @@ type AgentContextCheckpointRow struct {
 // Like AgentContextCheckpointRow it is bookkeeping, not a domain event: updating
 // it must not bump draft state_version or emit domain SSE events.
 type DraftPlanUpdateRow struct {
-	DraftID     string
-	ContentPlan map[string]any
+	DraftID          string
+	ContentPlan      map[string]any
+	ExpectedPlanHash string
+}
+
+func ContentPlanHash(plan map[string]any) (string, error) {
+	if plan == nil {
+		plan = map[string]any{}
+	}
+	encoded, err := json.Marshal(plan)
+	if err != nil {
+		return "", fmt.Errorf("草稿创作计划无法计算哈希: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(encoded)), nil
 }
 
 // AgentJobBridgeCursorRow and AgentJobObservationRow are persistent bridge
@@ -291,6 +305,9 @@ func Apply(
 		}
 	}
 	if err := persistResultRows(ctx, tx, options.ResultRows, state.createdAt); err != nil {
+		if errors.Is(err, errDraftPlanConflict) {
+			return Result{Status: StatusVersionConflict}, nil
+		}
 		return Result{}, err
 	}
 
@@ -1419,12 +1436,34 @@ func persistResultRows(
 		}
 	}
 	if plan := rows.DraftPlanUpdate; plan != nil {
-		if plan.DraftID == "" || plan.ContentPlan == nil {
+		if plan.DraftID == "" || plan.ContentPlan == nil || plan.ExpectedPlanHash == "" {
 			return errors.New("草稿创作计划更新字段不完整")
 		}
 		encoded, err := json.Marshal(plan.ContentPlan)
 		if err != nil {
 			return fmt.Errorf("草稿创作计划无法编码: %w", err)
+		}
+		var currentJSON sql.NullString
+		if err := tx.QueryRowContext(ctx,
+			"SELECT content_plan_json FROM drafts WHERE draft_id=?", plan.DraftID,
+		).Scan(&currentJSON); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("草稿创作计划更新未找到草稿 %s", plan.DraftID)
+			}
+			return err
+		}
+		current := map[string]any{}
+		if currentJSON.Valid && currentJSON.String != "" {
+			if err := json.Unmarshal([]byte(currentJSON.String), &current); err != nil {
+				return fmt.Errorf("草稿当前创作计划无法解码: %w", err)
+			}
+		}
+		currentHash, err := ContentPlanHash(current)
+		if err != nil {
+			return err
+		}
+		if currentHash != plan.ExpectedPlanHash {
+			return errDraftPlanConflict
 		}
 		result, err := tx.ExecContext(ctx,
 			"UPDATE drafts SET content_plan_json=? WHERE draft_id=?",
