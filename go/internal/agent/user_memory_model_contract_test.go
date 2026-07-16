@@ -1,0 +1,347 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/storage"
+	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
+)
+
+type userMemoryModelContractGolden struct {
+	Cases []userMemoryModelEvalCase `json:"cases"`
+}
+
+type userMemoryModelEvalCase struct {
+	Name                string                   `json:"name"`
+	Prompt              string                   `json:"prompt"`
+	SnapshotSections    map[string]any           `json:"snapshot_sections"`
+	AvailableTools      []string                 `json:"available_tools"`
+	RequiredTool        string                   `json:"required_tool"`
+	ForbiddenTools      []string                 `json:"forbidden_tools"`
+	ExpectedMemory      *userMemoryExpectedEntry `json:"expected_memory,omitempty"`
+	ArgumentContainsAny []string                 `json:"argument_contains_any,omitempty"`
+	MockResponse        userMemoryMockResponse   `json:"mock_response"`
+}
+
+type userMemoryExpectedEntry struct {
+	Key               string `json:"key"`
+	Kind              string `json:"kind"`
+	StatementContains string `json:"statement_contains"`
+}
+
+type userMemoryMockResponse struct {
+	Content   string                   `json:"content,omitempty"`
+	ToolCalls []userMemoryMockToolCall `json:"tool_calls"`
+}
+
+type userMemoryMockToolCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type goldenUserMemoryModel struct {
+	responses  map[string]*schema.Message
+	boundTools []string
+	messages   []*schema.Message
+}
+
+func (modelValue *goldenUserMemoryModel) WithTools(infos []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	bound := &goldenUserMemoryModel{responses: modelValue.responses}
+	for _, info := range infos {
+		if info == nil || strings.TrimSpace(info.Name) == "" {
+			return nil, fmt.Errorf("golden mock 收到空工具合同")
+		}
+		bound.boundTools = append(bound.boundTools, info.Name)
+	}
+	return bound, nil
+}
+
+func (modelValue *goldenUserMemoryModel) Generate(
+	_ context.Context,
+	messages []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	modelValue.messages = append([]*schema.Message(nil), messages...)
+	prompt := ""
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index] != nil && messages[index].Role == schema.User {
+			prompt = messages[index].Content
+			break
+		}
+	}
+	response, ok := modelValue.responses[prompt]
+	if !ok {
+		return nil, fmt.Errorf("golden mock 没有 prompt=%q 的响应", prompt)
+	}
+	return response, nil
+}
+
+func (modelValue *goldenUserMemoryModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	response, err := modelValue.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{response}), nil
+}
+
+func TestUserMemoryModelContractGolden(t *testing.T) {
+	evalCases := loadUserMemoryModelEvalCases(t)
+	database := agentTestDatabase(t)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	toolInfos, specs, err := userMemoryEvalToolContracts(t.Context(), service)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	responses := make(map[string]*schema.Message, len(evalCases))
+	for _, evalCase := range evalCases {
+		calls := make([]schema.ToolCall, 0, len(evalCase.MockResponse.ToolCalls))
+		for index, call := range evalCase.MockResponse.ToolCalls {
+			calls = append(calls, schema.ToolCall{
+				ID:       fmt.Sprintf("golden_%s_%d", evalCase.Name, index+1),
+				Function: schema.FunctionCall{Name: call.Name, Arguments: call.Arguments},
+			})
+		}
+		responses[evalCase.Prompt] = schema.AssistantMessage(evalCase.MockResponse.Content, calls)
+	}
+	baseModel := &goldenUserMemoryModel{responses: responses}
+
+	for _, evalCase := range evalCases {
+		t.Run(evalCase.Name, func(t *testing.T) {
+			infos := make([]*schema.ToolInfo, 0, len(evalCase.AvailableTools))
+			for _, name := range evalCase.AvailableTools {
+				info := toolInfos[name]
+				if info == nil {
+					t.Fatalf("golden 引用了未注册工具 %s", name)
+				}
+				infos = append(infos, info)
+			}
+			boundModel, err := baseModel.WithTools(infos)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bound := boundModel.(*goldenUserMemoryModel)
+			if strings.Join(bound.boundTools, "\x00") != strings.Join(evalCase.AvailableTools, "\x00") {
+				t.Fatalf("绑定工具漂移: got=%v want=%v", bound.boundTools, evalCase.AvailableTools)
+			}
+			messages, err := userMemoryEvalMessages(evalCase)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := bound.Generate(t.Context(), messages)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateUserMemoryModelResponse(evalCase, response, specs); err != nil {
+				t.Fatal(err)
+			}
+			captured := messageContents(bound.messages)
+			if !strings.Contains(captured, coreSystemPrompt) ||
+				!strings.Contains(captured, "【WorldState 参考快照") ||
+				!strings.Contains(captured, `"user_memory"`) ||
+				!strings.Contains(captured, evalCase.Prompt) {
+				t.Fatalf("评测没有走生产上下文管线: %s", captured)
+			}
+			if evalCase.Name == "uses_injected_preference_without_asking" &&
+				!strings.Contains(captured, "成片节奏偏快，切点密度可高于默认") {
+				t.Fatal("注入的长期偏好没有进入模型消息")
+			}
+		})
+	}
+}
+
+func loadUserMemoryModelEvalCases(t *testing.T) []userMemoryModelEvalCase {
+	t.Helper()
+	path := filepath.Join("testdata", "user_memory_model_contract.golden.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 %s: %v", path, err)
+	}
+	var golden userMemoryModelContractGolden
+	if err := json.Unmarshal(raw, &golden); err != nil {
+		t.Fatalf("解析 %s: %v", path, err)
+	}
+	if len(golden.Cases) != 3 {
+		t.Fatalf("用户记忆模型合同必须固定覆盖三个场景，实际 %d", len(golden.Cases))
+	}
+	seen := map[string]bool{}
+	for _, evalCase := range golden.Cases {
+		if strings.TrimSpace(evalCase.Name) == "" || seen[evalCase.Name] {
+			t.Fatalf("场景名为空或重复: %q", evalCase.Name)
+		}
+		seen[evalCase.Name] = true
+		available := stringSet(evalCase.AvailableTools)
+		if evalCase.RequiredTool != "" && !available[evalCase.RequiredTool] {
+			t.Fatalf("%s 的 required_tool 未出现在 available_tools", evalCase.Name)
+		}
+		for _, name := range evalCase.ForbiddenTools {
+			if !available[name] {
+				t.Fatalf("%s 的 forbidden_tool %s 未出现在 available_tools", evalCase.Name, name)
+			}
+		}
+		for _, call := range evalCase.MockResponse.ToolCalls {
+			if !available[call.Name] {
+				t.Fatalf("%s 的 mock 调用了未绑定工具 %s", evalCase.Name, call.Name)
+			}
+		}
+		if evalCase.ExpectedMemory != nil && evalCase.RequiredTool != "memory.update" {
+			t.Fatalf("%s 声明 expected_memory 但没有要求 memory.update", evalCase.Name)
+		}
+	}
+	return golden.Cases
+}
+
+func userMemoryEvalToolContracts(
+	ctx context.Context,
+	service *Service,
+) (map[string]*schema.ToolInfo, map[string]rushestools.Spec, error) {
+	infos := map[string]*schema.ToolInfo{}
+	specs := map[string]rushestools.Spec{}
+	for _, spec := range service.tools.Specs(true) {
+		if spec.Exposure != rushestools.ExposureLLM {
+			continue
+		}
+		info, err := spec.Implementation.Info(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("读取 %s 合同: %w", spec.Name, err)
+		}
+		infos[spec.Name] = info
+		specs[spec.Name] = spec
+	}
+	return infos, specs, nil
+}
+
+func userMemoryEvalMessages(evalCase userMemoryModelEvalCase) ([]*schema.Message, error) {
+	snapshot := NewWorldStateSnapshot(evalCase.SnapshotSections)
+	hash, err := snapshot.Hash()
+	if err != nil {
+		return nil, err
+	}
+	contextMessages, err := renderContextMessages(
+		snapshot,
+		snapshot,
+		nil,
+		storage.AgentContextCheckpoint{
+			WindowID:         "user_memory_eval_" + evalCase.Name,
+			WindowNumber:     1,
+			BaseSnapshotHash: hash,
+		},
+		nil,
+	)
+	if err != nil {
+		return nil, err
+	}
+	messages := []*schema.Message{schema.SystemMessage(coreSystemPrompt)}
+	messages = append(messages, contextMessages...)
+	messages = append(messages, schema.UserMessage(evalCase.Prompt))
+	return messages, nil
+}
+
+func validateUserMemoryModelResponse(
+	evalCase userMemoryModelEvalCase,
+	response *schema.Message,
+	specs map[string]rushestools.Spec,
+) error {
+	if response == nil {
+		return fmt.Errorf("模型返回 nil")
+	}
+	forbidden := stringSet(evalCase.ForbiddenTools)
+	var requiredCall *schema.ToolCall
+	for index := range response.ToolCalls {
+		call := &response.ToolCalls[index]
+		if forbidden[call.Function.Name] {
+			return fmt.Errorf("调用了禁止工具 %s", call.Function.Name)
+		}
+		spec, ok := specs[call.Function.Name]
+		if !ok {
+			return fmt.Errorf("调用了合同外工具 %s", call.Function.Name)
+		}
+		if err := validateLiveToolArguments(spec, call.Function.Arguments); err != nil {
+			return fmt.Errorf("%s 参数无效: %w", call.Function.Name, err)
+		}
+		if requiredCall == nil && call.Function.Name == evalCase.RequiredTool {
+			requiredCall = call
+		}
+	}
+	if evalCase.RequiredTool != "" && requiredCall == nil {
+		return fmt.Errorf("没有调用必需工具 %s；%s", evalCase.RequiredTool, userMemoryResponseSummary(response))
+	}
+	if evalCase.ExpectedMemory != nil {
+		var input rushestools.MemoryUpdateInput
+		if err := json.Unmarshal([]byte(requiredCall.Function.Arguments), &input); err != nil {
+			return fmt.Errorf("解析 memory.update: %w", err)
+		}
+		matched := false
+		for _, entry := range input.Entries {
+			if entry.Key == evalCase.ExpectedMemory.Key &&
+				entry.Kind == evalCase.ExpectedMemory.Kind &&
+				strings.Contains(entry.Statement, evalCase.ExpectedMemory.StatementContains) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("memory.update 未写入预期长期记忆: %s", requiredCall.Function.Arguments)
+		}
+	}
+	if len(evalCase.ArgumentContainsAny) > 0 {
+		matched := false
+		for _, fragment := range evalCase.ArgumentContainsAny {
+			if strings.Contains(requiredCall.Function.Arguments, fragment) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("%s 参数没有体现注入偏好: %s", evalCase.RequiredTool, requiredCall.Function.Arguments)
+		}
+	}
+	return nil
+}
+
+func userMemoryResponseSummary(response *schema.Message) string {
+	if response == nil {
+		return "response=nil"
+	}
+	calls := make([]string, 0, len(response.ToolCalls))
+	for _, call := range response.ToolCalls {
+		calls = append(calls, fmt.Sprintf(
+			"%s(%s)", call.Function.Name, truncateText(call.Function.Arguments, 240),
+		))
+	}
+	return fmt.Sprintf("tool_calls=%v content=%q", calls, truncateText(response.Content, 240))
+}
+
+func messageContents(messages []*schema.Message) string {
+	contents := make([]string, 0, len(messages))
+	for _, message := range messages {
+		if message != nil {
+			contents = append(contents, message.Content)
+		}
+	}
+	return strings.Join(contents, "\n")
+}
+
+func stringSet(values []string) map[string]bool {
+	result := make(map[string]bool, len(values))
+	for _, value := range values {
+		result[value] = true
+	}
+	return result
+}
