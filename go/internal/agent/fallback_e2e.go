@@ -15,6 +15,8 @@ const (
 	e2eBlockUntilCancelMarker    = "E2E_BLOCK_UNTIL_CANCEL"
 	e2eCancelUnderstandingMarker = "E2E_CANCEL_UNDERSTANDING"
 	e2eFullMainlineMarker        = "E2E_FULL_MAINLINE"
+	e2eMemoryWriteMarker         = "E2E_MEMORY_WRITE"
+	e2eMemoryStatusMarker        = "E2E_MEMORY_STATUS"
 )
 
 type e2eFallbackScaffold struct {
@@ -40,6 +42,32 @@ func (scaffold *e2eFallbackScaffold) TryHandle(
 	case strings.Contains(content, e2eFullMainlineMarker):
 		reply, err := scaffold.service.fallbackFullMainline(ctx, draftID)
 		return reply, true, err
+	case strings.Contains(content, e2eMemoryWriteMarker):
+		result, err := scaffold.service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+			Entries: []rushestools.MemoryEntryInput{{
+				Key: "e2e_pacing", Kind: "preference", Statement: "E2E 成片节奏偏快",
+			}},
+		})
+		if err != nil {
+			return "", true, err
+		}
+		toolResult, ok := result.(rushestools.ToolResult)
+		if !ok || toolResult.Status != "succeeded" {
+			return "", true, errors.New("E2E 长期记忆写入失败")
+		}
+		return "E2E_MEMORY_STORED", true, nil
+	case strings.Contains(content, e2eMemoryStatusMarker):
+		build, err := scaffold.service.contextManager.Build(ctx, draftID)
+		if err != nil {
+			return "", true, err
+		}
+		section, _ := build.Snapshot.Sections["user_memory"].(map[string]any)
+		for _, entry := range worldStateObjectSlice(section["entries"]) {
+			if entry["key"] == "e2e_pacing" {
+				return "E2E_MEMORY_PRESENT", true, nil
+			}
+		}
+		return "E2E_MEMORY_ABSENT", true, nil
 	default:
 		return "", false, nil
 	}

@@ -120,6 +120,9 @@ export type RewindRestoreResponse = Schemas["RewindRestoreResponse"];
 export type CurrentDecisionResponse = Schemas["CurrentDecisionResponse"];
 export type PendingDecisionsResponse = Schemas["PendingDecisionsResponse"];
 export type DecisionAnswerResponse = Schemas["DecisionAnswerResponse"];
+export type MemoryRecord = Schemas["MemoryRecord"];
+export type MemoriesResponse = Schemas["MemoriesResponse"];
+export type MemoryMutationResponse = Schemas["MemoryMutationResponse"];
 
 // ---- 请求体（引 generated） ----
 type DraftCreateRequest = Schemas["DraftCreateRequest"];
@@ -215,6 +218,25 @@ export const api = {
     return apiFetch<DraftBatchDeleteResponse>("/api/drafts", {
       method: "DELETE",
       body: payload
+    });
+  },
+
+  // ---- 工作区长期记忆治理 ----
+  listMemories(): Promise<MemoriesResponse> {
+    return apiFetch<MemoriesResponse>("/api/memories");
+  },
+
+  deleteMemory(memoryKey: string): Promise<MemoryMutationResponse> {
+    return apiFetch<MemoryMutationResponse>(`/api/memories/${encodeURIComponent(memoryKey)}`, {
+      method: "DELETE",
+      headers: JSON_MUTATION_HEADERS
+    });
+  },
+
+  clearMemories(confirm = true): Promise<MemoryMutationResponse> {
+    return apiFetch<MemoryMutationResponse>("/api/memories", {
+      method: "DELETE",
+      body: { confirm }
     });
   },
 

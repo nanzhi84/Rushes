@@ -223,6 +223,27 @@ func (e JobCancelResponseStatus) Valid() bool {
 	}
 }
 
+// Defines values for MemoryRecordKind.
+const (
+	Correction MemoryRecordKind = "correction"
+	Habit      MemoryRecordKind = "habit"
+	Preference MemoryRecordKind = "preference"
+)
+
+// Valid indicates whether the value is a known member of the MemoryRecordKind enum.
+func (e MemoryRecordKind) Valid() bool {
+	switch e {
+	case Correction:
+		return true
+	case Habit:
+		return true
+	case Preference:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for MessageQueuedResponseKind.
 const (
 	MessageQueuedResponseKindUserMessage MessageQueuedResponseKind = "user_message"
@@ -593,7 +614,6 @@ type DraftRecord struct {
 	RoughCutApproved        bool                     `json:"rough_cut_approved"`
 	RoughCutApprovedVersion *int                     `json:"rough_cut_approved_version"`
 	RunningJobs             []map[string]interface{} `json:"running_jobs"`
-	ScratchMemory           map[string]interface{}   `json:"scratch_memory"`
 	StateVersion            int                      `json:"state_version"`
 	Status                  string                   `json:"status"`
 	TimelineCurrentVersion  *int                     `json:"timeline_current_version"`
@@ -752,6 +772,30 @@ type MaterialsResponse struct {
 	DraftId             string          `json:"draft_id"`
 	InvalidatedAssetIds *[]string       `json:"invalidated_asset_ids,omitempty"`
 }
+
+// MemoriesResponse defines model for MemoriesResponse.
+type MemoriesResponse struct {
+	Memories []MemoryRecord `json:"memories"`
+}
+
+// MemoryMutationResponse defines model for MemoryMutationResponse.
+type MemoryMutationResponse struct {
+	DeletedCount      int      `json:"deleted_count"`
+	DeletedMemoryKeys []string `json:"deleted_memory_keys"`
+}
+
+// MemoryRecord defines model for MemoryRecord.
+type MemoryRecord struct {
+	CreatedAt       string           `json:"created_at"`
+	Kind            MemoryRecordKind `json:"kind"`
+	LastConfirmedAt string           `json:"last_confirmed_at"`
+	MemoryKey       string           `json:"memory_key"`
+	SourceDraftId   string           `json:"source_draft_id"`
+	Statement       string           `json:"statement"`
+}
+
+// MemoryRecordKind defines model for MemoryRecord.Kind.
+type MemoryRecordKind string
 
 // MessageCreateRequest defines model for MessageCreateRequest.
 type MessageCreateRequest struct {
@@ -986,6 +1030,9 @@ type FsPickApiFsPickPostJSONRequestBody = FsPickRequest
 
 // CancelJobApiJobsJobIdCancelPostJSONRequestBody defines body for CancelJobApiJobsJobIdCancelPost for application/json ContentType.
 type CancelJobApiJobsJobIdCancelPostJSONRequestBody = JobCancelRequest
+
+// ClearMemoriesApiMemoriesDeleteJSONRequestBody defines body for ClearMemoriesApiMemoriesDelete for application/json ContentType.
+type ClearMemoriesApiMemoriesDeleteJSONRequestBody = ConfirmRequest
 
 // AsValidationErrorLoc0 returns the union data inside the ValidationError_Loc_Item as a ValidationErrorLoc0
 func (t ValidationError_Loc_Item) AsValidationErrorLoc0() (ValidationErrorLoc0, error) {
@@ -1301,6 +1348,15 @@ type ServerInterface interface {
 	// Media Thumbnail
 	// (HEAD /api/media/{asset_id}/thumbnail)
 	MediaThumbnailApiMediaAssetIdThumbnailHead(w http.ResponseWriter, r *http.Request, assetId string)
+	// Clear Memories
+	// (DELETE /api/memories)
+	ClearMemoriesApiMemoriesDelete(w http.ResponseWriter, r *http.Request)
+	// List Memories
+	// (GET /api/memories)
+	ListMemoriesApiMemoriesGet(w http.ResponseWriter, r *http.Request)
+	// Delete Memory
+	// (DELETE /api/memories/{memory_key})
+	DeleteMemoryApiMemoriesMemoryKeyDelete(w http.ResponseWriter, r *http.Request, memoryKey string)
 }
 
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
@@ -1556,6 +1612,24 @@ func (_ Unimplemented) MediaThumbnailApiMediaAssetIdThumbnailGet(w http.Response
 // Media Thumbnail
 // (HEAD /api/media/{asset_id}/thumbnail)
 func (_ Unimplemented) MediaThumbnailApiMediaAssetIdThumbnailHead(w http.ResponseWriter, r *http.Request, assetId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Clear Memories
+// (DELETE /api/memories)
+func (_ Unimplemented) ClearMemoriesApiMemoriesDelete(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List Memories
+// (GET /api/memories)
+func (_ Unimplemented) ListMemoriesApiMemoriesGet(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Delete Memory
+// (DELETE /api/memories/{memory_key})
+func (_ Unimplemented) DeleteMemoryApiMemoriesMemoryKeyDelete(w http.ResponseWriter, r *http.Request, memoryKey string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -2670,6 +2744,60 @@ func (siw *ServerInterfaceWrapper) MediaThumbnailApiMediaAssetIdThumbnailHead(w 
 	handler.ServeHTTP(w, r)
 }
 
+// ClearMemoriesApiMemoriesDelete operation middleware
+func (siw *ServerInterfaceWrapper) ClearMemoriesApiMemoriesDelete(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ClearMemoriesApiMemoriesDelete(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListMemoriesApiMemoriesGet operation middleware
+func (siw *ServerInterfaceWrapper) ListMemoriesApiMemoriesGet(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListMemoriesApiMemoriesGet(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteMemoryApiMemoriesMemoryKeyDelete operation middleware
+func (siw *ServerInterfaceWrapper) DeleteMemoryApiMemoriesMemoryKeyDelete(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "memory_key" -------------
+	var memoryKey string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "memory_key", chi.URLParam(r, "memory_key"), &memoryKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "memory_key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteMemoryApiMemoriesMemoryKeyDelete(w, r, memoryKey)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 type UnescapedCookieParamError struct {
 	ParamName string
 	Err       error
@@ -2908,6 +3036,15 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Head(options.BaseURL+"/api/media/{asset_id}/thumbnail", wrapper.MediaThumbnailApiMediaAssetIdThumbnailHead)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/memories", wrapper.ClearMemoriesApiMemoriesDelete)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/memories", wrapper.ListMemoriesApiMemoriesGet)
+	})
+	r.Group(func(r chi.Router) {
+		r.Delete(options.BaseURL+"/api/memories/{memory_key}", wrapper.DeleteMemoryApiMemoriesMemoryKeyDelete)
 	})
 
 	return r

@@ -18,9 +18,9 @@ func TestRepositoriesRoundTripAllMaterializedViews(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO drafts(draft_id,name,state_version,status,defaults_json,running_jobs_json,brief_json,
-			timeline_validated,scratch_memory_json,created_at,updated_at)
-		VALUES('draft_active','Active',3,'active','{"fps":30}','[{"job_id":"j"}]','{"goal":"demo"}',1,'{}',?,?),
-		      ('draft_trash','Trash',0,'trashed','{}','[]','{}',0,'{}',?,?);
+			timeline_validated,created_at,updated_at)
+		VALUES('draft_active','Active',3,'active','{"fps":30}','[{"job_id":"j"}]','{"goal":"demo"}',1,?,?),
+		      ('draft_trash','Trash',0,'trashed','{}','[]','{}',0,?,?);
 		INSERT INTO objects(hash,rel_path,size,created_at) VALUES(?, 'aa/aa/object', 12, ?);
 		INSERT INTO assets(asset_id,storage_mode,object_hash,reference_path,kind,source,filename,hash,mtime,size,
 			probe_json,proxy_object_hash,thumbnail_object_hash,ingest_status,understanding_status,usable,failure_json)

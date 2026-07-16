@@ -286,6 +286,20 @@ func TestUserMemoryReducerRejectsAmbiguousMutations(t *testing.T) {
 			want: ErrUserMemoryInput,
 		},
 		{
+			name: "clear with upsert",
+			rows: ResultRows{
+				UserMemoryClearAll: true, UserMemoryUpserts: []UserMemoryRow{valid},
+			},
+			want: ErrUserMemoryInput,
+		},
+		{
+			name: "clear with remove",
+			rows: ResultRows{
+				UserMemoryClearAll: true, UserMemoryRemoveKeys: []string{"pacing"},
+			},
+			want: ErrUserMemoryInput,
+		},
+		{
 			name: "incomplete mutation evidence",
 			rows: ResultRows{
 				UserMemoryRemoveKeys: []string{"pacing"},

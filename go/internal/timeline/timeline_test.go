@@ -41,8 +41,8 @@ func TestComposeValidateInspectAndStore(t *testing.T) {
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO drafts(
 			draft_id,name,state_version,status,defaults_json,running_jobs_json,brief_json,
-			timeline_current_version,timeline_validated,scratch_memory_json,created_at,updated_at
-		) VALUES('draft_timeline','d',0,'active','{}','[]','{}',1,1,'{}',?,?)`, now, now); err != nil {
+			timeline_current_version,timeline_validated,created_at,updated_at
+		) VALUES('draft_timeline','d',0,'active','{}','[]','{}',1,1,?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.Write().ExecContext(t.Context(), `
@@ -625,8 +625,8 @@ func TestTimelineStoreMissingAndPreviewLookup(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO drafts(draft_id,name,state_version,status,defaults_json,running_jobs_json,brief_json,
-			timeline_current_version,timeline_validated,scratch_memory_json,created_at,updated_at)
-		VALUES('draft_preview','d',0,'active','{}','[]','{}',1,1,'{}',?,?);
+			timeline_current_version,timeline_validated,created_at,updated_at)
+		VALUES('draft_preview','d',0,'active','{}','[]','{}',1,1,?,?);
 		INSERT INTO timeline_versions(timeline_id,draft_id,version,document_json,created_at)
 		VALUES('draft_preview:v1','draft_preview',1,?,?);
 		INSERT INTO objects(hash,rel_path,size,created_at) VALUES(?, ?, 1, ?);
@@ -662,8 +662,8 @@ func TestNextVersionFollowsOnlyCurrentTimeline(t *testing.T) {
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO drafts(
 			draft_id,name,state_version,status,defaults_json,running_jobs_json,brief_json,
-			timeline_current_version,timeline_validated,scratch_memory_json,created_at,updated_at
-			) VALUES('draft_nav','d',0,'active','{}','[]','{}',4,1,'{}',?,?)`, now, now); err != nil {
+			timeline_current_version,timeline_validated,created_at,updated_at
+			) VALUES('draft_nav','d',0,'active','{}','[]','{}',4,1,?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
 	version, err := NextVersion(t.Context(), database, "draft_nav")

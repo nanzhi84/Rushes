@@ -34,6 +34,12 @@ func TestOpenMigratesSchemaAndCreatesWorkspace(t *testing.T) {
 	if version != schemaVersion {
 		t.Fatalf("user_version=%d", version)
 	}
+	var scratchColumn int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM pragma_table_info('drafts') WHERE name='scratch_memory_json'`,
+	).Scan(&scratchColumn); err != nil || scratchColumn != 0 {
+		t.Fatalf("fresh schema scratch_memory_json count=%d err=%v", scratchColumn, err)
+	}
 	var count int
 	if err := database.Read().QueryRowContext(t.Context(), `
 		SELECT COUNT(*) FROM sqlite_master
@@ -52,7 +58,7 @@ func TestOpenMigratesSchemaAndCreatesWorkspace(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesV12WorkspaceToUserMemories(t *testing.T) {
+func TestOpenMigratesV12WorkspaceToLatestSchema(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	database, err := Open(t.Context(), root)
@@ -90,8 +96,46 @@ func TestOpenMigratesV12WorkspaceToUserMemories(t *testing.T) {
 		t.Fatal(err)
 	}
 	draft, err := GetDraft(t.Context(), migrated.Read(), "draft_v12")
-	if err != nil || draft.Name != "迁移保留" || version != 13 || memories != 0 {
+	if err != nil || draft.Name != "迁移保留" || version != schemaVersion || memories != 0 {
 		t.Fatalf("draft=%#v version=%d memories=%d err=%v", draft, version, memories, err)
+	}
+}
+
+func TestOpenMigratesV13WorkspaceAndDropsScratchMemory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	database, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		ALTER TABLE drafts ADD COLUMN scratch_memory_json TEXT NOT NULL DEFAULT '{}';
+		INSERT INTO drafts(draft_id,name,scratch_memory_json,created_at,updated_at)
+		VALUES('draft_v13','迁移保留','{"legacy":true}','2026-07-16T00:00:00Z','2026-07-16T00:00:00Z');
+		PRAGMA user_version = 13`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = migrated.Close() })
+	var version, scratchColumn int
+	if err := migrated.Read().QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrated.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM pragma_table_info('drafts') WHERE name='scratch_memory_json'`,
+	).Scan(&scratchColumn); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := GetDraft(t.Context(), migrated.Read(), "draft_v13")
+	if err != nil || draft.Name != "迁移保留" || version != schemaVersion || scratchColumn != 0 {
+		t.Fatalf("draft=%#v version=%d scratch_column=%d err=%v", draft, version, scratchColumn, err)
 	}
 }
 

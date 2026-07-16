@@ -31,6 +31,8 @@ func TestProductionFallbackDoesNotInstallOrRecognizeE2EScaffold(t *testing.T) {
 		"E2E_BLOCK_UNTIL_CANCEL",
 		"E2E_CANCEL_UNDERSTANDING",
 		"E2E_FULL_MAINLINE",
+		"E2E_MEMORY_WRITE",
+		"E2E_MEMORY_STATUS",
 	} {
 		reply, err := service.fallbackTurn(t.Context(), draftID, "message", marker)
 		if err != nil || reply != defaultReply {

@@ -366,9 +366,9 @@ func draftRecord(draft storage.Draft) DraftRecord {
 		PendingDecisionId: draft.PendingDecisionID, PostprocessPlan: nil,
 		PreviewCurrentId: draft.PreviewCurrentID, RoughCutApproved: false,
 		RoughCutApprovedVersion: nil, RunningJobs: draft.RunningJobs,
-		ScratchMemory: draft.ScratchMemory, StateVersion: draft.StateVersion,
-		Status: draft.Status, TimelineCurrentVersion: draft.TimelineCurrentVersion,
-		TimelineValidated: draft.TimelineValidated, UpdatedAt: draft.UpdatedAt,
+		StateVersion: draft.StateVersion, Status: draft.Status,
+		TimelineCurrentVersion: draft.TimelineCurrentVersion,
+		TimelineValidated:      draft.TimelineValidated, UpdatedAt: draft.UpdatedAt,
 	}
 }
 

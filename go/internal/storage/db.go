@@ -371,6 +371,23 @@ func (database *DB) Migrate(ctx context.Context) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		version = 13
+	}
+	if version < 14 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := dropColumnIfExists(ctx, tx, "drafts", "scratch_memory_json", schemaV14); err != nil {
+			return fmt.Errorf("应用 schema v14: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 14"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -398,6 +415,30 @@ func addColumnIfMissing(
 	statement, ok := allowed[table+"."+column]
 	if !ok {
 		return fmt.Errorf("不允许的迁移列 %s.%s", table, column)
+	}
+	_, err := tx.ExecContext(ctx, statement)
+	return err
+}
+
+func dropColumnIfExists(
+	ctx context.Context,
+	tx *sql.Tx,
+	table string,
+	column string,
+	statement string,
+) error {
+	var exists int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM pragma_table_info(?) WHERE name=?)`, table, column,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if exists == 0 {
+		return nil
+	}
+	allowed := table == "drafts" && column == "scratch_memory_json" && statement == schemaV14
+	if !allowed {
+		return fmt.Errorf("不允许删除迁移列 %s.%s", table, column)
 	}
 	_, err := tx.ExecContext(ctx, statement)
 	return err

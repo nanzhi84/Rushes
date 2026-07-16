@@ -144,6 +144,52 @@ describe("DraftsHomePage", () => {
     screen.getByRole("button", { name: "关闭设置" }).click();
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "全局设置" })).toBeNull());
   });
+
+  it("长期记忆面板支持逐条删除与确认后清空", async () => {
+    renderHome({
+      memories: [
+        { memory_key: "pacing", kind: "preference", statement: "成片节奏偏快" },
+        { memory_key: "subtitle_style", kind: "correction", statement: "字幕不要遮脸" }
+      ]
+    });
+
+    await screen.findByText("7月7日");
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    expect(await screen.findByText("成片节奏偏快")).toBeTruthy();
+    expect(screen.getByText("字幕不要遮脸")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除长期记忆 pacing" }));
+    await waitFor(() => expect(screen.queryByText("成片节奏偏快")).toBeNull());
+    expect(screen.getByText("字幕不要遮脸")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "清空全部长期记忆" }));
+    expect(await screen.findByRole("dialog", { name: "确认清空全部长期记忆？" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.getByText("字幕不要遮脸")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "清空全部长期记忆" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认清空全部长期记忆" }));
+    expect(await screen.findByText("还没有长期记忆")).toBeTruthy();
+  });
+
+  it("逐条删除失败后清空成功会移除陈旧错误", async () => {
+    renderHome({
+      memories: [
+        { memory_key: "pacing", kind: "preference", statement: "成片节奏偏快" },
+        { memory_key: "subtitle_style", kind: "correction", statement: "字幕不要遮脸" }
+      ],
+      memoryDeleteFails: true
+    });
+
+    await screen.findByText("7月7日");
+    fireEvent.click(screen.getByRole("button", { name: "设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "删除长期记忆 pacing" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("删除失败");
+
+    fireEvent.click(screen.getByRole("button", { name: "清空全部长期记忆" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认清空全部长期记忆" }));
+    expect(await screen.findByText("还没有长期记忆")).toBeTruthy();
+    expect(screen.queryByText(/删除失败/)).toBeNull();
+  });
 });
 
 type DraftFixture = {
@@ -156,6 +202,12 @@ type DraftFixture = {
 type HomeFixture = {
   drafts?: DraftFixture[];
   batchDeleteFails?: boolean;
+  memoryDeleteFails?: boolean;
+  memories?: Array<{
+    memory_key: string;
+    kind: "preference" | "correction" | "habit";
+    statement: string;
+  }>;
 };
 
 function DraftMarker(): ReactElement {
@@ -202,9 +254,40 @@ function mockFetch(
     { draft_id: "draft_1", name: "7月7日", material_count: 3, cover_asset_ids: ["asset_1", "asset_2"] },
     { draft_id: "draft_2", name: "旅行 Vlog", material_count: 0, cover_asset_ids: [] }
   ];
+  let memories = (fixture.memories ?? []).map((memory) => ({
+    ...memory,
+    source_draft_id: "draft_1",
+    created_at: "2026-07-07T00:00:00Z",
+    last_confirmed_at: "2026-07-07T00:00:00Z"
+  }));
   return (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = (init?.method ?? "GET").toUpperCase();
+    if (url === "/api/memories" && method === "GET") {
+      return jsonResponse({ memories });
+    }
+    if (url.startsWith("/api/memories/") && method === "DELETE") {
+      if (fixture.memoryDeleteFails) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ detail: { reason: "internal_error" } }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" }
+          })
+        );
+      }
+      const memoryKey = decodeURIComponent(url.slice("/api/memories/".length));
+      const before = memories.length;
+      memories = memories.filter((memory) => memory.memory_key !== memoryKey);
+      return jsonResponse({
+        deleted_count: before - memories.length,
+        deleted_memory_keys: before === memories.length ? [] : [memoryKey]
+      });
+    }
+    if (url === "/api/memories" && method === "DELETE") {
+      const deleted = memories.map((memory) => memory.memory_key);
+      memories = [];
+      return jsonResponse({ deleted_count: deleted.length, deleted_memory_keys: deleted });
+    }
     if (url === "/api/drafts" && method === "DELETE") {
       if (fixture.batchDeleteFails) {
         return Promise.resolve(
