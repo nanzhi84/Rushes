@@ -164,7 +164,7 @@ func TestDropColumnMigrationRejectsUnlistedColumnsAndClosedTransactions(t *testi
 	}
 }
 
-func TestSchemaV14MigrationRollsBackWhenLegacyColumnCannotBeDropped(t *testing.T) {
+func TestSchemaV14MigrationFailureKeepsLegacyVersionAndColumn(t *testing.T) {
 	t.Parallel()
 	database, err := Open(t.Context(), t.TempDir())
 	if err != nil {

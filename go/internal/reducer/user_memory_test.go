@@ -361,9 +361,21 @@ func TestUserMemoryDatabaseFailuresRollBackMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Apply(t.Context(), database, nil, Options{
-		Actor: contracts.ActorUser, ResultRows: ResultRows{UserMemoryClearAll: true},
+		Actor: contracts.ActorUser, ResultRows: ResultRows{
+			Message: &MessageRow{
+				ID: "message_before_failed_clear", DraftID: "draft_memory_failure",
+				Role: "assistant", Kind: "reply", Content: "不应提交",
+			},
+			UserMemoryClearAll: true,
+		},
 	}); err == nil {
 		t.Fatal("clear-all trigger failure should roll back")
+	}
+	var messageCount int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM messages WHERE message_id='message_before_failed_clear'`,
+	).Scan(&messageCount); err != nil || messageCount != 0 {
+		t.Fatalf("failed clear message count=%d err=%v", messageCount, err)
 	}
 	if _, err := database.Write().ExecContext(t.Context(), `
 		DROP TRIGGER block_user_memory_delete;
@@ -374,9 +386,11 @@ func TestUserMemoryDatabaseFailuresRollBackMutations(t *testing.T) {
 	}
 	blocked := seed
 	blocked.Key = "blocked_insert"
+	allowed := seed
+	allowed.Key = "allowed_insert"
 	if _, err := Apply(t.Context(), database, nil, Options{
 		Actor:      contracts.ActorAgent,
-		ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{blocked}},
+		ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{allowed, blocked}},
 	}); err == nil {
 		t.Fatal("upsert trigger failure should roll back")
 	}
