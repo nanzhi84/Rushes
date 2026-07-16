@@ -181,7 +181,7 @@ test("Rewind 面板依次执行仅时间线、仅对话和两者恢复", async (
 async function sendMessage(page: Page, content: string): Promise<void> {
   await page.getByLabel("消息输入").fill(content);
   await page.getByRole("button", { name: "发送" }).click();
-  await expect(page.getByText(content, { exact: true })).toBeVisible();
+  await expect(page.getByLabel("消息列表").getByText(content, { exact: true })).toBeVisible();
   await expect(page.getByLabel("消息输入")).toBeEnabled({ timeout: 60_000 });
 }
 

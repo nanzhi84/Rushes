@@ -84,16 +84,39 @@ func (runner *Runner) Run(ctx context.Context) error {
 		defer group.Done()
 		runner.recoverLoop(ctx)
 	}()
-	for range runner.concurrency {
+	lanes := runner.claimLanes()
+	for _, lane := range lanes {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			runner.loop(ctx)
+			runner.loop(ctx, lane.filter, lane.workerID)
 		}()
 	}
 	<-ctx.Done()
 	group.Wait()
 	return nil
+}
+
+type claimLane struct {
+	filter   ClaimFilter
+	workerID string
+}
+
+func (runner *Runner) claimLanes() []claimLane {
+	if runner.concurrency == 1 {
+		return []claimLane{{workerID: runner.workerID}}
+	}
+	renderKinds := contracts.JobKindsByExecutionClass(contracts.JobExecutionRender)
+	lanes := []claimLane{{
+		filter: ClaimFilter{IncludeKinds: renderKinds}, workerID: runner.workerID + ":render",
+	}}
+	for index := 1; index < runner.concurrency; index++ {
+		lanes = append(lanes, claimLane{
+			filter:   ClaimFilter{ExcludeKinds: renderKinds},
+			workerID: fmt.Sprintf("%s:general:%d", runner.workerID, index),
+		})
+	}
+	return lanes
 }
 
 func (runner *Runner) recoverLoop(ctx context.Context) {
@@ -112,11 +135,11 @@ func (runner *Runner) recoverLoop(ctx context.Context) {
 	}
 }
 
-func (runner *Runner) loop(ctx context.Context) {
+func (runner *Runner) loop(ctx context.Context, filter ClaimFilter, workerID string) {
 	ticker := time.NewTicker(runner.pollInterval)
 	defer ticker.Stop()
 	for {
-		worked, err := runner.RunOnce(ctx)
+		worked, err := runner.runOnce(ctx, filter, workerID)
 		if err != nil && !errors.Is(err, context.Canceled) {
 			runner.logger.Error("worker job 执行失败", "error", err)
 		}
@@ -132,7 +155,11 @@ func (runner *Runner) loop(ctx context.Context) {
 }
 
 func (runner *Runner) RunOnce(ctx context.Context) (bool, error) {
-	job, err := Claim(ctx, runner.database, runner.workerID, runner.now())
+	return runner.runOnce(ctx, ClaimFilter{}, runner.workerID)
+}
+
+func (runner *Runner) runOnce(ctx context.Context, filter ClaimFilter, workerID string) (bool, error) {
+	job, err := ClaimMatching(ctx, runner.database, workerID, runner.now(), filter)
 	if err != nil || job == nil {
 		return false, err
 	}
@@ -148,17 +175,23 @@ func (runner *Runner) RunOnce(ctx context.Context) (bool, error) {
 	}
 	cancel()
 	<-heartbeatDone
-	stored, statusErr := GetJob(ctx, runner.database, job.ID)
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cleanupCancel()
+	stored, statusErr := GetJob(cleanupCtx, runner.database, job.ID)
 	if statusErr != nil {
 		return true, statusErr
 	}
 	if stored.Status != "running" || !sameClaim(stored, *job) {
 		return true, nil
 	}
+	if ctx.Err() != nil {
+		_, releaseErr := ReleaseClaim(cleanupCtx, runner.database, *job)
+		return true, releaseErr
+	}
 	if handlerErr != nil {
 		failure := failureJSON(handlerErr)
 		if !errors.Is(handlerErr, context.Canceled) && job.Attempts+1 <= job.MaxRetries {
-			scheduled, retryErr := ScheduleRetry(ctx, runner.database, *job, runner.now(), failure)
+			scheduled, retryErr := ScheduleRetry(cleanupCtx, runner.database, *job, runner.now(), failure)
 			if retryErr != nil {
 				return true, retryErr
 			}
@@ -166,13 +199,13 @@ func (runner *Runner) RunOnce(ctx context.Context) (bool, error) {
 				return true, nil
 			}
 		}
-		terminalErr := runner.emitTerminal(ctx, *job, "JobFailed", nil, failure)
+		terminalErr := runner.emitTerminal(cleanupCtx, *job, "JobFailed", nil, failure)
 		if errors.Is(terminalErr, reducer.ErrJobCancelled) || errors.Is(terminalErr, reducer.ErrJobClaimLost) {
 			return true, nil
 		}
 		return true, terminalErr
 	}
-	terminalErr := runner.emitTerminal(ctx, *job, "JobSucceeded", result, nil)
+	terminalErr := runner.emitTerminal(cleanupCtx, *job, "JobSucceeded", result, nil)
 	if errors.Is(terminalErr, reducer.ErrJobCancelled) || errors.Is(terminalErr, reducer.ErrJobClaimLost) {
 		return true, nil
 	}

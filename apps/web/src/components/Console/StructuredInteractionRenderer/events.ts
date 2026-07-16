@@ -7,6 +7,7 @@ import type {
   ProgressInteractionItem,
   StructuredInteractionItem
 } from "./types";
+import jobKindCatalog from "../../../../../../go/internal/contracts/testdata/job_kinds.golden.json";
 
 export function reduceStructuredInteractionItems(
   current: StructuredInteractionItem[],
@@ -172,19 +173,10 @@ const SILENT_EVENTS = new Set([
 ]);
 
 // 只有 Agent 会等待的 job 才进入对话进度行；ingest 进度由素材面板呈现。
-// 此集合与 go/internal/agent.agentWaitedJobKinds 对齐。
-const PROGRESS_JOB_KINDS = new Set([
-  "understand",
-  "render_preview",
-  "render_final"
-]);
+export const PROGRESS_JOB_KINDS = new Set<string>(jobKindCatalog.agent_waited);
 
 // 进度行标题按 kind 给中文名，比笼统的「后台任务」可读。
-const JOB_KIND_LABELS: Record<string, string> = {
-  understand: "理解素材",
-  render_preview: "渲染预览",
-  render_final: "渲染成片"
-};
+export const JOB_KIND_LABELS: Record<string, string> = jobKindCatalog.progress_labels;
 
 // 领域事件是 envelope；job 字段位于 event.payload。
 function progressJobKind(event: DomainSseEvent): string | null {

@@ -23,12 +23,16 @@ cmp "$TMP/schema.d.ts" "$ROOT/apps/web/src/api/generated/schema.d.ts"
 (
   cd "$ROOT/go"
   go test -tags='' ./internal/agent ./internal/api ./internal/contracts ./internal/reducer
+  go test -tags='' -run '^TestProductionRegistryMatchesJobKindCatalog$' ./internal/worker
   go test -tags=e2e_scaffold ./internal/agent ./internal/api ./internal/contracts ./internal/reducer
+  go test -tags=e2e_scaffold -run '^TestProductionRegistryMatchesJobKindCatalog$' ./internal/worker
 )
 
 (
   cd "$ROOT/apps/web"
-  ./node_modules/.bin/vitest run src/api/event_types.test.ts
+  ./node_modules/.bin/vitest run \
+    src/api/event_types.test.ts \
+    src/components/Console/StructuredInteractionRenderer/job_kind_contract.test.ts
 )
 
-echo "OpenAPI 生成物与 SSE 契约均无漂移。"
+echo "OpenAPI、SSE 与 job kind 契约均无漂移。"

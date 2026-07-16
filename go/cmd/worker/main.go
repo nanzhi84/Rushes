@@ -66,6 +66,9 @@ func run() error {
 	if err := worker.RegisterUnderstand(registry, database, analyzer); err != nil {
 		return err
 	}
+	if err := registry.ValidateCatalog(); err != nil {
+		return err
+	}
 	runner, err := worker.NewRunner(worker.RunnerConfig{
 		Database: database, Registry: registry, Concurrency: concurrency,
 	})
