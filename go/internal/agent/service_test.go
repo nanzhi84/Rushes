@@ -1706,10 +1706,14 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 		firstRender.Data["job_id"] != secondRender.Data["job_id"] {
 		t.Fatalf("render idempotency first=%#v second=%#v", firstRender, secondRender)
 	}
-	var renderJobs int
+	var renderJobs, minRenderRetries, maxRenderRetries int
 	if err := database.Read().QueryRowContext(t.Context(),
-		"SELECT COUNT(*) FROM jobs WHERE kind='render_preview' AND status='pending'").Scan(&renderJobs); err != nil || renderJobs != 1 {
-		t.Fatalf("render jobs=%d err=%v", renderJobs, err)
+		`SELECT COUNT(*),MIN(max_retries),MAX(max_retries)
+		 FROM jobs WHERE kind='render_preview' AND status='pending'`,
+	).Scan(&renderJobs, &minRenderRetries, &maxRenderRetries); err != nil ||
+		renderJobs != 1 || minRenderRetries != 2 || maxRenderRetries != 2 {
+		t.Fatalf("render jobs=%d retries=%d..%d err=%v",
+			renderJobs, minRenderRetries, maxRenderRetries, err)
 	}
 	if _, err := database.Write().ExecContext(t.Context(),
 		"UPDATE jobs SET status='failed' WHERE job_id=?", firstRender.Data["job_id"]); err != nil {
@@ -1754,10 +1758,14 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 	if completedRender.Status != "succeeded" || completedRender.Data["job_id"] != secondRetry.Data["job_id"] {
 		t.Fatalf("completed render idempotency=%#v", completedRender)
 	}
-	var retryJobs int
+	var retryJobs, minRetryBudget, maxRetryBudget int
 	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*) FROM jobs WHERE kind='render_preview'`).Scan(&retryJobs); err != nil || retryJobs != 3 {
-		t.Fatalf("render retry jobs=%d err=%v", retryJobs, err)
+		SELECT COUNT(*),MIN(max_retries),MAX(max_retries)
+		FROM jobs WHERE kind='render_preview'`,
+	).Scan(&retryJobs, &minRetryBudget, &maxRetryBudget); err != nil || retryJobs != 3 ||
+		minRetryBudget != 2 || maxRetryBudget != 2 {
+		t.Fatalf("render retry jobs=%d retries=%d..%d err=%v",
+			retryJobs, minRetryBudget, maxRetryBudget, err)
 	}
 	var timelineRows, latestTimelineVersion int
 	if err := database.Read().QueryRowContext(t.Context(), `

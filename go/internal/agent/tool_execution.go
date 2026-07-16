@@ -2684,7 +2684,9 @@ func (service *Service) toolEnqueueRender(
 			"job_id": jobID, "kind": kind, "requested_by_draft_id": draftID,
 			"idempotency_key": idempotencyKey,
 			"job_payload":     jobPayload,
-			"next_run_at":     time.Now().UTC().Format(time.RFC3339Nano), "priority": 30,
+			"next_run_at":     time.Now().UTC().Format(time.RFC3339Nano),
+			"priority":        30,
+			"max_retries":     2,
 		},
 	}}, reducer.Options{Actor: contracts.ActorAgent})
 	if err != nil || result.Status != reducer.StatusApplied {

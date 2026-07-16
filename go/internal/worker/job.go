@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/contracts"
+	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
 
@@ -25,11 +27,12 @@ type Job struct {
 	Priority           int
 	WorkerID           *string
 	StartedAt          *string
+	HeartbeatAt        *string
 }
 
 const jobColumns = `
 job_id, kind, status, draft_id, requested_by_draft_id, asset_id,
-payload_json, attempts, max_retries, priority, worker_id, started_at`
+payload_json, attempts, max_retries, priority, worker_id, started_at, heartbeat_at`
 
 func Claim(ctx context.Context, database *storage.DB, workerID string, now time.Time) (*Job, error) {
 	return ClaimMatching(ctx, database, workerID, now, ClaimFilter{})
@@ -114,11 +117,11 @@ func GetJob(ctx context.Context, database *storage.DB, jobID string) (Job, error
 
 func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 	var job Job
-	var draftID, requestedByDraftID, assetID, workerID, startedAt sql.NullString
+	var draftID, requestedByDraftID, assetID, workerID, startedAt, heartbeatAt sql.NullString
 	var payloadJSON string
 	if err := row.Scan(
 		&job.ID, &job.Kind, &job.Status, &draftID, &requestedByDraftID, &assetID,
-		&payloadJSON, &job.Attempts, &job.MaxRetries, &job.Priority, &workerID, &startedAt,
+		&payloadJSON, &job.Attempts, &job.MaxRetries, &job.Priority, &workerID, &startedAt, &heartbeatAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Job{}, storage.ErrNotFound
@@ -130,6 +133,7 @@ func scanJob(row interface{ Scan(...any) error }) (Job, error) {
 	job.AssetID = nullStringPointer(assetID)
 	job.WorkerID = nullStringPointer(workerID)
 	job.StartedAt = nullStringPointer(startedAt)
+	job.HeartbeatAt = nullStringPointer(heartbeatAt)
 	if err := json.Unmarshal([]byte(payloadJSON), &job.Payload); err != nil {
 		return Job{}, fmt.Errorf("job %s payload 无效: %w", job.ID, err)
 	}
@@ -168,14 +172,85 @@ func RecoverStale(
 ) (int64, error) {
 	cutoff := now.Add(-timeout).UTC().Format(time.RFC3339Nano)
 	next := now.UTC().Format(time.RFC3339Nano)
-	result, err := database.Write().ExecContext(ctx, `
-		UPDATE jobs SET status='pending', worker_id=NULL, heartbeat_at=NULL,
-		started_at=NULL, next_run_at=?
-		WHERE status='running' AND (heartbeat_at IS NULL OR heartbeat_at<?)`, next, cutoff)
+	rows, err := database.Read().QueryContext(ctx, `
+		SELECT `+jobColumns+` FROM jobs
+		WHERE status='running' AND (heartbeat_at IS NULL OR heartbeat_at<?)
+		ORDER BY job_id`, cutoff)
 	if err != nil {
 		return 0, err
 	}
-	return result.RowsAffected()
+	stale := []Job{}
+	for rows.Next() {
+		job, scanErr := scanJob(rows)
+		if scanErr != nil {
+			_ = rows.Close()
+			return 0, scanErr
+		}
+		stale = append(stale, job)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+
+	var recovered int64
+	for _, job := range stale {
+		attempts := job.Attempts + 1
+		if attempts > job.MaxRetries {
+			failure := map[string]any{
+				"error_code":   "stale_recovery_exhausted",
+				"message":      "job 心跳过期且重试额度已耗尽",
+				"worker_id":    value(job.WorkerID),
+				"heartbeat_at": value(job.HeartbeatAt),
+			}
+			result, applyErr := reducer.Apply(ctx, database, []contracts.Event{{
+				Type: "JobFailed", DraftID: value(job.DraftID),
+				Payload: map[string]any{
+					"job_id": job.ID, "kind": job.Kind, "asset_id": value(job.AssetID),
+					"requested_by_draft_id": value(job.RequestedByDraftID),
+					"worker_id":             value(job.WorkerID), "started_at": value(job.StartedAt),
+					"heartbeat_at": value(job.HeartbeatAt), "attempts": attempts,
+					"progress": 1.0, "error": failure,
+				},
+			}}, reducer.Options{Actor: contracts.ActorJob, CreatedAt: now})
+			if errors.Is(applyErr, reducer.ErrJobCancelled) || errors.Is(applyErr, reducer.ErrJobClaimLost) {
+				continue
+			}
+			if applyErr != nil {
+				return recovered, applyErr
+			}
+			if result.Status != reducer.StatusApplied {
+				return recovered, fmt.Errorf("stale job %s 终态写入失败: %s", job.ID, result.Status)
+			}
+			if len(result.AppliedEvents) == 1 {
+				recovered++
+			}
+			continue
+		}
+
+		// 未正常释放 claim 的进程退出会消耗一次重试额度；这是防止
+		// OOM/SIGKILL 类任务无限崩溃重领的有意取舍。
+		result, updateErr := database.Write().ExecContext(ctx, `
+			UPDATE jobs SET status='pending', worker_id=NULL, heartbeat_at=NULL,
+			started_at=NULL, attempts=?, next_run_at=?
+			WHERE job_id=? AND status='running'
+			AND worker_id IS ? AND started_at IS ? AND heartbeat_at IS ?
+			AND (heartbeat_at IS NULL OR heartbeat_at<?)`,
+			attempts, next, job.ID, pointerDatabaseValue(job.WorkerID),
+			pointerDatabaseValue(job.StartedAt), pointerDatabaseValue(job.HeartbeatAt), cutoff)
+		if updateErr != nil {
+			return recovered, updateErr
+		}
+		changed, rowsErr := result.RowsAffected()
+		if rowsErr != nil {
+			return recovered, rowsErr
+		}
+		recovered += changed
+	}
+	return recovered, nil
 }
 
 func ScheduleRetry(
@@ -216,6 +291,13 @@ func nullStringPointer(value sql.NullString) *string {
 		return nil
 	}
 	return &value.String
+}
+
+func pointerDatabaseValue(value *string) any {
+	if value == nil {
+		return nil
+	}
+	return *value
 }
 
 func mustJSON(value any) string {

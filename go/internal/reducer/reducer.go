@@ -1185,10 +1185,10 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 	var currentAssetID sql.NullString
 	if event.Type != "JobEnqueued" {
 		var currentStatus string
-		var currentWorkerID, currentStartedAt sql.NullString
+		var currentWorkerID, currentStartedAt, currentHeartbeatAt sql.NullString
 		if err := state.tx.QueryRowContext(ctx,
-			"SELECT status, kind, worker_id, started_at, asset_id FROM jobs WHERE job_id=?", jobID,
-		).Scan(&currentStatus, &currentKind, &currentWorkerID, &currentStartedAt, &currentAssetID); err != nil {
+			"SELECT status, kind, worker_id, started_at, heartbeat_at, asset_id FROM jobs WHERE job_id=?", jobID,
+		).Scan(&currentStatus, &currentKind, &currentWorkerID, &currentStartedAt, &currentHeartbeatAt, &currentAssetID); err != nil {
 			return err
 		}
 		if currentStatus == "cancelled" && event.Type != "JobCancelled" {
@@ -1202,6 +1202,19 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 		if expectedWorkerID != "" || expectedStartedAt != "" {
 			if !currentWorkerID.Valid || !currentStartedAt.Valid ||
 				currentWorkerID.String != expectedWorkerID || currentStartedAt.String != expectedStartedAt {
+				return ErrJobClaimLost
+			}
+		}
+		if expectedHeartbeat, checkHeartbeat := event.Payload["heartbeat_at"]; checkHeartbeat {
+			if currentStatus != "running" {
+				return ErrJobClaimLost
+			}
+			expected := stringFrom(expectedHeartbeat, "")
+			if expected == "" {
+				if currentHeartbeatAt.Valid {
+					return ErrJobClaimLost
+				}
+			} else if !currentHeartbeatAt.Valid || currentHeartbeatAt.String != expected {
 				return ErrJobClaimLost
 			}
 		}
@@ -1232,9 +1245,10 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 		_, err := state.tx.ExecContext(ctx, `
 			UPDATE jobs SET status=?, progress=COALESCE(?, progress),
 			result_json=COALESCE(?, result_json), error_json=COALESCE(?, error_json),
-			finished_at=COALESCE(?, finished_at)
+			attempts=COALESCE(?, attempts), finished_at=COALESCE(?, finished_at)
 			WHERE job_id=?`, status, nullableFloat(event.Payload["progress"]),
-			nullableJSON(event.Payload["result"]), nullableJSON(event.Payload["error"]), finishedAt, jobID)
+			nullableJSON(event.Payload["result"]), nullableJSON(event.Payload["error"]),
+			nullableInt64(event.Payload["attempts"]), finishedAt, jobID)
 		if err != nil {
 			return err
 		}
