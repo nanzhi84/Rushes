@@ -2969,6 +2969,19 @@
               "title": "Draft Id",
               "type": "string"
             }
+          },
+          {
+            "description": "Stable per-consumer token used to acknowledge turn-stream recovery snapshots.",
+            "in": "query",
+            "name": "turn_stream_client_id",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "title": "Turn Stream Client Id",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -4144,6 +4157,19 @@
             "required": true,
             "schema": {
               "title": "Draft Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Stable per-consumer token used to acknowledge turn-stream recovery snapshots.",
+            "in": "query",
+            "name": "turn_stream_client_id",
+            "required": true,
+            "schema": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._:-]+$",
+              "title": "Turn Stream Client Id",
               "type": "string"
             }
           }

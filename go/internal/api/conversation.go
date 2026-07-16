@@ -334,7 +334,12 @@ func (server *Server) DraftTurnStreamApiDraftsDraftIdTurnStreamGet(
 	writer http.ResponseWriter,
 	request *http.Request,
 	draftID string,
+	params DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams,
 ) {
+	if !validTurnStreamClientID(params.TurnStreamClientId) {
+		writeBadRequest(writer, "invalid_turn_stream_client_id")
+		return
+	}
 	if _, err := storage.GetDraft(request.Context(), server.database.Read(), draftID); errors.Is(err, storage.ErrNotFound) {
 		writeNotFound(writer, "draft_not_found")
 		return
@@ -348,7 +353,8 @@ func (server *Server) DraftTurnStreamApiDraftsDraftIdTurnStreamGet(
 	writer.WriteHeader(http.StatusOK)
 	controller := http.NewResponseController(writer)
 	_ = controller.Flush()
-	snapshot, stream, unsubscribe := server.agent.Hub().Subscribe(draftID)
+	snapshot, stream, acknowledgeSnapshot, acknowledgeEvent, unsubscribe :=
+		server.agent.Hub().SubscribeRecoverable(draftID, params.TurnStreamClientId)
 	defer unsubscribe()
 	sent := 0
 	writeEvent := func(event agent.StreamEvent) bool {
@@ -362,11 +368,18 @@ func (server *Server) DraftTurnStreamApiDraftsDraftIdTurnStreamGet(
 		if err := controller.Flush(); err != nil {
 			return false
 		}
+		acknowledgeEvent(event)
 		sent++
 		return true
 	}
-	for _, event := range snapshot {
-		if !writeEvent(event) || server.sseMaxEvents > 0 && sent >= server.sseMaxEvents {
+	for index, event := range snapshot {
+		if !writeEvent(event) {
+			return
+		}
+		if index == len(snapshot)-1 {
+			acknowledgeSnapshot()
+		}
+		if server.sseMaxEvents > 0 && sent >= server.sseMaxEvents {
 			return
 		}
 	}

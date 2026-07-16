@@ -919,6 +919,12 @@ type ValidationError_Loc_Item struct {
 	union json.RawMessage
 }
 
+// DraftEventsApiDraftsDraftIdEventsGetParams defines parameters for DraftEventsApiDraftsDraftIdEventsGet.
+type DraftEventsApiDraftsDraftIdEventsGetParams struct {
+	// TurnStreamClientId Stable per-consumer token used to acknowledge turn-stream recovery snapshots.
+	TurnStreamClientId string `form:"turn_stream_client_id" json:"turn_stream_client_id"`
+}
+
 // ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPost403JSONResponseBody defines parameters for ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPost.
 type ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPost403JSONResponseBody struct {
 	union json.RawMessage
@@ -927,6 +933,12 @@ type ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPost403JSONResponseB
 // ListDraftMessagesApiDraftsDraftIdMessagesGetParams defines parameters for ListDraftMessagesApiDraftsDraftIdMessagesGet.
 type ListDraftMessagesApiDraftsDraftIdMessagesGetParams struct {
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams defines parameters for DraftTurnStreamApiDraftsDraftIdTurnStreamGet.
+type DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams struct {
+	// TurnStreamClientId Stable per-consumer token used to acknowledge turn-stream recovery snapshots.
+	TurnStreamClientId string `form:"turn_stream_client_id" json:"turn_stream_client_id"`
 }
 
 // FsListApiFsListGetParams defines parameters for FsListApiFsListGet.
@@ -1201,7 +1213,7 @@ type ServerInterface interface {
 	PendingDraftDecisionsApiDraftsDraftIdDecisionsPendingGet(w http.ResponseWriter, r *http.Request, draftId string)
 	// Draft Events
 	// (GET /api/drafts/{draft_id}/events)
-	DraftEventsApiDraftsDraftIdEventsGet(w http.ResponseWriter, r *http.Request, draftId string)
+	DraftEventsApiDraftsDraftIdEventsGet(w http.ResponseWriter, r *http.Request, draftId string, params DraftEventsApiDraftsDraftIdEventsGetParams)
 	// List Materials
 	// (GET /api/drafts/{draft_id}/materials)
 	ListMaterialsApiDraftsDraftIdMaterialsGet(w http.ResponseWriter, r *http.Request, draftId string)
@@ -1240,7 +1252,7 @@ type ServerInterface interface {
 	ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(w http.ResponseWriter, r *http.Request, draftId string)
 	// Draft Turn Stream
 	// (GET /api/drafts/{draft_id}/turn-stream)
-	DraftTurnStreamApiDraftsDraftIdTurnStreamGet(w http.ResponseWriter, r *http.Request, draftId string)
+	DraftTurnStreamApiDraftsDraftIdTurnStreamGet(w http.ResponseWriter, r *http.Request, draftId string, params DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams)
 	// Cancel Current Turn
 	// (POST /api/drafts/{draft_id}/turn/cancel)
 	CancelCurrentTurnApiDraftsDraftIdTurnCancelPost(w http.ResponseWriter, r *http.Request, draftId string)
@@ -1369,7 +1381,7 @@ func (_ Unimplemented) PendingDraftDecisionsApiDraftsDraftIdDecisionsPendingGet(
 
 // Draft Events
 // (GET /api/drafts/{draft_id}/events)
-func (_ Unimplemented) DraftEventsApiDraftsDraftIdEventsGet(w http.ResponseWriter, r *http.Request, draftId string) {
+func (_ Unimplemented) DraftEventsApiDraftsDraftIdEventsGet(w http.ResponseWriter, r *http.Request, draftId string, params DraftEventsApiDraftsDraftIdEventsGetParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -1447,7 +1459,7 @@ func (_ Unimplemented) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(w htt
 
 // Draft Turn Stream
 // (GET /api/drafts/{draft_id}/turn-stream)
-func (_ Unimplemented) DraftTurnStreamApiDraftsDraftIdTurnStreamGet(w http.ResponseWriter, r *http.Request, draftId string) {
+func (_ Unimplemented) DraftTurnStreamApiDraftsDraftIdTurnStreamGet(w http.ResponseWriter, r *http.Request, draftId string, params DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -1847,8 +1859,24 @@ func (siw *ServerInterfaceWrapper) DraftEventsApiDraftsDraftIdEventsGet(w http.R
 		return
 	}
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DraftEventsApiDraftsDraftIdEventsGetParams
+
+	// ------------- Required query parameter "turn_stream_client_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "turn_stream_client_id", r.URL.Query(), &params.TurnStreamClientId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "turn_stream_client_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "turn_stream_client_id", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.DraftEventsApiDraftsDraftIdEventsGet(w, r, draftId)
+		siw.Handler.DraftEventsApiDraftsDraftIdEventsGet(w, r, draftId, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -2228,8 +2256,24 @@ func (siw *ServerInterfaceWrapper) DraftTurnStreamApiDraftsDraftIdTurnStreamGet(
 		return
 	}
 
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams
+
+	// ------------- Required query parameter "turn_stream_client_id" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, true, "turn_stream_client_id", r.URL.Query(), &params.TurnStreamClientId, runtime.BindQueryParameterOptions{Type: "string", Format: ""})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "turn_stream_client_id"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "turn_stream_client_id", Err: err})
+		}
+		return
+	}
+
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.DraftTurnStreamApiDraftsDraftIdTurnStreamGet(w, r, draftId)
+		siw.Handler.DraftTurnStreamApiDraftsDraftIdTurnStreamGet(w, r, draftId, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {

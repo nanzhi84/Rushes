@@ -77,7 +77,7 @@ func TestStreamEventsCoversReplayRecoveryAndTransportStops(t *testing.T) {
 		request := httptest.NewRequest(http.MethodGet, "/api/events", nil).WithContext(ctx)
 		done := make(chan struct{})
 		go func() {
-			server.streamEvents(httptest.NewRecorder(), request, nil, nil, contracts.RoutesToWorkspace)
+			server.streamEvents(httptest.NewRecorder(), request, nil, nil, "", contracts.RoutesToWorkspace)
 			close(done)
 		}()
 		time.Sleep(20 * time.Millisecond)
@@ -98,7 +98,7 @@ func TestStreamEventsCoversReplayRecoveryAndTransportStops(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		done := make(chan struct{})
 		go func() {
-			server.streamEvents(recorder, request, nil, &draftID, func(contracts.Event) bool { return false })
+			server.streamEvents(recorder, request, nil, &draftID, "test-client", func(contracts.Event) bool { return false })
 			close(done)
 		}()
 		time.Sleep(50 * time.Millisecond)
@@ -125,6 +125,7 @@ func TestStreamEventsCoversReplayRecoveryAndTransportStops(t *testing.T) {
 		request.Header.Set("Last-Event-ID", "999999")
 		server.streamEvents(
 			httptest.NewRecorder(), request, nil, &draftID,
+			"test-client",
 			func(contracts.Event) bool { return false },
 		)
 	})
@@ -145,6 +146,7 @@ func TestStreamEventsCoversReplayRecoveryAndTransportStops(t *testing.T) {
 				httptest.NewRequest(http.MethodGet, "/api/events", nil),
 				nil,
 				nil,
+				"",
 				contracts.RoutesToWorkspace,
 			)
 		})
@@ -157,7 +159,7 @@ func TestStreamEventsCoversReplayRecoveryAndTransportStops(t *testing.T) {
 		}
 		server.streamEvents(
 			httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/events", nil),
-			nil, nil, contracts.RoutesToWorkspace,
+			nil, nil, "", contracts.RoutesToWorkspace,
 		)
 	})
 }

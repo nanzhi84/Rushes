@@ -127,7 +127,7 @@ func TestDraftFSMaterialSummaryAndTimelineErrorContracts(t *testing.T) {
 		{http.MethodGet, "/api/drafts/missing/materials", nil, 404, "draft_not_found"},
 		{http.MethodGet, "/api/drafts/draft_edges/materials/missing/summary", nil, 404, "asset_not_linked"},
 		{http.MethodPost, "/api/drafts/missing/previews/missing/viewed", nil, 404, "draft_not_found"},
-		{http.MethodGet, "/api/drafts/missing/events", nil, 404, "draft_not_found"},
+		{http.MethodGet, "/api/drafts/missing/events?turn_stream_client_id=test-client", nil, 404, "draft_not_found"},
 	} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, apiRequest(t, item.method, item.path, item.body))
@@ -201,7 +201,8 @@ func TestDraftFSMaterialSummaryAndTimelineErrorContracts(t *testing.T) {
 	}
 
 	draftEvents := httptest.NewRecorder()
-	handler.ServeHTTP(draftEvents, apiRequest(t, http.MethodGet, "/api/drafts/draft_edges/events?last_event_id=0", nil))
+	handler.ServeHTTP(draftEvents, apiRequest(t, http.MethodGet,
+		"/api/drafts/draft_edges/events?last_event_id=0&turn_stream_client_id=test-client", nil))
 	if draftEvents.Code != http.StatusOK || !strings.Contains(draftEvents.Body.String(), "event: DraftCreated") {
 		t.Fatalf("draft events=%d body=%s", draftEvents.Code, draftEvents.Body.String())
 	}
@@ -466,7 +467,11 @@ func TestClosedDatabaseReturnsInternalErrorsAcrossAdapters(t *testing.T) {
 		func(w http.ResponseWriter, r *http.Request) {
 			server.CancelCurrentTurnApiDraftsDraftIdTurnCancelPost(w, r, "d")
 		},
-		func(w http.ResponseWriter, r *http.Request) { server.DraftEventsApiDraftsDraftIdEventsGet(w, r, "d") },
+		func(w http.ResponseWriter, r *http.Request) {
+			server.DraftEventsApiDraftsDraftIdEventsGet(w, r, "d", DraftEventsApiDraftsDraftIdEventsGetParams{
+				TurnStreamClientId: "edge-case-client",
+			})
+		},
 		func(w http.ResponseWriter, r *http.Request) { server.MediaSourceApiMediaAssetIdSourceGet(w, r, "a") },
 		func(w http.ResponseWriter, r *http.Request) {
 			server.MediaPreviewApiMediaPreviewPreviewIdGet(w, r, "p")

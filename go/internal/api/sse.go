@@ -15,14 +15,19 @@ import (
 )
 
 func (server *Server) WorkspaceEventsApiEventsGet(writer http.ResponseWriter, request *http.Request) {
-	server.streamEvents(writer, request, nil, nil, contracts.RoutesToWorkspace)
+	server.streamEvents(writer, request, nil, nil, "", contracts.RoutesToWorkspace)
 }
 
 func (server *Server) DraftEventsApiDraftsDraftIdEventsGet(
 	writer http.ResponseWriter,
 	request *http.Request,
 	draftID string,
+	params DraftEventsApiDraftsDraftIdEventsGetParams,
 ) {
+	if !validTurnStreamClientID(params.TurnStreamClientId) {
+		writeBadRequest(writer, "invalid_turn_stream_client_id")
+		return
+	}
 	if _, err := storage.GetDraft(request.Context(), server.database.Read(), draftID); err != nil {
 		if errors.Is(err, storage.ErrNotFound) {
 			writeNotFound(writer, "draft_not_found")
@@ -31,7 +36,7 @@ func (server *Server) DraftEventsApiDraftsDraftIdEventsGet(
 		}
 		return
 	}
-	server.streamEvents(writer, request, &draftID, &draftID, func(event contracts.Event) bool {
+	server.streamEvents(writer, request, &draftID, &draftID, params.TurnStreamClientId, func(event contracts.Event) bool {
 		return contracts.RoutesToDraft(event, draftID)
 	})
 }
@@ -41,6 +46,7 @@ func (server *Server) streamEvents(
 	request *http.Request,
 	draftID *string,
 	turnDraftID *string,
+	turnClientID string,
 	predicate func(contracts.Event) bool,
 ) {
 	writer.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -56,9 +62,12 @@ func (server *Server) streamEvents(
 	emitted := 0
 	var turnSnapshot []agent.StreamEvent
 	var turnStream <-chan agent.StreamEvent
+	var acknowledgeTurnSnapshot func()
+	var acknowledgeTurnEvent func(agent.StreamEvent)
 	var unsubscribeTurn func()
 	if turnDraftID != nil {
-		turnSnapshot, turnStream, unsubscribeTurn = server.agent.Hub().Subscribe(*turnDraftID)
+		turnSnapshot, turnStream, acknowledgeTurnSnapshot, acknowledgeTurnEvent, unsubscribeTurn =
+			server.agent.Hub().SubscribeRecoverable(*turnDraftID, turnClientID)
 		defer unsubscribeTurn()
 	}
 	turnSnapshotPending := len(turnSnapshot) > 0
@@ -74,6 +83,7 @@ func (server *Server) streamEvents(
 		if err := controller.Flush(); err != nil {
 			return false
 		}
+		acknowledgeTurnEvent(event)
 		emitted++
 		return true
 	}
@@ -113,9 +123,12 @@ func (server *Server) streamEvents(
 		// 先重放持久化领域事件，再补当前回合快照。这样 Last-Event-ID 仍只属于
 		// 领域事件，同时一个草稿页只需一条 SSE 连接。
 		if turnSnapshotPending {
-			for _, event := range turnSnapshot {
+			for index, event := range turnSnapshot {
 				if !writeTurnEvent(event) {
 					return
+				}
+				if index == len(turnSnapshot)-1 {
+					acknowledgeTurnSnapshot()
 				}
 				if server.sseMaxEvents > 0 && emitted >= server.sseMaxEvents {
 					return
@@ -130,8 +143,9 @@ func (server *Server) streamEvents(
 			return
 		case event, ok := <-turnStream:
 			if !ok {
-				turnStream = nil
-				continue
+				// The hub closes slow subscribers after a final recovery frame.
+				// End the HTTP stream so EventSource reconnects and receives a fresh snapshot.
+				return
 			}
 			if !writeTurnEvent(event) {
 				return
@@ -149,6 +163,22 @@ func (server *Server) streamEvents(
 		case <-poll.C:
 		}
 	}
+}
+
+func validTurnStreamClientID(clientID string) bool {
+	if clientID == "" || len(clientID) > 128 {
+		return false
+	}
+	for index := range len(clientID) {
+		character := clientID[index]
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '.' || character == '_' ||
+			character == ':' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func encodeSSE(eventID int64, event contracts.Event) (string, error) {

@@ -132,7 +132,25 @@ function createApiEventSource(path: string): EventSource {
   }
   const url = new URL(path, window.location.origin);
   url.searchParams.set("token", token);
+  if (/^\/api\/drafts\/[^/]+\/(?:events|turn-stream)$/.test(url.pathname)) {
+    url.searchParams.set("turn_stream_client_id", getTurnStreamClientId(url.pathname));
+  }
   return new EventSource(url.toString());
+}
+
+const turnStreamClientIds = new Map<string, string>();
+
+function getTurnStreamClientId(pathname: string): string {
+  const existing = turnStreamClientIds.get(pathname);
+  if (existing) {
+    return existing;
+  }
+  const clientId =
+    typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  turnStreamClientIds.set(pathname, clientId);
+  return clientId;
 }
 
 type SharedEventSourceEntry = {

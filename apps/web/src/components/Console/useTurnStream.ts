@@ -71,6 +71,8 @@ export const KNOWN_TURN_STREAM_TYPES = [
   "model_retry",
   "subagent_progress",
   "context_compaction_failed",
+  "stream_snapshot_truncated",
+  "stream_gap",
   "turn_ended",
   "turn_error"
 ] as const;
@@ -103,12 +105,15 @@ export type TurnStreamEvent =
       total?: number;
     }
   | { type: "context_compaction_failed"; reason?: string; fallback?: string }
+  | { type: "stream_snapshot_truncated" }
+  | { type: "stream_gap" }
   | ({ type: "turn_ended" } & TurnEndedEvent)
   | { type: "turn_error"; message: string };
 
 export type UseTurnStreamOptions = {
   onTurnEnded?: (event: TurnEndedEvent) => void;
   onTurnError?: (message: string) => void;
+  onStreamGap?: () => void;
 };
 
 export const INITIAL_STATE: TurnStreamState = {
@@ -275,7 +280,9 @@ export function useTurnStream(
         return;
       }
       dispatch(event);
-      if (event.type === "turn_ended") {
+      if (event.type === "stream_snapshot_truncated" || event.type === "stream_gap") {
+        optionsRef.current.onStreamGap?.();
+      } else if (event.type === "turn_ended") {
         optionsRef.current.onTurnEnded?.(normalizeTurnEndedEvent(event));
       } else if (event.type === "turn_error") {
         optionsRef.current.onTurnError?.(
@@ -283,9 +290,12 @@ export function useTurnStream(
         );
       }
     };
+    const handleError = () => optionsRef.current.onStreamGap?.();
     source.addEventListener("turn_stream", handle);
+    source.addEventListener("error", handleError);
     return () => {
       source.removeEventListener("turn_stream", handle);
+      source.removeEventListener("error", handleError);
       release();
     };
   }, [documentVisible, draftId]);

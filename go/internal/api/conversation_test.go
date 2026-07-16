@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -71,12 +72,21 @@ func TestMessageQueueTurnStreamHistoryAndCancel(t *testing.T) {
 	})
 	sse := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet,
-		"/api/drafts/draft_conversation/turn-stream?token="+testToken, nil)
+		"/api/drafts/draft_conversation/turn-stream?token="+testToken+"&turn_stream_client_id=test-client", nil)
 	request.Host = "127.0.0.1:8000"
 	handler.ServeHTTP(sse, request)
 	if sse.Code != http.StatusOK || strings.Count(sse.Body.String(), "event: turn_stream") != 2 ||
 		!strings.Contains(sse.Body.String(), `"turn_id":"snapshot"`) {
 		t.Fatalf("SSE status=%d body=%s", sse.Code, sse.Body.String())
+	}
+	missingClient := httptest.NewRecorder()
+	missingClientRequest := httptest.NewRequest(http.MethodGet,
+		"/api/drafts/draft_conversation/turn-stream?token="+testToken, nil)
+	missingClientRequest.Host = "127.0.0.1:8000"
+	handler.ServeHTTP(missingClient, missingClientRequest)
+	if missingClient.Code != http.StatusBadRequest ||
+		!strings.Contains(missingClient.Body.String(), "turn_stream_client_id is required") {
+		t.Fatalf("missing client status=%d body=%s", missingClient.Code, missingClient.Body.String())
 	}
 
 	queued := httptest.NewRecorder()
@@ -566,6 +576,7 @@ func TestTurnStreamLiveCancellationEncodingAndWriterFailures(t *testing.T) {
 			live,
 			httptest.NewRequest(http.MethodGet, "/api/drafts/draft_turn_live/turn-stream", nil),
 			"draft_turn_live",
+			DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams{TurnStreamClientId: "test-client"},
 		)
 	}()
 	time.Sleep(20 * time.Millisecond)
@@ -586,6 +597,7 @@ func TestTurnStreamLiveCancellationEncodingAndWriterFailures(t *testing.T) {
 		invalid,
 		httptest.NewRequest(http.MethodGet, "/api/drafts/draft_invalid_stream/turn-stream", nil),
 		"draft_invalid_stream",
+		DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams{TurnStreamClientId: "test-client"},
 	)
 	if strings.Contains(invalid.Body.String(), "event: turn_stream") {
 		t.Fatalf("非法事件不应写入: %s", invalid.Body.String())
@@ -601,6 +613,7 @@ func TestTurnStreamLiveCancellationEncodingAndWriterFailures(t *testing.T) {
 			writer,
 			httptest.NewRequest(http.MethodGet, "/api/drafts/draft_write_fail/turn-stream", nil),
 			"draft_write_fail",
+			DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams{TurnStreamClientId: "test-client"},
 		)
 	}
 
@@ -611,7 +624,22 @@ func TestTurnStreamLiveCancellationEncodingAndWriterFailures(t *testing.T) {
 		httptest.NewRecorder(),
 		httptest.NewRequest(http.MethodGet, "/api/drafts/draft_cancelled_stream/turn-stream", nil).WithContext(ctx),
 		"draft_cancelled_stream",
+		DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams{TurnStreamClientId: "test-client"},
 	)
+
+	for _, clientID := range []string{"", strings.Repeat("x", 129), "含中文"} {
+		invalidClient := httptest.NewRecorder()
+		server.DraftTurnStreamApiDraftsDraftIdTurnStreamGet(
+			invalidClient,
+			httptest.NewRequest(http.MethodGet, "/api/drafts/draft_turn_live/turn-stream", nil),
+			"draft_turn_live",
+			DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams{TurnStreamClientId: clientID},
+		)
+		if invalidClient.Code != http.StatusBadRequest ||
+			!strings.Contains(invalidClient.Body.String(), "invalid_turn_stream_client_id") {
+			t.Fatalf("invalid client id length=%d status=%d body=%s", len(clientID), invalidClient.Code, invalidClient.Body.String())
+		}
+	}
 
 	server.agent.Queue().Close()
 	closed := httptest.NewRecorder()
@@ -622,6 +650,127 @@ func TestTurnStreamLiveCancellationEncodingAndWriterFailures(t *testing.T) {
 	}
 }
 
+func TestSlowTurnStreamSubscriberReceivesGapAndTerminalThenReconnects(t *testing.T) {
+	server, handler := testServer(t, t.TempDir(), 0)
+	createDraftThroughAPI(t, handler, "draft_slow_stream")
+	writer := &blockingTurnStreamWriter{
+		header: http.Header{}, started: make(chan struct{}), release: make(chan struct{}),
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.DraftEventsApiDraftsDraftIdEventsGet(
+			writer,
+			httptest.NewRequest(http.MethodGet, "/api/drafts/draft_slow_stream/events", nil),
+			"draft_slow_stream",
+			DraftEventsApiDraftsDraftIdEventsGetParams{TurnStreamClientId: "test-client"},
+		)
+	}()
+	server.agent.Hub().Record("draft_slow_stream", agent.StreamEvent{"type": agent.TurnStreamTurnStarted})
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler did not start writing the turn stream")
+	}
+	for index := range agent.DefaultSubscriberQueueLimit {
+		server.agent.Hub().Record("draft_slow_stream", agent.StreamEvent{
+			"type": agent.TurnStreamTextDelta, "message_id": "message", "delta": index,
+		})
+	}
+	server.agent.Hub().Record("draft_slow_stream", agent.StreamEvent{
+		"type": agent.TurnStreamMessageCompleted, "message_id": "message", "content": "done",
+	})
+	server.agent.Hub().Record("draft_slow_stream", agent.StreamEvent{
+		"type": agent.TurnStreamTurnEnded, "outcome": "finished",
+	})
+	close(writer.release)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("slow turn stream connection did not close for EventSource reconnect")
+	}
+	body := writer.bodyString()
+	if !strings.Contains(body, `"type":"stream_gap"`) {
+		t.Fatalf("gap frame missing from first SSE body: %s", body)
+	}
+
+	server.sseMaxEvents = 2
+	reconnected := httptest.NewRecorder()
+	server.DraftTurnStreamApiDraftsDraftIdTurnStreamGet(
+		reconnected,
+		httptest.NewRequest(http.MethodGet, "/api/drafts/draft_slow_stream/turn-stream", nil),
+		"draft_slow_stream",
+		DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams{TurnStreamClientId: "test-client"},
+	)
+	if !strings.Contains(reconnected.Body.String(), `"type":"stream_gap"`) ||
+		!strings.Contains(reconnected.Body.String(), `"type":"turn_ended"`) {
+		t.Fatalf("terminal recovery snapshot missing: %s", reconnected.Body.String())
+	}
+	if snapshot := server.agent.Hub().Snapshot("draft_slow_stream"); len(snapshot) != 0 {
+		t.Fatalf("成功重放后未确认清理恢复快照: %#v", snapshot)
+	}
+}
+
+func TestTurnStreamTerminalFlushFailureRetainsRecoverySnapshot(t *testing.T) {
+	server, handler := testServer(t, t.TempDir(), 0)
+	createDraftThroughAPI(t, handler, "draft_terminal_flush_failure")
+	writer := &terminalFailureWriter{
+		header: http.Header{}, started: make(chan struct{}),
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.DraftEventsApiDraftsDraftIdEventsGet(
+			writer,
+			httptest.NewRequest(http.MethodGet, "/api/drafts/draft_terminal_flush_failure/events", nil),
+			"draft_terminal_flush_failure",
+			DraftEventsApiDraftsDraftIdEventsGetParams{TurnStreamClientId: "test-client"},
+		)
+	}()
+	server.agent.Hub().Record("draft_terminal_flush_failure", agent.StreamEvent{
+		"type": agent.TurnStreamTurnStarted,
+	})
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler did not flush turn_started")
+	}
+	server.agent.Hub().Record("draft_terminal_flush_failure", agent.StreamEvent{
+		"type": agent.TurnStreamTurnEnded, "outcome": "finished",
+	})
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("terminal write failure did not close SSE handler")
+	}
+
+	snapshot := server.agent.Hub().Snapshot("draft_terminal_flush_failure")
+	if len(snapshot) != 2 || snapshot[0]["type"] != agent.TurnStreamGap ||
+		snapshot[1]["type"] != agent.TurnStreamTurnEnded {
+		t.Fatalf("terminal flush 失败后恢复快照=%#v", snapshot)
+	}
+	server.sseMaxEvents = 2
+	reconnected := httptest.NewRecorder()
+	server.DraftTurnStreamApiDraftsDraftIdTurnStreamGet(
+		reconnected,
+		httptest.NewRequest(http.MethodGet, "/api/drafts/draft_terminal_flush_failure/turn-stream", nil),
+		"draft_terminal_flush_failure",
+		DraftTurnStreamApiDraftsDraftIdTurnStreamGetParams{TurnStreamClientId: "test-client"},
+	)
+	if !strings.Contains(reconnected.Body.String(), `"type":"stream_gap"`) ||
+		!strings.Contains(reconnected.Body.String(), `"type":"turn_ended"`) {
+		t.Fatalf("terminal flush 失败后重连未恢复: %s", reconnected.Body.String())
+	}
+	if strings.Contains(reconnected.Body.String(), turnStreamRecoveryGenerationKeyForTest) {
+		t.Fatalf("内部 recovery generation 泄漏到 SSE: %s", reconnected.Body.String())
+	}
+	if remaining := server.agent.Hub().Snapshot("draft_terminal_flush_failure"); len(remaining) != 0 {
+		t.Fatalf("恢复快照成功 flush 后未清理: %#v", remaining)
+	}
+}
+
+const turnStreamRecoveryGenerationKeyForTest = "_recovery_generation"
+
 type turnStreamErrorWriter struct {
 	mu       sync.Mutex
 	header   http.Header
@@ -629,6 +778,32 @@ type turnStreamErrorWriter struct {
 	writeErr error
 	flushErr error
 }
+
+type terminalFailureWriter struct {
+	mu      sync.Mutex
+	header  http.Header
+	body    strings.Builder
+	started chan struct{}
+	once    sync.Once
+}
+
+func (writer *terminalFailureWriter) Header() http.Header { return writer.header }
+
+func (writer *terminalFailureWriter) WriteHeader(int) {}
+
+func (writer *terminalFailureWriter) Write(data []byte) (int, error) {
+	if bytes.Contains(data, []byte(`"type":"turn_ended"`)) {
+		return 0, errors.New("terminal write failed")
+	}
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if bytes.Contains(data, []byte(`"type":"turn_started"`)) {
+		writer.once.Do(func() { close(writer.started) })
+	}
+	return writer.body.Write(data)
+}
+
+func (writer *terminalFailureWriter) FlushError() error { return nil }
 
 func (writer *turnStreamErrorWriter) Header() http.Header { return writer.header }
 
@@ -644,6 +819,37 @@ func (writer *turnStreamErrorWriter) Write(data []byte) (int, error) {
 }
 
 func (writer *turnStreamErrorWriter) FlushError() error { return writer.flushErr }
+
+type blockingTurnStreamWriter struct {
+	mu      sync.Mutex
+	header  http.Header
+	body    strings.Builder
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (writer *blockingTurnStreamWriter) Header() http.Header { return writer.header }
+
+func (writer *blockingTurnStreamWriter) WriteHeader(int) {}
+
+func (writer *blockingTurnStreamWriter) Write(data []byte) (int, error) {
+	writer.once.Do(func() {
+		close(writer.started)
+		<-writer.release
+	})
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.body.Write(data)
+}
+
+func (writer *blockingTurnStreamWriter) FlushError() error { return nil }
+
+func (writer *blockingTurnStreamWriter) bodyString() string {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.body.String()
+}
 
 func storageCurrentDecision(t *testing.T, server *Server, draftID string) (storage.Decision, error) {
 	t.Helper()
