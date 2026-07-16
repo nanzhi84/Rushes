@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -59,9 +60,10 @@ func (paths Paths) ObjectPath(hash string) (string, error) {
 }
 
 type DB struct {
-	write *sql.DB
-	read  *sql.DB
-	Paths Paths
+	write         *sql.DB
+	read          *sql.DB
+	workspaceLock *workspaceObjectLock
+	Paths         Paths
 }
 
 func Open(ctx context.Context, workspace string) (*DB, error) {
@@ -72,6 +74,12 @@ func Open(ctx context.Context, workspace string) (*DB, error) {
 	if err := paths.Initialize(); err != nil {
 		return nil, err
 	}
+	workspaceLock, runObjectGC, lockErr := acquireWorkspaceObjectGCLock(ctx, paths)
+	if lockErr != nil {
+		slog.Warn("无法安全锁定对象存储，跳过孤儿文件清理", "error", lockErr)
+		workspaceLock = nil
+		runObjectGC = false
+	}
 	u := &url.URL{Scheme: "file", Path: paths.DB}
 	dsn := u.String() +
 		"?_pragma=journal_mode(WAL)" +
@@ -81,16 +89,18 @@ func Open(ctx context.Context, workspace string) (*DB, error) {
 		"&_txlock=immediate"
 	write, err := sql.Open("sqlite", dsn)
 	if err != nil {
+		_ = closeWorkspaceObjectGCLock(workspaceLock)
 		return nil, err
 	}
 	write.SetMaxOpenConns(1)
 	read, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		_ = write.Close()
+		_ = closeWorkspaceObjectGCLock(workspaceLock)
 		return nil, err
 	}
 	read.SetMaxOpenConns(max(runtime.NumCPU(), 2))
-	database := &DB{write: write, read: read, Paths: paths}
+	database := &DB{write: write, read: read, workspaceLock: workspaceLock, Paths: paths}
 	if err := database.Migrate(ctx); err != nil {
 		_ = database.Close()
 		return nil, err
@@ -98,6 +108,15 @@ func Open(ctx context.Context, workspace string) (*DB, error) {
 	if err := database.read.PingContext(ctx); err != nil {
 		_ = database.Close()
 		return nil, fmt.Errorf("打开 SQLite 读池: %w", err)
+	}
+	if runObjectGC {
+		database.cleanupOrphanObjectsBestEffort(ctx)
+		sharedLock, err := transitionWorkspaceObjectGCLockToShared(ctx, paths, workspaceLock)
+		database.workspaceLock = sharedLock
+		if err != nil {
+			_ = database.Close()
+			return nil, fmt.Errorf("建立 workspace 对象存储共享锁: %w", err)
+		}
 	}
 	return database, nil
 }
@@ -107,7 +126,10 @@ func (database *DB) Write() *sql.DB { return database.write }
 func (database *DB) Read() *sql.DB { return database.read }
 
 func (database *DB) Close() error {
-	return errors.Join(database.read.Close(), database.write.Close())
+	readErr := database.read.Close()
+	writeErr := database.write.Close()
+	lockErr := closeWorkspaceObjectGCLock(database.workspaceLock)
+	return errors.Join(readErr, writeErr, lockErr)
 }
 
 func (database *DB) Migrate(ctx context.Context) error {
