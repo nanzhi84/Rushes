@@ -708,6 +708,18 @@ func TestContextCompressionHelpersBoundAndSanitizeHistory(t *testing.T) {
 	if _, exists := nested["version"]; exists || nested["keep"].([]map[string]any)[0]["value"] != 1 {
 		t.Fatalf("nested sanitize=%#v", sanitized)
 	}
+	plan := sanitizeContentPlanForContext(map[string]any{
+		"version":  3,
+		"section":  map[string]any{"version": 1},
+		"contract": map[string]any{"custom": map[string]any{"timeline_id": "stale"}, "keep": true},
+	}).(map[string]any)
+	if _, exists := plan["version"]; exists || plan["section"].(map[string]any)["version"] != 1 {
+		t.Fatalf("content plan top-level boundary mismatch: %#v", plan)
+	}
+	contract := plan["contract"].(map[string]any)
+	if _, exists := contract["custom"].(map[string]any)["timeline_id"]; exists || contract["keep"] != true {
+		t.Fatalf("content plan contract boundary mismatch: %#v", plan)
+	}
 	if valueOrContext("  ", "fallback") != "fallback" || valueOrContext("goal", "fallback") != "goal" {
 		t.Fatal("context fallback 错误")
 	}

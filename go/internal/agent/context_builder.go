@@ -818,7 +818,30 @@ func sanitizeContextMap(input map[string]any) map[string]any {
 		if isReservedContextKey(key) {
 			continue
 		}
+		if key == "content_plan" {
+			result[key] = sanitizeContentPlanForContext(value)
+			continue
+		}
 		result[key] = sanitizeContextValue(value)
+	}
+	return result
+}
+
+func sanitizeContentPlanForContext(value any) any {
+	plan, ok := value.(map[string]any)
+	if !ok {
+		return sanitizeContextValue(value)
+	}
+	result := make(map[string]any, len(plan))
+	for key, item := range plan {
+		if isReservedContextKey(key) {
+			continue
+		}
+		if key == "contract" {
+			result[key] = sanitizeContextValue(item)
+			continue
+		}
+		result[key] = cloneContentPlanValue(item)
 	}
 	return result
 }

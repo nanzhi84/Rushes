@@ -174,7 +174,7 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 	}
 	service.SetSpeechRecognizer(recognizer)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_talking_head_real")
-	ctx = rushestools.WithReporter(ctx, func(name, phase string, _, _ any, toolErr error) {
+	ctx = rushestools.WithReporter(ctx, func(_ context.Context, name, phase string, _, _ any, toolErr error) {
 		entry := talkingHeadMaterialTrace{Tool: name, Phase: phase}
 		if toolErr != nil {
 			entry.Error = toolErr.Error()

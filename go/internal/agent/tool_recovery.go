@@ -176,14 +176,16 @@ func newToolRecoveryMiddleware() compose.ToolMiddleware {
 				// 执行在用户界面仍表现为一次有明确终态的工具调用。
 				originalReporter, hasReporter := rushestools.ReporterFromContext(ctx)
 				var reportName string
+				var reportContext context.Context
 				var reportInput, reportOutput any
 				var reportErr error
 				reportStarted := false
 				reportFinished := false
 				if hasReporter {
 					ctx = rushestools.WithReporter(ctx, func(
-						name, phase string, reportedInput, output any, err error,
+						reportCtx context.Context, name, phase string, reportedInput, output any, err error,
 					) {
+						reportContext = reportCtx
 						switch phase {
 						case "started":
 							reportName, reportInput = name, reportedInput
@@ -191,7 +193,7 @@ func newToolRecoveryMiddleware() compose.ToolMiddleware {
 								return
 							}
 							reportStarted = true
-							originalReporter(name, phase, reportedInput, nil, nil)
+							originalReporter(reportCtx, name, phase, reportedInput, nil, nil)
 						case "finished":
 							reportFinished = true
 							reportName, reportInput = name, reportedInput
@@ -205,13 +207,13 @@ func newToolRecoveryMiddleware() compose.ToolMiddleware {
 						if !reportFinished && reportErr == nil {
 							reportErr = errors.New("工具没有返回完成状态")
 						}
-						originalReporter(reportName, "finished", reportInput, reportOutput, reportErr)
+						originalReporter(reportContext, reportName, "finished", reportInput, reportOutput, reportErr)
 					}()
 					// JSON/schema 解码和前置条件检查发生在注册工具的 reporter 之前。
 					// 这里先发 started，实际工具若也上报 started 会被上面的包装器合并；
 					// 因此任何失败路径都能在 UI 里形成唯一、完整的 started/finished。
 					if reporter, ok := rushestools.ReporterFromContext(ctx); ok {
-						reporter(input.Name, "started", toolArgumentsForReport(input.Arguments), nil, nil)
+						reporter(ctx, input.Name, "started", toolArgumentsForReport(input.Arguments), nil, nil)
 					}
 				}
 
@@ -442,13 +444,13 @@ func reportSyntheticToolFailure(ctx context.Context, name, arguments, rawOutput 
 		return
 	}
 	input := toolArgumentsForReport(arguments)
-	reporter(name, "started", input, nil, nil)
+	reporter(ctx, name, "started", input, nil, nil)
 	var result rushestools.ToolResult
 	if json.Unmarshal([]byte(rawOutput), &result) == nil {
-		reporter(name, "finished", input, result, nil)
+		reporter(ctx, name, "finished", input, result, nil)
 		return
 	}
-	reporter(name, "finished", input, nil, errors.New(truncateText(rawOutput, 1000)))
+	reporter(ctx, name, "finished", input, nil, errors.New(truncateText(rawOutput, 1000)))
 }
 
 func waitForToolRetry(ctx context.Context, attempt int) error {

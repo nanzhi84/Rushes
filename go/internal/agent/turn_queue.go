@@ -134,6 +134,26 @@ func newDraftWorker() *draftWorker {
 	}
 }
 
+// CanEnqueue closes the common rejection window before callers persist work.
+// Enqueue must still handle the small race between this preflight and the real send.
+func (queue *TurnQueue) CanEnqueue(draftID string) bool {
+	if draftID == "" {
+		return false
+	}
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if queue.closed || queue.ctx.Err() != nil || queue.cancelLeases[draftID] > 0 {
+		return false
+	}
+	worker := queue.workers[draftID]
+	if worker == nil {
+		return true
+	}
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	return !worker.canceling && !worker.retired
+}
+
 func (queue *TurnQueue) Enqueue(item QueueItem) bool {
 	if item.DraftID == "" {
 		return false

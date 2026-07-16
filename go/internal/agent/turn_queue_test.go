@@ -163,6 +163,26 @@ func TestTurnQueueCloseLinearizesBeforeLaterEnqueue(t *testing.T) {
 	}
 }
 
+func TestTurnQueueCanEnqueueMatchesClosedAndCancellationFences(t *testing.T) {
+	t.Parallel()
+	queue := NewTurnQueue(t.Context(), nil)
+	if queue.CanEnqueue("") || !queue.CanEnqueue("draft") {
+		t.Fatal("empty draft must fail and an open draft must pass preflight")
+	}
+	barrier, _ := queue.BeginDraftCancellation("draft")
+	if barrier == nil || queue.CanEnqueue("draft") {
+		t.Fatal("draft cancellation lease must close the enqueue preflight")
+	}
+	barrier.Release()
+	if !queue.CanEnqueue("draft") {
+		t.Fatal("released draft cancellation lease must reopen preflight")
+	}
+	queue.Close()
+	if queue.CanEnqueue("draft") {
+		t.Fatal("closed queue must reject preflight")
+	}
+}
+
 func TestDraftCancellationAbandonDrainsProducerBlockedBeforeSend(t *testing.T) {
 	queue := NewTurnQueue(t.Context(), nil)
 	worker := newDraftWorker()

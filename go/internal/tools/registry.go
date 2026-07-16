@@ -267,7 +267,7 @@ func addTool[I, O any](
 			return zero, err
 		}
 		if reporter, ok := ctx.Value(reporterKey).(Reporter); ok && reporter != nil {
-			reporter(name, "started", input, nil, nil)
+			reporter(ctx, name, "started", input, nil, nil)
 		}
 		raw, executeErr := registry.executor.ExecuteTool(ctx, name, input)
 		output, convertErr := convertResult[O](raw)
@@ -275,7 +275,7 @@ func addTool[I, O any](
 			executeErr = convertErr
 		}
 		if reporter, ok := ctx.Value(reporterKey).(Reporter); ok && reporter != nil {
-			reporter(name, "finished", input, output, executeErr)
+			reporter(ctx, name, "finished", input, output, executeErr)
 		}
 		return output, executeErr
 	}, utils.WithUnmarshalArguments(strictUnmarshalToolArguments[I]))

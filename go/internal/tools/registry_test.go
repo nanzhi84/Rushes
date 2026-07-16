@@ -701,7 +701,7 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 		t.Fatal("missing draft context should fail")
 	}
 	reports := []string{}
-	ctx := WithReporter(WithDraftID(t.Context(), "draft"), func(name, phase string, _, _ any, err error) {
+	ctx := WithReporter(WithDraftID(t.Context(), "draft"), func(_ context.Context, name, phase string, _, _ any, err error) {
 		reports = append(reports, name+":"+phase)
 		if phase == "finished" && err == nil {
 			t.Fatal("executor error missing from reporter")
