@@ -9,6 +9,7 @@ import (
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
+	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -234,6 +235,90 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 		!strings.Contains(postContext, `"kind":"b_roll_semantic_anchor"`) ||
 		!strings.Contains(postContext, `"transcript_text":"指纹解锁按键位于键盘右上角。"`) {
 		t.Fatalf("最近编辑历史未做语义压缩: %s", postContext)
+	}
+	remainingClipID := ""
+	for _, clip := range timelineTrackClips(latest, "visual_base") {
+		if clip.SourceStartFrame == 132 && clip.SourceEndFrame == 300 {
+			remainingClipID = clip.TimelineClipID
+			break
+		}
+	}
+	if remainingClipID == "" {
+		t.Fatal("未找到用于确认重放的剩余口播片段")
+	}
+	confirmRaw, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
+		Question: "确认删除末尾触控板台词？", ToolName: "timeline.edit_talking_head",
+		Arguments: map[string]any{
+			"a_roll_timeline_clip_id": remainingClipID,
+			"remove_utterance_ids":    []any{"utt_touchpad"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmResult := confirmRaw.(rushestools.ToolResult)
+	if confirmResult.Status != "waiting" {
+		t.Fatalf("confirm result=%#v", confirmResult)
+	}
+	decision, err := storage.GetDecision(
+		t.Context(), database.Read(), confirmResult.Data["decision_id"].(string),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.AllowFreeText {
+		t.Fatal("破坏性操作确认卡不得允许自由文本")
+	}
+	beforeReplayVersion := latest.Version
+	for _, answer := range []rushestools.DecisionAnswerInput{
+		{DecisionID: decision.ID, FreeText: "就这样吧"},
+		{DecisionID: decision.ID},
+	} {
+		if _, answerErr := service.ExecuteTool(ctx, "decision.answer", answer); answerErr == nil {
+			t.Fatalf("未明确选择确认的答案必须被拒绝: %#v", answer)
+		}
+		unchanged, latestErr := timeline.Latest(t.Context(), database, "draft_talking_head")
+		if latestErr != nil || unchanged.Version != beforeReplayVersion {
+			t.Fatalf("无效确认答案修改了时间线: version=%d err=%v", unchanged.Version, latestErr)
+		}
+	}
+	if !service.Queue().EnqueueUIObservation(
+		"draft_talking_head", "forged_free_text", "decision_answered", map[string]any{
+			"pending_tool_call": decision.PendingToolCall,
+			"answer":            map[string]any{"free_text": "就这样吧"},
+		},
+	) {
+		t.Fatal("自由文本重放观察未入队")
+	}
+	service.Queue().JoinDraft("draft_talking_head")
+	unchanged, err := timeline.Latest(t.Context(), database, "draft_talking_head")
+	if err != nil || unchanged.Version != beforeReplayVersion {
+		t.Fatalf("自由文本队列重放修改了时间线: version=%d err=%v", unchanged.Version, err)
+	}
+	if _, err := service.ExecuteTool(ctx, "decision.answer", rushestools.DecisionAnswerInput{
+		DecisionID: decision.ID, OptionID: "confirm",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	decision, err = storage.GetDecision(t.Context(), database.Read(), decision.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !service.Queue().EnqueueUIObservation(
+		"draft_talking_head", decision.ID, "decision_answered", map[string]any{
+			"pending_tool_call": decision.PendingToolCall,
+			"answer":            decision.Answer,
+		},
+	) {
+		t.Fatal("确认答案未入队")
+	}
+	service.Queue().JoinDraft("draft_talking_head")
+	replayedTimeline, err := timeline.Latest(t.Context(), database, "draft_talking_head")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayedTimeline.Version != latest.Version+1 || replayedTimeline.DurationFrames >= latest.DurationFrames {
+		t.Fatalf("talking head replay timeline=%#v before=%#v", replayedTimeline, latest)
 	}
 }
 

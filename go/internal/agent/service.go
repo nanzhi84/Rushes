@@ -856,12 +856,15 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 		return "已收到你的选择，我会按这个决定继续。", nil
 	}
 	optionID := interfaceString(answer["option_id"])
-	if optionID == "cancel" || optionID == "no" {
+	if optionID != "confirm" {
 		return "已取消这项操作。", nil
 	}
 	name, _ := pending["tool_name"].(string)
 	arguments, _ := pending["arguments"].(map[string]any)
-	input, err := replayInput(name, arguments)
+	if err := service.tools.ValidateConfirmation(ctx, name, arguments); err != nil {
+		return "", fmt.Errorf("确认工具重放校验失败: %w", err)
+	}
+	input, err := service.tools.DecodeInput(name, arguments)
 	if err != nil {
 		return "", err
 	}
@@ -874,91 +877,6 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 	}
 	return "已按你的确认继续执行。", nil
 }
-
-func replayInput(name string, arguments map[string]any) (any, error) {
-	decode := func(target any) (any, error) {
-		data, err := json.Marshal(arguments)
-		if err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(data, target); err != nil {
-			return nil, err
-		}
-		return reflectValue(target), nil
-	}
-	switch name {
-	case "asset.list_assets":
-		return decode(&rushestools.AssetListInput{})
-	case "understand.materials":
-		return decode(&rushestools.UnderstandInput{})
-	case "media.search_shots":
-		return decode(&rushestools.ShotSearchInput{})
-	case "audio.analyze_beats":
-		return decode(&rushestools.AudioBeatAnalysisInput{})
-	case "audio.analyze_speech_pauses":
-		return decode(&rushestools.SpeechPauseAnalysisInput{})
-	case "plan.update":
-		return decode(&rushestools.PlanUpdateInput{})
-	case "timeline.compose_initial":
-		return decode(&rushestools.ComposeInitialInput{})
-	case "timeline.apply_patch":
-		return decode(&rushestools.TimelinePatchInput{})
-	case "timeline.apply_patches":
-		return decode(&rushestools.TimelinePatchBatchInput{})
-	case "timeline.recut_to_beats":
-		return decode(&rushestools.TimelineBeatRecutInput{})
-	case "timeline.validate":
-		return rushestools.TimelineValidateInput{}, nil
-	case "timeline.inspect":
-		return decode(&rushestools.TimelineInspectInput{})
-	case "render.preview":
-		return decode(&rushestools.RenderPreviewInput{})
-	case "render.final_mp4":
-		return decode(&rushestools.RenderFinalInput{})
-	case "render.status":
-		return rushestools.RenderStatusInput{}, nil
-	case "render.inspect_preview":
-		return decode(&rushestools.RenderInspectInput{})
-	default:
-		return nil, fmt.Errorf("无法重放未注册工具: %s", name)
-	}
-}
-
-func reflectValue(value any) any {
-	switch typed := value.(type) {
-	case *rushestools.AssetListInput:
-		return *typed
-	case *rushestools.UnderstandInput:
-		return *typed
-	case *rushestools.ShotSearchInput:
-		return *typed
-	case *rushestools.AudioBeatAnalysisInput:
-		return *typed
-	case *rushestools.SpeechPauseAnalysisInput:
-		return *typed
-	case *rushestools.PlanUpdateInput:
-		return *typed
-	case *rushestools.ComposeInitialInput:
-		return *typed
-	case *rushestools.TimelinePatchInput:
-		return *typed
-	case *rushestools.TimelinePatchBatchInput:
-		return *typed
-	case *rushestools.TimelineBeatRecutInput:
-		return *typed
-	case *rushestools.TimelineInspectInput:
-		return *typed
-	case *rushestools.RenderPreviewInput:
-		return *typed
-	case *rushestools.RenderFinalInput:
-		return *typed
-	case *rushestools.RenderInspectInput:
-		return *typed
-	default:
-		return value
-	}
-}
-
 func interfaceString(value any) string {
 	switch typed := value.(type) {
 	case string:

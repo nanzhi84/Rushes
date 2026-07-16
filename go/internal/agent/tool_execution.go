@@ -65,11 +65,23 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 		return service.toolAskUser(ctx, draftID, input.(rushestools.AskUserInput), nil)
 	case "interaction.confirm_action":
 		confirmation := input.(rushestools.ConfirmActionInput)
+		if err := service.tools.ValidateConfirmation(ctx, confirmation.ToolName, confirmation.Arguments); err != nil {
+			return rushestools.ToolResult{
+				Status:      "validation_failed",
+				Observation: "无法创建确认卡：" + err.Error(),
+				Data: map[string]any{
+					"error_code": "invalid_confirmation_target",
+					"tool_name":  confirmation.ToolName,
+					"recovery":   "改用已注册的非 interaction 模型工具，并严格按该工具输入 schema 修正 arguments 后重试。",
+				},
+			}, nil
+		}
 		return service.toolAskUser(ctx, draftID, rushestools.AskUserInput{
 			Question: confirmation.Question,
 			Options: []rushestools.DecisionOptionInput{
 				{OptionID: "confirm", Label: "确认"}, {OptionID: "cancel", Label: "取消"},
 			},
+			AllowFreeText: boolPointer(false),
 		}, map[string]any{"tool_name": confirmation.ToolName, "arguments": confirmation.Arguments})
 	case "decision.answer":
 		return service.toolDecisionAnswer(ctx, draftID, input.(rushestools.DecisionAnswerInput))

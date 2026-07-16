@@ -11,6 +11,7 @@ import (
 
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
+	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
 
 type fakeExecutor struct{}
@@ -122,6 +123,164 @@ func TestLLMToolInputFieldsHaveDescriptions(t *testing.T) {
 			continue
 		}
 		assertInputFieldDescriptions(t, spec.Name, spec.InputType, map[reflect.Type]bool{})
+	}
+}
+
+func TestRegistryDecodeInputCoversEveryLLMTool(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	decodedCount := 0
+	for _, spec := range registry.Specs(true) {
+		if spec.Exposure != ExposureLLM {
+			continue
+		}
+		decoded, decodeErr := registry.DecodeInput(spec.Name, minimalDecodeArguments(spec.InputType))
+		if decodeErr != nil {
+			t.Errorf("DecodeInput(%s): %v", spec.Name, decodeErr)
+			continue
+		}
+		if got := reflect.TypeOf(decoded); got != spec.InputType {
+			t.Errorf("DecodeInput(%s) type=%v want=%v", spec.Name, got, spec.InputType)
+		}
+		decodedCount++
+	}
+	if decodedCount == 0 {
+		t.Fatal("没有覆盖任何 LLM 工具")
+	}
+
+	talkingHead, err := registry.DecodeInput("timeline.edit_talking_head", map[string]any{
+		"a_roll_timeline_clip_id": "clip_v1_001",
+		"remove_utterance_ids":    []any{"utt_1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	talkingHeadInput := talkingHead.(TalkingHeadEditInput)
+	if talkingHeadInput.ARollTimelineClipID != "clip_v1_001" || len(talkingHeadInput.RemoveUtteranceIDs) != 1 {
+		t.Fatalf("talking head input=%#v", talkingHeadInput)
+	}
+	speech, err := registry.DecodeInput("speech.inspect", map[string]any{
+		"timeline_clip_id": "clip_v1_001", "query": "口播",
+	})
+	if err != nil || speech.(SpeechInspectInput).Query != "口播" {
+		t.Fatalf("speech input=%#v err=%v", speech, err)
+	}
+	if _, err := registry.DecodeInput("timeline.inspect", map[string]any{"unknown": true}); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unknown field err=%v", err)
+	}
+	if _, err := registry.DecodeInput("missing", map[string]any{}); err == nil {
+		t.Fatal("未注册工具必须拒绝解码")
+	}
+	for name, arguments := range map[string]map[string]any{
+		"render.final_mp4":       {"orientation": nil},
+		"timeline.apply_patches": {"ops": []any{nil}},
+	} {
+		if _, err := registry.DecodeInput(name, arguments); err == nil || !strings.Contains(err.Error(), "不允许为 null") {
+			t.Errorf("DecodeInput(%s) explicit null err=%v", name, err)
+		}
+	}
+}
+
+func TestRegistryConfirmationValidationRejectsUnsafeTargets(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := WithDraftID(t.Context(), "draft_confirmation_validation")
+	if err := registry.ValidateConfirmation(ctx, "timeline.inspect", map[string]any{}); err != nil {
+		t.Fatalf("timeline.inspect should be confirmable: %v", err)
+	}
+	for _, fixture := range []struct {
+		name string
+		args map[string]any
+	}{
+		{name: "missing", args: map[string]any{}},
+		{name: "asset.import_local_file", args: map[string]any{}},
+		{name: "interaction.ask_user", args: map[string]any{}},
+		{name: "interaction.confirm_action", args: map[string]any{}},
+		{name: "decision.answer", args: map[string]any{}},
+		{name: "timeline.inspect", args: map[string]any{"unknown": true}},
+		{name: "understand.materials", args: nil},
+		{name: "understand.materials", args: map[string]any{}},
+		{name: "render.final_mp4", args: map[string]any{"orientation": nil}},
+		{name: "timeline.compose_initial", args: map[string]any{"clips": []any{map[string]any{}}}},
+		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{nil}}},
+		{name: "timeline.apply_patch", args: map[string]any{"op": map[string]any{}}},
+		{name: "timeline.apply_patch", args: map[string]any{"op": map[string]any{"kind": "delete_clip"}}},
+		{name: "timeline.apply_patch", args: map[string]any{"op": map[string]any{"kind": "unknown"}}},
+		{name: "timeline.apply_patch", args: map[string]any{"op": map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}}},
+	} {
+		if err := registry.ValidateConfirmation(ctx, fixture.name, fixture.args); err == nil {
+			t.Errorf("ValidateConfirmation(%s) should fail", fixture.name)
+		}
+	}
+	if _, err := registry.DecodeInput("understand.materials", nil); err == nil || !strings.Contains(err.Error(), "必须是 JSON 对象") {
+		t.Fatalf("DecodeInput nil arguments err=%v", err)
+	}
+}
+
+func minimalDecodeArguments(input reflect.Type) map[string]any {
+	for input.Kind() == reflect.Pointer {
+		input = input.Elem()
+	}
+	arguments := map[string]any{}
+	if input.Kind() != reflect.Struct {
+		return arguments
+	}
+	for index := range input.NumField() {
+		field := input.Field(index)
+		if field.PkgPath != "" || !strings.Contains(field.Tag.Get("jsonschema"), "required") {
+			continue
+		}
+		name := strings.Split(field.Tag.Get("json"), ",")[0]
+		if name == "" || name == "-" {
+			continue
+		}
+		arguments[name] = minimalDecodeValue(field.Type)
+	}
+	return arguments
+}
+
+func minimalDecodeValue(value reflect.Type) any {
+	for value.Kind() == reflect.Pointer {
+		value = value.Elem()
+	}
+	if value == reflect.TypeFor[TimelineOp]() {
+		return timeline.CorrectOpExample(timeline.Catalog[0])
+	}
+	switch value.Kind() {
+	case reflect.String:
+		return "fixture"
+	case reflect.Bool:
+		return true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return 1
+	case reflect.Slice, reflect.Array:
+		return []any{minimalDecodeValue(value.Elem())}
+	case reflect.Map, reflect.Interface:
+		return map[string]any{}
+	case reflect.Struct:
+		return minimalDecodeArguments(value)
+	default:
+		return nil
 	}
 }
 
