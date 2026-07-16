@@ -157,6 +157,10 @@ func TestContextSummaryFailureIsObservableAndBounded(t *testing.T) {
 	if !strings.Contains(contextCompactionPrompt, "content_plan 已持久保存的决定不要重复写入摘要") {
 		t.Fatal("compaction prompt lost content_plan dedup guard")
 	}
+	if !strings.Contains(contextCompactionPrompt, "user_memories 已持久保存的偏好不要重复写入摘要") ||
+		!strings.Contains(contextCompactionPrompt, "只保留尚未固化的新偏好") {
+		t.Fatal("compaction prompt lost user memory dedup guard")
+	}
 }
 
 func TestContextSummaryFallbackKeepsLatestCorrection(t *testing.T) {
