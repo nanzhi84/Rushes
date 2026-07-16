@@ -552,20 +552,23 @@ func TestTurnStreamHubSnapshotAllTypesAndSlowSubscriber(t *testing.T) {
 		hub.Record("draft", StreamEvent{"type": typeName})
 	}
 	select {
-	case _, open := <-live:
-		if !open {
-			t.Fatal("第一条实时事件不应关闭")
+	case event, open := <-live:
+		if !open || event["type"] != "tool_step_finished" {
+			t.Fatalf("慢订阅者剩余事件=%#v open=%v", event, open)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("未收到实时事件")
 	}
-	// queue limit=2；第三条到来时慢订阅者被踢并关闭。
-	for range 3 {
-		select {
-		case <-live:
-		case <-time.After(time.Second):
-			return
+	select {
+	case event, open := <-live:
+		if !open || event["type"] != TurnStreamGap {
+			t.Fatalf("gap=%#v open=%v", event, open)
 		}
+	case <-time.After(time.Second):
+		t.Fatal("慢订阅者未收到 stream_gap")
+	}
+	if _, open := <-live; open {
+		t.Fatal("stream_gap 后慢订阅 channel 应关闭")
 	}
 	_, terminal, stop := hub.Subscribe("terminal")
 	hub.Record("terminal", StreamEvent{"type": "turn_started"})
@@ -589,4 +592,325 @@ func TestTurnStreamHubSnapshotAllTypesAndSlowSubscriber(t *testing.T) {
 	if _, err := EncodeTurnStreamFrame(StreamEvent{"bad": make(chan int)}); err == nil {
 		t.Fatal("不可 JSON 编码的 turn-stream 事件应失败")
 	}
+}
+
+func TestTurnStreamHubBoundsSnapshotsByEventCountAndBytes(t *testing.T) {
+	t.Parallel()
+	t.Run("event count", func(t *testing.T) {
+		hub := newTurnStreamHub(2, 5, DefaultTurnStreamBufferByteLimit)
+		hub.Record("draft", StreamEvent{"type": TurnStreamTurnStarted})
+		hub.Record("draft", StreamEvent{"type": TurnStreamTextDelta, "delta": "old"})
+		hub.Record("draft", StreamEvent{"type": TurnStreamToolStepStarted, "step_id": "tool"})
+		for index := range 10 {
+			hub.Record("draft", StreamEvent{
+				"type": TurnStreamTextDelta, "message_id": "message", "delta": fmt.Sprintf("delta-%d", index),
+			})
+		}
+		hub.Record("draft", StreamEvent{"type": TurnStreamMessageCompleted, "message_id": "message"})
+
+		snapshot := hub.Snapshot("draft")
+		if len(snapshot) > 5 || snapshot[0]["type"] != TurnStreamSnapshotTruncated {
+			t.Fatalf("snapshot=%#v", snapshot)
+		}
+		for _, required := range []string{
+			TurnStreamTurnStarted, TurnStreamToolStepStarted, TurnStreamMessageCompleted,
+		} {
+			if !streamSnapshotContainsType(snapshot, required) {
+				t.Fatalf("结构事件 %s 被淘汰: %#v", required, snapshot)
+			}
+		}
+		if !streamSnapshotContainsDelta(snapshot, "delta-9") || streamSnapshotContainsDelta(snapshot, "old") {
+			t.Fatalf("text delta 未按从旧到新淘汰: %#v", snapshot)
+		}
+	})
+
+	t.Run("encoded bytes", func(t *testing.T) {
+		started := StreamEvent{"type": TurnStreamTurnStarted}
+		tool := StreamEvent{"type": TurnStreamToolStepStarted, "step_id": "tool"}
+		latest := StreamEvent{"type": TurnStreamTextDelta, "message_id": "message", "delta": "latest"}
+		marker := StreamEvent{"type": TurnStreamSnapshotTruncated}
+		byteLimit := encodedEventSize(started) + encodedEventSize(tool) + encodedEventSize(latest) +
+			encodedEventSize(marker) + 8
+		hub := newTurnStreamHub(2, 100, byteLimit)
+		hub.Record("draft", started)
+		hub.Record("draft", StreamEvent{
+			"type": TurnStreamTextDelta, "message_id": "message", "delta": strings.Repeat("x", byteLimit),
+		})
+		hub.Record("draft", tool)
+		hub.Record("draft", latest)
+
+		snapshot := hub.Snapshot("draft")
+		if snapshot[0]["type"] != TurnStreamSnapshotTruncated ||
+			!streamSnapshotContainsType(snapshot, TurnStreamToolStepStarted) ||
+			!streamSnapshotContainsDelta(snapshot, "latest") {
+			t.Fatalf("snapshot=%#v", snapshot)
+		}
+		hub.mu.Lock()
+		bufferBytes := hub.buffers["draft"].bytes
+		hub.mu.Unlock()
+		if bufferBytes > byteLimit {
+			t.Fatalf("buffer bytes=%d limit=%d", bufferBytes, byteLimit)
+		}
+	})
+
+	t.Run("structure only fallback", func(t *testing.T) {
+		hub := newTurnStreamHub(2, 3, DefaultTurnStreamBufferByteLimit)
+		for index := range 5 {
+			hub.Record("draft", StreamEvent{
+				"type": TurnStreamToolStepFinished, "step_id": fmt.Sprintf("step-%d", index),
+			})
+		}
+		snapshot := hub.Snapshot("draft")
+		if len(snapshot) != 2 || snapshot[0]["type"] != TurnStreamSnapshotTruncated ||
+			snapshot[1]["step_id"] != "step-4" {
+			t.Fatalf("snapshot=%#v", snapshot)
+		}
+	})
+
+	t.Run("oversized structure", func(t *testing.T) {
+		markerBytes := encodedEventSize(StreamEvent{"type": TurnStreamSnapshotTruncated})
+		hub := newTurnStreamHub(2, 10, markerBytes+8)
+		hub.Record("draft", StreamEvent{
+			"type": TurnStreamMessageCompleted, "content": strings.Repeat("x", markerBytes+32),
+		})
+		snapshot := hub.Snapshot("draft")
+		if len(snapshot) != 1 || snapshot[0]["type"] != TurnStreamSnapshotTruncated {
+			t.Fatalf("snapshot=%#v", snapshot)
+		}
+	})
+}
+
+func TestTurnStreamHubRecoversTerminalAfterOrdinaryUnsubscribe(t *testing.T) {
+	t.Parallel()
+	hub := NewTurnStreamHub(2)
+	_, _, _, _, unsubscribe := hub.SubscribeRecoverable("draft", "client")
+	hub.Record("draft", StreamEvent{"type": TurnStreamTurnStarted})
+	unsubscribe()
+	hub.Record("draft", StreamEvent{"type": TurnStreamTurnEnded, "outcome": "finished"})
+
+	snapshot, _, acknowledge, _, stop := hub.SubscribeRecoverable("draft", "client")
+	defer stop()
+	if len(snapshot) != 2 || snapshot[0]["type"] != TurnStreamGap ||
+		snapshot[1]["type"] != TurnStreamTurnEnded {
+		t.Fatalf("普通断线后的终态恢复快照=%#v", snapshot)
+	}
+	acknowledge()
+	if remaining := hub.Snapshot("draft"); len(remaining) != 0 {
+		t.Fatalf("完整重放确认后仍保留恢复快照=%#v", remaining)
+	}
+}
+
+func TestTurnStreamHubStaleSnapshotAckDoesNotDeleteNewRecovery(t *testing.T) {
+	t.Parallel()
+	hub := NewTurnStreamHub(2)
+	_, _, _, _, unsubscribe := hub.SubscribeRecoverable("draft", "client")
+	hub.Record("draft", StreamEvent{"type": TurnStreamTurnStarted})
+	unsubscribe()
+	hub.Record("draft", StreamEvent{"type": TurnStreamTurnEnded, "turn": 1})
+	_, _, acknowledgeOld, _, stopOld := hub.SubscribeRecoverable("draft", "client")
+	defer stopOld()
+	stopOld()
+
+	hub.Record("draft", StreamEvent{"type": TurnStreamTurnStarted})
+	_, _, _, _, unsubscribeNew := hub.SubscribeRecoverable("draft", "client")
+	unsubscribeNew()
+	hub.Record("draft", StreamEvent{"type": TurnStreamTurnEnded, "turn": 2})
+	acknowledgeOld()
+
+	snapshot := hub.Snapshot("draft")
+	if len(snapshot) != 2 || snapshot[1]["turn"] != 2 {
+		t.Fatalf("旧 generation 确认误删新恢复快照=%#v", snapshot)
+	}
+}
+
+func TestTurnStreamHubSnapshotAckDoesNotCoverLaterSubscriberFailure(t *testing.T) {
+	t.Parallel()
+	hub := NewTurnStreamHub(2)
+	_, streamA, _, _, stopA := hub.SubscribeRecoverable("draft", "client-a")
+	_, streamB, _, _, stopB := hub.SubscribeRecoverable("draft", "client-b")
+	hub.Record("draft", StreamEvent{"type": TurnStreamTurnStarted})
+	<-streamA
+	<-streamB
+	hub.Record("draft", StreamEvent{"type": TurnStreamTurnEnded})
+	<-streamA
+	<-streamB
+
+	stopA()
+	stopB()
+	_, _, acknowledgeARecovery, _, stopARecovery := hub.SubscribeRecoverable("draft", "client-a")
+	defer stopARecovery()
+	acknowledgeARecovery()
+	acknowledgeARecovery()
+	if snapshot := hub.Snapshot("draft"); len(snapshot) == 0 {
+		t.Fatal("A 的恢复确认清除了尚未恢复的 client-b terminal")
+	}
+
+	_, _, acknowledgeBRecovery, _, stopBRecovery := hub.SubscribeRecoverable("draft", "client-b")
+	defer stopBRecovery()
+	acknowledgeBRecovery()
+	if snapshot := hub.Snapshot("draft"); len(snapshot) != 0 {
+		t.Fatalf("client-b 已确认但恢复快照未清理=%#v", snapshot)
+	}
+}
+
+func TestTurnStreamHubLiveTerminalAckClearsEarlierFailureForSameClient(t *testing.T) {
+	t.Parallel()
+	hub := NewTurnStreamHub(2)
+	_, first, _, _, stopFirst := hub.SubscribeRecoverable("draft", "client")
+	hub.Record("draft", StreamEvent{"type": TurnStreamTurnStarted})
+	<-first
+	stopFirst()
+
+	_, reconnected, _, acknowledgeEvent, stopReconnected := hub.SubscribeRecoverable("draft", "client")
+	defer stopReconnected()
+	hub.Record("draft", StreamEvent{"type": TurnStreamTurnEnded})
+	terminal := <-reconnected
+	acknowledgeEvent(terminal)
+	if snapshot := hub.Snapshot("draft"); len(snapshot) != 0 {
+		t.Fatalf("同一 client 成功 flush live terminal 后仍遗留恢复快照=%#v", snapshot)
+	}
+}
+
+func TestTurnStreamHubBoundsOversizedTerminalRecovery(t *testing.T) {
+	t.Parallel()
+	hub := newTurnStreamHub(2, 5, 256)
+	_, stream, _, _, stop := hub.SubscribeRecoverable("draft", "client")
+	hub.Record("draft", StreamEvent{"type": TurnStreamTurnStarted})
+	<-stream
+	hub.Record("draft", StreamEvent{
+		"type": TurnStreamTurnError, "message": strings.Repeat("x", 1024),
+	})
+	<-stream
+	stop()
+
+	snapshot := hub.Snapshot("draft")
+	if len(snapshot) != 2 || snapshot[0]["type"] != TurnStreamSnapshotTruncated ||
+		snapshot[1]["type"] != TurnStreamTurnError {
+		t.Fatalf("超大 terminal 恢复快照=%#v", snapshot)
+	}
+	hub.mu.Lock()
+	bufferBytes := hub.buffers["draft"].bytes
+	hub.mu.Unlock()
+	if bufferBytes > 256 {
+		t.Fatalf("terminal recovery bytes=%d limit=256", bufferBytes)
+	}
+}
+
+func TestTurnStreamHubBoundsRecoveryDrafts(t *testing.T) {
+	t.Parallel()
+	hub := NewTurnStreamHub(2)
+	hub.recoveryLimit = 2
+	for _, draftID := range []string{"draft-1", "draft-2", "draft-3"} {
+		_, stream, _, _, stop := hub.SubscribeRecoverable(draftID, "client")
+		hub.Record(draftID, StreamEvent{"type": TurnStreamTurnStarted})
+		<-stream
+		stop()
+		hub.Record(draftID, StreamEvent{"type": TurnStreamTurnEnded})
+	}
+	if snapshot := hub.Snapshot("draft-1"); len(snapshot) != 0 {
+		t.Fatalf("最老 recovery tombstone 未被淘汰=%#v", snapshot)
+	}
+	for _, draftID := range []string{"draft-2", "draft-3"} {
+		if snapshot := hub.Snapshot(draftID); len(snapshot) == 0 {
+			t.Fatalf("较新的 recovery tombstone %s 被误删", draftID)
+		}
+	}
+}
+
+func TestTurnStreamHubRecoveryLimitDoesNotEvictPendingDelivery(t *testing.T) {
+	t.Parallel()
+	hub := NewTurnStreamHub(2)
+	hub.recoveryLimit = 1
+	_, pendingStream, _, _, stopPending := hub.SubscribeRecoverable("pending", "pending-client")
+	hub.Record("pending", StreamEvent{"type": TurnStreamTurnStarted})
+	<-pendingStream
+	hub.Record("pending", StreamEvent{"type": TurnStreamTurnEnded})
+
+	for _, draftID := range []string{"orphan-1", "orphan-2"} {
+		_, stream, _, _, stop := hub.SubscribeRecoverable(draftID, draftID+"-client")
+		hub.Record(draftID, StreamEvent{"type": TurnStreamTurnStarted})
+		<-stream
+		stop()
+		hub.Record(draftID, StreamEvent{"type": TurnStreamTurnEnded})
+	}
+	if snapshot := hub.Snapshot("pending"); len(snapshot) == 0 {
+		t.Fatal("recovery 上限淘汰了仍在等待 live flush 的 terminal")
+	}
+	stopPending()
+	hub.mu.Lock()
+	orphanCount := 0
+	for _, buffer := range hub.buffers {
+		if buffer.recoveryGeneration != 0 && len(buffer.pendingSubscribers) == 0 {
+			orphanCount++
+		}
+	}
+	hub.mu.Unlock()
+	if orphanCount > 1 {
+		t.Fatalf("pending 转 orphan 后 recovery 数量=%d limit=1", orphanCount)
+	}
+	if snapshot := hub.Snapshot("orphan-1"); len(snapshot) != 0 {
+		t.Fatalf("最老 orphan recovery 未被淘汰=%#v", snapshot)
+	}
+	if snapshot := hub.Snapshot("orphan-2"); len(snapshot) == 0 {
+		t.Fatal("最新 orphan recovery 被误删")
+	}
+}
+
+func TestTurnStreamHubBoundsLiveAckToOrphanRecovery(t *testing.T) {
+	t.Parallel()
+	hub := NewTurnStreamHub(2)
+	hub.recoveryLimit = 1
+	_, failedStream, _, _, stopFailed := hub.SubscribeRecoverable("live-ack", "failed-client")
+	hub.Record("live-ack", StreamEvent{"type": TurnStreamTurnStarted})
+	<-failedStream
+	stopFailed()
+	_, liveStream, _, acknowledgeLive, stopLive := hub.SubscribeRecoverable("live-ack", "live-client")
+	defer stopLive()
+	hub.Record("live-ack", StreamEvent{"type": TurnStreamTurnEnded})
+	terminal := <-liveStream
+
+	for _, draftID := range []string{"orphan-1", "orphan-2"} {
+		_, stream, _, _, stop := hub.SubscribeRecoverable(draftID, draftID+"-client")
+		hub.Record(draftID, StreamEvent{"type": TurnStreamTurnStarted})
+		<-stream
+		stop()
+		hub.Record(draftID, StreamEvent{"type": TurnStreamTurnEnded})
+	}
+	acknowledgeLive(terminal)
+
+	hub.mu.Lock()
+	orphanCount := 0
+	for _, buffer := range hub.buffers {
+		if buffer.recoveryGeneration != 0 && len(buffer.pendingSubscribers) == 0 {
+			orphanCount++
+		}
+	}
+	hub.mu.Unlock()
+	if orphanCount > 1 {
+		t.Fatalf("live ACK 转 orphan 后 recovery 数量=%d limit=1", orphanCount)
+	}
+	if snapshot := hub.Snapshot("live-ack"); len(snapshot) != 0 {
+		t.Fatalf("最老的 live ACK orphan 未被淘汰=%#v", snapshot)
+	}
+	if snapshot := hub.Snapshot("orphan-2"); len(snapshot) == 0 {
+		t.Fatal("最新 orphan recovery 被误删")
+	}
+}
+
+func streamSnapshotContainsType(snapshot []StreamEvent, typeName string) bool {
+	for _, event := range snapshot {
+		if event["type"] == typeName {
+			return true
+		}
+	}
+	return false
+}
+
+func streamSnapshotContainsDelta(snapshot []StreamEvent, delta string) bool {
+	for _, event := range snapshot {
+		if event["type"] == TurnStreamTextDelta && event["delta"] == delta {
+			return true
+		}
+	}
+	return false
 }

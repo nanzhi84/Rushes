@@ -85,6 +85,8 @@
     "model_retry",
     "subagent_progress",
     "context_compaction_failed",
+    "stream_snapshot_truncated",
+    "stream_gap",
     "turn_ended",
     "turn_error"
   ]

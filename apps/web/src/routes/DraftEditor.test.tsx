@@ -472,6 +472,7 @@ describe("DraftEditorView", () => {
     renderEditor(fetchMock);
 
     const stream = turnStreamSource();
+    expect(new URL(stream.url).searchParams.get("turn_stream_client_id")).toBeTruthy();
     emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
     emitTurnStream(stream, { type: "text_delta", message_id: "a1", kind: "assistant", delta: "正在" });
 
@@ -653,6 +654,46 @@ describe("DraftEditorView", () => {
     expect(screen.queryByText("流式临时文本")).toBeNull();
     expect(screen.getAllByText("落库后的最终回复")).toHaveLength(1);
   });
+
+  it.each(["stream_snapshot_truncated", "stream_gap", "error"] as const)(
+    "turn-stream %s 立即刷新历史消息",
+    async (signal) => {
+      let refreshed = false;
+      const fetchMock = mockFetch({
+        decision: null,
+        messages: () =>
+          refreshed
+            ? [
+                {
+                  message_id: "gap_recovery",
+                  role: "assistant",
+                  kind: "reply",
+                  content: "缺口后的落库消息",
+                  created_at: "2026-01-01T00:00:05Z"
+                }
+              ]
+            : []
+      });
+      renderEditor(fetchMock);
+      await waitFor(() =>
+        expect(
+          vi.mocked(fetchMock).mock.calls.filter(
+            ([input, init]) => String(input).includes("/messages") && init?.method !== "POST"
+          ).length
+        ).toBeGreaterThan(0)
+      );
+
+      refreshed = true;
+      const stream = turnStreamSource();
+      if (signal === "error") {
+        act(() => stream.emit("error", {}));
+      } else {
+        emitTurnStream(stream, { type: signal });
+      }
+
+      expect(await screen.findByText("缺口后的落库消息")).toBeTruthy();
+    }
+  );
 
   it("结构化 Decision 渲染五个选项并点击提交 button answer", async () => {
     const answerRequests: Array<{ url: string; body: unknown }> = [];

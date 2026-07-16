@@ -2052,7 +2052,10 @@ export interface operations {
     };
     draft_events_api_drafts__draft_id__events_get: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description Stable per-consumer token used to acknowledge turn-stream recovery snapshots. */
+                turn_stream_client_id: string;
+            };
             header?: never;
             path: {
                 draft_id: string;
@@ -3036,7 +3039,10 @@ export interface operations {
     };
     draft_turn_stream_api_drafts__draft_id__turn_stream_get: {
         parameters: {
-            query?: never;
+            query: {
+                /** @description Stable per-consumer token used to acknowledge turn-stream recovery snapshots. */
+                turn_stream_client_id: string;
+            };
             header?: never;
             path: {
                 draft_id: string;

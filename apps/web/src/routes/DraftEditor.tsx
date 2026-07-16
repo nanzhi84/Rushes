@@ -293,10 +293,13 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   }, [documentVisible, draftId, scheduleDraftQueryInvalidation]);
 
   // turn-stream 订阅置于领域 /events 订阅之后，保证 /events 是首个 EventSource。
-  const finishTurn = useCallback(() => {
-    setAwaitingTurnEnd(false);
+  const refreshMessages = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) });
   }, [draftId, queryClient]);
+  const finishTurn = useCallback(() => {
+    setAwaitingTurnEnd(false);
+    refreshMessages();
+  }, [refreshMessages]);
   const {
     items: streamItems,
     turnActive,
@@ -305,7 +308,8 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     reset: resetTurnStream
   } = useTurnStream(draftId, {
     onTurnEnded: finishTurn,
-    onTurnError: finishTurn
+    onTurnError: finishTurn,
+    onStreamGap: refreshMessages
   });
 
   // 当前回合以流式列表为准。历史里同 message_id / step_id 的落库副本让位，

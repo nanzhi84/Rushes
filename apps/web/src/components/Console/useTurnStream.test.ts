@@ -78,6 +78,15 @@ describe("reduceTurnStream · subagent_progress", () => {
     expect(reset).toEqual(INITIAL_STATE);
   });
 
+  it("流缺口信号不伪造回合终态", () => {
+    const running = apply([
+      { type: "turn_started", turn_id: "turn_gap" },
+      { type: "text_delta", message_id: "active", delta: "仍在执行" }
+    ]);
+    expect(reduceTurnStream(running, { type: "stream_gap" })).toBe(running);
+    expect(reduceTurnStream(running, { type: "stream_snapshot_truncated" })).toBe(running);
+  });
+
   it("忽略非法重试序号，并在回合结束时清空重试状态", () => {
     const invalid = apply([
       { type: "turn_started", turn_id: "turn_1" },
