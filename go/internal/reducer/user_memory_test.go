@@ -399,3 +399,117 @@ func TestUserMemoryDatabaseFailuresRollBackMutations(t *testing.T) {
 		t.Fatalf("memories after failures=%#v err=%v", memories, err)
 	}
 }
+
+func TestUserMemoryCapacityEvictionRollsBackWhenDeleteFails(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft_memory_eviction_failure")
+	seedUserMemoryMessage(t, database, "draft_memory_eviction_failure", "message_eviction_failure")
+	base := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	upserts := make([]UserMemoryRow, 0, storage.UserMemoryLimit)
+	for index := range storage.UserMemoryLimit {
+		upserts = append(upserts, UserMemoryRow{
+			Key: fmt.Sprintf("eviction_%02d", index), Kind: "preference",
+			Statement:    fmt.Sprintf("用户偏好编号 %02d", index),
+			EvidenceKind: storage.UserMemoryEvidenceMessage,
+			EvidenceID:   "message_eviction_failure", SourceDraftID: "draft_memory_eviction_failure",
+			LastConfirmedAt: base.Add(time.Duration(index) * time.Second).Format(time.RFC3339Nano),
+		})
+	}
+	if result, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorAgent, ResultRows: ResultRows{UserMemoryUpserts: upserts},
+	}); err != nil || result.Status != StatusApplied {
+		t.Fatalf("seed result=%#v err=%v", result, err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		CREATE TRIGGER block_oldest_memory_delete BEFORE DELETE ON user_memories
+		WHEN OLD.memory_key = 'eviction_00'
+		BEGIN SELECT RAISE(ABORT, 'blocked eviction'); END`); err != nil {
+		t.Fatal(err)
+	}
+	newest := UserMemoryRow{
+		Key: "eviction_50", Kind: "preference", Statement: "最新用户偏好",
+		EvidenceKind: storage.UserMemoryEvidenceMessage,
+		EvidenceID:   "message_eviction_failure", SourceDraftID: "draft_memory_eviction_failure",
+		LastConfirmedAt: base.Add(time.Hour).Format(time.RFC3339Nano),
+	}
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorAgent, ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{newest}},
+	}); err == nil {
+		t.Fatal("eviction delete failure should roll back the preceding upsert")
+	}
+	memories, err := storage.ListUserMemories(t.Context(), database.Read())
+	if err != nil || len(memories) != storage.UserMemoryLimit {
+		t.Fatalf("memories=%#v err=%v", memories, err)
+	}
+	keys := map[string]bool{}
+	for _, memory := range memories {
+		keys[memory.Key] = true
+	}
+	if !keys["eviction_00"] || keys["eviction_50"] {
+		t.Fatalf("eviction failure keys=%v", keys)
+	}
+}
+
+func TestUserMemoryCorruptRowsFailWithoutCommittingEarlierResultRows(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft_memory_corrupt")
+	if _, err := database.Write().ExecContext(t.Context(), `
+		DROP TABLE user_memories;
+		CREATE TABLE user_memories(
+			memory_key TEXT, kind TEXT, statement TEXT, evidence_kind TEXT,
+			evidence_id TEXT, source_draft_id TEXT, created_at TEXT, last_confirmed_at TEXT
+		);
+		INSERT INTO user_memories VALUES(
+			NULL,'preference','损坏记录','user_message','message_corrupt',
+			'draft_memory_corrupt','2026-07-16T00:00:00Z','2026-07-16T00:00:00Z'
+		)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.ListUserMemories(t.Context(), database.Read()); err == nil {
+		t.Fatal("nullable corrupt memory row should fail typed storage scan")
+	}
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorUser,
+		ResultRows: ResultRows{
+			Message: &MessageRow{
+				ID: "message_before_corrupt_clear", DraftID: "draft_memory_corrupt",
+				Role: "assistant", Kind: "reply", Content: "不应提交",
+			},
+			UserMemoryClearAll: true,
+		},
+	}); err == nil {
+		t.Fatal("corrupt key should fail clear-all scan")
+	}
+	var messageCount int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM messages WHERE message_id='message_before_corrupt_clear'`,
+	).Scan(&messageCount); err != nil || messageCount != 0 {
+		t.Fatalf("message count=%d err=%v", messageCount, err)
+	}
+}
+
+func TestUserMemoryEvidenceStorageFailureDoesNotWriteMemory(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft_memory_evidence_failure")
+	seedUserMemoryMessage(t, database, "draft_memory_evidence_failure", "message_evidence_failure")
+	if _, err := database.Write().ExecContext(t.Context(), "DROP TABLE messages"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{{
+			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
+			EvidenceKind: storage.UserMemoryEvidenceMessage,
+			EvidenceID:   "message_evidence_failure", SourceDraftID: "draft_memory_evidence_failure",
+		}}},
+	}); err == nil {
+		t.Fatal("evidence storage failure should reject memory upsert")
+	}
+	memories, err := storage.ListUserMemories(t.Context(), database.Read())
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("memories=%#v err=%v", memories, err)
+	}
+}
