@@ -265,6 +265,82 @@
       }
     },
     {
+      "name": "memory.update",
+      "description": "仅当当前用户明确表达跨项目稳定的偏好、习惯、纠正，或明确要求忘记已有长期记忆时更新用户画像；一次性草稿要求和模型自己的创作判断不得写入",
+      "parameters": {
+        "anyOf": [
+          {
+            "required": [
+              "entries"
+            ]
+          },
+          {
+            "required": [
+              "remove_keys"
+            ]
+          }
+        ],
+        "properties": {
+          "entries": {
+            "items": {
+              "properties": {
+                "key": {
+                  "maxLength": 40,
+                  "minLength": 2,
+                  "pattern": "^[a-z0-9_]{2,40}$",
+                  "description": "稳定语义主键，例如 pacing、subtitle_style；同键覆盖旧记忆",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "preference",
+                    "correction",
+                    "habit"
+                  ],
+                  "description": "preference 长期偏好，correction 用户纠正，habit 稳定使用习惯",
+                  "type": "string"
+                },
+                "statement": {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "description": "一句简体中文陈述用户当前明确表达的跨项目稳定偏好、纠正或习惯；不得写模型判断",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "key",
+                "kind",
+                "statement"
+              ],
+              "type": "object"
+            },
+            "maxItems": 8,
+            "minItems": 1,
+            "uniqueItems": true,
+            "description": "要写入或覆盖的长期记忆；一次性草稿要求不要入库",
+            "type": "array"
+          },
+          "remove_keys": {
+            "items": {
+              "maxLength": 40,
+              "minLength": 2,
+              "pattern": "^[a-z0-9_]{2,40}$",
+              "description": "稳定语义主键，例如 pacing、subtitle_style；同键覆盖旧记忆",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "uniqueItems": true,
+            "description": "用户当前明确要求忘记的长期记忆键；不得与 entries 中的 key 重复",
+            "type": "array"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
       "name": "plan.update",
       "description": "以 RFC 7396 语义增量合并 plan；reset=true 时先清空旧计划再应用该对象，用于在跨回合继续工作前保存已确定的计划结构",
       "parameters": {

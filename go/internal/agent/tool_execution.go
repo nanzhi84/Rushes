@@ -66,6 +66,8 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 		return service.toolDecisionAnswer(ctx, draftID, input.(rushestools.DecisionAnswerInput))
 	case "plan.update":
 		return service.toolPlanUpdate(ctx, draftID, input.(rushestools.PlanUpdateInput))
+	case "memory.update":
+		return service.toolMemoryUpdate(ctx, draftID, input.(rushestools.MemoryUpdateInput))
 	case "timeline.compose_initial":
 		return service.toolComposeInitial(ctx, draftID, input.(rushestools.ComposeInitialInput))
 	case "timeline.apply_patch":

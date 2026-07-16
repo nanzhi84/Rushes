@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 12
+const schemaVersion = 13
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -399,5 +399,26 @@ CREATE TABLE IF NOT EXISTS rewind_restore_requests (
     created_at TEXT NOT NULL,
     PRIMARY KEY(draft_id, idempotency_key),
     CHECK(mode IN ('timeline','conversation','both'))
+);
+`
+
+// schemaV13 persists workspace-wide user preferences separately from draft
+// state. Evidence fields deliberately have no foreign keys: a remembered user
+// statement survives rewind and draft cleanup, while reducer validation still
+// requires a real user message or answered decision at write time.
+const schemaV13 = `
+CREATE TABLE IF NOT EXISTS user_memories (
+    memory_key TEXT PRIMARY KEY
+        CHECK(length(memory_key) BETWEEN 2 AND 40)
+        CHECK(memory_key NOT GLOB '*[^a-z0-9_]*'),
+    kind TEXT NOT NULL CHECK(kind IN ('preference','correction','habit')),
+    statement TEXT NOT NULL
+        CHECK(length(trim(statement)) > 0 AND length(statement) <= 200),
+    evidence_kind TEXT NOT NULL
+        CHECK(evidence_kind IN ('user_message','decision_answer')),
+    evidence_id TEXT NOT NULL CHECK(length(evidence_id) > 0),
+    source_draft_id TEXT NOT NULL CHECK(length(source_draft_id) > 0),
+    created_at TEXT NOT NULL,
+    last_confirmed_at TEXT NOT NULL
 );
 `

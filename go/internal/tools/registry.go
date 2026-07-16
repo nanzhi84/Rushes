@@ -48,7 +48,8 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 	builders := []func(*Registry) error{
 		registerAssetImport, registerAssetList, registerUnderstand, registerShotSearch, registerAudioBeatAnalysis,
 		registerSpeechPauseAnalysis, registerSpeechInspect, registerAskUser,
-		registerDecisionAnswer, registerPlanUpdate, registerComposeInitial, registerApplyPatch, registerApplyPatchBatch,
+		registerDecisionAnswer, registerPlanUpdate, registerMemoryUpdate,
+		registerComposeInitial, registerApplyPatch, registerApplyPatchBatch,
 		registerBeatRecut, registerTalkingHeadEdit,
 		registerTimelineValidate, registerTimelineInspect, registerRenderPreview,
 		registerRenderFinal, registerRenderStatus, registerInspectPreview,
@@ -460,6 +461,15 @@ func registerPlanUpdate(registry *Registry) error {
 		registry,
 		"plan.update",
 		"以 RFC 7396 语义增量合并 plan；reset=true 时先清空旧计划再应用该对象，用于在跨回合继续工作前保存已确定的计划结构",
+		nil, ExposureLLM, false,
+	)
+}
+
+func registerMemoryUpdate(registry *Registry) error {
+	return addTool[MemoryUpdateInput, ToolResult](
+		registry,
+		"memory.update",
+		"仅当当前用户明确表达跨项目稳定的偏好、习惯、纠正，或明确要求忘记已有长期记忆时更新用户画像；一次性草稿要求和模型自己的创作判断不得写入",
 		nil, ExposureLLM, false,
 	)
 }

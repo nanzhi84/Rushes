@@ -137,6 +137,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	if item.Kind == QueueUserMessage {
 		ctx = withContextMessageBoundary(ctx, item.ItemID)
 	}
+	ctx = withQueueMemoryEvidence(ctx, item)
 	recoveryState := newToolRecoveryState()
 	ctx = withToolRecoveryState(ctx, recoveryState)
 	ctx = withTurnInteractionState(ctx, newTurnInteractionState())
