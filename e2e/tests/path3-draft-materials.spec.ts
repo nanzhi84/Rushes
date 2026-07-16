@@ -3,7 +3,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 type MaterialsResponse = {
-  assets: Array<{ asset_id: string; filename: string }>;
+  assets: Array<{
+    asset_id: string;
+    filename: string;
+    ingest_status: string;
+    usable: boolean;
+    jobs: Array<{ kind: string; status: string }>;
+  }>;
 };
 
 type DraftResponse = {
@@ -174,7 +180,10 @@ async function waitForImportedAsset(
       `/api/drafts/${draftId}/materials`
     );
     const asset = materials.assets.find((item) => item.filename === FIXTURE_NAME);
-    if (asset) {
+    const ingestSucceeded = asset?.jobs.some(
+      (job) => job.kind === "ingest" && job.status === "succeeded"
+    );
+    if (asset?.ingest_status === "ready" && asset.usable && ingestSucceeded) {
       return asset.asset_id;
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
