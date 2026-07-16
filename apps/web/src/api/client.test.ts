@@ -119,6 +119,32 @@ describe("draft api client functions", () => {
     expect(init?.body).toBe(JSON.stringify({ reason: "user_cancelled" }));
   });
 
+  it("rewind 检查点列表与恢复请求使用草稿专用路由", async () => {
+    const fetchMock = vi.fn(async (..._args: unknown[]) =>
+      jsonResponse({ draft_id: "draft 1", checkpoints: [] })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.rewindCheckpoints("draft 1");
+    await api.restoreRewindCheckpoint("draft 1", {
+      checkpoint_id: "rewind/1",
+      idempotency_key: "rewind-request-1",
+      mode: "both"
+    });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "/api/drafts/draft%201/rewind/checkpoints"
+    );
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/drafts/draft%201/rewind");
+    const init = fetchMock.mock.calls[1]?.[1] as RequestInit | undefined;
+    expect(init).toMatchObject({ method: "POST" });
+    expect(init?.body).toBe(JSON.stringify({
+      checkpoint_id: "rewind/1",
+      idempotency_key: "rewind-request-1",
+      mode: "both"
+    }));
+  });
+
 });
 
 function jsonResponse(payload: unknown): Response {

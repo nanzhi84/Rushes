@@ -39,7 +39,7 @@ func ListMessages(ctx context.Context, query Querier, draftID string, limit int)
 		SELECT message_id,draft_id,role,kind,content,created_at FROM (
 			SELECT m.message_id,m.draft_id,m.role,m.kind,m.content,m.created_at,m.rowid
 			FROM messages m
-			WHERE m.draft_id=? AND m.rowid >= COALESCE((
+			WHERE m.draft_id=? AND m.rewound_at IS NULL AND m.rowid >= COALESCE((
 				SELECT anchor.rowid
 				FROM drafts d JOIN messages anchor ON anchor.message_id=d.messages_tail_ref
 				WHERE d.draft_id=?
@@ -82,7 +82,7 @@ func ListMessagesAfter(
 	rows, err := query.QueryContext(ctx, `
 		SELECT m.message_id,m.draft_id,m.role,m.kind,m.content,m.created_at
 		FROM messages m
-		WHERE m.draft_id=?
+		WHERE m.draft_id=? AND m.rewound_at IS NULL
 		AND m.rowid >= COALESCE((
 			SELECT anchor.rowid
 			FROM drafts d JOIN messages anchor ON anchor.message_id=d.messages_tail_ref

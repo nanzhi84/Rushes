@@ -51,6 +51,7 @@ var EventRegistry = map[string]EventSpec{
 	"DecisionAnswered":               {Mode: VersionStrict, MergeKeys: []string{"decision_id"}, DraftScope: true},
 	"ConversationContextCleared":     {Mode: VersionStrict, DraftScope: true},
 	"TimelineVersionCreated":         {Mode: VersionStrict, DraftScope: true},
+	"TimelineVersionRestored":        {Mode: VersionStrict, DraftScope: true},
 	"TimelineValidated":              {Mode: VersionStrict, DraftScope: true},
 	"TimelineValidationFailed":       {Mode: VersionStrict, DraftScope: true},
 	"PreviewRendered":                {Mode: VersionMerge, MergeKeys: []string{"timeline_version", "artifact_id"}, DraftScope: true},
@@ -103,6 +104,19 @@ func (event Event) Validate() error {
 	for _, key := range spec.MergeKeys {
 		if valueForKey(event, key) == "" {
 			return fmt.Errorf("事件 %s 缺少 merge key %s", event.Type, key)
+		}
+	}
+	if event.Type == "TimelineVersionRestored" {
+		mode := stringValue(event.Payload["mode"])
+		if stringValue(event.Payload["checkpoint_id"]) == "" ||
+			stringValue(event.Payload["restore_checkpoint_id"]) == "" {
+			return errors.New("事件 TimelineVersionRestored 缺少 checkpoint_id")
+		}
+		if mode != "timeline" && mode != "conversation" && mode != "both" {
+			return errors.New("事件 TimelineVersionRestored mode 无效")
+		}
+		if mode != "conversation" && stringValue(event.Payload["timeline_version"]) == "" {
+			return errors.New("事件 TimelineVersionRestored 缺少 timeline_version")
 		}
 	}
 	return nil

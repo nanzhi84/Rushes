@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef } from "react";
 import { useDocumentVisibility } from "../../app/use_document_visibility";
 import { acquireApiEventSource } from "../../auth";
 
@@ -107,6 +107,8 @@ export const INITIAL_STATE: TurnStreamState = {
 // 纯 reducer：便于单测，也让重连快照重放（turn_started 起头）能从头重建状态。
 export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent): TurnStreamState {
   switch (event.type) {
+    case "local_reset":
+      return INITIAL_STATE;
     case "turn_started":
       // 新回合（或重连重放）从零重建，避免 text_delta 被重复追加。
       return { items: [], turnActive: true, modelRetry: null, subagentProgress: [] };
@@ -226,11 +228,12 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
 export function useTurnStream(
   draftId: string,
   options: UseTurnStreamOptions = {}
-): TurnStreamState {
+): TurnStreamState & { reset: () => void } {
   const [state, dispatch] = useReducer(reduceTurnStream, INITIAL_STATE);
   const optionsRef = useRef(options);
   optionsRef.current = options;
   const documentVisible = useDocumentVisibility();
+  const reset = useCallback(() => dispatch({ type: "local_reset" }), []);
 
   useEffect(() => {
     if (!documentVisible) {
@@ -261,7 +264,7 @@ export function useTurnStream(
     };
   }, [documentVisible, draftId]);
 
-  return state;
+  return { ...state, reset };
 }
 
 export function normalizeTurnEndedEvent(event: TurnStreamEvent): TurnEndedEvent {

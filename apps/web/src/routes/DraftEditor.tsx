@@ -6,6 +6,7 @@ import {
   ArrowUp,
   Captions,
   Crop,
+  History,
   Home,
   Link2,
   ListPlus,
@@ -28,6 +29,7 @@ import {
   type DecisionAnswer,
   type MaterialAsset,
   type MessageRecord,
+  type RewindRestoreRequest,
   type TimelineClipJson,
   type TimelineJson
 } from "../api/client";
@@ -36,6 +38,7 @@ import { queryKeys } from "../app/query_client";
 import { useDocumentVisibility } from "../app/use_document_visibility";
 import { acquireApiEventSource, ApiError } from "../auth";
 import { AssistantThread } from "../components/Console/AssistantThread";
+import { RewindPanel } from "../components/Console/RewindPanel";
 import { useTurnStream } from "../components/Console/useTurnStream";
 import {
   markDecisionAnswered,
@@ -77,6 +80,11 @@ export function DraftEditorPage(): ReactElement {
   return <DraftEditorView draftId={draftId} />;
 }
 
+type ConversationHistory = {
+  messages: ConsoleMessage[];
+  rewoundMessageCount: number;
+};
+
 export function DraftEditorView({ draftId }: { draftId: string }): ReactElement {
   const queryClient = useQueryClient();
   const {
@@ -106,6 +114,8 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [timelineEditError, setTimelineEditError] = useState<string | null>(null);
   const [conversationError, setConversationError] = useState<string | null>(null);
+  const [rewindOpen, setRewindOpen] = useState(false);
+  const [selectedRewindCheckpointId, setSelectedRewindCheckpointId] = useState<string | null>(null);
   const optimisticMessageSequenceRef = useRef(0);
   const timelineBodyRef = useRef<HTMLDivElement | null>(null);
   const timelineViewerRef = useRef<TimelineViewerHandle | null>(null);
@@ -122,9 +132,17 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     queryKey: queryKeys.messages(draftId),
     queryFn: async () => {
       const response = await api.getDraftMessages(draftId);
-      return response.messages.map(toConsoleMessage);
+      return {
+        messages: response.messages.map(toConsoleMessage),
+        rewoundMessageCount: response.rewound_message_count
+      };
     },
-    initialData: [] as ConsoleMessage[]
+    initialData: { messages: [] as ConsoleMessage[], rewoundMessageCount: 0 }
+  });
+
+  const rewindQuery = useQuery({
+    queryKey: queryKeys.rewindCheckpoints(draftId),
+    queryFn: () => api.rewindCheckpoints(draftId)
   });
 
   const decisionQuery = useQuery({
@@ -164,7 +182,26 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   });
 
   const currentDecision = decisionQuery.data?.decision ?? null;
-  const historyMessages = messagesQuery.data ?? [];
+  const historyMessages = messagesQuery.data.messages;
+  const rewoundMessageCount = messagesQuery.data.rewoundMessageCount;
+  const rewindCheckpoints = rewindQuery.data?.checkpoints ?? [];
+  const rewindCheckpointByItem = useMemo(() => {
+    const result: Record<string, string> = {};
+    for (const checkpoint of rewindCheckpoints) {
+      const messageEntry = checkpoint.trigger_kind === "user_message";
+      const attachedToolEntry =
+        checkpoint.trigger_kind === "timeline_write" &&
+        checkpoint.anchor_message_id !== checkpoint.anchor_turn_id;
+      if (
+        checkpoint.anchor_message_id &&
+        (messageEntry || attachedToolEntry) &&
+        result[checkpoint.anchor_message_id] === undefined
+      ) {
+        result[checkpoint.anchor_message_id] = checkpoint.checkpoint_id;
+      }
+    }
+    return result;
+  }, [rewindCheckpoints]);
   const timelinePayload = timelineQuery.data ?? null;
   const editorTimeline = editorSnapshot?.timeline ?? timelinePayload?.timeline ?? null;
   const previewSrc = timelinePayload?.preview_id
@@ -212,6 +249,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
           queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
           queryClient.invalidateQueries({ queryKey: ["timeline", draftId] }),
           queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
+          queryClient.invalidateQueries({ queryKey: queryKeys.rewindCheckpoints(draftId) }),
           queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
           queryClient.invalidateQueries({ queryKey: queryKeys.costs(draftId) }),
           queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) })
@@ -263,7 +301,8 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     items: streamItems,
     turnActive,
     modelRetry,
-    subagentProgress
+    subagentProgress,
+    reset: resetTurnStream
   } = useTurnStream(draftId, {
     onTurnEnded: finishTurn,
     onTurnError: finishTurn
@@ -290,10 +329,10 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         content,
         createdAt: new Date().toISOString()
       };
-      queryClient.setQueryData<ConsoleMessage[]>(queryKeys.messages(draftId), (current) => [
-        ...(current ?? []),
-        optimistic
-      ]);
+      queryClient.setQueryData<ConversationHistory>(queryKeys.messages(draftId), (current) => ({
+        messages: [...(current?.messages ?? []), optimistic],
+        rewoundMessageCount: current?.rewoundMessageCount ?? 0
+      }));
     },
     onError: () => setAwaitingTurnEnd(false)
   });
@@ -319,6 +358,33 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
       setConversationError(jobCancelErrorMessage(error));
       await queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) });
     }
+  });
+
+  const restoreRewind = useMutation({
+    mutationFn: ({ checkpointId, mode, idempotencyKey }: {
+      checkpointId: string;
+      mode: RewindRestoreRequest["mode"];
+      idempotencyKey: string;
+    }) => api.restoreRewindCheckpoint(draftId, {
+      checkpoint_id: checkpointId,
+      idempotency_key: idempotencyKey,
+      mode
+    }),
+    onMutate: () => setConversationError(null),
+    onSuccess: async () => {
+      resetTurnStream();
+      setAwaitingTurnEnd(false);
+      setStructuredItems([]);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.timeline(draftId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.rewindCheckpoints(draftId) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) })
+      ]);
+    },
+    onError: (error) => setConversationError(rewindErrorMessage(error))
   });
 
   const clearConversation = useMutation({
@@ -807,6 +873,16 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             <div className="flex items-center gap-2">
               <button
                 type="button"
+                className="inline-flex h-6 items-center gap-1 rounded-sm px-1.5 text-2xs text-fg-faint hover:bg-hover hover:text-fg"
+                aria-label="打开回退检查点"
+                aria-expanded={rewindOpen}
+                onClick={() => setRewindOpen((current) => !current)}
+              >
+                <History size={12} strokeWidth={1.7} aria-hidden />
+                回退
+              </button>
+              <button
+                type="button"
                 className="inline-flex h-6 items-center gap-1 rounded-sm px-1.5 text-2xs text-fg-faint hover:bg-hover hover:text-fg disabled:opacity-35"
                 aria-label="清空对话上下文"
                 title="清空对话；保留素材与时间线"
@@ -833,9 +909,38 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             </div>
           </div>
 
+          {rewindOpen ? (
+            <RewindPanel
+              checkpoints={rewindCheckpoints}
+              selectedCheckpointId={selectedRewindCheckpointId}
+              loading={rewindQuery.isLoading}
+              pending={restoreRewind.isPending}
+              onSelect={setSelectedRewindCheckpointId}
+              onRestore={(mode) => {
+                if (selectedRewindCheckpointId) {
+                  restoreRewind.mutate({
+                    checkpointId: selectedRewindCheckpointId,
+                    idempotencyKey: crypto.randomUUID(),
+                    mode
+                  });
+                }
+              }}
+              onClose={() => setRewindOpen(false)}
+            />
+          ) : null}
+
           {conversationError ? (
             <div className="shrink-0 border-b border-danger/30 bg-danger/8 px-3 py-1 text-2xs text-danger" role="alert">
               {conversationError}
+            </div>
+          ) : null}
+
+          {rewoundMessageCount > 0 ? (
+            <div
+              className="shrink-0 border-b border-line bg-panel px-3 py-1 text-center text-2xs text-fg-faint"
+              role="status"
+            >
+              已回退并折叠 {rewoundMessageCount} 条历史消息
             </div>
           ) : null}
 
@@ -849,6 +954,11 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             subagentProgress={subagentProgress}
             onCancelJob={(jobId) => cancelJob.mutate(jobId)}
             cancelPendingJobId={cancelJob.isPending ? (cancelJob.variables ?? null) : null}
+            rewindCheckpointByItem={rewindCheckpointByItem}
+            onOpenRewind={(checkpointId) => {
+              setSelectedRewindCheckpointId(checkpointId);
+              setRewindOpen(true);
+            }}
           />
 
           {sideDecisionItem ? (
@@ -1656,6 +1766,29 @@ function jobCancelErrorMessage(error: unknown): string {
     return "任务状态已变化，无法取消；已刷新当前状态。";
   }
   return `取消任务失败：${reason}`;
+}
+
+function rewindErrorMessage(error: unknown): string {
+  const reason = timelinePatchErrorMessage(error);
+  if (reason === "rewind_checkpoint_not_found") {
+    return "检查点已被清理，请刷新后选择新的检查点。";
+  }
+  if (reason === "rewind_checkpoint_has_no_timeline") {
+    return "这个检查点没有可恢复的时间线，请改用仅对话。";
+  }
+  if (reason === "rewind_cancellation_timeout") {
+    return "当前任务尚未安全停止，请稍后重试恢复。";
+  }
+  if (reason === "turn_queue_closed") {
+    return "剪辑任务队列已停止，请重启本地服务后再恢复。";
+  }
+  if (reason === "rewind_idempotency_key_reused") {
+    return "这次恢复请求已用于另一个检查点，请重新操作。";
+  }
+  if (reason === "version_conflict" || reason === "API 请求失败：409") {
+    return "草稿刚刚发生了变化，请刷新检查点后重试。";
+  }
+  return `恢复检查点失败：${reason}`;
 }
 
 function formatTimecode(sec: number): string {

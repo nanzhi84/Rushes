@@ -233,6 +233,111 @@ func TestContextManagerKeepsSmallTimelinePatchIncremental(t *testing.T) {
 	}
 }
 
+func TestContextManagerRebuildsWorldStateAfterRewindWithoutHashMismatch(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	const draftID = "draft_context_rewind"
+	createAgentDraft(t, database, draftID)
+	insertContextMessage(t, database, storage.Message{
+		ID: "rewind_user_one", DraftID: draftID, Role: "user", Kind: "user", Content: "保留第一版",
+	})
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+		AssetID: "asset_rewind", AssetKind: "video",
+		SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted, persistErr := service.persistTimeline(
+		t.Context(), draftID, document, "rewind_context_initial",
+	); persistErr != nil || persisted.Status != "succeeded" {
+		t.Fatalf("persist initial=%#v err=%v", persisted, persistErr)
+	}
+	manager := NewContextManager(database)
+	before, err := manager.Build(t.Context(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertContextMessage(t, database, storage.Message{
+		ID: "rewind_user_two", DraftID: draftID, Role: "user", Kind: "user", Content: "把声音压低",
+	})
+	document.Version = 2
+	document.TimelineID = draftID + ":v2"
+	document.Tracks[0].Clips[0].GainDB = -3
+	if persisted, persistErr := service.persistTimeline(
+		t.Context(), draftID, document, "rewind_context_edit",
+	); persistErr != nil || persisted.Status != "succeeded" {
+		t.Fatalf("persist edit=%#v err=%v", persisted, persistErr)
+	}
+	if _, err := manager.Build(t.Context(), draftID); err != nil {
+		t.Fatalf("build edited state: %v", err)
+	}
+	checkpoints, err := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target storage.RewindCheckpoint
+	for _, checkpoint := range checkpoints {
+		if checkpoint.TriggerKind == "timeline_write" && checkpoint.TimelineVersion != nil &&
+			*checkpoint.TimelineVersion == 1 {
+			target = checkpoint
+			break
+		}
+	}
+	if target.ID == "" {
+		t.Fatalf("missing rewind target: %#v", checkpoints)
+	}
+	draft, err := storage.GetDraft(t.Context(), database.Read(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "TimelineVersionRestored", DraftID: draftID,
+		Payload: map[string]any{
+			"checkpoint_id": target.ID, "mode": "both", "timeline_version": 3,
+			"restore_checkpoint_id": "rewind_context_restore",
+		},
+	}}, reducer.Options{
+		Actor: contracts.ActorUser, BaseVersion: &draft.StateVersion,
+		ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
+			ID: "rewind_context_observation", DraftID: draftID,
+			Role: "system_observation", Kind: "rewind", Content: "已恢复第一版",
+		}},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("restore=%#v err=%v", result, err)
+	}
+	after, err := manager.Build(t.Context(), draftID)
+	if err != nil {
+		t.Fatalf("build restored state: %v", err)
+	}
+	hash, err := after.Snapshot.Hash()
+	if err != nil || hash != after.Manifest.CurrentHash {
+		t.Fatalf("restored hash=%s manifest=%s err=%v", hash, after.Manifest.CurrentHash, err)
+	}
+	raw, err := after.Snapshot.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"gain_db":-3`) ||
+		!strings.Contains(string(raw), `"timeline_clip_id":"clip_v1_001"`) {
+		t.Fatalf("restored WorldState=%s", raw)
+	}
+	history := joinMessageContent(after.Messages)
+	if strings.Contains(history, "把声音压低") || !strings.Contains(history, "已恢复第一版") {
+		t.Fatalf("restored history=%s", history)
+	}
+	if after.Manifest.WindowID == before.Manifest.WindowID {
+		t.Fatalf("conversation rewind must rebuild context window: before=%s after=%s",
+			before.Manifest.WindowID, after.Manifest.WindowID)
+	}
+}
+
 func TestContextManagerKeepsCurrentQueuedUserLastAndHidesFutureUsers(t *testing.T) {
 	t.Parallel()
 	database := agentTestDatabase(t)

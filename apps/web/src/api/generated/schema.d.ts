@@ -246,6 +246,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/drafts/{draft_id}/rewind/checkpoints": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Rewind Checkpoints */
+        get: operations["list_rewind_checkpoints_api_drafts__draft_id__rewind_checkpoints_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drafts/{draft_id}/rewind": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore Rewind Checkpoint */
+        post: operations["restore_rewind_checkpoint_api_drafts__draft_id__rewind_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/drafts/{draft_id}/messages": {
         parameters: {
             query?: never;
@@ -1102,6 +1136,90 @@ export interface components {
             draft_id: string;
             /** Messages */
             messages: components["schemas"]["MessageRecord"][];
+            /** Rewound Message Count */
+            rewound_message_count: number;
+        };
+        /** RewindCheckpoint */
+        RewindCheckpoint: {
+            /** Anchor Event Id */
+            anchor_event_id: number | null;
+            /** Anchor Message Id */
+            anchor_message_id: string | null;
+            /** Anchor Turn Id */
+            anchor_turn_id: string | null;
+            /** Checkpoint Id */
+            checkpoint_id: string;
+            /** Clip Count */
+            clip_count: number;
+            /** Clip Count Delta */
+            clip_count_delta: number;
+            /** Created At */
+            created_at: string;
+            /** Duration Frames */
+            duration_frames: number;
+            /** Duration Frames Delta */
+            duration_frames_delta: number;
+            /** Patch Id */
+            patch_id: string | null;
+            /** Summary */
+            summary: string;
+            /** Timeline Version */
+            timeline_version: number | null;
+            /** Track Count */
+            track_count: number;
+            /** Track Count Delta */
+            track_count_delta: number;
+            /**
+             * Trigger Kind
+             * @enum {string}
+             */
+            trigger_kind: "user_message" | "timeline_write" | "restore";
+        };
+        /** RewindCheckpointsResponse */
+        RewindCheckpointsResponse: {
+            /** Checkpoints */
+            checkpoints: components["schemas"]["RewindCheckpoint"][];
+            /** Draft Id */
+            draft_id: string;
+        };
+        /** RewindRestoreRequest */
+        RewindRestoreRequest: {
+            /** Checkpoint Id */
+            checkpoint_id: string;
+            /** Idempotency Key */
+            idempotency_key: string;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "timeline" | "conversation" | "both";
+        };
+        /** RewindRestoreResponse */
+        RewindRestoreResponse: {
+            /** Cancelled Decisions */
+            cancelled_decisions: number;
+            /** Cancelled Jobs */
+            cancelled_jobs: number;
+            /** Checkpoint Id */
+            checkpoint_id: string;
+            /** Draft Id */
+            draft_id: string;
+            /** Event Ids */
+            event_ids: number[];
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "timeline" | "conversation" | "both";
+            /** Rewound Message Count */
+            rewound_message_count: number;
+            /**
+             * Status
+             * @constant
+             */
+            status: "restored";
+            /** Timeline Version */
+            timeline_version: number | null;
         };
         /** PendingDecisionsResponse */
         PendingDecisionsResponse: {
@@ -2410,6 +2528,162 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_rewind_checkpoints_api_drafts__draft_id__rewind_checkpoints_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                draft_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RewindCheckpointsResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    restore_rewind_checkpoint_api_drafts__draft_id__rewind_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                draft_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RewindRestoreRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RewindRestoreResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description Service Unavailable (turn_queue_closed) */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

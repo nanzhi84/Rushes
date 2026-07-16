@@ -51,6 +51,16 @@ describe("reduceTurnStream · subagent_progress", () => {
     expect(recovered.items).toHaveLength(1);
   });
 
+  it("本地回退重置会清空整段流式缓冲与运行态", () => {
+    const running = apply([
+      { type: "turn_started", turn_id: "turn_rewind" },
+      { type: "text_delta", message_id: "late-message", delta: "将被撤销" },
+      { type: "tool_step_started", step_id: "late-tool", tool: "assets.list" }
+    ]);
+    const reset = reduceTurnStream(running, { type: "local_reset" });
+    expect(reset).toEqual(INITIAL_STATE);
+  });
+
   it("忽略非法重试序号，并在回合结束时清空重试状态", () => {
     const invalid = apply([
       { type: "turn_started", turn_id: "turn_1" },

@@ -8,13 +8,14 @@ import (
 func TestEventRegistryCoreSetAndVersionModes(t *testing.T) {
 	t.Parallel()
 
-	if got := len(EventRegistry); got != 26 {
-		t.Fatalf("事件数=%d，核心与前端生命周期事件应为 26", got)
+	if got := len(EventRegistry); got != 27 {
+		t.Fatalf("事件数=%d，核心与前端生命周期事件应为 27", got)
 	}
 	strict := map[string]bool{
 		"DecisionCreated": true, "DecisionAnswered": true,
 		"ConversationContextCleared": true,
-		"TimelineVersionCreated":     true, "TimelineValidated": true,
+		"TimelineVersionCreated":     true, "TimelineVersionRestored": true,
+		"TimelineValidated":        true,
 		"TimelineValidationFailed": true,
 	}
 	for name, spec := range EventRegistry {
@@ -116,6 +117,43 @@ func TestEventValidationSerializationAndRoutingBranches(t *testing.T) {
 	}
 	if RoutesToWorkspace(Event{Type: "TimelineValidated"}) || RoutesToDraft(original, "draft_c") {
 		t.Fatal("unrelated event routed unexpectedly")
+	}
+}
+
+func TestTimelineVersionRestoredValidation(t *testing.T) {
+	t.Parallel()
+	valid := []Event{
+		{
+			Type: "TimelineVersionRestored", Actor: ActorUser, DraftID: "draft",
+			Payload: map[string]any{
+				"checkpoint_id": "checkpoint", "restore_checkpoint_id": "restore",
+				"mode": "timeline", "timeline_version": 2,
+			},
+		},
+		{
+			Type: "TimelineVersionRestored", Actor: ActorUser, DraftID: "draft",
+			Payload: map[string]any{
+				"checkpoint_id": "checkpoint", "restore_checkpoint_id": "restore",
+				"mode": "conversation",
+			},
+		},
+	}
+	for _, event := range valid {
+		if err := event.Validate(); err != nil {
+			t.Fatalf("valid restore rejected: %v", err)
+		}
+	}
+	for _, payload := range []map[string]any{
+		{"mode": "timeline", "timeline_version": 2, "restore_checkpoint_id": "restore"},
+		{"checkpoint_id": "checkpoint", "mode": "invalid", "restore_checkpoint_id": "restore"},
+		{"checkpoint_id": "checkpoint", "mode": "timeline", "restore_checkpoint_id": "restore"},
+	} {
+		event := Event{
+			Type: "TimelineVersionRestored", Actor: ActorUser, DraftID: "draft", Payload: payload,
+		}
+		if err := event.Validate(); err == nil {
+			t.Fatalf("invalid restore unexpectedly accepted: %#v", payload)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import {
   ChevronRight,
   CornerDownRight,
   LoaderCircle,
+  RotateCcw,
   TerminalSquare
 } from "lucide-react";
 import { Markdown } from "./Markdown";
@@ -51,7 +52,9 @@ export function AssistantThread({
   modelRetry = null,
   subagentProgress = [],
   onCancelJob,
-  cancelPendingJobId = null
+  cancelPendingJobId = null,
+  rewindCheckpointByItem = {},
+  onOpenRewind
 }: {
   runtime: ConsoleExternalStoreRuntime;
   onAnswerDecision: AnswerDecisionHandler;
@@ -62,6 +65,8 @@ export function AssistantThread({
   subagentProgress?: SubagentProgressEntry[];
   onCancelJob?: CancelJobHandler;
   cancelPendingJobId?: string | null;
+  rewindCheckpointByItem?: Record<string, string>;
+  onOpenRewind?: (checkpointId: string) => void;
 }): ReactElement {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const followLatestRef = useRef(true);
@@ -165,6 +170,8 @@ export function AssistantThread({
                   steps={block.steps}
                   activeToolStepId={null}
                   progress={[]}
+                  rewindCheckpointByItem={rewindCheckpointByItem}
+                  onOpenRewind={onOpenRewind}
                 />
               ) : (
                 <MessageRow
@@ -175,6 +182,8 @@ export function AssistantThread({
                   highlighted={highlightedMessageId === block.message.id}
                   onCancelJob={onCancelJob}
                   cancelPendingJobId={cancelPendingJobId}
+                  rewindCheckpointId={rewindCheckpointByItem[block.message.id]}
+                  onOpenRewind={onOpenRewind}
                 />
               )
             )}
@@ -190,6 +199,8 @@ export function AssistantThread({
                   streaming={block.message.kind === "assistant"}
                   onCancelJob={onCancelJob}
                   cancelPendingJobId={cancelPendingJobId}
+                  rewindCheckpointId={rewindCheckpointByItem[block.message.message_id]}
+                  onOpenRewind={onOpenRewind}
                 />
               ) : (
                 <ToolActivityGroup
@@ -197,6 +208,8 @@ export function AssistantThread({
                   steps={block.steps}
                   activeToolStepId={activeToolStepId}
                   progress={subagentProgress}
+                  rewindCheckpointByItem={rewindCheckpointByItem}
+                  onOpenRewind={onOpenRewind}
                 />
               )
             )}
@@ -213,6 +226,8 @@ export function AssistantThread({
                 highlighted={highlightedMessageId === structuredMessage.id}
                 onCancelJob={onCancelJob}
                 cancelPendingJobId={cancelPendingJobId}
+                rewindCheckpointId={rewindCheckpointByItem[structuredMessage.id]}
+                onOpenRewind={onOpenRewind}
               />
             ) : null}
           </div>
@@ -288,7 +303,9 @@ function MessageRow({
   highlighted,
   streaming = false,
   onCancelJob,
-  cancelPendingJobId
+  cancelPendingJobId,
+  rewindCheckpointId,
+  onOpenRewind
 }: {
   message: ConsoleAssistantMessage;
   onAnswerDecision: AnswerDecisionHandler;
@@ -297,6 +314,8 @@ function MessageRow({
   streaming?: boolean;
   onCancelJob?: CancelJobHandler;
   cancelPendingJobId?: string | null;
+  rewindCheckpointId?: string;
+  onOpenRewind?: (checkpointId: string) => void;
 }): ReactElement {
   if (message.metadata.consoleRole === "system_observation") {
     return <BackgroundActivityGroup messages={[message]} />;
@@ -343,8 +362,19 @@ function MessageRow({
     return (
       <article
         data-message-kind={message.metadata.messageKind ?? undefined}
-        className="flex w-full justify-end"
+        className="flex w-full items-start justify-end gap-1"
       >
+        {rewindCheckpointId && onOpenRewind ? (
+          <button
+            type="button"
+            className="mt-1 grid size-6 shrink-0 place-items-center rounded-sm text-fg-faint hover:bg-hover hover:text-fg"
+            aria-label="回到此消息"
+            title="回到此消息"
+            onClick={() => onOpenRewind(rewindCheckpointId)}
+          >
+            <RotateCcw size={12} strokeWidth={1.8} aria-hidden />
+          </button>
+        ) : null}
         <div
           data-user-message=""
           className={`${highlightClass(highlighted)} w-fit max-w-[85%] rounded-sm bg-user-bubble px-3 py-1.5 text-[13px] leading-5 text-fg`}
@@ -434,11 +464,15 @@ function BackgroundActivityGroup({
 function ToolActivityGroup({
   steps,
   activeToolStepId,
-  progress
+  progress,
+  rewindCheckpointByItem = {},
+  onOpenRewind
 }: {
   steps: StreamToolItem[];
   activeToolStepId: string | null;
   progress: SubagentProgressEntry[];
+  rewindCheckpointByItem?: Record<string, string>;
+  onOpenRewind?: (checkpointId: string) => void;
 }): ReactElement {
   const isActive = steps.some((step) => step.status === "running");
   const hasIssue = steps.some((step) => ["failed", "deny", "ask", "requires_user"].includes(step.status));
@@ -484,6 +518,8 @@ function ToolActivityGroup({
             key={step.step_id}
             step={step}
             progress={step.step_id === activeToolStepId ? progress : []}
+            rewindCheckpointId={rewindCheckpointByItem[step.step_id]}
+            onOpenRewind={onOpenRewind}
           />
         ))}
       </div>
@@ -493,15 +529,19 @@ function ToolActivityGroup({
 
 function ToolStepRow({
   step,
-  progress = []
+  progress = [],
+  rewindCheckpointId,
+  onOpenRewind
 }: {
   step: StreamToolItem;
   progress?: SubagentProgressEntry[];
+  rewindCheckpointId?: string;
+  onOpenRewind?: (checkpointId: string) => void;
 }): ReactElement {
   const label = TOOL_STEP_LABELS[step.tool] ?? step.tool;
   const hasDetails = Boolean(step.argsSummary || step.observation);
   const summaryRow = (
-    <span className="flex min-w-0 flex-1 items-start gap-1.5">
+    <span className={`flex min-w-0 flex-1 items-start gap-1.5 ${rewindCheckpointId ? "pr-6" : ""}`}>
       <StatusDot status={step.status} />
       <span className="min-w-0 flex-1 break-words text-xs text-fg-muted">{label}</span>
       <span className={`shrink-0 text-2xs ${toolStatusToneClass(step.status)}`}>
@@ -514,7 +554,7 @@ function ToolStepRow({
   );
 
   return (
-    <div className="py-0.5" data-tool-step-id={step.step_id} data-tool-status={step.status}>
+    <div className="relative py-0.5" data-tool-step-id={step.step_id} data-tool-status={step.status}>
       {hasDetails ? (
         <details className="group/tool">
           <summary className="flex cursor-pointer list-none items-center [&::-webkit-details-marker]:hidden">
@@ -542,6 +582,17 @@ function ToolStepRow({
       ) : (
         summaryRow
       )}
+      {rewindCheckpointId && onOpenRewind ? (
+        <button
+          type="button"
+          className="absolute right-0 top-0 grid size-5 place-items-center rounded-sm text-fg-faint hover:bg-hover hover:text-fg"
+          aria-label={`回到工具批次 ${label}`}
+          title="回到此工具批次"
+          onClick={() => onOpenRewind(rewindCheckpointId)}
+        >
+          <RotateCcw size={11} strokeWidth={1.8} aria-hidden />
+        </button>
+      ) : null}
 
       {progress.length > 0 ? (
         <ul className="mt-1 space-y-1 pl-5" aria-label="子代理进度">

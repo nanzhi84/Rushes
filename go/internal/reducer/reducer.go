@@ -24,9 +24,10 @@ const (
 )
 
 var (
-	ErrJobCancelled      = errors.New("job 已取消")
-	ErrJobNotCancellable = errors.New("job 当前状态不可取消")
-	ErrJobClaimLost      = errors.New("job 已被其他 worker 重新领取")
+	ErrJobCancelled           = errors.New("job 已取消")
+	ErrJobNotCancellable      = errors.New("job 当前状态不可取消")
+	ErrJobClaimLost           = errors.New("job 已被其他 worker 重新领取")
+	ErrRewindRestoreDuplicate = errors.New("rewind 恢复请求已提交")
 )
 
 type VersionConflict struct {
@@ -153,12 +154,26 @@ type JobClaim struct {
 }
 
 type Options struct {
-	BaseVersion *int
-	Actor       contracts.Actor
-	CreatedAt   time.Time
-	ResultRows  ResultRows
-	Validate    ValidationHook
-	JobClaim    *JobClaim
+	BaseVersion   *int
+	Actor         contracts.Actor
+	CreatedAt     time.Time
+	ResultRows    ResultRows
+	Validate      ValidationHook
+	JobClaim      *JobClaim
+	RewindRestore *RewindRestore
+}
+
+// RewindRestore persists the retry key and the response-producing metadata in
+// the same transaction as the restore events.
+type RewindRestore struct {
+	DraftID             string
+	IdempotencyKey      string
+	CheckpointID        string
+	Mode                string
+	TimelineVersion     *int
+	RewoundMessageCount int
+	CancelledJobs       int
+	CancelledDecisions  int
 }
 
 type applyState struct {
@@ -221,6 +236,25 @@ func Apply(
 		createdAt:        createdAt.Format(time.RFC3339Nano),
 		originalVersions: map[string]int{},
 		touched:          map[string]struct{}{},
+	}
+	if restore := options.RewindRestore; restore != nil {
+		result, insertErr := tx.ExecContext(ctx, `
+			INSERT INTO rewind_restore_requests(
+				draft_id,idempotency_key,checkpoint_id,mode,timeline_version,
+				rewound_message_count,cancelled_jobs,cancelled_decisions,event_ids_json,created_at
+			) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(draft_id,idempotency_key) DO NOTHING`,
+			restore.DraftID, restore.IdempotencyKey, restore.CheckpointID, restore.Mode,
+			restore.TimelineVersion, restore.RewoundMessageCount, restore.CancelledJobs,
+			restore.CancelledDecisions, "[]", state.createdAt,
+		)
+		if insertErr != nil {
+			return Result{}, insertErr
+		}
+		if rows, rowsErr := result.RowsAffected(); rowsErr != nil {
+			return Result{}, rowsErr
+		} else if rows == 0 {
+			return Result{}, ErrRewindRestoreDuplicate
+		}
 	}
 	if options.JobClaim != nil {
 		if err := validateJobClaim(ctx, tx, *options.JobClaim); err != nil {
@@ -291,6 +325,19 @@ func Apply(
 	applied, err := appendEvents(ctx, state, versions)
 	if err != nil {
 		return Result{}, err
+	}
+	if restore := options.RewindRestore; restore != nil {
+		eventIDs := make([]int64, 0, len(applied))
+		for _, event := range applied {
+			eventIDs = append(eventIDs, event.ID)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE rewind_restore_requests SET event_ids_json=?
+			WHERE draft_id=? AND idempotency_key=?`,
+			mustJSON(eventIDs), restore.DraftID, restore.IdempotencyKey,
+		); err != nil {
+			return Result{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Result{}, err
@@ -422,6 +469,8 @@ func applyEvent(ctx context.Context, state *applyState, event contracts.Event) e
 		return applyConversationContextCleared(ctx, state, event)
 	case "TimelineVersionCreated":
 		return applyTimelineCreated(ctx, state, event)
+	case "TimelineVersionRestored":
+		return applyTimelineRestored(ctx, state, event)
 	case "TimelineValidated", "TimelineValidationFailed":
 		return applyTimelineValidation(ctx, state, event)
 	case "PreviewRendered":
@@ -947,13 +996,23 @@ func applyTimelineCreated(ctx context.Context, state *applyState, event contract
 	}
 	// 每个版本都是已入队任务可引用的不可变快照；当前版本仅由 drafts 上的
 	// timeline_current_version 指针决定，不能在创建新版本时删除历史行。
+	var currentVersion sql.NullInt64
+	if err := state.tx.QueryRowContext(ctx,
+		"SELECT timeline_current_version FROM drafts WHERE draft_id=?", event.DraftID,
+	).Scan(&currentVersion); err != nil {
+		return err
+	}
+	parentVersion := nullableInt64(event.Payload["parent_version"])
+	if parentVersion == nil && currentVersion.Valid {
+		parentVersion = currentVersion.Int64
+	}
 	_, err := state.tx.ExecContext(ctx, `
 		INSERT INTO timeline_versions(
-			timeline_id, draft_id, version, created_by_patch_id,
+			timeline_id, draft_id, version, parent_version, created_by_patch_id,
 			document_json, validation_report_json, created_at
-		) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
 		stringFrom(event.Payload["timeline_id"], fmt.Sprintf("%s:v%d", event.DraftID, version)),
-		event.DraftID, version, nullableString(event.Payload["patch_id"]), mustJSON(document),
+		event.DraftID, version, parentVersion, nullableString(event.Payload["patch_id"]), mustJSON(document),
 		nullableJSON(event.Payload["validation_report"]), state.createdAt,
 	)
 	if err != nil {
@@ -986,6 +1045,9 @@ func applyTimelineCreated(ctx context.Context, state *applyState, event contract
 		}
 	}
 	if err := state.touch(ctx, event.DraftID); err != nil {
+		return err
+	}
+	if err := recordTimelineRewindCheckpoint(ctx, state, event, document, "timeline_write"); err != nil {
 		return err
 	}
 	_, err = state.tx.ExecContext(ctx,
@@ -1278,6 +1340,15 @@ func persistResultRows(
 			rows.Message.Role, stringFrom(rows.Message.Kind, "reply"), rows.Message.Content, createdAt,
 		); err != nil {
 			return err
+		}
+		if rows.Message.Role == "user" {
+			if err := recordMessageRewindCheckpoint(ctx, tx, *rows.Message, createdAt); err != nil {
+				return err
+			}
+		} else if rows.Message.Kind == "tool" {
+			if err := attachToolTraceToRewindCheckpoint(ctx, tx, *rows.Message); err != nil {
+				return err
+			}
 		}
 	}
 	for _, summary := range rows.MaterialSummaries {

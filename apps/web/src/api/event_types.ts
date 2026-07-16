@@ -17,6 +17,7 @@ const ALL_EVENT_TYPES = [
   "DecisionAnswered",
   "ConversationContextCleared",
   "TimelineVersionCreated",
+  "TimelineVersionRestored",
   "TimelineValidated",
   "TimelineValidationFailed",
   "PreviewRendered",
@@ -48,6 +49,7 @@ const CONVERSATION_EVENTS = ["ConversationContextCleared"] as const satisfies re
 
 const TIMELINE_EVENTS = [
   "TimelineVersionCreated",
+  "TimelineVersionRestored",
   "TimelineValidated",
   "TimelineValidationFailed"
 ] as const satisfies readonly EventType[];

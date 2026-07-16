@@ -258,6 +258,97 @@ describe("DraftEditorView", () => {
     ).toBe(false);
   });
 
+  it("回退面板展示检查点 diff，并从用户消息或工具批次执行恢复", async () => {
+    const restored: unknown[] = [];
+    const checkpointBase = {
+      anchor_event_id: 1,
+      clip_count: 1,
+      clip_count_delta: 1,
+      created_at: "2026-07-16T02:00:00Z",
+      duration_frames: 90,
+      duration_frames_delta: 90,
+      timeline_version: 1,
+      track_count: 1,
+      track_count_delta: 1,
+      trigger_kind: "timeline_write"
+    };
+    const fetchMock = mockFetch({
+      decision: null,
+      timeline: true,
+      rewoundMessageCount: 2,
+      messages: [
+        {
+          message_id: "user-anchor",
+          role: "user",
+          kind: "user",
+          content: "制作第一版",
+          created_at: "2026-07-16T01:59:00Z"
+        },
+        {
+          message_id: "tool-anchor",
+          role: "system",
+          kind: "tool",
+          content: JSON.stringify({
+            step_id: "tool-anchor",
+            tool: "timeline.apply_patches",
+            status: "succeeded",
+            args_summary: "{}",
+            observation: "ok"
+          }),
+          created_at: "2026-07-16T02:00:00Z"
+        }
+      ],
+      rewindCheckpoints: [
+        {
+          ...checkpointBase,
+          checkpoint_id: "rewind-tool",
+          anchor_message_id: "tool-anchor",
+          anchor_turn_id: "user-anchor",
+          patch_id: "patch-tool",
+          summary: "工具批次 timeline.apply_patches"
+        },
+        {
+          ...checkpointBase,
+          checkpoint_id: "rewind-user",
+          anchor_message_id: "user-anchor",
+          anchor_turn_id: "user-anchor",
+          patch_id: null,
+          summary: "制作第一版",
+          trigger_kind: "user_message"
+        }
+      ],
+      onRewind: (body) => restored.push(body)
+    });
+    renderEditor(fetchMock);
+
+    expect(await screen.findByText("已回退并折叠 2 条历史消息")).toBeTruthy();
+    act(() => {
+      emitTurnStream(turnStreamSource(), { type: "turn_started", turn_id: "turn-to-rewind" });
+      emitTurnStream(turnStreamSource(), {
+        type: "text_delta",
+        message_id: "late-stream-message",
+        delta: "即将撤销的流式回复"
+      });
+    });
+    expect(await screen.findByText("即将撤销的流式回复")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "打开回退检查点" }));
+    expect(await screen.findByRole("region", { name: "回退检查点" })).toBeTruthy();
+    expect(screen.getAllByText(/较前一检查点 \+1 片段/)).toHaveLength(2);
+    expect(await screen.findByRole("button", { name: "回到此消息" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "回到工具批次 批量修改时间线" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "回到此消息" }));
+    fireEvent.click(screen.getByRole("button", { name: "时间线和对话" }));
+    await waitFor(() => {
+      expect(restored).toContainEqual(expect.objectContaining({
+        checkpoint_id: "rewind-user",
+        idempotency_key: expect.any(String),
+        mode: "both"
+      }));
+    });
+    await waitFor(() => expect(screen.queryByText("即将撤销的流式回复")).toBeNull());
+  });
+
   it("顶栏成本小计渲染估算金额，且编辑器隐藏设置按钮", async () => {
     const fetchMock = mockFetch({ decision: null, costs: 1.2345 });
     renderEditor(fetchMock);
@@ -1300,7 +1391,10 @@ function mockFetch({
   materials = [],
   onAnswer,
   costs,
-  cancelFailure
+  cancelFailure,
+  rewindCheckpoints = [],
+  rewoundMessageCount = 0,
+  onRewind
 }: {
   decision: Decision | null;
   timeline?: boolean;
@@ -1309,6 +1403,9 @@ function mockFetch({
   onAnswer?: (url: string, init: RequestInit | undefined) => void;
   costs?: number;
   cancelFailure?: "conflict" | "network";
+  rewindCheckpoints?: Array<Record<string, unknown>>;
+  rewoundMessageCount?: number;
+  onRewind?: (body: unknown) => void;
 }): FetchMock {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -1338,6 +1435,23 @@ function mockFetch({
     if (url.endsWith("/decisions/current")) {
       return jsonResponse({ decision });
     }
+    if (url.endsWith("/rewind/checkpoints")) {
+      return jsonResponse({ draft_id: "draft_1", checkpoints: rewindCheckpoints });
+    }
+    if (url.endsWith("/rewind") && init?.method === "POST") {
+      onRewind?.(init.body ? JSON.parse(String(init.body)) : null);
+      return jsonResponse({
+        draft_id: "draft_1",
+        checkpoint_id: "rewind_1",
+        mode: "both",
+        status: "restored",
+        timeline_version: 2,
+        rewound_message_count: 2,
+        cancelled_jobs: 0,
+        cancelled_decisions: 0,
+        event_ids: [9]
+      });
+    }
     if (url.includes("/messages")) {
       if (init?.method === "POST") {
         return jsonResponse(
@@ -1352,7 +1466,8 @@ function mockFetch({
       }
       return jsonResponse({
         draft_id: "draft_1",
-        messages: typeof messages === "function" ? messages() : messages
+        messages: typeof messages === "function" ? messages() : messages,
+        rewound_message_count: rewoundMessageCount
       });
     }
     if (url === "/api/decisions/dec_style/answer") {
