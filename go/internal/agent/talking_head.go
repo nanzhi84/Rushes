@@ -123,11 +123,11 @@ func (service *Service) toolEditTalkingHead(
 	for _, fragment := range shortFragments {
 		fragmentByID[fragment.FragmentID] = fragment
 	}
-	var invalidFragmentDecisions []map[string]any
-	input, invalidFragmentDecisions = expandTalkingHeadFragmentDecisions(input, fragmentByID)
-	if len(invalidFragmentDecisions) > 0 {
+	fragmentExpansion := expandTalkingHeadFragmentDecisions(input, fragmentByID)
+	input = fragmentExpansion.Input
+	if len(fragmentExpansion.Invalid) > 0 {
 		return failed("short_fragment_decisions 包含未知、重复或非法决定", map[string]any{
-			"invalid_fragment_decisions": invalidFragmentDecisions,
+			"invalid_fragment_decisions": fragmentExpansion.Invalid,
 			"recovery":                   "重新读取 speech.inspect.short_speech_fragments；每个 fragment_id 只提交一次，action 只能是 remove 或 preserve。",
 		})
 	}
@@ -137,20 +137,9 @@ func (service *Service) toolEditTalkingHead(
 			"recovery": "如无需删剪，请添加确有语义对应的 B-roll；否则重新审阅候选并把需删除项标为 remove。",
 		})
 	}
-	preservedFragmentIDs := make(map[string]struct{}, len(input.PreserveSpeechFragmentIDs))
-	unknownPreservedFragmentIDs := []string{}
-	for _, id := range input.PreserveSpeechFragmentIDs {
-		if _, exists := fragmentByID[id]; !exists {
-			unknownPreservedFragmentIDs = append(unknownPreservedFragmentIDs, id)
-			continue
-		}
+	preservedFragmentIDs := make(map[string]struct{}, len(fragmentExpansion.PreservedIDs))
+	for _, id := range fragmentExpansion.PreservedIDs {
 		preservedFragmentIDs[id] = struct{}{}
-	}
-	if len(unknownPreservedFragmentIDs) > 0 {
-		return failed("preserve_speech_fragment_ids 包含未知或已失效 ID", map[string]any{
-			"invalid_fragment_ids": unknownPreservedFragmentIDs,
-			"recovery":             "重新调用 speech.inspect，并只使用本次 short_speech_fragments 返回的 fragment_id",
-		})
 	}
 	preserveReasonRequired := []rushestools.SpeechFragmentEvidence{}
 	for id := range preservedFragmentIDs {
@@ -159,7 +148,7 @@ func (service *Service) toolEditTalkingHead(
 			fragment.Kind != "earlier_take_before_repeated_phrase_restart" {
 			continue
 		}
-		reason := strings.TrimSpace(input.PreserveSpeechFragmentReasons[id])
+		reason := strings.TrimSpace(fragmentExpansion.PreservedReasons[id])
 		if validRestartFragmentPreserveReason(fragment, reason) {
 			continue
 		}
@@ -581,8 +570,8 @@ func (service *Service) toolEditTalkingHead(
 	result.Data["redundant_pause_ids"] = speechPauseIDs(redundantPauses)
 	result.Data["auto_preserved_pause_ids"] = speechPauseIDs(autoPreservedPauses)
 	result.Data["auto_preserved_pause_count"] = len(autoPreservedPauses)
-	result.Data["preserved_speech_fragment_ids"] = append([]string(nil), input.PreserveSpeechFragmentIDs...)
-	result.Data["preserved_speech_fragment_reasons"] = input.PreserveSpeechFragmentReasons
+	result.Data["preserved_speech_fragment_ids"] = append([]string(nil), fragmentExpansion.PreservedIDs...)
+	result.Data["preserved_speech_fragment_reasons"] = fragmentExpansion.PreservedReasons
 	attachTalkingHeadUnreviewedEvidence(
 		&result, unresolvedPauses, unresolvedRepetitions, unresolvedFragments,
 	)
@@ -700,18 +689,20 @@ func expandTalkingHeadRepetitionDecisions(
 	return input, seen, invalid
 }
 
+type talkingHeadFragmentExpansion struct {
+	Input            rushestools.TalkingHeadEditInput
+	PreservedIDs     []string
+	PreservedReasons map[string]string
+	Invalid          []map[string]any
+}
+
 func expandTalkingHeadFragmentDecisions(
 	input rushestools.TalkingHeadEditInput,
 	fragmentByID map[string]rushestools.SpeechFragmentEvidence,
-) (rushestools.TalkingHeadEditInput, []map[string]any) {
+) talkingHeadFragmentExpansion {
 	input.RemoveWordRanges = append([]rushestools.TalkingHeadWordRange(nil), input.RemoveWordRanges...)
-	input.PreserveSpeechFragmentIDs = append([]string(nil), input.PreserveSpeechFragmentIDs...)
-	reasons := make(map[string]string, len(input.PreserveSpeechFragmentReasons))
-	for key, value := range input.PreserveSpeechFragmentReasons {
-		reasons[key] = value
-	}
-	input.PreserveSpeechFragmentReasons = reasons
-
+	preservedIDs := []string{}
+	preservedReasons := map[string]string{}
 	seen := map[string]struct{}{}
 	invalid := []map[string]any{}
 	for index, decision := range input.ShortFragmentDecisions {
@@ -743,21 +734,14 @@ func expandTalkingHeadFragmentDecisions(
 			}
 			continue
 		}
-		alreadyPresent := false
-		for _, existing := range input.PreserveSpeechFragmentIDs {
-			if existing == id {
-				alreadyPresent = true
-				break
-			}
-		}
-		if !alreadyPresent {
-			input.PreserveSpeechFragmentIDs = append(input.PreserveSpeechFragmentIDs, id)
-		}
+		preservedIDs = append(preservedIDs, id)
 		if reason := strings.TrimSpace(decision.Reason); reason != "" {
-			input.PreserveSpeechFragmentReasons[id] = reason
+			preservedReasons[id] = reason
 		}
 	}
-	return input, invalid
+	return talkingHeadFragmentExpansion{
+		Input: input, PreservedIDs: preservedIDs, PreservedReasons: preservedReasons, Invalid: invalid,
+	}
 }
 
 func validRestartFragmentPreserveReason(

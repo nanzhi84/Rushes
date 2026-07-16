@@ -278,7 +278,7 @@ func addTool[I, O any](
 			reporter(name, "finished", input, output, executeErr)
 		}
 		return output, executeErr
-	})
+	}, utils.WithUnmarshalArguments(strictUnmarshalToolArguments[I]))
 	if err != nil {
 		return err
 	}
@@ -288,6 +288,22 @@ func addTool[I, O any](
 		InputType: inputType, Implementation: implementation,
 	}
 	return nil
+}
+
+func strictUnmarshalToolArguments[I any](_ context.Context, arguments string) (any, error) {
+	var input I
+	decoder := json.NewDecoder(strings.NewReader(arguments))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		return nil, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("包含多个 JSON 值")
+		}
+		return nil, err
+	}
+	return input, nil
 }
 
 func (registry *Registry) guard(ctx context.Context, spec Spec) error {
@@ -329,17 +345,41 @@ var prohibitedNames = map[string]struct{}{
 	"timeline_version": {}, "timeline_revision": {},
 }
 
+const prohibitedFieldMaxDepth = 4
+
 func prohibitedField(input reflect.Type) string {
-	if input.Kind() == reflect.Pointer {
-		input = input.Elem()
+	return prohibitedFieldAtDepth(input, 0, map[reflect.Type]struct{}{})
+}
+
+func prohibitedFieldAtDepth(input reflect.Type, depth int, active map[reflect.Type]struct{}) string {
+	switch input.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Array:
+		if _, recursive := active[input]; recursive {
+			return ""
+		}
+		active[input] = struct{}{}
+		result := prohibitedFieldAtDepth(input.Elem(), depth, active)
+		delete(active, input)
+		return result
 	}
 	if input.Kind() != reflect.Struct {
 		return ""
 	}
+	if _, recursive := active[input]; recursive {
+		return ""
+	}
+	active[input] = struct{}{}
+	defer delete(active, input)
 	for index := range input.NumField() {
 		field := input.Field(index)
+		if field.PkgPath != "" {
+			continue
+		}
 		name := strings.Split(field.Tag.Get("json"), ",")[0]
-		if name == "" || name == "-" {
+		if name == "-" {
+			continue
+		}
+		if name == "" {
 			name = field.Name
 		}
 		if _, prohibited := prohibitedNames[name]; prohibited {
@@ -348,6 +388,11 @@ func prohibitedField(input reflect.Type) string {
 		for _, part := range prohibitedParts {
 			if strings.Contains(name, part) {
 				return name
+			}
+		}
+		if depth < prohibitedFieldMaxDepth {
+			if nested := prohibitedFieldAtDepth(field.Type, depth+1, active); nested != "" {
+				return nested
 			}
 		}
 	}
