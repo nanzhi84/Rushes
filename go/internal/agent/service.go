@@ -696,6 +696,7 @@ const contextCompactionPrompt = `你是 Rushes 的上下文压缩器。禁止调
 4. 未完成事项和下一步；
 5. 仍需保留的关键 ID、错误证据或用户纠正。
 draft.content_plan 已持久保存的决定不要重复写入摘要；只保留计划外的新决定或冲突。
+user_memories 已持久保存的偏好不要重复写入摘要；只保留尚未固化的新偏好，并提示下回合固化。
 不要把历史回复里的素材、时间线、响度或节拍判断写成当前事实；这些客观信息会由最新 WorldState 单独注入。删除寒暄、重复工具日志、已被用户推翻的判断和冗余过程。`
 
 func (service *Service) toolReporter(ctx context.Context, draftID string) rushestools.Reporter {

@@ -20,6 +20,7 @@ const (
 	contextRecentEditLimit           = 20
 	contextRecentEditRuneBudget      = 6000
 	contextMaterialCatalogRuneBudget = 12000
+	contextUserMemoryRuneBudget      = 4000
 	contextResidentWaveformPoints    = 24
 )
 
@@ -44,6 +45,7 @@ func (builder *ContextBuilder) Build(ctx context.Context, draftID string) (strin
 	}
 	return "【当前草稿最新 WorldState】\n" + string(raw) +
 		"\nsections 是当前客观状态的唯一事实源；历史回复和 recent_edit_history 不能覆盖它。" +
+		"user_memory 是跨草稿的用户长期偏好；与当前用户指令冲突时以本回合指令为准，并用 memory.update 更新记忆。" +
 		"assets.material_catalog 是常驻精简素材目录；详细镜头语义必须按创作意图调用 media.search_shots 检索；完整口播转写不常驻，speech_searchable=true 时按需调用 speech.inspect。" +
 		"timeline 中 beat_grid.waveform 仅常驻最多 24 点摘要：point_count 是完整压缩波形点数，sample_interval_frames 是原始 RMS 窗口宽度，sample_frames 是按 timeline_fps 标尺表示的摘要点素材内帧坐标并与 samples 一一对应，loudness_min/mean/max 汇总完整波形的 0–100 原始响度；完整波形必须按创作意图调用 audio.analyze_beats 获取，摘要不包含高潮标签。" +
 		"人工编辑已经保存，不要要求用户重做；需要继续剪辑时直接基于当前轨道和片段。", nil
@@ -67,6 +69,7 @@ func (builder *ContextBuilder) Snapshot(
 		"timeline":            state["timeline"],
 		"recent_edit_history": state["recent_edit_history"],
 		"conversation":        conversation,
+		"user_memory":         state["user_memory"],
 	}), nil
 }
 
@@ -79,6 +82,10 @@ func (builder *ContextBuilder) buildSnapshotMap(
 		return nil, err
 	}
 	assets, err := storage.ListDraftAssets(ctx, builder.database.Read(), draftID)
+	if err != nil {
+		return nil, err
+	}
+	userMemory, err := builder.userMemoryContext(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -132,6 +139,7 @@ func (builder *ContextBuilder) buildSnapshotMap(
 		},
 		"timeline":            nil,
 		"recent_edit_history": []any{},
+		"user_memory":         userMemory,
 	}
 	if draft.MessagesTailRef != nil {
 		snapshot["conversation_reset"] = true
@@ -185,6 +193,35 @@ func (builder *ContextBuilder) buildSnapshotMap(
 
 	// 最后一层递归清洗避免旧日志或外部输入把已废弃的版本字段重新带回模型。
 	return sanitizeContextMap(snapshot), nil
+}
+
+func (builder *ContextBuilder) userMemoryContext(ctx context.Context) (map[string]any, error) {
+	memories, err := storage.ListUserMemories(ctx, builder.database.Read())
+	if err != nil {
+		return nil, err
+	}
+	entries := make([]map[string]any, 0, len(memories))
+	for _, memory := range memories {
+		candidate := append(append([]map[string]any(nil), entries...), map[string]any{
+			"key": memory.Key, "kind": memory.Kind, "statement": memory.Statement,
+		})
+		section := map[string]any{
+			"entries": candidate, "total": len(memories),
+			"truncated": len(candidate) < len(memories),
+		}
+		encoded, err := json.Marshal(section)
+		if err != nil {
+			return nil, err
+		}
+		if utf8.RuneCount(encoded) > contextUserMemoryRuneBudget {
+			break
+		}
+		entries = candidate
+	}
+	return map[string]any{
+		"entries": entries, "total": len(memories),
+		"truncated": len(entries) < len(memories),
+	}, nil
 }
 
 // materialCatalogContext keeps a compact directory resident in every model turn.
