@@ -481,10 +481,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := registry.Specs(false)
-	if len(core) != 20 {
+	if len(core) != 21 {
 		t.Fatalf("core tools=%d", len(core))
 	}
-	if len(registry.Specs(true)) != 22 {
+	if len(registry.Specs(true)) != 23 {
 		t.Fatalf("all tools=%d", len(registry.Specs(true)))
 	}
 	for _, spec := range registry.Specs(true) {
@@ -493,10 +493,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 			t.Fatalf("spec=%s info=%#v err=%v", spec.Name, info, infoErr)
 		}
 	}
-	if got := len(registry.EinoTools(false, false)); got != 19 {
+	if got := len(registry.EinoTools(false, false)); got != 20 {
 		t.Fatalf("LLM core tools=%d", got)
 	}
-	if got := len(registry.EinoTools(false, true)); got != 20 {
+	if got := len(registry.EinoTools(false, true)); got != 21 {
 		t.Fatalf("含 harness core tools=%d", got)
 	}
 
@@ -566,6 +566,67 @@ func TestPlanUpdateIsAlwaysAvailableWithTypedSchema(t *testing.T) {
 	allowed, err := registry.Allowed(WithDraftID(t.Context(), "draft_plan_schema"), false)
 	if err != nil || !containsSpec(allowed, "plan.update") {
 		t.Fatalf("allowed=%#v err=%v", allowed, err)
+	}
+}
+
+func TestMemoryUpdateSchemaCannotAcceptModelSuppliedEvidence(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var memoryUpdate Spec
+	for _, spec := range registry.Specs(true) {
+		if spec.Name == "memory.update" {
+			memoryUpdate = spec
+			break
+		}
+	}
+	if memoryUpdate.Implementation == nil || memoryUpdate.Exposure != ExposureLLM ||
+		memoryUpdate.Optional || len(memoryUpdate.Requires) != 0 ||
+		memoryUpdate.InputType != reflect.TypeFor[MemoryUpdateInput]() {
+		t.Fatalf("memory.update spec=%#v", memoryUpdate)
+	}
+	if field := prohibitedField(reflect.TypeFor[MemoryUpdateInput]()); field != "" {
+		t.Fatalf("MemoryUpdateInput 触发 PolicyGate: %s", field)
+	}
+	info, err := memoryUpdate.Implementation.Info(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parameters, err := info.ToJSONSchema()
+	if err != nil || parameters == nil || parameters.Properties == nil || len(parameters.AnyOf) != 2 {
+		t.Fatalf("memory.update parameters=%#v err=%v", parameters, err)
+	}
+	entries, entriesOK := parameters.Properties.Get("entries")
+	removals, removalsOK := parameters.Properties.Get("remove_keys")
+	if !entriesOK || entries.MinItems == nil || *entries.MinItems != 1 ||
+		entries.MaxItems == nil || *entries.MaxItems != 8 || entries.Items == nil ||
+		!removalsOK || removals.MinItems == nil || *removals.MinItems != 1 ||
+		removals.MaxItems == nil || *removals.MaxItems != 50 ||
+		!containsString(parameters.AnyOf[0].Required, "entries") ||
+		!containsString(parameters.AnyOf[1].Required, "remove_keys") {
+		t.Fatalf("entries=%#v removals=%#v anyOf=%#v", entries, removals, parameters.AnyOf)
+	}
+	kind, kindOK := entries.Items.Properties.Get("kind")
+	key, keyOK := entries.Items.Properties.Get("key")
+	statement, statementOK := entries.Items.Properties.Get("statement")
+	if !kindOK || len(kind.Enum) != 3 || !keyOK || key.Pattern != "^[a-z0-9_]{2,40}$" ||
+		!statementOK || statement.MaxLength == nil || *statement.MaxLength != 200 {
+		t.Fatalf("entry schema=%#v", entries.Items)
+	}
+	if _, err := registry.DecodeInput("memory.update", map[string]any{
+		"entries": []any{map[string]any{
+			"key": "pacing", "kind": "preference", "statement": "偏快",
+			"evidence_id": "forged",
+		}},
+	}); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("模型伪造 evidence 应被严格解码拒绝: %v", err)
 	}
 }
 

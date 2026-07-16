@@ -40,8 +40,8 @@ func TestOpenMigratesSchemaAndCreatesWorkspace(t *testing.T) {
 		WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 21 {
-		t.Fatalf("业务表数=%d want=21", count)
+	if count != 22 {
+		t.Fatalf("业务表数=%d want=22", count)
 	}
 	batches, err := ListTimelineEditBatches(t.Context(), database.Read(), "missing", 20)
 	if err != nil || len(batches) != 0 {
@@ -49,6 +49,49 @@ func TestOpenMigratesSchemaAndCreatesWorkspace(t *testing.T) {
 	}
 	if err := database.Migrate(t.Context()); err != nil {
 		t.Fatalf("迁移必须幂等: %v", err)
+	}
+}
+
+func TestOpenMigratesV12WorkspaceToUserMemories(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	database, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO drafts(draft_id,name,created_at,updated_at)
+		VALUES('draft_v12','迁移保留',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), "DROP TABLE user_memories"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), "PRAGMA user_version = 12"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = migrated.Close() })
+	var version, memories int
+	if err := migrated.Read().QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrated.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM user_memories",
+	).Scan(&memories); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := GetDraft(t.Context(), migrated.Read(), "draft_v12")
+	if err != nil || draft.Name != "迁移保留" || version != 13 || memories != 0 {
+		t.Fatalf("draft=%#v version=%d memories=%d err=%v", draft, version, memories, err)
 	}
 }
 

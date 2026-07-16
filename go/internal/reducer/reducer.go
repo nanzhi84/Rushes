@@ -29,6 +29,8 @@ var (
 	ErrJobNotCancellable      = errors.New("job 当前状态不可取消")
 	ErrJobClaimLost           = errors.New("job 已被其他 worker 重新领取")
 	ErrRewindRestoreDuplicate = errors.New("rewind 恢复请求已提交")
+	ErrUserMemoryEvidence     = errors.New("用户记忆证据无效")
+	ErrUserMemoryInput        = errors.New("用户记忆写入参数无效")
 	errDraftPlanConflict      = errors.New("草稿创作计划发生并发冲突")
 )
 
@@ -51,6 +53,7 @@ type Result struct {
 	DraftStateVersions map[string]int
 	Conflict           *VersionConflict
 	SkippedEvents      int
+	UserMemory         *UserMemoryOutcome
 }
 
 type MessageRow struct {
@@ -107,6 +110,34 @@ type DraftPlanUpdateRow struct {
 	ExpectedPlanHash string
 }
 
+// UserMemoryRow is workspace-level derived profile state. Evidence is
+// intentionally polymorphic and validated in the reducer transaction rather
+// than represented as a foreign key, so rewind and draft cleanup do not erase
+// a preference the user actually expressed.
+type UserMemoryRow struct {
+	Key             string
+	Kind            string
+	Statement       string
+	EvidenceKind    string
+	EvidenceID      string
+	SourceDraftID   string
+	CreatedAt       string
+	LastConfirmedAt string
+}
+
+type UserMemoryEvidenceRow struct {
+	Kind          string
+	ID            string
+	SourceDraftID string
+}
+
+type UserMemoryOutcome struct {
+	WrittenKeys []string
+	RemovedKeys []string
+	EvictedKeys []string
+	Total       int
+}
+
 func ContentPlanHash(plan map[string]any) (string, error) {
 	if plan == nil {
 		plan = map[string]any{}
@@ -154,6 +185,9 @@ type ResultRows struct {
 	AgentJobObservations            []AgentJobObservationRow
 	AgentJobObservationDelivery     *AgentJobObservationDeliveryRow
 	AgentJobObservationSuppressions []AgentJobObservationSuppressionRow
+	UserMemoryUpserts               []UserMemoryRow
+	UserMemoryRemoveKeys            []string
+	UserMemoryMutationEvidence      *UserMemoryEvidenceRow
 }
 
 type ValidationHook func(context.Context, *sql.Tx, []string) error
@@ -313,7 +347,12 @@ func Apply(
 			return Result{Status: StatusValidationFailed}, nil
 		}
 	}
-	if err := persistResultRows(ctx, tx, options.ResultRows, state.createdAt); err != nil {
+	var userMemory *UserMemoryOutcome
+	if len(options.ResultRows.UserMemoryUpserts) > 0 ||
+		len(options.ResultRows.UserMemoryRemoveKeys) > 0 {
+		userMemory = &UserMemoryOutcome{}
+	}
+	if err := persistResultRows(ctx, tx, options.ResultRows, state.createdAt, userMemory); err != nil {
 		if errors.Is(err, errDraftPlanConflict) {
 			return Result{Status: StatusVersionConflict}, nil
 		}
@@ -372,7 +411,7 @@ func Apply(
 	committed = true
 	return Result{
 		Status: StatusApplied, AppliedEvents: applied, DraftStateVersions: versions,
-		SkippedEvents: state.skipped,
+		SkippedEvents: state.skipped, UserMemory: userMemory,
 	}, nil
 }
 
@@ -1371,6 +1410,7 @@ func persistResultRows(
 	tx *sql.Tx,
 	rows ResultRows,
 	defaultCreatedAt string,
+	userMemoryOutcome *UserMemoryOutcome,
 ) error {
 	if rows.Message != nil {
 		createdAt := rows.Message.CreatedAt
@@ -1393,6 +1433,16 @@ func persistResultRows(
 				return err
 			}
 		}
+	}
+	userMemory, err := persistUserMemories(
+		ctx, tx, rows.UserMemoryUpserts, rows.UserMemoryRemoveKeys,
+		rows.UserMemoryMutationEvidence, defaultCreatedAt,
+	)
+	if err != nil {
+		return err
+	}
+	if userMemoryOutcome != nil {
+		*userMemoryOutcome = userMemory
 	}
 	for _, summary := range rows.MaterialSummaries {
 		createdAt := summary.CreatedAt
@@ -1571,6 +1621,201 @@ func persistResultRows(
 	return nil
 }
 
+func persistUserMemories(
+	ctx context.Context,
+	tx *sql.Tx,
+	upserts []UserMemoryRow,
+	removeKeys []string,
+	mutationEvidence *UserMemoryEvidenceRow,
+	defaultCreatedAt string,
+) (UserMemoryOutcome, error) {
+	outcome := UserMemoryOutcome{}
+	if len(upserts) == 0 && len(removeKeys) == 0 {
+		return outcome, nil
+	}
+	if mutationEvidence != nil {
+		if err := validateUserMemoryEvidence(ctx, tx, *mutationEvidence); err != nil {
+			return outcome, err
+		}
+	}
+
+	upsertKeys := make(map[string]struct{}, len(upserts))
+	for _, memory := range upserts {
+		if !storage.ValidUserMemoryKey(memory.Key) ||
+			!storage.ValidUserMemoryKind(memory.Kind) ||
+			!storage.ValidUserMemoryStatement(memory.Statement) ||
+			!storage.ValidUserMemoryEvidenceKind(memory.EvidenceKind) ||
+			memory.EvidenceID == "" || memory.SourceDraftID == "" {
+			return outcome, fmt.Errorf("%w: memory_key=%q", ErrUserMemoryInput, memory.Key)
+		}
+		if _, duplicate := upsertKeys[memory.Key]; duplicate {
+			return outcome, fmt.Errorf("%w: 重复 memory_key=%q", ErrUserMemoryInput, memory.Key)
+		}
+		upsertKeys[memory.Key] = struct{}{}
+		if mutationEvidence != nil &&
+			(memory.EvidenceKind != mutationEvidence.Kind ||
+				memory.EvidenceID != mutationEvidence.ID ||
+				memory.SourceDraftID != mutationEvidence.SourceDraftID) {
+			return outcome, fmt.Errorf("%w: 条目证据与本次用户回合不一致", ErrUserMemoryEvidence)
+		}
+	}
+	removeSet := make(map[string]struct{}, len(removeKeys))
+	for _, key := range removeKeys {
+		if !storage.ValidUserMemoryKey(key) {
+			return outcome, fmt.Errorf("%w: 删除键 %q 无效", ErrUserMemoryInput, key)
+		}
+		if _, duplicate := removeSet[key]; duplicate {
+			return outcome, fmt.Errorf("%w: 重复删除键 %q", ErrUserMemoryInput, key)
+		}
+		if _, overlap := upsertKeys[key]; overlap {
+			return outcome, fmt.Errorf("%w: memory_key=%q 同时写入和删除", ErrUserMemoryInput, key)
+		}
+		removeSet[key] = struct{}{}
+	}
+
+	for _, key := range removeKeys {
+		result, err := tx.ExecContext(ctx, "DELETE FROM user_memories WHERE memory_key=?", key)
+		if err != nil {
+			return outcome, err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return outcome, err
+		}
+		if affected == 1 {
+			outcome.RemovedKeys = append(outcome.RemovedKeys, key)
+		}
+	}
+
+	for _, memory := range upserts {
+		if err := validateUserMemoryEvidence(ctx, tx, UserMemoryEvidenceRow{
+			Kind: memory.EvidenceKind, ID: memory.EvidenceID, SourceDraftID: memory.SourceDraftID,
+		}); err != nil {
+			return outcome, err
+		}
+		createdAt := memory.CreatedAt
+		if createdAt == "" {
+			createdAt = defaultCreatedAt
+		}
+		createdAt, err := normalizeUserMemoryTimestamp(createdAt)
+		if err != nil {
+			return outcome, fmt.Errorf("%w: created_at: %v", ErrUserMemoryInput, err)
+		}
+		lastConfirmedAt := memory.LastConfirmedAt
+		if lastConfirmedAt == "" {
+			lastConfirmedAt = defaultCreatedAt
+		}
+		lastConfirmedAt, err = normalizeUserMemoryTimestamp(lastConfirmedAt)
+		if err != nil {
+			return outcome, fmt.Errorf("%w: last_confirmed_at: %v", ErrUserMemoryInput, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO user_memories(
+				memory_key,kind,statement,evidence_kind,evidence_id,
+				source_draft_id,created_at,last_confirmed_at
+			) VALUES(?,?,?,?,?,?,?,?)
+			ON CONFLICT(memory_key) DO UPDATE SET
+				kind=excluded.kind,
+				statement=excluded.statement,
+				evidence_kind=excluded.evidence_kind,
+				evidence_id=excluded.evidence_id,
+				source_draft_id=excluded.source_draft_id,
+				last_confirmed_at=excluded.last_confirmed_at`,
+			memory.Key, memory.Kind, memory.Statement, memory.EvidenceKind,
+			memory.EvidenceID, memory.SourceDraftID, createdAt, lastConfirmedAt,
+		); err != nil {
+			return outcome, err
+		}
+		outcome.WrittenKeys = append(outcome.WrittenKeys, memory.Key)
+	}
+
+	var count int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM user_memories").Scan(&count); err != nil {
+		return outcome, err
+	}
+	if excess := count - storage.UserMemoryLimit; excess > 0 {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT memory_key FROM user_memories
+			ORDER BY last_confirmed_at ASC,memory_key ASC
+			LIMIT ?`, excess)
+		if err != nil {
+			return outcome, err
+		}
+		for rows.Next() {
+			var key string
+			if err := rows.Scan(&key); err != nil {
+				_ = rows.Close()
+				return outcome, err
+			}
+			outcome.EvictedKeys = append(outcome.EvictedKeys, key)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return outcome, err
+		}
+		if err := rows.Close(); err != nil {
+			return outcome, err
+		}
+	}
+	for _, key := range outcome.EvictedKeys {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM user_memories WHERE memory_key=?", key); err != nil {
+			return outcome, err
+		}
+	}
+	outcome.Total = count - len(outcome.EvictedKeys)
+	sort.Strings(outcome.WrittenKeys)
+	sort.Strings(outcome.RemovedKeys)
+	return outcome, nil
+}
+
+const userMemoryTimestampFormat = "2006-01-02T15:04:05.000000000Z"
+
+func normalizeUserMemoryTimestamp(value string) (string, error) {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return "", err
+	}
+	return parsed.UTC().Format(userMemoryTimestampFormat), nil
+}
+
+func validateUserMemoryEvidence(
+	ctx context.Context,
+	tx *sql.Tx,
+	evidence UserMemoryEvidenceRow,
+) error {
+	if !storage.ValidUserMemoryEvidenceKind(evidence.Kind) ||
+		evidence.ID == "" || evidence.SourceDraftID == "" {
+		return fmt.Errorf("%w: 证据字段不完整", ErrUserMemoryEvidence)
+	}
+	var valid int
+	var err error
+	switch evidence.Kind {
+	case storage.UserMemoryEvidenceMessage:
+		err = tx.QueryRowContext(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM messages
+				WHERE message_id=? AND draft_id=? AND role='user'
+			)`, evidence.ID, evidence.SourceDraftID).Scan(&valid)
+	case storage.UserMemoryEvidenceDecision:
+		err = tx.QueryRowContext(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM decisions
+				WHERE decision_id=? AND draft_id=? AND status='answered'
+				AND answer_json IS NOT NULL AND answer_json!='null'
+			)`, evidence.ID, evidence.SourceDraftID).Scan(&valid)
+	}
+	if err != nil {
+		return err
+	}
+	if valid != 1 {
+		return fmt.Errorf(
+			"%w: kind=%s id=%s draft=%s",
+			ErrUserMemoryEvidence, evidence.Kind, evidence.ID, evidence.SourceDraftID,
+		)
+	}
+	return nil
+}
+
 func appendEvents(
 	ctx context.Context,
 	state *applyState,
@@ -1656,7 +1901,8 @@ func emptyResultRows(rows ResultRows) bool {
 		len(rows.Transcripts) == 0 && rows.AgentContextCheckpoint == nil &&
 		rows.DraftPlanUpdate == nil && rows.AgentJobBridgeCursor == nil &&
 		len(rows.AgentJobObservations) == 0 && rows.AgentJobObservationDelivery == nil &&
-		len(rows.AgentJobObservationSuppressions) == 0
+		len(rows.AgentJobObservationSuppressions) == 0 &&
+		len(rows.UserMemoryUpserts) == 0 && len(rows.UserMemoryRemoveKeys) == 0
 }
 
 func sortedKeys(values map[string]struct{}) []string {

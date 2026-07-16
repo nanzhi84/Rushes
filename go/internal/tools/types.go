@@ -490,6 +490,17 @@ type PlanUpdateInput struct {
 	Reset    *bool                `json:"reset,omitempty" jsonschema_description:"设为 true 时先清空现有计划，再按 RFC 7396 写入 plan；对象属性 null 仍表示删除；默认 false"`
 }
 
+type MemoryEntryInput struct {
+	Key       string `json:"key" jsonschema:"required" jsonschema_description:"稳定语义主键，匹配 [a-z0-9_]{2,40}，例如 pacing、subtitle_style；同键覆盖旧记忆"`
+	Kind      string `json:"kind" jsonschema:"required" jsonschema_description:"preference 表示长期偏好，correction 表示用户纠正，habit 表示稳定使用习惯"`
+	Statement string `json:"statement" jsonschema:"required" jsonschema_description:"一句简体中文陈述用户跨项目稳定的偏好、纠正或习惯，不超过 200 字；只能写当前用户明确表达过的内容，不得写模型自己的创作判断"`
+}
+
+type MemoryUpdateInput struct {
+	Entries    []MemoryEntryInput `json:"entries,omitempty" jsonschema_description:"要写入或覆盖的长期记忆，单次最多 8 条；一次性项目要求不要入库"`
+	RemoveKeys []string           `json:"remove_keys,omitempty" jsonschema_description:"用户本回合明确要求忘记的长期记忆键；不得与 entries 中的 key 重复"`
+}
+
 type ComposeClip struct {
 	AssetID          string `json:"asset_id" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的 video 或 image 素材 ID"`
 	SourceStartFrame int    `json:"source_start_frame" jsonschema_description:"素材入点整数帧，默认 0，必须小于 source_end_frame"`

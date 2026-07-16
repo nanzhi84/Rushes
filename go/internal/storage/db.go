@@ -354,6 +354,23 @@ func (database *DB) Migrate(ctx context.Context) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		version = 12
+	}
+	if version < 13 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV13); err != nil {
+			return fmt.Errorf("应用 schema v13: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 13"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
