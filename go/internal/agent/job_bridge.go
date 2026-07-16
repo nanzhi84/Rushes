@@ -59,7 +59,10 @@ func (service *Service) startJobObservationBridge(ctx context.Context) {
 }
 
 func (service *Service) bridgeIteration(ctx context.Context, cursor int64) int64 {
-	service.dispatchPendingJobObservations(ctx)
+	// Dispatch exactly one bounded page per iteration. Deferring preserves retry
+	// behavior on ingestion failures and includes newly persisted observations on
+	// successful ingestion without allowing a second page in the same tick.
+	defer service.dispatchPendingJobObservations(ctx)
 	rows, err := service.database.Read().QueryContext(ctx, `
 		SELECT event_id,draft_id,payload_json FROM event_log
 		WHERE event_id>? AND event_type IN ('JobSucceeded','JobFailed','JobCancelled')
@@ -67,6 +70,7 @@ func (service *Service) bridgeIteration(ctx context.Context, cursor int64) int64
 	if err != nil {
 		return cursor
 	}
+	defer func() { _ = rows.Close() }()
 	observations := make([]bridgeObservation, 0)
 	lastEventID := cursor
 	for rows.Next() {
@@ -74,7 +78,6 @@ func (service *Service) bridgeIteration(ctx context.Context, cursor int64) int64
 		var draftID *string
 		var payloadJSON []byte
 		if err := rows.Scan(&eventID, &draftID, &payloadJSON); err != nil {
-			_ = rows.Close()
 			return cursor
 		}
 		lastEventID = eventID
@@ -104,10 +107,8 @@ func (service *Service) bridgeIteration(ctx context.Context, cursor int64) int64
 		})
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
 		return cursor
 	}
-	_ = rows.Close()
 	if lastEventID == cursor {
 		return cursor
 	}
@@ -131,79 +132,53 @@ func (service *Service) bridgeIteration(ctx context.Context, cursor int64) int64
 	if err != nil || result.Status != reducer.StatusApplied {
 		return cursor
 	}
-	service.dispatchPendingJobObservations(ctx)
 	return lastEventID
 }
 
 func (service *Service) dispatchPendingJobObservations(ctx context.Context) {
 	service.bridgeDispatchMu.Lock()
 	defer service.bridgeDispatchMu.Unlock()
-	afterEventID := service.bridgeScanCursor
-	for {
-		page, lastEventID, scanned := service.pendingJobObservationPage(ctx, afterEventID)
-		if scanned < 0 {
-			return
-		}
-		if scanned == 0 && afterEventID != 0 {
-			// Wrap without consuming scan budget: the first query returned no rows,
-			// so this invocation still examines at most dispatchLimit records.
-			service.bridgeScanCursor = 0
-			afterEventID = 0
-			continue
-		}
-		if scanned > 0 {
-			service.bridgeScanCursor = lastEventID
-		}
-		for _, observation := range page {
-			service.dispatchJobObservation(ctx, observation)
-		}
+	page, err := service.pendingJobObservations(ctx)
+	if err != nil {
 		return
+	}
+	for _, observation := range page {
+		service.dispatchJobObservation(ctx, observation)
 	}
 }
 
-func (service *Service) pendingJobObservationPage(
-	ctx context.Context,
-	afterEventID int64,
-) ([]bridgeObservation, int64, int) {
+func (service *Service) pendingJobObservations(ctx context.Context) ([]bridgeObservation, error) {
 	rows, err := service.database.Read().QueryContext(ctx, `
 		SELECT event_id,job_id,draft_id,event_json,claim_token
 		FROM agent_job_observations
-		WHERE delivered_at IS NULL AND event_id>?
-		ORDER BY event_id LIMIT ?`, afterEventID, jobObservationDispatchLimit)
+		WHERE delivered_at IS NULL
+		ORDER BY event_id LIMIT ?`, jobObservationDispatchLimit)
 	if err != nil {
-		return nil, afterEventID, -1
+		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	page := make([]bridgeObservation, 0, jobObservationDispatchLimit)
-	lastEventID := afterEventID
-	scanned := 0
 	for rows.Next() {
 		var observation bridgeObservation
 		var eventJSON []byte
 		if err := rows.Scan(&observation.eventID, &observation.jobID, &observation.draftID,
 			&eventJSON, &observation.claimToken); err != nil {
-			_ = rows.Close()
-			return nil, afterEventID, -1
+			return nil, err
 		}
-		scanned++
-		lastEventID = observation.eventID
-		if json.Unmarshal(eventJSON, &observation.event) != nil {
-			continue
-		}
+		_ = json.Unmarshal(eventJSON, &observation.event)
 		page = append(page, observation)
 	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, afterEventID, -1
-	}
-	if err := rows.Close(); err != nil {
-		return nil, afterEventID, -1
-	}
-	return page, lastEventID, scanned
+	return page, rows.Err()
 }
 
 func (service *Service) dispatchJobObservation(ctx context.Context, observation bridgeObservation) bool {
 	jobID, draftID, claimToken := observation.jobID, observation.draftID, observation.claimToken
 	event := observation.event
+	if event == nil {
+		slog.Error("隔离损坏的 Agent job observation", "job_id", jobID, "event_id", observation.eventID)
+		service.markJobObservationDelivered(ctx, jobID, claimToken)
+		return true
+	}
 	payload, _ := event["payload"].(map[string]any)
 	reason, _ := payload["reason"].(string)
 	if (event["event"] == "JobCancelled" && reason == "turn_cancelled") ||

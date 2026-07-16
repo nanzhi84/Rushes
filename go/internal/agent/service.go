@@ -51,7 +51,6 @@ type Service struct {
 	bridgeMu         sync.Mutex
 	bridgeInflight   map[string]struct{}
 	bridgeDispatchMu sync.Mutex
-	bridgeScanCursor int64
 }
 
 func NewService(

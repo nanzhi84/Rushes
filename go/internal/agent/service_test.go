@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1416,8 +1417,8 @@ func TestJobObservationBridgeReleasesInflightAndHandlesClosedDependencies(t *tes
 		t.Fatal("存储不可用时不得把 observation 误判为已抑制")
 	}
 	closedService.markJobObservationDelivered(t.Context(), "job", "claim")
-	if page, _, scanned := closedService.pendingJobObservationPage(t.Context(), 9); page != nil || scanned != -1 {
-		t.Fatalf("存储不可用时 page=%v scanned=%d", page, scanned)
+	if page, err := closedService.pendingJobObservations(t.Context()); err == nil || page != nil {
+		t.Fatalf("存储不可用时 page=%v err=%v", page, err)
 	}
 	closedService.startJobObservationBridge(t.Context())
 	if cursor := closedService.bridgeIteration(t.Context(), 9); cursor != 9 {
@@ -1425,53 +1426,202 @@ func TestJobObservationBridgeReleasesInflightAndHandlesClosedDependencies(t *tes
 	}
 }
 
-func TestJobObservationBridgeScansPastInflightPage(t *testing.T) {
+func TestJobObservationBridgeRevisitsOldestAfterInflightClears(t *testing.T) {
 	t.Parallel()
 	database := agentTestDatabase(t)
 	createAgentDraft(t, database, "draft_bridge_page")
-	observations := make([]reducer.AgentJobObservationRow, 0, 101)
-	for index := 1; index <= 101; index++ {
-		jobID := fmt.Sprintf("job_page_%03d", index)
-		observations = append(observations, reducer.AgentJobObservationRow{
-			JobID: jobID, EventID: int64(index), DraftID: "draft_bridge_page",
-			ClaimToken: "claim_" + jobID,
-			Event: map[string]any{
-				"event": "JobSucceeded", "draft_id": "draft_bridge_page",
-				"payload": map[string]any{
-					"job_id": jobID, "kind": "render_preview",
-					"requested_by_draft_id": "draft_bridge_page",
+	makeObservations := func(first, last int) []reducer.AgentJobObservationRow {
+		observations := make([]reducer.AgentJobObservationRow, 0, last-first+1)
+		for index := first; index <= last; index++ {
+			jobID := fmt.Sprintf("job_page_%03d", index)
+			observations = append(observations, reducer.AgentJobObservationRow{
+				JobID: jobID, EventID: int64(index), DraftID: "draft_bridge_page",
+				ClaimToken: "claim_" + jobID,
+				Event: map[string]any{
+					"event": "JobSucceeded", "draft_id": "draft_bridge_page",
+					"payload": map[string]any{
+						"job_id": jobID, "kind": "render_preview",
+						"requested_by_draft_id": "draft_bridge_page",
+					},
 				},
-			},
-		})
+			})
+		}
+		return observations
 	}
 	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
 		Actor:      contracts.ActorAgent,
-		ResultRows: reducer.ResultRows{AgentJobObservations: observations},
+		ResultRows: reducer.ResultRows{AgentJobObservations: makeObservations(1, 101)},
 	})
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("seed status=%s err=%v", result.Status, err)
 	}
 
-	queueCtx, cancelQueue := context.WithCancel(t.Context())
-	service := &Service{database: database, hub: NewTurnStreamHub(0), bridgeInflight: map[string]struct{}{}}
-	queue := NewTurnQueue(queueCtx, func(runCtx context.Context, _ QueueItem) error {
-		<-runCtx.Done()
-		return runCtx.Err()
+	var observedMu sync.Mutex
+	observed := []string{}
+	service := &Service{database: database, hub: NewTurnStreamHub(0), bridgeInflight: map[string]struct{}{
+		"job_page_001": {},
+	}}
+	queue := NewTurnQueue(t.Context(), func(_ context.Context, item QueueItem) error {
+		observedMu.Lock()
+		observed = append(observed, item.ItemID)
+		observedMu.Unlock()
+		return nil
 	})
 	service.queue = queue
-	t.Cleanup(func() {
-		cancelQueue()
-		queue.Close()
-	})
+	t.Cleanup(queue.Close)
 
 	service.dispatchPendingJobObservations(t.Context())
-	service.dispatchPendingJobObservations(t.Context())
+	queue.JoinDraft("draft_bridge_page")
+	observedMu.Lock()
+	firstPass := append([]string(nil), observed...)
+	observedMu.Unlock()
+	if slices.Contains(firstPass, "job_page_001") || len(firstPass) != jobObservationDispatchLimit-1 {
+		t.Fatalf("first pass count=%d blocked_present=%v", len(firstPass), slices.Contains(firstPass, "job_page_001"))
+	}
+	result, err = reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{
+			AgentJobObservations: makeObservations(102, 201),
+		},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("inject backlog status=%s err=%v", result.Status, err)
+	}
 	service.bridgeMu.Lock()
-	_, scheduled := service.bridgeInflight["job_page_101"]
-	inflightCount := len(service.bridgeInflight)
+	delete(service.bridgeInflight, "job_page_001")
 	service.bridgeMu.Unlock()
-	if !scheduled || inflightCount != 101 {
-		t.Fatalf("job 101 scheduled=%v inflight=%d", scheduled, inflightCount)
+
+	service.dispatchPendingJobObservations(t.Context())
+	queue.JoinDraft("draft_bridge_page")
+	observedMu.Lock()
+	allObserved := append([]string(nil), observed...)
+	observedMu.Unlock()
+	dispatchCount := 0
+	for _, jobID := range allObserved {
+		if jobID == "job_page_001" {
+			dispatchCount++
+		}
+	}
+	if dispatchCount != 1 {
+		t.Fatalf("oldest observation dispatch count=%d observed=%v", dispatchCount, allObserved)
+	}
+}
+
+func TestJobObservationBridgeDispatchesOnePagePerIteration(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_bridge_limit")
+	observations := make([]reducer.AgentJobObservationRow, 0, 201)
+	for index := 1; index <= 201; index++ {
+		jobID := fmt.Sprintf("job_limit_%03d", index)
+		observations = append(observations, reducer.AgentJobObservationRow{
+			JobID: jobID, EventID: int64(index), DraftID: "draft_bridge_limit",
+			ClaimToken: "claim_" + jobID,
+			Event: map[string]any{
+				"event": "JobCancelled", "draft_id": "draft_bridge_limit",
+				"payload": map[string]any{
+					"job_id": jobID, "kind": "render_preview", "reason": "turn_cancelled",
+					"requested_by_draft_id": "draft_bridge_limit",
+				},
+			},
+		})
+	}
+	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{
+			AgentJobObservations: observations,
+		},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("seed status=%s err=%v", result.Status, err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO event_log(event_type,actor,payload_json,created_at)
+		VALUES('JobSucceeded','job',?,?)`,
+		`{"event":"JobSucceeded","payload":{"kind":"noop","job_id":"cursor_advance"}}`, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	service := &Service{database: database, bridgeInflight: map[string]struct{}{}}
+	if cursor := service.bridgeIteration(t.Context(), 0); cursor == 0 {
+		t.Fatal("event-log cursor should advance")
+	}
+	var delivered int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM agent_job_observations WHERE delivered_at IS NOT NULL`,
+	).Scan(&delivered); err != nil {
+		t.Fatal(err)
+	}
+	if delivered != jobObservationDispatchLimit {
+		t.Fatalf("delivered=%d want=%d", delivered, jobObservationDispatchLimit)
+	}
+}
+
+func TestJobObservationBridgeQuarantinesFullMalformedPage(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_bridge_malformed")
+	observations := make([]reducer.AgentJobObservationRow, 0, jobObservationDispatchLimit+1)
+	for index := 1; index <= jobObservationDispatchLimit+1; index++ {
+		jobID := fmt.Sprintf("job_malformed_%d", index)
+		observations = append(observations, reducer.AgentJobObservationRow{
+			JobID: jobID, EventID: int64(index), DraftID: "draft_bridge_malformed",
+			ClaimToken: "claim_" + jobID,
+			Event: map[string]any{
+				"event":   "JobSucceeded",
+				"payload": map[string]any{"job_id": jobID, "kind": "render_preview"},
+			},
+		})
+	}
+	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{
+			AgentJobObservations: observations,
+		},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("seed status=%s err=%v", result.Status, err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		UPDATE agent_job_observations SET event_json='not-json' WHERE event_id<=?`,
+		jobObservationDispatchLimit); err != nil {
+		t.Fatal(err)
+	}
+
+	observed := make(chan string, 1)
+	queue := NewTurnQueue(t.Context(), func(_ context.Context, item QueueItem) error {
+		observed <- item.ItemID
+		return nil
+	})
+	t.Cleanup(queue.Close)
+	service := &Service{database: database, queue: queue}
+	service.dispatchPendingJobObservations(t.Context())
+	var delivered int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM agent_job_observations WHERE delivered_at IS NOT NULL`,
+	).Scan(&delivered); err != nil {
+		t.Fatal(err)
+	}
+	if delivered != jobObservationDispatchLimit {
+		t.Fatalf("quarantined=%d want=%d", delivered, jobObservationDispatchLimit)
+	}
+	select {
+	case itemID := <-observed:
+		t.Fatalf("first page should contain only malformed observations, got %s", itemID)
+	default:
+	}
+
+	service.dispatchPendingJobObservations(t.Context())
+	queue.JoinDraft("draft_bridge_malformed")
+	select {
+	case itemID := <-observed:
+		if itemID != fmt.Sprintf("job_malformed_%d", jobObservationDispatchLimit+1) {
+			t.Fatalf("item=%s", itemID)
+		}
+	default:
+		t.Fatal("valid observation after malformed page was not dispatched on the next tick")
 	}
 }
 
