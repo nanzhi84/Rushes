@@ -57,6 +57,31 @@ func TestDraftCreatedAndMergeDedup(t *testing.T) {
 	}
 }
 
+func TestMergeKeyDeduplicatesWithinOneBatch(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	event := contracts.Event{
+		Type: "DraftCreated", DraftID: "draft-batch-dedup",
+		Payload: map[string]any{"name": "first"},
+	}
+	result, err := Apply(
+		t.Context(), database, []contracts.Event{event, event}, Options{Actor: contracts.ActorUser},
+	)
+	if err != nil || result.Status != StatusApplied || len(result.AppliedEvents) != 1 || result.SkippedEvents != 1 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	draft, err := storage.GetDraft(t.Context(), database.Read(), event.DraftID)
+	if err != nil || draft.Name != "first" {
+		t.Fatalf("draft=%#v err=%v", draft, err)
+	}
+	var eventCount int
+	if err := database.Read().QueryRowContext(
+		t.Context(), "SELECT COUNT(*) FROM event_log WHERE draft_id=?", event.DraftID,
+	).Scan(&eventCount); err != nil || eventCount != 1 {
+		t.Fatalf("event count=%d err=%v", eventCount, err)
+	}
+}
+
 func TestTimelineEditHistoryKeepsOnlyTwentySemanticBatches(t *testing.T) {
 	t.Parallel()
 	database := openTestDB(t)

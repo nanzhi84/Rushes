@@ -388,14 +388,14 @@ func TestPlanUpdateRejectsInvalidPlansWithoutChangingStoredContent(t *testing.T)
 		{name: "missing", plan: nil, wantReason: "plan_required"},
 		{name: "non json", plan: map[string]any{"bad": make(chan int)}, wantReason: "plan_not_json"},
 		{name: "timeline version", plan: map[string]any{"timeline_version": 1}, wantReason: "reserved_key"},
-		{name: "timeline revision nested", plan: map[string]any{
-			"section": map[string]any{"timeline_revision": 1},
+		{name: "timeline revision in contract", plan: map[string]any{
+			"contract": map[string]any{"custom": map[string]any{"timeline_revision": 1}},
 		}, wantReason: "reserved_key"},
-		{name: "version in array", plan: map[string]any{
-			"items": []any{map[string]any{"version": 1}},
+		{name: "version in contract array", plan: map[string]any{
+			"contract": map[string]any{"items": []any{map[string]any{"version": 1}}},
 		}, wantReason: "reserved_key"},
-		{name: "timeline id deep", plan: map[string]any{
-			"section": map[string]any{"item": map[string]any{"timeline_id": "bad"}},
+		{name: "timeline id deep in contract", plan: map[string]any{
+			"contract": map[string]any{"custom": map[string]any{"item": map[string]any{"timeline_id": "bad"}}},
 		}, wantReason: "reserved_key"},
 		{name: "draft id", plan: map[string]any{"draft_id": draftID}, wantReason: "reserved_key"},
 	}
@@ -414,6 +414,29 @@ func TestPlanUpdateRejectsInvalidPlansWithoutChangingStoredContent(t *testing.T)
 				t.Fatalf("guard changed plan=%#v err=%v", stored.ContentPlan, err)
 			}
 		})
+	}
+	allowed := map[string]any{
+		"section": map[string]any{"timeline_revision": 1},
+		"items":   []any{map[string]any{"version": 1}},
+		"details": map[string]any{"item": map[string]any{"timeline_id": "business-label"}},
+	}
+	result := executePlanUpdate(t, service, draftID, rushestools.PlanUpdateInput{Plan: allowed})
+	stored, err := storage.GetDraft(t.Context(), database.Read(), draftID)
+	if result.Status != "succeeded" || err != nil || stored.ContentPlan["section"] == nil ||
+		stored.ContentPlan["items"] == nil || stored.ContentPlan["details"] == nil {
+		t.Fatalf("business nested reserved names should be allowed: result=%#v plan=%#v err=%v", result, stored.ContentPlan, err)
+	}
+	snapshot, err := NewContextBuilder(database).Snapshot(t.Context(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worldPlan := snapshot.Sections["draft"].(map[string]any)["content_plan"].(map[string]any)
+	section := worldPlan["section"].(map[string]any)
+	items := worldPlan["items"].([]any)
+	details := worldPlan["details"].(map[string]any)["item"].(map[string]any)
+	if section["timeline_revision"] != float64(1) ||
+		items[0].(map[string]any)["version"] != float64(1) || details["timeline_id"] != "business-label" {
+		t.Fatalf("allowed business keys were stripped from WorldState: %#v", worldPlan)
 	}
 	if toolCanRetrySafely("plan.update") {
 		t.Fatal("plan.update 是写工具，不得自动重放")

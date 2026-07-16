@@ -283,10 +283,16 @@ func Apply(
 		return Result{Status: StatusVersionConflict, Conflict: conflict}, nil
 	}
 
+	mergeKeys := map[string]struct{}{}
 	for _, event := range normalized {
-		duplicate, err := isDuplicateMerge(ctx, state.tx, event)
+		mergeKey, duplicate, err := existingMergeEvent(ctx, state.tx, event)
 		if err != nil {
 			return Result{}, err
+		}
+		batchKey := event.Type + "\x00" + mergeKey
+		if mergeKey != "" {
+			_, duplicateInBatch := mergeKeys[batchKey]
+			duplicate = duplicate || duplicateInBatch
 		}
 		if duplicate {
 			state.skipped++
@@ -296,6 +302,9 @@ func Apply(
 			return Result{}, err
 		}
 		state.eventsToLog = append(state.eventsToLog, event)
+		if mergeKey != "" {
+			mergeKeys[batchKey] = struct{}{}
+		}
 	}
 
 	touched := sortedKeys(state.touched)
@@ -448,22 +457,22 @@ func lookupDraftVersion(ctx context.Context, query storage.Querier, draftID stri
 	return version, nil
 }
 
-func isDuplicateMerge(ctx context.Context, tx *sql.Tx, event contracts.Event) (bool, error) {
+func existingMergeEvent(ctx context.Context, tx *sql.Tx, event contracts.Event) (string, bool, error) {
 	key, err := event.MergeKey()
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	if key == "" {
-		return false, nil
+		return "", false, nil
 	}
 	var found int
 	err = tx.QueryRowContext(ctx,
 		"SELECT 1 FROM event_log WHERE event_type=? AND merge_key=? LIMIT 1", event.Type, key,
 	).Scan(&found)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return key, false, nil
 	}
-	return err == nil, err
+	return key, err == nil, err
 }
 
 type eventApplyFunc func(context.Context, *applyState, contracts.Event) error

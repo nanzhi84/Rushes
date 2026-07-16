@@ -18,7 +18,7 @@ type Executor interface {
 	ExecuteTool(context.Context, string, any) (any, error)
 }
 
-type Reporter func(name, phase string, input, output any, err error)
+type Reporter func(ctx context.Context, name, phase string, input, output any, err error)
 
 func WithDraftID(ctx context.Context, draftID string) context.Context {
 	return context.WithValue(ctx, draftIDKey, draftID)

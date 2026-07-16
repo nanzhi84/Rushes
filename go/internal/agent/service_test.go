@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
@@ -741,7 +742,7 @@ func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
 		Actor: contracts.ActorAgent, ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
 			ID: "tool_inspected", DraftID: "draft_job_dedup", Role: "system", Kind: "tool",
-			Content: `{"tool":"render.inspect_preview","args_summary":"{\"preview_id\":\"preview_done\"}","observation":"{\"summary\":\"ok\"}","status":"succeeded"}`,
+			Content: `{"tool":"render.inspect_preview","preview_id":"preview_done","args_summary":"{truncated...","observation":"{\"summary\":\"ok\"}","status":"succeeded"}`,
 		}},
 	})
 	if err != nil || result.Status != reducer.StatusApplied {
@@ -772,8 +773,8 @@ func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 	}
 	for index, content := range []string{
 		`not-json`,
-		`{"tool":"render.inspect_preview","args_summary":"{\"preview_id\":\"preview_done\"}","status":"failed"}`,
-		`{"tool":"render.inspect_preview","args_summary":"not-json","status":"succeeded"}`,
+		`{"tool":"render.inspect_preview","preview_id":"preview_done","status":"failed"}`,
+		`{"tool":"render.inspect_preview","args_summary":"{\"preview_id\":\"preview_legacy\"}","status":"succeeded"}`,
 	} {
 		result, err = reducer.Apply(t.Context(), database, nil, reducer.Options{
 			Actor: contracts.ActorAgent, ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
@@ -791,6 +792,9 @@ func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 	if !service.previewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_done"}) {
 		t.Fatal("应兼容 preview_id 形式的终态结果")
 	}
+	if !service.previewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_legacy"}) {
+		t.Fatal("升级后应兼容未截断的旧 args_summary trace")
+	}
 	if service.previewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"artifact_id": "preview_other"}) {
 		t.Fatal("不同预览不应被误去重")
 	}
@@ -802,6 +806,93 @@ func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_job_dedup", 20)
 	if err != nil || len(messages) != 5 {
 		t.Fatalf("去重后不应生成重复回复: messages=%#v err=%v", messages, err)
+	}
+}
+
+func TestToolReporterPairsSameNameCallsByCallIDAndPersistsPreviewID(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	const draftID = "draft_reporter_call_ids"
+	createAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	reporter := service.toolReporter(t.Context(), draftID)
+	firstCtx := rushestools.WithToolCallID(t.Context(), "call_first")
+	secondCtx := rushestools.WithToolCallID(t.Context(), "call_second")
+	firstInput := rushestools.RenderInspectInput{
+		PreviewID: "preview_first", Checks: []string{strings.Repeat("visual", 80)},
+	}
+	secondInput := rushestools.RenderInspectInput{PreviewID: "preview_second"}
+	reporter(firstCtx, "render.inspect_preview", "started", firstInput, nil, nil)
+	reporter(secondCtx, "render.inspect_preview", "started", secondInput, nil, nil)
+	reporter(firstCtx, "render.inspect_preview", "finished", firstInput, rushestools.ToolResult{Status: "succeeded"}, nil)
+	reporter(secondCtx, "render.inspect_preview", "finished", secondInput, rushestools.ToolResult{Status: "succeeded"}, nil)
+
+	events := service.Hub().Snapshot(draftID)
+	if len(events) != 4 || events[0]["step_id"] != events[2]["step_id"] ||
+		events[1]["step_id"] != events[3]["step_id"] || events[0]["step_id"] == events[1]["step_id"] {
+		t.Fatalf("same-name tool calls were cross-wired: %#v", events)
+	}
+	messages, err := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
+	if err != nil || len(messages) != 2 {
+		t.Fatalf("tool trace messages=%#v err=%v", messages, err)
+	}
+	previewIDs := map[string]bool{}
+	for _, message := range messages {
+		var record struct {
+			PreviewID   string `json:"preview_id"`
+			ArgsSummary string `json:"args_summary"`
+		}
+		if err := json.Unmarshal([]byte(message.Content), &record); err != nil {
+			t.Fatal(err)
+		}
+		previewIDs[record.PreviewID] = true
+		if record.PreviewID == "preview_first" && !strings.HasSuffix(record.ArgsSummary, "...") {
+			t.Fatalf("long argument fixture did not exercise truncation: %q", record.ArgsSummary)
+		}
+	}
+	if !previewIDs["preview_first"] || !previewIDs["preview_second"] {
+		t.Fatalf("persisted preview IDs=%#v", previewIDs)
+	}
+}
+
+func TestToolRecoveryPersistsPreviewIDFromSyntheticStartedArguments(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	const draftID = "draft_reporter_recovery_preview"
+	createAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	ctx := rushestools.WithReporter(t.Context(), service.toolReporter(t.Context(), draftID))
+	endpoint := newToolRecoveryMiddleware().Invokable(
+		func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			reporter, ok := rushestools.ReporterFromContext(ctx)
+			if !ok {
+				t.Fatal("tool recovery lost reporter")
+			}
+			typed := rushestools.RenderInspectInput{PreviewID: "preview_production"}
+			reporter(ctx, input.Name, "started", typed, nil, nil)
+			reporter(ctx, input.Name, "finished", typed, rushestools.ToolResult{Status: "succeeded"}, nil)
+			return &compose.ToolOutput{Result: `{"status":"succeeded"}`}, nil
+		},
+	)
+	if _, err := endpoint(ctx, &compose.ToolInput{
+		Name: "render.inspect_preview", CallID: "call_production",
+		Arguments: `{"preview_id":"preview_production","checks":["decode"]}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
+	if err != nil || len(messages) != 1 || !strings.Contains(messages[0].Content, `"preview_id":"preview_production"`) {
+		t.Fatalf("production recovery trace=%#v err=%v", messages, err)
 	}
 }
 
@@ -3404,7 +3495,7 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 		t.Fatalf("closed bridge cursor=%d", cursor)
 	}
 	reporter := service.toolReporter(t.Context(), "draft_closed")
-	reporter("orphan", "finished", nil, nil, errors.New("tool failed"))
+	reporter(t.Context(), "orphan", "finished", nil, nil, errors.New("tool failed"))
 }
 
 func agentTestDatabase(t *testing.T) *storage.DB {

@@ -37,6 +37,12 @@ func (server *Server) EnqueueMessageApiDraftsDraftIdMessagesPost(
 		writeBadRequest(writer, "empty_message")
 		return
 	}
+	if !server.agent.Queue().CanEnqueue(draftID) {
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]any{
+			"detail": map[string]string{"reason": "turn_queue_closed"},
+		})
+		return
+	}
 	messageID := newID("msg")
 	if payload.MessageId != nil && *payload.MessageId != "" {
 		messageID = *payload.MessageId
@@ -52,6 +58,8 @@ func (server *Server) EnqueueMessageApiDraftsDraftIdMessagesPost(
 		return
 	}
 	if !server.agent.Queue().EnqueueUserMessage(draftID, messageID, content) {
+		// CanEnqueue is intentionally only a preflight: shutdown or cancellation may
+		// still win before this send. Event-sourced messages cannot be deleted here.
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]any{
 			"detail": map[string]string{"reason": "turn_queue_closed"},
 		})

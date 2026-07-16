@@ -512,6 +512,7 @@ func (service *Service) previewAlreadyInspected(ctx context.Context, draftID str
 		}
 		var record struct {
 			Tool        string `json:"tool"`
+			PreviewID   string `json:"preview_id"`
 			ArgsSummary string `json:"args_summary"`
 			Status      string `json:"status"`
 		}
@@ -519,11 +520,18 @@ func (service *Service) previewAlreadyInspected(ctx context.Context, draftID str
 			record.Tool != "render.inspect_preview" || record.Status != "succeeded" {
 			continue
 		}
-		var args struct {
-			PreviewID string `json:"preview_id"`
-		}
-		if json.Unmarshal([]byte(record.ArgsSummary), &args) == nil && args.PreviewID == previewID {
+		if record.PreviewID == previewID {
 			return true
+		}
+		// Pre-D3 traces only stored preview_id inside an untruncated args_summary.
+		// New traces use the top-level field and never depend on this compatibility path.
+		if record.PreviewID == "" {
+			var legacyArgs struct {
+				PreviewID string `json:"preview_id"`
+			}
+			if json.Unmarshal([]byte(record.ArgsSummary), &legacyArgs) == nil && legacyArgs.PreviewID == previewID {
+				return true
+			}
 		}
 	}
 	return false
@@ -693,28 +701,34 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 	type activeStep struct {
 		id          string
 		argsSummary string
+		previewID   string
 	}
 	var mu sync.Mutex
 	steps := map[string]activeStep{}
-	return func(name, phase string, input, output any, err error) {
+	return func(reportCtx context.Context, name, phase string, input, output any, err error) {
 		mu.Lock()
 		defer mu.Unlock()
+		key := rushestools.ToolCallID(reportCtx)
+		if key == "" {
+			key = name
+		}
 		if phase == "started" {
 			stepID := randomID("step")
 			argsSummary := compactJSON(input)
-			steps[name] = activeStep{id: stepID, argsSummary: argsSummary}
+			previewID := previewIDFromToolReport(name, input)
+			steps[key] = activeStep{id: stepID, argsSummary: argsSummary, previewID: previewID}
 			service.hub.Record(draftID, StreamEvent{
 				"type": TurnStreamToolStepStarted, "step_id": stepID, "tool": name,
 				"args_summary": argsSummary,
 			})
 			return
 		}
-		step := steps[name]
+		step := steps[key]
 		stepID := step.id
 		if stepID == "" {
 			stepID = randomID("step")
 		}
-		delete(steps, name)
+		delete(steps, key)
 		status := "succeeded"
 		observation := compactJSON(output)
 		if err != nil {
@@ -729,20 +743,42 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 		})
 		_ = service.persistToolTrace(
 			context.WithoutCancel(ctx), draftID, stepID, name, status, step.argsSummary, observation,
+			step.previewID,
 		)
 	}
+}
+
+func previewIDFromToolReport(name string, input any) string {
+	if name != "render.inspect_preview" {
+		return ""
+	}
+	switch typed := input.(type) {
+	case rushestools.RenderInspectInput:
+		return strings.TrimSpace(typed.PreviewID)
+	case *rushestools.RenderInspectInput:
+		if typed != nil {
+			return strings.TrimSpace(typed.PreviewID)
+		}
+	case map[string]any:
+		return strings.TrimSpace(interfaceString(typed["preview_id"]))
+	}
+	return ""
 }
 
 // 工具折叠区在刷新后仍需存在，因此完成态通过 Reducer 持久化为 system/tool 消息。
 // 该消息只供 UI 回放，modelMessages 会过滤，避免工具 JSON 污染模型上下文。
 func (service *Service) persistToolTrace(
 	ctx context.Context,
-	draftID, stepID, name, status, argsSummary, observation string,
+	draftID, stepID, name, status, argsSummary, observation, previewID string,
 ) error {
-	content, err := json.Marshal(map[string]any{
+	record := map[string]any{
 		"step_id": stepID, "tool": name, "status": status,
 		"args_summary": argsSummary, "observation": observation,
-	})
+	}
+	if previewID != "" {
+		record["preview_id"] = previewID
+	}
+	content, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
@@ -793,9 +829,9 @@ func (service *Service) executeReported(
 	input any,
 ) (any, error) {
 	reporter := service.toolReporter(ctx, draftID)
-	reporter(name, "started", input, nil, nil)
+	reporter(ctx, name, "started", input, nil, nil)
 	output, err := service.ExecuteTool(ctx, name, input)
-	reporter(name, "finished", input, output, err)
+	reporter(ctx, name, "finished", input, output, err)
 	return output, err
 }
 

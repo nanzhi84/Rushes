@@ -55,7 +55,7 @@ func TestToolRecoveryFormattingHelpersCoverMalformedValues(t *testing.T) {
 	var phases []string
 	var finalErr error
 	reporterCtx := rushestools.WithReporter(t.Context(), func(
-		_ string, phase string, _, _ any, err error,
+		_ context.Context, _ string, phase string, _, _ any, err error,
 	) {
 		phases = append(phases, phase)
 		finalErr = err
@@ -101,7 +101,7 @@ func TestToolRecoveryDoesNotRetryDeterministicSchemaErrors(t *testing.T) {
 	events := []reportedEvent{}
 	ctx := rushestools.WithReporter(
 		withToolRecoveryState(t.Context(), newToolRecoveryState()),
-		func(_ string, phase string, _, _ any, err error) {
+		func(_ context.Context, _ string, phase string, _, _ any, err error) {
 			events = append(events, reportedEvent{phase: phase, err: err})
 		},
 	)
@@ -162,7 +162,7 @@ func TestToolRecoveryCollapsesInternalRetryReporterEvents(t *testing.T) {
 	events := []string{}
 	ctx := rushestools.WithReporter(
 		withToolRecoveryState(t.Context(), state),
-		func(_ string, phase string, _, _ any, _ error) {
+		func(_ context.Context, _ string, phase string, _, _ any, _ error) {
 			events = append(events, phase)
 		},
 	)
@@ -173,10 +173,10 @@ func TestToolRecoveryCollapsesInternalRetryReporterEvents(t *testing.T) {
 		if !ok {
 			t.Fatal("missing reporter")
 		}
-		reporter("asset.list_assets", "started", map[string]any{}, nil, nil)
+		reporter(ctx, "asset.list_assets", "started", map[string]any{}, nil, nil)
 		calls++
 		err := errors.New("temporary read failure")
-		reporter("asset.list_assets", "finished", map[string]any{}, nil, err)
+		reporter(ctx, "asset.list_assets", "finished", map[string]any{}, nil, err)
 		return nil, err
 	})
 	output, err := endpoint(ctx, &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`})
@@ -343,7 +343,7 @@ func TestUnknownToolBecomesRepairableToolResult(t *testing.T) {
 	events := []string{}
 	ctx := rushestools.WithReporter(
 		withToolRecoveryState(t.Context(), state),
-		func(_ string, phase string, _, _ any, _ error) { events = append(events, phase) },
+		func(_ context.Context, _ string, phase string, _, _ any, _ error) { events = append(events, phase) },
 	)
 	output, err := unknownToolRecoveryHandler(
 		ctx, "timeline.magic", `{}`,

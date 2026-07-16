@@ -648,6 +648,15 @@ func TestTurnStreamLiveCancellationEncodingAndWriterFailures(t *testing.T) {
 	if closed.Code != http.StatusServiceUnavailable || !strings.Contains(closed.Body.String(), "turn_queue_closed") {
 		t.Fatalf("closed queue status=%d body=%s", closed.Code, closed.Body.String())
 	}
+	messages, err := storage.ListMessages(t.Context(), server.database.Read(), "draft_turn_live", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range messages {
+		if message.Role == "user" && message.Content == "closed" {
+			t.Fatalf("queue preflight failure left an orphan user message: %#v", message)
+		}
+	}
 }
 
 func TestSlowTurnStreamSubscriberReceivesGapAndTerminalThenReconnects(t *testing.T) {

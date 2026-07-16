@@ -68,10 +68,10 @@ func (scaffold *e2eFallbackScaffold) cancelDuringUnderstanding(
 		AssetIDs: assetIDs, Depth: "scan", MaxStepsPerAsset: 8,
 	}
 	reporter := scaffold.service.toolReporter(ctx, draftID)
-	reporter("understand.materials", "started", logicalInput, nil, nil)
+	reporter(ctx, "understand.materials", "started", logicalInput, nil, nil)
 	var output any
 	defer func() {
-		reporter("understand.materials", "finished", logicalInput, output, resultErr)
+		reporter(ctx, "understand.materials", "finished", logicalInput, output, resultErr)
 	}()
 	output, resultErr = scaffold.service.ExecuteTool(ctx, "understand.materials", logicalInput)
 	if resultErr != nil {

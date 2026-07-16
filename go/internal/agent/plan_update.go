@@ -219,6 +219,24 @@ func cloneContentPlanValue(value any) any {
 }
 
 func reservedContentPlanKey(value any) string {
+	plan, ok := value.(map[string]any)
+	if !ok {
+		return ""
+	}
+	keys := make([]string, 0, len(plan))
+	for key := range plan {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if isReservedContextKey(key) {
+			return key
+		}
+	}
+	return reservedContentPlanContractKey(plan["contract"])
+}
+
+func reservedContentPlanContractKey(value any) string {
 	switch typed := value.(type) {
 	case map[string]any:
 		keys := make([]string, 0, len(typed))
@@ -230,13 +248,13 @@ func reservedContentPlanKey(value any) string {
 			if isReservedContextKey(key) {
 				return key
 			}
-			if nested := reservedContentPlanKey(typed[key]); nested != "" {
+			if nested := reservedContentPlanContractKey(typed[key]); nested != "" {
 				return nested
 			}
 		}
 	case []any:
 		for _, item := range typed {
-			if nested := reservedContentPlanKey(item); nested != "" {
+			if nested := reservedContentPlanContractKey(item); nested != "" {
 				return nested
 			}
 		}
