@@ -137,6 +137,8 @@ type MaterialEvidence struct {
 	Lighting         []string `json:"lighting,omitempty"`
 	Mood             []string `json:"mood,omitempty"`
 	EditHints        []string `json:"edit_hints,omitempty"`
+	OverexposedRatio *float64 `json:"overexposed_ratio,omitempty"`
+	SharpnessScore   *float64 `json:"sharpness_score,omitempty"`
 }
 
 // MaterialUnderstandingSummary 刻意省略模型名、生成时间和历史版本等编排元数据，
@@ -199,6 +201,9 @@ type ShotCandidate struct {
 	Lighting          []string `json:"lighting,omitempty"`
 	Mood              []string `json:"mood,omitempty"`
 	EditHints         []string `json:"edit_hints,omitempty"`
+	Transcript        string   `json:"transcript,omitempty"`
+	OverexposedRatio  *float64 `json:"overexposed_ratio,omitempty"`
+	SharpnessScore    *float64 `json:"sharpness_score,omitempty"`
 	BoundaryKind      string   `json:"boundary_kind,omitempty"`
 	BoundaryVerified  bool     `json:"boundary_verified,omitempty"`
 	MatchedQueryTerms []string `json:"matched_query_terms,omitempty"`
@@ -463,9 +468,26 @@ type DecisionAnswerInput struct {
 	Payload    map[string]any `json:"payload,omitempty" jsonschema_description:"可选结构化补充数据；仅透传真实用户或受信任上游已给出的字段"`
 }
 
+type ContentPlanFrameRange struct {
+	StartFrame int `json:"start_frame" jsonschema_description:"验收区间起始时间线帧，包含"`
+	EndFrame   int `json:"end_frame" jsonschema_description:"验收区间结束时间线帧，不包含且必须大于 start_frame"`
+}
+
+type ContentPlanContract struct {
+	TargetDurationFrames    int                     `json:"target_duration_frames,omitempty" jsonschema_description:"目标成片总帧数；大于 0 时编辑后自动核对"`
+	DurationToleranceFrames *int                    `json:"duration_tolerance_frames,omitempty" jsonschema_description:"目标时长允许误差帧数；省略时为 timeline_fps 的一半，显式传 0 表示必须精确命中"`
+	MustKeepUtteranceIDs    []string                `json:"must_keep_utterance_ids,omitempty" jsonschema_description:"speech.inspect 返回、成片必须完整保留的 utterance_id"`
+	BrollCoverageRanges     []ContentPlanFrameRange `json:"broll_coverage_ranges,omitempty" jsonschema_description:"必须由 visual_overlay B-roll 完整覆盖的时间线帧区间"`
+	MinOnBeatRatio          *float64                `json:"min_on_beat_ratio,omitempty" jsonschema_description:"画面切点落在真实 beat_grid 的最低比例，范围 0 到 1"`
+	Rhythm                  string                  `json:"rhythm,omitempty" jsonschema_description:"创作节奏意图，例如舒缓、均衡、紧凑；作为计划语义保留，数值验收使用切点密度字段"`
+	MinCutDensityPerMinute  *float64                `json:"min_cut_density_per_minute,omitempty" jsonschema_description:"每分钟画面切点数下限"`
+	MaxCutDensityPerMinute  *float64                `json:"max_cut_density_per_minute,omitempty" jsonschema_description:"每分钟画面切点数上限"`
+}
+
 type PlanUpdateInput struct {
-	Plan  map[string]any `json:"plan" jsonschema:"required" jsonschema_description:"要写入持久创作计划本的 JSON 对象；默认按 RFC 7396 增量合并，值为 null 时删除对应键"`
-	Reset *bool          `json:"reset,omitempty" jsonschema_description:"设为 true 时先清空现有计划，再按 RFC 7396 写入 plan；对象属性 null 仍表示删除；默认 false"`
+	Plan     map[string]any       `json:"plan" jsonschema:"required" jsonschema_description:"要写入持久创作计划本的 JSON 对象；默认按 RFC 7396 增量合并，值为 null 时删除对应键"`
+	Contract *ContentPlanContract `json:"contract,omitempty" jsonschema_description:"可执行验收合同；传入后写入 content_plan.contract，后续编辑与预览会自动核对"`
+	Reset    *bool                `json:"reset,omitempty" jsonschema_description:"设为 true 时先清空现有计划，再按 RFC 7396 写入 plan；对象属性 null 仍表示删除；默认 false"`
 }
 
 type ComposeClip struct {
@@ -555,21 +577,29 @@ type TimelineValidateInput struct{}
 
 type TimelineInspectInput struct{}
 
-type RenderPreviewInput struct{}
+type RenderPreviewInput struct {
+	Orientation string `json:"orientation,omitempty" jsonschema_description:"成片画幅方向：auto、portrait 或 landscape；默认 auto"`
+}
 
-type RenderFinalInput struct{}
+type RenderFinalInput struct {
+	Orientation string `json:"orientation,omitempty" jsonschema_description:"成片画幅方向：auto、portrait 或 landscape；默认 auto"`
+}
 
 type RenderStatusInput struct{}
 
 type RenderInspectInput struct {
 	PreviewID string   `json:"preview_id" jsonschema:"required" jsonschema_description:"render.preview 成功产物返回的 preview_id"`
-	Checks    []string `json:"checks,omitempty" jsonschema_description:"要执行的检查项：decode、black、freeze、silence、loudness；省略时执行全部支持项"`
+	Checks    []string `json:"checks,omitempty" jsonschema_description:"确定性检查项：decode、black、freeze、silence、loudness，省略时执行这五项；需要 contact sheet 视觉检查时额外传 visual"`
 }
 
 type PreviewInspectionResult struct {
-	Summary  string                   `json:"summary"`
-	Degraded bool                     `json:"degraded"`
-	Issues   []map[string]interface{} `json:"issues"`
+	Summary            string                   `json:"summary"`
+	Degraded           bool                     `json:"degraded"`
+	Issues             []map[string]interface{} `json:"issues"`
+	VisualFrameCount   int                      `json:"visual_frame_count,omitempty"`
+	VisualLatencyMS    int64                    `json:"visual_latency_ms,omitempty"`
+	VisualPromptTokens int                      `json:"visual_prompt_tokens,omitempty"`
+	VisualTotalTokens  int                      `json:"visual_total_tokens,omitempty"`
 }
 
 type ConfirmActionInput struct {

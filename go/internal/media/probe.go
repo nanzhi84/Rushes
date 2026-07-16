@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -14,6 +15,7 @@ type Probe struct {
 	FPS         *float64 `json:"fps"`
 	Width       *int     `json:"width"`
 	Height      *int     `json:"height"`
+	Rotation    *float64 `json:"rotation,omitempty"`
 	HasAudio    bool     `json:"has_audio"`
 }
 
@@ -27,6 +29,12 @@ type ffprobePayload struct {
 		AverageRate string `json:"avg_frame_rate"`
 		Width       int    `json:"width"`
 		Height      int    `json:"height"`
+		Tags        struct {
+			Rotate string `json:"rotate"`
+		} `json:"tags"`
+		SideDataList []struct {
+			Rotation *float64 `json:"rotation"`
+		} `json:"side_data_list"`
 	} `json:"streams"`
 }
 
@@ -54,6 +62,15 @@ func parseProbe(data []byte) (Probe, error) {
 			if stream.Height > 0 {
 				probe.Height = intPointer(stream.Height)
 			}
+			if rotation, err := strconv.ParseFloat(stream.Tags.Rotate, 64); err == nil {
+				probe.Rotation = floatPointer(rotation)
+			}
+			for _, sideData := range stream.SideDataList {
+				if sideData.Rotation != nil {
+					probe.Rotation = floatPointer(*sideData.Rotation)
+					break
+				}
+			}
 			if rate, err := parseRate(stream.AverageRate); err == nil && rate > 0 {
 				probe.FPS = floatPointer(rate)
 			}
@@ -71,6 +88,17 @@ func parseProbe(data []byte) (Probe, error) {
 		probe.DurationSec = 0
 	}
 	return probe, nil
+}
+
+func (probe Probe) displayDimensions() (*int, *int) {
+	if probe.Width == nil || probe.Height == nil || probe.Rotation == nil {
+		return probe.Width, probe.Height
+	}
+	rotation := math.Mod(math.Abs(*probe.Rotation), 180)
+	if math.Abs(rotation-90) < 0.5 {
+		return probe.Height, probe.Width
+	}
+	return probe.Width, probe.Height
 }
 
 func parseRate(raw string) (float64, error) {

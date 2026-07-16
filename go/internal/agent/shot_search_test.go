@@ -2,11 +2,13 @@ package agent
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
+	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
 func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
@@ -143,6 +145,100 @@ func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 	}
 	if excluded := excludedOutput.(rushestools.ShotSearchResult); len(excluded.Shots) != 0 {
 		t.Fatalf("已用源区间未排除: %#v", excluded)
+	}
+}
+
+func TestShotSearchJoinsTranscriptByOverlapAndMarksTermSource(t *testing.T) {
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_transcript_search")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO assets(asset_id,storage_mode,reference_path,kind,source,filename,hash,size,probe_json,ingest_status,understanding_status,usable)
+		VALUES('video_transcript','reference','/tmp/transcript.mp4','video','local_path','transcript.mp4','transcript',1,'{"duration_sec":4}','ready','ready',1);
+		INSERT INTO draft_asset_links(draft_id,asset_id,rel_dir,linked_at) VALUES('draft_transcript_search','video_transcript','Aroll',?);
+		INSERT INTO transcripts(transcript_id,asset_id,provider_id,raw_preserved,utterances_json,vad_segments_json)
+		VALUES('transcript_search','video_transcript','fixture',0,
+			'[{"utterance_id":"u_cross","source_start_frame":50,"source_end_frame":70,"text":"跨段口令"},{"utterance_id":"u_second","source_start_frame":80,"source_end_frame":100,"text":"第二专属词"}]','[]')
+	`, now); err != nil {
+		t.Fatal(err)
+	}
+	badExposure, badSharpness := 0.95, 0.0
+	normalExposure, normalSharpness := 0.01, 500.0
+	summary, _ := json.Marshal(map[string]any{
+		"asset_id": "video_transcript", "semantic_role": "a_roll",
+		"segments": []map[string]any{
+			{"source_start_frame": 0, "source_end_frame": 60, "description": "人物口播", "quality": "usable", "overexposed_ratio": badExposure, "sharpness_score": badSharpness},
+			{"source_start_frame": 60, "source_end_frame": 120, "description": "人物口播", "quality": "usable", "overexposed_ratio": normalExposure, "sharpness_score": normalSharpness},
+		},
+	})
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO material_summaries(summary_id,asset_id,version,status,summary_json,fingerprint,prompt_version,created_at)
+		VALUES('summary_transcript','video_transcript',1,'ready',?,'fp','v4',?)`, string(summary), now); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(t.Context(), "draft_transcript_search")
+	crossRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "跨段口令"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cross := crossRaw.(rushestools.ShotSearchResult)
+	if len(cross.Shots) != 2 {
+		t.Fatalf("cross shots=%#v", cross.Shots)
+	}
+	for _, shot := range cross.Shots {
+		hasTranscriptTerm, hasTranscriptEvidence := false, false
+		for _, term := range shot.MatchedQueryTerms {
+			hasTranscriptTerm = hasTranscriptTerm || strings.HasPrefix(term, "台词:")
+		}
+		for _, evidence := range shot.MatchEvidence {
+			hasTranscriptEvidence = hasTranscriptEvidence || strings.HasPrefix(evidence, "台词命中:")
+		}
+		if !strings.Contains(shot.Transcript, "跨段口令") || !hasTranscriptTerm || !hasTranscriptEvidence {
+			t.Fatalf("shot=%#v", shot)
+		}
+	}
+	secondRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "第二专属词"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := secondRaw.(rushestools.ShotSearchResult)
+	if len(second.Shots) != 1 || second.Shots[0].SourceStartFrame != 60 || !strings.Contains(second.Shots[0].Transcript, "第二专属词") {
+		t.Fatalf("second shots=%#v", second.Shots)
+	}
+	qualityRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "人物口播"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	quality := qualityRaw.(rushestools.ShotSearchResult)
+	if len(quality.Shots) != 2 || quality.Shots[0].SourceStartFrame != 60 || quality.Shots[1].SourceStartFrame != 0 {
+		t.Fatalf("quality ranking=%#v", quality.Shots)
+	}
+}
+
+func TestShotQualityMetricsGentlyLowerSearchAndRecutPriority(t *testing.T) {
+	normalExposure, normalSharpness := 0.01, 500.0
+	badExposure, badSharpness := 0.95, 0.0
+	normal := rushestools.ShotCandidate{OverexposedRatio: &normalExposure, SharpnessScore: &normalSharpness}
+	bad := rushestools.ShotCandidate{OverexposedRatio: &badExposure, SharpnessScore: &badSharpness}
+	if shotQualityPenalty(normal) != 0 || shotQualityPenalty(bad) <= 0 || shotQualityPenalty(bad) > 0.22 {
+		t.Fatalf("normal=%.4f bad=%.4f", shotQualityPenalty(normal), shotQualityPenalty(bad))
+	}
+	segments := []understanding.Segment{
+		{SourceStartFrame: 0, SourceEndFrame: 90, OverexposedRatio: &badExposure, SharpnessScore: &badSharpness},
+		{SourceStartFrame: 90, SourceEndFrame: 180, OverexposedRatio: &normalExposure, SharpnessScore: &normalSharpness},
+	}
+	ranges := beatMixRangesFromUnderstanding(segments, 180)
+	if len(ranges) < 2 || ranges[0].StartFrame != 90 || ranges[0].QualityPenalty != 0 {
+		t.Fatalf("ranges=%#v", ranges)
+	}
+	start, ok := chooseUnusedBeatMixSourceStart(180, 30, ranges, nil, 7, true)
+	if !ok || start != 90 {
+		t.Fatalf("start=%d ok=%v ranges=%#v", start, ok, ranges)
 	}
 }
 

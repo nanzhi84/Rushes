@@ -326,7 +326,7 @@ func registerRenderStatus(registry *Registry) error {
 }
 
 func registerInspectPreview(registry *Registry) error {
-	return addTool[RenderInspectInput, PreviewInspectionResult](registry, "render.inspect_preview", "检查预览的流、解码、黑帧、静帧、静音和响度", []string{"any_preview_exists"}, ExposureLLM, true)
+	return addTool[RenderInspectInput, PreviewInspectionResult](registry, "render.inspect_preview", "检查预览的流、解码、黑帧、静帧、静音和响度；传 visual 可追加切点、B-roll 与字幕 contact sheet 视觉检查", []string{"any_preview_exists"}, ExposureLLM, true)
 }
 
 func registerConfirmAction(registry *Registry) error {

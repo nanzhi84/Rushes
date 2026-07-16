@@ -131,6 +131,85 @@ describe("EditorSession", () => {
     ]);
   });
 
+  it("字幕样式在编辑、插入和保存失败后保持前后端同义", () => {
+    const initial = fixtureTimeline();
+    findTrack(initial, "subtitles").clips = [{
+      timeline_clip_id: "subtitle_a",
+      track_id: "subtitles",
+      timeline_start_frame: 0,
+      timeline_end_frame: 20,
+      text: "旧字幕",
+      subtitle_style: "default"
+    }];
+    const session = new EditorSession(initial);
+    session.apply({
+      kind: "edit_subtitle_text",
+      timeline_clip_id: "subtitle_a",
+      text: "新字幕",
+      style: "large_center"
+    });
+    expect(findClip(session.snapshot().timeline, "subtitle_a")).toMatchObject({
+      text: "新字幕",
+      subtitle_style: "large_center"
+    });
+    const styleOnly = applyLocalTimelineOperation(initial, {
+      kind: "edit_subtitle_text",
+      timeline_clip_id: "subtitle_a",
+      style: "bold_bottom"
+    });
+    expect(findClip(styleOnly, "subtitle_a")).toMatchObject({
+      text: "旧字幕",
+      subtitle_style: "bold_bottom"
+    });
+    session.beginSave();
+    session.rejectSave(new Error("network down"));
+    expect(findClip(session.snapshot().timeline, "subtitle_a").subtitle_style).toBe("large_center");
+    expect(session.beginSave()).toEqual([{
+      kind: "edit_subtitle_text",
+      timeline_clip_id: "subtitle_a",
+      text: "新字幕",
+      style: "large_center"
+    }]);
+
+    const inserted = applyLocalTimelineOperation(initial, {
+      kind: "insert_subtitle",
+      timeline_clip_id: "subtitle_b",
+      start_frame: 20,
+      end_frame: 40,
+      text: "新增字幕",
+      style: "bold_bottom"
+    });
+    expect(findClip(inserted, "subtitle_b").subtitle_style).toBe("bold_bottom");
+    const defaulted = applyLocalTimelineOperation(initial, {
+      kind: "insert_subtitle",
+      timeline_clip_id: "subtitle_c",
+      start_frame: 20,
+      end_frame: 40,
+      text: "默认字幕"
+    });
+    expect(findClip(defaulted, "subtitle_c").subtitle_style).toBe("default");
+  });
+
+  it("字幕乐观操作拒绝未知或空白样式", () => {
+    const initial = fixtureTimeline();
+    findTrack(initial, "subtitles").clips = [{
+      timeline_clip_id: "subtitle_a", track_id: "subtitles",
+      timeline_start_frame: 0, timeline_end_frame: 20, text: "字幕"
+    }];
+    expect(() => applyLocalTimelineOperation(initial, {
+      kind: "edit_subtitle_text", timeline_clip_id: "subtitle_a", text: "字幕", style: " "
+    })).toThrow("字幕 style 必须是");
+    expect(() => applyLocalTimelineOperation(initial, {
+      kind: "insert_subtitle", start_frame: 20, end_frame: 40, text: "字幕", style: "karaoke"
+    })).toThrow("字幕 style 必须是");
+    expect(() => applyLocalTimelineOperation(initial, {
+      kind: "edit_subtitle_text", timeline_clip_id: "subtitle_a"
+    })).toThrow("至少需要提供 text 或 style");
+    expect(() => applyLocalTimelineOperation(initial, {
+      kind: "edit_subtitle_text", timeline_clip_id: "subtitle_a", text: " ", style: "default"
+    })).toThrow("字幕文字不能为空");
+  });
+
   it("音频淡入淡出按整数帧乐观更新，并折叠连续拖动", () => {
     const session = new EditorSession(fixtureTimeline());
     session.apply({
@@ -156,6 +235,24 @@ describe("EditorSession", () => {
       fade_in_frames: 6,
       fade_out_frames: 12
     }]);
+  });
+
+  it("联动视频淡入淡出同时更新画面与代理预览原声", () => {
+    const result = applyLocalTimelineOperation(fixtureTimeline(), {
+      kind: "set_clip_fades",
+      timeline_clip_id: "visual_a",
+      fade_in_frames: 6,
+      fade_out_frames: 12
+    });
+
+    expect(findClip(result, "visual_a")).toMatchObject({
+      fade_in_frames: 6,
+      fade_out_frames: 12
+    });
+    expect(findClip(result, "original_a")).toMatchObject({
+      fade_in_frames: 6,
+      fade_out_frames: 12
+    });
   });
 
   it("服务端重复返回相同时间线时不通知订阅者", () => {

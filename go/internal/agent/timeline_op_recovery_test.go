@@ -319,7 +319,7 @@ func TestApplyPatchFieldFailureReturnsExactJITSchemaAndExample(t *testing.T) {
 	}
 }
 
-func TestApplyPatchUnknownKindReturnsOnlyEighteenEntryCatalog(t *testing.T) {
+func TestApplyPatchUnknownKindReturnsOnlyNineteenEntryCatalog(t *testing.T) {
 	t.Parallel()
 	service, _, ctx := timelineOpRecoveryFixture(t, "draft_op_jit_unknown")
 	raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{
@@ -331,7 +331,7 @@ func TestApplyPatchUnknownKindReturnsOnlyEighteenEntryCatalog(t *testing.T) {
 	result := raw.(rushestools.ToolResult)
 	catalog, ok := result.Data["op_catalog"].([]map[string]string)
 	if result.Status != "failed" || result.Data["op_kind"] != "remove_clip" ||
-		!ok || len(catalog) != len(timeline.Catalog) || len(catalog) != 18 {
+		!ok || len(catalog) != len(timeline.Catalog) || len(catalog) != 19 {
 		t.Fatalf("result=%#v", result)
 	}
 	seen := map[string]struct{}{}
@@ -341,7 +341,7 @@ func TestApplyPatchUnknownKindReturnsOnlyEighteenEntryCatalog(t *testing.T) {
 		}
 		seen[entry["kind"]] = struct{}{}
 	}
-	if len(seen) != 18 {
+	if len(seen) != 19 {
 		t.Fatalf("catalog kinds=%#v", seen)
 	}
 	if _, exists := result.Data["expected_schema"]; exists {

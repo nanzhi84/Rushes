@@ -38,6 +38,8 @@ type Segment struct {
 	Lighting         []string `json:"lighting,omitempty"`
 	Mood             []string `json:"mood,omitempty"`
 	EditHints        []string `json:"edit_hints,omitempty"`
+	OverexposedRatio *float64 `json:"overexposed_ratio,omitempty"`
+	SharpnessScore   *float64 `json:"sharpness_score,omitempty"`
 }
 
 type Summary struct {

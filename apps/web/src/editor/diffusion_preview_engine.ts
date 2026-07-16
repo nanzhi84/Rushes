@@ -4,6 +4,11 @@ import { frameOffsetTime, frameTime } from "./frame_time";
 import { previewCoverLayout } from "./preview_layout";
 import { resumePreviewClock } from "./preview_clock";
 import { timelineRuntimeSignature } from "./preview_timeline_signature";
+import { videoFadeAnimation } from "./video_fade";
+import {
+  duckedPreviewVolume,
+  subtitlePreviewPreset
+} from "./preview_presentation";
 
 export type DiffusionMediaResolver = (assetId: string, assetKind: string) => string;
 
@@ -26,6 +31,8 @@ export class DiffusionPreviewEngine {
   private syncTail: Promise<void> = Promise.resolve();
   private fps = 30;
   private disposed = false;
+  private previewTimeline: TimelineJson | null = null;
+  private readonly stopDuckingClock: () => void;
 
   constructor(private readonly resolveMedia: DiffusionMediaResolver) {
     this.composition = new core.Composition({
@@ -33,6 +40,11 @@ export class DiffusionPreviewEngine {
       height: 1080,
       background: "#000000",
       playbackEndBehavior: "stop"
+    });
+    this.stopDuckingClock = this.composition.on("playback:time", (seconds) => {
+      if (this.previewTimeline && typeof seconds === "number") {
+        this.applyRuntimeDucking(this.previewTimeline, seconds * this.fps);
+      }
     });
   }
 
@@ -75,6 +87,8 @@ export class DiffusionPreviewEngine {
       } else {
         await this.rebuild(timeline, structureSignature);
       }
+      this.previewTimeline = timeline;
+      this.applyRuntimeDucking(timeline, this.currentFrame);
       this.runtimeSignature = runtimeSignature;
       this.hasSynced = true;
     } catch (error) {
@@ -155,6 +169,8 @@ export class DiffusionPreviewEngine {
     this.structureSignature = "";
     this.runtimeSignature = "";
     this.hasSynced = false;
+    this.previewTimeline = null;
+    this.stopDuckingClock();
     const audioContext = this.composition.renderer.audioCtx;
     if (audioContext instanceof AudioContext && audioContext.state !== "closed") {
       await audioContext.close().catch(() => undefined);
@@ -184,8 +200,10 @@ export class DiffusionPreviewEngine {
         }
         applyRuntimeTiming(runtime.clip, clipJson);
         applyRuntimeAudio(runtime.clip, track, clipJson, originalAudio, soloAudio, this.fps);
+		applyRuntimeVisualFades(runtime.clip, clipJson);
         if (runtime.clip instanceof core.TextClip) {
           runtime.clip.text = stringValue(clipJson.text) || "字幕";
+          applySubtitlePreviewStyle(runtime.clip, clipJson, this.composition.height);
         }
       }
     }
@@ -193,6 +211,38 @@ export class DiffusionPreviewEngine {
     if (wasPlaying) {
       await this.resumeAt(currentFrame);
     }
+  }
+
+  private applyRuntimeDucking(timeline: TimelineJson, frame: number): void {
+    const soloAudio = timeline.tracks.some(
+      (track) => isAudioTrack(track.track_id, true) && track.solo === true
+    );
+    for (const track of timeline.tracks) {
+      if (!track.ducking) {
+        continue;
+      }
+      for (const clipJson of track.clips ?? []) {
+        const runtime = this.runtimeClips.get(stringValue(clipJson.timeline_clip_id));
+        if (!(runtime?.clip instanceof core.AudioClip)) {
+          continue;
+        }
+        const base = audioSettings(track, clipJson, soloAudio);
+        runtime.clip.volume = duckedPreviewVolume(
+          timeline,
+          track,
+          base.volume,
+          frame,
+          soloAudio,
+          (clip) => this.hasVideoAudio(clip)
+        );
+      }
+    }
+  }
+
+  private hasVideoAudio(clip: TimelineClipJson): boolean {
+    const runtime = this.runtimeClips.get(stringValue(clip.timeline_clip_id));
+    const source = runtime ? this.sources.get(runtime.sourceKey) : undefined;
+    return source instanceof core.VideoSource && source.audioTrack != null;
   }
 
   private async rebuild(timeline: TimelineJson, signature: string): Promise<void> {
@@ -274,18 +324,21 @@ export class DiffusionPreviewEngine {
     let sourceKey = "";
 
     if (track.track_id === "subtitles") {
+      const style = subtitlePreviewPreset(clipJson.subtitle_style, this.composition.height);
       clip = new core.TextClip({
         text: stringValue(clipJson.text) || "字幕",
         delay: start,
         duration,
         x: "50%",
-        y: "84%",
+        y: style.y,
         align: "center",
         baseline: "middle",
         maxWidth: "82%",
-        fontSize: 48,
+        fontSize: style.fontSize,
         color: "#FFFFFF",
-        strokes: [{ width: 3, color: "#000000" }]
+        strokes: style.outline > 0 ? [{ width: style.outline, color: "#000000" }] : [],
+        font: { family: "Arial", size: style.fontSize, weight: style.bold ? "bold" : "normal" },
+        background: style.background
       });
     } else {
       const assetId = stringValue(clipJson.asset_id);
@@ -352,6 +405,7 @@ export class DiffusionPreviewEngine {
       rushesRole: stringValue(clipJson.role) || null
     };
     applyRuntimeAudio(clip, track, clipJson, originalAudio, soloAudio, this.fps);
+	applyRuntimeVisualFades(clip, clipJson);
     return { clip, sourceKey, trackId: track.track_id };
   }
 
@@ -376,6 +430,19 @@ export class DiffusionPreviewEngine {
     this.sources.set(key, source);
     return source;
   }
+}
+
+function applySubtitlePreviewStyle(
+  clip: core.TextClip,
+  value: TimelineClipJson,
+  compositionHeight: number
+): void {
+  const style = subtitlePreviewPreset(value.subtitle_style, compositionHeight);
+  clip.y = style.y;
+  clip.fontSize = style.fontSize;
+  clip.font = { ...clip.font, size: style.fontSize, weight: style.bold ? "bold" : "normal" };
+  clip.strokes = style.outline > 0 ? [{ width: style.outline, color: "#000000" }] : [];
+  clip.background = style.background;
 }
 
 function applyRuntimeTiming(clip: core.Clip, value: TimelineClipJson): void {
@@ -415,6 +482,25 @@ function applyRuntimeAudio(
   clip.fadeOutDurationSeconds = settings.fadeOutFrames / fps;
 }
 
+function applyRuntimeVisualFades(clip: core.Clip, value: TimelineClipJson): void {
+  if (!(clip instanceof core.VideoClip) && !(clip instanceof core.ImageClip)) {
+    return;
+  }
+  const durationFrames = Math.max(
+    0,
+    frameValue(value.timeline_end_frame) - frameValue(value.timeline_start_frame)
+  );
+  const animation = videoFadeAnimation(
+    durationFrames,
+    frameValue(value.fade_in_frames),
+    frameValue(value.fade_out_frames)
+  );
+  clip.animations = clip.animations.filter((candidate) => candidate.key !== "opacity");
+  if (animation) {
+    clip.animations.push(animation);
+  }
+}
+
 type RuntimeAudioSettings = {
   volume: number;
   muted: boolean;
@@ -439,12 +525,14 @@ function videoAudioSettings(
         candidate.timeline_end_frame === clip.timeline_end_frame
   );
   if (!match) {
-    return {
-      volume: 1,
-      muted: soloAudio,
-      fadeInFrames: frameValue(clip.fade_in_frames),
-      fadeOutFrames: frameValue(clip.fade_out_frames)
-    };
+    return originalAudio
+      ? audioSettings(originalAudio, clip, soloAudio)
+      : {
+        volume: 1,
+        muted: soloAudio,
+        fadeInFrames: frameValue(clip.fade_in_frames),
+        fadeOutFrames: frameValue(clip.fade_out_frames)
+      };
   }
   return audioSettings(originalAudio!, match, soloAudio);
 }

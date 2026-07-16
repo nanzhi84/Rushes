@@ -68,7 +68,7 @@ func TestObjectPathValidation(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesTimelineHistoryToSingleCurrentRow(t *testing.T) {
+func TestOpenMigratesTimelineHistoryAndAllowsFutureSnapshots(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	dsn := (&url.URL{Scheme: "file", Path: filepath.Join(root, "rushes.db")}).String()
@@ -123,8 +123,12 @@ func TestOpenMigratesTimelineHistoryToSingleCurrentRow(t *testing.T) {
 	}
 	if _, err := database.Write().Exec(`
 		INSERT INTO timeline_versions(timeline_id,draft_id,version,document_json,created_at)
-		VALUES('timeline_3','draft_migrate',3,'{}',?)`, now); err == nil {
-		t.Fatal("同一草稿不应允许第二条时间线记录")
+		VALUES('timeline_3','draft_migrate',3,'{}',?)`, now); err != nil {
+		t.Fatalf("应允许保存后续不可变时间线快照: %v", err)
+	}
+	if err := database.Read().QueryRow(`
+		SELECT COUNT(*), MAX(version) FROM timeline_versions WHERE draft_id='draft_migrate'`).Scan(&count, &version); err != nil || count != 2 || version != 3 {
+		t.Fatalf("timeline rows=%d version=%d err=%v", count, version, err)
 	}
 	columns, err := database.Read().Query("PRAGMA table_info(timeline_versions)")
 	if err != nil {

@@ -108,7 +108,7 @@ func TestTimelineEditHistoryKeepsOnlyTwentySemanticBatches(t *testing.T) {
 	).Scan(&timelineRows, &currentVersion); err != nil {
 		t.Fatal(err)
 	}
-	if timelineRows != 1 || currentVersion != 25 {
+	if timelineRows != 25 || currentVersion != 25 {
 		t.Fatalf("timeline rows=%d current=%d", timelineRows, currentVersion)
 	}
 }

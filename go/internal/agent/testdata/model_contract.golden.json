@@ -272,6 +272,66 @@
             "description": "要写入持久创作计划本的 JSON 对象；默认按 RFC 7396 增量合并，值为 null 时删除对应键",
             "type": "object"
           },
+          "contract": {
+            "properties": {
+              "target_duration_frames": {
+                "description": "目标成片总帧数；大于 0 时编辑后自动核对",
+                "type": "integer"
+              },
+              "duration_tolerance_frames": {
+                "description": "目标时长允许误差帧数；省略时为 timeline_fps 的一半，显式传 0 表示必须精确命中",
+                "type": "integer"
+              },
+              "must_keep_utterance_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "description": "speech.inspect 返回、成片必须完整保留的 utterance_id",
+                "type": "array"
+              },
+              "broll_coverage_ranges": {
+                "items": {
+                  "properties": {
+                    "start_frame": {
+                      "description": "验收区间起始时间线帧，包含",
+                      "type": "integer"
+                    },
+                    "end_frame": {
+                      "description": "验收区间结束时间线帧，不包含且必须大于 start_frame",
+                      "type": "integer"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "start_frame",
+                    "end_frame"
+                  ],
+                  "type": "object"
+                },
+                "description": "必须由 visual_overlay B-roll 完整覆盖的时间线帧区间",
+                "type": "array"
+              },
+              "min_on_beat_ratio": {
+                "description": "画面切点落在真实 beat_grid 的最低比例，范围 0 到 1",
+                "type": "number"
+              },
+              "rhythm": {
+                "description": "创作节奏意图，例如舒缓、均衡、紧凑；作为计划语义保留，数值验收使用切点密度字段",
+                "type": "string"
+              },
+              "min_cut_density_per_minute": {
+                "description": "每分钟画面切点数下限",
+                "type": "number"
+              },
+              "max_cut_density_per_minute": {
+                "description": "每分钟画面切点数上限",
+                "type": "number"
+              }
+            },
+            "additionalProperties": false,
+            "description": "可执行验收合同；传入后写入 content_plan.contract，后续编辑与预览会自动核对",
+            "type": "object"
+          },
           "reset": {
             "description": "设为 true 时先清空现有计划，再按 RFC 7396 写入 plan；对象属性 null 仍表示删除；默认 false",
             "type": "boolean"
@@ -288,14 +348,19 @@
       "name": "render.final_mp4",
       "description": "排队导出最终 MP4",
       "parameters": {
-        "properties": {},
+        "properties": {
+          "orientation": {
+            "description": "成片画幅方向：auto、portrait 或 landscape；默认 auto",
+            "type": "string"
+          }
+        },
         "additionalProperties": false,
         "type": "object"
       }
     },
     {
       "name": "render.inspect_preview",
-      "description": "检查预览的流、解码、黑帧、静帧、静音和响度",
+      "description": "检查预览的流、解码、黑帧、静帧、静音和响度；传 visual 可追加切点、B-roll 与字幕 contact sheet 视觉检查",
       "parameters": {
         "properties": {
           "preview_id": {
@@ -306,7 +371,7 @@
             "items": {
               "type": "string"
             },
-            "description": "要执行的检查项：decode、black、freeze、silence、loudness；省略时执行全部支持项",
+            "description": "确定性检查项：decode、black、freeze、silence、loudness，省略时执行这五项；需要 contact sheet 视觉检查时额外传 visual",
             "type": "array"
           }
         },
@@ -321,7 +386,12 @@
       "name": "render.preview",
       "description": "排队渲染当前已验证时间线预览",
       "parameters": {
-        "properties": {},
+        "properties": {
+          "orientation": {
+            "description": "成片画幅方向：auto、portrait 或 landscape；默认 auto",
+            "type": "string"
+          }
+        },
         "additionalProperties": false,
         "type": "object"
       }
@@ -892,6 +962,72 @@
                 "type": "object"
               },
               {
+                "properties": {
+                  "kind": {
+                    "const": "set_track_ducking",
+                    "description": "设置 BGM 在人声出现时自动闪避",
+                    "type": "string"
+                  },
+                  "track_id": {
+                    "description": "只能是 bgm 轨",
+                    "examples": [
+                      "bgm"
+                    ],
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "description": "是否启用自动闪避",
+                    "examples": [
+                      true
+                    ],
+                    "type": "boolean"
+                  },
+                  "duck_db": {
+                    "description": "人声出现时的压低量，范围 [-18,-3] dB",
+                    "examples": [
+                      -9
+                    ],
+                    "type": "number"
+                  },
+                  "trigger_tracks": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "触发轨道，只能选择 voiceover 或 original_audio",
+                    "examples": [
+                      [
+                        "voiceover",
+                        "original_audio"
+                      ]
+                    ],
+                    "type": "array"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "kind",
+                  "track_id",
+                  "enabled",
+                  "duck_db",
+                  "trigger_tracks"
+                ],
+                "title": "set_track_ducking",
+                "description": "设置 BGM 在人声出现时自动闪避",
+                "examples": [
+                  {
+                    "duck_db": -9,
+                    "enabled": true,
+                    "kind": "set_track_ducking",
+                    "track_id": "bgm",
+                    "trigger_tracks": [
+                      "voiceover",
+                      "original_audio"
+                    ]
+                  }
+                ],
+                "type": "object"
+              },
+              {
                 "allOf": [
                   {
                     "anyOf": [
@@ -980,6 +1116,13 @@
                     ],
                     "type": "string"
                   },
+                  "style": {
+                    "description": "字幕样式：default、large_center、top_bar、minimal 或 bold_bottom",
+                    "examples": [
+                      "default"
+                    ],
+                    "type": "string"
+                  },
                   "timeline_clip_id": {
                     "description": "可选字幕片段 ID，缺省时自动生成",
                     "examples": [
@@ -1002,6 +1145,7 @@
                     "end_frame": 90,
                     "kind": "insert_subtitle",
                     "start_frame": 0,
+                    "style": "default",
                     "text": "示例字幕",
                     "timeline_clip_id": "subtitle_v2_001"
                   }
@@ -1379,7 +1523,7 @@
                 "properties": {
                   "kind": {
                     "const": "set_clip_fades",
-                    "description": "设置音频或带声视频片段的淡入淡出",
+                    "description": "设置音频或视频片段的音画淡入淡出",
                     "type": "string"
                   },
                   "timeline_clip_id": {
@@ -1418,7 +1562,7 @@
                   "fade_out_frames"
                 ],
                 "title": "set_clip_fades",
-                "description": "设置音频或带声视频片段的淡入淡出",
+                "description": "设置音频或视频片段的音画淡入淡出",
                 "examples": [
                   {
                     "fade_in_frames": 15,
@@ -1444,12 +1588,26 @@
                         ]
                       }
                     ]
+                  },
+                  {
+                    "anyOf": [
+                      {
+                        "required": [
+                          "text"
+                        ]
+                      },
+                      {
+                        "required": [
+                          "style"
+                        ]
+                      }
+                    ]
                   }
                 ],
                 "properties": {
                   "kind": {
                     "const": "edit_subtitle_text",
-                    "description": "修改字幕片段文字",
+                    "description": "修改字幕片段文字或样式",
                     "type": "string"
                   },
                   "timeline_clip_id": {
@@ -1467,23 +1625,30 @@
                     "type": "string"
                   },
                   "text": {
-                    "description": "新的非空字幕文字",
+                    "description": "可选的新字幕文字；提供时必须非空",
                     "examples": [
                       "修改后的字幕"
+                    ],
+                    "type": "string"
+                  },
+                  "style": {
+                    "description": "可选字幕样式：default、large_center、top_bar、minimal 或 bold_bottom",
+                    "examples": [
+                      "large_center"
                     ],
                     "type": "string"
                   }
                 },
                 "additionalProperties": false,
                 "required": [
-                  "kind",
-                  "text"
+                  "kind"
                 ],
                 "title": "edit_subtitle_text",
-                "description": "修改字幕片段文字",
+                "description": "修改字幕片段文字或样式",
                 "examples": [
                   {
                     "kind": "edit_subtitle_text",
+                    "style": "large_center",
                     "text": "修改后的字幕",
                     "timeline_clip_id": "clip_v1_001"
                   }
@@ -2028,6 +2193,72 @@
                   "type": "object"
                 },
                 {
+                  "properties": {
+                    "kind": {
+                      "const": "set_track_ducking",
+                      "description": "设置 BGM 在人声出现时自动闪避",
+                      "type": "string"
+                    },
+                    "track_id": {
+                      "description": "只能是 bgm 轨",
+                      "examples": [
+                        "bgm"
+                      ],
+                      "type": "string"
+                    },
+                    "enabled": {
+                      "description": "是否启用自动闪避",
+                      "examples": [
+                        true
+                      ],
+                      "type": "boolean"
+                    },
+                    "duck_db": {
+                      "description": "人声出现时的压低量，范围 [-18,-3] dB",
+                      "examples": [
+                        -9
+                      ],
+                      "type": "number"
+                    },
+                    "trigger_tracks": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "description": "触发轨道，只能选择 voiceover 或 original_audio",
+                      "examples": [
+                        [
+                          "voiceover",
+                          "original_audio"
+                        ]
+                      ],
+                      "type": "array"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "kind",
+                    "track_id",
+                    "enabled",
+                    "duck_db",
+                    "trigger_tracks"
+                  ],
+                  "title": "set_track_ducking",
+                  "description": "设置 BGM 在人声出现时自动闪避",
+                  "examples": [
+                    {
+                      "duck_db": -9,
+                      "enabled": true,
+                      "kind": "set_track_ducking",
+                      "track_id": "bgm",
+                      "trigger_tracks": [
+                        "voiceover",
+                        "original_audio"
+                      ]
+                    }
+                  ],
+                  "type": "object"
+                },
+                {
                   "allOf": [
                     {
                       "anyOf": [
@@ -2116,6 +2347,13 @@
                       ],
                       "type": "string"
                     },
+                    "style": {
+                      "description": "字幕样式：default、large_center、top_bar、minimal 或 bold_bottom",
+                      "examples": [
+                        "default"
+                      ],
+                      "type": "string"
+                    },
                     "timeline_clip_id": {
                       "description": "可选字幕片段 ID，缺省时自动生成",
                       "examples": [
@@ -2138,6 +2376,7 @@
                       "end_frame": 90,
                       "kind": "insert_subtitle",
                       "start_frame": 0,
+                      "style": "default",
                       "text": "示例字幕",
                       "timeline_clip_id": "subtitle_v2_001"
                     }
@@ -2515,7 +2754,7 @@
                   "properties": {
                     "kind": {
                       "const": "set_clip_fades",
-                      "description": "设置音频或带声视频片段的淡入淡出",
+                      "description": "设置音频或视频片段的音画淡入淡出",
                       "type": "string"
                     },
                     "timeline_clip_id": {
@@ -2554,7 +2793,7 @@
                     "fade_out_frames"
                   ],
                   "title": "set_clip_fades",
-                  "description": "设置音频或带声视频片段的淡入淡出",
+                  "description": "设置音频或视频片段的音画淡入淡出",
                   "examples": [
                     {
                       "fade_in_frames": 15,
@@ -2580,12 +2819,26 @@
                           ]
                         }
                       ]
+                    },
+                    {
+                      "anyOf": [
+                        {
+                          "required": [
+                            "text"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "style"
+                          ]
+                        }
+                      ]
                     }
                   ],
                   "properties": {
                     "kind": {
                       "const": "edit_subtitle_text",
-                      "description": "修改字幕片段文字",
+                      "description": "修改字幕片段文字或样式",
                       "type": "string"
                     },
                     "timeline_clip_id": {
@@ -2603,23 +2856,30 @@
                       "type": "string"
                     },
                     "text": {
-                      "description": "新的非空字幕文字",
+                      "description": "可选的新字幕文字；提供时必须非空",
                       "examples": [
                         "修改后的字幕"
+                      ],
+                      "type": "string"
+                    },
+                    "style": {
+                      "description": "可选字幕样式：default、large_center、top_bar、minimal 或 bold_bottom",
+                      "examples": [
+                        "large_center"
                       ],
                       "type": "string"
                     }
                   },
                   "additionalProperties": false,
                   "required": [
-                    "kind",
-                    "text"
+                    "kind"
                   ],
                   "title": "edit_subtitle_text",
-                  "description": "修改字幕片段文字",
+                  "description": "修改字幕片段文字或样式",
                   "examples": [
                     {
                       "kind": "edit_subtitle_text",
+                      "style": "large_center",
                       "text": "修改后的字幕",
                       "timeline_clip_id": "clip_v1_001"
                     }

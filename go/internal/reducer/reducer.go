@@ -879,13 +879,8 @@ func applyTimelineCreated(ctx context.Context, state *applyState, event contract
 	if len(document) == 0 {
 		document = emptyTimeline(event.DraftID, version)
 	}
-	// 单时间线模型：在同一 reducer 事务内用新文档替换旧文档。后续任一步
-	// 失败都会整体回滚，因此不会出现草稿暂时没有时间线的可见状态。
-	if _, err := state.tx.ExecContext(ctx,
-		"DELETE FROM timeline_versions WHERE draft_id=?", event.DraftID,
-	); err != nil {
-		return err
-	}
+	// 每个版本都是已入队任务可引用的不可变快照；当前版本仅由 drafts 上的
+	// timeline_current_version 指针决定，不能在创建新版本时删除历史行。
 	_, err := state.tx.ExecContext(ctx, `
 		INSERT INTO timeline_versions(
 			timeline_id, draft_id, version, created_by_patch_id,

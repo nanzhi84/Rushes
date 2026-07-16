@@ -105,10 +105,14 @@ func (service *Service) toolSearchShots(
 		if candidate.Quality == "usable" {
 			score += 0.08
 		}
+		score -= shotQualityPenalty(candidate)
 		if candidate.BoundaryVerified {
 			score += 0.04
 		}
 		candidate.MatchedQueryTerms = matchedSemanticTerms(queryTokens, semanticText)
+		for _, term := range matchedSemanticTerms(queryTokens, strings.ToLower(candidate.Transcript)) {
+			candidate.MatchedQueryTerms = append(candidate.MatchedQueryTerms, "台词:"+term)
+		}
 		candidate.MatchEvidence = shotMatchEvidence(queryTokens, candidate)
 		candidate.SegmentScore = roundScore(segmentScore)
 		candidate.AssetScore = roundScore(assetScore)
@@ -211,6 +215,12 @@ func (service *Service) draftShotIndex(
 			continue
 		}
 		semanticRole := understanding.SuggestVisualRole(asset.Filename, relDir, summary.SemanticRole)
+		transcript := storage.Transcript{}
+		if persisted, transcriptErr := storage.LatestTranscript(ctx, service.database.Read(), asset.ID); transcriptErr == nil {
+			transcript = persisted
+		} else if !errors.Is(transcriptErr, storage.ErrNotFound) {
+			return nil, nil, transcriptErr
+		}
 		for _, segment := range summary.Segments {
 			start := max(0, segment.SourceStartFrame)
 			end := segment.SourceEndFrame
@@ -225,6 +235,7 @@ func (service *Service) draftShotIndex(
 				continue
 			}
 			seen[shotID] = struct{}{}
+			transcriptText := transcriptTextForSourceRange(transcript.Utterances, start, end)
 			shots = append(shots, indexedShot{
 				candidate: rushestools.ShotCandidate{
 					ShotID: shotID, AssetID: asset.ID, Filename: asset.Filename,
@@ -235,8 +246,10 @@ func (service *Service) draftShotIndex(
 					Actions: append([]string(nil), segment.Actions...), Setting: append([]string(nil), segment.Setting...),
 					ShotScale: segment.ShotScale, Composition: segment.Composition,
 					Lighting: append([]string(nil), segment.Lighting...), Mood: append([]string(nil), segment.Mood...),
-					EditHints:    append([]string(nil), segment.EditHints...),
-					BoundaryKind: segment.BoundaryKind, BoundaryVerified: segment.BoundaryVerified,
+					EditHints:  append([]string(nil), segment.EditHints...),
+					Transcript: transcriptText, OverexposedRatio: segment.OverexposedRatio,
+					SharpnessScore: segment.SharpnessScore,
+					BoundaryKind:   segment.BoundaryKind, BoundaryVerified: segment.BoundaryVerified,
 				},
 				rangeInfo: beatMixSourceRange{StartFrame: start, EndFrame: end},
 			})
@@ -300,6 +313,7 @@ func shotMatchEvidence(tokens map[string]struct{}, candidate rushestools.ShotCan
 		{name: "镜头描述", value: candidate.Description},
 		{name: "标签", value: strings.Join(candidate.Tags, " ")},
 		{name: "主体/动作", value: strings.Join(append(append([]string{}, candidate.Subjects...), candidate.Actions...), " ")},
+		{name: "台词", value: candidate.Transcript},
 	}
 	result := []string{}
 	for _, field := range fields {
@@ -349,8 +363,34 @@ func shotSegmentSemanticText(candidate rushestools.ShotCandidate) string {
 		strings.Join(candidate.Subjects, " "), strings.Join(candidate.Actions, " "),
 		strings.Join(candidate.Setting, " "), candidate.ShotScale, candidate.Composition,
 		strings.Join(candidate.Lighting, " "), strings.Join(candidate.Mood, " "),
-		strings.Join(candidate.EditHints, " ")}
+		strings.Join(candidate.EditHints, " "), candidate.Transcript}
 	return strings.ToLower(strings.Join(parts, " "))
+}
+
+func transcriptTextForSourceRange(utterances []map[string]any, startFrame, endFrame int) string {
+	parts := []string{}
+	for _, utterance := range utterances {
+		startValue, startOK := numericValue(utterance["source_start_frame"])
+		endValue, endOK := numericValue(utterance["source_end_frame"])
+		if !startOK || !endOK || int(startValue) >= endFrame || int(endValue) <= startFrame {
+			continue
+		}
+		if text := strings.TrimSpace(interfaceString(utterance["text"])); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func shotQualityPenalty(candidate rushestools.ShotCandidate) float64 {
+	penalty := 0.0
+	if candidate.OverexposedRatio != nil && *candidate.OverexposedRatio > 0.10 {
+		penalty += min(0.12, (*candidate.OverexposedRatio-0.10)*0.15)
+	}
+	if candidate.SharpnessScore != nil && *candidate.SharpnessScore < 100 {
+		penalty += min(0.10, (100-*candidate.SharpnessScore)/1000)
+	}
+	return math.Round(penalty*10000) / 10000
 }
 
 func semanticSearchTokens(query string) map[string]struct{} {

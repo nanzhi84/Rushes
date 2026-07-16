@@ -105,6 +105,24 @@ func TestLinkedAVValidationAtomicEditsAndOriginalAudioSync(t *testing.T) {
 		t.Fatalf("rated=%#v audio=%#v report=%#v err=%v", rated.Tracks[0], rated.Tracks[2], Validate(rated), err)
 	}
 
+	faded, err := ApplyPatch(base, map[string]any{
+		"kind": "set_clip_fades", "timeline_clip_id": "clip_v1_001",
+		"fade_in_frames": 6, "fade_out_frames": 12,
+	})
+	if err != nil || faded.Tracks[0].Clips[0].FadeInFrames != 6 || faded.Tracks[0].Clips[0].FadeOutFrames != 12 ||
+		faded.Tracks[2].Clips[0].FadeInFrames != 6 || faded.Tracks[2].Clips[0].FadeOutFrames != 12 {
+		t.Fatalf("faded=%#v audio=%#v err=%v", faded.Tracks[0].Clips[0], faded.Tracks[2].Clips[0], err)
+	}
+	lockedAudio := base
+	lockedAudio.Tracks = append([]Track(nil), base.Tracks...)
+	lockedAudio.Tracks[2].Locked = true
+	if _, err := ApplyPatch(lockedAudio, map[string]any{
+		"kind": "set_clip_fades", "timeline_clip_id": "clip_v1_001",
+		"fade_in_frames": 6, "fade_out_frames": 12,
+	}); err == nil {
+		t.Fatal("联动原声轨锁定时不应只更新画面淡化")
+	}
+
 	inserted, err := ApplyPatch(base, map[string]any{
 		"kind": "insert_clip", "timeline_clip_id": "inserted_talk", "track_id": "visual_base",
 		"asset_id": "talk", "asset_kind": "video", "source_start_frame": 100, "source_end_frame": 120,
@@ -172,9 +190,17 @@ func TestApplyPatchSubsetTable(t *testing.T) {
 		{"fades", map[string]any{"kind": "set_clip_fades", "timeline_clip_id": "clip_v1_001", "fade_in_frames": 6, "fade_out_frames": 12}, func(value Document) bool {
 			return value.Tracks[0].Clips[0].FadeInFrames == 6 && value.Tracks[0].Clips[0].FadeOutFrames == 12
 		}},
-		{"subtitle", map[string]any{"kind": "edit_subtitle_text", "timeline_clip_id": "subtitle", "text": "新字幕"}, func(value Document) bool { return value.Tracks[5].Clips[0].Text == "新字幕" }},
-		{"insert subtitle", map[string]any{"kind": "insert_subtitle", "timeline_clip_id": "subtitle_new", "start_frame": 30, "end_frame": 60, "text": "新增字幕"}, func(value Document) bool {
-			return len(value.Tracks[5].Clips) == 2 && value.Tracks[5].Clips[1].Text == "新增字幕"
+		{"ducking", map[string]any{"kind": "set_track_ducking", "track_id": "bgm", "enabled": true, "duck_db": -9.0, "trigger_tracks": []string{"voiceover", "original_audio"}}, func(value Document) bool {
+			return value.Tracks[4].Ducking != nil && value.Tracks[4].Ducking.Enabled && value.Tracks[4].Ducking.DuckDB == -9 && len(value.Tracks[4].Ducking.TriggerTracks) == 2
+		}},
+		{"subtitle", map[string]any{"kind": "edit_subtitle_text", "timeline_clip_id": "subtitle", "text": "新字幕", "style": "large_center"}, func(value Document) bool {
+			return value.Tracks[5].Clips[0].Text == "新字幕" && value.Tracks[5].Clips[0].SubtitleStyle == "large_center"
+		}},
+		{"subtitle style only", map[string]any{"kind": "edit_subtitle_text", "timeline_clip_id": "subtitle", "style": "bold_bottom"}, func(value Document) bool {
+			return value.Tracks[5].Clips[0].Text == "旧字幕" && value.Tracks[5].Clips[0].SubtitleStyle == "bold_bottom"
+		}},
+		{"insert subtitle", map[string]any{"kind": "insert_subtitle", "timeline_clip_id": "subtitle_new", "start_frame": 30, "end_frame": 60, "text": "新增字幕", "style": "top_bar"}, func(value Document) bool {
+			return len(value.Tracks[5].Clips) == 2 && value.Tracks[5].Clips[1].Text == "新增字幕" && value.Tracks[5].Clips[1].SubtitleStyle == "top_bar"
 		}},
 		{"clear overlay", map[string]any{"kind": "remove_track_clips", "track_id": "visual_overlay"}, func(value Document) bool { return len(value.Tracks[1].Clips) == 0 }},
 	}
@@ -413,9 +439,35 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 		{"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 9},
 		{"kind": "adjust_gain"},
 		{"kind": "set_clip_fades", "timeline_clip_id": "clip_v1_001", "fade_in_frames": 40, "fade_out_frames": 40},
+		{"kind": "set_track_ducking", "track_id": "voiceover", "enabled": true, "duck_db": -9.0, "trigger_tracks": []string{"voiceover"}},
+		{"kind": "set_track_ducking", "track_id": "bgm", "enabled": true, "duck_db": -30.0, "trigger_tracks": []string{"voiceover"}},
+		{"kind": "set_track_ducking", "track_id": "bgm", "enabled": true, "duck_db": -9.0, "trigger_tracks": []string{"sfx"}},
+		{"kind": "set_track_ducking", "track_id": "bgm", "duck_db": -9.0, "trigger_tracks": []string{"voiceover"}},
+		{"kind": "set_track_ducking", "track_id": "bgm", "enabled": true, "duck_db": -9.0, "trigger_tracks": "voiceover"},
+		{"kind": "set_track_ducking", "track_id": "bgm", "enabled": true, "duck_db": -9.0, "trigger_tracks": []string{}},
 		{"kind": "edit_subtitle_text", "timeline_clip_id": "missing", "text": "x"},
+		{"kind": "edit_subtitle_text", "timeline_clip_id": "clip_v1_001", "text": "x", "style": "karaoke"},
+		{"kind": "edit_subtitle_text", "timeline_clip_id": "subtitle"},
+		{"kind": "edit_subtitle_text", "timeline_clip_id": "subtitle", "text": " ", "style": "default"},
 		{"kind": "insert_subtitle", "start_frame": 0, "end_frame": 99, "text": ""},
+		{"kind": "insert_subtitle", "start_frame": 0, "end_frame": 30, "text": "x", "style": "karaoke"},
 		{"kind": "remove_track_clips", "track_id": "visual_base"},
+	}
+	ducked, err := ApplyPatch(base, map[string]any{
+		"kind": "set_track_ducking", "track_id": "bgm", "enabled": false,
+		"duck_db": -6.0, "trigger_tracks": []any{"voiceover", "voiceover"},
+	})
+	if err != nil || ducked.Tracks[4].Ducking == nil || ducked.Tracks[4].Ducking.Enabled ||
+		len(ducked.Tracks[4].Ducking.TriggerTracks) != 1 {
+		t.Fatalf("generic deduplicated triggers=%#v err=%v", ducked.Tracks[4].Ducking, err)
+	}
+	locked := base
+	locked.Tracks[4].Locked = true
+	if _, err := ApplyPatch(locked, map[string]any{
+		"kind": "set_track_ducking", "track_id": "bgm", "enabled": true,
+		"duck_db": -9.0, "trigger_tracks": []string{"voiceover"},
+	}); err == nil {
+		t.Fatal("locked bgm track should reject ducking")
 	}
 	for _, operation := range badOperations {
 		if _, err := ApplyPatch(base, operation); err == nil {
@@ -435,6 +487,77 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 	if _, err := ComposeInitial("", 1, []Selection{{AssetID: "a", SourceEndFrame: 1}}); err == nil {
 		t.Fatal("empty draft should fail")
 	}
+}
+
+func TestValidatePresentationFields(t *testing.T) {
+	t.Parallel()
+	base, err := ComposeInitial("draft_presentation_validation", 1, []Selection{{AssetID: "a", SourceEndFrame: 60}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subtitles := trackByID(&base, "subtitles")
+	subtitles.Clips = []Clip{{
+		TimelineClipID: "subtitle", TrackID: "subtitles", Text: "字幕",
+		TimelineStartFrame: 0, TimelineEndFrame: 30,
+	}}
+	bgm := trackByID(&base, "bgm")
+	bgm.Ducking = &TrackDucking{Enabled: true, DuckDB: -9, TriggerTracks: []string{"voiceover", "original_audio"}}
+	if report := Validate(base); !report.Valid {
+		t.Fatalf("valid presentation fields: %#v", report.Issues)
+	}
+
+	tests := []struct {
+		name string
+		edit func(*Document)
+		code string
+	}{
+		{name: "ducking only on bgm", code: "invalid_track_ducking", edit: func(document *Document) {
+			document.Tracks[0].Ducking = document.Tracks[4].Ducking
+		}},
+		{name: "duck db range", code: "invalid_duck_db", edit: func(document *Document) {
+			document.Tracks[4].Ducking.DuckDB = 20
+		}},
+		{name: "unknown trigger", code: "invalid_ducking_trigger", edit: func(document *Document) {
+			document.Tracks[4].Ducking.TriggerTracks = []string{"sfx"}
+		}},
+		{name: "empty triggers", code: "empty_ducking_triggers", edit: func(document *Document) {
+			document.Tracks[4].Ducking.TriggerTracks = nil
+		}},
+		{name: "duplicate triggers", code: "duplicate_ducking_trigger", edit: func(document *Document) {
+			document.Tracks[4].Ducking.TriggerTracks = []string{"voiceover", "voiceover"}
+		}},
+		{name: "unknown subtitle style", code: "invalid_subtitle_style", edit: func(document *Document) {
+			document.Tracks[5].Clips[0].SubtitleStyle = "karaoke"
+		}},
+		{name: "subtitle style only on subtitle track", code: "invalid_subtitle_style_track", edit: func(document *Document) {
+			document.Tracks[0].Clips[0].SubtitleStyle = "bold_bottom"
+		}},
+		{name: "unknown subtitle style on non-subtitle track", code: "invalid_subtitle_style_track", edit: func(document *Document) {
+			document.Tracks[0].Clips[0].SubtitleStyle = "karaoke"
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			document, cloneErr := clone(base)
+			if cloneErr != nil {
+				t.Fatal(cloneErr)
+			}
+			test.edit(&document)
+			report := Validate(document)
+			if report.Valid || !hasValidationIssue(report, test.code) {
+				t.Fatalf("report=%#v", report)
+			}
+		})
+	}
+}
+
+func hasValidationIssue(report ValidationReport, code string) bool {
+	for _, issue := range report.Issues {
+		if issue.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDeleteRangeHandlesEveryOverlapShape(t *testing.T) {

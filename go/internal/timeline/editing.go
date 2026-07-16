@@ -98,6 +98,54 @@ func setTrackState(document *Document, operation map[string]any) error {
 	return nil
 }
 
+func setTrackDucking(document *Document, operation map[string]any) error {
+	if stringValue(operation["track_id"]) != "bgm" {
+		return errors.New("set_track_ducking 只能用于 bgm 轨")
+	}
+	track := trackByID(document, "bgm")
+	if track == nil {
+		return errors.New("bgm 轨不存在")
+	}
+	if track.Locked {
+		return trackLockedError(track.TrackID)
+	}
+	enabled, ok := operation["enabled"].(bool)
+	if !ok {
+		return errors.New("set_track_ducking 缺少 enabled 布尔值")
+	}
+	duckDB, ok := numericValue(operation["duck_db"])
+	if !ok || duckDB < -18 || duckDB > -3 {
+		return errors.New("duck_db 必须在 [-18,-3] 范围内")
+	}
+	triggerValues, ok := operation["trigger_tracks"].([]string)
+	if !ok {
+		if generic, genericOK := operation["trigger_tracks"].([]any); genericOK {
+			for _, value := range generic {
+				triggerValues = append(triggerValues, stringValue(value))
+			}
+		} else {
+			return errors.New("trigger_tracks 必须是字符串数组")
+		}
+	}
+	triggers := make([]string, 0, len(triggerValues))
+	seen := map[string]struct{}{}
+	for _, trigger := range triggerValues {
+		if trigger != "voiceover" && trigger != "original_audio" {
+			return errors.New("trigger_tracks 只能包含 voiceover 或 original_audio")
+		}
+		if _, exists := seen[trigger]; exists {
+			continue
+		}
+		seen[trigger] = struct{}{}
+		triggers = append(triggers, trigger)
+	}
+	if len(triggers) == 0 {
+		return errors.New("trigger_tracks 不能为空")
+	}
+	track.Ducking = &TrackDucking{Enabled: enabled, DuckDB: duckDB, TriggerTracks: triggers}
+	return nil
+}
+
 func setClipLinked(document *Document, operation map[string]any) error {
 	location, err := editableLocation(document, operation)
 	if err != nil {
@@ -435,6 +483,10 @@ func insertSubtitle(document *Document, operation map[string]any) error {
 	if start < 0 || end <= start || end > document.DurationFrames || text == "" {
 		return errors.New("insert_subtitle 时间范围或文字无效")
 	}
+	style := subtitleStyle(operation)
+	if _, provided := operation["style"]; provided && style == "" {
+		return errors.New("字幕 style 必须是 default、large_center、top_bar、minimal 或 bold_bottom")
+	}
 	id := valueOr(
 		stringValue(operation["timeline_clip_id"]),
 		fmt.Sprintf("subtitle_v%d_%03d", document.Version+1, len(track.Clips)+1),
@@ -448,9 +500,21 @@ func insertSubtitle(document *Document, operation map[string]any) error {
 		Text:               text,
 		TimelineStartFrame: start,
 		TimelineEndFrame:   end,
+		SubtitleStyle:      style,
 	})
 	sortTrack(track)
 	return nil
+}
+
+func subtitleStyle(operation map[string]any) string {
+	style := strings.TrimSpace(stringValue(operation["style"]))
+	if style == "" {
+		return "default"
+	}
+	if !isSubtitleStyle(style) {
+		return ""
+	}
+	return style
 }
 
 func insertIntoPrimary(document *Document, moving Clip, targetFrame int) error {
