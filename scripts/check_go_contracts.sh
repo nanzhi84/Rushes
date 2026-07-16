@@ -22,8 +22,13 @@ cmp "$TMP/schema.d.ts" "$ROOT/apps/web/src/api/generated/schema.d.ts"
 
 (
   cd "$ROOT/go"
-  go test -tags='' ./internal/agent ./internal/api
-  go test -tags=e2e_scaffold ./internal/agent ./internal/api
+  go test -tags='' ./internal/agent ./internal/api ./internal/contracts ./internal/reducer
+  go test -tags=e2e_scaffold ./internal/agent ./internal/api ./internal/contracts ./internal/reducer
 )
 
-echo "OpenAPI 生成物与两套 SSE 金丝雀均无漂移。"
+(
+  cd "$ROOT/apps/web"
+  ./node_modules/.bin/vitest run src/api/event_types.test.ts
+)
+
+echo "OpenAPI 生成物与 SSE 契约均无漂移。"

@@ -7,6 +7,23 @@ function apply(events: TurnStreamEvent[]): TurnStreamState {
 }
 
 describe("reduceTurnStream · subagent_progress", () => {
+  it("上下文压缩失败显示非阻塞降级提示", () => {
+    const state = apply([
+      { type: "turn_started", turn_id: "turn_1" },
+      { type: "model_retry", attempt: 5, max_retries: 5 },
+      { type: "context_compaction_failed", reason: "模型不可用" }
+    ]);
+
+    expect(state.turnActive).toBe(true);
+    expect(state.modelRetry).toBeNull();
+    expect(state.items).toContainEqual({
+      type: "message",
+      message_id: "context_compaction_failed",
+      kind: "observation",
+      text: "上下文压缩降级：本轮使用确定性摘要"
+    });
+  });
+
   it("原样转发回合终态 token usage，并兼容旧事件", () => {
     const token_usage = {
       model_calls: 2,

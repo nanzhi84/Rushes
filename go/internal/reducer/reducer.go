@@ -205,14 +205,15 @@ func Apply(
 	for _, event := range events {
 		event.Actor = options.Actor
 		event.CreatedAt = createdAt.Format(time.RFC3339Nano)
-		spec, ok := event.Spec()
+		_, ok := event.Spec()
 		if !ok {
 			return Result{}, fmt.Errorf("reducer 收到未注册事件 %q", event.Type)
 		}
-		if spec.Mode == contracts.VersionStrict && event.BaseVersion == nil {
+		mode, _ := event.VersionMode()
+		if mode == contracts.VersionStrict && event.BaseVersion == nil {
 			event.BaseVersion = options.BaseVersion
 		}
-		if spec.Mode == contracts.VersionMerge {
+		if mode == contracts.VersionMerge {
 			event.BaseVersion = nil
 		}
 		if err := event.Validate(); err != nil {
@@ -376,8 +377,8 @@ func preflightStrict(
 	events []contracts.Event,
 ) (*VersionConflict, error) {
 	for _, event := range events {
-		spec, _ := event.Spec()
-		if spec.Mode != contracts.VersionStrict {
+		mode, _ := event.VersionMode()
+		if mode != contracts.VersionStrict {
 			continue
 		}
 		if event.DraftID == "" {
@@ -448,42 +449,44 @@ func isDuplicateMerge(ctx context.Context, tx *sql.Tx, event contracts.Event) (b
 	return err == nil, err
 }
 
+type eventApplyFunc func(context.Context, *applyState, contracts.Event) error
+
+var eventApplyRegistry = map[string]eventApplyFunc{
+	"DraftCreated":                   applyDraftCreated,
+	"DraftRenamed":                   applyDraftLifecycle,
+	"DraftCopied":                    applyDraftLifecycle,
+	"DraftTrashed":                   applyDraftLifecycle,
+	"AssetImported":                  applyAssetEvent,
+	"AssetProbed":                    applyAssetEvent,
+	"ProxyGenerated":                 applyAssetEvent,
+	"MaterialUnderstandingStarted":   applyAssetEvent,
+	"MaterialUnderstandingCompleted": applyAssetEvent,
+	"MaterialUnderstandingFailed":    applyAssetEvent,
+	"AssetLinked":                    applyAssetLinked,
+	"AssetUnlinked":                  applyAssetUnlinked,
+	"DecisionCreated":                applyDecisionCreated,
+	"DecisionAnswered":               applyDecisionAnswered,
+	"ConversationContextCleared":     applyConversationContextCleared,
+	"TimelineVersionCreated":         applyTimelineCreated,
+	"TimelineVersionRestored":        applyTimelineRestored,
+	"TimelineValidated":              applyTimelineValidation,
+	"TimelineValidationFailed":       applyTimelineValidation,
+	"PreviewRendered":                applyPreviewRendered,
+	"PreviewViewed":                  applyPreviewViewed,
+	"ExportCompleted":                applyExportCompleted,
+	"JobEnqueued":                    applyJob,
+	"JobProgress":                    applyJob,
+	"JobSucceeded":                   applyJob,
+	"JobFailed":                      applyJob,
+	"JobCancelled":                   applyJob,
+}
+
 func applyEvent(ctx context.Context, state *applyState, event contracts.Event) error {
-	switch event.Type {
-	case "DraftCreated":
-		return applyDraftCreated(ctx, state, event)
-	case "DraftRenamed", "DraftCopied", "DraftTrashed":
-		return applyDraftLifecycle(ctx, state, event)
-	case "AssetImported", "AssetProbed", "ProxyGenerated",
-		"MaterialUnderstandingStarted", "MaterialUnderstandingCompleted", "MaterialUnderstandingFailed":
-		return applyAssetEvent(ctx, state, event)
-	case "AssetLinked":
-		return applyAssetLinked(ctx, state, event)
-	case "AssetUnlinked":
-		return applyAssetUnlinked(ctx, state, event)
-	case "DecisionCreated":
-		return applyDecisionCreated(ctx, state, event)
-	case "DecisionAnswered":
-		return applyDecisionAnswered(ctx, state, event)
-	case "ConversationContextCleared":
-		return applyConversationContextCleared(ctx, state, event)
-	case "TimelineVersionCreated":
-		return applyTimelineCreated(ctx, state, event)
-	case "TimelineVersionRestored":
-		return applyTimelineRestored(ctx, state, event)
-	case "TimelineValidated", "TimelineValidationFailed":
-		return applyTimelineValidation(ctx, state, event)
-	case "PreviewRendered":
-		return applyPreviewRendered(ctx, state, event)
-	case "PreviewViewed":
-		return applyPreviewViewed(ctx, state, event)
-	case "ExportCompleted":
-		return applyExportCompleted(ctx, state, event)
-	case "JobEnqueued", "JobProgress", "JobSucceeded", "JobFailed", "JobCancelled":
-		return applyJob(ctx, state, event)
-	default:
+	apply, ok := eventApplyRegistry[event.Type]
+	if !ok {
 		return fmt.Errorf("reducer 未实现事件 %s", event.Type)
 	}
+	return apply(ctx, state, event)
 }
 
 func applyDraftCreated(ctx context.Context, state *applyState, event contracts.Event) error {

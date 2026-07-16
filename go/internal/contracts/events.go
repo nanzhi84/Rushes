@@ -28,41 +28,54 @@ const (
 )
 
 type EventSpec struct {
-	Mode              VersionMode
-	MergeKeys         []string
-	OptionalMergeKeys []string
-	DraftScope        bool
+	Mode               VersionMode
+	WorkspaceScopeMode VersionMode
+	MergeKeys          []string
+	OptionalMergeKeys  []string
+	DraftScope         bool
+	Routes             EventRoutes
+}
+
+type EventRoutes uint8
+
+const (
+	RouteWorkspace EventRoutes = 1 << iota
+	RouteDraft
+)
+
+func (routes EventRoutes) Includes(route EventRoutes) bool {
+	return routes&route != 0
 }
 
 // EventRegistry 是 Go 精简核心与前端仍在使用的生命周期契约。
 var EventRegistry = map[string]EventSpec{
-	"DraftCreated":                   {Mode: VersionMerge, MergeKeys: []string{"draft_id"}, DraftScope: true},
-	"DraftRenamed":                   {Mode: VersionMerge, MergeKeys: []string{"draft_id", "name"}, DraftScope: true},
-	"DraftCopied":                    {Mode: VersionMerge, MergeKeys: []string{"draft_id"}, DraftScope: true},
-	"DraftTrashed":                   {Mode: VersionMerge, MergeKeys: []string{"draft_id"}, DraftScope: true},
-	"AssetImported":                  {Mode: VersionMerge, MergeKeys: []string{"asset_id", "job_id"}},
-	"AssetProbed":                    {Mode: VersionMerge, MergeKeys: []string{"asset_id"}},
-	"AssetLinked":                    {Mode: VersionMerge, MergeKeys: []string{"draft_id", "asset_id"}, DraftScope: true},
-	"AssetUnlinked":                  {Mode: VersionMerge, MergeKeys: []string{"draft_id", "asset_id"}, DraftScope: true},
-	"MaterialUnderstandingStarted":   {Mode: VersionMerge, MergeKeys: []string{"asset_id"}, OptionalMergeKeys: []string{"job_id", "attempt"}},
-	"MaterialUnderstandingCompleted": {Mode: VersionMerge, MergeKeys: []string{"asset_id"}, OptionalMergeKeys: []string{"job_id", "attempt"}},
-	"MaterialUnderstandingFailed":    {Mode: VersionMerge, MergeKeys: []string{"asset_id"}, OptionalMergeKeys: []string{"job_id", "attempt"}},
-	"DecisionCreated":                {Mode: VersionStrict, MergeKeys: []string{"decision_id"}, DraftScope: true},
-	"DecisionAnswered":               {Mode: VersionStrict, MergeKeys: []string{"decision_id"}, DraftScope: true},
-	"ConversationContextCleared":     {Mode: VersionStrict, DraftScope: true},
-	"TimelineVersionCreated":         {Mode: VersionStrict, DraftScope: true},
-	"TimelineVersionRestored":        {Mode: VersionStrict, DraftScope: true},
-	"TimelineValidated":              {Mode: VersionStrict, DraftScope: true},
-	"TimelineValidationFailed":       {Mode: VersionStrict, DraftScope: true},
-	"PreviewRendered":                {Mode: VersionMerge, MergeKeys: []string{"timeline_version", "artifact_id"}, DraftScope: true},
-	"ExportCompleted":                {Mode: VersionMerge, MergeKeys: []string{"timeline_version", "artifact_id"}, DraftScope: true},
-	"JobEnqueued":                    {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
-	"JobSucceeded":                   {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
-	"JobFailed":                      {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
-	"JobCancelled":                   {Mode: VersionMerge, MergeKeys: []string{"job_id"}},
-	"ProxyGenerated":                 {Mode: VersionMerge, MergeKeys: []string{"asset_id", "proxy_object_hash"}},
-	"JobProgress":                    {Mode: VersionMerge, MergeKeys: []string{"job_id", "progress"}, OptionalMergeKeys: []string{"update_id"}},
-	"PreviewViewed":                  {Mode: VersionMerge, MergeKeys: []string{"preview_id"}, DraftScope: true},
+	"DraftCreated":                   {Mode: VersionMerge, MergeKeys: []string{"draft_id"}, DraftScope: true, Routes: RouteWorkspace | RouteDraft},
+	"DraftRenamed":                   {Mode: VersionMerge, MergeKeys: []string{"draft_id", "name"}, DraftScope: true, Routes: RouteWorkspace | RouteDraft},
+	"DraftCopied":                    {Mode: VersionMerge, MergeKeys: []string{"draft_id"}, DraftScope: true, Routes: RouteWorkspace | RouteDraft},
+	"DraftTrashed":                   {Mode: VersionMerge, MergeKeys: []string{"draft_id"}, DraftScope: true, Routes: RouteWorkspace | RouteDraft},
+	"AssetImported":                  {Mode: VersionMerge, MergeKeys: []string{"asset_id", "job_id"}, Routes: RouteWorkspace | RouteDraft},
+	"AssetProbed":                    {Mode: VersionMerge, MergeKeys: []string{"asset_id"}, Routes: RouteWorkspace | RouteDraft},
+	"AssetLinked":                    {Mode: VersionMerge, MergeKeys: []string{"draft_id", "asset_id"}, DraftScope: true, Routes: RouteWorkspace | RouteDraft},
+	"AssetUnlinked":                  {Mode: VersionMerge, MergeKeys: []string{"draft_id", "asset_id"}, DraftScope: true, Routes: RouteWorkspace | RouteDraft},
+	"MaterialUnderstandingStarted":   {Mode: VersionMerge, MergeKeys: []string{"asset_id"}, OptionalMergeKeys: []string{"job_id", "attempt"}, Routes: RouteWorkspace | RouteDraft},
+	"MaterialUnderstandingCompleted": {Mode: VersionMerge, MergeKeys: []string{"asset_id"}, OptionalMergeKeys: []string{"job_id", "attempt"}, Routes: RouteWorkspace | RouteDraft},
+	"MaterialUnderstandingFailed":    {Mode: VersionMerge, MergeKeys: []string{"asset_id"}, OptionalMergeKeys: []string{"job_id", "attempt"}, Routes: RouteWorkspace | RouteDraft},
+	"DecisionCreated":                {Mode: VersionStrict, WorkspaceScopeMode: VersionMerge, MergeKeys: []string{"decision_id"}, DraftScope: true, Routes: RouteDraft},
+	"DecisionAnswered":               {Mode: VersionStrict, WorkspaceScopeMode: VersionMerge, MergeKeys: []string{"decision_id"}, DraftScope: true, Routes: RouteDraft},
+	"ConversationContextCleared":     {Mode: VersionStrict, DraftScope: true, Routes: RouteDraft},
+	"TimelineVersionCreated":         {Mode: VersionStrict, DraftScope: true, Routes: RouteDraft},
+	"TimelineVersionRestored":        {Mode: VersionStrict, DraftScope: true, Routes: RouteDraft},
+	"TimelineValidated":              {Mode: VersionStrict, DraftScope: true, Routes: RouteDraft},
+	"TimelineValidationFailed":       {Mode: VersionStrict, DraftScope: true, Routes: RouteDraft},
+	"PreviewRendered":                {Mode: VersionMerge, MergeKeys: []string{"timeline_version", "artifact_id"}, DraftScope: true, Routes: RouteDraft},
+	"ExportCompleted":                {Mode: VersionMerge, MergeKeys: []string{"timeline_version", "artifact_id"}, DraftScope: true, Routes: RouteDraft},
+	"JobEnqueued":                    {Mode: VersionMerge, MergeKeys: []string{"job_id"}, Routes: RouteWorkspace | RouteDraft},
+	"JobSucceeded":                   {Mode: VersionMerge, MergeKeys: []string{"job_id"}, Routes: RouteWorkspace | RouteDraft},
+	"JobFailed":                      {Mode: VersionMerge, MergeKeys: []string{"job_id"}, Routes: RouteWorkspace | RouteDraft},
+	"JobCancelled":                   {Mode: VersionMerge, MergeKeys: []string{"job_id"}, Routes: RouteWorkspace | RouteDraft},
+	"ProxyGenerated":                 {Mode: VersionMerge, MergeKeys: []string{"asset_id", "proxy_object_hash"}, Routes: RouteWorkspace | RouteDraft},
+	"JobProgress":                    {Mode: VersionMerge, MergeKeys: []string{"job_id", "progress"}, OptionalMergeKeys: []string{"update_id"}, Routes: RouteWorkspace | RouteDraft},
+	"PreviewViewed":                  {Mode: VersionMerge, MergeKeys: []string{"preview_id"}, DraftScope: true, Routes: RouteDraft},
 }
 
 type Event struct {
@@ -76,15 +89,20 @@ type Event struct {
 
 func (event Event) Spec() (EventSpec, bool) {
 	spec, ok := EventRegistry[event.Type]
+	return spec, ok
+}
+
+// VersionMode returns the effective concurrency mode without mutating the
+// registry declaration. Workspace-scoped variants opt into their mode in spec.
+func (event Event) VersionMode() (VersionMode, bool) {
+	spec, ok := event.Spec()
 	if !ok {
-		return EventSpec{}, false
+		return "", false
 	}
-	// Workspace decisions use merge semantics; draft decisions remain strict.
-	if (event.Type == "DecisionCreated" || event.Type == "DecisionAnswered") &&
-		stringValue(event.Payload["scope_type"]) == "workspace" {
-		spec.Mode = VersionMerge
+	if stringValue(event.Payload["scope_type"]) == "workspace" && spec.WorkspaceScopeMode != "" {
+		return spec.WorkspaceScopeMode, true
 	}
-	return spec, true
+	return spec.Mode, true
 }
 
 func (event Event) Validate() error {
@@ -136,7 +154,8 @@ func (event Event) MergeKey() (string, error) {
 	if !ok {
 		return "", errors.New("事件未注册")
 	}
-	if spec.Mode != VersionMerge || len(spec.MergeKeys) == 0 {
+	mode, _ := event.VersionMode()
+	if mode != VersionMerge || len(spec.MergeKeys) == 0 {
 		return "", nil
 	}
 	parts := make([]string, 0, len(spec.MergeKeys)+len(spec.OptionalMergeKeys))
@@ -164,18 +183,15 @@ func ParseEvent(data []byte) (Event, error) {
 }
 
 func RoutesToWorkspace(event Event) bool {
-	switch event.Type {
-	case "DraftCreated", "DraftRenamed", "DraftCopied", "DraftTrashed",
-		"AssetLinked", "AssetUnlinked", "AssetImported", "AssetProbed", "ProxyGenerated",
-		"MaterialUnderstandingStarted", "MaterialUnderstandingCompleted", "MaterialUnderstandingFailed",
-		"JobEnqueued", "JobProgress", "JobSucceeded", "JobFailed", "JobCancelled":
-		return true
-	default:
-		return false
-	}
+	spec, ok := event.Spec()
+	return ok && spec.Routes.Includes(RouteWorkspace)
 }
 
 func RoutesToDraft(event Event, draftID string) bool {
+	spec, ok := event.Spec()
+	if !ok || !spec.Routes.Includes(RouteDraft) {
+		return false
+	}
 	if event.DraftID == draftID {
 		return true
 	}

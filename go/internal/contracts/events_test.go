@@ -64,9 +64,42 @@ func TestEventMergeKeyAndDecisionWorkspaceMode(t *testing.T) {
 		Actor:   ActorAgent,
 		Payload: map[string]any{"scope_type": "workspace", "decision_id": "d"},
 	}
-	spec, _ := workspace.Spec()
-	if spec.Mode != VersionMerge {
-		t.Fatalf("workspace decision mode=%s", spec.Mode)
+	mode, _ := workspace.VersionMode()
+	if mode != VersionMerge {
+		t.Fatalf("workspace decision mode=%s", mode)
+	}
+	declared, _ := workspace.Spec()
+	if declared.Mode != VersionStrict || declared.WorkspaceScopeMode != VersionMerge {
+		t.Fatalf("workspace decision declaration=%#v", declared)
+	}
+}
+
+func TestEventRegistryDeclaresEveryRoute(t *testing.T) {
+	t.Parallel()
+
+	for eventType, spec := range EventRegistry {
+		if spec.Routes == 0 {
+			t.Errorf("%s 缺少 SSE 路由声明", eventType)
+		}
+		event := Event{
+			Type: eventType, Actor: ActorAgent, DraftID: "draft",
+			Payload: map[string]any{"requested_by_draft_id": "requested"},
+		}
+		workspace := spec.Routes.Includes(RouteWorkspace)
+		if got := RoutesToWorkspace(event); got != workspace {
+			t.Errorf("%s workspace route=%t want=%t", eventType, got, workspace)
+		}
+		draft := spec.Routes.Includes(RouteDraft)
+		if got := RoutesToDraft(event, "draft"); got != draft {
+			t.Errorf("%s direct draft route=%t want=%t", eventType, got, draft)
+		}
+		if got := RoutesToDraft(event, "requested"); got != draft {
+			t.Errorf("%s requested draft route=%t want=%t", eventType, got, draft)
+		}
+	}
+	unknown := Event{Type: "FutureEvent", DraftID: "draft", Payload: map[string]any{"requested_by_draft_id": "requested"}}
+	if RoutesToWorkspace(unknown) || RoutesToDraft(unknown, "draft") || RoutesToDraft(unknown, "requested") {
+		t.Fatal("未注册事件不应进入任何 SSE 路由")
 	}
 }
 

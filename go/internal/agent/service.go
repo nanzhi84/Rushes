@@ -132,7 +132,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	turnID := randomID("turn")
 	messageID := randomID("msg")
 	service.hub.Record(item.DraftID, StreamEvent{
-		"type": "turn_started", "turn_id": turnID,
+		"type": TurnStreamTurnStarted, "turn_id": turnID,
 	})
 	ctx = rushestools.WithDraftID(ctx, item.DraftID)
 	if item.Kind == QueueUserMessage {
@@ -185,14 +185,14 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 			ResultRows: resultRows,
 		})
 		if applyErr != nil {
-			service.hub.Record(item.DraftID, StreamEvent{"type": "turn_error", "message": applyErr.Error()})
+			service.hub.Record(item.DraftID, StreamEvent{"type": TurnStreamTurnError, "message": applyErr.Error()})
 			return applyErr
 		}
 		if result.Status != reducer.StatusApplied {
 			return fmt.Errorf("assistant message reducer status: %s", result.Status)
 		}
 		service.hub.Record(item.DraftID, StreamEvent{
-			"type": "message_completed", "message_id": messageID,
+			"type": TurnStreamMessageCompleted, "message_id": messageID,
 			"kind": messageKind, "content": content,
 		})
 	} else if delivery := observationDelivery(item); delivery != nil {
@@ -223,7 +223,7 @@ func observationDelivery(item QueueItem) *reducer.AgentJobObservationDeliveryRow
 }
 
 func (service *Service) recordTurnEnded(draftID, outcome string, reason any, turnBudget *turnBudgetState) {
-	turnEnded := StreamEvent{"type": "turn_ended", "outcome": outcome, "reason": reason}
+	turnEnded := StreamEvent{"type": TurnStreamTurnEnded, "outcome": outcome, "reason": reason}
 	if usage := turnBudget.usageSnapshot(); usage != nil {
 		turnEnded["token_usage"] = usage
 	}
@@ -233,7 +233,7 @@ func (service *Service) recordTurnEnded(draftID, outcome string, reason any, tur
 func (service *Service) withModelRetryReporting(ctx context.Context, draftID string) context.Context {
 	return withModelRetryReporter(ctx, func(notice modelRetryNotice) {
 		service.hub.Record(draftID, StreamEvent{
-			"type": "model_retry", "attempt": notice.Attempt,
+			"type": TurnStreamModelRetry, "attempt": notice.Attempt,
 			"max_retries": notice.MaxRetries, "reason": "模型响应超时",
 			"next_delay_ms": notice.Delay.Milliseconds(),
 		})
@@ -306,7 +306,7 @@ func (service *Service) streamAgent(
 		}
 		output.WriteString(message.Content)
 		service.hub.Record(draftID, StreamEvent{
-			"type": "text_delta", "message_id": messageID,
+			"type": TurnStreamTextDelta, "message_id": messageID,
 			"kind": "assistant", "delta": message.Content,
 		})
 	}
@@ -602,7 +602,7 @@ func (service *Service) fallbackTurn(
 		default:
 		}
 		service.hub.Record(draftID, StreamEvent{
-			"type": "text_delta", "message_id": messageID,
+			"type": TurnStreamTextDelta, "message_id": messageID,
 			"kind": "assistant", "delta": delta,
 		})
 	}
@@ -656,7 +656,7 @@ func (service *Service) contextSummary(ctx context.Context, draftID, source stri
 			reason = truncateText(err.Error(), 500)
 		}
 		service.hub.Record(draftID, StreamEvent{
-			"type": "context_compaction_failed", "reason": reason,
+			"type": TurnStreamContextCompactionFailed, "reason": reason,
 			"fallback": "deterministic_bounded_summary",
 		})
 		return summary
@@ -705,7 +705,7 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 			argsSummary := compactJSON(input)
 			steps[name] = activeStep{id: stepID, argsSummary: argsSummary}
 			service.hub.Record(draftID, StreamEvent{
-				"type": "tool_step_started", "step_id": stepID, "tool": name,
+				"type": TurnStreamToolStepStarted, "step_id": stepID, "tool": name,
 				"args_summary": argsSummary,
 			})
 			return
@@ -725,7 +725,7 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 			status = "failed"
 		}
 		service.hub.Record(draftID, StreamEvent{
-			"type": "tool_step_finished", "step_id": stepID, "tool": name,
+			"type": TurnStreamToolStepFinished, "step_id": stepID, "tool": name,
 			"status": status, "observation": observation,
 		})
 		_ = service.persistToolTrace(

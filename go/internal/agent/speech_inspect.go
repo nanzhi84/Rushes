@@ -351,7 +351,7 @@ func (service *Service) loadOrBuildSpeechTranscript(
 		chunks := buildASRChunks(durationFrames, pauses, maxASRChunkFrames)
 		for index, chunk := range chunks {
 			service.hub.Record(draftID, StreamEvent{
-				"type": "subagent_progress", "tool": "speech.inspect",
+				"type": TurnStreamSubagentProgress, "tool": "speech.inspect",
 				"asset_id": asset.ID, "note": fmt.Sprintf("ASR 转写 %d/%d", index+1, len(chunks)),
 				"completed": index, "total": len(chunks),
 			})
@@ -367,7 +367,7 @@ func (service *Service) loadOrBuildSpeechTranscript(
 			_ = os.Remove(path)
 			if errors.Is(recognizeErr, contracts.ErrSpeechNoWords) {
 				service.hub.Record(draftID, StreamEvent{
-					"type": "subagent_progress", "tool": "speech.inspect",
+					"type": TurnStreamSubagentProgress, "tool": "speech.inspect",
 					"asset_id":  asset.ID,
 					"note":      fmt.Sprintf("ASR 转写 %d/%d：该分块无台词，已跳过", index+1, len(chunks)),
 					"completed": index + 1, "total": len(chunks),
