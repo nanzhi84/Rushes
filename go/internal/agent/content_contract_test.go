@@ -146,6 +146,39 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 	}
 }
 
+func TestContentContractReportsMissingBeatGrid(t *testing.T) {
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_missing_beat_grid")
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	minRatio := 0.8
+	updated, err := service.toolPlanUpdate(t.Context(), "draft_missing_beat_grid", rushestools.PlanUpdateInput{
+		Plan:     map[string]any{"goal": "缺节拍网格合同测试"},
+		Contract: &rushestools.ContentPlanContract{MinOnBeatRatio: &minRatio},
+	})
+	if err != nil || updated.Status != "succeeded" {
+		t.Fatalf("plan update=%#v err=%v", updated, err)
+	}
+	document := timeline.Empty("draft_missing_beat_grid", 1)
+	report, configured, err := service.verifyContentContract(t.Context(), "draft_missing_beat_grid", document)
+	if err != nil || !configured || report.Pass || len(report.Items) != 1 {
+		t.Fatalf("report=%#v configured=%v err=%v", report, configured, err)
+	}
+	item := report.Items[0]
+	const guidance = "无法核对卡拍比例：当前 BGM 无节拍网格，请先 audio.analyze_beats 或用 recut_to_beats 重建"
+	if item.Check != "on_beat_ratio" || item.Pass || item.ErrorCode != "missing_beat_grid" || item.Message != guidance {
+		t.Fatalf("item=%#v", item)
+	}
+	persisted, err := service.persistTimeline(t.Context(), "draft_missing_beat_grid", document, "missing_beat_grid_fixture")
+	if err != nil || !strings.Contains(persisted.Observation, guidance) {
+		t.Fatalf("persisted=%#v err=%v", persisted, err)
+	}
+}
+
 func assertPersistedContractReport(t *testing.T, database *storage.DB, draftID string, version int, wantPass bool) {
 	t.Helper()
 	var raw string

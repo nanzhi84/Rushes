@@ -16,11 +16,12 @@ import (
 )
 
 type contractVerificationItem struct {
-	Check   string   `json:"check"`
-	Pass    bool     `json:"pass"`
-	Message string   `json:"message"`
-	Frames  []int    `json:"frames,omitempty"`
-	IDs     []string `json:"ids,omitempty"`
+	Check     string   `json:"check"`
+	Pass      bool     `json:"pass"`
+	ErrorCode string   `json:"error_code,omitempty"`
+	Message   string   `json:"message"`
+	Frames    []int    `json:"frames,omitempty"`
+	IDs       []string `json:"ids,omitempty"`
 }
 
 type contractVerificationReport struct {
@@ -154,11 +155,17 @@ func (service *Service) verifyContentContract(
 	if contract.MinOnBeatRatio != nil {
 		ratio, _ := numericValue(beatAlignment["alignment_ratio"])
 		offBeat, _ := beatAlignment["off_beat_cut_frames"].([]int)
-		report.Items = append(report.Items, contractVerificationItem{
+		item := contractVerificationItem{
 			Check: "on_beat_ratio", Pass: ratio >= *contract.MinOnBeatRatio,
 			Message: fmt.Sprintf("切点卡拍比例 %.3f，合同下限 %.3f。", ratio, *contract.MinOnBeatRatio),
 			Frames:  offBeat,
-		})
+		}
+		if beatAlignment["beat_grid_present"] != true {
+			item.Pass = false
+			item.ErrorCode = "missing_beat_grid"
+			item.Message = "无法核对卡拍比例：当前 BGM 无节拍网格，请先 audio.analyze_beats 或用 recut_to_beats 重建"
+		}
+		report.Items = append(report.Items, item)
 	}
 	if contract.MinCutDensityPerMinute != nil || contract.MaxCutDensityPerMinute != nil {
 		cutCount, _ := numericValue(beatAlignment["cut_count"])
@@ -310,20 +317,21 @@ func utteranceCoveredByClips(clips []timeline.Clip, assetID string, start, end i
 		if clip.SourceStartFrame > start || clip.SourceEndFrame <= start {
 			continue
 		}
-		sourceCursor := clip.SourceEndFrame
-		timelineCursor := clip.TimelineEndFrame
+		previous := clip
+		sourceCursor := previous.SourceEndFrame
 		playbackRate := contentClipPlaybackRate(clip)
 		if sourceCursor >= end {
 			return true
 		}
 		for next := index + 1; next < len(candidates); next++ {
 			candidate := candidates[next]
-			if candidate.SourceStartFrame != sourceCursor || candidate.TimelineStartFrame != timelineCursor ||
+			if !clipsHaveContinuousSourceBoundary(previous, candidate) ||
+				candidate.TimelineStartFrame != previous.TimelineEndFrame ||
 				math.Abs(contentClipPlaybackRate(candidate)-playbackRate) > 0.000001 {
 				continue
 			}
+			previous = candidate
 			sourceCursor = candidate.SourceEndFrame
-			timelineCursor = candidate.TimelineEndFrame
 			if sourceCursor >= end {
 				return true
 			}

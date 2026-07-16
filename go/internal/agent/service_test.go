@@ -3098,7 +3098,9 @@ func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
 	if candidates := beatCandidatesWithin([]int{-1, 0, 10, 10, 20, 30}, 30); !reflect.DeepEqual(candidates, []int{10, 20}) {
 		t.Fatalf("candidates=%v", candidates)
 	}
-	if !containsFrame([]int{10, 20, 30}, 20) || containsFrame([]int{10, 20, 30}, 25) {
+	if !containsFrame([]int{10, 20, 30}, 20) || !containsFrame([]int{10, 20, 30}, 19) ||
+		!containsFrame([]int{10, 20, 30}, 21) || containsFrame([]int{10, 20, 30}, 18) ||
+		containsFrame([]int{10, 20, 30}, 22) || containsFrame([]int{10, 20, 30}, 25) {
 		t.Fatal("containsFrame bounds failed")
 	}
 	if absInt(-4) != 4 || absInt(4) != 4 {
