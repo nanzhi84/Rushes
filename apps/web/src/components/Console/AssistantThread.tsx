@@ -424,9 +424,8 @@ function MessageRow({
   );
 }
 
-// 回合以错误终止时落库的持久失败提示行（role=system, kind=turn_failure）。
-// 刷新后仍从 DB 读回，避免「白等 → 被迫 rewind」的无声死亡。样式沿用既有
-// 危险色令牌，不引入新设计语言。
+// 回合以错误终止时落库的持久失败提示行（role=system, kind=turn_failure），
+// 刷新后仍从 DB 读回。
 function TurnFailureRow({
   message,
   highlighted

@@ -174,10 +174,8 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		messageKind := "reply"
 		switch {
 		case outcome == "failed":
-			// 回合以错误终止：落一条持久的系统失败消息（简体中文分类+简述），
-			// UI 渲染为失败提示行。即使用户不在页面上，也能从 DB 读回而不再无声
-			// 死亡（issue #95 H2）。用户主动取消走上面 context.Canceled 分支，
-			// 不会到这里，因此不会污染取消语义。
+			// 回合以错误终止：落一条持久的系统失败消息，用户不在页面时也能事后
+			// 从 DB 读回。用户主动取消走 context.Canceled 分支，不会到这里。
 			messageRole, messageKind = "system", "turn_failure"
 		case item.Kind == QueueJobObservation && service.react == nil:
 			messageKind = "observation"
