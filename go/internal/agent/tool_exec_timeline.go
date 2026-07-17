@@ -371,6 +371,14 @@ func (service *Service) toolValidateTimeline(ctx context.Context, draftID string
 		"validation_report": validationReport,
 		"beat_alignment":    beatAlignment,
 	}
+	quality, qualityErr := service.speechQualityReport(ctx, document)
+	if qualityErr != nil {
+		return rushestools.ToolResult{}, qualityErr
+	}
+	if present, _ := quality["a_roll_present"].(bool); present {
+		data["speech_quality"] = quality
+		observation += talkingHeadQualitySummary(quality)
+	}
 	if hasContract {
 		data["content_contract"] = contractReport
 		failures := contractFailureItems(contractReport)
