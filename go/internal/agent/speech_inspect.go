@@ -120,10 +120,14 @@ func (service *Service) toolInspectSpeech(
 	wordsTruncated := false
 	evidence := make([]rushestools.SpeechUtteranceEvidence, 0, len(selected))
 	for _, utterance := range selected {
+		sourceStart, sourceEnd, clamped := utterance.StartFrame, utterance.EndFrame, false
+		if timelineClip != nil {
+			sourceStart, sourceEnd, clamped = clampSpeechRangeToClip(*timelineClip, sourceStart, sourceEnd)
+		}
 		item := rushestools.SpeechUtteranceEvidence{
-			UtteranceID: utterance.ID, SourceStartFrame: utterance.StartFrame,
-			SourceEndFrame: utterance.EndFrame, Text: utterance.Text,
-			Language: utterance.Language, Emotion: utterance.Emotion,
+			UtteranceID: utterance.ID, SourceStartFrame: sourceStart,
+			SourceEndFrame: sourceEnd, Text: utterance.Text,
+			Language: utterance.Language, Emotion: utterance.Emotion, Clamped: clamped,
 		}
 		if timelineClip != nil {
 			if start, end, ok := mapSourceRangeToTimelineClip(*timelineClip, utterance.StartFrame, utterance.EndFrame); ok {
@@ -136,9 +140,17 @@ func (service *Service) toolInspectSpeech(
 					wordsTruncated = true
 					break
 				}
+				wordStart, wordEnd, wordClamped := word.StartFrame, word.EndFrame, false
+				if timelineClip != nil {
+					wordStart, wordEnd, wordClamped = clampSpeechRangeToClip(*timelineClip, wordStart, wordEnd)
+					if wordEnd <= wordStart {
+						continue
+					}
+				}
 				wordItem := rushestools.SpeechWordEvidence{
-					WordID: word.ID, SourceStartFrame: word.StartFrame,
-					SourceEndFrame: word.EndFrame, Text: word.Text, Punctuation: word.Punctuation,
+					WordID: word.ID, SourceStartFrame: wordStart,
+					SourceEndFrame: wordEnd, Text: word.Text, Punctuation: word.Punctuation,
+					Clamped: wordClamped,
 				}
 				if timelineClip != nil {
 					if start, end, ok := mapSourceRangeToTimelineClip(*timelineClip, word.StartFrame, word.EndFrame); ok {
@@ -166,16 +178,20 @@ func (service *Service) toolInspectSpeech(
 				input.SourceEndFrame != nil && pause.DeleteStart >= *input.SourceEndFrame {
 				continue
 			}
+			deleteStart, deleteEnd, clamped := pause.DeleteStart, pause.DeleteEnd, false
+			if timelineClip != nil {
+				deleteStart, deleteEnd, clamped = clampSpeechRangeToClip(*timelineClip, deleteStart, deleteEnd)
+			}
 			item := rushestools.SpeechPauseEvidence{
 				PauseID: pause.ID, SourceStartFrame: pause.StartFrame, SourceEndFrame: pause.EndFrame,
-				DeleteStartFrame: pause.DeleteStart, DeleteEndFrame: pause.DeleteEnd,
+				DeleteStartFrame: deleteStart, DeleteEndFrame: deleteEnd,
 				DurationFrames:       pause.EndFrame - pause.StartFrame,
-				DeleteDurationFrames: pause.DeleteEnd - pause.DeleteStart,
-				DetectionMethod:      pause.Method,
+				DeleteDurationFrames: deleteEnd - deleteStart,
+				DetectionMethod:      pause.Method, Clamped: clamped,
 			}
 			populateSpeechPauseContext(&item, utterances)
 			if timelineClip != nil {
-				if start, end, ok := mapSourceRangeToTimelineClip(*timelineClip, pause.DeleteStart, pause.DeleteEnd); ok {
+				if start, end, ok := mapSourceRangeToTimelineClip(*timelineClip, deleteStart, deleteEnd); ok {
 					item.TimelineStartFrame, item.TimelineEndFrame = &start, &end
 				}
 			}
@@ -1677,4 +1693,13 @@ func mapSourceRangeToTimelineClip(clip timeline.Clip, startFrame, endFrame int) 
 
 func sourceRangesOverlap(leftStart, leftEnd, rightStart, rightEnd int) bool {
 	return leftStart < rightEnd && rightStart < leftEnd
+}
+
+// clampSpeechRangeToClip 把源帧证据区间裁剪到 clip 的已裁剪源区间，返回裁剪后的
+// 区间与是否发生了裁剪。调用方对交集为空（end <= start）的项自行决定跳过或判非法，
+// 使 speech.inspect 返回的证据坐标与 timeline.edit_talking_head 的交集校验一致。
+func clampSpeechRangeToClip(clip timeline.Clip, start, end int) (int, int, bool) {
+	clampedStart := max(start, clip.SourceStartFrame)
+	clampedEnd := min(end, clip.SourceEndFrame)
+	return clampedStart, clampedEnd, clampedStart != start || clampedEnd != end
 }
