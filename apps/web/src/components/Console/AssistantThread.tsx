@@ -317,6 +317,10 @@ function MessageRow({
   rewindCheckpointId?: string;
   onOpenRewind?: (checkpointId: string) => void;
 }): ReactElement {
+  if (message.metadata.messageKind === "turn_failure") {
+    return <TurnFailureRow message={message} highlighted={highlighted} />;
+  }
+
   if (message.metadata.consoleRole === "system_observation") {
     return <BackgroundActivityGroup messages={[message]} />;
   }
@@ -415,6 +419,39 @@ function MessageRow({
             正在生成
           </span>
         ) : null}
+      </div>
+    </article>
+  );
+}
+
+// 回合以错误终止时落库的持久失败提示行（role=system, kind=turn_failure）。
+// 刷新后仍从 DB 读回，避免「白等 → 被迫 rewind」的无声死亡。样式沿用既有
+// 危险色令牌，不引入新设计语言。
+function TurnFailureRow({
+  message,
+  highlighted
+}: {
+  message: ConsoleAssistantMessage;
+  highlighted: boolean;
+}): ReactElement {
+  return (
+    <article
+      data-message-kind="turn_failure"
+      data-testid="turn-failure-row"
+      className={`${highlightClass(
+        highlighted
+      )} flex w-full items-start gap-2 rounded-md border border-danger/25 bg-danger/10 px-3 py-2 text-[13px] leading-5 text-fg`}
+    >
+      <span aria-hidden className="mt-1.5 size-1.5 shrink-0 rounded-full bg-danger" />
+      <div className="min-w-0 flex-1">
+        <span className="sr-only">本轮失败：</span>
+        {message.content.map((part, index) =>
+          part.type === "text" ? (
+            <p key={`${message.id}:${index}`} className="break-words whitespace-pre-wrap">
+              {part.text}
+            </p>
+          ) : null
+        )}
       </div>
     </article>
   );

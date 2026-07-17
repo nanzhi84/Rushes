@@ -174,6 +174,28 @@ describe("AssistantThread Claude Code 式消息流", () => {
     expect(screen.getAllByText("渲染预览")).toHaveLength(2);
   });
 
+  it("把回合失败终态渲染成持久的失败提示行，刷新后仍从 DB 读回", () => {
+    renderThread({
+      messages: [
+        message("user", "u1", "剪一条快节奏混剪", "user"),
+        message(
+          "system",
+          "f1",
+          "本轮没有完成：模型响应超时，已自动重试 3 次仍未恢复。系统已停止重试。你可以继续给出下一步指令。",
+          "turn_failure"
+        )
+      ]
+    });
+
+    const row = screen.getByTestId("turn-failure-row");
+    expect(row.getAttribute("data-message-kind")).toBe("turn_failure");
+    expect(row.textContent).toContain("本轮没有完成");
+    expect(row.textContent).toContain("本轮失败");
+    // 失败行独立呈现：不折叠进后台活动组，也不套用户气泡。
+    expect(screen.queryByTestId("background-activity-group")).toBeNull();
+    expect(row.closest("[data-user-message]")).toBeNull();
+  });
+
   it("用户消息使用源站的右侧窄灰气泡，助手正文不套卡片", () => {
     renderThread({
       messages: [
