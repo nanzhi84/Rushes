@@ -139,10 +139,17 @@ func (service *Service) toolSearchShots(
 	understandingCandidates := rankUnderstandingCandidates(
 		missing, input.Query, input.Tags, roleFilter, min(limit, 20),
 	)
-	return rushestools.ShotSearchResult{
+	result := rushestools.ShotSearchResult{
 		Query: input.Query, Shots: matches, TotalMatches: total, Truncated: total > len(matches),
 		MissingUnderstandingAssetIDs: missingIDs, UnderstandingCandidates: understandingCandidates,
-	}, nil
+	}
+	if len(missing) > 0 {
+		result.UnderstandingCoverageNote = fmt.Sprintf(
+			"当前草稿关联的可用视频素材中还有 %d 个尚未理解，未纳入本次检索；若目标画面可能在其中，先用 understand.materials 理解后重搜，或明确告知用户当前检索池并不完整。",
+			len(missing),
+		)
+	}
+	return result, nil
 }
 
 func (service *Service) draftShotIndex(
