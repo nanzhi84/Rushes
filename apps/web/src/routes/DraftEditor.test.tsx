@@ -1396,6 +1396,31 @@ describe("DraftEditorView", () => {
     // 预览区回到成片占位（时间线区也有同名占位，故按预览区作用域断言）
     expect(within(screen.getByLabelText("预览区")).getByText(/暂无时间线/)).toBeTruthy();
   });
+
+  it("流式 text_delta 高频更新期间不重渲染时间线子树（高频态已下沉到 ConsolePanel）", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true });
+    renderEditor(fetchMock);
+
+    // 等时间线首次挂载
+    await screen.findByTestId("mock-timeline-seek");
+    const stream = turnStreamSource();
+
+    // 首个 delta 会把 turnActive 翻成 true，经忙碌态回调让工作区重渲染一次（导出按钮禁用态）。
+    // 这是预期内的一次性切换，记录其后的渲染次数作为基线。
+    emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
+    emitTurnStream(stream, { type: "text_delta", message_id: "a1", kind: "assistant", delta: "开" });
+    await screen.findByText("开");
+    const baseline = consoleComponentMocks.timelineProps.length;
+
+    // 大量后续 delta：turnActive 保持 true、忙碌态不变，高频流式只重渲染左侧对话栏，
+    // 时间线子树（mock TimelineViewer 的渲染次数）完全不动。
+    for (let i = 0; i < 40; i += 1) {
+      emitTurnStream(stream, { type: "text_delta", message_id: "a1", kind: "assistant", delta: "字" });
+    }
+    await screen.findByText(`开${"字".repeat(40)}`);
+
+    expect(consoleComponentMocks.timelineProps.length).toBe(baseline);
+  });
 });
 
 function renderEditor(fetchMock: FetchMock): void {

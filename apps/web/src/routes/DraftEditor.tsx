@@ -1,22 +1,18 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import {
-  ArrowUp,
   Captions,
   Crop,
-  History,
   Home,
   Link2,
   ListPlus,
   Magnet,
-  MessageSquareX,
   MousePointer2,
   Pencil,
   Replace,
   Scissors,
-  Square,
   Trash2,
   Unlink2,
   X,
@@ -26,37 +22,19 @@ import {
 import type { LucideIcon } from "lucide-react";
 import {
   api,
-  type DecisionAnswer,
   type MaterialAsset,
-  type MessageRecord,
-  type RewindRestoreRequest,
   type TimelineClipJson,
   type TimelineJson
 } from "../api/client";
-import { DRAFT_EVENT_TYPES } from "../api/event_types";
 import { queryKeys } from "../app/query_client";
-import { useDocumentVisibility } from "../app/use_document_visibility";
-import { acquireApiEventSource, ApiError } from "../auth";
-import { AssistantThread } from "../components/Console/AssistantThread";
-import { RewindPanel } from "../components/Console/RewindPanel";
-import { useTurnStream } from "../components/Console/useTurnStream";
-import {
-  markDecisionAnswered,
-  mergeCurrentDecisionItem,
-  reduceStructuredInteractionItems,
-  StructuredInteractionRenderer
-} from "../components/Console/StructuredInteractionRenderer";
-import type {
-  DomainSsePayload,
-  StructuredInteractionItem
-} from "../components/Console/StructuredInteractionRenderer";
-import {
-  useConsoleExternalStoreRuntime,
-  type ConsoleMessage,
-  type ConsoleMessageRole
-} from "../components/Console/runtime";
 import { AssetMediaPreview } from "../components/Materials/AssetMediaPreview";
 import { AssetsPanel } from "../components/Materials/AssetsPanel";
+import {
+  ConsolePanel,
+  type ConsoleConnectionState,
+  type ConsolePanelHandle
+} from "../components/Console/ConsolePanel";
+import { timelinePatchErrorMessage } from "../components/Console/error_messages";
 import { DiffusionPreviewPlayer } from "../components/PreviewPlayer";
 import { EntityActionDialog } from "../components/Shell/EntityActionDialog";
 import { ResizeHandle } from "../components/Shell/ResizeHandle";
@@ -80,11 +58,6 @@ export function DraftEditorPage(): ReactElement {
   return <DraftEditorView draftId={draftId} />;
 }
 
-type ConversationHistory = {
-  messages: ConsoleMessage[];
-  rewoundMessageCount: number;
-};
-
 export function DraftEditorView({ draftId }: { draftId: string }): ReactElement {
   const queryClient = useQueryClient();
   const {
@@ -98,11 +71,6 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     timelinePanelHeight,
     setTimelinePanelHeight
   } = useUiStore();
-  const [draft, setDraft] = useState("");
-  const [awaitingTurnEnd, setAwaitingTurnEnd] = useState(false);
-  const [streamState, setStreamState] = useState<"connecting" | "open" | "closed">("connecting");
-  const documentVisible = useDocumentVisibility();
-  const [structuredItems, setStructuredItems] = useState<StructuredInteractionItem[]>([]);
   const [previewingAssetId, setPreviewingAssetId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
@@ -113,42 +81,20 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const [dropMode, setDropMode] = useState<TimelineDropMode>("insert");
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [timelineEditError, setTimelineEditError] = useState<string | null>(null);
-  const [conversationError, setConversationError] = useState<string | null>(null);
-  const [rewindOpen, setRewindOpen] = useState(false);
-  const [selectedRewindCheckpointId, setSelectedRewindCheckpointId] = useState<string | null>(null);
-  const optimisticMessageSequenceRef = useRef(0);
+  // 连接态与回合忙碌态由 ConsolePanel 通过回调低频回传：顶栏连接指示与导出按钮禁用态用它，
+  // 但每个 text_delta 不会流经这里，故不会重渲染右侧工作区。
+  const [consoleConnection, setConsoleConnection] = useState<ConsoleConnectionState>("connecting");
+  const [consoleBusy, setConsoleBusy] = useState(false);
+  const consoleRef = useRef<ConsolePanelHandle | null>(null);
   const timelineBodyRef = useRef<HTMLDivElement | null>(null);
   const timelineViewerRef = useRef<TimelineViewerHandle | null>(null);
   const playheadSecRef = useRef<number | null>(null);
   const playheadTimecodeRef = useRef<HTMLSpanElement | null>(null);
   const lastPlayheadCommitRef = useRef({ at: 0, sec: 0 });
-  const draftInvalidationTimerRef = useRef<number | null>(null);
   const editorSessionRef = useRef<EditorSession | null>(null);
   const editorSessionDraftRef = useRef<string | null>(null);
   const editorSessionUnsubscribeRef = useRef<(() => void) | null>(null);
   const [editorSnapshot, setEditorSnapshot] = useState<EditorSessionSnapshot | null>(null);
-
-  const messagesQuery = useQuery({
-    queryKey: queryKeys.messages(draftId),
-    queryFn: async () => {
-      const response = await api.getDraftMessages(draftId);
-      return {
-        messages: response.messages.map(toConsoleMessage),
-        rewoundMessageCount: response.rewound_message_count
-      };
-    },
-    initialData: { messages: [] as ConsoleMessage[], rewoundMessageCount: 0 }
-  });
-
-  const rewindQuery = useQuery({
-    queryKey: queryKeys.rewindCheckpoints(draftId),
-    queryFn: () => api.rewindCheckpoints(draftId)
-  });
-
-  const decisionQuery = useQuery({
-    queryKey: queryKeys.currentDecision(draftId),
-    queryFn: () => api.currentDecision(draftId)
-  });
 
   const draftQuery = useQuery({
     queryKey: queryKeys.draft(draftId),
@@ -181,247 +127,11 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     enabled: timelineVersion !== null
   });
 
-  const currentDecision = decisionQuery.data?.decision ?? null;
-  const historyMessages = messagesQuery.data.messages;
-  const rewoundMessageCount = messagesQuery.data.rewoundMessageCount;
-  const rewindCheckpoints = rewindQuery.data?.checkpoints ?? [];
-  const rewindCheckpointByItem = useMemo(() => {
-    const result: Record<string, string> = {};
-    for (const checkpoint of rewindCheckpoints) {
-      const messageEntry = checkpoint.trigger_kind === "user_message";
-      const attachedToolEntry =
-        checkpoint.trigger_kind === "timeline_write" &&
-        checkpoint.anchor_message_id !== checkpoint.anchor_turn_id;
-      if (
-        checkpoint.anchor_message_id &&
-        (messageEntry || attachedToolEntry) &&
-        result[checkpoint.anchor_message_id] === undefined
-      ) {
-        result[checkpoint.anchor_message_id] = checkpoint.checkpoint_id;
-      }
-    }
-    return result;
-  }, [rewindCheckpoints]);
   const timelinePayload = timelineQuery.data ?? null;
   const editorTimeline = editorSnapshot?.timeline ?? timelinePayload?.timeline ?? null;
   const previewSrc = timelinePayload?.preview_id
     ? api.mediaPreviewUrl(timelinePayload.preview_id)
     : null;
-  const renderedStructuredItems = useMemo(
-    () => {
-      if (
-        currentDecision &&
-        structuredItems.some(
-          (item) => item.kind === "decision" && item.decision_id === currentDecision.decision_id
-        )
-      ) {
-        return mergeCurrentDecisionItem(structuredItems, currentDecision);
-      }
-      return structuredItems;
-    },
-    [currentDecision, structuredItems]
-  );
-  const sideDecisionItem = useMemo(
-    () => {
-      if (
-        !currentDecision ||
-        renderedStructuredItems.some(
-          (item) => item.kind === "decision" && item.decision_id === currentDecision.decision_id
-        )
-      ) {
-        return null;
-      }
-      return mergeCurrentDecisionItem([], currentDecision)[0] ?? null;
-    },
-    [currentDecision, renderedStructuredItems]
-  );
-
-  const scheduleDraftQueryInvalidation = useCallback(
-    () => {
-      if (draftInvalidationTimerRef.current !== null) {
-        window.clearTimeout(draftInvalidationTimerRef.current);
-      }
-      // 首次 SSE 会重放历史领域事件。把同一小段事件突发合并成一次刷新，
-      // 避免几十条旧 Timeline 事件反复取消正在加载的最新时间线请求。
-      draftInvalidationTimerRef.current = window.setTimeout(() => {
-        draftInvalidationTimerRef.current = null;
-        void Promise.all([
-          queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
-          queryClient.invalidateQueries({ queryKey: ["timeline", draftId] }),
-          queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
-          queryClient.invalidateQueries({ queryKey: queryKeys.rewindCheckpoints(draftId) }),
-          queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
-          queryClient.invalidateQueries({ queryKey: queryKeys.costs(draftId) }),
-          queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) })
-        ]);
-      }, 80);
-    },
-    [draftId, queryClient]
-  );
-
-  useEffect(() => {
-    if (!documentVisible) {
-      setStreamState("connecting");
-      return;
-    }
-    const { source, release } = acquireApiEventSource(`/api/drafts/${draftId}/events`);
-    const handleOpen = () => setStreamState("open");
-    const handleError = () => setStreamState("closed");
-    source.addEventListener("open", handleOpen);
-    source.addEventListener("error", handleError);
-    const handleEvent = (event: Event) => {
-      const message = event as MessageEvent<string>;
-      const payload = JSON.parse(message.data) as DomainSsePayload;
-      setStructuredItems((current) => reduceStructuredInteractionItems(current, payload));
-      scheduleDraftQueryInvalidation();
-    };
-    for (const eventName of DRAFT_EVENT_TYPES) {
-      source.addEventListener(eventName, handleEvent);
-    }
-    return () => {
-      source.removeEventListener("open", handleOpen);
-      source.removeEventListener("error", handleError);
-      for (const eventName of DRAFT_EVENT_TYPES) {
-        source.removeEventListener(eventName, handleEvent);
-      }
-      release();
-      if (draftInvalidationTimerRef.current !== null) {
-        window.clearTimeout(draftInvalidationTimerRef.current);
-        draftInvalidationTimerRef.current = null;
-      }
-    };
-  }, [documentVisible, draftId, scheduleDraftQueryInvalidation]);
-
-  // turn-stream 订阅置于领域 /events 订阅之后，保证 /events 是首个 EventSource。
-  const refreshMessages = useCallback(() => {
-    void queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) });
-  }, [draftId, queryClient]);
-  const finishTurn = useCallback(() => {
-    setAwaitingTurnEnd(false);
-    refreshMessages();
-  }, [refreshMessages]);
-  const {
-    items: streamItems,
-    turnActive,
-    modelRetry,
-    subagentProgress,
-    reset: resetTurnStream
-  } = useTurnStream(draftId, {
-    onTurnEnded: finishTurn,
-    onTurnError: finishTurn,
-    onStreamGap: refreshMessages
-  });
-
-  // 当前回合以流式列表为准。历史里同 message_id / step_id 的落库副本让位，
-  // 回合结束后保留实时顺序，刷新页面后再由持久化消息与工具轨迹接管。
-  const messages = useMemo<ConsoleMessage[]>(() => {
-    const liveItemIds = new Set(
-      streamItems.map((item) => (item.type === "message" ? item.message_id : item.step_id))
-    );
-    return historyMessages.filter((message) => !liveItemIds.has(message.id));
-  }, [historyMessages, streamItems]);
-
-  const postMessage = useMutation({
-    mutationFn: (content: string) => api.postMessage(draftId, { content }),
-    onMutate: async (content) => {
-      setAwaitingTurnEnd(true);
-      await queryClient.cancelQueries({ queryKey: queryKeys.messages(draftId) });
-      optimisticMessageSequenceRef.current += 1;
-      const optimistic: ConsoleMessage = {
-        id: `local_${Date.now()}_${optimisticMessageSequenceRef.current}`,
-        role: "user",
-        content,
-        createdAt: new Date().toISOString()
-      };
-      queryClient.setQueryData<ConversationHistory>(queryKeys.messages(draftId), (current) => ({
-        messages: [...(current?.messages ?? []), optimistic],
-        rewoundMessageCount: current?.rewoundMessageCount ?? 0
-      }));
-    },
-    onError: () => setAwaitingTurnEnd(false)
-  });
-
-  const cancelTurn = useMutation({
-    mutationFn: () => api.cancelTurn(draftId)
-  });
-
-  const cancelJob = useMutation({
-    mutationFn: (jobId: string) => api.cancelJob(jobId, "user_cancelled"),
-    onMutate: () => setConversationError(null),
-    onSuccess: async (_response, jobId) => {
-      setStructuredItems((current) =>
-        current.map((item) =>
-          item.kind === "progress" && item.job_id === jobId
-            ? { ...item, status: "cancelled" }
-            : item
-        )
-      );
-      await queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) });
-    },
-    onError: async (error) => {
-      setConversationError(jobCancelErrorMessage(error));
-      await queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) });
-    }
-  });
-
-  const restoreRewind = useMutation({
-    mutationFn: ({ checkpointId, mode, idempotencyKey }: {
-      checkpointId: string;
-      mode: RewindRestoreRequest["mode"];
-      idempotencyKey: string;
-    }) => api.restoreRewindCheckpoint(draftId, {
-      checkpoint_id: checkpointId,
-      idempotency_key: idempotencyKey,
-      mode
-    }),
-    onMutate: () => setConversationError(null),
-    onSuccess: async () => {
-      resetTurnStream();
-      setAwaitingTurnEnd(false);
-      setStructuredItems([]);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.timeline(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.rewindCheckpoints(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) })
-      ]);
-    },
-    onError: (error) => setConversationError(rewindErrorMessage(error))
-  });
-
-  const clearConversation = useMutation({
-    mutationFn: () => api.clearDraftConversation(draftId),
-    onMutate: () => setConversationError(null),
-    onSuccess: async () => {
-      setDraft("");
-      setStructuredItems([]);
-      setHighlightedMessageId(null);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) })
-      ]);
-    },
-    onError: (error) => setConversationError(conversationClearErrorMessage(error))
-  });
-
-  const answerDecision = useMutation({
-    mutationFn: ({ decisionId, answer }: { decisionId: string; answer: DecisionAnswer }) =>
-      api.answerDecision(decisionId, {
-        draft_id: draftId,
-        answer
-      }),
-    onSuccess: async (_data, variables) => {
-      setStructuredItems((current) => markDecisionAnswered(current, variables.decisionId, variables.answer));
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
-        queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) })
-      ]);
-    }
-  });
 
   useEffect(() => {
     if (!timelinePayload) {
@@ -479,32 +189,13 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     return () => window.clearTimeout(timer);
   }, [editorSnapshot?.pendingCount, editorSnapshot?.saveState, flushEditorSession]);
 
-  // turnActive 覆盖刷新/断线重连后重放中的回合；不能只依赖本页发消息时设置的 awaitingTurnEnd。
-  // 运行状态只限制会破坏当前回合的操作，不再禁用输入。消息接口和 TurnQueue
-  // 已经按草稿 FIFO 串行化，因此运行中提交会自然排到当前回合之后。
-  const turnBusy = awaitingTurnEnd || turnActive;
-  const submitMessage = useCallback(
-    (content: string) => {
-      postMessage.mutate(content);
-    },
-    [postMessage]
-  );
-  const handleAnswerDecision = useCallback(
-    (decisionId: string, answer: DecisionAnswer) => {
-      answerDecision.mutate({ decisionId, answer });
-    },
-    [answerDecision]
-  );
-  const handleClearConversation = useCallback(() => {
-    if (
-      !window.confirm(
-        "清空当前对话上下文？素材、素材理解、时间线和预览都会保留，新对话会继承这些客观状态。"
-      )
-    ) {
-      return;
-    }
-    clearConversation.mutate();
-  }, [clearConversation]);
+  // ConsolePanel 用稳定回调把低频的连接态 / 回合忙碌态回传给工作区（顶栏与导出按钮）。
+  const handleConsoleConnectionChange = useCallback((state: ConsoleConnectionState) => {
+    setConsoleConnection(state);
+  }, []);
+  const handleConsoleTurnBusyChange = useCallback((busy: boolean) => {
+    setConsoleBusy(busy);
+  }, []);
   const handlePreviewFirstPlay = useCallback(() => {
     const previewId = timelinePayload?.preview_id;
     if (!previewId) {
@@ -734,9 +425,6 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
       text: "在这里输入字幕"
     });
   }, [applyTimelinePatch, editorTimeline, playheadSec]);
-  const handleExport = useCallback(() => {
-    postMessage.mutate("请把当前时间线导出为最终 MP4。");
-  }, [postMessage]);
 
   useEffect(() => {
     playheadSecRef.current = null;
@@ -777,31 +465,6 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     return () => window.removeEventListener("keydown", handleShortcut);
   }, [handleDeleteSelected, selectedClipId]);
 
-  const runtime = useConsoleExternalStoreRuntime({
-    messages,
-    structuredItems: renderedStructuredItems,
-    isRunning: turnBusy,
-    canSubmit: true,
-    submit: submitMessage
-  });
-  const submitComposer = useCallback(() => {
-    const content = draft.trim();
-    if (!content) {
-      return;
-    }
-    setDraft("");
-    runtime.submit(content);
-  }, [draft, runtime]);
-  const statusLabel = useMemo(() => {
-    if (streamState === "open") {
-      return "事件流已连接";
-    }
-    if (streamState === "closed") {
-      return "事件流重连中";
-    }
-    return "事件流连接中";
-  }, [streamState]);
-
   const timelineDurationSec = useMemo(() => {
     const timeline = editorTimeline;
     if (!timeline) {
@@ -822,7 +485,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   return (
     <div className="flex h-[100dvh] min-h-0 flex-col bg-ink text-fg">
       <TopBar
-        connectionState={streamState}
+        connectionState={consoleConnection}
         showSettings={false}
         leading={
           <>
@@ -856,8 +519,8 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             <button
               className="rounded-sm bg-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-accent-strong disabled:opacity-40"
               type="button"
-              disabled={turnBusy || timelineVersion === null}
-              onClick={handleExport}
+              disabled={consoleBusy || timelineVersion === null}
+              onClick={() => consoleRef.current?.submit("请把当前时间线导出为最终 MP4。")}
             >
               导出
             </button>
@@ -867,181 +530,14 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
 
       {/* ChatCut 式工作台：左侧 AI 贯穿全高；右侧素材/预览在上，时间线固定在下。 */}
       <div className="flex min-h-0 flex-1">
-        <aside
-          className="flex min-h-0 shrink-0 flex-col bg-panel"
-          style={{ width: chatPanelWidth }}
-          aria-label="剪辑对话"
-        >
-          <div className="flex h-8 shrink-0 items-center justify-between border-b border-line px-3">
-            <span className="text-xs font-semibold tracking-wide">AI 剪辑</span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                className="inline-flex h-6 items-center gap-1 rounded-sm px-1.5 text-2xs text-fg-faint hover:bg-hover hover:text-fg"
-                aria-label="打开回退检查点"
-                aria-expanded={rewindOpen}
-                onClick={() => setRewindOpen((current) => !current)}
-              >
-                <History size={12} strokeWidth={1.7} aria-hidden />
-                回退
-              </button>
-              <button
-                type="button"
-                className="inline-flex h-6 items-center gap-1 rounded-sm px-1.5 text-2xs text-fg-faint hover:bg-hover hover:text-fg disabled:opacity-35"
-                aria-label="清空对话上下文"
-                title="清空对话；保留素材与时间线"
-                disabled={turnBusy || clearConversation.isPending}
-                onClick={handleClearConversation}
-              >
-                <MessageSquareX size={12} strokeWidth={1.7} aria-hidden />
-                清空
-              </button>
-              <span className="inline-flex items-center gap-1.5 text-2xs text-fg-faint">
-                <span
-                  aria-hidden
-                  className={`size-1.5 rounded-full ${
-                    streamState === "open"
-                      ? "bg-ok"
-                      : streamState === "closed"
-                        ? "bg-danger"
-                        : "bg-warn"
-                  }`}
-                />
-                <span className="sr-only">{statusLabel}</span>
-                {streamState === "open" ? "在线" : "连接中"}
-              </span>
-            </div>
-          </div>
-
-          {rewindOpen ? (
-            <RewindPanel
-              checkpoints={rewindCheckpoints}
-              selectedCheckpointId={selectedRewindCheckpointId}
-              loading={rewindQuery.isLoading}
-              pending={restoreRewind.isPending}
-              onSelect={setSelectedRewindCheckpointId}
-              onRestore={(mode) => {
-                if (selectedRewindCheckpointId) {
-                  restoreRewind.mutate({
-                    checkpointId: selectedRewindCheckpointId,
-                    idempotencyKey: crypto.randomUUID(),
-                    mode
-                  });
-                }
-              }}
-              onClose={() => setRewindOpen(false)}
-            />
-          ) : null}
-
-          {conversationError ? (
-            <div className="shrink-0 border-b border-danger/30 bg-danger/8 px-3 py-1 text-2xs text-danger" role="alert">
-              {conversationError}
-            </div>
-          ) : null}
-
-          {rewoundMessageCount > 0 ? (
-            <div
-              className="shrink-0 border-b border-line bg-panel px-3 py-1 text-center text-2xs text-fg-faint"
-              role="status"
-            >
-              已回退并折叠 {rewoundMessageCount} 条历史消息
-            </div>
-          ) : null}
-
-          <AssistantThread
-            runtime={runtime}
-            onAnswerDecision={handleAnswerDecision}
-            answerPending={answerDecision.isPending}
-            highlightedMessageId={highlightedMessageId}
-            streamItems={streamItems}
-            modelRetry={modelRetry}
-            subagentProgress={subagentProgress}
-            onCancelJob={(jobId) => cancelJob.mutate(jobId)}
-            cancelPendingJobId={cancelJob.isPending ? (cancelJob.variables ?? null) : null}
-            rewindCheckpointByItem={rewindCheckpointByItem}
-            onOpenRewind={(checkpointId) => {
-              setSelectedRewindCheckpointId(checkpointId);
-              setRewindOpen(true);
-            }}
-          />
-
-          {sideDecisionItem ? (
-            <div className="shrink-0 border-t border-line p-2.5" aria-label="当前确认项">
-              <StructuredInteractionRenderer
-                item={sideDecisionItem}
-                onAnswerDecision={handleAnswerDecision}
-                answerPending={answerDecision.isPending}
-              />
-            </div>
-          ) : null}
-
-          <form
-            className="shrink-0 border-t border-line p-2.5"
-            onSubmit={(event) => {
-              event.preventDefault();
-              submitComposer();
-            }}
-          >
-            <div className="overflow-hidden rounded-md border border-line-strong bg-raised focus-within:border-accent">
-              <textarea
-                aria-label="消息输入"
-                className="h-16 w-full resize-none bg-transparent px-3 pt-2.5 text-[13px] leading-5 text-fg outline-none placeholder:text-fg-faint"
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (
-                    event.key === "Enter" &&
-                    !event.shiftKey &&
-                    !event.nativeEvent.isComposing
-                  ) {
-                    event.preventDefault();
-                    submitComposer();
-                  }
-                }}
-                placeholder={
-                  runtime.isRunning
-                    ? "描述下一步；发送后会排到当前任务之后…"
-                    : "描述你想怎样剪辑…"
-                }
-              />
-              <div className="flex items-center justify-between gap-3 border-t border-line px-2 py-1.5">
-                <div className="min-w-0 text-2xs text-fg-faint">
-                  {runtime.isRunning ? (
-                    <span className="block truncate text-accent" role="status" aria-live="polite">
-                      新消息将按发送顺序排队
-                    </span>
-                  ) : null}
-                  <span className="block">
-                    <kbd className="font-mono">Enter</kbd> 发送　
-                    <kbd className="font-mono">Shift+Enter</kbd> 换行
-                  </span>
-                </div>
-                <div className="flex shrink-0 items-center gap-1.5">
-                  {runtime.isRunning ? (
-                    <button
-                      className="flex size-7 items-center justify-center rounded-md border border-line-strong bg-panel text-fg-muted transition-[transform,background-color] duration-fast hover:bg-hover hover:text-fg active:translate-y-px disabled:opacity-40"
-                      type="button"
-                      aria-label="停止当前任务"
-                      disabled={cancelTurn.isPending}
-                      onClick={() => cancelTurn.mutate()}
-                    >
-                      <Square size={11} fill="currentColor" strokeWidth={1.5} aria-hidden />
-                    </button>
-                  ) : null}
-                  <button
-                    className="flex size-7 items-center justify-center rounded-md bg-accent text-white transition-[transform,background-color] duration-fast hover:bg-accent-strong active:translate-y-px disabled:opacity-40"
-                    type="submit"
-                    aria-label="发送消息"
-                    disabled={!runtime.canSubmit || draft.trim().length === 0}
-                  >
-                    <ArrowUp size={15} strokeWidth={2} aria-hidden />
-                    <span className="sr-only">发送</span>
-                  </button>
-                </div>
-              </div>
-            </div>
-          </form>
-        </aside>
+        <ConsolePanel
+          ref={consoleRef}
+          draftId={draftId}
+          chatPanelWidth={chatPanelWidth}
+          highlightedMessageId={highlightedMessageId}
+          onConnectionStateChange={handleConsoleConnectionChange}
+          onTurnBusyChange={handleConsoleTurnBusyChange}
+        />
 
         <ResizeHandle
           orientation="vertical"
@@ -1713,86 +1209,12 @@ function trackDisplayLabel(trackId: string): string {
   return labels[trackId] ?? trackId;
 }
 
-function toConsoleMessage(message: MessageRecord): ConsoleMessage {
-  return {
-    id: message.message_id,
-    role: normalizeConsoleRole(message.role),
-    kind: message.kind,
-    content: message.content,
-    createdAt: message.created_at
-  };
-}
-
-function normalizeConsoleRole(role: string): ConsoleMessageRole {
-  if (
-    role === "user" ||
-    role === "assistant" ||
-    role === "system" ||
-    role === "system_observation"
-  ) {
-    return role;
-  }
-  return "system";
-}
-
 function formatSeconds(value: number): string {
   return `${value.toFixed(2)}s`;
 }
 
 function clampNumber(value: number, minimum: number, maximum: number): number {
   return Math.min(Math.max(value, minimum), maximum);
-}
-
-function timelinePatchErrorMessage(error: unknown): string {
-  if (error instanceof ApiError && error.payload && typeof error.payload === "object") {
-    const detail = Reflect.get(error.payload, "detail");
-    if (detail && typeof detail === "object") {
-      const reason = Reflect.get(detail, "reason");
-      if (typeof reason === "string" && reason.trim()) {
-        return reason;
-      }
-    }
-  }
-  return error instanceof Error ? error.message : "时间线修改失败";
-}
-
-function conversationClearErrorMessage(error: unknown): string {
-  const reason = timelinePatchErrorMessage(error);
-  if (reason === "turn_active") {
-    return "当前任务仍在运行，请先停止或等待本轮结束后再清空对话。";
-  }
-  return reason === "API 请求失败：409" ? "当前任务仍在运行，暂时不能清空对话。" : reason;
-}
-
-function jobCancelErrorMessage(error: unknown): string {
-  const reason = timelinePatchErrorMessage(error);
-  if (reason === "job_not_cancellable" || reason === "API 请求失败：409") {
-    return "任务状态已变化，无法取消；已刷新当前状态。";
-  }
-  return `取消任务失败：${reason}`;
-}
-
-function rewindErrorMessage(error: unknown): string {
-  const reason = timelinePatchErrorMessage(error);
-  if (reason === "rewind_checkpoint_not_found") {
-    return "检查点已被清理，请刷新后选择新的检查点。";
-  }
-  if (reason === "rewind_checkpoint_has_no_timeline") {
-    return "这个检查点没有可恢复的时间线，请改用仅对话。";
-  }
-  if (reason === "rewind_cancellation_timeout") {
-    return "当前任务尚未安全停止，请稍后重试恢复。";
-  }
-  if (reason === "turn_queue_closed") {
-    return "剪辑任务队列已停止，请重启本地服务后再恢复。";
-  }
-  if (reason === "rewind_idempotency_key_reused") {
-    return "这次恢复请求已用于另一个检查点，请重新操作。";
-  }
-  if (reason === "version_conflict" || reason === "API 请求失败：409") {
-    return "草稿刚刚发生了变化，请刷新检查点后重试。";
-  }
-  return `恢复检查点失败：${reason}`;
 }
 
 function formatTimecode(sec: number): string {
