@@ -234,7 +234,7 @@ func (service *Service) withModelRetryReporting(ctx context.Context, draftID str
 	return withModelRetryReporter(ctx, func(notice modelRetryNotice) {
 		service.hub.Record(draftID, StreamEvent{
 			"type": TurnStreamModelRetry, "attempt": notice.Attempt,
-			"max_retries": notice.MaxRetries, "reason": "模型响应超时",
+			"max_retries": notice.MaxRetries, "reason": notice.Reason,
 			"next_delay_ms": notice.Delay.Milliseconds(),
 		})
 	})
