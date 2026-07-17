@@ -583,12 +583,12 @@ func (service *Service) toolEditTalkingHead(
 		result.Data["plan_drift"] = drift
 		result.Observation += " " + drift["summary"].(string)
 	}
-	quality, qualityErr := service.speechQualityReport(ctx, document)
-	if qualityErr != nil {
-		return rushestools.ToolResult{}, qualityErr
+	// 时间线此时已持久化成功，质检报告只是增强：读取失败时跳过附加，
+	// 不把成功的编辑伪装成失败去诱导模型重试（timeline.validate 仍是持久验收面）。
+	if quality, qualityErr := service.speechQualityReport(ctx, document); qualityErr == nil {
+		result.Data["speech_quality"] = quality
+		result.Observation += talkingHeadQualitySummary(quality)
 	}
-	result.Data["speech_quality"] = quality
-	result.Observation += talkingHeadQualitySummary(quality)
 	return result, nil
 }
 
