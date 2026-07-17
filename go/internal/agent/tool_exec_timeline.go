@@ -92,53 +92,6 @@ func composeInitialFailure(
 	}
 }
 
-func (service *Service) toolApplyPatch(
-	ctx context.Context,
-	draftID string,
-	input rushestools.TimelinePatchInput,
-) (rushestools.ToolResult, error) {
-	current, err := timeline.Latest(ctx, service.database, draftID)
-	if err != nil {
-		return rushestools.ToolResult{}, err
-	}
-	operations, err := service.enrichTimelineOperations(ctx, draftID, []map[string]any{map[string]any(input.Op)})
-	if err != nil {
-		return rushestools.ToolResult{}, err
-	}
-	operation := operations[0]
-	document, err := timeline.ApplyPatch(current, operation)
-	if err != nil {
-		if failure, ok := timelineOpFailureAt(err, operation, 0, current); ok {
-			return failure, nil
-		}
-		return rushestools.ToolResult{}, err
-	}
-	attachedBeatGrids, beatWarnings := service.attachMissingBGMBeatGrids(ctx, draftID, &document)
-	if report := timeline.Validate(document); !report.Valid {
-		return rushestools.ToolResult{
-			Status:      "failed",
-			Observation: "补丁结果未通过时间线校验，当前时间线未更新",
-			Data: map[string]any{
-				"reason":                     "validation_failed",
-				"current_timeline_unchanged": true,
-				"recovery":                   "根据 validation_report 修正补丁；原声错位时使用 sync_original_audio 原子重建。",
-				"validation_report": map[string]any{
-					"valid": report.Valid, "checks": report.Checks, "issues": report.Issues,
-				},
-			},
-		}, nil
-	}
-	next, err := timeline.NextVersion(ctx, service.database, draftID)
-	if err != nil {
-		return rushestools.ToolResult{}, err
-	}
-	document.Version = next
-	document.TimelineID = fmt.Sprintf("%s:v%d", draftID, next)
-	result, err := service.persistTimeline(ctx, draftID, document, "apply_patch", []map[string]any{operation})
-	appendBeatMetadataResult(&result, attachedBeatGrids, beatWarnings)
-	return result, err
-}
-
 func (service *Service) toolApplyPatches(
 	ctx context.Context,
 	draftID string,

@@ -49,7 +49,7 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 		registerAssetImport, registerAssetList, registerUnderstand, registerShotSearch, registerAudioBeatAnalysis,
 		registerSpeechPauseAnalysis, registerSpeechInspect, registerAskUser,
 		registerDecisionAnswer, registerPlanUpdate, registerMemoryUpdate,
-		registerComposeInitial, registerApplyPatch, registerApplyPatchBatch,
+		registerComposeInitial, registerApplyPatchBatch,
 		registerBeatRecut, registerTalkingHeadEdit,
 		registerTimelineValidate, registerTimelineInspect, registerRenderPreview,
 		registerRenderFinal, registerRenderStatus, registerInspectPreview,
@@ -476,10 +476,6 @@ func registerMemoryUpdate(registry *Registry) error {
 
 func registerComposeInitial(registry *Registry) error {
 	return addTool[ComposeInitialInput, ToolResult](registry, "timeline.compose_initial", "按整数帧源区间组装时间线；只传入 video/image 主视觉素材，不能传 audio/font；先从 asset.list_assets 读取 kind、duration_frames 与 timeline_fps", []string{"usable_asset_exists"}, ExposureLLM, false)
-}
-
-func registerApplyPatch(registry *Registry) error {
-	return addTool[TimelinePatchInput, ToolResult](registry, "timeline.apply_patch", "对当前时间线应用一个语义补丁；从 op.oneOf 选择 kind 和字段，编辑片段前先用 timeline.inspect 读取真实 ID", []string{"timeline_exists"}, ExposureLLM, false)
 }
 
 func registerApplyPatchBatch(registry *Registry) error {

@@ -199,8 +199,8 @@ func TestSyncOriginalAudioRepairsDriftedTimelineFromAssetProbe(t *testing.T) {
 	}
 
 	ctx := rushestools.WithDraftID(t.Context(), "draft_sync_original_audio")
-	raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{
-		Op: map[string]any{"kind": "sync_original_audio"},
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
+		Ops: []rushestools.TimelineOp{{"kind": "sync_original_audio"}},
 	})
 	if err != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
 		t.Fatalf("sync=%#v err=%v", raw, err)
@@ -320,10 +320,10 @@ func TestGenericBGMInsertAutomaticallyAttachesBeatGrid(t *testing.T) {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_generic_bgm")
-	output, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: map[string]any{
+	output, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "insert_clip", "track_id": "bgm", "asset_id": "generic_bgm",
 		"role": "bgm", "timeline_start_frame": 0, "source_start_frame": 0, "source_end_frame": 60,
-	}})
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}

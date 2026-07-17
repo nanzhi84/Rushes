@@ -270,8 +270,8 @@ func TestLiveToolCallingStability(t *testing.T) {
 	}
 
 	report.PerKind = map[string]liveToolEvalMetric{}
-	applyPatch := toolInfos["timeline.apply_patch"]
-	boundPatch, err := tiers.Chat.WithTools([]*schema.ToolInfo{applyPatch})
+	applyPatches := toolInfos["timeline.apply_patches"]
+	boundPatch, err := tiers.Chat.WithTools([]*schema.ToolInfo{applyPatches})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,23 +282,30 @@ func TestLiveToolCallingStability(t *testing.T) {
 			metric.Total++
 			call, callErr := liveGenerateToolCall(
 				t.Context(), boundPatch,
-				fmt.Sprintf("只调用 timeline.apply_patch，并严格按以下意图构造 %s：%s", opSpec.Kind, example),
-				liveSnapshotForSchemaCase("single_patch"), true, "timeline.apply_patch",
+				fmt.Sprintf("只调用 timeline.apply_patches，ops 数组只放一个补丁，并严格按以下意图构造 %s：%s", opSpec.Kind, example),
+				liveSnapshotForSchemaCase("single_patch"), true, "timeline.apply_patches",
 			)
-			var decoded rushestools.TimelinePatchInput
+			var decoded rushestools.TimelinePatchBatchInput
 			if callErr == nil {
 				callErr = json.Unmarshal([]byte(call.Function.Arguments), &decoded)
 			}
-			if callErr == nil {
-				callErr = validateLiveTimelineOp(decoded.Op)
+			if callErr == nil && len(decoded.Ops) != 1 {
+				callErr = fmt.Errorf("apply_patches ops 数量=%d，期望单元素", len(decoded.Ops))
 			}
-			if callErr == nil && decoded.Op["kind"] == opSpec.Kind {
+			if callErr == nil {
+				callErr = validateLiveTimelineOp(decoded.Ops[0])
+			}
+			if callErr == nil && decoded.Ops[0]["kind"] == opSpec.Kind {
 				metric.Succeeded++
 				continue
 			}
+			actualKind := ""
+			if len(decoded.Ops) > 0 {
+				actualKind = fmt.Sprint(decoded.Ops[0]["kind"])
+			}
 			report.Failures = append(report.Failures, liveToolEvalFailure{
 				Suite: "timeline_op_per_kind", Case: opSpec.Kind, Run: run,
-				Expected: opSpec.Kind, Actual: fmt.Sprint(decoded.Op["kind"]), Error: errorText(callErr),
+				Expected: opSpec.Kind, Actual: actualKind, Error: errorText(callErr),
 			})
 		}
 		metric.Rate = ratio(metric.Succeeded, metric.Total)
@@ -343,7 +350,7 @@ func liveSchemaCases() []liveToolEvalCase {
 		{Name: "decision_answer", Prompt: "请提交决策 decision_style_1 的答案 option_id=fast，补充说明为强节奏。", Expected: []string{"decision.answer"}},
 		{Name: "plan_update", Prompt: "请把已确定的创作计划持久记录下来：风格是克制电影感，节奏决定为前缓后快；使用增量合并，不要整体重置。", Expected: []string{"plan.update"}},
 		{Name: "compose", Prompt: "请立即组装初版时间线：asset_video_1 使用源 0到90帧，asset_video_2 使用源 30到120帧，两段都是 b_roll。", Expected: []string{"timeline.compose_initial"}},
-		{Name: "single_patch", Prompt: "请将时间线片段 clip_v1_001 的结尾裁到第 75 帧，使用单个语义补丁。", Expected: []string{"timeline.apply_patch"}},
+		{Name: "single_patch", Prompt: "请将时间线片段 clip_v1_001 的结尾裁到第 75 帧，使用单个语义补丁。", Expected: []string{"timeline.apply_patches"}},
 		{Name: "batch_patch", Prompt: "请一次原子调整两段：clip_v1_001 淡出 8 帧，clip_v1_002 淡出 10 帧。", Expected: []string{"timeline.apply_patches"}},
 		{Name: "beat_recut", Prompt: "请用 BGM asset_bgm_1 和视频 asset_video_1、asset_video_2 卡点重剪到 1440 帧，覆盖整首音乐，并将 asset_sfx_1 作为 45 帧的独立音效点缀。", Expected: []string{"timeline.recut_to_beats"}},
 		{
@@ -356,7 +363,7 @@ func liveSchemaCases() []liveToolEvalCase {
 		{Name: "final", Prompt: "时间线已验证，请排队导出最终 MP4。", Expected: []string{"render.final_mp4"}},
 		{Name: "status", Prompt: "请读取当前草稿的渲染任务和产物状态。", Expected: []string{"render.status"}},
 		{Name: "inspect_preview", Prompt: "请检查预览 preview_123 的解码、黑帧、静帧、静音和响度。", Expected: []string{"render.inspect_preview"}},
-		{Name: "confirm", Prompt: "请为危险的时间线清空操作创建确认：工具 timeline.apply_patch，参数是移除 visual_base 轨道所有片段。", Expected: []string{"interaction.confirm_action"}},
+		{Name: "confirm", Prompt: "请为危险的时间线清空操作创建确认：工具 timeline.apply_patches，参数是移除 visual_base 轨道所有片段。", Expected: []string{"interaction.confirm_action"}},
 	}
 	for index := range cases {
 		cases[index].Snapshot = liveSnapshotForSchemaCase(cases[index].Name)
@@ -375,7 +382,7 @@ func liveRoutingCases() []liveToolEvalCase {
 		{Name: "route_speech_inspect", Prompt: contextPrefix + "\n用户：读取 clip_v1_001 的逐句 ASR，检索重复说到‘指纹解锁’的地方并给出客观相似证据，暂时不删。", Expected: []string{"speech.inspect"}},
 		{Name: "route_plan_update", Prompt: contextPrefix + "\n用户：先不要继续剪，把已确定的创作方向记到持久计划本里：整体克制、高潮段加快节奏，供下回合继续。", Expected: []string{"plan.update"}},
 		{Name: "route_inspect", Prompt: contextPrefix + "\n用户：查看当前时间线的真实 clip 明细。", Expected: []string{"timeline.inspect"}},
-		{Name: "route_patch", Prompt: contextPrefix + "\n用户：已取得真实 ID，只把 clip_v1_001 音量调到 -6dB。", Expected: []string{"timeline.apply_patch"}},
+		{Name: "route_patch", Prompt: contextPrefix + "\n用户：已取得真实 ID，只把 clip_v1_001 音量调到 -6dB。", Expected: []string{"timeline.apply_patches"}},
 		{Name: "route_batch", Prompt: contextPrefix + "\n用户：已取得真实 ID，一次将 clip_v1_001 和 clip_v1_002 的淡出设为 8 帧。", Expected: []string{"timeline.apply_patches"}},
 		{Name: "route_recut", Prompt: contextPrefix + "\n节拍分析已完成，asset_bgm_1 的完整可用长度正好是 1440 帧；音效 asset_sfx_1 已确定从 900 帧开始、持续 45 帧、增益 -12dB，所有创作选择都已确定，无需提问。用户：现在直接覆盖整首 BGM 完成卡点重剪。", Expected: []string{"timeline.recut_to_beats"}},
 		{Name: "route_recut_after_recoverable_failure", Prompt: contextPrefix + "\n上一工具结果：{\"status\":\"failed\",\"observation\":\"所选镜头无法覆盖对应节拍片段，或其源区间已被重复使用\",\"data\":{\"shot_id\":\"shot_video_2\",\"required_frames\":120,\"shot_duration_frames\":80,\"recovery\":\"用 media.search_shots 按该片段 min_duration_frames 重新检索，且不要重复传同一 shot_id\"}}。检索已经完成，新候选 shot_video_2b 长 180 帧；原用户目标仍是用既定 BGM、节拍和其余镜头覆盖整首音乐完成卡点成片。请选择下一步工具。", Expected: []string{"timeline.recut_to_beats"}},
@@ -546,7 +553,7 @@ func liveRoutingAblationCases() []liveRoutingVariant {
 			}),
 		}},
 		liveRoutingVariant{Name: "incremental_edit", IncludePlaybook: true, Case: liveToolEvalCase{
-			Name: "incremental_edit_skips_edl", Expected: []string{"timeline.apply_patch"},
+			Name: "incremental_edit_skips_edl", Expected: []string{"timeline.apply_patches"},
 			Prompt:   "首剪已经确认并完成。只把真实片段 clip_v1_001 的音量调整到 -6dB，不要再次询问。",
 			Snapshot: liveSnapshotForSchemaCase("single_patch"),
 		}},
@@ -607,11 +614,6 @@ func validateLiveToolArguments(spec rushestools.Spec, raw string) error {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target.Interface()); err != nil {
 		return fmt.Errorf("参数不符合 Go schema: %w", err)
-	}
-	if input, ok := target.Elem().Interface().(rushestools.TimelinePatchInput); ok {
-		if err := validateLiveTimelineOp(input.Op); err != nil {
-			return fmt.Errorf("参数不符合 op.oneOf: %w", err)
-		}
 	}
 	if input, ok := target.Elem().Interface().(rushestools.TimelinePatchBatchInput); ok {
 		for index, operation := range input.Ops {
@@ -692,12 +694,12 @@ func validateLiveTimelineOp(operation rushestools.TimelineOp) error {
 
 func TestValidateLiveToolArgumentsChecksTimelineOpOneOfContract(t *testing.T) {
 	t.Parallel()
-	spec := rushestools.Spec{InputType: reflect.TypeFor[rushestools.TimelinePatchInput]()}
+	spec := rushestools.Spec{InputType: reflect.TypeFor[rushestools.TimelinePatchBatchInput]()}
 	valid := []string{
-		`{"op":{"kind":"trim_clip_edge","timeline_clip_id":"clip_1","timeline_frame":75,"edge":"end"}}`,
-		`{"op":{"kind":"delete_clip","clip_id":"clip_1"}}`,
-		`{"op":{"kind":"sync_original_audio"}}`,
-		`{"op":{"kind":"set_track_state","track_id":"bgm","muted":true}}`,
+		`{"ops":[{"kind":"trim_clip_edge","timeline_clip_id":"clip_1","timeline_frame":75,"edge":"end"}]}`,
+		`{"ops":[{"kind":"delete_clip","clip_id":"clip_1"}]}`,
+		`{"ops":[{"kind":"sync_original_audio"}]}`,
+		`{"ops":[{"kind":"set_track_state","track_id":"bgm","muted":true}]}`,
 	}
 	for _, raw := range valid {
 		if err := validateLiveToolArguments(spec, raw); err != nil {
@@ -705,10 +707,10 @@ func TestValidateLiveToolArgumentsChecksTimelineOpOneOfContract(t *testing.T) {
 		}
 	}
 	invalid := []string{
-		`{"op":{"kind":"trim_clip_edge","timeline_clip_id":"clip_1","target_frame":75,"edge":"end"}}`,
-		`{"op":{"kind":"delete_clip","clip_id":"clip_1","target_frame":75}}`,
-		`{"op":{"kind":"insert_clip","asset_id":"asset_1","source_start_frame":0,"source_end_frame":90,"asset_kind":"video"}}`,
-		`{"op":{"kind":"set_track_state","track_id":"bgm"}}`,
+		`{"ops":[{"kind":"trim_clip_edge","timeline_clip_id":"clip_1","target_frame":75,"edge":"end"}]}`,
+		`{"ops":[{"kind":"delete_clip","clip_id":"clip_1","target_frame":75}]}`,
+		`{"ops":[{"kind":"insert_clip","asset_id":"asset_1","source_start_frame":0,"source_end_frame":90,"asset_kind":"video"}]}`,
+		`{"ops":[{"kind":"set_track_state","track_id":"bgm"}]}`,
 	}
 	for _, raw := range invalid {
 		if err := validateLiveToolArguments(spec, raw); err == nil {

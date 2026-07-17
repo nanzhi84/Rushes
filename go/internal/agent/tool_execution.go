@@ -70,8 +70,6 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 		return service.toolMemoryUpdate(ctx, draftID, input.(rushestools.MemoryUpdateInput))
 	case "timeline.compose_initial":
 		return service.toolComposeInitial(ctx, draftID, input.(rushestools.ComposeInitialInput))
-	case "timeline.apply_patch":
-		return service.toolApplyPatch(ctx, draftID, input.(rushestools.TimelinePatchInput))
 	case "timeline.apply_patches":
 		return service.toolApplyPatches(ctx, draftID, input.(rushestools.TimelinePatchBatchInput))
 	case "timeline.recut_to_beats":

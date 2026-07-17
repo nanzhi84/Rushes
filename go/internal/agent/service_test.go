@@ -1891,9 +1891,9 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 	if draft.TimelineCurrentVersion == nil || *draft.TimelineCurrentVersion != 1 || !draft.TimelineValidated {
 		t.Fatalf("draft after compose=%#v", draft)
 	}
-	if _, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: map[string]any{
+	if _, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -2.0,
-	}}); err != nil {
+	}}}); err != nil {
 		t.Fatal(err)
 	}
 	batchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{
@@ -2119,10 +2119,10 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 		{Question: "空画幅？", ToolName: "render.final_mp4", Arguments: map[string]any{"orientation": nil}},
 		{Question: "片段参数缺失？", ToolName: "timeline.compose_initial", Arguments: map[string]any{"clips": []any{map[string]any{}}}},
 		{Question: "空批量补丁？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{nil}}},
-		{Question: "空补丁？", ToolName: "timeline.apply_patch", Arguments: map[string]any{"op": map[string]any{}}},
-		{Question: "缺少片段？", ToolName: "timeline.apply_patch", Arguments: map[string]any{"op": map[string]any{"kind": "delete_clip"}}},
-		{Question: "未知补丁？", ToolName: "timeline.apply_patch", Arguments: map[string]any{"op": map[string]any{"kind": "unknown"}}},
-		{Question: "补丁附加字段？", ToolName: "timeline.apply_patch", Arguments: map[string]any{"op": map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}}},
+		{Question: "空补丁？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{map[string]any{}}}},
+		{Question: "缺少片段？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{map[string]any{"kind": "delete_clip"}}}},
+		{Question: "未知补丁？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{map[string]any{"kind": "unknown"}}}},
+		{Question: "补丁附加字段？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}}}},
 	} {
 		raw, executeErr := service.ExecuteTool(ctx, "interaction.confirm_action", invalid)
 		if executeErr != nil {
@@ -2162,13 +2162,13 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 		t.Fatal("nil confirmation arguments must fail replay validation")
 	}
 	for _, arguments := range []map[string]any{
-		{"op": map[string]any{}},
-		{"op": map[string]any{"kind": "delete_clip"}},
-		{"op": map[string]any{"kind": "unknown"}},
-		{"op": map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}},
+		{"ops": []any{map[string]any{}}},
+		{"ops": []any{map[string]any{"kind": "delete_clip"}}},
+		{"ops": []any{map[string]any{"kind": "unknown"}}},
+		{"ops": []any{map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}}},
 	} {
 		if _, err := service.replayPendingTool(ctx, QueueItem{DraftID: "draft_full", Payload: map[string]any{
-			"pending_tool_call": map[string]any{"tool_name": "timeline.apply_patch", "arguments": arguments},
+			"pending_tool_call": map[string]any{"tool_name": "timeline.apply_patches", "arguments": arguments},
 			"answer":            map[string]any{"option_id": "confirm"},
 		}}); err == nil {
 			t.Fatalf("invalid timeline patch must fail replay validation: %#v", arguments)
@@ -2254,11 +2254,11 @@ func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T)
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	arguments := map[string]any{
-		"op": map[string]any{"kind": "delete_clip", "timeline_clip_id": "clip_v1_001"},
+		"ops": []any{map[string]any{"kind": "delete_clip", "timeline_clip_id": "clip_v1_001"}},
 	}
 
 	missingRaw, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
-		Question: "确认删除片段？", ToolName: "timeline.apply_patch", Arguments: arguments,
+		Question: "确认删除片段？", ToolName: "timeline.apply_patches", Arguments: arguments,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2285,7 +2285,7 @@ func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T)
 		t.Fatal(err)
 	}
 	confirmRaw, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
-		Question: "确认删除片段？", ToolName: "timeline.apply_patch", Arguments: arguments,
+		Question: "确认删除片段？", ToolName: "timeline.apply_patches", Arguments: arguments,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2348,18 +2348,18 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	for _, value := range []any{"yes", stringPointerValue("pointer"), (*string)(nil), 1} {
 		_ = interfaceString(value)
 	}
-	replayed, err := service.tools.DecodeInput("timeline.apply_patch", map[string]any{
-		"op": map[string]any{"kind": "delete_clip", "clip_id": "clip_replay"},
+	replayed, err := service.tools.DecodeInput("timeline.apply_patches", map[string]any{
+		"ops": []any{map[string]any{"kind": "delete_clip", "clip_id": "clip_replay"}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	patchInput, ok := replayed.(rushestools.TimelinePatchInput)
-	if !ok || reflect.TypeOf(patchInput.Op) != reflect.TypeFor[rushestools.TimelineOp]() {
-		t.Fatalf("replayed timeline patch type=%T op=%T", replayed, patchInput.Op)
+	patchInput, ok := replayed.(rushestools.TimelinePatchBatchInput)
+	if !ok || len(patchInput.Ops) != 1 || reflect.TypeOf(patchInput.Ops[0]) != reflect.TypeFor[rushestools.TimelineOp]() {
+		t.Fatalf("replayed timeline patch type=%T ops=%#v", replayed, patchInput.Ops)
 	}
-	if patchInput.Op["kind"] != "delete_clip" || patchInput.Op["clip_id"] != "clip_replay" {
-		t.Fatalf("replayed timeline op=%#v", patchInput.Op)
+	if patchInput.Ops[0]["kind"] != "delete_clip" || patchInput.Ops[0]["clip_id"] != "clip_replay" {
+		t.Fatalf("replayed timeline op=%#v", patchInput.Ops)
 	}
 	replayedPlan, err := service.tools.DecodeInput("plan.update", map[string]any{
 		"plan": map[string]any{"style": "cinematic"}, "reset": true,
@@ -2396,7 +2396,6 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 		"understand.materials":        rushestools.UnderstandInput{},
 		"audio.analyze_beats":         rushestools.AudioBeatAnalysisInput{},
 		"audio.analyze_speech_pauses": rushestools.SpeechPauseAnalysisInput{},
-		"timeline.apply_patch":        rushestools.TimelinePatchInput{},
 		"timeline.apply_patches":      rushestools.TimelinePatchBatchInput{},
 		"timeline.recut_to_beats":     rushestools.TimelineBeatRecutInput{},
 		"timeline.validate":           rushestools.TimelineValidateInput{},
@@ -3459,7 +3458,6 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 		"decision.answer":             rushestools.DecisionAnswerInput{DecisionID: "decision"},
 		"plan.update":                 rushestools.PlanUpdateInput{Plan: map[string]any{"status": "closed-db"}},
 		"timeline.compose_initial":    rushestools.ComposeInitialInput{},
-		"timeline.apply_patch":        rushestools.TimelinePatchInput{Op: map[string]any{"kind": "noop"}},
 		"timeline.apply_patches":      rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{"kind": "noop"}}},
 		"timeline.recut_to_beats":     rushestools.TimelineBeatRecutInput{CutFrames: []int{30}, BGMTimelineClipID: "bgm"},
 		"timeline.validate":           rushestools.TimelineValidateInput{},

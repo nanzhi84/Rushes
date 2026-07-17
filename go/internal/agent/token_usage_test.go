@@ -251,7 +251,7 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 	}
 }
 
-const modelToolSchemaTotalBaselineRunes = 46880
+const modelToolSchemaTotalBaselineRunes = 32415
 
 var modelToolSchemaBaselineRunes = map[string]int{
 	"asset.list_assets":           435,
@@ -268,8 +268,7 @@ var modelToolSchemaBaselineRunes = map[string]int{
 	"render.preview":              220,
 	"render.status":               128,
 	"speech.inspect":              1326,
-	"timeline.apply_patch":        14542,
-	"timeline.apply_patches":      14744,
+	"timeline.apply_patches":      14719,
 	"timeline.compose_initial":    826,
 	"timeline.edit_talking_head":  4056,
 	"timeline.inspect":            195,

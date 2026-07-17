@@ -31,6 +31,8 @@ func TestTimelineMutationEndpointsRejectMissingAndInvalidInputs(t *testing.T) {
 	}{
 		{"/api/drafts/timeline_errors/timeline/patch", map[string]any{}},
 		{"/api/drafts/timeline_errors/timeline/patch", map[string]any{"op": map[string]any{"kind": "unknown"}}},
+		{"/api/drafts/timeline_errors/timeline/patch", map[string]any{"op": map[string]any{"kind": "batch", "ops": []any{}}}},
+		{"/api/drafts/timeline_errors/timeline/patch", map[string]any{"op": map[string]any{"kind": "batch", "ops": []any{map[string]any{}}}}},
 	} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, apiRequest(t, http.MethodPost, item.path, item.body))
