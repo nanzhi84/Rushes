@@ -511,8 +511,10 @@ func registerPlanUpdate(registry *Registry) error {
 }
 
 func registerMemoryUpdate(registry *Registry) error {
-	// remove_keys 删除用户长期记忆是不可逆、且影响 agent 之外的持久画像，故归破坏性；
-	// 纯新增/更新虽可逆，但工具级只能取单一分级，按最坏路径分类由 G2 强制确认兜底。
+	// remove_keys 删除用户长期记忆是不可逆、且影响 agent 之外的持久画像，故归破坏性。
+	// 注意：Effect 是工具级信号，对 memory.update 必要不充分——纯新增/更新路径可逆，
+	// G2 验收明确其不受强制确认影响。因此 G2 拦截器不能只按 spec.Effect 拦截，必须再检查
+	// 本次 input 是否携带 remove_keys，据此豁免纯新增/更新路径、只拦真正的删除。
 	return addTool[MemoryUpdateInput, ToolResult](
 		registry,
 		"memory.update",

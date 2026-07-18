@@ -908,7 +908,7 @@ func TestToolRecoveryPersistsPreviewIDFromSyntheticStartedArguments(t *testing.T
 	t.Cleanup(service.Close)
 
 	ctx := rushestools.WithReporter(t.Context(), service.toolReporter(t.Context(), draftID))
-	endpoint := newToolRecoveryMiddleware(sharedEffectRetrySafe()).Invokable(
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
 		func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 			reporter, ok := rushestools.ReporterFromContext(ctx)
 			if !ok {
