@@ -527,3 +527,280 @@ func TestTimeoutRetryStreamHandlesFirstReceiveErrorEmptyAndWaitFailure(t *testin
 		t.Fatalf("wait err=%v", err)
 	}
 }
+
+// contextLengthRecoveryModel 在前 failCalls 次调用返回 context-length 错误，
+// 之后返回一条带 token 用量的成功回复，用于验证压缩重试链路与用量统计。
+type contextLengthRecoveryModel struct {
+	mu        sync.Mutex
+	failCalls int
+	failErr   error
+	usage     *schema.TokenUsage
+	calls     int
+	inputs    [][]*schema.Message
+}
+
+func (stub *contextLengthRecoveryModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return stub, nil
+}
+
+func (stub *contextLengthRecoveryModel) Generate(
+	_ context.Context, input []*schema.Message, _ ...model.Option,
+) (*schema.Message, error) {
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	stub.calls++
+	stub.inputs = append(stub.inputs, cloneRetryTestMessages(input))
+	if stub.calls <= stub.failCalls {
+		return nil, stub.failErr
+	}
+	response := schema.AssistantMessage("恢复成功", nil)
+	response.ResponseMeta = &schema.ResponseMeta{Usage: stub.usage}
+	return response, nil
+}
+
+func (stub *contextLengthRecoveryModel) Stream(
+	ctx context.Context, input []*schema.Message, options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	response, err := stub.Generate(ctx, input, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{response}), nil
+}
+
+func TestContextLengthErrorTriggersCompactionRetryThenSucceeds(t *testing.T) {
+	t.Parallel()
+	stub := &contextLengthRecoveryModel{
+		failCalls: 2,
+		failErr:   errors.New("Range of input length should be [1, 30720], but got 41234"),
+		usage:     &schema.TokenUsage{PromptTokens: 1200, CompletionTokens: 40, TotalTokens: 1240},
+	}
+	retry := &timeoutRetryChatModel{
+		inner: stub, maxRetries: maxModelTimeoutRetries,
+		delay: func(int) time.Duration { return 0 },
+		wait:  func(context.Context, time.Duration) error { return nil },
+	}
+	toolPayload, err := json.Marshal(map[string]any{
+		"status": "succeeded",
+		"data":   map[string]any{"analysis": strings.Repeat("完整语音观察", 4000)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolMessage := &schema.Message{
+		Role: schema.Tool, Content: string(toolPayload),
+		ToolCallID: "call_inspect", ToolName: "speech.inspect",
+	}
+	originalContent := toolMessage.Content
+	input := []*schema.Message{schema.UserMessage("继续剪辑"), toolMessage}
+	notices := make([]modelRetryNotice, 0, 2)
+	budget := newTurnBudgetState(8)
+	ctx := withTurnBudgetState(
+		withModelRetryReporter(t.Context(), func(notice modelRetryNotice) {
+			notices = append(notices, notice)
+		}),
+		budget,
+	)
+
+	response, generateErr := retry.Generate(ctx, input)
+	if generateErr != nil {
+		t.Fatalf("context-length 压缩重试后应成功: %v", generateErr)
+	}
+	if response.Content != "恢复成功" || stub.calls != 3 {
+		t.Fatalf("response=%#v calls=%d", response, stub.calls)
+	}
+	if len(notices) != 2 {
+		t.Fatalf("notices=%#v", notices)
+	}
+	for index, notice := range notices {
+		if notice.Attempt != index+1 || notice.Reason != "上下文超出模型上限" {
+			t.Fatalf("notice[%d]=%#v", index, notice)
+		}
+	}
+	if toolMessage.Content != originalContent {
+		t.Fatal("重试压缩修改了原始消息")
+	}
+	compacted := stub.inputs[1][1]
+	if compacted.ToolCallID != "call_inspect" || compacted.ToolName != "speech.inspect" {
+		t.Fatalf("压缩丢失工具关联: %#v", compacted)
+	}
+	if utf8.RuneCountInString(compacted.Content) >= utf8.RuneCountInString(originalContent) {
+		t.Fatalf("重试未压缩工具结果: %d", utf8.RuneCountInString(compacted.Content))
+	}
+	var decoded any
+	if err := json.Unmarshal([]byte(compacted.Content), &decoded); err != nil {
+		t.Fatalf("压缩后工具摘要不是合法 JSON: %v", err)
+	}
+	// usageSnapshot 正是 turn_ended 事件上报的 token_usage 数据源，
+	// 断言它计入了重试成功后的那次模型响应。
+	usage := budget.usageSnapshot()
+	if usage == nil || usage["model_calls"] != 1 ||
+		usage["prompt_tokens"] != 1200 || usage["total_tokens"] != 1240 {
+		t.Fatalf("turn 统计未计入压缩重试后的用量: %#v", usage)
+	}
+}
+
+func TestContextLengthErrorExhaustsAsContextLengthError(t *testing.T) {
+	t.Parallel()
+	providerErr := errors.New("the request's input tokens exceed the model's context length limit, please reduce the length")
+	stub := &contextLengthRecoveryModel{failCalls: 1 << 30, failErr: providerErr}
+	retry := &timeoutRetryChatModel{
+		inner: stub, maxRetries: maxModelTimeoutRetries,
+		delay: func(int) time.Duration { return 0 },
+		wait:  func(context.Context, time.Duration) error { return nil },
+	}
+	_, err := retry.Generate(t.Context(), []*schema.Message{
+		schema.UserMessage("继续"),
+		{Role: schema.Tool, ToolCallID: "call_big", Content: strings.Repeat("大工具结果", 5000)},
+	})
+	var contextErr *modelContextLengthError
+	if !errors.As(err, &contextErr) || contextErr.Retries != maxModelTimeoutRetries {
+		t.Fatalf("耗尽重试后应返回 context-length 终态: %#v", err)
+	}
+	if contextErr.Error() != "模型上下文超出上限（已自动压缩重试 5 次）" || !errors.Is(contextErr, providerErr) {
+		t.Fatalf("终态文案或 unwrap 错误: %v", contextErr)
+	}
+	if stub.calls != maxModelTimeoutRetries+1 {
+		t.Fatalf("calls=%d", stub.calls)
+	}
+}
+
+func TestIsContextLengthExceededDetectsProviderStyles(t *testing.T) {
+	t.Parallel()
+	retryable := []error{
+		errors.New("Range of input length should be [1, 30720], but got 41234"),
+		errors.New("This model's maximum context length is 32768 tokens. However, your messages resulted in 40000 tokens"),
+		errors.New("the request's input tokens exceed the model's context length limit, please reduce the length"),
+		errors.New(`{"error":{"code":"context_length_exceeded","message":"prompt too long"}}`),
+	}
+	for _, err := range retryable {
+		if !isContextLengthExceeded(err) {
+			t.Fatalf("context-length 文案未识别: %v", err)
+		}
+	}
+	nonRetryable := []error{
+		nil,
+		errors.New("invalid value for parameter 'fps': must be positive"),
+		errors.New("Client.Timeout exceeded while awaiting headers"),
+		context.Canceled,
+	}
+	for _, err := range nonRetryable {
+		if isContextLengthExceeded(err) {
+			t.Fatalf("普通/超时错误被误判为 context-length: %v", err)
+		}
+	}
+}
+
+func TestClassifyRetryableModelErrorDistinguishesReasons(t *testing.T) {
+	t.Parallel()
+	contextErr := errors.New("Range of input length should be [1, 30720], but got 41234")
+	if classifyRetryableModelError(t.Context(), context.DeadlineExceeded) != modelRetryReasonTimeout {
+		t.Fatal("超时未归类为 timeout")
+	}
+	if classifyRetryableModelError(t.Context(), contextErr) != modelRetryReasonContextLength {
+		t.Fatal("context-length 未归类为 contextLength")
+	}
+	if classifyRetryableModelError(t.Context(), errors.New("普通参数错误")) != modelRetryReasonNone ||
+		classifyRetryableModelError(t.Context(), nil) != modelRetryReasonNone {
+		t.Fatal("非可重试错误被错误归类")
+	}
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if classifyRetryableModelError(cancelled, contextErr) != modelRetryReasonNone {
+		t.Fatal("已取消的 context 不应触发 context-length 重试")
+	}
+	if modelRetryReasonTimeout.label() != "模型响应超时" ||
+		modelRetryReasonContextLength.label() != "上下文超出模型上限" {
+		t.Fatal("重试原因中文文案错误")
+	}
+}
+
+func TestModelRetryReporterPublishesContextLengthReason(t *testing.T) {
+	t.Parallel()
+	stub := &contextLengthRecoveryModel{
+		failCalls: 1 << 30, failErr: errors.New("context_length_exceeded"),
+	}
+	retry := &timeoutRetryChatModel{
+		inner: stub, maxRetries: 1,
+		delay: func(int) time.Duration { return 200 * time.Millisecond },
+		wait:  func(context.Context, time.Duration) error { return nil },
+	}
+	service := &Service{hub: NewTurnStreamHub(0)}
+	_, err := retry.Generate(
+		service.withModelRetryReporting(t.Context(), "draft_context_length"),
+		[]*schema.Message{schema.UserMessage("继续")},
+	)
+	var contextErr *modelContextLengthError
+	if !errors.As(err, &contextErr) {
+		t.Fatalf("err=%v", err)
+	}
+	events := service.hub.Snapshot("draft_context_length")
+	if len(events) != 1 || events[0]["type"] != "model_retry" ||
+		events[0]["attempt"] != 1 || events[0]["max_retries"] != 1 ||
+		events[0]["reason"] != "上下文超出模型上限" || events[0]["next_delay_ms"] != int64(200) {
+		t.Fatalf("events=%#v", events)
+	}
+}
+
+func TestTerminalFailureReplyClassifiesContextLengthWithoutAnotherModelCall(t *testing.T) {
+	t.Parallel()
+	stub := &countingFailureReplyModel{}
+	service := &Service{hub: NewTurnStreamHub(0), chatModel: stub}
+	content := service.terminalFailureReply(t.Context(), "draft_context", "msg_context", &modelContextLengthError{
+		Retries: maxModelTimeoutRetries, LastErr: errors.New("context_length_exceeded"),
+	})
+	if stub.calls != 0 {
+		t.Fatalf("上下文超限终态不应再次调用模型: %d", stub.calls)
+	}
+	if !strings.Contains(content, "上下文超出了模型长度上限") ||
+		!strings.Contains(content, "压缩并重试 5 次") ||
+		!strings.Contains(content, "当前最新时间线") {
+		t.Fatalf("context content=%q", content)
+	}
+	for _, event := range service.hub.Snapshot("draft_context") {
+		if event["type"] != "text_delta" {
+			t.Fatalf("unexpected event=%#v", event)
+		}
+	}
+}
+
+func TestContextLengthRetryFinishesTurnAndReportsUsage(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_context_length_turn")
+	stub := &contextLengthRecoveryModel{
+		failCalls: 1,
+		failErr:   errors.New("Range of input length should be [1, 30720], but got 41234"),
+		usage:     &schema.TokenUsage{PromptTokens: 800, CompletionTokens: 20, TotalTokens: 820},
+	}
+	service, err := NewService(t.Context(), database, stub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	_, stream, unsubscribe := service.Hub().Subscribe("draft_context_length_turn")
+	defer unsubscribe()
+	if !service.Queue().EnqueueUserMessage("draft_context_length_turn", "user_context_length", "继续推进") {
+		t.Fatal("enqueue failed")
+	}
+	service.Queue().JoinDraft("draft_context_length_turn")
+
+	var turnEnded StreamEvent
+	for turnEnded == nil {
+		select {
+		case event := <-stream:
+			if event["type"] == "turn_ended" {
+				turnEnded = event
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("等待 turn_ended 超时")
+		}
+	}
+	if turnEnded["outcome"] != "finished" {
+		t.Fatalf("压缩重试后回合应成功: %#v", turnEnded)
+	}
+	usage, _ := turnEnded["token_usage"].(map[string]any)
+	if usage["model_calls"] != 1 || usage["total_tokens"] != 820 {
+		t.Fatalf("turn_ended 未计入重试后的用量: %#v", turnEnded)
+	}
+}

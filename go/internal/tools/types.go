@@ -233,6 +233,7 @@ type ShotSearchResult struct {
 	Shots                        []ShotCandidate                    `json:"shots"`
 	TotalMatches                 int                                `json:"total_matches"`
 	Truncated                    bool                               `json:"truncated"`
+	UnderstandingCoverageNote    string                             `json:"understanding_coverage_note,omitempty"`
 	MissingUnderstandingAssetIDs []string                           `json:"missing_understanding_asset_ids,omitempty"`
 	UnderstandingCandidates      []ShotSearchUnderstandingCandidate `json:"understanding_candidates,omitempty"`
 }
