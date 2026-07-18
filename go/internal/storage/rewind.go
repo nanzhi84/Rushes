@@ -30,6 +30,7 @@ type RewindRestoreResult struct {
 	IdempotencyKey      string
 	CheckpointID        string
 	Mode                string
+	NewMessageID        string
 	TimelineVersion     *int
 	RewoundMessageCount int
 	CancelledJobs       int
@@ -45,15 +46,16 @@ func GetRewindRestoreResult(
 ) (RewindRestoreResult, error) {
 	var result RewindRestoreResult
 	var timelineVersion sql.NullInt64
+	var newMessageID sql.NullString
 	var eventIDsJSON string
 	err := query.QueryRowContext(ctx, `
-		SELECT draft_id,idempotency_key,checkpoint_id,mode,timeline_version,
+		SELECT draft_id,idempotency_key,checkpoint_id,mode,new_message_id,timeline_version,
 			rewound_message_count,cancelled_jobs,cancelled_decisions,event_ids_json
 		FROM rewind_restore_requests WHERE draft_id=? AND idempotency_key=?`,
 		draftID, idempotencyKey,
 	).Scan(
 		&result.DraftID, &result.IdempotencyKey, &result.CheckpointID, &result.Mode,
-		&timelineVersion, &result.RewoundMessageCount, &result.CancelledJobs,
+		&newMessageID, &timelineVersion, &result.RewoundMessageCount, &result.CancelledJobs,
 		&result.CancelledDecisions, &eventIDsJSON,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -62,6 +64,7 @@ func GetRewindRestoreResult(
 	if err != nil {
 		return RewindRestoreResult{}, err
 	}
+	result.NewMessageID = newMessageID.String
 	if timelineVersion.Valid {
 		value := int(timelineVersion.Int64)
 		result.TimelineVersion = &value
@@ -70,36 +73,6 @@ func GetRewindRestoreResult(
 		return RewindRestoreResult{}, err
 	}
 	return result, nil
-}
-
-func ListRewindCheckpoints(
-	ctx context.Context,
-	query Querier,
-	draftID string,
-	limit int,
-) ([]RewindCheckpoint, error) {
-	if limit <= 0 || limit > 50 {
-		limit = 50
-	}
-	rows, err := query.QueryContext(ctx, `
-		SELECT checkpoint_id,draft_id,trigger_kind,anchor_message_id,anchor_turn_id,anchor_event_id,
-			timeline_version,patch_id,decision_boundary,job_boundary,summary,clip_count,
-			duration_frames,track_count,created_at
-		FROM rewind_checkpoints WHERE draft_id=?
-		ORDER BY rowid DESC LIMIT ?`, draftID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	checkpoints := make([]RewindCheckpoint, 0, limit)
-	for rows.Next() {
-		checkpoint, scanErr := scanRewindCheckpoint(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		checkpoints = append(checkpoints, checkpoint)
-	}
-	return checkpoints, rows.Err()
 }
 
 func GetRewindCheckpoint(

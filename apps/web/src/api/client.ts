@@ -113,10 +113,8 @@ export type MessageQueuedResponse = Schemas["MessageQueuedResponse"];
 export type TurnCancelResponse = Schemas["TurnCancelResponse"];
 export type JobCancelResponse = Schemas["JobCancelResponse"];
 export type ConversationClearResponse = Schemas["ConversationClearResponse"];
-export type RewindCheckpoint = Schemas["RewindCheckpoint"];
-export type RewindCheckpointsResponse = Schemas["RewindCheckpointsResponse"];
-export type RewindRestoreRequest = Schemas["RewindRestoreRequest"];
-export type RewindRestoreResponse = Schemas["RewindRestoreResponse"];
+export type MessageResendRequest = Schemas["MessageResendRequest"];
+export type MessageResendResponse = Schemas["MessageResendResponse"];
 export type CurrentDecisionResponse = Schemas["CurrentDecisionResponse"];
 export type PendingDecisionsResponse = Schemas["PendingDecisionsResponse"];
 export type DecisionAnswerResponse = Schemas["DecisionAnswerResponse"];
@@ -266,18 +264,15 @@ export const api = {
 
   getDraftMessages,
 
-  rewindCheckpoints(draftId: string): Promise<RewindCheckpointsResponse> {
-    return apiFetch<RewindCheckpointsResponse>(`${draftPath(draftId)}/rewind/checkpoints`);
-  },
-
-  restoreRewindCheckpoint(
+  resendMessage(
     draftId: string,
-    payload: RewindRestoreRequest
-  ): Promise<RewindRestoreResponse> {
-    return apiFetch<RewindRestoreResponse>(`${draftPath(draftId)}/rewind`, {
-      method: "POST",
-      body: payload
-    });
+    messageId: string,
+    payload: MessageResendRequest
+  ): Promise<MessageResendResponse> {
+    return apiFetch<MessageResendResponse>(
+      `${draftPath(draftId)}/messages/${encodeURIComponent(messageId)}/resend`,
+      { method: "POST", body: payload }
+    );
   },
 
   currentDecision(draftId: string): Promise<CurrentDecisionResponse> {

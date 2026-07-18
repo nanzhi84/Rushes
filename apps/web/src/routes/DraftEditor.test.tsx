@@ -303,20 +303,8 @@ describe("DraftEditorView", () => {
     ).toBe(false);
   });
 
-  it("回退面板展示检查点 diff，并从用户消息或工具批次执行恢复", async () => {
-    const restored: unknown[] = [];
-    const checkpointBase = {
-      anchor_event_id: 1,
-      clip_count: 1,
-      clip_count_delta: 1,
-      created_at: "2026-07-16T02:00:00Z",
-      duration_frames: 90,
-      duration_frames_delta: 90,
-      timeline_version: 1,
-      track_count: 1,
-      track_count_delta: 1,
-      trigger_kind: "timeline_write"
-    };
+  it("从用户消息就地编辑并重发，撤销在途流式回复", async () => {
+    const resent: Array<{ url: string; body: unknown }> = [];
     const fetchMock = mockFetch({
       decision: null,
       timeline: true,
@@ -328,41 +316,9 @@ describe("DraftEditorView", () => {
           kind: "user",
           content: "制作第一版",
           created_at: "2026-07-16T01:59:00Z"
-        },
-        {
-          message_id: "tool-anchor",
-          role: "system",
-          kind: "tool",
-          content: JSON.stringify({
-            step_id: "tool-anchor",
-            tool: "timeline.apply_patches",
-            status: "succeeded",
-            args_summary: "{}",
-            observation: "ok"
-          }),
-          created_at: "2026-07-16T02:00:00Z"
         }
       ],
-      rewindCheckpoints: [
-        {
-          ...checkpointBase,
-          checkpoint_id: "rewind-tool",
-          anchor_message_id: "tool-anchor",
-          anchor_turn_id: "user-anchor",
-          patch_id: "patch-tool",
-          summary: "工具批次 timeline.apply_patches"
-        },
-        {
-          ...checkpointBase,
-          checkpoint_id: "rewind-user",
-          anchor_message_id: "user-anchor",
-          anchor_turn_id: "user-anchor",
-          patch_id: null,
-          summary: "制作第一版",
-          trigger_kind: "user_message"
-        }
-      ],
-      onRewind: (body) => restored.push(body)
+      onResend: (url, body) => resent.push({ url, body })
     });
     renderEditor(fetchMock);
 
@@ -376,20 +332,23 @@ describe("DraftEditorView", () => {
       });
     });
     expect(await screen.findByText("即将撤销的流式回复")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "打开回退检查点" }));
-    expect(await screen.findByRole("region", { name: "回退检查点" })).toBeTruthy();
-    expect(screen.getAllByText(/较前一检查点 \+1 片段/)).toHaveLength(2);
-    expect(await screen.findByRole("button", { name: "回到此消息" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "回到工具批次 批量修改时间线" })).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "回到此消息" }));
-    fireEvent.click(screen.getByRole("button", { name: "时间线和对话" }));
+    // 用户消息气泡上出现「编辑并重发」，点击后就地编辑并确认重发。
+    fireEvent.click(await screen.findByRole("button", { name: "编辑并重发" }));
+    const editor = await screen.findByRole("textbox", { name: "编辑消息" });
+    fireEvent.change(editor, { target: { value: "改写第一版" } });
+    fireEvent.click(screen.getByRole("button", { name: "重发" }));
+
     await waitFor(() => {
-      expect(restored).toContainEqual(expect.objectContaining({
-        checkpoint_id: "rewind-user",
-        idempotency_key: expect.any(String),
-        mode: "both"
-      }));
+      expect(resent).toContainEqual(
+        expect.objectContaining({
+          url: expect.stringContaining("/messages/user-anchor/resend"),
+          body: expect.objectContaining({
+            content: "改写第一版",
+            idempotency_key: expect.any(String)
+          })
+        })
+      );
     });
     await waitFor(() => expect(screen.queryByText("即将撤销的流式回复")).toBeNull());
   });
@@ -1504,9 +1463,8 @@ function mockFetch({
   onAnswer,
   costs,
   cancelFailure,
-  rewindCheckpoints = [],
   rewoundMessageCount = 0,
-  onRewind
+  onResend
 }: {
   decision: Decision | null;
   timeline?: boolean;
@@ -1515,9 +1473,8 @@ function mockFetch({
   onAnswer?: (url: string, init: RequestInit | undefined) => void;
   costs?: number;
   cancelFailure?: "conflict" | "network";
-  rewindCheckpoints?: Array<Record<string, unknown>>;
   rewoundMessageCount?: number;
-  onRewind?: (body: unknown) => void;
+  onResend?: (url: string, body: unknown) => void;
 }): FetchMock {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -1547,22 +1504,18 @@ function mockFetch({
     if (url.endsWith("/decisions/current")) {
       return jsonResponse({ decision });
     }
-    if (url.endsWith("/rewind/checkpoints")) {
-      return jsonResponse({ draft_id: "draft_1", checkpoints: rewindCheckpoints });
-    }
-    if (url.endsWith("/rewind") && init?.method === "POST") {
-      onRewind?.(init.body ? JSON.parse(String(init.body)) : null);
-      return jsonResponse({
-        draft_id: "draft_1",
-        checkpoint_id: "rewind_1",
-        mode: "both",
-        status: "restored",
-        timeline_version: 2,
-        rewound_message_count: 2,
-        cancelled_jobs: 0,
-        cancelled_decisions: 0,
-        event_ids: [9]
-      });
+    if (url.endsWith("/resend") && init?.method === "POST") {
+      onResend?.(url, init.body ? JSON.parse(String(init.body)) : null);
+      return jsonResponse(
+        {
+          draft_id: "draft_1",
+          message_id: "msg_resent",
+          status: "resent",
+          restored_timeline_version: 2,
+          rewound_message_count: 2
+        },
+        202
+      );
     }
     if (url.includes("/messages")) {
       if (init?.method === "POST") {

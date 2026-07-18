@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 15
+const schemaVersion = 16
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -427,8 +427,29 @@ CREATE TABLE IF NOT EXISTS user_memories (
 // the legacy column exists before executing this statement.
 const schemaV14 = `ALTER TABLE drafts DROP COLUMN scratch_memory_json`
 
-// schemaV15 adds a usage-recency signal to user memories. Historical rows stay
+// schemaV15 收敛 Rewind 检查点为“每条用户消息一个”。db.go 先用 addColumnIfMissing
+// 追加可空的 new_message_id 列（让编辑重发把回退与新消息记进同一条幂等结果），随后
+// 执行以下一次性数据迁移：把旧 user_message 检查点的可见集对齐到“消息之前”的新边界
+// （移除锚点消息自身），并删除已无用户入口的 timeline_write 工具级检查点及其可见集行。
+const schemaV15 = `
+DELETE FROM rewind_checkpoint_messages
+WHERE EXISTS (
+    SELECT 1 FROM rewind_checkpoints AS anchor
+    WHERE anchor.checkpoint_id=rewind_checkpoint_messages.checkpoint_id
+        AND anchor.anchor_message_id=rewind_checkpoint_messages.message_id
+        AND anchor.trigger_kind='user_message'
+);
+
+DELETE FROM rewind_checkpoint_messages
+WHERE checkpoint_id IN (
+    SELECT checkpoint_id FROM rewind_checkpoints WHERE trigger_kind='timeline_write'
+);
+
+DELETE FROM rewind_checkpoints WHERE trigger_kind='timeline_write';
+`
+
+// schemaV16 adds a usage-recency signal to user memories. Historical rows stay
 // NULL until the memory is next injected into a successful turn, so eviction can
 // value long-standing read-only preferences by max(last_confirmed_at,last_used_at)
 // rather than by confirmation time alone.
-const schemaV15 = `ALTER TABLE user_memories ADD COLUMN last_used_at TEXT`
+const schemaV16 = `ALTER TABLE user_memories ADD COLUMN last_used_at TEXT`

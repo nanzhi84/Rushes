@@ -230,6 +230,7 @@ type RewindRestore struct {
 	IdempotencyKey      string
 	CheckpointID        string
 	Mode                string
+	NewMessageID        string
 	TimelineVersion     *int
 	RewoundMessageCount int
 	CancelledJobs       int
@@ -301,10 +302,11 @@ func Apply(
 	if restore := options.RewindRestore; restore != nil {
 		result, insertErr := tx.ExecContext(ctx, `
 			INSERT INTO rewind_restore_requests(
-				draft_id,idempotency_key,checkpoint_id,mode,timeline_version,
+				draft_id,idempotency_key,checkpoint_id,mode,new_message_id,timeline_version,
 				rewound_message_count,cancelled_jobs,cancelled_decisions,event_ids_json,created_at
-			) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(draft_id,idempotency_key) DO NOTHING`,
+			) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(draft_id,idempotency_key) DO NOTHING`,
 			restore.DraftID, restore.IdempotencyKey, restore.CheckpointID, restore.Mode,
+			sql.NullString{String: restore.NewMessageID, Valid: restore.NewMessageID != ""},
 			restore.TimelineVersion, restore.RewoundMessageCount, restore.CancelledJobs,
 			restore.CancelledDecisions, "[]", state.createdAt,
 		)
@@ -1126,9 +1128,6 @@ func applyTimelineCreated(ctx context.Context, state *applyState, event contract
 	if err := state.touch(ctx, event.DraftID); err != nil {
 		return err
 	}
-	if err := recordTimelineRewindCheckpoint(ctx, state, event, document, "timeline_write"); err != nil {
-		return err
-	}
 	_, err = state.tx.ExecContext(ctx,
 		"UPDATE drafts SET timeline_current_version=?, timeline_validated=0 WHERE draft_id=?",
 		version, event.DraftID)
@@ -1437,10 +1436,6 @@ func persistResultRows(
 		}
 		if rows.Message.Role == "user" {
 			if err := recordMessageRewindCheckpoint(ctx, tx, *rows.Message, createdAt); err != nil {
-				return err
-			}
-		} else if rows.Message.Kind == "tool" {
-			if err := attachToolTraceToRewindCheckpoint(ctx, tx, *rows.Message); err != nil {
 				return err
 			}
 		}

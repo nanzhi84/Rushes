@@ -246,24 +246,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/drafts/{draft_id}/rewind/checkpoints": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List Rewind Checkpoints */
-        get: operations["list_rewind_checkpoints_api_drafts__draft_id__rewind_checkpoints_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/drafts/{draft_id}/rewind": {
+    "/api/drafts/{draft_id}/messages/{message_id}/resend": {
         parameters: {
             query?: never;
             header?: never;
@@ -272,8 +255,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Restore Rewind Checkpoint */
-        post: operations["restore_rewind_checkpoint_api_drafts__draft_id__rewind_post"];
+        /** Resend Message */
+        post: operations["resend_message_api_drafts__draft_id__messages__message_id__resend_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1200,87 +1183,28 @@ export interface components {
             /** Rewound Message Count */
             rewound_message_count: number;
         };
-        /** RewindCheckpoint */
-        RewindCheckpoint: {
-            /** Anchor Event Id */
-            anchor_event_id: number | null;
-            /** Anchor Message Id */
-            anchor_message_id: string | null;
-            /** Anchor Turn Id */
-            anchor_turn_id: string | null;
-            /** Checkpoint Id */
-            checkpoint_id: string;
-            /** Clip Count */
-            clip_count: number;
-            /** Clip Count Delta */
-            clip_count_delta: number;
-            /** Created At */
-            created_at: string;
-            /** Duration Frames */
-            duration_frames: number;
-            /** Duration Frames Delta */
-            duration_frames_delta: number;
-            /** Patch Id */
-            patch_id: string | null;
-            /** Summary */
-            summary: string;
-            /** Timeline Version */
-            timeline_version: number | null;
-            /** Track Count */
-            track_count: number;
-            /** Track Count Delta */
-            track_count_delta: number;
-            /**
-             * Trigger Kind
-             * @enum {string}
-             */
-            trigger_kind: "user_message" | "timeline_write" | "restore";
-        };
-        /** RewindCheckpointsResponse */
-        RewindCheckpointsResponse: {
-            /** Checkpoints */
-            checkpoints: components["schemas"]["RewindCheckpoint"][];
-            /** Draft Id */
-            draft_id: string;
-        };
-        /** RewindRestoreRequest */
-        RewindRestoreRequest: {
-            /** Checkpoint Id */
-            checkpoint_id: string;
+        /** MessageResendRequest */
+        MessageResendRequest: {
+            /** Content */
+            content: string;
             /** Idempotency Key */
             idempotency_key: string;
-            /**
-             * Mode
-             * @enum {string}
-             */
-            mode: "timeline" | "conversation" | "both";
         };
-        /** RewindRestoreResponse */
-        RewindRestoreResponse: {
-            /** Cancelled Decisions */
-            cancelled_decisions: number;
-            /** Cancelled Jobs */
-            cancelled_jobs: number;
-            /** Checkpoint Id */
-            checkpoint_id: string;
+        /** MessageResendResponse */
+        MessageResendResponse: {
             /** Draft Id */
             draft_id: string;
-            /** Event Ids */
-            event_ids: number[];
-            /**
-             * Mode
-             * @enum {string}
-             */
-            mode: "timeline" | "conversation" | "both";
+            /** Message Id */
+            message_id: string;
+            /** Restored Timeline Version */
+            restored_timeline_version: number | null;
             /** Rewound Message Count */
             rewound_message_count: number;
             /**
              * Status
              * @constant
              */
-            status: "restored";
-            /** Timeline Version */
-            timeline_version: number | null;
+            status: "resent";
         };
         /** PendingDecisionsResponse */
         PendingDecisionsResponse: {
@@ -2596,86 +2520,29 @@ export interface operations {
             };
         };
     };
-    list_rewind_checkpoints_api_drafts__draft_id__rewind_checkpoints_get: {
+    resend_message_api_drafts__draft_id__messages__message_id__resend_post: {
         parameters: {
             query?: never;
             header?: never;
             path: {
                 draft_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["RewindCheckpointsResponse"];
-                };
-            };
-            /** @description Unauthorized */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SecurityRefusalResponse"];
-                };
-            };
-            /** @description Forbidden */
-            403: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["SecurityRefusalResponse"];
-                };
-            };
-            /** @description Not Found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    restore_rewind_checkpoint_api_drafts__draft_id__rewind_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                draft_id: string;
+                message_id: string;
             };
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["RewindRestoreRequest"];
+                "application/json": components["schemas"]["MessageResendRequest"];
             };
         };
         responses: {
             /** @description Successful Response */
-            200: {
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["RewindRestoreResponse"];
+                    "application/json": components["schemas"]["MessageResendResponse"];
                 };
             };
             /** @description Bad Request */

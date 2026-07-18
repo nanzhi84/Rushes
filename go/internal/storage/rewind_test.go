@@ -5,25 +5,20 @@ import (
 	"testing"
 )
 
-func TestRewindCheckpointQueriesHandleLimitsAndStorageFailures(t *testing.T) {
+func TestRewindCheckpointQueriesHandleMissingRowsAndStorageFailures(t *testing.T) {
 	t.Parallel()
 	database, err := Open(t.Context(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = database.Close() })
-	for _, limit := range []int{0, 51} {
-		rows, listErr := ListRewindCheckpoints(
-			t.Context(), database.Read(), "missing-draft", limit,
-		)
-		if listErr != nil || len(rows) != 0 {
-			t.Fatalf("limit=%d rows=%#v err=%v", limit, rows, listErr)
-		}
+	if _, err := GetRewindCheckpoint(t.Context(), database.Read(), "missing-draft", "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("缺失检查点应返回 ErrNotFound: %v", err)
 	}
 	if _, err := database.Write().ExecContext(t.Context(), "DROP TABLE rewind_checkpoints"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ListRewindCheckpoints(t.Context(), database.Read(), "missing-draft", 10); err == nil {
+	if _, err := GetRewindCheckpoint(t.Context(), database.Read(), "missing-draft", "missing"); err == nil {
 		t.Fatal("缺少 rewind_checkpoints 表时查询必须失败")
 	}
 	if _, err := scanRewindCheckpoint(failingRewindScanner{}); err == nil {

@@ -77,7 +77,7 @@ func applyTimelineRestored(ctx context.Context, state *applyState, event contrac
 	}
 
 	if mode == "conversation" || mode == "both" {
-		if err := applyConversationRewind(ctx, state, event.DraftID, checkpointID, checkpoint); err != nil {
+		if err := applyConversationRewind(ctx, state, event.DraftID, checkpointID); err != nil {
 			return err
 		}
 	}
@@ -137,7 +137,6 @@ func applyConversationRewind(
 	state *applyState,
 	draftID string,
 	checkpointID string,
-	checkpoint rewindCheckpointState,
 ) error {
 	if _, err := state.tx.ExecContext(ctx, `
 		UPDATE messages SET rewound_at=?,rewind_checkpoint_id=?
@@ -156,18 +155,16 @@ func applyConversationRewind(
 	); err != nil {
 		return err
 	}
-	if checkpoint.anchorMessageID.Valid {
-		_, err := state.tx.ExecContext(ctx, `
-			UPDATE drafts SET messages_tail_ref=CASE
-				WHEN messages_tail_ref IS NULL THEN NULL
-				WHEN messages_tail_ref IN (
-					SELECT message_id FROM rewind_checkpoint_messages WHERE checkpoint_id=?
-				) THEN messages_tail_ref
-				ELSE ? END
-			WHERE draft_id=?`, checkpointID, checkpoint.anchorMessageID.String, draftID)
-		return err
-	}
-	_, err := state.tx.ExecContext(ctx, "UPDATE drafts SET messages_tail_ref=NULL WHERE draft_id=?", draftID)
+	// 上下文重置锚点若被本次回退遮蔽，则那次「清空上下文」一并被撤销，回到无重置
+	// 状态（模型可见 X 之前的历史 + 新的 X′）；仍可见的锚点原样保留。
+	_, err := state.tx.ExecContext(ctx, `
+		UPDATE drafts SET messages_tail_ref=CASE
+			WHEN messages_tail_ref IS NULL THEN NULL
+			WHEN messages_tail_ref IN (
+				SELECT message_id FROM rewind_checkpoint_messages WHERE checkpoint_id=?
+			) THEN messages_tail_ref
+			ELSE NULL END
+		WHERE draft_id=?`, checkpointID, draftID)
 	return err
 }
 
@@ -226,89 +223,6 @@ func recordMessageRewindCheckpoint(
 	})
 }
 
-func attachToolTraceToRewindCheckpoint(
-	ctx context.Context,
-	tx *sql.Tx,
-	message MessageRow,
-) error {
-	var trace struct {
-		Tool   string `json:"tool"`
-		Status string `json:"status"`
-	}
-	if json.Unmarshal([]byte(message.Content), &trace) != nil || trace.Status != "succeeded" ||
-		!isTimelineMutationTool(trace.Tool) {
-		return nil
-	}
-	var version sql.NullInt64
-	if err := tx.QueryRowContext(ctx,
-		"SELECT timeline_current_version FROM drafts WHERE draft_id=?", message.DraftID,
-	).Scan(&version); err != nil {
-		return err
-	}
-	if !version.Valid {
-		return nil
-	}
-	var checkpointID string
-	if err := tx.QueryRowContext(ctx, `
-		SELECT checkpoint_id FROM rewind_checkpoints
-		WHERE draft_id=? AND trigger_kind='timeline_write' AND timeline_version=?
-		ORDER BY rowid DESC LIMIT 1`, message.DraftID, version.Int64,
-	).Scan(&checkpointID); errors.Is(err, sql.ErrNoRows) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE rewind_checkpoints SET anchor_message_id=?,summary=? WHERE checkpoint_id=?`,
-		message.ID, "工具批次 "+trace.Tool, checkpointID,
-	); err != nil {
-		return err
-	}
-	_, err := tx.ExecContext(ctx, `
-		INSERT OR IGNORE INTO rewind_checkpoint_messages(checkpoint_id,message_id) VALUES(?,?)`,
-		checkpointID, message.ID,
-	)
-	return err
-}
-
-func isTimelineMutationTool(name string) bool {
-	switch name {
-	// timeline.apply_patch 自 #100 起已从 LLM 工具面移除，此处保留用于历史事件回放识别：
-	// 旧 trace/rewind checkpoint 仍以该工具名记录，回滚重放必须能认出它。
-	case "timeline.compose_initial", "timeline.apply_patch", "timeline.apply_patches",
-		"timeline.recut_to_beats", "timeline.edit_talking_head":
-		return true
-	default:
-		return false
-	}
-}
-
-func recordTimelineRewindCheckpoint(
-	ctx context.Context,
-	state *applyState,
-	event contracts.Event,
-	document map[string]any,
-	triggerKind string,
-) error {
-	version := intFrom(event.Payload["timeline_version"], 0)
-	timelineID := stringFrom(event.Payload["timeline_id"], fmt.Sprintf("%s:v%d", event.DraftID, version))
-	anchorID, summary, err := latestActiveUserMessage(ctx, state.tx, event.DraftID)
-	if err != nil {
-		return err
-	}
-	patchID := stringFrom(event.Payload["patch_id"], "")
-	if patchID != "" {
-		summary = strings.TrimSpace(summary + " · 编辑批次 " + patchID)
-	}
-	return recordRewindCheckpoint(ctx, state.tx, rewindCheckpointInput{
-		id: "rewind:timeline:" + timelineID, draftID: event.DraftID, triggerKind: triggerKind,
-		anchorMessageID: anchorID, anchorTurnID: anchorID,
-		timelineVersion: sql.NullInt64{Int64: int64(version), Valid: true},
-		patchID:         sql.NullString{String: patchID, Valid: patchID != ""},
-		summary:         truncateCheckpointSummary(summary), document: document, createdAt: state.createdAt,
-	})
-}
-
 func recordRewindCheckpoint(ctx context.Context, tx *sql.Tx, input rewindCheckpointInput) error {
 	if input.id == "" || input.draftID == "" || input.createdAt == "" {
 		return errors.New("rewind checkpoint 字段不完整")
@@ -345,10 +259,13 @@ func recordRewindCheckpoint(ctx context.Context, tx *sql.Tx, input rewindCheckpo
 	if rows, rowsErr := inserted.RowsAffected(); rowsErr != nil {
 		return rowsErr
 	} else if rows == 1 {
+		// 可见集边界取“锚点消息之前”：编辑重发消息 X 恢复到 X 发出前的状态，故
+		// X 自身不进入其检查点可见集；IS NOT 兼容锚点为 NULL 的非消息检查点。
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO rewind_checkpoint_messages(checkpoint_id,message_id)
-			SELECT ?,message_id FROM messages WHERE draft_id=? AND rewound_at IS NULL`,
-			input.id, input.draftID); err != nil {
+			SELECT ?,message_id FROM messages
+			WHERE draft_id=? AND rewound_at IS NULL AND message_id IS NOT ?`,
+			input.id, input.draftID, input.anchorMessageID); err != nil {
 			return err
 		}
 	}
@@ -385,22 +302,6 @@ func currentTimelineDocument(
 		return nil, version, err
 	}
 	return document, version, nil
-}
-
-func latestActiveUserMessage(
-	ctx context.Context,
-	tx *sql.Tx,
-	draftID string,
-) (sql.NullString, string, error) {
-	var messageID, content sql.NullString
-	err := tx.QueryRowContext(ctx, `
-		SELECT message_id,content FROM messages
-		WHERE draft_id=? AND role='user' AND rewound_at IS NULL
-		ORDER BY rowid DESC LIMIT 1`, draftID).Scan(&messageID, &content)
-	if errors.Is(err, sql.ErrNoRows) {
-		return sql.NullString{}, "时间线编辑", nil
-	}
-	return messageID, content.String, err
 }
 
 func timelineCheckpointStats(document map[string]any) (int, int, int) {

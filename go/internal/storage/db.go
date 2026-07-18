@@ -396,10 +396,30 @@ func (database *DB) Migrate(ctx context.Context) error {
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
-		if err := addColumnIfMissing(ctx, tx, "user_memories", "last_used_at"); err != nil {
+		if err := addColumnIfMissing(ctx, tx, "rewind_restore_requests", "new_message_id"); err != nil {
+			return fmt.Errorf("应用 schema v15 new_message_id: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, schemaV15); err != nil {
 			return fmt.Errorf("应用 schema v15: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 15"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 15
+	}
+	if version < 16 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := addColumnIfMissing(ctx, tx, "user_memories", "last_used_at"); err != nil {
+			return fmt.Errorf("应用 schema v16: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 16"); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
@@ -425,10 +445,11 @@ func addColumnIfMissing(
 		return nil
 	}
 	allowed := map[string]string{
-		"timeline_versions.parent_version": "ALTER TABLE timeline_versions ADD COLUMN parent_version INTEGER",
-		"messages.rewound_at":              "ALTER TABLE messages ADD COLUMN rewound_at TEXT",
-		"messages.rewind_checkpoint_id":    "ALTER TABLE messages ADD COLUMN rewind_checkpoint_id TEXT",
-		"user_memories.last_used_at":       schemaV15,
+		"timeline_versions.parent_version":       "ALTER TABLE timeline_versions ADD COLUMN parent_version INTEGER",
+		"messages.rewound_at":                    "ALTER TABLE messages ADD COLUMN rewound_at TEXT",
+		"messages.rewind_checkpoint_id":          "ALTER TABLE messages ADD COLUMN rewind_checkpoint_id TEXT",
+		"rewind_restore_requests.new_message_id": "ALTER TABLE rewind_restore_requests ADD COLUMN new_message_id TEXT",
+		"user_memories.last_used_at":             schemaV16,
 	}
 	statement, ok := allowed[table+"."+column]
 	if !ok {

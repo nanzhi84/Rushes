@@ -277,20 +277,12 @@ func TestContextManagerRebuildsWorldStateAfterRewindWithoutHashMismatch(t *testi
 	if _, err := manager.Build(t.Context(), draftID); err != nil {
 		t.Fatalf("build edited state: %v", err)
 	}
-	checkpoints, err := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var target storage.RewindCheckpoint
-	for _, checkpoint := range checkpoints {
-		if checkpoint.TriggerKind == "timeline_write" && checkpoint.TimelineVersion != nil &&
-			*checkpoint.TimelineVersion == 1 {
-			target = checkpoint
-			break
-		}
-	}
-	if target.ID == "" {
-		t.Fatalf("missing rewind target: %#v", checkpoints)
+	// rewind_user_two 在 v1 之后、v2 之前发出，其用户消息检查点捕获时间线 v1；
+	// 编辑重发它即回到第一版。
+	target, err := storage.GetRewindCheckpoint(
+		t.Context(), database.Read(), draftID, "rewind:message:rewind_user_two")
+	if err != nil || target.TimelineVersion == nil || *target.TimelineVersion != 1 {
+		t.Fatalf("rewind target=%#v err=%v", target, err)
 	}
 	draft, err := storage.GetDraft(t.Context(), database.Read(), draftID)
 	if err != nil {
