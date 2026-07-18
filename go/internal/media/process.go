@@ -90,7 +90,9 @@ func injectProtocolWhitelist(name string, args []string) []string {
 }
 
 func RunCommand(ctx context.Context, name string, args ...string) (CommandResult, error) {
-	command := exec.CommandContext(ctx, name, injectProtocolWhitelist(name, args)...)
+	plan := planSandbox(name, injectProtocolWhitelist(name, args))
+	defer plan.cleanup()
+	command := exec.CommandContext(ctx, plan.name, plan.args...)
 	configureProcess(command)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -112,7 +114,9 @@ func RunFFmpegProgress(
 	onProgress func(Progress),
 ) error {
 	progressArgs := append([]string{"-progress", "pipe:1", "-nostats", "-loglevel", "error"}, args...)
-	command := exec.CommandContext(ctx, ffmpeg, injectProtocolWhitelist(ffmpeg, progressArgs)...)
+	plan := planSandbox(ffmpeg, injectProtocolWhitelist(ffmpeg, progressArgs))
+	defer plan.cleanup()
+	command := exec.CommandContext(ctx, plan.name, plan.args...)
 	configureProcess(command)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
