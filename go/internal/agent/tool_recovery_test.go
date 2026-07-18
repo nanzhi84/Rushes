@@ -8,14 +8,65 @@ import (
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
+
+type effectProbeExecutor struct{}
+
+func (effectProbeExecutor) ExecuteTool(context.Context, string, any) (any, error) {
+	return nil, nil
+}
+
+// testRetrySafe 用真实注册表的 Effect 分级构造重试白名单，供下面的恢复机制单测复用（避免重新
+// 硬编码工具名）；DB 随测试生命周期用 t.TempDir()+Cleanup 回收。分类正确性另由 tools 包
+// TestToolEffectClassificationTable 保证。
+func testRetrySafe(t *testing.T) func(string) bool {
+	t.Helper()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := rushestools.NewRegistry(database, effectProbeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return retrySafeFromEffect(registry.Effect)
+}
+
+// TestRetrySafeFromEffectAllowlist 锁定 Effect 派生的重试白名单精确复刻此前硬编码的九工具集合：
+// 只读七件 + timeline.validate / speech.inspect 两个「可逆但稳定键幂等」的特例，其余一律不重试。
+func TestRetrySafeFromEffectAllowlist(t *testing.T) {
+	t.Parallel()
+	retrySafe := testRetrySafe(t)
+	for _, name := range []string{
+		"asset.list_assets", "media.search_shots", "audio.analyze_beats",
+		"audio.analyze_speech_pauses", "speech.inspect", "timeline.inspect",
+		"timeline.validate", "render.status", "render.inspect_preview",
+	} {
+		if !retrySafe(name) {
+			t.Fatalf("%s 应为重试安全", name)
+		}
+	}
+	for _, name := range []string{
+		"understand.materials", "plan.update", "memory.update",
+		"timeline.compose_initial", "timeline.apply_patches", "timeline.recut_to_beats",
+		"timeline.edit_talking_head", "render.preview", "render.final_mp4",
+		"interaction.ask_user", "interaction.confirm_action", "decision.answer",
+		"asset.import_local_file", "unknown.tool",
+	} {
+		if retrySafe(name) {
+			t.Fatalf("%s 不应为重试安全", name)
+		}
+	}
+}
 
 func TestToolRecoveryRetriesSafeErrorsAndReturnsThemToModel(t *testing.T) {
 	state := newToolRecoveryState()
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
-	middleware := newToolRecoveryMiddleware()
+	middleware := newToolRecoveryMiddleware(testRetrySafe(t))
 	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 		calls++
 		return nil, errors.New("temporary read failure")
@@ -75,7 +126,7 @@ func TestToolRecoveryFormattingHelpersCoverMalformedValues(t *testing.T) {
 
 func TestToolRecoveryDoesNotBlindlyReplayMutations(t *testing.T) {
 	calls := 0
-	middleware := newToolRecoveryMiddleware()
+	middleware := newToolRecoveryMiddleware(testRetrySafe(t))
 	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 		calls++
 		return nil, errors.New("commit result unknown")
@@ -107,7 +158,7 @@ func TestToolRecoveryDoesNotRetryDeterministicSchemaErrors(t *testing.T) {
 		},
 	)
 	calls := 0
-	endpoint := newToolRecoveryMiddleware().Invokable(
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
 		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 			calls++
 			return nil, errors.New("json: cannot unmarshal string into Go struct field only_usable of type bool")
@@ -133,7 +184,7 @@ func TestToolRecoveryDoesNotRetryDeterministicSchemaErrors(t *testing.T) {
 
 func TestToolRecoveryPreservesStructuredBusinessFailureForModel(t *testing.T) {
 	state := newToolRecoveryState()
-	endpoint := newToolRecoveryMiddleware().Invokable(
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
 		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 			return &compose.ToolOutput{Result: `{
 				"status":"validation_failed",
@@ -168,7 +219,7 @@ func TestToolRecoveryCollapsesInternalRetryReporterEvents(t *testing.T) {
 		},
 	)
 	calls := 0
-	middleware := newToolRecoveryMiddleware()
+	middleware := newToolRecoveryMiddleware(testRetrySafe(t))
 	endpoint := middleware.Invokable(func(ctx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
 		reporter, ok := rushestools.ReporterFromContext(ctx)
 		if !ok {
@@ -193,7 +244,7 @@ func TestToolRecoveryBlocksDuplicateFailuresAndExhaustsRepairBudget(t *testing.T
 	state := newToolRecoveryState()
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
-	middleware := newToolRecoveryMiddleware()
+	middleware := newToolRecoveryMiddleware(testRetrySafe(t))
 	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 		calls++
 		return &compose.ToolOutput{Result: marshalToolFailure("bad clip id", map[string]any{
@@ -234,7 +285,7 @@ func TestToolRecoveryCanonicalizesDuplicateJSONArguments(t *testing.T) {
 	state := newToolRecoveryState()
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
-	endpoint := newToolRecoveryMiddleware().Invokable(
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
 		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 			calls++
 			return &compose.ToolOutput{Result: marshalToolFailure("invalid range", nil)}, nil
@@ -261,7 +312,7 @@ func TestToolRecoveryCapsDistinctModelRepairFailures(t *testing.T) {
 	state := newToolRecoveryState()
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
-	endpoint := newToolRecoveryMiddleware().Invokable(
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
 		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 			calls++
 			return &compose.ToolOutput{Result: marshalToolFailure("still invalid", nil)}, nil
@@ -297,7 +348,7 @@ func TestToolRecoveryLetsModelCorrectArguments(t *testing.T) {
 	state := newToolRecoveryState()
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
-	middleware := newToolRecoveryMiddleware()
+	middleware := newToolRecoveryMiddleware(testRetrySafe(t))
 	endpoint := middleware.Invokable(func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 		calls++
 		if input.Arguments == `{"value":"good"}` {
@@ -318,7 +369,7 @@ func TestToolRecoverySuccessOnAnotherToolStartsFreshFailureChain(t *testing.T) {
 	state := newToolRecoveryState()
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
-	endpoint := newToolRecoveryMiddleware().Invokable(
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
 		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 			calls++
 			if input.Name == "asset.list_assets" {
@@ -368,7 +419,7 @@ func TestUnknownToolBecomesRepairableToolResult(t *testing.T) {
 }
 
 func TestToolRecoveryPropagatesCancellation(t *testing.T) {
-	middleware := newToolRecoveryMiddleware()
+	middleware := newToolRecoveryMiddleware(testRetrySafe(t))
 	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 		return nil, context.Canceled
 	})
