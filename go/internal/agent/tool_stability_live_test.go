@@ -738,12 +738,16 @@ func TestValidateLiveTalkingHeadPreserveDecision(t *testing.T) {
 	}
 }
 
+// liveEvalRuns 是每个 live 评测 case 的重复次数。随机模型下 n=1 是 0/100% 粗信号，
+// M5 把默认与下限都提到 5，保证每个 case 的 rate 至少建立在 n≥5 上；RUSHES_TOOL_EVAL_RUNS
+// 可显式调高（上限 50，防成本失控），但不得低于 5。
 func liveEvalRuns() int {
+	const floor = 5
 	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("RUSHES_TOOL_EVAL_RUNS")))
-	if err != nil || value < 1 {
-		return 1
+	if err != nil || value < floor {
+		return floor
 	}
-	return min(value, 5)
+	return min(value, 50)
 }
 
 func writeLiveToolEvalReport(t *testing.T, report liveToolEvalReport) {
