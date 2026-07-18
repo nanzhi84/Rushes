@@ -6,6 +6,7 @@ import {
   CornerDownRight,
   LoaderCircle,
   Pencil,
+  Sparkles,
   TerminalSquare
 } from "lucide-react";
 import { Markdown } from "./Markdown";
@@ -25,6 +26,7 @@ import type {
 } from "./runtime";
 import type {
   ModelRetryState,
+  StreamMemoryItem,
   StreamMessageItem,
   StreamToolItem,
   SubagentProgressEntry,
@@ -46,7 +48,8 @@ type HistoryBlock =
 
 type StreamBlock =
   | { type: "message"; message: StreamMessageItem }
-  | { type: "tools"; id: string; steps: StreamToolItem[] };
+  | { type: "tools"; id: string; steps: StreamToolItem[] }
+  | { type: "memory"; item: StreamMemoryItem };
 
 // 把历史块 / 流式块 / 活动指示 / 结构化交互拍平成统一行序列，供虚拟化按 index 取用。
 type ThreadRow =
@@ -66,7 +69,8 @@ export function AssistantThread({
   onCancelJob,
   cancelPendingJobId = null,
   onResendMessage,
-  resendPendingMessageId = null
+  resendPendingMessageId = null,
+  onOpenMemorySettings
 }: {
   runtime: ConsoleExternalStoreRuntime;
   onAnswerDecision: AnswerDecisionHandler;
@@ -79,6 +83,7 @@ export function AssistantThread({
   cancelPendingJobId?: string | null;
   onResendMessage?: (messageId: string, content: string) => void;
   resendPendingMessageId?: string | null;
+  onOpenMemorySettings?: () => void;
 }): ReactElement {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const followLatestRef = useRef(true);
@@ -105,11 +110,15 @@ export function AssistantThread({
   const streamFingerprint = useMemo(
     () =>
       streamItems
-        .map((item) =>
-          item.type === "message"
-            ? `${item.message_id}:${item.kind}:${item.text.length}`
-            : `${item.step_id}:${item.status}:${item.observation?.length ?? 0}`
-        )
+        .map((item) => {
+          if (item.type === "message") {
+            return `${item.message_id}:${item.kind}:${item.text.length}`;
+          }
+          if (item.type === "memory") {
+            return `mem:${item.id}:${item.written_keys.length}:${item.removed_keys.length}`;
+          }
+          return `${item.step_id}:${item.status}:${item.observation?.length ?? 0}`;
+        })
         .join("|"),
     [streamItems]
   );
@@ -168,7 +177,12 @@ export function AssistantThread({
       list.push({ key: `h:${key}`, kind: "history", block });
     }
     for (const block of streamBlocks) {
-      const key = block.type === "message" ? block.message.message_id : block.id;
+      const key =
+        block.type === "message"
+          ? block.message.message_id
+          : block.type === "memory"
+            ? block.item.id
+            : block.id;
       list.push({ key: `s:${key}`, kind: "stream", block });
     }
     if (runtime.isRunning) {
@@ -218,6 +232,9 @@ export function AssistantThread({
             progress={subagentProgress}
           />
         );
+      }
+      if (block.type === "memory") {
+        return <MemoryCardRow item={block.item} onOpenSettings={onOpenMemorySettings} />;
       }
       return (
         <MessageRow
@@ -330,6 +347,7 @@ const TurnFailureRow = memo(TurnFailureRowImpl);
 const BackgroundActivityGroup = memo(BackgroundActivityGroupImpl);
 const ToolActivityGroup = memo(ToolActivityGroupImpl);
 const ToolStepRow = memo(ToolStepRowImpl);
+const MemoryCardRow = memo(MemoryCardRowImpl);
 
 // 稳定空引用：非活跃工具步不传新数组，避免击穿 ToolStepRow/ToolActivityGroup 的 memo。
 const EMPTY_PROGRESS: SubagentProgressEntry[] = [];
@@ -368,6 +386,48 @@ function TurnActivityIndicator({
         当前任务进行中：{label}
       </span>
     </div>
+  );
+}
+
+// 长期记忆写入成功的可见卡片：列出已记住/已移除的键并直链设置面板；只追加不更新。
+function MemoryCardRowImpl({
+  item,
+  onOpenSettings
+}: {
+  item: StreamMemoryItem;
+  onOpenSettings?: () => void;
+}): ReactElement {
+  const written = item.written_keys;
+  const removed = item.removed_keys;
+  return (
+    <article
+      data-testid="memory-updated-card"
+      className="flex w-full items-start gap-2 rounded-md border border-accent/25 bg-accent/5 px-3 py-2 text-[13px] leading-5 text-fg"
+    >
+      <Sparkles size={14} strokeWidth={1.8} aria-hidden className="mt-0.5 shrink-0 text-accent" />
+      <div className="min-w-0 flex-1">
+        <p className="font-medium">{written.length > 0 ? "已记住长期记忆" : "已移除长期记忆"}</p>
+        {written.length > 0 ? (
+          <p className="mt-0.5 break-words text-xs text-fg-muted">
+            记住了 <span className="font-mono text-fg">{written.join("、")}</span>
+          </p>
+        ) : null}
+        {removed.length > 0 ? (
+          <p className="mt-0.5 break-words text-xs text-fg-muted">
+            移除了 <span className="font-mono text-fg">{removed.join("、")}</span>
+          </p>
+        ) : null}
+        {onOpenSettings ? (
+          <button
+            type="button"
+            className="mt-1 text-xs font-medium text-accent transition-opacity hover:opacity-80"
+            onClick={onOpenSettings}
+          >
+            在设置中查看和编辑
+          </button>
+        ) : null}
+      </div>
+    </article>
   );
 }
 
@@ -892,6 +952,10 @@ function groupStreamItems(items: TurnStreamItem[]): StreamBlock[] {
       continue;
     }
     flushTools();
+    if (item.type === "memory") {
+      blocks.push({ type: "memory", item });
+      continue;
+    }
     blocks.push({ type: "message", message: item });
   }
   flushTools();

@@ -432,3 +432,38 @@ func TestMemoryUpdateNegativeSetLocksEvidenceMappings(t *testing.T) {
 		t.Fatalf("负例集不得落库任何记忆: %#v err=%v", memories, err)
 	}
 }
+
+func TestMemoryUpdateEmitsMemoryUpdatedTurnStreamEvent(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_evt")
+	agenttest.InsertAgentMessage(t, database, "draft_evt", "message_evt", "以后都快一点")
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_evt"), "draft_evt")
+	if _, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+		Entries: []rushestools.MemoryEntryInput{{
+			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都快一点",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, event := range service.Hub().Snapshot("draft_evt") {
+		if event["type"] != TurnStreamMemoryUpdated {
+			continue
+		}
+		found = true
+		keys, ok := event["written_keys"].([]string)
+		if !ok || len(keys) != 1 || keys[0] != "pacing" {
+			t.Fatalf("memory_updated written_keys=%#v", event["written_keys"])
+		}
+	}
+	if !found {
+		t.Fatal("memory.update 成功后应发专门的 memory_updated turn-stream 事件")
+	}
+}

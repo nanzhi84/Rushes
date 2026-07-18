@@ -79,6 +79,10 @@ func BoolPointer(value bool) *bool { return &value }
 
 const TurnStreamSubagentProgress = "subagent_progress"
 
+// TurnStreamMemoryUpdated 与 agent 侧 knownTurnStreamTypes 同名同值:执行器经
+// recordProgress 发射,hub 用 agent 侧清单校验类型。字符串一致即可,不跨包依赖。
+const TurnStreamMemoryUpdated = "memory_updated"
+
 func TruncateRunes(value string, limit int) string {
 	runes := []rune(value)
 	if len(runes) <= limit {

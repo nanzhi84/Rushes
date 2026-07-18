@@ -121,6 +121,7 @@ export type DecisionAnswerResponse = Schemas["DecisionAnswerResponse"];
 export type MemoryRecord = Schemas["MemoryRecord"];
 export type MemoriesResponse = Schemas["MemoriesResponse"];
 export type MemoryMutationResponse = Schemas["MemoryMutationResponse"];
+export type MemoryStatementUpdateRequest = Schemas["MemoryStatementUpdateRequest"];
 
 // ---- 请求体（引 generated） ----
 type DraftCreateRequest = Schemas["DraftCreateRequest"];
@@ -228,6 +229,14 @@ export const api = {
     return apiFetch<MemoryMutationResponse>(`/api/memories/${encodeURIComponent(memoryKey)}`, {
       method: "DELETE",
       headers: JSON_MUTATION_HEADERS
+    });
+  },
+
+  updateMemoryStatement(memoryKey: string, statement: string): Promise<MemoryRecord> {
+    const payload: MemoryStatementUpdateRequest = { statement };
+    return apiFetch<MemoryRecord>(`/api/memories/${encodeURIComponent(memoryKey)}`, {
+      method: "PATCH",
+      body: payload
     });
   },
 

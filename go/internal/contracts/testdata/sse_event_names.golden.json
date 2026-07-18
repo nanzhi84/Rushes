@@ -88,6 +88,7 @@
     "stream_snapshot_truncated",
     "stream_gap",
     "turn_ended",
-    "turn_error"
+    "turn_error",
+    "memory_updated"
   ]
 }
