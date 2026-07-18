@@ -1,3 +1,4 @@
+// Package agentexec 承载与编排引擎解耦的视频领域执行算法与数据类型。
 package agentexec
 
 import (
@@ -51,6 +52,7 @@ func TruncateText(value string, limit int) string {
 	return value[:limit] + "…"
 }
 
+// One frame is about 33ms at 30fps, below the perceptible threshold for beat alignment.
 const beatSnapToleranceFrames = 1
 
 func ContainsFrame(frames []int, target int) bool {
