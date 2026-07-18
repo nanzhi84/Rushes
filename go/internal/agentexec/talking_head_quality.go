@@ -253,7 +253,9 @@ func WithConfirmedToolReplay(ctx context.Context) context.Context {
 	return context.WithValue(ctx, confirmedToolReplayKey{}, true)
 }
 
-func isConfirmedToolReplay(ctx context.Context) bool {
+// IsConfirmedToolReplay 报告本次调用是否为用户在决策卡上确认后的工具重放。
+// G2 的破坏性确认拦截器据此在 ctx 持有确认凭证时放行（见 agent/interceptor.go）。
+func IsConfirmedToolReplay(ctx context.Context) bool {
 	value, _ := ctx.Value(confirmedToolReplayKey{}).(bool)
 	return value
 }
@@ -265,7 +267,7 @@ func TalkingHeadPlanDrift(
 	autoPreserved []SpeechPause,
 	utterances []SpeechUtterance,
 ) map[string]any {
-	if !isConfirmedToolReplay(ctx) || len(autoPreserved) == 0 {
+	if !IsConfirmedToolReplay(ctx) || len(autoPreserved) == 0 {
 		return nil
 	}
 	items := make([]map[string]any, 0, len(autoPreserved))

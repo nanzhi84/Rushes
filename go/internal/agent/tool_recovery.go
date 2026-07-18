@@ -241,6 +241,16 @@ func newToolRecoveryMiddleware(retrySafe func(string) bool) compose.ToolMiddlewa
 					}
 				}
 				if err != nil {
+					// 拦截器策略拒绝（如破坏性工具缺确认）：回灌模型结构化提示，但不算工具执行
+					// 失败——不记恢复账、不触发重试、不消耗修复预算（#103 G2）。
+					var rejection *rushestools.InterceptorRejection
+					if errors.As(err, &rejection) {
+						if !reportFinished {
+							reportFinished = true
+							reportOutput, reportErr = rejectionToolResult(rejection), nil
+						}
+						return &compose.ToolOutput{Result: marshalInterceptorRejection(rejection)}, nil
+					}
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 						if !reportFinished {
 							reportFinished, reportErr = true, err
