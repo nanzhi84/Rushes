@@ -30,6 +30,7 @@ const (
 	TurnStreamGap                     = "stream_gap"
 	TurnStreamTurnEnded               = "turn_ended"
 	TurnStreamTurnError               = "turn_error"
+	TurnStreamMemoryUpdated           = "memory_updated"
 )
 
 var knownTurnStreamTypes = []string{
@@ -45,6 +46,7 @@ var knownTurnStreamTypes = []string{
 	TurnStreamGap,
 	TurnStreamTurnEnded,
 	TurnStreamTurnError,
+	TurnStreamMemoryUpdated,
 }
 
 func KnownTurnStreamTypes() []string {

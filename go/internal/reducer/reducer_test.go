@@ -1080,6 +1080,7 @@ func TestReducerMaterializesCompleteCoreEventLifecycle(t *testing.T) {
 	)
 	thumbnail := strings.Repeat("b", 64)
 	proxy := strings.Repeat("c", 64)
+	peaks := strings.Repeat("f", 64)
 	applyEvents(contracts.ActorJob,
 		contracts.Event{Type: "AssetProbed", Payload: map[string]any{
 			"asset_id": "asset-all", "probe": map[string]any{"duration_sec": 2},
@@ -1087,6 +1088,9 @@ func TestReducerMaterializesCompleteCoreEventLifecycle(t *testing.T) {
 		}},
 		contracts.Event{Type: "ProxyGenerated", Payload: map[string]any{
 			"asset_id": "asset-all", "proxy_object_hash": proxy, "proxy_object_size": float64(8),
+		}},
+		contracts.Event{Type: "PeaksGenerated", Payload: map[string]any{
+			"asset_id": "asset-all", "peaks_object_hash": peaks, "peaks_object_size": float64(6),
 		}},
 		contracts.Event{Type: "MaterialUnderstandingStarted", Payload: map[string]any{"asset_id": "asset-all"}},
 		contracts.Event{Type: "MaterialUnderstandingCompleted", Payload: map[string]any{"asset_id": "asset-all"}},
@@ -1169,11 +1173,15 @@ func TestReducerMaterializesCompleteCoreEventLifecycle(t *testing.T) {
 		draft.LastViewedPreviewID == nil || *draft.LastViewedPreviewID != "preview-all" {
 		t.Fatalf("draft=%#v err=%v", draft, err)
 	}
-	for table, want := range map[string]int{"timeline_versions": 1, "previews": 1, "exports": 1, "jobs": 2, "objects": 5} {
+	for table, want := range map[string]int{"timeline_versions": 1, "previews": 1, "exports": 1, "jobs": 2, "objects": 6} {
 		var count int
 		if err := database.Read().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != want {
 			t.Fatalf("%s count=%d want=%d err=%v", table, count, want, err)
 		}
+	}
+	assetAll, err := storage.GetAsset(t.Context(), database.Read(), "asset-all")
+	if err != nil || assetAll.PeaksObjectHash == nil || *assetAll.PeaksObjectHash != peaks {
+		t.Fatalf("asset peaks hash=%v err=%v", assetAll.PeaksObjectHash, err)
 	}
 }
 
@@ -1184,6 +1192,7 @@ func TestReducerRejectsMalformedDeepPayloads(t *testing.T) {
 	base := 0
 	cases := []contracts.Event{
 		{Type: "ProxyGenerated", Payload: map[string]any{"asset_id": "a"}},
+		{Type: "PeaksGenerated", Payload: map[string]any{"asset_id": "a"}},
 		{Type: "TimelineVersionCreated", DraftID: "draft-invalid", BaseVersion: &base, Payload: map[string]any{}},
 		{Type: "DecisionAnswered", DraftID: "draft-invalid", BaseVersion: &base, Payload: map[string]any{"decision_id": "missing"}},
 		{Type: "PreviewRendered", DraftID: "draft-invalid", Payload: map[string]any{"artifact_id": "p", "timeline_version": 1}},

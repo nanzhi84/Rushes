@@ -158,6 +158,10 @@ func TestMediaRangesAcrossSourceProxyThumbnailPreviewAndExport(t *testing.T) {
 			"asset_id": "asset_media", "proxy_object_hash": object.Hash,
 			"proxy_object_size": object.Size,
 		}},
+		{Type: "PeaksGenerated", Payload: map[string]any{
+			"asset_id": "asset_media", "peaks_object_hash": object.Hash,
+			"peaks_object_size": object.Size,
+		}},
 	}, reducer.Options{Actor: contracts.ActorJob, CreatedAt: time.Now().UTC()})
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("apply status=%s err=%v", result.Status, err)
@@ -186,6 +190,8 @@ func TestMediaRangesAcrossSourceProxyThumbnailPreviewAndExport(t *testing.T) {
 		{"source suffix", http.MethodGet, "/api/media/asset_media/source", "bytes=-3", 206, "789", "3", "bytes 7-9/10"},
 		{"proxy head", http.MethodHead, "/api/media/asset_media/proxy", "bytes=0-1", 206, "", "2", "bytes 0-1/10"},
 		{"thumbnail", http.MethodGet, "/api/media/asset_media/thumbnail", "", 200, "0123456789", "10", ""},
+		{"peaks", http.MethodGet, "/api/media/asset_media/peaks", "", 200, "0123456789", "10", ""},
+		{"peaks head", http.MethodHead, "/api/media/asset_media/peaks", "", 200, "", "10", ""},
 		{"preview", http.MethodGet, "/api/media/preview/preview_media", "bytes=1-", 206, "123456789", "9", "bytes 1-9/10"},
 		{"export", http.MethodGet, "/api/media/export/export_media", "bytes=0-99", 206, "0123456789", "10", "bytes 0-9/10"},
 	}

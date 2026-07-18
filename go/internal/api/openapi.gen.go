@@ -664,6 +664,7 @@ type MaterialAsset struct {
 	Jobs                []AssetJobSummary       `json:"jobs"`
 	Kind                string                  `json:"kind"`
 	Mtime               *int                    `json:"mtime"`
+	PeaksReady          bool                    `json:"peaks_ready"`
 	Probe               *map[string]interface{} `json:"probe"`
 	ProxyObjectHash     *string                 `json:"proxy_object_hash"`
 	ProxyReady          bool                    `json:"proxy_ready"`
@@ -723,16 +724,22 @@ type MemoryMutationResponse struct {
 
 // MemoryRecord defines model for MemoryRecord.
 type MemoryRecord struct {
-	CreatedAt       string           `json:"created_at"`
-	Kind            MemoryRecordKind `json:"kind"`
-	LastConfirmedAt string           `json:"last_confirmed_at"`
-	MemoryKey       string           `json:"memory_key"`
-	SourceDraftId   string           `json:"source_draft_id"`
-	Statement       string           `json:"statement"`
+	CreatedAt         string           `json:"created_at"`
+	Kind              MemoryRecordKind `json:"kind"`
+	LastConfirmedAt   string           `json:"last_confirmed_at"`
+	ManuallyRevisedAt string           `json:"manually_revised_at"`
+	MemoryKey         string           `json:"memory_key"`
+	SourceDraftId     string           `json:"source_draft_id"`
+	Statement         string           `json:"statement"`
 }
 
 // MemoryRecordKind defines model for MemoryRecord.Kind.
 type MemoryRecordKind string
+
+// MemoryStatementUpdateRequest defines model for MemoryStatementUpdateRequest.
+type MemoryStatementUpdateRequest struct {
+	Statement string `json:"statement"`
+}
 
 // MessageCreateRequest defines model for MessageCreateRequest.
 type MessageCreateRequest struct {
@@ -931,6 +938,9 @@ type CancelJobApiJobsJobIdCancelPostJSONRequestBody = JobCancelRequest
 
 // ClearMemoriesApiMemoriesDeleteJSONRequestBody defines body for ClearMemoriesApiMemoriesDelete for application/json ContentType.
 type ClearMemoriesApiMemoriesDeleteJSONRequestBody = ConfirmRequest
+
+// UpdateMemoryStatementApiMemoriesMemoryKeyPatchJSONRequestBody defines body for UpdateMemoryStatementApiMemoriesMemoryKeyPatch for application/json ContentType.
+type UpdateMemoryStatementApiMemoriesMemoryKeyPatchJSONRequestBody = MemoryStatementUpdateRequest
 
 // AsValidationErrorLoc0 returns the union data inside the ValidationError_Loc_Item as a ValidationErrorLoc0
 func (t ValidationError_Loc_Item) AsValidationErrorLoc0() (ValidationErrorLoc0, error) {
@@ -1225,6 +1235,12 @@ type ServerInterface interface {
 	// Media Preview
 	// (HEAD /api/media/preview/{preview_id})
 	MediaPreviewApiMediaPreviewPreviewIdHead(w http.ResponseWriter, r *http.Request, previewId string)
+	// Media Peaks
+	// (GET /api/media/{asset_id}/peaks)
+	MediaPeaksApiMediaAssetIdPeaksGet(w http.ResponseWriter, r *http.Request, assetId string)
+	// Media Peaks
+	// (HEAD /api/media/{asset_id}/peaks)
+	MediaPeaksApiMediaAssetIdPeaksHead(w http.ResponseWriter, r *http.Request, assetId string)
 	// Media Proxy
 	// (GET /api/media/{asset_id}/proxy)
 	MediaProxyApiMediaAssetIdProxyGet(w http.ResponseWriter, r *http.Request, assetId string)
@@ -1252,6 +1268,9 @@ type ServerInterface interface {
 	// Delete Memory
 	// (DELETE /api/memories/{memory_key})
 	DeleteMemoryApiMemoriesMemoryKeyDelete(w http.ResponseWriter, r *http.Request, memoryKey string)
+	// Update Memory Statement
+	// (PATCH /api/memories/{memory_key})
+	UpdateMemoryStatementApiMemoriesMemoryKeyPatch(w http.ResponseWriter, r *http.Request, memoryKey string)
 }
 
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
@@ -1468,6 +1487,18 @@ func (_ Unimplemented) MediaPreviewApiMediaPreviewPreviewIdHead(w http.ResponseW
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// Media Peaks
+// (GET /api/media/{asset_id}/peaks)
+func (_ Unimplemented) MediaPeaksApiMediaAssetIdPeaksGet(w http.ResponseWriter, r *http.Request, assetId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Media Peaks
+// (HEAD /api/media/{asset_id}/peaks)
+func (_ Unimplemented) MediaPeaksApiMediaAssetIdPeaksHead(w http.ResponseWriter, r *http.Request, assetId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // Media Proxy
 // (GET /api/media/{asset_id}/proxy)
 func (_ Unimplemented) MediaProxyApiMediaAssetIdProxyGet(w http.ResponseWriter, r *http.Request, assetId string) {
@@ -1519,6 +1550,12 @@ func (_ Unimplemented) ListMemoriesApiMemoriesGet(w http.ResponseWriter, r *http
 // Delete Memory
 // (DELETE /api/memories/{memory_key})
 func (_ Unimplemented) DeleteMemoryApiMemoriesMemoryKeyDelete(w http.ResponseWriter, r *http.Request, memoryKey string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Update Memory Statement
+// (PATCH /api/memories/{memory_key})
+func (_ Unimplemented) UpdateMemoryStatementApiMemoriesMemoryKeyPatch(w http.ResponseWriter, r *http.Request, memoryKey string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -2460,6 +2497,58 @@ func (siw *ServerInterfaceWrapper) MediaPreviewApiMediaPreviewPreviewIdHead(w ht
 	handler.ServeHTTP(w, r)
 }
 
+// MediaPeaksApiMediaAssetIdPeaksGet operation middleware
+func (siw *ServerInterfaceWrapper) MediaPeaksApiMediaAssetIdPeaksGet(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "asset_id" -------------
+	var assetId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "asset_id", chi.URLParam(r, "asset_id"), &assetId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "asset_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.MediaPeaksApiMediaAssetIdPeaksGet(w, r, assetId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// MediaPeaksApiMediaAssetIdPeaksHead operation middleware
+func (siw *ServerInterfaceWrapper) MediaPeaksApiMediaAssetIdPeaksHead(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "asset_id" -------------
+	var assetId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "asset_id", chi.URLParam(r, "asset_id"), &assetId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "asset_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.MediaPeaksApiMediaAssetIdPeaksHead(w, r, assetId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // MediaProxyApiMediaAssetIdProxyGet operation middleware
 func (siw *ServerInterfaceWrapper) MediaProxyApiMediaAssetIdProxyGet(w http.ResponseWriter, r *http.Request) {
 
@@ -2661,6 +2750,32 @@ func (siw *ServerInterfaceWrapper) DeleteMemoryApiMemoriesMemoryKeyDelete(w http
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.DeleteMemoryApiMemoriesMemoryKeyDelete(w, r, memoryKey)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateMemoryStatementApiMemoriesMemoryKeyPatch operation middleware
+func (siw *ServerInterfaceWrapper) UpdateMemoryStatementApiMemoriesMemoryKeyPatch(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "memory_key" -------------
+	var memoryKey string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "memory_key", chi.URLParam(r, "memory_key"), &memoryKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "memory_key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateMemoryStatementApiMemoriesMemoryKeyPatch(w, r, memoryKey)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -2889,6 +3004,12 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Head(options.BaseURL+"/api/media/preview/{preview_id}", wrapper.MediaPreviewApiMediaPreviewPreviewIdHead)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/media/{asset_id}/peaks", wrapper.MediaPeaksApiMediaAssetIdPeaksGet)
+	})
+	r.Group(func(r chi.Router) {
+		r.Head(options.BaseURL+"/api/media/{asset_id}/peaks", wrapper.MediaPeaksApiMediaAssetIdPeaksHead)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/media/{asset_id}/proxy", wrapper.MediaProxyApiMediaAssetIdProxyGet)
 	})
 	r.Group(func(r chi.Router) {
@@ -2914,6 +3035,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/api/memories/{memory_key}", wrapper.DeleteMemoryApiMemoriesMemoryKeyDelete)
+	})
+	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/api/memories/{memory_key}", wrapper.UpdateMemoryStatementApiMemoriesMemoryKeyPatch)
 	})
 
 	return r

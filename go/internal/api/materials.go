@@ -397,7 +397,8 @@ func materialAsset(asset storage.Asset, jobs []storage.JobSummary) MaterialAsset
 		UnderstandingStatus: asset.UnderstandingStatus, Usable: asset.Usable,
 		RelDir: asset.RelDir, Probe: mapPointer(asset.Probe), DurationSec: duration,
 		ProxyObjectHash: asset.ProxyObjectHash, ProxyReady: asset.ProxyObjectHash != nil,
-		ThumbnailReady: asset.ThumbnailObjectHash != nil, Invalid: !asset.Usable,
+		ThumbnailReady: asset.ThumbnailObjectHash != nil, PeaksReady: asset.PeaksObjectHash != nil,
+		Invalid: !asset.Usable,
 		Failure: mapPointer(asset.Failure), Jobs: jobItems,
 	}
 }

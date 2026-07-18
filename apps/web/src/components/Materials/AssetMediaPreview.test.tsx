@@ -101,6 +101,7 @@ function makeAsset(overrides: Partial<MaterialAsset> = {}): MaterialAsset {
     proxy_object_hash: null,
     proxy_ready: false,
     thumbnail_ready: true,
+    peaks_ready: false,
     invalid: false,
     failure: null,
     jobs: [],

@@ -74,6 +74,7 @@ var EventRegistry = map[string]EventSpec{
 	"JobFailed":                      {Mode: VersionMerge, MergeKeys: []string{"job_id"}, Routes: RouteWorkspace | RouteDraft},
 	"JobCancelled":                   {Mode: VersionMerge, MergeKeys: []string{"job_id"}, Routes: RouteWorkspace | RouteDraft},
 	"ProxyGenerated":                 {Mode: VersionMerge, MergeKeys: []string{"asset_id", "proxy_object_hash"}, Routes: RouteWorkspace | RouteDraft},
+	"PeaksGenerated":                 {Mode: VersionMerge, MergeKeys: []string{"asset_id", "peaks_object_hash"}, Routes: RouteWorkspace | RouteDraft},
 	"JobProgress":                    {Mode: VersionMerge, MergeKeys: []string{"job_id", "progress"}, OptionalMergeKeys: []string{"update_id"}, Routes: RouteWorkspace | RouteDraft},
 	"PreviewViewed":                  {Mode: VersionMerge, MergeKeys: []string{"preview_id"}, DraftScope: true, Routes: RouteDraft},
 }
