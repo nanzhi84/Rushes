@@ -19,6 +19,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 
 	rushagent "github.com/nanzhi84/Rushes/go/internal/agent"
+	"github.com/nanzhi84/Rushes/go/internal/config"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
 )
 
@@ -178,6 +179,51 @@ func TestArkHTTPClientAndRetry(t *testing.T) {
 	if strings.TrimSpace(response.Content) == "" {
 		t.Fatal("ark 返回为空")
 	}
+}
+
+// TestArkTiersAssemblySmoke 覆盖 #103 M2 新增的厂商开关装配路径：
+// RUSHES_CHAT_PROVIDER=ark 时经 config.ResolveChatProvider + providers.NewArkTiers
+// 装配聊天/视觉双档，并对聊天档做一次真实回合。默认跳过；仅在配置真实 ark 密钥、
+// 且（缺配置时）RUSHES_REQUIRE_LIVE_MODELS=1 才强制运行。
+func TestArkTiersAssemblySmoke(t *testing.T) {
+	key := requireLiveEnv(t, "RUSHES_ARK_API_KEY")
+	chatModel := requireLiveEnv(t, "RUSHES_ARK_CHAT_MODEL")
+	visionModel := envOr("RUSHES_ARK_VISION_MODEL", chatModel)
+
+	provider, err := config.ResolveChatProvider("ark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider != config.ProviderArk {
+		t.Fatalf("provider=%q，期望 ark", provider)
+	}
+
+	tiers, err := providers.NewArkTiers(t.Context(), providers.ArkTierConfig{
+		APIKey:      key,
+		AccessKey:   os.Getenv("RUSHES_ARK_ACCESS_KEY"),
+		SecretKey:   os.Getenv("RUSHES_ARK_SECRET_KEY"),
+		BaseURL:     os.Getenv("RUSHES_ARK_BASE_URL"),
+		Region:      os.Getenv("RUSHES_ARK_REGION"),
+		ChatModel:   chatModel,
+		VisionModel: visionModel,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tiers.Chat == nil || tiers.Vision == nil {
+		t.Fatal("ark 双档装配缺少 chat 或 vision")
+	}
+
+	response, err := tiers.Chat.Generate(t.Context(), []*schema.Message{
+		schema.UserMessage("只输出 ARK-TIERS-OK，不要补充其他文字。"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(response.Content) == "" {
+		t.Fatal("ark 双档聊天返回为空")
+	}
+	t.Logf("ARK_TIERS_ASSEMBLY_OK content_len=%d", len(response.Content))
 }
 
 func envOr(name, fallback string) string {

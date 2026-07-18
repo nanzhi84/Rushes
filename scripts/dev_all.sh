@@ -98,8 +98,11 @@ for port in "$API_PORT" "$WEB_PORT"; do
   fi
 done
 
-if [[ -z "${RUSHES_DASHSCOPE_API_KEY:-}" ]]; then
+CHAT_PROVIDER="$(printf '%s' "${RUSHES_CHAT_PROVIDER:-dashscope}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+if [[ "$CHAT_PROVIDER" == "dashscope" && -z "${RUSHES_DASHSCOPE_API_KEY:-}" ]]; then
   printf '\033[33m警告：未配置 RUSHES_DASHSCOPE_API_KEY；本地链路可运行，但 Agent 会使用无模型降级回复。\033[0m\n' >&2
+elif [[ "$CHAT_PROVIDER" == "ark" && -z "${RUSHES_ARK_API_KEY:-}" && ( -z "${RUSHES_ARK_ACCESS_KEY:-}" || -z "${RUSHES_ARK_SECRET_KEY:-}" ) ]]; then
+  printf '\033[33m警告：RUSHES_CHAT_PROVIDER=ark 但未配置 RUSHES_ARK_API_KEY（或 AK/SK）；API 与 worker 会在启动期报错。\033[0m\n' >&2
 fi
 
 mkdir -p "$BIN_DIR"

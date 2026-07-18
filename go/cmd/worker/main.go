@@ -52,11 +52,33 @@ func run() error {
 	if err := worker.RegisterRender(registry, database); err != nil {
 		return err
 	}
+	provider, err := config.ResolveChatProvider(os.Getenv(config.EnvChatProvider))
+	if err != nil {
+		return err
+	}
 	var analyzer = understanding.NewAnalyzer(nil)
-	if key := os.Getenv("RUSHES_DASHSCOPE_API_KEY"); key != "" {
-		vision, modelErr := providers.NewQwen(context.Background(), providers.QwenConfig{
-			APIKey: key, BaseURL: os.Getenv("RUSHES_DASHSCOPE_BASE_URL"),
-			Model: os.Getenv("RUSHES_QWEN_VISION_MODEL"), Timeout: 180 * time.Second,
+	switch provider {
+	case config.ProviderDashScope:
+		if key := os.Getenv("RUSHES_DASHSCOPE_API_KEY"); key != "" {
+			vision, modelErr := providers.NewQwen(context.Background(), providers.QwenConfig{
+				APIKey: key, BaseURL: os.Getenv("RUSHES_DASHSCOPE_BASE_URL"),
+				Model: os.Getenv("RUSHES_QWEN_VISION_MODEL"), Timeout: 180 * time.Second,
+			})
+			if modelErr != nil {
+				return modelErr
+			}
+			analyzer = understanding.NewAnalyzer(vision)
+		}
+	case config.ProviderArk:
+		// worker 只需视觉档；选择 ark 时缺密钥/模型由 NewArk 在启动期报错，不静默降级。
+		vision, modelErr := providers.NewArk(context.Background(), providers.ArkConfig{
+			APIKey:    os.Getenv("RUSHES_ARK_API_KEY"),
+			AccessKey: os.Getenv("RUSHES_ARK_ACCESS_KEY"),
+			SecretKey: os.Getenv("RUSHES_ARK_SECRET_KEY"),
+			BaseURL:   os.Getenv("RUSHES_ARK_BASE_URL"),
+			Region:    os.Getenv("RUSHES_ARK_REGION"),
+			Model:     os.Getenv("RUSHES_ARK_VISION_MODEL"),
+			Timeout:   180 * time.Second,
 		})
 		if modelErr != nil {
 			return modelErr
