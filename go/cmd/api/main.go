@@ -18,6 +18,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/agent"
 	"github.com/nanzhi84/Rushes/go/internal/api"
 	"github.com/nanzhi84/Rushes/go/internal/config"
+	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
@@ -52,6 +53,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	media.ConfigureFFmpegSandbox(
+		[]string{database.Paths.Objects, database.Paths.Temporary, database.Paths.Segments, database.Paths.Cache},
+		[]string{database.Paths.Temporary},
+	)
 	defer func() {
 		if closeErr := database.Close(); closeErr != nil {
 			slog.Error("关闭数据库失败", "error", closeErr)

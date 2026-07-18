@@ -27,6 +27,7 @@ export const ALL_EVENT_TYPES = [
   "JobFailed",
   "JobCancelled",
   "ProxyGenerated",
+  "PeaksGenerated",
   "JobProgress",
   "PreviewViewed"
 ] as const;
@@ -54,6 +55,7 @@ const ASSET_EVENTS = [
   "AssetLinked",
   "AssetUnlinked",
   "ProxyGenerated",
+  "PeaksGenerated",
   "MaterialUnderstandingStarted",
   "MaterialUnderstandingCompleted",
   "MaterialUnderstandingFailed"

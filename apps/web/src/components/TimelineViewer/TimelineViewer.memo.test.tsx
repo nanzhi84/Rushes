@@ -6,21 +6,6 @@ import { TimelineViewer } from "./TimelineViewer";
 import type { TimelineJson } from "./TimelineViewer";
 import { DiffusionPreviewPlayer } from "../PreviewPlayer";
 
-// wavesurfer 在 jsdom 下需打桩，避免真实音频解码。
-const waveSurferMock = vi.hoisted(() => ({
-  create: vi.fn(() => ({
-    on: vi.fn(),
-    un: vi.fn(),
-    exportPeaks: vi.fn(() => [[]]),
-    getDuration: vi.fn(() => 3),
-    destroy: vi.fn()
-  }))
-}));
-
-vi.mock("wavesurfer.js", () => ({
-  default: { create: waveSurferMock.create }
-}));
-
 function timelineFixture(): TimelineJson {
   return {
     fps: 30,

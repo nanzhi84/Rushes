@@ -529,6 +529,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/media/{asset_id}/peaks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Media Peaks */
+        get: operations["media_peaks_api_media__asset_id__peaks_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        /** Media Peaks */
+        head: operations["media_peaks_api_media__asset_id__peaks_head"];
+        patch?: never;
+        trace?: never;
+    };
     "/api/media/{asset_id}/proxy": {
         parameters: {
             query?: never;
@@ -1034,6 +1052,8 @@ export interface components {
             } | null;
             /** Proxy Object Hash */
             proxy_object_hash: string | null;
+            /** Peaks Ready */
+            peaks_ready: boolean;
             /** Proxy Ready */
             proxy_ready: boolean;
             /** Rel Dir */
@@ -3799,6 +3819,118 @@ export interface operations {
             header?: never;
             path: {
                 preview_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    media_peaks_api_media__asset_id__peaks_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    media_peaks_api_media__asset_id__peaks_head: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                asset_id: string;
             };
             cookie?: never;
         };

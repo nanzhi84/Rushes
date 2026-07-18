@@ -22,6 +22,7 @@ type Asset struct {
 	Probe               map[string]any
 	ProxyObjectHash     *string
 	ThumbnailObjectHash *string
+	PeaksObjectHash     *string
 	IngestStatus        string
 	UnderstandingStatus string
 	Usable              bool
@@ -32,7 +33,7 @@ type Asset struct {
 const assetColumns = `
 a.asset_id, a.storage_mode, a.object_hash, a.reference_path, a.kind, a.source,
 a.filename, a.hash, a.mtime, a.size, a.probe_json, a.proxy_object_hash,
-a.thumbnail_object_hash, a.ingest_status, a.understanding_status, a.usable,
+a.thumbnail_object_hash, a.peaks_object_hash, a.ingest_status, a.understanding_status, a.usable,
 a.failure_json`
 
 func GetAsset(ctx context.Context, query Querier, assetID string) (Asset, error) {
@@ -64,14 +65,14 @@ func ListDraftAssets(ctx context.Context, query Querier, draftID string) ([]Asse
 
 func scanAsset(row rowScanner, relDir *sql.NullString) (Asset, error) {
 	var asset Asset
-	var objectHash, referencePath, proxyHash, thumbnailHash sql.NullString
+	var objectHash, referencePath, proxyHash, thumbnailHash, peaksHash sql.NullString
 	var mtimeInteger sql.NullInt64
 	var probe, failure sql.NullString
 	var usable int
 	destinations := []any{
 		&asset.ID, &asset.StorageMode, &objectHash, &referencePath, &asset.Kind, &asset.Source,
 		&asset.Filename, &asset.Hash, &mtimeInteger, &asset.Size, &probe, &proxyHash,
-		&thumbnailHash, &asset.IngestStatus, &asset.UnderstandingStatus, &usable, &failure,
+		&thumbnailHash, &peaksHash, &asset.IngestStatus, &asset.UnderstandingStatus, &usable, &failure,
 	}
 	if relDir != nil {
 		destinations = append(destinations, relDir)
@@ -86,6 +87,7 @@ func scanAsset(row rowScanner, relDir *sql.NullString) (Asset, error) {
 	asset.ReferencePath = stringPointer(referencePath)
 	asset.ProxyObjectHash = stringPointer(proxyHash)
 	asset.ThumbnailObjectHash = stringPointer(thumbnailHash)
+	asset.PeaksObjectHash = stringPointer(peaksHash)
 	if mtimeInteger.Valid {
 		value := mtimeInteger.Int64
 		asset.MTime = &value

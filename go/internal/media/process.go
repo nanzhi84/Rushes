@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -90,7 +91,9 @@ func injectProtocolWhitelist(name string, args []string) []string {
 }
 
 func RunCommand(ctx context.Context, name string, args ...string) (CommandResult, error) {
-	command := exec.CommandContext(ctx, name, injectProtocolWhitelist(name, args)...)
+	plan := planSandbox(name, injectProtocolWhitelist(name, args))
+	defer plan.cleanup()
+	command := exec.CommandContext(ctx, plan.name, plan.args...)
 	configureProcess(command)
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
@@ -112,7 +115,9 @@ func RunFFmpegProgress(
 	onProgress func(Progress),
 ) error {
 	progressArgs := append([]string{"-progress", "pipe:1", "-nostats", "-loglevel", "error"}, args...)
-	command := exec.CommandContext(ctx, ffmpeg, injectProtocolWhitelist(ffmpeg, progressArgs)...)
+	plan := planSandbox(ffmpeg, injectProtocolWhitelist(ffmpeg, progressArgs))
+	defer plan.cleanup()
+	command := exec.CommandContext(ctx, plan.name, plan.args...)
 	configureProcess(command)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -154,6 +159,54 @@ func RunFFmpegProgress(
 		return &CommandError{
 			Name: ffmpeg, Stderr: stderrSummary(stderr.String()), Err: waitErr,
 		}
+	}
+	return nil
+}
+
+// RunFFmpegLines streams ffmpeg stdout to onLine line by line without buffering
+// the whole output. If onLine returns false the caller has enough and ffmpeg is
+// stopped early (context canceled, process killed) — memory stays O(1) in the
+// output size. Early stop returns nil; a real ffmpeg failure returns *CommandError.
+func RunFFmpegLines(
+	ctx context.Context,
+	ffmpeg string,
+	args []string,
+	onLine func(line string) bool,
+) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	command := exec.CommandContext(ctx, ffmpeg, injectProtocolWhitelist(ffmpeg, args)...)
+	configureProcess(command)
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		return err
+	}
+	stopped := false
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		if !onLine(scanner.Text()) {
+			stopped = true
+			cancel()
+			break
+		}
+	}
+	// 排空管道，避免子进程在被 kill 前阻塞在写；随后 Wait 回收。
+	_, _ = io.Copy(io.Discard, stdout)
+	waitErr := command.Wait()
+	if stopped {
+		return nil
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		return scanErr
+	}
+	if waitErr != nil {
+		return &CommandError{Name: ffmpeg, Stderr: stderrSummary(stderr.String()), Err: waitErr}
 	}
 	return nil
 }

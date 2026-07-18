@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/config"
+	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
@@ -44,6 +45,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	media.ConfigureFFmpegSandbox(
+		[]string{database.Paths.Objects, database.Paths.Temporary, database.Paths.Segments, database.Paths.Cache},
+		[]string{database.Paths.Temporary},
+	)
 	defer func() { _ = database.Close() }()
 	registry := worker.NewRegistry()
 	if err := worker.RegisterIngest(registry, database); err != nil {

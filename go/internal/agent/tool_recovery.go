@@ -159,7 +159,7 @@ func canonicalToolArguments(arguments string) string {
 	return strings.TrimSpace(arguments)
 }
 
-func newToolRecoveryMiddleware() compose.ToolMiddleware {
+func newToolRecoveryMiddleware(retrySafe func(string) bool) compose.ToolMiddleware {
 	return compose.ToolMiddleware{
 		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
@@ -224,7 +224,7 @@ func newToolRecoveryMiddleware() compose.ToolMiddleware {
 				for {
 					attempts++
 					output, err = next(ctx, input)
-					if err == nil || !toolErrorCanRetry(input.Name, err) || attempts > maxToolExecutionRetries {
+					if err == nil || !toolErrorCanRetry(retrySafe, input.Name, err) || attempts > maxToolExecutionRetries {
 						break
 					}
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -250,7 +250,7 @@ func newToolRecoveryMiddleware() compose.ToolMiddleware {
 					if !reportFinished {
 						reportFinished, reportErr = true, err
 					}
-					raw := executionErrorOutput(input.Name, err, attempts, toolErrorCanRetry(input.Name, err))
+					raw := executionErrorOutput(input.Name, err, attempts, toolErrorCanRetry(retrySafe, input.Name, err))
 					return &compose.ToolOutput{Result: decorateToolFailure(ctx, input, raw, attempts)}, nil
 				}
 				if output == nil {
@@ -392,23 +392,33 @@ func isStructuredToolFailure(raw string) bool {
 	return payload.Status == "failed" || payload.Status == "validation_failed"
 }
 
-func toolCanRetrySafely(name string) bool {
-	switch name {
-	case "asset.list_assets", "media.search_shots", "audio.analyze_beats", "audio.analyze_speech_pauses", "speech.inspect",
-		"timeline.inspect", "timeline.validate", "render.status", "render.inspect_preview":
-		return true
-	default:
-		// 写时间线、创建决策、排队理解/渲染等调用不能在提交状态未知时盲目重放。
-		return false
+// retrySafeFromEffect 从工具注册表的 Effect 分级派生「瞬时失败可重试」白名单（#103 G1），
+// 取代此前硬编码的九工具白名单。只读工具一律重试安全；timeline.validate 与 speech.inspect
+// 虽被归为 EffectReversible，却仍然重试安全——两者都经事务型 reducer 按稳定键落盘，顺序
+// 重放幂等，重试瞬时失败不会重复提交已生效状态。该白名单刻意宽于 G3 的只读并发集合（后者
+// 必须严格 EffectReadOnly）：重试是顺序执行，speech.inspect「并发首调重复建索引」这一
+// 使它无法归 EffectReadOnly 的隐患在顺序重试下并不成立。
+func retrySafeFromEffect(effectOf func(string) (rushestools.Effect, bool)) func(string) bool {
+	return func(name string) bool {
+		if effect, ok := effectOf(name); ok && effect == rushestools.EffectReadOnly {
+			return true
+		}
+		switch name {
+		case "timeline.validate", "speech.inspect":
+			return true
+		default:
+			// 写时间线、创建决策、排队理解/渲染等调用不能在提交状态未知时盲目重放。
+			return false
+		}
 	}
 }
 
-// toolErrorCanRetry intentionally requires both an idempotent/read-only tool and
-// a recognisably transient failure. Retrying invalid JSON, schema violations,
-// missing IDs or failed preconditions with identical arguments cannot heal and
-// only hides useful feedback from the model.
-func toolErrorCanRetry(name string, err error) bool {
-	if err == nil || !toolCanRetrySafely(name) ||
+// toolErrorCanRetry intentionally requires both a retry-safe tool (derived from
+// the registry Effect classification) and a recognisably transient failure.
+// Retrying invalid JSON, schema violations, missing IDs or failed preconditions
+// with identical arguments cannot heal and only hides useful feedback from the model.
+func toolErrorCanRetry(retrySafe func(string) bool, name string, err error) bool {
+	if err == nil || !retrySafe(name) ||
 		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}

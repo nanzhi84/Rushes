@@ -1,5 +1,5 @@
 import { fireEvent, render } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TimelineViewer } from "../components/TimelineViewer";
 import {
   makeStressMessages,
@@ -7,19 +7,13 @@ import {
   makeStressWaveformPeaks
 } from "../test/fixtures/stressDraft";
 
-const waveSurferMock = vi.hoisted(() => ({
-  create: vi.fn(() => ({
-    on: vi.fn(),
-    un: vi.fn(),
-    exportPeaks: vi.fn(() => [[]]),
-    getDuration: vi.fn(() => 3),
-    destroy: vi.fn()
-  }))
-}));
-
-vi.mock("wavesurfer.js", () => ({
-  default: { create: waveSurferMock.create }
-}));
+beforeEach(() => {
+  // 音频轨会请求后端 peaks；桩成 404，回退纯色块占位，不触真实网络（与波形节点数无关）。
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(() => Promise.resolve({ ok: false, status: 404 } as Response))
+  );
+});
 
 function stubSyncRaf(): void {
   vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {

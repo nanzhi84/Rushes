@@ -1702,6 +1702,7 @@ function videoAssetFixture(): Record<string, unknown> {
     proxy_object_hash: null,
     proxy_ready: true,
     thumbnail_ready: true,
+    peaks_ready: false,
     invalid: false,
     failure: null,
     jobs: []

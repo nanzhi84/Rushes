@@ -39,6 +39,14 @@ func (server *Server) MediaThumbnailApiMediaAssetIdThumbnailHead(writer http.Res
 	server.serveAssetMedia(writer, request, assetID, "thumbnail")
 }
 
+func (server *Server) MediaPeaksApiMediaAssetIdPeaksGet(writer http.ResponseWriter, request *http.Request, assetID string) {
+	server.serveAssetMedia(writer, request, assetID, "peaks")
+}
+
+func (server *Server) MediaPeaksApiMediaAssetIdPeaksHead(writer http.ResponseWriter, request *http.Request, assetID string) {
+	server.serveAssetMedia(writer, request, assetID, "peaks")
+}
+
 func (server *Server) serveAssetMedia(writer http.ResponseWriter, request *http.Request, assetID, variant string) {
 	asset, err := storage.GetAsset(request.Context(), server.database.Read(), assetID)
 	if errors.Is(err, storage.ErrNotFound) {
@@ -72,6 +80,9 @@ func (server *Server) serveAssetMedia(writer http.ResponseWriter, request *http.
 	case "thumbnail":
 		path, err = storage.ObjectPathByHash(server.database.Paths, asset.ThumbnailObjectHash)
 		contentType = "image/jpeg"
+	case "peaks":
+		path, err = storage.ObjectPathByHash(server.database.Paths, asset.PeaksObjectHash)
+		contentType = "application/json"
 	}
 	if err != nil || path == "" {
 		writeNotFound(writer, variant+"_not_ready")

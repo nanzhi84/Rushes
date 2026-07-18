@@ -370,8 +370,8 @@ export const api = {
     return apiFetch<FsListResponse>(`/api/fs/list?${params.toString()}`);
   },
 
-  // media 族 URL 由浏览器原生 <img>/<video>/wavesurfer 直连，设不了 Authorization header，
-  // 统一带 query token（Go 鉴权中间件对白名单媒体 GET/HEAD 放行，语义同 SSE）。
+  // media 族 URL 由浏览器原生 <img>/<video> 直连（peaks 也走同一带 token 的 URL fetch），
+  // 设不了 Authorization header，统一带 query token（Go 鉴权中间件对白名单媒体 GET/HEAD 放行，语义同 SSE）。
   // 素材试看优先直连原片（导入即刻可播，浏览器硬解 H.264/HEVC）；原片播不动时前端回落 proxy。
   mediaSourceUrl(assetId: string): string {
     return withQueryToken(`/api/media/${encodeURIComponent(assetId)}/source`);
@@ -383,6 +383,10 @@ export const api = {
 
   mediaThumbnailUrl(assetId: string): string {
     return withQueryToken(`/api/media/${encodeURIComponent(assetId)}/thumbnail`);
+  },
+
+  mediaPeaksUrl(assetId: string): string {
+    return withQueryToken(`/api/media/${encodeURIComponent(assetId)}/peaks`);
   },
 
   mediaPreviewUrl(previewId: string): string {

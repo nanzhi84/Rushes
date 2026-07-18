@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 18
+const schemaVersion = 19
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS assets (
     probe_json TEXT,
     proxy_object_hash TEXT REFERENCES objects(hash),
     thumbnail_object_hash TEXT REFERENCES objects(hash),
+    peaks_object_hash TEXT REFERENCES objects(hash),
     ingest_status TEXT NOT NULL,
     understanding_status TEXT NOT NULL DEFAULT 'none',
     usable INTEGER NOT NULL DEFAULT 1,
@@ -460,10 +461,14 @@ const schemaV16 = `ALTER TABLE user_memories ADD COLUMN last_used_at TEXT`
 // panel badge "手动修订" distinctly from model-written memories.
 const schemaV17 = `ALTER TABLE user_memories ADD COLUMN manually_revised_at TEXT`
 
-// schemaV18 snapshots, per resend, the long-term memories whose grounding fell in
+// schemaV18 attaches precomputed audio waveform peaks (min/max pairs) to assets.
+// Historical rows stay NULL and fall back to on-demand client decoding.
+const schemaV18 = `ALTER TABLE assets ADD COLUMN peaks_object_hash TEXT REFERENCES objects(hash)`
+
+// schemaV19 snapshots, per resend, the long-term memories whose grounding fell in
 // the rolled-back conversation (evidence rewound and created within the range).
 // Persisting the {key,statement} list in the same transaction as the rewind keeps
 // the idempotent replay response byte-identical to the first response, so a retried
 // resend re-renders the exact same "retract these memories" card. Historical rows
 // stay NULL and read back as an empty list.
-const schemaV18 = `ALTER TABLE rewind_restore_requests ADD COLUMN affected_memories_json TEXT`
+const schemaV19 = `ALTER TABLE rewind_restore_requests ADD COLUMN affected_memories_json TEXT`
