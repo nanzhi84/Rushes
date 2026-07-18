@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AssistantThread } from "./AssistantThread";
 import type { ConsoleAssistantMessage, ConsoleExternalStoreRuntime } from "./runtime";
@@ -48,7 +48,7 @@ describe("AssistantThread 流式渲染降级与虚拟化", () => {
     expect(container.querySelector('[data-streaming="true"]')).toBeTruthy();
   });
 
-  it("落库后的助手消息一次性 Markdown 化", () => {
+  it("落库后的助手消息一次性 Markdown 化", async () => {
     const completed: ConsoleAssistantMessage = {
       id: "a1",
       role: "assistant",
@@ -58,8 +58,10 @@ describe("AssistantThread 流式渲染降级与虚拟化", () => {
     };
     const { container } = renderThread([completed]);
 
-    // 历史消息（streaming=false）走 Markdown：加粗被解析成 <strong>，不再是裸 **。
-    expect(container.querySelector(".md-body strong")?.textContent).toBe("加粗");
+    // 历史消息（streaming=false）走 Markdown（懒加载，等按需 chunk 就绪）：加粗解析成 <strong>。
+    await waitFor(() =>
+      expect(container.querySelector(".md-body strong")?.textContent).toBe("加粗")
+    );
     expect(screen.queryByText("**加粗** 收尾")).toBeNull();
   });
 

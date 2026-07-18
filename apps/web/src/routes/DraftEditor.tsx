@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement } from "react";
 import {
   Captions,
@@ -129,6 +129,9 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
 
   const timelinePayload = timelineQuery.data ?? null;
   const editorTimeline = editorSnapshot?.timeline ?? timelinePayload?.timeline ?? null;
+  // 时间线渲染让位于紧急交互：缩放/流式高频提交时，React 可中断这棵较重的子树，
+  // 用上一份时间线继续绘制，避免阻塞输入。仅用于喂 TimelineViewer，handler 仍用 editorTimeline。
+  const deferredEditorTimeline = useDeferredValue(editorTimeline);
   const previewSrc = timelinePayload?.preview_id
     ? api.mediaPreviewUrl(timelinePayload.preview_id)
     : null;
@@ -218,7 +221,9 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     // 编辑逻辑，避免整棵工作台以 10fps 重渲染并反过来阻塞解码/绘制。
     if (now - previous.at >= 500 || Math.abs(sec - previous.sec) >= 5) {
       lastPlayheadCommitRef.current = { at: now, sec };
-      setPlayheadSec(sec);
+      // 播放头的可见推进走命令式 DOM；这里只是低频把秒数同步给吸附候选等编辑逻辑，
+      // 标记为非紧急，播放期间不与解码/绘制争抢主线程。
+      startTransition(() => setPlayheadSec(sec));
     }
   }, []);
   // 单击瓦片试看；再点已选中瓦片取消，回到成片/占位。
@@ -229,24 +234,30 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const handleTimelineSeek = useCallback((sec: number) => {
     playheadSecRef.current = sec;
     setSeekSec(sec);
-    setPlayheadSec(sec);
+    // 预览 seek（setSeekSec）与命令式播放头保持紧急；React 侧秒数同步为非紧急。
+    startTransition(() => setPlayheadSec(sec));
     timelineViewerRef.current?.setPlayheadSec(sec, false);
     if (playheadTimecodeRef.current) {
       playheadTimecodeRef.current.textContent = formatTimecode(sec);
     }
   }, []);
+  // 缩放会让整条时间线以新几何重排（clip 多时重）；用 transition 标记为非紧急，
+  // 缩放期间输入/滚动不被这次重排阻塞（React19 并发调度）。
+  const commitZoom = useCallback((next: number | ((current: number) => number)) => {
+    startTransition(() => setPxPerSec(next));
+  }, []);
   const zoomOutTimeline = useCallback(() => {
-    setPxPerSec((current) => {
+    commitZoom((current) => {
       const lower = [...TIMELINE_ZOOM_LEVELS].reverse().find((level) => level < current);
       return lower ?? current;
     });
-  }, []);
+  }, [commitZoom]);
   const zoomInTimeline = useCallback(() => {
-    setPxPerSec((current) => {
+    commitZoom((current) => {
       const higher = TIMELINE_ZOOM_LEVELS.find((level) => level > current);
       return higher ?? current;
     });
-  }, []);
+  }, [commitZoom]);
   const fitTimeline = useCallback(() => {
     const body = timelineBodyRef.current;
     const timeline = timelineQuery.data?.timeline;
@@ -259,13 +270,13 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
       return;
     }
     const available = body.clientWidth - TIMELINE_LABEL_WIDTH - 16;
-    setPxPerSec(
+    commitZoom(
       Math.min(
         TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1],
         Math.max(TIMELINE_ZOOM_LEVELS[0], Math.floor(available / durationSec))
       )
     );
-  }, [timelineQuery.data?.timeline]);
+  }, [commitZoom, timelineQuery.data?.timeline]);
   const handleClipClick = useCallback(
     (clipId: string) => {
       setSelectedClipId(clipId);
@@ -726,7 +737,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
                   max={TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1]}
                   step={1}
                   value={pxPerSec}
-                  onChange={(event) => setPxPerSec(Number(event.target.value))}
+                  onChange={(event) => commitZoom(Number(event.target.value))}
                 />
                 <span className="w-12 text-center text-2xs tabular-nums text-fg-faint">
                   {pxPerSec} px/s
@@ -768,14 +779,14 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
               ) : editorTimeline ? (
                 <TimelineViewer
                   ref={timelineViewerRef}
-                  timeline={editorTimeline}
+                  timeline={deferredEditorTimeline ?? editorTimeline}
                   pxPerSec={pxPerSec}
                   playheadSec={playheadSec}
                   selectedClipId={selectedClipId}
                   onClipClick={handleClipClick}
                   onDeselect={handleTimelineDeselect}
                   onSeek={handleTimelineSeek}
-                  onZoomChange={setPxPerSec}
+                  onZoomChange={commitZoom}
                   editMode={editMode}
                   dropMode={dropMode}
                   snapEnabled={snapEnabled}
