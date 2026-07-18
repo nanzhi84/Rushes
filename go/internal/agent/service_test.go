@@ -993,9 +993,9 @@ func TestCompletedPreviewObservationIncludesStructuredVerificationReport(t *test
 	if err != nil || applyResult.Status != reducer.StatusApplied {
 		t.Fatalf("preview status=%s err=%v", applyResult.Status, err)
 	}
-	report, err := service.executor.PreviewVerificationReport(t.Context(), "draft_job_report", map[string]any{"artifact_id": "preview_report"})
-	if err != nil {
-		t.Fatal(err)
+	skip, report := service.executor.PreviewVerification(t.Context(), "draft_job_report", map[string]any{"artifact_id": "preview_report"})
+	if skip {
+		t.Fatal("preview 尚未质检，PreviewVerification 不应返回 skip")
 	}
 	encodedReport, err := json.Marshal(report)
 	if err != nil {

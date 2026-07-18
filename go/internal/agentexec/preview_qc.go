@@ -16,7 +16,7 @@ func (exec *Executor) PreviewVerification(ctx context.Context, draftID string, d
 	if exec.PreviewAlreadyInspected(ctx, draftID, details) {
 		return true, nil
 	}
-	report, reportErr := exec.PreviewVerificationReport(ctx, draftID, details)
+	report, reportErr := exec.previewVerificationReport(ctx, draftID, details)
 	if reportErr != nil {
 		slog.Warn("预览自动质检失败", "draft_id", draftID, "error", reportErr)
 		report = degradedPreviewVerificationReport(details)
@@ -68,7 +68,7 @@ func (exec *Executor) PreviewAlreadyInspected(ctx context.Context, draftID strin
 	return false
 }
 
-func (exec *Executor) PreviewVerificationReport(
+func (exec *Executor) previewVerificationReport(
 	ctx context.Context,
 	draftID string,
 	result any,
