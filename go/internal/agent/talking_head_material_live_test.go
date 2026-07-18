@@ -14,6 +14,7 @@ import (
 	"time"
 
 	einotool "github.com/cloudwego/eino/components/tool"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -320,7 +321,7 @@ func semanticWordRange(
 	target string,
 	maxDurationFrames int,
 ) (string, string, bool) {
-	target = normalizeSpeechText(target)
+	target = agentexec.NormalizeSpeechText(target)
 	for start := range words {
 		text := ""
 		for end := start; end < len(words); end++ {
@@ -328,7 +329,7 @@ func semanticWordRange(
 				break
 			}
 			text += words[end].Text + words[end].Punctuation
-			if strings.Contains(normalizeSpeechText(text), target) {
+			if strings.Contains(agentexec.NormalizeSpeechText(text), target) {
 				return words[start].WordID, words[end].WordID, true
 			}
 		}

@@ -1,32 +1,28 @@
 package agentexec
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
-	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
-	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
-type talkingHeadRange struct {
+type TalkingHeadRange struct {
 	Start int
 	End   int
 }
 
 const (
 	maxTalkingHeadUnvoicedBridgeFrames = 12
-	minTalkingHeadPauseCandidateFrames = 12
-	minTalkingHeadPauseResidualFrames  = 5
-	minTalkingHeadBrollDurationFrames  = timeline.DefaultFPS / 2
+	MinTalkingHeadPauseCandidateFrames = 12
+	MinTalkingHeadPauseResidualFrames  = 5
+	MinTalkingHeadBrollDurationFrames  = timeline.DefaultFPS / 2
 )
 
-func attachTalkingHeadUnreviewedEvidence(
+func AttachTalkingHeadUnreviewedEvidence(
 	result *rushestools.ToolResult,
 	pauses []rushestools.SpeechPauseEvidence,
 	repetitions []rushestools.SpeechRepetitionEvidence,
@@ -47,9 +43,9 @@ func attachTalkingHeadUnreviewedEvidence(
 	)
 }
 
-func expandTalkingHeadPauseDecisions(
+func ExpandTalkingHeadPauseDecisions(
 	input rushestools.TalkingHeadEditInput,
-	pauseByID map[string]speechPause,
+	pauseByID map[string]SpeechPause,
 ) (rushestools.TalkingHeadEditInput, map[string]struct{}, []map[string]any) {
 	input.RemovePauseIDs = append([]string(nil), input.RemovePauseIDs...)
 	directRemovals := make(map[string]struct{}, len(input.RemovePauseIDs))
@@ -87,7 +83,7 @@ func expandTalkingHeadPauseDecisions(
 	return input, seen, invalid
 }
 
-func expandTalkingHeadRepetitionDecisions(
+func ExpandTalkingHeadRepetitionDecisions(
 	input rushestools.TalkingHeadEditInput,
 	repetitionByID map[string]rushestools.SpeechRepetitionEvidence,
 ) (rushestools.TalkingHeadEditInput, map[string]struct{}, []map[string]any) {
@@ -142,7 +138,7 @@ type talkingHeadFragmentExpansion struct {
 	Invalid          []map[string]any
 }
 
-func expandTalkingHeadFragmentDecisions(
+func ExpandTalkingHeadFragmentDecisions(
 	input rushestools.TalkingHeadEditInput,
 	fragmentByID map[string]rushestools.SpeechFragmentEvidence,
 ) talkingHeadFragmentExpansion {
@@ -190,20 +186,20 @@ func expandTalkingHeadFragmentDecisions(
 	}
 }
 
-func validRestartFragmentPreserveReason(
+func ValidRestartFragmentPreserveReason(
 	fragment rushestools.SpeechFragmentEvidence,
 	reason string,
 ) bool {
-	normalizedReason := normalizeSpeechText(reason)
-	normalizedFragment := normalizeSpeechText(fragment.Text)
-	normalizedAnchor := normalizeSpeechText(fragment.RestartAnchorText)
+	normalizedReason := NormalizeSpeechText(reason)
+	normalizedFragment := NormalizeSpeechText(fragment.Text)
+	normalizedAnchor := NormalizeSpeechText(fragment.RestartAnchorText)
 	return len([]rune(normalizedReason)) >= 20 && normalizedFragment != "" && normalizedAnchor != "" &&
 		strings.Contains(normalizedReason, normalizedFragment) &&
 		strings.Contains(normalizedReason, normalizedAnchor)
 }
 
-func talkingHeadRangeCoveredBy(target talkingHeadRange, ranges []talkingHeadRange) bool {
-	for _, value := range mergeTalkingHeadRanges(ranges) {
+func TalkingHeadRangeCoveredBy(target TalkingHeadRange, ranges []TalkingHeadRange) bool {
+	for _, value := range MergeTalkingHeadRanges(ranges) {
 		if value.Start <= target.Start && value.End >= target.End {
 			return true
 		}
@@ -211,14 +207,14 @@ func talkingHeadRangeCoveredBy(target talkingHeadRange, ranges []talkingHeadRang
 	return false
 }
 
-func resolveTalkingHeadPauseRanges(
-	pauses []speechPause,
-	semanticDeletions []talkingHeadRange,
+func ResolveTalkingHeadPauseRanges(
+	pauses []SpeechPause,
+	semanticDeletions []TalkingHeadRange,
 	minimumResidualFrames int,
-) (effective []speechPause, residualRanges []talkingHeadRange, redundant []speechPause) {
+) (effective []SpeechPause, residualRanges []TalkingHeadRange, redundant []SpeechPause) {
 	for _, pause := range pauses {
-		target := talkingHeadRange{Start: pause.DeleteStart, End: pause.DeleteEnd}
-		residuals := subtractTalkingHeadRanges(target, semanticDeletions)
+		target := TalkingHeadRange{Start: pause.DeleteStart, End: pause.DeleteEnd}
+		residuals := SubtractTalkingHeadRanges(target, semanticDeletions)
 		kept := residuals[:0]
 		for _, residual := range residuals {
 			if residual.End-residual.Start >= minimumResidualFrames {
@@ -232,33 +228,33 @@ func resolveTalkingHeadPauseRanges(
 		effective = append(effective, pause)
 		residualRanges = append(residualRanges, kept...)
 	}
-	return effective, mergeTalkingHeadRanges(residualRanges), redundant
+	return effective, MergeTalkingHeadRanges(residualRanges), redundant
 }
 
 // protectTalkingHeadOrphanFragments conservatively retracts only pause deletions
 // when they are the mechanical reason retained speech would become a sub-2s
 // island. Semantic removals remain model decisions and are never changed here.
-func protectTalkingHeadOrphanFragments(
-	semanticDeletions []talkingHeadRange,
-	selectedPauses []speechPause,
-	detectedPauses []speechPause,
-	retainedSpeech []talkingHeadRange,
-	utterances []speechUtterance,
+func ProtectTalkingHeadOrphanFragments(
+	semanticDeletions []TalkingHeadRange,
+	selectedPauses []SpeechPause,
+	detectedPauses []SpeechPause,
+	retainedSpeech []TalkingHeadRange,
+	utterances []SpeechUtterance,
 	removedUtterances map[string]struct{},
 	removedWords map[string]struct{},
 	clip timeline.Clip,
-	misspeakEvidence []talkingHeadEvidenceRange,
+	misspeakEvidence []TalkingHeadEvidenceRange,
 ) (
-	effectivePauses []speechPause,
-	effectivePauseRanges []talkingHeadRange,
-	sourceDeleteRanges []talkingHeadRange,
-	autoPreservedPauses []speechPause,
+	effectivePauses []SpeechPause,
+	effectivePauseRanges []TalkingHeadRange,
+	sourceDeleteRanges []TalkingHeadRange,
+	autoPreservedPauses []SpeechPause,
 	orphanFragments []map[string]any,
 ) {
-	remaining := append([]speechPause(nil), selectedPauses...)
+	remaining := append([]SpeechPause(nil), selectedPauses...)
 	autoPreservedIDs := map[string]struct{}{}
-	finalizeAutoPreserved := func() []speechPause {
-		result := make([]speechPause, 0, len(autoPreservedIDs))
+	finalizeAutoPreserved := func() []SpeechPause {
+		result := make([]SpeechPause, 0, len(autoPreservedIDs))
 		for _, pause := range selectedPauses {
 			if _, preserved := autoPreservedIDs[pause.ID]; preserved {
 				result = append(result, pause)
@@ -268,30 +264,30 @@ func protectTalkingHeadOrphanFragments(
 	}
 
 	for attempt := 0; attempt <= len(selectedPauses); attempt++ {
-		effectivePauses, effectivePauseRanges, _ = resolveTalkingHeadPauseRanges(
-			remaining, semanticDeletions, minTalkingHeadPauseResidualFrames,
+		effectivePauses, effectivePauseRanges, _ = ResolveTalkingHeadPauseRanges(
+			remaining, semanticDeletions, MinTalkingHeadPauseResidualFrames,
 		)
-		sourceDeleteRanges = append([]talkingHeadRange(nil), semanticDeletions...)
+		sourceDeleteRanges = append([]TalkingHeadRange(nil), semanticDeletions...)
 		sourceDeleteRanges = append(sourceDeleteRanges, effectivePauseRanges...)
-		sourceDeleteRanges = mergeTalkingHeadRanges(sourceDeleteRanges)
+		sourceDeleteRanges = MergeTalkingHeadRanges(sourceDeleteRanges)
 
-		bridgePauses := make([]speechPause, 0, len(detectedPauses))
+		bridgePauses := make([]SpeechPause, 0, len(detectedPauses))
 		for _, pause := range detectedPauses {
 			if _, preserved := autoPreservedIDs[pause.ID]; !preserved {
 				bridgePauses = append(bridgePauses, pause)
 			}
 		}
-		sourceDeleteRanges = bridgeTalkingHeadRanges(
+		sourceDeleteRanges = BridgeTalkingHeadRanges(
 			sourceDeleteRanges, retainedSpeech, bridgePauses, maxTalkingHeadUnvoicedBridgeFrames,
 		)
-		sourceDeleteRanges = absorbTalkingHeadEdgeSlivers(
+		sourceDeleteRanges = AbsorbTalkingHeadEdgeSlivers(
 			sourceDeleteRanges, retainedSpeech,
 			clip.SourceStartFrame, clip.SourceEndFrame, maxTalkingHeadUnvoicedBridgeFrames,
 		)
-		orphanFragments = talkingHeadOrphanSpeechFragments(
+		orphanFragments = TalkingHeadOrphanSpeechFragments(
 			sourceDeleteRanges, retainedSpeech, utterances,
 			removedUtterances, removedWords, effectivePauses,
-			clip.SourceStartFrame, clip.SourceEndFrame, minTalkingHeadRetainedIslandFrames,
+			clip.SourceStartFrame, clip.SourceEndFrame, MinTalkingHeadRetainedIslandFrames,
 			misspeakEvidence,
 		)
 		if len(orphanFragments) == 0 {
@@ -299,7 +295,7 @@ func protectTalkingHeadOrphanFragments(
 				finalizeAutoPreserved(), nil
 		}
 
-		effectiveByID := make(map[string]speechPause, len(effectivePauses))
+		effectiveByID := make(map[string]SpeechPause, len(effectivePauses))
 		for _, pause := range effectivePauses {
 			effectiveByID[pause.ID] = pause
 		}
@@ -308,7 +304,7 @@ func protectTalkingHeadOrphanFragments(
 			adjacentPauseIDs, _ := fragment["adjacent_pause_ids"].([]string)
 			bestFound := false
 			bestCost := 0
-			bestPause := speechPause{}
+			bestPause := SpeechPause{}
 			for _, pauseID := range adjacentPauseIDs {
 				pause, exists := effectiveByID[pauseID]
 				if !exists {
@@ -330,7 +326,7 @@ func protectTalkingHeadOrphanFragments(
 				finalizeAutoPreserved(), orphanFragments
 		}
 
-		next := make([]speechPause, 0, len(remaining)-len(preserveNow))
+		next := make([]SpeechPause, 0, len(remaining)-len(preserveNow))
 		for _, pause := range remaining {
 			if _, preserve := preserveNow[pause.ID]; preserve {
 				autoPreservedIDs[pause.ID] = struct{}{}
@@ -349,28 +345,28 @@ func protectTalkingHeadOrphanFragments(
 		finalizeAutoPreserved(), orphanFragments
 }
 
-func talkingHeadPauseResidualFrames(pause speechPause, semanticDeletions []talkingHeadRange) int {
+func talkingHeadPauseResidualFrames(pause SpeechPause, semanticDeletions []TalkingHeadRange) int {
 	frames := 0
-	for _, residual := range subtractTalkingHeadRanges(
-		talkingHeadRange{Start: pause.DeleteStart, End: pause.DeleteEnd}, semanticDeletions,
+	for _, residual := range SubtractTalkingHeadRanges(
+		TalkingHeadRange{Start: pause.DeleteStart, End: pause.DeleteEnd}, semanticDeletions,
 	) {
-		if duration := residual.End - residual.Start; duration >= minTalkingHeadPauseResidualFrames {
+		if duration := residual.End - residual.Start; duration >= MinTalkingHeadPauseResidualFrames {
 			frames += duration
 		}
 	}
 	return frames
 }
 
-func subtractTalkingHeadRanges(
-	target talkingHeadRange,
-	exclusions []talkingHeadRange,
-) []talkingHeadRange {
+func SubtractTalkingHeadRanges(
+	target TalkingHeadRange,
+	exclusions []TalkingHeadRange,
+) []TalkingHeadRange {
 	if target.End <= target.Start {
 		return nil
 	}
 	cursor := target.Start
-	result := []talkingHeadRange{}
-	for _, exclusion := range mergeTalkingHeadRanges(exclusions) {
+	result := []TalkingHeadRange{}
+	for _, exclusion := range MergeTalkingHeadRanges(exclusions) {
 		if exclusion.End <= cursor {
 			continue
 		}
@@ -378,7 +374,7 @@ func subtractTalkingHeadRanges(
 			break
 		}
 		if exclusion.Start > cursor {
-			result = append(result, talkingHeadRange{
+			result = append(result, TalkingHeadRange{
 				Start: cursor,
 				End:   min(exclusion.Start, target.End),
 			})
@@ -389,12 +385,12 @@ func subtractTalkingHeadRanges(
 		}
 	}
 	if cursor < target.End {
-		result = append(result, talkingHeadRange{Start: cursor, End: target.End})
+		result = append(result, TalkingHeadRange{Start: cursor, End: target.End})
 	}
 	return result
 }
 
-func speechPauseIDs(pauses []speechPause) []string {
+func SpeechPauseIDs(pauses []SpeechPause) []string {
 	ids := make([]string, 0, len(pauses))
 	for _, pause := range pauses {
 		ids = append(ids, pause.ID)
@@ -402,11 +398,11 @@ func speechPauseIDs(pauses []speechPause) []string {
 	return ids
 }
 
-func talkingHeadRetainedPauseCandidates(
-	pauses []speechPause,
-	semanticDeletions []talkingHeadRange,
+func TalkingHeadRetainedPauseCandidates(
+	pauses []SpeechPause,
+	semanticDeletions []TalkingHeadRange,
 	clip timeline.Clip,
-	utterances []speechUtterance,
+	utterances []SpeechUtterance,
 	minimumDeleteFrames int,
 	limit int,
 ) []rushestools.SpeechPauseEvidence {
@@ -415,7 +411,7 @@ func talkingHeadRetainedPauseCandidates(
 	}
 	candidates := []rushestools.SpeechPauseEvidence{}
 	for _, pause := range pauses {
-		target := talkingHeadRange{Start: pause.DeleteStart, End: pause.DeleteEnd}
+		target := TalkingHeadRange{Start: pause.DeleteStart, End: pause.DeleteEnd}
 		if target.End-target.Start < minimumDeleteFrames ||
 			target.Start < clip.SourceStartFrame || target.End > clip.SourceEndFrame ||
 			talkingHeadRangeOverlapsAny(target, semanticDeletions) {
@@ -428,7 +424,7 @@ func talkingHeadRetainedPauseCandidates(
 			DeleteDurationFrames: pause.DeleteEnd - pause.DeleteStart,
 			DetectionMethod:      pause.Method,
 		}
-		populateSpeechPauseContext(&item, utterances)
+		PopulateSpeechPauseContext(&item, utterances)
 		candidates = append(candidates, item)
 	}
 	sort.SliceStable(candidates, func(left, right int) bool {
@@ -443,16 +439,16 @@ func talkingHeadRetainedPauseCandidates(
 	return candidates
 }
 
-func unresolvedTalkingHeadPauseDecisions(
-	pauses []speechPause,
-	semanticDeletions []talkingHeadRange,
+func UnresolvedTalkingHeadPauseDecisions(
+	pauses []SpeechPause,
+	semanticDeletions []TalkingHeadRange,
 	clip timeline.Clip,
-	utterances []speechUtterance,
+	utterances []SpeechUtterance,
 	decided map[string]struct{},
 	minimumDeleteFrames int,
 	limit int,
 ) []rushestools.SpeechPauseEvidence {
-	candidates := talkingHeadRetainedPauseCandidates(
+	candidates := TalkingHeadRetainedPauseCandidates(
 		pauses, semanticDeletions, clip, utterances, minimumDeleteFrames, limit,
 	)
 	result := make([]rushestools.SpeechPauseEvidence, 0, len(candidates))
@@ -465,7 +461,7 @@ func unresolvedTalkingHeadPauseDecisions(
 	return result
 }
 
-func talkingHeadPrimaryClip(document timeline.Document, id string) (timeline.Clip, bool) {
+func TalkingHeadPrimaryClip(document timeline.Document, id string) (timeline.Clip, bool) {
 	for _, track := range document.Tracks {
 		if track.TrackID != "visual_base" {
 			continue
@@ -481,10 +477,10 @@ func talkingHeadPrimaryClip(document timeline.Document, id string) (timeline.Cli
 
 // selectTalkingHeadUtterances 用交集解析选择待删句：证据与 clip 源区间交集非空即
 // 合法，删除范围裁剪到交集；仅当 ID 未知或交集为空（完全落在 clip 之外）才判非法。
-func selectTalkingHeadUtterances(
-	ids []string, values map[string]speechUtterance, clip timeline.Clip,
-) ([]talkingHeadRange, []string) {
-	selected := []talkingHeadRange{}
+func SelectTalkingHeadUtterances(
+	ids []string, values map[string]SpeechUtterance, clip timeline.Clip,
+) ([]TalkingHeadRange, []string) {
+	selected := []TalkingHeadRange{}
 	invalid := []string{}
 	seen := map[string]struct{}{}
 	for _, id := range ids {
@@ -503,21 +499,21 @@ func selectTalkingHeadUtterances(
 			invalid = append(invalid, id)
 			continue
 		}
-		selected = append(selected, talkingHeadRange{Start: start, End: end})
+		selected = append(selected, TalkingHeadRange{Start: start, End: end})
 	}
 	return selected, invalid
 }
 
-func selectTalkingHeadWordRanges(
+func SelectTalkingHeadWordRanges(
 	requested []rushestools.TalkingHeadWordRange,
-	words []speechWord,
+	words []SpeechWord,
 	clip timeline.Clip,
-) ([]talkingHeadRange, []string, []map[string]any) {
+) ([]TalkingHeadRange, []string, []map[string]any) {
 	wordIndex := make(map[string]int, len(words))
 	for index, word := range words {
 		wordIndex[word.ID] = index
 	}
-	ranges := []talkingHeadRange{}
+	ranges := []TalkingHeadRange{}
 	removedIDs := []string{}
 	invalid := []map[string]any{}
 	seenWords := map[string]struct{}{}
@@ -545,7 +541,7 @@ func selectTalkingHeadWordRanges(
 			})
 			continue
 		}
-		ranges = append(ranges, talkingHeadRange{Start: start, End: end})
+		ranges = append(ranges, TalkingHeadRange{Start: start, End: end})
 		for cursor := startIndex; cursor <= endIndex; cursor++ {
 			word := words[cursor]
 			if word.EndFrame <= start || word.StartFrame >= end {
@@ -558,15 +554,15 @@ func selectTalkingHeadWordRanges(
 			removedIDs = append(removedIDs, word.ID)
 		}
 	}
-	return mergeTalkingHeadRanges(ranges), removedIDs, invalid
+	return MergeTalkingHeadRanges(ranges), removedIDs, invalid
 }
 
 // selectTalkingHeadPauses 用交集解析选择待删气口：删除区间与 clip 源区间交集非空即
 // 合法，并把该气口的删除区间裁剪到交集；仅当 ID 未知或交集为空才判非法。
-func selectTalkingHeadPauses(
-	ids []string, values map[string]speechPause, clip timeline.Clip,
-) ([]speechPause, []string) {
-	selected := []speechPause{}
+func SelectTalkingHeadPauses(
+	ids []string, values map[string]SpeechPause, clip timeline.Clip,
+) ([]SpeechPause, []string) {
+	selected := []SpeechPause{}
 	invalid := []string{}
 	seen := map[string]struct{}{}
 	for _, id := range ids {
@@ -593,23 +589,23 @@ func selectTalkingHeadPauses(
 
 // talkingHeadEvidenceClipHints 为每条非法证据查询它在当前时间线上实际所属的 clip，
 // 让模型不必猜「该证据现在归哪个 clip」。未知 ID 或素材已不在时间线上的项没有提示。
-func talkingHeadEvidenceClipHints(
+func TalkingHeadEvidenceClipHints(
 	document timeline.Document,
 	assetID string,
 	invalidUtterances []string,
-	utteranceByID map[string]speechUtterance,
+	utteranceByID map[string]SpeechUtterance,
 	invalidWordRanges []map[string]any,
-	words []speechWord,
+	words []SpeechWord,
 	invalidPauses []string,
-	pauseByID map[string]speechPause,
+	pauseByID map[string]SpeechPause,
 ) []map[string]any {
-	wordByID := make(map[string]speechWord, len(words))
+	wordByID := make(map[string]SpeechWord, len(words))
 	for _, word := range words {
 		wordByID[word.ID] = word
 	}
 	hints := []map[string]any{}
 	appendHint := func(kind, id string, start, end int) {
-		if clipID, ok := talkingHeadSourceRangeClip(document, assetID, start, end); ok {
+		if clipID, ok := TalkingHeadSourceRangeClip(document, assetID, start, end); ok {
 			hints = append(hints, map[string]any{
 				"evidence_kind": kind, "evidence_id": id, "current_timeline_clip_id": clipID,
 			})
@@ -639,7 +635,7 @@ func talkingHeadEvidenceClipHints(
 
 // talkingHeadSourceRangeClip 在主视频轨上找到与给定源区间重叠最多的同素材 clip，
 // 作为「该证据当前位于哪个 clip」的建议。
-func talkingHeadSourceRangeClip(
+func TalkingHeadSourceRangeClip(
 	document timeline.Document, assetID string, start, end int,
 ) (string, bool) {
 	bestID := ""
@@ -662,29 +658,29 @@ func talkingHeadSourceRangeClip(
 	return bestID, bestID != ""
 }
 
-func talkingHeadAssignmentSourceRange(
+func TalkingHeadAssignmentSourceRange(
 	assignment rushestools.TalkingHeadBrollAssignment,
-	utterances map[string]speechUtterance,
-	words []speechWord,
+	utterances map[string]SpeechUtterance,
+	words []SpeechWord,
 	removedUtterances map[string]struct{},
 	removedWords map[string]struct{},
 	clip timeline.Clip,
-) (talkingHeadRange, error) {
+) (TalkingHeadRange, error) {
 	if assignment.ShotID == "" {
-		return talkingHeadRange{}, errors.New("缺少 shot_id")
+		return TalkingHeadRange{}, errors.New("缺少 shot_id")
 	}
 	wordMode := assignment.StartWordID != "" || assignment.EndWordID != ""
 	utteranceMode := assignment.StartUtteranceID != "" || assignment.EndUtteranceID != ""
 	if wordMode == utteranceMode {
-		return talkingHeadRange{}, errors.New("必须在 utterance 语义范围与 word 语义范围之间二选一")
+		return TalkingHeadRange{}, errors.New("必须在 utterance 语义范围与 word 语义范围之间二选一")
 	}
 	anchorText := strings.TrimSpace(assignment.AnchorText)
 	if wordMode && anchorText != "" {
-		return talkingHeadRange{}, errors.New("anchor_text 只能与 utterance 语义范围一起使用，不能再传 word_id")
+		return TalkingHeadRange{}, errors.New("anchor_text 只能与 utterance 语义范围一起使用，不能再传 word_id")
 	}
 	if utteranceMode {
 		if assignment.StartUtteranceID == "" {
-			return talkingHeadRange{}, errors.New("缺少 start_utterance_id")
+			return TalkingHeadRange{}, errors.New("缺少 start_utterance_id")
 		}
 		start, startOK := utterances[assignment.StartUtteranceID]
 		end := start
@@ -695,21 +691,21 @@ func talkingHeadAssignmentSourceRange(
 		_, startRemoved := removedUtterances[assignment.StartUtteranceID]
 		_, endRemoved := removedUtterances[assignment.EndUtteranceID]
 		if !startOK || !endOK || startRemoved || endRemoved || start.StartFrame > end.StartFrame {
-			return talkingHeadRange{}, errors.New("utterance_id 未知、已删除或逆序")
+			return TalkingHeadRange{}, errors.New("utterance_id 未知、已删除或逆序")
 		}
 		if start.StartFrame < clip.SourceStartFrame || end.EndFrame > clip.SourceEndFrame {
-			return talkingHeadRange{}, errors.New("utterance 语义范围不完整地落在指定 A-roll clip 内")
+			return TalkingHeadRange{}, errors.New("utterance 语义范围不完整地落在指定 A-roll clip 内")
 		}
 		if anchorText != "" {
-			return talkingHeadAnchorTextSourceRange(
+			return TalkingHeadAnchorTextSourceRange(
 				anchorText, start.StartFrame, end.EndFrame, utterances, words,
 				removedUtterances, removedWords,
 			)
 		}
-		return talkingHeadRange{Start: start.StartFrame, End: end.EndFrame}, nil
+		return TalkingHeadRange{Start: start.StartFrame, End: end.EndFrame}, nil
 	}
 	if assignment.StartWordID == "" {
-		return talkingHeadRange{}, errors.New("缺少 start_word_id")
+		return TalkingHeadRange{}, errors.New("缺少 start_word_id")
 	}
 	endWordID := assignment.EndWordID
 	if endWordID == "" {
@@ -722,41 +718,41 @@ func talkingHeadAssignmentSourceRange(
 	startIndex, startOK := wordIndex[assignment.StartWordID]
 	endIndex, endOK := wordIndex[endWordID]
 	if !startOK || !endOK || startIndex > endIndex {
-		return talkingHeadRange{}, errors.New("word_id 未知或逆序")
+		return TalkingHeadRange{}, errors.New("word_id 未知或逆序")
 	}
 	for index := startIndex; index <= endIndex; index++ {
 		if _, removed := removedWords[words[index].ID]; removed {
-			return talkingHeadRange{}, errors.New("word_id 已在本次删除范围内")
+			return TalkingHeadRange{}, errors.New("word_id 已在本次删除范围内")
 		}
 		for utteranceID := range removedUtterances {
 			utterance, exists := utterances[utteranceID]
 			if exists && words[index].StartFrame < utterance.EndFrame &&
 				utterance.StartFrame < words[index].EndFrame {
-				return talkingHeadRange{}, errors.New("word_id 属于本次已删除 utterance")
+				return TalkingHeadRange{}, errors.New("word_id 属于本次已删除 utterance")
 			}
 		}
 	}
 	start, end := words[startIndex].StartFrame, words[endIndex].EndFrame
 	if start < clip.SourceStartFrame || end > clip.SourceEndFrame {
-		return talkingHeadRange{}, errors.New("word 语义范围不完整地落在指定 A-roll clip 内")
+		return TalkingHeadRange{}, errors.New("word 语义范围不完整地落在指定 A-roll clip 内")
 	}
-	return talkingHeadRange{Start: start, End: end}, nil
+	return TalkingHeadRange{Start: start, End: end}, nil
 }
 
-func talkingHeadAnchorTextSourceRange(
+func TalkingHeadAnchorTextSourceRange(
 	anchorText string,
 	windowStart int,
 	windowEnd int,
-	utterances map[string]speechUtterance,
-	words []speechWord,
+	utterances map[string]SpeechUtterance,
+	words []SpeechWord,
 	removedUtterances map[string]struct{},
 	removedWords map[string]struct{},
-) (talkingHeadRange, error) {
-	target := []rune(normalizeSpeechText(anchorText))
+) (TalkingHeadRange, error) {
+	target := []rune(NormalizeSpeechText(anchorText))
 	if len(target) < 2 {
-		return talkingHeadRange{}, errors.New("anchor_text 过短，至少需要 2 个可检索字符")
+		return TalkingHeadRange{}, errors.New("anchor_text 过短，至少需要 2 个可检索字符")
 	}
-	windowWords := make([]speechWord, 0)
+	windowWords := make([]SpeechWord, 0)
 	blocked := make([]bool, 0)
 	for _, word := range words {
 		if word.EndFrame <= windowStart || word.StartFrame >= windowEnd {
@@ -779,13 +775,13 @@ func talkingHeadAnchorTextSourceRange(
 	characters := make([]rune, 0)
 	owners := make([]int, 0)
 	for index, word := range windowWords {
-		for _, character := range normalizeSpeechText(word.Text + word.Punctuation) {
+		for _, character := range NormalizeSpeechText(word.Text + word.Punctuation) {
 			characters = append(characters, character)
 			owners = append(owners, index)
 		}
 	}
 	if len(characters) < len(target) {
-		return talkingHeadRange{}, errors.New("anchor_text 不存在于指定 utterance 范围的词级转写中")
+		return TalkingHeadRange{}, errors.New("anchor_text 不存在于指定 utterance 范围的词级转写中")
 	}
 	type wordSpan struct{ Start, End int }
 	matches := map[wordSpan]struct{}{}
@@ -815,23 +811,23 @@ func talkingHeadAnchorTextSourceRange(
 	}
 	if len(matches) == 0 {
 		if blockedMatch {
-			return talkingHeadRange{}, errors.New("anchor_text 包含本次将删除的词或 utterance；请改用删除后仍连续保留的原文，或改传保留的 word_id")
+			return TalkingHeadRange{}, errors.New("anchor_text 包含本次将删除的词或 utterance；请改用删除后仍连续保留的原文，或改传保留的 word_id")
 		}
-		return talkingHeadRange{}, errors.New("anchor_text 不存在、已删除，或没有连续落在指定 utterance 范围内")
+		return TalkingHeadRange{}, errors.New("anchor_text 不存在、已删除，或没有连续落在指定 utterance 范围内")
 	}
 	if len(matches) > 1 {
-		return talkingHeadRange{}, errors.New("anchor_text 在指定 utterance 范围内不唯一；请缩小 utterance 范围或改用 word_id")
+		return TalkingHeadRange{}, errors.New("anchor_text 在指定 utterance 范围内不唯一；请缩小 utterance 范围或改用 word_id")
 	}
 	for match := range matches {
-		return talkingHeadRange{
+		return TalkingHeadRange{
 			Start: windowWords[match.Start].StartFrame,
 			End:   windowWords[match.End].EndFrame,
 		}, nil
 	}
-	return talkingHeadRange{}, errors.New("anchor_text 无法解析")
+	return TalkingHeadRange{}, errors.New("anchor_text 无法解析")
 }
 
-func mergeTalkingHeadRanges(values []talkingHeadRange) []talkingHeadRange {
+func MergeTalkingHeadRanges(values []TalkingHeadRange) []TalkingHeadRange {
 	if len(values) == 0 {
 		return nil
 	}
@@ -841,7 +837,7 @@ func mergeTalkingHeadRanges(values []talkingHeadRange) []talkingHeadRange {
 		}
 		return values[left].End < values[right].End
 	})
-	result := []talkingHeadRange{values[0]}
+	result := []TalkingHeadRange{values[0]}
 	for _, value := range values[1:] {
 		last := &result[len(result)-1]
 		if value.Start <= last.End {
@@ -853,13 +849,13 @@ func mergeTalkingHeadRanges(values []talkingHeadRange) []talkingHeadRange {
 	return result
 }
 
-func talkingHeadRetainedSpeechRanges(
-	utterances []speechUtterance,
+func TalkingHeadRetainedSpeechRanges(
+	utterances []SpeechUtterance,
 	removedUtterances map[string]struct{},
 	removedWords map[string]struct{},
 	clip timeline.Clip,
-) []talkingHeadRange {
-	result := []talkingHeadRange{}
+) []TalkingHeadRange {
+	result := []TalkingHeadRange{}
 	for _, utterance := range utterances {
 		if _, removed := removedUtterances[utterance.ID]; removed {
 			continue
@@ -868,7 +864,7 @@ func talkingHeadRetainedSpeechRanges(
 			continue
 		}
 		if len(utterance.Words) == 0 {
-			result = append(result, talkingHeadRange{
+			result = append(result, TalkingHeadRange{
 				Start: max(utterance.StartFrame, clip.SourceStartFrame),
 				End:   min(utterance.EndFrame, clip.SourceEndFrame),
 			})
@@ -881,29 +877,29 @@ func talkingHeadRetainedSpeechRanges(
 			if word.EndFrame <= clip.SourceStartFrame || word.StartFrame >= clip.SourceEndFrame {
 				continue
 			}
-			result = append(result, talkingHeadRange{
+			result = append(result, TalkingHeadRange{
 				Start: max(word.StartFrame, clip.SourceStartFrame),
 				End:   min(word.EndFrame, clip.SourceEndFrame),
 			})
 		}
 	}
-	return mergeTalkingHeadRanges(result)
+	return MergeTalkingHeadRanges(result)
 }
 
-func bridgeTalkingHeadRanges(
-	deletions []talkingHeadRange,
-	retainedSpeech []talkingHeadRange,
-	detectedPauses []speechPause,
+func BridgeTalkingHeadRanges(
+	deletions []TalkingHeadRange,
+	retainedSpeech []TalkingHeadRange,
+	detectedPauses []SpeechPause,
 	maxGap int,
-) []talkingHeadRange {
-	deletions = mergeTalkingHeadRanges(deletions)
+) []TalkingHeadRange {
+	deletions = MergeTalkingHeadRanges(deletions)
 	if len(deletions) < 2 {
 		return deletions
 	}
-	result := []talkingHeadRange{deletions[0]}
+	result := []TalkingHeadRange{deletions[0]}
 	for _, deletion := range deletions[1:] {
 		last := &result[len(result)-1]
-		gap := talkingHeadRange{Start: last.End, End: deletion.Start}
+		gap := TalkingHeadRange{Start: last.End, End: deletion.Start}
 		unvoiced := !talkingHeadRangeOverlapsAny(gap, retainedSpeech)
 		microGap := maxGap > 0 && gap.End-gap.Start <= maxGap
 		detectedSilence := talkingHeadPauseCoverage(gap, detectedPauses) >= 0.8
@@ -916,19 +912,19 @@ func bridgeTalkingHeadRanges(
 	return result
 }
 
-func talkingHeadPauseCoverage(target talkingHeadRange, pauses []speechPause) float64 {
+func talkingHeadPauseCoverage(target TalkingHeadRange, pauses []SpeechPause) float64 {
 	if target.End <= target.Start {
 		return 0
 	}
-	covered := []talkingHeadRange{}
+	covered := []TalkingHeadRange{}
 	for _, pause := range pauses {
 		start := max(target.Start, pause.StartFrame)
 		end := min(target.End, pause.EndFrame)
 		if end > start {
-			covered = append(covered, talkingHeadRange{Start: start, End: end})
+			covered = append(covered, TalkingHeadRange{Start: start, End: end})
 		}
 	}
-	covered = mergeTalkingHeadRanges(covered)
+	covered = MergeTalkingHeadRanges(covered)
 	frames := 0
 	for _, value := range covered {
 		frames += value.End - value.Start
@@ -936,22 +932,22 @@ func talkingHeadPauseCoverage(target talkingHeadRange, pauses []speechPause) flo
 	return float64(frames) / float64(target.End-target.Start)
 }
 
-func absorbTalkingHeadEdgeSlivers(
-	deletions []talkingHeadRange,
-	retainedSpeech []talkingHeadRange,
+func AbsorbTalkingHeadEdgeSlivers(
+	deletions []TalkingHeadRange,
+	retainedSpeech []TalkingHeadRange,
 	clipStart, clipEnd, maxGap int,
-) []talkingHeadRange {
-	deletions = mergeTalkingHeadRanges(deletions)
+) []TalkingHeadRange {
+	deletions = MergeTalkingHeadRanges(deletions)
 	if len(deletions) == 0 || maxGap <= 0 {
 		return deletions
 	}
-	leading := talkingHeadRange{Start: clipStart, End: deletions[0].Start}
+	leading := TalkingHeadRange{Start: clipStart, End: deletions[0].Start}
 	if leading.End >= leading.Start && leading.End-leading.Start <= maxGap &&
 		!talkingHeadRangeOverlapsAny(leading, retainedSpeech) {
 		deletions[0].Start = clipStart
 	}
 	last := &deletions[len(deletions)-1]
-	trailing := talkingHeadRange{Start: last.End, End: clipEnd}
+	trailing := TalkingHeadRange{Start: last.End, End: clipEnd}
 	if trailing.End >= trailing.Start && trailing.End-trailing.Start <= maxGap &&
 		!talkingHeadRangeOverlapsAny(trailing, retainedSpeech) {
 		last.End = clipEnd
@@ -959,28 +955,28 @@ func absorbTalkingHeadEdgeSlivers(
 	return deletions
 }
 
-func talkingHeadOrphanSpeechFragments(
-	deletions []talkingHeadRange,
-	retainedSpeech []talkingHeadRange,
-	utterances []speechUtterance,
+func TalkingHeadOrphanSpeechFragments(
+	deletions []TalkingHeadRange,
+	retainedSpeech []TalkingHeadRange,
+	utterances []SpeechUtterance,
 	removedUtterances map[string]struct{},
 	removedWords map[string]struct{},
-	removedPauses []speechPause,
+	removedPauses []SpeechPause,
 	clipStart, clipEnd, minimumFrames int,
-	misspeakEvidence []talkingHeadEvidenceRange,
+	misspeakEvidence []TalkingHeadEvidenceRange,
 ) []map[string]any {
 	if minimumFrames <= 0 || clipEnd <= clipStart {
 		return nil
 	}
-	deletions = mergeTalkingHeadRanges(deletions)
+	deletions = MergeTalkingHeadRanges(deletions)
 	type retainedFragment struct {
-		rangeValue  talkingHeadRange
-		leftDelete  *talkingHeadRange
-		rightDelete *talkingHeadRange
+		rangeValue  TalkingHeadRange
+		leftDelete  *TalkingHeadRange
+		rightDelete *TalkingHeadRange
 	}
 	fragments := []retainedFragment{}
 	cursor := clipStart
-	var previousDeletion *talkingHeadRange
+	var previousDeletion *TalkingHeadRange
 	for index := range deletions {
 		deletion := deletions[index]
 		deletion.Start = max(deletion.Start, clipStart)
@@ -991,7 +987,7 @@ func talkingHeadOrphanSpeechFragments(
 		if deletion.Start > cursor {
 			copyOfDeletion := deletion
 			fragments = append(fragments, retainedFragment{
-				rangeValue: talkingHeadRange{Start: cursor, End: deletion.Start},
+				rangeValue: TalkingHeadRange{Start: cursor, End: deletion.Start},
 				leftDelete: previousDeletion, rightDelete: &copyOfDeletion,
 			})
 		}
@@ -1001,7 +997,7 @@ func talkingHeadOrphanSpeechFragments(
 	}
 	if cursor < clipEnd {
 		fragments = append(fragments, retainedFragment{
-			rangeValue: talkingHeadRange{Start: cursor, End: clipEnd},
+			rangeValue: TalkingHeadRange{Start: cursor, End: clipEnd},
 			leftDelete: previousDeletion,
 		})
 	}
@@ -1016,7 +1012,7 @@ func talkingHeadOrphanSpeechFragments(
 			continue
 		}
 		duration := fragment.rangeValue.End - fragment.rangeValue.Start
-		misspeakIDs := talkingHeadIslandMisspeakMatches(fragment.rangeValue, misspeakEvidence)
+		misspeakIDs := TalkingHeadIslandMisspeakMatches(fragment.rangeValue, misspeakEvidence)
 		tooShort := duration < minimumFrames
 		if len(misspeakIDs) == 0 && !tooShort {
 			continue
@@ -1025,7 +1021,7 @@ func talkingHeadOrphanSpeechFragments(
 		if len(misspeakIDs) > 0 {
 			reason = "lands_on_misspeak_evidence"
 		}
-		adjacentRanges := []talkingHeadRange{}
+		adjacentRanges := []TalkingHeadRange{}
 		if fragment.leftDelete != nil {
 			adjacentRanges = append(adjacentRanges, *fragment.leftDelete)
 		}
@@ -1047,7 +1043,7 @@ func talkingHeadOrphanSpeechFragments(
 			"source_end_frame":   fragment.rangeValue.End,
 			"duration_frames":    duration,
 			"reason":             reason,
-			"retained_text": talkingHeadTranscriptText(
+			"retained_text": TalkingHeadTranscriptText(
 				utterances, fragment.rangeValue.Start, fragment.rangeValue.End,
 				removedUtterances, removedWords,
 			),
@@ -1062,7 +1058,7 @@ func talkingHeadOrphanSpeechFragments(
 	return result
 }
 
-func talkingHeadRangeOverlapsAny(target talkingHeadRange, values []talkingHeadRange) bool {
+func talkingHeadRangeOverlapsAny(target TalkingHeadRange, values []TalkingHeadRange) bool {
 	for _, value := range values {
 		if target.Start < value.End && value.Start < target.End {
 			return true
@@ -1071,8 +1067,8 @@ func talkingHeadRangeOverlapsAny(target talkingHeadRange, values []talkingHeadRa
 	return false
 }
 
-func talkingHeadTranscriptText(
-	utterances []speechUtterance,
+func TalkingHeadTranscriptText(
+	utterances []SpeechUtterance,
 	startFrame, endFrame int,
 	removedUtterances map[string]struct{},
 	removedWords map[string]struct{},
@@ -1106,10 +1102,10 @@ func talkingHeadTranscriptText(
 	return strings.Join(parts, "")
 }
 
-func talkingHeadTimelineCoverage(
+func TalkingHeadTimelineCoverage(
 	document timeline.Document, assetID string, sourceStart, sourceEnd int,
-) (talkingHeadRange, error) {
-	ranges := []talkingHeadRange{}
+) (TalkingHeadRange, error) {
+	ranges := []TalkingHeadRange{}
 	for _, track := range document.Tracks {
 		if track.TrackID != "visual_base" {
 			continue
@@ -1118,24 +1114,24 @@ func talkingHeadTimelineCoverage(
 			if clip.AssetID != assetID {
 				continue
 			}
-			if start, end, ok := mapSourceRangeToTimelineClip(clip, sourceStart, sourceEnd); ok {
-				ranges = append(ranges, talkingHeadRange{Start: start, End: end})
+			if start, end, ok := MapSourceRangeToTimelineClip(clip, sourceStart, sourceEnd); ok {
+				ranges = append(ranges, TalkingHeadRange{Start: start, End: end})
 			}
 		}
 	}
 	if len(ranges) == 0 {
-		return talkingHeadRange{}, errors.New("语义源区间已经被删除或不在主视频轨")
+		return TalkingHeadRange{}, errors.New("语义源区间已经被删除或不在主视频轨")
 	}
 	sort.Slice(ranges, func(left, right int) bool { return ranges[left].Start < ranges[right].Start })
 	for index := 1; index < len(ranges); index++ {
 		if ranges[index].Start != ranges[index-1].End {
-			return talkingHeadRange{}, errors.New("同一语义源区间在时间线上不是唯一连续区域")
+			return TalkingHeadRange{}, errors.New("同一语义源区间在时间线上不是唯一连续区域")
 		}
 	}
-	return talkingHeadRange{Start: ranges[0].Start, End: ranges[len(ranges)-1].End}, nil
+	return TalkingHeadRange{Start: ranges[0].Start, End: ranges[len(ranges)-1].End}, nil
 }
 
-func talkingHeadOverlayOverlaps(document timeline.Document, target talkingHeadRange) bool {
+func TalkingHeadOverlayOverlaps(document timeline.Document, target TalkingHeadRange) bool {
 	for _, track := range document.Tracks {
 		if track.TrackID != "visual_overlay" {
 			continue
@@ -1149,7 +1145,7 @@ func talkingHeadOverlayOverlaps(document timeline.Document, target talkingHeadRa
 	return false
 }
 
-type talkingHeadEvidenceRange struct {
+type TalkingHeadEvidenceRange struct {
 	ID    string
 	Start int
 	End   int
@@ -1157,24 +1153,24 @@ type talkingHeadEvidenceRange struct {
 
 // talkingHeadMisspeakEvidence 汇总落在当前 clip 内的口误证据源区间（句内重复的两遍
 // 说法与短语音/重说残片），用于判断保留孤岛本身是否就是一段应删的口误。
-func talkingHeadMisspeakEvidence(
+func TalkingHeadMisspeakEvidence(
 	repetitions []rushestools.SpeechRepetitionEvidence,
 	fragments []rushestools.SpeechFragmentEvidence,
 	clip timeline.Clip,
-) []talkingHeadEvidenceRange {
-	result := []talkingHeadEvidenceRange{}
+) []TalkingHeadEvidenceRange {
+	result := []TalkingHeadEvidenceRange{}
 	within := func(start, end int) bool {
 		return start >= clip.SourceStartFrame && end <= clip.SourceEndFrame && end > start
 	}
 	for _, repetition := range repetitions {
 		if within(repetition.EarlierSourceStartFrame, repetition.EarlierSourceEndFrame) {
-			result = append(result, talkingHeadEvidenceRange{
+			result = append(result, TalkingHeadEvidenceRange{
 				ID:    repetition.RepetitionID + ":earlier",
 				Start: repetition.EarlierSourceStartFrame, End: repetition.EarlierSourceEndFrame,
 			})
 		}
 		if within(repetition.LaterSourceStartFrame, repetition.LaterSourceEndFrame) {
-			result = append(result, talkingHeadEvidenceRange{
+			result = append(result, TalkingHeadEvidenceRange{
 				ID:    repetition.RepetitionID + ":later",
 				Start: repetition.LaterSourceStartFrame, End: repetition.LaterSourceEndFrame,
 			})
@@ -1182,7 +1178,7 @@ func talkingHeadMisspeakEvidence(
 	}
 	for _, fragment := range fragments {
 		if within(fragment.SourceStartFrame, fragment.SourceEndFrame) {
-			result = append(result, talkingHeadEvidenceRange{
+			result = append(result, TalkingHeadEvidenceRange{
 				ID: fragment.FragmentID, Start: fragment.SourceStartFrame, End: fragment.SourceEndFrame,
 			})
 		}
@@ -1193,9 +1189,9 @@ func talkingHeadMisspeakEvidence(
 // talkingHeadIslandMisspeakMatches 返回把该保留孤岛过半覆盖的口误证据 ID：只有当单条
 // 证据覆盖孤岛的多数时长时，才认定"孤岛本身就是口误"，避免误伤内部仅含少量重复的
 // 完整长句。
-func talkingHeadIslandMisspeakMatches(
-	island talkingHeadRange,
-	evidence []talkingHeadEvidenceRange,
+func TalkingHeadIslandMisspeakMatches(
+	island TalkingHeadRange,
+	evidence []TalkingHeadEvidenceRange,
 ) []string {
 	islandDuration := island.End - island.Start
 	if islandDuration <= 0 {
@@ -1214,16 +1210,16 @@ func talkingHeadIslandMisspeakMatches(
 
 // talkingHeadIslandCounterProposals 为每个孤岛给出"并入相邻删除"的合并区间与可直接
 // 采纳的删除锚点，让模型确认删掉这段碎片，而不是自行发明绕过防护的缩删方式。
-func talkingHeadIslandCounterProposals(
+func TalkingHeadIslandCounterProposals(
 	orphanFragments []map[string]any,
-	utterances []speechUtterance,
+	utterances []SpeechUtterance,
 ) []map[string]any {
 	result := make([]map[string]any, 0, len(orphanFragments))
 	for _, orphan := range orphanFragments {
 		islandStart, _ := orphan["source_start_frame"].(int)
 		islandEnd, _ := orphan["source_end_frame"].(int)
-		merged := talkingHeadRange{Start: islandStart, End: islandEnd}
-		if adjacent, ok := orphan["adjacent_deleted_ranges"].([]talkingHeadRange); ok {
+		merged := TalkingHeadRange{Start: islandStart, End: islandEnd}
+		if adjacent, ok := orphan["adjacent_deleted_ranges"].([]TalkingHeadRange); ok {
 			for _, deletion := range adjacent {
 				merged.Start = min(merged.Start, deletion.Start)
 				merged.End = max(merged.End, deletion.End)
@@ -1252,7 +1248,7 @@ func talkingHeadIslandCounterProposals(
 
 // talkingHeadIslandWordRange 返回完整落在孤岛内的首尾 word_id，供模型用 remove_word_ranges
 // 直接采纳 counter-proposal；无词级证据时返回 ok=false。
-func talkingHeadIslandWordRange(utterances []speechUtterance, start, end int) (string, string, bool) {
+func talkingHeadIslandWordRange(utterances []SpeechUtterance, start, end int) (string, string, bool) {
 	startID, endID := "", ""
 	for _, utterance := range utterances {
 		for _, word := range utterance.Words {

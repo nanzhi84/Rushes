@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
@@ -225,8 +226,8 @@ func TestShotQualityMetricsGentlyLowerSearchAndRecutPriority(t *testing.T) {
 	badExposure, badSharpness := 0.95, 0.0
 	normal := rushestools.ShotCandidate{OverexposedRatio: &normalExposure, SharpnessScore: &normalSharpness}
 	bad := rushestools.ShotCandidate{OverexposedRatio: &badExposure, SharpnessScore: &badSharpness}
-	if shotQualityPenalty(normal) != 0 || shotQualityPenalty(bad) <= 0 || shotQualityPenalty(bad) > 0.22 {
-		t.Fatalf("normal=%.4f bad=%.4f", shotQualityPenalty(normal), shotQualityPenalty(bad))
+	if agentexec.ShotQualityPenalty(normal) != 0 || agentexec.ShotQualityPenalty(bad) <= 0 || agentexec.ShotQualityPenalty(bad) > 0.22 {
+		t.Fatalf("normal=%.4f bad=%.4f", agentexec.ShotQualityPenalty(normal), agentexec.ShotQualityPenalty(bad))
 	}
 	segments := []understanding.Segment{
 		{SourceStartFrame: 0, SourceEndFrame: 90, OverexposedRatio: &badExposure, SharpnessScore: &badSharpness},

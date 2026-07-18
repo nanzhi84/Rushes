@@ -2,22 +2,24 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"sort"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
+
+type indexedShot struct {
+	candidate rushestools.ShotCandidate
+	rangeInfo agentexec.BeatMixSourceRange
+}
 
 func (service *Service) toolSearchShots(
 	ctx context.Context,
@@ -50,7 +52,7 @@ func (service *Service) toolSearchShots(
 		return rushestools.ShotSearchResult{}, err
 	}
 
-	used := map[string][]beatMixSourceRange{}
+	used := map[string][]agentexec.BeatMixSourceRange{}
 	if input.ExcludeUsed {
 		if document, timelineErr := timeline.Latest(ctx, service.database, draftID); timelineErr == nil {
 			for _, track := range document.Tracks {
@@ -58,7 +60,7 @@ func (service *Service) toolSearchShots(
 					if clip.AssetID == "" || clip.SourceEndFrame <= clip.SourceStartFrame {
 						continue
 					}
-					used[clip.AssetID] = append(used[clip.AssetID], beatMixSourceRange{
+					used[clip.AssetID] = append(used[clip.AssetID], agentexec.BeatMixSourceRange{
 						StartFrame: clip.SourceStartFrame, EndFrame: clip.SourceEndFrame,
 					})
 				}
@@ -68,8 +70,8 @@ func (service *Service) toolSearchShots(
 		}
 	}
 
-	queryTokens := semanticSearchTokens(input.Query)
-	tagTokens := semanticTokens(strings.Join(input.Tags, " "))
+	queryTokens := agentexec.SemanticSearchTokens(input.Query)
+	tagTokens := agentexec.SemanticTokens(strings.Join(input.Tags, " "))
 	matches := make([]rushestools.ShotCandidate, 0, len(shots))
 	for _, shot := range shots {
 		candidate := shot.candidate
@@ -82,35 +84,35 @@ func (service *Service) toolSearchShots(
 			input.MaxDurationFrames > 0 && candidate.DurationFrames > input.MaxDurationFrames {
 			continue
 		}
-		if candidate.Quality == "unusable" || overlapsAny(shot.rangeInfo, used[candidate.AssetID]) {
+		if candidate.Quality == "unusable" || agentexec.OverlapsAny(shot.rangeInfo, used[candidate.AssetID]) {
 			continue
 		}
-		semanticText := shotSemanticText(candidate)
-		if len(tagTokens) > 0 && weightedSemanticMatchScore(tagTokens, semanticText) == 0 {
+		semanticText := agentexec.ShotSemanticText(candidate)
+		if len(tagTokens) > 0 && agentexec.WeightedSemanticMatchScore(tagTokens, semanticText) == 0 {
 			continue
 		}
-		segmentText := shotSegmentSemanticText(candidate)
-		assetText := shotAssetSemanticText(candidate)
-		segmentScore := weightedSemanticMatchScore(queryTokens, segmentText)
-		assetScore := weightedSemanticMatchScore(queryTokens, assetText)
-		score := segmentScore*0.78 + assetScore*0.22 + exactNumericEvidenceBonus(input.Query, segmentText)
+		segmentText := agentexec.ShotSegmentSemanticText(candidate)
+		assetText := agentexec.ShotAssetSemanticText(candidate)
+		segmentScore := agentexec.WeightedSemanticMatchScore(queryTokens, segmentText)
+		assetScore := agentexec.WeightedSemanticMatchScore(queryTokens, assetText)
+		score := segmentScore*0.78 + assetScore*0.22 + agentexec.ExactNumericEvidenceBonus(input.Query, segmentText)
 		if len(queryTokens) > 0 && score == 0 {
 			continue
 		}
 		if candidate.Quality == "usable" {
 			score += 0.08
 		}
-		score -= shotQualityPenalty(candidate)
+		score -= agentexec.ShotQualityPenalty(candidate)
 		if candidate.BoundaryVerified {
 			score += 0.04
 		}
-		candidate.MatchedQueryTerms = matchedSemanticTerms(queryTokens, semanticText)
-		for _, term := range matchedSemanticTerms(queryTokens, strings.ToLower(candidate.Transcript)) {
+		candidate.MatchedQueryTerms = agentexec.MatchedSemanticTerms(queryTokens, semanticText)
+		for _, term := range agentexec.MatchedSemanticTerms(queryTokens, strings.ToLower(candidate.Transcript)) {
 			candidate.MatchedQueryTerms = append(candidate.MatchedQueryTerms, "台词:"+term)
 		}
-		candidate.MatchEvidence = shotMatchEvidence(queryTokens, candidate)
-		candidate.SegmentScore = roundScore(segmentScore)
-		candidate.AssetScore = roundScore(assetScore)
+		candidate.MatchEvidence = agentexec.ShotMatchEvidence(queryTokens, candidate)
+		candidate.SegmentScore = agentexec.RoundScore(segmentScore)
+		candidate.AssetScore = agentexec.RoundScore(assetScore)
 		candidate.Score = math.Round(score*10000) / 10000
 		matches = append(matches, candidate)
 	}
@@ -131,7 +133,7 @@ func (service *Service) toolSearchShots(
 	for _, candidate := range missing {
 		missingIDs = append(missingIDs, candidate.AssetID)
 	}
-	understandingCandidates := rankUnderstandingCandidates(
+	understandingCandidates := agentexec.RankUnderstandingCandidates(
 		missing, input.Query, input.Tags, roleFilter, min(limit, 20),
 	)
 	result := rushestools.ShotSearchResult{
@@ -191,7 +193,7 @@ func (service *Service) draftShotIndex(
 				continue
 			}
 		}
-		durationSec, _ := numericValue(asset.Probe["duration_sec"])
+		durationSec, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
 		availableFrames := int(math.Round(durationSec * timeline.DefaultFPS))
 		relDir := ""
 		if asset.RelDir != nil {
@@ -232,12 +234,12 @@ func (service *Service) draftShotIndex(
 			if end <= start || segment.Quality == "unusable" {
 				continue
 			}
-			shotID := stableShotID(asset.ID, start, end)
+			shotID := agentexec.StableShotID(asset.ID, start, end)
 			if _, duplicate := seen[shotID]; duplicate {
 				continue
 			}
 			seen[shotID] = struct{}{}
-			transcriptText := transcriptTextForSourceRange(transcript.Utterances, start, end)
+			transcriptText := agentexec.TranscriptTextForSourceRange(transcript.Utterances, start, end)
 			shots = append(shots, indexedShot{
 				candidate: rushestools.ShotCandidate{
 					ShotID: shotID, AssetID: asset.ID, Filename: asset.Filename,
@@ -253,7 +255,7 @@ func (service *Service) draftShotIndex(
 					SharpnessScore: segment.SharpnessScore,
 					BoundaryKind:   segment.BoundaryKind, BoundaryVerified: segment.BoundaryVerified,
 				},
-				rangeInfo: beatMixSourceRange{StartFrame: start, EndFrame: end},
+				rangeInfo: agentexec.BeatMixSourceRange{StartFrame: start, EndFrame: end},
 			})
 		}
 	}

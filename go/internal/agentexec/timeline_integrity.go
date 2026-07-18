@@ -1,13 +1,10 @@
 package agentexec
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"sort"
 
-	"github.com/nanzhi84/Rushes/go/internal/media"
-	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
 
@@ -18,7 +15,7 @@ var independentAudioTrackIDs = []string{"bgm", "sfx"}
 // clips"; applying that order literally reaches an invalid empty primary track
 // halfway through. Moving the new primary inserts before the old deletions keeps
 // every intermediate document editable without changing the final ordering.
-func prepareTimelineBatch(
+func PrepareTimelineBatch(
 	current timeline.Document,
 	operations []map[string]any,
 ) ([]map[string]any, map[string]timeline.Track) {
@@ -45,14 +42,14 @@ func reorderFullPrimaryReplacement(
 	deleted := map[string]struct{}{}
 	visualInsertIndexes := map[int]struct{}{}
 	for index, operation := range operations {
-		switch stringValue(operation["kind"]) {
+		switch StringValue(operation["kind"]) {
 		case "delete_clip":
-			clipID := valueOr(stringValue(operation["timeline_clip_id"]), stringValue(operation["clip_id"]))
+			clipID := ValueOr(StringValue(operation["timeline_clip_id"]), StringValue(operation["clip_id"]))
 			if _, isPrimary := primaryIDs[clipID]; isPrimary {
 				deleted[clipID] = struct{}{}
 			}
 		case "insert_clip":
-			if valueOr(stringValue(operation["track_id"]), "visual_base") == "visual_base" {
+			if ValueOr(StringValue(operation["track_id"]), "visual_base") == "visual_base" {
 				visualInsertIndexes[index] = struct{}{}
 			}
 		}
@@ -81,7 +78,7 @@ func snapshotUntouchedIndependentAudio(
 	touched := touchedTrackIDs(current, operations)
 	preserved := map[string]timeline.Track{}
 	for _, track := range current.Tracks {
-		if !containsString(independentAudioTrackIDs, track.TrackID) {
+		if !ContainsString(independentAudioTrackIDs, track.TrackID) {
 			continue
 		}
 		if _, changed := touched[track.TrackID]; changed {
@@ -101,23 +98,23 @@ func touchedTrackIDs(current timeline.Document, operations []map[string]any) map
 	}
 	touched := map[string]struct{}{}
 	for _, operation := range operations {
-		kind := stringValue(operation["kind"])
+		kind := StringValue(operation["kind"])
 		if kind == "delete_range" {
 			for _, trackID := range independentAudioTrackIDs {
 				touched[trackID] = struct{}{}
 			}
 		}
-		trackID := stringValue(operation["track_id"])
+		trackID := StringValue(operation["track_id"])
 		if kind == "insert_clip" && trackID == "" {
 			trackID = "visual_base"
 		}
 		if trackID != "" {
 			touched[trackID] = struct{}{}
 		}
-		if targetTrackID := stringValue(operation["target_track_id"]); targetTrackID != "" {
+		if targetTrackID := StringValue(operation["target_track_id"]); targetTrackID != "" {
 			touched[targetTrackID] = struct{}{}
 		}
-		clipID := valueOr(stringValue(operation["timeline_clip_id"]), stringValue(operation["clip_id"]))
+		clipID := ValueOr(StringValue(operation["timeline_clip_id"]), StringValue(operation["clip_id"]))
 		if sourceTrackID := clipTracks[clipID]; sourceTrackID != "" {
 			touched[sourceTrackID] = struct{}{}
 		}
@@ -128,7 +125,7 @@ func touchedTrackIDs(current timeline.Document, operations []map[string]any) map
 	return touched
 }
 
-func restoreIndependentAudioTracks(
+func RestoreIndependentAudioTracks(
 	document *timeline.Document,
 	preserved map[string]timeline.Track,
 ) error {
@@ -156,16 +153,16 @@ func copyTimelineTrack(track timeline.Track) timeline.Track {
 	return copy
 }
 
-func hasBeatGrid(effects []map[string]any) bool {
+func HasBeatGrid(effects []map[string]any) bool {
 	for _, effect := range effects {
-		if stringValue(effect["kind"]) == "beat_grid" {
+		if StringValue(effect["kind"]) == "beat_grid" {
 			return true
 		}
 	}
 	return false
 }
 
-func beatAlignmentData(document timeline.Document) map[string]any {
+func BeatAlignmentData(document timeline.Document) map[string]any {
 	beatFrames := []int{}
 	strongFrames := []int{}
 	downbeatFrames := []int{}
@@ -175,7 +172,7 @@ func beatAlignmentData(document timeline.Document) map[string]any {
 		}
 		for _, clip := range track.Clips {
 			for _, effect := range clip.Effects {
-				if stringValue(effect["kind"]) != "beat_grid" {
+				if StringValue(effect["kind"]) != "beat_grid" {
 					continue
 				}
 				beatFrames = append(beatFrames, mapEffectFramesToTimeline(clip, effect["beat_frames"])...)
@@ -209,12 +206,12 @@ func beatAlignmentData(document timeline.Document) map[string]any {
 	onAccent := 0
 	offBeat := []int{}
 	for _, frame := range cutFrames {
-		if containsFrame(beatFrames, frame) {
+		if ContainsFrame(beatFrames, frame) {
 			onBeat++
 		} else {
 			offBeat = append(offBeat, frame)
 		}
-		if containsFrame(strongFrames, frame) || containsFrame(downbeatFrames, frame) {
+		if ContainsFrame(strongFrames, frame) || ContainsFrame(downbeatFrames, frame) {
 			onAccent++
 		}
 	}
@@ -251,7 +248,7 @@ func mapEffectFramesToTimeline(clip timeline.Clip, value any) []int {
 		rate = 1
 	}
 	frames := []int{}
-	for _, sourceFrame := range effectFrameValues(value) {
+	for _, sourceFrame := range EffectFrameValues(value) {
 		if sourceFrame < clip.SourceStartFrame || sourceFrame > clip.SourceEndFrame {
 			continue
 		}
@@ -262,7 +259,7 @@ func mapEffectFramesToTimeline(clip timeline.Clip, value any) []int {
 	return frames
 }
 
-func effectFrameValues(value any) []int {
+func EffectFrameValues(value any) []int {
 	result := []int{}
 	switch frames := value.(type) {
 	case []int:
@@ -275,7 +272,7 @@ func effectFrameValues(value any) []int {
 		}
 	case []any:
 		for _, raw := range frames {
-			if frame, ok := numericValue(raw); ok && frame >= 0 && frame == math.Trunc(frame) {
+			if frame, ok := NumericValue(raw); ok && frame >= 0 && frame == math.Trunc(frame) {
 				result = append(result, int(frame))
 			}
 		}
@@ -297,7 +294,7 @@ func sortedUniqueInts(values []int) []int {
 	return result
 }
 
-func containsString(values []string, target string) bool {
+func ContainsString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
 			return true
@@ -306,12 +303,12 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
-func stringValue(value any) string {
+func StringValue(value any) string {
 	text, _ := value.(string)
 	return text
 }
 
-func valueOr(value, fallback string) string {
+func ValueOr(value, fallback string) string {
 	if value != "" {
 		return value
 	}

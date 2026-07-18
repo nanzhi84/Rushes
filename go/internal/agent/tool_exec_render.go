@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -191,7 +192,7 @@ func (service *Service) toolInspectPreview(
 		return rushestools.PreviewInspectionResult{}, err
 	}
 	result := rushestools.PreviewInspectionResult{}
-	if containsString(input.Checks, "visual") {
+	if agentexec.ContainsString(input.Checks, "visual") {
 		frameContext, contextErr := service.previewInspectionFrameContext(
 			ctx, document, understanding.PreviewInspectionFrameNumbers(document),
 		)
@@ -307,7 +308,7 @@ func (service *Service) previewInspectionFrameContext(
 			if sourceEndFrame <= sourceFrame {
 				continue
 			}
-			if text := transcriptTextForSourceRange(transcript.Utterances, sourceFrame, sourceEndFrame); text != "" {
+			if text := agentexec.TranscriptTextForSourceRange(transcript.Utterances, sourceFrame, sourceEndFrame); text != "" {
 				parts = append(parts, "同帧台词："+truncatePreviewContextText(text, 512))
 			}
 		}
@@ -392,17 +393,4 @@ func timelineClipsAtFrame(document timeline.Document, frame int, trackIDs ...str
 		}
 	}
 	return result
-}
-
-func numericValue(value any) (float64, bool) {
-	switch typed := value.(type) {
-	case float64:
-		return typed, true
-	case float32:
-		return float64(typed), true
-	case int:
-		return float64(typed), true
-	default:
-		return 0, false
-	}
 }

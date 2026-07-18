@@ -15,6 +15,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -481,7 +482,7 @@ func liveGenerateToolCallWithPlaybook(
 		if err != nil {
 			lastErr = err
 		} else {
-			lastErr = fmt.Errorf("模型未调用工具，文本回复=%q", truncateText(responseContent(response), 240))
+			lastErr = fmt.Errorf("模型未调用工具，文本回复=%q", agentexec.TruncateText(responseContent(response), 240))
 		}
 		if attempt < 3 {
 			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
@@ -656,7 +657,7 @@ func validateLiveTalkingHeadPreserveDecision(raw string) error {
 			Text:              "但是没有同时",
 			RestartAnchorText: "这次键盘苹果",
 		}
-		if !validRestartFragmentPreserveReason(fragment, decision.Reason) {
+		if !agentexec.ValidRestartFragmentPreserveReason(fragment, decision.Reason) {
 			return errors.New("fragment_keep_1 的 preserve 理由必须至少 20 字并原样引用 fragment.text 与 restart_anchor_text")
 		}
 		return nil

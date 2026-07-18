@@ -1,11 +1,8 @@
 package agentexec
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -13,25 +10,17 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/nanzhi84/Rushes/go/internal/storage"
-	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
-	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
-type indexedShot struct {
-	candidate rushestools.ShotCandidate
-	rangeInfo beatMixSourceRange
-}
-
-func rankUnderstandingCandidates(
+func RankUnderstandingCandidates(
 	values []rushestools.ShotSearchUnderstandingCandidate,
 	query string,
 	tags []string,
 	roleFilter map[string]struct{},
 	limit int,
 ) []rushestools.ShotSearchUnderstandingCandidate {
-	tokens := semanticTokens(strings.TrimSpace(query + " " + strings.Join(tags, " ")))
+	tokens := SemanticTokens(strings.TrimSpace(query + " " + strings.Join(tags, " ")))
 	result := make([]rushestools.ShotSearchUnderstandingCandidate, 0, len(values))
 	for _, value := range values {
 		// 未理解素材的角色也可能尚未确定；只有目录/文件名已经明确给出
@@ -43,17 +32,17 @@ func rankUnderstandingCandidates(
 		}
 		filenameText := strings.ToLower(value.Filename)
 		catalogText := strings.ToLower(strings.Join([]string{value.Filename, value.RelDir, value.SemanticRole}, " "))
-		catalogScore := semanticMatchScore(tokens, catalogText)
+		catalogScore := SemanticMatchScore(tokens, catalogText)
 		if len(tokens) > 0 && catalogScore == 0 {
 			continue
 		}
-		filenameScore := semanticMatchScore(tokens, filenameText)
+		filenameScore := SemanticMatchScore(tokens, filenameText)
 		value.Score = math.Round((catalogScore*0.7+filenameScore*0.3)*10000) / 10000
-		value.MatchedQueryTerms = matchedSemanticTerms(tokens, catalogText)
-		if matched := matchedSemanticTerms(tokens, filenameText); len(matched) > 0 {
+		value.MatchedQueryTerms = MatchedSemanticTerms(tokens, catalogText)
+		if matched := MatchedSemanticTerms(tokens, filenameText); len(matched) > 0 {
 			value.MatchEvidence = append(value.MatchEvidence, "文件名命中: "+strings.Join(matched, "、"))
 		}
-		if matched := matchedSemanticTerms(tokens, strings.ToLower(value.RelDir)); len(matched) > 0 {
+		if matched := MatchedSemanticTerms(tokens, strings.ToLower(value.RelDir)); len(matched) > 0 {
 			value.MatchEvidence = append(value.MatchEvidence, "目录命中: "+strings.Join(matched, "、"))
 		}
 		result = append(result, value)
@@ -70,7 +59,7 @@ func rankUnderstandingCandidates(
 	return result
 }
 
-func shotMatchEvidence(tokens map[string]struct{}, candidate rushestools.ShotCandidate) []string {
+func ShotMatchEvidence(tokens map[string]struct{}, candidate rushestools.ShotCandidate) []string {
 	fields := []struct {
 		name  string
 		value string
@@ -83,14 +72,14 @@ func shotMatchEvidence(tokens map[string]struct{}, candidate rushestools.ShotCan
 	}
 	result := []string{}
 	for _, field := range fields {
-		if matched := matchedSemanticTerms(tokens, strings.ToLower(field.value)); len(matched) > 0 {
+		if matched := MatchedSemanticTerms(tokens, strings.ToLower(field.value)); len(matched) > 0 {
 			result = append(result, field.name+"命中: "+strings.Join(matched, "、"))
 		}
 	}
 	return result
 }
 
-func matchedSemanticTerms(tokens map[string]struct{}, text string) []string {
+func MatchedSemanticTerms(tokens map[string]struct{}, text string) []string {
 	result := []string{}
 	for token := range tokens {
 		if utf8.RuneCountInString(token) < 2 || !strings.Contains(text, token) {
@@ -111,20 +100,20 @@ func matchedSemanticTerms(tokens map[string]struct{}, text string) []string {
 	return result
 }
 
-func stableShotID(assetID string, startFrame, endFrame int) string {
+func StableShotID(assetID string, startFrame, endFrame int) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", assetID, startFrame, endFrame)))
 	return "shot_" + hex.EncodeToString(sum[:8])
 }
 
-func shotSemanticText(candidate rushestools.ShotCandidate) string {
-	return strings.TrimSpace(shotAssetSemanticText(candidate) + " " + shotSegmentSemanticText(candidate))
+func ShotSemanticText(candidate rushestools.ShotCandidate) string {
+	return strings.TrimSpace(ShotAssetSemanticText(candidate) + " " + ShotSegmentSemanticText(candidate))
 }
 
-func shotAssetSemanticText(candidate rushestools.ShotCandidate) string {
+func ShotAssetSemanticText(candidate rushestools.ShotCandidate) string {
 	return strings.ToLower(strings.Join([]string{candidate.Filename, candidate.SemanticRole}, " "))
 }
 
-func shotSegmentSemanticText(candidate rushestools.ShotCandidate) string {
+func ShotSegmentSemanticText(candidate rushestools.ShotCandidate) string {
 	parts := []string{candidate.Description, strings.Join(candidate.Tags, " "),
 		strings.Join(candidate.Subjects, " "), strings.Join(candidate.Actions, " "),
 		strings.Join(candidate.Setting, " "), candidate.ShotScale, candidate.Composition,
@@ -133,22 +122,22 @@ func shotSegmentSemanticText(candidate rushestools.ShotCandidate) string {
 	return strings.ToLower(strings.Join(parts, " "))
 }
 
-func transcriptTextForSourceRange(utterances []map[string]any, startFrame, endFrame int) string {
+func TranscriptTextForSourceRange(utterances []map[string]any, startFrame, endFrame int) string {
 	parts := []string{}
 	for _, utterance := range utterances {
-		startValue, startOK := numericValue(utterance["source_start_frame"])
-		endValue, endOK := numericValue(utterance["source_end_frame"])
+		startValue, startOK := NumericValue(utterance["source_start_frame"])
+		endValue, endOK := NumericValue(utterance["source_end_frame"])
 		if !startOK || !endOK || int(startValue) >= endFrame || int(endValue) <= startFrame {
 			continue
 		}
-		if text := strings.TrimSpace(interfaceString(utterance["text"])); text != "" {
+		if text := strings.TrimSpace(InterfaceString(utterance["text"])); text != "" {
 			parts = append(parts, text)
 		}
 	}
 	return strings.Join(parts, " ")
 }
 
-func shotQualityPenalty(candidate rushestools.ShotCandidate) float64 {
+func ShotQualityPenalty(candidate rushestools.ShotCandidate) float64 {
 	penalty := 0.0
 	if candidate.OverexposedRatio != nil && *candidate.OverexposedRatio > 0.10 {
 		penalty += min(0.12, (*candidate.OverexposedRatio-0.10)*0.15)
@@ -159,23 +148,23 @@ func shotQualityPenalty(candidate rushestools.ShotCandidate) float64 {
 	return math.Round(penalty*10000) / 10000
 }
 
-func semanticSearchTokens(query string) map[string]struct{} {
-	result := semanticTokens(query)
+func SemanticSearchTokens(query string) map[string]struct{} {
+	result := SemanticTokens(query)
 	lower := strings.ToLower(query)
 	if strings.Contains(lower, "无背光") || strings.Contains(lower, "没有背光") ||
 		strings.Contains(lower, "没背光") || strings.Contains(lower, "背光缺失") {
-		for token := range semanticTokens("背光关闭 键盘不亮 暗光 黑暗 极暗 低照度 全黑") {
+		for token := range SemanticTokens("背光关闭 键盘不亮 暗光 黑暗 极暗 低照度 全黑") {
 			result[token] = struct{}{}
 		}
 	}
 	return result
 }
 
-func weightedSemanticMatchScore(tokens map[string]struct{}, text string) float64 {
+func WeightedSemanticMatchScore(tokens map[string]struct{}, text string) float64 {
 	if len(tokens) == 0 {
 		return 0.5
 	}
-	textTokens := semanticTokens(text)
+	textTokens := SemanticTokens(text)
 	matchedWeight := 0.0
 	totalWeight := 0.0
 	for token := range tokens {
@@ -214,7 +203,7 @@ func semanticTokenWeight(token string) float64 {
 	return 0.5
 }
 
-func exactNumericEvidenceBonus(query, segmentText string) float64 {
+func ExactNumericEvidenceBonus(query, segmentText string) float64 {
 	bonus := 0.0
 	for _, field := range strings.Fields(strings.ToLower(query)) {
 		hasDigit := false
@@ -229,15 +218,15 @@ func exactNumericEvidenceBonus(query, segmentText string) float64 {
 	return min(bonus, 0.5)
 }
 
-func roundScore(value float64) float64 {
+func RoundScore(value float64) float64 {
 	return math.Round(value*10000) / 10000
 }
 
-func semanticMatchScore(tokens map[string]struct{}, text string) float64 {
+func SemanticMatchScore(tokens map[string]struct{}, text string) float64 {
 	if len(tokens) == 0 {
 		return 0.5
 	}
-	textTokens := semanticTokens(text)
+	textTokens := SemanticTokens(text)
 	matched := 0
 	for token := range tokens {
 		if _, ok := textTokens[token]; ok || strings.Contains(text, token) {
@@ -247,7 +236,7 @@ func semanticMatchScore(tokens map[string]struct{}, text string) float64 {
 	return float64(matched) / float64(len(tokens))
 }
 
-func semanticTokens(text string) map[string]struct{} {
+func SemanticTokens(text string) map[string]struct{} {
 	result := map[string]struct{}{}
 	lower := strings.ToLower(strings.TrimSpace(text))
 	word := []rune{}
@@ -285,7 +274,7 @@ func semanticTokens(text string) map[string]struct{} {
 	return result
 }
 
-func overlapsAny(target beatMixSourceRange, values []beatMixSourceRange) bool {
+func OverlapsAny(target BeatMixSourceRange, values []BeatMixSourceRange) bool {
 	for _, value := range values {
 		if target.StartFrame < value.EndFrame && value.StartFrame < target.EndFrame {
 			return true

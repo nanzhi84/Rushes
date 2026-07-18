@@ -1,15 +1,13 @@
 package agent
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"math"
 	"sort"
 	"strings"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -19,24 +17,24 @@ func (service *Service) verifyContentContract(
 	ctx context.Context,
 	draftID string,
 	document timeline.Document,
-) (contractVerificationReport, bool, error) {
+) (agentexec.ContractVerificationReport, bool, error) {
 	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
 	if err != nil {
-		return contractVerificationReport{}, false, err
+		return agentexec.ContractVerificationReport{}, false, err
 	}
-	contractMap, err := contentPlanContract(draft.ContentPlan)
+	contractMap, err := agentexec.ContentPlanContract(draft.ContentPlan)
 	if err != nil {
-		return contractVerificationReport{}, false, err
+		return agentexec.ContractVerificationReport{}, false, err
 	}
 	if contractMap == nil {
-		return contractVerificationReport{}, false, nil
+		return agentexec.ContractVerificationReport{}, false, nil
 	}
 	encoded, _ := json.Marshal(contractMap)
 	contract := rushestools.ContentPlanContract{}
 	if err := json.Unmarshal(encoded, &contract); err != nil {
-		return contractVerificationReport{}, false, err
+		return agentexec.ContractVerificationReport{}, false, err
 	}
-	report := contractVerificationReport{Pass: true, Items: []contractVerificationItem{}}
+	report := agentexec.ContractVerificationReport{Pass: true, Items: []agentexec.ContractVerificationItem{}}
 	if contract.TargetDurationFrames > 0 {
 		tolerance := 0
 		if contract.DurationToleranceFrames == nil {
@@ -45,7 +43,7 @@ func (service *Service) verifyContentContract(
 			tolerance = *contract.DurationToleranceFrames
 		}
 		delta := absInt(document.DurationFrames - contract.TargetDurationFrames)
-		report.Items = append(report.Items, contractVerificationItem{
+		report.Items = append(report.Items, agentexec.ContractVerificationItem{
 			Check: "target_duration", Pass: delta <= tolerance,
 			Message: fmt.Sprintf("当前 %d 帧，目标 %d±%d 帧。", document.DurationFrames, contract.TargetDurationFrames, tolerance),
 			Frames:  []int{document.DurationFrames, contract.TargetDurationFrames},
@@ -54,31 +52,31 @@ func (service *Service) verifyContentContract(
 	if len(contract.MustKeepUtteranceIDs) > 0 {
 		missing, anchors, verifyErr := service.missingRequiredUtterances(ctx, document, contract.MustKeepUtteranceIDs)
 		if verifyErr != nil {
-			return contractVerificationReport{}, false, verifyErr
+			return agentexec.ContractVerificationReport{}, false, verifyErr
 		}
-		report.Items = append(report.Items, contractVerificationItem{
+		report.Items = append(report.Items, agentexec.ContractVerificationItem{
 			Check: "must_keep_utterances", Pass: len(missing) == 0,
 			Message: map[bool]string{true: "必留台词均完整保留。", false: "必留台词已缺失或被截断：" + strings.Join(missing, "、")}[len(missing) == 0],
 			Frames:  anchors, IDs: missing,
 		})
 	}
 	if len(contract.BrollCoverageRanges) > 0 {
-		uncovered := uncoveredBrollRanges(document, contract.BrollCoverageRanges)
+		uncovered := agentexec.UncoveredBrollRanges(document, contract.BrollCoverageRanges)
 		frames := make([]int, 0, len(uncovered)*2)
 		for _, frameRange := range uncovered {
 			frames = append(frames, frameRange.StartFrame, frameRange.EndFrame)
 		}
-		report.Items = append(report.Items, contractVerificationItem{
+		report.Items = append(report.Items, agentexec.ContractVerificationItem{
 			Check: "broll_coverage", Pass: len(uncovered) == 0,
 			Message: map[bool]string{true: "B-roll 验收区间均已覆盖。", false: "存在未完整覆盖的 B-roll 验收区间。"}[len(uncovered) == 0],
 			Frames:  frames,
 		})
 	}
-	beatAlignment := beatAlignmentData(document)
+	beatAlignment := agentexec.BeatAlignmentData(document)
 	if contract.MinOnBeatRatio != nil {
-		ratio, _ := numericValue(beatAlignment["alignment_ratio"])
+		ratio, _ := agentexec.NumericValue(beatAlignment["alignment_ratio"])
 		offBeat, _ := beatAlignment["off_beat_cut_frames"].([]int)
-		item := contractVerificationItem{
+		item := agentexec.ContractVerificationItem{
 			Check: "on_beat_ratio", Pass: ratio >= *contract.MinOnBeatRatio,
 			Message: fmt.Sprintf("切点卡拍比例 %.3f，合同下限 %.3f。", ratio, *contract.MinOnBeatRatio),
 			Frames:  offBeat,
@@ -91,14 +89,14 @@ func (service *Service) verifyContentContract(
 		report.Items = append(report.Items, item)
 	}
 	if contract.MinCutDensityPerMinute != nil || contract.MaxCutDensityPerMinute != nil {
-		cutCount, _ := numericValue(beatAlignment["cut_count"])
+		cutCount, _ := agentexec.NumericValue(beatAlignment["cut_count"])
 		density := 0.0
 		if document.DurationFrames > 0 && document.FPS > 0 {
 			density = cutCount * float64(document.FPS) * 60 / float64(document.DurationFrames)
 		}
 		pass := contract.MinCutDensityPerMinute == nil || density >= *contract.MinCutDensityPerMinute
 		pass = pass && (contract.MaxCutDensityPerMinute == nil || density <= *contract.MaxCutDensityPerMinute)
-		report.Items = append(report.Items, contractVerificationItem{
+		report.Items = append(report.Items, agentexec.ContractVerificationItem{
 			Check: "cut_density", Pass: pass,
 			Message: fmt.Sprintf("当前切点密度 %.2f 次/分钟。", density),
 		})
@@ -122,7 +120,7 @@ func (service *Service) missingRequiredUtterances(
 	}
 	found := map[string]bool{}
 	anchors := map[string][2]int{}
-	contentClips := contentPreservingClips(document)
+	contentClips := agentexec.ContentPreservingClips(document)
 	assetIDs := map[string]struct{}{}
 	for _, clip := range contentClips {
 		if clip.AssetID != "" {
@@ -143,12 +141,12 @@ func (service *Service) missingRequiredUtterances(
 			return nil, nil, err
 		}
 		for _, utterance := range transcript.Utterances {
-			id := interfaceString(utterance["utterance_id"])
+			id := agentexec.InterfaceString(utterance["utterance_id"])
 			if _, required := wanted[id]; !required {
 				continue
 			}
-			startValue, startOK := numericValue(utterance["source_start_frame"])
-			endValue, endOK := numericValue(utterance["source_end_frame"])
+			startValue, startOK := agentexec.NumericValue(utterance["source_start_frame"])
+			endValue, endOK := agentexec.NumericValue(utterance["source_end_frame"])
 			if !startOK || !endOK {
 				continue
 			}
@@ -156,7 +154,7 @@ func (service *Service) missingRequiredUtterances(
 			if _, exists := anchors[id]; !exists {
 				anchors[id] = [2]int{start, end}
 			}
-			found[id] = found[id] || utteranceCoveredByClips(contentClips, assetID, start, end)
+			found[id] = found[id] || agentexec.UtteranceCoveredByClips(contentClips, assetID, start, end)
 		}
 	}
 	missing := make([]string, 0)

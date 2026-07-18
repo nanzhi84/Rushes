@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -202,7 +203,7 @@ func AdjudicateDecisionAnswer(
 
 func decisionOption(decision storage.Decision, optionID string) (map[string]any, bool) {
 	for _, option := range decision.Options {
-		if interfaceString(option["option_id"]) == optionID {
+		if agentexec.InterfaceString(option["option_id"]) == optionID {
 			return option, true
 		}
 	}

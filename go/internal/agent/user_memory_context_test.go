@@ -8,6 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -42,7 +43,7 @@ func TestUserMemoryWorldStateIsStableAcrossDraftsAndRemoval(t *testing.T) {
 			t.Fatalf("user_memory leaked private field %q: %#v", privateField, entries[0])
 		}
 	}
-	if total, ok := numericValue(section["total"]); !ok || total != 1 || section["truncated"] != false {
+	if total, ok := agentexec.NumericValue(section["total"]); !ok || total != 1 || section["truncated"] != false {
 		t.Fatalf("user_memory metadata=%#v", section)
 	}
 
@@ -55,7 +56,7 @@ func TestUserMemoryWorldStateIsStableAcrossDraftsAndRemoval(t *testing.T) {
 	if len(worldStateObjectSlice(section["entries"])) != 0 {
 		t.Fatalf("removed memory still visible: %#v", section)
 	}
-	if total, ok := numericValue(section["total"]); !ok || total != 0 || section["truncated"] != false {
+	if total, ok := agentexec.NumericValue(section["total"]); !ok || total != 0 || section["truncated"] != false {
 		t.Fatalf("empty user_memory metadata=%#v", section)
 	}
 }
@@ -87,7 +88,7 @@ func TestUserMemoryWorldStateUsesWholeEntryBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if total, ok := numericValue(section["total"]); !ok || total != storage.UserMemoryLimit ||
+	if total, ok := agentexec.NumericValue(section["total"]); !ok || total != storage.UserMemoryLimit ||
 		section["truncated"] != true || len(entries) == 0 || len(entries) >= storage.UserMemoryLimit {
 		t.Fatalf("budgeted user_memory metadata=%#v included=%d", section, len(entries))
 	}

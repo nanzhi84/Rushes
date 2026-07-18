@@ -2,12 +2,10 @@ package agentexec
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math"
 	"sort"
 
-	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -15,18 +13,18 @@ import (
 const (
 	// minTalkingHeadRetainedIslandFrames 是"保留孤岛"的时长下限：低于 2 秒的连续
 	// 保留台词被视为语义孤岛。孤岛防护与口播质检共用这一个阈值。
-	minTalkingHeadRetainedIslandFrames = 2 * timeline.DefaultFPS
+	MinTalkingHeadRetainedIslandFrames = 2 * timeline.DefaultFPS
 	// minTalkingHeadResidualBreathFrames 是口播质检列出残留气口的时长下限（0.3 秒）。
-	minTalkingHeadResidualBreathFrames = timeline.DefaultFPS * 3 / 10
+	MinTalkingHeadResidualBreathFrames = timeline.DefaultFPS * 3 / 10
 	// minTalkingHeadBrollQualityFrames 是口播质检提示过短 B-roll 的时长下限（1.5 秒），
 	// 比放置时的硬失败下限 minTalkingHeadBrollDurationFrames（0.5 秒）更宽，只作复检提示。
-	minTalkingHeadBrollQualityFrames = timeline.DefaultFPS * 3 / 2
+	MinTalkingHeadBrollQualityFrames = timeline.DefaultFPS * 3 / 2
 )
 
-type talkingHeadAssetTranscript struct {
-	utterances []speechUtterance
-	pauses     []speechPause
-	present    bool
+type TalkingHeadAssetTranscript struct {
+	Utterances []SpeechUtterance
+	Pauses     []SpeechPause
+	Present    bool
 }
 
 type talkingHeadRetainedRun struct {
@@ -37,14 +35,14 @@ type talkingHeadRetainedRun struct {
 	sourceEnd     int
 }
 
-func talkingHeadResidualBreaths(
+func TalkingHeadResidualBreaths(
 	baseClips []timeline.Clip,
-	transcripts map[string]talkingHeadAssetTranscript,
+	transcripts map[string]TalkingHeadAssetTranscript,
 	fps int,
 ) []map[string]any {
 	assetIDs := make([]string, 0, len(transcripts))
 	for assetID, transcript := range transcripts {
-		if transcript.present {
+		if transcript.Present {
 			assetIDs = append(assetIDs, assetID)
 		}
 	}
@@ -59,25 +57,25 @@ func talkingHeadResidualBreaths(
 			}
 		}
 		seen := map[[2]int]struct{}{}
-		for _, pause := range transcript.pauses {
+		for _, pause := range transcript.Pauses {
 			key := [2]int{pause.StartFrame, pause.EndFrame}
 			if _, duplicate := seen[key]; duplicate {
 				continue
 			}
 			seen[key] = struct{}{}
 			for _, clip := range clips {
-				start, end, ok := mapSourceRangeToTimelineClip(clip, pause.StartFrame, pause.EndFrame)
-				if !ok || end-start < minTalkingHeadResidualBreathFrames {
+				start, end, ok := MapSourceRangeToTimelineClip(clip, pause.StartFrame, pause.EndFrame)
+				if !ok || end-start < MinTalkingHeadResidualBreathFrames {
 					continue
 				}
-				previous, next := talkingHeadBreathContext(transcript.utterances, pause.StartFrame, pause.EndFrame)
+				previous, next := talkingHeadBreathContext(transcript.Utterances, pause.StartFrame, pause.EndFrame)
 				result = append(result, map[string]any{
 					"a_roll_asset_id":        assetID,
 					"timeline_start_frame":   start,
 					"timeline_end_frame":     end,
-					"timeline_start_seconds": frameSeconds(start, fps),
+					"timeline_start_seconds": FrameSeconds(start, fps),
 					"duration_frames":        end - start,
-					"duration_seconds":       frameSeconds(end-start, fps),
+					"duration_seconds":       FrameSeconds(end-start, fps),
 					"previous_text":          previous,
 					"next_text":              next,
 				})
@@ -90,9 +88,9 @@ func talkingHeadResidualBreaths(
 	return result
 }
 
-func talkingHeadRetainedIslands(
+func TalkingHeadRetainedIslands(
 	baseClips []timeline.Clip,
-	transcripts map[string]talkingHeadAssetTranscript,
+	transcripts map[string]TalkingHeadAssetTranscript,
 	fps int,
 ) ([]map[string]any, []talkingHeadRetainedRun) {
 	runs := []talkingHeadRetainedRun{}
@@ -105,7 +103,7 @@ func talkingHeadRetainedIslands(
 	}
 	for _, clip := range baseClips {
 		transcript, ok := transcripts[clip.AssetID]
-		if !ok || !transcript.present {
+		if !ok || !transcript.Present {
 			flush()
 			continue
 		}
@@ -128,7 +126,7 @@ func talkingHeadRetainedIslands(
 	islands := []map[string]any{}
 	for _, run := range runs {
 		duration := run.timelineEnd - run.timelineStart
-		if duration <= 0 || duration >= minTalkingHeadRetainedIslandFrames {
+		if duration <= 0 || duration >= MinTalkingHeadRetainedIslandFrames {
 			continue
 		}
 		islands = append(islands, map[string]any{
@@ -136,19 +134,19 @@ func talkingHeadRetainedIslands(
 			"timeline_start_frame": run.timelineStart,
 			"timeline_end_frame":   run.timelineEnd,
 			"duration_frames":      duration,
-			"duration_seconds":     frameSeconds(duration, fps),
-			"text": talkingHeadTranscriptText(
-				transcripts[run.assetID].utterances, run.sourceStart, run.sourceEnd, nil, nil,
+			"duration_seconds":     FrameSeconds(duration, fps),
+			"text": TalkingHeadTranscriptText(
+				transcripts[run.assetID].Utterances, run.sourceStart, run.sourceEnd, nil, nil,
 			),
 		})
 	}
 	return islands, runs
 }
 
-func talkingHeadUncoveredSeams(
+func TalkingHeadUncoveredSeams(
 	runs []talkingHeadRetainedRun,
 	overlays []timeline.Clip,
-	transcripts map[string]talkingHeadAssetTranscript,
+	transcripts map[string]TalkingHeadAssetTranscript,
 	fps int,
 ) []map[string]any {
 	result := []map[string]any{}
@@ -168,11 +166,11 @@ func talkingHeadUncoveredSeams(
 		if covered {
 			continue
 		}
-		previous, _ := talkingHeadBreathContext(transcripts[left.assetID].utterances, left.sourceEnd, left.sourceEnd)
-		_, next := talkingHeadBreathContext(transcripts[right.assetID].utterances, right.sourceStart, right.sourceStart)
+		previous, _ := talkingHeadBreathContext(transcripts[left.assetID].Utterances, left.sourceEnd, left.sourceEnd)
+		_, next := talkingHeadBreathContext(transcripts[right.assetID].Utterances, right.sourceStart, right.sourceStart)
 		result = append(result, map[string]any{
 			"timeline_frame":   seam,
-			"timeline_seconds": frameSeconds(seam, fps),
+			"timeline_seconds": FrameSeconds(seam, fps),
 			"previous_text":    previous,
 			"next_text":        next,
 		})
@@ -180,26 +178,26 @@ func talkingHeadUncoveredSeams(
 	return result
 }
 
-func talkingHeadShortBrollClips(overlays []timeline.Clip, fps int) []map[string]any {
+func TalkingHeadShortBrollClips(overlays []timeline.Clip, fps int) []map[string]any {
 	result := []map[string]any{}
 	for _, clip := range overlays {
 		if clip.Role != "b_roll" {
 			continue
 		}
 		duration := clip.TimelineEndFrame - clip.TimelineStartFrame
-		if duration <= 0 || duration >= minTalkingHeadBrollQualityFrames {
+		if duration <= 0 || duration >= MinTalkingHeadBrollQualityFrames {
 			continue
 		}
 		filename := ""
 		if clip.Metadata != nil {
-			filename = interfaceString(clip.Metadata["b_roll_filename"])
+			filename = InterfaceString(clip.Metadata["b_roll_filename"])
 		}
 		result = append(result, map[string]any{
 			"timeline_clip_id":     clip.TimelineClipID,
 			"timeline_start_frame": clip.TimelineStartFrame,
 			"timeline_end_frame":   clip.TimelineEndFrame,
 			"duration_frames":      duration,
-			"duration_seconds":     frameSeconds(duration, fps),
+			"duration_seconds":     FrameSeconds(duration, fps),
 			"b_roll_filename":      filename,
 		})
 	}
@@ -211,7 +209,7 @@ func talkingHeadShortBrollClips(overlays []timeline.Clip, fps int) []map[string]
 
 // talkingHeadBreathContext 返回落在 [start, end) 前后最近整句的台词，用于给残留
 // 气口和硬接缝提供人类可读的语境。
-func talkingHeadBreathContext(utterances []speechUtterance, start, end int) (string, string) {
+func talkingHeadBreathContext(utterances []SpeechUtterance, start, end int) (string, string) {
 	previous, next := "", ""
 	previousEnd, nextStart := -1, math.MaxInt
 	for _, utterance := range utterances {
@@ -227,7 +225,7 @@ func talkingHeadBreathContext(utterances []speechUtterance, start, end int) (str
 	return previous, next
 }
 
-func talkingHeadQualitySummary(report map[string]any) string {
+func TalkingHeadQualitySummary(report map[string]any) string {
 	if present, _ := report["a_roll_present"].(bool); !present {
 		return ""
 	}
@@ -238,7 +236,7 @@ func talkingHeadQualitySummary(report map[string]any) string {
 	)
 }
 
-func frameSeconds(frames, fps int) float64 {
+func FrameSeconds(frames, fps int) float64 {
 	if fps <= 0 {
 		fps = timeline.DefaultFPS
 	}
@@ -249,7 +247,7 @@ func frameSeconds(frames, fps int) float64 {
 // edit_talking_head 才会把执行结果与用户批准的删除方案的偏差输出为 plan_drift。
 type confirmedToolReplayKey struct{}
 
-func withConfirmedToolReplay(ctx context.Context) context.Context {
+func WithConfirmedToolReplay(ctx context.Context) context.Context {
 	return context.WithValue(ctx, confirmedToolReplayKey{}, true)
 }
 
@@ -260,10 +258,10 @@ func isConfirmedToolReplay(ctx context.Context) bool {
 
 // talkingHeadPlanDrift 在"决策卡批准后的重放"里，把工具为避免制造孤岛而保守撤回
 // 的气口列成偏差清单：这些是用户已批准删除、却因防护被保留下来的碎片。
-func talkingHeadPlanDrift(
+func TalkingHeadPlanDrift(
 	ctx context.Context,
-	autoPreserved []speechPause,
-	utterances []speechUtterance,
+	autoPreserved []SpeechPause,
+	utterances []SpeechUtterance,
 ) map[string]any {
 	if !isConfirmedToolReplay(ctx) || len(autoPreserved) == 0 {
 		return nil
@@ -273,7 +271,7 @@ func talkingHeadPlanDrift(
 		evidence := rushestools.SpeechPauseEvidence{
 			SourceStartFrame: pause.StartFrame, SourceEndFrame: pause.EndFrame,
 		}
-		populateSpeechPauseContext(&evidence, utterances)
+		PopulateSpeechPauseContext(&evidence, utterances)
 		items = append(items, map[string]any{
 			"pause_id":               pause.ID,
 			"delete_duration_frames": pause.DeleteEnd - pause.DeleteStart,

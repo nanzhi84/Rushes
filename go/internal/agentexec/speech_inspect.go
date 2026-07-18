@@ -1,42 +1,37 @@
 package agentexec
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
-	"os"
 	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
-	"github.com/nanzhi84/Rushes/go/internal/media"
-	"github.com/nanzhi84/Rushes/go/internal/reducer"
-	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 const (
-	maxASRChunkFrames = 25 * timeline.DefaultFPS
-	maxSimilarPairs   = 24
+	MaxASRChunkFrames = 25 * timeline.DefaultFPS
+	MaxSimilarPairs   = 24
 )
 
-type speechUtterance struct {
+type SpeechUtterance struct {
 	ID         string
 	StartFrame int
 	EndFrame   int
 	Text       string
 	Language   string
 	Emotion    string
-	Words      []speechWord
+	Words      []SpeechWord
 }
 
-type speechWord struct {
+type SpeechWord struct {
 	ID          string
 	StartFrame  int
 	EndFrame    int
@@ -44,7 +39,7 @@ type speechWord struct {
 	Punctuation string
 }
 
-type speechPause struct {
+type SpeechPause struct {
 	ID          string
 	StartFrame  int
 	EndFrame    int
@@ -53,12 +48,12 @@ type speechPause struct {
 	Method      string
 }
 
-func buildASRChunks(durationFrames int, pauses []speechPause, maxFrames int) [][2]int {
+func BuildASRChunks(durationFrames int, pauses []SpeechPause, maxFrames int) [][2]int {
 	if durationFrames <= 0 {
 		return nil
 	}
 	if maxFrames <= 0 {
-		maxFrames = maxASRChunkFrames
+		maxFrames = MaxASRChunkFrames
 	}
 	chunks := [][2]int{}
 	for start := 0; start < durationFrames; {
@@ -79,10 +74,10 @@ func buildASRChunks(durationFrames int, pauses []speechPause, maxFrames int) [][
 	return chunks
 }
 
-func alignRecognizedClauses(
+func AlignRecognizedClauses(
 	assetID, text, language, emotion string,
 	startFrame, endFrame int,
-) []speechUtterance {
+) []SpeechUtterance {
 	clauses := splitSpeechClauses(text)
 	if len(clauses) == 0 || endFrame <= startFrame {
 		return nil
@@ -91,7 +86,7 @@ func alignRecognizedClauses(
 	for _, clause := range clauses {
 		totalWeight += max(1, utf8.RuneCountInString(clause))
 	}
-	result := make([]speechUtterance, 0, len(clauses))
+	result := make([]SpeechUtterance, 0, len(clauses))
 	cursor, consumedWeight := startFrame, 0
 	for index, clause := range clauses {
 		weight := max(1, utf8.RuneCountInString(clause))
@@ -103,8 +98,8 @@ func alignRecognizedClauses(
 			))
 			end = max(cursor+1, min(end, endFrame-(len(clauses)-index-1)))
 		}
-		result = append(result, speechUtterance{
-			ID:         stableSpeechID("utt", assetID, cursor, end, clause),
+		result = append(result, SpeechUtterance{
+			ID:         StableSpeechID("utt", assetID, cursor, end, clause),
 			StartFrame: cursor, EndFrame: end, Text: clause, Language: language, Emotion: emotion,
 		})
 		cursor = end
@@ -112,11 +107,11 @@ func alignRecognizedClauses(
 	return result
 }
 
-func alignTimestampedRecognition(
+func AlignTimestampedRecognition(
 	assetID string,
 	recognized contracts.SpeechRecognitionResult,
 	chunkStartFrame, chunkEndFrame int,
-) []speechUtterance {
+) []SpeechUtterance {
 	if chunkEndFrame <= chunkStartFrame || len(recognized.Segments) == 0 {
 		return nil
 	}
@@ -124,14 +119,14 @@ func alignTimestampedRecognition(
 	for _, segment := range recognized.Segments {
 		segmentText.WriteString(segment.Text)
 	}
-	fullLength := utf8.RuneCountInString(normalizeSpeechText(recognized.Text))
-	segmentLength := utf8.RuneCountInString(normalizeSpeechText(segmentText.String()))
+	fullLength := utf8.RuneCountInString(NormalizeSpeechText(recognized.Text))
+	segmentLength := utf8.RuneCountInString(NormalizeSpeechText(segmentText.String()))
 	// 非流式响应有时只携带最后一句的 sentence 详情，而 output.text 是全文。
 	// 此时不能用不完整时间戳丢掉前文，回退到完整文本的本地对齐。
 	if fullLength > 0 && segmentLength*4 < fullLength*3 {
 		return nil
 	}
-	result := []speechUtterance{}
+	result := []SpeechUtterance{}
 	for _, segment := range recognized.Segments {
 		fromWords := timestampedWordsToUtterances(
 			assetID, segment.Words, recognized.Language, recognized.Emotion,
@@ -146,7 +141,7 @@ func alignTimestampedRecognition(
 		if end <= start {
 			continue
 		}
-		result = append(result, alignRecognizedClauses(
+		result = append(result, AlignRecognizedClauses(
 			assetID, segment.Text, recognized.Language, recognized.Emotion, start, end,
 		)...)
 	}
@@ -158,10 +153,10 @@ func timestampedWordsToUtterances(
 	words []contracts.SpeechRecognitionWord,
 	language, emotion string,
 	chunkStartFrame, chunkEndFrame int,
-) []speechUtterance {
-	result := []speechUtterance{}
+) []SpeechUtterance {
+	result := []SpeechUtterance{}
 	text := strings.Builder{}
-	utteranceWords := []speechWord{}
+	utteranceWords := []SpeechWord{}
 	startMilliseconds, endMilliseconds := -1, -1
 	flush := func() {
 		value := strings.TrimSpace(text.String())
@@ -169,11 +164,11 @@ func timestampedWordsToUtterances(
 			start := timestampToSourceFrame(startMilliseconds, chunkStartFrame, chunkEndFrame)
 			end := timestampToSourceFrame(endMilliseconds, chunkStartFrame, chunkEndFrame)
 			if end > start {
-				result = append(result, speechUtterance{
-					ID:         stableSpeechID("utt", assetID, start, end, value),
+				result = append(result, SpeechUtterance{
+					ID:         StableSpeechID("utt", assetID, start, end, value),
 					StartFrame: start, EndFrame: end, Text: value,
 					Language: language, Emotion: emotion,
-					Words: append([]speechWord(nil), utteranceWords...),
+					Words: append([]SpeechWord(nil), utteranceWords...),
 				})
 			}
 		}
@@ -195,8 +190,8 @@ func timestampedWordsToUtterances(
 			endFrame = min(chunkEndFrame, startFrame+1)
 		}
 		if endFrame > startFrame {
-			utteranceWords = append(utteranceWords, speechWord{
-				ID:         stableSpeechID("word", assetID, startFrame, endFrame, word.Text+word.Punctuation),
+			utteranceWords = append(utteranceWords, SpeechWord{
+				ID:         StableSpeechID("word", assetID, startFrame, endFrame, word.Text+word.Punctuation),
 				StartFrame: startFrame, EndFrame: endFrame, Text: word.Text, Punctuation: word.Punctuation,
 			})
 		}
@@ -236,7 +231,7 @@ func splitSpeechClauses(text string) []string {
 	return result
 }
 
-func encodeSpeechUtterances(values []speechUtterance) []map[string]any {
+func EncodeSpeechUtterances(values []SpeechUtterance) []map[string]any {
 	result := make([]map[string]any, 0, len(values))
 	for _, value := range values {
 		item := map[string]any{
@@ -255,7 +250,7 @@ func encodeSpeechUtterances(values []speechUtterance) []map[string]any {
 	return result
 }
 
-func encodeSpeechWords(values []speechWord) []map[string]any {
+func encodeSpeechWords(values []SpeechWord) []map[string]any {
 	result := make([]map[string]any, 0, len(values))
 	for _, value := range values {
 		result = append(result, map[string]any{
@@ -267,7 +262,7 @@ func encodeSpeechWords(values []speechWord) []map[string]any {
 	return result
 }
 
-func transcriptHasWordSchema(values []map[string]any) bool {
+func TranscriptHasWordSchema(values []map[string]any) bool {
 	for _, value := range values {
 		if _, exists := value["words"]; exists {
 			return true
@@ -276,7 +271,7 @@ func transcriptHasWordSchema(values []map[string]any) bool {
 	return false
 }
 
-func encodeSpeechPauses(values []speechPause) []map[string]any {
+func EncodeSpeechPauses(values []SpeechPause) []map[string]any {
 	result := make([]map[string]any, 0, len(values))
 	for _, value := range values {
 		item := map[string]any{
@@ -292,15 +287,15 @@ func encodeSpeechPauses(values []speechPause) []map[string]any {
 	return result
 }
 
-func decodeSpeechUtterances(values []map[string]any) ([]speechUtterance, error) {
-	result := make([]speechUtterance, 0, len(values))
+func DecodeSpeechUtterances(values []map[string]any) ([]SpeechUtterance, error) {
+	result := make([]SpeechUtterance, 0, len(values))
 	for _, value := range values {
-		start, startOK := numericValue(value["source_start_frame"])
-		end, endOK := numericValue(value["source_end_frame"])
-		item := speechUtterance{
-			ID: interfaceString(value["utterance_id"]), StartFrame: int(start), EndFrame: int(end),
-			Text: interfaceString(value["text"]), Language: interfaceString(value["language"]),
-			Emotion: interfaceString(value["emotion"]),
+		start, startOK := NumericValue(value["source_start_frame"])
+		end, endOK := NumericValue(value["source_end_frame"])
+		item := SpeechUtterance{
+			ID: InterfaceString(value["utterance_id"]), StartFrame: int(start), EndFrame: int(end),
+			Text: InterfaceString(value["text"]), Language: InterfaceString(value["language"]),
+			Emotion: InterfaceString(value["emotion"]),
 		}
 		if item.ID == "" || item.Text == "" || !startOK || !endOK || item.EndFrame <= item.StartFrame {
 			return nil, errors.New("持久化 transcript utterance 无效")
@@ -316,7 +311,7 @@ func decodeSpeechUtterances(values []map[string]any) ([]speechUtterance, error) 
 	return result, nil
 }
 
-func decodeSpeechWords(raw any) ([]speechWord, error) {
+func decodeSpeechWords(raw any) ([]SpeechWord, error) {
 	if raw == nil {
 		return nil, nil
 	}
@@ -335,13 +330,13 @@ func decodeSpeechWords(raw any) ([]speechWord, error) {
 	default:
 		return nil, errors.New("持久化 transcript words 无效")
 	}
-	result := make([]speechWord, 0, len(values))
+	result := make([]SpeechWord, 0, len(values))
 	for _, value := range values {
-		start, startOK := numericValue(value["source_start_frame"])
-		end, endOK := numericValue(value["source_end_frame"])
-		word := speechWord{
-			ID: interfaceString(value["word_id"]), StartFrame: int(start), EndFrame: int(end),
-			Text: interfaceString(value["text"]), Punctuation: interfaceString(value["punctuation"]),
+		start, startOK := NumericValue(value["source_start_frame"])
+		end, endOK := NumericValue(value["source_end_frame"])
+		word := SpeechWord{
+			ID: InterfaceString(value["word_id"]), StartFrame: int(start), EndFrame: int(end),
+			Text: InterfaceString(value["text"]), Punctuation: InterfaceString(value["punctuation"]),
 		}
 		if word.ID == "" || word.Text == "" || !startOK || !endOK || word.EndFrame <= word.StartFrame {
 			return nil, errors.New("持久化 transcript word 无效")
@@ -352,17 +347,17 @@ func decodeSpeechWords(raw any) ([]speechWord, error) {
 	return result, nil
 }
 
-func decodeSpeechPauses(values []map[string]any) ([]speechPause, error) {
-	result := make([]speechPause, 0, len(values))
+func DecodeSpeechPauses(values []map[string]any) ([]SpeechPause, error) {
+	result := make([]SpeechPause, 0, len(values))
 	for _, value := range values {
-		start, startOK := numericValue(value["source_start_frame"])
-		end, endOK := numericValue(value["source_end_frame"])
-		deleteStart, deleteStartOK := numericValue(value["delete_start_frame"])
-		deleteEnd, deleteEndOK := numericValue(value["delete_end_frame"])
-		item := speechPause{
-			ID: interfaceString(value["pause_id"]), StartFrame: int(start), EndFrame: int(end),
+		start, startOK := NumericValue(value["source_start_frame"])
+		end, endOK := NumericValue(value["source_end_frame"])
+		deleteStart, deleteStartOK := NumericValue(value["delete_start_frame"])
+		deleteEnd, deleteEndOK := NumericValue(value["delete_end_frame"])
+		item := SpeechPause{
+			ID: InterfaceString(value["pause_id"]), StartFrame: int(start), EndFrame: int(end),
 			DeleteStart: int(deleteStart), DeleteEnd: int(deleteEnd),
-			Method: interfaceString(value["detection_method"]),
+			Method: InterfaceString(value["detection_method"]),
 		}
 		if item.ID == "" || !startOK || !endOK || !deleteStartOK || !deleteEndOK ||
 			item.EndFrame <= item.StartFrame || item.DeleteEnd <= item.DeleteStart {
@@ -373,15 +368,15 @@ func decodeSpeechPauses(values []map[string]any) ([]speechPause, error) {
 	return result, nil
 }
 
-func deriveASRWordGaps(assetID string, utterances []speechUtterance) []speechPause {
-	words := []speechWord{}
+func DeriveASRWordGaps(assetID string, utterances []SpeechUtterance) []SpeechPause {
+	words := []SpeechWord{}
 	for _, utterance := range utterances {
 		words = append(words, utterance.Words...)
 	}
 	sort.SliceStable(words, func(left, right int) bool {
 		return words[left].StartFrame < words[right].StartFrame
 	})
-	result := []speechPause{}
+	result := []SpeechPause{}
 	for index := 1; index < len(words); index++ {
 		start, end := words[index-1].EndFrame, words[index].StartFrame
 		if end-start < 5 {
@@ -391,8 +386,8 @@ func deriveASRWordGaps(assetID string, utterances []speechUtterance) []speechPau
 		if deleteEnd <= deleteStart {
 			continue
 		}
-		result = append(result, speechPause{
-			ID:         stableSpeechID("pause", assetID, start, end, "asr_word_gap"),
+		result = append(result, SpeechPause{
+			ID:         StableSpeechID("pause", assetID, start, end, "asr_word_gap"),
 			StartFrame: start, EndFrame: end,
 			DeleteStart: deleteStart, DeleteEnd: deleteEnd,
 			Method: "asr_word_gap",
@@ -401,7 +396,7 @@ func deriveASRWordGaps(assetID string, utterances []speechUtterance) []speechPau
 	return result
 }
 
-func mergeSpeechPauses(assetID string, values []speechPause) []speechPause {
+func MergeSpeechPauses(assetID string, values []SpeechPause) []SpeechPause {
 	if len(values) == 0 {
 		return nil
 	}
@@ -411,7 +406,7 @@ func mergeSpeechPauses(assetID string, values []speechPause) []speechPause {
 		}
 		return values[left].EndFrame < values[right].EndFrame
 	})
-	result := []speechPause{values[0]}
+	result := []SpeechPause{values[0]}
 	for _, value := range values[1:] {
 		last := &result[len(result)-1]
 		if value.StartFrame <= last.EndFrame {
@@ -425,30 +420,30 @@ func mergeSpeechPauses(assetID string, values []speechPause) []speechPause {
 		result = append(result, value)
 	}
 	for index := range result {
-		result[index].ID = stableSpeechID(
+		result[index].ID = StableSpeechID(
 			"pause", assetID, result[index].StartFrame, result[index].EndFrame, result[index].Method,
 		)
 	}
 	return result
 }
 
-func clampSpeechPausesToWordBoundaries(
+func ClampSpeechPausesToWordBoundaries(
 	assetID string,
-	values []speechPause,
-	utterances []speechUtterance,
-) []speechPause {
+	values []SpeechPause,
+	utterances []SpeechUtterance,
+) []SpeechPause {
 	const minimumSafeDeleteFrames = 5
-	words := []speechWord{}
+	words := []SpeechWord{}
 	for _, utterance := range utterances {
 		words = append(words, utterance.Words...)
 	}
 	sort.SliceStable(words, func(left, right int) bool {
 		return words[left].StartFrame < words[right].StartFrame
 	})
-	result := []speechPause{}
+	result := []SpeechPause{}
 	for _, value := range values {
 		cursor := value.DeleteStart
-		segments := []talkingHeadRange{}
+		segments := []TalkingHeadRange{}
 		clamped := false
 		for _, word := range words {
 			if word.EndFrame <= cursor {
@@ -459,7 +454,7 @@ func clampSpeechPausesToWordBoundaries(
 			}
 			clamped = true
 			if word.StartFrame > cursor {
-				segments = append(segments, talkingHeadRange{
+				segments = append(segments, TalkingHeadRange{
 					Start: cursor,
 					End:   min(word.StartFrame, value.DeleteEnd),
 				})
@@ -470,10 +465,10 @@ func clampSpeechPausesToWordBoundaries(
 			}
 		}
 		if cursor < value.DeleteEnd {
-			segments = append(segments, talkingHeadRange{Start: cursor, End: value.DeleteEnd})
+			segments = append(segments, TalkingHeadRange{Start: cursor, End: value.DeleteEnd})
 		}
 		if !clamped && len(segments) == 0 {
-			segments = append(segments, talkingHeadRange{Start: value.DeleteStart, End: value.DeleteEnd})
+			segments = append(segments, TalkingHeadRange{Start: value.DeleteStart, End: value.DeleteEnd})
 		}
 		for _, segment := range segments {
 			if segment.End-segment.Start < minimumSafeDeleteFrames {
@@ -484,7 +479,7 @@ func clampSpeechPausesToWordBoundaries(
 			changed := clamped || segment.Start != value.DeleteStart || segment.End != value.DeleteEnd
 			if changed {
 				item.Method = joinSpeechDetectionMethods(item.Method, "word_boundary_clamped")
-				item.ID = stableSpeechID(
+				item.ID = StableSpeechID(
 					"pause", assetID, item.StartFrame, item.EndFrame,
 					fmt.Sprintf("%s:%d:%d", item.Method, item.DeleteStart, item.DeleteEnd),
 				)
@@ -516,13 +511,13 @@ func joinSpeechDetectionMethods(left, right string) string {
 	return strings.Join(ordered, "+")
 }
 
-func populateSpeechPauseContext(
+func PopulateSpeechPauseContext(
 	target *rushestools.SpeechPauseEvidence,
-	utterances []speechUtterance,
+	utterances []SpeechUtterance,
 ) {
 	previousEnd := -1
 	nextStart := math.MaxInt
-	allWords := []speechWord{}
+	allWords := []SpeechWord{}
 	for _, utterance := range utterances {
 		if len(utterance.Words) == 0 {
 			if utterance.EndFrame <= target.SourceStartFrame && utterance.EndFrame > previousEnd {
@@ -554,8 +549,8 @@ func populateSpeechPauseContext(
 	sort.SliceStable(allWords, func(left, right int) bool {
 		return allWords[left].StartFrame < allWords[right].StartFrame
 	})
-	previousWords := []speechWord{}
-	nextWords := []speechWord{}
+	previousWords := []SpeechWord{}
+	nextWords := []SpeechWord{}
 	for _, word := range allWords {
 		if word.EndFrame <= target.SourceStartFrame {
 			previousWords = append(previousWords, word)
@@ -581,7 +576,7 @@ func populateSpeechPauseContext(
 	target.JoinedContext = target.PreviousContext + target.NextContext
 }
 
-func rankSpeechPauseEvidence(
+func RankSpeechPauseEvidence(
 	values []rushestools.SpeechPauseEvidence,
 	limit int,
 ) ([]rushestools.SpeechPauseEvidence, int, bool) {
@@ -603,7 +598,7 @@ func rankSpeechPauseEvidence(
 	return values, total, truncated
 }
 
-func joinSpeechWords(words []speechWord) string {
+func joinSpeechWords(words []SpeechWord) string {
 	var builder strings.Builder
 	for _, word := range words {
 		builder.WriteString(word.Text)
@@ -612,9 +607,9 @@ func joinSpeechWords(words []speechWord) string {
 	return builder.String()
 }
 
-func intraUtteranceSpeechRepetitions(
+func IntraUtteranceSpeechRepetitions(
 	assetID string,
-	utterances []speechUtterance,
+	utterances []SpeechUtterance,
 	limit int,
 ) []rushestools.SpeechRepetitionEvidence {
 	if limit <= 0 {
@@ -623,8 +618,8 @@ func intraUtteranceSpeechRepetitions(
 	result := []rushestools.SpeechRepetitionEvidence{}
 	for _, utterance := range utterances {
 		for index := 0; index+1 < len(utterance.Words); index++ {
-			left := normalizeSpeechText(utterance.Words[index].Text)
-			right := normalizeSpeechText(utterance.Words[index+1].Text)
+			left := NormalizeSpeechText(utterance.Words[index].Text)
+			right := NormalizeSpeechText(utterance.Words[index+1].Text)
 			if left == "" || left != right {
 				continue
 			}
@@ -674,7 +669,7 @@ func intraUtteranceSpeechRepetitions(
 
 func buildIntraUtteranceRepetition(
 	assetID string,
-	utterance speechUtterance,
+	utterance SpeechUtterance,
 	kind string,
 	earlierStart, earlierEnd, laterStart, laterEnd int,
 	matchedText string,
@@ -682,7 +677,7 @@ func buildIntraUtteranceRepetition(
 	evidence string,
 ) rushestools.SpeechRepetitionEvidence {
 	return rushestools.SpeechRepetitionEvidence{
-		RepetitionID: stableSpeechID(
+		RepetitionID: StableSpeechID(
 			"repetition", assetID,
 			utterance.Words[earlierStart].StartFrame,
 			utterance.Words[laterEnd].EndFrame,
@@ -704,11 +699,11 @@ func buildIntraUtteranceRepetition(
 	}
 }
 
-func speechUtteranceCharacterMap(words []speechWord) ([]rune, []int) {
+func speechUtteranceCharacterMap(words []SpeechWord) ([]rune, []int) {
 	characters := []rune{}
 	wordIndexes := []int{}
 	for index, word := range words {
-		for _, character := range normalizeSpeechText(word.Text) {
+		for _, character := range NormalizeSpeechText(word.Text) {
 			characters = append(characters, character)
 			wordIndexes = append(wordIndexes, index)
 		}
@@ -742,10 +737,10 @@ func longestNonOverlappingSpeechRepeat(characters []rune) (int, int, int) {
 	return bestEarlier, bestLater, bestLength
 }
 
-func shortLeadingSpeechFragments(
+func ShortLeadingSpeechFragments(
 	assetID string,
-	utterances []speechUtterance,
-	pauses []speechPause,
+	utterances []SpeechUtterance,
+	pauses []SpeechPause,
 	limit int,
 ) []rushestools.SpeechFragmentEvidence {
 	if limit <= 0 {
@@ -766,8 +761,8 @@ func shortLeadingSpeechFragments(
 				pause.StartFrame <= utterance.StartFrame || pause.EndFrame >= utterance.EndFrame {
 				continue
 			}
-			before := []speechWord{}
-			after := []speechWord{}
+			before := []SpeechWord{}
+			after := []SpeechWord{}
 			for _, word := range utterance.Words {
 				if word.StartFrame < pause.StartFrame {
 					before = append(before, word)
@@ -785,8 +780,8 @@ func shortLeadingSpeechFragments(
 				last.EndFrame-utterance.StartFrame > maximumFrames {
 				continue
 			}
-			fragmentWords := append([]speechWord(nil), before...)
-			nextWords := append([]speechWord(nil), after...)
+			fragmentWords := append([]SpeechWord(nil), before...)
+			nextWords := append([]SpeechWord(nil), after...)
 			kind := "short_leading_fragment_before_internal_pause"
 			restartAnchorText := ""
 			matchedEarlierUtteranceID := ""
@@ -794,8 +789,8 @@ func shortLeadingSpeechFragments(
 			if anchor, ok := speechRestartAnchorAfterPause(
 				utterances, utteranceIndex, utterance, pause.EndFrame,
 			); ok {
-				fragmentWords = append([]speechWord(nil), utterance.Words[:anchor.WordIndex]...)
-				nextWords = append([]speechWord(nil), utterance.Words[anchor.WordIndex:]...)
+				fragmentWords = append([]SpeechWord(nil), utterance.Words[:anchor.WordIndex]...)
+				nextWords = append([]SpeechWord(nil), utterance.Words[anchor.WordIndex:]...)
 				if len(nextWords) > 8 {
 					nextWords = nextWords[:8]
 				}
@@ -814,7 +809,7 @@ func shortLeadingSpeechFragments(
 			if utteranceIndex > 0 {
 				previousContext = trailingSpeechContext(utterances[utteranceIndex-1], 8)
 			}
-			fragmentID := stableSpeechID(
+			fragmentID := StableSpeechID(
 				"fragment", assetID, fragmentWords[0].StartFrame, last.EndFrame,
 				"leading_before_internal_pause:"+pause.ID+":"+text,
 			)
@@ -868,12 +863,12 @@ func shortLeadingSpeechFragments(
 
 func intraUtteranceRetakeTailFragments(
 	assetID string,
-	utterances []speechUtterance,
-	pauses []speechPause,
+	utterances []SpeechUtterance,
+	pauses []SpeechPause,
 ) []rushestools.SpeechFragmentEvidence {
 	const minimumBoundaryPauseFrames = 6
 	result := []rushestools.SpeechFragmentEvidence{}
-	for _, repetition := range intraUtteranceSpeechRepetitions(assetID, utterances, int(^uint(0)>>1)) {
+	for _, repetition := range IntraUtteranceSpeechRepetitions(assetID, utterances, int(^uint(0)>>1)) {
 		if repetition.Kind != "repeated_phrase" {
 			continue
 		}
@@ -904,7 +899,7 @@ func intraUtteranceRetakeTailFragments(
 			laterStartIndex <= earlierEndIndex+1 {
 			continue
 		}
-		var boundary *speechPause
+		var boundary *SpeechPause
 		for index := range pauses {
 			pause := &pauses[index]
 			if pause.EndFrame-pause.StartFrame < minimumBoundaryPauseFrames ||
@@ -919,7 +914,7 @@ func intraUtteranceRetakeTailFragments(
 		if boundary == nil {
 			continue
 		}
-		fragmentWords := []speechWord{}
+		fragmentWords := []SpeechWord{}
 		for _, word := range utterance.Words[earlierStartIndex:laterStartIndex] {
 			if word.EndFrame <= boundary.StartFrame {
 				fragmentWords = append(fragmentWords, word)
@@ -928,7 +923,7 @@ func intraUtteranceRetakeTailFragments(
 		if len(fragmentWords) == 0 {
 			continue
 		}
-		nextWords := []speechWord{}
+		nextWords := []SpeechWord{}
 		for _, word := range utterance.Words[earlierEndIndex+1:] {
 			if word.StartFrame < boundary.EndFrame {
 				continue
@@ -946,7 +941,7 @@ func intraUtteranceRetakeTailFragments(
 		last := fragmentWords[len(fragmentWords)-1]
 		text := joinSpeechWords(fragmentWords)
 		result = append(result, rushestools.SpeechFragmentEvidence{
-			FragmentID: stableSpeechID(
+			FragmentID: StableSpeechID(
 				"fragment", assetID, fragmentWords[0].StartFrame, last.EndFrame,
 				"earlier_take:"+repetition.RepetitionID+":"+boundary.ID,
 			),
@@ -969,7 +964,7 @@ func intraUtteranceRetakeTailFragments(
 	return result
 }
 
-func trailingSpeechContext(utterance speechUtterance, maximumWords int) string {
+func trailingSpeechContext(utterance SpeechUtterance, maximumWords int) string {
 	if maximumWords <= 0 {
 		return ""
 	}
@@ -977,7 +972,7 @@ func trailingSpeechContext(utterance speechUtterance, maximumWords int) string {
 		start := max(0, len(utterance.Words)-maximumWords)
 		return joinSpeechWords(utterance.Words[start:])
 	}
-	return truncateText(utterance.Text, 80)
+	return TruncateText(utterance.Text, 80)
 }
 
 type speechRestartAnchor struct {
@@ -988,9 +983,9 @@ type speechRestartAnchor struct {
 }
 
 func speechRestartAnchorAfterPause(
-	utterances []speechUtterance,
+	utterances []SpeechUtterance,
 	utteranceIndex int,
-	utterance speechUtterance,
+	utterance SpeechUtterance,
 	pauseEndFrame int,
 ) (speechRestartAnchor, bool) {
 	const (
@@ -1014,7 +1009,7 @@ func speechRestartAnchorAfterPause(
 			continue
 		}
 		for earlierIndex := utteranceIndex - 1; earlierIndex >= 0; earlierIndex-- {
-			if !strings.Contains(normalizeSpeechText(utterances[earlierIndex].Text), normalizedAnchor) {
+			if !strings.Contains(NormalizeSpeechText(utterances[earlierIndex].Text), normalizedAnchor) {
 				continue
 			}
 			return speechRestartAnchor{
@@ -1027,20 +1022,20 @@ func speechRestartAnchorAfterPause(
 	return speechRestartAnchor{}, false
 }
 
-func speechWordPrefix(words []speechWord, minimumRunes int) (string, string) {
-	parts := []speechWord{}
+func speechWordPrefix(words []SpeechWord, minimumRunes int) (string, string) {
+	parts := []SpeechWord{}
 	for _, word := range words {
 		parts = append(parts, word)
-		normalized := normalizeSpeechText(joinSpeechWords(parts))
+		normalized := NormalizeSpeechText(joinSpeechWords(parts))
 		if utf8.RuneCountInString(normalized) >= minimumRunes {
 			characters := []rune(normalized)
 			return joinSpeechWords(parts), string(characters[:minimumRunes])
 		}
 	}
-	return joinSpeechWords(parts), normalizeSpeechText(joinSpeechWords(parts))
+	return joinSpeechWords(parts), NormalizeSpeechText(joinSpeechWords(parts))
 }
 
-func similarSpeechPairs(values []speechUtterance, limit int) []rushestools.SpeechSimilarityEvidence {
+func SimilarSpeechPairs(values []SpeechUtterance, limit int) []rushestools.SpeechSimilarityEvidence {
 	if limit <= 0 || len(values) < 2 {
 		return nil
 	}
@@ -1113,7 +1108,7 @@ type speechSimilarityCandidate struct {
 	rank                     float64
 }
 
-func speechSequenceSimilarityCandidates(values []speechUtterance) []speechSimilarityCandidate {
+func speechSequenceSimilarityCandidates(values []SpeechUtterance) []speechSimilarityCandidate {
 	const (
 		maxWindowUtterances = 4
 		minSequenceRunes    = 18
@@ -1124,7 +1119,7 @@ func speechSequenceSimilarityCandidates(values []speechUtterance) []speechSimila
 	candidates := []speechSimilarityCandidate{}
 	for earlierStart := 0; earlierStart < len(values); earlierStart++ {
 		for earlierEnd := earlierStart; earlierEnd < len(values) && earlierEnd < earlierStart+maxWindowUtterances; earlierEnd++ {
-			earlierText := normalizeSpeechText(joinSpeechUtteranceText(values, earlierStart, earlierEnd))
+			earlierText := NormalizeSpeechText(joinSpeechUtteranceText(values, earlierStart, earlierEnd))
 			earlierLength := utf8.RuneCountInString(earlierText)
 			if earlierLength < minSequenceRunes {
 				continue
@@ -1134,7 +1129,7 @@ func speechSequenceSimilarityCandidates(values []speechUtterance) []speechSimila
 					if earlierStart == earlierEnd && laterStart == laterEnd {
 						continue
 					}
-					laterText := normalizeSpeechText(joinSpeechUtteranceText(values, laterStart, laterEnd))
+					laterText := NormalizeSpeechText(joinSpeechUtteranceText(values, laterStart, laterEnd))
 					laterLength := utf8.RuneCountInString(laterText)
 					if laterLength < minSequenceRunes {
 						continue
@@ -1168,7 +1163,7 @@ func speechSequenceSimilarityCandidates(values []speechUtterance) []speechSimila
 }
 
 func buildSpeechSimilarityEvidence(
-	values []speechUtterance,
+	values []SpeechUtterance,
 	earlierStart, earlierEnd, laterStart, laterEnd int,
 	score float64,
 	matched int,
@@ -1192,7 +1187,7 @@ func buildSpeechSimilarityEvidence(
 	}
 }
 
-func joinSpeechUtteranceText(values []speechUtterance, start, end int) string {
+func joinSpeechUtteranceText(values []SpeechUtterance, start, end int) string {
 	parts := make([]string, 0, end-start+1)
 	for index := start; index <= end; index++ {
 		parts = append(parts, strings.TrimSpace(values[index].Text))
@@ -1238,8 +1233,8 @@ func speechWindowOverlapRatio(leftStart, leftEnd, rightStart, rightEnd int) floa
 }
 
 func speechTextSimilarity(left, right string) float64 {
-	left = normalizeSpeechText(left)
-	right = normalizeSpeechText(right)
+	left = NormalizeSpeechText(left)
+	right = NormalizeSpeechText(right)
 	if utf8.RuneCountInString(left) < 4 || utf8.RuneCountInString(right) < 4 {
 		return 0
 	}
@@ -1260,7 +1255,7 @@ func speechTextSimilarity(left, right string) float64 {
 	return float64(intersection) / float64(union)
 }
 
-func normalizeSpeechText(value string) string {
+func NormalizeSpeechText(value string) string {
 	result := []rune{}
 	for _, character := range strings.ToLower(value) {
 		if unicode.IsLetter(character) || unicode.IsDigit(character) || unicode.In(character, unicode.Han) {
@@ -1279,12 +1274,12 @@ func speechBigrams(value string) map[string]struct{} {
 	return result
 }
 
-func stableSpeechID(prefix, assetID string, startFrame, endFrame int, text string) string {
+func StableSpeechID(prefix, assetID string, startFrame, endFrame int, text string) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%s:%d:%d:%s", prefix, assetID, startFrame, endFrame, text)))
 	return prefix + "_" + hex.EncodeToString(sum[:8])
 }
 
-func mapSourceRangeToTimelineClip(clip timeline.Clip, startFrame, endFrame int) (int, int, bool) {
+func MapSourceRangeToTimelineClip(clip timeline.Clip, startFrame, endFrame int) (int, int, bool) {
 	start := max(startFrame, clip.SourceStartFrame)
 	end := min(endFrame, clip.SourceEndFrame)
 	if end <= start {
@@ -1301,14 +1296,14 @@ func mapSourceRangeToTimelineClip(clip timeline.Clip, startFrame, endFrame int) 
 	return timelineStart, timelineEnd, timelineEnd > timelineStart
 }
 
-func sourceRangesOverlap(leftStart, leftEnd, rightStart, rightEnd int) bool {
+func SourceRangesOverlap(leftStart, leftEnd, rightStart, rightEnd int) bool {
 	return leftStart < rightEnd && rightStart < leftEnd
 }
 
 // clampSpeechRangeToClip 把源帧证据区间裁剪到 clip 的已裁剪源区间，返回裁剪后的
 // 区间与是否发生了裁剪。调用方对交集为空（end <= start）的项自行决定跳过或判非法，
 // 使 speech.inspect 返回的证据坐标与 timeline.edit_talking_head 的交集校验一致。
-func clampSpeechRangeToClip(clip timeline.Clip, start, end int) (int, int, bool) {
+func ClampSpeechRangeToClip(clip timeline.Clip, start, end int) (int, int, bool) {
 	clampedStart := max(start, clip.SourceStartFrame)
 	clampedEnd := min(end, clip.SourceEndFrame)
 	return clampedStart, clampedEnd, clampedStart != start || clampedEnd != end

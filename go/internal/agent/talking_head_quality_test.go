@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -190,21 +191,21 @@ func TestSpeechQualityReportSurfacesInValidateAndEdit(t *testing.T) {
 // 相邻删除的 counter-proposal；仅少量重叠的完整长句不受影响。
 func TestTalkingHeadIslandOnMisspeakEvidenceRejectedWithCounterProposal(t *testing.T) {
 	t.Parallel()
-	utterance := speechUtterance{
+	utterance := agentexec.SpeechUtterance{
 		ID: "utt", StartFrame: 0, EndFrame: 240, Text: "前面口误后面。",
-		Words: []speechWord{
+		Words: []agentexec.SpeechWord{
 			{ID: "w_lead", StartFrame: 0, EndFrame: 100, Text: "前面"},
 			{ID: "w_bad", StartFrame: 100, EndFrame: 180, Text: "口误"},
 			{ID: "w_tail", StartFrame: 180, EndFrame: 240, Text: "后面", Punctuation: "。"},
 		},
 	}
-	deletions := []talkingHeadRange{{Start: 0, End: 100}, {Start: 180, End: 240}}
-	island := []talkingHeadRange{{Start: 100, End: 180}}
-	evidence := []talkingHeadEvidenceRange{{ID: "frag_bad", Start: 100, End: 180}}
-	orphans := talkingHeadOrphanSpeechFragments(
-		deletions, island, []speechUtterance{utterance},
+	deletions := []agentexec.TalkingHeadRange{{Start: 0, End: 100}, {Start: 180, End: 240}}
+	island := []agentexec.TalkingHeadRange{{Start: 100, End: 180}}
+	evidence := []agentexec.TalkingHeadEvidenceRange{{ID: "frag_bad", Start: 100, End: 180}}
+	orphans := agentexec.TalkingHeadOrphanSpeechFragments(
+		deletions, island, []agentexec.SpeechUtterance{utterance},
 		map[string]struct{}{}, map[string]struct{}{}, nil,
-		0, 240, minTalkingHeadRetainedIslandFrames, evidence,
+		0, 240, agentexec.MinTalkingHeadRetainedIslandFrames, evidence,
 	)
 	if len(orphans) != 1 || orphans[0]["reason"] != "lands_on_misspeak_evidence" ||
 		orphans[0]["duration_frames"] != 80 {
@@ -213,18 +214,18 @@ func TestTalkingHeadIslandOnMisspeakEvidenceRejectedWithCounterProposal(t *testi
 	if matched, _ := orphans[0]["matched_evidence_ids"].([]string); len(matched) != 1 || matched[0] != "frag_bad" {
 		t.Fatalf("matched=%#v", orphans[0]["matched_evidence_ids"])
 	}
-	proposals := talkingHeadIslandCounterProposals(orphans, []speechUtterance{utterance})
+	proposals := agentexec.TalkingHeadIslandCounterProposals(orphans, []agentexec.SpeechUtterance{utterance})
 	if len(proposals) != 1 || proposals[0]["merged_delete_source_start_frame"] != 0 ||
 		proposals[0]["merged_delete_source_end_frame"] != 240 ||
 		proposals[0]["island_start_word_id"] != "w_bad" || proposals[0]["island_end_word_id"] != "w_bad" ||
 		proposals[0]["island_text"] != "口误" || proposals[0]["reason"] != "lands_on_misspeak_evidence" {
 		t.Fatalf("proposals=%#v", proposals)
 	}
-	minority := []talkingHeadEvidenceRange{{ID: "frag_minor", Start: 100, End: 120}}
-	clean := talkingHeadOrphanSpeechFragments(
-		deletions, island, []speechUtterance{utterance},
+	minority := []agentexec.TalkingHeadEvidenceRange{{ID: "frag_minor", Start: 100, End: 120}}
+	clean := agentexec.TalkingHeadOrphanSpeechFragments(
+		deletions, island, []agentexec.SpeechUtterance{utterance},
 		map[string]struct{}{}, map[string]struct{}{}, nil,
-		0, 240, minTalkingHeadRetainedIslandFrames, minority,
+		0, 240, agentexec.MinTalkingHeadRetainedIslandFrames, minority,
 	)
 	if len(clean) != 0 {
 		t.Fatalf("仅少量重叠的 >=2 秒保留段不应被判为孤岛: %#v", clean)
@@ -307,19 +308,19 @@ func TestTalkingHeadEditNarrowingIntoIslandReturnsCounterProposal(t *testing.T) 
 // 决策卡批准后的重放里、且实际保留了气口时才产出，并明示保留了几处。
 func TestTalkingHeadPlanDriftOnlyWithApprovedReplay(t *testing.T) {
 	t.Parallel()
-	utterances := []speechUtterance{
+	utterances := []agentexec.SpeechUtterance{
 		{ID: "u1", StartFrame: 0, EndFrame: 60, Text: "前一句。"},
 		{ID: "u2", StartFrame: 80, EndFrame: 140, Text: "后一句。"},
 	}
-	preserved := []speechPause{{ID: "pause_x", StartFrame: 60, EndFrame: 80, DeleteStart: 62, DeleteEnd: 78}}
-	if talkingHeadPlanDrift(t.Context(), preserved, utterances) != nil {
+	preserved := []agentexec.SpeechPause{{ID: "pause_x", StartFrame: 60, EndFrame: 80, DeleteStart: 62, DeleteEnd: 78}}
+	if agentexec.TalkingHeadPlanDrift(t.Context(), preserved, utterances) != nil {
 		t.Fatal("非确认重放不应产出 plan_drift")
 	}
-	replayCtx := withConfirmedToolReplay(t.Context())
-	if talkingHeadPlanDrift(replayCtx, nil, utterances) != nil {
+	replayCtx := agentexec.WithConfirmedToolReplay(t.Context())
+	if agentexec.TalkingHeadPlanDrift(replayCtx, nil, utterances) != nil {
 		t.Fatal("无漂移不应产出 plan_drift")
 	}
-	drift := talkingHeadPlanDrift(replayCtx, preserved, utterances)
+	drift := agentexec.TalkingHeadPlanDrift(replayCtx, preserved, utterances)
 	if drift == nil || drift["retained_pause_count"] != 1 || drift["approved_plan"] != true ||
 		drift["summary"] != "与你批准的删除方案相比，为避免制造不足 2 秒的保留孤岛，本次实际保留了 1 处气口未删；请在回复中如实向用户说明这一偏差。" {
 		t.Fatalf("drift=%#v", drift)
@@ -389,12 +390,12 @@ func TestSpeechQualityReportEdgeCasesAndHelpers(t *testing.T) {
 		TimelineStartFrame: 0, TimelineEndFrame: 90, SourceStartFrame: 0, SourceEndFrame: 90, PlaybackRate: 1,
 	}}
 	empty, err := service.speechQualityReport(t.Context(), noTranscript)
-	if err != nil || empty["a_roll_present"] != false || talkingHeadQualitySummary(empty) != "" {
+	if err != nil || empty["a_roll_present"] != false || agentexec.TalkingHeadQualitySummary(empty) != "" {
 		t.Fatalf("empty report=%#v err=%v", empty, err)
 	}
 
-	if frameSeconds(45, 0) != 1.5 || frameSeconds(9, 30) != 0.3 {
-		t.Fatalf("frameSeconds edge wrong: %v %v", frameSeconds(45, 0), frameSeconds(9, 30))
+	if agentexec.FrameSeconds(45, 0) != 1.5 || agentexec.FrameSeconds(9, 30) != 0.3 {
+		t.Fatalf("frameSeconds edge wrong: %v %v", agentexec.FrameSeconds(45, 0), agentexec.FrameSeconds(9, 30))
 	}
 }
 
@@ -414,19 +415,19 @@ func TestTalkingHeadMisspeakEvidenceClipsToSelectedRange(t *testing.T) {
 		{FragmentID: "frag_in", SourceStartFrame: 70, SourceEndFrame: 90},
 		{FragmentID: "frag_out", SourceStartFrame: 300, SourceEndFrame: 320},
 	}
-	evidence := talkingHeadMisspeakEvidence(
+	evidence := agentexec.TalkingHeadMisspeakEvidence(
 		repetitions, fragments, timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 100},
 	)
-	got := map[string]talkingHeadRange{}
+	got := map[string]agentexec.TalkingHeadRange{}
 	for _, item := range evidence {
-		got[item.ID] = talkingHeadRange{Start: item.Start, End: item.End}
+		got[item.ID] = agentexec.TalkingHeadRange{Start: item.Start, End: item.End}
 	}
-	if len(evidence) != 3 || got["rep_in:earlier"] != (talkingHeadRange{Start: 10, End: 30}) ||
-		got["rep_in:later"] != (talkingHeadRange{Start: 40, End: 60}) ||
-		got["frag_in"] != (talkingHeadRange{Start: 70, End: 90}) {
+	if len(evidence) != 3 || got["rep_in:earlier"] != (agentexec.TalkingHeadRange{Start: 10, End: 30}) ||
+		got["rep_in:later"] != (agentexec.TalkingHeadRange{Start: 40, End: 60}) ||
+		got["frag_in"] != (agentexec.TalkingHeadRange{Start: 70, End: 90}) {
 		t.Fatalf("evidence=%#v", evidence)
 	}
-	if talkingHeadIslandMisspeakMatches(talkingHeadRange{Start: 50, End: 50}, evidence) != nil {
+	if agentexec.TalkingHeadIslandMisspeakMatches(agentexec.TalkingHeadRange{Start: 50, End: 50}, evidence) != nil {
 		t.Fatal("零长孤岛不应匹配任何证据")
 	}
 }
@@ -597,7 +598,7 @@ func TestConfirmedToolReplayCtxGatesEditTalkingHeadPlanDrift(t *testing.T) {
 	const confirmedDraft = "draft_plan_drift_confirmed"
 	createAgentDraft(t, database, confirmedDraft)
 	seedTalkingHeadAutoPreserveScenario(t, database, service, confirmedDraft, "asset_plan_drift_confirmed")
-	confirmedCtx := withConfirmedToolReplay(rushestools.WithDraftID(t.Context(), confirmedDraft))
+	confirmedCtx := agentexec.WithConfirmedToolReplay(rushestools.WithDraftID(t.Context(), confirmedDraft))
 	confirmedRaw, err := service.executeReported(confirmedCtx, confirmedDraft, "timeline.edit_talking_head", editInput)
 	if err != nil {
 		t.Fatal(err)

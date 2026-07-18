@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -41,7 +42,7 @@ func (service *Service) toolEditTalkingHead(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	selectedClip, found := talkingHeadPrimaryClip(document, input.ARollTimelineClipID)
+	selectedClip, found := agentexec.TalkingHeadPrimaryClip(document, input.ARollTimelineClipID)
 	if !found {
 		return failed("a_roll_timeline_clip_id 不存在于主视频轨", map[string]any{
 			"recovery": "调用 timeline.inspect 取得当前 visual_base clip ID",
@@ -67,36 +68,36 @@ func (service *Service) toolEditTalkingHead(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	utterances, err := decodeSpeechUtterances(transcript.Utterances)
+	utterances, err := agentexec.DecodeSpeechUtterances(transcript.Utterances)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	pauses, err := decodeSpeechPauses(transcript.VADSegments)
+	pauses, err := agentexec.DecodeSpeechPauses(transcript.VADSegments)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	pauses = clampSpeechPausesToWordBoundaries(asset.ID, pauses, utterances)
-	pauseByID := make(map[string]speechPause, len(pauses))
+	pauses = agentexec.ClampSpeechPausesToWordBoundaries(asset.ID, pauses, utterances)
+	pauseByID := make(map[string]agentexec.SpeechPause, len(pauses))
 	for _, pause := range pauses {
 		pauseByID[pause.ID] = pause
 	}
 	var decidedPauseIDs map[string]struct{}
 	var invalidPauseDecisions []map[string]any
-	input, decidedPauseIDs, invalidPauseDecisions = expandTalkingHeadPauseDecisions(input, pauseByID)
+	input, decidedPauseIDs, invalidPauseDecisions = agentexec.ExpandTalkingHeadPauseDecisions(input, pauseByID)
 	if len(invalidPauseDecisions) > 0 {
 		return failed("pause_decisions 包含未知、重复、冲突或非法决定", map[string]any{
 			"invalid_pause_decisions": invalidPauseDecisions,
 			"recovery":                "重新读取 speech.inspect.pauses；每个 pause_id 只提交一次，action 只能是 remove 或 preserve，且 preserve 不能同时出现在 remove_pause_ids。",
 		})
 	}
-	repetitions := intraUtteranceSpeechRepetitions(asset.ID, utterances, maxSimilarPairs)
+	repetitions := agentexec.IntraUtteranceSpeechRepetitions(asset.ID, utterances, agentexec.MaxSimilarPairs)
 	repetitionByID := make(map[string]rushestools.SpeechRepetitionEvidence, len(repetitions))
 	for _, repetition := range repetitions {
 		repetitionByID[repetition.RepetitionID] = repetition
 	}
 	var decidedRepetitionIDs map[string]struct{}
 	var invalidRepetitionDecisions []map[string]any
-	input, decidedRepetitionIDs, invalidRepetitionDecisions = expandTalkingHeadRepetitionDecisions(
+	input, decidedRepetitionIDs, invalidRepetitionDecisions = agentexec.ExpandTalkingHeadRepetitionDecisions(
 		input, repetitionByID,
 	)
 	if len(invalidRepetitionDecisions) > 0 {
@@ -105,12 +106,12 @@ func (service *Service) toolEditTalkingHead(
 			"recovery":                     "重新读取 speech.inspect.intra_utterance_repetitions；每个 repetition_id 只提交一次，action 只能是 remove_earlier、remove_later 或 preserve。",
 		})
 	}
-	shortFragments := shortLeadingSpeechFragments(asset.ID, utterances, pauses, maxSimilarPairs)
+	shortFragments := agentexec.ShortLeadingSpeechFragments(asset.ID, utterances, pauses, agentexec.MaxSimilarPairs)
 	fragmentByID := make(map[string]rushestools.SpeechFragmentEvidence, len(shortFragments))
 	for _, fragment := range shortFragments {
 		fragmentByID[fragment.FragmentID] = fragment
 	}
-	fragmentExpansion := expandTalkingHeadFragmentDecisions(input, fragmentByID)
+	fragmentExpansion := agentexec.ExpandTalkingHeadFragmentDecisions(input, fragmentByID)
 	input = fragmentExpansion.Input
 	if len(fragmentExpansion.Invalid) > 0 {
 		return failed("short_fragment_decisions 包含未知、重复或非法决定", map[string]any{
@@ -136,7 +137,7 @@ func (service *Service) toolEditTalkingHead(
 			continue
 		}
 		reason := strings.TrimSpace(fragmentExpansion.PreservedReasons[id])
-		if validRestartFragmentPreserveReason(fragment, reason) {
+		if agentexec.ValidRestartFragmentPreserveReason(fragment, reason) {
 			continue
 		}
 		preserveReasonRequired = append(preserveReasonRequired, fragment)
@@ -148,8 +149,8 @@ func (service *Service) toolEditTalkingHead(
 			"recovery":                 "逐项读取 previous_context、joined_context 与 matched_earlier_text：若拼接后是病句或重说残片，用 start_word_id/end_word_id 删除；若确应保留，理由必须原样引用 fragment.text 和 restart_anchor_text 并解释完整语义。不要只写“正常”“衔接”或“保留”。",
 		})
 	}
-	utteranceByID := make(map[string]speechUtterance, len(utterances))
-	wordSequence := []speechWord{}
+	utteranceByID := make(map[string]agentexec.SpeechUtterance, len(utterances))
+	wordSequence := []agentexec.SpeechWord{}
 	for _, utterance := range utterances {
 		utteranceByID[utterance.ID] = utterance
 		wordSequence = append(wordSequence, utterance.Words...)
@@ -157,20 +158,20 @@ func (service *Service) toolEditTalkingHead(
 	sort.SliceStable(wordSequence, func(left, right int) bool {
 		return wordSequence[left].StartFrame < wordSequence[right].StartFrame
 	})
-	removedUtteranceRanges, invalidUtterances := selectTalkingHeadUtterances(
+	removedUtteranceRanges, invalidUtterances := agentexec.SelectTalkingHeadUtterances(
 		input.RemoveUtteranceIDs, utteranceByID, selectedClip,
 	)
-	removedWordRanges, removedWordIDs, invalidWordRanges := selectTalkingHeadWordRanges(
+	removedWordRanges, removedWordIDs, invalidWordRanges := agentexec.SelectTalkingHeadWordRanges(
 		input.RemoveWordRanges, wordSequence, selectedClip,
 	)
-	removedPauses, invalidPauses := selectTalkingHeadPauses(input.RemovePauseIDs, pauseByID, selectedClip)
+	removedPauses, invalidPauses := agentexec.SelectTalkingHeadPauses(input.RemovePauseIDs, pauseByID, selectedClip)
 	if len(invalidUtterances) > 0 || len(invalidWordRanges) > 0 || len(invalidPauses) > 0 {
 		data := map[string]any{
 			"invalid_utterance_ids": invalidUtterances, "invalid_word_ranges": invalidWordRanges,
 			"invalid_pause_ids": invalidPauses,
 			"recovery":          "逐条核对：evidence_current_clips 会指出证据当前所属的 timeline_clip_id，请改用该 clip 重新调用；其余为未知 ID，需重新对当前 a_roll_timeline_clip_id 调用 speech.inspect（句内删剪设 include_words=true）。inspect 返回的证据已按该 clip 裁剪，可直接使用其中的 ID。",
 		}
-		if hints := talkingHeadEvidenceClipHints(
+		if hints := agentexec.TalkingHeadEvidenceClipHints(
 			document, asset.ID, invalidUtterances, utteranceByID,
 			invalidWordRanges, wordSequence, invalidPauses, pauseByID,
 		); len(hints) > 0 {
@@ -186,10 +187,10 @@ func (service *Service) toolEditTalkingHead(
 	for _, id := range removedWordIDs {
 		removedWordIDSet[id] = struct{}{}
 	}
-	assignmentSourceRanges := make([]talkingHeadRange, len(input.BrollAssignments))
+	assignmentSourceRanges := make([]agentexec.TalkingHeadRange, len(input.BrollAssignments))
 	invalidAssignments := []map[string]any{}
 	for index, assignment := range input.BrollAssignments {
-		sourceRange, resolveErr := talkingHeadAssignmentSourceRange(
+		sourceRange, resolveErr := agentexec.TalkingHeadAssignmentSourceRange(
 			assignment, utteranceByID, wordSequence, removedIDSet, removedWordIDSet, selectedClip,
 		)
 		if resolveErr != nil {
@@ -234,33 +235,33 @@ func (service *Service) toolEditTalkingHead(
 			"recovery":            "用 speech.inspect 返回的未删除 utterance_id，并可在其中附带唯一的原文 anchor_text；若原文不唯一则改用连续 word_id。utterance 与 word 两种锚点二选一",
 		})
 	}
-	semanticDeleteRanges := make([]talkingHeadRange, 0, len(removedUtteranceRanges)+len(removedWordRanges))
+	semanticDeleteRanges := make([]agentexec.TalkingHeadRange, 0, len(removedUtteranceRanges)+len(removedWordRanges))
 	semanticDeleteRanges = append(semanticDeleteRanges, removedUtteranceRanges...)
 	semanticDeleteRanges = append(semanticDeleteRanges, removedWordRanges...)
-	semanticDeleteRanges = mergeTalkingHeadRanges(semanticDeleteRanges)
-	effectivePauses, _, redundantPauses := resolveTalkingHeadPauseRanges(
-		removedPauses, semanticDeleteRanges, minTalkingHeadPauseResidualFrames,
+	semanticDeleteRanges = agentexec.MergeTalkingHeadRanges(semanticDeleteRanges)
+	effectivePauses, _, redundantPauses := agentexec.ResolveTalkingHeadPauseRanges(
+		removedPauses, semanticDeleteRanges, agentexec.MinTalkingHeadPauseResidualFrames,
 	)
 	if len(removedPauses) > 0 && len(effectivePauses) == 0 && len(redundantPauses) > 0 {
-		candidates := talkingHeadRetainedPauseCandidates(
+		candidates := agentexec.TalkingHeadRetainedPauseCandidates(
 			pauses, semanticDeleteRanges, selectedClip, utterances,
-			minTalkingHeadPauseCandidateFrames, 8,
+			agentexec.MinTalkingHeadPauseCandidateFrames, 8,
 		)
 		if len(candidates) > 0 {
 			return failed("所选气口已被句子或词级删除完整覆盖，本次不会产生任何额外气口清理", map[string]any{
-				"redundant_pause_ids":       speechPauseIDs(redundantPauses),
+				"redundant_pause_ids":       agentexec.SpeechPauseIDs(redundantPauses),
 				"retained_pause_candidates": candidates,
 				"recovery":                  "删除这些冗余 pause_id；若创作意图仍要求清理气口，由模型结合 retained_pause_candidates 的两侧原文自主选择后重试。候选只是客观时长与上下文，不代表必须删除。",
 			})
 		}
 	}
 	removedPauses = effectivePauses
-	retainedSpeech := talkingHeadRetainedSpeechRanges(
+	retainedSpeech := agentexec.TalkingHeadRetainedSpeechRanges(
 		utterances, removedIDSet, removedWordIDSet, selectedClip,
 	)
-	misspeakEvidence := talkingHeadMisspeakEvidence(repetitions, shortFragments, selectedClip)
+	misspeakEvidence := agentexec.TalkingHeadMisspeakEvidence(repetitions, shortFragments, selectedClip)
 	removedPauses, effectivePauseRanges, sourceDeleteRanges, autoPreservedPauses, orphanFragments :=
-		protectTalkingHeadOrphanFragments(
+		agentexec.ProtectTalkingHeadOrphanFragments(
 			semanticDeleteRanges, removedPauses, pauses, retainedSpeech, utterances,
 			removedIDSet, removedWordIDSet, selectedClip, misspeakEvidence,
 		)
@@ -272,26 +273,26 @@ func (service *Service) toolEditTalkingHead(
 			recovery = "结合保留台词重新决定相邻语义是否也应删除；若台词应保留，则无需继续删除这些气口。"
 		}
 		return failed(message, map[string]any{
-			"auto_preserved_pause_ids": speechPauseIDs(autoPreservedPauses),
-			"redundant_pause_ids":      speechPauseIDs(redundantPauses),
+			"auto_preserved_pause_ids": agentexec.SpeechPauseIDs(autoPreservedPauses),
+			"redundant_pause_ids":      agentexec.SpeechPauseIDs(redundantPauses),
 			"recovery":                 recovery,
 		})
 	}
 	if len(orphanFragments) > 0 {
-		counterProposals := talkingHeadIslandCounterProposals(orphanFragments, utterances)
+		counterProposals := agentexec.TalkingHeadIslandCounterProposals(orphanFragments, utterances)
 		return failed("组合删除会把保留台词夹成不足 2 秒或落在口误证据上的孤立碎片", map[string]any{
 			"orphan_fragments":               orphanFragments,
 			"island_counter_proposals":       counterProposals,
-			"auto_preserved_pause_ids":       speechPauseIDs(autoPreservedPauses),
-			"minimum_retained_island_frames": minTalkingHeadRetainedIslandFrames,
+			"auto_preserved_pause_ids":       agentexec.SpeechPauseIDs(autoPreservedPauses),
+			"minimum_retained_island_frames": agentexec.MinTalkingHeadRetainedIslandFrames,
 			"recovery":                       "优先采纳 island_counter_proposals：把 merged_delete_source_start_frame..merged_delete_source_end_frame 或 island_start_word_id/island_end_word_id 一并加入删除，清掉这段碎片；若这段其实是你要保留的完整台词，则改为撤回它两侧的相邻删除，让它与前后文连成不小于 2 秒的连续片段。不要原样重试，也不要只把删除缩到刚好过阈值。",
 		})
 	}
 	unresolvedPauses := []rushestools.SpeechPauseEvidence{}
 	if speechCleanupRequested {
-		unresolvedPauses = unresolvedTalkingHeadPauseDecisions(
+		unresolvedPauses = agentexec.UnresolvedTalkingHeadPauseDecisions(
 			pauses, semanticDeleteRanges, selectedClip, utterances,
-			decidedPauseIDs, minTalkingHeadPauseCandidateFrames, maxSimilarPairs,
+			decidedPauseIDs, agentexec.MinTalkingHeadPauseCandidateFrames, agentexec.MaxSimilarPairs,
 		)
 	}
 	unresolvedRepetitions := []rushestools.SpeechRepetitionEvidence{}
@@ -303,10 +304,10 @@ func (service *Service) toolEditTalkingHead(
 		if _, decided := decidedRepetitionIDs[repetition.RepetitionID]; decided {
 			continue
 		}
-		earlierCovered := talkingHeadRangeCoveredBy(talkingHeadRange{
+		earlierCovered := agentexec.TalkingHeadRangeCoveredBy(agentexec.TalkingHeadRange{
 			Start: repetition.EarlierSourceStartFrame, End: repetition.EarlierSourceEndFrame,
 		}, sourceDeleteRanges)
-		laterCovered := talkingHeadRangeCoveredBy(talkingHeadRange{
+		laterCovered := agentexec.TalkingHeadRangeCoveredBy(agentexec.TalkingHeadRange{
 			Start: repetition.LaterSourceStartFrame, End: repetition.LaterSourceEndFrame,
 		}, sourceDeleteRanges)
 		if earlierCovered || laterCovered {
@@ -321,8 +322,8 @@ func (service *Service) toolEditTalkingHead(
 			continue
 		}
 		if _, preserved := preservedFragmentIDs[fragment.FragmentID]; preserved ||
-			talkingHeadRangeCoveredBy(
-				talkingHeadRange{Start: fragment.SourceStartFrame, End: fragment.SourceEndFrame},
+			agentexec.TalkingHeadRangeCoveredBy(
+				agentexec.TalkingHeadRange{Start: fragment.SourceStartFrame, End: fragment.SourceEndFrame},
 				sourceDeleteRanges,
 			) {
 			continue
@@ -332,11 +333,11 @@ func (service *Service) toolEditTalkingHead(
 	// 未处理候选属于供模型继续判断的内容证据，不是参数非法或时间线
 	// 不变量错误。局部修正不应为了当前目标以外的候选被迫失败；全量
 	// 口播任务仍会在成功结果中拿到这些证据，并可自主决定是否继续编辑。
-	deleteRanges := make([]talkingHeadRange, 0, len(sourceDeleteRanges))
+	deleteRanges := make([]agentexec.TalkingHeadRange, 0, len(sourceDeleteRanges))
 	for _, sourceRange := range sourceDeleteRanges {
-		start, end, ok := mapSourceRangeToTimelineClip(selectedClip, sourceRange.Start, sourceRange.End)
+		start, end, ok := agentexec.MapSourceRangeToTimelineClip(selectedClip, sourceRange.Start, sourceRange.End)
 		if ok {
-			deleteRanges = append(deleteRanges, talkingHeadRange{Start: start, End: end})
+			deleteRanges = append(deleteRanges, agentexec.TalkingHeadRange{Start: start, End: end})
 		}
 	}
 	for index := len(deleteRanges) - 1; index >= 0; index-- {
@@ -365,7 +366,7 @@ func (service *Service) toolEditTalkingHead(
 	anchorPrecisionIssues := []map[string]any{}
 	for index, assignment := range input.BrollAssignments {
 		sourceRange := assignmentSourceRanges[index]
-		coverage, coverageErr := talkingHeadTimelineCoverage(
+		coverage, coverageErr := agentexec.TalkingHeadTimelineCoverage(
 			document, asset.ID, sourceRange.Start, sourceRange.End,
 		)
 		if coverageErr != nil {
@@ -383,17 +384,17 @@ func (service *Service) toolEditTalkingHead(
 		}
 		duration := min(coverage.End-coverage.Start, shot.candidate.DurationFrames)
 		semanticDuration := coverage.End - coverage.Start
-		if duration < minTalkingHeadBrollDurationFrames {
+		if duration < agentexec.MinTalkingHeadBrollDurationFrames {
 			shortBrollIssues = append(shortBrollIssues, map[string]any{
 				"assignment_index": index, "shot_id": assignment.ShotID,
 				"anchor_text":   assignment.AnchorText,
 				"start_word_id": assignment.StartWordID, "end_word_id": assignment.EndWordID,
 				"b_roll_filename":                    shot.candidate.Filename,
 				"placement_duration_frames":          duration,
-				"minimum_duration_frames":            minTalkingHeadBrollDurationFrames,
+				"minimum_duration_frames":            agentexec.MinTalkingHeadBrollDurationFrames,
 				"semantic_window_source_start_frame": sourceRange.Start,
 				"semantic_window_source_end_frame":   sourceRange.End,
-				"transcript_text": talkingHeadTranscriptText(
+				"transcript_text": agentexec.TalkingHeadTranscriptText(
 					utterances, sourceRange.Start, sourceRange.End,
 					removedIDSet, removedWordIDSet,
 				),
@@ -412,7 +413,7 @@ func (service *Service) toolEditTalkingHead(
 				"semantic_window_source_start_frame": sourceRange.Start,
 				"semantic_window_source_end_frame":   sourceRange.End,
 				"semantic_window_timeline_frames":    semanticDuration,
-				"transcript_text": talkingHeadTranscriptText(
+				"transcript_text": agentexec.TalkingHeadTranscriptText(
 					utterances, sourceRange.Start, sourceRange.End,
 					removedIDSet, removedWordIDSet,
 				),
@@ -434,7 +435,7 @@ func (service *Service) toolEditTalkingHead(
 	inserted := make([]map[string]any, 0, len(input.BrollAssignments))
 	for index, assignment := range input.BrollAssignments {
 		sourceRange := assignmentSourceRanges[index]
-		coverage, coverageErr := talkingHeadTimelineCoverage(
+		coverage, coverageErr := agentexec.TalkingHeadTimelineCoverage(
 			document, asset.ID, sourceRange.Start, sourceRange.End,
 		)
 		if coverageErr != nil {
@@ -454,8 +455,8 @@ func (service *Service) toolEditTalkingHead(
 		// 时长。短镜头放在窗口起点，长镜头裁到窗口末尾；这样模型可以用词级
 		// ID 表达“这段画面属于哪句话”，无需反向计算镜头长度来制造脆弱参数。
 		duration := min(coverage.End-coverage.Start, shot.candidate.DurationFrames)
-		placement := talkingHeadRange{Start: coverage.Start, End: coverage.Start + duration}
-		if talkingHeadOverlayOverlaps(document, placement) {
+		placement := agentexec.TalkingHeadRange{Start: coverage.Start, End: coverage.Start + duration}
+		if agentexec.TalkingHeadOverlayOverlaps(document, placement) {
 			return failed("B-roll 覆盖范围与现有叠加轨片段重叠", map[string]any{
 				"assignment_index": index, "timeline_start_frame": placement.Start,
 				"timeline_end_frame": placement.End,
@@ -463,7 +464,7 @@ func (service *Service) toolEditTalkingHead(
 			})
 		}
 		clipID := randomID("broll")
-		transcriptText := talkingHeadTranscriptText(
+		transcriptText := agentexec.TalkingHeadTranscriptText(
 			utterances, sourceRange.Start, sourceRange.End,
 			removedIDSet, removedWordIDSet,
 		)
@@ -558,21 +559,21 @@ func (service *Service) toolEditTalkingHead(
 	result.Data["repetition_decisions"] = append([]rushestools.TalkingHeadRepetitionDecision(nil), input.RepetitionDecisions...)
 	result.Data["short_fragment_decisions"] = append([]rushestools.TalkingHeadFragmentDecision(nil), input.ShortFragmentDecisions...)
 	result.Data["pause_decisions"] = append([]rushestools.TalkingHeadPauseDecision(nil), input.PauseDecisions...)
-	result.Data["removed_pause_ids"] = speechPauseIDs(removedPauses)
+	result.Data["removed_pause_ids"] = agentexec.SpeechPauseIDs(removedPauses)
 	result.Data["removed_pause_ranges"] = effectivePauseRanges
 	result.Data["removed_pause_range_count"] = len(effectivePauseRanges)
 	result.Data["removed_pause_evidence_count"] = len(removedPauses)
-	result.Data["redundant_pause_ids"] = speechPauseIDs(redundantPauses)
-	result.Data["auto_preserved_pause_ids"] = speechPauseIDs(autoPreservedPauses)
+	result.Data["redundant_pause_ids"] = agentexec.SpeechPauseIDs(redundantPauses)
+	result.Data["auto_preserved_pause_ids"] = agentexec.SpeechPauseIDs(autoPreservedPauses)
 	result.Data["auto_preserved_pause_count"] = len(autoPreservedPauses)
 	result.Data["preserved_speech_fragment_ids"] = append([]string(nil), fragmentExpansion.PreservedIDs...)
 	result.Data["preserved_speech_fragment_reasons"] = fragmentExpansion.PreservedReasons
-	attachTalkingHeadUnreviewedEvidence(
+	agentexec.AttachTalkingHeadUnreviewedEvidence(
 		&result, unresolvedPauses, unresolvedRepetitions, unresolvedFragments,
 	)
 	result.Data["deleted_timeline_ranges"] = deleteRanges
 	result.Data["b_roll_clips"] = inserted
-	if drift := talkingHeadPlanDrift(ctx, autoPreservedPauses, utterances); drift != nil {
+	if drift := agentexec.TalkingHeadPlanDrift(ctx, autoPreservedPauses, utterances); drift != nil {
 		result.Data["plan_drift"] = drift
 		result.Observation += " " + drift["summary"].(string)
 	}
@@ -580,7 +581,7 @@ func (service *Service) toolEditTalkingHead(
 	// 不把成功的编辑伪装成失败去诱导模型重试（timeline.validate 仍是持久验收面）。
 	if quality, qualityErr := service.speechQualityReport(ctx, document); qualityErr == nil {
 		result.Data["speech_quality"] = quality
-		result.Observation += talkingHeadQualitySummary(quality)
+		result.Observation += agentexec.TalkingHeadQualitySummary(quality)
 	}
 	return result, nil
 }

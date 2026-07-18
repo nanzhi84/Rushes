@@ -13,6 +13,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -137,8 +138,8 @@ func (state *toolRecoveryState) summary() string {
 	return fmt.Sprintf(
 		"工具：%s；参数：%s；最后错误：%s；模型修复失败次数：%d/%d",
 		state.latest.Tool,
-		truncateText(canonicalToolArguments(state.latest.Arguments), 320),
-		truncateText(state.latest.Observation, 600),
+		agentexec.TruncateText(canonicalToolArguments(state.latest.Arguments), 320),
+		agentexec.TruncateText(state.latest.Observation, 600),
 		state.repairFailures,
 		maxModelRepairAttempts,
 	)
@@ -298,7 +299,7 @@ func decorateToolFailure(
 ) string {
 	payload := map[string]any{}
 	if json.Unmarshal([]byte(raw), &payload) != nil {
-		payload = map[string]any{"status": "failed", "observation": truncateText(raw, 1000)}
+		payload = map[string]any{"status": "failed", "observation": agentexec.TruncateText(raw, 1000)}
 	}
 	payload["status"] = "failed"
 	observation, _ := payload["observation"].(string)
@@ -338,7 +339,7 @@ func blockedToolCallOutput(input *compose.ToolInput, decision recoveryDecision) 
 	return marshalToolFailure(observation, map[string]any{
 		"error_code":       errorCode,
 		"tool":             input.Name,
-		"last_failure":     truncateText(decision.latest.Observation, 600),
+		"last_failure":     agentexec.TruncateText(decision.latest.Observation, 600),
 		"harness_recovery": recoveryMetadata(decision, decision.latest.ExecutionAttempts),
 	})
 }
@@ -366,7 +367,7 @@ func executionErrorOutput(name string, err error, attempts int, retryable bool) 
 	if retryable {
 		recovery = "已完成有限次自动重试；请根据最终错误调整方案，不要原样重复"
 	}
-	return marshalToolFailure("工具 "+name+" 执行失败："+truncateText(err.Error(), 800), map[string]any{
+	return marshalToolFailure("工具 "+name+" 执行失败："+agentexec.TruncateText(err.Error(), 800), map[string]any{
 		"error_code":         "tool_execution_error",
 		"retryable":          retryable,
 		"execution_attempts": attempts,
@@ -435,7 +436,7 @@ func toolArgumentsForReport(arguments string) any {
 	if json.Unmarshal([]byte(arguments), &value) == nil {
 		return value
 	}
-	return map[string]any{"raw_arguments": truncateText(arguments, 1000)}
+	return map[string]any{"raw_arguments": agentexec.TruncateText(arguments, 1000)}
 }
 
 func reportSyntheticToolFailure(ctx context.Context, name, arguments, rawOutput string) {
@@ -450,7 +451,7 @@ func reportSyntheticToolFailure(ctx context.Context, name, arguments, rawOutput 
 		reporter(ctx, name, "finished", input, result, nil)
 		return
 	}
-	reporter(ctx, name, "finished", input, nil, errors.New(truncateText(rawOutput, 1000)))
+	reporter(ctx, name, "finished", input, nil, errors.New(agentexec.TruncateText(rawOutput, 1000)))
 }
 
 func waitForToolRetry(ctx context.Context, attempt int) error {
@@ -463,14 +464,6 @@ func waitForToolRetry(ctx context.Context, attempt int) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-func truncateText(value string, limit int) string {
-	value = strings.TrimSpace(value)
-	if limit <= 0 || len(value) <= limit {
-		return value
-	}
-	return value[:limit] + "…"
 }
 
 // emitAssistantReply 把一段最终回复按增量推送到 turn 流，并原样返回内容。
@@ -510,7 +503,7 @@ func (service *Service) terminalFailureReply(
 		details = state.summary()
 	}
 	if details == "" && turnErr != nil {
-		details = truncateText(turnErr.Error(), 800)
+		details = agentexec.TruncateText(turnErr.Error(), 800)
 	}
 	if details == "" {
 		details = "本轮执行没有生成可交付结果"

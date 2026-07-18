@@ -3,13 +3,11 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
-	"math"
 	"sort"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
-	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 // speechQualityReport 是纯读函数：只读取当前时间线文档与已持久化的转写，量化含
@@ -33,7 +31,7 @@ func (service *Service) speechQualityReport(
 		return baseClips[left].TimelineStartFrame < baseClips[right].TimelineStartFrame
 	})
 
-	transcripts := map[string]talkingHeadAssetTranscript{}
+	transcripts := map[string]agentexec.TalkingHeadAssetTranscript{}
 	aRollPresent := false
 	for _, clip := range baseClips {
 		if clip.AssetKind != "video" || clip.AssetID == "" {
@@ -44,22 +42,22 @@ func (service *Service) speechQualityReport(
 		}
 		transcript, err := storage.LatestTranscript(ctx, service.database.Read(), clip.AssetID)
 		if errors.Is(err, storage.ErrNotFound) {
-			transcripts[clip.AssetID] = talkingHeadAssetTranscript{}
+			transcripts[clip.AssetID] = agentexec.TalkingHeadAssetTranscript{}
 			continue
 		}
 		if err != nil {
 			return nil, err
 		}
-		utterances, err := decodeSpeechUtterances(transcript.Utterances)
+		utterances, err := agentexec.DecodeSpeechUtterances(transcript.Utterances)
 		if err != nil {
 			return nil, err
 		}
-		pauses, err := decodeSpeechPauses(transcript.VADSegments)
+		pauses, err := agentexec.DecodeSpeechPauses(transcript.VADSegments)
 		if err != nil {
 			return nil, err
 		}
-		transcripts[clip.AssetID] = talkingHeadAssetTranscript{
-			utterances: utterances, pauses: pauses, present: true,
+		transcripts[clip.AssetID] = agentexec.TalkingHeadAssetTranscript{
+			Utterances: utterances, Pauses: pauses, Present: true,
 		}
 		aRollPresent = true
 	}
@@ -70,10 +68,10 @@ func (service *Service) speechQualityReport(
 	if fps <= 0 {
 		fps = timeline.DefaultFPS
 	}
-	breaths := talkingHeadResidualBreaths(baseClips, transcripts, fps)
-	islands, runs := talkingHeadRetainedIslands(baseClips, transcripts, fps)
-	seams := talkingHeadUncoveredSeams(runs, overlayClips, transcripts, fps)
-	shortBroll := talkingHeadShortBrollClips(overlayClips, fps)
+	breaths := agentexec.TalkingHeadResidualBreaths(baseClips, transcripts, fps)
+	islands, runs := agentexec.TalkingHeadRetainedIslands(baseClips, transcripts, fps)
+	seams := agentexec.TalkingHeadUncoveredSeams(runs, overlayClips, transcripts, fps)
+	shortBroll := agentexec.TalkingHeadShortBrollClips(overlayClips, fps)
 	return map[string]any{
 		"a_roll_present":              true,
 		"residual_breaths":            breaths,
@@ -85,9 +83,9 @@ func (service *Service) speechQualityReport(
 		"short_b_roll_clips":          shortBroll,
 		"short_b_roll_clip_count":     len(shortBroll),
 		"thresholds": map[string]any{
-			"residual_breath_frames": minTalkingHeadResidualBreathFrames,
-			"retained_island_frames": minTalkingHeadRetainedIslandFrames,
-			"short_b_roll_frames":    minTalkingHeadBrollQualityFrames,
+			"residual_breath_frames": agentexec.MinTalkingHeadResidualBreathFrames,
+			"retained_island_frames": agentexec.MinTalkingHeadRetainedIslandFrames,
+			"short_b_roll_frames":    agentexec.MinTalkingHeadBrollQualityFrames,
 		},
 	}, nil
 }

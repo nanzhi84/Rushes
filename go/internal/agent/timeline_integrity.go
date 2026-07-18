@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -37,16 +38,16 @@ func (service *Service) enrichTimelineOperations(
 		for key, value := range original {
 			operation[key] = value
 		}
-		switch stringValue(operation["kind"]) {
+		switch agentexec.StringValue(operation["kind"]) {
 		case "insert_clip":
-			asset, exists := assetByID[stringValue(operation["asset_id"])]
+			asset, exists := assetByID[agentexec.StringValue(operation["asset_id"])]
 			if !exists {
 				break
 			}
-			if stringValue(operation["asset_kind"]) == "" {
+			if agentexec.StringValue(operation["asset_kind"]) == "" {
 				operation["asset_kind"] = asset.Kind
 			}
-			if valueOr(stringValue(operation["track_id"]), "visual_base") != "visual_base" {
+			if agentexec.ValueOr(agentexec.StringValue(operation["track_id"]), "visual_base") != "visual_base" {
 				break
 			}
 			if _, explicit := operation["include_original_audio"]; !explicit {
@@ -84,7 +85,7 @@ func (service *Service) attachMissingBGMBeatGrids(
 		}
 		for clipIndex := range document.Tracks[trackIndex].Clips {
 			clip := &document.Tracks[trackIndex].Clips[clipIndex]
-			if clip.AssetID == "" || hasBeatGrid(clip.Effects) {
+			if clip.AssetID == "" || agentexec.HasBeatGrid(clip.Effects) {
 				continue
 			}
 			grid, cached := gridByAsset[clip.AssetID]
@@ -106,7 +107,7 @@ func (service *Service) attachMissingBGMBeatGrids(
 					continue
 				}
 				gridByAsset[clip.AssetID] = grid
-				durationSec, _ := numericValue(asset.Probe["duration_sec"])
+				durationSec, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
 				waveform = optionalWaveformEnvelope(
 					ctx,
 					source,

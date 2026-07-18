@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -38,9 +39,9 @@ func withQueueMemoryEvidence(ctx context.Context, item QueueItem) context.Contex
 	case QueueUserMessage:
 		return withMemoryEvidence(ctx, storage.UserMemoryEvidenceMessage, item.ItemID)
 	case QueueUIObservation:
-		if interfaceString(item.Payload["observation_type"]) == "decision_answered" {
+		if agentexec.InterfaceString(item.Payload["observation_type"]) == "decision_answered" {
 			return withMemoryEvidence(
-				ctx, storage.UserMemoryEvidenceDecision, interfaceString(item.Payload["decision_id"]),
+				ctx, storage.UserMemoryEvidenceDecision, agentexec.InterfaceString(item.Payload["decision_id"]),
 			)
 		}
 	}

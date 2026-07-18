@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -41,7 +42,7 @@ func (service *Service) toolListAssets(
 		if input.OnlyUsable != nil && *input.OnlyUsable != asset.Usable {
 			continue
 		}
-		duration, _ := numericValue(asset.Probe["duration_sec"])
+		duration, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
 		suggestedRole := ""
 		suggestedVisualRole := ""
 		switch asset.Kind {

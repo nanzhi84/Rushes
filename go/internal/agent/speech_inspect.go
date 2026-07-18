@@ -2,17 +2,13 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
 	"os"
-	"sort"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -38,20 +34,20 @@ func (service *Service) toolInspectSpeech(
 	if err != nil {
 		return rushestools.SpeechInspectResult{}, err
 	}
-	utterances, err := decodeSpeechUtterances(transcript.Utterances)
+	utterances, err := agentexec.DecodeSpeechUtterances(transcript.Utterances)
 	if err != nil {
 		return rushestools.SpeechInspectResult{}, err
 	}
-	pauses, err := decodeSpeechPauses(transcript.VADSegments)
+	pauses, err := agentexec.DecodeSpeechPauses(transcript.VADSegments)
 	if err != nil {
 		return rushestools.SpeechInspectResult{}, err
 	}
-	pauses = clampSpeechPausesToWordBoundaries(asset.ID, pauses, utterances)
+	pauses = agentexec.ClampSpeechPausesToWordBoundaries(asset.ID, pauses, utterances)
 
-	queryTokens := semanticTokens(input.Query)
-	selected := make([]speechUtterance, 0, len(utterances))
+	queryTokens := agentexec.SemanticTokens(input.Query)
+	selected := make([]agentexec.SpeechUtterance, 0, len(utterances))
 	for _, utterance := range utterances {
-		if timelineClip != nil && !sourceRangesOverlap(
+		if timelineClip != nil && !agentexec.SourceRangesOverlap(
 			utterance.StartFrame, utterance.EndFrame,
 			timelineClip.SourceStartFrame, timelineClip.SourceEndFrame,
 		) {
@@ -61,7 +57,7 @@ func (service *Service) toolInspectSpeech(
 			input.SourceEndFrame != nil && utterance.StartFrame >= *input.SourceEndFrame {
 			continue
 		}
-		if len(queryTokens) > 0 && semanticMatchScore(queryTokens, strings.ToLower(utterance.Text)) == 0 {
+		if len(queryTokens) > 0 && agentexec.SemanticMatchScore(queryTokens, strings.ToLower(utterance.Text)) == 0 {
 			continue
 		}
 		selected = append(selected, utterance)
@@ -90,7 +86,7 @@ func (service *Service) toolInspectSpeech(
 	for _, utterance := range selected {
 		sourceStart, sourceEnd, clamped := utterance.StartFrame, utterance.EndFrame, false
 		if timelineClip != nil {
-			sourceStart, sourceEnd, clamped = clampSpeechRangeToClip(*timelineClip, sourceStart, sourceEnd)
+			sourceStart, sourceEnd, clamped = agentexec.ClampSpeechRangeToClip(*timelineClip, sourceStart, sourceEnd)
 		}
 		item := rushestools.SpeechUtteranceEvidence{
 			UtteranceID: utterance.ID, SourceStartFrame: sourceStart,
@@ -98,7 +94,7 @@ func (service *Service) toolInspectSpeech(
 			Language: utterance.Language, Emotion: utterance.Emotion, Clamped: clamped,
 		}
 		if timelineClip != nil {
-			if start, end, ok := mapSourceRangeToTimelineClip(*timelineClip, utterance.StartFrame, utterance.EndFrame); ok {
+			if start, end, ok := agentexec.MapSourceRangeToTimelineClip(*timelineClip, utterance.StartFrame, utterance.EndFrame); ok {
 				item.TimelineStartFrame, item.TimelineEndFrame = &start, &end
 			}
 		}
@@ -110,7 +106,7 @@ func (service *Service) toolInspectSpeech(
 				}
 				wordStart, wordEnd, wordClamped := word.StartFrame, word.EndFrame, false
 				if timelineClip != nil {
-					wordStart, wordEnd, wordClamped = clampSpeechRangeToClip(*timelineClip, wordStart, wordEnd)
+					wordStart, wordEnd, wordClamped = agentexec.ClampSpeechRangeToClip(*timelineClip, wordStart, wordEnd)
 					if wordEnd <= wordStart {
 						continue
 					}
@@ -121,7 +117,7 @@ func (service *Service) toolInspectSpeech(
 					Clamped: wordClamped,
 				}
 				if timelineClip != nil {
-					if start, end, ok := mapSourceRangeToTimelineClip(*timelineClip, word.StartFrame, word.EndFrame); ok {
+					if start, end, ok := agentexec.MapSourceRangeToTimelineClip(*timelineClip, word.StartFrame, word.EndFrame); ok {
 						wordItem.TimelineStartFrame, wordItem.TimelineEndFrame = &start, &end
 					}
 				}
@@ -136,7 +132,7 @@ func (service *Service) toolInspectSpeech(
 	pauseEvidence := []rushestools.SpeechPauseEvidence{}
 	if includePauses {
 		for _, pause := range pauses {
-			if timelineClip != nil && !sourceRangesOverlap(
+			if timelineClip != nil && !agentexec.SourceRangesOverlap(
 				pause.DeleteStart, pause.DeleteEnd,
 				timelineClip.SourceStartFrame, timelineClip.SourceEndFrame,
 			) {
@@ -148,7 +144,7 @@ func (service *Service) toolInspectSpeech(
 			}
 			deleteStart, deleteEnd, clamped := pause.DeleteStart, pause.DeleteEnd, false
 			if timelineClip != nil {
-				deleteStart, deleteEnd, clamped = clampSpeechRangeToClip(*timelineClip, deleteStart, deleteEnd)
+				deleteStart, deleteEnd, clamped = agentexec.ClampSpeechRangeToClip(*timelineClip, deleteStart, deleteEnd)
 			}
 			item := rushestools.SpeechPauseEvidence{
 				PauseID: pause.ID, SourceStartFrame: pause.StartFrame, SourceEndFrame: pause.EndFrame,
@@ -157,29 +153,29 @@ func (service *Service) toolInspectSpeech(
 				DeleteDurationFrames: deleteEnd - deleteStart,
 				DetectionMethod:      pause.Method, Clamped: clamped,
 			}
-			populateSpeechPauseContext(&item, utterances)
+			agentexec.PopulateSpeechPauseContext(&item, utterances)
 			if timelineClip != nil {
-				if start, end, ok := mapSourceRangeToTimelineClip(*timelineClip, deleteStart, deleteEnd); ok {
+				if start, end, ok := agentexec.MapSourceRangeToTimelineClip(*timelineClip, deleteStart, deleteEnd); ok {
 					item.TimelineStartFrame, item.TimelineEndFrame = &start, &end
 				}
 			}
 			pauseEvidence = append(pauseEvidence, item)
 		}
 	}
-	pauseEvidence, pauseTotal, pausesTruncated := rankSpeechPauseEvidence(pauseEvidence, input.MaxPauses)
+	pauseEvidence, pauseTotal, pausesTruncated := agentexec.RankSpeechPauseEvidence(pauseEvidence, input.MaxPauses)
 	includeSimilar := input.IncludeSimilar == nil || *input.IncludeSimilar
 	similar := []rushestools.SpeechSimilarityEvidence{}
 	repetitions := []rushestools.SpeechRepetitionEvidence{}
 	repetitionTotal, repetitionsTruncated := 0, false
 	if includeSimilar {
-		similar = similarSpeechPairs(utterances, maxSimilarPairs)
-		repetitions = intraUtteranceSpeechRepetitions(asset.ID, selected, int(^uint(0)>>1))
+		similar = agentexec.SimilarSpeechPairs(utterances, agentexec.MaxSimilarPairs)
+		repetitions = agentexec.IntraUtteranceSpeechRepetitions(asset.ID, selected, int(^uint(0)>>1))
 		repetitionTotal = len(repetitions)
-		if repetitionsTruncated = len(repetitions) > maxSimilarPairs; repetitionsTruncated {
-			repetitions = repetitions[:maxSimilarPairs]
+		if repetitionsTruncated = len(repetitions) > agentexec.MaxSimilarPairs; repetitionsTruncated {
+			repetitions = repetitions[:agentexec.MaxSimilarPairs]
 		}
 	}
-	allShortFragments := shortLeadingSpeechFragments(asset.ID, utterances, pauses, int(^uint(0)>>1))
+	allShortFragments := agentexec.ShortLeadingSpeechFragments(asset.ID, utterances, pauses, int(^uint(0)>>1))
 	selectedUtteranceIDs := make(map[string]struct{}, len(selected))
 	for _, utterance := range selected {
 		selectedUtteranceIDs[utterance.ID] = struct{}{}
@@ -191,9 +187,9 @@ func (service *Service) toolInspectSpeech(
 		}
 	}
 	shortFragmentTotal := len(shortFragments)
-	shortFragmentsTruncated := shortFragmentTotal > maxSimilarPairs
+	shortFragmentsTruncated := shortFragmentTotal > agentexec.MaxSimilarPairs
 	if shortFragmentsTruncated {
-		shortFragments = shortFragments[:maxSimilarPairs]
+		shortFragments = shortFragments[:agentexec.MaxSimilarPairs]
 	}
 	usageNote := "utterance_id、word_id、pause_id 与帧坐标是客观证据；传入 timeline_clip_id 时 clamped=true 表示该证据已按当前 clip 裁剪，utterance/word 文本与 pause 声学边界保持完整，只有帧坐标、删除范围与词列表取落在 clip 内的子集；similarity、intra_utterance_repetitions 与 short_speech_fragments 只是单句、连续台词块、句内重复或停顿前短语音岛的证据，不代表必须删除。" +
 		"intra_utterance_repetitions 会优先列出全部相邻同词证据，并自带 repetition_id 与前后两段精确 word_id（其中数字拆词和叠词也可能是正常表达）；模型应结合 context_text 自主逐项判断并一次性通过 repetition_decisions 提交 remove_earlier/remove_later/preserve；" +
@@ -275,7 +271,7 @@ func (service *Service) loadOrBuildSpeechTranscript(
 ) (storage.Transcript, bool, error) {
 	if !forceRefresh {
 		if cached, err := storage.LatestTranscript(ctx, service.database.Read(), asset.ID); err == nil {
-			if !requireWordSchema || transcriptHasWordSchema(cached.Utterances) ||
+			if !requireWordSchema || agentexec.TranscriptHasWordSchema(cached.Utterances) ||
 				cached.ProviderID == "sidecar-srt" || service.speechRecognizer == nil {
 				return cached, true, nil
 			}
@@ -302,10 +298,10 @@ func (service *Service) loadOrBuildSpeechTranscript(
 	if err != nil {
 		return storage.Transcript{}, false, err
 	}
-	pauses := make([]speechPause, 0, len(pauseAnalysis.Pauses))
+	pauses := make([]agentexec.SpeechPause, 0, len(pauseAnalysis.Pauses))
 	for _, pause := range pauseAnalysis.Pauses {
-		pauses = append(pauses, speechPause{
-			ID:         stableSpeechID("pause", asset.ID, pause.SourceStartFrame, pause.SourceEndFrame, ""),
+		pauses = append(pauses, agentexec.SpeechPause{
+			ID:         agentexec.StableSpeechID("pause", asset.ID, pause.SourceStartFrame, pause.SourceEndFrame, ""),
 			StartFrame: pause.SourceStartFrame, EndFrame: pause.SourceEndFrame,
 			DeleteStart: pause.DeleteStartFrame, DeleteEnd: pause.DeleteEndFrame,
 			Method: "rms_silence",
@@ -313,7 +309,7 @@ func (service *Service) loadOrBuildSpeechTranscript(
 	}
 
 	providerID := ""
-	utterances := []speechUtterance{}
+	utterances := []agentexec.SpeechUtterance{}
 	if sidecar := media.FindSidecarSRT(source); sidecar != "" {
 		cues, parseErr := media.ParseSRT(sidecar, timeline.DefaultFPS)
 		if parseErr != nil {
@@ -321,8 +317,8 @@ func (service *Service) loadOrBuildSpeechTranscript(
 		}
 		providerID = "sidecar-srt"
 		for _, cue := range cues {
-			utterances = append(utterances, speechUtterance{
-				ID:         stableSpeechID("utt", asset.ID, cue.StartFrame, cue.EndFrame, cue.Text),
+			utterances = append(utterances, agentexec.SpeechUtterance{
+				ID:         agentexec.StableSpeechID("utt", asset.ID, cue.StartFrame, cue.EndFrame, cue.Text),
 				StartFrame: cue.StartFrame, EndFrame: cue.EndFrame, Text: cue.Text, Language: language,
 			})
 		}
@@ -332,7 +328,7 @@ func (service *Service) loadOrBuildSpeechTranscript(
 				"素材没有同名 SRT，且当前环境未配置云端 ASR；请配置 RUSHES_DASHSCOPE_API_KEY 后重试",
 			)
 		}
-		chunks := buildASRChunks(durationFrames, pauses, maxASRChunkFrames)
+		chunks := agentexec.BuildASRChunks(durationFrames, pauses, agentexec.MaxASRChunkFrames)
 		for index, chunk := range chunks {
 			service.hub.Record(draftID, StreamEvent{
 				"type": TurnStreamSubagentProgress, "tool": "speech.inspect",
@@ -364,10 +360,10 @@ func (service *Service) loadOrBuildSpeechTranscript(
 				)
 			}
 			alignmentID := "provider-timestamps"
-			chunkUtterances := alignTimestampedRecognition(asset.ID, recognized, chunk[0], chunk[1])
+			chunkUtterances := agentexec.AlignTimestampedRecognition(asset.ID, recognized, chunk[0], chunk[1])
 			if len(chunkUtterances) == 0 {
 				alignmentID = "local-frame-alignment"
-				chunkUtterances = alignRecognizedClauses(
+				chunkUtterances = agentexec.AlignRecognizedClauses(
 					asset.ID, recognized.Text, recognized.Language, recognized.Emotion, chunk[0], chunk[1],
 				)
 			}
@@ -383,14 +379,14 @@ func (service *Service) loadOrBuildSpeechTranscript(
 	if len(utterances) == 0 {
 		return storage.Transcript{}, false, errors.New("speech.inspect 没有取得可用台词")
 	}
-	pauses = clampSpeechPausesToWordBoundaries(
+	pauses = agentexec.ClampSpeechPausesToWordBoundaries(
 		asset.ID,
-		mergeSpeechPauses(asset.ID, append(pauses, deriveASRWordGaps(asset.ID, utterances)...)),
+		agentexec.MergeSpeechPauses(asset.ID, append(pauses, agentexec.DeriveASRWordGaps(asset.ID, utterances)...)),
 		utterances,
 	)
-	utteranceMaps := encodeSpeechUtterances(utterances)
-	pauseMaps := encodeSpeechPauses(pauses)
-	fingerprint := stableSpeechID("transcript", asset.Hash, 0, durationFrames, providerID)
+	utteranceMaps := agentexec.EncodeSpeechUtterances(utterances)
+	pauseMaps := agentexec.EncodeSpeechPauses(pauses)
+	fingerprint := agentexec.StableSpeechID("transcript", asset.Hash, 0, durationFrames, providerID)
 	transcriptID := fingerprint
 	if forceRefresh {
 		transcriptID += "_" + randomID("run")

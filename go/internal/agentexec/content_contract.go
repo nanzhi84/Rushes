@@ -2,7 +2,6 @@ package agentexec
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,12 +9,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-type contractVerificationItem struct {
+type ContractVerificationItem struct {
 	Check     string   `json:"check"`
 	Pass      bool     `json:"pass"`
 	ErrorCode string   `json:"error_code,omitempty"`
@@ -24,12 +22,12 @@ type contractVerificationItem struct {
 	IDs       []string `json:"ids,omitempty"`
 }
 
-type contractVerificationReport struct {
+type ContractVerificationReport struct {
 	Pass  bool                       `json:"pass"`
-	Items []contractVerificationItem `json:"items"`
+	Items []ContractVerificationItem `json:"items"`
 }
 
-func contentPlanContract(plan map[string]any) (map[string]any, error) {
+func ContentPlanContract(plan map[string]any) (map[string]any, error) {
 	raw, exists := plan["contract"]
 	if !exists || raw == nil {
 		return nil, nil
@@ -89,10 +87,10 @@ func contentPlanContract(plan map[string]any) (map[string]any, error) {
 			return nil, fmt.Errorf("验收合同含无效 B-roll 覆盖区间")
 		}
 	}
-	return canonicalContentPlanValue(contract)
+	return CanonicalContentPlanValue(contract)
 }
 
-func contentPreservingClips(document timeline.Document) []timeline.Clip {
+func ContentPreservingClips(document timeline.Document) []timeline.Clip {
 	result := []timeline.Clip{}
 	hasAudioSolo := false
 	for _, track := range document.Tracks {
@@ -136,7 +134,7 @@ func isAudioTrack(trackID string) bool {
 	}
 }
 
-func utteranceCoveredByClips(clips []timeline.Clip, assetID string, start, end int) bool {
+func UtteranceCoveredByClips(clips []timeline.Clip, assetID string, start, end int) bool {
 	if assetID == "" || end <= start {
 		return false
 	}
@@ -198,7 +196,7 @@ func contentClipPlaybackRate(clip timeline.Clip) float64 {
 	return 1
 }
 
-func uncoveredBrollRanges(document timeline.Document, required []rushestools.ContentPlanFrameRange) []rushestools.ContentPlanFrameRange {
+func UncoveredBrollRanges(document timeline.Document, required []rushestools.ContentPlanFrameRange) []rushestools.ContentPlanFrameRange {
 	overlays := []timeline.Clip{}
 	for _, track := range document.Tracks {
 		if track.TrackID == "visual_overlay" && !track.Muted {
@@ -225,8 +223,8 @@ func uncoveredBrollRanges(document timeline.Document, required []rushestools.Con
 	return uncovered
 }
 
-func contractFailureItems(report contractVerificationReport) []contractVerificationItem {
-	failures := make([]contractVerificationItem, 0)
+func ContractFailureItems(report ContractVerificationReport) []ContractVerificationItem {
+	failures := make([]ContractVerificationItem, 0)
 	for _, item := range report.Items {
 		if !item.Pass {
 			failures = append(failures, item)

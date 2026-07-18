@@ -11,6 +11,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -426,7 +427,7 @@ func validateUserMemorySemantic(semantic, value string) error {
 		if hasPositiveFastPacingPhrase(value) {
 			return nil
 		}
-		return fmt.Errorf("缺少无反向限定的快节奏语义: %s", truncateText(value, 240))
+		return fmt.Errorf("缺少无反向限定的快节奏语义: %s", agentexec.TruncateText(value, 240))
 	default:
 		return fmt.Errorf("未知评测语义 %q", semantic)
 	}
@@ -452,7 +453,7 @@ func validateRequiredToolSemantic(semantic, toolName, arguments string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("plan 的单个语义值均未表达无反向限定的快节奏: %s", truncateText(arguments, 240))
+	return fmt.Errorf("plan 的单个语义值均未表达无反向限定的快节奏: %s", agentexec.TruncateText(arguments, 240))
 }
 
 func hasPositiveFastPacingPhrase(value string) bool {
@@ -503,10 +504,10 @@ func userMemoryResponseSummary(response *schema.Message) string {
 	calls := make([]string, 0, len(response.ToolCalls))
 	for _, call := range response.ToolCalls {
 		calls = append(calls, fmt.Sprintf(
-			"%s(%s)", call.Function.Name, truncateText(call.Function.Arguments, 240),
+			"%s(%s)", call.Function.Name, agentexec.TruncateText(call.Function.Arguments, 240),
 		))
 	}
-	return fmt.Sprintf("tool_calls=%v content=%q", calls, truncateText(response.Content, 240))
+	return fmt.Sprintf("tool_calls=%v content=%q", calls, agentexec.TruncateText(response.Content, 240))
 }
 
 func messageContents(messages []*schema.Message) string {
