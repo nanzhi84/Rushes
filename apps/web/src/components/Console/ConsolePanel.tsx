@@ -13,14 +13,16 @@ import type { ReactElement } from "react";
 import { ArrowUp, MessageSquareX, Square } from "lucide-react";
 import {
   api,
+  type AffectedMemory,
   type DecisionAnswer,
   type MessageRecord
 } from "../../api/client";
 import { DRAFT_EVENT_TYPES } from "../../api/event_types";
 import { queryKeys } from "../../app/query_client";
 import { useDocumentVisibility } from "../../app/use_document_visibility";
-import { acquireApiEventSource } from "../../auth";
+import { acquireApiEventSource, ApiError } from "../../auth";
 import { AssistantThread } from "./AssistantThread";
+import { AffectedMemoriesCard } from "./MemoryCards";
 import { WorkspaceSettingsDialog } from "../Shell/WorkspaceSettingsDialog";
 import { useTurnStream } from "./useTurnStream";
 import {
@@ -82,6 +84,9 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
     const documentVisible = useDocumentVisibility();
     const [structuredItems, setStructuredItems] = useState<StructuredInteractionItem[]>([]);
     const [conversationError, setConversationError] = useState<string | null>(null);
+    // 「编辑并重发」回退波及的长期记忆(证据落在被撤回对话里):后端在回退事务内算出并随
+    // 响应带回,前端据此渲染「撤回这些记忆」卡片。默认保留,撤回或关闭卡片后清空。
+    const [affectedMemories, setAffectedMemories] = useState<AffectedMemory[]>([]);
     const optimisticMessageSequenceRef = useRef(0);
     const draftInvalidationTimerRef = useRef<number | null>(null);
 
@@ -282,11 +287,13 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
         }),
       onMutate: () => {
         setConversationError(null);
+        setAffectedMemories([]);
         setAwaitingTurnEnd(true);
       },
-      onSuccess: async () => {
+      onSuccess: async (response) => {
         resetTurnStream();
         setStructuredItems([]);
+        setAffectedMemories(response.affected_memories);
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
           queryClient.invalidateQueries({ queryKey: queryKeys.timeline(draftId) }),
@@ -299,6 +306,28 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
         setAwaitingTurnEnd(false);
         setConversationError(resendErrorMessage(error));
       }
+    });
+
+    // 撤回被回退对话形成的长期记忆:批量走 Actor=User 删除路径(复用 M3 已有的单键端点)。
+    // 已不存在(404)视作已达成目标,只有真失败才报错并保留卡片供重试;成功后清卡并刷新记忆。
+    const retractAffectedMemories = useMutation({
+      mutationFn: async (keys: string[]) => {
+        const outcomes = await Promise.allSettled(keys.map((key) => api.deleteMemory(key)));
+        const failure = outcomes.find(
+          (outcome) =>
+            outcome.status === "rejected" &&
+            !(outcome.reason instanceof ApiError && outcome.reason.status === 404)
+        );
+        if (failure && failure.status === "rejected") {
+          throw failure.reason;
+        }
+      },
+      onMutate: () => setConversationError(null),
+      onSuccess: async () => {
+        setAffectedMemories([]);
+        await queryClient.invalidateQueries({ queryKey: ["memories"] });
+      },
+      onError: () => setConversationError("撤回记忆失败,请稍后重试。")
     });
 
     const clearConversation = useMutation({
@@ -405,6 +434,12 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
 
     const [memorySettingsOpen, setMemorySettingsOpen] = useState(false);
     const openMemorySettings = useCallback(() => setMemorySettingsOpen(true), []);
+    const retractMemoriesMutate = retractAffectedMemories.mutate;
+    const handleRetractAffectedMemories = useCallback(
+      () => retractMemoriesMutate(affectedMemories.map((memory) => memory.key)),
+      [retractMemoriesMutate, affectedMemories]
+    );
+    const handleDismissAffectedMemories = useCallback(() => setAffectedMemories([]), []);
 
     return (
       <aside
@@ -455,6 +490,17 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
             role="status"
           >
             已回退并折叠 {rewoundMessageCount} 条历史消息
+          </div>
+        ) : null}
+
+        {affectedMemories.length > 0 ? (
+          <div className="shrink-0 border-b border-line px-3 py-2">
+            <AffectedMemoriesCard
+              memories={affectedMemories}
+              onRetract={handleRetractAffectedMemories}
+              onDismiss={handleDismissAffectedMemories}
+              retracting={retractAffectedMemories.isPending}
+            />
           </div>
         ) : null}
 

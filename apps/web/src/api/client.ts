@@ -115,6 +115,7 @@ export type JobCancelResponse = Schemas["JobCancelResponse"];
 export type ConversationClearResponse = Schemas["ConversationClearResponse"];
 export type MessageResendRequest = Schemas["MessageResendRequest"];
 export type MessageResendResponse = Schemas["MessageResendResponse"];
+export type AffectedMemory = Schemas["AffectedMemory"];
 export type CurrentDecisionResponse = Schemas["CurrentDecisionResponse"];
 export type PendingDecisionsResponse = Schemas["PendingDecisionsResponse"];
 export type DecisionAnswerResponse = Schemas["DecisionAnswerResponse"];

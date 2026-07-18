@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
+	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
 
 const maxRewindCheckpoints = 50
@@ -85,6 +86,17 @@ func applyTimelineRestored(ctx context.Context, state *applyState, event contrac
 		ctx, state.tx, event.DraftID, checkpoint.decisionBoundary,
 	); err != nil {
 		return err
+	}
+	// 回退遮蔽消息、作废决策之后,枚举被本次回退波及的长期记忆。只有动了对话
+	// (conversation/both)才有区间可言;纯时间线回退不牵动任何记忆。
+	if mode == "conversation" || mode == "both" {
+		affected, err := collectRewindAffectedMemories(
+			ctx, state.tx, event.DraftID, checkpoint.anchorMessageID, checkpoint.decisionBoundary,
+		)
+		if err != nil {
+			return err
+		}
+		state.rewindAffectedMemories = affected
 	}
 	if err := state.touch(ctx, event.DraftID); err != nil {
 		return err
@@ -323,4 +335,73 @@ func truncateCheckpointSummary(value string) string {
 	}
 	runes := []rune(value)
 	return string(runes[:117]) + "…"
+}
+
+// collectRewindAffectedMemories 在回退事务内枚举「被这次编辑并重发波及」的长期记忆:
+// 记忆创建于回退区间内(created_at >= 锚点消息 created_at),且其当前证据也落在同一区间
+// 内(证据消息已被本次回退遮蔽,或证据决策创建于检查点决策边界之后)。两条同时成立才计
+// 入:只重发某条较早消息不牵动更早已成立的偏好;证据仍指向可见历史的记忆也保留。记忆本
+// 身不随回退删除(证据无外键、刻意跨回退存活),清单仅用于提示用户显式「撤回这些记忆」。
+// 锚点缺失或消息已不存在(非消息检查点)时无区间可言,返回空。
+func collectRewindAffectedMemories(
+	ctx context.Context,
+	tx *sql.Tx,
+	draftID string,
+	anchorMessageID sql.NullString,
+	decisionBoundary int64,
+) ([]storage.RewindAffectedMemory, error) {
+	affected := []storage.RewindAffectedMemory{}
+	if !anchorMessageID.Valid {
+		return affected, nil
+	}
+	var anchorCreatedAt string
+	err := tx.QueryRowContext(ctx,
+		"SELECT created_at FROM messages WHERE message_id=? AND draft_id=?",
+		anchorMessageID.String, draftID,
+	).Scan(&anchorCreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return affected, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// user_memories.created_at 是定宽零填充格式(9 位纳秒),messages.created_at 是
+	// RFC3339Nano(去尾零、变宽)。把锚点时间戳规整到记忆格式后再比,才能让字典序等价
+	// 于时间序;两个变宽格式直接比会在尾零处错判。
+	boundary, err := normalizeUserMemoryTimestamp(anchorCreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	// 决策证据按 rowid>检查点决策边界 判定「落在回退区间」,而非 status:已回答的证据决策
+	// 不会被 invalidateDecisionsAfterCheckpoint 作废(它只动 pending),靠 status 判不出来。
+	// 这依赖 decisions 无物理删除 + 确定性重放的既有契约(与 invalidateDecisionsAfterCheckpoint
+	// 同一假设):rowid 单调递增、检查点边界稳定,故「边界之后」等价于「本次回退区间内」。
+	rows, err := tx.QueryContext(ctx, `
+		SELECT memory_key,statement FROM user_memories
+		WHERE source_draft_id=? AND created_at>=? AND (
+			(evidence_kind='user_message' AND EXISTS(
+				SELECT 1 FROM messages m
+				WHERE m.message_id=user_memories.evidence_id AND m.draft_id=?
+					AND m.rewound_at IS NOT NULL))
+			OR
+			(evidence_kind='decision_answer' AND EXISTS(
+				SELECT 1 FROM decisions d
+				WHERE d.decision_id=user_memories.evidence_id AND d.draft_id=?
+					AND d.rowid>?))
+		)
+		ORDER BY memory_key ASC`,
+		draftID, boundary, draftID, draftID, decisionBoundary,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var memory storage.RewindAffectedMemory
+		if err := rows.Scan(&memory.Key, &memory.Statement); err != nil {
+			return nil, err
+		}
+		affected = append(affected, memory)
+	}
+	return affected, rows.Err()
 }
