@@ -538,6 +538,7 @@ var eventApplyRegistry = map[string]eventApplyFunc{
 	"AssetImported":                  applyAssetEvent,
 	"AssetProbed":                    applyAssetEvent,
 	"ProxyGenerated":                 applyAssetEvent,
+	"PeaksGenerated":                 applyAssetEvent,
 	"MaterialUnderstandingStarted":   applyAssetEvent,
 	"MaterialUnderstandingCompleted": applyAssetEvent,
 	"MaterialUnderstandingFailed":    applyAssetEvent,
@@ -843,6 +844,18 @@ func applyAssetEvent(ctx context.Context, state *applyState, event contracts.Eve
 		_, err := state.tx.ExecContext(ctx,
 			"UPDATE assets SET proxy_object_hash=?, ingest_status=? WHERE asset_id=?",
 			hash, stringFrom(event.Payload["ingest_status"], "ready"), assetID)
+		return err
+	case "PeaksGenerated":
+		hash := stringFrom(event.Payload["peaks_object_hash"], "")
+		if hash == "" {
+			return errors.New("PeaksGenerated 缺少 peaks_object_hash")
+		}
+		if err := ensureObject(ctx, state, hash, int64From(event.Payload["peaks_object_size"], 0)); err != nil {
+			return err
+		}
+		// peaks 是显示增强，不改 ingest_status（资产在 ProxyGenerated 后已 ready）。
+		_, err := state.tx.ExecContext(ctx,
+			"UPDATE assets SET peaks_object_hash=? WHERE asset_id=?", hash, assetID)
 		return err
 	case "MaterialUnderstandingStarted":
 		ready, err := hasReadyMaterialSummary(ctx, state.tx, assetID)

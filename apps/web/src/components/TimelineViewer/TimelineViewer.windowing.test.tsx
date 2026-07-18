@@ -1,21 +1,7 @@
 import { fireEvent, render } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { TimelineViewer } from "./TimelineViewer";
 import type { TimelineJson } from "./TimelineViewer";
-
-const waveSurferMock = vi.hoisted(() => ({
-  create: vi.fn(() => ({
-    on: vi.fn(),
-    un: vi.fn(),
-    exportPeaks: vi.fn(() => [[]]),
-    getDuration: vi.fn(() => 3),
-    destroy: vi.fn()
-  }))
-}));
-
-vi.mock("wavesurfer.js", () => ({
-  default: { create: waveSurferMock.create }
-}));
 
 // 让窗口化测量同步生效：measureViewport 挂在 requestAnimationFrame 上，桩成同步执行，
 // 使 fireEvent.scroll 后立即完成一次可视区量测与重渲染，断言无需等待真实帧。
@@ -52,10 +38,6 @@ function stressTimeline(clipCount = 300, clipFrames = 20): TimelineJson {
 }
 
 describe("TimelineViewer 视口窗口化与瓦片降级", () => {
-  beforeEach(() => {
-    waveSurferMock.create.mockClear();
-  });
-
   it("未测量到视口尺寸时全量渲染，保持既有行为", () => {
     const { container } = render(<TimelineViewer timeline={stressTimeline()} pxPerSec={60} />);
     // jsdom 下 clientWidth 为 0 → 窗口化退化为全量，300 个 clip 全部在 DOM 中。

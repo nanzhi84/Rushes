@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"time"
@@ -86,9 +87,48 @@ func RegisterIngest(registry *Registry, database *storage.DB) error {
 				return nil, err
 			}
 		}
+		// 波形峰值：仅对含音频的资产（音频 asset 或带音轨的视频）生成并挂到对象库，
+		// 供前端直接绘制而不再下载解码整段音频。best-effort——生成失败则该资产无 peaks，
+		// 前端回退到即时解码，不阻断已 ready 的 ingest。
+		if kind == "audio" || probe.HasAudio {
+			if ref := analyzeAndStorePeaks(ctx, store, source, probe.DurationSec); ref != nil {
+				result["peaks_object_hash"] = ref.Hash
+				if _, err := reducer.Apply(ctx, database, []contracts.Event{{
+					Type: "PeaksGenerated", Payload: map[string]any{
+						"asset_id": assetID, "peaks_object_hash": ref.Hash,
+						"peaks_object_size": ref.Size,
+					},
+				}}, claimedJobOptions(job, reducer.Options{CreatedAt: time.Now().UTC()})); err != nil {
+					return nil, err
+				}
+			}
+		}
 		if err := report(ctx, job, Progress(0.99)); err != nil {
 			return nil, err
 		}
 		return result, nil
 	})
+}
+
+// analyzeAndStorePeaks 生成波形峰值 JSON 并写入对象库；任何生成/写入失败都返回 nil
+// （best-effort，前端回退即时解码），不返回 error 以免阻断 ingest。
+func analyzeAndStorePeaks(
+	ctx context.Context,
+	store media.ObjectStore,
+	source string,
+	durationSec float64,
+) *media.ObjectRef {
+	peaks, err := media.AnalyzeWaveformPeaks(ctx, source, durationSec)
+	if err != nil {
+		return nil
+	}
+	encoded, err := json.Marshal(peaks)
+	if err != nil {
+		return nil
+	}
+	ref, err := store.Put(ctx, bytes.NewReader(encoded))
+	if err != nil {
+		return nil
+	}
+	return &ref
 }

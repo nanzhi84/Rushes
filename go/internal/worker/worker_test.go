@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -705,6 +706,72 @@ func TestIngestHandlerProducesProbeThumbnailProxyAndProgress(t *testing.T) {
 	}
 	if progress < 3 || terminal != 1 {
 		t.Fatalf("progress=%d terminal=%d", progress, terminal)
+	}
+}
+
+func TestIngestHandlerProducesWaveformPeaksForAudioAsset(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg 未安装")
+	}
+	database := testDatabase(t)
+	source := filepath.Join(database.Paths.Temporary, "tone.wav")
+	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y", "-f", "lavfi",
+		"-i", "sine=frequency=440:duration=1:sample_rate=48000", "-ac", "1", source); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	createDraft(t, database, "draft_audio", now)
+	apply(t, database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset_audio", "job_id": "job_audio", "storage_mode": "reference",
+			"reference_path": source, "kind": "audio", "source": "local", "filename": "tone.wav",
+			"hash": "audio-hash", "size": 1, "ingest_status": "imported",
+		}},
+		{Type: "AssetLinked", DraftID: "draft_audio", Payload: map[string]any{"asset_id": "asset_audio"}},
+		{Type: "JobEnqueued", DraftID: "draft_audio", Payload: map[string]any{
+			"job_id": "job_audio", "kind": "ingest", "asset_id": "asset_audio",
+			"requested_by_draft_id": "draft_audio", "idempotency_key": "asset_audio",
+			"next_run_at": now.Format(time.RFC3339Nano),
+		}},
+	}, contracts.ActorUser, now)
+	registry := NewRegistry()
+	if err := RegisterIngest(registry, database); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewRunner(RunnerConfig{
+		Database: database, Registry: registry, WorkerID: "ingest",
+		HeartbeatInterval: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, err := runner.RunOnce(t.Context()); err != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, err)
+	}
+	asset, err := storage.GetAsset(t.Context(), database.Read(), "asset_audio")
+	if err != nil || asset.PeaksObjectHash == nil {
+		t.Fatalf("asset peaks hash=%v err=%v", asset.PeaksObjectHash, err)
+	}
+	path, err := storage.ObjectPathByHash(database.Paths, asset.PeaksObjectHash)
+	if err != nil || path == "" {
+		t.Fatalf("peaks object path=%q err=%v", path, err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload media.WaveformPeaks
+	if err := json.Unmarshal(raw, &payload); err != nil ||
+		payload.Version != media.PeaksSchemaVersion || len(payload.Peaks) == 0 {
+		t.Fatalf("peaks payload=%#v err=%v", payload, err)
+	}
+	var peaksEvents int
+	if err := database.Read().QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM event_log WHERE event_type='PeaksGenerated'`).Scan(&peaksEvents); err != nil {
+		t.Fatal(err)
+	}
+	if peaksEvents != 1 {
+		t.Fatalf("PeaksGenerated 事件数=%d", peaksEvents)
 	}
 }
 
