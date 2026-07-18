@@ -95,7 +95,7 @@ func NewServiceWithModels(
 				Tools:               registry.EinoTools(true, false),
 				ExecuteSequentially: true,
 				UnknownToolsHandler: unknownToolRecoveryHandler,
-				ToolCallMiddlewares: []compose.ToolMiddleware{newToolRecoveryMiddleware()},
+				ToolCallMiddlewares: []compose.ToolMiddleware{newToolRecoveryMiddleware(retrySafeFromEffect(registry.Effect))},
 			},
 			// 多主题口播可能需要 30 轮以上的模型/工具往返，因此将真实预算
 			// 保留到 40 轮；最后 5 轮由 MessageModifier 注入收敛提醒。
