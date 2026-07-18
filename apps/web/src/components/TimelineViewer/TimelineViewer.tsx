@@ -204,6 +204,11 @@ const SNAP_THRESHOLD_PX = 8;
 const SEEK_PREVIEW_INTERVAL_MS = 50;
 const MIN_PX_PER_SEC = 8;
 const MAX_PX_PER_SEC = 320;
+// 视口窗口化：只渲染滚动可视区 ±overscan 命中的 clip。overscan 必须 ≥ step，
+// 保证两次量化更新之间可视区始终有已渲染内容，滚动不露白。step 越小重渲染越频繁，
+// overscan 越大预渲染越多；两者按「一屏内低百位 DOM 节点」平衡。
+const TIMELINE_WINDOW_OVERSCAN_PX = 512;
+const TIMELINE_WINDOW_STEP_PX = 128;
 
 // 时间线是数千节点的 SVG，reconcile 昂贵；用 memo 把它挡在流式对话高频重渲染之外。
 // 上层（DraftEditorView）传入的 props 已保持引用稳定：timeline 来自 EditorSession 快照，
@@ -253,6 +258,52 @@ export const TimelineViewer = memo(
   const seekDragRef = useRef<SeekDragState | null>(null);
   const suppressClipClickRef = useRef(false);
   const pendingZoomRef = useRef<{ anchorSec: number; viewportX: number } | null>(null);
+  // 滚动可视窗口（SVG 本地坐标，已扣除左侧粘性轨道头）。width<=0 表示尚未测量或非浏览器
+  // 环境（如 jsdom 未桩接布局），此时退化为全量渲染，保持既有行为不变。
+  const [viewport, setViewport] = useState<{ left: number; width: number }>({ left: 0, width: 0 });
+  const scrollRafRef = useRef<number | null>(null);
+
+  const measureViewport = useCallback(() => {
+    const scroller = scrollSurfaceRef.current;
+    if (!scroller) {
+      return;
+    }
+    const width = Math.max(0, scroller.clientWidth - LABEL_WIDTH);
+    // 量化到 step，滚动细粒度抖动不触发重渲染；overscan≥step 兜住量化误差。
+    const left =
+      Math.floor(Math.max(0, scroller.scrollLeft) / TIMELINE_WINDOW_STEP_PX) *
+      TIMELINE_WINDOW_STEP_PX;
+    setViewport((current) =>
+      current.left === left && current.width === width ? current : { left, width }
+    );
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    if (scrollRafRef.current !== null) {
+      return;
+    }
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      measureViewport();
+    });
+  }, [measureViewport]);
+
+  useLayoutEffect(() => {
+    measureViewport();
+    const scroller = scrollSurfaceRef.current;
+    if (!scroller || typeof ResizeObserver === "undefined") {
+      return;
+    }
+    const observer = new ResizeObserver(() => measureViewport());
+    observer.observe(scroller);
+    return () => {
+      observer.disconnect();
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+    };
+  }, [measureViewport]);
 
   const updatePlayhead = useCallback(
     (sec: number | null, follow = false) => {
@@ -298,6 +349,45 @@ export const TimelineViewer = memo(
     () => buildSnapCandidates(tracks, ticks, clampedPlayheadSec, safeFps, timeline.duration_frames),
     [clampedPlayheadSec, safeFps, ticks, timeline.duration_frames, tracks]
   );
+  // 只把命中可视窗口的 clip 交给渲染；吸附/拖拽计算仍走全量 tracks（snapCandidates 不受影响）。
+  // 选中 clip 始终保留，避免选中后滚动到窗口外时手柄/选中态被摘除。
+  const visibleClipsByTrack = useMemo(() => {
+    const map = new Map<string, DrawableClip[]>();
+    const windowing = viewport.width > 0;
+    const rangeStart = viewport.left - TIMELINE_WINDOW_OVERSCAN_PX;
+    const rangeEnd = viewport.left + viewport.width + TIMELINE_WINDOW_OVERSCAN_PX;
+    for (const track of tracks) {
+      if (!windowing) {
+        map.set(track.track_id, track.clips);
+        continue;
+      }
+      map.set(
+        track.track_id,
+        track.clips.filter((clip) => {
+          if (clip.clipId === selectedClipId) {
+            return true;
+          }
+          const startX = (clip.startFrame / safeFps) * pxPerSec;
+          const endX = (clip.endFrame / safeFps) * pxPerSec;
+          return endX >= rangeStart && startX <= rangeEnd;
+        })
+      );
+    }
+    return map;
+  }, [tracks, viewport, safeFps, pxPerSec, selectedClipId]);
+  // 刻度同样随时长线性增长（长时间线细刻度可达数百上千个），一并按可视窗口裁剪；
+  // 吸附候选仍用全量 ticks（buildSnapCandidates 不受影响）。
+  const visibleTicks = useMemo(() => {
+    if (viewport.width <= 0) {
+      return ticks;
+    }
+    const rangeStart = viewport.left - TIMELINE_WINDOW_OVERSCAN_PX;
+    const rangeEnd = viewport.left + viewport.width + TIMELINE_WINDOW_OVERSCAN_PX;
+    return ticks.filter((tick) => {
+      const x = tick.sec * pxPerSec;
+      return x >= rangeStart && x <= rangeEnd;
+    });
+  }, [ticks, viewport, pxPerSec]);
 
   useLayoutEffect(() => {
     const pending = pendingZoomRef.current;
@@ -778,6 +868,7 @@ export const TimelineViewer = memo(
       className="h-full overflow-auto"
       data-testid="timeline-scroll-surface"
       onWheel={handleZoomWheel}
+      onScroll={handleScroll}
     >
       <div
         className="relative flex min-h-full min-w-full items-center"
@@ -824,7 +915,7 @@ export const TimelineViewer = memo(
           <rect width={timelineWidth} height={svgHeight} fill="var(--color-panel)" />
 
           <g>
-            {ticks.map((tick) => (
+            {visibleTicks.map((tick) => (
               <g key={tick.sec} transform={`translate(${tick.sec * pxPerSec} 0)`}>
                 <line
                   y1={tick.major ? HEADER_HEIGHT - 10 : HEADER_HEIGHT - 5}
@@ -884,7 +975,7 @@ export const TimelineViewer = memo(
                     strokeOpacity={0.9}
                     pointerEvents="none"
                   />
-                  {track.clips.map((clip) => {
+                  {(visibleClipsByTrack.get(track.track_id) ?? track.clips).map((clip) => {
                     const x = (clip.startFrame / safeFps) * pxPerSec;
                     const width = Math.max(
                       ((clip.endFrame - clip.startFrame) / safeFps) * pxPerSec,
@@ -924,9 +1015,6 @@ export const TimelineViewer = memo(
                       (clip.fadeOutFrames / safeFps) * pxPerSec
                     );
                     const clipBeatMarkers = buildBeatMarkersForClip(clip);
-                    const tileCount = thumbUrl
-                      ? Math.max(1, Math.ceil(visualWidth / FILM_TILE_WIDTH))
-                      : 0;
                     return (
                       <g
                         key={clip.clipId}
@@ -947,40 +1035,53 @@ export const TimelineViewer = memo(
                         />
                         {thumbUrl ? (
                           <>
-                            <clipPath id={`tl-film-${sid}`}>
-                              <rect x={visualX} y={clipY} width={visualWidth} height={CLIP_HEIGHT} rx={3} />
-                            </clipPath>
-                            <g clipPath={`url(#tl-film-${sid})`} pointerEvents="none">
-                              {Array.from({ length: tileCount }, (_, tileIndex) => (
-                                <image
-                                  key={tileIndex}
-                                  href={thumbUrl}
-                                  x={visualX + tileIndex * FILM_TILE_WIDTH}
-                                  y={clipY}
-                                  width={FILM_TILE_WIDTH}
-                                  height={CLIP_HEIGHT}
-                                  preserveAspectRatio="xMidYMid slice"
-                                />
-                              ))}
-                              {Array.from({ length: Math.max(0, tileCount - 1) }, (_, tileIndex) => (
-                                <line
-                                  key={`sep-${tileIndex}`}
-                                  x1={visualX + (tileIndex + 1) * FILM_TILE_WIDTH}
-                                  x2={visualX + (tileIndex + 1) * FILM_TILE_WIDTH}
-                                  y1={clipY}
-                                  y2={clipY + CLIP_HEIGHT}
-                                  stroke="var(--color-ink)"
-                                  strokeOpacity={0.35}
-                                />
-                              ))}
-                              <rect
-                                x={visualX}
-                                y={clipY}
-                                width={visualWidth}
+                            {/* 胶片瓦片降级：同一 poster 改用 SVG pattern 平铺，节点数与 clip 宽度
+                                解耦——替代原先每 56px 一个 <image>（单个长 clip 最多可达数百个）。
+                                pattern 原点对齐 clip 左上角，配一条右边界分隔线复现胶片格视觉。 */}
+                            <pattern
+                              id={`tl-film-${sid}`}
+                              patternUnits="userSpaceOnUse"
+                              x={visualX}
+                              y={clipY}
+                              width={FILM_TILE_WIDTH}
+                              height={CLIP_HEIGHT}
+                            >
+                              <image
+                                href={thumbUrl}
+                                x={0}
+                                y={0}
+                                width={FILM_TILE_WIDTH}
                                 height={CLIP_HEIGHT}
-                                fill="url(#tl-label-scrim)"
+                                preserveAspectRatio="xMidYMid slice"
                               />
-                            </g>
+                              <line
+                                x1={FILM_TILE_WIDTH}
+                                x2={FILM_TILE_WIDTH}
+                                y1={0}
+                                y2={CLIP_HEIGHT}
+                                stroke="var(--color-ink)"
+                                strokeOpacity={0.35}
+                              />
+                            </pattern>
+                            <rect
+                              data-clip-film
+                              x={visualX}
+                              y={clipY}
+                              width={visualWidth}
+                              height={CLIP_HEIGHT}
+                              rx={3}
+                              fill={`url(#tl-film-${sid})`}
+                              pointerEvents="none"
+                            />
+                            <rect
+                              x={visualX}
+                              y={clipY}
+                              width={visualWidth}
+                              height={CLIP_HEIGHT}
+                              rx={3}
+                              fill="url(#tl-label-scrim)"
+                              pointerEvents="none"
+                            />
                           </>
                         ) : null}
                         {wavePath ? (
