@@ -41,7 +41,7 @@ func (scaffold *e2eFallbackScaffold) TryHandle(
 		reply, err := scaffold.cancelDuringUnderstanding(ctx, draftID)
 		return reply, true, err
 	case strings.Contains(content, e2eFullMainlineMarker):
-		reply, err := scaffold.service.fallbackFullMainline(ctx, draftID)
+		reply, err := scaffold.service.fallbackMainline(ctx, draftID)
 		return reply, true, err
 	case strings.Contains(content, e2eMemoryWriteMarker):
 		result, err := scaffold.service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
@@ -65,7 +65,7 @@ func (scaffold *e2eFallbackScaffold) TryHandle(
 			return "", true, err
 		}
 		section, _ := build.Snapshot.Sections["user_memory"].(map[string]any)
-		for _, entry := range worldStateObjectSlice(section["entries"]) {
+		for _, entry := range agentexec.WorldStateObjectSlice(section["entries"]) {
 			if entry["key"] == "e2e_pacing" {
 				return "E2E_MEMORY_PRESENT", true, nil
 			}

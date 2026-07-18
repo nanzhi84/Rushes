@@ -14,7 +14,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
-func CanonicalContentPlanValue(input any) (map[string]any, error) {
+func canonicalContentPlanValue(input any) (map[string]any, error) {
 	encoded, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
@@ -76,8 +76,6 @@ func RandomID(prefix string) string {
 }
 
 func BoolPointer(value bool) *bool { return &value }
-
-const TurnStreamSubagentProgress = "subagent_progress"
 
 // TurnStreamMemoryUpdated 与 agent 侧 knownTurnStreamTypes 同名同值:执行器经
 // recordProgress 发射,hub 用 agent 侧清单校验类型。字符串一致即可,不跨包依赖。

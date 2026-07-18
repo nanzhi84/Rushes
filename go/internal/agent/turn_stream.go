@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+
+	"github.com/nanzhi84/Rushes/go/internal/contracts"
 )
 
 const DefaultSubscriberQueueLimit = 1024
@@ -23,7 +25,6 @@ const (
 	TurnStreamToolStepStarted         = "tool_step_started"
 	TurnStreamToolStepFinished        = "tool_step_finished"
 	TurnStreamModelRetry              = "model_retry"
-	TurnStreamSubagentProgress        = "subagent_progress"
 	TurnStreamContextCompactionFailed = "context_compaction_failed"
 	TurnStreamSnapshotTruncated       = "stream_snapshot_truncated"
 	TurnStreamGap                     = "stream_gap"
@@ -39,7 +40,7 @@ var knownTurnStreamTypes = []string{
 	TurnStreamToolStepStarted,
 	TurnStreamToolStepFinished,
 	TurnStreamModelRetry,
-	TurnStreamSubagentProgress,
+	contracts.TurnStreamSubagentProgress,
 	TurnStreamContextCompactionFailed,
 	TurnStreamSnapshotTruncated,
 	TurnStreamGap,

@@ -89,7 +89,7 @@ func ContentPlanContract(plan map[string]any) (map[string]any, error) {
 			return nil, fmt.Errorf("验收合同含无效 B-roll 覆盖区间")
 		}
 	}
-	return CanonicalContentPlanValue(contract)
+	return canonicalContentPlanValue(contract)
 }
 
 func ContentPreservingClips(document timeline.Document) []timeline.Clip {

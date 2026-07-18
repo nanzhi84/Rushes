@@ -274,7 +274,7 @@ func (exec *Executor) PersistTimeline(
 	return toolResult, nil
 }
 
-func (exec *Executor) ToolValidateTimeline(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
+func (exec *Executor) toolValidateTimeline(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
 	document, err := timeline.Latest(ctx, exec.database, draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err

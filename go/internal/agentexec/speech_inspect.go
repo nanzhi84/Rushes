@@ -1314,7 +1314,7 @@ func ClampSpeechRangeToClip(clip timeline.Clip, start, end int) (int, int, bool)
 	return clampedStart, clampedEnd, clampedStart != start || clampedEnd != end
 }
 
-func (exec *Executor) ToolInspectSpeech(
+func (exec *Executor) toolInspectSpeech(
 	ctx context.Context,
 	draftID string,
 	input rushestools.SpeechInspectInput,
@@ -1628,7 +1628,7 @@ func (exec *Executor) loadOrBuildSpeechTranscript(
 		chunks := BuildASRChunks(durationFrames, pauses, MaxASRChunkFrames)
 		for index, chunk := range chunks {
 			exec.recordProgress(draftID, map[string]any{
-				"type": TurnStreamSubagentProgress, "tool": "speech.inspect",
+				"type": contracts.TurnStreamSubagentProgress, "tool": "speech.inspect",
 				"asset_id": asset.ID, "note": fmt.Sprintf("ASR 转写 %d/%d", index+1, len(chunks)),
 				"completed": index, "total": len(chunks),
 			})
@@ -1644,7 +1644,7 @@ func (exec *Executor) loadOrBuildSpeechTranscript(
 			_ = os.Remove(path)
 			if errors.Is(recognizeErr, contracts.ErrSpeechNoWords) {
 				exec.recordProgress(draftID, map[string]any{
-					"type": TurnStreamSubagentProgress, "tool": "speech.inspect",
+					"type": contracts.TurnStreamSubagentProgress, "tool": "speech.inspect",
 					"asset_id":  asset.ID,
 					"note":      fmt.Sprintf("ASR 转写 %d/%d：该分块无台词，已跳过", index+1, len(chunks)),
 					"completed": index + 1, "total": len(chunks),

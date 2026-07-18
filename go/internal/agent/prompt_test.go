@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -21,8 +22,8 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 		t.Fatalf("core system prompt=%d runes, want <=1800", runes)
 	}
 	combined := strings.Join([]string{
-		coreSystemPrompt, audioTrackPlaybook, beatEditingPlaybook,
-		timelineEditingPlaybook, talkingHeadPlaybook,
+		coreSystemPrompt, agentexec.AudioTrackPlaybook, agentexec.BeatEditingPlaybook,
+		agentexec.TimelineEditingPlaybook, agentexec.TalkingHeadPlaybook,
 	}, "\n")
 	for _, incident := range []string{
 		"压压", "跷跷", "键盘背光", "键帽", "max_pauses 提高到 100",
@@ -43,12 +44,12 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 			"WorldState.user_memory", "memory.update", "本回合为准", "一次性要求不要入库", "remove_keys",
 			"可逆创作细节", "Rewind", "decision_type=critical", "不得把首剪方案",
 		}},
-		"audio": {audioTrackPlaybook, []string{"持续音乐", "短时点缀", "叠加"}},
-		"beat":  {beatEditingPlaybook, []string{"节拍与完整动态证据", "可核验镜头", "自主规划", "不要求用户审批", "卡点重剪"}},
-		"timeline": {timelineEditingPlaybook, []string{
+		"audio": {agentexec.AudioTrackPlaybook, []string{"持续音乐", "短时点缀", "叠加"}},
+		"beat":  {agentexec.BeatEditingPlaybook, []string{"节拍与完整动态证据", "可核验镜头", "自主规划", "不要求用户审批", "卡点重剪"}},
+		"timeline": {agentexec.TimelineEditingPlaybook, []string{
 			"两个或更多片段", "原子批次", "自主决定", "直接组装可回滚的初版",
 		}},
-		"talking_head": {talkingHeadPlaybook, []string{
+		"talking_head": {agentexec.TalkingHeadPlaybook, []string{
 			"已有时间线", "尚无时间线", "建立初版", "逐句语音证据", "词级标识",
 			"自主判断", "不向用户逐项审批",
 		}},
@@ -74,14 +75,14 @@ func TestTaskPlaybookSegmentsTriggerPreciselyFromCurrentWorldState(t *testing.T)
 			sections: map[string]any{"assets": map[string]any{
 				"audio_roles": []map[string]any{{"suggested_role": "sfx"}},
 			}},
-			want: []string{audioTrackPlaybook},
+			want: []string{agentexec.AudioTrackPlaybook},
 		},
 		{
 			name: "bgm only",
 			sections: map[string]any{"assets": map[string]any{
 				"material_catalog": []map[string]any{{"suggested_role": "bgm"}},
 			}},
-			want: []string{beatEditingPlaybook},
+			want: []string{agentexec.BeatEditingPlaybook},
 		},
 		{
 			name: "bgm audio role survives catalog truncation",
@@ -89,19 +90,19 @@ func TestTaskPlaybookSegmentsTriggerPreciselyFromCurrentWorldState(t *testing.T)
 				"audio_roles":      []map[string]any{{"suggested_role": "bgm"}},
 				"material_catalog": []any{},
 			}},
-			want: []string{audioTrackPlaybook, beatEditingPlaybook},
+			want: []string{agentexec.AudioTrackPlaybook, agentexec.BeatEditingPlaybook},
 		},
 		{
 			name:     "timeline only",
 			sections: map[string]any{"timeline": map[string]any{}},
-			want:     []string{timelineEditingPlaybook},
+			want:     []string{agentexec.TimelineEditingPlaybook},
 		},
 		{
 			name: "transcript only",
 			sections: map[string]any{"assets": map[string]any{
 				"material_catalog": []map[string]any{{"transcript_provider": "sidecar_srt"}},
 			}},
-			want: []string{talkingHeadPlaybook},
+			want: []string{agentexec.TalkingHeadPlaybook},
 		},
 		{
 			name: "all in stable order",
@@ -115,8 +116,8 @@ func TestTaskPlaybookSegmentsTriggerPreciselyFromCurrentWorldState(t *testing.T)
 				"timeline": map[string]any{},
 			},
 			want: []string{
-				audioTrackPlaybook, beatEditingPlaybook,
-				timelineEditingPlaybook, talkingHeadPlaybook,
+				agentexec.AudioTrackPlaybook, agentexec.BeatEditingPlaybook,
+				agentexec.TimelineEditingPlaybook, agentexec.TalkingHeadPlaybook,
 			},
 		},
 		{
@@ -137,7 +138,7 @@ func TestTaskPlaybookSegmentsTriggerPreciselyFromCurrentWorldState(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			snapshot := NewWorldStateSnapshot(test.sections)
-			got := taskPlaybookSegments(snapshot)
+			got := agentexec.TaskPlaybookSegments(snapshot.Sections)
 			if strings.Join(got, "\x00") != strings.Join(test.want, "\x00") {
 				t.Fatalf("segments=%#v want=%#v", got, test.want)
 			}
@@ -169,7 +170,7 @@ func TestTaskPlaybookMessageUsesCurrentSnapshotBetweenReferenceAndPatch(t *testi
 		messages[0].Extra["context_phase"] != "world_state_reference" ||
 		messages[1].Extra["context_phase"] != "task_playbook" ||
 		messages[2].Extra["context_phase"] != "world_state_update" ||
-		!strings.Contains(messages[1].Content, timelineEditingPlaybook) {
+		!strings.Contains(messages[1].Content, agentexec.TimelineEditingPlaybook) {
 		t.Fatalf("messages=%#v", messages)
 	}
 
@@ -228,8 +229,8 @@ func TestPersistentTranscriptMarksSnapshotForTalkingHeadPlaybook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	segments := taskPlaybookSegments(snapshot)
-	if len(segments) != 1 || segments[0] != talkingHeadPlaybook {
+	segments := agentexec.TaskPlaybookSegments(snapshot.Sections)
+	if len(segments) != 1 || segments[0] != agentexec.TalkingHeadPlaybook {
 		t.Fatalf("persistent transcript segments=%#v snapshot=%#v", segments, snapshot)
 	}
 }
@@ -263,8 +264,8 @@ func TestLLMToolDescriptionsDoNotDuplicatePromptFacts(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	sources := []string{
-		coreSystemPrompt, audioTrackPlaybook, beatEditingPlaybook,
-		timelineEditingPlaybook, talkingHeadPlaybook,
+		coreSystemPrompt, agentexec.AudioTrackPlaybook, agentexec.BeatEditingPlaybook,
+		agentexec.TimelineEditingPlaybook, agentexec.TalkingHeadPlaybook,
 	}
 	for _, spec := range service.tools.Specs(true) {
 		if spec.Exposure != rushestools.ExposureLLM {

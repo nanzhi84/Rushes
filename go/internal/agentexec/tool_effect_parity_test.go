@@ -75,7 +75,7 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := countEvents(draftID)
-		if _, err := exec.ToolValidateTimeline(t.Context(), draftID); err != nil {
+		if _, err := exec.toolValidateTimeline(t.Context(), draftID); err != nil {
 			t.Fatal(err)
 		}
 		if after := countEvents(draftID); after <= before {
@@ -90,7 +90,7 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 			t.Fatalf("plan.update Effect=%q，期望 reversible", effect)
 		}
 		ctx := rushestools.WithDraftID(t.Context(), draftID)
-		if _, err := exec.ToolPlanUpdate(ctx, draftID, rushestools.PlanUpdateInput{
+		if _, err := exec.toolPlanUpdate(ctx, draftID, rushestools.PlanUpdateInput{
 			Plan: map[string]any{"pacing": "fast"},
 		}); err != nil {
 			t.Fatal(err)

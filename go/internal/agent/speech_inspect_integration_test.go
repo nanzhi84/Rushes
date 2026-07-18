@@ -30,7 +30,7 @@ func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
 	if err := os.Symlink(source, linkedSource); err != nil {
 		t.Fatal(err)
 	}
-	insertSpeechFixtureAsset(t, database, "draft_live_fun_asr", "asset_live_aroll", linkedSource)
+	agenttest.InsertSpeechFixtureAsset(t, database, "draft_live_fun_asr", "asset_live_aroll", linkedSource)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +44,7 @@ func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.SetSpeechRecognizer(recognizer)
-	result, err := service.executor.ToolInspectSpeech(t.Context(), "draft_live_fun_asr", rushestools.SpeechInspectInput{
+	result, err := executeInspectSpeech(t, service, "draft_live_fun_asr", rushestools.SpeechInspectInput{
 		AssetID: "asset_live_aroll", Language: "zh", MaxUtterances: 200,
 		IncludeWords: true, MaxWords: 2000,
 	})
@@ -73,7 +73,7 @@ func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
 	const executionRuns = 20
 	succeeded := 1
 	for run := 1; run < executionRuns; run++ {
-		cached, cacheErr := service.executor.ToolInspectSpeech(t.Context(), "draft_live_fun_asr", rushestools.SpeechInspectInput{
+		cached, cacheErr := executeInspectSpeech(t, service, "draft_live_fun_asr", rushestools.SpeechInspectInput{
 			AssetID: "asset_live_aroll", Query: result.Utterances[0].Text, MaxUtterances: 5,
 		})
 		if cacheErr == nil && cached.CacheHit && len(cached.Utterances) > 0 {
@@ -87,4 +87,24 @@ func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
 		"SPEECH_INSPECT_FUN_ASR_OK provider=%s utterances=%d words=%d pauses=%d execution_success=%d/%d",
 		result.ProviderID, result.UtteranceTotal, result.WordTotal, len(result.Pauses), succeeded, executionRuns,
 	)
+}
+
+// executeInspectSpeech 把 speech.inspect 经引擎装饰器 ExecuteTool 路由到领域执行器。
+// 工具错误照常回传由调用点判定；仅在不可能的类型不符时 t.Fatal（本文件调用点均在测试主 goroutine）。
+func executeInspectSpeech(
+	t *testing.T,
+	service *Service,
+	draftID string,
+	input rushestools.SpeechInspectInput,
+) (rushestools.SpeechInspectResult, error) {
+	t.Helper()
+	raw, err := service.ExecuteTool(rushestools.WithDraftID(t.Context(), draftID), "speech.inspect", input)
+	if err != nil {
+		return rushestools.SpeechInspectResult{}, err
+	}
+	result, ok := raw.(rushestools.SpeechInspectResult)
+	if !ok {
+		t.Fatalf("speech.inspect 返回类型异常: %T", raw)
+	}
+	return result, nil
 }

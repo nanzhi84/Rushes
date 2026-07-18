@@ -36,14 +36,14 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 	invalid := rushestools.PlanUpdateInput{Plan: map[string]any{}, Contract: &rushestools.ContentPlanContract{
 		MinOnBeatRatio: &invalidRatio,
 	}}
-	result, err := exec.ToolPlanUpdate(t.Context(), "draft_contract", invalid)
+	result, err := exec.toolPlanUpdate(t.Context(), "draft_contract", invalid)
 	if err != nil || result.Status != "failed" || !strings.Contains(result.Observation, "0 到 1") {
 		t.Fatalf("invalid result=%#v err=%v", result, err)
 	}
 	minRatio := 0.9
 	tolerance := 2
 	minDensity, maxDensity := 10.0, 19.0
-	result, err = exec.ToolPlanUpdate(t.Context(), "draft_contract", rushestools.PlanUpdateInput{
+	result, err = exec.toolPlanUpdate(t.Context(), "draft_contract", rushestools.PlanUpdateInput{
 		Plan: map[string]any{"goal": "合同测试"},
 		Contract: &rushestools.ContentPlanContract{
 			TargetDurationFrames: 120, DurationToleranceFrames: &tolerance,
@@ -91,7 +91,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
 	assertPersistedContractReport(t, database, "draft_contract", 1, false)
-	validated, err := exec.ToolValidateTimeline(t.Context(), "draft_contract")
+	validated, err := exec.toolValidateTimeline(t.Context(), "draft_contract")
 	if err != nil || validated.Status != "succeeded" ||
 		!strings.Contains(validated.Observation, "验收合同未通过项") ||
 		len(validated.Data["contract_failures"].([]ContractVerificationItem)) != 5 ||
@@ -124,7 +124,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		t.Fatal(err)
 	}
 	assertPersistedContractReport(t, database, "draft_contract", 2, true)
-	validated, err = exec.ToolValidateTimeline(t.Context(), "draft_contract")
+	validated, err = exec.toolValidateTimeline(t.Context(), "draft_contract")
 	if err != nil || validated.Status != "succeeded" ||
 		!strings.Contains(validated.Observation, "验收合同全部通过") ||
 		len(validated.Data["contract_failures"].([]ContractVerificationItem)) != 0 ||
@@ -155,7 +155,7 @@ func TestContentContractReportsMissingBeatGrid(t *testing.T) {
 	}
 
 	minRatio := 0.8
-	updated, err := exec.ToolPlanUpdate(t.Context(), "draft_missing_beat_grid", rushestools.PlanUpdateInput{
+	updated, err := exec.toolPlanUpdate(t.Context(), "draft_missing_beat_grid", rushestools.PlanUpdateInput{
 		Plan:     map[string]any{"goal": "缺节拍网格合同测试"},
 		Contract: &rushestools.ContentPlanContract{MinOnBeatRatio: &minRatio},
 	})
@@ -349,7 +349,7 @@ func TestPlanUpdateTypedContractPreservesMustKeepUtteranceValidation(t *testing.
 			if err := json.Unmarshal([]byte(test.payload), &input); err != nil {
 				t.Fatal(err)
 			}
-			result, err := exec.ToolPlanUpdate(t.Context(), "draft_typed_contract", input)
+			result, err := exec.toolPlanUpdate(t.Context(), "draft_typed_contract", input)
 			if err != nil || result.Status != test.wantStatus {
 				t.Fatalf("result=%#v err=%v", result, err)
 			}

@@ -18,7 +18,7 @@ const (
 	PlanUpdateMaxAttempts = 3
 )
 
-func (exec *Executor) ToolPlanUpdate(
+func (exec *Executor) toolPlanUpdate(
 	ctx context.Context,
 	draftID string,
 	input rushestools.PlanUpdateInput,
@@ -49,7 +49,7 @@ func (exec *Executor) ToolPlanUpdateWithBeforeApply(
 				"reason": "contract_invalid",
 			}), nil
 		}
-		contractMap, contractErr := CanonicalContentPlanValue(input.Contract)
+		contractMap, contractErr := canonicalContentPlanValue(input.Contract)
 		if contractErr != nil {
 			return planUpdateFailure("验收合同无法编码为 JSON", map[string]any{"reason": "contract_not_json"}), nil
 		}

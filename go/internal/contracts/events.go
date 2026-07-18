@@ -224,3 +224,7 @@ func stringValue(value any) string {
 		return ""
 	}
 }
+
+// TurnStreamSubagentProgress 是子过程进度 SSE 事件类型,agent(编排)与
+// agentexec(领域执行)共用,置于契约层单一事实源。
+const TurnStreamSubagentProgress = "subagent_progress"

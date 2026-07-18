@@ -34,7 +34,7 @@ func TestUserMemoryWorldStateIsStableAcrossDraftsAndRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	section := userMemorySection(t, snapshot)
-	entries := worldStateObjectSlice(section["entries"])
+	entries := agentexec.WorldStateObjectSlice(section["entries"])
 	if len(entries) != 1 || entries[0]["key"] != "pacing" ||
 		entries[0]["kind"] != "preference" || entries[0]["statement"] != "成片节奏偏快" {
 		t.Fatalf("user_memory entries=%#v", entries)
@@ -57,7 +57,7 @@ func TestUserMemoryWorldStateIsStableAcrossDraftsAndRemoval(t *testing.T) {
 		t.Fatal(err)
 	}
 	section = userMemorySection(t, afterRemoval)
-	if len(worldStateObjectSlice(section["entries"])) != 0 {
+	if len(agentexec.WorldStateObjectSlice(section["entries"])) != 0 {
 		t.Fatalf("removed memory still visible: %#v", section)
 	}
 	if total, ok := agentexec.NumericValue(section["total"]); !ok || total != 0 || section["truncated"] != false {
@@ -90,7 +90,7 @@ func TestUserMemoryWorldStateUsesWholeEntryBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	section := userMemorySection(t, snapshot)
-	entries := worldStateObjectSlice(section["entries"])
+	entries := agentexec.WorldStateObjectSlice(section["entries"])
 	encoded, err := json.Marshal(section)
 	if err != nil {
 		t.Fatal(err)
