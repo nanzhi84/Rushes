@@ -62,3 +62,43 @@ func TestAnalyzeWaveformPeaksErrorsWithoutFFmpeg(t *testing.T) {
 		t.Fatal("缺 ffmpeg 应报错")
 	}
 }
+
+func TestPeaksAccumulatorCapsPairsAndSignalsStop(t *testing.T) {
+	acc := &peaksAccumulator{maxPairs: 3}
+	stopped := false
+	for i := 0; i < 100; i++ {
+		if !acc.addLine("frame:x") {
+			stopped = true
+			break
+		}
+		acc.addLine("lavfi.astats.Overall.Min_level=-0.5")
+		acc.addLine("lavfi.astats.Overall.Max_level=0.5")
+	}
+	if !stopped {
+		t.Fatal("到达上限应返回停止信号")
+	}
+	if len(acc.pairs) != 3 {
+		t.Fatalf("pairs=%d want=3（内存应钉在 maxPairs）", len(acc.pairs))
+	}
+}
+
+func TestRunFFmpegLinesStopsEarlyWithoutReadingAll(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "ffmpeg")
+	// 无限输出 frame 行；若 RunFFmpegLines 不在 onLine 返回 false 时取消 ffmpeg，测试会挂死。
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nwhile :; do echo frame:x; done\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	seen := 0
+	err := RunFFmpegLines(t.Context(), "ffmpeg", []string{"-i", "x"}, func(string) bool {
+		seen++
+		return seen < 5
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen != 5 {
+		t.Fatalf("seen=%d want=5（应在第 5 行提前停止，不读完无限流）", seen)
+	}
+}

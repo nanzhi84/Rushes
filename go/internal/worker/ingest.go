@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
@@ -91,7 +92,7 @@ func RegisterIngest(registry *Registry, database *storage.DB) error {
 		// 供前端直接绘制而不再下载解码整段音频。best-effort——生成失败则该资产无 peaks，
 		// 前端回退到即时解码，不阻断已 ready 的 ingest。
 		if kind == "audio" || probe.HasAudio {
-			if ref := analyzeAndStorePeaks(ctx, store, source, probe.DurationSec); ref != nil {
+			if ref := analyzeAndStorePeaks(ctx, store, assetID, source, probe.DurationSec); ref != nil {
 				result["peaks_object_hash"] = ref.Hash
 				if _, err := reducer.Apply(ctx, database, []contracts.Event{{
 					Type: "PeaksGenerated", Payload: map[string]any{
@@ -115,19 +116,23 @@ func RegisterIngest(registry *Registry, database *storage.DB) error {
 func analyzeAndStorePeaks(
 	ctx context.Context,
 	store media.ObjectStore,
+	assetID string,
 	source string,
 	durationSec float64,
 ) *media.ObjectRef {
 	peaks, err := media.AnalyzeWaveformPeaks(ctx, source, durationSec)
 	if err != nil {
+		slog.Warn("波形峰值生成失败", "asset_id", assetID, "stage", "analyze", "err", err)
 		return nil
 	}
 	encoded, err := json.Marshal(peaks)
 	if err != nil {
+		slog.Warn("波形峰值序列化失败", "asset_id", assetID, "stage", "marshal", "err", err)
 		return nil
 	}
 	ref, err := store.Put(ctx, bytes.NewReader(encoded))
 	if err != nil {
+		slog.Warn("波形峰值写入对象库失败", "asset_id", assetID, "stage", "store", "err", err)
 		return nil
 	}
 	return &ref
