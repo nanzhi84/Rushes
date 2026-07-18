@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -363,7 +364,7 @@ func (manager *ContextManager) newCheckpoint(
 	digest := sha256.Sum256(baseRaw)
 	hash := hex.EncodeToString(digest[:])
 	checkpoint := storage.AgentContextCheckpoint{
-		DraftID: draftID, WindowID: randomID("context"),
+		DraftID: draftID, WindowID: agentexec.RandomID("context"),
 		WindowNumber: max(1, windowNumber), HistoryVersion: max(1, historyVersion),
 		BaseSnapshot: base, BaseSnapshotHash: hash,
 		Summary: strings.TrimSpace(summary), CompactedThroughMessageID: compactedThrough,
@@ -540,18 +541,18 @@ func (build ContextBuild) CompactionSource(preservePendingUser bool) (string, *s
 	parts := make([]string, 0, end+3)
 	remaining := contextCompactionRuneBudget
 	if summary := strings.TrimSpace(build.Checkpoint.Summary); summary != "" {
-		previous := "[上一份交接]\n" + truncateRunes(summary, min(8000, remaining))
+		previous := "[上一份交接]\n" + agentexec.TruncateRunes(summary, min(8000, remaining))
 		parts = append(parts, previous)
 		remaining -= len([]rune(previous))
 	}
 	for index := end; index >= 0 && remaining > 0; index-- {
 		item := build.history[index]
 		role := item.row.Role
-		content := truncateRunes(strings.TrimSpace(item.row.Content), 1200)
+		content := agentexec.TruncateRunes(strings.TrimSpace(item.row.Content), 1200)
 		entry := fmt.Sprintf("[%s:%s]\n%s", role, item.row.ID, content)
 		entryRunes := len([]rune(entry))
 		if entryRunes > remaining {
-			entry = truncateRunes(entry, remaining)
+			entry = agentexec.TruncateRunes(entry, remaining)
 			entryRunes = len([]rune(entry))
 		}
 		parts = append(parts, entry)

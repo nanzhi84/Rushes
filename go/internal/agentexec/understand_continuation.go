@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -9,12 +9,11 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/schema"
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
-const understandJobEvidenceRuneBudget = 4000
+const UnderstandJobEvidenceRuneBudget = 4000
 
 type understandJobPayload struct {
 	AssetIDs             []string
@@ -35,14 +34,14 @@ type understandJobEvidenceEnvelope struct {
 	UnlinkedAssetIDs []string         `json:"unlinked_asset_ids,omitempty"`
 }
 
-func (service *Service) understandJobEvidenceMessage(
+func (exec *Executor) UnderstandJobEvidenceMessage(
 	ctx context.Context,
 	draftID string,
 	jobID string,
 ) (*schema.Message, error) {
 	var payloadJSON string
 	var legacyAssetID sql.NullString
-	err := service.database.Read().QueryRowContext(ctx, `
+	err := exec.database.Read().QueryRowContext(ctx, `
 		SELECT payload_json, asset_id FROM jobs
 		WHERE job_id=? AND kind='understand' AND status='succeeded'
 		AND COALESCE(requested_by_draft_id, draft_id)=?`, jobID, draftID,
@@ -53,7 +52,7 @@ func (service *Service) understandJobEvidenceMessage(
 	if err != nil {
 		return nil, err
 	}
-	payload, err := decodeUnderstandJobPayload(payloadJSON)
+	payload, err := DecodeUnderstandJobPayload(payloadJSON)
 	if err != nil {
 		return nil, fmt.Errorf("understand job %s payload 无效: %w", jobID, err)
 	}
@@ -65,7 +64,7 @@ func (service *Service) understandJobEvidenceMessage(
 		return nil, fmt.Errorf("understand job %s 缺少 asset_ids", jobID)
 	}
 
-	linkedAssets, err := storage.ListDraftAssets(ctx, service.database.Read(), draftID)
+	linkedAssets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +87,7 @@ func (service *Service) understandJobEvidenceMessage(
 			})
 			fingerprint = understanding.AnalysisFingerprint(asset, options)
 		}
-		raw, summaryErr := service.materialSummaryForUnderstandJob(ctx, jobID, assetID, fingerprint)
+		raw, summaryErr := exec.materialSummaryForUnderstandJob(ctx, jobID, assetID, fingerprint)
 		if summaryErr != nil {
 			return nil, fmt.Errorf("understand job %s 已成功但素材 %s 缺少持久化摘要: %w",
 				jobID, assetID, summaryErr)
@@ -99,9 +98,9 @@ func (service *Service) understandJobEvidenceMessage(
 			return nil, fmt.Errorf("素材 %s 的持久化摘要无效: %w", assetID, err)
 		}
 		item := map[string]any{
-			"asset_id": asset.ID, "filename": truncateRunes(asset.Filename, 160), "kind": asset.Kind,
-			"overall":       truncateRunes(strings.TrimSpace(summary.Overall), 256),
-			"semantic_tags": limitedStrings(catalogSemanticTags(summary.Segments, 10), 10, 64),
+			"asset_id": asset.ID, "filename": TruncateRunes(asset.Filename, 160), "kind": asset.Kind,
+			"overall":       TruncateRunes(strings.TrimSpace(summary.Overall), 256),
+			"semantic_tags": limitedStrings(CatalogSemanticTags(summary.Segments, 10), 10, 64),
 			"shot_count":    len(summary.Segments),
 		}
 		if summary.AnalysisDepth != "" {
@@ -131,14 +130,14 @@ func (service *Service) understandJobEvidenceMessage(
 			return nil, marshalErr
 		}
 		content = header + string(encoded) + "\n逐镜头证据需要时再调用 media.search_shots；不要重复调用 understand.materials。"
-		if len([]rune(content)) <= understandJobEvidenceRuneBudget {
+		if len([]rune(content)) <= UnderstandJobEvidenceRuneBudget {
 			break
 		}
 		included--
 	}
 	if included == 0 {
 		return nil, fmt.Errorf("understand job %s 的最小证据仍超过 %d rune 预算",
-			jobID, understandJobEvidenceRuneBudget)
+			jobID, UnderstandJobEvidenceRuneBudget)
 	}
 	message := schema.SystemMessage(content)
 	message.Extra = map[string]any{
@@ -147,14 +146,14 @@ func (service *Service) understandJobEvidenceMessage(
 	return message, nil
 }
 
-func (service *Service) materialSummaryForUnderstandJob(
+func (exec *Executor) materialSummaryForUnderstandJob(
 	ctx context.Context,
 	jobID string,
 	assetID string,
 	fingerprint string,
 ) (map[string]any, error) {
 	summaryID := fmt.Sprintf("summary_%s_%s", assetID, jobID)
-	summary, err := storage.MaterialSummaryByID(ctx, service.database.Read(), summaryID)
+	summary, err := storage.MaterialSummaryByID(ctx, exec.database.Read(), summaryID)
 	if err == nil {
 		return summary, nil
 	}
@@ -164,20 +163,20 @@ func (service *Service) materialSummaryForUnderstandJob(
 	if strings.TrimSpace(fingerprint) == "" {
 		return nil, storage.ErrNotFound
 	}
-	return storage.MaterialSummaryByFingerprint(ctx, service.database.Read(), assetID, fingerprint)
+	return storage.MaterialSummaryByFingerprint(ctx, exec.database.Read(), assetID, fingerprint)
 }
 
-func decodeUnderstandJobPayload(raw string) (understandJobPayload, error) {
+func DecodeUnderstandJobPayload(raw string) (understandJobPayload, error) {
 	var value map[string]any
 	if err := json.Unmarshal([]byte(raw), &value); err != nil {
 		return understandJobPayload{}, err
 	}
 	payload := understandJobPayload{
 		AssetIDs: looseStringSlice(value["asset_ids"]),
-		Focus:    agentexec.InterfaceString(value["focus"]), Depth: agentexec.InterfaceString(value["depth"]),
+		Focus:    InterfaceString(value["focus"]), Depth: InterfaceString(value["depth"]),
 		AnalysisFingerprints: map[string]string{},
 	}
-	if numeric, ok := agentexec.NumericValue(value["max_steps_per_asset"]); ok {
+	if numeric, ok := NumericValue(value["max_steps_per_asset"]); ok {
 		payload.MaxStepsPerAsset = int(numeric)
 	}
 	if fingerprints, ok := value["analysis_fingerprints"].(map[string]any); ok {
@@ -238,7 +237,7 @@ func limitedStrings(values []string, limit int, runeLimit int) []string {
 	}
 	result := make([]string, 0, len(values))
 	for _, value := range values {
-		result = append(result, truncateRunes(value, runeLimit))
+		result = append(result, TruncateRunes(value, runeLimit))
 	}
 	return result
 }

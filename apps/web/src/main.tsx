@@ -12,6 +12,7 @@ import {
   getAuthToken,
   listenForLaunchUrlAuth
 } from "./auth";
+import { initWebVitals } from "./perf/vitals";
 import "./index.css";
 
 bootstrapAuthFromLaunchUrl();
@@ -66,3 +67,6 @@ if (rootElement) {
     </StrictMode>
   );
 }
+
+// 开发期采集 Web Vitals 到 console（生产构建 tree-shake，零开销）。
+initWebVitals();

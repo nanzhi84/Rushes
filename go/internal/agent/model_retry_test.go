@@ -15,6 +15,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 )
 
 type timeoutRecordingModel struct {
@@ -766,8 +767,8 @@ func TestTerminalFailureReplyClassifiesContextLengthWithoutAnotherModelCall(t *t
 
 func TestContextLengthRetryFinishesTurnAndReportsUsage(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_context_length_turn")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_context_length_turn")
 	stub := &contextLengthRecoveryModel{
 		failCalls: 1,
 		failErr:   errors.New("Range of input length should be [1, 30720], but got 41234"),

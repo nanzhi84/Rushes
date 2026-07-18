@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"os"
@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -38,8 +38,8 @@ func TestPrepareTimelineBatchReordersFullPrimaryReplacementAndPreservesAudio(t *
 		{"kind": "insert_clip", "track_id": "visual_base", "asset_id": "new_b", "asset_kind": "video", "source_start_frame": 0, "source_end_frame": 40},
 	}
 
-	planned, preserved := agentexec.PrepareTimelineBatch(document, operations)
-	if agentexec.StringValue(planned[0]["kind"]) != "insert_clip" || agentexec.StringValue(planned[1]["kind"]) != "insert_clip" {
+	planned, preserved := PrepareTimelineBatch(document, operations)
+	if StringValue(planned[0]["kind"]) != "insert_clip" || StringValue(planned[1]["kind"]) != "insert_clip" {
 		t.Fatalf("full replacement was not reordered safely: %#v", planned)
 	}
 	result := document
@@ -49,7 +49,7 @@ func TestPrepareTimelineBatchReordersFullPrimaryReplacementAndPreservesAudio(t *
 			t.Fatalf("operation=%#v err=%v", operation, err)
 		}
 	}
-	if err := agentexec.RestoreIndependentAudioTracks(&result, preserved); err != nil {
+	if err := RestoreIndependentAudioTracks(&result, preserved); err != nil {
 		t.Fatal(err)
 	}
 	if report := timeline.Validate(result); !report.Valid {
@@ -77,14 +77,14 @@ func TestIndependentAudioGuardRejectsPartialPrimaryDeletion(t *testing.T) {
 		TimelineClipID: "bgm_full", TrackID: "bgm", AssetID: "music", AssetKind: "audio",
 		TimelineEndFrame: 60, SourceEndFrame: 60,
 	}}
-	planned, preserved := agentexec.PrepareTimelineBatch(document, []map[string]any{{
+	planned, preserved := PrepareTimelineBatch(document, []map[string]any{{
 		"kind": "delete_clip", "timeline_clip_id": "clip_v1_001",
 	}})
 	result, err := timeline.ApplyPatch(document, planned[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := agentexec.RestoreIndependentAudioTracks(&result, preserved); err == nil {
+	if err := RestoreIndependentAudioTracks(&result, preserved); err == nil {
 		t.Fatalf("partial replacement must not silently truncate BGM: %#v", result)
 	}
 }
@@ -100,7 +100,7 @@ func TestPrepareTimelineBatchAllowsExplicitAudioEdit(t *testing.T) {
 		TimelineClipID: "bgm_edit", TrackID: "bgm", AssetID: "music", AssetKind: "audio",
 		TimelineEndFrame: 60, SourceEndFrame: 60,
 	}}
-	_, preserved := agentexec.PrepareTimelineBatch(document, []map[string]any{{
+	_, preserved := PrepareTimelineBatch(document, []map[string]any{{
 		"kind": "adjust_gain", "timeline_clip_id": "bgm_edit", "gain_db": -8,
 	}})
 	if _, exists := preserved["bgm"]; exists {
@@ -109,13 +109,12 @@ func TestPrepareTimelineBatchAllowsExplicitAudioEdit(t *testing.T) {
 }
 
 func TestApplyPatchesAtomicallyReplacesPrimaryWithoutChangingBGMOrSFX(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_atomic_primary")
-	service, err := NewService(t.Context(), database, nil)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_atomic_primary")
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 	document, err := timeline.ComposeInitial("draft_atomic_primary", 1, []timeline.Selection{
 		{AssetID: "old_a", AssetKind: "video", SourceEndFrame: 30},
 		{AssetID: "old_b", AssetKind: "video", SourceEndFrame: 30},
@@ -132,11 +131,11 @@ func TestApplyPatchesAtomicallyReplacesPrimaryWithoutChangingBGMOrSFX(t *testing
 		TimelineClipID: "sfx_keep", TrackID: "sfx", AssetID: "hit", AssetKind: "audio",
 		TimelineStartFrame: 40, TimelineEndFrame: 50, SourceEndFrame: 10, PlaybackRate: 1,
 	}}
-	if persisted, persistErr := service.persistTimeline(t.Context(), "draft_atomic_primary", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := exec.PersistTimeline(t.Context(), "draft_atomic_primary", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_atomic_primary")
-	output, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{
+	output, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{
 		{"kind": "delete_clip", "timeline_clip_id": "clip_v1_001"},
 		{"kind": "delete_clip", "timeline_clip_id": "clip_v1_002"},
 		{"kind": "insert_clip", "track_id": "visual_base", "asset_id": "new_a", "asset_kind": "video", "source_start_frame": 0, "source_end_frame": 20},
@@ -149,12 +148,12 @@ func TestApplyPatchesAtomicallyReplacesPrimaryWithoutChangingBGMOrSFX(t *testing
 	if err != nil || len(latest.Tracks[4].Clips) != 1 || len(latest.Tracks[6].Clips) != 1 ||
 		latest.Tracks[4].Clips[0].TimelineClipID != "bgm_keep" ||
 		latest.Tracks[4].Clips[0].TimelineEndFrame != 60 ||
-		!agentexec.HasBeatGrid(latest.Tracks[4].Clips[0].Effects) ||
+		!HasBeatGrid(latest.Tracks[4].Clips[0].Effects) ||
 		latest.Tracks[6].Clips[0].TimelineClipID != "sfx_keep" ||
 		latest.Tracks[6].Clips[0].TimelineStartFrame != 40 {
 		t.Fatalf("latest=%#v err=%v", latest, err)
 	}
-	failed, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+	failed, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "delete_clip", "timeline_clip_id": latest.Tracks[0].Clips[0].TimelineClipID,
 	}}})
 	if err != nil || failed.(rushestools.ToolResult).Status != "failed" {
@@ -163,14 +162,14 @@ func TestApplyPatchesAtomicallyReplacesPrimaryWithoutChangingBGMOrSFX(t *testing
 	unchanged, err := timeline.Latest(t.Context(), database, "draft_atomic_primary")
 	if err != nil || unchanged.Version != latest.Version || len(unchanged.Tracks[4].Clips) != 1 ||
 		unchanged.Tracks[4].Clips[0].TimelineEndFrame != 60 ||
-		!agentexec.HasBeatGrid(unchanged.Tracks[4].Clips[0].Effects) {
+		!HasBeatGrid(unchanged.Tracks[4].Clips[0].Effects) {
 		t.Fatalf("failed batch changed timeline: %#v err=%v", unchanged, err)
 	}
 }
 
 func TestSyncOriginalAudioRepairsDriftedTimelineFromAssetProbe(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_sync_original_audio")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_sync_original_audio")
 	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
 		{Type: "AssetImported", Payload: map[string]any{
 			"asset_id": "talk", "job_id": "job_talk", "kind": "video", "filename": "talk.mp4",
@@ -181,11 +180,10 @@ func TestSyncOriginalAudioRepairsDriftedTimelineFromAssetProbe(t *testing.T) {
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("asset result=%#v err=%v", result, err)
 	}
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 	document, err := timeline.ComposeInitial("draft_sync_original_audio", 1, []timeline.Selection{
 		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll", HasAudio: true},
 		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 60, SourceEndFrame: 120, Role: "a_roll", HasAudio: true},
@@ -195,12 +193,12 @@ func TestSyncOriginalAudioRepairsDriftedTimelineFromAssetProbe(t *testing.T) {
 	}
 	document.Tracks[2].Clips[0].TimelineStartFrame = 10
 	document.Tracks[2].Clips[0].TimelineEndFrame = 70
-	if persisted, persistErr := service.persistTimeline(t.Context(), "draft_sync_original_audio", document, "drifted_fixture"); persistErr != nil || persisted.Status != "validation_failed" {
+	if persisted, persistErr := exec.PersistTimeline(t.Context(), "draft_sync_original_audio", document, "drifted_fixture"); persistErr != nil || persisted.Status != "validation_failed" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 
 	ctx := rushestools.WithDraftID(t.Context(), "draft_sync_original_audio")
-	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
+	raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
 		Ops: []rushestools.TimelineOp{{"kind": "sync_original_audio"}},
 	})
 	if err != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
@@ -229,7 +227,7 @@ func TestBeatAlignmentDataDistinguishesStructureFromBeatSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	missing := agentexec.BeatAlignmentData(document)
+	missing := BeatAlignmentData(document)
 	if missing["beat_grid_present"] != false || missing["cut_count"] != 2 {
 		t.Fatalf("missing=%#v", missing)
 	}
@@ -241,7 +239,7 @@ func TestBeatAlignmentDataDistinguishesStructureFromBeatSync(t *testing.T) {
 			"strong_beat_frames": []int{60}, "downbeat_frames": []int{30},
 		}},
 	}}
-	aligned := agentexec.BeatAlignmentData(document)
+	aligned := BeatAlignmentData(document)
 	if aligned["beat_grid_present"] != true || aligned["on_beat_cut_count"] != 2 ||
 		aligned["on_accent_cut_count"] != 2 || aligned["all_cuts_on_beat_grid"] != true {
 		t.Fatalf("aligned=%#v", aligned)
@@ -263,7 +261,7 @@ func TestBeatAlignmentDataUsesToleranceAndExcludesContinuousSourceSplits(t *test
 		Effects: []map[string]any{{"kind": "beat_grid", "beat_frames": []int{30, 60}}},
 	}}
 
-	alignment := agentexec.BeatAlignmentData(document)
+	alignment := BeatAlignmentData(document)
 	if alignment["cut_count"] != 2 || alignment["on_beat_cut_count"] != 1 ||
 		alignment["alignment_ratio"] != 0.5 {
 		t.Fatalf("alignment=%#v", alignment)
@@ -285,8 +283,8 @@ func TestGenericBGMInsertAutomaticallyAttachesBeatGrid(t *testing.T) {
 		}
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_generic_bgm")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_generic_bgm")
 	source := filepath.Join(database.Paths.Temporary, "generic-bgm.wav")
 	if err := os.WriteFile(source, []byte("fake source"), 0o600); err != nil {
 		t.Fatal(err)
@@ -306,22 +304,21 @@ func TestGenericBGMInsertAutomaticallyAttachesBeatGrid(t *testing.T) {
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("assets status=%s err=%v", result.Status, err)
 	}
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 	document, err := timeline.ComposeInitial("draft_generic_bgm", 1, []timeline.Selection{{
 		AssetID: "video", AssetKind: "video", SourceEndFrame: 60,
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := service.persistTimeline(t.Context(), "draft_generic_bgm", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := exec.PersistTimeline(t.Context(), "draft_generic_bgm", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_generic_bgm")
-	output, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+	output, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "insert_clip", "track_id": "bgm", "asset_id": "generic_bgm",
 		"role": "bgm", "timeline_start_frame": 0, "source_start_frame": 0, "source_end_frame": 60,
 	}}})
@@ -334,7 +331,7 @@ func TestGenericBGMInsertAutomaticallyAttachesBeatGrid(t *testing.T) {
 	}
 	latest, err := timeline.Latest(t.Context(), database, "draft_generic_bgm")
 	if err != nil || len(latest.Tracks[4].Clips) != 1 || latest.Tracks[4].Clips[0].AssetKind != "audio" ||
-		!agentexec.HasBeatGrid(latest.Tracks[4].Clips[0].Effects) {
+		!HasBeatGrid(latest.Tracks[4].Clips[0].Effects) {
 		t.Fatalf("latest=%#v err=%v", latest, err)
 	}
 }

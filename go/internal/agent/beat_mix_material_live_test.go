@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -32,8 +33,8 @@ func TestBeatMixRealMaterialAcceptance(t *testing.T) {
 		{"beat_video_2", "视频/混剪素材-12.mov", "video"},
 		{"beat_video_3", "视频/混剪素材-17.mov", "video"},
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_beat_mix_real")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_beat_mix_real")
 	now := time.Now().UTC()
 	for index, asset := range assets {
 		path := filepath.Join(root, asset.relative)

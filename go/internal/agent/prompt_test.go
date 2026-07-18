@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -192,8 +193,8 @@ func TestPersistentTranscriptMarksSnapshotForTalkingHeadPlaybook(t *testing.T) {
 	t.Parallel()
 	const draftID = "draft_prompt_transcript_trigger"
 	const assetID = "asset_prompt_transcript_trigger"
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, draftID)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(
 			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
@@ -255,7 +256,7 @@ func TestMessageModifierKeepsTaskPlaybookTransientAndNonAccumulating(t *testing.
 
 func TestLLMToolDescriptionsDoNotDuplicatePromptFacts(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)

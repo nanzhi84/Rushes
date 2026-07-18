@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"sort"
 	"unicode/utf8"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -15,19 +14,19 @@ import (
 )
 
 const (
-	contentPlanRuneLimit  = 8000
-	planUpdateMaxAttempts = 3
+	ContentPlanRuneLimit  = 8000
+	PlanUpdateMaxAttempts = 3
 )
 
-func (service *Service) toolPlanUpdate(
+func (exec *Executor) ToolPlanUpdate(
 	ctx context.Context,
 	draftID string,
 	input rushestools.PlanUpdateInput,
 ) (rushestools.ToolResult, error) {
-	return service.toolPlanUpdateWithBeforeApply(ctx, draftID, input, nil)
+	return exec.ToolPlanUpdateWithBeforeApply(ctx, draftID, input, nil)
 }
 
-func (service *Service) toolPlanUpdateWithBeforeApply(
+func (exec *Executor) ToolPlanUpdateWithBeforeApply(
 	ctx context.Context,
 	draftID string,
 	input rushestools.PlanUpdateInput,
@@ -38,7 +37,7 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 			"reason": "plan_required",
 		}), nil
 	}
-	patch, err := canonicalContentPlan(input.Plan)
+	patch, err := CanonicalContentPlan(input.Plan)
 	if err != nil {
 		return planUpdateFailure("创作计划本只能包含可编码为 JSON 的内容", map[string]any{
 			"reason": "plan_not_json",
@@ -50,7 +49,7 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 				"reason": "contract_invalid",
 			}), nil
 		}
-		contractMap, contractErr := agentexec.CanonicalContentPlanValue(input.Contract)
+		contractMap, contractErr := CanonicalContentPlanValue(input.Contract)
 		if contractErr != nil {
 			return planUpdateFailure("验收合同无法编码为 JSON", map[string]any{"reason": "contract_not_json"}), nil
 		}
@@ -69,14 +68,14 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 		mode = "merge"
 	}
 
-	for attempt := 1; attempt <= planUpdateMaxAttempts; attempt++ {
-		draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
+	for attempt := 1; attempt <= PlanUpdateMaxAttempts; attempt++ {
+		draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
 		if err != nil {
 			return rushestools.ToolResult{}, err
 		}
-		updated := mergeContentPlan(nil, patch)
+		updated := MergeContentPlan(nil, patch)
 		if !reset {
-			updated = mergeContentPlan(draft.ContentPlan, patch)
+			updated = MergeContentPlan(draft.ContentPlan, patch)
 		}
 		if key := reservedContentPlanKey(updated); key != "" {
 			return planUpdateFailure(
@@ -84,7 +83,7 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 				map[string]any{"reason": "stored_reserved_key", "reserved_key": key},
 			), nil
 		}
-		if contract, contractErr := agentexec.ContentPlanContract(updated); contractErr != nil {
+		if contract, contractErr := ContentPlanContract(updated); contractErr != nil {
 			return planUpdateFailure(contractErr.Error(), map[string]any{"reason": "contract_invalid"}), nil
 		} else if contract != nil {
 			updated["contract"] = contract
@@ -96,12 +95,12 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 			}), nil
 		}
 		runes := utf8.RuneCount(encoded)
-		if runes > contentPlanRuneLimit {
+		if runes > ContentPlanRuneLimit {
 			return planUpdateFailure(
 				"创作计划本超出 8000 字上限；请只记纲要，细节留在对应工具按需检索",
 				map[string]any{
 					"reason": "plan_too_large", "plan_runes": runes,
-					"limit_runes": contentPlanRuneLimit, "current_plan_unchanged": true,
+					"limit_runes": ContentPlanRuneLimit, "current_plan_unchanged": true,
 				},
 			), nil
 		}
@@ -115,7 +114,7 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 			}
 		}
 
-		result, err := reducer.Apply(ctx, service.database, nil, reducer.Options{
+		result, err := reducer.Apply(ctx, exec.database, nil, reducer.Options{
 			Actor: contracts.ActorAgent,
 			ResultRows: reducer.ResultRows{DraftPlanUpdate: &reducer.DraftPlanUpdateRow{
 				DraftID: draftID, ContentPlan: updated, ExpectedPlanHash: expectedPlanHash,
@@ -148,7 +147,7 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 	), nil
 }
 
-func canonicalContentPlan(input map[string]any) (map[string]any, error) {
+func CanonicalContentPlan(input map[string]any) (map[string]any, error) {
 	encoded, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
@@ -166,7 +165,7 @@ func canonicalContentPlan(input map[string]any) (map[string]any, error) {
 // mergeContentPlan implements the object branch of RFC 7396 without mutating
 // either input. A null patch value deletes a key; objects merge recursively;
 // arrays and scalar values replace the previous value.
-func mergeContentPlan(target, patch map[string]any) map[string]any {
+func MergeContentPlan(target, patch map[string]any) map[string]any {
 	result := cloneContentPlanMap(target)
 	for key, patchValue := range patch {
 		if patchValue == nil {
@@ -175,11 +174,11 @@ func mergeContentPlan(target, patch map[string]any) map[string]any {
 		}
 		patchObject, isObject := patchValue.(map[string]any)
 		if !isObject {
-			result[key] = cloneContentPlanValue(patchValue)
+			result[key] = CloneContentPlanValue(patchValue)
 			continue
 		}
 		targetObject, _ := result[key].(map[string]any)
-		result[key] = mergeContentPlan(targetObject, patchObject)
+		result[key] = MergeContentPlan(targetObject, patchObject)
 	}
 	return result
 }
@@ -187,19 +186,19 @@ func mergeContentPlan(target, patch map[string]any) map[string]any {
 func cloneContentPlanMap(input map[string]any) map[string]any {
 	result := make(map[string]any, len(input))
 	for key, value := range input {
-		result[key] = cloneContentPlanValue(value)
+		result[key] = CloneContentPlanValue(value)
 	}
 	return result
 }
 
-func cloneContentPlanValue(value any) any {
+func CloneContentPlanValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		return cloneContentPlanMap(typed)
 	case []any:
 		result := make([]any, len(typed))
 		for index, item := range typed {
-			result[index] = cloneContentPlanValue(item)
+			result[index] = CloneContentPlanValue(item)
 		}
 		return result
 	default:
@@ -218,7 +217,7 @@ func reservedContentPlanKey(value any) string {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		if isReservedContextKey(key) {
+		if IsReservedContextKey(key) {
 			return key
 		}
 	}
@@ -234,7 +233,7 @@ func reservedContentPlanContractKey(value any) string {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			if isReservedContextKey(key) {
+			if IsReservedContextKey(key) {
 				return key
 			}
 			if nested := reservedContentPlanContractKey(typed[key]); nested != "" {

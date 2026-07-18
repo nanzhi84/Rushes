@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -17,8 +18,8 @@ import (
 
 func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_talking_head")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_talking_head")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, fixture := range []struct {
 		id       string
@@ -99,7 +100,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), "draft_talking_head", document, "fixture",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
@@ -326,8 +327,8 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 func TestTalkingHeadResultDoesNotCountAutoPreservedPauseAsRemovedRange(t *testing.T) {
 	t.Parallel()
 	const draftID = "draft_talking_head_auto_preserved_pause"
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, draftID)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(
 			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
@@ -377,7 +378,7 @@ func TestTalkingHeadResultDoesNotCountAutoPreservedPauseAsRemovedRange(t *testin
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	if persisted, persistErr := service.persistTimeline(t.Context(), draftID, document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := service.executor.PersistTimeline(t.Context(), draftID, document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
@@ -659,8 +660,8 @@ func TestTalkingHeadHelperEdgeBranches(t *testing.T) {
 
 func TestTalkingHeadEditDeletesExactWordRangeWithoutSwallowingRetainedSpeech(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_talking_head_words")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_talking_head_words")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(
@@ -705,7 +706,7 @@ func TestTalkingHeadEditDeletesExactWordRangeWithoutSwallowingRetainedSpeech(t *
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), "draft_talking_head_words", document, "fixture",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
@@ -1110,7 +1111,7 @@ func TestTalkingHeadRangeCoveredByRequiresFullCoverage(t *testing.T) {
 
 func TestTalkingHeadEditRequiresARollRoleAndSpeechIndex(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1126,7 +1127,7 @@ func TestTalkingHeadEditRequiresARollRoleAndSpeechIndex(t *testing.T) {
 		{draftID: "draft_broll_rejected", assetID: "asset_broll_rejected", relDir: "Broll", role: "b_roll", want: "不能作为口播主干"},
 		{draftID: "draft_aroll_unindexed", assetID: "asset_aroll_unindexed", relDir: "Aroll", role: "a_roll", want: "尚无持久化逐句索引"},
 	} {
-		createAgentDraft(t, database, fixture.draftID)
+		agenttest.CreateAgentDraft(t, database, fixture.draftID)
 		if _, err := database.Write().ExecContext(t.Context(), `
 			INSERT INTO assets(
 				asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
@@ -1151,7 +1152,7 @@ func TestTalkingHeadEditRequiresARollRoleAndSpeechIndex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if persisted, err := service.persistTimeline(t.Context(), fixture.draftID, document, "fixture"); err != nil || persisted.Status != "succeeded" {
+		if persisted, err := service.executor.PersistTimeline(t.Context(), fixture.draftID, document, "fixture"); err != nil || persisted.Status != "succeeded" {
 			t.Fatalf("persisted=%#v err=%v", persisted, err)
 		}
 		ctx := rushestools.WithDraftID(t.Context(), fixture.draftID)

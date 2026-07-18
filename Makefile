@@ -31,6 +31,7 @@ web:
 	$(PNPM) --dir apps/web typecheck
 	$(PNPM) --dir apps/web exec vitest run
 	$(PNPM) --dir apps/web build
+	$(PNPM) --dir apps/web run check:bundle
 
 e2e:
 	cd go && go test -race -tags=e2e_scaffold ./internal/agent ./internal/api

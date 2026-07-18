@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -15,8 +17,8 @@ import (
 
 func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_context_latest")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_context_latest")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +49,7 @@ func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *te
 			},
 		}},
 	}}
-	first, err := service.persistTimeline(
+	first, err := service.executor.PersistTimeline(
 		t.Context(), "draft_context_latest", document, "context_first", []map[string]any{{
 			"kind": "adjust_gain", "timeline_clip_id": "clip_context", "gain_db": -3,
 			"timeline_revision": 24,
@@ -62,7 +64,7 @@ func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *te
 	document.TimelineID = "draft_context_latest:v2"
 	document.Tracks[0].Clips[0].GainDB = -9
 	manualContext := rushestools.WithTimelineMutationOrigin(t.Context(), "manual")
-	second, err := service.persistTimeline(
+	second, err := service.executor.PersistTimeline(
 		manualContext, "draft_context_latest", document, "context_second", []map[string]any{{
 			"kind": "adjust_gain", "timeline_clip_id": "clip_context", "gain_db": -9,
 			"timeline_version": 2, "draft_id": "draft_context_latest",
@@ -102,8 +104,8 @@ func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *te
 
 func TestContextBuilderInjectsPersistentCompactMaterialCatalog(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_context_summaries")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_context_summaries")
 	for index := 0; index < 30; index++ {
 		assetID := fmt.Sprintf("asset_summary_%02d", index)
 		if _, err := database.Write().ExecContext(t.Context(), `
@@ -159,7 +161,7 @@ func TestContextBuilderInjectsPersistentCompactMaterialCatalog(t *testing.T) {
 		TimelineStartFrame: 0, TimelineEndFrame: 30,
 		SourceStartFrame: 0, SourceEndFrame: 30, PlaybackRate: 1,
 	}}
-	if result, err := service.persistTimeline(
+	if result, err := service.executor.PersistTimeline(
 		t.Context(), "draft_context_summaries", document, "summary_context",
 	); err != nil || result.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", result, err)
@@ -225,7 +227,7 @@ func TestContextBuilderInjectsPersistentCompactMaterialCatalog(t *testing.T) {
 
 func TestMaterialCatalogKeepsAudioRoleAndStopsAtBudget(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	items, available, err := NewContextBuilder(database).materialCatalogContext(t.Context(), []storage.Asset{
 		{
 			ID: "audio_catalog", Filename: "IGNIS BGM.wav", Kind: "audio",
@@ -246,8 +248,8 @@ func TestMaterialCatalogKeepsAudioRoleAndStopsAtBudget(t *testing.T) {
 
 func TestContextBuilderShowsPlanHintAndDeduplicatesAudioRoles(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_plan_hint")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_plan_hint")
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(
 			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
@@ -276,7 +278,7 @@ func TestContextBuilderShowsPlanHintAndDeduplicatesAudioRoles(t *testing.T) {
 
 func TestMaterialCatalogPrioritizesUsedAndTranscriptAssetsWithStableOutput(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const transcriptID = "asset_catalog_119"
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(
@@ -409,7 +411,7 @@ func TestCompactUnderstandingSummaryPreservesDirectFrameEvidenceAcrossAsset(t *t
 			BoundaryVerified: true,
 		})
 	}
-	compact := compactUnderstandingSummary(storage.Asset{
+	compact := agentexec.CompactUnderstandingSummary(storage.Asset{
 		ID: "asset_direct_frames", Filename: "direct.mp4", Kind: "video",
 	}, understanding.Summary{
 		Overall: "完整素材", SemanticRole: "b_roll", Segments: segments,
@@ -436,7 +438,7 @@ func TestCompactUnderstandingSummaryPreservesDirectFrameEvidenceAcrossAsset(t *t
 func TestCompactUnderstandingSummaryNormalizesDerivedFramesAndRichSemantics(t *testing.T) {
 	t.Parallel()
 	transcript := strings.Repeat("台词", 100)
-	compact := compactUnderstandingSummary(storage.Asset{
+	compact := agentexec.CompactUnderstandingSummary(storage.Asset{
 		ID: "asset_derived_frames", Filename: "derived.mp4", Kind: "video",
 	}, understanding.Summary{
 		Overall: "相同描述",
@@ -691,10 +693,10 @@ func TestRecentEditHistoryBudgetFallsBackToMinimalLatestEntry(t *testing.T) {
 func TestContextCompressionHelpersBoundAndSanitizeHistory(t *testing.T) {
 	t.Parallel()
 	longGoal := strings.Repeat("剪", 220)
-	if truncateRunes("短文本", 10) != "短文本" || !strings.HasSuffix(truncateRunes(longGoal, 10), "…") {
+	if agentexec.TruncateRunes("短文本", 10) != "短文本" || !strings.HasSuffix(agentexec.TruncateRunes(longGoal, 10), "…") {
 		t.Fatal("rune 截断行为错误")
 	}
-	semanticTags := catalogSemanticTags([]understanding.Segment{{
+	semanticTags := agentexec.CatalogSemanticTags([]understanding.Segment{{
 		Tags: []string{"", "人物", "人物"}, Subjects: []string{"舞者"}, Actions: []string{"转身"},
 	}}, 3)
 	if !reflect.DeepEqual(semanticTags, []string{"人物", "舞者", "转身"}) {

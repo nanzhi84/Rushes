@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +39,7 @@ type Service struct {
 	hub              *TurnStreamHub
 	queue            *TurnQueue
 	tools            *rushestools.Registry
+	executor         *agentexec.Executor
 	chatModel        model.ToolCallingChatModel
 	react            *react.Agent
 	analyzer         *understanding.Analyzer
@@ -79,6 +78,9 @@ func NewServiceWithModels(
 		contextManager: NewContextManager(database),
 		bridgeInflight: map[string]struct{}{},
 	}
+	service.executor = agentexec.New(database, service.analyzer, nil, func(draftID string, event map[string]any) {
+		service.hub.Record(draftID, event)
+	})
 	service.fallbackScaffold = newFallbackScaffold(service)
 	registry, err := rushestools.NewRegistry(database, service)
 	if err != nil {
@@ -120,6 +122,7 @@ func (service *Service) Tools() *rushestools.Registry { return service.tools }
 
 func (service *Service) SetSpeechRecognizer(recognizer contracts.SpeechRecognizer) {
 	service.speechRecognizer = recognizer
+	service.executor.SetSpeechRecognizer(recognizer)
 }
 
 func (service *Service) Close() {
@@ -129,8 +132,8 @@ func (service *Service) Close() {
 }
 
 func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
-	turnID := randomID("turn")
-	messageID := randomID("msg")
+	turnID := agentexec.RandomID("turn")
+	messageID := agentexec.RandomID("msg")
 	service.hub.Record(item.DraftID, StreamEvent{
 		"type": TurnStreamTurnStarted, "turn_id": turnID,
 	})
@@ -142,7 +145,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	ctx, injectedMemory := withInjectedMemoryCollector(ctx)
 	recoveryState := newToolRecoveryState()
 	ctx = withToolRecoveryState(ctx, recoveryState)
-	ctx = withTurnInteractionState(ctx, newTurnInteractionState())
+	ctx = agentexec.WithTurnInteractionState(ctx, agentexec.NewTurnInteractionState())
 	turnBudget := newTurnBudgetState(maxToolRoundsPerTurn)
 	ctx = withTurnBudgetState(ctx, turnBudget)
 	ctx = service.withModelRetryReporting(ctx, item.DraftID)
@@ -456,7 +459,7 @@ func (service *Service) continueAfterJobObservation(
 		return "", err
 	}
 	if succeeded && kind == "understand" {
-		evidence, evidenceErr := service.understandJobEvidenceMessage(ctx, item.DraftID, jobID)
+		evidence, evidenceErr := service.executor.UnderstandJobEvidenceMessage(ctx, item.DraftID, jobID)
 		if evidenceErr != nil {
 			return "", evidenceErr
 		}
@@ -479,7 +482,7 @@ func (service *Service) previewVerificationReport(
 	if previewID == "" {
 		return nil, nil
 	}
-	inspection, err := service.toolInspectPreview(ctx, draftID, rushestools.RenderInspectInput{PreviewID: previewID})
+	inspection, err := service.executor.ToolInspectPreview(ctx, draftID, rushestools.RenderInspectInput{PreviewID: previewID})
 	if err != nil {
 		return nil, err
 	}
@@ -493,7 +496,7 @@ func (service *Service) previewVerificationReport(
 	if err != nil {
 		return nil, err
 	}
-	contractReport, hasContract, err := service.verifyContentContract(ctx, draftID, document)
+	contractReport, hasContract, err := service.executor.VerifyContentContract(ctx, draftID, document)
 	if err != nil {
 		return nil, err
 	}
@@ -702,7 +705,7 @@ func (service *Service) contextSummary(ctx context.Context, draftID, source stri
 		})
 		return summary
 	}
-	return truncateRunes(strings.TrimSpace(response.Content), contextCompactionSummaryRuneLimit)
+	return agentexec.TruncateRunes(strings.TrimSpace(response.Content), contextCompactionSummaryRuneLimit)
 }
 
 func deterministicContextSummary(source string) string {
@@ -748,7 +751,7 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 			key = name
 		}
 		if phase == "started" {
-			stepID := randomID("step")
+			stepID := agentexec.RandomID("step")
 			argsSummary := compactJSON(input)
 			previewID := previewIDFromToolReport(name, input)
 			steps[key] = activeStep{id: stepID, argsSummary: argsSummary, previewID: previewID}
@@ -761,7 +764,7 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 		step := steps[key]
 		stepID := step.id
 		if stepID == "" {
-			stepID = randomID("step")
+			stepID = agentexec.RandomID("step")
 		}
 		delete(steps, key)
 		status := "succeeded"
@@ -871,7 +874,7 @@ func (service *Service) executeReported(
 }
 
 func (service *Service) fallbackFullMainline(ctx context.Context, draftID string) (string, error) {
-	listed, err := service.toolListAssets(ctx, draftID, rushestools.AssetListInput{OnlyUsable: boolPointer(true)})
+	listed, err := service.executor.ToolListAssets(ctx, draftID, rushestools.AssetListInput{OnlyUsable: agentexec.BoolPointer(true)})
 	if err != nil {
 		return "", err
 	}
@@ -948,15 +951,5 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 	}
 	return "已按你的确认继续执行。", nil
 }
-
-func randomID(prefix string) string {
-	data := make([]byte, 12)
-	if _, err := rand.Read(data); err != nil {
-		panic(err)
-	}
-	return prefix + "_" + hex.EncodeToString(data)
-}
-
-func boolPointer(value bool) *bool { return &value }
 
 var _ rushestools.Executor = (*Service)(nil)

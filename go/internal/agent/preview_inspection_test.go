@@ -5,13 +5,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
+	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
 func TestNormalizePreviewInspectionChecks(t *testing.T) {
 	t.Parallel()
 	for _, checks := range [][]string{{"visaul"}, {" "}, {"decode", "unknown"}} {
-		if _, err := normalizePreviewInspectionChecks(checks); err == nil {
+		if _, err := agentexec.NormalizePreviewInspectionChecks(checks); err == nil {
 			t.Fatalf("checks=%q should fail", checks)
 		}
 	}
@@ -23,7 +26,7 @@ func TestNormalizePreviewInspectionChecks(t *testing.T) {
 		{checks: []string{" decode ", "decode", "visual"}, want: []string{"decode", "visual"}},
 		{checks: []string{"visual"}, want: []string{"visual"}},
 	} {
-		got, err := normalizePreviewInspectionChecks(test.checks)
+		got, err := agentexec.NormalizePreviewInspectionChecks(test.checks)
 		if err != nil || !reflect.DeepEqual(got, test.want) {
 			t.Fatalf("checks=%q got=%q want=%q err=%v", test.checks, got, test.want, err)
 		}
@@ -31,8 +34,8 @@ func TestNormalizePreviewInspectionChecks(t *testing.T) {
 }
 
 func TestPreviewInspectionFrameContextJoinsTimelineSpeechAndSubtitle(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_preview_context")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_preview_context")
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(asset_id,storage_mode,reference_path,kind,source,filename,hash,size,probe_json,ingest_status,understanding_status,usable)
 		VALUES('video_preview_context','reference','/tmp/context.mp4','video','local_path','context.mp4','context',1,'{"duration_sec":10}','ready','ready',1);
@@ -59,8 +62,8 @@ func TestPreviewInspectionFrameContextJoinsTimelineSpeechAndSubtitle(t *testing.
 			}}
 		}
 	}
-	service := &Service{database: database}
-	contexts, err := service.previewInspectionFrameContext(t.Context(), document, []int{10, 15, 45})
+	service := &Service{database: database, executor: agentexec.New(database, understanding.NewAnalyzer(nil), nil, nil)}
+	contexts, err := service.executor.PreviewInspectionFrameContext(t.Context(), document, []int{10, 15, 45})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +84,7 @@ func TestPreviewInspectionFrameContextJoinsTimelineSpeechAndSubtitle(t *testing.
 			document.Tracks[index].Clips[0].SourceEndFrame = 3
 		}
 	}
-	contexts, err = service.previewInspectionFrameContext(t.Context(), document, []int{1})
+	contexts, err = service.executor.PreviewInspectionFrameContext(t.Context(), document, []int{1})
 	if err != nil || strings.Contains(contexts[1], "片段外台词") {
 		t.Fatalf("clip 尾帧越界 context=%q err=%v", contexts[1], err)
 	}
@@ -93,7 +96,7 @@ func TestPreviewInspectionFrameContextJoinsTimelineSpeechAndSubtitle(t *testing.
 			document.Tracks[index].Clips[0].SourceEndFrame = 220
 		}
 	}
-	contexts, err = service.previewInspectionFrameContext(t.Context(), document, []int{15})
+	contexts, err = service.executor.PreviewInspectionFrameContext(t.Context(), document, []int{15})
 	if err != nil || !strings.Contains(contexts[15], "同帧台词：正在讲解咖啡机") {
 		t.Fatalf("muted visual_base context=%q err=%v", contexts[15], err)
 	}
@@ -102,7 +105,7 @@ func TestPreviewInspectionFrameContextJoinsTimelineSpeechAndSubtitle(t *testing.
 			document.Tracks[index].Muted = true
 		}
 	}
-	contexts, err = service.previewInspectionFrameContext(t.Context(), document, []int{15})
+	contexts, err = service.executor.PreviewInspectionFrameContext(t.Context(), document, []int{15})
 	if err != nil || strings.Contains(contexts[15], "同帧台词") || !strings.Contains(contexts[15], "同帧字幕") {
 		t.Fatalf("muted original context=%q err=%v", contexts[15], err)
 	}
@@ -114,7 +117,7 @@ func TestPreviewInspectionFrameContextJoinsTimelineSpeechAndSubtitle(t *testing.
 			document.Tracks[index].Solo = true
 		}
 	}
-	contexts, err = service.previewInspectionFrameContext(t.Context(), document, []int{15})
+	contexts, err = service.executor.PreviewInspectionFrameContext(t.Context(), document, []int{15})
 	if err != nil || strings.Contains(contexts[15], "同帧台词") {
 		t.Fatalf("solo bgm context=%q err=%v", contexts[15], err)
 	}
@@ -130,15 +133,15 @@ func TestPreviewInspectionFrameContextJoinsTimelineSpeechAndSubtitle(t *testing.
 			document.Tracks[index].Solo = false
 		}
 	}
-	contexts, err = service.previewInspectionFrameContext(t.Context(), document, []int{15})
+	contexts, err = service.executor.PreviewInspectionFrameContext(t.Context(), document, []int{15})
 	if err != nil || strings.Contains(contexts[15], "同帧台词") {
 		t.Fatalf("explicit original gap context=%q err=%v", contexts[15], err)
 	}
 }
 
 func TestPreviewInspectionFrameContextBoundsUntrustedText(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_preview_context_bounds")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_preview_context_bounds")
 	document := timeline.Empty("draft_preview_context_bounds", 1)
 	document.DurationFrames = 30
 	for index := range document.Tracks {
@@ -149,8 +152,8 @@ func TestPreviewInspectionFrameContextBoundsUntrustedText(t *testing.T) {
 			}}
 		}
 	}
-	service := &Service{database: database}
-	contexts, err := service.previewInspectionFrameContext(t.Context(), document, []int{10})
+	service := &Service{database: database, executor: agentexec.New(database, understanding.NewAnalyzer(nil), nil, nil)}
+	contexts, err := service.executor.PreviewInspectionFrameContext(t.Context(), document, []int{10})
 	if err != nil {
 		t.Fatal(err)
 	}
