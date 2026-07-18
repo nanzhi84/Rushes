@@ -305,13 +305,19 @@
                   "minLength": 1,
                   "description": "一句简体中文陈述用户当前明确表达的跨项目稳定偏好、纠正或习惯；不得写模型判断",
                   "type": "string"
+                },
+                "evidence_quote": {
+                  "minLength": 2,
+                  "description": "从当前用户消息或决策回答逐字摘录的原文片段，佐证该记忆有据；必须是原文连续子串，改写/拼接/无关摘录会被拒绝",
+                  "type": "string"
                 }
               },
               "additionalProperties": false,
               "required": [
                 "key",
                 "kind",
-                "statement"
+                "statement",
+                "evidence_quote"
               ],
               "type": "object"
             },

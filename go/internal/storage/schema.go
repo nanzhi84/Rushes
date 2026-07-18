@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 14
+const schemaVersion = 15
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -426,3 +426,9 @@ CREATE TABLE IF NOT EXISTS user_memories (
 // databases no longer create it in schemaV1, so the migration checks whether
 // the legacy column exists before executing this statement.
 const schemaV14 = `ALTER TABLE drafts DROP COLUMN scratch_memory_json`
+
+// schemaV15 adds a usage-recency signal to user memories. Historical rows stay
+// NULL until the memory is next injected into a successful turn, so eviction can
+// value long-standing read-only preferences by max(last_confirmed_at,last_used_at)
+// rather than by confirmation time alone.
+const schemaV15 = `ALTER TABLE user_memories ADD COLUMN last_used_at TEXT`

@@ -613,8 +613,11 @@ func TestMemoryUpdateSchemaCannotAcceptModelSuppliedEvidence(t *testing.T) {
 	kind, kindOK := entries.Items.Properties.Get("kind")
 	key, keyOK := entries.Items.Properties.Get("key")
 	statement, statementOK := entries.Items.Properties.Get("statement")
+	quote, quoteOK := entries.Items.Properties.Get("evidence_quote")
 	if !kindOK || len(kind.Enum) != 3 || !keyOK || key.Pattern != "^[a-z0-9_]{2,40}$" ||
-		!statementOK || statement.MaxLength == nil || *statement.MaxLength != 200 {
+		!statementOK || statement.MaxLength == nil || *statement.MaxLength != 200 ||
+		!quoteOK || quote.MinLength == nil || *quote.MinLength != 2 ||
+		!containsString(entries.Items.Required, "evidence_quote") {
 		t.Fatalf("entry schema=%#v", entries.Items)
 	}
 	if _, err := registry.DecodeInput("memory.update", map[string]any{

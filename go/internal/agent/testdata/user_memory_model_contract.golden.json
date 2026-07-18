@@ -34,7 +34,7 @@
         "tool_calls": [
           {
             "name": "memory.update",
-            "arguments": "{\"entries\":[{\"key\":\"pacing\",\"kind\":\"preference\",\"statement\":\"用户长期偏好成片节奏偏快\"}]}"
+            "arguments": "{\"entries\":[{\"key\":\"pacing\",\"kind\":\"preference\",\"statement\":\"用户长期偏好成片节奏偏快\",\"evidence_quote\":\"节奏都要快一点\"}]}"
           }
         ]
       }

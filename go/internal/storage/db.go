@@ -388,6 +388,23 @@ func (database *DB) Migrate(ctx context.Context) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		version = 14
+	}
+	if version < 15 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := addColumnIfMissing(ctx, tx, "user_memories", "last_used_at"); err != nil {
+			return fmt.Errorf("应用 schema v15: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 15"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -411,6 +428,7 @@ func addColumnIfMissing(
 		"timeline_versions.parent_version": "ALTER TABLE timeline_versions ADD COLUMN parent_version INTEGER",
 		"messages.rewound_at":              "ALTER TABLE messages ADD COLUMN rewound_at TEXT",
 		"messages.rewind_checkpoint_id":    "ALTER TABLE messages ADD COLUMN rewind_checkpoint_id TEXT",
+		"user_memories.last_used_at":       schemaV15,
 	}
 	statement, ok := allowed[table+"."+column]
 	if !ok {

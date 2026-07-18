@@ -71,8 +71,8 @@ func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.
 
 	raw, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
 		Entries: []rushestools.MemoryEntryInput{
-			{Key: "pacing", Kind: "preference", Statement: "成片节奏偏快"},
-			{Key: "subtitle_style", Kind: "correction", Statement: "字幕不要遮挡人物面部"},
+			{Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都快一点"},
+			{Key: "subtitle_style", Kind: "correction", Statement: "字幕不要遮挡人物面部", EvidenceQuote: "字幕别遮脸"},
 		},
 	})
 	result := raw.(rushestools.ToolResult)
@@ -126,7 +126,7 @@ func TestMemoryUpdateAcceptsAnsweredDecisionEvidence(t *testing.T) {
 	)
 	raw, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
 		Entries: []rushestools.MemoryEntryInput{{
-			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
+			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都快一点",
 		}},
 	})
 	result := raw.(rushestools.ToolResult)
@@ -151,7 +151,7 @@ func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	input := rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{
-		Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
+		Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "偏快",
 	}}}
 
 	for _, test := range []struct {
@@ -250,10 +250,17 @@ func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
 			code: "memory_statement_invalid",
 		},
 		{
+			name: "missing evidence quote",
+			input: rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{
+				Key: "pacing", Kind: "preference", Statement: "偏快",
+			}}},
+			code: "memory_evidence_quote_invalid",
+		},
+		{
 			name: "duplicate entry",
 			input: rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{
-				{Key: "pacing", Kind: "preference", Statement: "偏快"},
-				{Key: "pacing", Kind: "correction", Statement: "更快"},
+				{Key: "pacing", Kind: "preference", Statement: "偏快", EvidenceQuote: "偏快"},
+				{Key: "pacing", Kind: "correction", Statement: "更快", EvidenceQuote: "更快"},
 			}},
 			code: "memory_key_duplicate",
 		},
@@ -261,7 +268,7 @@ func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
 			name: "entry remove conflict",
 			input: rushestools.MemoryUpdateInput{
 				Entries: []rushestools.MemoryEntryInput{{
-					Key: "pacing", Kind: "preference", Statement: "偏快",
+					Key: "pacing", Kind: "preference", Statement: "偏快", EvidenceQuote: "偏快",
 				}},
 				RemoveKeys: []string{"pacing"},
 			},
@@ -287,4 +294,49 @@ func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInjectedMemoryCollectorTouchesLastUsedAtOnSuccess(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_touch")
+	insertAgentMessage(t, database, "draft_touch", "message_touch", "以后都快一点")
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(
+		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_touch"),
+		"draft_touch",
+	)
+	if _, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+		Entries: []rushestools.MemoryEntryInput{{
+			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都快一点",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := storage.ListUserMemories(t.Context(), database.Read())
+	if err != nil || len(before) != 1 || before[0].LastUsedAt != "" {
+		t.Fatalf("初始 last_used_at 应为空: %#v err=%v", before, err)
+	}
+
+	// 收集器记录本回合注入的键：去重并排序，未挂到 ctx 时为 no-op。
+	collectorCtx, collector := withInjectedMemoryCollector(t.Context())
+	recordInjectedMemoryKeys(t.Context(), []string{"ignored"})
+	recordInjectedMemoryKeys(collectorCtx, []string{"pacing", "pacing", "missing"})
+	if keys := collector.snapshot(); len(keys) != 2 || keys[0] != "missing" || keys[1] != "pacing" {
+		t.Fatalf("collector snapshot=%v", keys)
+	}
+
+	// 成功收尾的 touch 只刷新已存在的键，缺失键静默跳过。
+	service.touchInjectedMemories(t.Context(), "draft_touch", collector.snapshot())
+	after, err := storage.ListUserMemories(t.Context(), database.Read())
+	if err != nil || len(after) != 1 || after[0].Key != "pacing" || after[0].LastUsedAt == "" {
+		t.Fatalf("touch 后 pacing 的 last_used_at 应非空: %#v err=%v", after, err)
+	}
+
+	// 空键集合是安全的空操作。
+	service.touchInjectedMemories(t.Context(), "draft_touch", nil)
 }

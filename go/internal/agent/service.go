@@ -138,6 +138,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		ctx = withContextMessageBoundary(ctx, item.ItemID)
 	}
 	ctx = withQueueMemoryEvidence(ctx, item)
+	ctx, injectedMemory := withInjectedMemoryCollector(ctx)
 	recoveryState := newToolRecoveryState()
 	ctx = withToolRecoveryState(ctx, recoveryState)
 	ctx = withTurnInteractionState(ctx, newTurnInteractionState())
@@ -220,6 +221,9 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 			return fmt.Errorf("job observation delivery reducer status: %s", result.Status)
 		}
 	}
+	if outcome == "finished" {
+		service.touchInjectedMemories(ctx, item.DraftID, injectedMemory.snapshot())
+	}
 	service.recordTurnEnded(item.DraftID, outcome, reason, turnBudget)
 	return nil
 }
@@ -241,6 +245,21 @@ func (service *Service) recordTurnEnded(draftID, outcome string, reason any, tur
 		turnEnded["token_usage"] = usage
 	}
 	service.hub.Record(draftID, turnEnded)
+}
+
+// touchInjectedMemories 在回合成功收尾后刷新本回合注入的用户记忆 last_used_at。
+// 走 reducer 单写路径；best-effort，失败只记日志、不影响回合结局。用 WithoutCancel
+// 隔离回合结束后可能到来的取消，避免这笔记账被顺带杀掉。
+func (service *Service) touchInjectedMemories(ctx context.Context, draftID string, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	if _, err := reducer.Apply(context.WithoutCancel(ctx), service.database, nil, reducer.Options{
+		Actor:      contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{UserMemoryTouchKeys: keys},
+	}); err != nil {
+		slog.Warn("刷新用户记忆 last_used_at 失败", "draft_id", draftID, "error", err)
+	}
 }
 
 func (service *Service) withModelRetryReporting(ctx context.Context, draftID string) context.Context {
