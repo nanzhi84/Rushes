@@ -45,6 +45,9 @@ func TestUserMemoryWorldStateIsStableAcrossDraftsAndRemoval(t *testing.T) {
 	if total, ok := numericValue(section["total"]); !ok || total != 1 || section["truncated"] != false {
 		t.Fatalf("user_memory metadata=%#v", section)
 	}
+	if _, exists := section["omitted_keys"]; exists {
+		t.Fatalf("未截断时不应出现 omitted_keys: %#v", section)
+	}
 
 	applyUserMemories(t, database, nil, []string{"pacing"})
 	afterRemoval, err := builder.Snapshot(t.Context(), "draft_memory_target")
@@ -57,6 +60,9 @@ func TestUserMemoryWorldStateIsStableAcrossDraftsAndRemoval(t *testing.T) {
 	}
 	if total, ok := numericValue(section["total"]); !ok || total != 0 || section["truncated"] != false {
 		t.Fatalf("empty user_memory metadata=%#v", section)
+	}
+	if _, exists := section["omitted_keys"]; exists {
+		t.Fatalf("空记忆时不应出现 omitted_keys: %#v", section)
 	}
 }
 
@@ -98,6 +104,24 @@ func TestUserMemoryWorldStateUsesWholeEntryBudget(t *testing.T) {
 		if utf8.RuneCountInString(entry["statement"].(string)) != storage.UserMemoryStatementRuneLimit {
 			t.Fatal("budget truncation must never split a memory statement")
 		}
+	}
+
+	omittedKeys := worldStateStringSlice(section["omitted_keys"])
+	if len(omittedKeys) != storage.UserMemoryLimit-len(entries) {
+		t.Fatalf("omitted_keys=%d 应等于被折叠记忆数 %d", len(omittedKeys), storage.UserMemoryLimit-len(entries))
+	}
+	covered := make(map[string]bool, storage.UserMemoryLimit)
+	for _, entry := range entries {
+		covered[entry["key"].(string)] = true
+	}
+	for _, key := range omittedKeys {
+		if covered[key] {
+			t.Fatalf("omitted_keys 与已注入 entries 重叠: %q", key)
+		}
+		covered[key] = true
+	}
+	if len(covered) != storage.UserMemoryLimit {
+		t.Fatalf("entries 与 omitted_keys 合起来未覆盖全部 %d 条记忆，实际 %d", storage.UserMemoryLimit, len(covered))
 	}
 }
 
@@ -202,4 +226,22 @@ func userMemorySection(t *testing.T, snapshot WorldStateSnapshot) map[string]any
 		t.Fatalf("user_memory section=%#v", snapshot.Sections["user_memory"])
 	}
 	return section
+}
+
+// worldStateStringSlice 读取经 JSON 归一化后的字符串数组（omitted_keys 会被还原为 []any）。
+func worldStateStringSlice(value any) []string {
+	switch typed := value.(type) {
+	case []any:
+		result := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return result
+	case []string:
+		return typed
+	default:
+		return nil
+	}
 }
