@@ -85,7 +85,12 @@ export function AssistantThread({
   const [hasNewOutput, setHasNewOutput] = useState(false);
 
   // 结构化交互固定排在当前回合之后，避免确认卡被新的工具输出挤到中间。
-  const regularMessages = runtime.messages.filter((message) => message.id !== STRUCTURED_MESSAGE_ID);
+  // memo 化：runtime.messages 稳定时不重算，否则 historyBlocks 每帧新建，会击穿
+  // ToolActivityGroup/BackgroundActivityGroup 的 memo（block.steps/messages 每帧换引用）。
+  const regularMessages = useMemo(
+    () => runtime.messages.filter((message) => message.id !== STRUCTURED_MESSAGE_ID),
+    [runtime.messages]
+  );
   const structuredMessage =
     runtime.messages.find((message) => message.id === STRUCTURED_MESSAGE_ID) ?? null;
   const historyBlocks = useMemo(() => groupHistoryMessages(regularMessages), [regularMessages]);
@@ -175,7 +180,11 @@ export function AssistantThread({
     return list;
   }, [historyBlocks, streamBlocks, runtime.isRunning, structuredMessage]);
 
-  const renderRow = (row: ThreadRow): ReactElement | null => {
+  const renderRow = (row: ThreadRow | undefined): ReactElement | null => {
+    if (!row) {
+      // 行数收缩瞬间，虚拟化的 index 可能短暂越界，防御式返回空。
+      return null;
+    }
     if (row.kind === "history") {
       const block = row.block;
       if (block.type === "activity") {
