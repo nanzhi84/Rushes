@@ -6,10 +6,10 @@ import {
   CornerDownRight,
   LoaderCircle,
   Pencil,
-  Sparkles,
   TerminalSquare
 } from "lucide-react";
 import { Markdown } from "./Markdown";
+import { MemoryCardShell } from "./MemoryCards";
 import {
   DecisionInteractionGroup,
   StructuredInteractionRenderer
@@ -400,34 +400,28 @@ function MemoryCardRowImpl({
   const written = item.written_keys;
   const removed = item.removed_keys;
   return (
-    <article
-      data-testid="memory-updated-card"
-      className="flex w-full items-start gap-2 rounded-md border border-accent/25 bg-accent/5 px-3 py-2 text-[13px] leading-5 text-fg"
-    >
-      <Sparkles size={14} strokeWidth={1.8} aria-hidden className="mt-0.5 shrink-0 text-accent" />
-      <div className="min-w-0 flex-1">
-        <p className="font-medium">{written.length > 0 ? "已记住长期记忆" : "已移除长期记忆"}</p>
-        {written.length > 0 ? (
-          <p className="mt-0.5 break-words text-xs text-fg-muted">
-            记住了 <span className="font-mono text-fg">{written.join("、")}</span>
-          </p>
-        ) : null}
-        {removed.length > 0 ? (
-          <p className="mt-0.5 break-words text-xs text-fg-muted">
-            移除了 <span className="font-mono text-fg">{removed.join("、")}</span>
-          </p>
-        ) : null}
-        {onOpenSettings ? (
-          <button
-            type="button"
-            className="mt-1 text-xs font-medium text-accent transition-opacity hover:opacity-80"
-            onClick={onOpenSettings}
-          >
-            在设置中查看和编辑
-          </button>
-        ) : null}
-      </div>
-    </article>
+    <MemoryCardShell testId="memory-updated-card">
+      <p className="font-medium">{written.length > 0 ? "已记住长期记忆" : "已移除长期记忆"}</p>
+      {written.length > 0 ? (
+        <p className="mt-0.5 break-words text-xs text-fg-muted">
+          记住了 <span className="font-mono text-fg">{written.join("、")}</span>
+        </p>
+      ) : null}
+      {removed.length > 0 ? (
+        <p className="mt-0.5 break-words text-xs text-fg-muted">
+          移除了 <span className="font-mono text-fg">{removed.join("、")}</span>
+        </p>
+      ) : null}
+      {onOpenSettings ? (
+        <button
+          type="button"
+          className="mt-1 text-xs font-medium text-accent transition-opacity hover:opacity-80"
+          onClick={onOpenSettings}
+        >
+          在设置中查看和编辑
+        </button>
+      ) : null}
+    </MemoryCardShell>
   );
 }
 

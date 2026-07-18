@@ -370,6 +370,12 @@ func (e TurnCancelResponseStatus) Valid() bool {
 	}
 }
 
+// AffectedMemory defines model for AffectedMemory.
+type AffectedMemory struct {
+	Key       string `json:"key"`
+	Statement string `json:"statement"`
+}
+
 // AssetJobSummary defines model for AssetJobSummary.
 type AssetJobSummary struct {
 	ErrorJson *map[string]interface{} `json:"error_json,omitempty"`
@@ -777,6 +783,7 @@ type MessageResendRequest struct {
 
 // MessageResendResponse defines model for MessageResendResponse.
 type MessageResendResponse struct {
+	AffectedMemories        []AffectedMemory            `json:"affected_memories"`
 	DraftId                 string                      `json:"draft_id"`
 	MessageId               string                      `json:"message_id"`
 	RestoredTimelineVersion *int                        `json:"restored_timeline_version"`

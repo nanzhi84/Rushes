@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 17
+const schemaVersion = 18
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -459,3 +459,11 @@ const schemaV16 = `ALTER TABLE user_memories ADD COLUMN last_used_at TEXT`
 // Actor=User reducer path without model evidence, so this column is what lets the
 // panel badge "手动修订" distinctly from model-written memories.
 const schemaV17 = `ALTER TABLE user_memories ADD COLUMN manually_revised_at TEXT`
+
+// schemaV18 snapshots, per resend, the long-term memories whose grounding fell in
+// the rolled-back conversation (evidence rewound and created within the range).
+// Persisting the {key,statement} list in the same transaction as the rewind keeps
+// the idempotent replay response byte-identical to the first response, so a retried
+// resend re-renders the exact same "retract these memories" card. Historical rows
+// stay NULL and read back as an empty list.
+const schemaV18 = `ALTER TABLE rewind_restore_requests ADD COLUMN affected_memories_json TEXT`

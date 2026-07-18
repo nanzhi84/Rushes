@@ -59,6 +59,9 @@ type Result struct {
 	Conflict           *VersionConflict
 	SkippedEvents      int
 	UserMemory         *UserMemoryOutcome
+	// RewindAffectedMemories 是「编辑并重发」回退波及的长期记忆快照(证据落在回退区间内
+	// 且创建于区间内);随回退在同一事务内算出,供 API 原样带回响应。非回退结果为 nil。
+	RewindAffectedMemories []storage.RewindAffectedMemory
 }
 
 type MessageRow struct {
@@ -253,6 +256,9 @@ type applyState struct {
 	touched          map[string]struct{}
 	eventsToLog      []contracts.Event
 	skipped          int
+	// rewindAffectedMemories 由 TimelineVersionRestored 处理器在回退事务内填充,Apply
+	// 收尾时既落进幂等结果表供重放,又带进 Result 供本次响应。
+	rewindAffectedMemories []storage.RewindAffectedMemory
 }
 
 func Apply(
@@ -424,10 +430,14 @@ func Apply(
 		for _, event := range applied {
 			eventIDs = append(eventIDs, event.ID)
 		}
+		affectedMemories := state.rewindAffectedMemories
+		if affectedMemories == nil {
+			affectedMemories = []storage.RewindAffectedMemory{}
+		}
 		if _, err := tx.ExecContext(ctx, `
-			UPDATE rewind_restore_requests SET event_ids_json=?
+			UPDATE rewind_restore_requests SET event_ids_json=?,affected_memories_json=?
 			WHERE draft_id=? AND idempotency_key=?`,
-			mustJSON(eventIDs), restore.DraftID, restore.IdempotencyKey,
+			mustJSON(eventIDs), mustJSON(affectedMemories), restore.DraftID, restore.IdempotencyKey,
 		); err != nil {
 			return Result{}, err
 		}
@@ -439,6 +449,7 @@ func Apply(
 	return Result{
 		Status: StatusApplied, AppliedEvents: applied, DraftStateVersions: versions,
 		SkippedEvents: state.skipped, UserMemory: userMemory,
+		RewindAffectedMemories: state.rewindAffectedMemories,
 	}, nil
 }
 

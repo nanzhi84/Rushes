@@ -1512,7 +1512,8 @@ function mockFetch({
           message_id: "msg_resent",
           status: "resent",
           restored_timeline_version: 2,
-          rewound_message_count: 2
+          rewound_message_count: 2,
+          affected_memories: []
         },
         202
       );

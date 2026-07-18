@@ -271,7 +271,18 @@ func resendResponse(draftID string, previous storage.RewindRestoreResult) Messag
 		Status:                  Resent,
 		RestoredTimelineVersion: previous.TimelineVersion,
 		RewoundMessageCount:     previous.RewoundMessageCount,
+		AffectedMemories:        toAffectedMemories(previous.AffectedMemories),
 	}
+}
+
+// toAffectedMemories 把回退波及的记忆快照映射到响应契约类型。始终返回非 nil 切片,
+// 让契约里 required 的 affected_memories 恒为 JSON 数组(无波及即空数组,而非 null)。
+func toAffectedMemories(memories []storage.RewindAffectedMemory) []AffectedMemory {
+	result := make([]AffectedMemory, 0, len(memories))
+	for _, memory := range memories {
+		result = append(result, AffectedMemory{Key: memory.Key, Statement: memory.Statement})
+	}
+	return result
 }
 
 func (server *Server) beginRewindCancellation(
@@ -402,6 +413,7 @@ func (server *Server) applyResend(
 	return MessageResendResponse{
 		DraftId: draftID, MessageId: newMessageID, Status: Resent,
 		RestoredTimelineVersion: newTimelineVersion, RewoundMessageCount: rewoundMessages,
+		AffectedMemories: toAffectedMemories(result.RewindAffectedMemories),
 	}, nil
 }
 

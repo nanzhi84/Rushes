@@ -442,6 +442,23 @@ func (database *DB) Migrate(ctx context.Context) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		version = 17
+	}
+	if version < 18 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := addColumnIfMissing(ctx, tx, "rewind_restore_requests", "affected_memories_json"); err != nil {
+			return fmt.Errorf("应用 schema v18: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 18"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -462,12 +479,13 @@ func addColumnIfMissing(
 		return nil
 	}
 	allowed := map[string]string{
-		"timeline_versions.parent_version":       "ALTER TABLE timeline_versions ADD COLUMN parent_version INTEGER",
-		"messages.rewound_at":                    "ALTER TABLE messages ADD COLUMN rewound_at TEXT",
-		"messages.rewind_checkpoint_id":          "ALTER TABLE messages ADD COLUMN rewind_checkpoint_id TEXT",
-		"rewind_restore_requests.new_message_id": "ALTER TABLE rewind_restore_requests ADD COLUMN new_message_id TEXT",
-		"user_memories.last_used_at":             schemaV16,
-		"user_memories.manually_revised_at":      schemaV17,
+		"timeline_versions.parent_version":               "ALTER TABLE timeline_versions ADD COLUMN parent_version INTEGER",
+		"messages.rewound_at":                            "ALTER TABLE messages ADD COLUMN rewound_at TEXT",
+		"messages.rewind_checkpoint_id":                  "ALTER TABLE messages ADD COLUMN rewind_checkpoint_id TEXT",
+		"rewind_restore_requests.new_message_id":         "ALTER TABLE rewind_restore_requests ADD COLUMN new_message_id TEXT",
+		"user_memories.last_used_at":                     schemaV16,
+		"user_memories.manually_revised_at":              schemaV17,
+		"rewind_restore_requests.affected_memories_json": schemaV18,
 	}
 	statement, ok := allowed[table+"."+column]
 	if !ok {

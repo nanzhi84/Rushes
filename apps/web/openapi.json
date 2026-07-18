@@ -1,6 +1,25 @@
 {
   "components": {
     "schemas": {
+      "AffectedMemory": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "statement": {
+            "title": "Statement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "statement"
+        ],
+        "title": "AffectedMemory",
+        "type": "object"
+      },
       "AssetJobSummary": {
         "additionalProperties": false,
         "properties": {
@@ -1839,6 +1858,14 @@
       "MessageResendResponse": {
         "additionalProperties": false,
         "properties": {
+          "affected_memories": {
+            "items": {
+              "$ref": "#/components/schemas/AffectedMemory"
+            },
+            "maxItems": 50,
+            "title": "Affected Memories",
+            "type": "array"
+          },
           "draft_id": {
             "title": "Draft Id",
             "type": "string"
@@ -1870,7 +1897,8 @@
           "message_id",
           "status",
           "restored_timeline_version",
-          "rewound_message_count"
+          "rewound_message_count",
+          "affected_memories"
         ],
         "title": "MessageResendResponse",
         "type": "object"

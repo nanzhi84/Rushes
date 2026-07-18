@@ -587,6 +587,13 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AffectedMemory */
+        AffectedMemory: {
+            /** Key */
+            key: string;
+            /** Statement */
+            statement: string;
+        };
         /** AssetJobSummary */
         AssetJobSummary: {
             /** Error Json */
@@ -1200,6 +1207,8 @@ export interface components {
         };
         /** MessageResendResponse */
         MessageResendResponse: {
+            /** Affected Memories */
+            affected_memories: components["schemas"]["AffectedMemory"][];
             /** Draft Id */
             draft_id: string;
             /** Message Id */

@@ -25,6 +25,14 @@ type RewindCheckpoint struct {
 	CreatedAt        string
 }
 
+// RewindAffectedMemory 是一次「编辑并重发」回退波及的一条长期记忆:其当前证据落在被
+// 回退的对话区间内、且该记忆创建于同一区间内。key+statement 摘要供前端「撤回这些记忆」
+// 卡片列出;记忆本身不随回退自动删除(证据无外键、刻意跨回退存活),撤回是用户显式动作。
+type RewindAffectedMemory struct {
+	Key       string `json:"key"`
+	Statement string `json:"statement"`
+}
+
 type RewindRestoreResult struct {
 	DraftID             string
 	IdempotencyKey      string
@@ -36,6 +44,7 @@ type RewindRestoreResult struct {
 	CancelledJobs       int
 	CancelledDecisions  int
 	EventIDs            []int64
+	AffectedMemories    []RewindAffectedMemory
 }
 
 func GetRewindRestoreResult(
@@ -48,15 +57,17 @@ func GetRewindRestoreResult(
 	var timelineVersion sql.NullInt64
 	var newMessageID sql.NullString
 	var eventIDsJSON string
+	var affectedMemoriesJSON string
 	err := query.QueryRowContext(ctx, `
 		SELECT draft_id,idempotency_key,checkpoint_id,mode,new_message_id,timeline_version,
-			rewound_message_count,cancelled_jobs,cancelled_decisions,event_ids_json
+			rewound_message_count,cancelled_jobs,cancelled_decisions,event_ids_json,
+			COALESCE(affected_memories_json,'[]')
 		FROM rewind_restore_requests WHERE draft_id=? AND idempotency_key=?`,
 		draftID, idempotencyKey,
 	).Scan(
 		&result.DraftID, &result.IdempotencyKey, &result.CheckpointID, &result.Mode,
 		&newMessageID, &timelineVersion, &result.RewoundMessageCount, &result.CancelledJobs,
-		&result.CancelledDecisions, &eventIDsJSON,
+		&result.CancelledDecisions, &eventIDsJSON, &affectedMemoriesJSON,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RewindRestoreResult{}, ErrNotFound
@@ -70,6 +81,10 @@ func GetRewindRestoreResult(
 		result.TimelineVersion = &value
 	}
 	if err := json.Unmarshal([]byte(eventIDsJSON), &result.EventIDs); err != nil {
+		return RewindRestoreResult{}, err
+	}
+	result.AffectedMemories = []RewindAffectedMemory{}
+	if err := json.Unmarshal([]byte(affectedMemoriesJSON), &result.AffectedMemories); err != nil {
 		return RewindRestoreResult{}, err
 	}
 	return result, nil
