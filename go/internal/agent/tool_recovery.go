@@ -473,6 +473,17 @@ func truncateText(value string, limit int) string {
 	return value[:limit] + "…"
 }
 
+// emitAssistantReply 把一段最终回复按增量推送到 turn 流，并原样返回内容。
+func (service *Service) emitAssistantReply(draftID, messageID, content string) string {
+	for _, delta := range runeChunks(content, 12) {
+		service.hub.Record(draftID, StreamEvent{
+			"type": TurnStreamTextDelta, "message_id": messageID,
+			"kind": "assistant", "delta": delta,
+		})
+	}
+	return content
+}
+
 func (service *Service) terminalFailureReply(
 	ctx context.Context,
 	draftID, messageID string,
@@ -480,17 +491,17 @@ func (service *Service) terminalFailureReply(
 ) string {
 	var timeoutErr *modelResponseTimeoutError
 	if errors.As(turnErr, &timeoutErr) {
-		content := fmt.Sprintf(
+		return service.emitAssistantReply(draftID, messageID, fmt.Sprintf(
 			"本轮没有完成：模型响应超时，已自动重试 %d 次仍未恢复。系统已停止重试。你可以继续给出下一步指令，我会从当前最新时间线接着执行。",
 			timeoutErr.Retries,
-		)
-		for _, delta := range runeChunks(content, 12) {
-			service.hub.Record(draftID, StreamEvent{
-				"type": TurnStreamTextDelta, "message_id": messageID,
-				"kind": "assistant", "delta": delta,
-			})
-		}
-		return content
+		))
+	}
+	var contextLengthErr *modelContextLengthError
+	if errors.As(turnErr, &contextLengthErr) {
+		return service.emitAssistantReply(draftID, messageID, fmt.Sprintf(
+			"本轮没有完成：对话上下文超出了模型长度上限，已自动压缩并重试 %d 次仍无法容纳。系统已停止重试。你可以精简指令或另开新话题后再试，我会从当前最新时间线接着执行。",
+			contextLengthErr.Retries,
+		))
 	}
 
 	state := toolRecoveryFromContext(ctx)
@@ -524,11 +535,5 @@ func (service *Service) terminalFailureReply(
 	if content == "" {
 		content = "本轮没有完成，系统已经停止重复失败的工具调用。最后问题：" + details + "。你可以继续告诉我下一步怎么处理，我会从当前最新时间线接着执行。"
 	}
-	for _, delta := range runeChunks(content, 12) {
-		service.hub.Record(draftID, StreamEvent{
-			"type": TurnStreamTextDelta, "message_id": messageID,
-			"kind": "assistant", "delta": delta,
-		})
-	}
-	return content
+	return service.emitAssistantReply(draftID, messageID, content)
 }
