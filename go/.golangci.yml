@@ -4,6 +4,14 @@ run:
   tests: true
   relative-path-mode: gomod
 
+# depguard 语义备忘(2026-07 S2b 修复,详见 issue #103):
+# 1) files glob 中「**/*.go」要求至少一层子目录,不匹配包直属文件;本仓 internal 包全部
+#    扁平,故每条规则必须同时写「/*.go」(直属)与「/**/*.go」(子目录)两条。
+# 2) allow 是纯字符串前缀匹配,不支持 glob;互为前缀的两个包名并列会相互干扰
+#    (如 eino 与 eino-ext),需用尾斜杠消歧;生产源码只 import eino 子包,故统一尾斜杠。
+# 3) 分层守护只管生产源码,_test.go 一律豁免(见文末 exclusions)。
+# allow 列表按最小实际依赖维护,新增跨包依赖须同步修改并说明理由。
+
 linters:
   default: none
   enable:
@@ -19,6 +27,7 @@ linters:
         contracts:
           list-mode: strict
           files:
+            - "**/internal/contracts/*.go"
             - "**/internal/contracts/**/*.go"
           allow:
             - $gostd
@@ -26,14 +35,17 @@ linters:
         storage:
           list-mode: strict
           files:
+            - "**/internal/storage/*.go"
             - "**/internal/storage/**/*.go"
           allow:
             - $gostd
             - modernc.org/sqlite
+            - golang.org/x/sys/unix
 
         reducer:
           list-mode: strict
           files:
+            - "**/internal/reducer/*.go"
             - "**/internal/reducer/**/*.go"
           allow:
             - $gostd
@@ -43,16 +55,18 @@ linters:
         providers:
           list-mode: strict
           files:
+            - "**/internal/providers/*.go"
             - "**/internal/providers/**/*.go"
           allow:
             - $gostd
-            - github.com/cloudwego/eino
-            - github.com/cloudwego/eino-ext
+            - github.com/cloudwego/eino/
+            - github.com/cloudwego/eino-ext/
             - github.com/nanzhi84/Rushes/go/internal/contracts
 
         media:
           list-mode: strict
           files:
+            - "**/internal/media/*.go"
             - "**/internal/media/**/*.go"
           allow:
             - $gostd
@@ -62,6 +76,7 @@ linters:
         timeline:
           list-mode: strict
           files:
+            - "**/internal/timeline/*.go"
             - "**/internal/timeline/**/*.go"
           allow:
             - $gostd
@@ -70,10 +85,11 @@ linters:
         tools:
           list-mode: strict
           files:
+            - "**/internal/tools/*.go"
             - "**/internal/tools/**/*.go"
           allow:
             - $gostd
-            - github.com/cloudwego/eino
+            - github.com/cloudwego/eino/
             - github.com/eino-contrib/jsonschema
             - github.com/nanzhi84/Rushes/go/internal/storage
             - github.com/nanzhi84/Rushes/go/internal/timeline
@@ -81,20 +97,23 @@ linters:
         understanding:
           list-mode: strict
           files:
+            - "**/internal/understanding/*.go"
             - "**/internal/understanding/**/*.go"
           allow:
             - $gostd
-            - github.com/cloudwego/eino
+            - github.com/cloudwego/eino/
             - github.com/nanzhi84/Rushes/go/internal/media
             - github.com/nanzhi84/Rushes/go/internal/storage
+            - github.com/nanzhi84/Rushes/go/internal/timeline
 
         agent:
           list-mode: strict
           files:
+            - "**/internal/agent/*.go"
             - "**/internal/agent/**/*.go"
           allow:
             - $gostd
-            - github.com/cloudwego/eino
+            - github.com/cloudwego/eino/
             - github.com/nanzhi84/Rushes/go/internal/contracts
             - github.com/nanzhi84/Rushes/go/internal/media
             - github.com/nanzhi84/Rushes/go/internal/reducer
@@ -106,6 +125,7 @@ linters:
         api:
           list-mode: strict
           files:
+            - "**/internal/api/*.go"
             - "**/internal/api/**/*.go"
           allow:
             - $gostd
@@ -122,6 +142,7 @@ linters:
         worker:
           list-mode: strict
           files:
+            - "**/internal/worker/*.go"
             - "**/internal/worker/**/*.go"
           allow:
             - $gostd
@@ -130,6 +151,12 @@ linters:
             - github.com/nanzhi84/Rushes/go/internal/reducer
             - github.com/nanzhi84/Rushes/go/internal/storage
             - github.com/nanzhi84/Rushes/go/internal/timeline
+            - github.com/nanzhi84/Rushes/go/internal/understanding
+  exclusions:
+    rules:
+      - path: '_test\.go'
+        linters:
+          - depguard
 
 formatters:
   enable:
