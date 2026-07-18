@@ -372,6 +372,10 @@ func collectRewindAffectedMemories(
 	if err != nil {
 		return nil, err
 	}
+	// 决策证据按 rowid>检查点决策边界 判定「落在回退区间」,而非 status:已回答的证据决策
+	// 不会被 invalidateDecisionsAfterCheckpoint 作废(它只动 pending),靠 status 判不出来。
+	// 这依赖 decisions 无物理删除 + 确定性重放的既有契约(与 invalidateDecisionsAfterCheckpoint
+	// 同一假设):rowid 单调递增、检查点边界稳定,故「边界之后」等价于「本次回退区间内」。
 	rows, err := tx.QueryContext(ctx, `
 		SELECT memory_key,statement FROM user_memories
 		WHERE source_draft_id=? AND created_at>=? AND (

@@ -186,3 +186,46 @@ func TestRewindAffectedMemoriesCoverDecisionEvidenceAndSkipOtherDrafts(t *testin
 		t.Fatalf("affected=%v want [pacing_decision]", got)
 	}
 }
+
+// 规整守护:四象限用例的秒级间隔走不到小数位比较,删掉 collectRewindAffectedMemories 里的
+// normalizeUserMemoryTimestamp 仍全绿。本用例专门守护规整——锚点整秒 created_at 经 RFC3339Nano
+// 去尾零变宽(…:00.1Z),记忆同秒稍晚是定宽零填充(…:00.150000000Z);不规整时字典序会误判
+// .150000000Z < .1Z(小数点后 '5' < 'Z'),这条同秒边界记忆被漏掉。规整后字典序等价时间序,计入。
+func TestRewindAffectedMemoriesSameSecondBoundaryNeedsTimestampNormalization(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	draftID := "draft-affected-frac"
+	createDraft(t, database, draftID)
+
+	// 锚点 X 的 created_at 落在 0.1s(RFC3339Nano 记作 …:00.1Z,变宽)。
+	anchorAt := time.Date(2026, 7, 18, 11, 0, 0, 100000000, time.UTC)
+	insertRewindTestMessageAt(t, database, draftID, "keep-1", "保留消息", anchorAt.Add(-time.Second))
+	insertRewindTestMessageAt(t, database, draftID, "frac-anchor", "请记住这条", anchorAt)
+	// 记忆同秒稍晚(0.15s,库里定宽 …:00.150000000Z),证据就是将被遮蔽的锚点。
+	upsertRewindTestMemory(t, database, draftID, "same_second",
+		storage.UserMemoryEvidenceMessage, "frac-anchor", "记住这条",
+		time.Date(2026, 7, 18, 11, 0, 0, 150000000, time.UTC))
+
+	target := messageCheckpoint(t, database, draftID, "frac-anchor")
+	draft, _ := storage.GetDraft(t.Context(), database.Read(), draftID)
+	baseVersion := draft.StateVersion
+	result, err := Apply(t.Context(), database, []contracts.Event{{
+		Type: "TimelineVersionRestored", DraftID: draftID,
+		Payload: map[string]any{
+			"checkpoint_id": target.ID, "mode": "conversation",
+			"restore_checkpoint_id": "rewind:restore:frac",
+		},
+	}}, Options{
+		Actor: contracts.ActorUser, BaseVersion: &baseVersion,
+		ResultRows: ResultRows{Message: &MessageRow{
+			ID: "frac-anchor-b", DraftID: draftID, Role: "user", Kind: "user", Content: "改写锚点",
+		}},
+	})
+	if err != nil || result.Status != StatusApplied {
+		t.Fatalf("resend result=%#v err=%v", result, err)
+	}
+	// 同秒稍晚、证据被遮蔽 → 必须计入;删掉 normalizeUserMemoryTimestamp 会让这条被漏掉。
+	if got := affectedKeys(result.RewindAffectedMemories); !slices.Equal(got, []string{"same_second"}) {
+		t.Fatalf("affected=%v want [same_second](删掉时间戳规整会漏掉这条同秒边界记忆)", got)
+	}
+}
