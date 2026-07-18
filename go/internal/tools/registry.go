@@ -61,9 +61,32 @@ type Spec struct {
 }
 
 type Registry struct {
-	database *storage.DB
-	executor Executor
-	specs    map[string]Spec
+	database     *storage.DB
+	executor     Executor
+	specs        map[string]Spec
+	interceptors []Interceptor
+}
+
+// Interceptor 在 guard 通过后、executor 执行前按注册序运行，可对具体调用行使否决权
+// （#103 G2）。返回非 nil error 时该调用不进入 executor。返回 *InterceptorRejection
+// 表示策略拒绝（如破坏性工具缺确认）：回灌模型一条结构化提示，不算工具执行失败、不触发
+// 自动重试、不消耗恢复预算；返回其它 error 则按普通工具错误处理。
+type Interceptor func(ctx context.Context, spec Spec, input any) error
+
+// InterceptorRejection 是拦截器的策略拒绝载荷；agent 恢复中间件据此回灌模型一条结构化
+// 提示，而不把它计入失败恢复账。
+type InterceptorRejection struct {
+	Observation string
+	Data        map[string]any
+}
+
+func (rejection *InterceptorRejection) Error() string { return rejection.Observation }
+
+// Use 追加一个执行拦截器；多个拦截器按注册序在执行链中运行。
+func (registry *Registry) Use(interceptor Interceptor) {
+	if interceptor != nil {
+		registry.interceptors = append(registry.interceptors, interceptor)
+	}
 }
 
 func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
@@ -296,6 +319,12 @@ func addTool[I, O any](
 		if err := registry.guard(ctx, spec); err != nil {
 			var zero O
 			return zero, err
+		}
+		for _, interceptor := range registry.interceptors {
+			if err := interceptor(ctx, spec, input); err != nil {
+				var zero O
+				return zero, err
+			}
 		}
 		if reporter, ok := ctx.Value(reporterKey).(Reporter); ok && reporter != nil {
 			reporter(ctx, name, "started", input, nil, nil)

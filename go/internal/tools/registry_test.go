@@ -252,6 +252,56 @@ func TestToolEffectClassificationTable(t *testing.T) {
 	}
 }
 
+func TestInterceptorChainRunsInOrderAndCanReject(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var order []string
+	registry.Use(func(_ context.Context, spec Spec, _ any) error {
+		order = append(order, "a:"+spec.Name)
+		return nil
+	})
+	registry.Use(func(_ context.Context, spec Spec, _ any) error {
+		order = append(order, "b:"+spec.Name)
+		if spec.Name == "asset.list_assets" {
+			return &InterceptorRejection{Observation: "blocked", Data: map[string]any{"error_code": "x"}}
+		}
+		return nil
+	})
+	registry.Use(nil) // nil 拦截器被忽略，不改变链
+
+	ctx := WithDraftID(t.Context(), "draft_interceptor")
+
+	// 被否决：第二个拦截器返回 InterceptorRejection，executor 不执行、错误原样上抛。
+	rejected := registry.specs["asset.list_assets"].Implementation.(einotool.InvokableTool)
+	_, rejectErr := rejected.InvokableRun(ctx, `{}`)
+	var rejection *InterceptorRejection
+	if !errors.As(rejectErr, &rejection) || rejection.Data["error_code"] != "x" {
+		t.Fatalf("拦截器应否决 asset.list_assets: err=%v", rejectErr)
+	}
+	if len(order) != 2 || order[0] != "a:asset.list_assets" || order[1] != "b:asset.list_assets" {
+		t.Fatalf("拦截器未按注册序运行: %v", order)
+	}
+
+	// 放行：无前置的 timeline.inspect 两个拦截器都放行，正常进入 executor。
+	order = nil
+	allowed := registry.specs["timeline.inspect"].Implementation.(einotool.InvokableTool)
+	if _, err := allowed.InvokableRun(ctx, `{}`); err != nil {
+		t.Fatalf("放行工具不应报错: %v", err)
+	}
+	if len(order) != 2 || order[0] != "a:timeline.inspect" || order[1] != "b:timeline.inspect" {
+		t.Fatalf("放行路径拦截器未按序运行: %v", order)
+	}
+}
+
 func TestLLMToolInputFieldsHaveDescriptions(t *testing.T) {
 	t.Parallel()
 	database, err := storage.Open(t.Context(), t.TempDir())
