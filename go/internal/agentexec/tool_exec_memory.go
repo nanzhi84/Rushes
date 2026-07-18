@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -22,7 +21,7 @@ type memoryEvidence struct {
 
 type memoryEvidenceContextKey struct{}
 
-func withMemoryEvidence(ctx context.Context, kind, id string) context.Context {
+func WithMemoryEvidence(ctx context.Context, kind, id string) context.Context {
 	if !storage.ValidUserMemoryEvidenceKind(kind) || strings.TrimSpace(id) == "" {
 		return ctx
 	}
@@ -34,21 +33,7 @@ func memoryEvidenceFromContext(ctx context.Context) (memoryEvidence, bool) {
 	return evidence, ok && storage.ValidUserMemoryEvidenceKind(evidence.Kind) && evidence.ID != ""
 }
 
-func withQueueMemoryEvidence(ctx context.Context, item QueueItem) context.Context {
-	switch item.Kind {
-	case QueueUserMessage:
-		return withMemoryEvidence(ctx, storage.UserMemoryEvidenceMessage, item.ItemID)
-	case QueueUIObservation:
-		if agentexec.InterfaceString(item.Payload["observation_type"]) == "decision_answered" {
-			return withMemoryEvidence(
-				ctx, storage.UserMemoryEvidenceDecision, agentexec.InterfaceString(item.Payload["decision_id"]),
-			)
-		}
-	}
-	return ctx
-}
-
-func (service *Service) toolMemoryUpdate(
+func (exec *Executor) toolMemoryUpdate(
 	ctx context.Context,
 	draftID string,
 	input rushestools.MemoryUpdateInput,
@@ -160,7 +145,7 @@ func (service *Service) toolMemoryUpdate(
 		seenRemovals[key] = struct{}{}
 	}
 
-	result, err := reducer.Apply(ctx, service.database, nil, reducer.Options{
+	result, err := reducer.Apply(ctx, exec.database, nil, reducer.Options{
 		Actor: contracts.ActorAgent,
 		ResultRows: reducer.ResultRows{
 			UserMemoryUpserts: rows, UserMemoryRemoveKeys: input.RemoveKeys,

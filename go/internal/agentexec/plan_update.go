@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"sort"
 	"unicode/utf8"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -19,15 +18,15 @@ const (
 	planUpdateMaxAttempts = 3
 )
 
-func (service *Service) toolPlanUpdate(
+func (exec *Executor) toolPlanUpdate(
 	ctx context.Context,
 	draftID string,
 	input rushestools.PlanUpdateInput,
 ) (rushestools.ToolResult, error) {
-	return service.toolPlanUpdateWithBeforeApply(ctx, draftID, input, nil)
+	return exec.toolPlanUpdateWithBeforeApply(ctx, draftID, input, nil)
 }
 
-func (service *Service) toolPlanUpdateWithBeforeApply(
+func (exec *Executor) toolPlanUpdateWithBeforeApply(
 	ctx context.Context,
 	draftID string,
 	input rushestools.PlanUpdateInput,
@@ -50,7 +49,7 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 				"reason": "contract_invalid",
 			}), nil
 		}
-		contractMap, contractErr := agentexec.CanonicalContentPlanValue(input.Contract)
+		contractMap, contractErr := CanonicalContentPlanValue(input.Contract)
 		if contractErr != nil {
 			return planUpdateFailure("验收合同无法编码为 JSON", map[string]any{"reason": "contract_not_json"}), nil
 		}
@@ -70,7 +69,7 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 	}
 
 	for attempt := 1; attempt <= planUpdateMaxAttempts; attempt++ {
-		draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
+		draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
 		if err != nil {
 			return rushestools.ToolResult{}, err
 		}
@@ -84,7 +83,7 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 				map[string]any{"reason": "stored_reserved_key", "reserved_key": key},
 			), nil
 		}
-		if contract, contractErr := agentexec.ContentPlanContract(updated); contractErr != nil {
+		if contract, contractErr := ContentPlanContract(updated); contractErr != nil {
 			return planUpdateFailure(contractErr.Error(), map[string]any{"reason": "contract_invalid"}), nil
 		} else if contract != nil {
 			updated["contract"] = contract
@@ -115,7 +114,7 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 			}
 		}
 
-		result, err := reducer.Apply(ctx, service.database, nil, reducer.Options{
+		result, err := reducer.Apply(ctx, exec.database, nil, reducer.Options{
 			Actor: contracts.ActorAgent,
 			ResultRows: reducer.ResultRows{DraftPlanUpdate: &reducer.DraftPlanUpdateRow{
 				DraftID: draftID, ContentPlan: updated, ExpectedPlanHash: expectedPlanHash,
@@ -175,7 +174,7 @@ func mergeContentPlan(target, patch map[string]any) map[string]any {
 		}
 		patchObject, isObject := patchValue.(map[string]any)
 		if !isObject {
-			result[key] = cloneContentPlanValue(patchValue)
+			result[key] = CloneContentPlanValue(patchValue)
 			continue
 		}
 		targetObject, _ := result[key].(map[string]any)
@@ -187,19 +186,19 @@ func mergeContentPlan(target, patch map[string]any) map[string]any {
 func cloneContentPlanMap(input map[string]any) map[string]any {
 	result := make(map[string]any, len(input))
 	for key, value := range input {
-		result[key] = cloneContentPlanValue(value)
+		result[key] = CloneContentPlanValue(value)
 	}
 	return result
 }
 
-func cloneContentPlanValue(value any) any {
+func CloneContentPlanValue(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		return cloneContentPlanMap(typed)
 	case []any:
 		result := make([]any, len(typed))
 		for index, item := range typed {
-			result[index] = cloneContentPlanValue(item)
+			result[index] = CloneContentPlanValue(item)
 		}
 		return result
 	default:
@@ -218,7 +217,7 @@ func reservedContentPlanKey(value any) string {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		if isReservedContextKey(key) {
+		if IsReservedContextKey(key) {
 			return key
 		}
 	}
@@ -234,7 +233,7 @@ func reservedContentPlanContractKey(value any) string {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			if isReservedContextKey(key) {
+			if IsReservedContextKey(key) {
 				return key
 			}
 			if nested := reservedContentPlanContractKey(typed[key]); nested != "" {

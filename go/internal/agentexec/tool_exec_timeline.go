@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"math"
 	"strings"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -16,22 +15,22 @@ import (
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-func (service *Service) toolComposeInitial(
+func (exec *Executor) toolComposeInitial(
 	ctx context.Context,
 	draftID string,
 	input rushestools.ComposeInitialInput,
 ) (rushestools.ToolResult, error) {
-	version, err := timeline.NextVersion(ctx, service.database, draftID)
+	version, err := timeline.NextVersion(ctx, exec.database, draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
 	selections := make([]timeline.Selection, 0, len(input.Clips))
 	for index, clip := range input.Clips {
-		asset, assetErr := storage.GetAsset(ctx, service.database.Read(), clip.AssetID)
+		asset, assetErr := storage.GetAsset(ctx, exec.database.Read(), clip.AssetID)
 		if assetErr != nil {
 			return composeInitialFailure(index, clip, storage.Asset{}, assetErr.Error()), nil
 		}
-		durationSec, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
+		durationSec, _ := NumericValue(asset.Probe["duration_sec"])
 		durationFrames := int(math.Round(durationSec * timeline.DefaultFPS))
 		if asset.Kind != "video" && asset.Kind != "image" {
 			return composeInitialFailure(index, clip, asset, "主视觉轨只支持 video/image 素材"), nil
@@ -58,7 +57,7 @@ func (service *Service) toolComposeInitial(
 			},
 		}, nil
 	}
-	return service.persistTimeline(ctx, draftID, document, "compose_initial", []map[string]any{{
+	return exec.persistTimeline(ctx, draftID, document, "compose_initial", []map[string]any{{
 		"kind": "compose_initial", "clip_count": len(input.Clips),
 	}})
 }
@@ -69,7 +68,7 @@ func composeInitialFailure(
 	asset storage.Asset,
 	reason string,
 ) rushestools.ToolResult {
-	durationSec, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
+	durationSec, _ := NumericValue(asset.Probe["duration_sec"])
 	assetID := asset.ID
 	if assetID == "" {
 		assetID = clip.AssetID
@@ -93,7 +92,7 @@ func composeInitialFailure(
 	}
 }
 
-func (service *Service) toolApplyPatches(
+func (exec *Executor) toolApplyPatches(
 	ctx context.Context,
 	draftID string,
 	input rushestools.TimelinePatchBatchInput,
@@ -104,7 +103,7 @@ func (service *Service) toolApplyPatches(
 	if len(input.Ops) > 100 {
 		return rushestools.ToolResult{}, errors.New("timeline.apply_patches 单次最多 100 个 op")
 	}
-	current, err := timeline.Latest(ctx, service.database, draftID)
+	current, err := timeline.Latest(ctx, exec.database, draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -112,11 +111,11 @@ func (service *Service) toolApplyPatches(
 	for index := range input.Ops {
 		operations[index] = map[string]any(input.Ops[index])
 	}
-	enrichedOperations, err := service.enrichTimelineOperations(ctx, draftID, operations)
+	enrichedOperations, err := exec.enrichTimelineOperations(ctx, draftID, operations)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	plannedOperations, preservedAudio := agentexec.PrepareTimelineBatch(current, enrichedOperations)
+	plannedOperations, preservedAudio := PrepareTimelineBatch(current, enrichedOperations)
 	document := current
 	for index, operation := range plannedOperations {
 		beforeOperation := document
@@ -139,7 +138,7 @@ func (service *Service) toolApplyPatches(
 			}, nil
 		}
 	}
-	if restoreErr := agentexec.RestoreIndependentAudioTracks(&document, preservedAudio); restoreErr != nil {
+	if restoreErr := RestoreIndependentAudioTracks(&document, preservedAudio); restoreErr != nil {
 		return rushestools.ToolResult{
 			Status:      "failed",
 			Observation: "批量主视频编辑会破坏未被本批直接编辑的 BGM/SFX，当前时间线未更新",
@@ -151,7 +150,7 @@ func (service *Service) toolApplyPatches(
 			},
 		}, nil
 	}
-	attachedBeatGrids, beatWarnings := service.attachMissingBGMBeatGrids(ctx, draftID, &document)
+	attachedBeatGrids, beatWarnings := exec.attachMissingBGMBeatGrids(ctx, draftID, &document)
 	if report := timeline.Validate(document); !report.Valid {
 		return rushestools.ToolResult{
 			Status:      "failed",
@@ -167,13 +166,13 @@ func (service *Service) toolApplyPatches(
 			},
 		}, nil
 	}
-	next, err := timeline.NextVersion(ctx, service.database, draftID)
+	next, err := timeline.NextVersion(ctx, exec.database, draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
 	document.Version = next
 	document.TimelineID = fmt.Sprintf("%s:v%d", draftID, next)
-	result, err := service.persistTimeline(ctx, draftID, document, "apply_patches", plannedOperations)
+	result, err := exec.persistTimeline(ctx, draftID, document, "apply_patches", plannedOperations)
 	appendBeatMetadataResult(&result, attachedBeatGrids, beatWarnings)
 	return result, err
 }
@@ -195,14 +194,14 @@ func appendBeatMetadataResult(
 	}
 }
 
-func (service *Service) persistTimeline(
+func (exec *Executor) persistTimeline(
 	ctx context.Context,
 	draftID string,
 	document timeline.Document,
 	operation string,
 	editOperationBatches ...[]map[string]any,
 ) (rushestools.ToolResult, error) {
-	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
+	draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -216,7 +215,7 @@ func (service *Service) persistTimeline(
 		validationType = "TimelineValidationFailed"
 	}
 	reportMap := map[string]any{"valid": report.Valid, "checks": report.Checks, "issues": report.Issues}
-	contractReport, hasContract, contractErr := service.verifyContentContract(ctx, draftID, document)
+	contractReport, hasContract, contractErr := exec.VerifyContentContract(ctx, draftID, document)
 	if contractErr != nil {
 		return rushestools.ToolResult{}, contractErr
 	}
@@ -235,8 +234,8 @@ func (service *Service) persistTimeline(
 	if len(editOperationBatches) > 0 {
 		editOperations = editOperationBatches[0]
 	}
-	patchID := operation + ":" + randomID("patch")
-	result, err := reducer.Apply(ctx, service.database, []contracts.Event{
+	patchID := operation + ":" + RandomID("patch")
+	result, err := reducer.Apply(ctx, exec.database, []contracts.Event{
 		{
 			Type: "TimelineVersionCreated", DraftID: draftID,
 			Payload: map[string]any{
@@ -261,11 +260,11 @@ func (service *Service) persistTimeline(
 		Status: status, Observation: timeline.Inspect(document),
 		Data: map[string]any{
 			"validation_report": reportMap,
-			"beat_alignment":    agentexec.BeatAlignmentData(document),
+			"beat_alignment":    BeatAlignmentData(document),
 		},
 	}
 	if hasContract {
-		failures := agentexec.ContractFailureItems(contractReport)
+		failures := ContractFailureItems(contractReport)
 		if len(failures) > 0 {
 			encoded, _ := json.Marshal(failures)
 			toolResult.Observation += " 验收合同未通过项：" + string(encoded)
@@ -275,18 +274,18 @@ func (service *Service) persistTimeline(
 	return toolResult, nil
 }
 
-func (service *Service) toolValidateTimeline(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
-	document, err := timeline.Latest(ctx, service.database, draftID)
+func (exec *Executor) toolValidateTimeline(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
+	document, err := timeline.Latest(ctx, exec.database, draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
+	draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
 	report := timeline.Validate(document)
-	beatAlignment := agentexec.BeatAlignmentData(document)
-	contractReport, hasContract, contractErr := service.verifyContentContract(ctx, draftID, document)
+	beatAlignment := BeatAlignmentData(document)
+	contractReport, hasContract, contractErr := exec.VerifyContentContract(ctx, draftID, document)
 	if contractErr != nil {
 		return rushestools.ToolResult{}, contractErr
 	}
@@ -300,7 +299,7 @@ func (service *Service) toolValidateTimeline(ctx context.Context, draftID string
 	if !report.Valid {
 		eventType = "TimelineValidationFailed"
 	}
-	result, err := reducer.Apply(ctx, service.database, []contracts.Event{{
+	result, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
 		Type: eventType, DraftID: draftID,
 		Payload: map[string]any{
 			"timeline_version":  document.Version,
@@ -327,15 +326,15 @@ func (service *Service) toolValidateTimeline(ctx context.Context, draftID string
 	}
 	// validate 是只读诊断：口播质检读取失败（如 transcript 缺失/损坏）时跳过附加，
 	// 不让合法时间线因增强信息读取失败而报错（与 toolEditTalkingHead 的软跳过一致）。
-	if quality, qualityErr := service.speechQualityReport(ctx, document); qualityErr == nil {
+	if quality, qualityErr := exec.speechQualityReport(ctx, document); qualityErr == nil {
 		if present, _ := quality["a_roll_present"].(bool); present {
 			data["speech_quality"] = quality
-			observation += agentexec.TalkingHeadQualitySummary(quality)
+			observation += TalkingHeadQualitySummary(quality)
 		}
 	}
 	if hasContract {
 		data["content_contract"] = contractReport
-		failures := agentexec.ContractFailureItems(contractReport)
+		failures := ContractFailureItems(contractReport)
 		data["contract_failures"] = failures
 		if len(failures) == 0 {
 			observation += " 验收合同全部通过。"
@@ -351,12 +350,12 @@ func (service *Service) toolValidateTimeline(ctx context.Context, draftID string
 	}, nil
 }
 
-func (service *Service) toolInspectTimeline(
+func (exec *Executor) toolInspectTimeline(
 	ctx context.Context,
 	draftID string,
 	_ rushestools.TimelineInspectInput,
 ) (rushestools.ToolResult, error) {
-	document, err := timeline.Latest(ctx, service.database, draftID)
+	document, err := timeline.Latest(ctx, exec.database, draftID)
 	if errors.Is(err, storage.ErrNotFound) {
 		return rushestools.ToolResult{
 			Status:      "succeeded",
@@ -413,7 +412,7 @@ func (service *Service) toolInspectTimeline(
 			"timeline_exists": true,
 			"fps":             document.FPS, "duration_frames": document.DurationFrames, "tracks": tracks,
 			"audio_layout":   audioLayoutData(document),
-			"beat_alignment": agentexec.BeatAlignmentData(document),
+			"beat_alignment": BeatAlignmentData(document),
 		},
 	}, nil
 }

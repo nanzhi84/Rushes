@@ -113,9 +113,14 @@ linters:
             - "**/internal/agentexec/**/*.go"
           allow:
             - $gostd
+            - github.com/cloudwego/eino/
             - github.com/nanzhi84/Rushes/go/internal/contracts
+            - github.com/nanzhi84/Rushes/go/internal/media
+            - github.com/nanzhi84/Rushes/go/internal/reducer
+            - github.com/nanzhi84/Rushes/go/internal/storage
             - github.com/nanzhi84/Rushes/go/internal/timeline
             - github.com/nanzhi84/Rushes/go/internal/tools
+            - github.com/nanzhi84/Rushes/go/internal/understanding
 
         agent:
           list-mode: strict
@@ -144,6 +149,7 @@ linters:
             - github.com/go-chi/chi/v5
             - github.com/oapi-codegen
             - github.com/nanzhi84/Rushes/go/internal/agent
+            - github.com/nanzhi84/Rushes/go/internal/agentexec
             - github.com/nanzhi84/Rushes/go/internal/contracts
             - github.com/nanzhi84/Rushes/go/internal/media
             - github.com/nanzhi84/Rushes/go/internal/reducer

@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/nanzhi84/Rushes/go/internal/agent"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -107,9 +107,9 @@ func (server *Server) AnswerDecisionApiDecisionsDecisionIdAnswerPost(
 	if payload.Answer.Payload != nil {
 		answerPayload = *payload.Answer.Payload
 	}
-	answer, err := agent.AdjudicateDecisionAnswer(decision, optionID, freeText, answerPayload)
+	answer, err := agentexec.AdjudicateDecisionAnswer(decision, optionID, freeText, answerPayload)
 	if err != nil {
-		var answerErr *agent.DecisionAnswerError
+		var answerErr *agentexec.DecisionAnswerError
 		if errors.As(err, &answerErr) {
 			writeBadRequest(writer, answerErr.Reason)
 			return

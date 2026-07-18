@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -691,10 +692,10 @@ func TestRecentEditHistoryBudgetFallsBackToMinimalLatestEntry(t *testing.T) {
 func TestContextCompressionHelpersBoundAndSanitizeHistory(t *testing.T) {
 	t.Parallel()
 	longGoal := strings.Repeat("剪", 220)
-	if truncateRunes("短文本", 10) != "短文本" || !strings.HasSuffix(truncateRunes(longGoal, 10), "…") {
+	if agentexec.TruncateRunes("短文本", 10) != "短文本" || !strings.HasSuffix(agentexec.TruncateRunes(longGoal, 10), "…") {
 		t.Fatal("rune 截断行为错误")
 	}
-	semanticTags := catalogSemanticTags([]understanding.Segment{{
+	semanticTags := agentexec.CatalogSemanticTags([]understanding.Segment{{
 		Tags: []string{"", "人物", "人物"}, Subjects: []string{"舞者"}, Actions: []string{"转身"},
 	}}, 3)
 	if !reflect.DeepEqual(semanticTags, []string{"人物", "舞者", "转身"}) {

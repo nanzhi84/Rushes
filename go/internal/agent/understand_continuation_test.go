@@ -78,7 +78,7 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 		t.Fatalf("fixture 未触发 material catalog 截断: %s", rawSnapshot)
 	}
 
-	message, err := service.understandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
+	message, err := service.executor.UnderstandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestUnderstandJobEvidenceAndTerminalReuseSelectJobSpecificSummary(t *testin
 		t.Fatalf("terminal=%#v err=%v", terminal, err)
 	}
 
-	message, err := service.understandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
+	message, err := service.executor.UnderstandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
 	if err != nil {
 		t.Fatal(err)
 	}

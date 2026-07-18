@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -36,7 +37,7 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 	t.Cleanup(service.Close)
 
 	base := rushestools.WithDraftID(t.Context(), "draft_same_turn_decision")
-	base = withTurnInteractionState(base, newTurnInteractionState())
+	base = agentexec.WithTurnInteractionState(base, agentexec.NewTurnInteractionState())
 	askContext := rushestools.WithToolCallID(base, "call_ask_1")
 	raw, err := service.ExecuteTool(askContext, "interaction.ask_user", rushestools.AskUserInput{
 		Question:     "当前素材支持两条互相冲突的主线，且无法判断用户目标，请选择核心方向。",
@@ -135,7 +136,7 @@ func TestAskUserRejectsCreativeApprovalAndVerboseCriticalQuestion(t *testing.T) 
 	t.Cleanup(service.Close)
 
 	ctx := rushestools.WithDraftID(t.Context(), "draft_autonomous_editing")
-	ctx = withTurnInteractionState(ctx, newTurnInteractionState())
+	ctx = agentexec.WithTurnInteractionState(ctx, agentexec.NewTurnInteractionState())
 	for name, input := range map[string]rushestools.AskUserInput{
 		"reversible approval": {
 			Question: "请逐项确认口播删保项和 B-roll 方案。", DecisionType: "approve_speech_cut",
@@ -172,8 +173,8 @@ func TestAskUserRejectsCreativeApprovalAndVerboseCriticalQuestion(t *testing.T) 
 
 func TestBlockingDecisionSerializesParallelToolCalls(t *testing.T) {
 	t.Parallel()
-	state := newTurnInteractionState()
-	ctx := withTurnInteractionState(t.Context(), state)
+	state := agentexec.NewTurnInteractionState()
+	ctx := agentexec.WithTurnInteractionState(t.Context(), state)
 	release, blocked := beginTurnToolCall(ctx)
 	if blocked != "" {
 		t.Fatalf("unexpected initial block %q", blocked)

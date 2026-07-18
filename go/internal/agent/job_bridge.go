@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 )
@@ -103,7 +104,7 @@ func (service *Service) bridgeIteration(ctx context.Context, cursor int64) int64
 		}
 		observations = append(observations, bridgeObservation{
 			eventID: eventID, draftID: target, jobID: jobID, event: envelope,
-			claimToken: randomID("bridge"),
+			claimToken: agentexec.RandomID("bridge"),
 		})
 	}
 	if err := rows.Err(); err != nil {

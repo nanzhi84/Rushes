@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -9,7 +9,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -21,7 +20,7 @@ import (
 // 重建主视觉，而不是继续消耗当前时间线上已经裁短的 source range。这样“重剪
 // 到 48 秒并覆盖整首音乐”可以在一个原子提交里完成，不需要模型手工拼几十个
 // compose/insert/trim 补丁。
-func (service *Service) toolBuildBeatMix(
+func (exec *Executor) toolBuildBeatMix(
 	ctx context.Context,
 	draftID string,
 	input rushestools.TimelineBeatRecutInput,
@@ -32,13 +31,13 @@ func (service *Service) toolBuildBeatMix(
 		}
 		return rushestools.ToolResult{Status: "failed", Observation: message, Data: data}, nil
 	}
-	current, err := timeline.Latest(ctx, service.database, draftID)
+	current, err := timeline.Latest(ctx, exec.database, draftID)
 	if errors.Is(err, storage.ErrNotFound) {
 		current = timeline.Empty(draftID, 0)
 	} else if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	assets, err := storage.ListDraftAssets(ctx, service.database.Read(), draftID)
+	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -64,7 +63,7 @@ func (service *Service) toolBuildBeatMix(
 	if bgmAssetID == "" {
 		candidates := make([]string, 0, 2)
 		for _, asset := range assets {
-			duration, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
+			duration, _ := NumericValue(asset.Probe["duration_sec"])
 			if asset.Kind == "audio" && asset.Usable &&
 				understanding.ClassifyAudioRole(asset.Filename, duration) == "bgm" {
 				candidates = append(candidates, asset.ID)
@@ -85,7 +84,7 @@ func (service *Service) toolBuildBeatMix(
 			"bgm_asset_id": bgmAssetID,
 		})
 	}
-	bgmDurationSec, _ := agentexec.NumericValue(bgmAsset.Probe["duration_sec"])
+	bgmDurationSec, _ := NumericValue(bgmAsset.Probe["duration_sec"])
 	bgmAvailableFrames := int(math.Round(bgmDurationSec * float64(current.FPS)))
 	if bgmAvailableFrames <= 0 {
 		return failed("BGM 缺少可用时长，无法覆盖成片", map[string]any{"bgm_asset_id": bgmAssetID})
@@ -110,7 +109,7 @@ func (service *Service) toolBuildBeatMix(
 		})
 	}
 
-	bgmSource, _, err := media.ResolveAssetSource(ctx, service.database, bgmAsset.ID)
+	bgmSource, _, err := media.ResolveAssetSource(ctx, exec.database, bgmAsset.ID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -128,7 +127,7 @@ func (service *Service) toolBuildBeatMix(
 	type videoSource struct {
 		asset          storage.Asset
 		availableFrame int
-		analysisRanges []agentexec.BeatMixSourceRange
+		analysisRanges []BeatMixSourceRange
 	}
 	seenCurrentAssets := map[string]struct{}{}
 	currentOrder := make([]string, 0)
@@ -169,12 +168,12 @@ func (service *Service) toolBuildBeatMix(
 			}
 			continue
 		}
-		durationSec, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
+		durationSec, _ := NumericValue(asset.Probe["duration_sec"])
 		available := int(math.Round(durationSec * float64(current.FPS)))
 		if available <= 0 {
 			continue
 		}
-		analysisRanges := service.latestBeatMixSourceRanges(ctx, asset.ID, available)
+		analysisRanges := exec.latestBeatMixSourceRanges(ctx, asset.ID, available)
 		seenVideo[assetID] = struct{}{}
 		videoSources = append(videoSources, videoSource{
 			asset: asset, availableFrame: available,
@@ -191,7 +190,7 @@ func (service *Service) toolBuildBeatMix(
 	}
 	shotByID := map[string]indexedShot{}
 	if len(input.ShotIDs) > 0 {
-		indexedShots, _, indexErr := service.draftShotIndex(ctx, draftID, nil)
+		indexedShots, _, indexErr := exec.draftShotIndex(ctx, draftID, nil)
 		if indexErr != nil {
 			return rushestools.ToolResult{}, indexErr
 		}
@@ -232,7 +231,7 @@ func (service *Service) toolBuildBeatMix(
 				})
 			}
 			// 最后一帧允许是音乐/目标边界；其余切点必须来自真实节拍网格。
-			if cutFrame != targetFrames && !agentexec.ContainsFrame(grid.BeatFrames, cutFrame) {
+			if cutFrame != targetFrames && !ContainsFrame(grid.BeatFrames, cutFrame) {
 				return failed("cut_frames 中存在不属于真实节拍网格的帧", map[string]any{
 					"cut_index": index + 1, "cut_frame": cutFrame,
 					"recovery": "使用 audio.analyze_beats 返回的 beat_frames，或省略 cut_frames",
@@ -294,7 +293,7 @@ func (service *Service) toolBuildBeatMix(
 	selections := make([]timeline.Selection, 0, len(cutFrames))
 	usedVideoIDs := make([]string, 0, len(cutFrames))
 	usedAssets := map[string]struct{}{}
-	usedSourceRanges := map[string][]agentexec.BeatMixSourceRange{}
+	usedSourceRanges := map[string][]BeatMixSourceRange{}
 	sourceIndexByAsset := make(map[string]int, len(videoSources))
 	for index, source := range videoSources {
 		sourceIndexByAsset[source.asset.ID] = index
@@ -313,7 +312,7 @@ func (service *Service) toolBuildBeatMix(
 			var fits bool
 			start, fits = chooseUnusedBeatMixSourceStart(
 				videoSources[selectedIndex].availableFrame, duration,
-				[]agentexec.BeatMixSourceRange{shot.rangeInfo}, usedSourceRanges[shot.candidate.AssetID], 0, true,
+				[]BeatMixSourceRange{shot.rangeInfo}, usedSourceRanges[shot.candidate.AssetID], 0, true,
 			)
 			if !fits {
 				return failed("所选镜头无法覆盖对应节拍片段，或其源区间已被重复使用", map[string]any{
@@ -353,7 +352,7 @@ func (service *Service) toolBuildBeatMix(
 			})
 		}
 		selected := videoSources[selectedIndex]
-		usedRange := agentexec.BeatMixSourceRange{StartFrame: start, EndFrame: start + duration}
+		usedRange := BeatMixSourceRange{StartFrame: start, EndFrame: start + duration}
 		usedSourceRanges[selected.asset.ID] = append(usedSourceRanges[selected.asset.ID], usedRange)
 		usedAssets[selected.asset.ID] = struct{}{}
 		if sourceRangeContains(selected.analysisRanges, start, start+duration) {
@@ -388,7 +387,7 @@ func (service *Service) toolBuildBeatMix(
 		})
 	}
 
-	nextVersion, err := timeline.NextVersion(ctx, service.database, draftID)
+	nextVersion, err := timeline.NextVersion(ctx, exec.database, draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -409,7 +408,7 @@ func (service *Service) toolBuildBeatMix(
 	if bgmTrack == nil || sfxTrack == nil {
 		return rushestools.ToolResult{}, errors.New("时间线缺少 bgm 或 sfx 轨")
 	}
-	bgmClipID := randomID("bgm_beat")
+	bgmClipID := RandomID("bgm_beat")
 	bgmTrack.Clips = append(bgmTrack.Clips, timeline.Clip{
 		TimelineClipID: bgmClipID, TrackID: "bgm", AssetID: bgmAsset.ID,
 		AssetKind: "audio", Role: "bgm", TimelineStartFrame: 0,
@@ -428,7 +427,7 @@ func (service *Service) toolBuildBeatMix(
 		if sfx.DurationFrames <= 0 || sfx.DurationFrames > current.FPS*3 {
 			return failed("SFX duration_frames 必须大于 0 且不超过 3 秒", nil)
 		}
-		sfxDurationSec, _ := agentexec.NumericValue(sfxAsset.Probe["duration_sec"])
+		sfxDurationSec, _ := NumericValue(sfxAsset.Probe["duration_sec"])
 		available := int(math.Round(sfxDurationSec * float64(current.FPS)))
 		if available > 0 && sfx.DurationFrames > available {
 			return failed("SFX 请求时长超过素材时长", map[string]any{
@@ -454,7 +453,7 @@ func (service *Service) toolBuildBeatMix(
 		if gain < -60 || gain > 12 {
 			return failed("SFX gain_db 必须在 [-60,12] 范围内", nil)
 		}
-		sfxClipID = randomID("sfx_beat")
+		sfxClipID = RandomID("sfx_beat")
 		sfxTrack.Clips = append(sfxTrack.Clips, timeline.Clip{
 			TimelineClipID: sfxClipID, TrackID: "sfx", AssetID: sfxAsset.ID,
 			AssetKind: "audio", Role: "sfx", TimelineStartFrame: sfxStartFrame,
@@ -481,7 +480,7 @@ func (service *Service) toolBuildBeatMix(
 		semanticOperation["sfx_asset_id"] = input.SFX.AssetID
 		semanticOperation["sfx_start_frame"] = sfxStartFrame
 	}
-	result, err := service.persistTimeline(
+	result, err := exec.persistTimeline(
 		ctx, draftID, document, "recut_to_beats", []map[string]any{semanticOperation},
 	)
 	if err != nil || result.Status != "succeeded" {
@@ -514,12 +513,12 @@ func (service *Service) toolBuildBeatMix(
 
 // latestBeatMixSourceRanges 读取质量最完整的理解摘要中的源帧证据。摘要缺失、损坏或
 // 区间不合法时静默回退到完整素材，避免让理解服务的降级阻塞高层剪辑工具。
-func (service *Service) latestBeatMixSourceRanges(
+func (exec *Executor) latestBeatMixSourceRanges(
 	ctx context.Context,
 	assetID string,
 	availableFrames int,
-) []agentexec.BeatMixSourceRange {
-	raw, err := storage.BestMaterialSummary(ctx, service.database.Read(), assetID)
+) []BeatMixSourceRange {
+	raw, err := storage.BestMaterialSummary(ctx, exec.database.Read(), assetID)
 	if err != nil {
 		return nil
 	}
@@ -537,9 +536,9 @@ func (service *Service) latestBeatMixSourceRanges(
 func beatMixRangesFromUnderstanding(
 	segments []understanding.Segment,
 	availableFrames int,
-) []agentexec.BeatMixSourceRange {
-	ranges := make([]agentexec.BeatMixSourceRange, 0, len(segments)*2)
-	var continuous *agentexec.BeatMixSourceRange
+) []BeatMixSourceRange {
+	ranges := make([]BeatMixSourceRange, 0, len(segments)*2)
+	var continuous *BeatMixSourceRange
 	flushContinuous := func() {
 		if continuous == nil {
 			return
@@ -558,7 +557,7 @@ func beatMixRangesFromUnderstanding(
 			continue
 		}
 		penalty := understandingSegmentQualityPenalty(segment)
-		ranges = append(ranges, agentexec.BeatMixSourceRange{StartFrame: start, EndFrame: end, QualityPenalty: penalty})
+		ranges = append(ranges, BeatMixSourceRange{StartFrame: start, EndFrame: end, QualityPenalty: penalty})
 		// analysis_window 是同一长镜头内的理解采样边界。卡点片段可以跨越
 		// 相邻窗口，但不能跨越 VLM 已确认的真实切镜或不可用区间。
 		if continuous != nil && start <= continuous.EndFrame+1 && segment.BoundaryKind == "analysis_window" {
@@ -567,7 +566,7 @@ func beatMixRangesFromUnderstanding(
 			continue
 		}
 		flushContinuous()
-		continuous = &agentexec.BeatMixSourceRange{StartFrame: start, EndFrame: end, QualityPenalty: penalty}
+		continuous = &BeatMixSourceRange{StartFrame: start, EndFrame: end, QualityPenalty: penalty}
 	}
 	flushContinuous()
 	sort.SliceStable(ranges, func(i, j int) bool {
@@ -596,15 +595,15 @@ func understandingSegmentQualityPenalty(segment understanding.Segment) float64 {
 func chooseUnusedBeatMixSourceStart(
 	availableFrames int,
 	durationFrames int,
-	ranges []agentexec.BeatMixSourceRange,
-	used []agentexec.BeatMixSourceRange,
+	ranges []BeatMixSourceRange,
+	used []BeatMixSourceRange,
 	rangeOffset int,
 	strictRanges bool,
 ) (int, bool) {
 	if durationFrames <= 0 || availableFrames < durationFrames {
 		return 0, false
 	}
-	candidates := make([]agentexec.BeatMixSourceRange, 0, max(1, len(ranges)))
+	candidates := make([]BeatMixSourceRange, 0, max(1, len(ranges)))
 	for _, sourceRange := range ranges {
 		sourceRange.StartFrame = max(0, sourceRange.StartFrame)
 		sourceRange.EndFrame = min(availableFrames, sourceRange.EndFrame)
@@ -613,7 +612,7 @@ func chooseUnusedBeatMixSourceStart(
 		}
 	}
 	if len(candidates) == 0 && !strictRanges {
-		candidates = append(candidates, agentexec.BeatMixSourceRange{StartFrame: 0, EndFrame: availableFrames})
+		candidates = append(candidates, BeatMixSourceRange{StartFrame: 0, EndFrame: availableFrames})
 	}
 	if len(candidates) == 0 {
 		return 0, false
@@ -624,7 +623,7 @@ func chooseUnusedBeatMixSourceStart(
 		}
 		return candidates[left].StartFrame < candidates[right].StartFrame
 	})
-	sortedUsed := append([]agentexec.BeatMixSourceRange(nil), used...)
+	sortedUsed := append([]BeatMixSourceRange(nil), used...)
 	sort.SliceStable(sortedUsed, func(i, j int) bool {
 		return sortedUsed[i].StartFrame < sortedUsed[j].StartFrame
 	})
@@ -635,7 +634,7 @@ func chooseUnusedBeatMixSourceStart(
 	for preferredCount < len(candidates) && candidates[preferredCount].QualityPenalty == candidates[0].QualityPenalty {
 		preferredCount++
 	}
-	ordered := make([]agentexec.BeatMixSourceRange, 0, len(candidates))
+	ordered := make([]BeatMixSourceRange, 0, len(candidates))
 	for step := 0; step < preferredCount; step++ {
 		ordered = append(ordered, candidates[(rangeOffset+step)%preferredCount])
 	}
@@ -661,7 +660,7 @@ func chooseUnusedBeatMixSourceStart(
 	if !strictRanges && (len(candidates) != 1 || candidates[0].StartFrame != 0 || candidates[0].EndFrame != availableFrames) {
 		return chooseUnusedBeatMixSourceStart(
 			availableFrames, durationFrames,
-			[]agentexec.BeatMixSourceRange{{StartFrame: 0, EndFrame: availableFrames}},
+			[]BeatMixSourceRange{{StartFrame: 0, EndFrame: availableFrames}},
 			used, rangeOffset, true,
 		)
 	}

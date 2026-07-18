@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -19,7 +18,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
-func (service *Service) toolEnqueueRender(
+func (exec *Executor) toolEnqueueRender(
 	ctx context.Context,
 	draftID, kind, orientation string,
 ) (rushestools.ToolResult, error) {
@@ -27,7 +26,7 @@ func (service *Service) toolEnqueueRender(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
+	draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -37,7 +36,7 @@ func (service *Service) toolEnqueueRender(
 	baseIdempotencyKey := fmt.Sprintf("%s:%s:%d:%s", kind, draftID, *draft.TimelineCurrentVersion, orientation)
 	idempotencyKey := baseIdempotencyKey
 	retryOfJobID := ""
-	if existing, found, err := service.findRenderJob(ctx, kind, baseIdempotencyKey, true); err != nil {
+	if existing, found, err := exec.findRenderJob(ctx, kind, baseIdempotencyKey, true); err != nil {
 		return rushestools.ToolResult{}, err
 	} else if found {
 		if existing.Status != "failed" && existing.Status != "cancelled" {
@@ -46,12 +45,12 @@ func (service *Service) toolEnqueueRender(
 		retryOfJobID = existing.ID
 		idempotencyKey = fmt.Sprintf("%s:retry:%s", baseIdempotencyKey, existing.ID)
 	}
-	jobID := randomID("job")
+	jobID := RandomID("job")
 	jobPayload := map[string]any{"timeline_version": *draft.TimelineCurrentVersion, "orientation": orientation}
 	if retryOfJobID != "" {
 		jobPayload["retry_of_job_id"] = retryOfJobID
 	}
-	result, err := reducer.Apply(ctx, service.database, []contracts.Event{{
+	result, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: draftID,
 		Payload: map[string]any{
 			"job_id": jobID, "kind": kind, "requested_by_draft_id": draftID,
@@ -63,7 +62,7 @@ func (service *Service) toolEnqueueRender(
 		},
 	}}, reducer.Options{Actor: contracts.ActorAgent})
 	if err != nil || result.Status != reducer.StatusApplied {
-		if existing, found, lookupErr := service.findRenderJob(ctx, kind, idempotencyKey, false); lookupErr != nil {
+		if existing, found, lookupErr := exec.findRenderJob(ctx, kind, idempotencyKey, false); lookupErr != nil {
 			return rushestools.ToolResult{}, errors.Join(err, lookupErr)
 		} else if found {
 			return renderJobResult(kind, existing.ID, existing.Status), nil
@@ -91,7 +90,7 @@ type renderJobRef struct {
 	Status string
 }
 
-func (service *Service) findRenderJob(
+func (exec *Executor) findRenderJob(
 	ctx context.Context,
 	kind, idempotencyKey string,
 	includeRetries bool,
@@ -106,7 +105,7 @@ func (service *Service) findRenderJob(
 		arguments = []any{kind, idempotencyKey, retryPrefix, retryPrefix}
 	}
 	var job renderJobRef
-	err := service.database.Read().QueryRowContext(ctx, query, arguments...).Scan(&job.ID, &job.Status)
+	err := exec.database.Read().QueryRowContext(ctx, query, arguments...).Scan(&job.ID, &job.Status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return renderJobRef{}, false, nil
 	}
@@ -132,8 +131,8 @@ func renderJobResult(kind, jobID, jobStatus string) rushestools.ToolResult {
 	}
 }
 
-func (service *Service) toolRenderStatus(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
-	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
+func (exec *Executor) toolRenderStatus(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
+	draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -146,7 +145,7 @@ func (service *Service) toolRenderStatus(ctx context.Context, draftID string) (r
 	}, nil
 }
 
-func (service *Service) toolInspectPreview(
+func (exec *Executor) ToolInspectPreview(
 	ctx context.Context,
 	draftID string,
 	input rushestools.RenderInspectInput,
@@ -160,7 +159,7 @@ func (service *Service) toolInspectPreview(
 	var timelineVersion int
 	var width, height sql.NullInt64
 	var fps, duration sql.NullFloat64
-	err = service.database.Read().QueryRowContext(ctx, `
+	err = exec.database.Read().QueryRowContext(ctx, `
 		SELECT object_hash,timeline_version,render_width,render_height,render_fps,expected_duration_sec
 		FROM previews WHERE preview_id=? AND draft_id=?`, input.PreviewID, draftID).Scan(
 		&hash, &timelineVersion, &width, &height, &fps, &duration,
@@ -171,15 +170,15 @@ func (service *Service) toolInspectPreview(
 	if err != nil {
 		return rushestools.PreviewInspectionResult{}, err
 	}
-	path, err := service.database.Paths.ObjectPath(hash)
+	path, err := exec.database.Paths.ObjectPath(hash)
 	if err != nil {
 		return rushestools.PreviewInspectionResult{}, err
 	}
-	document, err := timeline.Get(ctx, service.database, draftID, timelineVersion)
+	document, err := timeline.Get(ctx, exec.database, draftID, timelineVersion)
 	if err != nil {
 		return rushestools.PreviewInspectionResult{}, err
 	}
-	expected, err := media.TimelineInspectionIntent(ctx, service.database, document)
+	expected, err := media.TimelineInspectionIntent(ctx, exec.database, document)
 	if err != nil {
 		return rushestools.PreviewInspectionResult{}, err
 	}
@@ -192,15 +191,15 @@ func (service *Service) toolInspectPreview(
 		return rushestools.PreviewInspectionResult{}, err
 	}
 	result := rushestools.PreviewInspectionResult{}
-	if agentexec.ContainsString(input.Checks, "visual") {
-		frameContext, contextErr := service.previewInspectionFrameContext(
+	if ContainsString(input.Checks, "visual") {
+		frameContext, contextErr := exec.previewInspectionFrameContext(
 			ctx, document, understanding.PreviewInspectionFrameNumbers(document),
 		)
 		if contextErr != nil {
 			return rushestools.PreviewInspectionResult{}, contextErr
 		}
-		visual, visualErr := service.analyzer.InspectPreview(
-			ctx, service.database.Paths, path, document, frameContext,
+		visual, visualErr := exec.analyzer.InspectPreview(
+			ctx, exec.database.Paths, path, document, frameContext,
 		)
 		if visualErr != nil {
 			return rushestools.PreviewInspectionResult{}, visualErr
@@ -264,7 +263,7 @@ func normalizePreviewInspectionChecks(checks []string) ([]string, error) {
 	return normalized, nil
 }
 
-func (service *Service) previewInspectionFrameContext(
+func (exec *Executor) previewInspectionFrameContext(
 	ctx context.Context,
 	document timeline.Document,
 	frames []int,
@@ -284,7 +283,7 @@ func (service *Service) previewInspectionFrameContext(
 				if _, missing := missingTranscript[clip.AssetID]; missing {
 					continue
 				}
-				loaded, err := storage.LatestTranscript(ctx, service.database.Read(), clip.AssetID)
+				loaded, err := storage.LatestTranscript(ctx, exec.database.Read(), clip.AssetID)
 				if errors.Is(err, storage.ErrNotFound) {
 					missingTranscript[clip.AssetID] = struct{}{}
 					continue
@@ -308,7 +307,7 @@ func (service *Service) previewInspectionFrameContext(
 			if sourceEndFrame <= sourceFrame {
 				continue
 			}
-			if text := agentexec.TranscriptTextForSourceRange(transcript.Utterances, sourceFrame, sourceEndFrame); text != "" {
+			if text := TranscriptTextForSourceRange(transcript.Utterances, sourceFrame, sourceEndFrame); text != "" {
 				parts = append(parts, "同帧台词："+truncatePreviewContextText(text, 512))
 			}
 		}

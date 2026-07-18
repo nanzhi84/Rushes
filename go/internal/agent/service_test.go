@@ -194,7 +194,7 @@ func (modelValue *terminatingFailureLoopModel) Generate(
 	modelValue.calls++
 	if modelValue.calls <= maxModelRepairAttempts+1 {
 		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID: randomID("bounded_loop_call"),
+			ID: agentexec.RandomID("bounded_loop_call"),
 			Function: schema.FunctionCall{
 				Name: "timeline.nonexistent", Arguments: `{"same":true}`,
 			},
@@ -288,7 +288,7 @@ func (modelValue *toolRoundBudgetModel) Generate(
 	}
 	if modelValue.toolRounds < targetRounds {
 		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID: randomID("budget_round_call"),
+			ID: agentexec.RandomID("budget_round_call"),
 			Function: schema.FunctionCall{
 				Name: "asset.list_assets", Arguments: `{}`,
 			},
@@ -370,7 +370,7 @@ func (*loopingFailureServiceModel) Generate(
 	...model.Option,
 ) (*schema.Message, error) {
 	return schema.AssistantMessage("", []schema.ToolCall{{
-		ID:       randomID("loop_call"),
+		ID:       agentexec.RandomID("loop_call"),
 		Function: schema.FunctionCall{Name: "timeline.nonexistent", Arguments: `{"same":true}`},
 	}}), nil
 }
@@ -2601,8 +2601,8 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 			t.Fatalf("asset=%s result=%#v err=%v", item.id, result, err)
 		}
 	}
-	filtered, err := service.toolListAssets(ctx, "draft_assets_filter", rushestools.AssetListInput{
-		Kind: "video", After: "a", Limit: 1, OnlyUsable: boolPointer(true),
+	filtered, err := service.executor.ToolListAssets(ctx, "draft_assets_filter", rushestools.AssetListInput{
+		Kind: "video", After: "a", Limit: 1, OnlyUsable: agentexec.BoolPointer(true),
 	})
 	if err != nil || len(filtered.Assets) != 1 || filtered.Assets[0].AssetID != "c" {
 		t.Fatalf("filtered=%#v err=%v", filtered, err)
@@ -2619,7 +2619,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	if err != nil || !strings.Contains(string(encodedAssetResult), `"usage_note":"asset_id`) {
 		t.Fatalf("asset result 未把字段口径序列化给模型: %s err=%v", encodedAssetResult, err)
 	}
-	audio, err := service.toolListAssets(ctx, "draft_assets_filter", rushestools.AssetListInput{Kind: "audio"})
+	audio, err := service.executor.ToolListAssets(ctx, "draft_assets_filter", rushestools.AssetListInput{Kind: "audio"})
 	if err != nil || len(audio.Assets) != 1 || audio.Assets[0].SuggestedRole != "sfx" {
 		t.Fatalf("audio role=%#v err=%v", audio, err)
 	}

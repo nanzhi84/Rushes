@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -7,14 +7,13 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-func (service *Service) toolAskUser(
+func (exec *Executor) toolAskUser(
 	ctx context.Context,
 	draftID string,
 	input rushestools.AskUserInput,
@@ -43,11 +42,11 @@ func (service *Service) toolAskUser(
 			}, nil
 		}
 	}
-	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
+	draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	decisionID := randomID("decision")
+	decisionID := RandomID("decision")
 	options := make([]map[string]any, 0, len(input.Options))
 	for _, option := range input.Options {
 		storedOption := map[string]any{
@@ -69,7 +68,7 @@ func (service *Service) toolAskUser(
 		pendingPayload = pending
 		pendingStatus = "pending"
 	}
-	result, err := reducer.Apply(ctx, service.database, []contracts.Event{{
+	result, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
 		Type: "DecisionCreated", DraftID: draftID,
 		Payload: map[string]any{
 			"decision_id": decisionID, "scope_type": "draft", "type": decisionType,
@@ -103,7 +102,7 @@ func (service *Service) toolAskUser(
 	}, nil
 }
 
-func (service *Service) toolDecisionAnswer(
+func (exec *Executor) toolDecisionAnswer(
 	ctx context.Context,
 	draftID string,
 	input rushestools.DecisionAnswerInput,
@@ -118,11 +117,11 @@ func (service *Service) toolDecisionAnswer(
 			},
 		}, nil
 	}
-	draft, err := storage.GetDraft(ctx, service.database.Read(), draftID)
+	draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	decision, err := storage.GetDecision(ctx, service.database.Read(), input.DecisionID)
+	decision, err := storage.GetDecision(ctx, exec.database.Read(), input.DecisionID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -136,7 +135,7 @@ func (service *Service) toolDecisionAnswer(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	result, err := reducer.Apply(ctx, service.database, []contracts.Event{{
+	result, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
 		Type: "DecisionAnswered", DraftID: draftID,
 		Payload: map[string]any{
 			"decision_id": input.DecisionID, "scope_type": "draft",
@@ -203,7 +202,7 @@ func AdjudicateDecisionAnswer(
 
 func decisionOption(decision storage.Decision, optionID string) (map[string]any, bool) {
 	for _, option := range decision.Options {
-		if agentexec.InterfaceString(option["option_id"]) == optionID {
+		if InterfaceString(option["option_id"]) == optionID {
 			return option, true
 		}
 	}

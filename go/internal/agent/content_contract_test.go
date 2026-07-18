@@ -30,7 +30,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	if report, configured, err := service.verifyContentContract(t.Context(), "draft_contract", timeline.Empty("draft_contract", 1)); err != nil || configured || len(report.Items) != 0 {
+	if report, configured, err := service.executor.VerifyContentContract(t.Context(), "draft_contract", timeline.Empty("draft_contract", 1)); err != nil || configured || len(report.Items) != 0 {
 		t.Fatalf("empty contract report=%#v configured=%v err=%v", report, configured, err)
 	}
 	invalidRatio := 1.1
@@ -74,7 +74,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		TimelineStartFrame: 0, TimelineEndFrame: 90, SourceStartFrame: 0, SourceEndFrame: 90,
 		Effects: []map[string]any{{"kind": "beat_grid", "beat_frames": []int{30, 60}}},
 	}}
-	report, configured, err := service.verifyContentContract(t.Context(), "draft_contract", failing)
+	report, configured, err := service.executor.VerifyContentContract(t.Context(), "draft_contract", failing)
 	if err != nil || !configured || report.Pass || len(agentexec.ContractFailureItems(report)) != 5 {
 		t.Fatalf("failing report=%#v configured=%v err=%v", report, configured, err)
 	}
@@ -116,7 +116,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		TimelineStartFrame: 0, TimelineEndFrame: 120, SourceStartFrame: 0, SourceEndFrame: 120,
 		Effects: []map[string]any{{"kind": "beat_grid", "beat_frames": []int{30}}},
 	}}
-	report, configured, err = service.verifyContentContract(t.Context(), "draft_contract", compliant)
+	report, configured, err = service.executor.VerifyContentContract(t.Context(), "draft_contract", compliant)
 	if err != nil || !configured || !report.Pass || len(agentexec.ContractFailureItems(report)) != 0 {
 		t.Fatalf("compliant report=%#v configured=%v err=%v", report, configured, err)
 	}
@@ -165,7 +165,7 @@ func TestContentContractReportsMissingBeatGrid(t *testing.T) {
 		t.Fatalf("plan update=%#v err=%v", updated, err)
 	}
 	document := timeline.Empty("draft_missing_beat_grid", 1)
-	report, configured, err := service.verifyContentContract(t.Context(), "draft_missing_beat_grid", document)
+	report, configured, err := service.executor.VerifyContentContract(t.Context(), "draft_missing_beat_grid", document)
 	if err != nil || !configured || report.Pass || len(report.Items) != 1 {
 		t.Fatalf("report=%#v configured=%v err=%v", report, configured, err)
 	}
@@ -236,7 +236,7 @@ func TestContentContractDistinguishesOmittedAndExplicitZeroTolerance(t *testing.
 		if _, updateErr := database.Write().ExecContext(t.Context(), `UPDATE drafts SET content_plan_json=? WHERE draft_id=?`, string(encoded), draft.ID); updateErr != nil {
 			t.Fatal(updateErr)
 		}
-		report, configured, verifyErr := service.verifyContentContract(t.Context(), draft.ID, document)
+		report, configured, verifyErr := service.executor.VerifyContentContract(t.Context(), draft.ID, document)
 		if verifyErr != nil || !configured {
 			t.Fatalf("report=%#v configured=%v err=%v", report, configured, verifyErr)
 		}

@@ -91,7 +91,7 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 		t.Fatal("未知素材应失败")
 	}
 	first, err := service.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
-		AssetID: "asset_speech_sidecar", IncludeSimilar: boolPointer(true), IncludePauses: boolPointer(false),
+		AssetID: "asset_speech_sidecar", IncludeSimilar: agentexec.BoolPointer(true), IncludePauses: agentexec.BoolPointer(false),
 	})
 	if err != nil {
 		t.Fatal(err)
