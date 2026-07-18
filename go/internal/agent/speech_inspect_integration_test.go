@@ -30,7 +30,7 @@ func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
 	if err := os.Symlink(source, linkedSource); err != nil {
 		t.Fatal(err)
 	}
-	insertSpeechFixtureAsset(t, database, "draft_live_fun_asr", "asset_live_aroll", linkedSource)
+	agenttest.InsertSpeechFixtureAsset(t, database, "draft_live_fun_asr", "asset_live_aroll", linkedSource)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)

@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
@@ -42,7 +41,7 @@ func TestSpeechInspectSkipsOnlyChunksWithoutWords(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_speech_partial")
 	audio := createSpeechFixtureAudioDuration(t, database.Paths.Temporary, "partial", 30)
-	insertSpeechFixtureAsset(t, database, "draft_speech_partial", "asset_speech_partial", audio)
+	agenttest.InsertSpeechFixtureAsset(t, database, "draft_speech_partial", "asset_speech_partial", audio)
 	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +72,7 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 	), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	insertSpeechFixtureAsset(t, database, "draft_speech_sidecar", "asset_speech_sidecar", audio)
+	agenttest.InsertSpeechFixtureAsset(t, database, "draft_speech_sidecar", "asset_speech_sidecar", audio)
 	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -134,7 +133,7 @@ func TestSpeechInspectUsesChunkedRecognizerWithoutSidecar(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_speech_asr")
 	audio := createSpeechFixtureAudio(t, database.Paths.Temporary, "asr")
-	insertSpeechFixtureAsset(t, database, "draft_speech_asr", "asset_speech_asr", audio)
+	agenttest.InsertSpeechFixtureAsset(t, database, "draft_speech_asr", "asset_speech_asr", audio)
 	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -564,31 +563,4 @@ func createSpeechFixtureAudioDuration(
 		t.Fatal(err)
 	}
 	return path
-}
-
-func insertSpeechFixtureAsset(
-	t *testing.T, database *storage.DB, draftID, assetID, path string,
-) {
-	t.Helper()
-	probe, err := media.ProbeFile(t.Context(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	probeJSON, _ := json.Marshal(probe)
-	if _, err := database.Write().ExecContext(t.Context(), `
-		INSERT INTO assets(
-			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
-			probe_json,ingest_status,understanding_status,usable
-		) VALUES(?, 'reference', ?, 'audio', 'local_path', ?, ?, 1, ?, 'ready', 'none', 1)`,
-		assetID, path, filepath.Base(path), assetID, string(probeJSON),
-	); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := database.Write().ExecContext(t.Context(), `
-		INSERT INTO draft_asset_links(draft_id,asset_id,rel_dir,linked_at)
-		VALUES(?, ?, 'Aroll', ?)`,
-		draftID, assetID, time.Now().UTC().Format(time.RFC3339Nano),
-	); err != nil {
-		t.Fatal(err)
-	}
 }
