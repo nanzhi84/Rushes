@@ -160,6 +160,12 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 		if edit.Status != "succeeded" {
 			t.Fatalf("跨界气口删除应成功: %#v", edit)
 		}
+		// 删除区间按 clip 边界裁剪：pause_tail 删除范围 [122,145] 与 clip 源区间
+		// [0,130] 的交集是 [122,130]，跨过已删帧的尾部 [130,145] 不参与本次删除。
+		assertDeletedRanges(t, edit.Data, "removed_pause_ranges",
+			[]talkingHeadRange{{Start: 122, End: clipEnd}})
+		assertDeletedRanges(t, edit.Data, "deleted_timeline_ranges",
+			[]talkingHeadRange{{Start: 122, End: clipEnd}})
 	})
 
 	t.Run("fragment", func(t *testing.T) {
@@ -188,6 +194,34 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 		)
 		clipID := clipBySourceRange(t, document, 0, clipEnd)
 		inspect := inspectClip(t, service, ctx, clipID)
+		// P2-2 正面：跨界 utterance/word 在 inspect 中标注 clamped 且裁剪到 clip 末尾；
+		// 完全落在 clip 之外的 fb_have/fb_same 交集为空，被 inspect 直接跳过（负例）。
+		var clampedUtterance *rushestools.SpeechUtteranceEvidence
+		for index := range inspect.Utterances {
+			if inspect.Utterances[index].UtteranceID == "utt_frag" {
+				clampedUtterance = &inspect.Utterances[index]
+			}
+		}
+		if clampedUtterance == nil || !clampedUtterance.Clamped ||
+			clampedUtterance.SourceEndFrame != clipEnd {
+			t.Fatalf("跨界 utterance 应裁剪到 clip 末尾并标注 clamped: %#v", inspect.Utterances)
+		}
+		var clampedWord *rushestools.SpeechWordEvidence
+		droppedTailWords := 0
+		for index := range clampedUtterance.Words {
+			switch clampedUtterance.Words[index].WordID {
+			case "fb_no":
+				clampedWord = &clampedUtterance.Words[index]
+			case "fb_have", "fb_same":
+				droppedTailWords++
+			}
+		}
+		if clampedWord == nil || !clampedWord.Clamped || clampedWord.SourceEndFrame != clipEnd {
+			t.Fatalf("跨界 word fb_no 应裁剪到 clip 末尾并标注 clamped: %#v", clampedUtterance.Words)
+		}
+		if droppedTailWords != 0 {
+			t.Fatalf("交集为空的 fb_have/fb_same 应被 inspect 跳过: %#v", clampedUtterance.Words)
+		}
 		fragmentID := ""
 		for _, fragment := range inspect.ShortFragments {
 			if fragment.StartWordID == "fb_but" {
@@ -206,6 +240,14 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 		if edit.Status != "succeeded" {
 			t.Fatalf("跨界短片段删除应成功: %#v", edit)
 		}
+		// P2-1：短片段 fb_but[195,210]+fb_no[210,240] 与 clip 源区间 [0,235] 的交集是
+		// [195,235]；fb_no 落在 clip 外的 [235,240] 被裁掉，删除词与删除区间都是裁剪后子集。
+		if ids, ok := edit.Data["removed_word_ids"].([]string); !ok ||
+			len(ids) != 2 || ids[0] != "fb_but" || ids[1] != "fb_no" {
+			t.Fatalf("跨界短片段应只删除交集内的 fb_but、fb_no: %#v", edit.Data["removed_word_ids"])
+		}
+		assertDeletedRanges(t, edit.Data, "deleted_timeline_ranges",
+			[]talkingHeadRange{{Start: 195, End: clipEnd}})
 	})
 
 	t.Run("repetition", func(t *testing.T) {
@@ -256,6 +298,14 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 		if edit.Status != "succeeded" {
 			t.Fatalf("跨界句内重复删除应成功: %#v", edit)
 		}
+		// P2-1：remove_later 段 rl_this2[120,130]…rl_green[155,170] 与 clip 源区间
+		// [0,150] 的交集是 [120,150]；rl_green 落在 clip 外，删除词到 rl_look 为止。
+		if ids, ok := edit.Data["removed_word_ids"].([]string); !ok ||
+			len(ids) != 3 || ids[0] != "rl_this2" || ids[1] != "rl_color" || ids[2] != "rl_look" {
+			t.Fatalf("跨界句内重复应只删除交集内的 rl_this2、rl_color、rl_look: %#v", edit.Data["removed_word_ids"])
+		}
+		assertDeletedRanges(t, edit.Data, "deleted_timeline_ranges",
+			[]talkingHeadRange{{Start: 120, End: clipEnd}})
 	})
 }
 
@@ -448,4 +498,24 @@ func randomEvidenceCuts(random *rand.Rand) []map[string]any {
 		duration -= span
 	}
 	return cuts
+}
+
+// assertDeletedRanges 断言 edit 结果中某个删除区间字段恰好等于期望的帧区间。期望值均为
+// 「证据 ∩ clip 源区间」的手算交集，不从被测逻辑反推，用来锁死跨界证据的坐标系裁剪行为。
+func assertDeletedRanges(
+	t *testing.T, data map[string]any, key string, want []talkingHeadRange,
+) {
+	t.Helper()
+	got, ok := data[key].([]talkingHeadRange)
+	if !ok {
+		t.Fatalf("%s 不是 []talkingHeadRange: %#v", key, data[key])
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%s 期望 %d 个区间 %v，实际 %#v", key, len(want), want, got)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("%s[%d] 期望 %v，实际 %v", key, index, want[index], got[index])
+		}
+	}
 }
