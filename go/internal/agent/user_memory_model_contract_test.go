@@ -268,8 +268,8 @@ func loadUserMemoryModelEvalCases(t *testing.T) []userMemoryModelEvalCase {
 	if err := json.Unmarshal(raw, &golden); err != nil {
 		t.Fatalf("解析 %s: %v", path, err)
 	}
-	if len(golden.Cases) != 3 {
-		t.Fatalf("用户记忆模型合同必须固定覆盖三个场景，实际 %d", len(golden.Cases))
+	if len(golden.Cases) != 6 {
+		t.Fatalf("用户记忆模型合同必须固定覆盖六个场景，实际 %d", len(golden.Cases))
 	}
 	seen := map[string]bool{}
 	for _, evalCase := range golden.Cases {
@@ -421,20 +421,70 @@ func validateUserMemoryModelResponse(
 	return nil
 }
 
-func validateUserMemorySemantic(semantic, value string) error {
-	switch semantic {
-	case "fast_pacing":
-		if hasPositiveFastPacingPhrase(value) {
-			return nil
+// memorySemanticSpec 是一个评测语义维度的确定性词袋：命中任一 negative 直接判负
+// （反向限定优先），若配置了 requireTopic 则须先命中话题词圈定范围，再要求命中任一
+// positive 正向表达。数据驱动的多维词袋取代原先只认 fast_pacing 的单维硬编码，
+// 既能无 LLM-judge 地扩展新语义，又保持 CI 里的确定性。
+type memorySemanticSpec struct {
+	requireTopic []string
+	positive     []string
+	negative     []string
+}
+
+var memorySemanticSpecs = map[string]memorySemanticSpec{
+	"fast_pacing": {
+		negative: []string{"不", "拒绝", "禁止", "避免", "慢", "舒缓", "降低", "减少", "低密度", "太快"},
+		positive: []string{
+			"快节奏", "节奏偏快", "节奏加快", "加快节奏", "节奏更快", "节奏要快", "节奏都要快",
+			"节奏快", "节奏偏好快", "紧凑节奏", "节奏紧凑", "高切点密度", "切点密度高",
+			"提高切点密度", "切点密度偏高", "切点密度可高", "高密度切点",
+		},
+	},
+	"prefers_more_broll": {
+		requireTopic: []string{"b-roll", "broll", "空镜"},
+		negative:     []string{"少", "减少", "太多", "不要", "别放", "降低", "别太"},
+		positive:     []string{"多", "增", "提高", "更多", "铺满", "大量", "覆盖率高", "密集"},
+	},
+}
+
+func hasMemorySemanticPhrase(semantic, value string) bool {
+	spec, ok := memorySemanticSpecs[semantic]
+	if !ok {
+		return false
+	}
+	lower := strings.ToLower(value)
+	for _, fragment := range spec.negative {
+		if strings.Contains(lower, fragment) {
+			return false
 		}
-		return fmt.Errorf("缺少无反向限定的快节奏语义: %s", agentexec.TruncateText(value, 240))
-	default:
+	}
+	if len(spec.requireTopic) > 0 && !containsAnySubstring(lower, spec.requireTopic) {
+		return false
+	}
+	return containsAnySubstring(lower, spec.positive)
+}
+
+func containsAnySubstring(value string, fragments []string) bool {
+	for _, fragment := range fragments {
+		if strings.Contains(value, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateUserMemorySemantic(semantic, value string) error {
+	if _, ok := memorySemanticSpecs[semantic]; !ok {
 		return fmt.Errorf("未知评测语义 %q", semantic)
 	}
+	if hasMemorySemanticPhrase(semantic, value) {
+		return nil
+	}
+	return fmt.Errorf("记忆陈述未确定性命中语义 %q: %s", semantic, agentexec.TruncateText(value, 240))
 }
 
 func validateRequiredToolSemantic(semantic, toolName, arguments string) error {
-	if semantic != "fast_pacing" {
+	if _, ok := memorySemanticSpecs[semantic]; !ok {
 		return fmt.Errorf("未知评测语义 %q", semantic)
 	}
 	if toolName != "plan.update" {
@@ -449,31 +499,11 @@ func validateRequiredToolSemantic(semantic, toolName, arguments string) error {
 		values = append(values, input.Contract.Rhythm)
 	}
 	for _, value := range values {
-		if hasPositiveFastPacingPhrase(value) {
+		if hasMemorySemanticPhrase(semantic, value) {
 			return nil
 		}
 	}
-	return fmt.Errorf("plan 的单个语义值均未表达无反向限定的快节奏: %s", agentexec.TruncateText(arguments, 240))
-}
-
-func hasPositiveFastPacingPhrase(value string) bool {
-	negative := []string{"不", "拒绝", "禁止", "避免", "慢", "舒缓", "降低", "减少", "低密度", "太快"}
-	for _, fragment := range negative {
-		if strings.Contains(value, fragment) {
-			return false
-		}
-	}
-	positive := []string{
-		"快节奏", "节奏偏快", "节奏加快", "加快节奏", "节奏更快", "节奏要快", "节奏都要快",
-		"节奏快", "节奏偏好快", "紧凑节奏", "节奏紧凑", "高切点密度", "切点密度高",
-		"提高切点密度", "切点密度偏高", "切点密度可高", "高密度切点",
-	}
-	for _, fragment := range positive {
-		if strings.Contains(value, fragment) {
-			return true
-		}
-	}
-	return false
+	return fmt.Errorf("plan 的单个语义值均未确定性命中语义 %q: %s", semantic, agentexec.TruncateText(arguments, 240))
 }
 
 func collectStringValues(value any) []string {

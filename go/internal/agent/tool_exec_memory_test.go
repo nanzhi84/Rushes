@@ -374,3 +374,59 @@ func TestMemoryUpdateMapsRewrittenQuoteToQuoteInvalidNotEvidenceInvalid(t *testi
 		t.Fatalf("非子串引文不得落库: %#v err=%v", memories, err)
 	}
 }
+
+// TestMemoryUpdateNegativeSetLocksEvidenceMappings 是 M5 的确定性负例集：锁住 #113 拆分出的
+// 两类证据错误映射不退化——引文语义不符（同义改写 / 跨字段拼接 / 过短）走 quote_mismatch →
+// memory_evidence_quote_invalid（逐字重摘可救回），证据缺失 / 伪造走 evidence_invalid /
+// unavailable（重试无益）。任何一条都不得落库。
+func TestMemoryUpdateNegativeSetLocksEvidenceMappings(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_neg")
+	insertAgentMessage(t, database, "draft_neg", "message_neg", "以后节奏都要快一点，字幕别遮脸")
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	realCtx := rushestools.WithDraftID(
+		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_neg"), "draft_neg")
+	forgedCtx := rushestools.WithDraftID(
+		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_absent"), "draft_neg")
+	noEvidenceCtx := rushestools.WithDraftID(t.Context(), "draft_neg")
+	entry := func(quote string) rushestools.MemoryUpdateInput {
+		return rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{
+			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: quote,
+		}}}
+	}
+
+	for _, test := range []struct {
+		name  string
+		ctx   context.Context
+		input rushestools.MemoryUpdateInput
+		code  string
+	}{
+		// 引文语义不符 → quote_mismatch → memory_evidence_quote_invalid
+		{"同义改写非子串", realCtx, entry("节奏要加快"), "memory_evidence_quote_invalid"},
+		{"跨逗号拼接", realCtx, entry("快一点字幕别遮脸"), "memory_evidence_quote_invalid"},
+		{"跨子句摘取", realCtx, entry("都要快一点字幕"), "memory_evidence_quote_invalid"},
+		{"引文过短单字", realCtx, entry("快"), "memory_evidence_quote_invalid"},
+		// 证据缺失 / 伪造 → evidence_invalid / unavailable
+		{"伪造消息证据", forgedCtx, entry("节奏都要快一点"), "memory_evidence_invalid"},
+		{"无证据上下文", noEvidenceCtx, entry("节奏都要快一点"), "memory_evidence_unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw, execErr := service.ExecuteTool(test.ctx, "memory.update", test.input)
+			result := raw.(rushestools.ToolResult)
+			if execErr != nil || result.Status != "validation_failed" ||
+				result.Data["error_code"] != test.code || result.Data["current_memory_unchanged"] != true {
+				t.Fatalf("负例 %q 应判 %s：result=%#v err=%v", test.name, test.code, result, execErr)
+			}
+		})
+	}
+	memories, err := storage.ListUserMemories(t.Context(), database.Read())
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("负例集不得落库任何记忆: %#v err=%v", memories, err)
+	}
+}
