@@ -511,12 +511,6 @@ func (service *Service) toolBuildBeatMix(
 	return result, nil
 }
 
-type beatMixSourceRange struct {
-	StartFrame     int
-	EndFrame       int
-	QualityPenalty float64
-}
-
 // latestBeatMixSourceRanges 读取质量最完整的理解摘要中的源帧证据。摘要缺失、损坏或
 // 区间不合法时静默回退到完整素材，避免让理解服务的降级阻塞高层剪辑工具。
 func (service *Service) latestBeatMixSourceRanges(
