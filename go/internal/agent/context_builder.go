@@ -210,6 +210,10 @@ func (builder *ContextBuilder) userMemoryContext(
 	if err != nil {
 		return nil, err
 	}
+	// memories 非空时 included 必 ≥1：单条 entry 的 statement≤200 rune、key≤40，加上其余
+	// 记忆的 omitted_keys（每个 key≤40、总数≤UserMemoryLimit）在最坏情况下仍远低于 4000 rune
+	// 预算，首条一定进得去——不会退化成「entries 空、omitted_keys 兜住全部」。若日后放宽
+	// key/statement 长度上限或压低预算，需重新核这条不变量。
 	included := 0
 	for included < len(memories) {
 		encoded, err := json.Marshal(

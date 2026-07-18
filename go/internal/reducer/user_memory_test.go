@@ -534,8 +534,8 @@ func TestUserMemoryEvidenceQuoteMustBeVerbatimSubstring(t *testing.T) {
 		{"纯空白", "   "},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if err := applyQuote(test.quote); !errors.Is(err, ErrUserMemoryEvidence) {
-				t.Fatalf("污染 quote %q 应判 ErrUserMemoryEvidence，实际 %v", test.quote, err)
+			if err := applyQuote(test.quote); !errors.Is(err, ErrUserMemoryEvidenceQuoteMismatch) {
+				t.Fatalf("污染 quote %q 应判 ErrUserMemoryEvidenceQuoteMismatch，实际 %v", test.quote, err)
 			}
 		})
 	}
@@ -577,7 +577,7 @@ func TestUserMemoryDecisionAnswerQuoteMatchesFreeTextAndOptionLabel(t *testing.T
 	if err := applyQuote("字幕别太大"); err != nil {
 		t.Fatalf("自由文本子串应通过: %v", err)
 	}
-	if err := applyQuote("整体要放慢"); !errors.Is(err, ErrUserMemoryEvidence) {
+	if err := applyQuote("整体要放慢"); !errors.Is(err, ErrUserMemoryEvidenceQuoteMismatch) {
 		t.Fatalf("非子串应被拦截，err=%v", err)
 	}
 }

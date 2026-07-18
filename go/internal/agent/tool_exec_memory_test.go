@@ -340,3 +340,37 @@ func TestInjectedMemoryCollectorTouchesLastUsedAtOnSuccess(t *testing.T) {
 	// 空键集合是安全的空操作。
 	service.touchInjectedMemories(t.Context(), "draft_touch", nil)
 }
+
+func TestMemoryUpdateMapsRewrittenQuoteToQuoteInvalidNotEvidenceInvalid(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_quote_map")
+	insertAgentMessage(t, database, "draft_quote_map", "message_quote_map", "以后都快一点")
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(
+		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_quote_map"),
+		"draft_quote_map",
+	)
+	// 引文有 ≥2 字、过工具预检，但被模型改写，不是证据原文子串：由 reducer 拦下。
+	// 必须映射到 memory_evidence_quote_invalid（逐字重摘可救回），而非 memory_evidence_invalid
+	// （等下一条消息）——后者对最常见的改写失败是反向误导，会让合法记忆静默流失。
+	raw, executeErr := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+		Entries: []rushestools.MemoryEntryInput{{
+			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都慢一点",
+		}},
+	})
+	result := raw.(rushestools.ToolResult)
+	if executeErr != nil || result.Status != "validation_failed" ||
+		result.Data["error_code"] != "memory_evidence_quote_invalid" ||
+		result.Data["current_memory_unchanged"] != true {
+		t.Fatalf("result=%#v err=%v", result, executeErr)
+	}
+	memories, err := storage.ListUserMemories(t.Context(), database.Read())
+	if err != nil || len(memories) != 0 {
+		t.Fatalf("非子串引文不得落库: %#v err=%v", memories, err)
+	}
+}

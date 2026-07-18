@@ -34,6 +34,11 @@ var (
 	errDraftPlanConflict      = errors.New("草稿创作计划发生并发冲突")
 )
 
+// ErrUserMemoryEvidenceQuoteMismatch 与 ErrUserMemoryEvidence 分开：前者是 evidence_quote
+// 本身与证据原文不符（改写/拼接/过短），模型逐字重摘即可救回；后者是证据缺失或越权，重试无益。
+// 拆开是为了让工具层给出方向相反的恢复指引。
+var ErrUserMemoryEvidenceQuoteMismatch = errors.New("用户记忆引文与证据原文不符")
+
 type VersionConflict struct {
 	DraftID             string `json:"draft_id"`
 	ExpectedBaseVersion *int   `json:"expected_base_version"`
@@ -1872,14 +1877,14 @@ func validateUserMemoryEvidenceQuote(
 ) error {
 	trimmed := strings.TrimSpace(quote)
 	if !storage.ValidUserMemoryEvidenceQuote(trimmed) {
-		return fmt.Errorf("%w: evidence_quote 为空或过短", ErrUserMemoryEvidence)
+		return fmt.Errorf("%w: evidence_quote 为空或过短", ErrUserMemoryEvidenceQuoteMismatch)
 	}
 	text, err := userMemoryEvidenceText(ctx, tx, evidence)
 	if err != nil {
 		return err
 	}
 	if !strings.Contains(text, trimmed) {
-		return fmt.Errorf("%w: evidence_quote 不是证据原文子串", ErrUserMemoryEvidence)
+		return fmt.Errorf("%w: evidence_quote 不是证据原文子串", ErrUserMemoryEvidenceQuoteMismatch)
 	}
 	return nil
 }
