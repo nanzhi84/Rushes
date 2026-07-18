@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 17
+const schemaVersion = 18
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -455,6 +455,12 @@ DELETE FROM rewind_checkpoints WHERE trigger_kind='timeline_write';
 // rather than by confirmation time alone.
 const schemaV16 = `ALTER TABLE user_memories ADD COLUMN last_used_at TEXT`
 
-// schemaV17 attaches precomputed audio waveform peaks (min/max pairs) to assets.
+// schemaV17 records when a memory's statement was last edited by the user in the
+// settings panel. Historical rows stay NULL. Manual revisions go through the
+// Actor=User reducer path without model evidence, so this column is what lets the
+// panel badge "手动修订" distinctly from model-written memories.
+const schemaV17 = `ALTER TABLE user_memories ADD COLUMN manually_revised_at TEXT`
+
+// schemaV18 attaches precomputed audio waveform peaks (min/max pairs) to assets.
 // Historical rows stay NULL and fall back to on-demand client decoding.
-const schemaV17 = `ALTER TABLE assets ADD COLUMN peaks_object_hash TEXT REFERENCES objects(hash)`
+const schemaV18 = `ALTER TABLE assets ADD COLUMN peaks_object_hash TEXT REFERENCES objects(hash)`

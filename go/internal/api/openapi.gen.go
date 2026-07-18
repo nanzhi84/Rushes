@@ -724,16 +724,22 @@ type MemoryMutationResponse struct {
 
 // MemoryRecord defines model for MemoryRecord.
 type MemoryRecord struct {
-	CreatedAt       string           `json:"created_at"`
-	Kind            MemoryRecordKind `json:"kind"`
-	LastConfirmedAt string           `json:"last_confirmed_at"`
-	MemoryKey       string           `json:"memory_key"`
-	SourceDraftId   string           `json:"source_draft_id"`
-	Statement       string           `json:"statement"`
+	CreatedAt         string           `json:"created_at"`
+	Kind              MemoryRecordKind `json:"kind"`
+	LastConfirmedAt   string           `json:"last_confirmed_at"`
+	ManuallyRevisedAt string           `json:"manually_revised_at"`
+	MemoryKey         string           `json:"memory_key"`
+	SourceDraftId     string           `json:"source_draft_id"`
+	Statement         string           `json:"statement"`
 }
 
 // MemoryRecordKind defines model for MemoryRecord.Kind.
 type MemoryRecordKind string
+
+// MemoryStatementUpdateRequest defines model for MemoryStatementUpdateRequest.
+type MemoryStatementUpdateRequest struct {
+	Statement string `json:"statement"`
+}
 
 // MessageCreateRequest defines model for MessageCreateRequest.
 type MessageCreateRequest struct {
@@ -932,6 +938,9 @@ type CancelJobApiJobsJobIdCancelPostJSONRequestBody = JobCancelRequest
 
 // ClearMemoriesApiMemoriesDeleteJSONRequestBody defines body for ClearMemoriesApiMemoriesDelete for application/json ContentType.
 type ClearMemoriesApiMemoriesDeleteJSONRequestBody = ConfirmRequest
+
+// UpdateMemoryStatementApiMemoriesMemoryKeyPatchJSONRequestBody defines body for UpdateMemoryStatementApiMemoriesMemoryKeyPatch for application/json ContentType.
+type UpdateMemoryStatementApiMemoriesMemoryKeyPatchJSONRequestBody = MemoryStatementUpdateRequest
 
 // AsValidationErrorLoc0 returns the union data inside the ValidationError_Loc_Item as a ValidationErrorLoc0
 func (t ValidationError_Loc_Item) AsValidationErrorLoc0() (ValidationErrorLoc0, error) {
@@ -1259,6 +1268,9 @@ type ServerInterface interface {
 	// Delete Memory
 	// (DELETE /api/memories/{memory_key})
 	DeleteMemoryApiMemoriesMemoryKeyDelete(w http.ResponseWriter, r *http.Request, memoryKey string)
+	// Update Memory Statement
+	// (PATCH /api/memories/{memory_key})
+	UpdateMemoryStatementApiMemoriesMemoryKeyPatch(w http.ResponseWriter, r *http.Request, memoryKey string)
 }
 
 // Unimplemented server implementation that returns http.StatusNotImplemented for each endpoint.
@@ -1538,6 +1550,12 @@ func (_ Unimplemented) ListMemoriesApiMemoriesGet(w http.ResponseWriter, r *http
 // Delete Memory
 // (DELETE /api/memories/{memory_key})
 func (_ Unimplemented) DeleteMemoryApiMemoriesMemoryKeyDelete(w http.ResponseWriter, r *http.Request, memoryKey string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Update Memory Statement
+// (PATCH /api/memories/{memory_key})
+func (_ Unimplemented) UpdateMemoryStatementApiMemoriesMemoryKeyPatch(w http.ResponseWriter, r *http.Request, memoryKey string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -2741,6 +2759,32 @@ func (siw *ServerInterfaceWrapper) DeleteMemoryApiMemoriesMemoryKeyDelete(w http
 	handler.ServeHTTP(w, r)
 }
 
+// UpdateMemoryStatementApiMemoriesMemoryKeyPatch operation middleware
+func (siw *ServerInterfaceWrapper) UpdateMemoryStatementApiMemoriesMemoryKeyPatch(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "memory_key" -------------
+	var memoryKey string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "memory_key", chi.URLParam(r, "memory_key"), &memoryKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "memory_key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateMemoryStatementApiMemoriesMemoryKeyPatch(w, r, memoryKey)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 type UnescapedCookieParamError struct {
 	ParamName string
 	Err       error
@@ -2991,6 +3035,9 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Delete(options.BaseURL+"/api/memories/{memory_key}", wrapper.DeleteMemoryApiMemoriesMemoryKeyDelete)
+	})
+	r.Group(func(r chi.Router) {
+		r.Patch(options.BaseURL+"/api/memories/{memory_key}", wrapper.UpdateMemoryStatementApiMemoriesMemoryKeyPatch)
 	})
 
 	return r

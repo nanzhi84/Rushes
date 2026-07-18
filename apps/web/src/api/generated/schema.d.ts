@@ -489,7 +489,8 @@ export interface paths {
         delete: operations["delete_memory_api_memories__memory_key__delete"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** Update Memory Statement */
+        patch: operations["update_memory_statement_api_memories__memory_key__patch"];
         trace?: never;
     };
     "/api/media/export/{export_id}": {
@@ -1187,10 +1188,17 @@ export interface components {
             kind: "preference" | "correction" | "habit";
             /** Last Confirmed At */
             last_confirmed_at: string;
+            /** Manually Revised At */
+            manually_revised_at: string;
             /** Memory Key */
             memory_key: string;
             /** Source Draft Id */
             source_draft_id: string;
+            /** Statement */
+            statement: string;
+        };
+        /** MemoryStatementUpdateRequest */
+        MemoryStatementUpdateRequest: {
             /** Statement */
             statement: string;
         };
@@ -3508,6 +3516,77 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MemoryMutationResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+        };
+    };
+    update_memory_statement_api_memories__memory_key__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                memory_key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MemoryStatementUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryRecord"];
                 };
             };
             /** @description Bad Request */

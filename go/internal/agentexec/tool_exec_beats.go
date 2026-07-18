@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -8,18 +8,17 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-const audioBeatPhaseNote = "强拍来自频谱通量瞬态；每 4 拍网格以强拍贴合度推断 4/4 小节相位，仍可由剪辑者微调；拍点、强拍和 downbeat 只是音频结构证据，不能自动等同于高潮或好剪辑。"
+const AudioBeatPhaseNote = "强拍来自频谱通量瞬态；每 4 拍网格以强拍贴合度推断 4/4 小节相位，仍可由剪辑者微调；拍点、强拍和 downbeat 只是音频结构证据，不能自动等同于高潮或好剪辑。"
 
-const audioWaveformUsageNote = "waveform.sample_frames 与 samples 一一对应；前者是按 timeline_fps 标尺表示的素材内 RMS 窗口起始帧，后者是该点 0-100 原始响度。本结果返回本次请求的完整压缩波形；WorldState 只常驻最多 24 点摘要。"
+const AudioWaveformUsageNote = "waveform.sample_frames 与 samples 一一对应；前者是按 timeline_fps 标尺表示的素材内 RMS 窗口起始帧，后者是该点 0-100 原始响度。本结果返回本次请求的完整压缩波形；WorldState 只常驻最多 24 点摘要。"
 
-func (service *Service) toolAnalyzeAudioBeats(
+func (exec *Executor) toolAnalyzeAudioBeats(
 	ctx context.Context,
 	draftID string,
 	input rushestools.AudioBeatAnalysisInput,
@@ -34,7 +33,7 @@ func (service *Service) toolAnalyzeAudioBeats(
 			media.MaxWaveformPoints,
 		)
 	}
-	assets, err := storage.ListDraftAssets(ctx, service.database.Read(), draftID)
+	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return rushestools.AudioBeatAnalysisResult{}, err
 	}
@@ -51,7 +50,7 @@ func (service *Service) toolAnalyzeAudioBeats(
 	if (selected.Kind != "audio" && selected.Kind != "video") || !selected.Usable {
 		return rushestools.AudioBeatAnalysisResult{}, errors.New("节拍分析只支持当前草稿中可用的音频或带音轨视频素材")
 	}
-	source, _, err := media.ResolveAssetSource(ctx, service.database, selected.ID)
+	source, _, err := media.ResolveAssetSource(ctx, exec.database, selected.ID)
 	if err != nil {
 		return rushestools.AudioBeatAnalysisResult{}, err
 	}
@@ -84,13 +83,13 @@ func (service *Service) toolAnalyzeAudioBeats(
 		DownbeatFrames: grid.DownbeatFrames, EveryTwoBeatFrames: grid.EveryTwoBeatFrames,
 		EveryFourBeatFrames: grid.EveryFourBeatFrames, AnalysisMethod: grid.AnalysisMethod,
 		BarPhase: grid.BarPhase, Truncated: grid.Truncated,
-		PhaseNote:         audioBeatPhaseNote,
-		WaveformUsageNote: audioWaveformUsageNote,
+		PhaseNote:         AudioBeatPhaseNote,
+		WaveformUsageNote: AudioWaveformUsageNote,
 		Waveform:          waveformToolValue(waveform),
 	}, nil
 }
 
-func (service *Service) toolAnalyzeSpeechPauses(
+func (exec *Executor) toolAnalyzeSpeechPauses(
 	ctx context.Context,
 	draftID string,
 	input rushestools.SpeechPauseAnalysisInput,
@@ -98,7 +97,7 @@ func (service *Service) toolAnalyzeSpeechPauses(
 	assetID := strings.TrimSpace(input.AssetID)
 	var timelineClip *timeline.Clip
 	if input.TimelineClipID != "" {
-		current, err := timeline.Latest(ctx, service.database, draftID)
+		current, err := timeline.Latest(ctx, exec.database, draftID)
 		if err != nil {
 			return rushestools.SpeechPauseAnalysisResult{}, err
 		}
@@ -125,7 +124,7 @@ func (service *Service) toolAnalyzeSpeechPauses(
 	if assetID == "" {
 		return rushestools.SpeechPauseAnalysisResult{}, errors.New("audio.analyze_speech_pauses 至少需要 asset_id 或 timeline_clip_id")
 	}
-	assets, err := storage.ListDraftAssets(ctx, service.database.Read(), draftID)
+	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return rushestools.SpeechPauseAnalysisResult{}, err
 	}
@@ -139,7 +138,7 @@ func (service *Service) toolAnalyzeSpeechPauses(
 	if selected == nil || !selected.Usable || selected.Kind != "audio" && selected.Kind != "video" {
 		return rushestools.SpeechPauseAnalysisResult{}, errors.New("气口分析只支持当前草稿中可用的音频或视频素材")
 	}
-	source, _, err := media.ResolveAssetSource(ctx, service.database, selected.ID)
+	source, _, err := media.ResolveAssetSource(ctx, exec.database, selected.ID)
 	if err != nil {
 		return rushestools.SpeechPauseAnalysisResult{}, err
 	}
@@ -191,7 +190,7 @@ func (service *Service) toolAnalyzeSpeechPauses(
 	}, nil
 }
 
-func (service *Service) toolRecutToBeats(
+func (exec *Executor) toolRecutToBeats(
 	ctx context.Context,
 	draftID string,
 	input rushestools.TimelineBeatRecutInput,
@@ -202,15 +201,15 @@ func (service *Service) toolRecutToBeats(
 	// 无法扩回更长节拍区间，模型会逐段修改 cut_frames 仍必然失败。
 	if len(input.CutFrames) > 0 && input.BGMAssetID == "" &&
 		input.TargetDurationFrames == 0 && !input.CoverEntireBGM && len(input.VideoAssetIDs) == 0 {
-		if _, latestErr := timeline.Latest(ctx, service.database, draftID); errors.Is(latestErr, storage.ErrNotFound) {
-			return service.toolBuildBeatMix(ctx, draftID, input)
+		if _, latestErr := timeline.Latest(ctx, exec.database, draftID); errors.Is(latestErr, storage.ErrNotFound) {
+			return exec.toolBuildBeatMix(ctx, draftID, input)
 		}
-		return service.toolRecutCurrentClipsToBeats(ctx, draftID, input)
+		return exec.toolRecutCurrentClipsToBeats(ctx, draftID, input)
 	}
-	return service.toolBuildBeatMix(ctx, draftID, input)
+	return exec.toolBuildBeatMix(ctx, draftID, input)
 }
 
-func (service *Service) toolRecutCurrentClipsToBeats(
+func (exec *Executor) toolRecutCurrentClipsToBeats(
 	ctx context.Context,
 	draftID string,
 	input rushestools.TimelineBeatRecutInput,
@@ -221,7 +220,7 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 		}
 		return rushestools.ToolResult{Status: "failed", Observation: message, Data: data}, nil
 	}
-	current, err := timeline.Latest(ctx, service.database, draftID)
+	current, err := timeline.Latest(ctx, exec.database, draftID)
 	if errors.Is(err, storage.ErrNotFound) {
 		current = timeline.Empty(draftID, 0)
 	} else if err != nil {
@@ -256,7 +255,7 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 		return visuals[i].TimelineStartFrame < visuals[j].TimelineStartFrame
 	})
 
-	assets, err := storage.ListDraftAssets(ctx, service.database.Read(), draftID)
+	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -268,7 +267,7 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 	if !exists || bgmAsset.Kind != "audio" || !bgmAsset.Usable {
 		return failed("BGM clip 未关联当前草稿中的可用音频素材", nil)
 	}
-	bgmSource, _, err := media.ResolveAssetSource(ctx, service.database, bgmAsset.ID)
+	bgmSource, _, err := media.ResolveAssetSource(ctx, exec.database, bgmAsset.ID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -276,7 +275,7 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	bgmDuration, _ := agentexec.NumericValue(bgmAsset.Probe["duration_sec"])
+	bgmDuration, _ := NumericValue(bgmAsset.Probe["duration_sec"])
 	waveform := optionalWaveformEnvelope(
 		ctx,
 		bgmSource,
@@ -407,7 +406,7 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 		if !found || sfxAsset.Kind != "audio" || !sfxAsset.Usable {
 			return failed("SFX 素材必须是当前草稿中的可用音频", map[string]any{"asset_id": sfx.AssetID})
 		}
-		sfxDuration, _ := agentexec.NumericValue(sfxAsset.Probe["duration_sec"])
+		sfxDuration, _ := NumericValue(sfxAsset.Probe["duration_sec"])
 		if available := int(math.Round(sfxDuration * float64(current.FPS))); available > 0 && sfx.DurationFrames > available {
 			return failed("SFX 请求时长超过素材时长", map[string]any{
 				"requested_frames": sfx.DurationFrames, "available_frames": available,
@@ -420,7 +419,7 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 		if gain < -60 || gain > 12 {
 			return failed("SFX gain_db 必须在 [-60,12] 范围内", nil)
 		}
-		sfxClipID = randomID("sfx_beat")
+		sfxClipID = RandomID("sfx_beat")
 		operations = append(operations,
 			map[string]any{
 				"kind": "insert_clip", "track_id": "sfx", "timeline_clip_id": sfxClipID,
@@ -438,7 +437,7 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 	for index := range operations {
 		typedOperations[index] = rushestools.TimelineOp(operations[index])
 	}
-	result, err := service.toolApplyPatches(ctx, draftID, rushestools.TimelinePatchBatchInput{Ops: typedOperations})
+	result, err := exec.toolApplyPatches(ctx, draftID, rushestools.TimelinePatchBatchInput{Ops: typedOperations})
 	if err != nil || result.Status != "succeeded" {
 		return result, err
 	}
@@ -457,7 +456,7 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 	return result, nil
 }
 
-func sourceRangeContains(ranges []agentexec.BeatMixSourceRange, startFrame, endFrame int) bool {
+func SourceRangeContains(ranges []BeatMixSourceRange, startFrame, endFrame int) bool {
 	for _, sourceRange := range ranges {
 		if startFrame >= sourceRange.StartFrame && endFrame <= sourceRange.EndFrame {
 			return true
@@ -515,23 +514,23 @@ func waveformToolValue(waveform media.WaveformEnvelope) rushestools.AudioWavefor
 	}
 }
 
-func chooseBeatMixCuts(everyFour, everyBeat []int, targetFrames, maxClips int) []int {
+func ChooseBeatMixCuts(everyFour, everyBeat []int, targetFrames, maxClips int) []int {
 	if targetFrames <= 0 || maxClips <= 0 {
 		return nil
 	}
-	candidates := beatCandidatesWithin(everyFour, targetFrames)
+	candidates := BeatCandidatesWithin(everyFour, targetFrames)
 	if len(candidates) == 0 {
-		candidates = beatCandidatesWithin(everyBeat, targetFrames)
+		candidates = BeatCandidatesWithin(everyBeat, targetFrames)
 	}
 	return distributeBeatMixCuts(candidates, targetFrames, maxClips)
 }
 
-func chooseAllBeatMixCuts(everyFour, everyBeat []int, targetFrames, clipCount int) []int {
-	candidates := beatCandidatesWithin(everyFour, targetFrames)
+func ChooseAllBeatMixCuts(everyFour, everyBeat []int, targetFrames, clipCount int) []int {
+	candidates := BeatCandidatesWithin(everyFour, targetFrames)
 	// 四拍网格不足以为每个素材提供一个切点时，回退到完整拍点网格。
 	// 只有显式 use_all_video_assets 才提高密度，避免默认规划为了短素材过度切碎。
 	if len(candidates)+1 < clipCount {
-		candidates = beatCandidatesWithin(everyBeat, targetFrames)
+		candidates = BeatCandidatesWithin(everyBeat, targetFrames)
 	}
 	return distributeBeatMixCuts(candidates, targetFrames, clipCount)
 }
@@ -543,7 +542,7 @@ func chooseAllBeatMixCuts(everyFour, everyBeat []int, targetFrames, clipCount in
 // Prefer the sparser four-beat grid, then fall back to the full beat grid. If
 // neither grid has a capacity-feasible assignment, preserve the prior planner
 // result so the existing source-selection failure remains specific and useful.
-func chooseCapacityAwareBeatMixCuts(
+func ChooseCapacityAwareBeatMixCuts(
 	everyFour, everyBeat []int,
 	targetFrames int,
 	capacities []int,
@@ -552,15 +551,15 @@ func chooseCapacityAwareBeatMixCuts(
 		return nil
 	}
 	for _, grid := range [][]int{everyFour, everyBeat} {
-		candidates := beatCandidatesWithin(grid, targetFrames)
-		if cuts, ok := distributeCapacityAwareBeatMixCuts(candidates, targetFrames, capacities); ok {
+		candidates := BeatCandidatesWithin(grid, targetFrames)
+		if cuts, ok := DistributeCapacityAwareBeatMixCuts(candidates, targetFrames, capacities); ok {
 			return cuts
 		}
 	}
-	return chooseAllBeatMixCuts(everyFour, everyBeat, targetFrames, len(capacities))
+	return ChooseAllBeatMixCuts(everyFour, everyBeat, targetFrames, len(capacities))
 }
 
-func distributeCapacityAwareBeatMixCuts(
+func DistributeCapacityAwareBeatMixCuts(
 	candidates []int,
 	targetFrames int,
 	capacities []int,
@@ -616,8 +615,8 @@ func distributeCapacityAwareBeatMixCuts(
 			}
 		}
 		sort.SliceStable(options, func(left, right int) bool {
-			leftDistance := absInt(options[left] - idealCut)
-			rightDistance := absInt(options[right] - idealCut)
+			leftDistance := AbsInt(options[left] - idealCut)
+			rightDistance := AbsInt(options[right] - idealCut)
 			if leftDistance == rightDistance {
 				return options[left] < options[right]
 			}
@@ -651,7 +650,7 @@ func distributeBeatMixCuts(candidates []int, targetFrames, maxClips int) []int {
 		ideal := int(math.Round(float64(targetFrames*segment) / float64(clipCount)))
 		selectedIndex := minIndex
 		for index := minIndex + 1; index <= maxIndex; index++ {
-			if absInt(candidates[index]-ideal) < absInt(candidates[selectedIndex]-ideal) {
+			if AbsInt(candidates[index]-ideal) < AbsInt(candidates[selectedIndex]-ideal) {
 				selectedIndex = index
 			}
 		}
@@ -661,7 +660,7 @@ func distributeBeatMixCuts(candidates []int, targetFrames, maxClips int) []int {
 	return append(cuts, targetFrames)
 }
 
-func beatCandidatesWithin(frames []int, targetFrames int) []int {
+func BeatCandidatesWithin(frames []int, targetFrames int) []int {
 	result := make([]int, 0, len(frames))
 	previous := -1
 	for _, frame := range frames {
@@ -674,7 +673,7 @@ func beatCandidatesWithin(frames []int, targetFrames int) []int {
 	return result
 }
 
-func absInt(value int) int {
+func AbsInt(value int) int {
 	if value < 0 {
 		return -value
 	}

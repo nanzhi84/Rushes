@@ -1,9 +1,8 @@
-package agent
+package agentexec
 
 import (
 	"errors"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -25,7 +24,7 @@ func timelineOpFieldFailure(
 		data["failed_op"] = operation
 	}
 	if fieldErr.Spec != nil {
-		data["expected_schema"] = timelineOpExpectedSchema(*fieldErr.Spec)
+		data["expected_schema"] = TimelineOpExpectedSchema(*fieldErr.Spec)
 		data["correct_example"] = timeline.CorrectOpExample(*fieldErr.Spec)
 		data["recovery"] = "只修正当前 op 的字段名与类型后重新调用；不要原样重发失败参数。"
 	} else {
@@ -39,7 +38,7 @@ func timelineOpFieldFailure(
 	}
 }
 
-func timelineOpExpectedSchema(spec timeline.OpSpec) map[string]any {
+func TimelineOpExpectedSchema(spec timeline.OpSpec) map[string]any {
 	correctExample := timeline.CorrectOpExample(spec)
 	properties := map[string]any{
 		"kind": map[string]any{
@@ -120,61 +119,12 @@ func timelineOpCatalogIndex() []map[string]string {
 	return index
 }
 
-func timelineOpFieldError(err error) (*timeline.OpFieldError, bool) {
+func TimelineOpFieldError(err error) (*timeline.OpFieldError, bool) {
 	var fieldErr *timeline.OpFieldError
 	if errors.As(err, &fieldErr) {
 		return fieldErr, true
 	}
 	return nil, false
-}
-
-func timelineOpFailureAt(
-	err error,
-	operation map[string]any,
-	failedIndex int,
-	document timeline.Document,
-) (rushestools.ToolResult, bool) {
-	fieldErr, ok := timelineOpFieldError(err)
-	if ok {
-		return timelineOpFieldFailure(fieldErr, operation, failedIndex), true
-	}
-	var semanticErr *timeline.SemanticError
-	if !errors.As(err, &semanticErr) {
-		return rushestools.ToolResult{}, false
-	}
-	data := map[string]any{
-		"error_code":                 "timeline_op_semantic_error",
-		"semantic_error_kind":        semanticErr.Kind,
-		"failed_op":                  operation,
-		"reason":                     semanticErr.Error(),
-		"current_timeline_unchanged": true,
-		"recovery":                   "根据当前时间线事实修正 failed_op 后重新调用；不要猜测 clip ID 或帧范围。",
-	}
-	if failedIndex > 0 {
-		data["failed_op_index"] = failedIndex
-	}
-	if spec, exists := timeline.LookupOpSpec(agentexec.InterfaceString(operation["kind"])); exists {
-		data["expected_schema"] = timelineOpExpectedSchema(*spec)
-		data["correct_example"] = timeline.CorrectOpExample(*spec)
-	}
-	switch semanticErr.Kind {
-	case timeline.SemanticClipNotFound:
-		data["available_timeline_clip_ids"] = timelineClipIDsByTrack(document)
-	case timeline.SemanticFrameRange:
-		data["actual_clip_range"] = map[string]any{
-			"timeline_clip_id":     semanticErr.ClipID,
-			"timeline_start_frame": semanticErr.TimelineStartFrame,
-			"timeline_end_frame":   semanticErr.TimelineEndFrame,
-			"source_start_frame":   semanticErr.SourceStartFrame,
-			"source_end_frame":     semanticErr.SourceEndFrame,
-			"provided_frame":       semanticErr.ProvidedFrame,
-		}
-	case timeline.SemanticTrackLocked:
-		data["locked_track_id"] = semanticErr.TrackID
-	}
-	return rushestools.ToolResult{
-		Status: "failed", Observation: "时间线补丁语义校验失败：" + semanticErr.Error(), Data: data,
-	}, true
 }
 
 func timelineClipIDsByTrack(document timeline.Document) map[string][]string {

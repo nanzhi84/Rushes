@@ -139,10 +139,16 @@ type UserMemoryEvidenceRow struct {
 	SourceDraftID string
 }
 
+type UserMemoryStatementEditRow struct {
+	Key       string
+	Statement string
+}
+
 type UserMemoryOutcome struct {
 	WrittenKeys []string
 	RemovedKeys []string
 	EvictedKeys []string
+	EditedKeys  []string
 	Total       int
 }
 
@@ -200,6 +206,9 @@ type ResultRows struct {
 	// UserMemoryTouchKeys 是本回合成功收尾时需要刷新 last_used_at 的记忆键（被注入
 	// WorldState 的那些）；只更新已存在的键，缺失键静默跳过，是 M2 价值感知的用侧信号。
 	UserMemoryTouchKeys []string
+	// UserMemoryStatementEdit 是用户在设置面板对某条记忆 statement 的手动修订：仅限
+	// Actor=User,不带模型证据,直接更新 statement 并标注 manually_revised_at。
+	UserMemoryStatementEdit *UserMemoryStatementEditRow
 }
 
 type ValidationHook func(context.Context, *sql.Tx, []string) error
@@ -361,9 +370,13 @@ func Apply(
 			return Result{Status: StatusValidationFailed}, nil
 		}
 	}
+	if options.ResultRows.UserMemoryStatementEdit != nil && options.Actor != contracts.ActorUser {
+		return Result{}, fmt.Errorf("%w: 手动修订记忆仅限用户", ErrUserMemoryInput)
+	}
 	var userMemory *UserMemoryOutcome
 	if len(options.ResultRows.UserMemoryUpserts) > 0 ||
-		len(options.ResultRows.UserMemoryRemoveKeys) > 0 || options.ResultRows.UserMemoryClearAll {
+		len(options.ResultRows.UserMemoryRemoveKeys) > 0 || options.ResultRows.UserMemoryClearAll ||
+		options.ResultRows.UserMemoryStatementEdit != nil {
 		userMemory = &UserMemoryOutcome{}
 	}
 	if err := persistResultRows(ctx, tx, options.ResultRows, state.createdAt, userMemory); err != nil {
@@ -1466,6 +1479,15 @@ func persistResultRows(
 	if err := touchUserMemories(ctx, tx, rows.UserMemoryTouchKeys, defaultCreatedAt); err != nil {
 		return err
 	}
+	if rows.UserMemoryStatementEdit != nil {
+		edited, err := editUserMemoryStatement(ctx, tx, *rows.UserMemoryStatementEdit, defaultCreatedAt)
+		if err != nil {
+			return err
+		}
+		if edited && userMemoryOutcome != nil {
+			userMemoryOutcome.EditedKeys = append(userMemoryOutcome.EditedKeys, rows.UserMemoryStatementEdit.Key)
+		}
+	}
 	for _, summary := range rows.MaterialSummaries {
 		createdAt := summary.CreatedAt
 		if createdAt == "" {
@@ -1966,6 +1988,35 @@ func decisionAnswerEvidenceText(answerJSON, optionsJSON string) string {
 	return strings.Join(parts, "\n")
 }
 
+// editUserMemoryStatement 是用户手动修订路径：直接更新 statement、刷新 last_confirmed_at
+// 并标注 manually_revised_at；不校验证据（人工修订天然是用户权威），键不存在返回 false 让
+// 端点回 404。仅由 Actor=User 的设置面板 PATCH 触发。
+func editUserMemoryStatement(ctx context.Context, tx *sql.Tx, edit UserMemoryStatementEditRow, at string) (bool, error) {
+	if !storage.ValidUserMemoryKey(edit.Key) {
+		return false, fmt.Errorf("%w: 手动修订键 %q 无效", ErrUserMemoryInput, edit.Key)
+	}
+	statement := strings.TrimSpace(edit.Statement)
+	if !storage.ValidUserMemoryStatement(statement) {
+		return false, fmt.Errorf("%w: 手动修订 statement 为空或超过 200 字", ErrUserMemoryInput)
+	}
+	revisedAt, err := normalizeUserMemoryTimestamp(at)
+	if err != nil {
+		return false, fmt.Errorf("%w: manually_revised_at: %v", ErrUserMemoryInput, err)
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE user_memories
+		SET statement=?, last_confirmed_at=?, manually_revised_at=?
+		WHERE memory_key=?`, statement, revisedAt, revisedAt, edit.Key)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
 // touchUserMemories 刷新记忆的 last_used_at。只更新已存在的键（被淘汰的键静默跳过），
 // 是回合成功收尾后 M2 价值感知的用侧信号；与其它写入同处一个 reducer 事务。
 func touchUserMemories(ctx context.Context, tx *sql.Tx, keys []string, at string) error {
@@ -2081,7 +2132,8 @@ func emptyResultRows(rows ResultRows) bool {
 		len(rows.AgentJobObservations) == 0 && rows.AgentJobObservationDelivery == nil &&
 		len(rows.AgentJobObservationSuppressions) == 0 &&
 		len(rows.UserMemoryUpserts) == 0 && len(rows.UserMemoryRemoveKeys) == 0 &&
-		!rows.UserMemoryClearAll && len(rows.UserMemoryTouchKeys) == 0
+		!rows.UserMemoryClearAll && len(rows.UserMemoryTouchKeys) == 0 &&
+		rows.UserMemoryStatementEdit == nil
 }
 
 func sortedKeys(values map[string]struct{}) []string {

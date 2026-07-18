@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -33,6 +35,9 @@ type UserMemory struct {
 	// 历史行为空串（列可空）。淘汰价值按 max(last_confirmed_at,last_used_at) 衡量，
 	// 让长期只读的稳定偏好不因久未复写而最先出局。
 	LastUsedAt string `json:"last_used_at,omitempty"`
+	// ManuallyRevisedAt 非空表示该记忆的 statement 最近由用户在设置面板手动修订过
+	// （走 Actor=User 路径、不带模型证据）；用于面板区分「手动修订」与模型写入。
+	ManuallyRevisedAt string `json:"manually_revised_at,omitempty"`
 }
 
 func ValidUserMemoryKey(value string) bool {
@@ -65,7 +70,8 @@ func ValidUserMemoryEvidenceKind(value string) bool {
 func ListUserMemories(ctx context.Context, query Querier) ([]UserMemory, error) {
 	rows, err := query.QueryContext(ctx, `
 		SELECT memory_key,kind,statement,evidence_kind,evidence_id,
-		source_draft_id,created_at,last_confirmed_at,COALESCE(last_used_at,'')
+		source_draft_id,created_at,last_confirmed_at,COALESCE(last_used_at,''),
+		COALESCE(manually_revised_at,'')
 		FROM user_memories
 		ORDER BY max(last_confirmed_at,COALESCE(last_used_at,last_confirmed_at)) DESC,memory_key ASC`)
 	if err != nil {
@@ -79,10 +85,33 @@ func ListUserMemories(ctx context.Context, query Querier) ([]UserMemory, error) 
 			&memory.Key, &memory.Kind, &memory.Statement,
 			&memory.EvidenceKind, &memory.EvidenceID, &memory.SourceDraftID,
 			&memory.CreatedAt, &memory.LastConfirmedAt, &memory.LastUsedAt,
+			&memory.ManuallyRevisedAt,
 		); err != nil {
 			return nil, err
 		}
 		memories = append(memories, memory)
 	}
 	return memories, rows.Err()
+}
+
+// GetUserMemory 按 key 读取单条记忆；不存在返回 ErrNotFound。供设置面板 PATCH 后回读。
+func GetUserMemory(ctx context.Context, query Querier, key string) (UserMemory, error) {
+	var memory UserMemory
+	err := query.QueryRowContext(ctx, `
+		SELECT memory_key,kind,statement,evidence_kind,evidence_id,
+		source_draft_id,created_at,last_confirmed_at,COALESCE(last_used_at,''),
+		COALESCE(manually_revised_at,'')
+		FROM user_memories WHERE memory_key=?`, key).Scan(
+		&memory.Key, &memory.Kind, &memory.Statement,
+		&memory.EvidenceKind, &memory.EvidenceID, &memory.SourceDraftID,
+		&memory.CreatedAt, &memory.LastConfirmedAt, &memory.LastUsedAt,
+		&memory.ManuallyRevisedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return UserMemory{}, ErrNotFound
+	}
+	if err != nil {
+		return UserMemory{}, err
+	}
+	return memory, nil
 }

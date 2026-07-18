@@ -361,10 +361,10 @@ func (builder *ContextBuilder) materialCatalogContext(
 			encoded, _ := json.Marshal(raw)
 			var summary understanding.Summary
 			if json.Unmarshal(encoded, &summary) == nil {
-				item["overall"] = truncateRunes(strings.TrimSpace(summary.Overall), 128)
+				item["overall"] = agentexec.TruncateRunes(strings.TrimSpace(summary.Overall), 128)
 				item["shot_count"] = len(summary.Segments)
 				item["searchable"] = asset.Kind == "video" && len(summary.Segments) > 0
-				item["semantic_tags"] = catalogSemanticTags(summary.Segments, 10)
+				item["semantic_tags"] = agentexec.CatalogSemanticTags(summary.Segments, 10)
 				if role := understanding.SuggestVisualRole(
 					asset.Filename, relDir, summary.SemanticRole,
 				); role != "" {
@@ -442,31 +442,6 @@ func (builder *ContextBuilder) materialCatalogContext(
 	return items, len(assets), nil
 }
 
-func catalogSemanticTags(segments []understanding.Segment, limit int) []string {
-	values := make([]string, 0, limit)
-	seen := map[string]struct{}{}
-	for _, segment := range segments {
-		groups := [][]string{segment.Tags, segment.Subjects, segment.Actions, segment.Setting, segment.Mood}
-		for _, group := range groups {
-			for _, value := range group {
-				value = strings.TrimSpace(value)
-				if value == "" {
-					continue
-				}
-				if _, duplicate := seen[value]; duplicate {
-					continue
-				}
-				seen[value] = struct{}{}
-				values = append(values, value)
-				if len(values) >= limit {
-					return values
-				}
-			}
-		}
-	}
-	return values
-}
-
 func cloneContextMap(source map[string]any) map[string]any {
 	result := make(map[string]any, len(source))
 	for key, value := range source {
@@ -539,10 +514,10 @@ func compactSemanticAnchorContext(metadata map[string]any) map[string]any {
 		}
 	}
 	if text := strings.TrimSpace(agentexec.StringValue(metadata["transcript_text"])); text != "" {
-		result["transcript_text"] = truncateRunes(text, 160)
+		result["transcript_text"] = agentexec.TruncateRunes(text, 160)
 	}
 	if description := strings.TrimSpace(agentexec.StringValue(metadata["b_roll_description"])); description != "" {
-		result["b_roll_description"] = truncateRunes(description, 160)
+		result["b_roll_description"] = agentexec.TruncateRunes(description, 160)
 	}
 	return result
 }
@@ -809,7 +784,7 @@ func compactEditHistoryValue(value any, depth int) any {
 		}
 		return result
 	case string:
-		return truncateRunes(typed, 240)
+		return agentexec.TruncateRunes(typed, 240)
 	}
 
 	reflected := reflect.ValueOf(value)
@@ -865,7 +840,7 @@ func minimalEditHistoryEntry(entry map[string]any) map[string]any {
 	operation, _ := entry["op"].(map[string]any)
 	minimalOperation := map[string]any{"kind": operation["kind"]}
 	if target := operationTarget(operation); target != "" {
-		minimalOperation["target"] = truncateRunes(target, 120)
+		minimalOperation["target"] = agentexec.TruncateRunes(target, 120)
 	}
 	result["op"] = minimalOperation
 	return result
@@ -945,7 +920,7 @@ func operationTarget(operation map[string]any) string {
 func sanitizeContextMap(input map[string]any) map[string]any {
 	result := make(map[string]any, len(input))
 	for key, value := range input {
-		if isReservedContextKey(key) {
+		if agentexec.IsReservedContextKey(key) {
 			continue
 		}
 		if key == "content_plan" {
@@ -964,25 +939,16 @@ func sanitizeContentPlanForContext(value any) any {
 	}
 	result := make(map[string]any, len(plan))
 	for key, item := range plan {
-		if isReservedContextKey(key) {
+		if agentexec.IsReservedContextKey(key) {
 			continue
 		}
 		if key == "contract" {
 			result[key] = sanitizeContextValue(item)
 			continue
 		}
-		result[key] = cloneContentPlanValue(item)
+		result[key] = agentexec.CloneContentPlanValue(item)
 	}
 	return result
-}
-
-func isReservedContextKey(key string) bool {
-	switch key {
-	case "timeline_version", "timeline_revision", "version", "timeline_id", "draft_id":
-		return true
-	default:
-		return false
-	}
 }
 
 func sanitizeContextValue(value any) any {
@@ -1026,12 +992,4 @@ func valueOrContext(value, fallback string) string {
 		return fallback
 	}
 	return value
-}
-
-func truncateRunes(value string, limit int) string {
-	runes := []rune(value)
-	if len(runes) <= limit {
-		return value
-	}
-	return string(runes[:limit]) + "…"
 }

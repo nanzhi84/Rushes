@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -79,10 +80,10 @@ func (scaffold *e2eFallbackScaffold) cancelDuringUnderstanding(
 	ctx context.Context,
 	draftID string,
 ) (reply string, resultErr error) {
-	listed, err := scaffold.service.toolListAssets(
+	listed, err := scaffold.service.executor.ToolListAssets(
 		ctx,
 		draftID,
-		rushestools.AssetListInput{OnlyUsable: boolPointer(true)},
+		rushestools.AssetListInput{OnlyUsable: agentexec.BoolPointer(true)},
 	)
 	if err != nil {
 		return "", err

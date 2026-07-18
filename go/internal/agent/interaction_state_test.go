@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -19,7 +21,7 @@ func TestNormalizeDecisionTypeMapsKnownScenarios(t *testing.T) {
 		"approve_rough_cut":    "approve_rough_cut",
 		"unexpected":           "generic",
 	} {
-		if got := normalizeDecisionType(input); got != want {
+		if got := agentexec.NormalizeDecisionType(input); got != want {
 			t.Errorf("normalizeDecisionType(%q)=%q want=%q", input, got, want)
 		}
 	}
@@ -27,8 +29,8 @@ func TestNormalizeDecisionTypeMapsKnownScenarios(t *testing.T) {
 
 func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_same_turn_decision")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_same_turn_decision")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +38,7 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 	t.Cleanup(service.Close)
 
 	base := rushestools.WithDraftID(t.Context(), "draft_same_turn_decision")
-	base = withTurnInteractionState(base, newTurnInteractionState())
+	base = agentexec.WithTurnInteractionState(base, agentexec.NewTurnInteractionState())
 	askContext := rushestools.WithToolCallID(base, "call_ask_1")
 	raw, err := service.ExecuteTool(askContext, "interaction.ask_user", rushestools.AskUserInput{
 		Question:     "当前素材支持两条互相冲突的主线，且无法判断用户目标，请选择核心方向。",
@@ -62,7 +64,7 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 		*decision.CreatedByToolCallID != "call_ask_1" {
 		t.Fatalf("decision=%#v", decision)
 	}
-	directAnswer, err := service.toolDecisionAnswer(askContext, "draft_same_turn_decision", rushestools.DecisionAnswerInput{
+	directAnswer, err := service.executor.ToolDecisionAnswer(askContext, "draft_same_turn_decision", rushestools.DecisionAnswerInput{
 		DecisionID: decisionID, OptionID: "product",
 	})
 	if err != nil || directAnswer.Status != "failed" || directAnswer.Data["turn_should_end"] != true {
@@ -105,7 +107,7 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 
 func TestAdjudicateDecisionAnswerTrustedOptionPayloadWins(t *testing.T) {
 	t.Parallel()
-	answer, err := AdjudicateDecisionAnswer(storage.Decision{
+	answer, err := agentexec.AdjudicateDecisionAnswer(storage.Decision{
 		Options: []map[string]any{{
 			"option_id": "story",
 			"payload":   map[string]any{"shared": "trusted", "preset": "narrative"},
@@ -126,8 +128,8 @@ func TestAdjudicateDecisionAnswerTrustedOptionPayloadWins(t *testing.T) {
 
 func TestAskUserRejectsCreativeApprovalAndVerboseCriticalQuestion(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_autonomous_editing")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_autonomous_editing")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +137,7 @@ func TestAskUserRejectsCreativeApprovalAndVerboseCriticalQuestion(t *testing.T) 
 	t.Cleanup(service.Close)
 
 	ctx := rushestools.WithDraftID(t.Context(), "draft_autonomous_editing")
-	ctx = withTurnInteractionState(ctx, newTurnInteractionState())
+	ctx = agentexec.WithTurnInteractionState(ctx, agentexec.NewTurnInteractionState())
 	for name, input := range map[string]rushestools.AskUserInput{
 		"reversible approval": {
 			Question: "请逐项确认口播删保项和 B-roll 方案。", DecisionType: "approve_speech_cut",
@@ -172,8 +174,8 @@ func TestAskUserRejectsCreativeApprovalAndVerboseCriticalQuestion(t *testing.T) 
 
 func TestBlockingDecisionSerializesParallelToolCalls(t *testing.T) {
 	t.Parallel()
-	state := newTurnInteractionState()
-	ctx := withTurnInteractionState(t.Context(), state)
+	state := agentexec.NewTurnInteractionState()
+	ctx := agentexec.WithTurnInteractionState(t.Context(), state)
 	release, blocked := beginTurnToolCall(ctx)
 	if blocked != "" {
 		t.Fatalf("unexpected initial block %q", blocked)
@@ -190,7 +192,7 @@ func TestBlockingDecisionSerializesParallelToolCalls(t *testing.T) {
 		t.Fatalf("parallel call bypassed active tool execution: %q", decisionID)
 	case <-time.After(20 * time.Millisecond):
 	}
-	markDecisionCreatedThisTurn(ctx, "decision_parallel", true)
+	agentexec.MarkDecisionCreatedThisTurn(ctx, "decision_parallel", true)
 	release()
 	select {
 	case decisionID := <-acquired:
@@ -204,9 +206,9 @@ func TestBlockingDecisionSerializesParallelToolCalls(t *testing.T) {
 
 func TestDecisionAnswerValidatesOwnershipStateAndAnswer(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_decision_owner")
-	createAgentDraft(t, database, "draft_decision_other")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_decision_owner")
+	agenttest.CreateAgentDraft(t, database, "draft_decision_other")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
