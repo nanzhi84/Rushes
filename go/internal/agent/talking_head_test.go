@@ -821,7 +821,7 @@ func TestTalkingHeadOrphanSpeechFragmentsExposeAdjacentPauseEvidence(t *testing.
 		0, 200, minTalkingHeadRetainedIslandFrames, nil,
 	)
 	if len(fragments) != 1 || fragments[0]["retained_text"] != "自己" {
-		t.Fatalf("不足 0.8 秒的单词语音岛必须显式解决: %#v", fragments)
+		t.Fatalf("不足 2 秒的单词语音岛必须显式解决: %#v", fragments)
 	}
 }
 

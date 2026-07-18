@@ -430,3 +430,201 @@ func TestTalkingHeadMisspeakEvidenceClipsToSelectedRange(t *testing.T) {
 		t.Fatal("零长孤岛不应匹配任何证据")
 	}
 }
+
+// TestValidateTimelineSoftSkipsBrokenQualityReport 锁定 P2-1：validate 是只读诊断，
+// 口播质检读取失败（此处注入 source_end<=source_start 的损坏 utterance，令
+// speechQualityReport 直接报错）时应跳过附加 speech_quality，让结构合法的时间线仍
+// 成功返回，而不是把诊断读取失败伪装成校验失败去诱导模型重试。
+func TestValidateTimelineSoftSkipsBrokenQualityReport(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_validate_softskip")
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO assets(asset_id,storage_mode,reference_path,kind,source,filename,hash,size,probe_json,ingest_status,understanding_status,usable)
+		VALUES('asset_broken_tx','reference','/tmp/broken.mp4','video','local_path','broken.mp4','hash_broken',1,'{}','ready','done',1);
+		INSERT INTO transcripts(transcript_id,asset_id,provider_id,raw_preserved,utterances_json,vad_segments_json)
+		VALUES('transcript_broken','asset_broken_tx','fixture',0,
+			'[{"utterance_id":"utt_broken","source_start_frame":100,"source_end_frame":50,"text":"坏"}]','[]')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	document, err := timeline.ComposeInitial("draft_validate_softskip", 1, []timeline.Selection{
+		{AssetID: "asset_broken_tx", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 前置断言：损坏 transcript 确实让质检报告器直接报错，否则这条软跳过测试没有意义。
+	if _, qualityErr := service.speechQualityReport(t.Context(), document); qualityErr == nil {
+		t.Fatal("期望损坏 transcript 让 speechQualityReport 报错，但返回了 nil")
+	}
+	if _, err := service.persistTimeline(t.Context(), "draft_validate_softskip", document, "softskip_fixture"); err != nil {
+		t.Fatal(err)
+	}
+
+	validated, err := service.toolValidateTimeline(t.Context(), "draft_validate_softskip")
+	if err != nil {
+		t.Fatalf("validate 应软跳过质检读取失败，却返回错误：%v", err)
+	}
+	if validated.Status != "succeeded" {
+		t.Fatalf("validate status=%q，期望 succeeded（结构合法的时间线不应因质检读取失败降级）", validated.Status)
+	}
+	if _, present := validated.Data["speech_quality"]; present {
+		t.Fatalf("质检读取失败时不应附加 speech_quality，实际存在：%#v", validated.Data["speech_quality"])
+	}
+}
+
+// seedTalkingHeadAutoPreserveScenario 复用 auto-preserve 形态：删两个气口时
+// pause_after_year 会把保留台词夹成不足 2 秒的孤岛，被防护保守撤回删除，从而在
+// 确认后重放里产生 plan_drift。为每个 draft 用独立 asset，便于并行与多 draft 断言。
+func seedTalkingHeadAutoPreserveScenario(
+	t *testing.T, database *storage.DB, service *Service, draftID, assetID string,
+) {
+	t.Helper()
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO assets(
+			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
+			probe_json,ingest_status,understanding_status,usable
+		) VALUES(?, 'reference', ?, 'video', 'local_path', ?, ?, 1,
+			'{"duration_sec":4,"has_audio":true}', 'ready', 'ready', 1);`,
+		assetID, "/tmp/"+assetID+".mp4", assetID+".mp4", assetID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(),
+		`INSERT INTO draft_asset_links(draft_id,asset_id,rel_dir,linked_at) VALUES(?, ?, 'Aroll', ?);`,
+		draftID, assetID, time.Now().UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	transcriptResult, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{Transcripts: []reducer.TranscriptRow{{
+			ID: "transcript_" + assetID, AssetID: assetID, ProviderID: "fixture-word-timestamps",
+			Utterances: []map[string]any{{
+				"utterance_id": "utt_year", "source_start_frame": 70,
+				"source_end_frame": 104, "text": "是2015年。",
+				"words": []map[string]any{
+					{"word_id": "w_is", "source_start_frame": 70, "source_end_frame": 78, "text": "是"},
+					{"word_id": "w_year", "source_start_frame": 91, "source_end_frame": 104, "text": "2015年", "punctuation": "。"},
+				},
+			}},
+			VADSegments: []map[string]any{
+				{"pause_id": "pause_before_year", "source_start_frame": 78, "source_end_frame": 91, "delete_start_frame": 78, "delete_end_frame": 91},
+				{"pause_id": "pause_after_year", "source_start_frame": 104, "source_end_frame": 116, "delete_start_frame": 104, "delete_end_frame": 116},
+			},
+		}}},
+	})
+	if err != nil || transcriptResult.Status != reducer.StatusApplied {
+		t.Fatalf("transcript status=%s err=%v", transcriptResult.Status, err)
+	}
+	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+		AssetID: assetID, AssetKind: "video",
+		SourceStartFrame: 0, SourceEndFrame: 120, Role: "a_roll", HasAudio: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted, persistErr := service.persistTimeline(t.Context(), draftID, document, "plan_drift_fixture"); persistErr != nil || persisted.Status != "succeeded" {
+		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
+	}
+}
+
+// TestReplayPendingEditTalkingHeadEmitsPlanDrift 锁定 P2-2 生产链路：
+// replayPendingTool → executeReported → ExecuteTool → toolEditTalkingHead 的确认重放
+// ctx 透传。summary 与 Data["plan_drift"] 在 toolEditTalkingHead 的同一 if drift != nil
+// 分支一同写入，而 replayPendingTool 只回传 Observation，故 summary 出现在返回观察里即为
+// 「Data["plan_drift"] 非空且确认重放 ctx 一路透传到 talkingHeadPlanDrift」的端到端证据。
+func TestReplayPendingEditTalkingHeadEmitsPlanDrift(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	const draftID = "draft_plan_drift_replay"
+	createAgentDraft(t, database, draftID)
+	seedTalkingHeadAutoPreserveScenario(t, database, service, draftID, "asset_plan_drift_replay")
+
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	observation, err := service.replayPendingTool(ctx, QueueItem{
+		DraftID: draftID,
+		Payload: map[string]any{
+			"pending_tool_call": map[string]any{
+				"tool_name": "timeline.edit_talking_head",
+				"arguments": map[string]any{
+					"a_roll_timeline_clip_id": "clip_v1_001",
+					"remove_pause_ids":        []any{"pause_before_year", "pause_after_year"},
+				},
+			},
+			"answer": map[string]any{"option_id": "confirm"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("replayPendingTool err=%v", err)
+	}
+	if !strings.Contains(observation, "为避免制造不足 2 秒的保留孤岛") ||
+		!strings.Contains(observation, "如实向用户说明这一偏差") {
+		t.Fatalf("确认重放未透传 plan_drift 偏差告知：%q", observation)
+	}
+}
+
+// TestConfirmedToolReplayCtxGatesEditTalkingHeadPlanDrift 直接锁定 Data["plan_drift"]
+// 的结构化形态与 ctx 门控：仅确认重放 ctx 才结构化产出 plan_drift；同样触发 auto-preserve
+// 的普通调用不得输出，避免把工具的保守保留误当成用户批准方案。
+func TestConfirmedToolReplayCtxGatesEditTalkingHeadPlanDrift(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	editInput := rushestools.TalkingHeadEditInput{
+		ARollTimelineClipID: "clip_v1_001",
+		RemovePauseIDs:      []string{"pause_before_year", "pause_after_year"},
+	}
+
+	const confirmedDraft = "draft_plan_drift_confirmed"
+	createAgentDraft(t, database, confirmedDraft)
+	seedTalkingHeadAutoPreserveScenario(t, database, service, confirmedDraft, "asset_plan_drift_confirmed")
+	confirmedCtx := withConfirmedToolReplay(rushestools.WithDraftID(t.Context(), confirmedDraft))
+	confirmedRaw, err := service.executeReported(confirmedCtx, confirmedDraft, "timeline.edit_talking_head", editInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmed := confirmedRaw.(rushestools.ToolResult)
+	drift, driftOK := confirmed.Data["plan_drift"].(map[string]any)
+	if confirmed.Status != "succeeded" || !driftOK || drift == nil {
+		t.Fatalf("确认重放应结构化产出 plan_drift：result=%#v", confirmed)
+	}
+	retained, _ := drift["retained_pauses"].([]map[string]any)
+	if drift["retained_pause_count"] != 1 || len(retained) != 1 || retained[0]["pause_id"] != "pause_after_year" {
+		t.Fatalf("plan_drift 形态异常：%#v", drift)
+	}
+
+	const normalDraft = "draft_plan_drift_normal"
+	createAgentDraft(t, database, normalDraft)
+	seedTalkingHeadAutoPreserveScenario(t, database, service, normalDraft, "asset_plan_drift_normal")
+	normalRaw, err := service.executeReported(rushestools.WithDraftID(t.Context(), normalDraft), normalDraft, "timeline.edit_talking_head", editInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	normal := normalRaw.(rushestools.ToolResult)
+	if _, present := normal.Data["plan_drift"]; present {
+		t.Fatalf("非确认重放不应输出 plan_drift：%#v", normal.Data["plan_drift"])
+	}
+	// 前置校验这条非确认路径确实触发了 auto-preserve，否则负向断言没有意义。
+	if normal.Data["auto_preserved_pause_count"] != 1 {
+		t.Fatalf("非确认路径未触发 auto-preserve，负向断言失效：%#v", normal.Data)
+	}
+}
