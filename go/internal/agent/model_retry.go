@@ -34,10 +34,39 @@ func (err *modelResponseTimeoutError) Error() string {
 
 func (err *modelResponseTimeoutError) Unwrap() error { return err.LastErr }
 
+// modelContextLengthError 表示压缩重试后模型输入仍超出上下文上限的终态。
+type modelContextLengthError struct {
+	Retries int
+	LastErr error
+}
+
+func (err *modelContextLengthError) Error() string {
+	return fmt.Sprintf("模型上下文超出上限（已自动压缩重试 %d 次）", err.Retries)
+}
+
+func (err *modelContextLengthError) Unwrap() error { return err.LastErr }
+
+// modelRetryReason 是触发自动重试的错误类别内部标识；label 返回面向用户的简体中文原因短语。
+type modelRetryReason int
+
+const (
+	modelRetryReasonNone modelRetryReason = iota
+	modelRetryReasonTimeout
+	modelRetryReasonContextLength
+)
+
+func (reason modelRetryReason) label() string {
+	if reason == modelRetryReasonContextLength {
+		return "上下文超出模型上限"
+	}
+	return "模型响应超时"
+}
+
 type modelRetryNotice struct {
 	Attempt    int
 	MaxRetries int
 	Delay      time.Duration
+	Reason     string
 }
 
 type modelRetryReporter func(modelRetryNotice)
@@ -180,10 +209,16 @@ func (retry *timeoutRetryChatModel) nextAttempt(
 	completedRetries int,
 	requestErr error,
 ) (int, []*schema.Message, error) {
-	if !isRetryableModelTimeout(ctx, requestErr) {
+	reason := classifyRetryableModelError(ctx, requestErr)
+	if reason == modelRetryReasonNone {
 		return completedRetries, nil, requestErr
 	}
 	if completedRetries >= retry.maxRetries {
+		if reason == modelRetryReasonContextLength {
+			return completedRetries, nil, &modelContextLengthError{
+				Retries: completedRetries, LastErr: requestErr,
+			}
+		}
 		return completedRetries, nil, &modelResponseTimeoutError{
 			Retries: completedRetries, LastErr: requestErr,
 		}
@@ -192,7 +227,7 @@ func (retry *timeoutRetryChatModel) nextAttempt(
 	retryAttempt := completedRetries + 1
 	delay := retry.delay(retryAttempt)
 	reportModelRetry(ctx, modelRetryNotice{
-		Attempt: retryAttempt, MaxRetries: retry.maxRetries, Delay: delay,
+		Attempt: retryAttempt, MaxRetries: retry.maxRetries, Delay: delay, Reason: reason.label(),
 	})
 	if err := retry.wait(ctx, delay); err != nil {
 		return completedRetries, nil, err
@@ -240,6 +275,42 @@ func isRetryableModelTimeout(ctx context.Context, err error) bool {
 	for _, marker := range []string{
 		"context deadline exceeded", "client.timeout", "i/o timeout",
 		"timeout awaiting response headers", "request timeout", "response timeout",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyRetryableModelError 判定一个模型调用错误是否值得压缩后重试，并区分原因。
+// 超时优先判定以保持既有行为；context-length 类错误复用同一条压缩重试路径。
+func classifyRetryableModelError(ctx context.Context, err error) modelRetryReason {
+	if isRetryableModelTimeout(ctx, err) {
+		return modelRetryReasonTimeout
+	}
+	if err != nil && ctx.Err() == nil && isContextLengthExceeded(err) {
+		return modelRetryReasonContextLength
+	}
+	return modelRetryReasonNone
+}
+
+// isContextLengthExceeded 识别 dashscope/qwen 与 ark/doubao 返回的“上下文/输入超长”类
+// 400 错误（大小写不敏感）。压缩工具结果后重试通常能让输入重新落入上限。典型样式：
+//
+//	dashscope/qwen: "Range of input length should be [1, 30720], but got 41234"
+//	openai 兼容:     "This model's maximum context length is 32768 tokens. However, your messages resulted in ..."
+//	ark/doubao:      "the request's input tokens exceed the model's context length limit, please reduce the length"
+//
+// 仅匹配与长度/上下文窗口直接相关的短语，避免把普通 400 参数错误误判成可重试。
+func isContextLengthExceeded(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"context length", "context_length_exceeded",
+		"input length", "input tokens", "reduce the length",
 	} {
 		if strings.Contains(message, marker) {
 			return true
