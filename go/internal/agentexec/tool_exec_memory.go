@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-const memoryUpdateEntryLimit = 8
+const MemoryUpdateEntryLimit = 8
 
 type memoryEvidence struct {
 	Kind string
@@ -22,38 +21,24 @@ type memoryEvidence struct {
 
 type memoryEvidenceContextKey struct{}
 
-func withMemoryEvidence(ctx context.Context, kind, id string) context.Context {
+func WithMemoryEvidence(ctx context.Context, kind, id string) context.Context {
 	if !storage.ValidUserMemoryEvidenceKind(kind) || strings.TrimSpace(id) == "" {
 		return ctx
 	}
 	return context.WithValue(ctx, memoryEvidenceContextKey{}, memoryEvidence{Kind: kind, ID: id})
 }
 
-func memoryEvidenceFromContext(ctx context.Context) (memoryEvidence, bool) {
+func MemoryEvidenceFromContext(ctx context.Context) (memoryEvidence, bool) {
 	evidence, ok := ctx.Value(memoryEvidenceContextKey{}).(memoryEvidence)
 	return evidence, ok && storage.ValidUserMemoryEvidenceKind(evidence.Kind) && evidence.ID != ""
 }
 
-func withQueueMemoryEvidence(ctx context.Context, item QueueItem) context.Context {
-	switch item.Kind {
-	case QueueUserMessage:
-		return withMemoryEvidence(ctx, storage.UserMemoryEvidenceMessage, item.ItemID)
-	case QueueUIObservation:
-		if agentexec.InterfaceString(item.Payload["observation_type"]) == "decision_answered" {
-			return withMemoryEvidence(
-				ctx, storage.UserMemoryEvidenceDecision, agentexec.InterfaceString(item.Payload["decision_id"]),
-			)
-		}
-	}
-	return ctx
-}
-
-func (service *Service) toolMemoryUpdate(
+func (exec *Executor) toolMemoryUpdate(
 	ctx context.Context,
 	draftID string,
 	input rushestools.MemoryUpdateInput,
 ) (rushestools.ToolResult, error) {
-	evidence, ok := memoryEvidenceFromContext(ctx)
+	evidence, ok := MemoryEvidenceFromContext(ctx)
 	if !ok {
 		return memoryUpdateFailure(
 			"长期记忆只能锚定当前真实用户消息或当前决策回答；后台续跑和其他 UI 观察不得修改记忆。",
@@ -70,12 +55,12 @@ func (service *Service) toolMemoryUpdate(
 			nil,
 		), nil
 	}
-	if len(input.Entries) > memoryUpdateEntryLimit {
+	if len(input.Entries) > MemoryUpdateEntryLimit {
 		return memoryUpdateFailure(
-			fmt.Sprintf("单次最多写入 %d 条长期记忆。", memoryUpdateEntryLimit),
+			fmt.Sprintf("单次最多写入 %d 条长期记忆。", MemoryUpdateEntryLimit),
 			"memory_entries_limit",
 			"合并语义重复项，只保留用户明确表达的稳定偏好后重试。",
-			map[string]any{"entry_count": len(input.Entries), "limit": memoryUpdateEntryLimit},
+			map[string]any{"entry_count": len(input.Entries), "limit": MemoryUpdateEntryLimit},
 		), nil
 	}
 	if len(input.RemoveKeys) > storage.UserMemoryLimit {
@@ -169,7 +154,7 @@ func (service *Service) toolMemoryUpdate(
 		seenRemovals[key] = struct{}{}
 	}
 
-	result, err := reducer.Apply(ctx, service.database, nil, reducer.Options{
+	result, err := reducer.Apply(ctx, exec.database, nil, reducer.Options{
 		Actor: contracts.ActorAgent,
 		ResultRows: reducer.ResultRows{
 			UserMemoryUpserts: rows, UserMemoryRemoveKeys: input.RemoveKeys,

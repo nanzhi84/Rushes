@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -16,10 +17,10 @@ import (
 
 func TestUserMemoryWorldStateIsStableAcrossDraftsAndRemoval(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_memory_source")
-	createAgentDraft(t, database, "draft_memory_target")
-	insertAgentMessage(t, database, "draft_memory_source", "message_memory_source", "以后成片节奏都快一点")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_source")
+	agenttest.CreateAgentDraft(t, database, "draft_memory_target")
+	agenttest.InsertAgentMessage(t, database, "draft_memory_source", "message_memory_source", "以后成片节奏都快一点")
 
 	applyUserMemories(t, database, []reducer.UserMemoryRow{{
 		Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
@@ -69,9 +70,9 @@ func TestUserMemoryWorldStateIsStableAcrossDraftsAndRemoval(t *testing.T) {
 
 func TestUserMemoryWorldStateUsesWholeEntryBudget(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_memory_budget")
-	insertAgentMessage(t, database, "draft_memory_budget", "message_memory_budget", "请记住这些长期偏好")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_budget")
+	agenttest.InsertAgentMessage(t, database, "draft_memory_budget", "message_memory_budget", "请记住这些长期偏好")
 
 	memories := make([]reducer.UserMemoryRow, 0, storage.UserMemoryLimit)
 	for index := 0; index < storage.UserMemoryLimit; index++ {
@@ -131,8 +132,8 @@ func TestUserMemoryWorldStateSupportsOldReferencesAndBuildPriority(t *testing.T)
 	if worldStateSchemaVersion != 1 {
 		t.Fatalf("adding user_memory must not bump WorldState schema version: %d", worldStateSchemaVersion)
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_memory_build")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_build")
 	manager := NewContextManager(database)
 	first, err := manager.Build(t.Context(), "draft_memory_build")
 	if err != nil {
@@ -159,7 +160,7 @@ func TestUserMemoryWorldStateSupportsOldReferencesAndBuildPriority(t *testing.T)
 		t.Fatal(err)
 	}
 
-	insertAgentMessage(t, database, "draft_memory_build", "message_memory_build", "以后成片节奏都快一点")
+	agenttest.InsertAgentMessage(t, database, "draft_memory_build", "message_memory_build", "以后成片节奏都快一点")
 	applyUserMemories(t, database, []reducer.UserMemoryRow{{
 		Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
 		EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "成片节奏都快一点",

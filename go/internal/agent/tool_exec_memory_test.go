@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -46,7 +48,7 @@ func TestQueueMemoryEvidenceUsesOnlyUserOwnedInputs(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			evidence, ok := memoryEvidenceFromContext(withQueueMemoryEvidence(t.Context(), test.item))
+			evidence, ok := agentexec.MemoryEvidenceFromContext(withQueueMemoryEvidence(t.Context(), test.item))
 			if ok != test.ok || evidence.Kind != test.kind || evidence.ID != test.id {
 				t.Fatalf("evidence=%#v ok=%v", evidence, ok)
 			}
@@ -56,16 +58,16 @@ func TestQueueMemoryEvidenceUsesOnlyUserOwnedInputs(t *testing.T) {
 
 func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_memory_tool")
-	insertAgentMessage(t, database, "draft_memory_tool", "message_memory_tool", "以后都快一点，字幕别遮脸")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_tool")
+	agenttest.InsertAgentMessage(t, database, "draft_memory_tool", "message_memory_tool", "以后都快一点，字幕别遮脸")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(
-		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_memory_tool"),
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_memory_tool"),
 		"draft_memory_tool",
 	)
 
@@ -105,8 +107,8 @@ func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.
 
 func TestMemoryUpdateAcceptsAnsweredDecisionEvidence(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_memory_decision")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_decision")
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO decisions(
 			decision_id,scope_type,draft_id,type,question,options_json,
@@ -121,7 +123,7 @@ func TestMemoryUpdateAcceptsAnsweredDecisionEvidence(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(
-		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceDecision, "decision_memory"),
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceDecision, "decision_memory"),
 		"draft_memory_decision",
 	)
 	raw, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
@@ -143,8 +145,8 @@ func TestMemoryUpdateAcceptsAnsweredDecisionEvidence(t *testing.T) {
 
 func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_memory_reject")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_reject")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +169,7 @@ func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 		{
 			name: "forged message id fails reducer validation",
 			ctx: rushestools.WithDraftID(
-				withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "missing"),
+				agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "missing"),
 				"draft_memory_reject",
 			),
 			code: "memory_evidence_invalid",
@@ -190,19 +192,19 @@ func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 
 func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_memory_input")
-	insertAgentMessage(t, database, "draft_memory_input", "message_memory_input", "记住")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_input")
+	agenttest.InsertAgentMessage(t, database, "draft_memory_input", "message_memory_input", "记住")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(
-		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_memory_input"),
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_memory_input"),
 		"draft_memory_input",
 	)
-	tooManyEntries := make([]rushestools.MemoryEntryInput, memoryUpdateEntryLimit+1)
+	tooManyEntries := make([]rushestools.MemoryEntryInput, agentexec.MemoryUpdateEntryLimit+1)
 	for index := range tooManyEntries {
 		tooManyEntries[index] = rushestools.MemoryEntryInput{
 			Key: "key_" + strings.Repeat("x", index+1), Kind: "habit", Statement: "稳定习惯",
@@ -298,16 +300,16 @@ func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
 
 func TestInjectedMemoryCollectorTouchesLastUsedAtOnSuccess(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_touch")
-	insertAgentMessage(t, database, "draft_touch", "message_touch", "以后都快一点")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_touch")
+	agenttest.InsertAgentMessage(t, database, "draft_touch", "message_touch", "以后都快一点")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(
-		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_touch"),
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_touch"),
 		"draft_touch",
 	)
 	if _, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
@@ -343,16 +345,16 @@ func TestInjectedMemoryCollectorTouchesLastUsedAtOnSuccess(t *testing.T) {
 
 func TestMemoryUpdateMapsRewrittenQuoteToQuoteInvalidNotEvidenceInvalid(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_quote_map")
-	insertAgentMessage(t, database, "draft_quote_map", "message_quote_map", "以后都快一点")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_quote_map")
+	agenttest.InsertAgentMessage(t, database, "draft_quote_map", "message_quote_map", "以后都快一点")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(
-		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_quote_map"),
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_quote_map"),
 		"draft_quote_map",
 	)
 	// 引文有 ≥2 字、过工具预检，但被模型改写，不是证据原文子串：由 reducer 拦下。
@@ -381,9 +383,9 @@ func TestMemoryUpdateMapsRewrittenQuoteToQuoteInvalidNotEvidenceInvalid(t *testi
 // unavailable（重试无益）。任何一条都不得落库。
 func TestMemoryUpdateNegativeSetLocksEvidenceMappings(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_neg")
-	insertAgentMessage(t, database, "draft_neg", "message_neg", "以后节奏都要快一点，字幕别遮脸")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_neg")
+	agenttest.InsertAgentMessage(t, database, "draft_neg", "message_neg", "以后节奏都要快一点，字幕别遮脸")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -391,9 +393,9 @@ func TestMemoryUpdateNegativeSetLocksEvidenceMappings(t *testing.T) {
 	t.Cleanup(service.Close)
 
 	realCtx := rushestools.WithDraftID(
-		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_neg"), "draft_neg")
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_neg"), "draft_neg")
 	forgedCtx := rushestools.WithDraftID(
-		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_absent"), "draft_neg")
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_absent"), "draft_neg")
 	noEvidenceCtx := rushestools.WithDraftID(t.Context(), "draft_neg")
 	entry := func(quote string) rushestools.MemoryUpdateInput {
 		return rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{

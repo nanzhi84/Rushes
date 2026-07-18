@@ -10,6 +10,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -136,8 +137,8 @@ func (modelValue *timelineOpReactRepairModel) snapshot() (int, bool, bool, bool,
 
 func TestReactAgentRepairsTimelineOpFromJITFieldFailure(t *testing.T) {
 	const draftID = "draft_timeline_op_react_repair"
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, draftID)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	modelValue := &timelineOpReactRepairModel{}
 	service, err := NewService(t.Context(), database, modelValue)
 	if err != nil {
@@ -150,7 +151,7 @@ func TestReactAgentRepairsTimelineOpFromJITFieldFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixtureResult, err := service.persistTimeline(t.Context(), draftID, document, "react_repair_fixture")
+	fixtureResult, err := service.executor.PersistTimeline(t.Context(), draftID, document, "react_repair_fixture")
 	if err != nil || fixtureResult.Status != "succeeded" {
 		t.Fatalf("fixture result=%#v err=%v", fixtureResult, err)
 	}

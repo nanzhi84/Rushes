@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -18,8 +19,8 @@ import (
 
 func TestContextManagerKeepsReferenceSnapshotAndInjectsObjectiveMergePatch(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_context_reference")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_context_reference")
 	insertContextMessage(t, database, storage.Message{
 		ID: "user_reference", DraftID: "draft_context_reference",
 		Role: "user", Kind: "user", Content: "做成克制的电影感",
@@ -95,9 +96,9 @@ func TestContextManagerKeepsReferenceSnapshotAndInjectsObjectiveMergePatch(t *te
 
 func TestContextManagerRebasesOversizedWorldStatePatch(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_context_large_patch"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +116,7 @@ func TestContextManagerRebasesOversizedWorldStatePatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "large_context_fixture",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist initial=%#v err=%v", persisted, persistErr)
@@ -129,7 +130,7 @@ func TestContextManagerRebasesOversizedWorldStatePatch(t *testing.T) {
 	document.Version = 2
 	document.TimelineID = draftID + ":v2"
 	document.Tracks[0].Clips[0].GainDB = -6
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "large_context_edit",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist edit=%#v err=%v", persisted, persistErr)
@@ -169,9 +170,9 @@ func TestContextManagerRebasesOversizedWorldStatePatch(t *testing.T) {
 
 func TestContextManagerKeepsSmallTimelinePatchIncremental(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_context_small_patch"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -184,7 +185,7 @@ func TestContextManagerKeepsSmallTimelinePatchIncremental(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "small_context_fixture",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist initial=%#v err=%v", persisted, persistErr)
@@ -197,7 +198,7 @@ func TestContextManagerKeepsSmallTimelinePatchIncremental(t *testing.T) {
 	document.Version = 2
 	document.TimelineID = draftID + ":v2"
 	document.Tracks[0].Clips[0].GainDB = -3
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "small_context_edit",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist edit=%#v err=%v", persisted, persistErr)
@@ -235,9 +236,9 @@ func TestContextManagerKeepsSmallTimelinePatchIncremental(t *testing.T) {
 
 func TestContextManagerRebuildsWorldStateAfterRewindWithoutHashMismatch(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_context_rewind"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	insertContextMessage(t, database, storage.Message{
 		ID: "rewind_user_one", DraftID: draftID, Role: "user", Kind: "user", Content: "保留第一版",
 	})
@@ -253,7 +254,7 @@ func TestContextManagerRebuildsWorldStateAfterRewindWithoutHashMismatch(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "rewind_context_initial",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist initial=%#v err=%v", persisted, persistErr)
@@ -269,7 +270,7 @@ func TestContextManagerRebuildsWorldStateAfterRewindWithoutHashMismatch(t *testi
 	document.Version = 2
 	document.TimelineID = draftID + ":v2"
 	document.Tracks[0].Clips[0].GainDB = -3
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "rewind_context_edit",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist edit=%#v err=%v", persisted, persistErr)
@@ -332,9 +333,9 @@ func TestContextManagerRebuildsWorldStateAfterRewindWithoutHashMismatch(t *testi
 
 func TestContextManagerKeepsCurrentQueuedUserLastAndHidesFutureUsers(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_context_queue_boundary"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	for _, message := range []storage.Message{
 		{ID: "user_a", DraftID: draftID, Role: "user", Kind: "user", Content: "第一条"},
 		{ID: "user_b", DraftID: draftID, Role: "user", Kind: "user", Content: "当前第二条"},
@@ -358,9 +359,9 @@ func TestContextManagerKeepsCurrentQueuedUserLastAndHidesFutureUsers(t *testing.
 
 func TestServiceCompactionReplacesHistoryAndPreservesPendingUser(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_context_compaction"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	for index := 0; index < 25; index++ {
 		insertContextMessage(t, database, storage.Message{
 			ID: fmt.Sprintf("user_%02d", index), DraftID: draftID,
@@ -409,9 +410,9 @@ func TestServiceCompactionReplacesHistoryAndPreservesPendingUser(t *testing.T) {
 
 func TestCJKHistoryTriggersCompactionAndPreservesAssistantBoundary(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_context_cjk_compaction"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	content := strings.Repeat("中", contextHistorySoftTokenLimit+1)
 	legacyEstimate := (len([]byte(content)) + 3) / 4
 	if legacyEstimate >= contextHistorySoftTokenLimit {
@@ -479,9 +480,9 @@ func TestApproximateTokensCalibratesCJKAndPreservesASCIIEstimate(t *testing.T) {
 
 func TestConversationClearDeletesContextWindowButPreservesWorldState(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_context_clear"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	insertContextMessage(t, database, storage.Message{
 		ID: "user_before_clear", DraftID: draftID, Role: "user", Kind: "user", Content: "旧目标",
 	})
@@ -553,9 +554,9 @@ func TestWorldStateSnapshotRejectsMalformedCheckpoint(t *testing.T) {
 
 func TestContextManagerRepairsCorruptPersistedCheckpoint(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_context_corrupt"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO agent_context_checkpoints(
 			draft_id,window_id,window_number,history_version,
@@ -581,9 +582,9 @@ func TestContextManagerRepairsCorruptPersistedCheckpoint(t *testing.T) {
 
 func TestContextManagerRebasesCheckpointWithMismatchedHash(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_context_hash_mismatch"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	manager := NewContextManager(database)
 	first, err := manager.Build(t.Context(), draftID)
 	if err != nil {
@@ -707,7 +708,7 @@ func TestContextManagerDefensiveBranchesAndCompactionBudget(t *testing.T) {
 		t.Fatalf("budgeted source runes=%d through=%v ok=%v", len([]rune(source)), through, ok)
 	}
 
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	manager := NewContextManager(database)
 	if _, err := manager.newCheckpoint(t.Context(), "missing", bad, 1, 1, "", nil); err == nil {
 		t.Fatal("bad snapshot checkpoint must fail")
@@ -743,7 +744,7 @@ func TestContextManagerDefensiveBranchesAndCompactionBudget(t *testing.T) {
 		t.Fatalf("unknown boundary error=%v", err)
 	}
 
-	closedDatabase := agentTestDatabase(t)
+	closedDatabase := agenttest.AgentTestDatabase(t)
 	if err := closedDatabase.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -754,8 +755,8 @@ func TestContextManagerDefensiveBranchesAndCompactionBudget(t *testing.T) {
 		t.Fatal("closed checkpoint persistence must fail")
 	}
 
-	builderDatabase := agentTestDatabase(t)
-	createAgentDraft(t, builderDatabase, "draft_separate_builder")
+	builderDatabase := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, builderDatabase, "draft_separate_builder")
 	separate := &ContextManager{
 		database: closedDatabase, builder: NewContextBuilder(builderDatabase),
 		historyTokenLimit: contextHistorySoftTokenLimit,

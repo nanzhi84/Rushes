@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -16,21 +16,21 @@ type turnInteractionState struct {
 	blockingDecision string
 }
 
-func newTurnInteractionState() *turnInteractionState {
+func NewTurnInteractionState() *turnInteractionState {
 	return &turnInteractionState{createdDecisions: map[string]struct{}{}}
 }
 
-func withTurnInteractionState(ctx context.Context, state *turnInteractionState) context.Context {
+func WithTurnInteractionState(ctx context.Context, state *turnInteractionState) context.Context {
 	return context.WithValue(ctx, turnInteractionContextKey{}, state)
 }
 
-func interactionStateFromContext(ctx context.Context) *turnInteractionState {
+func InteractionStateFromContext(ctx context.Context) *turnInteractionState {
 	state, _ := ctx.Value(turnInteractionContextKey{}).(*turnInteractionState)
 	return state
 }
 
-func markDecisionCreatedThisTurn(ctx context.Context, decisionID string, blocking bool) {
-	state := interactionStateFromContext(ctx)
+func MarkDecisionCreatedThisTurn(ctx context.Context, decisionID string, blocking bool) {
+	state := InteractionStateFromContext(ctx)
 	if state == nil || decisionID == "" {
 		return
 	}
@@ -42,23 +42,8 @@ func markDecisionCreatedThisTurn(ctx context.Context, decisionID string, blockin
 	}
 }
 
-// beginTurnToolCall serializes tool execution within one model turn. This makes
-// a blocking decision an actual barrier even when one assistant message emits
-// multiple tool calls that the graph runner would otherwise execute in parallel.
-func beginTurnToolCall(ctx context.Context) (func(), string) {
-	state := interactionStateFromContext(ctx)
-	if state == nil {
-		return func() {}, ""
-	}
-	state.executionMu.Lock()
-	state.mu.Lock()
-	decisionID := state.blockingDecision
-	state.mu.Unlock()
-	return state.executionMu.Unlock, decisionID
-}
-
 func decisionCreatedThisTurn(ctx context.Context, decisionID string) bool {
-	state := interactionStateFromContext(ctx)
+	state := InteractionStateFromContext(ctx)
 	if state == nil || decisionID == "" {
 		return false
 	}
@@ -75,11 +60,22 @@ func nullableToolCallID(ctx context.Context) any {
 	return nil
 }
 
-func normalizeDecisionType(value string) string {
+func NormalizeDecisionType(value string) string {
 	switch value {
 	case "critical", "approve_content_plan", "approve_speech_cut", "approve_rough_cut":
 		return value
 	default:
 		return "generic"
 	}
+}
+
+// BeginToolCall 取得本回合工具执行互斥，并返回释放函数与当前阻塞决策 ID。
+// 引擎侧装饰器 beginTurnToolCall 读取 ctx 后调用它，把决策屏障语义留在引擎、
+// 状态内部字段留在领域包。
+func (state *turnInteractionState) BeginToolCall() (func(), string) {
+	state.executionMu.Lock()
+	state.mu.Lock()
+	decisionID := state.blockingDecision
+	state.mu.Unlock()
+	return state.executionMu.Unlock, decisionID
 }

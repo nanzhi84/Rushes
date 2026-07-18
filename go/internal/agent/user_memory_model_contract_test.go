@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -99,7 +100,7 @@ func (modelValue *goldenUserMemoryModel) Stream(
 
 func TestUserMemoryModelContractGolden(t *testing.T) {
 	evalCases := loadUserMemoryModelEvalCases(t)
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -169,7 +170,7 @@ func TestUserMemoryModelContractGolden(t *testing.T) {
 
 func TestUserMemoryModelContractRejectsMemoryPollution(t *testing.T) {
 	evalCase := loadUserMemoryModelEvalCases(t)[0]
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)

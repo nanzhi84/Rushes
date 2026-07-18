@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -23,12 +22,12 @@ import (
 
 const assetListUsageNote = "asset_id 是后续调用使用的稳定素材 ID；filename 只用于识别素材，不是本地路径；kind 决定 video/audio/image/font 类型。duration_frames 的标尺是 timeline_fps；usable=false 的素材不可用于剪辑，ingest_status 与 understanding_status 分别表示导入和素材理解状态。rel_dir 与 suggested_visual_role 用于识别 A-roll/B-roll，音频按 suggested_role 区分 bgm/sfx。"
 
-func (service *Service) toolListAssets(
+func (exec *Executor) ToolListAssets(
 	ctx context.Context,
 	draftID string,
 	input rushestools.AssetListInput,
 ) (rushestools.AssetListResult, error) {
-	assets, err := storage.ListDraftAssets(ctx, service.database.Read(), draftID)
+	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return rushestools.AssetListResult{}, err
 	}
@@ -42,7 +41,7 @@ func (service *Service) toolListAssets(
 		if input.OnlyUsable != nil && *input.OnlyUsable != asset.Usable {
 			continue
 		}
-		duration, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
+		duration, _ := NumericValue(asset.Probe["duration_sec"])
 		suggestedRole := ""
 		suggestedVisualRole := ""
 		switch asset.Kind {
@@ -54,7 +53,7 @@ func (service *Service) toolListAssets(
 				relDir = *asset.RelDir
 			}
 			understoodRole := ""
-			if raw, summaryErr := storage.BestMaterialSummary(ctx, service.database.Read(), asset.ID); summaryErr == nil {
+			if raw, summaryErr := storage.BestMaterialSummary(ctx, exec.database.Read(), asset.ID); summaryErr == nil {
 				encoded, _ := json.Marshal(raw)
 				var summary understanding.Summary
 				if json.Unmarshal(encoded, &summary) == nil {
@@ -87,12 +86,12 @@ func (service *Service) toolListAssets(
 	return result, nil
 }
 
-func (service *Service) toolUnderstand(
+func (exec *Executor) ToolUnderstand(
 	ctx context.Context,
 	draftID string,
 	input rushestools.UnderstandInput,
 ) (rushestools.UnderstandResult, error) {
-	request, err := service.prepareUnderstandRequest(ctx, draftID, input)
+	request, err := exec.prepareUnderstandRequest(ctx, draftID, input)
 	if err != nil {
 		return rushestools.UnderstandResult{}, err
 	}
@@ -102,19 +101,19 @@ func (service *Service) toolUnderstand(
 	if err != nil {
 		return rushestools.UnderstandResult{}, err
 	}
-	if existing, found, findErr := service.findUnderstandJob(ctx, idempotencyKey); findErr != nil {
+	if existing, found, findErr := exec.findUnderstandJob(ctx, idempotencyKey); findErr != nil {
 		return rushestools.UnderstandResult{}, findErr
 	} else if found {
 		if !input.ForceRefresh && request.AllCacheHit &&
 			(existing.Status == "failed" || existing.Status == "cancelled") {
-			return service.runUnderstandInline(ctx, draftID, request)
+			return exec.runUnderstandInline(ctx, draftID, request)
 		}
-		return service.existingUnderstandResult(ctx, draftID, existing, request)
+		return exec.existingUnderstandResult(ctx, draftID, existing, request)
 	}
 	if shouldEnqueueUnderstand(request, input.ForceRefresh) {
-		return service.enqueueUnderstand(ctx, draftID, input, request, idempotencyKey)
+		return exec.enqueueUnderstand(ctx, draftID, input, request, idempotencyKey)
 	}
-	return service.runUnderstandInline(ctx, draftID, request)
+	return exec.runUnderstandInline(ctx, draftID, request)
 }
 
 type preparedUnderstandAsset struct {
@@ -131,7 +130,7 @@ type preparedUnderstandRequest struct {
 	AllCacheHit      bool
 }
 
-func (service *Service) prepareUnderstandRequest(
+func (exec *Executor) prepareUnderstandRequest(
 	ctx context.Context,
 	draftID string,
 	input rushestools.UnderstandInput,
@@ -139,7 +138,7 @@ func (service *Service) prepareUnderstandRequest(
 	if len(input.AssetIDs) == 0 {
 		return preparedUnderstandRequest{}, errors.New("understand.materials 至少需要一个 asset_id")
 	}
-	linkedAssets, err := storage.ListDraftAssets(ctx, service.database.Read(), draftID)
+	linkedAssets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return preparedUnderstandRequest{}, err
 	}
@@ -180,7 +179,7 @@ func (service *Service) prepareUnderstandRequest(
 		prepared := preparedUnderstandAsset{Asset: asset, Options: options, Fingerprint: fingerprint}
 		if !input.ForceRefresh {
 			if _, cacheErr := storage.MaterialSummaryByFingerprint(
-				ctx, service.database.Read(), assetID, fingerprint,
+				ctx, exec.database.Read(), assetID, fingerprint,
 			); cacheErr == nil {
 				prepared.CacheHit = true
 				request.CacheHitAssetIDs = append(request.CacheHitAssetIDs, assetID)
@@ -201,7 +200,7 @@ func shouldEnqueueUnderstand(request preparedUnderstandRequest, forceRefresh boo
 	return len(request.Assets) != 1 || request.Assets[0].Options.Depth != "scan" || forceRefresh
 }
 
-func (service *Service) runUnderstandInline(
+func (exec *Executor) runUnderstandInline(
 	ctx context.Context,
 	draftID string,
 	request preparedUnderstandRequest,
@@ -209,7 +208,7 @@ func (service *Service) runUnderstandInline(
 	runID := ""
 	for _, prepared := range request.Assets {
 		if !prepared.CacheHit {
-			runID = randomID("understand_inline")
+			runID = RandomID("understand_inline")
 			break
 		}
 	}
@@ -221,23 +220,23 @@ func (service *Service) runUnderstandInline(
 		}
 		asset := prepared.Asset
 		if prepared.CacheHit {
-			summary, err := service.bestUnderstandingSummary(ctx, asset)
+			summary, err := exec.bestUnderstandingSummary(ctx, asset)
 			if err != nil {
 				return rushestools.UnderstandResult{}, err
 			}
 			summaries = append(summaries, summary)
 			continue
 		}
-		started, err := reducer.Apply(ctx, service.database, []contracts.Event{{
+		started, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
 			Type:    "MaterialUnderstandingStarted",
 			Payload: map[string]any{"asset_id": asset.ID, "job_id": runID},
 		}}, reducer.Options{Actor: contracts.ActorAgent})
 		if err != nil || started.Status != reducer.StatusApplied {
 			return rushestools.UnderstandResult{}, errors.Join(err, fmt.Errorf("start reducer status: %s", started.Status))
 		}
-		summary, analyzeErr := service.analyzer.AnalyzeWithOptions(
-			ctx, service.database, asset, prepared.Options, func(note string) {
-				service.hub.Record(draftID, StreamEvent{
+		summary, analyzeErr := exec.analyzer.AnalyzeWithOptions(
+			ctx, exec.database, asset, prepared.Options, func(note string) {
+				exec.recordProgress(draftID, map[string]any{
 					"type": TurnStreamSubagentProgress, "tool": "understand.materials",
 					"asset_id": asset.ID, "note": note, "completed": index, "total": len(request.Assets),
 				})
@@ -245,7 +244,7 @@ func (service *Service) runUnderstandInline(
 		)
 		if analyzeErr != nil {
 			cancelled := errors.Is(analyzeErr, context.Canceled)
-			_, _ = reducer.Apply(context.WithoutCancel(ctx), service.database, []contracts.Event{{
+			_, _ = reducer.Apply(context.WithoutCancel(ctx), exec.database, []contracts.Event{{
 				Type: "MaterialUnderstandingFailed",
 				Payload: map[string]any{
 					"asset_id": asset.ID, "job_id": runID, "cancelled": cancelled,
@@ -257,29 +256,29 @@ func (service *Service) runUnderstandInline(
 		var summaryMap map[string]any
 		encoded, _ := json.Marshal(summary)
 		_ = json.Unmarshal(encoded, &summaryMap)
-		summaryID := randomID("summary")
-		completed, err := reducer.Apply(ctx, service.database, []contracts.Event{{
+		summaryID := RandomID("summary")
+		completed, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
 			Type:    "MaterialUnderstandingCompleted",
 			Payload: map[string]any{"asset_id": asset.ID, "job_id": runID, "summary_id": summaryID},
 		}}, reducer.Options{
 			Actor: contracts.ActorAgent,
 			ResultRows: reducer.ResultRows{MaterialSummaries: []reducer.MaterialSummaryRow{{
 				ID: summaryID, AssetID: asset.ID, Version: 0,
-				Focus: stringPointerValue(prepared.Options.Focus), Status: "ready", Summary: summaryMap,
-				Model: stringPointerValue(summary.Model), Fingerprint: stringPointerValue(prepared.Fingerprint),
-				PromptVersion: stringPointerValue(understanding.PromptVersion),
+				Focus: StringPointerValue(prepared.Options.Focus), Status: "ready", Summary: summaryMap,
+				Model: StringPointerValue(summary.Model), Fingerprint: StringPointerValue(prepared.Fingerprint),
+				PromptVersion: StringPointerValue(understanding.PromptVersion),
 			}}},
 		})
 		if err != nil || completed.Status != reducer.StatusApplied {
 			return rushestools.UnderstandResult{}, errors.Join(err, fmt.Errorf("complete reducer status: %s", completed.Status))
 		}
-		bestSummary, err := service.bestUnderstandingSummary(ctx, asset)
+		bestSummary, err := exec.bestUnderstandingSummary(ctx, asset)
 		if err != nil {
 			return rushestools.UnderstandResult{}, err
 		}
 		summaries = append(summaries, bestSummary)
 		analyzedAssetIDs = append(analyzedAssetIDs, asset.ID)
-		service.hub.Record(draftID, StreamEvent{
+		exec.recordProgress(draftID, map[string]any{
 			"type": TurnStreamSubagentProgress, "tool": "understand.materials",
 			"asset_id": asset.ID, "note": "摘要已完成", "completed": index + 1, "total": len(request.Assets),
 		})
@@ -290,11 +289,11 @@ func (service *Service) runUnderstandInline(
 	}, nil
 }
 
-func (service *Service) bestUnderstandingSummary(
+func (exec *Executor) bestUnderstandingSummary(
 	ctx context.Context,
 	asset storage.Asset,
 ) (rushestools.MaterialUnderstandingSummary, error) {
-	effective, err := storage.BestMaterialSummary(ctx, service.database.Read(), asset.ID)
+	effective, err := storage.BestMaterialSummary(ctx, exec.database.Read(), asset.ID)
 	if err != nil {
 		return rushestools.MaterialUnderstandingSummary{}, err
 	}
@@ -303,23 +302,23 @@ func (service *Service) bestUnderstandingSummary(
 	if err := json.Unmarshal(encoded, &summary); err != nil {
 		return rushestools.MaterialUnderstandingSummary{}, err
 	}
-	return compactUnderstandingSummary(asset, summary, 12), nil
+	return CompactUnderstandingSummary(asset, summary, 12), nil
 }
 
-func (service *Service) enqueueUnderstand(
+func (exec *Executor) enqueueUnderstand(
 	ctx context.Context,
 	draftID string,
 	input rushestools.UnderstandInput,
 	request preparedUnderstandRequest,
 	idempotencyKey string,
 ) (rushestools.UnderstandResult, error) {
-	jobID := randomID("job")
+	jobID := RandomID("job")
 	firstOptions := request.Assets[0].Options
 	fingerprints := make(map[string]string, len(request.Assets))
 	for _, prepared := range request.Assets {
 		fingerprints[prepared.Asset.ID] = prepared.Fingerprint
 	}
-	result, err := reducer.Apply(ctx, service.database, []contracts.Event{{
+	result, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: draftID,
 		Payload: map[string]any{
 			"job_id": jobID, "kind": "understand", "requested_by_draft_id": draftID,
@@ -335,10 +334,10 @@ func (service *Service) enqueueUnderstand(
 		},
 	}}, reducer.Options{Actor: contracts.ActorAgent})
 	if err != nil || result.Status != reducer.StatusApplied {
-		if existing, found, lookupErr := service.findUnderstandJob(ctx, idempotencyKey); lookupErr != nil {
+		if existing, found, lookupErr := exec.findUnderstandJob(ctx, idempotencyKey); lookupErr != nil {
 			return rushestools.UnderstandResult{}, errors.Join(err, lookupErr)
 		} else if found {
-			return service.existingUnderstandResult(ctx, draftID, existing, request)
+			return exec.existingUnderstandResult(ctx, draftID, existing, request)
 		}
 		return rushestools.UnderstandResult{}, errors.Join(err, fmt.Errorf("understand enqueue reducer status: %s", result.Status))
 	}
@@ -350,13 +349,13 @@ type understandJobRef struct {
 	Status string
 }
 
-func (service *Service) findUnderstandJob(
+func (exec *Executor) findUnderstandJob(
 	ctx context.Context,
 	idempotencyKey string,
 ) (understandJobRef, bool, error) {
 	query := "SELECT job_id, status FROM jobs WHERE kind='understand' AND idempotency_key=? LIMIT 1"
 	var job understandJobRef
-	err := service.database.Read().QueryRowContext(ctx, query, idempotencyKey).Scan(&job.ID, &job.Status)
+	err := exec.database.Read().QueryRowContext(ctx, query, idempotencyKey).Scan(&job.ID, &job.Status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return understandJobRef{}, false, nil
 	}
@@ -366,7 +365,7 @@ func (service *Service) findUnderstandJob(
 	return job, true, nil
 }
 
-func (service *Service) existingUnderstandResult(
+func (exec *Executor) existingUnderstandResult(
 	ctx context.Context,
 	draftID string,
 	job understandJobRef,
@@ -378,7 +377,7 @@ func (service *Service) existingUnderstandResult(
 	case "succeeded":
 		summaries := make([]rushestools.MaterialUnderstandingSummary, 0, len(request.Assets))
 		for _, prepared := range request.Assets {
-			raw, err := service.materialSummaryForUnderstandJob(
+			raw, err := exec.materialSummaryForUnderstandJob(
 				ctx, job.ID, prepared.Asset.ID, prepared.Fingerprint,
 			)
 			if err != nil {
@@ -391,7 +390,7 @@ func (service *Service) existingUnderstandResult(
 			if err := json.Unmarshal(encoded, &summary); err != nil {
 				return rushestools.UnderstandResult{}, err
 			}
-			summaries = append(summaries, compactUnderstandingSummary(prepared.Asset, summary, 12))
+			summaries = append(summaries, CompactUnderstandingSummary(prepared.Asset, summary, 12))
 		}
 		return rushestools.UnderstandResult{
 			DraftID: draftID, JobID: job.ID, AssetIDs: request.AssetIDs, Status: "completed",
@@ -452,22 +451,22 @@ func queuedUnderstandResult(
 	}
 }
 
-func compactUnderstandingSummary(
+func CompactUnderstandingSummary(
 	asset storage.Asset,
 	summary understanding.Summary,
 	evidenceLimit int,
 ) rushestools.MaterialUnderstandingSummary {
-	overall := truncateRunes(strings.TrimSpace(summary.Overall), 320)
+	overall := TruncateRunes(strings.TrimSpace(summary.Overall), 320)
 	segments := sampleUnderstandingSegments(summary.Segments, evidenceLimit)
 	evidence := make([]rushestools.MaterialEvidence, 0, len(segments))
 	for _, segment := range segments {
-		description := truncateRunes(strings.TrimSpace(segment.Description), 220)
+		description := TruncateRunes(strings.TrimSpace(segment.Description), 220)
 		if description == overall {
 			description = ""
 		}
 		transcript := ""
 		if segment.Transcript != nil {
-			transcript = truncateRunes(strings.TrimSpace(*segment.Transcript), 160)
+			transcript = TruncateRunes(strings.TrimSpace(*segment.Transcript), 160)
 		}
 		startFrame := segment.SourceStartFrame
 		endFrame := segment.SourceEndFrame
@@ -529,7 +528,7 @@ func sampleUnderstandingSegments(
 	return result
 }
 
-func stringPointerValue(value string) *string {
+func StringPointerValue(value string) *string {
 	if value == "" {
 		return nil
 	}

@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -152,7 +154,7 @@ func TestLinkedSplitRangeFailureReturnsFailedMemberFacts(t *testing.T) {
 			document.Tracks[trackIndex].Clips[0].SourceEndFrame = 20
 		}
 	}
-	if persisted, persistErr := service.persistTimeline(t.Context(), "draft_linked_split_range", document, "linked_split_fixture"); persistErr != nil || persisted.Status != "validation_failed" {
+	if persisted, persistErr := service.executor.PersistTimeline(t.Context(), "draft_linked_split_range", document, "linked_split_fixture"); persistErr != nil || persisted.Status != "validation_failed" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
 	}
 	before, _ := timeline.Latest(t.Context(), database, "draft_linked_split_range")
@@ -183,7 +185,7 @@ func TestLinkedLockedTrackFailureReturnsSemanticJITAndPreservesTimeline(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, persistErr := service.persistTimeline(t.Context(), "draft_semantic_linked_lock", document, "linked_fixture"); persistErr != nil || result.Status != "succeeded" {
+	if result, persistErr := service.executor.PersistTimeline(t.Context(), "draft_semantic_linked_lock", document, "linked_fixture"); persistErr != nil || result.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", result, persistErr)
 	}
 	if raw, lockErr := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
@@ -211,8 +213,8 @@ func TestLinkedLockedTrackFailureReturnsSemanticJITAndPreservesTimeline(t *testi
 
 func TestComposeInitialFailuresIncludeAssetFacts(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_compose_facts")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_compose_facts")
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(
 			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
@@ -385,7 +387,7 @@ func TestApplyPatchesSemanticFailureUsesDocumentBeforeFailedOperation(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := service.persistTimeline(t.Context(), "draft_op_jit_semantic_batch", document, "jit_semantic_fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := service.executor.PersistTimeline(t.Context(), "draft_op_jit_semantic_batch", document, "jit_semantic_fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
 	}
 	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
@@ -422,7 +424,7 @@ func TestApplyPatchesReorderFailureUsesFailedPointFactsAndStaysAtomic(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := service.persistTimeline(t.Context(), "draft_reorder_semantic_batch", document, "reorder_semantic_fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := service.executor.PersistTimeline(t.Context(), "draft_reorder_semantic_batch", document, "reorder_semantic_fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
 	}
 	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
@@ -474,7 +476,7 @@ func TestApplyPatchesSplitFailureUsesFailedPointFactsAndStaysAtomic(t *testing.T
 func TestTimelineOpExpectedSchemasFollowCatalogAndHideInjectedFields(t *testing.T) {
 	t.Parallel()
 	for _, spec := range timeline.Catalog {
-		schema := timelineOpExpectedSchema(spec)
+		schema := agentexec.TimelineOpExpectedSchema(spec)
 		properties := schema["properties"].(map[string]any)
 		kind := properties["kind"].(map[string]any)
 		if kind["const"] != spec.Kind || schema["additionalProperties"] != false {
@@ -500,20 +502,20 @@ func TestTimelineOpExpectedSchemasFollowCatalogAndHideInjectedFields(t *testing.
 	if !ok {
 		t.Fatal("insert_clip missing")
 	}
-	first := timelineOpExpectedSchema(*insertSpec)
+	first := agentexec.TimelineOpExpectedSchema(*insertSpec)
 	metadata := first["properties"].(map[string]any)["metadata"].(map[string]any)
 	metadata["examples"].([]any)[0].(map[string]any)["source"] = "mutated"
-	second := timelineOpExpectedSchema(*insertSpec)
+	second := agentexec.TimelineOpExpectedSchema(*insertSpec)
 	secondMetadata := second["properties"].(map[string]any)["metadata"].(map[string]any)
 	if secondMetadata["examples"].([]any)[0].(map[string]any)["source"] != "catalog_example" {
 		t.Fatal("expected_schema 暴露了 Catalog 的可变示例")
 	}
 
 	wrapped := fmt.Errorf("wrapped: %w", &timeline.OpFieldError{Kind: "delete_clip", Field: "timeline_clip_id"})
-	if fieldErr, ok := timelineOpFieldError(wrapped); !ok || fieldErr.Kind != "delete_clip" {
+	if fieldErr, ok := agentexec.TimelineOpFieldError(wrapped); !ok || fieldErr.Kind != "delete_clip" {
 		t.Fatalf("wrapped field error not preserved: %#v ok=%v", fieldErr, ok)
 	}
-	if _, ok := timelineOpFailureAt(errors.New("semantic failure"), nil, 0, timeline.Document{}); ok {
+	if _, ok := agentexec.TimelineOpFailureAt(errors.New("semantic failure"), nil, 0, timeline.Document{}); ok {
 		t.Fatal("非字段错误不应被改写成 JIT field failure")
 	}
 }
@@ -523,8 +525,8 @@ func timelineOpRecoveryFixture(
 	draftID string,
 ) (*Service, *storage.DB, context.Context) {
 	t.Helper()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, draftID)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -536,7 +538,7 @@ func timelineOpRecoveryFixture(
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.persistTimeline(t.Context(), draftID, document, "op_jit_fixture")
+	result, err := service.executor.PersistTimeline(t.Context(), draftID, document, "op_jit_fixture")
 	if err != nil || result.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", result, err)
 	}

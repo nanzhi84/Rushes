@@ -11,6 +11,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 )
 
 type usageServiceModel struct {
@@ -61,8 +62,8 @@ func (stub *usageServiceModel) Stream(
 
 func TestTurnEndedReportsAccumulatedTokenUsage(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_token_usage")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_token_usage")
 	service, err := NewService(t.Context(), database, &usageServiceModel{})
 	if err != nil {
 		t.Fatal(err)
@@ -212,8 +213,8 @@ func (stub *cancelAfterUsageModel) Stream(ctx context.Context, messages []*schem
 
 func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_cancelled_usage")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_cancelled_usage")
 	stub := &cancelAfterUsageModel{blocked: make(chan struct{})}
 	service, err := NewService(t.Context(), database, stub)
 	if err != nil {
@@ -288,7 +289,7 @@ func modelToolSchemaRuneLimit(baseline int) int {
 
 func TestModelToolSchemaRuneBudgetCoversEveryLLMTool(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)

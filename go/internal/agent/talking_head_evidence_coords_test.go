@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -25,8 +26,8 @@ func setupEvidenceCoordsDraft(
 	cuts []map[string]any,
 ) (*Service, context.Context, timeline.Document) {
 	t.Helper()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, draftID)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(
@@ -73,7 +74,7 @@ func setupEvidenceCoordsDraft(
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "fixture",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
