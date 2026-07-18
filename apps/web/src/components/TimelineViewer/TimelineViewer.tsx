@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  memo,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -204,7 +205,11 @@ const SEEK_PREVIEW_INTERVAL_MS = 50;
 const MIN_PX_PER_SEC = 8;
 const MAX_PX_PER_SEC = 320;
 
-export const TimelineViewer = forwardRef<TimelineViewerHandle, TimelineViewerProps>(
+// 时间线是数千节点的 SVG，reconcile 昂贵；用 memo 把它挡在流式对话高频重渲染之外。
+// 上层（DraftEditorView）传入的 props 已保持引用稳定：timeline 来自 EditorSession 快照，
+// 所有 handler 走 useCallback，playhead 已节流并改用命令式 DOM 更新。默认浅比较即可生效。
+export const TimelineViewer = memo(
+  forwardRef<TimelineViewerHandle, TimelineViewerProps>(
   function TimelineViewer(
     {
       timeline,
@@ -1297,6 +1302,7 @@ export const TimelineViewer = forwardRef<TimelineViewerHandle, TimelineViewerPro
     </div>
   );
   }
+  )
 );
 
 function TrackHeader({
