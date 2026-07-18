@@ -1713,7 +1713,7 @@ function trackDisplayLabel(trackId: string): string {
   return labels[trackId] ?? trackId;
 }
 
-function toConsoleMessage(message: MessageRecord): ConsoleMessage {
+export function toConsoleMessage(message: MessageRecord): ConsoleMessage {
   return {
     id: message.message_id,
     role: normalizeConsoleRole(message.role),
@@ -1723,7 +1723,7 @@ function toConsoleMessage(message: MessageRecord): ConsoleMessage {
   };
 }
 
-function normalizeConsoleRole(role: string): ConsoleMessageRole {
+export function normalizeConsoleRole(role: string): ConsoleMessageRole {
   if (
     role === "user" ||
     role === "assistant" ||

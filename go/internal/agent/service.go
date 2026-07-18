@@ -146,7 +146,11 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	ctx = service.withModelRetryReporting(ctx, item.DraftID)
 	ctx = rushestools.WithReporter(ctx, service.toolReporter(ctx, item.DraftID))
 	content, err := service.turnContent(ctx, item, messageID)
-	if errors.Is(err, context.Canceled) {
+	// 用户主动取消有两种形态：错误链里包着 context.Canceled，或 provider 在连接
+	// 中断时抛出的普通传输错误（不包裹 Canceled）但 turn 上下文已被取消。两者都
+	// 只落 cancelled 终态，绝不合成 turn_failure；ctx.Err() 兜住后一种，与
+	// model_retry.go 的既有护栏写法一致。
+	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 		service.recordTurnEnded(item.DraftID, "cancelled", "user_cancelled", turnBudget)
 		return err
 	}
@@ -164,18 +168,27 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		outcome = "failed"
 		reason = truncateText(err.Error(), 800)
 	} else if recoveryState.recoveryExhausted() {
-		// 模型可能在收到 exhausted=true 后正确生成了失败说明。保留这条可见
-		// 回复，但终态必须真实标记为 failed，不能把“已停止修复”记成完成。
+		// 模型在恢复预算耗尽后亲笔生成了失败说明：这条走下面的 assistant/reply
+		// 保留为可见回复并注入下一轮上下文，但回合终态必须真实标记为 failed，
+		// 不能把“已停止修复”记成完成。
 		outcome = "failed"
 		reason = truncateText(recoveryState.summary(), 800)
 	}
 	if content != "" {
+		messageRole := "assistant"
 		messageKind := "reply"
-		if item.Kind == QueueJobObservation && service.react == nil {
+		switch {
+		case err != nil:
+			// 只有 harness 合成的终态失败文案（terminalFailureReply，恒非空）落
+			// 持久系统失败消息，用户不在页面时也能事后从 DB 读回。模型在恢复预算
+			// 耗尽后亲笔生成的失败说明走下面的 assistant/reply，仍注入下一轮上下文；
+			// 用户主动取消走上面的 context.Canceled/ctx.Err 分支，不会到这里。
+			messageRole, messageKind = "system", "turn_failure"
+		case item.Kind == QueueJobObservation && service.react == nil:
 			messageKind = "observation"
 		}
 		resultRows := reducer.ResultRows{Message: &reducer.MessageRow{
-			ID: messageID, DraftID: item.DraftID, Role: "assistant", Kind: messageKind, Content: content,
+			ID: messageID, DraftID: item.DraftID, Role: messageRole, Kind: messageKind, Content: content,
 		}}
 		if delivery := observationDelivery(item); delivery != nil {
 			resultRows.AgentJobObservationDelivery = delivery

@@ -123,6 +123,28 @@ describe("reduceTurnStream · subagent_progress", () => {
     ]);
   });
 
+  it("回合失败终态复用 message_completed 通道并保留 turn_failure 类型", () => {
+    const state = apply([
+      { type: "turn_started", turn_id: "turn_1" },
+      { type: "text_delta", message_id: "m1", kind: "assistant", delta: "本轮没有完成" },
+      {
+        type: "message_completed",
+        message_id: "m1",
+        kind: "turn_failure",
+        content: "本轮没有完成：模型响应超时，系统已停止重试。"
+      }
+    ]);
+    // text_delta 阶段以 assistant 流式呈现，完成后整体替换为 turn_failure 终态。
+    expect(state.items).toEqual([
+      {
+        type: "message",
+        message_id: "m1",
+        kind: "turn_failure",
+        text: "本轮没有完成：模型响应超时，系统已停止重试。"
+      }
+    ]);
+  });
+
   it("不为无素材详情的批次进度创建额外 UI 状态", () => {
     const state = apply([
       { type: "turn_started", turn_id: "turn_1" },
