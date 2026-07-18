@@ -241,11 +241,13 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
       playheadTimecodeRef.current.textContent = formatTimecode(sec);
     }
   }, []);
-  // 缩放会让整条时间线以新几何重排（clip 多时重）；用 transition 标记为非紧急，
-  // 缩放期间输入/滚动不被这次重排阻塞（React19 并发调度）。
+  // 缩放会让整条时间线以新几何重排（clip 多时重）。受控滑块的 value 必须紧急更新
+  // （包 transition 会在重排拖慢时把 thumb 顶回旧值、拖动回弹），因此 setPxPerSec
+  // 同步提交，只把昂贵的时间线重排经 useDeferredValue 延后（见 deferredPxPerSec）。
   const commitZoom = useCallback((next: number | ((current: number) => number)) => {
-    startTransition(() => setPxPerSec(next));
+    setPxPerSec(next);
   }, []);
+  const deferredPxPerSec = useDeferredValue(pxPerSec);
   const zoomOutTimeline = useCallback(() => {
     commitZoom((current) => {
       const lower = [...TIMELINE_ZOOM_LEVELS].reverse().find((level) => level < current);
@@ -780,7 +782,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
                 <TimelineViewer
                   ref={timelineViewerRef}
                   timeline={deferredEditorTimeline ?? editorTimeline}
-                  pxPerSec={pxPerSec}
+                  pxPerSec={deferredPxPerSec}
                   playheadSec={playheadSec}
                   selectedClipId={selectedClipId}
                   onClipClick={handleClipClick}
