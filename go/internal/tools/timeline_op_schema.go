@@ -5,7 +5,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
 
-// TimelineOp 是 timeline.apply_patch 面向模型的单个语义补丁。
+// TimelineOp 是 timeline.apply_patches 面向模型的单个语义补丁。
 //
 // 运行时仍保留 map 语义；JSONSchema 则把 timeline.Catalog 编译成 oneOf，
 // 让模型只看到所选 kind 的合法字段，并隐藏由服务端注入的字段。

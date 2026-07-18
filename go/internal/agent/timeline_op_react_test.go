@@ -30,7 +30,7 @@ func (modelValue *timelineOpReactRepairModel) WithTools(
 	modelValue.mu.Lock()
 	defer modelValue.mu.Unlock()
 	for _, info := range infos {
-		if info.Name == "timeline.apply_patch" {
+		if info.Name == "timeline.apply_patches" {
 			modelValue.applyPatchBound = true
 			break
 		}
@@ -49,13 +49,13 @@ func (modelValue *timelineOpReactRepairModel) Generate(
 	switch modelValue.calls {
 	case 1:
 		if !modelValue.applyPatchBound {
-			return nil, errors.New("timeline.apply_patch 未绑定")
+			return nil, errors.New("timeline.apply_patches 未绑定")
 		}
 		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID: "trim_edge_wrong_field",
 			Function: schema.FunctionCall{
-				Name:      "timeline.apply_patch",
-				Arguments: `{"op":{"kind":"trim_clip_edge","timeline_clip_id":"clip_v1_001","edge":"end","target_frame":45}}`,
+				Name:      "timeline.apply_patches",
+				Arguments: `{"ops":[{"kind":"trim_clip_edge","timeline_clip_id":"clip_v1_001","edge":"end","target_frame":45}]}`,
 			},
 		}}), nil
 	case 2:
@@ -93,8 +93,8 @@ func (modelValue *timelineOpReactRepairModel) Generate(
 		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID: "trim_edge_corrected_field",
 			Function: schema.FunctionCall{
-				Name:      "timeline.apply_patch",
-				Arguments: `{"op":{"kind":"trim_clip_edge","timeline_clip_id":"clip_v1_001","edge":"end","timeline_frame":45}}`,
+				Name:      "timeline.apply_patches",
+				Arguments: `{"ops":[{"kind":"trim_clip_edge","timeline_clip_id":"clip_v1_001","edge":"end","timeline_frame":45}]}`,
 			},
 		}}), nil
 	case 3:

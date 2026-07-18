@@ -516,12 +516,8 @@ type ComposeInitialInput struct {
 	Clips []ComposeClip `json:"clips" jsonschema:"required" jsonschema_description:"按成片顺序排列的主视觉片段；根据用户目标和素材证据自主组装可回滚的初版，不要要求用户审批 EDL"`
 }
 
-type TimelinePatchInput struct {
-	Op TimelineOp `json:"op" jsonschema:"required" jsonschema_description:"从 op.oneOf 选择一种扁平补丁，按所选 kind 提供字段"`
-}
-
 type TimelinePatchBatchInput struct {
-	Ops []TimelineOp `json:"ops" jsonschema:"required" jsonschema_description:"按顺序原子应用的时间线语义补丁；每项从 oneOf 选择 kind 和字段；卡点剪辑或同时修改多个 clip 时优先用此工具，整批只写入一次当前时间线"`
+	Ops []TimelineOp `json:"ops" jsonschema:"required" jsonschema_description:"按顺序原子应用的时间线语义补丁；每项从 oneOf 选择 kind 和字段，整批只写入一次当前时间线"`
 }
 
 type TalkingHeadBrollAssignment struct {

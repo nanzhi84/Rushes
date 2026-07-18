@@ -81,7 +81,7 @@ func TestToolRecoveryDoesNotBlindlyReplayMutations(t *testing.T) {
 	})
 	output, err := endpoint(
 		withToolRecoveryState(t.Context(), newToolRecoveryState()),
-		&compose.ToolInput{Name: "timeline.apply_patch", Arguments: `{"op":{"kind":"split_clip"}}`},
+		&compose.ToolInput{Name: "timeline.apply_patches", Arguments: `{"ops":[{"kind":"split_clip"}]}`},
 	)
 	if err != nil || calls != 1 {
 		t.Fatalf("calls=%d output=%#v err=%v", calls, output, err)
@@ -240,12 +240,12 @@ func TestToolRecoveryCanonicalizesDuplicateJSONArguments(t *testing.T) {
 		},
 	)
 	if _, err := endpoint(ctx, &compose.ToolInput{
-		Name: "timeline.apply_patch", Arguments: `{"b":2,"a":1}`,
+		Name: "timeline.apply_patches", Arguments: `{"b":2,"a":1}`,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	blocked, err := endpoint(ctx, &compose.ToolInput{
-		Name: "timeline.apply_patch", Arguments: `{ "a": 1, "b": 2 }`,
+		Name: "timeline.apply_patches", Arguments: `{ "a": 1, "b": 2 }`,
 	})
 	if err != nil || calls != 1 {
 		t.Fatalf("canonical duplicate executed: calls=%d blocked=%#v err=%v", calls, blocked, err)
@@ -270,7 +270,7 @@ func TestToolRecoveryCapsDistinctModelRepairFailures(t *testing.T) {
 	for attempt := 0; attempt <= maxModelRepairAttempts; attempt++ {
 		var err error
 		last, err = endpoint(ctx, &compose.ToolInput{
-			Name: "timeline.apply_patch", Arguments: `{"attempt":` + string(rune('0'+attempt)) + `}`,
+			Name: "timeline.apply_patches", Arguments: `{"attempt":` + string(rune('0'+attempt)) + `}`,
 		})
 		if err != nil {
 			t.Fatal(err)

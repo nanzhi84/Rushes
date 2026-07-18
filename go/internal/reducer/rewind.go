@@ -273,6 +273,8 @@ func attachToolTraceToRewindCheckpoint(
 
 func isTimelineMutationTool(name string) bool {
 	switch name {
+	// timeline.apply_patch 自 #100 起已从 LLM 工具面移除，此处保留用于历史事件回放识别：
+	// 旧 trace/rewind checkpoint 仍以该工具名记录，回滚重放必须能认出它。
 	case "timeline.compose_initial", "timeline.apply_patch", "timeline.apply_patches",
 		"timeline.recut_to_beats", "timeline.edit_talking_head":
 		return true

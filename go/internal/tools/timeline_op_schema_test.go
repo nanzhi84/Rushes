@@ -13,54 +13,6 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
 
-func TestTimelineApplyPatchInfoCompilesCatalogToOneOf(t *testing.T) {
-	t.Parallel()
-	database, err := storage.Open(t.Context(), t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	registry, err := NewRegistry(database, fakeExecutor{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var applyPatch Spec
-	for _, spec := range registry.Specs(true) {
-		if spec.Name == "timeline.apply_patch" {
-			applyPatch = spec
-			break
-		}
-	}
-	if applyPatch.Implementation == nil {
-		t.Fatal("timeline.apply_patch 未注册")
-	}
-	info, err := applyPatch.Implementation.Info(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	parameters, err := info.ToJSONSchema()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if parameters == nil || parameters.Properties == nil {
-		t.Fatalf("parameters schema 缺少 properties: %#v", parameters)
-	}
-	if !containsString(parameters.Required, "op") {
-		t.Fatalf("timeline.apply_patch parameters.required=%v want op", parameters.Required)
-	}
-	opSchema, exists := parameters.Properties.Get("op")
-	if !exists {
-		t.Fatal("timeline.apply_patch parameters 缺少 op")
-	}
-	assertTimelineOpCatalogSchema(t, opSchema)
-	encoded, err := json.Marshal(parameters)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("timeline.apply_patch parameters schema bytes=%d", len(encoded))
-}
-
 func TestTimelineApplyPatchesInfoCompilesCatalogToOneOf(t *testing.T) {
 	t.Parallel()
 	database, err := storage.Open(t.Context(), t.TempDir())
@@ -130,16 +82,16 @@ func TestTimelineOpSchemaCallsDoNotShareMutableExamples(t *testing.T) {
 	}
 }
 
-func TestTimelinePatchInputJSONKeepsNamedMapRuntimeSemantics(t *testing.T) {
+func TestTimelinePatchBatchInputJSONKeepsNamedMapRuntimeSemantics(t *testing.T) {
 	t.Parallel()
-	var decoded TimelinePatchInput
-	if err := json.Unmarshal([]byte(`{"op":{"kind":"delete_clip","clip_id":"clip_1"}}`), &decoded); err != nil {
+	var decoded TimelinePatchBatchInput
+	if err := json.Unmarshal([]byte(`{"ops":[{"kind":"delete_clip","clip_id":"clip_1"}]}`), &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Op["kind"] != "delete_clip" || decoded.Op["clip_id"] != "clip_1" {
-		t.Fatalf("decoded op=%#v", decoded.Op)
+	if len(decoded.Ops) != 1 || decoded.Ops[0]["kind"] != "delete_clip" || decoded.Ops[0]["clip_id"] != "clip_1" {
+		t.Fatalf("decoded ops=%#v", decoded.Ops)
 	}
-	if err := timeline.ValidateOpFields(map[string]any(decoded.Op)); err != nil {
+	if err := timeline.ValidateOpFields(map[string]any(decoded.Ops[0])); err != nil {
 		t.Fatalf("命名 map 未保留运行时语义: %v", err)
 	}
 }
