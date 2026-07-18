@@ -17,6 +17,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -166,13 +167,13 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		}
 		content = service.terminalFailureReply(ctx, item.DraftID, messageID, err)
 		outcome = "failed"
-		reason = truncateText(err.Error(), 800)
+		reason = agentexec.TruncateText(err.Error(), 800)
 	} else if recoveryState.recoveryExhausted() {
 		// 模型在恢复预算耗尽后亲笔生成了失败说明：这条走下面的 assistant/reply
 		// 保留为可见回复并注入下一轮上下文，但回合终态必须真实标记为 failed，
 		// 不能把“已停止修复”记成完成。
 		outcome = "failed"
-		reason = truncateText(recoveryState.summary(), 800)
+		reason = agentexec.TruncateText(recoveryState.summary(), 800)
 	}
 	if content != "" {
 		messageRole := "assistant"
@@ -261,11 +262,11 @@ func (service *Service) maySilentlyFinishTurn(ctx context.Context, item QueueIte
 		return false
 	}
 	event, _ := item.Payload["event"].(map[string]any)
-	if interfaceString(event["event"]) != "JobSucceeded" {
+	if agentexec.InterfaceString(event["event"]) != "JobSucceeded" {
 		return false
 	}
 	payload, _ := event["payload"].(map[string]any)
-	if interfaceString(payload["kind"]) != "render_preview" {
+	if agentexec.InterfaceString(payload["kind"]) != "render_preview" {
 		return false
 	}
 	return service.previewAlreadyInspected(ctx, item.DraftID, payload["result"])
@@ -331,7 +332,7 @@ func (service *Service) continueAfterDecision(
 	item QueueItem,
 	messageID string,
 ) (string, error) {
-	decisionID := interfaceString(item.Payload["decision_id"])
+	decisionID := agentexec.InterfaceString(item.Payload["decision_id"])
 	if decisionID == "" {
 		return "", errors.New("决策回答缺少 decision_id")
 	}
@@ -364,13 +365,13 @@ func (service *Service) continueAfterJobObservation(
 	messageID string,
 ) (string, error) {
 	event, _ := item.Payload["event"].(map[string]any)
-	eventType := interfaceString(event["event"])
+	eventType := agentexec.InterfaceString(event["event"])
 	payload, _ := event["payload"].(map[string]any)
-	jobID := interfaceString(item.Payload["job_id"])
-	if value := interfaceString(payload["job_id"]); value != "" {
+	jobID := agentexec.InterfaceString(item.Payload["job_id"])
+	if value := agentexec.InterfaceString(payload["job_id"]); value != "" {
 		jobID = value
 	}
-	kind := interfaceString(payload["kind"])
+	kind := agentexec.InterfaceString(payload["kind"])
 	if kind == "" {
 		kind = "后台"
 	}
@@ -452,9 +453,9 @@ func (service *Service) previewVerificationReport(
 	result any,
 ) (map[string]any, error) {
 	resultMap, _ := result.(map[string]any)
-	previewID := interfaceString(resultMap["artifact_id"])
+	previewID := agentexec.InterfaceString(resultMap["artifact_id"])
 	if previewID == "" {
-		previewID = interfaceString(resultMap["preview_id"])
+		previewID = agentexec.InterfaceString(resultMap["preview_id"])
 	}
 	if previewID == "" {
 		return nil, nil
@@ -490,9 +491,9 @@ func (service *Service) previewVerificationReport(
 
 func degradedPreviewVerificationReport(result any) map[string]any {
 	resultMap, _ := result.(map[string]any)
-	previewID := interfaceString(resultMap["artifact_id"])
+	previewID := agentexec.InterfaceString(resultMap["artifact_id"])
 	if previewID == "" {
-		previewID = interfaceString(resultMap["preview_id"])
+		previewID = agentexec.InterfaceString(resultMap["preview_id"])
 	}
 	issue := map[string]any{
 		"check":      "inspection",
@@ -509,9 +510,9 @@ func degradedPreviewVerificationReport(result any) map[string]any {
 
 func (service *Service) previewAlreadyInspected(ctx context.Context, draftID string, result any) bool {
 	resultMap, _ := result.(map[string]any)
-	previewID := interfaceString(resultMap["artifact_id"])
+	previewID := agentexec.InterfaceString(resultMap["artifact_id"])
 	if previewID == "" {
-		previewID = interfaceString(resultMap["preview_id"])
+		previewID = agentexec.InterfaceString(resultMap["preview_id"])
 	}
 	if previewID == "" {
 		return false
@@ -552,12 +553,12 @@ func (service *Service) previewAlreadyInspected(ctx context.Context, draftID str
 }
 
 func decisionContinuationPrompt(decision storage.Decision, answer map[string]any) string {
-	optionID := interfaceString(answer["option_id"])
-	freeText := interfaceString(answer["free_text"])
+	optionID := agentexec.InterfaceString(answer["option_id"])
+	freeText := agentexec.InterfaceString(answer["free_text"])
 	label := ""
 	for _, option := range decision.Options {
-		if interfaceString(option["option_id"]) == optionID {
-			label = interfaceString(option["label"])
+		if agentexec.InterfaceString(option["option_id"]) == optionID {
+			label = agentexec.InterfaceString(option["label"])
 			break
 		}
 	}
@@ -674,7 +675,7 @@ func (service *Service) contextSummary(ctx context.Context, draftID, source stri
 	if err != nil || response == nil || strings.TrimSpace(response.Content) == "" {
 		reason := "模型返回空摘要"
 		if err != nil {
-			reason = truncateText(err.Error(), 500)
+			reason = agentexec.TruncateText(err.Error(), 500)
 		}
 		service.hub.Record(draftID, StreamEvent{
 			"type": TurnStreamContextCompactionFailed, "reason": reason,
@@ -775,7 +776,7 @@ func previewIDFromToolReport(name string, input any) string {
 			return strings.TrimSpace(typed.PreviewID)
 		}
 	case map[string]any:
-		return strings.TrimSpace(interfaceString(typed["preview_id"]))
+		return strings.TrimSpace(agentexec.InterfaceString(typed["preview_id"]))
 	}
 	return ""
 }
@@ -905,7 +906,7 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 	if pending == nil {
 		return "已收到你的选择，我会按这个决定继续。", nil
 	}
-	optionID := interfaceString(answer["option_id"])
+	optionID := agentexec.InterfaceString(answer["option_id"])
 	if optionID != "confirm" {
 		return "已取消这项操作。", nil
 	}
@@ -918,7 +919,7 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 	if err != nil {
 		return "", err
 	}
-	ctx = withConfirmedToolReplay(ctx)
+	ctx = agentexec.WithConfirmedToolReplay(ctx)
 	output, err := service.executeReported(ctx, item.DraftID, name, input)
 	if err != nil {
 		return "", err
@@ -927,17 +928,6 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 		return result.Observation, nil
 	}
 	return "已按你的确认继续执行。", nil
-}
-func interfaceString(value any) string {
-	switch typed := value.(type) {
-	case string:
-		return typed
-	case *string:
-		if typed != nil {
-			return *typed
-		}
-	}
-	return ""
 }
 
 func randomID(prefix string) string {

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
@@ -102,7 +103,7 @@ func (builder *ContextBuilder) buildSnapshotMap(
 			readyUnderstanding++
 		}
 		if asset.Kind == "audio" {
-			duration, _ := numericValue(asset.Probe["duration_sec"])
+			duration, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
 			audioRoles = append(audioRoles, map[string]any{
 				"asset_id":       asset.ID,
 				"suggested_role": understanding.ClassifyAudioRole(asset.Filename, duration),
@@ -112,7 +113,7 @@ func (builder *ContextBuilder) buildSnapshotMap(
 
 	draftContext := map[string]any{
 		"name":   draft.Name,
-		"goal":   valueOrContext(interfaceString(draft.Brief["goal"]), "以当前用户指令为准"),
+		"goal":   valueOrContext(agentexec.InterfaceString(draft.Brief["goal"]), "以当前用户指令为准"),
 		"status": draft.Status,
 	}
 	if len(draft.Brief) > 1 {
@@ -157,14 +158,14 @@ func (builder *ContextBuilder) buildSnapshotMap(
 			usedAssetSet[assetID] = struct{}{}
 		}
 		timelineSnapshot["validated"] = draft.TimelineValidated
-		timelineSnapshot["beat_alignment"] = beatAlignmentData(document)
+		timelineSnapshot["beat_alignment"] = agentexec.BeatAlignmentData(document)
 		usedAssets := make([]map[string]any, 0, len(usedAssetIDs))
 		for _, assetID := range usedAssetIDs {
 			asset, exists := assetByID[assetID]
 			if !exists {
 				continue
 			}
-			duration, _ := numericValue(asset.Probe["duration_sec"])
+			duration, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
 			usedAssets = append(usedAssets, map[string]any{
 				"asset_id": asset.ID, "filename": asset.Filename,
 				"kind": asset.Kind, "duration_sec": duration,
@@ -280,7 +281,7 @@ func (builder *ContextBuilder) materialCatalogContext(
 	}
 	candidates := make([]candidate, 0, len(assets))
 	for linkedIndex, asset := range assets {
-		durationSec, _ := numericValue(asset.Probe["duration_sec"])
+		durationSec, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
 		relDir := ""
 		if asset.RelDir != nil {
 			relDir = *asset.RelDir
@@ -472,7 +473,7 @@ func buildTimelineContext(document timeline.Document) (map[string]any, []string)
 }
 
 func compactSemanticAnchorContext(metadata map[string]any) map[string]any {
-	if stringValue(metadata["kind"]) != "b_roll_semantic_anchor" {
+	if agentexec.StringValue(metadata["kind"]) != "b_roll_semantic_anchor" {
 		return nil
 	}
 	result := map[string]any{"kind": "b_roll_semantic_anchor"}
@@ -485,10 +486,10 @@ func compactSemanticAnchorContext(metadata map[string]any) map[string]any {
 			result[key] = value
 		}
 	}
-	if text := strings.TrimSpace(stringValue(metadata["transcript_text"])); text != "" {
+	if text := strings.TrimSpace(agentexec.StringValue(metadata["transcript_text"])); text != "" {
 		result["transcript_text"] = truncateRunes(text, 160)
 	}
-	if description := strings.TrimSpace(stringValue(metadata["b_roll_description"])); description != "" {
+	if description := strings.TrimSpace(agentexec.StringValue(metadata["b_roll_description"])); description != "" {
 		result["b_roll_description"] = truncateRunes(description, 160)
 	}
 	return result
@@ -496,15 +497,15 @@ func compactSemanticAnchorContext(metadata map[string]any) map[string]any {
 
 func compactBeatGridContext(effects []map[string]any) map[string]any {
 	for _, effect := range effects {
-		if stringValue(effect["kind"]) != "beat_grid" {
+		if agentexec.StringValue(effect["kind"]) != "beat_grid" {
 			continue
 		}
 		result := map[string]any{
 			"bpm":               effect["bpm"],
 			"analysis_method":   effect["analysis_method"],
-			"beat_count":        len(effectFrameValues(effect["beat_frames"])),
-			"strong_beat_count": len(effectFrameValues(effect["strong_beat_frames"])),
-			"downbeat_count":    len(effectFrameValues(effect["downbeat_frames"])),
+			"beat_count":        len(agentexec.EffectFrameValues(effect["beat_frames"])),
+			"strong_beat_count": len(agentexec.EffectFrameValues(effect["strong_beat_frames"])),
+			"downbeat_count":    len(agentexec.EffectFrameValues(effect["downbeat_frames"])),
 		}
 		if waveform := compactWaveformContext(effect["waveform"]); waveform != nil {
 			result["waveform"] = waveform
@@ -519,8 +520,8 @@ func compactWaveformContext(value any) map[string]any {
 	if !ok {
 		return nil
 	}
-	interval, intervalOK := numericValue(waveform["sample_interval_frames"])
-	samples := effectFrameValues(waveform["samples"])
+	interval, intervalOK := agentexec.NumericValue(waveform["sample_interval_frames"])
+	samples := agentexec.EffectFrameValues(waveform["samples"])
 	if !intervalOK || interval <= 0 || interval != float64(int(interval)) || len(samples) == 0 {
 		return nil
 	}
@@ -532,7 +533,7 @@ func compactWaveformContext(value any) map[string]any {
 			return nil
 		}
 	}
-	sampleFrames := effectFrameValues(waveform["sample_frames"])
+	sampleFrames := agentexec.EffectFrameValues(waveform["sample_frames"])
 	if len(sampleFrames) == 0 {
 		// 兼容升级前已经持久化的 beat_grid：旧数据虽只存间隔和数组，
 		// 仍可无损恢复每个 RMS 窗口的起始帧。
@@ -686,7 +687,7 @@ func timelineEditHistoryKey(sequence int64, operationIndex int) string {
 
 func summarizeTimelineEditOperation(raw map[string]any) map[string]any {
 	operation := sanitizeContextMap(raw)
-	kind := interfaceString(operation["kind"])
+	kind := agentexec.InterfaceString(operation["kind"])
 	if kind != "recut_to_beats" {
 		compacted, _ := compactEditHistoryValue(operation, 0).(map[string]any)
 		if compacted == nil {
@@ -699,7 +700,7 @@ func summarizeTimelineEditOperation(raw map[string]any) map[string]any {
 	copyContextFields(result, operation,
 		"bgm_asset_id", "target_duration_frames", "sfx_asset_id", "sfx_start_frame",
 	)
-	cutFrames := effectFrameValues(operation["cut_frames"])
+	cutFrames := agentexec.EffectFrameValues(operation["cut_frames"])
 	if len(cutFrames) > 0 {
 		result["clip_count"] = len(cutFrames)
 		result["first_cut_frame"] = cutFrames[0]

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
@@ -173,10 +174,10 @@ func decodeUnderstandJobPayload(raw string) (understandJobPayload, error) {
 	}
 	payload := understandJobPayload{
 		AssetIDs: looseStringSlice(value["asset_ids"]),
-		Focus:    interfaceString(value["focus"]), Depth: interfaceString(value["depth"]),
+		Focus:    agentexec.InterfaceString(value["focus"]), Depth: agentexec.InterfaceString(value["depth"]),
 		AnalysisFingerprints: map[string]string{},
 	}
-	if numeric, ok := numericValue(value["max_steps_per_asset"]); ok {
+	if numeric, ok := agentexec.NumericValue(value["max_steps_per_asset"]); ok {
 		payload.MaxStepsPerAsset = int(numeric)
 	}
 	if fingerprints, ok := value["analysis_fingerprints"].(map[string]any); ok {

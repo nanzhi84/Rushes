@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -275,7 +276,7 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	bgmDuration, _ := numericValue(bgmAsset.Probe["duration_sec"])
+	bgmDuration, _ := agentexec.NumericValue(bgmAsset.Probe["duration_sec"])
 	waveform := optionalWaveformEnvelope(
 		ctx,
 		bgmSource,
@@ -406,7 +407,7 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 		if !found || sfxAsset.Kind != "audio" || !sfxAsset.Usable {
 			return failed("SFX 素材必须是当前草稿中的可用音频", map[string]any{"asset_id": sfx.AssetID})
 		}
-		sfxDuration, _ := numericValue(sfxAsset.Probe["duration_sec"])
+		sfxDuration, _ := agentexec.NumericValue(sfxAsset.Probe["duration_sec"])
 		if available := int(math.Round(sfxDuration * float64(current.FPS))); available > 0 && sfx.DurationFrames > available {
 			return failed("SFX 请求时长超过素材时长", map[string]any{
 				"requested_frames": sfx.DurationFrames, "available_frames": available,
@@ -456,7 +457,7 @@ func (service *Service) toolRecutCurrentClipsToBeats(
 	return result, nil
 }
 
-func sourceRangeContains(ranges []beatMixSourceRange, startFrame, endFrame int) bool {
+func sourceRangeContains(ranges []agentexec.BeatMixSourceRange, startFrame, endFrame int) bool {
 	for _, sourceRange := range ranges {
 		if startFrame >= sourceRange.StartFrame && endFrame <= sourceRange.EndFrame {
 			return true
@@ -671,14 +672,6 @@ func beatCandidatesWithin(frames []int, targetFrames int) []int {
 		previous = frame
 	}
 	return result
-}
-
-// One frame is about 33ms at 30fps, below the perceptible threshold for beat alignment.
-const beatSnapToleranceFrames = 1
-
-func containsFrame(frames []int, target int) bool {
-	index := sort.SearchInts(frames, target-beatSnapToleranceFrames)
-	return index < len(frames) && frames[index] <= target+beatSnapToleranceFrames
 }
 
 func absInt(value int) int {

@@ -8,6 +8,7 @@ import (
 	"math"
 	"strings"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -30,7 +31,7 @@ func (service *Service) toolComposeInitial(
 		if assetErr != nil {
 			return composeInitialFailure(index, clip, storage.Asset{}, assetErr.Error()), nil
 		}
-		durationSec, _ := numericValue(asset.Probe["duration_sec"])
+		durationSec, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
 		durationFrames := int(math.Round(durationSec * timeline.DefaultFPS))
 		if asset.Kind != "video" && asset.Kind != "image" {
 			return composeInitialFailure(index, clip, asset, "主视觉轨只支持 video/image 素材"), nil
@@ -68,7 +69,7 @@ func composeInitialFailure(
 	asset storage.Asset,
 	reason string,
 ) rushestools.ToolResult {
-	durationSec, _ := numericValue(asset.Probe["duration_sec"])
+	durationSec, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
 	assetID := asset.ID
 	if assetID == "" {
 		assetID = clip.AssetID
@@ -115,7 +116,7 @@ func (service *Service) toolApplyPatches(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	plannedOperations, preservedAudio := prepareTimelineBatch(current, enrichedOperations)
+	plannedOperations, preservedAudio := agentexec.PrepareTimelineBatch(current, enrichedOperations)
 	document := current
 	for index, operation := range plannedOperations {
 		beforeOperation := document
@@ -138,7 +139,7 @@ func (service *Service) toolApplyPatches(
 			}, nil
 		}
 	}
-	if restoreErr := restoreIndependentAudioTracks(&document, preservedAudio); restoreErr != nil {
+	if restoreErr := agentexec.RestoreIndependentAudioTracks(&document, preservedAudio); restoreErr != nil {
 		return rushestools.ToolResult{
 			Status:      "failed",
 			Observation: "批量主视频编辑会破坏未被本批直接编辑的 BGM/SFX，当前时间线未更新",
@@ -260,11 +261,11 @@ func (service *Service) persistTimeline(
 		Status: status, Observation: timeline.Inspect(document),
 		Data: map[string]any{
 			"validation_report": reportMap,
-			"beat_alignment":    beatAlignmentData(document),
+			"beat_alignment":    agentexec.BeatAlignmentData(document),
 		},
 	}
 	if hasContract {
-		failures := contractFailureItems(contractReport)
+		failures := agentexec.ContractFailureItems(contractReport)
 		if len(failures) > 0 {
 			encoded, _ := json.Marshal(failures)
 			toolResult.Observation += " 验收合同未通过项：" + string(encoded)
@@ -284,7 +285,7 @@ func (service *Service) toolValidateTimeline(ctx context.Context, draftID string
 		return rushestools.ToolResult{}, err
 	}
 	report := timeline.Validate(document)
-	beatAlignment := beatAlignmentData(document)
+	beatAlignment := agentexec.BeatAlignmentData(document)
 	contractReport, hasContract, contractErr := service.verifyContentContract(ctx, draftID, document)
 	if contractErr != nil {
 		return rushestools.ToolResult{}, contractErr
@@ -329,12 +330,12 @@ func (service *Service) toolValidateTimeline(ctx context.Context, draftID string
 	if quality, qualityErr := service.speechQualityReport(ctx, document); qualityErr == nil {
 		if present, _ := quality["a_roll_present"].(bool); present {
 			data["speech_quality"] = quality
-			observation += talkingHeadQualitySummary(quality)
+			observation += agentexec.TalkingHeadQualitySummary(quality)
 		}
 	}
 	if hasContract {
 		data["content_contract"] = contractReport
-		failures := contractFailureItems(contractReport)
+		failures := agentexec.ContractFailureItems(contractReport)
 		data["contract_failures"] = failures
 		if len(failures) == 0 {
 			observation += " 验收合同全部通过。"
@@ -412,7 +413,7 @@ func (service *Service) toolInspectTimeline(
 			"timeline_exists": true,
 			"fps":             document.FPS, "duration_frames": document.DurationFrames, "tracks": tracks,
 			"audio_layout":   audioLayoutData(document),
-			"beat_alignment": beatAlignmentData(document),
+			"beat_alignment": agentexec.BeatAlignmentData(document),
 		},
 	}, nil
 }

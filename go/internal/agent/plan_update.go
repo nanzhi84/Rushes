@@ -7,6 +7,7 @@ import (
 	"sort"
 	"unicode/utf8"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -49,7 +50,7 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 				"reason": "contract_invalid",
 			}), nil
 		}
-		contractMap, contractErr := canonicalContentPlanValue(input.Contract)
+		contractMap, contractErr := agentexec.CanonicalContentPlanValue(input.Contract)
 		if contractErr != nil {
 			return planUpdateFailure("验收合同无法编码为 JSON", map[string]any{"reason": "contract_not_json"}), nil
 		}
@@ -83,7 +84,7 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 				map[string]any{"reason": "stored_reserved_key", "reserved_key": key},
 			), nil
 		}
-		if contract, contractErr := contentPlanContract(updated); contractErr != nil {
+		if contract, contractErr := agentexec.ContentPlanContract(updated); contractErr != nil {
 			return planUpdateFailure(contractErr.Error(), map[string]any{"reason": "contract_invalid"}), nil
 		} else if contract != nil {
 			updated["contract"] = contract
@@ -145,18 +146,6 @@ func (service *Service) toolPlanUpdateWithBeforeApply(
 			"recovery":               "重新读取 WorldState 后重试 plan.update",
 		},
 	), nil
-}
-
-func canonicalContentPlanValue(input any) (map[string]any, error) {
-	encoded, err := json.Marshal(input)
-	if err != nil {
-		return nil, err
-	}
-	result := map[string]any{}
-	if err := json.Unmarshal(encoded, &result); err != nil {
-		return nil, err
-	}
-	return result, nil
 }
 
 func canonicalContentPlan(input map[string]any) (map[string]any, error) {

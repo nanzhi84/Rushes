@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -152,7 +153,7 @@ func timelineOpFailureAt(
 	if failedIndex > 0 {
 		data["failed_op_index"] = failedIndex
 	}
-	if spec, exists := timeline.LookupOpSpec(interfaceString(operation["kind"])); exists {
+	if spec, exists := timeline.LookupOpSpec(agentexec.InterfaceString(operation["kind"])); exists {
 		data["expected_schema"] = timelineOpExpectedSchema(*spec)
 		data["correct_example"] = timeline.CorrectOpExample(*spec)
 	}

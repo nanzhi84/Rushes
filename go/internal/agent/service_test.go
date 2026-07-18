@@ -18,6 +18,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -2492,7 +2493,7 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 		t.Fatalf("compact length=%d", len(got))
 	}
 	for _, value := range []any{"yes", stringPointerValue("pointer"), (*string)(nil), 1} {
-		_ = interfaceString(value)
+		_ = agentexec.InterfaceString(value)
 	}
 	replayed, err := service.tools.DecodeInput("timeline.apply_patches", map[string]any{
 		"ops": []any{map[string]any{"kind": "delete_clip", "clip_id": "clip_replay"}},
@@ -2521,7 +2522,7 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 		t.Fatal("unknown replay should fail")
 	}
 	for _, value := range []any{float64(1), float32(2), 3, "bad"} {
-		_, _ = numericValue(value)
+		_, _ = agentexec.NumericValue(value)
 	}
 }
 
@@ -3220,10 +3221,10 @@ func TestBeatRecutToolRebuildsFullLengthMixFromSourceAssets(t *testing.T) {
 	if multiLatestErr != nil || len(multiLatest.Tracks[0].Clips) != 5 {
 		t.Fatalf("multi latest=%#v err=%v", multiLatest, multiLatestErr)
 	}
-	usedByAsset := map[string][]beatMixSourceRange{}
+	usedByAsset := map[string][]agentexec.BeatMixSourceRange{}
 	for _, clip := range multiLatest.Tracks[0].Clips {
-		candidate := beatMixSourceRange{StartFrame: clip.SourceStartFrame, EndFrame: clip.SourceEndFrame}
-		if overlapsAny(candidate, usedByAsset[clip.AssetID]) {
+		candidate := agentexec.BeatMixSourceRange{StartFrame: clip.SourceStartFrame, EndFrame: clip.SourceEndFrame}
+		if agentexec.OverlapsAny(candidate, usedByAsset[clip.AssetID]) {
 			t.Fatalf("同一素材源区间重叠: asset=%s ranges=%#v candidate=%#v", clip.AssetID, usedByAsset[clip.AssetID], candidate)
 		}
 		usedByAsset[clip.AssetID] = append(usedByAsset[clip.AssetID], candidate)
@@ -3305,7 +3306,7 @@ func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
 		if duration := cut - previous; duration <= 0 || duration > capacities[index] {
 			t.Fatalf("capacity-aware segment=%d duration=%d cuts=%v", index, duration, capacityCuts)
 		}
-		if cut != 900 && !containsFrame(capacityBeatFrames, cut) {
+		if cut != 900 && !agentexec.ContainsFrame(capacityBeatFrames, cut) {
 			t.Fatalf("capacity-aware cut not on beat: %v", capacityCuts)
 		}
 		previous = cut
@@ -3334,16 +3335,16 @@ func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
 	if candidates := beatCandidatesWithin([]int{-1, 0, 10, 10, 20, 30}, 30); !reflect.DeepEqual(candidates, []int{10, 20}) {
 		t.Fatalf("candidates=%v", candidates)
 	}
-	if !containsFrame([]int{10, 20, 30}, 20) || !containsFrame([]int{10, 20, 30}, 19) ||
-		!containsFrame([]int{10, 20, 30}, 21) || containsFrame([]int{10, 20, 30}, 18) ||
-		containsFrame([]int{10, 20, 30}, 22) || containsFrame([]int{10, 20, 30}, 25) {
+	if !agentexec.ContainsFrame([]int{10, 20, 30}, 20) || !agentexec.ContainsFrame([]int{10, 20, 30}, 19) ||
+		!agentexec.ContainsFrame([]int{10, 20, 30}, 21) || agentexec.ContainsFrame([]int{10, 20, 30}, 18) ||
+		agentexec.ContainsFrame([]int{10, 20, 30}, 22) || agentexec.ContainsFrame([]int{10, 20, 30}, 25) {
 		t.Fatal("containsFrame bounds failed")
 	}
 	if absInt(-4) != 4 || absInt(4) != 4 {
 		t.Fatal("absInt failed")
 	}
-	ranges := []beatMixSourceRange{{StartFrame: 120, EndFrame: 220}}
-	usedRanges := []beatMixSourceRange{{StartFrame: 120, EndFrame: 150}}
+	ranges := []agentexec.BeatMixSourceRange{{StartFrame: 120, EndFrame: 220}}
+	usedRanges := []agentexec.BeatMixSourceRange{{StartFrame: 120, EndFrame: 150}}
 	if start, ok := chooseUnusedBeatMixSourceStart(300, 30, ranges, usedRanges, -1, true); !ok || start != 150 {
 		t.Fatalf("unused semantic gap start=%d ok=%v", start, ok)
 	}

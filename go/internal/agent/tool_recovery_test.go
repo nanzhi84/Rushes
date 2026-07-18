@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -48,7 +49,7 @@ func TestToolRecoveryFormattingHelpersCoverMalformedValues(t *testing.T) {
 	if invalid["raw_arguments"] != "not-json" {
 		t.Fatalf("invalid arguments=%#v", invalid)
 	}
-	if truncateText(" abc ", 0) != "abc" || truncateText("abcdef", 3) != "abc…" {
+	if agentexec.TruncateText(" abc ", 0) != "abc" || agentexec.TruncateText("abcdef", 3) != "abc…" {
 		t.Fatal("truncateText mismatch")
 	}
 	reportSyntheticToolFailure(context.Background(), "missing-reporter", `{}`, "not-json")
