@@ -9,19 +9,17 @@ import {
   useState
 } from "react";
 import type { ReactElement } from "react";
-import { ArrowUp, History, MessageSquareX, Square } from "lucide-react";
+import { ArrowUp, MessageSquareX, Square } from "lucide-react";
 import {
   api,
   type DecisionAnswer,
-  type MessageRecord,
-  type RewindRestoreRequest
+  type MessageRecord
 } from "../../api/client";
 import { DRAFT_EVENT_TYPES } from "../../api/event_types";
 import { queryKeys } from "../../app/query_client";
 import { useDocumentVisibility } from "../../app/use_document_visibility";
 import { acquireApiEventSource } from "../../auth";
 import { AssistantThread } from "./AssistantThread";
-import { RewindPanel } from "./RewindPanel";
 import { useTurnStream } from "./useTurnStream";
 import {
   markDecisionAnswered,
@@ -41,7 +39,7 @@ import {
 import {
   conversationClearErrorMessage,
   jobCancelErrorMessage,
-  rewindErrorMessage
+  resendErrorMessage
 } from "./error_messages";
 
 export type ConsoleConnectionState = "connecting" | "open" | "closed";
@@ -82,8 +80,6 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
     const documentVisible = useDocumentVisibility();
     const [structuredItems, setStructuredItems] = useState<StructuredInteractionItem[]>([]);
     const [conversationError, setConversationError] = useState<string | null>(null);
-    const [rewindOpen, setRewindOpen] = useState(false);
-    const [selectedRewindCheckpointId, setSelectedRewindCheckpointId] = useState<string | null>(null);
     const optimisticMessageSequenceRef = useRef(0);
     const draftInvalidationTimerRef = useRef<number | null>(null);
 
@@ -99,11 +95,6 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
       initialData: { messages: [] as ConsoleMessage[], rewoundMessageCount: 0 }
     });
 
-    const rewindQuery = useQuery({
-      queryKey: queryKeys.rewindCheckpoints(draftId),
-      queryFn: () => api.rewindCheckpoints(draftId)
-    });
-
     const decisionQuery = useQuery({
       queryKey: queryKeys.currentDecision(draftId),
       queryFn: () => api.currentDecision(draftId)
@@ -112,24 +103,6 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
     const currentDecision = decisionQuery.data?.decision ?? null;
     const historyMessages = messagesQuery.data.messages;
     const rewoundMessageCount = messagesQuery.data.rewoundMessageCount;
-    const rewindCheckpoints = rewindQuery.data?.checkpoints ?? [];
-    const rewindCheckpointByItem = useMemo(() => {
-      const result: Record<string, string> = {};
-      for (const checkpoint of rewindCheckpoints) {
-        const messageEntry = checkpoint.trigger_kind === "user_message";
-        const attachedToolEntry =
-          checkpoint.trigger_kind === "timeline_write" &&
-          checkpoint.anchor_message_id !== checkpoint.anchor_turn_id;
-        if (
-          checkpoint.anchor_message_id &&
-          (messageEntry || attachedToolEntry) &&
-          result[checkpoint.anchor_message_id] === undefined
-        ) {
-          result[checkpoint.anchor_message_id] = checkpoint.checkpoint_id;
-        }
-      }
-      return result;
-    }, [rewindCheckpoints]);
     const renderedStructuredItems = useMemo(
       () => {
         if (
@@ -172,7 +145,6 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
             queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
             queryClient.invalidateQueries({ queryKey: ["timeline", draftId] }),
             queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
-            queryClient.invalidateQueries({ queryKey: queryKeys.rewindCheckpoints(draftId) }),
             queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
             queryClient.invalidateQueries({ queryKey: queryKeys.costs(draftId) }),
             queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) })
@@ -287,31 +259,33 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
       }
     });
 
-    const restoreRewind = useMutation({
-      mutationFn: ({ checkpointId, mode, idempotencyKey }: {
-        checkpointId: string;
-        mode: RewindRestoreRequest["mode"];
-        idempotencyKey: string;
-      }) => api.restoreRewindCheckpoint(draftId, {
-        checkpoint_id: checkpointId,
-        idempotency_key: idempotencyKey,
-        mode
-      }),
-      onMutate: () => setConversationError(null),
+    // 编辑并重发：回退到该消息之前并以新内容开启新回合。软遮蔽后靠领域 SSE 的
+    // query invalidation 让旧消息与旧时间线从 UI 消失，新回合复用现有 turn-stream。
+    const resendMessage = useMutation({
+      mutationFn: ({ messageId, content }: { messageId: string; content: string }) =>
+        api.resendMessage(draftId, messageId, {
+          content,
+          idempotency_key: crypto.randomUUID()
+        }),
+      onMutate: () => {
+        setConversationError(null);
+        setAwaitingTurnEnd(true);
+      },
       onSuccess: async () => {
         resetTurnStream();
-        setAwaitingTurnEnd(false);
         setStructuredItems([]);
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) }),
           queryClient.invalidateQueries({ queryKey: queryKeys.timeline(draftId) }),
           queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
           queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
-          queryClient.invalidateQueries({ queryKey: queryKeys.rewindCheckpoints(draftId) }),
           queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) })
         ]);
       },
-      onError: (error) => setConversationError(rewindErrorMessage(error))
+      onError: (error) => {
+        setAwaitingTurnEnd(false);
+        setConversationError(resendErrorMessage(error));
+      }
     });
 
     const clearConversation = useMutation({
@@ -416,16 +390,6 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
           <div className="flex items-center gap-2">
             <button
               type="button"
-              className="inline-flex h-6 items-center gap-1 rounded-sm px-1.5 text-2xs text-fg-faint hover:bg-hover hover:text-fg"
-              aria-label="打开回退检查点"
-              aria-expanded={rewindOpen}
-              onClick={() => setRewindOpen((current) => !current)}
-            >
-              <History size={12} strokeWidth={1.7} aria-hidden />
-              回退
-            </button>
-            <button
-              type="button"
               className="inline-flex h-6 items-center gap-1 rounded-sm px-1.5 text-2xs text-fg-faint hover:bg-hover hover:text-fg disabled:opacity-35"
               aria-label="清空对话上下文"
               title="清空对话；保留素材与时间线"
@@ -452,26 +416,6 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
           </div>
         </div>
 
-        {rewindOpen ? (
-          <RewindPanel
-            checkpoints={rewindCheckpoints}
-            selectedCheckpointId={selectedRewindCheckpointId}
-            loading={rewindQuery.isLoading}
-            pending={restoreRewind.isPending}
-            onSelect={setSelectedRewindCheckpointId}
-            onRestore={(mode) => {
-              if (selectedRewindCheckpointId) {
-                restoreRewind.mutate({
-                  checkpointId: selectedRewindCheckpointId,
-                  idempotencyKey: crypto.randomUUID(),
-                  mode
-                });
-              }
-            }}
-            onClose={() => setRewindOpen(false)}
-          />
-        ) : null}
-
         {conversationError ? (
           <div className="shrink-0 border-b border-danger/30 bg-danger/8 px-3 py-1 text-2xs text-danger" role="alert">
             {conversationError}
@@ -497,11 +441,10 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
           subagentProgress={subagentProgress}
           onCancelJob={(jobId) => cancelJob.mutate(jobId)}
           cancelPendingJobId={cancelJob.isPending ? (cancelJob.variables ?? null) : null}
-          rewindCheckpointByItem={rewindCheckpointByItem}
-          onOpenRewind={(checkpointId) => {
-            setSelectedRewindCheckpointId(checkpointId);
-            setRewindOpen(true);
-          }}
+          onResendMessage={(messageId, content) => resendMessage.mutate({ messageId, content })}
+          resendPendingMessageId={
+            resendMessage.isPending ? (resendMessage.variables?.messageId ?? null) : null
+          }
         />
 
         {sideDecisionItem ? (

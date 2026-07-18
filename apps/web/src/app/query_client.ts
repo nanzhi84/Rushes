@@ -28,7 +28,6 @@ export const queryKeys = {
   fsList: (path: string) => ["fs-list", path] as const,
   timeline: (draftId: string) => ["timeline", draftId] as const,
   messages: (draftId: string) => ["messages", draftId] as const,
-  rewindCheckpoints: (draftId: string) => ["rewind-checkpoints", draftId] as const,
   currentDecision: (draftId: string) => ["current-decision", draftId] as const,
   pendingDecisions: (draftId: string) => ["pending-decisions", draftId] as const,
   costs: (draftId: string) => ["costs", draftId] as const

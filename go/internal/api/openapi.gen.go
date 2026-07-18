@@ -246,13 +246,13 @@ func (e MemoryRecordKind) Valid() bool {
 
 // Defines values for MessageQueuedResponseKind.
 const (
-	MessageQueuedResponseKindUserMessage MessageQueuedResponseKind = "user_message"
+	UserMessage MessageQueuedResponseKind = "user_message"
 )
 
 // Valid indicates whether the value is a known member of the MessageQueuedResponseKind enum.
 func (e MessageQueuedResponseKind) Valid() bool {
 	switch e {
-	case MessageQueuedResponseKindUserMessage:
+	case UserMessage:
 		return true
 	default:
 		return false
@@ -274,78 +274,15 @@ func (e MessageQueuedResponseStatus) Valid() bool {
 	}
 }
 
-// Defines values for RewindCheckpointTriggerKind.
+// Defines values for MessageResendResponseStatus.
 const (
-	RewindCheckpointTriggerKindRestore       RewindCheckpointTriggerKind = "restore"
-	RewindCheckpointTriggerKindTimelineWrite RewindCheckpointTriggerKind = "timeline_write"
-	RewindCheckpointTriggerKindUserMessage   RewindCheckpointTriggerKind = "user_message"
+	Resent MessageResendResponseStatus = "resent"
 )
 
-// Valid indicates whether the value is a known member of the RewindCheckpointTriggerKind enum.
-func (e RewindCheckpointTriggerKind) Valid() bool {
+// Valid indicates whether the value is a known member of the MessageResendResponseStatus enum.
+func (e MessageResendResponseStatus) Valid() bool {
 	switch e {
-	case RewindCheckpointTriggerKindRestore:
-		return true
-	case RewindCheckpointTriggerKindTimelineWrite:
-		return true
-	case RewindCheckpointTriggerKindUserMessage:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for RewindRestoreRequestMode.
-const (
-	RewindRestoreRequestModeBoth         RewindRestoreRequestMode = "both"
-	RewindRestoreRequestModeConversation RewindRestoreRequestMode = "conversation"
-	RewindRestoreRequestModeTimeline     RewindRestoreRequestMode = "timeline"
-)
-
-// Valid indicates whether the value is a known member of the RewindRestoreRequestMode enum.
-func (e RewindRestoreRequestMode) Valid() bool {
-	switch e {
-	case RewindRestoreRequestModeBoth:
-		return true
-	case RewindRestoreRequestModeConversation:
-		return true
-	case RewindRestoreRequestModeTimeline:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for RewindRestoreResponseMode.
-const (
-	RewindRestoreResponseModeBoth         RewindRestoreResponseMode = "both"
-	RewindRestoreResponseModeConversation RewindRestoreResponseMode = "conversation"
-	RewindRestoreResponseModeTimeline     RewindRestoreResponseMode = "timeline"
-)
-
-// Valid indicates whether the value is a known member of the RewindRestoreResponseMode enum.
-func (e RewindRestoreResponseMode) Valid() bool {
-	switch e {
-	case RewindRestoreResponseModeBoth:
-		return true
-	case RewindRestoreResponseModeConversation:
-		return true
-	case RewindRestoreResponseModeTimeline:
-		return true
-	default:
-		return false
-	}
-}
-
-// Defines values for RewindRestoreResponseStatus.
-const (
-	Restored RewindRestoreResponseStatus = "restored"
-)
-
-// Valid indicates whether the value is a known member of the RewindRestoreResponseStatus enum.
-func (e RewindRestoreResponseStatus) Valid() bool {
-	switch e {
-	case Restored:
+	case Resent:
 		return true
 	default:
 		return false
@@ -826,6 +763,24 @@ type MessageRecord struct {
 	Role      string `json:"role"`
 }
 
+// MessageResendRequest defines model for MessageResendRequest.
+type MessageResendRequest struct {
+	Content        string `json:"content"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// MessageResendResponse defines model for MessageResendResponse.
+type MessageResendResponse struct {
+	DraftId                 string                      `json:"draft_id"`
+	MessageId               string                      `json:"message_id"`
+	RestoredTimelineVersion *int                        `json:"restored_timeline_version"`
+	RewoundMessageCount     int                         `json:"rewound_message_count"`
+	Status                  MessageResendResponseStatus `json:"status"`
+}
+
+// MessageResendResponseStatus defines model for MessageResendResponse.Status.
+type MessageResendResponseStatus string
+
 // MessagesResponse defines model for MessagesResponse.
 type MessagesResponse struct {
 	DraftId             string          `json:"draft_id"`
@@ -855,63 +810,6 @@ type ReducerConflictDetail struct {
 	EventType           string `json:"event_type"`
 	ExpectedBaseVersion *int   `json:"expected_base_version"`
 }
-
-// RewindCheckpoint defines model for RewindCheckpoint.
-type RewindCheckpoint struct {
-	AnchorEventId       *int                        `json:"anchor_event_id"`
-	AnchorMessageId     *string                     `json:"anchor_message_id"`
-	AnchorTurnId        *string                     `json:"anchor_turn_id"`
-	CheckpointId        string                      `json:"checkpoint_id"`
-	ClipCount           int                         `json:"clip_count"`
-	ClipCountDelta      int                         `json:"clip_count_delta"`
-	CreatedAt           string                      `json:"created_at"`
-	DurationFrames      int                         `json:"duration_frames"`
-	DurationFramesDelta int                         `json:"duration_frames_delta"`
-	PatchId             *string                     `json:"patch_id"`
-	Summary             string                      `json:"summary"`
-	TimelineVersion     *int                        `json:"timeline_version"`
-	TrackCount          int                         `json:"track_count"`
-	TrackCountDelta     int                         `json:"track_count_delta"`
-	TriggerKind         RewindCheckpointTriggerKind `json:"trigger_kind"`
-}
-
-// RewindCheckpointTriggerKind defines model for RewindCheckpoint.TriggerKind.
-type RewindCheckpointTriggerKind string
-
-// RewindCheckpointsResponse defines model for RewindCheckpointsResponse.
-type RewindCheckpointsResponse struct {
-	Checkpoints []RewindCheckpoint `json:"checkpoints"`
-	DraftId     string             `json:"draft_id"`
-}
-
-// RewindRestoreRequest defines model for RewindRestoreRequest.
-type RewindRestoreRequest struct {
-	CheckpointId   string                   `json:"checkpoint_id"`
-	IdempotencyKey string                   `json:"idempotency_key"`
-	Mode           RewindRestoreRequestMode `json:"mode"`
-}
-
-// RewindRestoreRequestMode defines model for RewindRestoreRequest.Mode.
-type RewindRestoreRequestMode string
-
-// RewindRestoreResponse defines model for RewindRestoreResponse.
-type RewindRestoreResponse struct {
-	CancelledDecisions  int                         `json:"cancelled_decisions"`
-	CancelledJobs       int                         `json:"cancelled_jobs"`
-	CheckpointId        string                      `json:"checkpoint_id"`
-	DraftId             string                      `json:"draft_id"`
-	EventIds            []int                       `json:"event_ids"`
-	Mode                RewindRestoreResponseMode   `json:"mode"`
-	RewoundMessageCount int                         `json:"rewound_message_count"`
-	Status              RewindRestoreResponseStatus `json:"status"`
-	TimelineVersion     *int                        `json:"timeline_version"`
-}
-
-// RewindRestoreResponseMode defines model for RewindRestoreResponse.Mode.
-type RewindRestoreResponseMode string
-
-// RewindRestoreResponseStatus defines model for RewindRestoreResponse.Status.
-type RewindRestoreResponseStatus string
 
 // SecurityReason defines model for SecurityReason.
 type SecurityReason string
@@ -1019,8 +917,8 @@ type ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPostJSONRequestBody 
 // EnqueueMessageApiDraftsDraftIdMessagesPostJSONRequestBody defines body for EnqueueMessageApiDraftsDraftIdMessagesPost for application/json ContentType.
 type EnqueueMessageApiDraftsDraftIdMessagesPostJSONRequestBody = MessageCreateRequest
 
-// RestoreRewindCheckpointApiDraftsDraftIdRewindPostJSONRequestBody defines body for RestoreRewindCheckpointApiDraftsDraftIdRewindPost for application/json ContentType.
-type RestoreRewindCheckpointApiDraftsDraftIdRewindPostJSONRequestBody = RewindRestoreRequest
+// ResendMessageApiDraftsDraftIdMessagesMessageIdResendPostJSONRequestBody defines body for ResendMessageApiDraftsDraftIdMessagesMessageIdResendPost for application/json ContentType.
+type ResendMessageApiDraftsDraftIdMessagesMessageIdResendPostJSONRequestBody = MessageResendRequest
 
 // ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPostJSONRequestBody defines body for ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost for application/json ContentType.
 type ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPostJSONRequestBody = TimelinePatchRequest
@@ -1282,15 +1180,12 @@ type ServerInterface interface {
 	// Enqueue Message
 	// (POST /api/drafts/{draft_id}/messages)
 	EnqueueMessageApiDraftsDraftIdMessagesPost(w http.ResponseWriter, r *http.Request, draftId string)
+	// Resend Message
+	// (POST /api/drafts/{draft_id}/messages/{message_id}/resend)
+	ResendMessageApiDraftsDraftIdMessagesMessageIdResendPost(w http.ResponseWriter, r *http.Request, draftId string, messageId string)
 	// Preview Viewed
 	// (POST /api/drafts/{draft_id}/previews/{preview_id}/viewed)
 	PreviewViewedApiDraftsDraftIdPreviewsPreviewIdViewedPost(w http.ResponseWriter, r *http.Request, draftId string, previewId string)
-	// Restore Rewind Checkpoint
-	// (POST /api/drafts/{draft_id}/rewind)
-	RestoreRewindCheckpointApiDraftsDraftIdRewindPost(w http.ResponseWriter, r *http.Request, draftId string)
-	// List Rewind Checkpoints
-	// (GET /api/drafts/{draft_id}/rewind/checkpoints)
-	ListRewindCheckpointsApiDraftsDraftIdRewindCheckpointsGet(w http.ResponseWriter, r *http.Request, draftId string)
 	// Get Draft Timeline
 	// (GET /api/drafts/{draft_id}/timeline)
 	GetDraftTimelineApiDraftsDraftIdTimelineGet(w http.ResponseWriter, r *http.Request, draftId string)
@@ -1483,21 +1378,15 @@ func (_ Unimplemented) EnqueueMessageApiDraftsDraftIdMessagesPost(w http.Respons
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// Resend Message
+// (POST /api/drafts/{draft_id}/messages/{message_id}/resend)
+func (_ Unimplemented) ResendMessageApiDraftsDraftIdMessagesMessageIdResendPost(w http.ResponseWriter, r *http.Request, draftId string, messageId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // Preview Viewed
 // (POST /api/drafts/{draft_id}/previews/{preview_id}/viewed)
 func (_ Unimplemented) PreviewViewedApiDraftsDraftIdPreviewsPreviewIdViewedPost(w http.ResponseWriter, r *http.Request, draftId string, previewId string) {
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// Restore Rewind Checkpoint
-// (POST /api/drafts/{draft_id}/rewind)
-func (_ Unimplemented) RestoreRewindCheckpointApiDraftsDraftIdRewindPost(w http.ResponseWriter, r *http.Request, draftId string) {
-	w.WriteHeader(http.StatusNotImplemented)
-}
-
-// List Rewind Checkpoints
-// (GET /api/drafts/{draft_id}/rewind/checkpoints)
-func (_ Unimplemented) ListRewindCheckpointsApiDraftsDraftIdRewindCheckpointsGet(w http.ResponseWriter, r *http.Request, draftId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -2176,6 +2065,41 @@ func (siw *ServerInterfaceWrapper) EnqueueMessageApiDraftsDraftIdMessagesPost(w 
 	handler.ServeHTTP(w, r)
 }
 
+// ResendMessageApiDraftsDraftIdMessagesMessageIdResendPost operation middleware
+func (siw *ServerInterfaceWrapper) ResendMessageApiDraftsDraftIdMessagesMessageIdResendPost(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "draft_id" -------------
+	var draftId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "draft_id", chi.URLParam(r, "draft_id"), &draftId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "draft_id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "message_id" -------------
+	var messageId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "message_id", chi.URLParam(r, "message_id"), &messageId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "message_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ResendMessageApiDraftsDraftIdMessagesMessageIdResendPost(w, r, draftId, messageId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // PreviewViewedApiDraftsDraftIdPreviewsPreviewIdViewedPost operation middleware
 func (siw *ServerInterfaceWrapper) PreviewViewedApiDraftsDraftIdPreviewsPreviewIdViewedPost(w http.ResponseWriter, r *http.Request) {
 
@@ -2202,58 +2126,6 @@ func (siw *ServerInterfaceWrapper) PreviewViewedApiDraftsDraftIdPreviewsPreviewI
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.PreviewViewedApiDraftsDraftIdPreviewsPreviewIdViewedPost(w, r, draftId, previewId)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// RestoreRewindCheckpointApiDraftsDraftIdRewindPost operation middleware
-func (siw *ServerInterfaceWrapper) RestoreRewindCheckpointApiDraftsDraftIdRewindPost(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-	_ = err
-
-	// ------------- Path parameter "draft_id" -------------
-	var draftId string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "draft_id", chi.URLParam(r, "draft_id"), &draftId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "draft_id", Err: err})
-		return
-	}
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.RestoreRewindCheckpointApiDraftsDraftIdRewindPost(w, r, draftId)
-	}))
-
-	for _, middleware := range siw.HandlerMiddlewares {
-		handler = middleware(handler)
-	}
-
-	handler.ServeHTTP(w, r)
-}
-
-// ListRewindCheckpointsApiDraftsDraftIdRewindCheckpointsGet operation middleware
-func (siw *ServerInterfaceWrapper) ListRewindCheckpointsApiDraftsDraftIdRewindCheckpointsGet(w http.ResponseWriter, r *http.Request) {
-
-	var err error
-	_ = err
-
-	// ------------- Path parameter "draft_id" -------------
-	var draftId string
-
-	err = runtime.BindStyledParameterWithOptions("simple", "draft_id", chi.URLParam(r, "draft_id"), &draftId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
-	if err != nil {
-		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "draft_id", Err: err})
-		return
-	}
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.ListRewindCheckpointsApiDraftsDraftIdRewindCheckpointsGet(w, r, draftId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -2972,13 +2844,10 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Post(options.BaseURL+"/api/drafts/{draft_id}/messages", wrapper.EnqueueMessageApiDraftsDraftIdMessagesPost)
 	})
 	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/drafts/{draft_id}/messages/{message_id}/resend", wrapper.ResendMessageApiDraftsDraftIdMessagesMessageIdResendPost)
+	})
+	r.Group(func(r chi.Router) {
 		r.Post(options.BaseURL+"/api/drafts/{draft_id}/previews/{preview_id}/viewed", wrapper.PreviewViewedApiDraftsDraftIdPreviewsPreviewIdViewedPost)
-	})
-	r.Group(func(r chi.Router) {
-		r.Post(options.BaseURL+"/api/drafts/{draft_id}/rewind", wrapper.RestoreRewindCheckpointApiDraftsDraftIdRewindPost)
-	})
-	r.Group(func(r chi.Router) {
-		r.Get(options.BaseURL+"/api/drafts/{draft_id}/rewind/checkpoints", wrapper.ListRewindCheckpointsApiDraftsDraftIdRewindCheckpointsGet)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/drafts/{draft_id}/timeline", wrapper.GetDraftTimelineApiDraftsDraftIdTimelineGet)

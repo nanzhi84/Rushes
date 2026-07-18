@@ -934,3 +934,53 @@ func streamSnapshotContainsDelta(snapshot []StreamEvent, delta string) bool {
 	}
 	return false
 }
+
+func TestTurnQueueEnqueueUserMessageIfIdleReservesAtMostOne(t *testing.T) {
+	t.Parallel()
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var ran []string
+	queue := NewTurnQueue(t.Context(), func(ctx context.Context, item QueueItem) error {
+		started <- item.ItemID
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		mu.Lock()
+		ran = append(ran, item.ItemID)
+		mu.Unlock()
+		return ctx.Err()
+	})
+	t.Cleanup(queue.Close)
+
+	// 空闲草稿补入队成功,回合开始并阻塞在 runner。
+	if !queue.EnqueueUserMessageIfIdle("draft", "m1", "内容") {
+		t.Fatal("空闲草稿应可补入队")
+	}
+	if got := <-started; got != "m1" {
+		t.Fatalf("m1 未启动: %s", got)
+	}
+	// 回合运行中(pendingCount=1)再补入队被空闲守卫拒绝,不产生第二个回合。
+	if queue.EnqueueUserMessageIfIdle("draft", "m2", "内容") {
+		t.Fatal("非空闲草稿不应补入队")
+	}
+	if pending := queue.PendingCount("draft"); pending != 1 {
+		t.Fatalf("pending=%d", pending)
+	}
+	close(release)
+	queue.JoinDraft("draft")
+	mu.Lock()
+	joined := strings.Join(ran, ",")
+	mu.Unlock()
+	if joined != "m1" {
+		t.Fatalf("只应运行 m1: %s", joined)
+	}
+	if pending := queue.PendingCount("draft"); pending != 0 {
+		t.Fatalf("排空后 pending=%d", pending)
+	}
+	// 空闲草稿 PendingCount 为 0。
+	if pending := queue.PendingCount("missing"); pending != 0 {
+		t.Fatalf("不存在草稿 pending=%d", pending)
+	}
+}
