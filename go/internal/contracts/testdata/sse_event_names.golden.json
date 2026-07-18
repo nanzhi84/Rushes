@@ -25,6 +25,7 @@
     "JobFailed",
     "JobCancelled",
     "ProxyGenerated",
+    "PeaksGenerated",
     "JobProgress",
     "PreviewViewed"
   ],
@@ -45,6 +46,7 @@
     "JobFailed",
     "JobCancelled",
     "ProxyGenerated",
+    "PeaksGenerated",
     "JobProgress"
   ],
   "draft_event_types": [
@@ -73,6 +75,7 @@
     "JobFailed",
     "JobCancelled",
     "ProxyGenerated",
+    "PeaksGenerated",
     "JobProgress",
     "PreviewViewed"
   ],

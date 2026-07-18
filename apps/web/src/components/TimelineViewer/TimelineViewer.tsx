@@ -21,7 +21,6 @@ import {
   Volume2,
   VolumeX
 } from "lucide-react";
-import WaveSurfer from "wavesurfer.js";
 import { api } from "../../api/client";
 import { markEnd, markStart, perfSpan } from "../../perf/marks";
 
@@ -165,7 +164,8 @@ type FadeDragState = {
 
 type AssetWaveform = {
   durationSec: number;
-  peaks: number[];
+  // 每个元素是一个 [min, max] 归一化峰值对（[-1,1]），由后端预计算，前端只画不解码。
+  peaks: Array<[number, number]>;
 };
 
 type SeekDragState = {
@@ -200,7 +200,6 @@ const CLIP_HEIGHT = 42;
 const FILM_TILE_WIDTH = 56;
 const TRIM_HANDLE_WIDTH = 8;
 const CLIP_VISUAL_GAP = 2;
-const WAVEFORM_SAMPLE_COUNT = 6000;
 const SNAP_THRESHOLD_PX = 8;
 const SEEK_PREVIEW_INTERVAL_MS = 50;
 const MIN_PX_PER_SEC = 8;
@@ -347,7 +346,7 @@ export const TimelineViewer = memo(
     updatePlayhead(playheadSec, false);
   }, [playheadSec, updatePlayhead]);
 
-  const waveforms = useAssetWaveforms(tracks, WAVEFORM_SAMPLE_COUNT);
+  const waveforms = useAssetWaveforms(tracks);
   const snapCandidates = useMemo(
     () => buildSnapCandidates(tracks, ticks, clampedPlayheadSec, safeFps, timeline.duration_frames),
     [clampedPlayheadSec, safeFps, ticks, timeline.duration_frames, tracks]
@@ -1530,10 +1529,7 @@ function TrackHeader({
   );
 }
 
-function useAssetWaveforms(
-  tracks: DrawableTrack[],
-  sampleCount: number
-): Map<string, AssetWaveform> {
+function useAssetWaveforms(tracks: DrawableTrack[]): Map<string, AssetWaveform> {
   const assetIds = useMemo(
     () => [
       ...new Set(
@@ -1552,65 +1548,46 @@ function useAssetWaveforms(
     if (assetIds.length === 0) {
       return;
     }
-    let cancelled = false;
-    const instances = assetIds.map((assetId) => {
-      const container = document.createElement("div");
-      const wavesurfer = WaveSurfer.create({
-        container,
-        url: api.mediaProxyUrl(assetId),
-        height: 0,
-        interact: false
-      });
-      const handleReady = (): void => {
-        if (cancelled) {
+    const controller = new AbortController();
+    for (const assetId of assetIds) {
+      void fetchAssetPeaks(assetId, controller.signal).then((waveform) => {
+        if (!waveform) {
           return;
         }
-        try {
-          const channels =
-            typeof wavesurfer.exportPeaks === "function"
-              ? wavesurfer.exportPeaks({ maxLength: sampleCount })
-              : [];
-          const peaks = normalizeWavePeaks(channels);
-          if (peaks.length > 1) {
-            setWaveforms((current) => {
-              const next = new Map(current);
-              next.set(assetId, {
-                durationSec: Math.max(0, wavesurfer.getDuration?.() ?? 0),
-                peaks
-              });
-              return next;
-            });
-          }
-        } catch {
-          // 代理尚未生成或浏览器无法解码该音轨时保留纯色素材块。
-        }
-      };
-      wavesurfer.on("ready", handleReady);
-      wavesurfer.on("decode", handleReady);
-      return wavesurfer;
-    });
-    return () => {
-      cancelled = true;
-      for (const wavesurfer of instances) {
-        wavesurfer.destroy();
-      }
-    };
-  // assetKey 是稳定的素材集合签名；避免纯轨道位置变化触发所有音频重新解码。
+        setWaveforms((current) => {
+          const next = new Map(current);
+          next.set(assetId, waveform);
+          return next;
+        });
+      });
+    }
+    return () => controller.abort();
+  // assetKey 是稳定的素材集合签名；避免纯轨道位置变化触发所有音频重新请求。
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [assetKey, sampleCount]);
+  }, [assetKey]);
   return waveforms;
 }
 
-function normalizeWavePeaks(channels: ArrayLike<ArrayLike<number>>): number[] {
-  const channelList = Array.from(channels);
-  const length = channelList.reduce((maxLength, channel) => Math.max(maxLength, channel.length), 0);
-  const result = new Array<number>(length).fill(0);
-  for (const channel of channelList) {
-    for (let index = 0; index < channel.length; index += 1) {
-      result[index] = Math.max(result[index] ?? 0, Math.abs(Number(channel[index]) || 0));
+// 读取后端预计算的 min/max 峰值 JSON（F4）：时间线打开不再下载解码整段音频。
+// 无 peaks（存量素材未生成）或请求失败时返回 null，该素材回退为纯色素材块占位。
+async function fetchAssetPeaks(assetId: string, signal: AbortSignal): Promise<AssetWaveform | null> {
+  try {
+    const response = await fetch(api.mediaPeaksUrl(assetId), { signal });
+    if (!response.ok) {
+      return null;
     }
+    const data = (await response.json()) as { duration_sec?: number; peaks?: unknown };
+    if (!Array.isArray(data.peaks) || data.peaks.length < 2) {
+      return null;
+    }
+    const peaks = data.peaks.map((pair): [number, number] => {
+      const values = Array.isArray(pair) ? pair : [];
+      return [clamp(Number(values[0]) || 0, -1, 1), clamp(Number(values[1]) || 0, -1, 1)];
+    });
+    return { durationSec: Math.max(0, Number(data.duration_sec) || 0), peaks };
+  } catch {
+    return null;
   }
-  return result;
 }
 
 function buildWavePath(
@@ -1654,9 +1631,12 @@ function buildWavePath(
     const sourceIndex = Math.min(slice.length - 1, Math.round(ratio * (slice.length - 1)));
     const pointX = x + ratio * width;
     const envelope = fadeEnvelope(ratio, fadeInFrames, fadeOutFrames, clipDurationFrames);
-    const amplitude = Math.min(1, slice[sourceIndex] ?? 0) * envelope;
-    top.push(`${pointX.toFixed(2)} ${(centerY - amplitude * half).toFixed(2)}`);
-    bottom.push(`${pointX.toFixed(2)} ${(centerY + amplitude * half).toFixed(2)}`);
+    const pair = slice[sourceIndex] ?? [0, 0];
+    // 上沿走正峰（max），下沿走负峰（|min|）；对称音频两者相近，与旧的对称包络观感一致。
+    const maxAmp = Math.min(1, Math.max(0, pair[1])) * envelope;
+    const minAmp = Math.min(1, Math.max(0, -pair[0])) * envelope;
+    top.push(`${pointX.toFixed(2)} ${(centerY - maxAmp * half).toFixed(2)}`);
+    bottom.push(`${pointX.toFixed(2)} ${(centerY + minAmp * half).toFixed(2)}`);
   }
   bottom.reverse();
   return `M ${top.join(" L ")} L ${bottom.join(" L ")} Z`;

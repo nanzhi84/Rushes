@@ -1,28 +1,16 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createRef } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TimelineViewer } from "./TimelineViewer";
 import type { TimelineJson, TimelineViewerHandle } from "./TimelineViewer";
 
-const waveSurferMock = vi.hoisted(() => ({
-  create: vi.fn((..._args: unknown[]) => ({
-    on: vi.fn(),
-    un: vi.fn(),
-    exportPeaks: vi.fn(() => [[]]),
-    getDuration: vi.fn(() => 3),
-    destroy: vi.fn()
-  }))
-}));
-
-vi.mock("wavesurfer.js", () => ({
-  default: {
-    create: waveSurferMock.create
-  }
-}));
-
 describe("TimelineViewer", () => {
   beforeEach(() => {
-    waveSurferMock.create.mockClear();
+    // 默认桩：无 peaks（404）→ useAssetWaveforms 回退纯色块占位；不触真实网络。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() => Promise.resolve({ ok: false, status: 404 } as Response))
+    );
   });
 
   it("按帧坐标绘制 clip 矩形并处理点击和选中态", () => {
@@ -353,7 +341,17 @@ describe("TimelineViewer", () => {
     expect(screen.getByText("音效")).toBeTruthy();
   });
 
-  it("按每个音频素材分别用 wavesurfer 解码代理波形，卸载时销毁", () => {
+  it("按音频素材从后端读取预计算 min/max 峰值并绘制波形，不在浏览器解码", async () => {
+    const peaksBody = {
+      version: 1,
+      sample_rate_hz: 100,
+      duration_sec: 3,
+      peaks: Array.from({ length: 300 }, () => [-0.6, 0.6])
+    };
+    const fetchMock = vi.fn((_input: RequestInfo | URL) =>
+      Promise.resolve({ ok: true, json: () => Promise.resolve(peaksBody) } as Response)
+    );
+    vi.stubGlobal("fetch", fetchMock);
     const timeline = timelineFixture();
     timeline.tracks.push({
       track_id: "bgm",
@@ -368,22 +366,15 @@ describe("TimelineViewer", () => {
         source_end_frame: 90
       }]
     });
-    const { unmount } = render(
-      <TimelineViewer
-        timeline={timeline}
-        pxPerSec={72}
-      />
+    const { container } = render(<TimelineViewer timeline={timeline} pxPerSec={72} />);
+
+    // 读的是后端 peaks 端点（不再下载 proxy 解码）。
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/api/media/asset_music/peaks");
+    // 峰值解析后画出半透明波形 path（fill-opacity 0.5 唯一属于波形）。
+    await waitFor(() =>
+      expect(container.querySelector('path[fill-opacity="0.5"]')).toBeTruthy()
     );
-
-    expect(waveSurferMock.create).toHaveBeenCalledTimes(1);
-    expect(waveSurferMock.create.mock.calls[0]?.[0]).toMatchObject({
-      url: "/api/media/asset_music/proxy"
-    });
-
-    const instance = waveSurferMock.create.mock.results[0]?.value;
-    unmount();
-
-    expect(instance.destroy).toHaveBeenCalledTimes(1);
   });
 
   it("音频片段显示淡出包络与可拖拽手柄，并按整数帧提交", () => {

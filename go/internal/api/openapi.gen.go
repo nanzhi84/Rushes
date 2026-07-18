@@ -664,6 +664,7 @@ type MaterialAsset struct {
 	Jobs                []AssetJobSummary       `json:"jobs"`
 	Kind                string                  `json:"kind"`
 	Mtime               *int                    `json:"mtime"`
+	PeaksReady          bool                    `json:"peaks_ready"`
 	Probe               *map[string]interface{} `json:"probe"`
 	ProxyObjectHash     *string                 `json:"proxy_object_hash"`
 	ProxyReady          bool                    `json:"proxy_ready"`
@@ -1234,6 +1235,12 @@ type ServerInterface interface {
 	// Media Preview
 	// (HEAD /api/media/preview/{preview_id})
 	MediaPreviewApiMediaPreviewPreviewIdHead(w http.ResponseWriter, r *http.Request, previewId string)
+	// Media Peaks
+	// (GET /api/media/{asset_id}/peaks)
+	MediaPeaksApiMediaAssetIdPeaksGet(w http.ResponseWriter, r *http.Request, assetId string)
+	// Media Peaks
+	// (HEAD /api/media/{asset_id}/peaks)
+	MediaPeaksApiMediaAssetIdPeaksHead(w http.ResponseWriter, r *http.Request, assetId string)
 	// Media Proxy
 	// (GET /api/media/{asset_id}/proxy)
 	MediaProxyApiMediaAssetIdProxyGet(w http.ResponseWriter, r *http.Request, assetId string)
@@ -1477,6 +1484,18 @@ func (_ Unimplemented) MediaPreviewApiMediaPreviewPreviewIdGet(w http.ResponseWr
 // Media Preview
 // (HEAD /api/media/preview/{preview_id})
 func (_ Unimplemented) MediaPreviewApiMediaPreviewPreviewIdHead(w http.ResponseWriter, r *http.Request, previewId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Media Peaks
+// (GET /api/media/{asset_id}/peaks)
+func (_ Unimplemented) MediaPeaksApiMediaAssetIdPeaksGet(w http.ResponseWriter, r *http.Request, assetId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Media Peaks
+// (HEAD /api/media/{asset_id}/peaks)
+func (_ Unimplemented) MediaPeaksApiMediaAssetIdPeaksHead(w http.ResponseWriter, r *http.Request, assetId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -2478,6 +2497,58 @@ func (siw *ServerInterfaceWrapper) MediaPreviewApiMediaPreviewPreviewIdHead(w ht
 	handler.ServeHTTP(w, r)
 }
 
+// MediaPeaksApiMediaAssetIdPeaksGet operation middleware
+func (siw *ServerInterfaceWrapper) MediaPeaksApiMediaAssetIdPeaksGet(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "asset_id" -------------
+	var assetId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "asset_id", chi.URLParam(r, "asset_id"), &assetId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "asset_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.MediaPeaksApiMediaAssetIdPeaksGet(w, r, assetId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// MediaPeaksApiMediaAssetIdPeaksHead operation middleware
+func (siw *ServerInterfaceWrapper) MediaPeaksApiMediaAssetIdPeaksHead(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "asset_id" -------------
+	var assetId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "asset_id", chi.URLParam(r, "asset_id"), &assetId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "asset_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.MediaPeaksApiMediaAssetIdPeaksHead(w, r, assetId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // MediaProxyApiMediaAssetIdProxyGet operation middleware
 func (siw *ServerInterfaceWrapper) MediaProxyApiMediaAssetIdProxyGet(w http.ResponseWriter, r *http.Request) {
 
@@ -2931,6 +3002,12 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Head(options.BaseURL+"/api/media/preview/{preview_id}", wrapper.MediaPreviewApiMediaPreviewPreviewIdHead)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/media/{asset_id}/peaks", wrapper.MediaPeaksApiMediaAssetIdPeaksGet)
+	})
+	r.Group(func(r chi.Router) {
+		r.Head(options.BaseURL+"/api/media/{asset_id}/peaks", wrapper.MediaPeaksApiMediaAssetIdPeaksHead)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/media/{asset_id}/proxy", wrapper.MediaProxyApiMediaAssetIdProxyGet)

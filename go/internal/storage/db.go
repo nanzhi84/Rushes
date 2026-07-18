@@ -443,6 +443,22 @@ func (database *DB) Migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if version < 18 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := addColumnIfMissing(ctx, tx, "assets", "peaks_object_hash"); err != nil {
+			return fmt.Errorf("应用 schema v18: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 18"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -468,6 +484,7 @@ func addColumnIfMissing(
 		"rewind_restore_requests.new_message_id": "ALTER TABLE rewind_restore_requests ADD COLUMN new_message_id TEXT",
 		"user_memories.last_used_at":             schemaV16,
 		"user_memories.manually_revised_at":      schemaV17,
+		"assets.peaks_object_hash":               schemaV18,
 	}
 	statement, ok := allowed[table+"."+column]
 	if !ok {

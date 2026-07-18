@@ -131,6 +131,7 @@ describe("AssetsPanel 导入状态就地化", () => {
         filename: "a.mp4",
         kind: "video",
         thumbnail_ready: false,
+        peaks_ready: false,
         jobs: [{ job_id: "j1", kind: "proxy", status: "running" }]
       })
     ]);
@@ -148,6 +149,7 @@ describe("AssetsPanel 导入状态就地化", () => {
         filename: "b.mp4",
         kind: "video",
         thumbnail_ready: true,
+        peaks_ready: false,
         jobs: [{ job_id: "j2", kind: "proxy", status: "succeeded" }]
       })
     ]);
@@ -283,6 +285,7 @@ function makeAsset(overrides: Partial<MaterialAsset> = {}): MaterialAsset {
     proxy_object_hash: null,
     proxy_ready: false,
     thumbnail_ready: true,
+    peaks_ready: false,
     invalid: false,
     failure: null,
     jobs: [],
