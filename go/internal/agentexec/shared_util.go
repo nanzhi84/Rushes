@@ -14,7 +14,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
-func CanonicalContentPlanValue(input any) (map[string]any, error) {
+func canonicalContentPlanValue(input any) (map[string]any, error) {
 	encoded, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
@@ -76,8 +76,6 @@ func RandomID(prefix string) string {
 }
 
 func BoolPointer(value bool) *bool { return &value }
-
-const TurnStreamSubagentProgress = "subagent_progress"
 
 func TruncateRunes(value string, limit int) string {
 	runes := []rune(value)

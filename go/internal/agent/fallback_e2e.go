@@ -65,7 +65,7 @@ func (scaffold *e2eFallbackScaffold) TryHandle(
 			return "", true, err
 		}
 		section, _ := build.Snapshot.Sections["user_memory"].(map[string]any)
-		for _, entry := range worldStateObjectSlice(section["entries"]) {
+		for _, entry := range agentexec.WorldStateObjectSlice(section["entries"]) {
 			if entry["key"] == "e2e_pacing" {
 				return "E2E_MEMORY_PRESENT", true, nil
 			}

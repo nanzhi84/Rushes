@@ -269,7 +269,7 @@ func TestContextBuilderShowsPlanHintAndDeduplicatesAudioRoles(t *testing.T) {
 	if plan["_hint"] != "尚未建立创作计划" {
 		t.Fatalf("draft=%#v", draft)
 	}
-	audioRoles := worldStateObjectSlice(snapshot.Sections["assets"].(map[string]any)["audio_roles"])
+	audioRoles := agentexec.WorldStateObjectSlice(snapshot.Sections["assets"].(map[string]any)["audio_roles"])
 	if len(audioRoles) != 1 || len(audioRoles[0]) != 2 ||
 		audioRoles[0]["asset_id"] != "audio_plan_hint" || audioRoles[0]["suggested_role"] != "bgm" {
 		t.Fatalf("audio_roles=%#v", audioRoles)

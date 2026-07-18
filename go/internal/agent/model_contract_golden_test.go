@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -40,8 +41,8 @@ func TestModelContractGolden(t *testing.T) {
 
 	contract := modelContractGolden{
 		Prompts: modelContractPrompts{
-			Core: coreSystemPrompt, Audio: audioTrackPlaybook, Beat: beatEditingPlaybook,
-			Timeline: timelineEditingPlaybook, TalkingHead: talkingHeadPlaybook,
+			Core: coreSystemPrompt, Audio: agentexec.AudioTrackPlaybook, Beat: agentexec.BeatEditingPlaybook,
+			Timeline: agentexec.TimelineEditingPlaybook, TalkingHead: agentexec.TalkingHeadPlaybook,
 		},
 	}
 	for _, spec := range service.tools.Specs(true) {

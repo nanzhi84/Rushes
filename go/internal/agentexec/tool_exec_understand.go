@@ -237,7 +237,7 @@ func (exec *Executor) runUnderstandInline(
 		summary, analyzeErr := exec.analyzer.AnalyzeWithOptions(
 			ctx, exec.database, asset, prepared.Options, func(note string) {
 				exec.recordProgress(draftID, map[string]any{
-					"type": TurnStreamSubagentProgress, "tool": "understand.materials",
+					"type": contracts.TurnStreamSubagentProgress, "tool": "understand.materials",
 					"asset_id": asset.ID, "note": note, "completed": index, "total": len(request.Assets),
 				})
 			},
@@ -279,7 +279,7 @@ func (exec *Executor) runUnderstandInline(
 		summaries = append(summaries, bestSummary)
 		analyzedAssetIDs = append(analyzedAssetIDs, asset.ID)
 		exec.recordProgress(draftID, map[string]any{
-			"type": TurnStreamSubagentProgress, "tool": "understand.materials",
+			"type": contracts.TurnStreamSubagentProgress, "tool": "understand.materials",
 			"asset_id": asset.ID, "note": "摘要已完成", "completed": index + 1, "total": len(request.Assets),
 		})
 	}
