@@ -41,7 +41,7 @@ func (scaffold *e2eFallbackScaffold) TryHandle(
 		reply, err := scaffold.cancelDuringUnderstanding(ctx, draftID)
 		return reply, true, err
 	case strings.Contains(content, e2eFullMainlineMarker):
-		reply, err := scaffold.service.fallbackFullMainline(ctx, draftID)
+		reply, err := scaffold.service.fallbackMainline(ctx, draftID)
 		return reply, true, err
 	case strings.Contains(content, e2eMemoryWriteMarker):
 		result, err := scaffold.service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{

@@ -19,7 +19,6 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
-	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
@@ -291,7 +290,7 @@ func (service *Service) maySilentlyFinishTurn(ctx context.Context, item QueueIte
 	if agentexec.InterfaceString(payload["kind"]) != "render_preview" {
 		return false
 	}
-	return service.previewAlreadyInspected(ctx, item.DraftID, payload["result"])
+	return service.executor.PreviewAlreadyInspected(ctx, item.DraftID, payload["result"])
 }
 
 func (service *Service) turnContent(ctx context.Context, item QueueItem, messageID string) (string, error) {
@@ -418,15 +417,11 @@ func (service *Service) continueAfterJobObservation(
 		}
 		return fmt.Sprintf("%s 任务 %s 失败：%s", kind, jobID, details), nil
 	}
-	if succeeded && kind == "render_preview" && service.previewAlreadyInspected(ctx, item.DraftID, terminalDetails) {
-		return "", nil
-	}
 	verificationReport := ""
 	if succeeded && kind == "render_preview" {
-		report, reportErr := service.previewVerificationReport(ctx, item.DraftID, terminalDetails)
-		if reportErr != nil {
-			slog.Warn("预览自动质检失败", "draft_id", item.DraftID, "error", reportErr)
-			report = degradedPreviewVerificationReport(terminalDetails)
+		skip, report := service.executor.PreviewVerification(ctx, item.DraftID, terminalDetails)
+		if skip {
+			return "", nil
 		}
 		if report != nil {
 			verificationReport = "\nverification_report：" + compactJSON(report)
@@ -469,111 +464,6 @@ func (service *Service) continueAfterJobObservation(
 	return service.streamAgent(ctx, item.DraftID, messageID, messages)
 }
 
-func (service *Service) previewVerificationReport(
-	ctx context.Context,
-	draftID string,
-	result any,
-) (map[string]any, error) {
-	resultMap, _ := result.(map[string]any)
-	previewID := agentexec.InterfaceString(resultMap["artifact_id"])
-	if previewID == "" {
-		previewID = agentexec.InterfaceString(resultMap["preview_id"])
-	}
-	if previewID == "" {
-		return nil, nil
-	}
-	inspection, err := service.executor.ToolInspectPreview(ctx, draftID, rushestools.RenderInspectInput{PreviewID: previewID})
-	if err != nil {
-		return nil, err
-	}
-	var timelineVersion int
-	if err := service.database.Read().QueryRowContext(ctx,
-		"SELECT timeline_version FROM previews WHERE preview_id=? AND draft_id=?", previewID, draftID,
-	).Scan(&timelineVersion); err != nil {
-		return nil, err
-	}
-	document, err := timeline.Get(ctx, service.database, draftID, timelineVersion)
-	if err != nil {
-		return nil, err
-	}
-	contractReport, hasContract, err := service.executor.VerifyContentContract(ctx, draftID, document)
-	if err != nil {
-		return nil, err
-	}
-	report := map[string]any{
-		"preview_id":        previewID,
-		"timeline_version":  timelineVersion,
-		"render_inspection": inspection,
-	}
-	if hasContract {
-		report["content_contract"] = contractReport
-	}
-	return report, nil
-}
-
-func degradedPreviewVerificationReport(result any) map[string]any {
-	resultMap, _ := result.(map[string]any)
-	previewID := agentexec.InterfaceString(resultMap["artifact_id"])
-	if previewID == "" {
-		previewID = agentexec.InterfaceString(resultMap["preview_id"])
-	}
-	issue := map[string]any{
-		"check":      "inspection",
-		"severity":   "warning",
-		"error_code": "preview_inspection_unavailable",
-		"message":    "自动质检暂不可用，请稍后重试。",
-	}
-	return map[string]any{
-		"preview_id": previewID,
-		"degraded":   true,
-		"issues":     []map[string]any{issue},
-	}
-}
-
-func (service *Service) previewAlreadyInspected(ctx context.Context, draftID string, result any) bool {
-	resultMap, _ := result.(map[string]any)
-	previewID := agentexec.InterfaceString(resultMap["artifact_id"])
-	if previewID == "" {
-		previewID = agentexec.InterfaceString(resultMap["preview_id"])
-	}
-	if previewID == "" {
-		return false
-	}
-	messages, err := storage.ListMessages(ctx, service.database.Read(), draftID, 200)
-	if err != nil {
-		return false
-	}
-	for index := len(messages) - 1; index >= 0; index-- {
-		if messages[index].Kind != "tool" {
-			continue
-		}
-		var record struct {
-			Tool        string `json:"tool"`
-			PreviewID   string `json:"preview_id"`
-			ArgsSummary string `json:"args_summary"`
-			Status      string `json:"status"`
-		}
-		if json.Unmarshal([]byte(messages[index].Content), &record) != nil ||
-			record.Tool != "render.inspect_preview" || record.Status != "succeeded" {
-			continue
-		}
-		if record.PreviewID == previewID {
-			return true
-		}
-		// Pre-D3 traces only stored preview_id inside an untruncated args_summary.
-		// New traces use the top-level field and never depend on this compatibility path.
-		if record.PreviewID == "" {
-			var legacyArgs struct {
-				PreviewID string `json:"preview_id"`
-			}
-			if json.Unmarshal([]byte(record.ArgsSummary), &legacyArgs) == nil && legacyArgs.PreviewID == previewID {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func decisionContinuationPrompt(decision storage.Decision, answer map[string]any) string {
 	optionID := agentexec.InterfaceString(answer["option_id"])
 	freeText := agentexec.InterfaceString(answer["free_text"])
@@ -614,7 +504,7 @@ func (service *Service) fallbackTurn(
 		}
 	}
 	if strings.Contains(content, "混剪") {
-		return service.fallbackFullMainline(ctx, draftID)
+		return service.fallbackMainline(ctx, draftID)
 	}
 	if strings.Contains(content, "导出") {
 		_, err := service.executeReported(ctx, draftID, "interaction.confirm_action", rushestools.ConfirmActionInput{
@@ -873,55 +763,6 @@ func (service *Service) executeReported(
 	return output, err
 }
 
-func (service *Service) fallbackFullMainline(ctx context.Context, draftID string) (string, error) {
-	listed, err := service.executor.ToolListAssets(ctx, draftID, rushestools.AssetListInput{OnlyUsable: agentexec.BoolPointer(true)})
-	if err != nil {
-		return "", err
-	}
-	visualAssets := make([]rushestools.AssetManifest, 0, len(listed.Assets))
-	for _, asset := range listed.Assets {
-		if asset.Kind == "video" || asset.Kind == "image" {
-			visualAssets = append(visualAssets, asset)
-		}
-	}
-	if len(visualAssets) == 0 {
-		return "当前草稿还没有可用的视频或图片素材，请先导入素材。", nil
-	}
-	understandIDs := []string{}
-	for _, asset := range visualAssets {
-		if asset.UnderstandingStatus != "ready" {
-			understandIDs = append(understandIDs, asset.AssetID)
-		}
-	}
-	if len(understandIDs) > 0 {
-		for _, assetID := range understandIDs {
-			if _, err := service.executeReported(ctx, draftID, "understand.materials", rushestools.UnderstandInput{
-				AssetIDs: []string{assetID}, Depth: "scan", Focus: "混剪可用画面",
-			}); err != nil {
-				return "", err
-			}
-		}
-	}
-	clips := make([]rushestools.ComposeClip, 0, len(visualAssets))
-	for _, asset := range visualAssets {
-		endFrame := asset.DurationFrames
-		if endFrame <= 0 {
-			endFrame = timeline.DefaultFPS
-		}
-		endFrame = min(endFrame, 5*timeline.DefaultFPS)
-		clips = append(clips, rushestools.ComposeClip{
-			AssetID: asset.AssetID, SourceStartFrame: 0, SourceEndFrame: endFrame, Role: "b_roll",
-		})
-	}
-	if _, err := service.executeReported(ctx, draftID, "timeline.compose_initial", rushestools.ComposeInitialInput{Clips: clips}); err != nil {
-		return "", err
-	}
-	if _, err := service.executeReported(ctx, draftID, "render.preview", rushestools.RenderPreviewInput{}); err != nil {
-		return "", err
-	}
-	return "已完成素材理解与初版时间线，并开始渲染预览。", nil
-}
-
 func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (string, error) {
 	pending, _ := item.Payload["pending_tool_call"].(map[string]any)
 	answer, _ := item.Payload["answer"].(map[string]any)
@@ -953,3 +794,11 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 }
 
 var _ rushestools.Executor = (*Service)(nil)
+
+// fallbackMainline 是引擎侧对领域「混剪主线」的薄委托:注入 executeReported 上报器,
+// 编排序列本体在 agentexec.Executor.FallbackMainline。
+func (service *Service) fallbackMainline(ctx context.Context, draftID string) (string, error) {
+	return service.executor.FallbackMainline(ctx, draftID, func(c context.Context, name string, input any) (any, error) {
+		return service.executeReported(c, draftID, name, input)
+	})
+}

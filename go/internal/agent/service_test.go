@@ -822,21 +822,21 @@ func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 			t.Fatalf("ignored tool message status=%s err=%v", result.Status, err)
 		}
 	}
-	if service.previewAlreadyInspected(t.Context(), "draft_job_dedup", nil) {
+	if service.executor.PreviewAlreadyInspected(t.Context(), "draft_job_dedup", nil) {
 		t.Fatal("缺少预览 ID 时不应判定为已质检")
 	}
-	if !service.previewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_done"}) {
+	if !service.executor.PreviewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_done"}) {
 		t.Fatal("应兼容 preview_id 形式的终态结果")
 	}
-	if !service.previewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_legacy"}) {
+	if !service.executor.PreviewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_legacy"}) {
 		t.Fatal("升级后应兼容未截断的旧 args_summary trace")
 	}
-	if service.previewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"artifact_id": "preview_other"}) {
+	if service.executor.PreviewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"artifact_id": "preview_other"}) {
 		t.Fatal("不同预览不应被误去重")
 	}
 	cancelledContext, cancel := context.WithCancel(t.Context())
 	cancel()
-	if service.previewAlreadyInspected(cancelledContext, "draft_job_dedup", map[string]any{"artifact_id": "preview_done"}) {
+	if service.executor.PreviewAlreadyInspected(cancelledContext, "draft_job_dedup", map[string]any{"artifact_id": "preview_done"}) {
 		t.Fatal("读取历史失败时应保守地继续后台回调")
 	}
 	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_job_dedup", 20)
@@ -993,7 +993,7 @@ func TestCompletedPreviewObservationIncludesStructuredVerificationReport(t *test
 	if err != nil || applyResult.Status != reducer.StatusApplied {
 		t.Fatalf("preview status=%s err=%v", applyResult.Status, err)
 	}
-	report, err := service.previewVerificationReport(t.Context(), "draft_job_report", map[string]any{"artifact_id": "preview_report"})
+	report, err := service.executor.PreviewVerificationReport(t.Context(), "draft_job_report", map[string]any{"artifact_id": "preview_report"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2199,7 +2199,7 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	}
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_full")
-	content, err := service.fallbackFullMainline(ctx, "draft_full")
+	content, err := service.fallbackMainline(ctx, "draft_full")
 	if err != nil || content == "" {
 		t.Fatalf("content=%q err=%v", content, err)
 	}
@@ -2475,7 +2475,7 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_empty")
-	if content, err := service.fallbackFullMainline(ctx, "draft_empty"); err != nil || content == "" {
+	if content, err := service.fallbackMainline(ctx, "draft_empty"); err != nil || content == "" {
 		t.Fatalf("content=%q err=%v", content, err)
 	}
 	if _, err := service.fallbackTurn(ctx, "draft_empty", "msg", "ASK_USER"); err != nil {
@@ -3647,7 +3647,7 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 	if _, err := service.modelMessages(ctx, "draft_closed"); err == nil {
 		t.Fatal("closed modelMessages 应失败")
 	}
-	if _, err := service.fallbackFullMainline(ctx, "draft_closed"); err == nil {
+	if _, err := service.fallbackMainline(ctx, "draft_closed"); err == nil {
 		t.Fatal("closed fallback mainline 应失败")
 	}
 	if _, err := service.executor.PersistTimeline(ctx, "draft_closed", timeline.Empty("draft_closed", 1), "closed"); err == nil {
