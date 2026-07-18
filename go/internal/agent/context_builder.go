@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"reflect"
 	"sort"
@@ -85,7 +86,7 @@ func (builder *ContextBuilder) buildSnapshotMap(
 	if err != nil {
 		return nil, err
 	}
-	userMemory, err := builder.userMemoryContext(ctx)
+	userMemory, err := builder.userMemoryContext(ctx, draftID)
 	if err != nil {
 		return nil, err
 	}
@@ -195,33 +196,72 @@ func (builder *ContextBuilder) buildSnapshotMap(
 	return sanitizeContextMap(snapshot), nil
 }
 
-func (builder *ContextBuilder) userMemoryContext(ctx context.Context) (map[string]any, error) {
+// userMemoryContext 把工作区级用户记忆按 last_confirmed_at DESC 顺序装进预算。
+// 逼近预算时不再静默少放：被折叠的记忆以 omitted_keys 显式列出（只列 key，几乎
+// 不占预算），模型至少知道还有哪些长期记忆存在但未展开；同时把注入规模落进结构化
+// 日志，让截断在真实会话中变得可观测。omitted_keys 参与预算裁剪，保证最终快照连同
+// 该列表一起仍不超过 contextUserMemoryRuneBudget。
+func (builder *ContextBuilder) userMemoryContext(
+	ctx context.Context,
+	draftID string,
+) (map[string]any, error) {
 	memories, err := storage.ListUserMemories(ctx, builder.database.Read())
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]map[string]any, 0, len(memories))
-	for _, memory := range memories {
-		candidate := append(append([]map[string]any(nil), entries...), map[string]any{
-			"key": memory.Key, "kind": memory.Kind, "statement": memory.Statement,
-		})
-		section := map[string]any{
-			"entries": candidate, "total": len(memories),
-			"truncated": len(candidate) < len(memories),
-		}
-		encoded, err := json.Marshal(section)
+	included := 0
+	for included < len(memories) {
+		encoded, err := json.Marshal(
+			userMemorySnapshotSection(memories[:included+1], memories[included+1:]),
+		)
 		if err != nil {
 			return nil, err
 		}
 		if utf8.RuneCount(encoded) > contextUserMemoryRuneBudget {
 			break
 		}
-		entries = candidate
+		included++
 	}
-	return map[string]any{
-		"entries": entries, "total": len(memories),
-		"truncated": len(entries) < len(memories),
-	}, nil
+	section := userMemorySnapshotSection(memories[:included], memories[included:])
+	encoded, err := json.Marshal(section)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info(
+		"用户记忆注入 WorldState 快照",
+		"draft_id", draftID,
+		"total", len(memories),
+		"included", included,
+		"omitted", len(memories)-included,
+		"section_runes", utf8.RuneCount(encoded),
+		"truncated", included < len(memories),
+	)
+	return section, nil
+}
+
+// userMemorySnapshotSection 构造 user_memory 快照节。included 是已放入预算的记忆，
+// omitted 是被折叠的记忆；仅在发生截断时附 omitted_keys（只列 key，不泄漏 statement），
+// 未截断时省略该字段以保持既有形状与 golden 稳定。
+func userMemorySnapshotSection(included, omitted []storage.UserMemory) map[string]any {
+	entries := make([]map[string]any, 0, len(included))
+	for _, memory := range included {
+		entries = append(entries, map[string]any{
+			"key": memory.Key, "kind": memory.Kind, "statement": memory.Statement,
+		})
+	}
+	section := map[string]any{
+		"entries":   entries,
+		"total":     len(included) + len(omitted),
+		"truncated": len(omitted) > 0,
+	}
+	if len(omitted) > 0 {
+		omittedKeys := make([]string, 0, len(omitted))
+		for _, memory := range omitted {
+			omittedKeys = append(omittedKeys, memory.Key)
+		}
+		section["omitted_keys"] = omittedKeys
+	}
+	return section
 }
 
 // materialCatalogContext keeps a compact directory resident in every model turn.
