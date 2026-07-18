@@ -343,6 +343,17 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
       }
       clearConversation.mutate();
     }, [clearConversation]);
+    // 稳定引用：memo 化的消息行只有拿到不变的回调才能在流式高频重渲染中被挡下。
+    const cancelJobMutate = cancelJob.mutate;
+    const resendMutate = resendMessage.mutate;
+    const handleCancelJob = useCallback(
+      (jobId: string) => cancelJobMutate(jobId),
+      [cancelJobMutate]
+    );
+    const handleResendMessage = useCallback(
+      (messageId: string, content: string) => resendMutate({ messageId, content }),
+      [resendMutate]
+    );
 
     const runtime = useConsoleExternalStoreRuntime({
       messages,
@@ -439,9 +450,9 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
           streamItems={streamItems}
           modelRetry={modelRetry}
           subagentProgress={subagentProgress}
-          onCancelJob={(jobId) => cancelJob.mutate(jobId)}
+          onCancelJob={handleCancelJob}
           cancelPendingJobId={cancelJob.isPending ? (cancelJob.variables ?? null) : null}
-          onResendMessage={(messageId, content) => resendMessage.mutate({ messageId, content })}
+          onResendMessage={handleResendMessage}
           resendPendingMessageId={
             resendMessage.isPending ? (resendMessage.variables?.messageId ?? null) : null
           }
