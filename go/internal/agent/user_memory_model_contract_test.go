@@ -179,7 +179,7 @@ func TestUserMemoryModelContractRejectsMemoryPollution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	valid := `{"entries":[{"key":"pacing","kind":"preference","statement":"用户长期偏好视频节奏快一点"}]}`
+	valid := `{"entries":[{"key":"pacing","kind":"preference","statement":"用户长期偏好视频节奏快一点","evidence_quote":"节奏都要快一点"}]}`
 	tests := []struct {
 		name  string
 		calls []schema.ToolCall
@@ -187,23 +187,23 @@ func TestUserMemoryModelContractRejectsMemoryPollution(t *testing.T) {
 		{
 			name: "opposite memory",
 			calls: []schema.ToolCall{memoryEvalToolCall(`{"entries":[` +
-				`{"key":"pacing","kind":"preference","statement":"用户不喜欢快节奏，应该慢一点"}]}`)},
+				`{"key":"pacing","kind":"preference","statement":"用户不喜欢快节奏，应该慢一点","evidence_quote":"节奏都要快一点"}]}`)},
 		},
 		{
 			name: "rejected memory",
 			calls: []schema.ToolCall{memoryEvalToolCall(`{"entries":[` +
-				`{"key":"pacing","kind":"preference","statement":"用户拒绝快节奏，希望舒缓处理"}]}`)},
+				`{"key":"pacing","kind":"preference","statement":"用户拒绝快节奏，希望舒缓处理","evidence_quote":"节奏都要快一点"}]}`)},
 		},
 		{
 			name: "extra entry",
 			calls: []schema.ToolCall{memoryEvalToolCall(`{"entries":[` +
-				`{"key":"pacing","kind":"preference","statement":"用户长期偏好视频节奏快一点"},` +
-				`{"key":"subtitle_style","kind":"preference","statement":"用户偏好花字"}]}`)},
+				`{"key":"pacing","kind":"preference","statement":"用户长期偏好视频节奏快一点","evidence_quote":"节奏都要快一点"},` +
+				`{"key":"subtitle_style","kind":"preference","statement":"用户偏好花字","evidence_quote":"花字风格"}]}`)},
 		},
 		{
 			name: "remove alongside write",
 			calls: []schema.ToolCall{memoryEvalToolCall(`{"entries":[` +
-				`{"key":"pacing","kind":"preference","statement":"用户长期偏好视频节奏快一点"}],` +
+				`{"key":"pacing","kind":"preference","statement":"用户长期偏好视频节奏快一点","evidence_quote":"节奏都要快一点"}],` +
 				`"remove_keys":["subtitle_style"]}`)},
 		},
 		{

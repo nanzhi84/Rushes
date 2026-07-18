@@ -39,8 +39,8 @@ func TestUserMemoryResultRowsUpsertRemoveAndEvictDeterministically(t *testing.T)
 		upserts = append(upserts, UserMemoryRow{
 			Key: fmt.Sprintf("memory_%02d", index), Kind: "preference",
 			Statement:    fmt.Sprintf("用户偏好编号 %02d", index),
-			EvidenceKind: storage.UserMemoryEvidenceMessage,
-			EvidenceID:   "message_memory", SourceDraftID: "draft_memory",
+			EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "偏好",
+			EvidenceID: "message_memory", SourceDraftID: "draft_memory",
 			LastConfirmedAt: confirmedAt.Format(time.RFC3339Nano),
 		})
 	}
@@ -72,8 +72,8 @@ func TestUserMemoryResultRowsUpsertRemoveAndEvictDeterministically(t *testing.T)
 		ResultRows: ResultRows{
 			UserMemoryUpserts: []UserMemoryRow{{
 				Key: "memory_01", Kind: "correction", Statement: "用户纠正后的长期偏好",
-				EvidenceKind: storage.UserMemoryEvidenceMessage,
-				EvidenceID:   "message_memory", SourceDraftID: "draft_memory",
+				EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "偏好",
+				EvidenceID: "message_memory", SourceDraftID: "draft_memory",
 				CreatedAt: updatedAt, LastConfirmedAt: updatedAt,
 			}},
 			UserMemoryRemoveKeys: []string{"memory_02", "memory_missing"},
@@ -98,8 +98,8 @@ func TestUserMemoryResultRowsUpsertRemoveAndEvictDeterministically(t *testing.T)
 	for index := 0; index <= storage.UserMemoryLimit; index++ {
 		tieUpserts = append(tieUpserts, UserMemoryRow{
 			Key: fmt.Sprintf("tie_%02d", index), Kind: "habit", Statement: "相同确认时间",
-			EvidenceKind: storage.UserMemoryEvidenceMessage,
-			EvidenceID:   "message_memory", SourceDraftID: "draft_memory",
+			EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "偏好",
+			EvidenceID: "message_memory", SourceDraftID: "draft_memory",
 			LastConfirmedAt: base.Format(time.RFC3339Nano),
 		})
 	}
@@ -138,8 +138,8 @@ func TestUserMemoryEvidenceValidationCoversMessagesDecisionsAndRemoval(t *testin
 		Actor: contracts.ActorAgent,
 		ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{{
 			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
-			EvidenceKind: storage.UserMemoryEvidenceDecision,
-			EvidenceID:   "decision_valid", SourceDraftID: "draft_memory_evidence",
+			EvidenceKind: storage.UserMemoryEvidenceDecision, EvidenceQuote: "快一点",
+			EvidenceID: "decision_valid", SourceDraftID: "draft_memory_evidence",
 		}}},
 	})
 	if err != nil || decisionResult.Status != StatusApplied {
@@ -206,8 +206,8 @@ func TestUserMemoryAndMessageRollbackTogetherAfterAppendFailure(t *testing.T) {
 			},
 			UserMemoryUpserts: []UserMemoryRow{{
 				Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
-				EvidenceKind: storage.UserMemoryEvidenceMessage,
-				EvidenceID:   "message_atomic", SourceDraftID: draft.ID,
+				EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "快节奏",
+				EvidenceID: "message_atomic", SourceDraftID: draft.ID,
 			}},
 		},
 	})
@@ -347,8 +347,8 @@ func TestUserMemoryDatabaseFailuresRollBackMutations(t *testing.T) {
 	seedUserMemoryMessage(t, database, "draft_memory_failure", "message_failure")
 	seed := UserMemoryRow{
 		Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
-		EvidenceKind: storage.UserMemoryEvidenceMessage,
-		EvidenceID:   "message_failure", SourceDraftID: "draft_memory_failure",
+		EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "偏好",
+		EvidenceID: "message_failure", SourceDraftID: "draft_memory_failure",
 	}
 	if result, err := Apply(t.Context(), database, nil, Options{
 		Actor: contracts.ActorAgent, ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{seed}},
@@ -411,8 +411,8 @@ func TestUserMemoryCapacityEvictionRollsBackWhenDeleteFails(t *testing.T) {
 		upserts = append(upserts, UserMemoryRow{
 			Key: fmt.Sprintf("eviction_%02d", index), Kind: "preference",
 			Statement:    fmt.Sprintf("用户偏好编号 %02d", index),
-			EvidenceKind: storage.UserMemoryEvidenceMessage,
-			EvidenceID:   "message_eviction_failure", SourceDraftID: "draft_memory_eviction_failure",
+			EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "偏好",
+			EvidenceID: "message_eviction_failure", SourceDraftID: "draft_memory_eviction_failure",
 			LastConfirmedAt: base.Add(time.Duration(index) * time.Second).Format(time.RFC3339Nano),
 		})
 	}
@@ -429,8 +429,8 @@ func TestUserMemoryCapacityEvictionRollsBackWhenDeleteFails(t *testing.T) {
 	}
 	newest := UserMemoryRow{
 		Key: "eviction_50", Kind: "preference", Statement: "最新用户偏好",
-		EvidenceKind: storage.UserMemoryEvidenceMessage,
-		EvidenceID:   "message_eviction_failure", SourceDraftID: "draft_memory_eviction_failure",
+		EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "偏好",
+		EvidenceID: "message_eviction_failure", SourceDraftID: "draft_memory_eviction_failure",
 		LastConfirmedAt: base.Add(time.Hour).Format(time.RFC3339Nano),
 	}
 	if _, err := Apply(t.Context(), database, nil, Options{
@@ -487,6 +487,171 @@ func TestUserMemoryCorruptRowsFailWithoutCommittingEarlierResultRows(t *testing.
 		SELECT COUNT(*) FROM messages WHERE message_id='message_before_corrupt_clear'`,
 	).Scan(&messageCount); err != nil || messageCount != 0 {
 		t.Fatalf("message count=%d err=%v", messageCount, err)
+	}
+}
+
+func TestUserMemoryEvidenceQuoteMustBeVerbatimSubstring(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft_quote")
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorUser,
+		ResultRows: ResultRows{Message: &MessageRow{
+			ID: "message_quote", DraftID: "draft_quote", Role: "user", Kind: "user",
+			Content: "以后我的视频节奏都要快一点，字幕别遮脸",
+		}},
+	}); err != nil {
+		t.Fatalf("seed message err=%v", err)
+	}
+	seed := UserMemoryRow{
+		Key: "pacing", Kind: "preference", Statement: "用户长期偏好快节奏",
+		EvidenceKind: storage.UserMemoryEvidenceMessage,
+		EvidenceID:   "message_quote", SourceDraftID: "draft_quote",
+	}
+	applyQuote := func(quote string) error {
+		row := seed
+		row.EvidenceQuote = quote
+		_, err := Apply(t.Context(), database, nil, Options{
+			Actor: contracts.ActorAgent, ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{row}},
+		})
+		return err
+	}
+	if err := applyQuote("节奏都要快一点"); err != nil {
+		t.Fatalf("逐字子串应通过校验: %v", err)
+	}
+	memories, err := storage.ListUserMemories(t.Context(), database.Read())
+	if err != nil || len(memories) != 1 || memories[0].Key != "pacing" {
+		t.Fatalf("memories=%#v err=%v", memories, err)
+	}
+	for _, test := range []struct {
+		name  string
+		quote string
+	}{
+		{"改写非子串", "节奏都要慢一点"},
+		{"跨逗号拼接", "快一点字幕别遮脸"},
+		{"无关摘录", "封面要用红色"},
+		{"过短单字", "快"},
+		{"纯空白", "   "},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := applyQuote(test.quote); !errors.Is(err, ErrUserMemoryEvidenceQuoteMismatch) {
+				t.Fatalf("污染 quote %q 应判 ErrUserMemoryEvidenceQuoteMismatch，实际 %v", test.quote, err)
+			}
+		})
+	}
+	after, err := storage.ListUserMemories(t.Context(), database.Read())
+	if err != nil || len(after) != 1 || after[0].Statement != "用户长期偏好快节奏" {
+		t.Fatalf("污染 quote 不得改写既有记忆: %#v err=%v", after, err)
+	}
+}
+
+func TestUserMemoryDecisionAnswerQuoteMatchesFreeTextAndOptionLabel(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft_quote_decision")
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO decisions(
+			decision_id,scope_type,draft_id,type,question,options_json,
+			allow_free_text,status,answer_json,blocking
+		) VALUES('decision_quote','draft','draft_quote_decision','critical','默认节奏？',
+			'[{"option_id":"fast","label":"整体更紧凑"}]',
+			1,'answered','{"option_id":"fast","free_text":"顺便字幕别太大"}',1)`); err != nil {
+		t.Fatal(err)
+	}
+	seed := UserMemoryRow{
+		Key: "pacing", Kind: "preference", Statement: "用户偏好紧凑节奏",
+		EvidenceKind: storage.UserMemoryEvidenceDecision,
+		EvidenceID:   "decision_quote", SourceDraftID: "draft_quote_decision",
+	}
+	applyQuote := func(quote string) error {
+		row := seed
+		row.EvidenceQuote = quote
+		_, err := Apply(t.Context(), database, nil, Options{
+			Actor: contracts.ActorAgent, ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{row}},
+		})
+		return err
+	}
+	if err := applyQuote("整体更紧凑"); err != nil {
+		t.Fatalf("所选项标签子串应通过: %v", err)
+	}
+	if err := applyQuote("字幕别太大"); err != nil {
+		t.Fatalf("自由文本子串应通过: %v", err)
+	}
+	if err := applyQuote("整体要放慢"); !errors.Is(err, ErrUserMemoryEvidenceQuoteMismatch) {
+		t.Fatalf("非子串应被拦截，err=%v", err)
+	}
+}
+
+func TestUserMemoryEvictionValuesRecentUseAndProtectsCorrections(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft_value")
+	seedUserMemoryMessage(t, database, "draft_value", "message_value")
+	base := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	upserts := make([]UserMemoryRow, 0, storage.UserMemoryLimit)
+	for index := range storage.UserMemoryLimit {
+		kind := "preference"
+		if index == 1 {
+			kind = "correction"
+		}
+		upserts = append(upserts, UserMemoryRow{
+			Key: fmt.Sprintf("mem_%02d", index), Kind: kind, Statement: "长期偏好",
+			EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "偏好",
+			EvidenceID: "message_value", SourceDraftID: "draft_value",
+			LastConfirmedAt: base.Add(time.Duration(index) * time.Second).Format(time.RFC3339Nano),
+		})
+	}
+	if result, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorAgent, ResultRows: ResultRows{UserMemoryUpserts: upserts},
+	}); err != nil || result.Status != StatusApplied {
+		t.Fatalf("seed result=%#v err=%v", result, err)
+	}
+
+	// 老偏好 mem_00 被注入并用于一个成功回合：touch 让它的 last_used_at 变新。
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorAgent, CreatedAt: base.Add(10 * time.Hour),
+		ResultRows: ResultRows{UserMemoryTouchKeys: []string{"mem_00"}},
+	}); err != nil {
+		t.Fatalf("touch err=%v", err)
+	}
+
+	const newWrites = 5
+	for index := range newWrites {
+		writtenAt := base.Add(time.Duration(20+index) * time.Hour)
+		if _, err := Apply(t.Context(), database, nil, Options{
+			Actor: contracts.ActorAgent, CreatedAt: writtenAt,
+			ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{{
+				Key: fmt.Sprintf("fresh_%02d", index), Kind: "preference", Statement: "新偏好",
+				EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "偏好",
+				EvidenceID: "message_value", SourceDraftID: "draft_value",
+				LastConfirmedAt: writtenAt.Format(time.RFC3339Nano),
+			}}},
+		}); err != nil {
+			t.Fatalf("write %d err=%v", index, err)
+		}
+	}
+
+	memories, err := storage.ListUserMemories(t.Context(), database.Read())
+	if err != nil || len(memories) != storage.UserMemoryLimit {
+		t.Fatalf("memories len=%d err=%v", len(memories), err)
+	}
+	present := map[string]string{}
+	for _, memory := range memories {
+		present[memory.Key] = memory.LastUsedAt
+	}
+	if lastUsed, ok := present["mem_00"]; !ok || lastUsed == "" {
+		t.Fatalf("被 touch 的稳定偏好 mem_00 应存活且 last_used_at 非空: ok=%v used=%q", ok, lastUsed)
+	}
+	if _, ok := present["mem_01"]; !ok {
+		t.Fatal("correction mem_01 应受保护存活")
+	}
+	if _, ok := present["mem_02"]; ok {
+		t.Fatal("最低价值且未使用的老偏好 mem_02 应最先被淘汰")
+	}
+	for index := range newWrites {
+		if _, ok := present[fmt.Sprintf("fresh_%02d", index)]; !ok {
+			t.Fatalf("新写入 fresh_%02d 应存活", index)
+		}
 	}
 }
 

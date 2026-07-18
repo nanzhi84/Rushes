@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
@@ -210,6 +211,10 @@ func (builder *ContextBuilder) userMemoryContext(
 	if err != nil {
 		return nil, err
 	}
+	// memories 非空时 included 必 ≥1：单条 entry 的 statement≤200 rune、key≤40，加上其余
+	// 记忆的 omitted_keys（每个 key≤40、总数≤UserMemoryLimit）在最坏情况下仍远低于 4000 rune
+	// 预算，首条一定进得去——不会退化成「entries 空、omitted_keys 兜住全部」。若日后放宽
+	// key/statement 长度上限或压低预算，需重新核这条不变量。
 	included := 0
 	for included < len(memories) {
 		encoded, err := json.Marshal(
@@ -237,7 +242,54 @@ func (builder *ContextBuilder) userMemoryContext(
 		"section_runes", utf8.RuneCount(encoded),
 		"truncated", included < len(memories),
 	)
+	recordInjectedMemoryKeys(ctx, userMemoryKeys(memories[:included]))
 	return section, nil
+}
+
+func userMemoryKeys(memories []storage.UserMemory) []string {
+	keys := make([]string, len(memories))
+	for index, memory := range memories {
+		keys[index] = memory.Key
+	}
+	return keys
+}
+
+// injectedMemoryCollector 汇集一个回合内被注入 WorldState 的记忆键。回合成功收尾时
+// 经 reducer 刷新它们的 last_used_at（M2 价值感知）。未挂到 ctx 时记录为 no-op，
+// 因此快照构建在回合之外调用不受影响。
+type injectedMemoryCollector struct {
+	mu   sync.Mutex
+	keys map[string]struct{}
+}
+
+type injectedMemoryCollectorKey struct{}
+
+func withInjectedMemoryCollector(ctx context.Context) (context.Context, *injectedMemoryCollector) {
+	collector := &injectedMemoryCollector{keys: map[string]struct{}{}}
+	return context.WithValue(ctx, injectedMemoryCollectorKey{}, collector), collector
+}
+
+func recordInjectedMemoryKeys(ctx context.Context, keys []string) {
+	collector, ok := ctx.Value(injectedMemoryCollectorKey{}).(*injectedMemoryCollector)
+	if !ok || collector == nil {
+		return
+	}
+	collector.mu.Lock()
+	defer collector.mu.Unlock()
+	for _, key := range keys {
+		collector.keys[key] = struct{}{}
+	}
+}
+
+func (collector *injectedMemoryCollector) snapshot() []string {
+	collector.mu.Lock()
+	defer collector.mu.Unlock()
+	keys := make([]string, 0, len(collector.keys))
+	for key := range collector.keys {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // userMemorySnapshotSection 构造 user_memory 快照节。included 是已放入预算的记忆，
