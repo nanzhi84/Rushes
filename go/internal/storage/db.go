@@ -388,6 +388,7 @@ func (database *DB) Migrate(ctx context.Context) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		version = 14
 	}
 	if version < 15 {
 		tx, err := database.write.BeginTx(ctx, nil)
@@ -402,6 +403,23 @@ func (database *DB) Migrate(ctx context.Context) error {
 			return fmt.Errorf("应用 schema v15: %w", err)
 		}
 		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 15"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 15
+	}
+	if version < 16 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := addColumnIfMissing(ctx, tx, "user_memories", "last_used_at"); err != nil {
+			return fmt.Errorf("应用 schema v16: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 16"); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
@@ -431,6 +449,7 @@ func addColumnIfMissing(
 		"messages.rewound_at":                    "ALTER TABLE messages ADD COLUMN rewound_at TEXT",
 		"messages.rewind_checkpoint_id":          "ALTER TABLE messages ADD COLUMN rewind_checkpoint_id TEXT",
 		"rewind_restore_requests.new_message_id": "ALTER TABLE rewind_restore_requests ADD COLUMN new_message_id TEXT",
+		"user_memories.last_used_at":             schemaV16,
 	}
 	statement, ok := allowed[table+"."+column]
 	if !ok {

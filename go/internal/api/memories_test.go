@@ -116,8 +116,8 @@ func seedAPIMemory(t *testing.T, server *Server, key, kind, statement string) {
 			},
 			UserMemoryUpserts: []reducer.UserMemoryRow{{
 				Key: key, Kind: kind, Statement: statement,
-				EvidenceKind: storage.UserMemoryEvidenceMessage,
-				EvidenceID:   messageID, SourceDraftID: draftID,
+				EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: statement,
+				EvidenceID: messageID, SourceDraftID: draftID,
 			}},
 		},
 	})

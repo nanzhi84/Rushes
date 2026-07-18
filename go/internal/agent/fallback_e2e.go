@@ -47,6 +47,8 @@ func (scaffold *e2eFallbackScaffold) TryHandle(
 		result, err := scaffold.service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
 			Entries: []rushestools.MemoryEntryInput{{
 				Key: "e2e_pacing", Kind: "preference", Statement: "E2E 成片节奏偏快",
+				// evidence_quote 必是证据用户消息的原文子串；本回合证据就是这条 E2E_MEMORY_WRITE 消息。
+				EvidenceQuote: e2eMemoryWriteMarker,
 			}},
 		})
 		if err != nil {

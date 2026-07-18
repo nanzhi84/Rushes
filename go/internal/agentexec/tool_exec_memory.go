@@ -111,8 +111,17 @@ func (exec *Executor) toolMemoryUpdate(
 				},
 			), nil
 		}
+		quote := strings.TrimSpace(entry.EvidenceQuote)
+		if !storage.ValidUserMemoryEvidenceQuote(quote) {
+			return memoryUpdateFailure(
+				fmt.Sprintf("长期记忆 %q 缺少有效的 evidence_quote。", entry.Key),
+				"memory_evidence_quote_invalid",
+				"evidence_quote 必须从当前这条用户消息或决策回答里逐字摘录一段原文（至少两个字），用来佐证该记忆确有用户依据；改写或拼接都会被拒绝。",
+				map[string]any{"memory_key": entry.Key},
+			), nil
+		}
 		rows = append(rows, reducer.UserMemoryRow{
-			Key: entry.Key, Kind: entry.Kind, Statement: statement,
+			Key: entry.Key, Kind: entry.Kind, Statement: statement, EvidenceQuote: quote,
 			EvidenceKind: evidence.Kind, EvidenceID: evidence.ID, SourceDraftID: draftID,
 		})
 	}
@@ -154,6 +163,14 @@ func (exec *Executor) toolMemoryUpdate(
 			},
 		},
 	})
+	if errors.Is(err, reducer.ErrUserMemoryEvidenceQuoteMismatch) {
+		return memoryUpdateFailure(
+			"长期记忆 evidence_quote 未能在证据原文中逐字匹配，未修改任何记忆。",
+			"memory_evidence_quote_invalid",
+			"evidence_quote 必须从当前这条用户消息或决策回答里逐字摘录原文片段；改写、拼接或无关摘录都会被拒绝。改成逐字原文后可立即重试，不要放弃这条记忆。",
+			nil,
+		), nil
+	}
 	if errors.Is(err, reducer.ErrUserMemoryEvidence) {
 		return memoryUpdateFailure(
 			"当前长期记忆证据未通过数据库核验，未修改任何记忆。",

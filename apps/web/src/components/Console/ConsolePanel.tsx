@@ -209,12 +209,20 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
 
     // 当前回合以流式列表为准。历史里同 message_id / step_id 的落库副本让位，
     // 回合结束后保留实时顺序，刷新页面后再由持久化消息与工具轨迹接管。
+    // 流式文本增量不断换 streamItems 引用，但活跃项 id 集合在增量之间不变。按 id 集合的
+    // 稳定签名 memo，避免每个 text_delta 重建 messages —— 否则 useConsoleExternalStoreRuntime
+    // 会重建全部消息对象，击穿 AssistantThread 里所有消息行的 memo。
+    const liveItemIdsKey = streamItems
+      .map((item) => (item.type === "message" ? item.message_id : item.step_id))
+      .join(" ");
     const messages = useMemo<ConsoleMessage[]>(() => {
       const liveItemIds = new Set(
         streamItems.map((item) => (item.type === "message" ? item.message_id : item.step_id))
       );
       return historyMessages.filter((message) => !liveItemIds.has(message.id));
-    }, [historyMessages, streamItems]);
+      // liveItemIdsKey 是 streamItems 活跃 id 集合的稳定签名，替代 streamItems 引用依赖。
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [historyMessages, liveItemIdsKey]);
 
     const postMessage = useMutation({
       mutationFn: (content: string) => api.postMessage(draftId, { content }),
@@ -343,6 +351,17 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
       }
       clearConversation.mutate();
     }, [clearConversation]);
+    // 稳定引用：memo 化的消息行只有拿到不变的回调才能在流式高频重渲染中被挡下。
+    const cancelJobMutate = cancelJob.mutate;
+    const resendMutate = resendMessage.mutate;
+    const handleCancelJob = useCallback(
+      (jobId: string) => cancelJobMutate(jobId),
+      [cancelJobMutate]
+    );
+    const handleResendMessage = useCallback(
+      (messageId: string, content: string) => resendMutate({ messageId, content }),
+      [resendMutate]
+    );
 
     const runtime = useConsoleExternalStoreRuntime({
       messages,
@@ -439,9 +458,9 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
           streamItems={streamItems}
           modelRetry={modelRetry}
           subagentProgress={subagentProgress}
-          onCancelJob={(jobId) => cancelJob.mutate(jobId)}
+          onCancelJob={handleCancelJob}
           cancelPendingJobId={cancelJob.isPending ? (cancelJob.variables ?? null) : null}
-          onResendMessage={(messageId, content) => resendMessage.mutate({ messageId, content })}
+          onResendMessage={handleResendMessage}
           resendPendingMessageId={
             resendMessage.isPending ? (resendMessage.variables?.messageId ?? null) : null
           }

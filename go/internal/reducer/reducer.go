@@ -34,6 +34,11 @@ var (
 	errDraftPlanConflict      = errors.New("草稿创作计划发生并发冲突")
 )
 
+// ErrUserMemoryEvidenceQuoteMismatch 与 ErrUserMemoryEvidence 分开：前者是 evidence_quote
+// 本身与证据原文不符（改写/拼接/过短），模型逐字重摘即可救回；后者是证据缺失或越权，重试无益。
+// 拆开是为了让工具层给出方向相反的恢复指引。
+var ErrUserMemoryEvidenceQuoteMismatch = errors.New("用户记忆引文与证据原文不符")
+
 type VersionConflict struct {
 	DraftID             string `json:"draft_id"`
 	ExpectedBaseVersion *int   `json:"expected_base_version"`
@@ -115,12 +120,15 @@ type DraftPlanUpdateRow struct {
 // than represented as a foreign key, so rewind and draft cleanup do not erase
 // a preference the user actually expressed.
 type UserMemoryRow struct {
-	Key             string
-	Kind            string
-	Statement       string
-	EvidenceKind    string
-	EvidenceID      string
-	SourceDraftID   string
+	Key           string
+	Kind          string
+	Statement     string
+	EvidenceKind  string
+	EvidenceID    string
+	SourceDraftID string
+	// EvidenceQuote 是模型从证据消息/决策回答里逐字摘录的原文片段，reducer 事务内
+	// 比对它确为证据原文子串后才落库；本身不入库，只作写入期的语义绑定闸门。
+	EvidenceQuote   string
 	CreatedAt       string
 	LastConfirmedAt string
 }
@@ -189,6 +197,9 @@ type ResultRows struct {
 	UserMemoryRemoveKeys            []string
 	UserMemoryClearAll              bool
 	UserMemoryMutationEvidence      *UserMemoryEvidenceRow
+	// UserMemoryTouchKeys 是本回合成功收尾时需要刷新 last_used_at 的记忆键（被注入
+	// WorldState 的那些）；只更新已存在的键，缺失键静默跳过，是 M2 价值感知的用侧信号。
+	UserMemoryTouchKeys []string
 }
 
 type ValidationHook func(context.Context, *sql.Tx, []string) error
@@ -1439,6 +1450,9 @@ func persistResultRows(
 	if userMemoryOutcome != nil {
 		*userMemoryOutcome = userMemory
 	}
+	if err := touchUserMemories(ctx, tx, rows.UserMemoryTouchKeys, defaultCreatedAt); err != nil {
+		return err
+	}
 	for _, summary := range rows.MaterialSummaries {
 		createdAt := summary.CreatedAt
 		if createdAt == "" {
@@ -1733,6 +1747,11 @@ func persistUserMemories(
 		if err != nil {
 			return outcome, fmt.Errorf("%w: last_confirmed_at: %v", ErrUserMemoryInput, err)
 		}
+		if err := validateUserMemoryEvidenceQuote(ctx, tx, UserMemoryEvidenceRow{
+			Kind: memory.EvidenceKind, ID: memory.EvidenceID, SourceDraftID: memory.SourceDraftID,
+		}, memory.EvidenceQuote); err != nil {
+			return outcome, err
+		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO user_memories(
 				memory_key,kind,statement,evidence_kind,evidence_id,
@@ -1760,7 +1779,9 @@ func persistUserMemories(
 	if excess := count - storage.UserMemoryLimit; excess > 0 {
 		rows, err := tx.QueryContext(ctx, `
 			SELECT memory_key FROM user_memories
-			ORDER BY last_confirmed_at ASC,memory_key ASC
+			ORDER BY (kind='correction') ASC,
+				max(last_confirmed_at,COALESCE(last_used_at,last_confirmed_at)) ASC,
+				memory_key ASC
 			LIMIT ?`, excess)
 		if err != nil {
 			return outcome, err
@@ -1836,6 +1857,126 @@ func validateUserMemoryEvidence(
 			"%w: kind=%s id=%s draft=%s",
 			ErrUserMemoryEvidence, evidence.Kind, evidence.ID, evidence.SourceDraftID,
 		)
+	}
+	return nil
+}
+
+// validateUserMemoryEvidenceQuote 是防污染的核心闸门：evidence_quote 去空白后必须
+// 达到长度下限，且确为证据消息内容 / 决策回答文本的子串。改写、拼接、无关摘录都不是
+// 连续子串，会被判 ErrUserMemoryEvidence。
+func validateUserMemoryEvidenceQuote(
+	ctx context.Context,
+	tx *sql.Tx,
+	evidence UserMemoryEvidenceRow,
+	quote string,
+) error {
+	trimmed := strings.TrimSpace(quote)
+	if !storage.ValidUserMemoryEvidenceQuote(trimmed) {
+		return fmt.Errorf("%w: evidence_quote 为空或过短", ErrUserMemoryEvidenceQuoteMismatch)
+	}
+	text, err := userMemoryEvidenceText(ctx, tx, evidence)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(text, trimmed) {
+		return fmt.Errorf("%w: evidence_quote 不是证据原文子串", ErrUserMemoryEvidenceQuoteMismatch)
+	}
+	return nil
+}
+
+// userMemoryEvidenceText 取回证据的可比对原文：用户消息取 content，决策回答取用户
+// 自由文本与所选项标签的拼接。证据不存在时返回 ErrUserMemoryEvidence。
+func userMemoryEvidenceText(
+	ctx context.Context,
+	tx *sql.Tx,
+	evidence UserMemoryEvidenceRow,
+) (string, error) {
+	switch evidence.Kind {
+	case storage.UserMemoryEvidenceMessage:
+		var content string
+		err := tx.QueryRowContext(ctx, `
+			SELECT content FROM messages
+			WHERE message_id=? AND draft_id=? AND role='user'`,
+			evidence.ID, evidence.SourceDraftID,
+		).Scan(&content)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("%w: 证据消息不存在", ErrUserMemoryEvidence)
+		}
+		if err != nil {
+			return "", err
+		}
+		return content, nil
+	case storage.UserMemoryEvidenceDecision:
+		var answerJSON, optionsJSON sql.NullString
+		err := tx.QueryRowContext(ctx, `
+			SELECT answer_json, options_json FROM decisions
+			WHERE decision_id=? AND draft_id=? AND status='answered'
+			AND answer_json IS NOT NULL AND answer_json!='null'`,
+			evidence.ID, evidence.SourceDraftID,
+		).Scan(&answerJSON, &optionsJSON)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("%w: 证据决策不存在或未回答", ErrUserMemoryEvidence)
+		}
+		if err != nil {
+			return "", err
+		}
+		return decisionAnswerEvidenceText(answerJSON.String, optionsJSON.String), nil
+	}
+	return "", fmt.Errorf("%w: 未知证据类型 %q", ErrUserMemoryEvidence, evidence.Kind)
+}
+
+// decisionAnswerEvidenceText 把决策回答还原成用户「说过的话」：自由文本 + 所选项
+// 标签。模型引用的 evidence_quote 必须落在其中。
+func decisionAnswerEvidenceText(answerJSON, optionsJSON string) string {
+	var answer struct {
+		OptionID string `json:"option_id"`
+		FreeText string `json:"free_text"`
+	}
+	_ = json.Unmarshal([]byte(answerJSON), &answer)
+	parts := make([]string, 0, 2)
+	if text := strings.TrimSpace(answer.FreeText); text != "" {
+		parts = append(parts, text)
+	}
+	if answer.OptionID != "" {
+		var options []struct {
+			OptionID string `json:"option_id"`
+			Label    string `json:"label"`
+		}
+		_ = json.Unmarshal([]byte(optionsJSON), &options)
+		for _, option := range options {
+			if option.OptionID == answer.OptionID && strings.TrimSpace(option.Label) != "" {
+				parts = append(parts, option.Label)
+				break
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// touchUserMemories 刷新记忆的 last_used_at。只更新已存在的键（被淘汰的键静默跳过），
+// 是回合成功收尾后 M2 价值感知的用侧信号；与其它写入同处一个 reducer 事务。
+func touchUserMemories(ctx context.Context, tx *sql.Tx, keys []string, at string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	usedAt, err := normalizeUserMemoryTimestamp(at)
+	if err != nil {
+		return fmt.Errorf("%w: last_used_at: %v", ErrUserMemoryInput, err)
+	}
+	seen := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		if !storage.ValidUserMemoryKey(key) {
+			return fmt.Errorf("%w: 触碰键 %q 无效", ErrUserMemoryInput, key)
+		}
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE user_memories SET last_used_at=? WHERE memory_key=?", usedAt, key,
+		); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1927,7 +2068,7 @@ func emptyResultRows(rows ResultRows) bool {
 		len(rows.AgentJobObservations) == 0 && rows.AgentJobObservationDelivery == nil &&
 		len(rows.AgentJobObservationSuppressions) == 0 &&
 		len(rows.UserMemoryUpserts) == 0 && len(rows.UserMemoryRemoveKeys) == 0 &&
-		!rows.UserMemoryClearAll
+		!rows.UserMemoryClearAll && len(rows.UserMemoryTouchKeys) == 0
 }
 
 func sortedKeys(values map[string]struct{}) []string {

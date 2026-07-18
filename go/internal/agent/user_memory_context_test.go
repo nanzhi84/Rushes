@@ -24,8 +24,8 @@ func TestUserMemoryWorldStateIsStableAcrossDraftsAndRemoval(t *testing.T) {
 
 	applyUserMemories(t, database, []reducer.UserMemoryRow{{
 		Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
-		EvidenceKind: storage.UserMemoryEvidenceMessage,
-		EvidenceID:   "message_memory_source", SourceDraftID: "draft_memory_source",
+		EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "成片节奏都快一点",
+		EvidenceID: "message_memory_source", SourceDraftID: "draft_memory_source",
 	}}, nil)
 
 	builder := NewContextBuilder(database)
@@ -79,8 +79,8 @@ func TestUserMemoryWorldStateUsesWholeEntryBudget(t *testing.T) {
 		memories = append(memories, reducer.UserMemoryRow{
 			Key: fmt.Sprintf("memory_%02d", index), Kind: "preference",
 			Statement:    strings.Repeat("偏", storage.UserMemoryStatementRuneLimit),
-			EvidenceKind: storage.UserMemoryEvidenceMessage,
-			EvidenceID:   "message_memory_budget", SourceDraftID: "draft_memory_budget",
+			EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "长期偏好",
+			EvidenceID: "message_memory_budget", SourceDraftID: "draft_memory_budget",
 		})
 	}
 	applyUserMemories(t, database, memories, nil)
@@ -163,8 +163,8 @@ func TestUserMemoryWorldStateSupportsOldReferencesAndBuildPriority(t *testing.T)
 	agenttest.InsertAgentMessage(t, database, "draft_memory_build", "message_memory_build", "以后成片节奏都快一点")
 	applyUserMemories(t, database, []reducer.UserMemoryRow{{
 		Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
-		EvidenceKind: storage.UserMemoryEvidenceMessage,
-		EvidenceID:   "message_memory_build", SourceDraftID: "draft_memory_build",
+		EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "成片节奏都快一点",
+		EvidenceID: "message_memory_build", SourceDraftID: "draft_memory_build",
 	}}, nil)
 	second, err := manager.Build(t.Context(), "draft_memory_build")
 	if err != nil {

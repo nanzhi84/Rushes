@@ -20,9 +20,15 @@ func (MemoryUpdateInput) JSONSchema() *jsonschema.Schema {
 		Type: "string", MinLength: uint64Pointer(1), MaxLength: uint64Pointer(200),
 		Description: "一句简体中文陈述用户当前明确表达的跨项目稳定偏好、纠正或习惯；不得写模型判断",
 	})
+	// MinLength 镜像运行期下限 storage.UserMemoryEvidenceQuoteMinRunes；真正的子串
+	// 绑定在 reducer 事务内完成，schema 只做形状提示。
+	entryProperties.Set("evidence_quote", &jsonschema.Schema{
+		Type: "string", MinLength: uint64Pointer(2),
+		Description: "从当前用户消息或决策回答逐字摘录的原文片段，佐证该记忆有据；必须是原文连续子串，改写/拼接/无关摘录会被拒绝",
+	})
 	entrySchema := &jsonschema.Schema{
 		Type: "object", Properties: entryProperties,
-		Required:             []string{"key", "kind", "statement"},
+		Required:             []string{"key", "kind", "statement", "evidence_quote"},
 		AdditionalProperties: jsonschema.FalseSchema,
 	}
 	properties := jsonschema.NewProperties()

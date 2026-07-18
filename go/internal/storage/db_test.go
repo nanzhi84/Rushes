@@ -140,6 +140,54 @@ func TestOpenMigratesV13WorkspaceAndDropsScratchMemory(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesV15WorkspaceAddsUserMemoryLastUsedColumn(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	database, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 回落到 v15 形状（v15=Rewind 收敛已在库里）：去掉 last_used_at 列并塞入一条历史记忆，模拟升级前的库。
+	if _, err := database.Write().ExecContext(t.Context(), `
+		ALTER TABLE user_memories DROP COLUMN last_used_at;
+		INSERT INTO user_memories(
+			memory_key,kind,statement,evidence_kind,evidence_id,source_draft_id,created_at,last_confirmed_at
+		) VALUES('pacing','preference','成片节奏偏快','user_message','message_legacy','draft_legacy',
+			'2026-07-16T00:00:00.000000000Z','2026-07-16T00:00:00.000000000Z');
+		PRAGMA user_version = 15`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = migrated.Close() })
+	var version, lastUsedColumn, historicalNull int
+	if err := migrated.Read().QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrated.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM pragma_table_info('user_memories') WHERE name='last_used_at'`,
+	).Scan(&lastUsedColumn); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrated.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM user_memories WHERE memory_key='pacing' AND last_used_at IS NULL`,
+	).Scan(&historicalNull); err != nil {
+		t.Fatal(err)
+	}
+	memories, err := ListUserMemories(t.Context(), migrated.Read())
+	if err != nil || version != schemaVersion || lastUsedColumn != 1 || historicalNull != 1 ||
+		len(memories) != 1 || memories[0].Key != "pacing" || memories[0].LastUsedAt != "" {
+		t.Fatalf("version=%d col=%d null=%d memories=%#v err=%v",
+			version, lastUsedColumn, historicalNull, memories, err)
+	}
+}
+
 func TestDropColumnMigrationRejectsUnlistedColumnsAndClosedTransactions(t *testing.T) {
 	t.Parallel()
 	database, err := Open(t.Context(), t.TempDir())

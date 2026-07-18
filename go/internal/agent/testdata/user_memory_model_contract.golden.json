@@ -34,7 +34,7 @@
         "tool_calls": [
           {
             "name": "memory.update",
-            "arguments": "{\"entries\":[{\"key\":\"pacing\",\"kind\":\"preference\",\"statement\":\"用户长期偏好成片节奏偏快\"}]}"
+            "arguments": "{\"entries\":[{\"key\":\"pacing\",\"kind\":\"preference\",\"statement\":\"用户长期偏好成片节奏偏快\",\"evidence_quote\":\"节奏都要快一点\"}]}"
           }
         ]
       }
@@ -120,6 +120,130 @@
           {
             "name": "plan.update",
             "arguments": "{\"plan\":{\"rhythm\":\"快节奏、高切点密度\"}}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "stores_broll_correction",
+      "prompt": "你上次给的 B-roll 太少了，以后成片一律多铺 B-roll。",
+      "snapshot_sections": {
+        "draft": {
+          "draft_id": "draft_memory_correction",
+          "content_plan": {}
+        },
+        "assets": {
+          "audio_roles": [],
+          "material_catalog": []
+        },
+        "timeline": null,
+        "user_memory": {
+          "entries": [],
+          "total": 0,
+          "truncated": false
+        }
+      },
+      "available_tools": [
+        "memory.update",
+        "plan.update"
+      ],
+      "required_tool": "memory.update",
+      "forbidden_tools": [],
+      "expected_memory": {
+        "key": "broll_coverage",
+        "kind": "correction",
+        "semantic": "prefers_more_broll"
+      },
+      "mock_response": {
+        "tool_calls": [
+          {
+            "name": "memory.update",
+            "arguments": "{\"entries\":[{\"key\":\"broll_coverage\",\"kind\":\"correction\",\"statement\":\"用户纠正：以后成片一律多铺 B-roll，提高覆盖率\",\"evidence_quote\":\"一律多铺 B-roll\"}]}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "does_not_store_trial_pacing",
+      "prompt": "这条片子这次先试试快节奏，看看效果。",
+      "snapshot_sections": {
+        "draft": {
+          "draft_id": "draft_memory_trial",
+          "content_plan": {}
+        },
+        "assets": {
+          "audio_roles": [],
+          "material_catalog": []
+        },
+        "timeline": null,
+        "user_memory": {
+          "entries": [],
+          "total": 0,
+          "truncated": false
+        }
+      },
+      "available_tools": [
+        "memory.update",
+        "plan.update"
+      ],
+      "required_tool": "",
+      "forbidden_tools": [
+        "memory.update"
+      ],
+      "mock_response": {
+        "tool_calls": [
+          {
+            "name": "plan.update",
+            "arguments": "{\"plan\":{\"trial_rhythm\":\"本片试快节奏\"}}"
+          }
+        ]
+      }
+    },
+    {
+      "name": "applies_injected_pacing_across_drafts",
+      "prompt": "换个新片子，也帮我剪一版。",
+      "snapshot_sections": {
+        "draft": {
+          "draft_id": "draft_memory_cross",
+          "content_plan": {}
+        },
+        "assets": {
+          "audio_roles": [],
+          "material_catalog": [
+            {
+              "asset_id": "asset_video_cross",
+              "kind": "video",
+              "status": "ready"
+            }
+          ]
+        },
+        "timeline": null,
+        "user_memory": {
+          "entries": [
+            {
+              "key": "pacing",
+              "kind": "preference",
+              "statement": "成片节奏偏快，切点密度可高于默认"
+            }
+          ],
+          "total": 1,
+          "truncated": false
+        }
+      },
+      "available_tools": [
+        "plan.update",
+        "interaction.ask_user"
+      ],
+      "required_tool": "plan.update",
+      "forbidden_tools": [
+        "interaction.ask_user"
+      ],
+      "required_tool_semantic": "fast_pacing",
+      "mock_response": {
+        "tool_calls": [
+          {
+            "name": "plan.update",
+            "arguments": "{\"plan\":{\"rhythm\":\"沿用快节奏、高切点密度\"}}"
           }
         ]
       }

@@ -498,6 +498,8 @@ type MemoryEntryInput struct {
 	Key       string `json:"key" jsonschema:"required" jsonschema_description:"稳定语义主键，匹配 [a-z0-9_]{2,40}，例如 pacing、subtitle_style；同键覆盖旧记忆"`
 	Kind      string `json:"kind" jsonschema:"required" jsonschema_description:"preference 表示长期偏好，correction 表示用户纠正，habit 表示稳定使用习惯"`
 	Statement string `json:"statement" jsonschema:"required" jsonschema_description:"一句简体中文陈述用户跨项目稳定的偏好、纠正或习惯，不超过 200 字；只能写当前用户明确表达过的内容，不得写模型自己的创作判断"`
+	// EvidenceQuote 由模型提供、由 reducer 事务内比对，不是系统权威字段，故不触发 PolicyGate。
+	EvidenceQuote string `json:"evidence_quote" jsonschema:"required" jsonschema_description:"从当前这条用户消息或决策回答里逐字摘录的原文片段，用于佐证该记忆确有用户依据；必须是原文连续子串，改写、拼接或与本条陈述无关的摘录都会被拒绝"`
 }
 
 type MemoryUpdateInput struct {

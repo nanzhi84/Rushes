@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 15
+const schemaVersion = 16
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -447,3 +447,9 @@ WHERE checkpoint_id IN (
 
 DELETE FROM rewind_checkpoints WHERE trigger_kind='timeline_write';
 `
+
+// schemaV16 adds a usage-recency signal to user memories. Historical rows stay
+// NULL until the memory is next injected into a successful turn, so eviction can
+// value long-standing read-only preferences by max(last_confirmed_at,last_used_at)
+// rather than by confirmation time alone.
+const schemaV16 = `ALTER TABLE user_memories ADD COLUMN last_used_at TEXT`

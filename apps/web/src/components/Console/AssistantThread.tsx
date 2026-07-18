@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactElement, UIEvent } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   ChevronRight,
   CornerDownRight,
@@ -33,6 +34,10 @@ import { formatElapsedTime, useElapsedSeconds } from "./useElapsedTime";
 
 const STRUCTURED_MESSAGE_ID = "structured-interactions";
 const FOLLOW_THRESHOLD_PX = 48;
+// 行数超过阈值才启用虚拟化；短列表（含全部既有单测场景）直渲染，DOM 与行为零变化。
+const VIRTUALIZE_THRESHOLD = 40;
+const ROW_ESTIMATE_PX = 72;
+const ROW_GAP_PX = 10; // 对齐直渲染路径的 space-y-2.5 行距
 
 type HistoryBlock =
   | { type: "message"; message: ConsoleAssistantMessage }
@@ -42,6 +47,13 @@ type HistoryBlock =
 type StreamBlock =
   | { type: "message"; message: StreamMessageItem }
   | { type: "tools"; id: string; steps: StreamToolItem[] };
+
+// 把历史块 / 流式块 / 活动指示 / 结构化交互拍平成统一行序列，供虚拟化按 index 取用。
+type ThreadRow =
+  | { key: string; kind: "history"; block: HistoryBlock }
+  | { key: string; kind: "stream"; block: StreamBlock }
+  | { key: string; kind: "indicator" }
+  | { key: string; kind: "structured"; message: ConsoleAssistantMessage };
 
 export function AssistantThread({
   runtime,
@@ -73,7 +85,12 @@ export function AssistantThread({
   const [hasNewOutput, setHasNewOutput] = useState(false);
 
   // 结构化交互固定排在当前回合之后，避免确认卡被新的工具输出挤到中间。
-  const regularMessages = runtime.messages.filter((message) => message.id !== STRUCTURED_MESSAGE_ID);
+  // memo 化：runtime.messages 稳定时不重算，否则 historyBlocks 每帧新建，会击穿
+  // ToolActivityGroup/BackgroundActivityGroup 的 memo（block.steps/messages 每帧换引用）。
+  const regularMessages = useMemo(
+    () => runtime.messages.filter((message) => message.id !== STRUCTURED_MESSAGE_ID),
+    [runtime.messages]
+  );
   const structuredMessage =
     runtime.messages.find((message) => message.id === STRUCTURED_MESSAGE_ID) ?? null;
   const historyBlocks = useMemo(() => groupHistoryMessages(regularMessages), [regularMessages]);
@@ -144,6 +161,109 @@ export function AssistantThread({
     setHasNewOutput(false);
   };
 
+  const rows = useMemo<ThreadRow[]>(() => {
+    const list: ThreadRow[] = [];
+    for (const block of historyBlocks) {
+      const key = block.type === "message" ? block.message.id : block.id;
+      list.push({ key: `h:${key}`, kind: "history", block });
+    }
+    for (const block of streamBlocks) {
+      const key = block.type === "message" ? block.message.message_id : block.id;
+      list.push({ key: `s:${key}`, kind: "stream", block });
+    }
+    if (runtime.isRunning) {
+      list.push({ key: "activity-indicator", kind: "indicator" });
+    }
+    if (structuredMessage) {
+      list.push({ key: `struct:${structuredMessage.id}`, kind: "structured", message: structuredMessage });
+    }
+    return list;
+  }, [historyBlocks, streamBlocks, runtime.isRunning, structuredMessage]);
+
+  const renderRow = (row: ThreadRow | undefined): ReactElement | null => {
+    if (!row) {
+      // 行数收缩瞬间，虚拟化的 index 可能短暂越界，防御式返回空。
+      return null;
+    }
+    if (row.kind === "history") {
+      const block = row.block;
+      if (block.type === "activity") {
+        return <BackgroundActivityGroup messages={block.messages} />;
+      }
+      if (block.type === "tools") {
+        return (
+          <ToolActivityGroup steps={block.steps} activeToolStepId={null} progress={EMPTY_PROGRESS} />
+        );
+      }
+      return (
+        <MessageRow
+          message={block.message}
+          onAnswerDecision={onAnswerDecision}
+          answerPending={answerPending}
+          highlighted={highlightedMessageId === block.message.id}
+          onCancelJob={onCancelJob}
+          cancelPendingJobId={cancelPendingJobId}
+          onResendMessage={onResendMessage}
+          resendPending={resendPendingMessageId === block.message.id}
+        />
+      );
+    }
+    if (row.kind === "stream") {
+      const block = row.block;
+      if (block.type === "tools") {
+        return (
+          <ToolActivityGroup
+            steps={block.steps}
+            activeToolStepId={activeToolStepId}
+            progress={subagentProgress}
+          />
+        );
+      }
+      return (
+        <MessageRow
+          message={toStreamMessage(block.message)}
+          onAnswerDecision={onAnswerDecision}
+          answerPending={answerPending}
+          highlighted={highlightedMessageId === block.message.message_id}
+          streaming={block.message.kind === "assistant"}
+          onCancelJob={onCancelJob}
+          cancelPendingJobId={cancelPendingJobId}
+          onResendMessage={onResendMessage}
+          resendPending={resendPendingMessageId === block.message.message_id}
+        />
+      );
+    }
+    if (row.kind === "indicator") {
+      return <TurnActivityIndicator items={streamItems} modelRetry={modelRetry} />;
+    }
+    return (
+      <MessageRow
+        message={row.message}
+        onAnswerDecision={onAnswerDecision}
+        answerPending={answerPending}
+        highlighted={highlightedMessageId === row.message.id}
+        onCancelJob={onCancelJob}
+        cancelPendingJobId={cancelPendingJobId}
+        onResendMessage={onResendMessage}
+        resendPending={resendPendingMessageId === row.message.id}
+      />
+    );
+  };
+
+  // 长会话（>阈值）启用虚拟化，只渲染视口 ±overscan 的行，避免 500 条历史全量进 DOM。
+  const shouldVirtualize = rows.length > VIRTUALIZE_THRESHOLD;
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollerRef.current,
+    estimateSize: () => ROW_ESTIMATE_PX,
+    overscan: 12,
+    getItemKey: (index) => rows[index]?.key ?? index,
+    enabled: shouldVirtualize,
+    // 首帧（ResizeObserver 尚未测量）先按此视口估算，宁多勿少避免露白；浏览器随即以真实
+    // 尺寸修正。也让无布局的 jsdom 能确定性地完成一次窗口化用于回归测试。
+    initialRect: { width: 0, height: 1200 }
+  });
+
   return (
     <div className="relative min-h-0 flex-1">
       <div
@@ -159,73 +279,31 @@ export function AssistantThread({
               描述成片目标、节奏或要删除的内容。剪辑过程和工具调用会持续显示在这里。
             </p>
           </div>
+        ) : shouldVirtualize ? (
+          <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+            {virtualizer.getVirtualItems().map((virtualRow) => (
+              <div
+                key={virtualRow.key}
+                data-index={virtualRow.index}
+                ref={virtualizer.measureElement}
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  transform: `translateY(${virtualRow.start}px)`,
+                  paddingBottom: ROW_GAP_PX
+                }}
+              >
+                {renderRow(rows[virtualRow.index])}
+              </div>
+            ))}
+          </div>
         ) : (
           <div className="space-y-2.5">
-            {historyBlocks.map((block) =>
-              block.type === "activity" ? (
-                <BackgroundActivityGroup key={block.id} messages={block.messages} />
-              ) : block.type === "tools" ? (
-                <ToolActivityGroup
-                  key={block.id}
-                  steps={block.steps}
-                  activeToolStepId={null}
-                  progress={[]}
-                />
-              ) : (
-                <MessageRow
-                  key={block.message.id}
-                  message={block.message}
-                  onAnswerDecision={onAnswerDecision}
-                  answerPending={answerPending}
-                  highlighted={highlightedMessageId === block.message.id}
-                  onCancelJob={onCancelJob}
-                  cancelPendingJobId={cancelPendingJobId}
-                  onResendMessage={onResendMessage}
-                  resendPending={resendPendingMessageId === block.message.id}
-                />
-              )
-            )}
-
-            {streamBlocks.map((block) =>
-              block.type === "message" ? (
-                <MessageRow
-                  key={block.message.message_id}
-                  message={toStreamMessage(block.message)}
-                  onAnswerDecision={onAnswerDecision}
-                  answerPending={answerPending}
-                  highlighted={highlightedMessageId === block.message.message_id}
-                  streaming={block.message.kind === "assistant"}
-                  onCancelJob={onCancelJob}
-                  cancelPendingJobId={cancelPendingJobId}
-                  onResendMessage={onResendMessage}
-                  resendPending={resendPendingMessageId === block.message.message_id}
-                />
-              ) : (
-                <ToolActivityGroup
-                  key={block.id}
-                  steps={block.steps}
-                  activeToolStepId={activeToolStepId}
-                  progress={subagentProgress}
-                />
-              )
-            )}
-
-            {runtime.isRunning ? (
-              <TurnActivityIndicator items={streamItems} modelRetry={modelRetry} />
-            ) : null}
-
-            {structuredMessage ? (
-              <MessageRow
-                message={structuredMessage}
-                onAnswerDecision={onAnswerDecision}
-                answerPending={answerPending}
-                highlighted={highlightedMessageId === structuredMessage.id}
-                onCancelJob={onCancelJob}
-                cancelPendingJobId={cancelPendingJobId}
-                onResendMessage={onResendMessage}
-                resendPending={resendPendingMessageId === structuredMessage.id}
-              />
-            ) : null}
+            {rows.map((row) => (
+              <Fragment key={row.key}>{renderRow(row)}</Fragment>
+            ))}
           </div>
         )}
       </div>
@@ -243,6 +321,18 @@ export function AssistantThread({
     </div>
   );
 }
+
+// 消息行 memo 化：流式高频重渲染与长列表滚动期间，props 未变的历史行不再重渲染。
+// impl+memo 拆分保留原有前向引用（组件在渲染期互相引用，此时模块已完成初始化）。
+const UserMessageRow = memo(UserMessageRowImpl);
+const MessageRow = memo(MessageRowImpl);
+const TurnFailureRow = memo(TurnFailureRowImpl);
+const BackgroundActivityGroup = memo(BackgroundActivityGroupImpl);
+const ToolActivityGroup = memo(ToolActivityGroupImpl);
+const ToolStepRow = memo(ToolStepRowImpl);
+
+// 稳定空引用：非活跃工具步不传新数组，避免击穿 ToolStepRow/ToolActivityGroup 的 memo。
+const EMPTY_PROGRESS: SubagentProgressEntry[] = [];
 
 function TurnActivityIndicator({
   items,
@@ -301,7 +391,7 @@ function userMessageText(message: ConsoleAssistantMessage): string {
 
 // 用户消息气泡：hover 出「编辑并重发」，点击后就地进入编辑态（避免动到主输入框里
 // 用户正在打的草稿）；确认即调 resend 端点回退到该消息之前并以新内容开启新回合。
-function UserMessageRow({
+function UserMessageRowImpl({
   message,
   highlighted,
   onResendMessage,
@@ -407,7 +497,7 @@ function UserMessageRow({
   );
 }
 
-function MessageRow({
+function MessageRowImpl({
   message,
   onAnswerDecision,
   answerPending,
@@ -499,7 +589,13 @@ function MessageRow({
         {message.content.map((part, index) =>
           part.type === "text" ? (
             <div key={`${message.id}:${index}`} className={narration ? "leading-5" : "leading-[1.55]"}>
-              {narration ? <p className="whitespace-pre-wrap">{part.text}</p> : <Markdown text={part.text} />}
+              {/* 流式期间用纯文本轻量渲染，避免每个 delta 全量重跑 react-markdown/micromark
+                  （O(N²)）；message_completed 落库后（streaming=false）再一次性 Markdown 化。 */}
+              {narration || streaming ? (
+                <p className="whitespace-pre-wrap">{part.text}</p>
+              ) : (
+                <Markdown text={part.text} />
+              )}
             </div>
           ) : null
         )}
@@ -515,7 +611,7 @@ function MessageRow({
 
 // 回合以错误终止时落库的持久失败提示行（role=system, kind=turn_failure），
 // 刷新后仍从 DB 读回。
-function TurnFailureRow({
+function TurnFailureRowImpl({
   message,
   highlighted
 }: {
@@ -545,7 +641,7 @@ function TurnFailureRow({
   );
 }
 
-function BackgroundActivityGroup({
+function BackgroundActivityGroupImpl({
   messages
 }: {
   messages: ConsoleAssistantMessage[];
@@ -586,7 +682,7 @@ function BackgroundActivityGroup({
   );
 }
 
-function ToolActivityGroup({
+function ToolActivityGroupImpl({
   steps,
   activeToolStepId,
   progress
@@ -638,7 +734,7 @@ function ToolActivityGroup({
           <ToolStepRow
             key={step.step_id}
             step={step}
-            progress={step.step_id === activeToolStepId ? progress : []}
+            progress={step.step_id === activeToolStepId ? progress : EMPTY_PROGRESS}
           />
         ))}
       </div>
@@ -646,7 +742,7 @@ function ToolActivityGroup({
   );
 }
 
-function ToolStepRow({
+function ToolStepRowImpl({
   step,
   progress = []
 }: {
