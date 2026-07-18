@@ -50,7 +50,7 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	input := rushestools.UnderstandInput{AssetIDs: []string{assetID}, Depth: "deep"}
-	queued, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
+	queued, err := executeUnderstand(service, t.Context(), draftID, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestUnderstandJobEvidenceAndTerminalReuseSelectJobSpecificSummary(t *testin
 	input := rushestools.UnderstandInput{
 		AssetIDs: []string{assetID}, Focus: "只识别 logo 颜色", Depth: "deep",
 	}
-	queued, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
+	queued, err := executeUnderstand(service, t.Context(), draftID, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestUnderstandJobEvidenceAndTerminalReuseSelectJobSpecificSummary(t *testin
 		t.Fatalf("长 tag 后 evidence runes=%d budget=%d",
 			len([]rune(message.Content)), agentexec.UnderstandJobEvidenceRuneBudget)
 	}
-	repeated, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
+	repeated, err := executeUnderstand(service, t.Context(), draftID, input)
 	if err != nil || repeated.JobID != queued.JobID || repeated.Status != "completed" ||
 		len(repeated.Summaries) != 1 || repeated.Summaries[0].Overall != currentMarker {
 		t.Fatalf("terminal reuse=%#v err=%v", repeated, err)

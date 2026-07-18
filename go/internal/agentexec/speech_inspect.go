@@ -1314,7 +1314,7 @@ func ClampSpeechRangeToClip(clip timeline.Clip, start, end int) (int, int, bool)
 	return clampedStart, clampedEnd, clampedStart != start || clampedEnd != end
 }
 
-func (exec *Executor) ToolInspectSpeech(
+func (exec *Executor) toolInspectSpeech(
 	ctx context.Context,
 	draftID string,
 	input rushestools.SpeechInspectInput,

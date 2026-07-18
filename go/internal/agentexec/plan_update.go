@@ -18,7 +18,7 @@ const (
 	PlanUpdateMaxAttempts = 3
 )
 
-func (exec *Executor) ToolPlanUpdate(
+func (exec *Executor) toolPlanUpdate(
 	ctx context.Context,
 	draftID string,
 	input rushestools.PlanUpdateInput,

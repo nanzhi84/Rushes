@@ -49,7 +49,7 @@ func TestSpeechInspectSkipsOnlyChunksWithoutWords(t *testing.T) {
 	}
 	recognizer := &fakeSpeechRecognizer{noWordsCalls: map[int]bool{1: true}}
 	exec.SetSpeechRecognizer(recognizer)
-	result, err := exec.ToolInspectSpeech(t.Context(), "draft_speech_partial", rushestools.SpeechInspectInput{
+	result, err := exec.toolInspectSpeech(t.Context(), "draft_speech_partial", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_partial", Language: "zh",
 	})
 	if err != nil {
@@ -78,17 +78,17 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := exec.ToolInspectSpeech(
+	if _, err := exec.toolInspectSpeech(
 		t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{},
 	); err == nil {
 		t.Fatal("缺少 asset_id/timeline_clip_id 应失败")
 	}
-	if _, err := exec.ToolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+	if _, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
 		AssetID: "missing",
 	}); err == nil {
 		t.Fatal("未知素材应失败")
 	}
-	first, err := exec.ToolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+	first, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_sidecar", IncludeSimilar: BoolPointer(true), IncludePauses: BoolPointer(false),
 	})
 	if err != nil {
@@ -106,7 +106,7 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 			t.Fatalf("usage note missing %q: %s", required, first.UsageNote)
 		}
 	}
-	second, err := exec.ToolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+	second, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_sidecar", Query: "第一句", MaxUtterances: 1,
 	})
 	if err != nil {
@@ -115,7 +115,7 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 	if !second.CacheHit || len(second.Utterances) != 1 || !second.Truncated {
 		t.Fatalf("second=%#v", second)
 	}
-	refreshed, err := exec.ToolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+	refreshed, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_sidecar", ForceRefresh: true,
 	})
 	if err != nil {
@@ -139,14 +139,14 @@ func TestSpeechInspectUsesChunkedRecognizerWithoutSidecar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := exec.ToolInspectSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechInspectInput{
+	if _, err := exec.toolInspectSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_asr",
 	}); err == nil {
 		t.Fatal("无 sidecar 且未配置 ASR 应失败")
 	}
 	recognizer := &fakeSpeechRecognizer{}
 	exec.SetSpeechRecognizer(recognizer)
-	result, err := exec.ToolInspectSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechInspectInput{
+	result, err := exec.toolInspectSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_asr", Language: "zh",
 	})
 	if err != nil {

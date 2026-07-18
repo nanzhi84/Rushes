@@ -86,7 +86,7 @@ func (exec *Executor) ToolListAssets(
 	return result, nil
 }
 
-func (exec *Executor) ToolUnderstand(
+func (exec *Executor) toolUnderstand(
 	ctx context.Context,
 	draftID string,
 	input rushestools.UnderstandInput,

@@ -945,11 +945,11 @@ func TestCompletedPreviewObservationIncludesStructuredVerificationReport(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	planResult, err := service.executor.ToolPlanUpdate(t.Context(), "draft_job_report", rushestools.PlanUpdateInput{
+	planResult := executePlanUpdate(t, service, "draft_job_report", rushestools.PlanUpdateInput{
 		Plan: map[string]any{}, Contract: &rushestools.ContentPlanContract{TargetDurationFrames: 30},
 	})
-	if err != nil || planResult.Status != "succeeded" {
-		t.Fatalf("plan=%#v err=%v", planResult, err)
+	if planResult.Status != "succeeded" {
+		t.Fatalf("plan=%#v", planResult)
 	}
 	document, err := timeline.ComposeInitial("draft_job_report", 1, []timeline.Selection{{
 		AssetID: "fixture", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",

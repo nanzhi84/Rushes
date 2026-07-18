@@ -470,9 +470,15 @@ func TestValidateTimelineSoftSkipsBrokenQualityReport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	validated, err := service.executor.ToolValidateTimeline(t.Context(), "draft_validate_softskip")
+	validatedRaw, err := service.ExecuteTool(
+		rushestools.WithDraftID(t.Context(), "draft_validate_softskip"), "timeline.validate", rushestools.TimelineValidateInput{},
+	)
 	if err != nil {
 		t.Fatalf("validate 应软跳过质检读取失败，却返回错误：%v", err)
+	}
+	validated, ok := validatedRaw.(rushestools.ToolResult)
+	if !ok {
+		t.Fatalf("timeline.validate 返回类型异常: %T", validatedRaw)
 	}
 	if validated.Status != "succeeded" {
 		t.Fatalf("validate status=%q，期望 succeeded（结构合法的时间线不应因质检读取失败降级）", validated.Status)
