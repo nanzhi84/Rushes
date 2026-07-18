@@ -37,6 +37,7 @@ func TestDestructiveConfirmationInterceptor(t *testing.T) {
 		{"纯新增豁免（不带 remove_keys）", context.Background(), destructive, addInput, false},
 		{"删记忆但持确认凭证放行", confirmedCtx, destructive, removeInput, false},
 		{"未来删除类工具默认按破坏性拦", context.Background(), futureDelete, rushestools.MemoryUpdateInput{}, true},
+		{"memory.update 输入类型异常 fail-closed 拦", context.Background(), destructive, "not-a-memory-input", true},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -58,7 +59,8 @@ func TestInterceptorRejectionMiddlewareSkipsRecoveryBudget(t *testing.T) {
 	state := newToolRecoveryState()
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
-	// 用一个「重试安全」的工具名，证明策略拒绝即便对可重试工具也不触发重试。
+	// 重试安全工具 + 非 transient 文案：策略拒绝走结构性短路（isInterceptorRejection）不进重试；
+	// 文案恰好含 transient 词的结构性保证另见 TestInterceptorRejectionNotRetriedOnTransientText。
 	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
 		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 			calls++
@@ -80,6 +82,32 @@ func TestInterceptorRejectionMiddlewareSkipsRecoveryBudget(t *testing.T) {
 	// 关键：不消耗恢复预算——既不记失败链，harness_recovery 也不该出现（未走 decorateToolFailure）。
 	if state.unresolved() || data["harness_recovery"] != nil {
 		t.Fatalf("策略拒绝不得计入恢复账: unresolved=%v data=%#v", state.unresolved(), data)
+	}
+}
+
+// TestInterceptorRejectionNotRetriedOnTransientText 锁死「被拦≠重试」的结构性保证：即便工具
+// 本身重试安全、且拒绝文案恰好含 transient 词（timed out），isInterceptorRejection 短路也让它
+// 绝不重试。若退回按文案判定，asset.list_assets 这种只读工具上的拦截器就会误触发多次重试。
+func TestInterceptorRejectionNotRetriedOnTransientText(t *testing.T) {
+	t.Parallel()
+	state := newToolRecoveryState()
+	ctx := withToolRecoveryState(t.Context(), state)
+	calls := 0
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+			calls++
+			return nil, &rushestools.InterceptorRejection{
+				Observation: "confirmation required (request timed out)",
+				Data:        map[string]any{"error_code": "confirmation_required"},
+			}
+		},
+	)
+	output, err := endpoint(ctx, &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`})
+	if err != nil || calls != 1 {
+		t.Fatalf("含 transient 词的策略拒绝也不得重试: calls=%d err=%v", calls, err)
+	}
+	if decodeRecoveryPayload(t, output.Result)["status"] != "failed" || state.unresolved() {
+		t.Fatal("拒绝应回灌结构化提示且不记恢复账")
 	}
 }
 

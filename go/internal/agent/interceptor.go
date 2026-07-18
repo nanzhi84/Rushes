@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -43,10 +44,21 @@ func inputIsDestructive(name string, input any) bool {
 	switch name {
 	case "memory.update":
 		update, ok := input.(rushestools.MemoryUpdateInput)
-		return ok && len(update.RemoveKeys) > 0
+		if !ok {
+			// 类型断言失败是意外情形；安全闸门默认方向必须 fail-closed，交由确认。
+			return true
+		}
+		return len(update.RemoveKeys) > 0
 	default:
 		return true
 	}
+}
+
+// isInterceptorRejection 报告 err 是否为拦截器的策略拒绝。恢复中间件据此在重试判定里对拒绝
+// 做结构性短路（与 context.Canceled 同级），不依赖拒绝文案是否恰好含 transient 词。
+func isInterceptorRejection(err error) bool {
+	var rejection *rushestools.InterceptorRejection
+	return errors.As(err, &rejection)
 }
 
 // marshalInterceptorRejection 把策略拒绝渲染成模型可读的结构化工具结果；状态用 failed，让

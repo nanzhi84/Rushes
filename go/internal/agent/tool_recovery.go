@@ -429,7 +429,8 @@ func retrySafeFromEffect(effectOf func(string) (rushestools.Effect, bool)) func(
 // with identical arguments cannot heal and only hides useful feedback from the model.
 func toolErrorCanRetry(retrySafe func(string) bool, name string, err error) bool {
 	if err == nil || !retrySafe(name) ||
-		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		isInterceptorRejection(err) {
 		return false
 	}
 	var networkError net.Error
