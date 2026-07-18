@@ -49,7 +49,7 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 		registerAssetImport, registerAssetList, registerUnderstand, registerShotSearch, registerAudioBeatAnalysis,
 		registerSpeechPauseAnalysis, registerSpeechInspect, registerAskUser,
 		registerDecisionAnswer, registerPlanUpdate, registerMemoryUpdate,
-		registerComposeInitial, registerApplyPatch, registerApplyPatchBatch,
+		registerComposeInitial, registerApplyPatchBatch,
 		registerBeatRecut, registerTalkingHeadEdit,
 		registerTimelineValidate, registerTimelineInspect, registerRenderPreview,
 		registerRenderFinal, registerRenderStatus, registerInspectPreview,
@@ -478,10 +478,6 @@ func registerComposeInitial(registry *Registry) error {
 	return addTool[ComposeInitialInput, ToolResult](registry, "timeline.compose_initial", "按整数帧源区间组装时间线；只传入 video/image 主视觉素材，不能传 audio/font；先从 asset.list_assets 读取 kind、duration_frames 与 timeline_fps", []string{"usable_asset_exists"}, ExposureLLM, false)
 }
 
-func registerApplyPatch(registry *Registry) error {
-	return addTool[TimelinePatchInput, ToolResult](registry, "timeline.apply_patch", "对当前时间线应用一个语义补丁；从 op.oneOf 选择 kind 和字段，编辑片段前先用 timeline.inspect 读取真实 ID", []string{"timeline_exists"}, ExposureLLM, false)
-}
-
 func registerApplyPatchBatch(registry *Registry) error {
 	return addTool[TimelinePatchBatchInput, ToolResult](
 		registry,
@@ -504,7 +500,7 @@ func registerTalkingHeadEdit(registry *Registry) error {
 	return addTool[TalkingHeadEditInput, ToolResult](
 		registry,
 		"timeline.edit_talking_head",
-		"按模型已经选定的 utterance_id、pause/repetition/fragment 决定、连续 word_id 范围和 b_roll shot_id 原子剪辑口播。模型结合两侧原文自主选择 remove/preserve；工具只校验稳定 ID 与合法范围、波纹删除整句/句内卡壳/气口，并把 B-roll 放到独立叠加轨。B-roll 的 utterance、anchor_text 或 word_id 必须以本次全部删除决定展开后的保留台词为准：anchor_text 要从 speech.inspect 原文逐字复制，不能包含同次将删除的卡壳、重复词或短片段。短镜头可用保留 utterance 内的唯一连续 anchor_text，或直接使用保留的 start/end_word_id。若删气口会把保留台词夹成不足 0.8 秒的孤立碎片，工具会保守撤回最短的相邻气口删除并在 auto_preserved_pause_ids 中报告；纯语义删除造成的孤片仍会失败。未处理的内容候选作为非阻塞证据随成功结果返回，工具不替模型判断内容好坏",
+		"按模型已经选定的 utterance_id、pause/repetition/fragment 决定、连续 word_id 范围和 b_roll shot_id 原子剪辑口播。模型结合两侧原文自主选择 remove/preserve；工具只校验稳定 ID 与合法范围、波纹删除整句/句内卡壳/气口，并把 B-roll 放到独立叠加轨。B-roll 的 utterance、anchor_text 或 word_id 必须以本次全部删除决定展开后的保留台词为准：anchor_text 要从 speech.inspect 原文逐字复制，不能包含同次将删除的卡壳、重复词或短片段。短镜头可用保留 utterance 内的唯一连续 anchor_text，或直接使用保留的 start/end_word_id。若删气口会把保留台词夹成不足 2 秒的孤立碎片，工具会保守撤回最短的相邻气口删除并在 auto_preserved_pause_ids 中报告；语义删除造成的孤片或落在口误证据上的保留岛会失败，并在 island_counter_proposals 里给出可直接采纳的合并删除区间。未处理的内容候选作为非阻塞证据随成功结果返回，工具不替模型判断内容好坏",
 		[]string{"timeline_exists"}, ExposureLLM, false,
 	)
 }

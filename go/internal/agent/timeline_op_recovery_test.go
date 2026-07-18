@@ -19,9 +19,9 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 	t.Run("clip_not_found", func(t *testing.T) {
 		service, database, ctx := timelineOpRecoveryFixture(t, "draft_semantic_missing")
 		before, _ := timeline.Latest(t.Context(), database, "draft_semantic_missing")
-		raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: rushestools.TimelineOp{
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "delete_clip", "timeline_clip_id": "clip_missing",
-		}})
+		}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -40,10 +40,10 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 
 	t.Run("frame_range", func(t *testing.T) {
 		service, _, ctx := timelineOpRecoveryFixture(t, "draft_semantic_range")
-		raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: rushestools.TimelineOp{
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "trim_clip_edge", "timeline_clip_id": "clip_v1_001",
 			"timeline_frame": 60, "edge": "end",
-		}})
+		}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -59,9 +59,9 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 	t.Run("reorder_clip_not_found", func(t *testing.T) {
 		service, database, ctx := timelineOpRecoveryFixture(t, "draft_reorder_missing")
 		before, _ := timeline.Latest(t.Context(), database, "draft_reorder_missing")
-		raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: rushestools.TimelineOp{
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "reorder_clip", "timeline_clip_id": "missing", "target_frame": 0,
-		}})
+		}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,9 +79,9 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 
 	t.Run("reorder_frame_range", func(t *testing.T) {
 		service, _, ctx := timelineOpRecoveryFixture(t, "draft_reorder_range")
-		raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: rushestools.TimelineOp{
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "reorder_clip", "timeline_clip_id": "clip_v1_001", "target_frame": 61,
-		}})
+		}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -97,9 +97,9 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 	t.Run("split_frame_range", func(t *testing.T) {
 		service, database, ctx := timelineOpRecoveryFixture(t, "draft_split_range")
 		before, _ := timeline.Latest(t.Context(), database, "draft_split_range")
-		raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: rushestools.TimelineOp{
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "split_clip", "timeline_clip_id": "clip_v1_001", "split_frame": 60,
-		}})
+		}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -118,14 +118,14 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 
 	t.Run("locked_track", func(t *testing.T) {
 		service, _, ctx := timelineOpRecoveryFixture(t, "draft_semantic_locked")
-		if raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: rushestools.TimelineOp{
+		if raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "set_track_state", "track_id": "visual_base", "locked": true,
-		}}); err != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
+		}}}); err != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
 			t.Fatalf("lock result=%#v err=%v", raw, err)
 		}
-		raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: rushestools.TimelineOp{
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 1.25,
-		}})
+		}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -156,9 +156,9 @@ func TestLinkedSplitRangeFailureReturnsFailedMemberFacts(t *testing.T) {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
 	}
 	before, _ := timeline.Latest(t.Context(), database, "draft_linked_split_range")
-	raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: rushestools.TimelineOp{
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "split_clip", "timeline_clip_id": "clip_v2_001", "split_frame": 30,
-	}})
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,15 +186,15 @@ func TestLinkedLockedTrackFailureReturnsSemanticJITAndPreservesTimeline(t *testi
 	if result, persistErr := service.persistTimeline(t.Context(), "draft_semantic_linked_lock", document, "linked_fixture"); persistErr != nil || result.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", result, persistErr)
 	}
-	if raw, lockErr := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: rushestools.TimelineOp{
+	if raw, lockErr := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "set_track_state", "track_id": "original_audio", "locked": true,
-	}}); lockErr != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
+	}}}); lockErr != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
 		t.Fatalf("lock=%#v err=%v", raw, lockErr)
 	}
 	before, _ := timeline.Latest(t.Context(), database, "draft_semantic_linked_lock")
-	raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{Op: rushestools.TimelineOp{
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "trim_clip_edge", "timeline_clip_id": "clip_v2_001", "timeline_frame": 30, "edge": "end",
-	}})
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +258,7 @@ func TestFailureDecorationIncludesRemainingToolRoundsOnlyOnFailure(t *testing.T)
 	ctx := withTurnBudgetState(t.Context(), budget)
 	budget.beginModelCall()
 	budget.beginModelCall()
-	raw := decorateToolFailure(ctx, &compose.ToolInput{Name: "timeline.apply_patch", Arguments: `{}`},
+	raw := decorateToolFailure(ctx, &compose.ToolInput{Name: "timeline.apply_patches", Arguments: `{}`},
 		`{"status":"failed","observation":"bad"}`, 1)
 	var payload map[string]any
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
@@ -281,12 +281,10 @@ func TestApplyPatchFieldFailureReturnsExactJITSchemaAndExample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{
-		Op: map[string]any{
-			"kind": "trim_clip_edge", "timeline_clip_id": "clip_v1_001",
-			"target_frame": float64(10), "edge": "end",
-		},
-	})
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+		"kind": "trim_clip_edge", "timeline_clip_id": "clip_v1_001",
+		"target_frame": float64(10), "edge": "end",
+	}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,9 +320,7 @@ func TestApplyPatchFieldFailureReturnsExactJITSchemaAndExample(t *testing.T) {
 func TestApplyPatchUnknownKindReturnsOnlyNineteenEntryCatalog(t *testing.T) {
 	t.Parallel()
 	service, _, ctx := timelineOpRecoveryFixture(t, "draft_op_jit_unknown")
-	raw, err := service.ExecuteTool(ctx, "timeline.apply_patch", rushestools.TimelinePatchInput{
-		Op: map[string]any{"kind": "remove_clip", "timeline_clip_id": "clip_v1_001"},
-	})
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{"kind": "remove_clip", "timeline_clip_id": "clip_v1_001"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

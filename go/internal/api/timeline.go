@@ -57,22 +57,20 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 		tools.WithDraftID(request.Context(), draftID),
 		"manual",
 	)
-	toolName := "timeline.apply_patch"
-	var toolInput any = tools.TimelinePatchInput{Op: tools.TimelineOp(payload.Op)}
+	operations := []map[string]any{map[string]any(payload.Op)}
 	if kind, _ := payload.Op["kind"].(string); kind == "batch" {
-		operations, valid := timelinePatchOperations(payload.Op["ops"])
-		if !valid || len(operations) == 0 || len(operations) > 100 {
+		expanded, valid := timelinePatchOperations(payload.Op["ops"])
+		if !valid || len(expanded) == 0 || len(expanded) > 100 {
 			writeBadRequest(writer, "timeline_patch_invalid")
 			return
 		}
-		toolName = "timeline.apply_patches"
-		typedOperations := make([]tools.TimelineOp, len(operations))
-		for index := range operations {
-			typedOperations[index] = tools.TimelineOp(operations[index])
-		}
-		toolInput = tools.TimelinePatchBatchInput{Ops: typedOperations}
+		operations = expanded
 	}
-	raw, err := server.agent.ExecuteTool(ctx, toolName, toolInput)
+	typedOperations := make([]tools.TimelineOp, len(operations))
+	for index := range operations {
+		typedOperations[index] = tools.TimelineOp(operations[index])
+	}
+	raw, err := server.agent.ExecuteTool(ctx, "timeline.apply_patches", tools.TimelinePatchBatchInput{Ops: typedOperations})
 	if err != nil {
 		writeBadRequest(writer, "timeline_patch_invalid: "+err.Error())
 		return

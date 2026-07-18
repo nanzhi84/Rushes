@@ -918,6 +918,7 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 	if err != nil {
 		return "", err
 	}
+	ctx = withConfirmedToolReplay(ctx)
 	output, err := service.executeReported(ctx, item.DraftID, name, input)
 	if err != nil {
 		return "", err

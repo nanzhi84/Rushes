@@ -20,11 +20,10 @@ type talkingHeadRange struct {
 }
 
 const (
-	maxTalkingHeadUnvoicedBridgeFrames   = 12
-	minTalkingHeadRetainedFragmentFrames = 24
-	minTalkingHeadPauseCandidateFrames   = 12
-	minTalkingHeadPauseResidualFrames    = 5
-	minTalkingHeadBrollDurationFrames    = timeline.DefaultFPS / 2
+	maxTalkingHeadUnvoicedBridgeFrames = 12
+	minTalkingHeadPauseCandidateFrames = 12
+	minTalkingHeadPauseResidualFrames  = 5
+	minTalkingHeadBrollDurationFrames  = timeline.DefaultFPS / 2
 )
 
 func (service *Service) toolEditTalkingHead(
@@ -271,10 +270,11 @@ func (service *Service) toolEditTalkingHead(
 	retainedSpeech := talkingHeadRetainedSpeechRanges(
 		utterances, removedIDSet, removedWordIDSet, selectedClip,
 	)
+	misspeakEvidence := talkingHeadMisspeakEvidence(repetitions, shortFragments, selectedClip)
 	removedPauses, effectivePauseRanges, sourceDeleteRanges, autoPreservedPauses, orphanFragments :=
 		protectTalkingHeadOrphanFragments(
 			semanticDeleteRanges, removedPauses, pauses, retainedSpeech, utterances,
-			removedIDSet, removedWordIDSet, selectedClip,
+			removedIDSet, removedWordIDSet, selectedClip, misspeakEvidence,
 		)
 	if len(sourceDeleteRanges) == 0 && len(input.BrollAssignments) == 0 {
 		message := "本次没有可安全应用的实际编辑"
@@ -290,11 +290,13 @@ func (service *Service) toolEditTalkingHead(
 		})
 	}
 	if len(orphanFragments) > 0 {
-		return failed("组合删除会把保留语音夹成不足 0.8 秒的孤立碎片", map[string]any{
-			"orphan_fragments":                 orphanFragments,
-			"auto_preserved_pause_ids":         speechPauseIDs(autoPreservedPauses),
-			"minimum_retained_fragment_frames": minTalkingHeadRetainedFragmentFrames,
-			"recovery":                         "剩余孤片两侧没有可机械撤回的气口。逐项查看 retained_text：若该词应保留，撤回相邻语义删除；若它本身是口误，则用 speech.inspect(include_words=true) 取得连续 word_id 后明确删除。不要原样重试。",
+		counterProposals := talkingHeadIslandCounterProposals(orphanFragments, utterances)
+		return failed("组合删除会把保留台词夹成不足 2 秒或落在口误证据上的孤立碎片", map[string]any{
+			"orphan_fragments":               orphanFragments,
+			"island_counter_proposals":       counterProposals,
+			"auto_preserved_pause_ids":       speechPauseIDs(autoPreservedPauses),
+			"minimum_retained_island_frames": minTalkingHeadRetainedIslandFrames,
+			"recovery":                       "优先采纳 island_counter_proposals：把 merged_delete_source_start_frame..merged_delete_source_end_frame 或 island_start_word_id/island_end_word_id 一并加入删除，清掉这段碎片；若这段其实是你要保留的完整台词，则改为撤回它两侧的相邻删除，让它与前后文连成不小于 2 秒的连续片段。不要原样重试，也不要只把删除缩到刚好过阈值。",
 		})
 	}
 	unresolvedPauses := []rushestools.SpeechPauseEvidence{}
@@ -557,7 +559,7 @@ func (service *Service) toolEditTalkingHead(
 	)
 	if len(autoPreservedPauses) > 0 {
 		result.Observation += fmt.Sprintf(
-			" 为避免保留台词变成不足 0.8 秒的孤片，已保守保留 %d 个相邻气口。",
+			" 为避免保留台词变成不足 2 秒的孤片，已保守保留 %d 个相邻气口。",
 			len(autoPreservedPauses),
 		)
 	}
@@ -582,6 +584,16 @@ func (service *Service) toolEditTalkingHead(
 	)
 	result.Data["deleted_timeline_ranges"] = deleteRanges
 	result.Data["b_roll_clips"] = inserted
+	if drift := talkingHeadPlanDrift(ctx, autoPreservedPauses, utterances); drift != nil {
+		result.Data["plan_drift"] = drift
+		result.Observation += " " + drift["summary"].(string)
+	}
+	// 时间线此时已持久化成功，质检报告只是增强：读取失败时跳过附加，
+	// 不把成功的编辑伪装成失败去诱导模型重试（timeline.validate 仍是持久验收面）。
+	if quality, qualityErr := service.speechQualityReport(ctx, document); qualityErr == nil {
+		result.Data["speech_quality"] = quality
+		result.Observation += talkingHeadQualitySummary(quality)
+	}
 	return result, nil
 }
 
@@ -795,7 +807,7 @@ func resolveTalkingHeadPauseRanges(
 }
 
 // protectTalkingHeadOrphanFragments conservatively retracts only pause deletions
-// when they are the mechanical reason retained speech would become a sub-0.8s
+// when they are the mechanical reason retained speech would become a sub-2s
 // island. Semantic removals remain model decisions and are never changed here.
 func protectTalkingHeadOrphanFragments(
 	semanticDeletions []talkingHeadRange,
@@ -806,6 +818,7 @@ func protectTalkingHeadOrphanFragments(
 	removedUtterances map[string]struct{},
 	removedWords map[string]struct{},
 	clip timeline.Clip,
+	misspeakEvidence []talkingHeadEvidenceRange,
 ) (
 	effectivePauses []speechPause,
 	effectivePauseRanges []talkingHeadRange,
@@ -849,7 +862,8 @@ func protectTalkingHeadOrphanFragments(
 		orphanFragments = talkingHeadOrphanSpeechFragments(
 			sourceDeleteRanges, retainedSpeech, utterances,
 			removedUtterances, removedWords, effectivePauses,
-			clip.SourceStartFrame, clip.SourceEndFrame, minTalkingHeadRetainedFragmentFrames,
+			clip.SourceStartFrame, clip.SourceEndFrame, minTalkingHeadRetainedIslandFrames,
+			misspeakEvidence,
 		)
 		if len(orphanFragments) == 0 {
 			return effectivePauses, effectivePauseRanges, sourceDeleteRanges,
@@ -1554,6 +1568,7 @@ func talkingHeadOrphanSpeechFragments(
 	removedWords map[string]struct{},
 	removedPauses []speechPause,
 	clipStart, clipEnd, minimumFrames int,
+	misspeakEvidence []talkingHeadEvidenceRange,
 ) []map[string]any {
 	if minimumFrames <= 0 || clipEnd <= clipStart {
 		return nil
@@ -1593,9 +1608,23 @@ func talkingHeadOrphanSpeechFragments(
 	}
 	result := []map[string]any{}
 	for _, fragment := range fragments {
-		duration := fragment.rangeValue.End - fragment.rangeValue.Start
-		if duration >= minimumFrames || !talkingHeadRangeOverlapsAny(fragment.rangeValue, retainedSpeech) {
+		if !talkingHeadRangeOverlapsAny(fragment.rangeValue, retainedSpeech) {
 			continue
+		}
+		// 只有被删除区间从两侧夹住的保留片段才算"孤岛"；开头或结尾的短片段有一侧连着
+		// 素材边界、在时间线上与相邻内容相接，不视为孤立碎片。
+		if fragment.leftDelete == nil || fragment.rightDelete == nil {
+			continue
+		}
+		duration := fragment.rangeValue.End - fragment.rangeValue.Start
+		misspeakIDs := talkingHeadIslandMisspeakMatches(fragment.rangeValue, misspeakEvidence)
+		tooShort := duration < minimumFrames
+		if len(misspeakIDs) == 0 && !tooShort {
+			continue
+		}
+		reason := "too_short"
+		if len(misspeakIDs) > 0 {
+			reason = "lands_on_misspeak_evidence"
 		}
 		adjacentRanges := []talkingHeadRange{}
 		if fragment.leftDelete != nil {
@@ -1604,23 +1633,32 @@ func talkingHeadOrphanSpeechFragments(
 		if fragment.rightDelete != nil {
 			adjacentRanges = append(adjacentRanges, *fragment.rightDelete)
 		}
+		// 落在口误证据上的孤岛应当被删除而非并入保留内容，因此不给它可机械撤回的
+		// 相邻气口；防护循环只对纯粹过短的好台词尝试撤回气口来消解孤岛。
 		adjacentPauseIDs := []string{}
-		for _, pause := range removedPauses {
-			if pause.DeleteEnd == fragment.rangeValue.Start || pause.DeleteStart == fragment.rangeValue.End {
-				adjacentPauseIDs = append(adjacentPauseIDs, pause.ID)
+		if reason == "too_short" {
+			for _, pause := range removedPauses {
+				if pause.DeleteEnd == fragment.rangeValue.Start || pause.DeleteStart == fragment.rangeValue.End {
+					adjacentPauseIDs = append(adjacentPauseIDs, pause.ID)
+				}
 			}
 		}
-		result = append(result, map[string]any{
+		item := map[string]any{
 			"source_start_frame": fragment.rangeValue.Start,
 			"source_end_frame":   fragment.rangeValue.End,
 			"duration_frames":    duration,
+			"reason":             reason,
 			"retained_text": talkingHeadTranscriptText(
 				utterances, fragment.rangeValue.Start, fragment.rangeValue.End,
 				removedUtterances, removedWords,
 			),
 			"adjacent_deleted_ranges": adjacentRanges,
 			"adjacent_pause_ids":      adjacentPauseIDs,
-		})
+		}
+		if len(misspeakIDs) > 0 {
+			item["matched_evidence_ids"] = misspeakIDs
+		}
+		result = append(result, item)
 	}
 	return result
 }
@@ -1710,4 +1748,122 @@ func talkingHeadOverlayOverlaps(document timeline.Document, target talkingHeadRa
 		}
 	}
 	return false
+}
+
+type talkingHeadEvidenceRange struct {
+	ID    string
+	Start int
+	End   int
+}
+
+// talkingHeadMisspeakEvidence 汇总落在当前 clip 内的口误证据源区间（句内重复的两遍
+// 说法与短语音/重说残片），用于判断保留孤岛本身是否就是一段应删的口误。
+func talkingHeadMisspeakEvidence(
+	repetitions []rushestools.SpeechRepetitionEvidence,
+	fragments []rushestools.SpeechFragmentEvidence,
+	clip timeline.Clip,
+) []talkingHeadEvidenceRange {
+	result := []talkingHeadEvidenceRange{}
+	within := func(start, end int) bool {
+		return start >= clip.SourceStartFrame && end <= clip.SourceEndFrame && end > start
+	}
+	for _, repetition := range repetitions {
+		if within(repetition.EarlierSourceStartFrame, repetition.EarlierSourceEndFrame) {
+			result = append(result, talkingHeadEvidenceRange{
+				ID:    repetition.RepetitionID + ":earlier",
+				Start: repetition.EarlierSourceStartFrame, End: repetition.EarlierSourceEndFrame,
+			})
+		}
+		if within(repetition.LaterSourceStartFrame, repetition.LaterSourceEndFrame) {
+			result = append(result, talkingHeadEvidenceRange{
+				ID:    repetition.RepetitionID + ":later",
+				Start: repetition.LaterSourceStartFrame, End: repetition.LaterSourceEndFrame,
+			})
+		}
+	}
+	for _, fragment := range fragments {
+		if within(fragment.SourceStartFrame, fragment.SourceEndFrame) {
+			result = append(result, talkingHeadEvidenceRange{
+				ID: fragment.FragmentID, Start: fragment.SourceStartFrame, End: fragment.SourceEndFrame,
+			})
+		}
+	}
+	return result
+}
+
+// talkingHeadIslandMisspeakMatches 返回把该保留孤岛过半覆盖的口误证据 ID：只有当单条
+// 证据覆盖孤岛的多数时长时，才认定"孤岛本身就是口误"，避免误伤内部仅含少量重复的
+// 完整长句。
+func talkingHeadIslandMisspeakMatches(
+	island talkingHeadRange,
+	evidence []talkingHeadEvidenceRange,
+) []string {
+	islandDuration := island.End - island.Start
+	if islandDuration <= 0 {
+		return nil
+	}
+	ids := []string{}
+	for _, candidate := range evidence {
+		overlap := min(island.End, candidate.End) - max(island.Start, candidate.Start)
+		if overlap > 0 && overlap*2 >= islandDuration {
+			ids = append(ids, candidate.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// talkingHeadIslandCounterProposals 为每个孤岛给出"并入相邻删除"的合并区间与可直接
+// 采纳的删除锚点，让模型确认删掉这段碎片，而不是自行发明绕过防护的缩删方式。
+func talkingHeadIslandCounterProposals(
+	orphanFragments []map[string]any,
+	utterances []speechUtterance,
+) []map[string]any {
+	result := make([]map[string]any, 0, len(orphanFragments))
+	for _, orphan := range orphanFragments {
+		islandStart, _ := orphan["source_start_frame"].(int)
+		islandEnd, _ := orphan["source_end_frame"].(int)
+		merged := talkingHeadRange{Start: islandStart, End: islandEnd}
+		if adjacent, ok := orphan["adjacent_deleted_ranges"].([]talkingHeadRange); ok {
+			for _, deletion := range adjacent {
+				merged.Start = min(merged.Start, deletion.Start)
+				merged.End = max(merged.End, deletion.End)
+			}
+		}
+		proposal := map[string]any{
+			"island_source_start_frame":        islandStart,
+			"island_source_end_frame":          islandEnd,
+			"island_duration_frames":           orphan["duration_frames"],
+			"island_text":                      orphan["retained_text"],
+			"reason":                           orphan["reason"],
+			"merged_delete_source_start_frame": merged.Start,
+			"merged_delete_source_end_frame":   merged.End,
+		}
+		if startWordID, endWordID, ok := talkingHeadIslandWordRange(utterances, islandStart, islandEnd); ok {
+			proposal["island_start_word_id"] = startWordID
+			proposal["island_end_word_id"] = endWordID
+		}
+		if ids, ok := orphan["matched_evidence_ids"].([]string); ok && len(ids) > 0 {
+			proposal["matched_evidence_ids"] = ids
+		}
+		result = append(result, proposal)
+	}
+	return result
+}
+
+// talkingHeadIslandWordRange 返回完整落在孤岛内的首尾 word_id，供模型用 remove_word_ranges
+// 直接采纳 counter-proposal；无词级证据时返回 ok=false。
+func talkingHeadIslandWordRange(utterances []speechUtterance, start, end int) (string, string, bool) {
+	startID, endID := "", ""
+	for _, utterance := range utterances {
+		for _, word := range utterance.Words {
+			if word.StartFrame >= start && word.EndFrame <= end {
+				if startID == "" {
+					startID = word.ID
+				}
+				endID = word.ID
+			}
+		}
+	}
+	return startID, endID, startID != "" && endID != ""
 }

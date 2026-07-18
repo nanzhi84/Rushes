@@ -965,6 +965,7 @@ const TOOL_STEP_LABELS: Record<string, string> = {
   "audio.analyze_beats": "分析音乐节拍",
   "audio.analyze_speech_pauses": "分析口播气口",
   "decision.answer": "记录你的回答",
+  // timeline.apply_patch 自 #100 起已从 LLM 工具面移除，此标签仅供历史轨迹展示回放，勿随工具删除清理。
   "timeline.apply_patch": "修改时间线",
   "timeline.apply_patches": "批量修改时间线",
   "timeline.recut_to_beats": "按节拍重剪",

@@ -301,10 +301,10 @@ func TestRegistryConfirmationValidationRejectsUnsafeTargets(t *testing.T) {
 		{name: "render.final_mp4", args: map[string]any{"orientation": nil}},
 		{name: "timeline.compose_initial", args: map[string]any{"clips": []any{map[string]any{}}}},
 		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{nil}}},
-		{name: "timeline.apply_patch", args: map[string]any{"op": map[string]any{}}},
-		{name: "timeline.apply_patch", args: map[string]any{"op": map[string]any{"kind": "delete_clip"}}},
-		{name: "timeline.apply_patch", args: map[string]any{"op": map[string]any{"kind": "unknown"}}},
-		{name: "timeline.apply_patch", args: map[string]any{"op": map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}}},
+		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{map[string]any{}}}},
+		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{map[string]any{"kind": "delete_clip"}}}},
+		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{map[string]any{"kind": "unknown"}}}},
+		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}}}},
 	} {
 		if err := registry.ValidateConfirmation(ctx, fixture.name, fixture.args); err == nil {
 			t.Errorf("ValidateConfirmation(%s) should fail", fixture.name)
@@ -440,9 +440,6 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		"plan.update": {
 			"RFC 7396", "reset=true", "跨回合",
 		},
-		"timeline.apply_patch": {
-			"op.oneOf", "timeline.inspect",
-		},
 		"timeline.apply_patches": {
 			"insert_clip", "delete_clip", "同一次调用", "BGM/SFX", "timeline.recut_to_beats",
 		},
@@ -481,10 +478,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := registry.Specs(false)
-	if len(core) != 21 {
+	if len(core) != 20 {
 		t.Fatalf("core tools=%d", len(core))
 	}
-	if len(registry.Specs(true)) != 23 {
+	if len(registry.Specs(true)) != 22 {
 		t.Fatalf("all tools=%d", len(registry.Specs(true)))
 	}
 	for _, spec := range registry.Specs(true) {
@@ -493,10 +490,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 			t.Fatalf("spec=%s info=%#v err=%v", spec.Name, info, infoErr)
 		}
 	}
-	if got := len(registry.EinoTools(false, false)); got != 20 {
+	if got := len(registry.EinoTools(false, false)); got != 19 {
 		t.Fatalf("LLM core tools=%d", got)
 	}
-	if got := len(registry.EinoTools(false, true)); got != 21 {
+	if got := len(registry.EinoTools(false, true)); got != 20 {
 		t.Fatalf("含 harness core tools=%d", got)
 	}
 
@@ -685,7 +682,7 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	allowed, _ = registry.Allowed(ctx, true)
-	for _, name := range []string{"timeline.apply_patch", "timeline.apply_patches", "timeline.recut_to_beats", "timeline.validate", "timeline.inspect", "render.preview", "render.final_mp4", "render.status"} {
+	for _, name := range []string{"timeline.apply_patches", "timeline.recut_to_beats", "timeline.validate", "timeline.inspect", "render.preview", "render.final_mp4", "render.status"} {
 		if !containsSpec(allowed, name) {
 			t.Fatalf("%s 未放行", name)
 		}

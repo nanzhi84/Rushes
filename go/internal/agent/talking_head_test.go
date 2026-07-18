@@ -794,7 +794,7 @@ func TestTalkingHeadOrphanSpeechFragmentsExposeAdjacentPauseEvidence(t *testing.
 	fragments := talkingHeadOrphanSpeechFragments(
 		[]talkingHeadRange{{Start: 78, End: 91}, {Start: 104, End: 116}},
 		retainedSpeech, utterances, map[string]struct{}{}, map[string]struct{}{}, pauses,
-		0, 120, 15,
+		0, 120, 15, nil,
 	)
 	if len(fragments) != 1 || fragments[0]["source_start_frame"] != 91 ||
 		fragments[0]["source_end_frame"] != 104 || fragments[0]["retained_text"] != "2015年。" ||
@@ -805,7 +805,7 @@ func TestTalkingHeadOrphanSpeechFragmentsExposeAdjacentPauseEvidence(t *testing.
 	fragments = talkingHeadOrphanSpeechFragments(
 		[]talkingHeadRange{{Start: 78, End: 91}},
 		retainedSpeech, utterances, map[string]struct{}{}, map[string]struct{}{}, pauses[:1],
-		0, 120, 15,
+		0, 120, 15, nil,
 	)
 	if len(fragments) != 0 {
 		t.Fatalf("撤回一侧气口后不应再形成孤立碎片: %#v", fragments)
@@ -818,10 +818,10 @@ func TestTalkingHeadOrphanSpeechFragmentsExposeAdjacentPauseEvidence(t *testing.
 		[]talkingHeadRange{{Start: 0, End: 120}, {Start: 139, End: 170}},
 		[]talkingHeadRange{{Start: 120, End: 139}}, []speechUtterance{orphanWord},
 		map[string]struct{}{}, map[string]struct{}{}, nil,
-		0, 200, minTalkingHeadRetainedFragmentFrames,
+		0, 200, minTalkingHeadRetainedIslandFrames, nil,
 	)
 	if len(fragments) != 1 || fragments[0]["retained_text"] != "自己" {
-		t.Fatalf("不足 0.8 秒的单词语音岛必须显式解决: %#v", fragments)
+		t.Fatalf("不足 2 秒的单词语音岛必须显式解决: %#v", fragments)
 	}
 }
 
@@ -842,7 +842,7 @@ func TestProtectTalkingHeadOrphanFragmentsRetractsOnlyAdjacentPause(t *testing.T
 		nil, pauses, pauses,
 		[]talkingHeadRange{{Start: 70, End: 78}, {Start: 91, End: 104}},
 		[]speechUtterance{utterance}, map[string]struct{}{}, map[string]struct{}{},
-		timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 120},
+		timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 120}, nil,
 	)
 	if len(orphans) != 0 || len(effective) != 1 || effective[0].ID != "pause_before_year" ||
 		len(autoPreserved) != 1 || autoPreserved[0].ID != "pause_after_year" ||
@@ -862,7 +862,7 @@ func TestProtectTalkingHeadOrphanFragmentsRetractsOnlyAdjacentPause(t *testing.T
 		[]talkingHeadRange{{Start: 0, End: 120}, {Start: 139, End: 170}}, nil, nil,
 		[]talkingHeadRange{{Start: 120, End: 139}}, []speechUtterance{semanticOnlyUtterance},
 		map[string]struct{}{}, map[string]struct{}{},
-		timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 200},
+		timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 200}, nil,
 	)
 	if len(autoPreserved) != 0 || len(orphans) != 1 || orphans[0]["retained_text"] != "自己" {
 		t.Fatalf("纯语义删除不能由工具擅自改写: autoPreserved=%#v orphans=%#v", autoPreserved, orphans)
