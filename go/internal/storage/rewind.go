@@ -75,36 +75,6 @@ func GetRewindRestoreResult(
 	return result, nil
 }
 
-func ListRewindCheckpoints(
-	ctx context.Context,
-	query Querier,
-	draftID string,
-	limit int,
-) ([]RewindCheckpoint, error) {
-	if limit <= 0 || limit > 50 {
-		limit = 50
-	}
-	rows, err := query.QueryContext(ctx, `
-		SELECT checkpoint_id,draft_id,trigger_kind,anchor_message_id,anchor_turn_id,anchor_event_id,
-			timeline_version,patch_id,decision_boundary,job_boundary,summary,clip_count,
-			duration_frames,track_count,created_at
-		FROM rewind_checkpoints WHERE draft_id=?
-		ORDER BY rowid DESC LIMIT ?`, draftID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	checkpoints := make([]RewindCheckpoint, 0, limit)
-	for rows.Next() {
-		checkpoint, scanErr := scanRewindCheckpoint(rows)
-		if scanErr != nil {
-			return nil, scanErr
-		}
-		checkpoints = append(checkpoints, checkpoint)
-	}
-	return checkpoints, rows.Err()
-}
-
 func GetRewindCheckpoint(
 	ctx context.Context,
 	query Querier,

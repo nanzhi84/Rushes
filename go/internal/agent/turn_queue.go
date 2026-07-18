@@ -155,6 +155,14 @@ func (queue *TurnQueue) CanEnqueue(draftID string) bool {
 }
 
 func (queue *TurnQueue) Enqueue(item QueueItem) bool {
+	return queue.enqueue(item, false)
+}
+
+// enqueue reserves a turn slot and hands the item to the draft worker. When
+// onlyIfIdle is set it enqueues only if the draft has no pending or running
+// turn; pendingCount is held under worker.mu across the whole turn lifecycle,
+// so concurrent idle-guarded enqueues of the same lost turn reserve at most one.
+func (queue *TurnQueue) enqueue(item QueueItem, onlyIfIdle bool) bool {
 	if item.DraftID == "" {
 		return false
 	}
@@ -174,6 +182,11 @@ func (queue *TurnQueue) Enqueue(item QueueItem) bool {
 	}
 	worker.mu.Lock()
 	if worker.canceling || worker.retired {
+		worker.mu.Unlock()
+		queue.mu.Unlock()
+		return false
+	}
+	if onlyIfIdle && worker.pendingCount > 0 {
 		worker.mu.Unlock()
 		queue.mu.Unlock()
 		return false
@@ -211,10 +224,38 @@ func (queue *TurnQueue) Enqueue(item QueueItem) bool {
 }
 
 func (queue *TurnQueue) EnqueueUserMessage(draftID, messageID, content string) bool {
-	return queue.Enqueue(QueueItem{
+	return queue.enqueue(userMessageItem(draftID, messageID, content), false)
+}
+
+// EnqueueUserMessageIfIdle enqueues a user-message turn only when the draft has
+// no pending or running turn. It converges a resend whose reducer transaction
+// committed but whose turn never started (crash / shutdown before enqueue):
+// same-key retries re-drive it, and the idle guard keeps concurrent retries
+// from starting a second turn.
+func (queue *TurnQueue) EnqueueUserMessageIfIdle(draftID, messageID, content string) bool {
+	return queue.enqueue(userMessageItem(draftID, messageID, content), true)
+}
+
+func userMessageItem(draftID, messageID, content string) QueueItem {
+	return QueueItem{
 		DraftID: draftID, Kind: QueueUserMessage, ItemID: messageID,
 		Payload: map[string]any{"message_id": messageID, "content": content},
-	})
+	}
+}
+
+// PendingCount reports the number of turns reserved (pending or running) for a
+// draft. pendingCount is incremented before the worker send and decremented
+// only after the turn finishes, so it has no gap between dequeue and execution.
+func (queue *TurnQueue) PendingCount(draftID string) int {
+	queue.mu.Lock()
+	worker := queue.workers[draftID]
+	queue.mu.Unlock()
+	if worker == nil {
+		return 0
+	}
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	return worker.pendingCount
 }
 
 func (queue *TurnQueue) EnqueueJobObservation(draftID, jobID string, event map[string]any) bool {

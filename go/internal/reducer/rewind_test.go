@@ -22,13 +22,13 @@ func TestRewindEditResendBranchesTimelineAndSoftShadowsConversation(t *testing.T
 	insertRewindTestMessage(t, database, draftID, "user-3", "第三轮")
 
 	// 收敛后只保留每条用户消息一个检查点：无 timeline_write 来源。
-	checkpoints, err := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-	if err != nil || len(checkpoints) != 3 {
-		t.Fatalf("checkpoints=%#v err=%v", checkpoints, err)
+	checkpoints := listTestCheckpoints(t, database, draftID)
+	if len(checkpoints) != 3 {
+		t.Fatalf("checkpoints=%#v", checkpoints)
 	}
 	for _, checkpoint := range checkpoints {
-		if checkpoint.TriggerKind != "user_message" {
-			t.Fatalf("unexpected trigger kind %q in %#v", checkpoint.TriggerKind, checkpoint)
+		if checkpoint.triggerKind != "user_message" {
+			t.Fatalf("unexpected trigger kind %q", checkpoint.triggerKind)
 		}
 	}
 	// user-2 的检查点在 v1 之后、v2 之前记录，故捕获 timeline v1。
@@ -294,13 +294,12 @@ func TestRewindCheckpointRetentionKeepsLatestFifty(t *testing.T) {
 		insertRewindTestMessage(t, database, draftID,
 			fmt.Sprintf("user-%02d", index), fmt.Sprintf("第 %d 轮", index))
 	}
-	checkpoints, err := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-	if err != nil || len(checkpoints) != 50 {
-		t.Fatalf("checkpoints=%d err=%v", len(checkpoints), err)
+	checkpoints := listTestCheckpoints(t, database, draftID)
+	if len(checkpoints) != 50 {
+		t.Fatalf("checkpoints=%d", len(checkpoints))
 	}
-	if checkpoints[0].AnchorMessageID == nil || *checkpoints[0].AnchorMessageID != "user-55" ||
-		checkpoints[49].AnchorMessageID == nil || *checkpoints[49].AnchorMessageID != "user-06" {
-		t.Fatalf("retained boundaries newest=%#v oldest=%#v", checkpoints[0], checkpoints[49])
+	if checkpoints[0].anchor != "user-55" || checkpoints[49].anchor != "user-06" {
+		t.Fatalf("retained boundaries newest=%q oldest=%q", checkpoints[0].anchor, checkpoints[49].anchor)
 	}
 }
 
@@ -808,6 +807,36 @@ func TestRewindRestoreRollsBackOnPersistenceFailures(t *testing.T) {
 			}
 		})
 	}
+}
+
+type testCheckpoint struct {
+	triggerKind string
+	anchor      string
+}
+
+// listTestCheckpoints returns a draft's checkpoints newest-first, replacing the
+// removed storage list query with the fields these tests assert on.
+func listTestCheckpoints(t *testing.T, database *storage.DB, draftID string) []testCheckpoint {
+	t.Helper()
+	rows, err := database.Read().QueryContext(t.Context(), `
+		SELECT trigger_kind, COALESCE(anchor_message_id, '')
+		FROM rewind_checkpoints WHERE draft_id=? ORDER BY rowid DESC`, draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var checkpoints []testCheckpoint
+	for rows.Next() {
+		var entry testCheckpoint
+		if err := rows.Scan(&entry.triggerKind, &entry.anchor); err != nil {
+			t.Fatal(err)
+		}
+		checkpoints = append(checkpoints, entry)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return checkpoints
 }
 
 func insertRewindTestMessage(

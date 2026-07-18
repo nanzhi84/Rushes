@@ -34,11 +34,14 @@ export function jobCancelErrorMessage(error: unknown): string {
 
 export function resendErrorMessage(error: unknown): string {
   const reason = timelinePatchErrorMessage(error);
-  if (reason === "resend_cancellation_timeout") {
+  if (reason === "resend_cancellation_timeout" || reason === "resend_in_progress") {
     return "当前任务尚未安全停止，请稍后重试。";
   }
   if (reason === "resend_checkpoint_unavailable") {
     return "这条消息太早了，已无法回到它之前的状态。";
+  }
+  if (reason === "resend_message_not_found") {
+    return "这条消息已不存在，请刷新后重试。";
   }
   if (reason === "resend_message_not_editable") {
     return "这条消息已被新的编辑覆盖，请刷新后重试。";

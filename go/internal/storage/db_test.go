@@ -304,9 +304,11 @@ func TestOpenMigratesTimelineHistoryAndAllowsFutureSnapshots(t *testing.T) {
 	).Scan(&rewoundAt, &rewindCheckpointID); err != nil || rewoundAt != nil || rewindCheckpointID != nil {
 		t.Fatalf("现网消息迁移结果 rewound_at=%v checkpoint=%v err=%v", rewoundAt, rewindCheckpointID, err)
 	}
-	checkpoints, err := ListRewindCheckpoints(t.Context(), database.Read(), "draft_migrate", 50)
-	if err != nil || len(checkpoints) != 0 {
-		t.Fatalf("现网草稿检查点表不可用: checkpoints=%#v err=%v", checkpoints, err)
+	var checkpointCount int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM rewind_checkpoints WHERE draft_id='draft_migrate'",
+	).Scan(&checkpointCount); err != nil || checkpointCount != 0 {
+		t.Fatalf("现网草稿检查点表不可用: count=%d err=%v", checkpointCount, err)
 	}
 }
 

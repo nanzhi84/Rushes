@@ -537,9 +537,10 @@ func TestResendDoesNotCommitWhenTurnCancellationTimesOut(t *testing.T) {
 	if timeout.Code != http.StatusConflict || !strings.Contains(timeout.Body.String(), "resend_cancellation_timeout") {
 		t.Fatalf("status=%d body=%s", timeout.Code, timeout.Body.String())
 	}
+	// 首个 resend 超时后由后台排空持有屏障,并发第二次 resend 属「进行中」而非超时。
 	drainingRetry := httptest.NewRecorder()
 	server.Handler().ServeHTTP(drainingRetry, apiRequest(t, http.MethodPost, resendPath(draftID, "timeout-anchor"), body))
-	if drainingRetry.Code != http.StatusConflict || !strings.Contains(drainingRetry.Body.String(), "resend_cancellation_timeout") {
+	if drainingRetry.Code != http.StatusConflict || !strings.Contains(drainingRetry.Body.String(), "resend_in_progress") {
 		t.Fatalf("draining retry status=%d body=%s", drainingRetry.Code, drainingRetry.Body.String())
 	}
 	// 超时路径不得提交任何回退或幂等记录。
@@ -684,5 +685,60 @@ func assertRowStatus(t *testing.T, database *storage.DB, query, want string) {
 	var status string
 	if err := database.Read().QueryRowContext(t.Context(), query).Scan(&status); err != nil || status != want {
 		t.Fatalf("query=%q status=%q want=%q err=%v", query, status, want, err)
+	}
+}
+
+func TestResendReplayReenqueuesLostTurn(t *testing.T) {
+	t.Parallel()
+	server, handler, blocking := resendTestServer(t)
+	draftID := "draft-resend-lost-turn"
+	createDraftThroughAPI(t, handler, draftID)
+	insertAPIResendMessage(t, server.database, draftID, "lost-anchor", "锚点")
+	checkpoint, err := storage.GetRewindCheckpoint(
+		t.Context(), server.database.Read(), draftID, "rewind:message:lost-anchor")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟「reducer 事务已提交(回退+X′+key 记 new_message_id)但回合从未入队」的
+	// 崩溃/关停窗口:直接调 applyResend(它只提交,不入队)。
+	newMessageID := newID("msg")
+	if _, err := server.applyResend(
+		t.Context(), draftID, checkpoint, newMessageID, "改写重发", "lost-key", nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if pending := server.agent.Queue().PendingCount(draftID); pending != 0 {
+		t.Fatalf("applyResend 不应入队, pending=%d", pending)
+	}
+
+	// 同 key 重放:命中已提交结果,补入队 X′,回合开始。
+	replay := httptest.NewRecorder()
+	handler.ServeHTTP(replay, apiRequest(t, http.MethodPost, resendPath(draftID, "lost-anchor"),
+		map[string]any{"content": "改写重发", "idempotency_key": "lost-key"}))
+	if replay.Code != http.StatusAccepted {
+		t.Fatalf("replay status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	var response MessageResendResponse
+	if err := json.Unmarshal(replay.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.MessageId != newMessageID {
+		t.Fatalf("replay message_id=%s want=%s", response.MessageId, newMessageID)
+	}
+	select {
+	case <-blocking.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("replay 未补入队丢失的回合")
+	}
+
+	// 回合运行中再次重放:空闲守卫保证不产生第二个回合。
+	secondReplay := httptest.NewRecorder()
+	handler.ServeHTTP(secondReplay, apiRequest(t, http.MethodPost, resendPath(draftID, "lost-anchor"),
+		map[string]any{"content": "改写重发", "idempotency_key": "lost-key"}))
+	if secondReplay.Code != http.StatusAccepted {
+		t.Fatalf("second replay status=%d body=%s", secondReplay.Code, secondReplay.Body.String())
+	}
+	if pending := server.agent.Queue().PendingCount(draftID); pending != 1 {
+		t.Fatalf("重复重放应单入队, pending=%d", pending)
 	}
 }

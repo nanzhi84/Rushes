@@ -83,7 +83,7 @@ func (server *Server) ResendMessageApiDraftsDraftIdMessagesMessageIdResendPost(
 
 	barrier, draining := server.beginRewindCancellation(draftID)
 	if draining {
-		writeConflict(writer, "resend_cancellation_timeout")
+		writeConflict(writer, "resend_in_progress")
 		return
 	}
 	if barrier == nil {
@@ -180,8 +180,41 @@ func (server *Server) resendReplay(
 		writeConflict(writer, "resend_idempotency_key_reused")
 		return true, nil
 	}
+	// 收敛「回退已提交但入队丢失」:同 key 重放时补入队 X′(空闲守卫防并发双入队)。
+	if err := server.ensureResendTurnEnqueued(ctx, draftID, previous.NewMessageID, content); err != nil {
+		return false, err
+	}
 	writeJSON(writer, http.StatusAccepted, resendResponse(draftID, previous))
 	return true, nil
+}
+
+// ensureResendTurnEnqueued 收敛崩溃/关停窗口:reducer 事务已提交但 X′ 的回合从未
+// 入队(其后无非 user 消息即视为「未开始回合」),且队列空闲时补入队。X′ 已有回合
+// 产物或队列非空闲则不动;EnqueueUserMessageIfIdle 的空闲守卫保证并发重试单入队。
+func (server *Server) ensureResendTurnEnqueued(
+	ctx context.Context,
+	draftID string,
+	messageID string,
+	content string,
+) error {
+	if messageID == "" {
+		return nil
+	}
+	var hasTurnOutput bool
+	if err := server.database.Read().QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM messages
+			WHERE draft_id=? AND role != 'user'
+			AND rowid > COALESCE((SELECT rowid FROM messages WHERE message_id=?), 0)
+		)`, draftID, messageID,
+	).Scan(&hasTurnOutput); err != nil {
+		return err
+	}
+	if hasTurnOutput {
+		return nil
+	}
+	server.agent.Queue().EnqueueUserMessageIfIdle(draftID, messageID, content)
+	return nil
 }
 
 // resendMessageEditable 报告目标是否为仍可见的用户消息（未被遮蔽）。
