@@ -143,9 +143,11 @@ func assertDiagnosableRejection(t *testing.T, err error) {
 	if summary == "" {
 		t.Fatal("stderr 摘要为空，拒绝原因不可诊断")
 	}
-	lower := strings.ToLower(summary)
-	if !strings.Contains(lower, "http") && !strings.Contains(lower, "whitelist") && !strings.Contains(lower, "protocol") {
-		t.Fatalf("stderr 摘要未提及协议/白名单，可诊断性存疑：%s", summary)
+	// 必须命中「注入的」白名单值 ffmpegProtocolWhitelist。ffmpeg 8.x 默认对 HLS 嵌套
+	// 资源就用 file,crypto,data 拦截 http，其 stderr 同样含 "whitelist"，无法区分注入是否
+	// 生效；断言 stderr 出现 file,pipe，才能在去掉 injectProtocolWhitelist 注入后转红。
+	if !strings.Contains(summary, ffmpegProtocolWhitelist) {
+		t.Fatalf("stderr 应含注入的白名单 %q（否则可能是 ffmpeg 默认拦截），实际：%s", ffmpegProtocolWhitelist, summary)
 	}
 }
 

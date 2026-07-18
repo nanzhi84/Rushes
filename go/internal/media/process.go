@@ -59,6 +59,9 @@ func isFFmpegFamily(name string) bool {
 // 各注入一次；ffprobe 以位置参数作为输入，则在参数最前面注入一次即可覆盖。非
 // ffmpeg/ffprobe 命令原样返回；调用方若已显式指定 -protocol_whitelist，则尊重其设置、
 // 不再注入。
+// 前提：本函数按裸 -i token 判定输入位；若某个选项的取值恰好是字符串 "-i"
+// （形如 [flag, "-i"] 的三段式用法），会被误判为输入位而多注入一次白名单——
+// 当前全部调用点均无此形态。
 func injectProtocolWhitelist(name string, args []string) []string {
 	if !isFFmpegFamily(name) {
 		return args

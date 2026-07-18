@@ -3,7 +3,7 @@
 #EXT-X-TARGETDURATION:11
 #EXT-X-MEDIA-SEQUENCE:0
 #EXTINF:10.0,
-http://169.254.169.254/latest/meta-data/iam/security-credentials/
+http://169.254.169.254/latest/meta-data/x.ts
 #EXTINF:10.0,
 http://malicious.example.com/segment1.ts
 #EXT-X-ENDLIST
