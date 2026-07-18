@@ -29,7 +29,6 @@ linters:
             - "**/internal/storage/**/*.go"
           allow:
             - $gostd
-            - github.com/nanzhi84/Rushes/go/internal/contracts
             - modernc.org/sqlite
 
         reducer:
@@ -57,10 +56,8 @@ linters:
             - "**/internal/media/**/*.go"
           allow:
             - $gostd
-            - github.com/nanzhi84/Rushes/go/internal/contracts
             - github.com/nanzhi84/Rushes/go/internal/storage
             - github.com/nanzhi84/Rushes/go/internal/timeline
-            - github.com/nanzhi84/Rushes/go/internal/understanding
 
         timeline:
           list-mode: strict
@@ -68,7 +65,6 @@ linters:
             - "**/internal/timeline/**/*.go"
           allow:
             - $gostd
-            - github.com/nanzhi84/Rushes/go/internal/contracts
             - github.com/nanzhi84/Rushes/go/internal/storage
 
         tools:
@@ -79,9 +75,6 @@ linters:
             - $gostd
             - github.com/cloudwego/eino
             - github.com/eino-contrib/jsonschema
-            - github.com/nanzhi84/Rushes/go/internal/contracts
-            - github.com/nanzhi84/Rushes/go/internal/media
-            - github.com/nanzhi84/Rushes/go/internal/providers
             - github.com/nanzhi84/Rushes/go/internal/storage
             - github.com/nanzhi84/Rushes/go/internal/timeline
 
