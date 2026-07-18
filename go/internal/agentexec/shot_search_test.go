@@ -134,7 +134,7 @@ func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, err := exec.persistTimeline(t.Context(), "draft_shot_search", document, "shot_search_fixture"); err != nil || persisted.Status != "succeeded" {
+	if persisted, err := exec.PersistTimeline(t.Context(), "draft_shot_search", document, "shot_search_fixture"); err != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
 	excludedOutput, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
@@ -231,11 +231,11 @@ func TestShotQualityMetricsGentlyLowerSearchAndRecutPriority(t *testing.T) {
 		{SourceStartFrame: 0, SourceEndFrame: 90, OverexposedRatio: &badExposure, SharpnessScore: &badSharpness},
 		{SourceStartFrame: 90, SourceEndFrame: 180, OverexposedRatio: &normalExposure, SharpnessScore: &normalSharpness},
 	}
-	ranges := beatMixRangesFromUnderstanding(segments, 180)
+	ranges := BeatMixRangesFromUnderstanding(segments, 180)
 	if len(ranges) < 2 || ranges[0].StartFrame != 90 || ranges[0].QualityPenalty != 0 {
 		t.Fatalf("ranges=%#v", ranges)
 	}
-	start, ok := chooseUnusedBeatMixSourceStart(180, 30, ranges, nil, 7, true)
+	start, ok := ChooseUnusedBeatMixSourceStart(180, 30, ranges, nil, 7, true)
 	if !ok || start != 90 {
 		t.Fatalf("start=%d ok=%v ranges=%#v", start, ok, ranges)
 	}

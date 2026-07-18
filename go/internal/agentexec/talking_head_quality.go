@@ -295,7 +295,7 @@ func TalkingHeadPlanDrift(
 // speechQualityReport 是纯读函数：只读取当前时间线文档与已持久化的转写，量化含
 // a_roll 的口播成片里"还剩什么没剪干净"——残留气口、过短保留孤岛、未被 overlay
 // 遮盖的硬接缝、过短 B-roll。它只陈述证据、不做裁决，供模型自主收敛、供用户验收。
-func (exec *Executor) speechQualityReport(
+func (exec *Executor) SpeechQualityReport(
 	ctx context.Context,
 	document timeline.Document,
 ) (map[string]any, error) {

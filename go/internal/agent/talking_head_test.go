@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -94,19 +95,19 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
-	if persisted, persistErr := exec.persistTimeline(
+	t.Cleanup(service.Close)
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), "draft_talking_head", document, "fixture",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_talking_head")
 
-	inspectRaw, err := exec.ExecuteTool(ctx, "speech.inspect", rushestools.SpeechInspectInput{
+	inspectRaw, err := service.ExecuteTool(ctx, "speech.inspect", rushestools.SpeechInspectInput{
 		TimelineClipID: "clip_v1_001", Query: "指纹解锁",
 	})
 	if err != nil {
@@ -127,7 +128,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 		t.Fatalf("口播上下文索引或全文隔离无效: %s", contextText)
 	}
 
-	searchRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	searchRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
 		Query: "指纹解锁 键盘右上角", SemanticRoles: []string{"b_roll"}, Limit: 5,
 	})
 	if err != nil {
@@ -137,39 +138,39 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 	if len(search.Shots) != 1 || search.Shots[0].SemanticRole != "b_roll" {
 		t.Fatalf("search=%#v", search)
 	}
-	assertTalkingHeadFailure(t, exec, ctx, rushestools.TalkingHeadEditInput{}, "至少需要一个删除项")
-	assertTalkingHeadFailure(t, exec, ctx, rushestools.TalkingHeadEditInput{
+	assertTalkingHeadFailure(t, service, ctx, rushestools.TalkingHeadEditInput{}, "至少需要一个删除项")
+	assertTalkingHeadFailure(t, service, ctx, rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "missing", RemovePauseIDs: []string{"pause_breath"},
 	}, "不存在于主视频轨")
-	assertTalkingHeadFailure(t, exec, ctx, rushestools.TalkingHeadEditInput{
+	assertTalkingHeadFailure(t, service, ctx, rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001", RemoveUtteranceIDs: []string{"utt_missing"},
 	}, "未知 ID")
-	assertTalkingHeadFailure(t, exec, ctx, rushestools.TalkingHeadEditInput{
+	assertTalkingHeadFailure(t, service, ctx, rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001", RemoveUtteranceIDs: []string{"utt_fingerprint"},
 		BrollAssignments: []rushestools.TalkingHeadBrollAssignment{{
 			ShotID: search.Shots[0].ShotID, StartUtteranceID: "utt_fingerprint",
 		}},
 	}, "引用了未知")
-	assertTalkingHeadFailure(t, exec, ctx, rushestools.TalkingHeadEditInput{
+	assertTalkingHeadFailure(t, service, ctx, rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
 		BrollAssignments: []rushestools.TalkingHeadBrollAssignment{{
 			ShotID: "shot_missing", StartUtteranceID: "utt_fingerprint",
 		}},
 	}, "不存在、已失效")
-	assertTalkingHeadFailure(t, exec, ctx, rushestools.TalkingHeadEditInput{
+	assertTalkingHeadFailure(t, service, ctx, rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
 		BrollAssignments: []rushestools.TalkingHeadBrollAssignment{{
 			ShotID: search.Shots[0].ShotID, StartWordID: "w_touchpad_short",
 		}},
 	}, "不足半秒")
-	assertTalkingHeadFailure(t, exec, ctx, rushestools.TalkingHeadEditInput{
+	assertTalkingHeadFailure(t, service, ctx, rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
 		BrollAssignments: []rushestools.TalkingHeadBrollAssignment{{
 			ShotID:           search.Shots[0].ShotID,
 			StartUtteranceID: "utt_intro", EndUtteranceID: "utt_fingerprint",
 		}},
 	}, "语义窗口过宽")
-	editRaw, err := exec.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
+	editRaw, err := service.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
 		RemoveUtteranceIDs:  []string{"utt_duplicate"},
 		RemovePauseIDs:      []string{"pause_breath"},
@@ -184,7 +185,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 	if edit.Status != "succeeded" {
 		t.Fatalf("edit=%#v", edit)
 	}
-	removedPauseRanges, rangesOK := edit.Data["removed_pause_ranges"].([]TalkingHeadRange)
+	removedPauseRanges, rangesOK := edit.Data["removed_pause_ranges"].([]agentexec.TalkingHeadRange)
 	autoPreservedPauseIDs, preservedOK := edit.Data["auto_preserved_pause_ids"].([]string)
 	if !rangesOK || !preservedOK || edit.Data["removed_pause_range_count"] != len(removedPauseRanges) ||
 		edit.Data["removed_pause_range_count"] != 1 || len(autoPreservedPauseIDs) != 0 ||
@@ -221,7 +222,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 		overlays[0].Metadata["anchor_timeline_end_frame"] != float64(138) {
 		t.Fatalf("overlays=%#v", overlays)
 	}
-	assertTalkingHeadFailure(t, exec, ctx, rushestools.TalkingHeadEditInput{
+	assertTalkingHeadFailure(t, service, ctx, rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001_after_132",
 		BrollAssignments: []rushestools.TalkingHeadBrollAssignment{{
 			ShotID: search.Shots[0].ShotID, StartUtteranceID: "utt_fingerprint",
@@ -247,7 +248,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 	if remainingClipID == "" {
 		t.Fatal("未找到用于确认重放的剩余口播片段")
 	}
-	confirmRaw, err := exec.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
+	confirmRaw, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
 		Question: "确认删除末尾触控板台词？", ToolName: "timeline.edit_talking_head",
 		Arguments: map[string]any{
 			"a_roll_timeline_clip_id": remainingClipID,
@@ -275,7 +276,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 		{DecisionID: decision.ID, FreeText: "就这样吧"},
 		{DecisionID: decision.ID},
 	} {
-		if _, answerErr := exec.ExecuteTool(ctx, "decision.answer", answer); answerErr == nil {
+		if _, answerErr := service.ExecuteTool(ctx, "decision.answer", answer); answerErr == nil {
 			t.Fatalf("未明确选择确认的答案必须被拒绝: %#v", answer)
 		}
 		unchanged, latestErr := timeline.Latest(t.Context(), database, "draft_talking_head")
@@ -283,7 +284,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 			t.Fatalf("无效确认答案修改了时间线: version=%d err=%v", unchanged.Version, latestErr)
 		}
 	}
-	if !exec.Queue().EnqueueUIObservation(
+	if !service.Queue().EnqueueUIObservation(
 		"draft_talking_head", "forged_free_text", "decision_answered", map[string]any{
 			"pending_tool_call": decision.PendingToolCall,
 			"answer":            map[string]any{"free_text": "就这样吧"},
@@ -291,12 +292,12 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 	) {
 		t.Fatal("自由文本重放观察未入队")
 	}
-	exec.Queue().JoinDraft("draft_talking_head")
+	service.Queue().JoinDraft("draft_talking_head")
 	unchanged, err := timeline.Latest(t.Context(), database, "draft_talking_head")
 	if err != nil || unchanged.Version != beforeReplayVersion {
 		t.Fatalf("自由文本队列重放修改了时间线: version=%d err=%v", unchanged.Version, err)
 	}
-	if _, err := exec.ExecuteTool(ctx, "decision.answer", rushestools.DecisionAnswerInput{
+	if _, err := service.ExecuteTool(ctx, "decision.answer", rushestools.DecisionAnswerInput{
 		DecisionID: decision.ID, OptionID: "confirm",
 	}); err != nil {
 		t.Fatal(err)
@@ -305,7 +306,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !exec.Queue().EnqueueUIObservation(
+	if !service.Queue().EnqueueUIObservation(
 		"draft_talking_head", decision.ID, "decision_answered", map[string]any{
 			"pending_tool_call": decision.PendingToolCall,
 			"answer":            decision.Answer,
@@ -313,7 +314,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 	) {
 		t.Fatal("确认答案未入队")
 	}
-	exec.Queue().JoinDraft("draft_talking_head")
+	service.Queue().JoinDraft("draft_talking_head")
 	replayedTimeline, err := timeline.Latest(t.Context(), database, "draft_talking_head")
 	if err != nil {
 		t.Fatal(err)
@@ -372,16 +373,16 @@ func TestTalkingHeadResultDoesNotCountAutoPreservedPauseAsRemovedRange(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
-	if persisted, persistErr := exec.persistTimeline(t.Context(), draftID, document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	t.Cleanup(service.Close)
+	if persisted, persistErr := service.executor.PersistTimeline(t.Context(), draftID, document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
-	raw, err := exec.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
+	raw, err := service.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
 		RemovePauseIDs:      []string{"pause_before_year", "pause_after_year"},
 	})
@@ -389,7 +390,7 @@ func TestTalkingHeadResultDoesNotCountAutoPreservedPauseAsRemovedRange(t *testin
 		t.Fatal(err)
 	}
 	result := raw.(rushestools.ToolResult)
-	removedRanges, rangesOK := result.Data["removed_pause_ranges"].([]TalkingHeadRange)
+	removedRanges, rangesOK := result.Data["removed_pause_ranges"].([]agentexec.TalkingHeadRange)
 	removedIDs, removedOK := result.Data["removed_pause_ids"].([]string)
 	autoPreservedIDs, preservedOK := result.Data["auto_preserved_pause_ids"].([]string)
 	if result.Status != "succeeded" || !rangesOK || !removedOK || !preservedOK ||
@@ -405,13 +406,13 @@ func TestTalkingHeadResultDoesNotCountAutoPreservedPauseAsRemovedRange(t *testin
 
 func TestTalkingHeadAssignmentResolvesUniqueAnchorTextToWordFrames(t *testing.T) {
 	t.Parallel()
-	utterances := map[string]SpeechUtterance{
+	utterances := map[string]agentexec.SpeechUtterance{
 		"utt_fingerprint": {
 			ID: "utt_fingerprint", StartFrame: 100, EndFrame: 180,
 			Text: "指纹识别解锁，然后指纹设置。",
 		},
 	}
-	words := []SpeechWord{
+	words := []agentexec.SpeechWord{
 		{ID: "w1", StartFrame: 100, EndFrame: 122, Text: "指纹识别"},
 		{ID: "w2", StartFrame: 122, EndFrame: 140, Text: "解锁"},
 		{ID: "w3", StartFrame: 140, EndFrame: 152, Text: "然后"},
@@ -419,17 +420,17 @@ func TestTalkingHeadAssignmentResolvesUniqueAnchorTextToWordFrames(t *testing.T)
 		{ID: "w5", StartFrame: 168, EndFrame: 180, Text: "设置", Punctuation: "。"},
 	}
 	clip := timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 300}
-	resolved, err := TalkingHeadAssignmentSourceRange(
+	resolved, err := agentexec.TalkingHeadAssignmentSourceRange(
 		rushestools.TalkingHeadBrollAssignment{
 			ShotID: "shot_fingerprint", StartUtteranceID: "utt_fingerprint",
 			AnchorText: "指纹识别解锁",
 		},
 		utterances, words, map[string]struct{}{}, map[string]struct{}{}, clip,
 	)
-	if err != nil || resolved != (TalkingHeadRange{Start: 100, End: 140}) {
+	if err != nil || resolved != (agentexec.TalkingHeadRange{Start: 100, End: 140}) {
 		t.Fatalf("resolved=%#v err=%v", resolved, err)
 	}
-	_, err = TalkingHeadAssignmentSourceRange(
+	_, err = agentexec.TalkingHeadAssignmentSourceRange(
 		rushestools.TalkingHeadBrollAssignment{
 			ShotID: "shot_fingerprint", StartUtteranceID: "utt_fingerprint",
 			AnchorText: "指纹",
@@ -439,7 +440,7 @@ func TestTalkingHeadAssignmentResolvesUniqueAnchorTextToWordFrames(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "不唯一") {
 		t.Fatalf("ambiguous anchor err=%v", err)
 	}
-	_, err = TalkingHeadAssignmentSourceRange(
+	_, err = agentexec.TalkingHeadAssignmentSourceRange(
 		rushestools.TalkingHeadBrollAssignment{
 			ShotID: "shot_fingerprint", StartUtteranceID: "utt_fingerprint",
 			AnchorText: "指纹识别解锁",
@@ -454,12 +455,12 @@ func TestTalkingHeadAssignmentResolvesUniqueAnchorTextToWordFrames(t *testing.T)
 func TestTalkingHeadHelperEdgeBranches(t *testing.T) {
 	t.Parallel()
 	clip := timeline.Clip{SourceStartFrame: 10, SourceEndFrame: 80}
-	utterances := map[string]SpeechUtterance{
+	utterances := map[string]agentexec.SpeechUtterance{
 		"u1":      {ID: "u1", StartFrame: 10, EndFrame: 40, Text: "第一第二第三"},
 		"u2":      {ID: "u2", StartFrame: 50, EndFrame: 80, Text: "第四第五"},
 		"outside": {ID: "outside", StartFrame: 0, EndFrame: 9, Text: "越界"},
 	}
-	words := []SpeechWord{
+	words := []agentexec.SpeechWord{
 		{ID: "w1", StartFrame: 10, EndFrame: 20, Text: "第一"},
 		{ID: "w2", StartFrame: 20, EndFrame: 30, Text: "第二"},
 		{ID: "w3", StartFrame: 30, EndFrame: 40, Text: "第三"},
@@ -468,14 +469,14 @@ func TestTalkingHeadHelperEdgeBranches(t *testing.T) {
 		{ID: "w_out", StartFrame: 81, EndFrame: 90, Text: "越界"},
 	}
 
-	selectedUtterances, invalidUtterances := SelectTalkingHeadUtterances(
+	selectedUtterances, invalidUtterances := agentexec.SelectTalkingHeadUtterances(
 		[]string{"u1", "u1", "missing", "outside", "u2"}, utterances, clip,
 	)
 	if len(selectedUtterances) != 2 || len(invalidUtterances) != 2 {
 		t.Fatalf("selected=%#v invalid=%#v", selectedUtterances, invalidUtterances)
 	}
 
-	ranges, removedWords, invalidWordRanges := SelectTalkingHeadWordRanges(
+	ranges, removedWords, invalidWordRanges := agentexec.SelectTalkingHeadWordRanges(
 		[]rushestools.TalkingHeadWordRange{
 			{StartWordID: "w1"},
 			{StartWordID: "w1", EndWordID: "w2"},
@@ -490,59 +491,59 @@ func TestTalkingHeadHelperEdgeBranches(t *testing.T) {
 		t.Fatalf("ranges=%#v removed=%#v invalid=%#v", ranges, removedWords, invalidWordRanges)
 	}
 
-	pauses := map[string]SpeechPause{
+	pauses := map[string]agentexec.SpeechPause{
 		"p1":      {ID: "p1", StartFrame: 18, EndFrame: 28, DeleteStart: 20, DeleteEnd: 26, Method: "fixture"},
 		"outside": {ID: "outside", StartFrame: 0, EndFrame: 9, DeleteStart: 1, DeleteEnd: 8, Method: "fixture"},
 	}
-	selectedPauses, invalidPauses := SelectTalkingHeadPauses(
+	selectedPauses, invalidPauses := agentexec.SelectTalkingHeadPauses(
 		[]string{"p1", "p1", "missing", "outside"}, pauses, clip,
 	)
 	if len(selectedPauses) != 1 || len(invalidPauses) != 2 {
 		t.Fatalf("selected=%#v invalid=%#v", selectedPauses, invalidPauses)
 	}
 
-	if got := SubtractTalkingHeadRanges(TalkingHeadRange{Start: 5, End: 5}, nil); got != nil {
+	if got := agentexec.SubtractTalkingHeadRanges(agentexec.TalkingHeadRange{Start: 5, End: 5}, nil); got != nil {
 		t.Fatalf("invalid target=%#v", got)
 	}
-	residual := SubtractTalkingHeadRanges(
-		TalkingHeadRange{Start: 10, End: 40},
-		[]TalkingHeadRange{{Start: 0, End: 5}, {Start: 20, End: 25}, {Start: 40, End: 50}},
+	residual := agentexec.SubtractTalkingHeadRanges(
+		agentexec.TalkingHeadRange{Start: 10, End: 40},
+		[]agentexec.TalkingHeadRange{{Start: 0, End: 5}, {Start: 20, End: 25}, {Start: 40, End: 50}},
 	)
-	if len(residual) != 2 || residual[0] != (TalkingHeadRange{Start: 10, End: 20}) ||
-		residual[1] != (TalkingHeadRange{Start: 25, End: 40}) {
+	if len(residual) != 2 || residual[0] != (agentexec.TalkingHeadRange{Start: 10, End: 20}) ||
+		residual[1] != (agentexec.TalkingHeadRange{Start: 25, End: 40}) {
 		t.Fatalf("residual=%#v", residual)
 	}
-	covered := SubtractTalkingHeadRanges(
-		TalkingHeadRange{Start: 10, End: 40},
-		[]TalkingHeadRange{{Start: 20, End: 50}},
+	covered := agentexec.SubtractTalkingHeadRanges(
+		agentexec.TalkingHeadRange{Start: 10, End: 40},
+		[]agentexec.TalkingHeadRange{{Start: 20, End: 50}},
 	)
-	if len(covered) != 1 || covered[0] != (TalkingHeadRange{Start: 10, End: 20}) {
+	if len(covered) != 1 || covered[0] != (agentexec.TalkingHeadRange{Start: 10, End: 20}) {
 		t.Fatalf("covered=%#v", covered)
 	}
 
-	pauseList := []SpeechPause{
+	pauseList := []agentexec.SpeechPause{
 		{ID: "equal_late", StartFrame: 28, EndFrame: 38, DeleteStart: 30, DeleteEnd: 36, Method: "fixture"},
 		{ID: "equal_early", StartFrame: 18, EndFrame: 28, DeleteStart: 20, DeleteEnd: 26, Method: "fixture"},
 		{ID: "too_short", StartFrame: 40, EndFrame: 43, DeleteStart: 40, DeleteEnd: 42, Method: "fixture"},
 		{ID: "overlap", StartFrame: 48, EndFrame: 60, DeleteStart: 50, DeleteEnd: 58, Method: "fixture"},
 	}
-	if got := TalkingHeadRetainedPauseCandidates(pauseList, nil, clip, nil, 4, 0); got != nil {
+	if got := agentexec.TalkingHeadRetainedPauseCandidates(pauseList, nil, clip, nil, 4, 0); got != nil {
 		t.Fatalf("limit zero=%#v", got)
 	}
-	candidates := TalkingHeadRetainedPauseCandidates(
-		pauseList, []TalkingHeadRange{{Start: 49, End: 59}}, clip, nil, 4, 1,
+	candidates := agentexec.TalkingHeadRetainedPauseCandidates(
+		pauseList, []agentexec.TalkingHeadRange{{Start: 49, End: 59}}, clip, nil, 4, 1,
 	)
 	if len(candidates) != 1 || candidates[0].PauseID != "equal_early" {
 		t.Fatalf("candidates=%#v", candidates)
 	}
-	if unresolved := UnresolvedTalkingHeadPauseDecisions(
+	if unresolved := agentexec.UnresolvedTalkingHeadPauseDecisions(
 		pauseList, nil, clip, nil, map[string]struct{}{"equal_early": {}}, 4, 4,
 	); len(unresolved) != 2 {
 		t.Fatalf("unresolved=%#v", unresolved)
 	}
 
 	result := rushestools.ToolResult{}
-	AttachTalkingHeadUnreviewedEvidence(
+	agentexec.AttachTalkingHeadUnreviewedEvidence(
 		&result,
 		[]rushestools.SpeechPauseEvidence{{PauseID: "p1"}},
 		nil,
@@ -551,13 +552,13 @@ func TestTalkingHeadHelperEdgeBranches(t *testing.T) {
 	if result.Data == nil || !strings.Contains(result.Observation, "另返回") {
 		t.Fatalf("result=%#v", result)
 	}
-	AttachTalkingHeadUnreviewedEvidence(&result, nil, nil, nil)
+	agentexec.AttachTalkingHeadUnreviewedEvidence(&result, nil, nil, nil)
 
 	repetition := rushestools.SpeechRepetitionEvidence{
 		RepetitionID: "repeat", EarlierStartWordID: "w1", EarlierEndWordID: "w2",
 		LaterStartWordID: "w3", LaterEndWordID: "w4",
 	}
-	repetitionInput, decidedRepetitions, invalidRepetitions := ExpandTalkingHeadRepetitionDecisions(
+	repetitionInput, decidedRepetitions, invalidRepetitions := agentexec.ExpandTalkingHeadRepetitionDecisions(
 		rushestools.TalkingHeadEditInput{
 			RemoveWordRanges: []rushestools.TalkingHeadWordRange{{StartWordID: "w1", EndWordID: "w2"}},
 			RepetitionDecisions: []rushestools.TalkingHeadRepetitionDecision{
@@ -578,7 +579,7 @@ func TestTalkingHeadHelperEdgeBranches(t *testing.T) {
 	keepFragment := rushestools.SpeechFragmentEvidence{
 		FragmentID: "keep", StartWordID: "w3", EndWordID: "w4",
 	}
-	fragmentExpansion := ExpandTalkingHeadFragmentDecisions(
+	fragmentExpansion := agentexec.ExpandTalkingHeadFragmentDecisions(
 		rushestools.TalkingHeadEditInput{
 			RemoveWordRanges: []rushestools.TalkingHeadWordRange{{StartWordID: "w1", EndWordID: "w2"}},
 			ShortFragmentDecisions: []rushestools.TalkingHeadFragmentDecision{
@@ -598,7 +599,7 @@ func TestTalkingHeadHelperEdgeBranches(t *testing.T) {
 
 	assertAssignmentError := func(assignment rushestools.TalkingHeadBrollAssignment, removedUtterances, removed map[string]struct{}) {
 		t.Helper()
-		if _, err := TalkingHeadAssignmentSourceRange(
+		if _, err := agentexec.TalkingHeadAssignmentSourceRange(
 			assignment, utterances, words, removedUtterances, removed, clip,
 		); err == nil {
 			t.Fatalf("assignment should fail: %#v", assignment)
@@ -643,13 +644,13 @@ func TestTalkingHeadHelperEdgeBranches(t *testing.T) {
 		ShotID: "shot", StartWordID: "w_out",
 	}, nil, nil)
 
-	if _, err := TalkingHeadAnchorTextSourceRange("一", 10, 40, utterances, words, nil, nil); err == nil {
+	if _, err := agentexec.TalkingHeadAnchorTextSourceRange("一", 10, 40, utterances, words, nil, nil); err == nil {
 		t.Fatal("short anchor should fail")
 	}
-	if _, err := TalkingHeadAnchorTextSourceRange("不存在", 10, 20, utterances, words, nil, nil); err == nil {
+	if _, err := agentexec.TalkingHeadAnchorTextSourceRange("不存在", 10, 20, utterances, words, nil, nil); err == nil {
 		t.Fatal("missing anchor should fail")
 	}
-	if _, err := TalkingHeadAnchorTextSourceRange(
+	if _, err := agentexec.TalkingHeadAnchorTextSourceRange(
 		"第一", 10, 40, utterances, words,
 		map[string]struct{}{"u1": {}}, nil,
 	); err == nil {
@@ -700,18 +701,18 @@ func TestTalkingHeadEditDeletesExactWordRangeWithoutSwallowingRetainedSpeech(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
-	if persisted, persistErr := exec.persistTimeline(
+	t.Cleanup(service.Close)
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), "draft_talking_head_words", document, "fixture",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_talking_head_words")
-	inspectRaw, err := exec.ExecuteTool(ctx, "speech.inspect", rushestools.SpeechInspectInput{
+	inspectRaw, err := service.ExecuteTool(ctx, "speech.inspect", rushestools.SpeechInspectInput{
 		TimelineClipID: "clip_v1_001", IncludeWords: true,
 	})
 	if err != nil {
@@ -722,7 +723,7 @@ func TestTalkingHeadEditDeletesExactWordRangeWithoutSwallowingRetainedSpeech(t *
 		len(inspect.Utterances[0].Words) != 5 {
 		t.Fatalf("inspect=%#v", inspect)
 	}
-	invalidRaw, err := exec.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
+	invalidRaw, err := service.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
 		RemoveWordRanges: []rushestools.TalkingHeadWordRange{{
 			StartWordID: "w_computer", EndWordID: "w_this_1",
@@ -735,7 +736,7 @@ func TestTalkingHeadEditDeletesExactWordRangeWithoutSwallowingRetainedSpeech(t *
 	if invalid.Status != "failed" || !strings.Contains(invalid.Observation, "未知 ID") {
 		t.Fatalf("invalid=%#v", invalid)
 	}
-	editRaw, err := exec.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
+	editRaw, err := service.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
 		RemoveWordRanges: []rushestools.TalkingHeadWordRange{{
 			StartWordID: "w_this_2", EndWordID: "w_this_2",
@@ -765,14 +766,14 @@ func TestTalkingHeadEditDeletesExactWordRangeWithoutSwallowingRetainedSpeech(t *
 }
 
 func TestAbsorbTalkingHeadEdgeSliversKeepsSpeechAndRemovesSilentTail(t *testing.T) {
-	deletions := []TalkingHeadRange{{Start: 10, End: 20}, {Start: 90, End: 96}}
-	retainedSpeech := []TalkingHeadRange{{Start: 0, End: 9}, {Start: 21, End: 90}}
-	got := AbsorbTalkingHeadEdgeSlivers(deletions, retainedSpeech, 0, 100, 12)
+	deletions := []agentexec.TalkingHeadRange{{Start: 10, End: 20}, {Start: 90, End: 96}}
+	retainedSpeech := []agentexec.TalkingHeadRange{{Start: 0, End: 9}, {Start: 21, End: 90}}
+	got := agentexec.AbsorbTalkingHeadEdgeSlivers(deletions, retainedSpeech, 0, 100, 12)
 	if len(got) != 2 || got[0].Start != 10 || got[1].End != 100 {
 		t.Fatalf("silent tail was not absorbed without touching leading speech: %#v", got)
 	}
-	withTrailingSpeech := []TalkingHeadRange{{Start: 0, End: 9}, {Start: 21, End: 90}, {Start: 98, End: 100}}
-	got = AbsorbTalkingHeadEdgeSlivers(deletions, withTrailingSpeech, 0, 100, 12)
+	withTrailingSpeech := []agentexec.TalkingHeadRange{{Start: 0, End: 9}, {Start: 21, End: 90}, {Start: 98, End: 100}}
+	got = agentexec.AbsorbTalkingHeadEdgeSlivers(deletions, withTrailingSpeech, 0, 100, 12)
 	if got[1].End != 96 {
 		t.Fatalf("trailing speech was swallowed: %#v", got)
 	}
@@ -780,20 +781,20 @@ func TestAbsorbTalkingHeadEdgeSliversKeepsSpeechAndRemovesSilentTail(t *testing.
 
 func TestTalkingHeadOrphanSpeechFragmentsExposeAdjacentPauseEvidence(t *testing.T) {
 	t.Parallel()
-	utterances := []SpeechUtterance{{
+	utterances := []agentexec.SpeechUtterance{{
 		ID: "utt_year", StartFrame: 70, EndFrame: 104, Text: "是2015年。",
-		Words: []SpeechWord{
+		Words: []agentexec.SpeechWord{
 			{ID: "w_is", StartFrame: 70, EndFrame: 78, Text: "是"},
 			{ID: "w_year", StartFrame: 91, EndFrame: 104, Text: "2015年", Punctuation: "。"},
 		},
 	}}
-	retainedSpeech := []TalkingHeadRange{{Start: 70, End: 78}, {Start: 91, End: 104}}
-	pauses := []SpeechPause{
+	retainedSpeech := []agentexec.TalkingHeadRange{{Start: 70, End: 78}, {Start: 91, End: 104}}
+	pauses := []agentexec.SpeechPause{
 		{ID: "pause_before_year", DeleteStart: 78, DeleteEnd: 91},
 		{ID: "pause_after_year", DeleteStart: 104, DeleteEnd: 116},
 	}
-	fragments := TalkingHeadOrphanSpeechFragments(
-		[]TalkingHeadRange{{Start: 78, End: 91}, {Start: 104, End: 116}},
+	fragments := agentexec.TalkingHeadOrphanSpeechFragments(
+		[]agentexec.TalkingHeadRange{{Start: 78, End: 91}, {Start: 104, End: 116}},
 		retainedSpeech, utterances, map[string]struct{}{}, map[string]struct{}{}, pauses,
 		0, 120, 15, nil,
 	)
@@ -803,23 +804,23 @@ func TestTalkingHeadOrphanSpeechFragmentsExposeAdjacentPauseEvidence(t *testing.
 		!strings.Contains(fmtJSON(fragments[0]["adjacent_pause_ids"]), "pause_after_year") {
 		t.Fatalf("orphan fragments=%#v", fragments)
 	}
-	fragments = TalkingHeadOrphanSpeechFragments(
-		[]TalkingHeadRange{{Start: 78, End: 91}},
+	fragments = agentexec.TalkingHeadOrphanSpeechFragments(
+		[]agentexec.TalkingHeadRange{{Start: 78, End: 91}},
 		retainedSpeech, utterances, map[string]struct{}{}, map[string]struct{}{}, pauses[:1],
 		0, 120, 15, nil,
 	)
 	if len(fragments) != 0 {
 		t.Fatalf("撤回一侧气口后不应再形成孤立碎片: %#v", fragments)
 	}
-	orphanWord := SpeechUtterance{
+	orphanWord := agentexec.SpeechUtterance{
 		ID: "utt_orphan_word", StartFrame: 120, EndFrame: 139, Text: "自己",
-		Words: []SpeechWord{{ID: "w_self", StartFrame: 120, EndFrame: 139, Text: "自己"}},
+		Words: []agentexec.SpeechWord{{ID: "w_self", StartFrame: 120, EndFrame: 139, Text: "自己"}},
 	}
-	fragments = TalkingHeadOrphanSpeechFragments(
-		[]TalkingHeadRange{{Start: 0, End: 120}, {Start: 139, End: 170}},
-		[]TalkingHeadRange{{Start: 120, End: 139}}, []SpeechUtterance{orphanWord},
+	fragments = agentexec.TalkingHeadOrphanSpeechFragments(
+		[]agentexec.TalkingHeadRange{{Start: 0, End: 120}, {Start: 139, End: 170}},
+		[]agentexec.TalkingHeadRange{{Start: 120, End: 139}}, []agentexec.SpeechUtterance{orphanWord},
 		map[string]struct{}{}, map[string]struct{}{}, nil,
-		0, 200, MinTalkingHeadRetainedIslandFrames, nil,
+		0, 200, agentexec.MinTalkingHeadRetainedIslandFrames, nil,
 	)
 	if len(fragments) != 1 || fragments[0]["retained_text"] != "自己" {
 		t.Fatalf("不足 2 秒的单词语音岛必须显式解决: %#v", fragments)
@@ -828,40 +829,40 @@ func TestTalkingHeadOrphanSpeechFragmentsExposeAdjacentPauseEvidence(t *testing.
 
 func TestProtectTalkingHeadOrphanFragmentsRetractsOnlyAdjacentPause(t *testing.T) {
 	t.Parallel()
-	utterance := SpeechUtterance{
+	utterance := agentexec.SpeechUtterance{
 		ID: "utt_year", StartFrame: 70, EndFrame: 104, Text: "是2015年。",
-		Words: []SpeechWord{
+		Words: []agentexec.SpeechWord{
 			{ID: "w_is", StartFrame: 70, EndFrame: 78, Text: "是"},
 			{ID: "w_year", StartFrame: 91, EndFrame: 104, Text: "2015年", Punctuation: "。"},
 		},
 	}
-	pauses := []SpeechPause{
+	pauses := []agentexec.SpeechPause{
 		{ID: "pause_before_year", DeleteStart: 78, DeleteEnd: 91},
 		{ID: "pause_after_year", DeleteStart: 104, DeleteEnd: 116},
 	}
-	effective, pauseRanges, deletions, autoPreserved, orphans := ProtectTalkingHeadOrphanFragments(
+	effective, pauseRanges, deletions, autoPreserved, orphans := agentexec.ProtectTalkingHeadOrphanFragments(
 		nil, pauses, pauses,
-		[]TalkingHeadRange{{Start: 70, End: 78}, {Start: 91, End: 104}},
-		[]SpeechUtterance{utterance}, map[string]struct{}{}, map[string]struct{}{},
+		[]agentexec.TalkingHeadRange{{Start: 70, End: 78}, {Start: 91, End: 104}},
+		[]agentexec.SpeechUtterance{utterance}, map[string]struct{}{}, map[string]struct{}{},
 		timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 120}, nil,
 	)
 	if len(orphans) != 0 || len(effective) != 1 || effective[0].ID != "pause_before_year" ||
 		len(autoPreserved) != 1 || autoPreserved[0].ID != "pause_after_year" ||
-		len(pauseRanges) != 1 || pauseRanges[0] != (TalkingHeadRange{Start: 78, End: 91}) ||
-		len(deletions) != 1 || deletions[0] != (TalkingHeadRange{Start: 78, End: 91}) {
+		len(pauseRanges) != 1 || pauseRanges[0] != (agentexec.TalkingHeadRange{Start: 78, End: 91}) ||
+		len(deletions) != 1 || deletions[0] != (agentexec.TalkingHeadRange{Start: 78, End: 91}) {
 		t.Fatalf(
 			"effective=%#v pauseRanges=%#v deletions=%#v autoPreserved=%#v orphans=%#v",
 			effective, pauseRanges, deletions, autoPreserved, orphans,
 		)
 	}
 
-	semanticOnlyUtterance := SpeechUtterance{
+	semanticOnlyUtterance := agentexec.SpeechUtterance{
 		ID: "utt_self", StartFrame: 120, EndFrame: 139, Text: "自己",
-		Words: []SpeechWord{{ID: "w_self", StartFrame: 120, EndFrame: 139, Text: "自己"}},
+		Words: []agentexec.SpeechWord{{ID: "w_self", StartFrame: 120, EndFrame: 139, Text: "自己"}},
 	}
-	_, _, _, autoPreserved, orphans = ProtectTalkingHeadOrphanFragments(
-		[]TalkingHeadRange{{Start: 0, End: 120}, {Start: 139, End: 170}}, nil, nil,
-		[]TalkingHeadRange{{Start: 120, End: 139}}, []SpeechUtterance{semanticOnlyUtterance},
+	_, _, _, autoPreserved, orphans = agentexec.ProtectTalkingHeadOrphanFragments(
+		[]agentexec.TalkingHeadRange{{Start: 0, End: 120}, {Start: 139, End: 170}}, nil, nil,
+		[]agentexec.TalkingHeadRange{{Start: 120, End: 139}}, []agentexec.SpeechUtterance{semanticOnlyUtterance},
 		map[string]struct{}{}, map[string]struct{}{},
 		timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 200}, nil,
 	)
@@ -881,11 +882,11 @@ func TestRestartFragmentPreserveReasonMustQuoteExactEvidence(t *testing.T) {
 		"但是没有同时是完整衔接，所以保留",
 		"这次键盘苹果是下一句，所以保留",
 	} {
-		if ValidRestartFragmentPreserveReason(fragment, reason) {
+		if agentexec.ValidRestartFragmentPreserveReason(fragment, reason) {
 			t.Fatalf("模糊理由不应通过: %q", reason)
 		}
 	}
-	if !ValidRestartFragmentPreserveReason(
+	if !agentexec.ValidRestartFragmentPreserveReason(
 		fragment,
 		"原文“但是没有同时”接到“这次键盘苹果”后仍表达同一转折条件，句法和语义均完整，因此保留。",
 	) {
@@ -903,7 +904,7 @@ func TestExpandTalkingHeadFragmentDecisionsCreatesOneShotWordAndPreserveChoices(
 			FragmentID: "keep_me", StartWordID: "w_keep_start", EndWordID: "w_keep_end",
 		},
 	}
-	expansion := ExpandTalkingHeadFragmentDecisions(rushestools.TalkingHeadEditInput{
+	expansion := agentexec.ExpandTalkingHeadFragmentDecisions(rushestools.TalkingHeadEditInput{
 		ShortFragmentDecisions: []rushestools.TalkingHeadFragmentDecision{
 			{FragmentID: "remove_me", Action: "REMOVE"},
 			{FragmentID: "keep_me", Action: "preserve", Reason: "两侧语义完整，应保留"},
@@ -917,7 +918,7 @@ func TestExpandTalkingHeadFragmentDecisionsCreatesOneShotWordAndPreserveChoices(
 		t.Fatalf("expansion=%#v", expansion)
 	}
 
-	invalidExpansion := ExpandTalkingHeadFragmentDecisions(rushestools.TalkingHeadEditInput{
+	invalidExpansion := agentexec.ExpandTalkingHeadFragmentDecisions(rushestools.TalkingHeadEditInput{
 		ShortFragmentDecisions: []rushestools.TalkingHeadFragmentDecision{
 			{FragmentID: "remove_me", Action: "remove"},
 			{FragmentID: "remove_me", Action: "preserve"},
@@ -945,7 +946,7 @@ func TestExpandTalkingHeadRepetitionDecisionsCreatesExplicitWordChoices(t *testi
 		},
 		"rep_number": {RepetitionID: "rep_number"},
 	}
-	input, decided, invalid := ExpandTalkingHeadRepetitionDecisions(
+	input, decided, invalid := agentexec.ExpandTalkingHeadRepetitionDecisions(
 		rushestools.TalkingHeadEditInput{
 			RepetitionDecisions: []rushestools.TalkingHeadRepetitionDecision{
 				{RepetitionID: "rep_stutter", Action: "REMOVE_EARLIER"},
@@ -960,7 +961,7 @@ func TestExpandTalkingHeadRepetitionDecisionsCreatesExplicitWordChoices(t *testi
 		input.RemoveWordRanges[1] != (rushestools.TalkingHeadWordRange{StartWordID: "later_start", EndWordID: "later_end"}) {
 		t.Fatalf("input=%#v decided=%#v invalid=%#v", input, decided, invalid)
 	}
-	_, _, invalid = ExpandTalkingHeadRepetitionDecisions(
+	_, _, invalid = agentexec.ExpandTalkingHeadRepetitionDecisions(
 		rushestools.TalkingHeadEditInput{RepetitionDecisions: []rushestools.TalkingHeadRepetitionDecision{
 			{RepetitionID: "rep_stutter", Action: "preserve"},
 			{RepetitionID: "rep_stutter", Action: "remove_later"},
@@ -976,11 +977,11 @@ func TestExpandTalkingHeadRepetitionDecisionsCreatesExplicitWordChoices(t *testi
 
 func TestExpandTalkingHeadPauseDecisionsRequiresExplicitRemoveOrPreserve(t *testing.T) {
 	t.Parallel()
-	pauses := map[string]SpeechPause{
+	pauses := map[string]agentexec.SpeechPause{
 		"pause_remove":   {ID: "pause_remove", DeleteStart: 40, DeleteEnd: 70},
 		"pause_preserve": {ID: "pause_preserve", DeleteStart: 90, DeleteEnd: 110},
 	}
-	input, decided, invalid := ExpandTalkingHeadPauseDecisions(
+	input, decided, invalid := agentexec.ExpandTalkingHeadPauseDecisions(
 		rushestools.TalkingHeadEditInput{
 			PauseDecisions: []rushestools.TalkingHeadPauseDecision{
 				{PauseID: "pause_remove", Action: "REMOVE", Reason: "两侧语义直接相连，是明显气口"},
@@ -994,7 +995,7 @@ func TestExpandTalkingHeadPauseDecisionsRequiresExplicitRemoveOrPreserve(t *test
 		t.Fatalf("input=%#v decided=%#v invalid=%#v", input, decided, invalid)
 	}
 
-	_, _, invalid = ExpandTalkingHeadPauseDecisions(
+	_, _, invalid = agentexec.ExpandTalkingHeadPauseDecisions(
 		rushestools.TalkingHeadEditInput{
 			RemovePauseIDs: []string{"pause_preserve"},
 			PauseDecisions: []rushestools.TalkingHeadPauseDecision{
@@ -1014,38 +1015,38 @@ func TestExpandTalkingHeadPauseDecisionsRequiresExplicitRemoveOrPreserve(t *test
 
 func TestTalkingHeadPausesSeparateRedundantSelectionsAndRankRetainedCandidates(t *testing.T) {
 	t.Parallel()
-	semantic := []TalkingHeadRange{{Start: 10, End: 30}}
-	pauses := []SpeechPause{
+	semantic := []agentexec.TalkingHeadRange{{Start: 10, End: 30}}
+	pauses := []agentexec.SpeechPause{
 		{ID: "pause_redundant", StartFrame: 12, EndFrame: 24, DeleteStart: 14, DeleteEnd: 22},
 		{ID: "pause_retained_long", StartFrame: 40, EndFrame: 62, DeleteStart: 42, DeleteEnd: 60},
 		{ID: "pause_retained_short", StartFrame: 70, EndFrame: 80, DeleteStart: 72, DeleteEnd: 78},
 	}
-	effective, residuals, redundant := ResolveTalkingHeadPauseRanges(
-		pauses[:2], semantic, MinTalkingHeadPauseResidualFrames,
+	effective, residuals, redundant := agentexec.ResolveTalkingHeadPauseRanges(
+		pauses[:2], semantic, agentexec.MinTalkingHeadPauseResidualFrames,
 	)
 	if len(effective) != 1 || effective[0].ID != "pause_retained_long" ||
-		len(residuals) != 1 || residuals[0] != (TalkingHeadRange{Start: 42, End: 60}) ||
+		len(residuals) != 1 || residuals[0] != (agentexec.TalkingHeadRange{Start: 42, End: 60}) ||
 		len(redundant) != 1 || redundant[0].ID != "pause_redundant" {
 		t.Fatalf("effective=%#v residuals=%#v redundant=%#v", effective, residuals, redundant)
 	}
-	candidates := TalkingHeadRetainedPauseCandidates(
+	candidates := agentexec.TalkingHeadRetainedPauseCandidates(
 		pauses, semantic, timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 100},
-		nil, MinTalkingHeadPauseCandidateFrames, 8,
+		nil, agentexec.MinTalkingHeadPauseCandidateFrames, 8,
 	)
 	if len(candidates) != 1 || candidates[0].PauseID != "pause_retained_long" ||
 		candidates[0].DeleteDurationFrames != 18 {
 		t.Fatalf("candidates=%#v", candidates)
 	}
-	unresolved := UnresolvedTalkingHeadPauseDecisions(
+	unresolved := agentexec.UnresolvedTalkingHeadPauseDecisions(
 		pauses, semantic, timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 100}, nil,
-		map[string]struct{}{}, MinTalkingHeadPauseCandidateFrames, 8,
+		map[string]struct{}{}, agentexec.MinTalkingHeadPauseCandidateFrames, 8,
 	)
 	if len(unresolved) != 1 || unresolved[0].PauseID != "pause_retained_long" {
 		t.Fatalf("显著气口没有进入必答列表: %#v", unresolved)
 	}
-	unresolved = UnresolvedTalkingHeadPauseDecisions(
+	unresolved = agentexec.UnresolvedTalkingHeadPauseDecisions(
 		pauses, semantic, timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 100}, nil,
-		map[string]struct{}{"pause_retained_long": {}}, MinTalkingHeadPauseCandidateFrames, 8,
+		map[string]struct{}{"pause_retained_long": {}}, agentexec.MinTalkingHeadPauseCandidateFrames, 8,
 	)
 	if len(unresolved) != 0 {
 		t.Fatalf("已明确 remove/preserve 的气口不应再次要求决定: %#v", unresolved)
@@ -1057,7 +1058,7 @@ func TestTalkingHeadUnreviewedContentCandidatesAreNonBlockingEvidence(t *testing
 	result := rushestools.ToolResult{
 		Status: "succeeded", Observation: "已完成局部编辑。", Data: map[string]any{},
 	}
-	AttachTalkingHeadUnreviewedEvidence(
+	agentexec.AttachTalkingHeadUnreviewedEvidence(
 		&result,
 		[]rushestools.SpeechPauseEvidence{{PauseID: "pause_outside_target"}},
 		[]rushestools.SpeechRepetitionEvidence{{RepetitionID: "repeat_outside_target"}},
@@ -1076,21 +1077,21 @@ func TestTalkingHeadUnreviewedContentCandidatesAreNonBlockingEvidence(t *testing
 
 func TestBridgeTalkingHeadRangesAbsorbsDetectedSilentIslandBetweenSemanticDeletes(t *testing.T) {
 	t.Parallel()
-	deletions := []TalkingHeadRange{{Start: 918, End: 965}, {Start: 1017, End: 1571}}
-	pauses := []SpeechPause{{
+	deletions := []agentexec.TalkingHeadRange{{Start: 918, End: 965}, {Start: 1017, End: 1571}}
+	pauses := []agentexec.SpeechPause{{
 		ID: "pause_between_takes", StartFrame: 959, EndFrame: 1017,
 		DeleteStart: 961, DeleteEnd: 1015,
 	}}
-	got := BridgeTalkingHeadRanges(deletions, nil, pauses, 12)
+	got := agentexec.BridgeTalkingHeadRanges(deletions, nil, pauses, 12)
 	if len(got) != 1 || got[0].Start != 918 || got[0].End != 1571 {
 		t.Fatalf("已检测静音岛未并入相邻语义删除: %#v", got)
 	}
-	withoutEvidence := BridgeTalkingHeadRanges(deletions, nil, nil, 12)
+	withoutEvidence := agentexec.BridgeTalkingHeadRanges(deletions, nil, nil, 12)
 	if len(withoutEvidence) != 2 {
 		t.Fatalf("没有静音证据的长非语音区间不应自动删除: %#v", withoutEvidence)
 	}
-	withSpeech := BridgeTalkingHeadRanges(
-		deletions, []TalkingHeadRange{{Start: 980, End: 1000}}, pauses, 12,
+	withSpeech := agentexec.BridgeTalkingHeadRanges(
+		deletions, []agentexec.TalkingHeadRange{{Start: 980, End: 1000}}, pauses, 12,
 	)
 	if len(withSpeech) != 2 {
 		t.Fatalf("包含保留语音的区间不应并入删除: %#v", withSpeech)
@@ -1099,11 +1100,11 @@ func TestBridgeTalkingHeadRangesAbsorbsDetectedSilentIslandBetweenSemanticDelete
 
 func TestTalkingHeadRangeCoveredByRequiresFullCoverage(t *testing.T) {
 	t.Parallel()
-	ranges := []TalkingHeadRange{{Start: 10, End: 20}, {Start: 20, End: 30}}
-	if !TalkingHeadRangeCoveredBy(TalkingHeadRange{Start: 12, End: 28}, ranges) {
+	ranges := []agentexec.TalkingHeadRange{{Start: 10, End: 20}, {Start: 20, End: 30}}
+	if !agentexec.TalkingHeadRangeCoveredBy(agentexec.TalkingHeadRange{Start: 12, End: 28}, ranges) {
 		t.Fatal("相邻删除范围合并后应完整覆盖候选")
 	}
-	if TalkingHeadRangeCoveredBy(TalkingHeadRange{Start: 5, End: 15}, ranges) {
+	if agentexec.TalkingHeadRangeCoveredBy(agentexec.TalkingHeadRange{Start: 5, End: 15}, ranges) {
 		t.Fatal("部分重叠不能视为完整处理")
 	}
 }
@@ -1111,11 +1112,11 @@ func TestTalkingHeadRangeCoveredByRequiresFullCoverage(t *testing.T) {
 func TestTalkingHeadEditRequiresARollRoleAndSpeechIndex(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	for _, fixture := range []struct {
 		draftID string
 		assetID string
@@ -1151,11 +1152,11 @@ func TestTalkingHeadEditRequiresARollRoleAndSpeechIndex(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if persisted, err := exec.persistTimeline(t.Context(), fixture.draftID, document, "fixture"); err != nil || persisted.Status != "succeeded" {
+		if persisted, err := service.executor.PersistTimeline(t.Context(), fixture.draftID, document, "fixture"); err != nil || persisted.Status != "succeeded" {
 			t.Fatalf("persisted=%#v err=%v", persisted, err)
 		}
 		ctx := rushestools.WithDraftID(t.Context(), fixture.draftID)
-		raw, err := exec.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
+		raw, err := service.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
 			ARollTimelineClipID: "clip_v1_001", RemovePauseIDs: []string{"pause"},
 		})
 		if err != nil {
@@ -1170,17 +1171,17 @@ func TestTalkingHeadEditRequiresARollRoleAndSpeechIndex(t *testing.T) {
 
 func assertTalkingHeadFailure(
 	t *testing.T,
-	exec *Service,
+	service *Service,
 	ctx context.Context,
 	input rushestools.TalkingHeadEditInput,
 	want string,
 ) {
 	t.Helper()
-	before, err := timeline.Latest(t.Context(), exec.database, "draft_talking_head")
+	before, err := timeline.Latest(t.Context(), service.database, "draft_talking_head")
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := exec.ExecuteTool(ctx, "timeline.edit_talking_head", input)
+	raw, err := service.ExecuteTool(ctx, "timeline.edit_talking_head", input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1188,7 +1189,7 @@ func assertTalkingHeadFailure(
 	if result.Status != "failed" || !strings.Contains(result.Observation, want) {
 		t.Fatalf("failure=%#v want=%q", result, want)
 	}
-	after, err := timeline.Latest(t.Context(), exec.database, "draft_talking_head")
+	after, err := timeline.Latest(t.Context(), service.database, "draft_talking_head")
 	if err != nil {
 		t.Fatal(err)
 	}

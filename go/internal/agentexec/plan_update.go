@@ -14,19 +14,19 @@ import (
 )
 
 const (
-	contentPlanRuneLimit  = 8000
-	planUpdateMaxAttempts = 3
+	ContentPlanRuneLimit  = 8000
+	PlanUpdateMaxAttempts = 3
 )
 
-func (exec *Executor) toolPlanUpdate(
+func (exec *Executor) ToolPlanUpdate(
 	ctx context.Context,
 	draftID string,
 	input rushestools.PlanUpdateInput,
 ) (rushestools.ToolResult, error) {
-	return exec.toolPlanUpdateWithBeforeApply(ctx, draftID, input, nil)
+	return exec.ToolPlanUpdateWithBeforeApply(ctx, draftID, input, nil)
 }
 
-func (exec *Executor) toolPlanUpdateWithBeforeApply(
+func (exec *Executor) ToolPlanUpdateWithBeforeApply(
 	ctx context.Context,
 	draftID string,
 	input rushestools.PlanUpdateInput,
@@ -37,7 +37,7 @@ func (exec *Executor) toolPlanUpdateWithBeforeApply(
 			"reason": "plan_required",
 		}), nil
 	}
-	patch, err := canonicalContentPlan(input.Plan)
+	patch, err := CanonicalContentPlan(input.Plan)
 	if err != nil {
 		return planUpdateFailure("创作计划本只能包含可编码为 JSON 的内容", map[string]any{
 			"reason": "plan_not_json",
@@ -68,14 +68,14 @@ func (exec *Executor) toolPlanUpdateWithBeforeApply(
 		mode = "merge"
 	}
 
-	for attempt := 1; attempt <= planUpdateMaxAttempts; attempt++ {
+	for attempt := 1; attempt <= PlanUpdateMaxAttempts; attempt++ {
 		draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
 		if err != nil {
 			return rushestools.ToolResult{}, err
 		}
-		updated := mergeContentPlan(nil, patch)
+		updated := MergeContentPlan(nil, patch)
 		if !reset {
-			updated = mergeContentPlan(draft.ContentPlan, patch)
+			updated = MergeContentPlan(draft.ContentPlan, patch)
 		}
 		if key := reservedContentPlanKey(updated); key != "" {
 			return planUpdateFailure(
@@ -95,12 +95,12 @@ func (exec *Executor) toolPlanUpdateWithBeforeApply(
 			}), nil
 		}
 		runes := utf8.RuneCount(encoded)
-		if runes > contentPlanRuneLimit {
+		if runes > ContentPlanRuneLimit {
 			return planUpdateFailure(
 				"创作计划本超出 8000 字上限；请只记纲要，细节留在对应工具按需检索",
 				map[string]any{
 					"reason": "plan_too_large", "plan_runes": runes,
-					"limit_runes": contentPlanRuneLimit, "current_plan_unchanged": true,
+					"limit_runes": ContentPlanRuneLimit, "current_plan_unchanged": true,
 				},
 			), nil
 		}
@@ -147,7 +147,7 @@ func (exec *Executor) toolPlanUpdateWithBeforeApply(
 	), nil
 }
 
-func canonicalContentPlan(input map[string]any) (map[string]any, error) {
+func CanonicalContentPlan(input map[string]any) (map[string]any, error) {
 	encoded, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
@@ -165,7 +165,7 @@ func canonicalContentPlan(input map[string]any) (map[string]any, error) {
 // mergeContentPlan implements the object branch of RFC 7396 without mutating
 // either input. A null patch value deletes a key; objects merge recursively;
 // arrays and scalar values replace the previous value.
-func mergeContentPlan(target, patch map[string]any) map[string]any {
+func MergeContentPlan(target, patch map[string]any) map[string]any {
 	result := cloneContentPlanMap(target)
 	for key, patchValue := range patch {
 		if patchValue == nil {
@@ -178,7 +178,7 @@ func mergeContentPlan(target, patch map[string]any) map[string]any {
 			continue
 		}
 		targetObject, _ := result[key].(map[string]any)
-		result[key] = mergeContentPlan(targetObject, patchObject)
+		result[key] = MergeContentPlan(targetObject, patchObject)
 	}
 	return result
 }

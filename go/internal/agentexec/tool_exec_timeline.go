@@ -57,7 +57,7 @@ func (exec *Executor) toolComposeInitial(
 			},
 		}, nil
 	}
-	return exec.persistTimeline(ctx, draftID, document, "compose_initial", []map[string]any{{
+	return exec.PersistTimeline(ctx, draftID, document, "compose_initial", []map[string]any{{
 		"kind": "compose_initial", "clip_count": len(input.Clips),
 	}})
 }
@@ -121,7 +121,7 @@ func (exec *Executor) toolApplyPatches(
 		beforeOperation := document
 		document, err = timeline.ApplyPatch(document, operation)
 		if err != nil {
-			if failure, ok := timelineOpFailureAt(err, operation, index+1, beforeOperation); ok {
+			if failure, ok := TimelineOpFailureAt(err, operation, index+1, beforeOperation); ok {
 				return failure, nil
 			}
 			message := fmt.Sprintf("第 %d 个时间线补丁失败: %v", index+1, err)
@@ -172,7 +172,7 @@ func (exec *Executor) toolApplyPatches(
 	}
 	document.Version = next
 	document.TimelineID = fmt.Sprintf("%s:v%d", draftID, next)
-	result, err := exec.persistTimeline(ctx, draftID, document, "apply_patches", plannedOperations)
+	result, err := exec.PersistTimeline(ctx, draftID, document, "apply_patches", plannedOperations)
 	appendBeatMetadataResult(&result, attachedBeatGrids, beatWarnings)
 	return result, err
 }
@@ -194,7 +194,7 @@ func appendBeatMetadataResult(
 	}
 }
 
-func (exec *Executor) persistTimeline(
+func (exec *Executor) PersistTimeline(
 	ctx context.Context,
 	draftID string,
 	document timeline.Document,
@@ -274,7 +274,7 @@ func (exec *Executor) persistTimeline(
 	return toolResult, nil
 }
 
-func (exec *Executor) toolValidateTimeline(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
+func (exec *Executor) ToolValidateTimeline(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
 	document, err := timeline.Latest(ctx, exec.database, draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
@@ -326,7 +326,7 @@ func (exec *Executor) toolValidateTimeline(ctx context.Context, draftID string) 
 	}
 	// validate 是只读诊断：口播质检读取失败（如 transcript 缺失/损坏）时跳过附加，
 	// 不让合法时间线因增强信息读取失败而报错（与 toolEditTalkingHead 的软跳过一致）。
-	if quality, qualityErr := exec.speechQualityReport(ctx, document); qualityErr == nil {
+	if quality, qualityErr := exec.SpeechQualityReport(ctx, document); qualityErr == nil {
 		if present, _ := quality["a_roll_present"].(bool); present {
 			data["speech_quality"] = quality
 			observation += TalkingHeadQualitySummary(quality)
@@ -411,13 +411,13 @@ func (exec *Executor) toolInspectTimeline(
 		Data: map[string]any{
 			"timeline_exists": true,
 			"fps":             document.FPS, "duration_frames": document.DurationFrames, "tracks": tracks,
-			"audio_layout":   audioLayoutData(document),
+			"audio_layout":   AudioLayoutData(document),
 			"beat_alignment": BeatAlignmentData(document),
 		},
 	}, nil
 }
 
-func audioLayoutData(document timeline.Document) map[string]any {
+func AudioLayoutData(document timeline.Document) map[string]any {
 	bgmClips := []timeline.Clip{}
 	sfxClips := []timeline.Clip{}
 	for _, track := range document.Tracks {

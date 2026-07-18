@@ -58,7 +58,7 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 	case "asset.list_assets":
 		return exec.ToolListAssets(ctx, draftID, input.(rushestools.AssetListInput))
 	case "understand.materials":
-		return exec.toolUnderstand(ctx, draftID, input.(rushestools.UnderstandInput))
+		return exec.ToolUnderstand(ctx, draftID, input.(rushestools.UnderstandInput))
 	case "media.search_shots":
 		return exec.toolSearchShots(ctx, draftID, input.(rushestools.ShotSearchInput))
 	case "audio.analyze_beats":
@@ -66,7 +66,7 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 	case "audio.analyze_speech_pauses":
 		return exec.toolAnalyzeSpeechPauses(ctx, draftID, input.(rushestools.SpeechPauseAnalysisInput))
 	case "speech.inspect":
-		return exec.toolInspectSpeech(ctx, draftID, input.(rushestools.SpeechInspectInput))
+		return exec.ToolInspectSpeech(ctx, draftID, input.(rushestools.SpeechInspectInput))
 	case "interaction.ask_user":
 		return exec.toolAskUser(ctx, draftID, input.(rushestools.AskUserInput), nil)
 	case "interaction.confirm_action":
@@ -79,9 +79,9 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 			AllowFreeText: BoolPointer(false),
 		}, map[string]any{"tool_name": confirmation.ToolName, "arguments": confirmation.Arguments})
 	case "decision.answer":
-		return exec.toolDecisionAnswer(ctx, draftID, input.(rushestools.DecisionAnswerInput))
+		return exec.ToolDecisionAnswer(ctx, draftID, input.(rushestools.DecisionAnswerInput))
 	case "plan.update":
-		return exec.toolPlanUpdate(ctx, draftID, input.(rushestools.PlanUpdateInput))
+		return exec.ToolPlanUpdate(ctx, draftID, input.(rushestools.PlanUpdateInput))
 	case "memory.update":
 		return exec.toolMemoryUpdate(ctx, draftID, input.(rushestools.MemoryUpdateInput))
 	case "timeline.compose_initial":
@@ -93,7 +93,7 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 	case "timeline.edit_talking_head":
 		return exec.toolEditTalkingHead(ctx, draftID, input.(rushestools.TalkingHeadEditInput))
 	case "timeline.validate":
-		return exec.toolValidateTimeline(ctx, draftID)
+		return exec.ToolValidateTimeline(ctx, draftID)
 	case "timeline.inspect":
 		return exec.toolInspectTimeline(ctx, draftID, input.(rushestools.TimelineInspectInput))
 	case "render.preview":

@@ -264,7 +264,7 @@ func (exec *Executor) VerifyContentContract(
 		} else {
 			tolerance = *contract.DurationToleranceFrames
 		}
-		delta := absInt(document.DurationFrames - contract.TargetDurationFrames)
+		delta := AbsInt(document.DurationFrames - contract.TargetDurationFrames)
 		report.Items = append(report.Items, ContractVerificationItem{
 			Check: "target_duration", Pass: delta <= tolerance,
 			Message: fmt.Sprintf("当前 %d 帧，目标 %d±%d 帧。", document.DurationFrames, contract.TargetDurationFrames, tolerance),

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -43,13 +44,13 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 		t.Fatalf("fillers result=%#v err=%v", result, err)
 	}
 	addUnderstandRoutingAsset(t, database, draftID, assetID)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	input := rushestools.UnderstandInput{AssetIDs: []string{assetID}, Depth: "deep"}
-	queued, err := exec.toolUnderstand(t.Context(), draftID, input)
+	queued, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +80,7 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 		t.Fatalf("fixture 未触发 material catalog 截断: %s", rawSnapshot)
 	}
 
-	message, err := exec.executor.UnderstandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
+	message, err := service.executor.UnderstandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,8 +93,8 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 			t.Fatalf("evidence 缺少 %q: %s", expected, message.Content)
 		}
 	}
-	if len([]rune(message.Content)) > understandJobEvidenceRuneBudget {
-		t.Fatalf("evidence runes=%d budget=%d", len([]rune(message.Content)), understandJobEvidenceRuneBudget)
+	if len([]rune(message.Content)) > agentexec.UnderstandJobEvidenceRuneBudget {
+		t.Fatalf("evidence runes=%d budget=%d", len([]rune(message.Content)), agentexec.UnderstandJobEvidenceRuneBudget)
 	}
 	if strings.Contains(message.Content, `"segments"`) {
 		t.Fatalf("定向证据不应常驻逐镜头 segments: %s", message.Content)
@@ -102,7 +103,7 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 
 func TestDecodeUnderstandJobPayloadKeepsLegacyMixedAssetIDs(t *testing.T) {
 	t.Parallel()
-	payload, err := decodeUnderstandJobPayload(`{
+	payload, err := agentexec.DecodeUnderstandJobPayload(`{
 		"asset_ids":["asset-a",42,"asset-b",null],
 		"focus":"人物","depth":"deep","max_steps_per_asset":9,
 		"analysis_fingerprints":{"asset-a":"fp-a","asset-b":17}
@@ -125,11 +126,11 @@ func TestUnderstandJobEvidenceAndTerminalReuseSelectJobSpecificSummary(t *testin
 		oldMarker     = "OLD_GLOBAL_BEST_MARKER"
 		currentMarker = "CURRENT_JOB_MARKER"
 	)
-	database, exec := setupUnderstandRoutingService(t, draftID, assetID)
+	database, service := setupUnderstandRoutingService(t, draftID, assetID)
 	input := rushestools.UnderstandInput{
 		AssetIDs: []string{assetID}, Focus: "只识别 logo 颜色", Depth: "deep",
 	}
-	queued, err := exec.toolUnderstand(t.Context(), draftID, input)
+	queued, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,18 +193,18 @@ func TestUnderstandJobEvidenceAndTerminalReuseSelectJobSpecificSummary(t *testin
 		t.Fatalf("terminal=%#v err=%v", terminal, err)
 	}
 
-	message, err := exec.executor.UnderstandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
+	message, err := service.executor.UnderstandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(message.Content, currentMarker) || strings.Contains(message.Content, oldMarker) {
 		t.Fatalf("定向证据未绑定当前 job: %s", message.Content)
 	}
-	if len([]rune(message.Content)) > understandJobEvidenceRuneBudget {
+	if len([]rune(message.Content)) > agentexec.UnderstandJobEvidenceRuneBudget {
 		t.Fatalf("长 tag 后 evidence runes=%d budget=%d",
-			len([]rune(message.Content)), understandJobEvidenceRuneBudget)
+			len([]rune(message.Content)), agentexec.UnderstandJobEvidenceRuneBudget)
 	}
-	repeated, err := exec.toolUnderstand(t.Context(), draftID, input)
+	repeated, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 	if err != nil || repeated.JobID != queued.JobID || repeated.Status != "completed" ||
 		len(repeated.Summaries) != 1 || repeated.Summaries[0].Overall != currentMarker {
 		t.Fatalf("terminal reuse=%#v err=%v", repeated, err)

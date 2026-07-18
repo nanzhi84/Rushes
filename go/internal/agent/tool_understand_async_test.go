@@ -57,8 +57,8 @@ func TestToolUnderstandRoutesAsyncRequestsToPendingJobs(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			draftID := "draft_" + test.name
-			database, exec := setupUnderstandRoutingService(t, draftID, test.assetIDs...)
-			result, err := exec.toolUnderstand(t.Context(), draftID, test.input)
+			database, service := setupUnderstandRoutingService(t, draftID, test.assetIDs...)
+			result, err := service.executor.ToolUnderstand(t.Context(), draftID, test.input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -100,8 +100,8 @@ func TestToolUnderstandSingleScanStaysInlineAndCancelable(t *testing.T) {
 	t.Run("completed_inline_without_job", func(t *testing.T) {
 		t.Parallel()
 		const draftID = "draft_understand_inline"
-		database, exec := setupUnderstandRoutingService(t, draftID, "asset_inline")
-		result, err := exec.toolUnderstand(t.Context(), draftID, rushestools.UnderstandInput{
+		database, service := setupUnderstandRoutingService(t, draftID, "asset_inline")
+		result, err := service.executor.ToolUnderstand(t.Context(), draftID, rushestools.UnderstandInput{
 			AssetIDs: []string{"asset_inline"}, Depth: "scan", Focus: "主体",
 		})
 		if err != nil {
@@ -123,10 +123,10 @@ func TestToolUnderstandSingleScanStaysInlineAndCancelable(t *testing.T) {
 	t.Run("cancelled_context_never_falls_back_to_job", func(t *testing.T) {
 		t.Parallel()
 		const draftID = "draft_understand_inline_cancel"
-		database, exec := setupUnderstandRoutingService(t, draftID, "asset_inline_cancel")
+		database, service := setupUnderstandRoutingService(t, draftID, "asset_inline_cancel")
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		_, err := exec.toolUnderstand(ctx, draftID, rushestools.UnderstandInput{
+		_, err := service.executor.ToolUnderstand(ctx, draftID, rushestools.UnderstandInput{
 			AssetIDs: []string{"asset_inline_cancel"}, Depth: "scan",
 		})
 		if !errors.Is(err, context.Canceled) {
@@ -148,13 +148,13 @@ func TestToolUnderstandCacheRouting(t *testing.T) {
 		t.Parallel()
 		const draftID = "draft_understand_all_cached"
 		assetIDs := []string{"asset_cached_a", "asset_cached_b"}
-		database, exec := setupUnderstandRoutingService(t, draftID, assetIDs...)
+		database, service := setupUnderstandRoutingService(t, draftID, assetIDs...)
 		input := rushestools.UnderstandInput{AssetIDs: assetIDs, Focus: "人物 动作", Depth: "scan"}
 		for _, assetID := range assetIDs {
 			cacheUnderstandRoutingSummary(t, database, assetID, input)
 		}
 
-		result, err := exec.toolUnderstand(t.Context(), draftID, input)
+		result, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -171,11 +171,11 @@ func TestToolUnderstandCacheRouting(t *testing.T) {
 		t.Parallel()
 		const draftID = "draft_understand_partial_cached"
 		assetIDs := []string{"asset_partial_hit", "asset_partial_miss"}
-		database, exec := setupUnderstandRoutingService(t, draftID, assetIDs...)
+		database, service := setupUnderstandRoutingService(t, draftID, assetIDs...)
 		input := rushestools.UnderstandInput{AssetIDs: assetIDs, Focus: "动作", Depth: "scan"}
 		cacheUnderstandRoutingSummary(t, database, assetIDs[0], input)
 
-		result, err := exec.toolUnderstand(t.Context(), draftID, input)
+		result, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -198,15 +198,15 @@ func TestToolUnderstandIdempotencySerialAndConcurrent(t *testing.T) {
 	t.Run("serial", func(t *testing.T) {
 		t.Parallel()
 		const draftID = "draft_understand_serial_idempotency"
-		database, exec := setupUnderstandRoutingService(t, draftID, "asset_serial_a", "asset_serial_b")
+		database, service := setupUnderstandRoutingService(t, draftID, "asset_serial_a", "asset_serial_b")
 		input := rushestools.UnderstandInput{
 			AssetIDs: []string{"asset_serial_a", "asset_serial_b"}, Focus: "相同参数", Depth: "scan",
 		}
-		first, err := exec.toolUnderstand(t.Context(), draftID, input)
+		first, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 		if err != nil {
 			t.Fatal(err)
 		}
-		second, err := exec.toolUnderstand(t.Context(), draftID, input)
+		second, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -218,7 +218,7 @@ func TestToolUnderstandIdempotencySerialAndConcurrent(t *testing.T) {
 	t.Run("concurrent_first_enqueue", func(t *testing.T) {
 		t.Parallel()
 		const draftID = "draft_understand_concurrent_idempotency"
-		database, exec := setupUnderstandRoutingService(t, draftID, "asset_concurrent_a", "asset_concurrent_b")
+		database, service := setupUnderstandRoutingService(t, draftID, "asset_concurrent_a", "asset_concurrent_b")
 		input := rushestools.UnderstandInput{
 			AssetIDs: []string{"asset_concurrent_a", "asset_concurrent_b"}, Focus: "并发参数", Depth: "scan",
 		}
@@ -232,7 +232,7 @@ func TestToolUnderstandIdempotencySerialAndConcurrent(t *testing.T) {
 			go func() {
 				defer wait.Done()
 				<-start
-				result, err := exec.toolUnderstand(t.Context(), draftID, input)
+				result, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 				if err != nil {
 					errorsFound <- err
 					return
@@ -272,11 +272,11 @@ func TestToolUnderstandIdempotencySerialAndConcurrent(t *testing.T) {
 func TestToolUnderstandRejectsForeignAssetBeforeAnySideEffect(t *testing.T) {
 	t.Parallel()
 	const draftID = "draft_understand_invalid_asset"
-	database, exec := setupUnderstandRoutingService(t, draftID, "asset_valid_first")
+	database, service := setupUnderstandRoutingService(t, draftID, "asset_valid_first")
 	agenttest.CreateAgentDraft(t, database, "draft_understand_asset_owner")
 	addUnderstandRoutingAsset(t, database, "draft_understand_asset_owner", "asset_foreign")
 
-	_, err := exec.toolUnderstand(t.Context(), draftID, rushestools.UnderstandInput{
+	_, err := service.executor.ToolUnderstand(t.Context(), draftID, rushestools.UnderstandInput{
 		AssetIDs: []string{"asset_valid_first", "asset_foreign"}, Depth: "scan",
 	})
 	if err == nil || !strings.Contains(err.Error(), "不属于当前草稿") {
@@ -304,11 +304,11 @@ func TestToolUnderstandRejectsForeignAssetBeforeAnySideEffect(t *testing.T) {
 func TestToolUnderstandForceRefreshReusesTerminalJobAndPersistedSummary(t *testing.T) {
 	t.Parallel()
 	const draftID = "draft_understand_force_terminal"
-	database, exec := setupUnderstandRoutingService(t, draftID, "asset_force_terminal")
+	database, service := setupUnderstandRoutingService(t, draftID, "asset_force_terminal")
 	input := rushestools.UnderstandInput{
 		AssetIDs: []string{"asset_force_terminal"}, Depth: "scan", ForceRefresh: true,
 	}
-	first, err := exec.toolUnderstand(t.Context(), draftID, input)
+	first, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestToolUnderstandForceRefreshReusesTerminalJobAndPersistedSummary(t *testi
 		go func() {
 			defer wait.Done()
 			<-start
-			result, callErr := exec.toolUnderstand(t.Context(), draftID, input)
+			result, callErr := service.executor.ToolUnderstand(t.Context(), draftID, input)
 			if callErr != nil {
 				errorsFound <- callErr
 				return
@@ -354,7 +354,7 @@ func TestToolUnderstandForceRefreshReusesTerminalJobAndPersistedSummary(t *testi
 			t.Errorf("terminal jobID=%q want=%q", jobID, first.JobID)
 		}
 	}
-	serial, err := exec.toolUnderstand(t.Context(), draftID, input)
+	serial, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 	if err != nil || serial.JobID != first.JobID || serial.Status != "completed" || len(serial.Summaries) != 1 {
 		t.Fatalf("serial=%#v err=%v", serial, err)
 	}
@@ -363,12 +363,12 @@ func TestToolUnderstandForceRefreshReusesTerminalJobAndPersistedSummary(t *testi
 	}
 	newGenerationInput := input
 	newGenerationInput.RefreshNonce = "explicit-user-rerun-2"
-	newGeneration, err := exec.toolUnderstand(t.Context(), draftID, newGenerationInput)
+	newGeneration, err := service.executor.ToolUnderstand(t.Context(), draftID, newGenerationInput)
 	if err != nil || newGeneration.Status != "queued" || newGeneration.JobID == "" ||
 		newGeneration.JobID == first.JobID {
 		t.Fatalf("new generation=%#v err=%v", newGeneration, err)
 	}
-	repeatedGeneration, err := exec.toolUnderstand(t.Context(), draftID, newGenerationInput)
+	repeatedGeneration, err := service.executor.ToolUnderstand(t.Context(), draftID, newGenerationInput)
 	if err != nil || repeatedGeneration.JobID != newGeneration.JobID {
 		t.Fatalf("repeated generation=%#v err=%v", repeatedGeneration, err)
 	}
@@ -384,9 +384,9 @@ func TestToolUnderstandReusesFailedAndCancelledTerminalJobs(t *testing.T) {
 			t.Parallel()
 			draftID := "draft_understand_terminal_" + status
 			assetID := "asset_understand_terminal_" + status
-			database, exec := setupUnderstandRoutingService(t, draftID, assetID)
+			database, service := setupUnderstandRoutingService(t, draftID, assetID)
 			input := rushestools.UnderstandInput{AssetIDs: []string{assetID}, Depth: "deep"}
-			first, err := exec.toolUnderstand(t.Context(), draftID, input)
+			first, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -395,7 +395,7 @@ func TestToolUnderstandReusesFailedAndCancelledTerminalJobs(t *testing.T) {
 			); err != nil {
 				t.Fatal(err)
 			}
-			repeated, err := exec.toolUnderstand(t.Context(), draftID, input)
+			repeated, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 			if err != nil || repeated.JobID != first.JobID || repeated.Status != status {
 				t.Fatalf("repeated=%#v err=%v", repeated, err)
 			}
@@ -405,7 +405,7 @@ func TestToolUnderstandReusesFailedAndCancelledTerminalJobs(t *testing.T) {
 			retryInput := input
 			retryInput.ForceRefresh = true
 			retryInput.RefreshNonce = "explicit-recovery-2"
-			retry, err := exec.toolUnderstand(t.Context(), draftID, retryInput)
+			retry, err := service.executor.ToolUnderstand(t.Context(), draftID, retryInput)
 			if err != nil || retry.Status != "queued" || retry.JobID == "" || retry.JobID == first.JobID {
 				t.Fatalf("retry=%#v err=%v", retry, err)
 			}
@@ -420,9 +420,9 @@ func TestToolUnderstandReadyCacheSupersedesFailedOrCancelledJob(t *testing.T) {
 			t.Parallel()
 			draftID := "draft_understand_terminal_cache_" + status
 			assetID := "asset_understand_terminal_cache_" + status
-			database, exec := setupUnderstandRoutingService(t, draftID, assetID)
+			database, service := setupUnderstandRoutingService(t, draftID, assetID)
 			input := rushestools.UnderstandInput{AssetIDs: []string{assetID}, Depth: "deep"}
-			first, err := exec.toolUnderstand(t.Context(), draftID, input)
+			first, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -433,7 +433,7 @@ func TestToolUnderstandReadyCacheSupersedesFailedOrCancelledJob(t *testing.T) {
 			}
 			// 素材摘要是全局缓存；它可能由另一个草稿或任务在历史 job 终态后写入。
 			cacheUnderstandRoutingSummary(t, database, assetID, input)
-			repeated, err := exec.toolUnderstand(t.Context(), draftID, input)
+			repeated, err := service.executor.ToolUnderstand(t.Context(), draftID, input)
 			if err != nil || repeated.Status != "completed" || repeated.JobID != "" ||
 				len(repeated.Summaries) != 1 || !reflect.DeepEqual(repeated.CacheHitAssetIDs, []string{assetID}) {
 				t.Fatalf("repeated=%#v err=%v", repeated, err)
@@ -448,14 +448,14 @@ func TestToolUnderstandReadyCacheSupersedesFailedOrCancelledJob(t *testing.T) {
 func TestToolUnderstandAssetOrderIsPartOfIdempotencyKey(t *testing.T) {
 	t.Parallel()
 	const draftID = "draft_understand_ordered_key"
-	database, exec := setupUnderstandRoutingService(t, draftID, "asset_order_a", "asset_order_b")
-	first, err := exec.toolUnderstand(t.Context(), draftID, rushestools.UnderstandInput{
+	database, service := setupUnderstandRoutingService(t, draftID, "asset_order_a", "asset_order_b")
+	first, err := service.executor.ToolUnderstand(t.Context(), draftID, rushestools.UnderstandInput{
 		AssetIDs: []string{"asset_order_a", "asset_order_b"}, Depth: "scan",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := exec.toolUnderstand(t.Context(), draftID, rushestools.UnderstandInput{
+	second, err := service.executor.ToolUnderstand(t.Context(), draftID, rushestools.UnderstandInput{
 		AssetIDs: []string{"asset_order_b", "asset_order_a"}, Depth: "scan",
 	})
 	if err != nil {
@@ -488,12 +488,12 @@ func setupUnderstandRoutingService(
 	for _, assetID := range assetIDs {
 		addUnderstandRoutingAsset(t, database, draftID, assetID)
 	}
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
-	return database, exec
+	t.Cleanup(service.Close)
+	return database, service
 }
 
 func addUnderstandRoutingAsset(t *testing.T, database *storage.DB, draftID, assetID string) {

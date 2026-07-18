@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -47,7 +48,7 @@ func TestQueueMemoryEvidenceUsesOnlyUserOwnedInputs(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			evidence, ok := memoryEvidenceFromContext(withQueueMemoryEvidence(t.Context(), test.item))
+			evidence, ok := agentexec.MemoryEvidenceFromContext(withQueueMemoryEvidence(t.Context(), test.item))
 			if ok != test.ok || evidence.Kind != test.kind || evidence.ID != test.id {
 				t.Fatalf("evidence=%#v ok=%v", evidence, ok)
 			}
@@ -60,17 +61,17 @@ func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_memory_tool")
 	agenttest.InsertAgentMessage(t, database, "draft_memory_tool", "message_memory_tool", "以后都快一点，字幕别遮脸")
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(
-		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_memory_tool"),
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_memory_tool"),
 		"draft_memory_tool",
 	)
 
-	raw, err := exec.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+	raw, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
 		Entries: []rushestools.MemoryEntryInput{
 			{Key: "pacing", Kind: "preference", Statement: "成片节奏偏快"},
 			{Key: "subtitle_style", Kind: "correction", Statement: "字幕不要遮挡人物面部"},
@@ -91,7 +92,7 @@ func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.
 		}
 	}
 
-	raw, err = exec.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+	raw, err = service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
 		RemoveKeys: []string{"pacing"},
 	})
 	result = raw.(rushestools.ToolResult)
@@ -116,16 +117,16 @@ func TestMemoryUpdateAcceptsAnsweredDecisionEvidence(t *testing.T) {
 			1,'answered','{"free_text":"以后都快一点"}',1)`); err != nil {
 		t.Fatal(err)
 	}
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(
-		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceDecision, "decision_memory"),
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceDecision, "decision_memory"),
 		"draft_memory_decision",
 	)
-	raw, err := exec.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+	raw, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
 		Entries: []rushestools.MemoryEntryInput{{
 			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
 		}},
@@ -146,11 +147,11 @@ func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_memory_reject")
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	input := rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{
 		Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
 	}}}
@@ -168,14 +169,14 @@ func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 		{
 			name: "forged message id fails reducer validation",
 			ctx: rushestools.WithDraftID(
-				withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "missing"),
+				agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "missing"),
 				"draft_memory_reject",
 			),
 			code: "memory_evidence_invalid",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			raw, executeErr := exec.ExecuteTool(test.ctx, "memory.update", input)
+			raw, executeErr := service.ExecuteTool(test.ctx, "memory.update", input)
 			result := raw.(rushestools.ToolResult)
 			if executeErr != nil || result.Status != "validation_failed" ||
 				result.Data["error_code"] != test.code || result.Data["current_memory_unchanged"] != true {
@@ -194,16 +195,16 @@ func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_memory_input")
 	agenttest.InsertAgentMessage(t, database, "draft_memory_input", "message_memory_input", "记住")
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(
-		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_memory_input"),
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_memory_input"),
 		"draft_memory_input",
 	)
-	tooManyEntries := make([]rushestools.MemoryEntryInput, memoryUpdateEntryLimit+1)
+	tooManyEntries := make([]rushestools.MemoryEntryInput, agentexec.MemoryUpdateEntryLimit+1)
 	for index := range tooManyEntries {
 		tooManyEntries[index] = rushestools.MemoryEntryInput{
 			Key: "key_" + strings.Repeat("x", index+1), Kind: "habit", Statement: "稳定习惯",
@@ -281,7 +282,7 @@ func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			raw, executeErr := exec.ExecuteTool(ctx, "memory.update", test.input)
+			raw, executeErr := service.ExecuteTool(ctx, "memory.update", test.input)
 			result := raw.(rushestools.ToolResult)
 			if executeErr != nil || result.Status != "validation_failed" || result.Data["error_code"] != test.code {
 				t.Fatalf("result=%#v err=%v", result, executeErr)

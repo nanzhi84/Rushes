@@ -24,7 +24,7 @@ func timelineOpFieldFailure(
 		data["failed_op"] = operation
 	}
 	if fieldErr.Spec != nil {
-		data["expected_schema"] = timelineOpExpectedSchema(*fieldErr.Spec)
+		data["expected_schema"] = TimelineOpExpectedSchema(*fieldErr.Spec)
 		data["correct_example"] = timeline.CorrectOpExample(*fieldErr.Spec)
 		data["recovery"] = "只修正当前 op 的字段名与类型后重新调用；不要原样重发失败参数。"
 	} else {
@@ -38,7 +38,7 @@ func timelineOpFieldFailure(
 	}
 }
 
-func timelineOpExpectedSchema(spec timeline.OpSpec) map[string]any {
+func TimelineOpExpectedSchema(spec timeline.OpSpec) map[string]any {
 	correctExample := timeline.CorrectOpExample(spec)
 	properties := map[string]any{
 		"kind": map[string]any{
@@ -119,7 +119,7 @@ func timelineOpCatalogIndex() []map[string]string {
 	return index
 }
 
-func timelineOpFieldError(err error) (*timeline.OpFieldError, bool) {
+func TimelineOpFieldError(err error) (*timeline.OpFieldError, bool) {
 	var fieldErr *timeline.OpFieldError
 	if errors.As(err, &fieldErr) {
 		return fieldErr, true

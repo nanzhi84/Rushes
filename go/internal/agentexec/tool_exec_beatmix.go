@@ -255,7 +255,7 @@ func (exec *Executor) toolBuildBeatMix(
 		}
 	} else {
 		if len(input.ShotIDs) > 0 {
-			cutFrames = chooseAllBeatMixCuts(
+			cutFrames = ChooseAllBeatMixCuts(
 				grid.EveryFourBeatFrames, grid.BeatFrames, targetFrames, len(input.ShotIDs),
 			)
 		} else if input.UseAllVideoAssets {
@@ -263,11 +263,11 @@ func (exec *Executor) toolBuildBeatMix(
 			for _, source := range videoSources {
 				capacities = append(capacities, source.availableFrame)
 			}
-			cutFrames = chooseCapacityAwareBeatMixCuts(
+			cutFrames = ChooseCapacityAwareBeatMixCuts(
 				grid.EveryFourBeatFrames, grid.BeatFrames, targetFrames, capacities,
 			)
 		} else {
-			cutFrames = chooseBeatMixCuts(
+			cutFrames = ChooseBeatMixCuts(
 				grid.EveryFourBeatFrames, grid.BeatFrames, targetFrames, len(videoSources),
 			)
 		}
@@ -310,7 +310,7 @@ func (exec *Executor) toolBuildBeatMix(
 			shot := shotByID[selectedShotID]
 			selectedIndex = sourceIndexByAsset[shot.candidate.AssetID]
 			var fits bool
-			start, fits = chooseUnusedBeatMixSourceStart(
+			start, fits = ChooseUnusedBeatMixSourceStart(
 				videoSources[selectedIndex].availableFrame, duration,
 				[]BeatMixSourceRange{shot.rangeInfo}, usedSourceRanges[shot.candidate.AssetID], 0, true,
 			)
@@ -332,7 +332,7 @@ func (exec *Executor) toolBuildBeatMix(
 					if phase == 0 && alreadyUsed || phase == 1 && !alreadyUsed {
 						continue
 					}
-					candidateStart, fits := chooseUnusedBeatMixSourceStart(
+					candidateStart, fits := ChooseUnusedBeatMixSourceStart(
 						source.availableFrame, duration, source.analysisRanges,
 						usedSourceRanges[source.asset.ID], segmentIndex+index, false,
 					)
@@ -355,7 +355,7 @@ func (exec *Executor) toolBuildBeatMix(
 		usedRange := BeatMixSourceRange{StartFrame: start, EndFrame: start + duration}
 		usedSourceRanges[selected.asset.ID] = append(usedSourceRanges[selected.asset.ID], usedRange)
 		usedAssets[selected.asset.ID] = struct{}{}
-		if sourceRangeContains(selected.analysisRanges, start, start+duration) {
+		if SourceRangeContains(selected.analysisRanges, start, start+duration) {
 			understandingRangesUsed++
 		}
 		selections = append(selections, timeline.Selection{
@@ -480,7 +480,7 @@ func (exec *Executor) toolBuildBeatMix(
 		semanticOperation["sfx_asset_id"] = input.SFX.AssetID
 		semanticOperation["sfx_start_frame"] = sfxStartFrame
 	}
-	result, err := exec.persistTimeline(
+	result, err := exec.PersistTimeline(
 		ctx, draftID, document, "recut_to_beats", []map[string]any{semanticOperation},
 	)
 	if err != nil || result.Status != "succeeded" {
@@ -530,10 +530,10 @@ func (exec *Executor) latestBeatMixSourceRanges(
 	if err := json.Unmarshal(encoded, &summary); err != nil {
 		return nil
 	}
-	return beatMixRangesFromUnderstanding(summary.Segments, availableFrames)
+	return BeatMixRangesFromUnderstanding(summary.Segments, availableFrames)
 }
 
-func beatMixRangesFromUnderstanding(
+func BeatMixRangesFromUnderstanding(
 	segments []understanding.Segment,
 	availableFrames int,
 ) []BeatMixSourceRange {
@@ -592,7 +592,7 @@ func understandingSegmentQualityPenalty(segment understanding.Segment) float64 {
 	return math.Round(penalty*10000) / 10000
 }
 
-func chooseUnusedBeatMixSourceStart(
+func ChooseUnusedBeatMixSourceStart(
 	availableFrames int,
 	durationFrames int,
 	ranges []BeatMixSourceRange,
@@ -658,7 +658,7 @@ func chooseUnusedBeatMixSourceStart(
 		}
 	}
 	if !strictRanges && (len(candidates) != 1 || candidates[0].StartFrame != 0 || candidates[0].EndFrame != availableFrames) {
-		return chooseUnusedBeatMixSourceStart(
+		return ChooseUnusedBeatMixSourceStart(
 			availableFrames, durationFrames,
 			[]BeatMixSourceRange{{StartFrame: 0, EndFrame: availableFrames}},
 			used, rangeOffset, true,

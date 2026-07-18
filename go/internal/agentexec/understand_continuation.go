@@ -13,7 +13,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
-const understandJobEvidenceRuneBudget = 4000
+const UnderstandJobEvidenceRuneBudget = 4000
 
 type understandJobPayload struct {
 	AssetIDs             []string
@@ -52,7 +52,7 @@ func (exec *Executor) UnderstandJobEvidenceMessage(
 	if err != nil {
 		return nil, err
 	}
-	payload, err := decodeUnderstandJobPayload(payloadJSON)
+	payload, err := DecodeUnderstandJobPayload(payloadJSON)
 	if err != nil {
 		return nil, fmt.Errorf("understand job %s payload 无效: %w", jobID, err)
 	}
@@ -130,14 +130,14 @@ func (exec *Executor) UnderstandJobEvidenceMessage(
 			return nil, marshalErr
 		}
 		content = header + string(encoded) + "\n逐镜头证据需要时再调用 media.search_shots；不要重复调用 understand.materials。"
-		if len([]rune(content)) <= understandJobEvidenceRuneBudget {
+		if len([]rune(content)) <= UnderstandJobEvidenceRuneBudget {
 			break
 		}
 		included--
 	}
 	if included == 0 {
 		return nil, fmt.Errorf("understand job %s 的最小证据仍超过 %d rune 预算",
-			jobID, understandJobEvidenceRuneBudget)
+			jobID, UnderstandJobEvidenceRuneBudget)
 	}
 	message := schema.SystemMessage(content)
 	message.Extra = map[string]any{
@@ -166,7 +166,7 @@ func (exec *Executor) materialSummaryForUnderstandJob(
 	return storage.MaterialSummaryByFingerprint(ctx, exec.database.Read(), assetID, fingerprint)
 }
 
-func decodeUnderstandJobPayload(raw string) (understandJobPayload, error) {
+func DecodeUnderstandJobPayload(raw string) (understandJobPayload, error) {
 	var value map[string]any
 	if err := json.Unmarshal([]byte(raw), &value); err != nil {
 		return understandJobPayload{}, err

@@ -945,7 +945,7 @@ func TestCompletedPreviewObservationIncludesStructuredVerificationReport(t *test
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	planResult, err := service.toolPlanUpdate(t.Context(), "draft_job_report", rushestools.PlanUpdateInput{
+	planResult, err := service.executor.ToolPlanUpdate(t.Context(), "draft_job_report", rushestools.PlanUpdateInput{
 		Plan: map[string]any{}, Contract: &rushestools.ContentPlanContract{TargetDurationFrames: 30},
 	})
 	if err != nil || planResult.Status != "succeeded" {
@@ -957,7 +957,7 @@ func TestCompletedPreviewObservationIncludesStructuredVerificationReport(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.persistTimeline(t.Context(), "draft_job_report", document, "preview_report_fixture"); err != nil {
+	if _, err := service.executor.PersistTimeline(t.Context(), "draft_job_report", document, "preview_report_fixture"); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(database.Paths.Temporary, "preview-report.mp4")
@@ -1047,7 +1047,7 @@ func TestCompletedPreviewObservationContinuesWhenAutomaticInspectionFails(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.persistTimeline(t.Context(), "draft_job_degraded_report", document, "preview_degraded_fixture"); err != nil {
+	if _, err := service.executor.PersistTimeline(t.Context(), "draft_job_degraded_report", document, "preview_degraded_fixture"); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -2429,7 +2429,7 @@ func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.persistTimeline(t.Context(), draftID, document, "confirmation_precondition_fixture"); err != nil {
+	if _, err := service.executor.PersistTimeline(t.Context(), draftID, document, "confirmation_precondition_fixture"); err != nil {
 		t.Fatal(err)
 	}
 	confirmRaw, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
@@ -2493,7 +2493,7 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	if got := compactJSON(map[string]any{"long": string(make([]byte, 300))}); len(got) > 240 {
 		t.Fatalf("compact length=%d", len(got))
 	}
-	for _, value := range []any{"yes", stringPointerValue("pointer"), (*string)(nil), 1} {
+	for _, value := range []any{"yes", agentexec.StringPointerValue("pointer"), (*string)(nil), 1} {
 		_ = agentexec.InterfaceString(value)
 	}
 	replayed, err := service.tools.DecodeInput("timeline.apply_patches", map[string]any{
@@ -2575,7 +2575,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	invalid.Tracks[0].Clips = []timeline.Clip{{
 		TimelineClipID: "bad", TrackID: "visual_base", AssetID: "a", TimelineEndFrame: 1, SourceEndFrame: 1,
 	}}
-	result, err := service.persistTimeline(ctx, "draft_failures", invalid, "invalid")
+	result, err := service.executor.PersistTimeline(ctx, "draft_failures", invalid, "invalid")
 	if err != nil || result.Status != "validation_failed" {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
@@ -2634,7 +2634,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 		TimelineClipID: "objective_clip", TrackID: "visual_base", AssetID: "a", AssetKind: "video",
 		Role: "video", TimelineEndFrame: 1, SourceEndFrame: 1, PlaybackRate: 1,
 	}}
-	timelineResult, err := service.persistTimeline(
+	timelineResult, err := service.executor.PersistTimeline(
 		t.Context(), "draft_assets_filter", validObjectiveTimeline, "objective_valid",
 	)
 	if err != nil || timelineResult.Status != "succeeded" {
@@ -2648,7 +2648,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	invalidObjectiveTimeline.TimelineID = "draft_assets_filter:v2"
 	invalidObjectiveTimeline.Version = 2
 	invalidObjectiveTimeline.FPS = 0
-	timelineResult, err = service.persistTimeline(
+	timelineResult, err = service.executor.PersistTimeline(
 		t.Context(), "draft_assets_filter", invalidObjectiveTimeline, "objective_invalid",
 	)
 	if err != nil || timelineResult.Status != "validation_failed" {
@@ -2662,20 +2662,20 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 
 func TestAudioBeatPhaseNoteWarnsThatBeatEvidenceIsNotCreativeJudgment(t *testing.T) {
 	t.Parallel()
-	if !strings.Contains(audioBeatPhaseNote, "高潮") ||
-		!strings.Contains(audioBeatPhaseNote, "不能自动等同") ||
-		!strings.Contains(audioBeatPhaseNote, "好剪辑") {
-		t.Fatalf("phase note missing creative-judgment warning: %q", audioBeatPhaseNote)
+	if !strings.Contains(agentexec.AudioBeatPhaseNote, "高潮") ||
+		!strings.Contains(agentexec.AudioBeatPhaseNote, "不能自动等同") ||
+		!strings.Contains(agentexec.AudioBeatPhaseNote, "好剪辑") {
+		t.Fatalf("phase note missing creative-judgment warning: %q", agentexec.AudioBeatPhaseNote)
 	}
 	for _, fragment := range []string{
 		"sample_frames", "samples 一一对应", "timeline_fps", "完整压缩波形", "WorldState", "24 点摘要",
 	} {
-		if !strings.Contains(audioWaveformUsageNote, fragment) {
-			t.Fatalf("waveform usage note missing %q: %q", fragment, audioWaveformUsageNote)
+		if !strings.Contains(agentexec.AudioWaveformUsageNote, fragment) {
+			t.Fatalf("waveform usage note missing %q: %q", fragment, agentexec.AudioWaveformUsageNote)
 		}
 	}
 	encodedWaveformResult, err := json.Marshal(rushestools.AudioBeatAnalysisResult{
-		WaveformUsageNote: audioWaveformUsageNote,
+		WaveformUsageNote: agentexec.AudioWaveformUsageNote,
 	})
 	if err != nil || !strings.Contains(string(encodedWaveformResult), `"waveform_usage_note":"waveform.sample_frames`) {
 		t.Fatalf("waveform result 未把字段口径序列化给模型: %s err=%v", encodedWaveformResult, err)
@@ -2732,7 +2732,7 @@ func TestAudioBeatAnalysisToolReturnsIntegerFrameGrid(t *testing.T) {
 		len(beats.Waveform.SampleFrames) != len(beats.Waveform.Samples) ||
 		len(beats.Waveform.Samples) > 32 || beats.Waveform.Encoding != media.WaveformEncoding ||
 		!strings.Contains(beats.PhaseNote, "不能自动等同于高潮或好剪辑") ||
-		beats.WaveformUsageNote != audioWaveformUsageNote {
+		beats.WaveformUsageNote != agentexec.AudioWaveformUsageNote {
 		t.Fatalf("beats=%#v", beats)
 	}
 }
@@ -2854,7 +2854,7 @@ func TestBeatRecutToolAcceptsModelChosenSFXFrameAndKeepsSeparateTrack(t *testing
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	if persisted, err := service.persistTimeline(t.Context(), "draft_beat_recut", document, "fixture"); err != nil || persisted.Status != "succeeded" {
+	if persisted, err := service.executor.PersistTimeline(t.Context(), "draft_beat_recut", document, "fixture"); err != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_beat_recut")
@@ -2930,7 +2930,7 @@ func TestBeatRecutToolAcceptsModelChosenSFXFrameAndKeepsSeparateTrack(t *testing
 		latest.Tracks[6].Clips[0].TimelineEndFrame != 50 || latest.Tracks[6].Clips[0].GainDB != -12 {
 		t.Fatalf("sfx=%#v", latest.Tracks[6].Clips)
 	}
-	if warnings := audioLayoutData(latest)["warnings"].([]string); len(warnings) != 0 {
+	if warnings := agentexec.AudioLayoutData(latest)["warnings"].([]string); len(warnings) != 0 {
 		t.Fatalf("warnings=%v", warnings)
 	}
 }
@@ -3259,17 +3259,17 @@ func TestBeatRecutToolRebuildsFullLengthMixFromSourceAssets(t *testing.T) {
 }
 
 func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
-	if cuts := chooseBeatMixCuts(nil, nil, 0, 3); cuts != nil {
+	if cuts := agentexec.ChooseBeatMixCuts(nil, nil, 0, 3); cuts != nil {
 		t.Fatalf("invalid cuts=%v", cuts)
 	}
-	if cuts := chooseBeatMixCuts(nil, []int{0, 20, 20, 100}, 20, 1); !reflect.DeepEqual(cuts, []int{20}) {
+	if cuts := agentexec.ChooseBeatMixCuts(nil, []int{0, 20, 20, 100}, 20, 1); !reflect.DeepEqual(cuts, []int{20}) {
 		t.Fatalf("single cut=%v", cuts)
 	}
-	cuts := chooseBeatMixCuts([]int{0, 10, 20, 30, 40, 50, 60, 100}, nil, 100, 3)
+	cuts := agentexec.ChooseBeatMixCuts([]int{0, 10, 20, 30, 40, 50, 60, 100}, nil, 100, 3)
 	if len(cuts) != 3 || cuts[2] != 100 || cuts[0] >= cuts[1] {
 		t.Fatalf("distributed cuts=%v", cuts)
 	}
-	fallbackCuts := chooseAllBeatMixCuts([]int{10}, []int{10, 20, 30, 40, 50}, 60, 4)
+	fallbackCuts := agentexec.ChooseAllBeatMixCuts([]int{10}, []int{10, 20, 30, 40, 50}, 60, 4)
 	if len(fallbackCuts) != 4 || fallbackCuts[3] != 60 {
 		t.Fatalf("full beat fallback cuts=%v", fallbackCuts)
 	}
@@ -3285,18 +3285,18 @@ func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
 	}
 	capacityFourBeatFrames := []int{89, 132, 183, 224, 265, 306, 353, 405, 460, 513, 570, 630, 690, 750, 810, 870}
 	capacities := []int{325, 327, 303}
-	legacyCuts := chooseAllBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, len(capacities))
+	legacyCuts := agentexec.ChooseAllBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, len(capacities))
 	if !reflect.DeepEqual(legacyCuts, []int{306, 570, 900}) {
 		t.Fatalf("legacy cuts=%v", legacyCuts)
 	}
 	if legacyCuts[2]-legacyCuts[1] <= capacities[2] {
 		t.Fatalf("legacy planner unexpectedly fits capacities: cuts=%v capacities=%v", legacyCuts, capacities)
 	}
-	capacityCuts := chooseCapacityAwareBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, capacities)
+	capacityCuts := agentexec.ChooseCapacityAwareBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, capacities)
 	if !reflect.DeepEqual(capacityCuts, []int{306, 630, 900}) {
 		t.Fatalf("capacity-aware cuts=%v", capacityCuts)
 	}
-	if repeated := chooseCapacityAwareBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, capacities); !reflect.DeepEqual(repeated, capacityCuts) {
+	if repeated := agentexec.ChooseCapacityAwareBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, capacities); !reflect.DeepEqual(repeated, capacityCuts) {
 		t.Fatalf("capacity-aware planner is not deterministic: first=%v repeated=%v", capacityCuts, repeated)
 	}
 	if len(capacityCuts) != 3 || capacityCuts[2] != 900 {
@@ -3312,28 +3312,28 @@ func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
 		}
 		previous = cut
 	}
-	if fallback := chooseCapacityAwareBeatMixCuts([]int{296, 585}, capacityBeatFrames, 900, capacities); !reflect.DeepEqual(fallback, []int{296, 600, 900}) {
+	if fallback := agentexec.ChooseCapacityAwareBeatMixCuts([]int{296, 585}, capacityBeatFrames, 900, capacities); !reflect.DeepEqual(fallback, []int{296, 600, 900}) {
 		t.Fatalf("capacity-aware full-beat fallback=%v", fallback)
 	}
-	if cuts, ok := distributeCapacityAwareBeatMixCuts([]int{30, 60}, 100, []int{30, 30, 30}); ok || cuts != nil {
+	if cuts, ok := agentexec.DistributeCapacityAwareBeatMixCuts([]int{30, 60}, 100, []int{30, 30, 30}); ok || cuts != nil {
 		t.Fatalf("insufficient capacity cuts=%v ok=%v", cuts, ok)
 	}
-	if cuts := chooseCapacityAwareBeatMixCuts(nil, nil, 0, nil); cuts != nil {
+	if cuts := agentexec.ChooseCapacityAwareBeatMixCuts(nil, nil, 0, nil); cuts != nil {
 		t.Fatalf("invalid capacity-aware cuts=%v", cuts)
 	}
-	if cuts, ok := distributeCapacityAwareBeatMixCuts(nil, 30, []int{30}); !ok || !reflect.DeepEqual(cuts, []int{30}) {
+	if cuts, ok := agentexec.DistributeCapacityAwareBeatMixCuts(nil, 30, []int{30}); !ok || !reflect.DeepEqual(cuts, []int{30}) {
 		t.Fatalf("single capacity cuts=%v ok=%v", cuts, ok)
 	}
-	if cuts, ok := distributeCapacityAwareBeatMixCuts(nil, 31, []int{30}); ok || cuts != nil {
+	if cuts, ok := agentexec.DistributeCapacityAwareBeatMixCuts(nil, 31, []int{30}); ok || cuts != nil {
 		t.Fatalf("single short capacity cuts=%v ok=%v", cuts, ok)
 	}
-	if cuts, ok := distributeCapacityAwareBeatMixCuts([]int{10}, 20, []int{0, 20}); ok || cuts != nil {
+	if cuts, ok := agentexec.DistributeCapacityAwareBeatMixCuts([]int{10}, 20, []int{0, 20}); ok || cuts != nil {
 		t.Fatalf("zero capacity cuts=%v ok=%v", cuts, ok)
 	}
-	if cuts, ok := distributeCapacityAwareBeatMixCuts([]int{10}, 20, []int{10, 10, 10}); ok || cuts != nil {
+	if cuts, ok := agentexec.DistributeCapacityAwareBeatMixCuts([]int{10}, 20, []int{10, 10, 10}); ok || cuts != nil {
 		t.Fatalf("insufficient beat candidates cuts=%v ok=%v", cuts, ok)
 	}
-	if candidates := beatCandidatesWithin([]int{-1, 0, 10, 10, 20, 30}, 30); !reflect.DeepEqual(candidates, []int{10, 20}) {
+	if candidates := agentexec.BeatCandidatesWithin([]int{-1, 0, 10, 10, 20, 30}, 30); !reflect.DeepEqual(candidates, []int{10, 20}) {
 		t.Fatalf("candidates=%v", candidates)
 	}
 	if !agentexec.ContainsFrame([]int{10, 20, 30}, 20) || !agentexec.ContainsFrame([]int{10, 20, 30}, 19) ||
@@ -3341,33 +3341,33 @@ func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
 		agentexec.ContainsFrame([]int{10, 20, 30}, 22) || agentexec.ContainsFrame([]int{10, 20, 30}, 25) {
 		t.Fatal("containsFrame bounds failed")
 	}
-	if absInt(-4) != 4 || absInt(4) != 4 {
+	if agentexec.AbsInt(-4) != 4 || agentexec.AbsInt(4) != 4 {
 		t.Fatal("absInt failed")
 	}
 	ranges := []agentexec.BeatMixSourceRange{{StartFrame: 120, EndFrame: 220}}
 	usedRanges := []agentexec.BeatMixSourceRange{{StartFrame: 120, EndFrame: 150}}
-	if start, ok := chooseUnusedBeatMixSourceStart(300, 30, ranges, usedRanges, -1, true); !ok || start != 150 {
+	if start, ok := agentexec.ChooseUnusedBeatMixSourceStart(300, 30, ranges, usedRanges, -1, true); !ok || start != 150 {
 		t.Fatalf("unused semantic gap start=%d ok=%v", start, ok)
 	}
-	if _, ok := chooseUnusedBeatMixSourceStart(300, 120, ranges, nil, 0, true); ok {
+	if _, ok := agentexec.ChooseUnusedBeatMixSourceStart(300, 120, ranges, nil, 0, true); ok {
 		t.Fatal("strict short semantic range should not fit")
 	}
-	if start, ok := chooseUnusedBeatMixSourceStart(300, 120, ranges, nil, 0, false); !ok || start != 0 {
+	if start, ok := agentexec.ChooseUnusedBeatMixSourceStart(300, 120, ranges, nil, 0, false); !ok || start != 0 {
 		t.Fatalf("full-source fallback start=%d ok=%v", start, ok)
 	}
-	if _, ok := chooseUnusedBeatMixSourceStart(20, 30, nil, nil, 0, false); ok {
+	if _, ok := agentexec.ChooseUnusedBeatMixSourceStart(20, 30, nil, nil, 0, false); ok {
 		t.Fatal("short full source should not fit")
 	}
-	coalesced := beatMixRangesFromUnderstanding([]understanding.Segment{
+	coalesced := agentexec.BeatMixRangesFromUnderstanding([]understanding.Segment{
 		{SourceStartFrame: 0, SourceEndFrame: 100, Quality: "usable", BoundaryKind: "video_start"},
 		{SourceStartFrame: 100, SourceEndFrame: 200, Quality: "usable", BoundaryKind: "analysis_window"},
 		{SourceStartFrame: 200, SourceEndFrame: 300, Quality: "usable", BoundaryKind: "analysis_window"},
 		{SourceStartFrame: 300, SourceEndFrame: 400, Quality: "usable", BoundaryKind: "visual_cut"},
 	}, 400)
-	if !sourceRangeContains(coalesced, 0, 250) || sourceRangeContains(coalesced, 200, 350) {
+	if !agentexec.SourceRangeContains(coalesced, 0, 250) || agentexec.SourceRangeContains(coalesced, 200, 350) {
 		t.Fatalf("analysis-window coalescing=%#v", coalesced)
 	}
-	invalidRanges := beatMixRangesFromUnderstanding([]understanding.Segment{
+	invalidRanges := agentexec.BeatMixRangesFromUnderstanding([]understanding.Segment{
 		{SourceStartFrame: 0, SourceEndFrame: 50, Quality: "unusable", BoundaryKind: "video_start"},
 		{SourceStartFrame: 80, SourceEndFrame: 80, Quality: "usable", BoundaryKind: "analysis_window"},
 	}, 100)
@@ -3391,7 +3391,7 @@ func TestAudioLayoutDataWarnsWhenSFXDoesNotAccentBGM(t *testing.T) {
 			}}
 		}
 	}
-	layout := audioLayoutData(document)
+	layout := agentexec.AudioLayoutData(document)
 	warnings := layout["warnings"].([]string)
 	without := layout["sfx_without_bgm"].([]string)
 	if len(warnings) != 2 || len(without) != 1 || without[0] != "sfx_late" {
@@ -3604,7 +3604,7 @@ func TestJobBridgeSkipsMalformedAndUnrelatedEvents(t *testing.T) {
 }
 
 func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
-	if stringPointerValue("") != nil {
+	if agentexec.StringPointerValue("") != nil {
 		t.Fatal("空字符串不应生成指针")
 	}
 	database := agenttest.AgentTestDatabase(t)
@@ -3641,7 +3641,7 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 			t.Fatalf("closed database: %s 应失败", name)
 		}
 	}
-	if _, _, err := service.findRenderJob(t.Context(), "render_preview", "closed", false); err == nil {
+	if _, _, err := service.executor.FindRenderJob(t.Context(), "render_preview", "closed", false); err == nil {
 		t.Fatal("closed findRenderJob 应失败")
 	}
 	if _, err := service.modelMessages(ctx, "draft_closed"); err == nil {
@@ -3650,7 +3650,7 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 	if _, err := service.fallbackFullMainline(ctx, "draft_closed"); err == nil {
 		t.Fatal("closed fallback mainline 应失败")
 	}
-	if _, err := service.persistTimeline(ctx, "draft_closed", timeline.Empty("draft_closed", 1), "closed"); err == nil {
+	if _, err := service.executor.PersistTimeline(ctx, "draft_closed", timeline.Empty("draft_closed", 1), "closed"); err == nil {
 		t.Fatal("closed persist timeline 应失败")
 	}
 	if err := service.runTurn(t.Context(), QueueItem{

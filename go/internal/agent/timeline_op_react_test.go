@@ -140,18 +140,18 @@ func TestReactAgentRepairsTimelineOpFromJITFieldFailure(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, draftID)
 	modelValue := &timelineOpReactRepairModel{}
-	exec, err := newTestExecutor(t.Context(), database, modelValue)
+	service, err := NewService(t.Context(), database, modelValue)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
 		AssetID: "talk", AssetKind: "video", SourceEndFrame: 60, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixtureResult, err := exec.persistTimeline(t.Context(), draftID, document, "react_repair_fixture")
+	fixtureResult, err := service.executor.PersistTimeline(t.Context(), draftID, document, "react_repair_fixture")
 	if err != nil || fixtureResult.Status != "succeeded" {
 		t.Fatalf("fixture result=%#v err=%v", fixtureResult, err)
 	}
@@ -160,7 +160,7 @@ func TestReactAgentRepairsTimelineOpFromJITFieldFailure(t *testing.T) {
 	ctx := withToolRecoveryState(t.Context(), recoveryState)
 	ctx = withTurnBudgetState(ctx, newTurnBudgetState(maxToolRoundsPerTurn))
 	ctx = rushestools.WithDraftID(ctx, draftID)
-	response, err := exec.react.Generate(ctx, []*schema.Message{
+	response, err := service.react.Generate(ctx, []*schema.Message{
 		schema.UserMessage("把主视频片段结尾裁到第 45 帧。"),
 	})
 	if err != nil {

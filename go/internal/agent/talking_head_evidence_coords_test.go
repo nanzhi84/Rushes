@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -68,17 +69,17 @@ func setupEvidenceCoordsDraft(
 			t.Fatalf("apply cut %#v: %v", cut, err)
 		}
 	}
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
-	if persisted, persistErr := exec.persistTimeline(
+	t.Cleanup(service.Close)
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "fixture",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
 	}
-	return exec, rushestools.WithDraftID(t.Context(), draftID), document
+	return service, rushestools.WithDraftID(t.Context(), draftID), document
 }
 
 // clipBySourceRange 在主视频轨上按已裁剪源区间定位 clip，避免依赖裁剪后的 ID 命名。
@@ -94,10 +95,10 @@ func clipBySourceRange(t *testing.T, document timeline.Document, start, end int)
 }
 
 func inspectClip(
-	t *testing.T, exec *Service, ctx context.Context, clipID string,
+	t *testing.T, service *Service, ctx context.Context, clipID string,
 ) rushestools.SpeechInspectResult {
 	t.Helper()
-	raw, err := exec.ExecuteTool(ctx, "speech.inspect", rushestools.SpeechInspectInput{
+	raw, err := service.ExecuteTool(ctx, "speech.inspect", rushestools.SpeechInspectInput{
 		TimelineClipID: clipID, IncludeWords: true,
 	})
 	if err != nil {
@@ -107,10 +108,10 @@ func inspectClip(
 }
 
 func editTalkingHead(
-	t *testing.T, exec *Service, ctx context.Context, input rushestools.TalkingHeadEditInput,
+	t *testing.T, service *Service, ctx context.Context, input rushestools.TalkingHeadEditInput,
 ) rushestools.ToolResult {
 	t.Helper()
-	raw, err := exec.ExecuteTool(ctx, "timeline.edit_talking_head", input)
+	raw, err := service.ExecuteTool(ctx, "timeline.edit_talking_head", input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +131,7 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 	t.Run("pause", func(t *testing.T) {
 		t.Parallel()
 		const clipEnd = 130
-		exec, ctx, document := setupEvidenceCoordsDraft(t, "draft_ec_pause", "asset_ec_pause",
+		service, ctx, document := setupEvidenceCoordsDraft(t, "draft_ec_pause", "asset_ec_pause",
 			[]map[string]any{
 				{"utterance_id": "utt_keep", "source_start_frame": 0, "source_end_frame": 120,
 					"text": "开头这一段口播内容需要完整保留下来继续讲。"},
@@ -145,7 +146,7 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 			},
 		)
 		clipID := clipBySourceRange(t, document, 0, clipEnd)
-		inspect := inspectClip(t, exec, ctx, clipID)
+		inspect := inspectClip(t, service, ctx, clipID)
 		var clampedPause *rushestools.SpeechPauseEvidence
 		for index := range inspect.Pauses {
 			if inspect.Pauses[index].PauseID == "pause_tail" {
@@ -155,7 +156,7 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 		if clampedPause == nil || !clampedPause.Clamped || clampedPause.DeleteEndFrame != clipEnd {
 			t.Fatalf("跨界气口未按 clip 裁剪并标注 clamped: %#v", inspect.Pauses)
 		}
-		edit := editTalkingHead(t, exec, ctx, rushestools.TalkingHeadEditInput{
+		edit := editTalkingHead(t, service, ctx, rushestools.TalkingHeadEditInput{
 			ARollTimelineClipID: clipID, RemovePauseIDs: []string{"pause_tail"},
 		})
 		if edit.Status != "succeeded" {
@@ -164,15 +165,15 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 		// 删除区间按 clip 边界裁剪：pause_tail 删除范围 [122,145] 与 clip 源区间
 		// [0,130] 的交集是 [122,130]，跨过已删帧的尾部 [130,145] 不参与本次删除。
 		assertDeletedRanges(t, edit.Data, "removed_pause_ranges",
-			[]TalkingHeadRange{{Start: 122, End: clipEnd}})
+			[]agentexec.TalkingHeadRange{{Start: 122, End: clipEnd}})
 		assertDeletedRanges(t, edit.Data, "deleted_timeline_ranges",
-			[]TalkingHeadRange{{Start: 122, End: clipEnd}})
+			[]agentexec.TalkingHeadRange{{Start: 122, End: clipEnd}})
 	})
 
 	t.Run("fragment", func(t *testing.T) {
 		t.Parallel()
 		const clipEnd = 235
-		exec, ctx, document := setupEvidenceCoordsDraft(t, "draft_ec_fragment", "asset_ec_fragment",
+		service, ctx, document := setupEvidenceCoordsDraft(t, "draft_ec_fragment", "asset_ec_fragment",
 			[]map[string]any{
 				{"utterance_id": "utt_keep", "source_start_frame": 0, "source_end_frame": 180,
 					"text": "前面这一整段正常口播内容全部保留下来继续往下讲。"},
@@ -194,7 +195,7 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 			},
 		)
 		clipID := clipBySourceRange(t, document, 0, clipEnd)
-		inspect := inspectClip(t, exec, ctx, clipID)
+		inspect := inspectClip(t, service, ctx, clipID)
 		// P2-2 正面：跨界 utterance/word 在 inspect 中标注 clamped 且裁剪到 clip 末尾；
 		// 完全落在 clip 之外的 fb_have/fb_same 交集为空，被 inspect 直接跳过（负例）。
 		var clampedUtterance *rushestools.SpeechUtteranceEvidence
@@ -232,7 +233,7 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 		if fragmentID == "" {
 			t.Fatalf("未检测到跨界的重启前缀短片段: %#v", inspect.ShortFragments)
 		}
-		edit := editTalkingHead(t, exec, ctx, rushestools.TalkingHeadEditInput{
+		edit := editTalkingHead(t, service, ctx, rushestools.TalkingHeadEditInput{
 			ARollTimelineClipID: clipID,
 			ShortFragmentDecisions: []rushestools.TalkingHeadFragmentDecision{
 				{FragmentID: fragmentID, Action: "remove"},
@@ -248,13 +249,13 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 			t.Fatalf("跨界短片段应只删除交集内的 fb_but、fb_no: %#v", edit.Data["removed_word_ids"])
 		}
 		assertDeletedRanges(t, edit.Data, "deleted_timeline_ranges",
-			[]TalkingHeadRange{{Start: 195, End: clipEnd}})
+			[]agentexec.TalkingHeadRange{{Start: 195, End: clipEnd}})
 	})
 
 	t.Run("repetition", func(t *testing.T) {
 		t.Parallel()
 		const clipEnd = 150
-		exec, ctx, document := setupEvidenceCoordsDraft(t, "draft_ec_repeat", "asset_ec_repeat",
+		service, ctx, document := setupEvidenceCoordsDraft(t, "draft_ec_repeat", "asset_ec_repeat",
 			[]map[string]any{
 				{"utterance_id": "utt_intro", "source_start_frame": 0, "source_end_frame": 35,
 					"text": "先做一个开头的介绍作为保留内容。"},
@@ -280,7 +281,7 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 			},
 		)
 		clipID := clipBySourceRange(t, document, 0, clipEnd)
-		inspect := inspectClip(t, exec, ctx, clipID)
+		inspect := inspectClip(t, service, ctx, clipID)
 		repetitionID := ""
 		for _, repetition := range inspect.Repetitions {
 			if repetition.Kind == "repeated_phrase" {
@@ -290,7 +291,7 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 		if repetitionID == "" {
 			t.Fatalf("未检测到跨界的句内重复短语: %#v", inspect.Repetitions)
 		}
-		edit := editTalkingHead(t, exec, ctx, rushestools.TalkingHeadEditInput{
+		edit := editTalkingHead(t, service, ctx, rushestools.TalkingHeadEditInput{
 			ARollTimelineClipID: clipID,
 			RepetitionDecisions: []rushestools.TalkingHeadRepetitionDecision{
 				{RepetitionID: repetitionID, Action: "remove_later"},
@@ -306,7 +307,7 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 			t.Fatalf("跨界句内重复应只删除交集内的 rl_this2、rl_color、rl_look: %#v", edit.Data["removed_word_ids"])
 		}
 		assertDeletedRanges(t, edit.Data, "deleted_timeline_ranges",
-			[]TalkingHeadRange{{Start: 120, End: clipEnd}})
+			[]agentexec.TalkingHeadRange{{Start: 120, End: clipEnd}})
 	})
 }
 
@@ -359,34 +360,34 @@ func TestTalkingHeadEvidenceCoordsInspectEditContract(t *testing.T) {
 
 	for index, cuts := range cutTable {
 		draftID := "draft_ec_contract_" + strconv.Itoa(index)
-		exec, ctx, document := setupEvidenceCoordsDraft(
+		service, ctx, document := setupEvidenceCoordsDraft(
 			t, draftID, "asset_ec_contract_"+strconv.Itoa(index), utterances, pauses, cuts,
 		)
-		transcript, err := storage.LatestTranscript(t.Context(), exec.database.Read(), "asset_ec_contract_"+strconv.Itoa(index))
+		transcript, err := storage.LatestTranscript(t.Context(), service.database.Read(), "asset_ec_contract_"+strconv.Itoa(index))
 		if err != nil {
 			t.Fatal(err)
 		}
-		decoded, err := DecodeSpeechUtterances(transcript.Utterances)
+		decoded, err := agentexec.DecodeSpeechUtterances(transcript.Utterances)
 		if err != nil {
 			t.Fatal(err)
 		}
-		decodedPauses, err := DecodeSpeechPauses(transcript.VADSegments)
+		decodedPauses, err := agentexec.DecodeSpeechPauses(transcript.VADSegments)
 		if err != nil {
 			t.Fatal(err)
 		}
-		clampedPauses := ClampSpeechPausesToWordBoundaries("asset_ec_contract_"+strconv.Itoa(index), decodedPauses, decoded)
-		utteranceByID := make(map[string]SpeechUtterance, len(decoded))
-		wordSequence := []SpeechWord{}
+		clampedPauses := agentexec.ClampSpeechPausesToWordBoundaries("asset_ec_contract_"+strconv.Itoa(index), decodedPauses, decoded)
+		utteranceByID := make(map[string]agentexec.SpeechUtterance, len(decoded))
+		wordSequence := []agentexec.SpeechWord{}
 		for _, utterance := range decoded {
 			utteranceByID[utterance.ID] = utterance
 			wordSequence = append(wordSequence, utterance.Words...)
 		}
-		pauseByID := make(map[string]SpeechPause, len(clampedPauses))
+		pauseByID := make(map[string]agentexec.SpeechPause, len(clampedPauses))
 		for _, pause := range clampedPauses {
 			pauseByID[pause.ID] = pause
 		}
 		for _, clip := range timelineTrackClips(document, "visual_base") {
-			inspect := inspectClip(t, exec, ctx, clip.TimelineClipID)
+			inspect := inspectClip(t, service, ctx, clip.TimelineClipID)
 			utteranceIDs := make([]string, 0, len(inspect.Utterances))
 			wordRanges := []rushestools.TalkingHeadWordRange{}
 			for _, utterance := range inspect.Utterances {
@@ -399,13 +400,13 @@ func TestTalkingHeadEvidenceCoordsInspectEditContract(t *testing.T) {
 			for _, pause := range inspect.Pauses {
 				pauseIDs = append(pauseIDs, pause.PauseID)
 			}
-			if _, invalid := SelectTalkingHeadUtterances(utteranceIDs, utteranceByID, clip); len(invalid) > 0 {
+			if _, invalid := agentexec.SelectTalkingHeadUtterances(utteranceIDs, utteranceByID, clip); len(invalid) > 0 {
 				t.Fatalf("cut#%d clip=%s inspect utterance 被 edit 拒收: %#v", index, clip.TimelineClipID, invalid)
 			}
-			if _, _, invalid := SelectTalkingHeadWordRanges(wordRanges, wordSequence, clip); len(invalid) > 0 {
+			if _, _, invalid := agentexec.SelectTalkingHeadWordRanges(wordRanges, wordSequence, clip); len(invalid) > 0 {
 				t.Fatalf("cut#%d clip=%s inspect word 被 edit 拒收: %#v", index, clip.TimelineClipID, invalid)
 			}
-			if _, invalid := SelectTalkingHeadPauses(pauseIDs, pauseByID, clip); len(invalid) > 0 {
+			if _, invalid := agentexec.SelectTalkingHeadPauses(pauseIDs, pauseByID, clip); len(invalid) > 0 {
 				t.Fatalf("cut#%d clip=%s inspect pause 被 edit 拒收: %#v", index, clip.TimelineClipID, invalid)
 			}
 		}
@@ -416,7 +417,7 @@ func TestTalkingHeadEvidenceCoordsInspectEditContract(t *testing.T) {
 // clip 之外时，失败 observation 会指出它当前实际所属的 clip；未知 ID 则不给提示。
 func TestTalkingHeadEvidenceCoordsRelocatesInvalidEvidence(t *testing.T) {
 	t.Parallel()
-	exec, ctx, document := setupEvidenceCoordsDraft(t, "draft_ec_relocate", "asset_ec_relocate",
+	service, ctx, document := setupEvidenceCoordsDraft(t, "draft_ec_relocate", "asset_ec_relocate",
 		[]map[string]any{
 			{"utterance_id": "utt_first", "source_start_frame": 0, "source_end_frame": 140,
 				"text": "第一段保留在前一个片段里的内容。"},
@@ -436,7 +437,7 @@ func TestTalkingHeadEvidenceCoordsRelocatesInvalidEvidence(t *testing.T) {
 	)
 	firstClip := clipBySourceRange(t, document, 0, 150)
 	secondClip := clipBySourceRange(t, document, 150, 300)
-	edit := editTalkingHead(t, exec, ctx, rushestools.TalkingHeadEditInput{
+	edit := editTalkingHead(t, service, ctx, rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: firstClip,
 		RemoveUtteranceIDs:  []string{"utt_second", "utt_unknown"},
 		RemoveWordRanges:    []rushestools.TalkingHeadWordRange{{StartWordID: "s1"}},
@@ -474,10 +475,10 @@ func TestTalkingHeadSourceRangeClipPicksOverlappingSameAssetClip(t *testing.T) {
 			{TimelineClipID: "c_overlay", AssetID: "a", SourceStartFrame: 200, SourceEndFrame: 260},
 		}},
 	}}
-	if id, ok := TalkingHeadSourceRangeClip(document, "a", 200, 260); !ok || id != "c_tail" {
+	if id, ok := agentexec.TalkingHeadSourceRangeClip(document, "a", 200, 260); !ok || id != "c_tail" {
 		t.Fatalf("与 [200,260] 重叠最多的同素材主视频 clip 应为 c_tail: clip=%q ok=%v", id, ok)
 	}
-	if id, ok := TalkingHeadSourceRangeClip(document, "missing", 200, 260); ok || id != "" {
+	if id, ok := agentexec.TalkingHeadSourceRangeClip(document, "missing", 200, 260); ok || id != "" {
 		t.Fatalf("素材不在主视频轨时应返回空: clip=%q ok=%v", id, ok)
 	}
 }
@@ -504,10 +505,10 @@ func randomEvidenceCuts(random *rand.Rand) []map[string]any {
 // assertDeletedRanges 断言 edit 结果中某个删除区间字段恰好等于期望的帧区间。期望值均为
 // 「证据 ∩ clip 源区间」的手算交集，不从被测逻辑反推，用来锁死跨界证据的坐标系裁剪行为。
 func assertDeletedRanges(
-	t *testing.T, data map[string]any, key string, want []TalkingHeadRange,
+	t *testing.T, data map[string]any, key string, want []agentexec.TalkingHeadRange,
 ) {
 	t.Helper()
-	got, ok := data[key].([]TalkingHeadRange)
+	got, ok := data[key].([]agentexec.TalkingHeadRange)
 	if !ok {
 		t.Fatalf("%s 不是 []talkingHeadRange: %#v", key, data[key])
 	}

@@ -1788,7 +1788,7 @@ func (exec *Executor) toolEditTalkingHead(
 		"auto_preserved_pause_count":   len(autoPreservedPauses),
 		"b_roll_assignment_count":      len(inserted),
 	}
-	result, err := exec.persistTimeline(
+	result, err := exec.PersistTimeline(
 		ctx, draftID, document, "edit_talking_head", []map[string]any{semanticOperation},
 	)
 	if err != nil || result.Status != "succeeded" {
@@ -1831,7 +1831,7 @@ func (exec *Executor) toolEditTalkingHead(
 	}
 	// 时间线此时已持久化成功，质检报告只是增强：读取失败时跳过附加，
 	// 不把成功的编辑伪装成失败去诱导模型重试（timeline.validate 仍是持久验收面）。
-	if quality, qualityErr := exec.speechQualityReport(ctx, document); qualityErr == nil {
+	if quality, qualityErr := exec.SpeechQualityReport(ctx, document); qualityErr == nil {
 		result.Data["speech_quality"] = quality
 		result.Observation += TalkingHeadQualitySummary(quality)
 	}

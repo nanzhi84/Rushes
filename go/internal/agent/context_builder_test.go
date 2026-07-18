@@ -49,7 +49,7 @@ func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *te
 			},
 		}},
 	}}
-	first, err := service.persistTimeline(
+	first, err := service.executor.PersistTimeline(
 		t.Context(), "draft_context_latest", document, "context_first", []map[string]any{{
 			"kind": "adjust_gain", "timeline_clip_id": "clip_context", "gain_db": -3,
 			"timeline_revision": 24,
@@ -64,7 +64,7 @@ func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *te
 	document.TimelineID = "draft_context_latest:v2"
 	document.Tracks[0].Clips[0].GainDB = -9
 	manualContext := rushestools.WithTimelineMutationOrigin(t.Context(), "manual")
-	second, err := service.persistTimeline(
+	second, err := service.executor.PersistTimeline(
 		manualContext, "draft_context_latest", document, "context_second", []map[string]any{{
 			"kind": "adjust_gain", "timeline_clip_id": "clip_context", "gain_db": -9,
 			"timeline_version": 2, "draft_id": "draft_context_latest",
@@ -161,7 +161,7 @@ func TestContextBuilderInjectsPersistentCompactMaterialCatalog(t *testing.T) {
 		TimelineStartFrame: 0, TimelineEndFrame: 30,
 		SourceStartFrame: 0, SourceEndFrame: 30, PlaybackRate: 1,
 	}}
-	if result, err := service.persistTimeline(
+	if result, err := service.executor.PersistTimeline(
 		t.Context(), "draft_context_summaries", document, "summary_context",
 	); err != nil || result.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", result, err)
@@ -411,7 +411,7 @@ func TestCompactUnderstandingSummaryPreservesDirectFrameEvidenceAcrossAsset(t *t
 			BoundaryVerified: true,
 		})
 	}
-	compact := compactUnderstandingSummary(storage.Asset{
+	compact := agentexec.CompactUnderstandingSummary(storage.Asset{
 		ID: "asset_direct_frames", Filename: "direct.mp4", Kind: "video",
 	}, understanding.Summary{
 		Overall: "完整素材", SemanticRole: "b_roll", Segments: segments,
@@ -438,7 +438,7 @@ func TestCompactUnderstandingSummaryPreservesDirectFrameEvidenceAcrossAsset(t *t
 func TestCompactUnderstandingSummaryNormalizesDerivedFramesAndRichSemantics(t *testing.T) {
 	t.Parallel()
 	transcript := strings.Repeat("台词", 100)
-	compact := compactUnderstandingSummary(storage.Asset{
+	compact := agentexec.CompactUnderstandingSummary(storage.Asset{
 		ID: "asset_derived_frames", Filename: "derived.mp4", Kind: "video",
 	}, understanding.Summary{
 		Overall: "相同描述",

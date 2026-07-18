@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -19,11 +20,11 @@ func TestPlanUpdatePersistsAndAppearsInNextWorldStatePatch(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_plan_context"
 	agenttest.CreateAgentDraft(t, database, draftID)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	manager := NewContextManager(database)
 	first, err := manager.Build(t.Context(), draftID)
 	if err != nil {
@@ -39,7 +40,7 @@ func TestPlanUpdatePersistsAndAppearsInNextWorldStatePatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result := executePlanUpdate(t, exec, draftID, rushestools.PlanUpdateInput{Plan: map[string]any{
+	result := executePlanUpdate(t, service, draftID, rushestools.PlanUpdateInput{Plan: map[string]any{
 		"intent": "强调产品质感",
 		"decisions": map[string]any{
 			"pace": "fast", "keep_original_audio": true,
@@ -117,11 +118,11 @@ func TestPlanUpdateRFC7396MergeDeleteAndReset(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_plan_merge"
 	agenttest.CreateAgentDraft(t, database, draftID)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 
 	initial := map[string]any{
@@ -129,7 +130,7 @@ func TestPlanUpdateRFC7396MergeDeleteAndReset(t *testing.T) {
 		"nested": map[string]any{"keep": true, "replace": "old"},
 		"shots":  []any{"one", "two"},
 	}
-	if raw, err := exec.ExecuteTool(ctx, "plan.update", rushestools.PlanUpdateInput{Plan: initial}); err != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
+	if raw, err := service.ExecuteTool(ctx, "plan.update", rushestools.PlanUpdateInput{Plan: initial}); err != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
 		t.Fatalf("initial=%#v err=%v", raw, err)
 	}
 	patch := map[string]any{
@@ -137,7 +138,7 @@ func TestPlanUpdateRFC7396MergeDeleteAndReset(t *testing.T) {
 		"nested": map[string]any{"replace": "new", "added": true},
 		"shots":  []any{"three"},
 	}
-	if raw, err := exec.ExecuteTool(ctx, "plan.update", rushestools.PlanUpdateInput{Plan: patch}); err != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
+	if raw, err := service.ExecuteTool(ctx, "plan.update", rushestools.PlanUpdateInput{Plan: patch}); err != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
 		t.Fatalf("merge=%#v err=%v", raw, err)
 	}
 	merged, err := storage.GetDraft(t.Context(), database.Read(), draftID)
@@ -153,7 +154,7 @@ func TestPlanUpdateRFC7396MergeDeleteAndReset(t *testing.T) {
 		t.Fatalf("merged=%#v", merged.ContentPlan)
 	}
 
-	if raw, err := exec.ExecuteTool(ctx, "plan.update", rushestools.PlanUpdateInput{Plan: map[string]any{
+	if raw, err := service.ExecuteTool(ctx, "plan.update", rushestools.PlanUpdateInput{Plan: map[string]any{
 		"b": nil, "nested": map[string]any{"replace": nil},
 	}}); err != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
 		t.Fatalf("delete=%#v err=%v", raw, err)
@@ -176,7 +177,7 @@ func TestPlanUpdateRFC7396MergeDeleteAndReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	reset := true
-	result := executePlanUpdate(t, exec, draftID, rushestools.PlanUpdateInput{
+	result := executePlanUpdate(t, service, draftID, rushestools.PlanUpdateInput{
 		Plan: map[string]any{
 			"only": "replacement", "drop": nil,
 			"nested": map[string]any{"drop": nil},
@@ -212,7 +213,7 @@ func TestPlanUpdateRFC7396MergeDeleteAndReset(t *testing.T) {
 	if reconstructed := applyMergePatch(baseMap, resetPatch); !reflect.DeepEqual(reconstructed, currentMap) {
 		t.Fatalf("reset plan patch 无法重建当前状态\npatch=%#v\nwant=%#v\ngot=%#v", resetPatch, currentMap, reconstructed)
 	}
-	result = executePlanUpdate(t, exec, draftID, rushestools.PlanUpdateInput{
+	result = executePlanUpdate(t, service, draftID, rushestools.PlanUpdateInput{
 		Plan: map[string]any{}, Reset: &reset,
 	})
 	cleared, err := storage.GetDraft(t.Context(), database.Read(), draftID)
@@ -264,11 +265,11 @@ func TestPlanUpdateRetriesConcurrentMergesWithoutLostUpdates(t *testing.T) {
 			database := agenttest.AgentTestDatabase(t)
 			const draftID = "draft_plan_concurrent"
 			agenttest.CreateAgentDraft(t, database, draftID)
-			exec, err := newTestExecutor(t.Context(), database, nil)
+			service, err := NewService(t.Context(), database, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(exec.Close)
+			t.Cleanup(service.Close)
 
 			ready := make(chan struct{}, 2)
 			release := make(chan struct{})
@@ -281,7 +282,7 @@ func TestPlanUpdateRetriesConcurrentMergesWithoutLostUpdates(t *testing.T) {
 			for _, patch := range test.patches {
 				patch := patch
 				go func() {
-					result, err := exec.toolPlanUpdateWithBeforeApply(
+					result, err := service.executor.ToolPlanUpdateWithBeforeApply(
 						ctx, draftID, rushestools.PlanUpdateInput{Plan: patch},
 						func(attempt int) error {
 							if attempt == 1 {
@@ -327,14 +328,14 @@ func TestPlanUpdateReturnsStructuredFailureAfterThreeConflicts(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_plan_conflicts"
 	agenttest.CreateAgentDraft(t, database, draftID)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 
 	attempts := 0
-	result, err := exec.toolPlanUpdateWithBeforeApply(
+	result, err := service.executor.ToolPlanUpdateWithBeforeApply(
 		t.Context(), draftID,
 		rushestools.PlanUpdateInput{Plan: map[string]any{"tool": "must-not-stick"}},
 		func(attempt int) error {
@@ -352,14 +353,14 @@ func TestPlanUpdateReturnsStructuredFailureAfterThreeConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if attempts != planUpdateMaxAttempts || result.Status != "failed" ||
+	if attempts != agentexec.PlanUpdateMaxAttempts || result.Status != "failed" ||
 		result.Data["reason"] != "plan_conflict" || result.Data["error_code"] != "plan_conflict" ||
 		result.Data["current_plan_unchanged"] != false ||
 		!strings.Contains(result.Data["recovery"].(string), "WorldState") {
 		t.Fatalf("attempts=%d result=%#v", attempts, result)
 	}
 	stored, err := storage.GetDraft(t.Context(), database.Read(), draftID)
-	if err != nil || stored.ContentPlan["external_attempt"] != float64(planUpdateMaxAttempts) {
+	if err != nil || stored.ContentPlan["external_attempt"] != float64(agentexec.PlanUpdateMaxAttempts) {
 		t.Fatalf("stored plan=%#v err=%v", stored.ContentPlan, err)
 	}
 	if _, exists := stored.ContentPlan["tool"]; exists {
@@ -372,12 +373,12 @@ func TestPlanUpdateRejectsInvalidPlansWithoutChangingStoredContent(t *testing.T)
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_plan_guards"
 	agenttest.CreateAgentDraft(t, database, draftID)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
-	executePlanUpdate(t, exec, draftID, rushestools.PlanUpdateInput{
+	t.Cleanup(service.Close)
+	executePlanUpdate(t, service, draftID, rushestools.PlanUpdateInput{
 		Plan: map[string]any{"stable": "keep"},
 	})
 
@@ -402,7 +403,7 @@ func TestPlanUpdateRejectsInvalidPlansWithoutChangingStoredContent(t *testing.T)
 	}
 	for _, test := range invalid {
 		t.Run(test.name, func(t *testing.T) {
-			result := executePlanUpdate(t, exec, draftID, rushestools.PlanUpdateInput{Plan: test.plan})
+			result := executePlanUpdate(t, service, draftID, rushestools.PlanUpdateInput{Plan: test.plan})
 			if result.Status != "failed" || result.Data["reason"] != test.wantReason ||
 				result.Data["error_code"] != test.wantReason {
 				t.Fatalf("result=%#v", result)
@@ -421,7 +422,7 @@ func TestPlanUpdateRejectsInvalidPlansWithoutChangingStoredContent(t *testing.T)
 		"items":   []any{map[string]any{"version": 1}},
 		"details": map[string]any{"item": map[string]any{"timeline_id": "business-label"}},
 	}
-	result := executePlanUpdate(t, exec, draftID, rushestools.PlanUpdateInput{Plan: allowed})
+	result := executePlanUpdate(t, service, draftID, rushestools.PlanUpdateInput{Plan: allowed})
 	stored, err := storage.GetDraft(t.Context(), database.Read(), draftID)
 	if result.Status != "succeeded" || err != nil || stored.ContentPlan["section"] == nil ||
 		stored.ContentPlan["items"] == nil || stored.ContentPlan["details"] == nil {
@@ -455,12 +456,12 @@ func TestPlanUpdateRequiresResetToRepairStoredReservedKeys(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
-	result := executePlanUpdate(t, exec, draftID, rushestools.PlanUpdateInput{
+	t.Cleanup(service.Close)
+	result := executePlanUpdate(t, service, draftID, rushestools.PlanUpdateInput{
 		Plan: map[string]any{"new": true},
 	})
 	if result.Status != "failed" || result.Data["reason"] != "stored_reserved_key" ||
@@ -469,7 +470,7 @@ func TestPlanUpdateRequiresResetToRepairStoredReservedKeys(t *testing.T) {
 		t.Fatalf("stored reserved result=%#v", result)
 	}
 	reset := true
-	result = executePlanUpdate(t, exec, draftID, rushestools.PlanUpdateInput{
+	result = executePlanUpdate(t, service, draftID, rushestools.PlanUpdateInput{
 		Plan: map[string]any{"clean": true}, Reset: &reset,
 	})
 	stored, err := storage.GetDraft(t.Context(), database.Read(), draftID)
@@ -484,28 +485,28 @@ func TestPlanUpdateAllowsExactlyEightThousandRunesAndRejectsMore(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_plan_limit"
 	agenttest.CreateAgentDraft(t, database, draftID)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	reset := true
 	emptyEncoded, err := json.Marshal(map[string]any{"notes": ""})
 	if err != nil {
 		t.Fatal(err)
 	}
 	overhead := utf8.RuneCount(emptyEncoded)
-	exact := map[string]any{"notes": strings.Repeat("界", contentPlanRuneLimit-overhead)}
-	result := executePlanUpdate(t, exec, draftID, rushestools.PlanUpdateInput{Plan: exact, Reset: &reset})
-	if result.Status != "succeeded" || result.Data["plan_runes"] != contentPlanRuneLimit {
+	exact := map[string]any{"notes": strings.Repeat("界", agentexec.ContentPlanRuneLimit-overhead)}
+	result := executePlanUpdate(t, service, draftID, rushestools.PlanUpdateInput{Plan: exact, Reset: &reset})
+	if result.Status != "succeeded" || result.Data["plan_runes"] != agentexec.ContentPlanRuneLimit {
 		t.Fatalf("exact limit result=%#v overhead=%d", result, overhead)
 	}
 	before, err := storage.GetDraft(t.Context(), database.Read(), draftID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	over := map[string]any{"notes": strings.Repeat("界", contentPlanRuneLimit-overhead+1)}
-	result = executePlanUpdate(t, exec, draftID, rushestools.PlanUpdateInput{Plan: over, Reset: &reset})
+	over := map[string]any{"notes": strings.Repeat("界", agentexec.ContentPlanRuneLimit-overhead+1)}
+	result = executePlanUpdate(t, service, draftID, rushestools.PlanUpdateInput{Plan: over, Reset: &reset})
 	if result.Status != "failed" || result.Data["reason"] != "plan_too_large" ||
 		result.Data["current_plan_unchanged"] != true ||
 		!strings.Contains(result.Observation, "超出 8000 字上限") ||
@@ -527,9 +528,9 @@ func TestMergeContentPlanHandlesScalarToObjectWithoutMutatingInputs(t *testing.T
 		"section": map[string]any{"new": true},
 		"nested":  map[string]any{"remove": nil},
 	}
-	targetBefore, _ := canonicalContentPlan(target)
-	patchBefore, _ := canonicalContentPlan(patch)
-	merged := mergeContentPlan(target, patch)
+	targetBefore, _ := agentexec.CanonicalContentPlan(target)
+	patchBefore, _ := agentexec.CanonicalContentPlan(patch)
+	merged := agentexec.MergeContentPlan(target, patch)
 	section := merged["section"].(map[string]any)
 	if section["new"] != true || merged["nested"].(map[string]any)["keep"] != true {
 		t.Fatalf("merged=%#v", merged)
@@ -541,12 +542,12 @@ func TestMergeContentPlanHandlesScalarToObjectWithoutMutatingInputs(t *testing.T
 
 func executePlanUpdate(
 	t *testing.T,
-	exec *Service,
+	service *Service,
 	draftID string,
 	input rushestools.PlanUpdateInput,
 ) rushestools.ToolResult {
 	t.Helper()
-	raw, err := exec.ExecuteTool(
+	raw, err := service.ExecuteTool(
 		rushestools.WithDraftID(t.Context(), draftID), "plan.update", input,
 	)
 	if err != nil {

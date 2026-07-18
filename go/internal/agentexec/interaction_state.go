@@ -29,7 +29,7 @@ func InteractionStateFromContext(ctx context.Context) *turnInteractionState {
 	return state
 }
 
-func markDecisionCreatedThisTurn(ctx context.Context, decisionID string, blocking bool) {
+func MarkDecisionCreatedThisTurn(ctx context.Context, decisionID string, blocking bool) {
 	state := InteractionStateFromContext(ctx)
 	if state == nil || decisionID == "" {
 		return
@@ -60,7 +60,7 @@ func nullableToolCallID(ctx context.Context) any {
 	return nil
 }
 
-func normalizeDecisionType(value string) string {
+func NormalizeDecisionType(value string) string {
 	switch value {
 	case "critical", "approve_content_plan", "approve_speech_cut", "approve_rough_cut":
 		return value

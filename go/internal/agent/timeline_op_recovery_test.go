@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -18,9 +19,9 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 	t.Parallel()
 
 	t.Run("clip_not_found", func(t *testing.T) {
-		exec, database, ctx := timelineOpRecoveryFixture(t, "draft_semantic_missing")
+		service, database, ctx := timelineOpRecoveryFixture(t, "draft_semantic_missing")
 		before, _ := timeline.Latest(t.Context(), database, "draft_semantic_missing")
-		raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "delete_clip", "timeline_clip_id": "clip_missing",
 		}}})
 		if err != nil {
@@ -40,8 +41,8 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 	})
 
 	t.Run("frame_range", func(t *testing.T) {
-		exec, _, ctx := timelineOpRecoveryFixture(t, "draft_semantic_range")
-		raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+		service, _, ctx := timelineOpRecoveryFixture(t, "draft_semantic_range")
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "trim_clip_edge", "timeline_clip_id": "clip_v1_001",
 			"timeline_frame": 60, "edge": "end",
 		}}})
@@ -58,9 +59,9 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 	})
 
 	t.Run("reorder_clip_not_found", func(t *testing.T) {
-		exec, database, ctx := timelineOpRecoveryFixture(t, "draft_reorder_missing")
+		service, database, ctx := timelineOpRecoveryFixture(t, "draft_reorder_missing")
 		before, _ := timeline.Latest(t.Context(), database, "draft_reorder_missing")
-		raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "reorder_clip", "timeline_clip_id": "missing", "target_frame": 0,
 		}}})
 		if err != nil {
@@ -79,8 +80,8 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 	})
 
 	t.Run("reorder_frame_range", func(t *testing.T) {
-		exec, _, ctx := timelineOpRecoveryFixture(t, "draft_reorder_range")
-		raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+		service, _, ctx := timelineOpRecoveryFixture(t, "draft_reorder_range")
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "reorder_clip", "timeline_clip_id": "clip_v1_001", "target_frame": 61,
 		}}})
 		if err != nil {
@@ -96,9 +97,9 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 	})
 
 	t.Run("split_frame_range", func(t *testing.T) {
-		exec, database, ctx := timelineOpRecoveryFixture(t, "draft_split_range")
+		service, database, ctx := timelineOpRecoveryFixture(t, "draft_split_range")
 		before, _ := timeline.Latest(t.Context(), database, "draft_split_range")
-		raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "split_clip", "timeline_clip_id": "clip_v1_001", "split_frame": 60,
 		}}})
 		if err != nil {
@@ -118,13 +119,13 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 	})
 
 	t.Run("locked_track", func(t *testing.T) {
-		exec, _, ctx := timelineOpRecoveryFixture(t, "draft_semantic_locked")
-		if raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+		service, _, ctx := timelineOpRecoveryFixture(t, "draft_semantic_locked")
+		if raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "set_track_state", "track_id": "visual_base", "locked": true,
 		}}}); err != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
 			t.Fatalf("lock result=%#v err=%v", raw, err)
 		}
-		raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+		raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 1.25,
 		}}})
 		if err != nil {
@@ -140,7 +141,7 @@ func TestApplyPatchSemanticFailuresReturnCurrentTimelineFacts(t *testing.T) {
 
 func TestLinkedSplitRangeFailureReturnsFailedMemberFacts(t *testing.T) {
 	t.Parallel()
-	exec, database, ctx := timelineOpRecoveryFixture(t, "draft_linked_split_range")
+	service, database, ctx := timelineOpRecoveryFixture(t, "draft_linked_split_range")
 	document, err := timeline.ComposeInitial("draft_linked_split_range", 2, []timeline.Selection{{
 		AssetID: "talk", AssetKind: "video", HasAudio: true, SourceEndFrame: 60, Role: "a_roll",
 	}})
@@ -153,11 +154,11 @@ func TestLinkedSplitRangeFailureReturnsFailedMemberFacts(t *testing.T) {
 			document.Tracks[trackIndex].Clips[0].SourceEndFrame = 20
 		}
 	}
-	if persisted, persistErr := exec.persistTimeline(t.Context(), "draft_linked_split_range", document, "linked_split_fixture"); persistErr != nil || persisted.Status != "validation_failed" {
+	if persisted, persistErr := service.executor.PersistTimeline(t.Context(), "draft_linked_split_range", document, "linked_split_fixture"); persistErr != nil || persisted.Status != "validation_failed" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
 	}
 	before, _ := timeline.Latest(t.Context(), database, "draft_linked_split_range")
-	raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "split_clip", "timeline_clip_id": "clip_v2_001", "split_frame": 30,
 	}}})
 	if err != nil {
@@ -177,23 +178,23 @@ func TestLinkedSplitRangeFailureReturnsFailedMemberFacts(t *testing.T) {
 
 func TestLinkedLockedTrackFailureReturnsSemanticJITAndPreservesTimeline(t *testing.T) {
 	t.Parallel()
-	exec, database, ctx := timelineOpRecoveryFixture(t, "draft_semantic_linked_lock")
+	service, database, ctx := timelineOpRecoveryFixture(t, "draft_semantic_linked_lock")
 	document, err := timeline.ComposeInitial("draft_semantic_linked_lock", 2, []timeline.Selection{{
 		AssetID: "talk", AssetKind: "video", HasAudio: true, SourceEndFrame: 60, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, persistErr := exec.persistTimeline(t.Context(), "draft_semantic_linked_lock", document, "linked_fixture"); persistErr != nil || result.Status != "succeeded" {
+	if result, persistErr := service.executor.PersistTimeline(t.Context(), "draft_semantic_linked_lock", document, "linked_fixture"); persistErr != nil || result.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", result, persistErr)
 	}
-	if raw, lockErr := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+	if raw, lockErr := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "set_track_state", "track_id": "original_audio", "locked": true,
 	}}}); lockErr != nil || raw.(rushestools.ToolResult).Status != "succeeded" {
 		t.Fatalf("lock=%#v err=%v", raw, lockErr)
 	}
 	before, _ := timeline.Latest(t.Context(), database, "draft_semantic_linked_lock")
-	raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "trim_clip_edge", "timeline_clip_id": "clip_v2_001", "timeline_frame": 30, "edge": "end",
 	}}})
 	if err != nil {
@@ -223,11 +224,11 @@ func TestComposeInitialFailuresIncludeAssetFacts(t *testing.T) {
 			('compose_video','reference','/tmp/video.mp4','video','local_path','video.mp4','compose_video',1,'{"duration_sec":10}','ready','none',1)`); err != nil {
 		t.Fatal(err)
 	}
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_compose_facts")
 
 	for _, test := range []struct {
@@ -239,7 +240,7 @@ func TestComposeInitialFailuresIncludeAssetFacts(t *testing.T) {
 		{name: "range", clip: rushestools.ComposeClip{AssetID: "compose_video", SourceEndFrame: 301, Role: "a_roll"}, kind: "video"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			raw, err := exec.ExecuteTool(ctx, "timeline.compose_initial", rushestools.ComposeInitialInput{Clips: []rushestools.ComposeClip{test.clip}})
+			raw, err := service.ExecuteTool(ctx, "timeline.compose_initial", rushestools.ComposeInitialInput{Clips: []rushestools.ComposeClip{test.clip}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -277,12 +278,12 @@ func TestFailureDecorationIncludesRemainingToolRoundsOnlyOnFailure(t *testing.T)
 
 func TestApplyPatchFieldFailureReturnsExactJITSchemaAndExample(t *testing.T) {
 	t.Parallel()
-	exec, database, ctx := timelineOpRecoveryFixture(t, "draft_op_jit_single")
+	service, database, ctx := timelineOpRecoveryFixture(t, "draft_op_jit_single")
 	before, err := timeline.Latest(t.Context(), database, "draft_op_jit_single")
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 		"kind": "trim_clip_edge", "timeline_clip_id": "clip_v1_001",
 		"target_frame": float64(10), "edge": "end",
 	}}})
@@ -320,8 +321,8 @@ func TestApplyPatchFieldFailureReturnsExactJITSchemaAndExample(t *testing.T) {
 
 func TestApplyPatchUnknownKindReturnsOnlyNineteenEntryCatalog(t *testing.T) {
 	t.Parallel()
-	exec, _, ctx := timelineOpRecoveryFixture(t, "draft_op_jit_unknown")
-	raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{"kind": "remove_clip", "timeline_clip_id": "clip_v1_001"}}})
+	service, _, ctx := timelineOpRecoveryFixture(t, "draft_op_jit_unknown")
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{"kind": "remove_clip", "timeline_clip_id": "clip_v1_001"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,8 +352,8 @@ func TestApplyPatchUnknownKindReturnsOnlyNineteenEntryCatalog(t *testing.T) {
 
 func TestApplyPatchesFieldFailurePreservesAtomicityAndJITMetadata(t *testing.T) {
 	t.Parallel()
-	exec, database, ctx := timelineOpRecoveryFixture(t, "draft_op_jit_batch")
-	raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
+	service, database, ctx := timelineOpRecoveryFixture(t, "draft_op_jit_batch")
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
 		Ops: []rushestools.TimelineOp{
 			{"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -6.0},
 			{
@@ -378,7 +379,7 @@ func TestApplyPatchesFieldFailurePreservesAtomicityAndJITMetadata(t *testing.T) 
 
 func TestApplyPatchesSemanticFailureUsesDocumentBeforeFailedOperation(t *testing.T) {
 	t.Parallel()
-	exec, database, ctx := timelineOpRecoveryFixture(t, "draft_op_jit_semantic_batch")
+	service, database, ctx := timelineOpRecoveryFixture(t, "draft_op_jit_semantic_batch")
 	document, err := timeline.ComposeInitial("draft_op_jit_semantic_batch", 2, []timeline.Selection{
 		{AssetID: "talk-a", AssetKind: "video", SourceEndFrame: 60, Role: "a_roll"},
 		{AssetID: "talk-b", AssetKind: "video", SourceEndFrame: 60, Role: "a_roll"},
@@ -386,10 +387,10 @@ func TestApplyPatchesSemanticFailureUsesDocumentBeforeFailedOperation(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := exec.persistTimeline(t.Context(), "draft_op_jit_semantic_batch", document, "jit_semantic_fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := service.executor.PersistTimeline(t.Context(), "draft_op_jit_semantic_batch", document, "jit_semantic_fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
 	}
-	raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
 		Ops: []rushestools.TimelineOp{
 			{"kind": "delete_clip", "timeline_clip_id": "clip_v2_001"},
 			{"kind": "delete_clip", "timeline_clip_id": "missing"},
@@ -415,7 +416,7 @@ func TestApplyPatchesSemanticFailureUsesDocumentBeforeFailedOperation(t *testing
 
 func TestApplyPatchesReorderFailureUsesFailedPointFactsAndStaysAtomic(t *testing.T) {
 	t.Parallel()
-	exec, database, ctx := timelineOpRecoveryFixture(t, "draft_reorder_semantic_batch")
+	service, database, ctx := timelineOpRecoveryFixture(t, "draft_reorder_semantic_batch")
 	document, err := timeline.ComposeInitial("draft_reorder_semantic_batch", 2, []timeline.Selection{
 		{AssetID: "talk-a", AssetKind: "video", SourceEndFrame: 60, Role: "a_roll"},
 		{AssetID: "talk-b", AssetKind: "video", SourceEndFrame: 60, Role: "a_roll"},
@@ -423,10 +424,10 @@ func TestApplyPatchesReorderFailureUsesFailedPointFactsAndStaysAtomic(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := exec.persistTimeline(t.Context(), "draft_reorder_semantic_batch", document, "reorder_semantic_fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := service.executor.PersistTimeline(t.Context(), "draft_reorder_semantic_batch", document, "reorder_semantic_fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
 	}
-	raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
 		Ops: []rushestools.TimelineOp{
 			{"kind": "delete_clip", "timeline_clip_id": "clip_v2_001"},
 			{"kind": "reorder_clip", "timeline_clip_id": "missing", "target_frame": 0},
@@ -449,8 +450,8 @@ func TestApplyPatchesReorderFailureUsesFailedPointFactsAndStaysAtomic(t *testing
 
 func TestApplyPatchesSplitFailureUsesFailedPointFactsAndStaysAtomic(t *testing.T) {
 	t.Parallel()
-	exec, database, ctx := timelineOpRecoveryFixture(t, "draft_split_semantic_batch")
-	raw, err := exec.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
+	service, database, ctx := timelineOpRecoveryFixture(t, "draft_split_semantic_batch")
+	raw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{
 		Ops: []rushestools.TimelineOp{
 			{"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -6.0},
 			{"kind": "split_clip", "timeline_clip_id": "clip_v1_001", "split_frame": 60},
@@ -475,7 +476,7 @@ func TestApplyPatchesSplitFailureUsesFailedPointFactsAndStaysAtomic(t *testing.T
 func TestTimelineOpExpectedSchemasFollowCatalogAndHideInjectedFields(t *testing.T) {
 	t.Parallel()
 	for _, spec := range timeline.Catalog {
-		schema := timelineOpExpectedSchema(spec)
+		schema := agentexec.TimelineOpExpectedSchema(spec)
 		properties := schema["properties"].(map[string]any)
 		kind := properties["kind"].(map[string]any)
 		if kind["const"] != spec.Kind || schema["additionalProperties"] != false {
@@ -501,20 +502,20 @@ func TestTimelineOpExpectedSchemasFollowCatalogAndHideInjectedFields(t *testing.
 	if !ok {
 		t.Fatal("insert_clip missing")
 	}
-	first := timelineOpExpectedSchema(*insertSpec)
+	first := agentexec.TimelineOpExpectedSchema(*insertSpec)
 	metadata := first["properties"].(map[string]any)["metadata"].(map[string]any)
 	metadata["examples"].([]any)[0].(map[string]any)["source"] = "mutated"
-	second := timelineOpExpectedSchema(*insertSpec)
+	second := agentexec.TimelineOpExpectedSchema(*insertSpec)
 	secondMetadata := second["properties"].(map[string]any)["metadata"].(map[string]any)
 	if secondMetadata["examples"].([]any)[0].(map[string]any)["source"] != "catalog_example" {
 		t.Fatal("expected_schema 暴露了 Catalog 的可变示例")
 	}
 
 	wrapped := fmt.Errorf("wrapped: %w", &timeline.OpFieldError{Kind: "delete_clip", Field: "timeline_clip_id"})
-	if fieldErr, ok := timelineOpFieldError(wrapped); !ok || fieldErr.Kind != "delete_clip" {
+	if fieldErr, ok := agentexec.TimelineOpFieldError(wrapped); !ok || fieldErr.Kind != "delete_clip" {
 		t.Fatalf("wrapped field error not preserved: %#v ok=%v", fieldErr, ok)
 	}
-	if _, ok := timelineOpFailureAt(errors.New("semantic failure"), nil, 0, timeline.Document{}); ok {
+	if _, ok := agentexec.TimelineOpFailureAt(errors.New("semantic failure"), nil, 0, timeline.Document{}); ok {
 		t.Fatal("非字段错误不应被改写成 JIT field failure")
 	}
 }
@@ -526,21 +527,21 @@ func timelineOpRecoveryFixture(
 	t.Helper()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, draftID)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
 		AssetID: "talk", AssetKind: "video", SourceEndFrame: 60, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := exec.persistTimeline(t.Context(), draftID, document, "op_jit_fixture")
+	result, err := service.executor.PersistTimeline(t.Context(), draftID, document, "op_jit_fixture")
 	if err != nil || result.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", result, err)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
-	return exec, database, ctx
+	return service, database, ctx
 }

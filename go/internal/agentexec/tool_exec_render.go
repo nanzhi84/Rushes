@@ -36,7 +36,7 @@ func (exec *Executor) toolEnqueueRender(
 	baseIdempotencyKey := fmt.Sprintf("%s:%s:%d:%s", kind, draftID, *draft.TimelineCurrentVersion, orientation)
 	idempotencyKey := baseIdempotencyKey
 	retryOfJobID := ""
-	if existing, found, err := exec.findRenderJob(ctx, kind, baseIdempotencyKey, true); err != nil {
+	if existing, found, err := exec.FindRenderJob(ctx, kind, baseIdempotencyKey, true); err != nil {
 		return rushestools.ToolResult{}, err
 	} else if found {
 		if existing.Status != "failed" && existing.Status != "cancelled" {
@@ -62,7 +62,7 @@ func (exec *Executor) toolEnqueueRender(
 		},
 	}}, reducer.Options{Actor: contracts.ActorAgent})
 	if err != nil || result.Status != reducer.StatusApplied {
-		if existing, found, lookupErr := exec.findRenderJob(ctx, kind, idempotencyKey, false); lookupErr != nil {
+		if existing, found, lookupErr := exec.FindRenderJob(ctx, kind, idempotencyKey, false); lookupErr != nil {
 			return rushestools.ToolResult{}, errors.Join(err, lookupErr)
 		} else if found {
 			return renderJobResult(kind, existing.ID, existing.Status), nil
@@ -90,7 +90,7 @@ type renderJobRef struct {
 	Status string
 }
 
-func (exec *Executor) findRenderJob(
+func (exec *Executor) FindRenderJob(
 	ctx context.Context,
 	kind, idempotencyKey string,
 	includeRetries bool,
@@ -150,7 +150,7 @@ func (exec *Executor) ToolInspectPreview(
 	draftID string,
 	input rushestools.RenderInspectInput,
 ) (rushestools.PreviewInspectionResult, error) {
-	checks, err := normalizePreviewInspectionChecks(input.Checks)
+	checks, err := NormalizePreviewInspectionChecks(input.Checks)
 	if err != nil {
 		return rushestools.PreviewInspectionResult{}, err
 	}
@@ -192,7 +192,7 @@ func (exec *Executor) ToolInspectPreview(
 	}
 	result := rushestools.PreviewInspectionResult{}
 	if ContainsString(input.Checks, "visual") {
-		frameContext, contextErr := exec.previewInspectionFrameContext(
+		frameContext, contextErr := exec.PreviewInspectionFrameContext(
 			ctx, document, understanding.PreviewInspectionFrameNumbers(document),
 		)
 		if contextErr != nil {
@@ -240,7 +240,7 @@ func (exec *Executor) ToolInspectPreview(
 	return result, nil
 }
 
-func normalizePreviewInspectionChecks(checks []string) ([]string, error) {
+func NormalizePreviewInspectionChecks(checks []string) ([]string, error) {
 	allowed := map[string]struct{}{
 		"decode": {}, "black": {}, "freeze": {}, "silence": {}, "loudness": {}, "visual": {},
 	}
@@ -263,7 +263,7 @@ func normalizePreviewInspectionChecks(checks []string) ([]string, error) {
 	return normalized, nil
 }
 
-func (exec *Executor) previewInspectionFrameContext(
+func (exec *Executor) PreviewInspectionFrameContext(
 	ctx context.Context,
 	document timeline.Document,
 	frames []int,

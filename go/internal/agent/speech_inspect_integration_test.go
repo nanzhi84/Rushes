@@ -44,7 +44,7 @@ func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.SetSpeechRecognizer(recognizer)
-	result, err := service.toolInspectSpeech(t.Context(), "draft_live_fun_asr", rushestools.SpeechInspectInput{
+	result, err := service.executor.ToolInspectSpeech(t.Context(), "draft_live_fun_asr", rushestools.SpeechInspectInput{
 		AssetID: "asset_live_aroll", Language: "zh", MaxUtterances: 200,
 		IncludeWords: true, MaxWords: 2000,
 	})
@@ -73,7 +73,7 @@ func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
 	const executionRuns = 20
 	succeeded := 1
 	for run := 1; run < executionRuns; run++ {
-		cached, cacheErr := service.toolInspectSpeech(t.Context(), "draft_live_fun_asr", rushestools.SpeechInspectInput{
+		cached, cacheErr := service.executor.ToolInspectSpeech(t.Context(), "draft_live_fun_asr", rushestools.SpeechInspectInput{
 			AssetID: "asset_live_aroll", Query: result.Utterances[0].Text, MaxUtterances: 5,
 		})
 		if cacheErr == nil && cached.CacheHit && len(cached.Utterances) > 0 {

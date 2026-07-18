@@ -116,7 +116,7 @@ func TestContextManagerRebasesOversizedWorldStatePatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "large_context_fixture",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist initial=%#v err=%v", persisted, persistErr)
@@ -130,7 +130,7 @@ func TestContextManagerRebasesOversizedWorldStatePatch(t *testing.T) {
 	document.Version = 2
 	document.TimelineID = draftID + ":v2"
 	document.Tracks[0].Clips[0].GainDB = -6
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "large_context_edit",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist edit=%#v err=%v", persisted, persistErr)
@@ -185,7 +185,7 @@ func TestContextManagerKeepsSmallTimelinePatchIncremental(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "small_context_fixture",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist initial=%#v err=%v", persisted, persistErr)
@@ -198,7 +198,7 @@ func TestContextManagerKeepsSmallTimelinePatchIncremental(t *testing.T) {
 	document.Version = 2
 	document.TimelineID = draftID + ":v2"
 	document.Tracks[0].Clips[0].GainDB = -3
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "small_context_edit",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist edit=%#v err=%v", persisted, persistErr)
@@ -254,7 +254,7 @@ func TestContextManagerRebuildsWorldStateAfterRewindWithoutHashMismatch(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "rewind_context_initial",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist initial=%#v err=%v", persisted, persistErr)
@@ -270,7 +270,7 @@ func TestContextManagerRebuildsWorldStateAfterRewindWithoutHashMismatch(t *testi
 	document.Version = 2
 	document.TimelineID = draftID + ":v2"
 	document.Tracks[0].Clips[0].GainDB = -3
-	if persisted, persistErr := service.persistTimeline(
+	if persisted, persistErr := service.executor.PersistTimeline(
 		t.Context(), draftID, document, "rewind_context_edit",
 	); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persist edit=%#v err=%v", persisted, persistErr)

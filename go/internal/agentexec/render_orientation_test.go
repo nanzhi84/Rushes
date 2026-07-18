@@ -22,7 +22,7 @@ func TestRenderOrientationParticipatesInIdempotencyWithoutNumericKnobs(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := exec.persistTimeline(t.Context(), "draft_orientation", document, "orientation_fixture"); err != nil {
+	if _, err := exec.PersistTimeline(t.Context(), "draft_orientation", document, "orientation_fixture"); err != nil {
 		t.Fatal(err)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_orientation")

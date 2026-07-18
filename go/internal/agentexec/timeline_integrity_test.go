@@ -131,7 +131,7 @@ func TestApplyPatchesAtomicallyReplacesPrimaryWithoutChangingBGMOrSFX(t *testing
 		TimelineClipID: "sfx_keep", TrackID: "sfx", AssetID: "hit", AssetKind: "audio",
 		TimelineStartFrame: 40, TimelineEndFrame: 50, SourceEndFrame: 10, PlaybackRate: 1,
 	}}
-	if persisted, persistErr := exec.persistTimeline(t.Context(), "draft_atomic_primary", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := exec.PersistTimeline(t.Context(), "draft_atomic_primary", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_atomic_primary")
@@ -193,7 +193,7 @@ func TestSyncOriginalAudioRepairsDriftedTimelineFromAssetProbe(t *testing.T) {
 	}
 	document.Tracks[2].Clips[0].TimelineStartFrame = 10
 	document.Tracks[2].Clips[0].TimelineEndFrame = 70
-	if persisted, persistErr := exec.persistTimeline(t.Context(), "draft_sync_original_audio", document, "drifted_fixture"); persistErr != nil || persisted.Status != "validation_failed" {
+	if persisted, persistErr := exec.PersistTimeline(t.Context(), "draft_sync_original_audio", document, "drifted_fixture"); persistErr != nil || persisted.Status != "validation_failed" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 
@@ -314,7 +314,7 @@ func TestGenericBGMInsertAutomaticallyAttachesBeatGrid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := exec.persistTimeline(t.Context(), "draft_generic_bgm", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := exec.PersistTimeline(t.Context(), "draft_generic_bgm", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_generic_bgm")

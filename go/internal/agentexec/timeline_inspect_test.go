@@ -55,7 +55,7 @@ func TestTimelineInspectReturnsWaveTwoEditingState(t *testing.T) {
 			t.Fatalf("operation=%#v err=%v", operation, err)
 		}
 	}
-	if _, err := exec.persistTimeline(t.Context(), "draft_inspect_wave_two", document, "inspect_wave_two_fixture"); err != nil {
+	if _, err := exec.PersistTimeline(t.Context(), "draft_inspect_wave_two", document, "inspect_wave_two_fixture"); err != nil {
 		t.Fatal(err)
 	}
 	result, err := exec.toolInspectTimeline(t.Context(), "draft_inspect_wave_two", rushestools.TimelineInspectInput{})

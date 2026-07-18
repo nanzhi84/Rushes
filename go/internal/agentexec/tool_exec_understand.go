@@ -86,7 +86,7 @@ func (exec *Executor) ToolListAssets(
 	return result, nil
 }
 
-func (exec *Executor) toolUnderstand(
+func (exec *Executor) ToolUnderstand(
 	ctx context.Context,
 	draftID string,
 	input rushestools.UnderstandInput,
@@ -264,9 +264,9 @@ func (exec *Executor) runUnderstandInline(
 			Actor: contracts.ActorAgent,
 			ResultRows: reducer.ResultRows{MaterialSummaries: []reducer.MaterialSummaryRow{{
 				ID: summaryID, AssetID: asset.ID, Version: 0,
-				Focus: stringPointerValue(prepared.Options.Focus), Status: "ready", Summary: summaryMap,
-				Model: stringPointerValue(summary.Model), Fingerprint: stringPointerValue(prepared.Fingerprint),
-				PromptVersion: stringPointerValue(understanding.PromptVersion),
+				Focus: StringPointerValue(prepared.Options.Focus), Status: "ready", Summary: summaryMap,
+				Model: StringPointerValue(summary.Model), Fingerprint: StringPointerValue(prepared.Fingerprint),
+				PromptVersion: StringPointerValue(understanding.PromptVersion),
 			}}},
 		})
 		if err != nil || completed.Status != reducer.StatusApplied {
@@ -302,7 +302,7 @@ func (exec *Executor) bestUnderstandingSummary(
 	if err := json.Unmarshal(encoded, &summary); err != nil {
 		return rushestools.MaterialUnderstandingSummary{}, err
 	}
-	return compactUnderstandingSummary(asset, summary, 12), nil
+	return CompactUnderstandingSummary(asset, summary, 12), nil
 }
 
 func (exec *Executor) enqueueUnderstand(
@@ -390,7 +390,7 @@ func (exec *Executor) existingUnderstandResult(
 			if err := json.Unmarshal(encoded, &summary); err != nil {
 				return rushestools.UnderstandResult{}, err
 			}
-			summaries = append(summaries, compactUnderstandingSummary(prepared.Asset, summary, 12))
+			summaries = append(summaries, CompactUnderstandingSummary(prepared.Asset, summary, 12))
 		}
 		return rushestools.UnderstandResult{
 			DraftID: draftID, JobID: job.ID, AssetIDs: request.AssetIDs, Status: "completed",
@@ -451,7 +451,7 @@ func queuedUnderstandResult(
 	}
 }
 
-func compactUnderstandingSummary(
+func CompactUnderstandingSummary(
 	asset storage.Asset,
 	summary understanding.Summary,
 	evidenceLimit int,
@@ -528,7 +528,7 @@ func sampleUnderstandingSegments(
 	return result
 }
 
-func stringPointerValue(value string) *string {
+func StringPointerValue(value string) *string {
 	if value == "" {
 		return nil
 	}

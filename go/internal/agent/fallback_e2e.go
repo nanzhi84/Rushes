@@ -78,7 +78,7 @@ func (scaffold *e2eFallbackScaffold) cancelDuringUnderstanding(
 	ctx context.Context,
 	draftID string,
 ) (reply string, resultErr error) {
-	listed, err := scaffold.service.toolListAssets(
+	listed, err := scaffold.service.executor.ToolListAssets(
 		ctx,
 		draftID,
 		rushestools.AssetListInput{OnlyUsable: agentexec.BoolPointer(true)},

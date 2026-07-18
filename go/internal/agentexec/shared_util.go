@@ -96,13 +96,13 @@ func IsReservedContextKey(key string) bool {
 	}
 }
 
-func timelineOpFailureAt(
+func TimelineOpFailureAt(
 	err error,
 	operation map[string]any,
 	failedIndex int,
 	document timeline.Document,
 ) (rushestools.ToolResult, bool) {
-	fieldErr, ok := timelineOpFieldError(err)
+	fieldErr, ok := TimelineOpFieldError(err)
 	if ok {
 		return timelineOpFieldFailure(fieldErr, operation, failedIndex), true
 	}
@@ -122,7 +122,7 @@ func timelineOpFailureAt(
 		data["failed_op_index"] = failedIndex
 	}
 	if spec, exists := timeline.LookupOpSpec(InterfaceString(operation["kind"])); exists {
-		data["expected_schema"] = timelineOpExpectedSchema(*spec)
+		data["expected_schema"] = TimelineOpExpectedSchema(*spec)
 		data["correct_example"] = timeline.CorrectOpExample(*spec)
 	}
 	switch semanticErr.Kind {

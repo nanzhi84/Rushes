@@ -21,7 +21,7 @@ func TestNormalizeDecisionTypeMapsKnownScenarios(t *testing.T) {
 		"approve_rough_cut":    "approve_rough_cut",
 		"unexpected":           "generic",
 	} {
-		if got := normalizeDecisionType(input); got != want {
+		if got := agentexec.NormalizeDecisionType(input); got != want {
 			t.Errorf("normalizeDecisionType(%q)=%q want=%q", input, got, want)
 		}
 	}
@@ -64,7 +64,7 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 		*decision.CreatedByToolCallID != "call_ask_1" {
 		t.Fatalf("decision=%#v", decision)
 	}
-	directAnswer, err := service.toolDecisionAnswer(askContext, "draft_same_turn_decision", rushestools.DecisionAnswerInput{
+	directAnswer, err := service.executor.ToolDecisionAnswer(askContext, "draft_same_turn_decision", rushestools.DecisionAnswerInput{
 		DecisionID: decisionID, OptionID: "product",
 	})
 	if err != nil || directAnswer.Status != "failed" || directAnswer.Data["turn_should_end"] != true {
@@ -107,7 +107,7 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 
 func TestAdjudicateDecisionAnswerTrustedOptionPayloadWins(t *testing.T) {
 	t.Parallel()
-	answer, err := AdjudicateDecisionAnswer(storage.Decision{
+	answer, err := agentexec.AdjudicateDecisionAnswer(storage.Decision{
 		Options: []map[string]any{{
 			"option_id": "story",
 			"payload":   map[string]any{"shared": "trusted", "preset": "narrative"},
@@ -192,7 +192,7 @@ func TestBlockingDecisionSerializesParallelToolCalls(t *testing.T) {
 		t.Fatalf("parallel call bypassed active tool execution: %q", decisionID)
 	case <-time.After(20 * time.Millisecond):
 	}
-	markDecisionCreatedThisTurn(ctx, "decision_parallel", true)
+	agentexec.MarkDecisionCreatedThisTurn(ctx, "decision_parallel", true)
 	release()
 	select {
 	case decisionID := <-acquired:

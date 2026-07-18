@@ -12,7 +12,7 @@ import (
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-const memoryUpdateEntryLimit = 8
+const MemoryUpdateEntryLimit = 8
 
 type memoryEvidence struct {
 	Kind string
@@ -28,7 +28,7 @@ func WithMemoryEvidence(ctx context.Context, kind, id string) context.Context {
 	return context.WithValue(ctx, memoryEvidenceContextKey{}, memoryEvidence{Kind: kind, ID: id})
 }
 
-func memoryEvidenceFromContext(ctx context.Context) (memoryEvidence, bool) {
+func MemoryEvidenceFromContext(ctx context.Context) (memoryEvidence, bool) {
 	evidence, ok := ctx.Value(memoryEvidenceContextKey{}).(memoryEvidence)
 	return evidence, ok && storage.ValidUserMemoryEvidenceKind(evidence.Kind) && evidence.ID != ""
 }
@@ -38,7 +38,7 @@ func (exec *Executor) toolMemoryUpdate(
 	draftID string,
 	input rushestools.MemoryUpdateInput,
 ) (rushestools.ToolResult, error) {
-	evidence, ok := memoryEvidenceFromContext(ctx)
+	evidence, ok := MemoryEvidenceFromContext(ctx)
 	if !ok {
 		return memoryUpdateFailure(
 			"长期记忆只能锚定当前真实用户消息或当前决策回答；后台续跑和其他 UI 观察不得修改记忆。",
@@ -55,12 +55,12 @@ func (exec *Executor) toolMemoryUpdate(
 			nil,
 		), nil
 	}
-	if len(input.Entries) > memoryUpdateEntryLimit {
+	if len(input.Entries) > MemoryUpdateEntryLimit {
 		return memoryUpdateFailure(
-			fmt.Sprintf("单次最多写入 %d 条长期记忆。", memoryUpdateEntryLimit),
+			fmt.Sprintf("单次最多写入 %d 条长期记忆。", MemoryUpdateEntryLimit),
 			"memory_entries_limit",
 			"合并语义重复项，只保留用户明确表达的稳定偏好后重试。",
-			map[string]any{"entry_count": len(input.Entries), "limit": memoryUpdateEntryLimit},
+			map[string]any{"entry_count": len(input.Entries), "limit": MemoryUpdateEntryLimit},
 		), nil
 	}
 	if len(input.RemoveKeys) > storage.UserMemoryLimit {

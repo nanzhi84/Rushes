@@ -19,7 +19,7 @@ func (exec *Executor) toolAskUser(
 	input rushestools.AskUserInput,
 	pending map[string]any,
 ) (rushestools.ToolResult, error) {
-	decisionType := normalizeDecisionType(input.DecisionType)
+	decisionType := NormalizeDecisionType(input.DecisionType)
 	if len(pending) == 0 {
 		if decisionType != "critical" {
 			return rushestools.ToolResult{
@@ -81,7 +81,7 @@ func (exec *Executor) toolAskUser(
 	if err != nil || result.Status != reducer.StatusApplied {
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("reducer status: %s", result.Status))
 	}
-	markDecisionCreatedThisTurn(ctx, decisionID, blocking)
+	MarkDecisionCreatedThisTurn(ctx, decisionID, blocking)
 	if !blocking {
 		return rushestools.ToolResult{
 			Status:      "succeeded",
@@ -102,7 +102,7 @@ func (exec *Executor) toolAskUser(
 	}, nil
 }
 
-func (exec *Executor) toolDecisionAnswer(
+func (exec *Executor) ToolDecisionAnswer(
 	ctx context.Context,
 	draftID string,
 	input rushestools.DecisionAnswerInput,

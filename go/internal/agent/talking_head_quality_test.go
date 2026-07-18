@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -73,11 +74,11 @@ func TestSpeechQualityReportMatchesAnchorShapedTimeline(t *testing.T) {
 		pause("p4", 450, 462), pause("p5", 520, 535), pause("p6", 640, 650),
 	}
 	seedTalkingHeadQualityAsset(t, database, "draft_q6_report", "asset_q6", 24, utterances, pauses)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 
 	document := timeline.Empty("draft_q6_report", 1)
 	document.FPS = 30
@@ -97,7 +98,7 @@ func TestSpeechQualityReportMatchesAnchorShapedTimeline(t *testing.T) {
 			Metadata: map[string]any{"b_roll_filename": "broll_b.mp4"}},
 	}
 
-	report, err := exec.speechQualityReport(t.Context(), document)
+	report, err := service.executor.SpeechQualityReport(t.Context(), document)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,11 +141,11 @@ func TestSpeechQualityReportSurfacesInValidateAndEdit(t *testing.T) {
 		},
 	}}
 	seedTalkingHeadQualityAsset(t, database, "draft_q6_surface", "asset_q6s", 10, utterances, nil)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	document, err := timeline.ComposeInitial("draft_q6_surface", 1, []timeline.Selection{{
 		AssetID: "asset_q6s", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 300,
 		Role: "a_roll", HasAudio: true,
@@ -152,12 +153,12 @@ func TestSpeechQualityReportSurfacesInValidateAndEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := exec.persistTimeline(t.Context(), "draft_q6_surface", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := service.executor.PersistTimeline(t.Context(), "draft_q6_surface", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_q6_surface")
 
-	validateRaw, err := exec.ExecuteTool(ctx, "timeline.validate", rushestools.TimelineValidateInput{})
+	validateRaw, err := service.ExecuteTool(ctx, "timeline.validate", rushestools.TimelineValidateInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +168,7 @@ func TestSpeechQualityReportSurfacesInValidateAndEdit(t *testing.T) {
 		t.Fatalf("validate=%#v", validate)
 	}
 
-	editRaw, err := exec.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
+	editRaw, err := service.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
 		RemoveWordRanges:    []rushestools.TalkingHeadWordRange{{StartWordID: "w_filler", EndWordID: "w_filler"}},
 	})
@@ -191,21 +192,21 @@ func TestSpeechQualityReportSurfacesInValidateAndEdit(t *testing.T) {
 // 相邻删除的 counter-proposal；仅少量重叠的完整长句不受影响。
 func TestTalkingHeadIslandOnMisspeakEvidenceRejectedWithCounterProposal(t *testing.T) {
 	t.Parallel()
-	utterance := SpeechUtterance{
+	utterance := agentexec.SpeechUtterance{
 		ID: "utt", StartFrame: 0, EndFrame: 240, Text: "前面口误后面。",
-		Words: []SpeechWord{
+		Words: []agentexec.SpeechWord{
 			{ID: "w_lead", StartFrame: 0, EndFrame: 100, Text: "前面"},
 			{ID: "w_bad", StartFrame: 100, EndFrame: 180, Text: "口误"},
 			{ID: "w_tail", StartFrame: 180, EndFrame: 240, Text: "后面", Punctuation: "。"},
 		},
 	}
-	deletions := []TalkingHeadRange{{Start: 0, End: 100}, {Start: 180, End: 240}}
-	island := []TalkingHeadRange{{Start: 100, End: 180}}
-	evidence := []TalkingHeadEvidenceRange{{ID: "frag_bad", Start: 100, End: 180}}
-	orphans := TalkingHeadOrphanSpeechFragments(
-		deletions, island, []SpeechUtterance{utterance},
+	deletions := []agentexec.TalkingHeadRange{{Start: 0, End: 100}, {Start: 180, End: 240}}
+	island := []agentexec.TalkingHeadRange{{Start: 100, End: 180}}
+	evidence := []agentexec.TalkingHeadEvidenceRange{{ID: "frag_bad", Start: 100, End: 180}}
+	orphans := agentexec.TalkingHeadOrphanSpeechFragments(
+		deletions, island, []agentexec.SpeechUtterance{utterance},
 		map[string]struct{}{}, map[string]struct{}{}, nil,
-		0, 240, MinTalkingHeadRetainedIslandFrames, evidence,
+		0, 240, agentexec.MinTalkingHeadRetainedIslandFrames, evidence,
 	)
 	if len(orphans) != 1 || orphans[0]["reason"] != "lands_on_misspeak_evidence" ||
 		orphans[0]["duration_frames"] != 80 {
@@ -214,18 +215,18 @@ func TestTalkingHeadIslandOnMisspeakEvidenceRejectedWithCounterProposal(t *testi
 	if matched, _ := orphans[0]["matched_evidence_ids"].([]string); len(matched) != 1 || matched[0] != "frag_bad" {
 		t.Fatalf("matched=%#v", orphans[0]["matched_evidence_ids"])
 	}
-	proposals := TalkingHeadIslandCounterProposals(orphans, []SpeechUtterance{utterance})
+	proposals := agentexec.TalkingHeadIslandCounterProposals(orphans, []agentexec.SpeechUtterance{utterance})
 	if len(proposals) != 1 || proposals[0]["merged_delete_source_start_frame"] != 0 ||
 		proposals[0]["merged_delete_source_end_frame"] != 240 ||
 		proposals[0]["island_start_word_id"] != "w_bad" || proposals[0]["island_end_word_id"] != "w_bad" ||
 		proposals[0]["island_text"] != "口误" || proposals[0]["reason"] != "lands_on_misspeak_evidence" {
 		t.Fatalf("proposals=%#v", proposals)
 	}
-	minority := []TalkingHeadEvidenceRange{{ID: "frag_minor", Start: 100, End: 120}}
-	clean := TalkingHeadOrphanSpeechFragments(
-		deletions, island, []SpeechUtterance{utterance},
+	minority := []agentexec.TalkingHeadEvidenceRange{{ID: "frag_minor", Start: 100, End: 120}}
+	clean := agentexec.TalkingHeadOrphanSpeechFragments(
+		deletions, island, []agentexec.SpeechUtterance{utterance},
 		map[string]struct{}{}, map[string]struct{}{}, nil,
-		0, 240, MinTalkingHeadRetainedIslandFrames, minority,
+		0, 240, agentexec.MinTalkingHeadRetainedIslandFrames, minority,
 	)
 	if len(clean) != 0 {
 		t.Fatalf("仅少量重叠的 >=2 秒保留段不应被判为孤岛: %#v", clean)
@@ -249,11 +250,11 @@ func TestTalkingHeadEditNarrowingIntoIslandReturnsCounterProposal(t *testing.T) 
 		},
 	}}
 	seedTalkingHeadQualityAsset(t, database, "draft_q2_island", "asset_q2i", 12, utterances, nil)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 	document, err := timeline.ComposeInitial("draft_q2_island", 1, []timeline.Selection{{
 		AssetID: "asset_q2i", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 360,
 		Role: "a_roll", HasAudio: true,
@@ -261,12 +262,12 @@ func TestTalkingHeadEditNarrowingIntoIslandReturnsCounterProposal(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := exec.persistTimeline(t.Context(), "draft_q2_island", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := service.executor.PersistTimeline(t.Context(), "draft_q2_island", document, "fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_q2_island")
 
-	strandRaw, err := exec.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
+	strandRaw, err := service.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
 		RemoveWordRanges: []rushestools.TalkingHeadWordRange{
 			{StartWordID: "w_a", EndWordID: "w_a"}, {StartWordID: "w_b", EndWordID: "w_b"},
@@ -288,7 +289,7 @@ func TestTalkingHeadEditNarrowingIntoIslandReturnsCounterProposal(t *testing.T) 
 		t.Fatalf("counter-proposals=%#v", strand.Data["island_counter_proposals"])
 	}
 
-	adoptRaw, err := exec.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
+	adoptRaw, err := service.ExecuteTool(ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
 		RemoveWordRanges: []rushestools.TalkingHeadWordRange{
 			{StartWordID: "w_a", EndWordID: "w_a"},
@@ -308,19 +309,19 @@ func TestTalkingHeadEditNarrowingIntoIslandReturnsCounterProposal(t *testing.T) 
 // 决策卡批准后的重放里、且实际保留了气口时才产出，并明示保留了几处。
 func TestTalkingHeadPlanDriftOnlyWithApprovedReplay(t *testing.T) {
 	t.Parallel()
-	utterances := []SpeechUtterance{
+	utterances := []agentexec.SpeechUtterance{
 		{ID: "u1", StartFrame: 0, EndFrame: 60, Text: "前一句。"},
 		{ID: "u2", StartFrame: 80, EndFrame: 140, Text: "后一句。"},
 	}
-	preserved := []SpeechPause{{ID: "pause_x", StartFrame: 60, EndFrame: 80, DeleteStart: 62, DeleteEnd: 78}}
-	if TalkingHeadPlanDrift(t.Context(), preserved, utterances) != nil {
+	preserved := []agentexec.SpeechPause{{ID: "pause_x", StartFrame: 60, EndFrame: 80, DeleteStart: 62, DeleteEnd: 78}}
+	if agentexec.TalkingHeadPlanDrift(t.Context(), preserved, utterances) != nil {
 		t.Fatal("非确认重放不应产出 plan_drift")
 	}
-	replayCtx := WithConfirmedToolReplay(t.Context())
-	if TalkingHeadPlanDrift(replayCtx, nil, utterances) != nil {
+	replayCtx := agentexec.WithConfirmedToolReplay(t.Context())
+	if agentexec.TalkingHeadPlanDrift(replayCtx, nil, utterances) != nil {
 		t.Fatal("无漂移不应产出 plan_drift")
 	}
-	drift := TalkingHeadPlanDrift(replayCtx, preserved, utterances)
+	drift := agentexec.TalkingHeadPlanDrift(replayCtx, preserved, utterances)
 	if drift == nil || drift["retained_pause_count"] != 1 || drift["approved_plan"] != true ||
 		drift["summary"] != "与你批准的删除方案相比，为避免制造不足 2 秒的保留孤岛，本次实际保留了 1 处气口未删；请在回复中如实向用户说明这一偏差。" {
 		t.Fatalf("drift=%#v", drift)
@@ -344,11 +345,11 @@ func TestSpeechQualityReportEdgeCasesAndHelpers(t *testing.T) {
 		{"utterance_id": "u3", "source_start_frame": 500, "source_end_frame": 800, "text": "长段三。"},
 	}
 	seedTalkingHeadQualityAsset(t, database, "draft_q6_edge", "asset_edge", 30, utterances, nil)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 
 	document := timeline.Empty("draft_q6_edge", 1)
 	document.FPS = 30
@@ -366,7 +367,7 @@ func TestSpeechQualityReportEdgeCasesAndHelpers(t *testing.T) {
 			TimelineStartFrame: 250, TimelineEndFrame: 310, SourceStartFrame: 0, SourceEndFrame: 60, PlaybackRate: 1,
 			Metadata: map[string]any{"b_roll_filename": "cover.mp4"}},
 	}
-	report, err := exec.speechQualityReport(t.Context(), document)
+	report, err := service.executor.SpeechQualityReport(t.Context(), document)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,13 +390,13 @@ func TestSpeechQualityReportEdgeCasesAndHelpers(t *testing.T) {
 		TimelineClipID: "x", TrackID: "visual_base", AssetID: "asset_no_transcript", AssetKind: "video",
 		TimelineStartFrame: 0, TimelineEndFrame: 90, SourceStartFrame: 0, SourceEndFrame: 90, PlaybackRate: 1,
 	}}
-	empty, err := exec.speechQualityReport(t.Context(), noTranscript)
-	if err != nil || empty["a_roll_present"] != false || TalkingHeadQualitySummary(empty) != "" {
+	empty, err := service.executor.SpeechQualityReport(t.Context(), noTranscript)
+	if err != nil || empty["a_roll_present"] != false || agentexec.TalkingHeadQualitySummary(empty) != "" {
 		t.Fatalf("empty report=%#v err=%v", empty, err)
 	}
 
-	if FrameSeconds(45, 0) != 1.5 || FrameSeconds(9, 30) != 0.3 {
-		t.Fatalf("frameSeconds edge wrong: %v %v", FrameSeconds(45, 0), FrameSeconds(9, 30))
+	if agentexec.FrameSeconds(45, 0) != 1.5 || agentexec.FrameSeconds(9, 30) != 0.3 {
+		t.Fatalf("frameSeconds edge wrong: %v %v", agentexec.FrameSeconds(45, 0), agentexec.FrameSeconds(9, 30))
 	}
 }
 
@@ -415,19 +416,19 @@ func TestTalkingHeadMisspeakEvidenceClipsToSelectedRange(t *testing.T) {
 		{FragmentID: "frag_in", SourceStartFrame: 70, SourceEndFrame: 90},
 		{FragmentID: "frag_out", SourceStartFrame: 300, SourceEndFrame: 320},
 	}
-	evidence := TalkingHeadMisspeakEvidence(
+	evidence := agentexec.TalkingHeadMisspeakEvidence(
 		repetitions, fragments, timeline.Clip{SourceStartFrame: 0, SourceEndFrame: 100},
 	)
-	got := map[string]TalkingHeadRange{}
+	got := map[string]agentexec.TalkingHeadRange{}
 	for _, item := range evidence {
-		got[item.ID] = TalkingHeadRange{Start: item.Start, End: item.End}
+		got[item.ID] = agentexec.TalkingHeadRange{Start: item.Start, End: item.End}
 	}
-	if len(evidence) != 3 || got["rep_in:earlier"] != (TalkingHeadRange{Start: 10, End: 30}) ||
-		got["rep_in:later"] != (TalkingHeadRange{Start: 40, End: 60}) ||
-		got["frag_in"] != (TalkingHeadRange{Start: 70, End: 90}) {
+	if len(evidence) != 3 || got["rep_in:earlier"] != (agentexec.TalkingHeadRange{Start: 10, End: 30}) ||
+		got["rep_in:later"] != (agentexec.TalkingHeadRange{Start: 40, End: 60}) ||
+		got["frag_in"] != (agentexec.TalkingHeadRange{Start: 70, End: 90}) {
 		t.Fatalf("evidence=%#v", evidence)
 	}
-	if TalkingHeadIslandMisspeakMatches(TalkingHeadRange{Start: 50, End: 50}, evidence) != nil {
+	if agentexec.TalkingHeadIslandMisspeakMatches(agentexec.TalkingHeadRange{Start: 50, End: 50}, evidence) != nil {
 		t.Fatal("零长孤岛不应匹配任何证据")
 	}
 }
@@ -449,11 +450,11 @@ func TestValidateTimelineSoftSkipsBrokenQualityReport(t *testing.T) {
 	`); err != nil {
 		t.Fatal(err)
 	}
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 
 	document, err := timeline.ComposeInitial("draft_validate_softskip", 1, []timeline.Selection{
 		{AssetID: "asset_broken_tx", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll"},
@@ -462,14 +463,14 @@ func TestValidateTimelineSoftSkipsBrokenQualityReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 前置断言：损坏 transcript 确实让质检报告器直接报错，否则这条软跳过测试没有意义。
-	if _, qualityErr := exec.speechQualityReport(t.Context(), document); qualityErr == nil {
+	if _, qualityErr := service.executor.SpeechQualityReport(t.Context(), document); qualityErr == nil {
 		t.Fatal("期望损坏 transcript 让 speechQualityReport 报错，但返回了 nil")
 	}
-	if _, err := exec.persistTimeline(t.Context(), "draft_validate_softskip", document, "softskip_fixture"); err != nil {
+	if _, err := service.executor.PersistTimeline(t.Context(), "draft_validate_softskip", document, "softskip_fixture"); err != nil {
 		t.Fatal(err)
 	}
 
-	validated, err := exec.toolValidateTimeline(t.Context(), "draft_validate_softskip")
+	validated, err := service.executor.ToolValidateTimeline(t.Context(), "draft_validate_softskip")
 	if err != nil {
 		t.Fatalf("validate 应软跳过质检读取失败，却返回错误：%v", err)
 	}
@@ -485,7 +486,7 @@ func TestValidateTimelineSoftSkipsBrokenQualityReport(t *testing.T) {
 // pause_after_year 会把保留台词夹成不足 2 秒的孤岛，被防护保守撤回删除，从而在
 // 确认后重放里产生 plan_drift。为每个 draft 用独立 asset，便于并行与多 draft 断言。
 func seedTalkingHeadAutoPreserveScenario(
-	t *testing.T, database *storage.DB, exec *Service, draftID, assetID string,
+	t *testing.T, database *storage.DB, service *Service, draftID, assetID string,
 ) {
 	t.Helper()
 	if _, err := database.Write().ExecContext(t.Context(), `
@@ -532,7 +533,7 @@ func seedTalkingHeadAutoPreserveScenario(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, persistErr := exec.persistTimeline(t.Context(), draftID, document, "plan_drift_fixture"); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := service.executor.PersistTimeline(t.Context(), draftID, document, "plan_drift_fixture"); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 }
@@ -545,18 +546,18 @@ func seedTalkingHeadAutoPreserveScenario(
 func TestReplayPendingEditTalkingHeadEmitsPlanDrift(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 
 	const draftID = "draft_plan_drift_replay"
 	agenttest.CreateAgentDraft(t, database, draftID)
-	seedTalkingHeadAutoPreserveScenario(t, database, exec, draftID, "asset_plan_drift_replay")
+	seedTalkingHeadAutoPreserveScenario(t, database, service, draftID, "asset_plan_drift_replay")
 
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
-	observation, err := exec.replayPendingTool(ctx, QueueItem{
+	observation, err := service.replayPendingTool(ctx, QueueItem{
 		DraftID: draftID,
 		Payload: map[string]any{
 			"pending_tool_call": map[string]any{
@@ -584,11 +585,11 @@ func TestReplayPendingEditTalkingHeadEmitsPlanDrift(t *testing.T) {
 func TestConfirmedToolReplayCtxGatesEditTalkingHeadPlanDrift(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
-	exec, err := newTestExecutor(t.Context(), database, nil)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(exec.Close)
+	t.Cleanup(service.Close)
 
 	editInput := rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
@@ -597,9 +598,9 @@ func TestConfirmedToolReplayCtxGatesEditTalkingHeadPlanDrift(t *testing.T) {
 
 	const confirmedDraft = "draft_plan_drift_confirmed"
 	agenttest.CreateAgentDraft(t, database, confirmedDraft)
-	seedTalkingHeadAutoPreserveScenario(t, database, exec, confirmedDraft, "asset_plan_drift_confirmed")
-	confirmedCtx := WithConfirmedToolReplay(rushestools.WithDraftID(t.Context(), confirmedDraft))
-	confirmedRaw, err := exec.executeReported(confirmedCtx, confirmedDraft, "timeline.edit_talking_head", editInput)
+	seedTalkingHeadAutoPreserveScenario(t, database, service, confirmedDraft, "asset_plan_drift_confirmed")
+	confirmedCtx := agentexec.WithConfirmedToolReplay(rushestools.WithDraftID(t.Context(), confirmedDraft))
+	confirmedRaw, err := service.executeReported(confirmedCtx, confirmedDraft, "timeline.edit_talking_head", editInput)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,8 +616,8 @@ func TestConfirmedToolReplayCtxGatesEditTalkingHeadPlanDrift(t *testing.T) {
 
 	const normalDraft = "draft_plan_drift_normal"
 	agenttest.CreateAgentDraft(t, database, normalDraft)
-	seedTalkingHeadAutoPreserveScenario(t, database, exec, normalDraft, "asset_plan_drift_normal")
-	normalRaw, err := exec.executeReported(rushestools.WithDraftID(t.Context(), normalDraft), normalDraft, "timeline.edit_talking_head", editInput)
+	seedTalkingHeadAutoPreserveScenario(t, database, service, normalDraft, "asset_plan_drift_normal")
+	normalRaw, err := service.executeReported(rushestools.WithDraftID(t.Context(), normalDraft), normalDraft, "timeline.edit_talking_head", editInput)
 	if err != nil {
 		t.Fatal(err)
 	}

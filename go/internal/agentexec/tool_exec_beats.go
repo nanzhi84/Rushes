@@ -14,9 +14,9 @@ import (
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-const audioBeatPhaseNote = "强拍来自频谱通量瞬态；每 4 拍网格以强拍贴合度推断 4/4 小节相位，仍可由剪辑者微调；拍点、强拍和 downbeat 只是音频结构证据，不能自动等同于高潮或好剪辑。"
+const AudioBeatPhaseNote = "强拍来自频谱通量瞬态；每 4 拍网格以强拍贴合度推断 4/4 小节相位，仍可由剪辑者微调；拍点、强拍和 downbeat 只是音频结构证据，不能自动等同于高潮或好剪辑。"
 
-const audioWaveformUsageNote = "waveform.sample_frames 与 samples 一一对应；前者是按 timeline_fps 标尺表示的素材内 RMS 窗口起始帧，后者是该点 0-100 原始响度。本结果返回本次请求的完整压缩波形；WorldState 只常驻最多 24 点摘要。"
+const AudioWaveformUsageNote = "waveform.sample_frames 与 samples 一一对应；前者是按 timeline_fps 标尺表示的素材内 RMS 窗口起始帧，后者是该点 0-100 原始响度。本结果返回本次请求的完整压缩波形；WorldState 只常驻最多 24 点摘要。"
 
 func (exec *Executor) toolAnalyzeAudioBeats(
 	ctx context.Context,
@@ -83,8 +83,8 @@ func (exec *Executor) toolAnalyzeAudioBeats(
 		DownbeatFrames: grid.DownbeatFrames, EveryTwoBeatFrames: grid.EveryTwoBeatFrames,
 		EveryFourBeatFrames: grid.EveryFourBeatFrames, AnalysisMethod: grid.AnalysisMethod,
 		BarPhase: grid.BarPhase, Truncated: grid.Truncated,
-		PhaseNote:         audioBeatPhaseNote,
-		WaveformUsageNote: audioWaveformUsageNote,
+		PhaseNote:         AudioBeatPhaseNote,
+		WaveformUsageNote: AudioWaveformUsageNote,
 		Waveform:          waveformToolValue(waveform),
 	}, nil
 }
@@ -456,7 +456,7 @@ func (exec *Executor) toolRecutCurrentClipsToBeats(
 	return result, nil
 }
 
-func sourceRangeContains(ranges []BeatMixSourceRange, startFrame, endFrame int) bool {
+func SourceRangeContains(ranges []BeatMixSourceRange, startFrame, endFrame int) bool {
 	for _, sourceRange := range ranges {
 		if startFrame >= sourceRange.StartFrame && endFrame <= sourceRange.EndFrame {
 			return true
@@ -514,23 +514,23 @@ func waveformToolValue(waveform media.WaveformEnvelope) rushestools.AudioWavefor
 	}
 }
 
-func chooseBeatMixCuts(everyFour, everyBeat []int, targetFrames, maxClips int) []int {
+func ChooseBeatMixCuts(everyFour, everyBeat []int, targetFrames, maxClips int) []int {
 	if targetFrames <= 0 || maxClips <= 0 {
 		return nil
 	}
-	candidates := beatCandidatesWithin(everyFour, targetFrames)
+	candidates := BeatCandidatesWithin(everyFour, targetFrames)
 	if len(candidates) == 0 {
-		candidates = beatCandidatesWithin(everyBeat, targetFrames)
+		candidates = BeatCandidatesWithin(everyBeat, targetFrames)
 	}
 	return distributeBeatMixCuts(candidates, targetFrames, maxClips)
 }
 
-func chooseAllBeatMixCuts(everyFour, everyBeat []int, targetFrames, clipCount int) []int {
-	candidates := beatCandidatesWithin(everyFour, targetFrames)
+func ChooseAllBeatMixCuts(everyFour, everyBeat []int, targetFrames, clipCount int) []int {
+	candidates := BeatCandidatesWithin(everyFour, targetFrames)
 	// 四拍网格不足以为每个素材提供一个切点时，回退到完整拍点网格。
 	// 只有显式 use_all_video_assets 才提高密度，避免默认规划为了短素材过度切碎。
 	if len(candidates)+1 < clipCount {
-		candidates = beatCandidatesWithin(everyBeat, targetFrames)
+		candidates = BeatCandidatesWithin(everyBeat, targetFrames)
 	}
 	return distributeBeatMixCuts(candidates, targetFrames, clipCount)
 }
@@ -542,7 +542,7 @@ func chooseAllBeatMixCuts(everyFour, everyBeat []int, targetFrames, clipCount in
 // Prefer the sparser four-beat grid, then fall back to the full beat grid. If
 // neither grid has a capacity-feasible assignment, preserve the prior planner
 // result so the existing source-selection failure remains specific and useful.
-func chooseCapacityAwareBeatMixCuts(
+func ChooseCapacityAwareBeatMixCuts(
 	everyFour, everyBeat []int,
 	targetFrames int,
 	capacities []int,
@@ -551,15 +551,15 @@ func chooseCapacityAwareBeatMixCuts(
 		return nil
 	}
 	for _, grid := range [][]int{everyFour, everyBeat} {
-		candidates := beatCandidatesWithin(grid, targetFrames)
-		if cuts, ok := distributeCapacityAwareBeatMixCuts(candidates, targetFrames, capacities); ok {
+		candidates := BeatCandidatesWithin(grid, targetFrames)
+		if cuts, ok := DistributeCapacityAwareBeatMixCuts(candidates, targetFrames, capacities); ok {
 			return cuts
 		}
 	}
-	return chooseAllBeatMixCuts(everyFour, everyBeat, targetFrames, len(capacities))
+	return ChooseAllBeatMixCuts(everyFour, everyBeat, targetFrames, len(capacities))
 }
 
-func distributeCapacityAwareBeatMixCuts(
+func DistributeCapacityAwareBeatMixCuts(
 	candidates []int,
 	targetFrames int,
 	capacities []int,
@@ -615,8 +615,8 @@ func distributeCapacityAwareBeatMixCuts(
 			}
 		}
 		sort.SliceStable(options, func(left, right int) bool {
-			leftDistance := absInt(options[left] - idealCut)
-			rightDistance := absInt(options[right] - idealCut)
+			leftDistance := AbsInt(options[left] - idealCut)
+			rightDistance := AbsInt(options[right] - idealCut)
 			if leftDistance == rightDistance {
 				return options[left] < options[right]
 			}
@@ -650,7 +650,7 @@ func distributeBeatMixCuts(candidates []int, targetFrames, maxClips int) []int {
 		ideal := int(math.Round(float64(targetFrames*segment) / float64(clipCount)))
 		selectedIndex := minIndex
 		for index := minIndex + 1; index <= maxIndex; index++ {
-			if absInt(candidates[index]-ideal) < absInt(candidates[selectedIndex]-ideal) {
+			if AbsInt(candidates[index]-ideal) < AbsInt(candidates[selectedIndex]-ideal) {
 				selectedIndex = index
 			}
 		}
@@ -660,7 +660,7 @@ func distributeBeatMixCuts(candidates []int, targetFrames, maxClips int) []int {
 	return append(cuts, targetFrames)
 }
 
-func beatCandidatesWithin(frames []int, targetFrames int) []int {
+func BeatCandidatesWithin(frames []int, targetFrames int) []int {
 	result := make([]int, 0, len(frames))
 	previous := -1
 	for _, frame := range frames {
@@ -673,7 +673,7 @@ func beatCandidatesWithin(frames []int, targetFrames int) []int {
 	return result
 }
 
-func absInt(value int) int {
+func AbsInt(value int) int {
 	if value < 0 {
 		return -value
 	}
