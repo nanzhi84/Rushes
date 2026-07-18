@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   forwardRef,
+  startTransition,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -167,7 +168,10 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
       const handleEvent = (event: Event) => {
         const message = event as MessageEvent<string>;
         const payload = JSON.parse(message.data) as DomainSsePayload;
-        setStructuredItems((current) => reduceStructuredInteractionItems(current, payload));
+        // 结构化交互更新非用户输入驱动，标记为非紧急，让位于流式与滚动等紧急渲染。
+        startTransition(() =>
+          setStructuredItems((current) => reduceStructuredInteractionItems(current, payload))
+        );
         scheduleDraftQueryInvalidation();
       };
       for (const eventName of DRAFT_EVENT_TYPES) {
