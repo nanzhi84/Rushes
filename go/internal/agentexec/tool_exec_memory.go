@@ -194,8 +194,9 @@ func (exec *Executor) toolMemoryUpdate(
 		return rushestools.ToolResult{}, fmt.Errorf("长期记忆写入状态异常: %s", result.Status)
 	}
 	// 写入成功发专门 turn-stream 事件，前端据此渲染「已记住/已更新长期记忆」卡片并直链设置面板。
+	// 执行器不依赖引擎 hub，经注入的 recordProgress 上报;引擎装配把它接到 hub.Record。
 	if len(result.UserMemory.WrittenKeys) > 0 || len(result.UserMemory.RemovedKeys) > 0 {
-		service.hub.Record(draftID, StreamEvent{
+		exec.recordProgress(draftID, map[string]any{
 			"type":         TurnStreamMemoryUpdated,
 			"written_keys": result.UserMemory.WrittenKeys,
 			"removed_keys": result.UserMemory.RemovedKeys,

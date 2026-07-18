@@ -435,16 +435,16 @@ func TestMemoryUpdateNegativeSetLocksEvidenceMappings(t *testing.T) {
 
 func TestMemoryUpdateEmitsMemoryUpdatedTurnStreamEvent(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_evt")
-	insertAgentMessage(t, database, "draft_evt", "message_evt", "以后都快一点")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_evt")
+	agenttest.InsertAgentMessage(t, database, "draft_evt", "message_evt", "以后都快一点")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(
-		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_evt"), "draft_evt")
+		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_evt"), "draft_evt")
 	if _, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
 		Entries: []rushestools.MemoryEntryInput{{
 			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都快一点",
