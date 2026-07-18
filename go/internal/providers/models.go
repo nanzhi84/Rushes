@@ -33,12 +33,13 @@ type QwenTierConfig struct {
 	VisionModel string
 }
 
-type QwenTiers struct {
+// ModelTiers 是与厂商无关的聊天/视觉双档模型集合，供 API/worker 装配层消费。
+type ModelTiers struct {
 	Chat   model.ToolCallingChatModel
 	Vision model.ToolCallingChatModel
 }
 
-func NewQwenTiers(ctx context.Context, config QwenTierConfig) (QwenTiers, error) {
+func NewQwenTiers(ctx context.Context, config QwenTierConfig) (ModelTiers, error) {
 	if config.ChatModel == "" {
 		config.ChatModel = DefaultChatModel
 	}
@@ -50,16 +51,16 @@ func NewQwenTiers(ctx context.Context, config QwenTierConfig) (QwenTiers, error)
 		Timeout: defaultAgentTimeout,
 	})
 	if err != nil {
-		return QwenTiers{}, err
+		return ModelTiers{}, err
 	}
 	vision, err := NewQwen(ctx, QwenConfig{
 		APIKey: config.APIKey, BaseURL: config.BaseURL, Model: config.VisionModel,
 		Timeout: 180 * time.Second,
 	})
 	if err != nil {
-		return QwenTiers{}, err
+		return ModelTiers{}, err
 	}
-	return QwenTiers{Chat: chat, Vision: vision}, nil
+	return ModelTiers{Chat: chat, Vision: vision}, nil
 }
 
 func NewQwen(ctx context.Context, cfg QwenConfig) (model.ToolCallingChatModel, error) {
@@ -124,4 +125,38 @@ func NewArk(ctx context.Context, cfg ArkConfig) (model.ToolCallingChatModel, err
 		),
 		RetryTimes: &retries,
 	})
+}
+
+// ArkTierConfig 描述火山方舟聊天/视觉双档装配所需配置；密钥支持 APIKey 或 AK/SK。
+type ArkTierConfig struct {
+	APIKey      string
+	AccessKey   string
+	SecretKey   string
+	BaseURL     string
+	Region      string
+	ChatModel   string
+	VisionModel string
+	Retries     int
+}
+
+// NewArkTiers 按与 DashScope 相同的超时约定装配火山方舟聊天(120s)/视觉(180s)双档。
+// 缺少密钥或模型 ID 时由 NewArk 在构造前返回简体中文错误（不含任何密钥值）。
+func NewArkTiers(ctx context.Context, config ArkTierConfig) (ModelTiers, error) {
+	chat, err := NewArk(ctx, ArkConfig{
+		APIKey: config.APIKey, AccessKey: config.AccessKey, SecretKey: config.SecretKey,
+		BaseURL: config.BaseURL, Region: config.Region, Model: config.ChatModel,
+		Timeout: defaultAgentTimeout, Retries: config.Retries,
+	})
+	if err != nil {
+		return ModelTiers{}, err
+	}
+	vision, err := NewArk(ctx, ArkConfig{
+		APIKey: config.APIKey, AccessKey: config.AccessKey, SecretKey: config.SecretKey,
+		BaseURL: config.BaseURL, Region: config.Region, Model: config.VisionModel,
+		Timeout: 180 * time.Second, Retries: config.Retries,
+	})
+	if err != nil {
+		return ModelTiers{}, err
+	}
+	return ModelTiers{Chat: chat, Vision: vision}, nil
 }

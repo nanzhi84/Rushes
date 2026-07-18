@@ -1,5 +1,5 @@
 import { Pause, Play, StepBack, StepForward } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type {
   ChangeEvent,
   KeyboardEvent,
@@ -21,7 +21,10 @@ export type DiffusionPreviewPlayerProps = {
 
 type Phase = "loading" | "ready" | "error";
 
-export function DiffusionPreviewPlayer({
+// 预览播放器持有原生解码器与 rAF 播放循环，重挂载代价高；用 memo 让它不随左栏
+// 流式对话的高频重渲染而重建。上层 props 已稳定：timeline 来自 EditorSession 快照、
+// 回调走 useCallback、seekSec/fallbackSrc 为按值稳定的基本类型。默认浅比较即可生效。
+export const DiffusionPreviewPlayer = memo(function DiffusionPreviewPlayer({
   timeline,
   fallbackSrc = null,
   onFirstPlay,
@@ -400,7 +403,7 @@ export function DiffusionPreviewPlayer({
       </div>
     </div>
   );
-}
+});
 
 export function PreviewScrubber({
   currentSec,

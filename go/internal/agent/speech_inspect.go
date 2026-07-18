@@ -120,10 +120,14 @@ func (service *Service) toolInspectSpeech(
 	wordsTruncated := false
 	evidence := make([]rushestools.SpeechUtteranceEvidence, 0, len(selected))
 	for _, utterance := range selected {
+		sourceStart, sourceEnd, clamped := utterance.StartFrame, utterance.EndFrame, false
+		if timelineClip != nil {
+			sourceStart, sourceEnd, clamped = clampSpeechRangeToClip(*timelineClip, sourceStart, sourceEnd)
+		}
 		item := rushestools.SpeechUtteranceEvidence{
-			UtteranceID: utterance.ID, SourceStartFrame: utterance.StartFrame,
-			SourceEndFrame: utterance.EndFrame, Text: utterance.Text,
-			Language: utterance.Language, Emotion: utterance.Emotion,
+			UtteranceID: utterance.ID, SourceStartFrame: sourceStart,
+			SourceEndFrame: sourceEnd, Text: utterance.Text,
+			Language: utterance.Language, Emotion: utterance.Emotion, Clamped: clamped,
 		}
 		if timelineClip != nil {
 			if start, end, ok := mapSourceRangeToTimelineClip(*timelineClip, utterance.StartFrame, utterance.EndFrame); ok {
@@ -136,9 +140,17 @@ func (service *Service) toolInspectSpeech(
 					wordsTruncated = true
 					break
 				}
+				wordStart, wordEnd, wordClamped := word.StartFrame, word.EndFrame, false
+				if timelineClip != nil {
+					wordStart, wordEnd, wordClamped = clampSpeechRangeToClip(*timelineClip, wordStart, wordEnd)
+					if wordEnd <= wordStart {
+						continue
+					}
+				}
 				wordItem := rushestools.SpeechWordEvidence{
-					WordID: word.ID, SourceStartFrame: word.StartFrame,
-					SourceEndFrame: word.EndFrame, Text: word.Text, Punctuation: word.Punctuation,
+					WordID: word.ID, SourceStartFrame: wordStart,
+					SourceEndFrame: wordEnd, Text: word.Text, Punctuation: word.Punctuation,
+					Clamped: wordClamped,
 				}
 				if timelineClip != nil {
 					if start, end, ok := mapSourceRangeToTimelineClip(*timelineClip, word.StartFrame, word.EndFrame); ok {
@@ -166,16 +178,20 @@ func (service *Service) toolInspectSpeech(
 				input.SourceEndFrame != nil && pause.DeleteStart >= *input.SourceEndFrame {
 				continue
 			}
+			deleteStart, deleteEnd, clamped := pause.DeleteStart, pause.DeleteEnd, false
+			if timelineClip != nil {
+				deleteStart, deleteEnd, clamped = clampSpeechRangeToClip(*timelineClip, deleteStart, deleteEnd)
+			}
 			item := rushestools.SpeechPauseEvidence{
 				PauseID: pause.ID, SourceStartFrame: pause.StartFrame, SourceEndFrame: pause.EndFrame,
-				DeleteStartFrame: pause.DeleteStart, DeleteEndFrame: pause.DeleteEnd,
+				DeleteStartFrame: deleteStart, DeleteEndFrame: deleteEnd,
 				DurationFrames:       pause.EndFrame - pause.StartFrame,
-				DeleteDurationFrames: pause.DeleteEnd - pause.DeleteStart,
-				DetectionMethod:      pause.Method,
+				DeleteDurationFrames: deleteEnd - deleteStart,
+				DetectionMethod:      pause.Method, Clamped: clamped,
 			}
 			populateSpeechPauseContext(&item, utterances)
 			if timelineClip != nil {
-				if start, end, ok := mapSourceRangeToTimelineClip(*timelineClip, pause.DeleteStart, pause.DeleteEnd); ok {
+				if start, end, ok := mapSourceRangeToTimelineClip(*timelineClip, deleteStart, deleteEnd); ok {
 					item.TimelineStartFrame, item.TimelineEndFrame = &start, &end
 				}
 			}
@@ -211,7 +227,7 @@ func (service *Service) toolInspectSpeech(
 	if shortFragmentsTruncated {
 		shortFragments = shortFragments[:maxSimilarPairs]
 	}
-	usageNote := "utterance_id、word_id、pause_id 与帧坐标是客观证据；similarity、intra_utterance_repetitions 与 short_speech_fragments 只是单句、连续台词块、句内重复或停顿前短语音岛的证据，不代表必须删除。" +
+	usageNote := "utterance_id、word_id、pause_id 与帧坐标是客观证据；传入 timeline_clip_id 时 clamped=true 表示该证据已按当前 clip 裁剪，utterance/word 文本与 pause 声学边界保持完整，只有帧坐标、删除范围与词列表取落在 clip 内的子集；similarity、intra_utterance_repetitions 与 short_speech_fragments 只是单句、连续台词块、句内重复或停顿前短语音岛的证据，不代表必须删除。" +
 		"intra_utterance_repetitions 会优先列出全部相邻同词证据，并自带 repetition_id 与前后两段精确 word_id（其中数字拆词和叠词也可能是正常表达）；模型应结合 context_text 自主逐项判断并一次性通过 repetition_decisions 提交 remove_earlier/remove_later/preserve；" +
 		"pauses 默认按可安全删除时长从长到短排列，previous_context、next_context 与 joined_context 用于判断气口是否影响表达；口播删剪时应对可见的显著候选一次性通过 pause_decisions 提交 remove/preserve，工具不会按时长替模型判断；" +
 		"不属于现成 repetition/fragment 证据的句内卡壳或半句重说，才需要设置 include_words=true 并把连续 word_id 范围传给 timeline.edit_talking_head；" +
@@ -1677,4 +1693,13 @@ func mapSourceRangeToTimelineClip(clip timeline.Clip, startFrame, endFrame int) 
 
 func sourceRangesOverlap(leftStart, leftEnd, rightStart, rightEnd int) bool {
 	return leftStart < rightEnd && rightStart < leftEnd
+}
+
+// clampSpeechRangeToClip 把源帧证据区间裁剪到 clip 的已裁剪源区间，返回裁剪后的
+// 区间与是否发生了裁剪。调用方对交集为空（end <= start）的项自行决定跳过或判非法，
+// 使 speech.inspect 返回的证据坐标与 timeline.edit_talking_head 的交集校验一致。
+func clampSpeechRangeToClip(clip timeline.Clip, start, end int) (int, int, bool) {
+	clampedStart := max(start, clip.SourceStartFrame)
+	clampedEnd := min(end, clip.SourceEndFrame)
+	return clampedStart, clampedEnd, clampedStart != start || clampedEnd != end
 }

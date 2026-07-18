@@ -145,6 +145,40 @@ func (modelValue *emptyServiceModel) Stream(
 	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
+// cancelDuringModelExecModel 在模型执行中阻塞，直到 turn 上下文被取消，然后返回一个
+// 不包裹 context.Canceled 的普通传输错误（模拟 provider 连接中断）。用于复现“取消发生
+// 在模型执行中、错误不携带 Canceled”这条 fallback 路径覆盖不到的风险路径。
+type cancelDuringModelExecModel struct {
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (modelValue *cancelDuringModelExecModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return modelValue, nil
+}
+
+func (modelValue *cancelDuringModelExecModel) Generate(
+	ctx context.Context,
+	_ []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	modelValue.once.Do(func() { close(modelValue.entered) })
+	<-ctx.Done()
+	return nil, errors.New("provider 连接中断")
+}
+
+func (modelValue *cancelDuringModelExecModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := modelValue.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
 func (modelValue *terminatingFailureLoopModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return modelValue, nil
 }
@@ -1083,6 +1117,118 @@ func TestServiceCancellationPropagatesToTurnContext(t *testing.T) {
 				return
 			}
 		case <-time.After(time.Second):
+			t.Fatal("未收到取消终态")
+		}
+	}
+}
+
+// 用户主动取消与回合失败是两条不同语义：取消只落 cancelled 终态，绝不产出
+// turn_failure 系统消息，否则会把用户自己的中止误报成系统失败（issue #95 H2）。
+func TestUserCancelledTurnPersistsNoFailureMessage(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_cancel_no_failure")
+	insertAgentMessage(t, database, "draft_cancel_no_failure", "user_cancel_no_failure", "等待取消")
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	service.fallbackScaffold = blockingFallbackScaffold{}
+	_, stream, unsubscribe := service.Hub().Subscribe("draft_cancel_no_failure")
+	defer unsubscribe()
+	service.Queue().EnqueueUserMessage("draft_cancel_no_failure", "user_cancel_no_failure", "等待取消")
+	for {
+		event := <-stream
+		if event["type"] == "turn_started" {
+			break
+		}
+	}
+	if !service.Queue().RequestStop("draft_cancel_no_failure") {
+		t.Fatal("取消请求未传播")
+	}
+	service.Queue().JoinDraft("draft_cancel_no_failure")
+	for {
+		select {
+		case event := <-stream:
+			switch event["type"] {
+			case "turn_error":
+				t.Fatal("用户主动取消不应触发 turn_error")
+			case "message_completed":
+				t.Fatalf("用户取消不应产出任何终态消息：%#v", event)
+			case "turn_ended":
+				if event["outcome"] != "cancelled" {
+					t.Fatalf("取消终态错误：%#v", event)
+				}
+				messages, listErr := storage.ListMessages(t.Context(), database.Read(), "draft_cancel_no_failure", 20)
+				if listErr != nil {
+					t.Fatal(listErr)
+				}
+				for _, message := range messages {
+					if message.Kind == "turn_failure" || message.Role == "system" {
+						t.Fatalf("取消回合不应落库失败消息：%#v", message)
+					}
+				}
+				return
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("未收到取消终态")
+		}
+	}
+}
+
+// 取消发生在模型执行中、且 provider 抛出的错误不包裹 context.Canceled 时，仍必须判为
+// cancelled 终态而非 turn_failure。这是只走 fallback 的
+// TestUserCancelledTurnPersistsNoFailureMessage 覆盖不到的风险路径：runTurn 的取消分水岭
+// 依赖 ctx.Err() 兜底，而非只看错误链（issue #95 H2）。
+func TestModelExecutionCancelledPersistsNoFailureMessage(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_cancel_model_exec")
+	insertAgentMessage(t, database, "draft_cancel_model_exec", "user_cancel_model_exec", "在模型执行中取消")
+	chatModel := &cancelDuringModelExecModel{entered: make(chan struct{})}
+	service, err := NewService(t.Context(), database, chatModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	_, stream, unsubscribe := service.Hub().Subscribe("draft_cancel_model_exec")
+	defer unsubscribe()
+	service.Queue().EnqueueUserMessage("draft_cancel_model_exec", "user_cancel_model_exec", "在模型执行中取消")
+	// 等模型真正进入执行（阻塞）后再取消，确保取消落在模型执行中而非其前后。
+	select {
+	case <-chatModel.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("模型未进入执行")
+	}
+	if !service.Queue().RequestStop("draft_cancel_model_exec") {
+		t.Fatal("取消请求未传播")
+	}
+	service.Queue().JoinDraft("draft_cancel_model_exec")
+	for {
+		select {
+		case event := <-stream:
+			switch event["type"] {
+			case "turn_error":
+				t.Fatal("模型执行中取消不应触发 turn_error")
+			case "message_completed":
+				t.Fatalf("模型执行中取消不应产出任何终态消息：%#v", event)
+			case "turn_ended":
+				if event["outcome"] != "cancelled" {
+					t.Fatalf("取消终态错误：%#v", event)
+				}
+				messages, listErr := storage.ListMessages(t.Context(), database.Read(), "draft_cancel_model_exec", 20)
+				if listErr != nil {
+					t.Fatal(listErr)
+				}
+				for _, message := range messages {
+					if message.Kind == "turn_failure" || message.Role == "system" {
+						t.Fatalf("模型执行中取消不应落库失败消息：%#v", message)
+					}
+				}
+				return
+			}
+		case <-time.After(3 * time.Second):
 			t.Fatal("未收到取消终态")
 		}
 	}
@@ -3274,14 +3420,25 @@ func TestModelFailureStillRepliesAndEndsTurn(t *testing.T) {
 				t.Fatal("模型失败不应让回合静默终止")
 			case "message_completed":
 				completed, _ = event["content"].(string)
+				// 失败终态复用现有 message 类事件通道：live message_completed
+				// 以 kind=turn_failure 呈现，前端据此渲染失败提示行。
+				if event["kind"] != "turn_failure" {
+					t.Fatalf("失败回合 message_completed 应带 kind=turn_failure：%#v", event)
+				}
 			case "turn_ended":
 				if event["outcome"] != "failed" || !strings.Contains(completed, "本轮没有完成") {
 					t.Fatalf("completed=%q event=%#v", completed, event)
 				}
+				// 回合失败终态必须持久化为 role=system, kind=turn_failure 消息，
+				// 刷新页面能从 DB 读回而不再无声死亡（issue #95 H2）。
 				messages, listErr := storage.ListMessages(t.Context(), database.Read(), "draft_model_error", 20)
-				if listErr != nil || len(messages) < 2 || messages[len(messages)-1].Role != "assistant" ||
-					messages[len(messages)-1].Content != completed {
+				if listErr != nil || len(messages) < 2 {
 					t.Fatalf("messages=%#v err=%v", messages, listErr)
+				}
+				failure := messages[len(messages)-1]
+				if failure.Role != "system" || failure.Kind != "turn_failure" ||
+					failure.Content != completed {
+					t.Fatalf("失败终态未落库为系统失败消息：%#v", failure)
 				}
 				return
 			}
@@ -3346,6 +3503,11 @@ func TestExhaustedRecoveryReplyIsVisibleAndMarkedFailed(t *testing.T) {
 			switch event["type"] {
 			case "message_completed":
 				completed, _ = event["content"].(string)
+				// 模型在恢复预算耗尽后亲笔生成的失败说明是它自己的回复，走
+				// assistant/reply 通道，不套 harness 的 turn_failure（P2#2）。
+				if event["kind"] != "reply" {
+					t.Fatalf("模型亲笔失败说明应走 kind=reply：%#v", event)
+				}
 			case "turn_ended":
 				if event["outcome"] != "failed" || completed != "本轮工具修复未完成，请告诉我下一步怎么处理。" {
 					t.Fatalf("completed=%q event=%#v", completed, event)
@@ -3362,6 +3524,12 @@ func TestExhaustedRecoveryReplyIsVisibleAndMarkedFailed(t *testing.T) {
 				}
 				if toolRows != 1 {
 					t.Fatalf("重复失败不应污染 UI：tool_rows=%d messages=%#v", toolRows, messages)
+				}
+				// 只有 harness 合成的终态文案才落 system/turn_failure；模型亲笔的失败说明
+				// 必须保留为 assistant/reply，才能注入下一轮上下文而不是被当成系统失败（P2#2）。
+				reply := messages[len(messages)-1]
+				if reply.Role != "assistant" || reply.Kind != "reply" || reply.Content != completed {
+					t.Fatalf("恢复耗尽的模型亲笔回复应落 assistant/reply：%#v", reply)
 				}
 				return
 			}

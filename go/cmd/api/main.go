@@ -57,12 +57,33 @@ func run() error {
 			slog.Error("关闭数据库失败", "error", closeErr)
 		}
 	}()
-	var tiers providers.QwenTiers
-	if key := os.Getenv("RUSHES_DASHSCOPE_API_KEY"); key != "" {
-		tiers, err = providers.NewQwenTiers(context.Background(), providers.QwenTierConfig{
-			APIKey: key, BaseURL: os.Getenv("RUSHES_DASHSCOPE_BASE_URL"),
-			ChatModel:   os.Getenv("RUSHES_QWEN_CHAT_MODEL"),
-			VisionModel: os.Getenv("RUSHES_QWEN_VISION_MODEL"),
+	provider, err := config.ResolveChatProvider(os.Getenv(config.EnvChatProvider))
+	if err != nil {
+		return err
+	}
+	var tiers providers.ModelTiers
+	switch provider {
+	case config.ProviderDashScope:
+		if key := os.Getenv("RUSHES_DASHSCOPE_API_KEY"); key != "" {
+			tiers, err = providers.NewQwenTiers(context.Background(), providers.QwenTierConfig{
+				APIKey: key, BaseURL: os.Getenv("RUSHES_DASHSCOPE_BASE_URL"),
+				ChatModel:   os.Getenv("RUSHES_QWEN_CHAT_MODEL"),
+				VisionModel: os.Getenv("RUSHES_QWEN_VISION_MODEL"),
+			})
+			if err != nil {
+				return err
+			}
+		}
+	case config.ProviderArk:
+		// 选择 ark 即人工决策，缺密钥/模型时由 NewArkTiers 在启动期报错，不静默降级。
+		tiers, err = providers.NewArkTiers(context.Background(), providers.ArkTierConfig{
+			APIKey:      os.Getenv("RUSHES_ARK_API_KEY"),
+			AccessKey:   os.Getenv("RUSHES_ARK_ACCESS_KEY"),
+			SecretKey:   os.Getenv("RUSHES_ARK_SECRET_KEY"),
+			BaseURL:     os.Getenv("RUSHES_ARK_BASE_URL"),
+			Region:      os.Getenv("RUSHES_ARK_REGION"),
+			ChatModel:   os.Getenv("RUSHES_ARK_CHAT_MODEL"),
+			VisionModel: os.Getenv("RUSHES_ARK_VISION_MODEL"),
 		})
 		if err != nil {
 			return err

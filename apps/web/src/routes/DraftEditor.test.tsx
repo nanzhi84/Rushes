@@ -5,9 +5,18 @@ import {
   createRouter,
   RouterContextProvider
 } from "@tanstack/react-router";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Decision, DecisionAnswer } from "../api/client";
+import type { Decision, DecisionAnswer, MessageRecord } from "../api/client";
+import { useConsoleExternalStoreRuntime } from "../components/Console/runtime";
 import { storeAuthToken } from "../auth";
 import {
   itemFromEvent,
@@ -16,6 +25,7 @@ import {
 } from "../components/Console/StructuredInteractionRenderer";
 import type { DomainSsePayload } from "../components/Console/StructuredInteractionRenderer";
 import { DEFAULT_MATERIALS_PANEL_WIDTH, useUiStore } from "../state/ui_store";
+import { normalizeConsoleRole, toConsoleMessage } from "../components/Console/ConsolePanel";
 import { DraftEditorView } from "./DraftEditor";
 
 type MockPreviewProps = {
@@ -199,6 +209,41 @@ class MockEventSource {
     }
   }
 }
+
+describe("刷新后从 DB 读回：turn_failure 系统消息透传到 UI 失败行判定", () => {
+  it("role=system/kind=turn_failure 经 toConsoleMessage 与 runtime 适配后仍带 messageKind=turn_failure", () => {
+    // 回合失败终态以 role=system/kind=turn_failure 落库；刷新页面时经此链路回放，
+    // 而非走 live turn-stream。此路径此前无覆盖（issue #95 H2 审查修理 P2#4）。
+    const record: MessageRecord = {
+      message_id: "f1",
+      role: "system",
+      kind: "turn_failure",
+      content: "本轮没有完成：模型响应超时，系统已停止重试。",
+      created_at: "2026-07-18T00:00:00Z"
+    };
+
+    // normalizeConsoleRole 必须原样保留 system，否则失败行会退化成普通助手气泡。
+    expect(normalizeConsoleRole("system")).toBe("system");
+
+    const consoleMessage = toConsoleMessage(record);
+    expect(consoleMessage.role).toBe("system");
+    expect(consoleMessage.kind).toBe("turn_failure");
+
+    // 经 assistant-ui 适配后，AssistantThread 依据 metadata.messageKind 判定失败行。
+    const { result } = renderHook(() =>
+      useConsoleExternalStoreRuntime({
+        messages: [consoleMessage],
+        structuredItems: [],
+        isRunning: false,
+        canSubmit: true,
+        submit: vi.fn()
+      })
+    );
+    const uiMessage = result.current.messages[0];
+    expect(uiMessage.role).toBe("system");
+    expect(uiMessage.metadata.messageKind).toBe("turn_failure");
+  });
+});
 
 describe("DraftEditorView", () => {
   afterEach(() => {
@@ -1395,6 +1440,31 @@ describe("DraftEditorView", () => {
     await waitFor(() => expect(screen.queryByLabelText("clip.mp4 视频试看")).toBeNull());
     // 预览区回到成片占位（时间线区也有同名占位，故按预览区作用域断言）
     expect(within(screen.getByLabelText("预览区")).getByText(/暂无时间线/)).toBeTruthy();
+  });
+
+  it("流式 text_delta 高频更新期间不重渲染时间线子树（高频态已下沉到 ConsolePanel）", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true });
+    renderEditor(fetchMock);
+
+    // 等时间线首次挂载
+    await screen.findByTestId("mock-timeline-seek");
+    const stream = turnStreamSource();
+
+    // 首个 delta 会把 turnActive 翻成 true，经忙碌态回调让工作区重渲染一次（导出按钮禁用态）。
+    // 这是预期内的一次性切换，记录其后的渲染次数作为基线。
+    emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
+    emitTurnStream(stream, { type: "text_delta", message_id: "a1", kind: "assistant", delta: "开" });
+    await screen.findByText("开");
+    const baseline = consoleComponentMocks.timelineProps.length;
+
+    // 大量后续 delta：turnActive 保持 true、忙碌态不变，高频流式只重渲染左侧对话栏，
+    // 时间线子树（mock TimelineViewer 的渲染次数）完全不动。
+    for (let i = 0; i < 40; i += 1) {
+      emitTurnStream(stream, { type: "text_delta", message_id: "a1", kind: "assistant", delta: "字" });
+    }
+    await screen.findByText(`开${"字".repeat(40)}`);
+
+    expect(consoleComponentMocks.timelineProps.length).toBe(baseline);
   });
 });
 

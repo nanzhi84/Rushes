@@ -324,6 +324,14 @@ func (service *Service) toolValidateTimeline(ctx context.Context, draftID string
 		"validation_report": validationReport,
 		"beat_alignment":    beatAlignment,
 	}
+	// validate 是只读诊断：口播质检读取失败（如 transcript 缺失/损坏）时跳过附加，
+	// 不让合法时间线因增强信息读取失败而报错（与 toolEditTalkingHead 的软跳过一致）。
+	if quality, qualityErr := service.speechQualityReport(ctx, document); qualityErr == nil {
+		if present, _ := quality["a_roll_present"].(bool); present {
+			data["speech_quality"] = quality
+			observation += talkingHeadQualitySummary(quality)
+		}
+	}
 	if hasContract {
 		data["content_contract"] = contractReport
 		failures := contractFailureItems(contractReport)
