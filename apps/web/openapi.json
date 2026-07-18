@@ -1738,6 +1738,10 @@
             "title": "Last Confirmed At",
             "type": "string"
           },
+          "manually_revised_at": {
+            "title": "Manually Revised At",
+            "type": "string"
+          },
           "memory_key": {
             "pattern": "^[a-z0-9_]{2,40}$",
             "title": "Memory Key",
@@ -1761,9 +1765,26 @@
           "statement",
           "source_draft_id",
           "created_at",
-          "last_confirmed_at"
+          "last_confirmed_at",
+          "manually_revised_at"
         ],
         "title": "MemoryRecord",
+        "type": "object"
+      },
+      "MemoryStatementUpdateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "statement": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Statement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "statement"
+        ],
+        "title": "MemoryStatementUpdateRequest",
         "type": "object"
       },
       "MessagesResponse": {
@@ -4744,6 +4765,94 @@
           }
         },
         "summary": "Delete Memory"
+      },
+      "patch": {
+        "operationId": "update_memory_statement_api_memories__memory_key__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "memory_key",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9_]{2,40}$",
+              "title": "Memory Key",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryStatementUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecurityRefusalResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          }
+        },
+        "summary": "Update Memory Statement"
       }
     },
     "/api/media/export/{export_id}": {

@@ -251,3 +251,32 @@ describe("reduceTurnStream · subagent_progress", () => {
     expect(state.subagentProgress).toEqual([{ asset_id: "asset_01a2", note: "转写音频中" }]);
   });
 });
+
+describe("reduceTurnStream · memory_updated", () => {
+  it("写入成功追加一张记忆卡片项，id 稳定且 replay 可重建", () => {
+    const events: TurnStreamEvent[] = [
+      { type: "turn_started", turn_id: "turn_1" },
+      { type: "memory_updated", written_keys: ["pacing"], removed_keys: [], total: 1 }
+    ];
+    const first = apply(events);
+    const memories = first.items.filter((item) => item.type === "memory");
+    expect(memories).toHaveLength(1);
+    expect(memories[0]).toEqual({
+      type: "memory",
+      id: "memory_0",
+      written_keys: ["pacing"],
+      removed_keys: [],
+      total: 1
+    });
+    // 相同事件序列重放得到同样的 id，保证虚拟化 key 稳定。
+    expect(apply(events)).toEqual(first);
+  });
+
+  it("既无写入也无移除的记忆事件被忽略", () => {
+    const state = apply([
+      { type: "turn_started", turn_id: "turn_1" },
+      { type: "memory_updated", written_keys: [], removed_keys: [], total: 0 }
+    ]);
+    expect(state.items.filter((item) => item.type === "memory")).toHaveLength(0);
+  });
+});

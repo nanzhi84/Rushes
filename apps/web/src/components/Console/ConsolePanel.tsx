@@ -20,6 +20,7 @@ import { queryKeys } from "../../app/query_client";
 import { useDocumentVisibility } from "../../app/use_document_visibility";
 import { acquireApiEventSource } from "../../auth";
 import { AssistantThread } from "./AssistantThread";
+import { WorkspaceSettingsDialog } from "../Shell/WorkspaceSettingsDialog";
 import { useTurnStream } from "./useTurnStream";
 import {
   markDecisionAnswered,
@@ -213,11 +214,11 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
     // 稳定签名 memo，避免每个 text_delta 重建 messages —— 否则 useConsoleExternalStoreRuntime
     // 会重建全部消息对象，击穿 AssistantThread 里所有消息行的 memo。
     const liveItemIdsKey = streamItems
-      .map((item) => (item.type === "message" ? item.message_id : item.step_id))
+      .map((item) => (item.type === "message" ? item.message_id : item.type === "memory" ? item.id : item.step_id))
       .join(" ");
     const messages = useMemo<ConsoleMessage[]>(() => {
       const liveItemIds = new Set(
-        streamItems.map((item) => (item.type === "message" ? item.message_id : item.step_id))
+        streamItems.map((item) => (item.type === "message" ? item.message_id : item.type === "memory" ? item.id : item.step_id))
       );
       return historyMessages.filter((message) => !liveItemIds.has(message.id));
       // liveItemIdsKey 是 streamItems 活跃 id 集合的稳定签名，替代 streamItems 引用依赖。
@@ -398,6 +399,9 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
     }, [onTurnBusyChange, turnBusy]);
     useImperativeHandle(ref, () => ({ submit: submitMessage }), [submitMessage]);
 
+    const [memorySettingsOpen, setMemorySettingsOpen] = useState(false);
+    const openMemorySettings = useCallback(() => setMemorySettingsOpen(true), []);
+
     return (
       <aside
         className="flex min-h-0 shrink-0 flex-col bg-panel"
@@ -464,6 +468,12 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
           resendPendingMessageId={
             resendMessage.isPending ? (resendMessage.variables?.messageId ?? null) : null
           }
+          onOpenMemorySettings={openMemorySettings}
+        />
+
+        <WorkspaceSettingsDialog
+          open={memorySettingsOpen}
+          onClose={() => setMemorySettingsOpen(false)}
         />
 
         {sideDecisionItem ? (

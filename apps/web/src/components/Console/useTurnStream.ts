@@ -21,9 +21,18 @@ export type StreamToolItem = {
   observation: string | null;
 };
 
-// 消息与工具步合并成按到达顺序排列的单一列表：前端据此把工具行内嵌在
+// 长期记忆写入成功的可见卡片：列出已记住/已更新/已移除的记忆键并直链设置面板。
+export type StreamMemoryItem = {
+  type: "memory";
+  id: string;
+  written_keys: string[];
+  removed_keys: string[];
+  total: number;
+};
+
+// 消息、工具步与记忆卡片合并成按到达顺序排列的单一列表：前端据此把工具行内嵌在
 // 叙述之间（对齐 Claude Code 的呈现方式），而不是把工具堆在消息流末尾。
-export type TurnStreamItem = StreamMessageItem | StreamToolItem;
+export type TurnStreamItem = StreamMessageItem | StreamToolItem | StreamMemoryItem;
 
 // 素材理解等子代理执行期间的实时动态：按素材粒度只保留最近一条 note。
 export type SubagentProgressEntry = {
@@ -74,7 +83,8 @@ export const KNOWN_TURN_STREAM_TYPES = [
   "stream_snapshot_truncated",
   "stream_gap",
   "turn_ended",
-  "turn_error"
+  "turn_error",
+  "memory_updated"
 ] as const;
 
 export type TurnStreamEvent =
@@ -108,7 +118,8 @@ export type TurnStreamEvent =
   | { type: "stream_snapshot_truncated" }
   | { type: "stream_gap" }
   | ({ type: "turn_ended" } & TurnEndedEvent)
-  | { type: "turn_error"; message: string };
+  | { type: "turn_error"; message: string }
+  | { type: "memory_updated"; written_keys?: string[]; removed_keys?: string[]; total?: number };
 
 export type UseTurnStreamOptions = {
   onTurnEnded?: (event: TurnEndedEvent) => void;
@@ -218,6 +229,35 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
         }),
         // 工具收尾即清空其子代理进度，避免残留串到下一个进行中工具行上。
         subagentProgress: []
+      };
+    }
+    case "memory_updated": {
+      const written = Array.isArray(event.written_keys)
+        ? event.written_keys.filter((key): key is string => typeof key === "string")
+        : [];
+      const removed = Array.isArray(event.removed_keys)
+        ? event.removed_keys.filter((key): key is string => typeof key === "string")
+        : [];
+      if (written.length === 0 && removed.length === 0) {
+        return state;
+      }
+      // 记忆卡片只追加、不更新；replay 从 turn_started 起头，按已存在记忆卡片数生成
+      // 稳定 id，保证虚拟化列表与 memo 的 key 稳定。
+      const memoryCount = state.items.filter((item) => item.type === "memory").length;
+      return {
+        ...state,
+        turnActive: true,
+        modelRetry: null,
+        items: [
+          ...state.items,
+          {
+            type: "memory",
+            id: `memory_${memoryCount}`,
+            written_keys: written,
+            removed_keys: removed,
+            total: typeof event.total === "number" ? event.total : written.length
+          }
+        ]
       };
     }
     case "subagent_progress": {

@@ -678,3 +678,50 @@ func TestUserMemoryEvidenceStorageFailureDoesNotWriteMemory(t *testing.T) {
 		t.Fatalf("memories=%#v err=%v", memories, err)
 	}
 }
+
+func TestUserMemoryManualStatementEditMarksRevisionAndGuardsActor(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft_edit")
+	seedUserMemoryMessage(t, database, "draft_edit", "message_edit")
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorAgent,
+		ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{{
+			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
+			EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "偏好",
+			EvidenceID: "message_edit", SourceDraftID: "draft_edit",
+		}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Actor=Agent 不得走手动修订路径（绕过证据）。
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor:      contracts.ActorAgent,
+		ResultRows: ResultRows{UserMemoryStatementEdit: &UserMemoryStatementEditRow{Key: "pacing", Statement: "越权改写"}},
+	}); !errors.Is(err, ErrUserMemoryInput) {
+		t.Fatalf("Actor=Agent 手动修订应被拒: %v", err)
+	}
+	// Actor=User 手动修订：更新 statement、标注 manually_revised_at，无需证据。
+	result, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorUser, CreatedAt: time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC),
+		ResultRows: ResultRows{UserMemoryStatementEdit: &UserMemoryStatementEditRow{
+			Key: "pacing", Statement: "用户手动改为：成片整体紧凑",
+		}},
+	})
+	if err != nil || result.UserMemory == nil || len(result.UserMemory.EditedKeys) != 1 ||
+		result.UserMemory.EditedKeys[0] != "pacing" {
+		t.Fatalf("手动修订应成功: result=%#v err=%v", result, err)
+	}
+	memory, err := storage.GetUserMemory(t.Context(), database.Read(), "pacing")
+	if err != nil || memory.Statement != "用户手动改为：成片整体紧凑" || memory.ManuallyRevisedAt == "" {
+		t.Fatalf("修订未落库或未标注 manually_revised_at: %#v err=%v", memory, err)
+	}
+	// 键不存在：EditedKeys 为空，供端点回 404。
+	missing, err := Apply(t.Context(), database, nil, Options{
+		Actor:      contracts.ActorUser,
+		ResultRows: ResultRows{UserMemoryStatementEdit: &UserMemoryStatementEditRow{Key: "absent_key", Statement: "无此键"}},
+	})
+	if err != nil || missing.UserMemory == nil || len(missing.UserMemory.EditedKeys) != 0 {
+		t.Fatalf("不存在的键不应报编辑: result=%#v err=%v", missing, err)
+	}
+}

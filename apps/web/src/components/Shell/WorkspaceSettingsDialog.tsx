@@ -1,6 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Trash2, X } from "lucide-react";
+import { Pencil, Trash2, X } from "lucide-react";
 import { useState, type ReactElement, type ReactNode } from "react";
 import { api, type MemoriesResponse, type MemoryRecord } from "../../api/client";
 
@@ -28,6 +28,18 @@ export function WorkspaceSettingsDialog({
       }));
     }
   });
+  const updateMemory = useMutation({
+    mutationFn: ({ memoryKey, statement }: { memoryKey: string; statement: string }) =>
+      api.updateMemoryStatement(memoryKey, statement),
+    onSuccess: (updated) => {
+      queryClient.setQueryData<MemoriesResponse>(["memories"], (current) => ({
+        memories:
+          current?.memories.map((memory) =>
+            memory.memory_key === updated.memory_key ? updated : memory
+          ) ?? []
+      }));
+    }
+  });
   const clearMemories = useMutation({
     mutationFn: () => api.clearMemories(true),
     onSuccess: () => {
@@ -37,7 +49,7 @@ export function WorkspaceSettingsDialog({
   });
   const memories = memoriesQuery.data?.memories ?? [];
   const deleteError = deleteMemory.error;
-  const mutationPending = deleteMemory.isPending || clearMemories.isPending;
+  const mutationPending = deleteMemory.isPending || clearMemories.isPending || updateMemory.isPending;
 
   const handleDelete = (memoryKey: string): void => {
     clearMemories.reset();
@@ -121,8 +133,17 @@ export function WorkspaceSettingsDialog({
                     key={memory.memory_key}
                     memory={memory}
                     deleting={deleteMemory.isPending && deleteMemory.variables === memory.memory_key}
+                    saving={
+                      updateMemory.isPending &&
+                      updateMemory.variables?.memoryKey === memory.memory_key
+                    }
                     disabled={mutationPending}
                     onDelete={() => handleDelete(memory.memory_key)}
+                    onSave={(statement) => {
+                      clearMemories.reset();
+                      deleteMemory.reset();
+                      updateMemory.mutate({ memoryKey: memory.memory_key, statement });
+                    }}
                   />
                 ))}
               </ul>
@@ -130,6 +151,11 @@ export function WorkspaceSettingsDialog({
             {deleteError ? (
               <p className="mt-3 text-sm text-danger" role="alert">
                 删除失败，请重新打开设置确认当前内容。
+              </p>
+            ) : null}
+            {updateMemory.isError ? (
+              <p className="mt-3 text-sm text-danger" role="alert">
+                保存失败，请重试或重新打开设置确认当前内容。
               </p>
             ) : null}
             {memories.length > 0 ? (
@@ -223,36 +249,109 @@ function ClearMemoriesDialog({
 function MemoryRow({
   memory,
   deleting,
+  saving,
   disabled,
-  onDelete
+  onDelete,
+  onSave
 }: {
   memory: MemoryRecord;
   deleting: boolean;
+  saving: boolean;
   disabled: boolean;
   onDelete: () => void;
+  onSave: (statement: string) => void;
 }): ReactElement {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(memory.statement);
+  const trimmed = draft.trim();
+  const canSave = trimmed.length > 0 && trimmed.length <= 200 && trimmed !== memory.statement;
+
+  const submit = (): void => {
+    if (!canSave) {
+      return;
+    }
+    onSave(trimmed);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <li className="rounded-md border border-accent/50 bg-raised px-3 py-2.5">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-fg-faint">
+          <span className="rounded bg-hover px-1.5 py-0.5">{memoryKindLabel(memory.kind)}</span>
+          <code>{memory.memory_key}</code>
+        </div>
+        <textarea
+          aria-label={`编辑长期记忆 ${memory.memory_key}`}
+          autoFocus
+          maxLength={200}
+          className="mt-1.5 h-16 w-full resize-none rounded-sm border border-line bg-panel px-2 py-1.5 text-sm leading-5 text-fg outline-none focus:border-accent"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+        <div className="mt-1.5 flex items-center justify-end gap-1.5">
+          <button
+            type="button"
+            className="rounded-sm px-2 py-1 text-2xs text-fg-muted transition-colors hover:bg-hover hover:text-fg"
+            onClick={() => {
+              setDraft(memory.statement);
+              setEditing(false);
+            }}
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            className="rounded-sm bg-accent px-2 py-1 text-2xs font-medium text-white transition-colors hover:bg-accent-strong disabled:opacity-40"
+            disabled={!canSave || saving}
+            onClick={submit}
+          >
+            {saving ? "正在保存" : "保存"}
+          </button>
+        </div>
+      </li>
+    );
+  }
+
   return (
     <li className="flex items-start gap-3 rounded-md border border-line bg-raised px-3 py-2.5">
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2 text-xs text-fg-faint">
           <span className="rounded bg-hover px-1.5 py-0.5">{memoryKindLabel(memory.kind)}</span>
           <code>{memory.memory_key}</code>
+          {memory.manually_revised_at ? (
+            <span className="rounded bg-accent/10 px-1.5 py-0.5 text-accent">手动修订</span>
+          ) : null}
         </div>
         <p className="mt-1 text-sm leading-5 text-fg">{memory.statement}</p>
         <p className="mt-1 truncate text-[11px] text-fg-faint" title={memory.source_draft_id}>
           来源草稿 {memory.source_draft_id} · {new Date(memory.last_confirmed_at).toLocaleString()}
         </p>
       </div>
-      <button
-        className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-fg-muted transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-40"
-        type="button"
-        aria-label={`删除长期记忆 ${memory.memory_key}`}
-        disabled={disabled}
-        onClick={onDelete}
-      >
-        <Trash2 size={14} strokeWidth={1.75} aria-hidden />
-        <span className="sr-only">{deleting ? "正在删除" : "删除"}</span>
-      </button>
+      <div className="flex shrink-0 items-center gap-0.5">
+        <button
+          className="grid h-7 w-7 place-items-center rounded-md text-fg-muted transition-colors hover:bg-hover hover:text-fg disabled:opacity-40"
+          type="button"
+          aria-label={`编辑长期记忆 ${memory.memory_key}`}
+          disabled={disabled}
+          onClick={() => {
+            setDraft(memory.statement);
+            setEditing(true);
+          }}
+        >
+          <Pencil size={14} strokeWidth={1.75} aria-hidden />
+        </button>
+        <button
+          className="grid h-7 w-7 place-items-center rounded-md text-fg-muted transition-colors hover:bg-danger/10 hover:text-danger disabled:opacity-40"
+          type="button"
+          aria-label={`删除长期记忆 ${memory.memory_key}`}
+          disabled={disabled}
+          onClick={onDelete}
+        >
+          <Trash2 size={14} strokeWidth={1.75} aria-hidden />
+          <span className="sr-only">{deleting ? "正在删除" : "删除"}</span>
+        </button>
+      </div>
     </li>
   );
 }

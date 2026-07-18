@@ -125,3 +125,55 @@ func seedAPIMemory(t *testing.T, server *Server, key, kind, statement string) {
 		t.Fatalf("seed memory result=%#v err=%v", result, err)
 	}
 }
+
+func TestMemoryStatementPatchEditsAndMarksManualRevision(t *testing.T) {
+	t.Parallel()
+	server, handler := testServer(t, t.TempDir(), 0)
+	seedAPIMemory(t, server, "pacing", "preference", "成片节奏偏快")
+
+	edited := httptest.NewRecorder()
+	handler.ServeHTTP(edited, apiRequest(t, http.MethodPatch, "/api/memories/pacing",
+		map[string]any{"statement": "用户手动改为：成片整体更紧凑一些"}))
+	if edited.Code != http.StatusOK {
+		t.Fatalf("patch status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	var record MemoryRecord
+	if err := json.Unmarshal(edited.Body.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record.MemoryKey != "pacing" || record.Statement != "用户手动改为：成片整体更紧凑一些" ||
+		record.ManuallyRevisedAt == "" {
+		t.Fatalf("edited record=%#v", record)
+	}
+	// 手动修订不得泄漏证据私有字段。
+	for _, leaked := range []string{"evidence_kind", "evidence_id"} {
+		if strings.Contains(edited.Body.String(), leaked) {
+			t.Fatalf("patch response leaked %s: %s", leaked, edited.Body.String())
+		}
+	}
+
+	missing := httptest.NewRecorder()
+	handler.ServeHTTP(missing, apiRequest(t, http.MethodPatch, "/api/memories/absent_key",
+		map[string]any{"statement": "无此键"}))
+	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), "memory_not_found") {
+		t.Fatalf("missing status=%d body=%s", missing.Code, missing.Body.String())
+	}
+	invalidKey := httptest.NewRecorder()
+	handler.ServeHTTP(invalidKey, apiRequest(t, http.MethodPatch, "/api/memories/Bad-Key",
+		map[string]any{"statement": "有效陈述"}))
+	if invalidKey.Code != http.StatusBadRequest || !strings.Contains(invalidKey.Body.String(), "invalid_memory_key") {
+		t.Fatalf("invalid key status=%d body=%s", invalidKey.Code, invalidKey.Body.String())
+	}
+	blank := httptest.NewRecorder()
+	handler.ServeHTTP(blank, apiRequest(t, http.MethodPatch, "/api/memories/pacing",
+		map[string]any{"statement": "   "}))
+	if blank.Code != http.StatusBadRequest || !strings.Contains(blank.Body.String(), "invalid_statement") {
+		t.Fatalf("blank statement status=%d body=%s", blank.Code, blank.Body.String())
+	}
+	malformed := httptest.NewRecorder()
+	handler.ServeHTTP(malformed, apiRequest(t, http.MethodPatch, "/api/memories/pacing",
+		json.RawMessage(`{"statement":"ok可用","extra":1}`)))
+	if malformed.Code != http.StatusBadRequest || !strings.Contains(malformed.Body.String(), "invalid_json") {
+		t.Fatalf("malformed status=%d body=%s", malformed.Code, malformed.Body.String())
+	}
+}

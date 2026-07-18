@@ -336,6 +336,26 @@ describe("AssistantThread Claude Code 式消息流", () => {
     fireEvent.click(screen.getByText("查看最新输出"));
     expect(scroller.scrollTop).toBe(300);
   });
+
+  it("记忆写入渲染「已记住」卡片，可点击直链设置面板", () => {
+    const onOpenMemorySettings = vi.fn();
+    render(
+      <AssistantThread
+        runtime={runtime([], false)}
+        onAnswerDecision={vi.fn()}
+        answerPending={false}
+        streamItems={[
+          { type: "memory", id: "memory_0", written_keys: ["pacing"], removed_keys: [], total: 1 }
+        ]}
+        onOpenMemorySettings={onOpenMemorySettings}
+      />
+    );
+    const card = screen.getByTestId("memory-updated-card");
+    expect(card.textContent).toContain("已记住长期记忆");
+    expect(card.textContent).toContain("pacing");
+    fireEvent.click(screen.getByRole("button", { name: "在设置中查看和编辑" }));
+    expect(onOpenMemorySettings).toHaveBeenCalledTimes(1);
+  });
 });
 
 function renderThread({
