@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -39,18 +39,17 @@ func (recognizer *fakeSpeechRecognizer) Recognize(
 
 func TestSpeechInspectSkipsOnlyChunksWithoutWords(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_speech_partial")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_speech_partial")
 	audio := createSpeechFixtureAudioDuration(t, database.Paths.Temporary, "partial", 30)
 	insertSpeechFixtureAsset(t, database, "draft_speech_partial", "asset_speech_partial", audio)
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 	recognizer := &fakeSpeechRecognizer{noWordsCalls: map[int]bool{1: true}}
-	service.SetSpeechRecognizer(recognizer)
-	result, err := service.toolInspectSpeech(t.Context(), "draft_speech_partial", rushestools.SpeechInspectInput{
+	exec.SetSpeechRecognizer(recognizer)
+	result, err := exec.toolInspectSpeech(t.Context(), "draft_speech_partial", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_partial", Language: "zh",
 	})
 	if err != nil {
@@ -64,8 +63,8 @@ func TestSpeechInspectSkipsOnlyChunksWithoutWords(t *testing.T) {
 
 func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_speech_sidecar")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_speech_sidecar")
 	audio := createSpeechFixtureAudio(t, database.Paths.Temporary, "sidecar")
 	srt := audio[:len(audio)-len(filepath.Ext(audio))] + ".srt"
 	if err := os.WriteFile(srt, []byte(
@@ -75,23 +74,22 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	insertSpeechFixtureAsset(t, database, "draft_speech_sidecar", "asset_speech_sidecar", audio)
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
-	if _, err := service.toolInspectSpeech(
+	if _, err := exec.toolInspectSpeech(
 		t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{},
 	); err == nil {
 		t.Fatal("缺少 asset_id/timeline_clip_id 应失败")
 	}
-	if _, err := service.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+	if _, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
 		AssetID: "missing",
 	}); err == nil {
 		t.Fatal("未知素材应失败")
 	}
-	first, err := service.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
-		AssetID: "asset_speech_sidecar", IncludeSimilar: agentexec.BoolPointer(true), IncludePauses: agentexec.BoolPointer(false),
+	first, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+		AssetID: "asset_speech_sidecar", IncludeSimilar: BoolPointer(true), IncludePauses: BoolPointer(false),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -108,7 +106,7 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 			t.Fatalf("usage note missing %q: %s", required, first.UsageNote)
 		}
 	}
-	second, err := service.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+	second, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_sidecar", Query: "第一句", MaxUtterances: 1,
 	})
 	if err != nil {
@@ -117,7 +115,7 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 	if !second.CacheHit || len(second.Utterances) != 1 || !second.Truncated {
 		t.Fatalf("second=%#v", second)
 	}
-	refreshed, err := service.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+	refreshed, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_sidecar", ForceRefresh: true,
 	})
 	if err != nil {
@@ -133,23 +131,22 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 
 func TestSpeechInspectUsesChunkedRecognizerWithoutSidecar(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_speech_asr")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_speech_asr")
 	audio := createSpeechFixtureAudio(t, database.Paths.Temporary, "asr")
 	insertSpeechFixtureAsset(t, database, "draft_speech_asr", "asset_speech_asr", audio)
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
-	if _, err := service.toolInspectSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechInspectInput{
+	if _, err := exec.toolInspectSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_asr",
 	}); err == nil {
 		t.Fatal("无 sidecar 且未配置 ASR 应失败")
 	}
 	recognizer := &fakeSpeechRecognizer{}
-	service.SetSpeechRecognizer(recognizer)
-	result, err := service.toolInspectSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechInspectInput{
+	exec.SetSpeechRecognizer(recognizer)
+	result, err := exec.toolInspectSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechInspectInput{
 		AssetID: "asset_speech_asr", Language: "zh",
 	})
 	if err != nil {
@@ -164,35 +161,35 @@ func TestSpeechInspectUsesChunkedRecognizerWithoutSidecar(t *testing.T) {
 
 func TestSpeechEvidenceHelpersKeepStableRangesAndRejectInvalidRows(t *testing.T) {
 	t.Parallel()
-	pauses := []agentexec.SpeechPause{{StartFrame: 90, EndFrame: 120}, {StartFrame: 210, EndFrame: 240}}
-	chunks := agentexec.BuildASRChunks(300, pauses, 180)
+	pauses := []SpeechPause{{StartFrame: 90, EndFrame: 120}, {StartFrame: 210, EndFrame: 240}}
+	chunks := BuildASRChunks(300, pauses, 180)
 	if len(chunks) != 3 || chunks[0] != [2]int{0, 105} || chunks[1] != [2]int{105, 225} ||
 		chunks[2] != [2]int{225, 300} {
 		t.Fatalf("chunks=%#v", chunks)
 	}
-	utterances := agentexec.AlignRecognizedClauses("asset", "第一句。第二句！第三句", "zh", "neutral", 30, 120)
+	utterances := AlignRecognizedClauses("asset", "第一句。第二句！第三句", "zh", "neutral", 30, 120)
 	if len(utterances) != 3 || utterances[0].StartFrame != 30 ||
 		utterances[2].EndFrame != 120 || utterances[0].ID == utterances[1].ID {
 		t.Fatalf("utterances=%#v", utterances)
 	}
-	encodedUtterances := agentexec.EncodeSpeechUtterances(utterances)
-	decodedUtterances, err := agentexec.DecodeSpeechUtterances(encodedUtterances)
+	encodedUtterances := EncodeSpeechUtterances(utterances)
+	decodedUtterances, err := DecodeSpeechUtterances(encodedUtterances)
 	if err != nil || len(decodedUtterances) != len(utterances) {
 		t.Fatalf("decoded=%#v err=%v", decodedUtterances, err)
 	}
-	encodedPauses := agentexec.EncodeSpeechPauses([]agentexec.SpeechPause{{
+	encodedPauses := EncodeSpeechPauses([]SpeechPause{{
 		ID: "pause", StartFrame: 40, EndFrame: 55, DeleteStart: 42, DeleteEnd: 53,
 	}})
-	if decoded, err := agentexec.DecodeSpeechPauses(encodedPauses); err != nil || len(decoded) != 1 {
+	if decoded, err := DecodeSpeechPauses(encodedPauses); err != nil || len(decoded) != 1 {
 		t.Fatalf("decoded=%#v err=%v", decoded, err)
 	}
-	if _, err := agentexec.DecodeSpeechUtterances([]map[string]any{{"utterance_id": "bad"}}); err == nil {
+	if _, err := DecodeSpeechUtterances([]map[string]any{{"utterance_id": "bad"}}); err == nil {
 		t.Fatal("无效 utterance 应失败")
 	}
-	if _, err := agentexec.DecodeSpeechPauses([]map[string]any{{"pause_id": "bad"}}); err == nil {
+	if _, err := DecodeSpeechPauses([]map[string]any{{"pause_id": "bad"}}); err == nil {
 		t.Fatal("无效 pause 应失败")
 	}
-	timestamped := agentexec.AlignTimestampedRecognition("asset", contracts.SpeechRecognitionResult{
+	timestamped := AlignTimestampedRecognition("asset", contracts.SpeechRecognitionResult{
 		Text: "第一句。第二句。", Language: "zh", ProviderID: "fun-asr",
 		Segments: []contracts.SpeechRecognitionSegment{{
 			Text: "第一句。第二句。", BeginMilliseconds: 100, EndMilliseconds: 1900,
@@ -208,22 +205,22 @@ func TestSpeechEvidenceHelpersKeepStableRangesAndRejectInvalidRows(t *testing.T)
 		timestamped[0].Words[0].ID == "" || timestamped[0].Words[0].Text != "第一句" {
 		t.Fatalf("timestamped=%#v", timestamped)
 	}
-	encodedTimestamped := agentexec.EncodeSpeechUtterances(timestamped)
-	if !agentexec.TranscriptHasWordSchema(encodedTimestamped) {
+	encodedTimestamped := EncodeSpeechUtterances(timestamped)
+	if !TranscriptHasWordSchema(encodedTimestamped) {
 		t.Fatalf("词级 schema 未持久化: %#v", encodedTimestamped)
 	}
-	decodedTimestamped, err := agentexec.DecodeSpeechUtterances(encodedTimestamped)
+	decodedTimestamped, err := DecodeSpeechUtterances(encodedTimestamped)
 	if err != nil || len(decodedTimestamped) != 2 || len(decodedTimestamped[1].Words) != 1 ||
 		decodedTimestamped[1].Words[0].Punctuation != "。" {
 		t.Fatalf("decoded timestamped=%#v err=%v", decodedTimestamped, err)
 	}
-	wordGaps := agentexec.DeriveASRWordGaps("asset", timestamped)
+	wordGaps := DeriveASRWordGaps("asset", timestamped)
 	if len(wordGaps) != 1 || wordGaps[0].StartFrame != 54 || wordGaps[0].EndFrame != 63 ||
 		wordGaps[0].DeleteStart != 56 || wordGaps[0].DeleteEnd != 61 ||
 		wordGaps[0].Method != "asr_word_gap" {
 		t.Fatalf("word gaps=%#v", wordGaps)
 	}
-	mergedPauses := agentexec.MergeSpeechPauses("asset", append(wordGaps, agentexec.SpeechPause{
+	mergedPauses := MergeSpeechPauses("asset", append(wordGaps, SpeechPause{
 		StartFrame: 55, EndFrame: 62, DeleteStart: 57, DeleteEnd: 60, Method: "rms_silence",
 	}))
 	if len(mergedPauses) != 1 || mergedPauses[0].Method != "asr_word_gap+rms_silence" ||
@@ -233,7 +230,7 @@ func TestSpeechEvidenceHelpersKeepStableRangesAndRejectInvalidRows(t *testing.T)
 	pauseEvidence := rushestools.SpeechPauseEvidence{
 		SourceStartFrame: mergedPauses[0].StartFrame, SourceEndFrame: mergedPauses[0].EndFrame,
 	}
-	agentexec.PopulateSpeechPauseContext(&pauseEvidence, timestamped)
+	PopulateSpeechPauseContext(&pauseEvidence, timestamped)
 	if pauseEvidence.PreviousText != "第一句。" || pauseEvidence.NextText != "第二句。" ||
 		pauseEvidence.PreviousWordID == "" || pauseEvidence.NextWordID == "" {
 		t.Fatalf("pause context=%#v", pauseEvidence)
@@ -243,7 +240,7 @@ func TestSpeechEvidenceHelpersKeepStableRangesAndRejectInvalidRows(t *testing.T)
 		pauseEvidence.PreviousContextStartWordID == "" || pauseEvidence.NextContextEndWordID == "" {
 		t.Fatalf("pause local word context=%#v", pauseEvidence)
 	}
-	if got := agentexec.AlignTimestampedRecognition("asset", contracts.SpeechRecognitionResult{
+	if got := AlignTimestampedRecognition("asset", contracts.SpeechRecognitionResult{
 		Text: "这是完整的第一句和第二句。", Segments: []contracts.SpeechRecognitionSegment{{
 			Text: "第二句。", BeginMilliseconds: 1000, EndMilliseconds: 1800,
 		}},
@@ -260,7 +257,7 @@ func TestRankSpeechPauseEvidenceSurfacesLongestCandidatesAndReportsTruncation(t 
 		{PauseID: "middle_long", SourceStartFrame: 500, DeleteDurationFrames: 22},
 		{PauseID: "same_length_earlier", SourceStartFrame: 400, DeleteDurationFrames: 22},
 	}
-	ranked, total, truncated := agentexec.RankSpeechPauseEvidence(values, 3)
+	ranked, total, truncated := RankSpeechPauseEvidence(values, 3)
 	if total != 4 || !truncated || len(ranked) != 3 ||
 		ranked[0].PauseID != "late_long" || ranked[1].PauseID != "same_length_earlier" ||
 		ranked[2].PauseID != "middle_long" {
@@ -272,7 +269,7 @@ func TestRankSpeechPauseEvidenceSurfacesLongestCandidatesAndReportsTruncation(t 
 			PauseID: fmt.Sprintf("pause_%03d", index), DeleteDurationFrames: index + 1,
 		}
 	}
-	defaultRanked, defaultTotal, defaultTruncated := agentexec.RankSpeechPauseEvidence(
+	defaultRanked, defaultTotal, defaultTruncated := RankSpeechPauseEvidence(
 		append([]rushestools.SpeechPauseEvidence(nil), many...), 0,
 	)
 	if defaultTotal != 150 || !defaultTruncated || len(defaultRanked) != 24 {
@@ -281,7 +278,7 @@ func TestRankSpeechPauseEvidenceSurfacesLongestCandidatesAndReportsTruncation(t 
 			len(defaultRanked), defaultTotal, defaultTruncated,
 		)
 	}
-	capped, cappedTotal, cappedTruncated := agentexec.RankSpeechPauseEvidence(
+	capped, cappedTotal, cappedTruncated := RankSpeechPauseEvidence(
 		append([]rushestools.SpeechPauseEvidence(nil), many...), 101,
 	)
 	if cappedTotal != 150 || !cappedTruncated || len(capped) != 100 {
@@ -291,7 +288,7 @@ func TestRankSpeechPauseEvidenceSurfacesLongestCandidatesAndReportsTruncation(t 
 
 func TestIntraUtteranceSpeechRepetitionsExposeRepeatedTakesAndAdjacentWords(t *testing.T) {
 	t.Parallel()
-	words := []agentexec.SpeechWord{
+	words := []SpeechWord{
 		{ID: "w_early_this", StartFrame: 10, EndFrame: 20, Text: "这个"},
 		{ID: "w_early_color", StartFrame: 20, EndFrame: 30, Text: "柑橘色"},
 		{ID: "w_early_look", StartFrame: 30, EndFrame: 45, Text: "看起来"},
@@ -303,7 +300,7 @@ func TestIntraUtteranceSpeechRepetitionsExposeRepeatedTakesAndAdjacentWords(t *t
 		{ID: "w_later_look", StartFrame: 120, EndFrame: 135, Text: "看起来"},
 		{ID: "w_later_green", StartFrame: 135, EndFrame: 150, Text: "偏绿", Punctuation: "。"},
 	}
-	got := agentexec.IntraUtteranceSpeechRepetitions("asset_repeat", []agentexec.SpeechUtterance{{
+	got := IntraUtteranceSpeechRepetitions("asset_repeat", []SpeechUtterance{{
 		ID: "utt_repeat", StartFrame: 10, EndFrame: 150,
 		Text: "这个柑橘色看起来偏绿，反正这个这个柑橘色看起来偏绿。", Words: words,
 	}}, 12)
@@ -359,22 +356,22 @@ func TestSpeechInspectResultSerializesDecisionEvidenceBeforeUtterances(t *testin
 
 func TestIntraUtteranceSpeechRepetitionsReserveLimitedOutputForAdjacentWords(t *testing.T) {
 	t.Parallel()
-	utterances := []agentexec.SpeechUtterance{
-		{ID: "utt_phrase", Text: "abcdef过渡abcdef", Words: []agentexec.SpeechWord{
+	utterances := []SpeechUtterance{
+		{ID: "utt_phrase", Text: "abcdef过渡abcdef", Words: []SpeechWord{
 			{ID: "phrase_early_a", StartFrame: 0, EndFrame: 5, Text: "abc"},
 			{ID: "phrase_early_b", StartFrame: 5, EndFrame: 10, Text: "def"},
 			{ID: "phrase_bridge", StartFrame: 10, EndFrame: 15, Text: "过渡"},
 			{ID: "phrase_late_a", StartFrame: 15, EndFrame: 20, Text: "abc"},
 			{ID: "phrase_late_b", StartFrame: 20, EndFrame: 25, Text: "def"},
 		}},
-		{ID: "utt_stutter", Text: "纯物理压压的方式", Words: []agentexec.SpeechWord{
+		{ID: "utt_stutter", Text: "纯物理压压的方式", Words: []SpeechWord{
 			{ID: "normal", StartFrame: 30, EndFrame: 40, Text: "纯物理"},
 			{ID: "press_1", StartFrame: 40, EndFrame: 41, Text: "压"},
 			{ID: "press_2", StartFrame: 41, EndFrame: 46, Text: "压"},
 			{ID: "ending", StartFrame: 46, EndFrame: 55, Text: "的方式"},
 		}},
 	}
-	got := agentexec.IntraUtteranceSpeechRepetitions("asset_repeat_priority", utterances, 1)
+	got := IntraUtteranceSpeechRepetitions("asset_repeat_priority", utterances, 1)
 	if len(got) != 1 || got[0].Kind != "adjacent_word_repeat" ||
 		got[0].EarlierStartWordID != "press_1" || got[0].LaterStartWordID != "press_2" {
 		t.Fatalf("有限结果必须优先暴露相邻重复词: %#v", got)
@@ -383,10 +380,10 @@ func TestIntraUtteranceSpeechRepetitionsReserveLimitedOutputForAdjacentWords(t *
 
 func TestShortLeadingSpeechFragmentsExposeInterruptedFalseStart(t *testing.T) {
 	t.Parallel()
-	utterance := agentexec.SpeechUtterance{
+	utterance := SpeechUtterance{
 		ID: "utt_retry", StartFrame: 1017, EndFrame: 1459,
 		Text: "但是没有同时这次键盘苹果也说做了一些新的创新。",
-		Words: []agentexec.SpeechWord{
+		Words: []SpeechWord{
 			{ID: "w_but", StartFrame: 1017, EndFrame: 1027, Text: "但是"},
 			{ID: "w_not", StartFrame: 1027, EndFrame: 1049, Text: "没"},
 			{ID: "w_have", StartFrame: 1064, EndFrame: 1067, Text: "有"},
@@ -395,11 +392,11 @@ func TestShortLeadingSpeechFragmentsExposeInterruptedFalseStart(t *testing.T) {
 			{ID: "w_keyboard", StartFrame: 1083, EndFrame: 1095, Text: "键盘", Punctuation: "。"},
 		},
 	}
-	pauses := []agentexec.SpeechPause{{
+	pauses := []SpeechPause{{
 		ID: "pause_false_start", StartFrame: 1037, EndFrame: 1064,
 		DeleteStart: 1039, DeleteEnd: 1062,
 	}}
-	got := agentexec.ShortLeadingSpeechFragments("asset", []agentexec.SpeechUtterance{utterance}, pauses, 12)
+	got := ShortLeadingSpeechFragments("asset", []SpeechUtterance{utterance}, pauses, 12)
 	if len(got) != 1 || got[0].Text != "但是没" || got[0].StartWordID != "w_but" ||
 		got[0].EndWordID != "w_not" || got[0].NextContext != "有同时这次键盘。" ||
 		got[0].JoinedContext != "但是没有同时这次键盘。" ||
@@ -410,15 +407,15 @@ func TestShortLeadingSpeechFragmentsExposeInterruptedFalseStart(t *testing.T) {
 
 func TestClampSpeechPausesNeverCutsASRWords(t *testing.T) {
 	t.Parallel()
-	utterances := []agentexec.SpeechUtterance{{
+	utterances := []SpeechUtterance{{
 		ID: "utt", StartFrame: 0, EndFrame: 100,
-		Words: []agentexec.SpeechWord{
+		Words: []SpeechWord{
 			{ID: "w1", StartFrame: 5, EndFrame: 10, Text: "前"},
 			{ID: "w2", StartFrame: 20, EndFrame: 30, Text: "后"},
 			{ID: "w3", StartFrame: 50, EndFrame: 60, Text: "中"},
 		},
 	}}
-	got := agentexec.ClampSpeechPausesToWordBoundaries("asset", []agentexec.SpeechPause{
+	got := ClampSpeechPausesToWordBoundaries("asset", []SpeechPause{
 		{ID: "p1", StartFrame: 8, EndFrame: 25, DeleteStart: 8, DeleteEnd: 25, Method: "rms_silence"},
 		{ID: "p2", StartFrame: 40, EndFrame: 80, DeleteStart: 40, DeleteEnd: 80, Method: "rms_silence"},
 		{ID: "tiny", StartFrame: 31, EndFrame: 34, DeleteStart: 31, DeleteEnd: 34, Method: "rms_silence"},
@@ -433,7 +430,7 @@ func TestClampSpeechPausesNeverCutsASRWords(t *testing.T) {
 			t.Fatalf("pause[%d]=%#v want=%v", index, pause, want[index])
 		}
 		for _, word := range utterances[0].Words {
-			if agentexec.SourceRangesOverlap(pause.DeleteStart, pause.DeleteEnd, word.StartFrame, word.EndFrame) {
+			if SourceRangesOverlap(pause.DeleteStart, pause.DeleteEnd, word.StartFrame, word.EndFrame) {
 				t.Fatalf("pause %#v cuts word %#v", pause, word)
 			}
 		}
@@ -442,14 +439,14 @@ func TestClampSpeechPausesNeverCutsASRWords(t *testing.T) {
 
 func TestShortLeadingSpeechFragmentsExpandToRepeatedTakeRestart(t *testing.T) {
 	t.Parallel()
-	earlier := agentexec.SpeechUtterance{
+	earlier := SpeechUtterance{
 		ID: "utt_earlier", StartFrame: 353, EndFrame: 446,
 		Text: "那这次键盘苹果也说做了创新是什么创新呢？",
 	}
-	retry := agentexec.SpeechUtterance{
+	retry := SpeechUtterance{
 		ID: "utt_retry", StartFrame: 1017, EndFrame: 1459,
 		Text: "但是没有同时这次键盘苹果也说做了一些新的创新。",
-		Words: []agentexec.SpeechWord{
+		Words: []SpeechWord{
 			{ID: "w_but", StartFrame: 1017, EndFrame: 1027, Text: "但是"},
 			{ID: "w_not", StartFrame: 1027, EndFrame: 1049, Text: "没"},
 			{ID: "w_have", StartFrame: 1064, EndFrame: 1067, Text: "有"},
@@ -461,11 +458,11 @@ func TestShortLeadingSpeechFragmentsExpandToRepeatedTakeRestart(t *testing.T) {
 			{ID: "w_also", StartFrame: 1105, EndFrame: 1109, Text: "也"},
 		},
 	}
-	pauses := []agentexec.SpeechPause{{
+	pauses := []SpeechPause{{
 		ID: "pause_false_start", StartFrame: 1037, EndFrame: 1064,
 		DeleteStart: 1039, DeleteEnd: 1062,
 	}}
-	got := agentexec.ShortLeadingSpeechFragments("asset", []agentexec.SpeechUtterance{earlier, retry}, pauses, 12)
+	got := ShortLeadingSpeechFragments("asset", []SpeechUtterance{earlier, retry}, pauses, 12)
 	if len(got) != 1 || got[0].Kind != "restart_prefix_before_repeated_take" ||
 		got[0].Text != "但是没有同时" || got[0].EndWordID != "w_time" ||
 		got[0].NextContextStartWordID != "w_retry" ||
@@ -480,10 +477,10 @@ func TestShortLeadingSpeechFragmentsExpandToRepeatedTakeRestart(t *testing.T) {
 
 func TestShortLeadingSpeechFragmentsExposeEarlierTakeBeforeRepeatedPhraseRestart(t *testing.T) {
 	t.Parallel()
-	utterance := agentexec.SpeechUtterance{
+	utterance := SpeechUtterance{
 		ID: "utt_color_retry", StartFrame: 0, EndFrame: 120,
 		Text: "柑橘色我觉得最爱的颜色反正可以自己这个全新的柑橘色我觉得",
-		Words: []agentexec.SpeechWord{
+		Words: []SpeechWord{
 			{ID: "early_color", StartFrame: 0, EndFrame: 10, Text: "柑橘色"},
 			{ID: "early_think", StartFrame: 10, EndFrame: 20, Text: "我觉得"},
 			{ID: "tail_color", StartFrame: 20, EndFrame: 40, Text: "最爱的颜色"},
@@ -494,12 +491,12 @@ func TestShortLeadingSpeechFragmentsExposeEarlierTakeBeforeRepeatedPhraseRestart
 			{ID: "later_think", StartFrame: 100, EndFrame: 110, Text: "我觉得"},
 		},
 	}
-	pauses := []agentexec.SpeechPause{{
+	pauses := []SpeechPause{{
 		ID: "pause_before_restart", StartFrame: 60, EndFrame: 72,
 		DeleteStart: 62, DeleteEnd: 70,
 	}}
 
-	got := agentexec.ShortLeadingSpeechFragments("asset_color", []agentexec.SpeechUtterance{utterance}, pauses, 12)
+	got := ShortLeadingSpeechFragments("asset_color", []SpeechUtterance{utterance}, pauses, 12)
 	if len(got) != 1 || got[0].Kind != "earlier_take_before_repeated_phrase_restart" ||
 		got[0].Text != "柑橘色我觉得最爱的颜色反正可以自己" ||
 		got[0].StartWordID != "early_color" || got[0].EndWordID != "tail_self" ||
@@ -513,7 +510,7 @@ func TestShortLeadingSpeechFragmentsExposeEarlierTakeBeforeRepeatedPhraseRestart
 
 func TestSimilarSpeechPairsExposeRepeatedMultiUtteranceTakes(t *testing.T) {
 	t.Parallel()
-	values := []agentexec.SpeechUtterance{
+	values := []SpeechUtterance{
 		{ID: "utt_color", StartFrame: 10, EndFrame: 344, Text: "这个柑橘色看起来有点偏绿。"},
 		{ID: "utt_keyboard_intro", StartFrame: 353, EndFrame: 446, Text: "那这次键盘苹果也说做了创新是什么创新呢？"},
 		{ID: "utt_keycaps", StartFrame: 457, EndFrame: 632, Text: "它把键盘的键帽颜色靠近了外表颜色，这就是最大的创新了。"},
@@ -524,7 +521,7 @@ func TestSimilarSpeechPairsExposeRepeatedMultiUtteranceTakes(t *testing.T) {
 		{ID: "utt_typing_retry", StartFrame: 1464, EndFrame: 1571, Text: "打字手感方面没有什么问题，回弹也都不错。"},
 		{ID: "utt_fingerprint", StartFrame: 1583, EndFrame: 1721, Text: "电源键提供指纹识别。"},
 	}
-	pairs := agentexec.SimilarSpeechPairs(values, 24)
+	pairs := SimilarSpeechPairs(values, 24)
 	found := false
 	for _, pair := range pairs {
 		if pair.Method != "normalized_character_lcs_dice" ||

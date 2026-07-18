@@ -1,4 +1,4 @@
-package agent
+package agentexec
 
 import (
 	"encoding/json"
@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
@@ -14,8 +14,8 @@ import (
 
 func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_shot_search")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_shot_search")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, fixture := range []struct {
 		assetID  string
@@ -68,29 +68,28 @@ func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_shot_search")
-	if _, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	if _, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
 		MinDurationFrames: 90, MaxDurationFrames: 30,
 	}); err == nil {
 		t.Fatal("无效时长范围应失败")
 	}
-	if _, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	if _, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
 		AssetIDs: []string{"missing"},
 	}); err == nil {
 		t.Fatal("未知素材过滤应失败")
 	}
-	if _, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	if _, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
 		SemanticRoles: []string{"supporting"},
 	}); err == nil {
 		t.Fatal("未知视觉角色应失败")
 	}
 
-	output, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	output, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
 		Query: "夜晚火焰人物 高潮", Tags: []string{"火焰"},
 		MinDurationFrames: 30, MaxDurationFrames: 90, SemanticRoles: []string{"b_roll"},
 	})
@@ -105,7 +104,7 @@ func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 		t.Fatalf("search result=%#v", result)
 	}
 
-	missingOutput, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	missingOutput, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
 		Query: "键盘指纹解锁", SemanticRoles: []string{"b_roll"}, Limit: 5,
 	})
 	if err != nil {
@@ -120,7 +119,7 @@ func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 		t.Fatalf("missing understanding search=%#v", missing)
 	}
 
-	allOutput, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Limit: 1})
+	allOutput, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Limit: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,10 +134,10 @@ func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, err := service.persistTimeline(t.Context(), "draft_shot_search", document, "shot_search_fixture"); err != nil || persisted.Status != "succeeded" {
+	if persisted, err := exec.persistTimeline(t.Context(), "draft_shot_search", document, "shot_search_fixture"); err != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
-	excludedOutput, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	excludedOutput, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
 		Query: "火焰", ExcludeUsed: true,
 	})
 	if err != nil {
@@ -150,8 +149,8 @@ func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 }
 
 func TestShotSearchJoinsTranscriptByOverlapAndMarksTermSource(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_transcript_search")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_transcript_search")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(asset_id,storage_mode,reference_path,kind,source,filename,hash,size,probe_json,ingest_status,understanding_status,usable)
@@ -177,13 +176,12 @@ func TestShotSearchJoinsTranscriptByOverlapAndMarksTermSource(t *testing.T) {
 		VALUES('summary_transcript','video_transcript',1,'ready',?,'fp','v4',?)`, string(summary), now); err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_transcript_search")
-	crossRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "跨段口令"})
+	crossRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "跨段口令"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +201,7 @@ func TestShotSearchJoinsTranscriptByOverlapAndMarksTermSource(t *testing.T) {
 			t.Fatalf("shot=%#v", shot)
 		}
 	}
-	secondRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "第二专属词"})
+	secondRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "第二专属词"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +209,7 @@ func TestShotSearchJoinsTranscriptByOverlapAndMarksTermSource(t *testing.T) {
 	if len(second.Shots) != 1 || second.Shots[0].SourceStartFrame != 60 || !strings.Contains(second.Shots[0].Transcript, "第二专属词") {
 		t.Fatalf("second shots=%#v", second.Shots)
 	}
-	qualityRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "人物口播"})
+	qualityRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "人物口播"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,8 +224,8 @@ func TestShotQualityMetricsGentlyLowerSearchAndRecutPriority(t *testing.T) {
 	badExposure, badSharpness := 0.95, 0.0
 	normal := rushestools.ShotCandidate{OverexposedRatio: &normalExposure, SharpnessScore: &normalSharpness}
 	bad := rushestools.ShotCandidate{OverexposedRatio: &badExposure, SharpnessScore: &badSharpness}
-	if agentexec.ShotQualityPenalty(normal) != 0 || agentexec.ShotQualityPenalty(bad) <= 0 || agentexec.ShotQualityPenalty(bad) > 0.22 {
-		t.Fatalf("normal=%.4f bad=%.4f", agentexec.ShotQualityPenalty(normal), agentexec.ShotQualityPenalty(bad))
+	if ShotQualityPenalty(normal) != 0 || ShotQualityPenalty(bad) <= 0 || ShotQualityPenalty(bad) > 0.22 {
+		t.Fatalf("normal=%.4f bad=%.4f", ShotQualityPenalty(normal), ShotQualityPenalty(bad))
 	}
 	segments := []understanding.Segment{
 		{SourceStartFrame: 0, SourceEndFrame: 90, OverexposedRatio: &badExposure, SharpnessScore: &badSharpness},
@@ -245,8 +243,8 @@ func TestShotQualityMetricsGentlyLowerSearchAndRecutPriority(t *testing.T) {
 
 func TestShotSearchRanksSegmentEvidenceAboveSharedFilename(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_segment_ranking")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_segment_ranking")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	fixtures := []struct {
 		assetID  string
@@ -295,14 +293,13 @@ func TestShotSearchRanksSegmentEvidenceAboveSharedFilename(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_segment_ranking")
 
-	yearRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	yearRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
 		Query: "2015年 MacBook Force Touch 触控板 历史", AssetIDs: []string{"video_year"}, Limit: 5,
 	})
 	if err != nil {
@@ -313,7 +310,7 @@ func TestShotSearchRanksSegmentEvidenceAboveSharedFilename(t *testing.T) {
 		t.Fatalf("year ranking=%#v", year.Shots)
 	}
 
-	backlightRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	backlightRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
 		Query: "键盘背光 无背光 晚上打字", AssetIDs: []string{"video_backlight"}, Limit: 5,
 	})
 	if err != nil {
@@ -327,8 +324,8 @@ func TestShotSearchRanksSegmentEvidenceAboveSharedFilename(t *testing.T) {
 
 func TestShotSearchReportsUnderstandingCoverageGap(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_coverage")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_coverage")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, fixture := range []struct {
 		assetID       string
@@ -372,14 +369,13 @@ func TestShotSearchReportsUnderstandingCoverageGap(t *testing.T) {
 	}
 	insertSummary("video_ready", "室内产品展示特写")
 
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_coverage")
 
-	gapRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{})
+	gapRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +388,7 @@ func TestShotSearchReportsUnderstandingCoverageGap(t *testing.T) {
 
 	insertSummary("video_pending", "户外街景空镜")
 
-	fullRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{})
+	fullRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{})
 	if err != nil {
 		t.Fatal(err)
 	}

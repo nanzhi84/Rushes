@@ -10,6 +10,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -136,21 +137,21 @@ func (modelValue *timelineOpReactRepairModel) snapshot() (int, bool, bool, bool,
 
 func TestReactAgentRepairsTimelineOpFromJITFieldFailure(t *testing.T) {
 	const draftID = "draft_timeline_op_react_repair"
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, draftID)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	modelValue := &timelineOpReactRepairModel{}
-	service, err := NewService(t.Context(), database, modelValue)
+	exec, err := newTestExecutor(t.Context(), database, modelValue)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
+	t.Cleanup(exec.Close)
 	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
 		AssetID: "talk", AssetKind: "video", SourceEndFrame: 60, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixtureResult, err := service.persistTimeline(t.Context(), draftID, document, "react_repair_fixture")
+	fixtureResult, err := exec.persistTimeline(t.Context(), draftID, document, "react_repair_fixture")
 	if err != nil || fixtureResult.Status != "succeeded" {
 		t.Fatalf("fixture result=%#v err=%v", fixtureResult, err)
 	}
@@ -159,7 +160,7 @@ func TestReactAgentRepairsTimelineOpFromJITFieldFailure(t *testing.T) {
 	ctx := withToolRecoveryState(t.Context(), recoveryState)
 	ctx = withTurnBudgetState(ctx, newTurnBudgetState(maxToolRoundsPerTurn))
 	ctx = rushestools.WithDraftID(ctx, draftID)
-	response, err := service.react.Generate(ctx, []*schema.Message{
+	response, err := exec.react.Generate(ctx, []*schema.Message{
 		schema.UserMessage("把主视频片段结尾裁到第 45 帧。"),
 	})
 	if err != nil {

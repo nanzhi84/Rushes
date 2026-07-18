@@ -19,6 +19,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -428,9 +429,9 @@ func (modelValue *failingReadToolServiceModel) Stream(
 
 func TestServiceRunsProductionReactAgentAndPersistsStreamedReply(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_react")
-	insertAgentMessage(t, database, "draft_react", "user_msg", "列出素材")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_react")
+	agenttest.InsertAgentMessage(t, database, "draft_react", "user_msg", "列出素材")
 	service, err := NewService(t.Context(), database, &serviceToolModel{})
 	if err != nil {
 		t.Fatal(err)
@@ -493,9 +494,9 @@ func TestReactAgentMakesBudgetVisibleAndAllowsFortyToolRounds(t *testing.T) {
 			maxToolRoundsPerTurn, maxReActStepsPerTurn,
 		)
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_tool_round_budget")
-	insertAgentMessage(t, database, "draft_tool_round_budget", "user_tool_round_budget", "连续执行多轮工具")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_tool_round_budget")
+	agenttest.InsertAgentMessage(t, database, "draft_tool_round_budget", "user_tool_round_budget", "连续执行多轮工具")
 	modelValue := &toolRoundBudgetModel{}
 	service, err := NewService(t.Context(), database, modelValue)
 	if err != nil {
@@ -555,9 +556,9 @@ func TestReactAgentMakesBudgetVisibleAndAllowsFortyToolRounds(t *testing.T) {
 func TestReactAgentThirtyRoundFixtureWarnsOnCallsTwentySixAndThirtyOne(t *testing.T) {
 	t.Parallel()
 	const fixtureRounds = 30
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_thirty_round_fixture"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	modelValue := &toolRoundBudgetModel{targetRounds: fixtureRounds}
 	service, err := NewService(t.Context(), database, modelValue)
 	if err != nil {
@@ -598,9 +599,9 @@ func TestReactAgentThirtyRoundFixtureWarnsOnCallsTwentySixAndThirtyOne(t *testin
 
 func TestServiceReturnsToolFailureToModelForSelfRepair(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_self_repair")
-	insertAgentMessage(t, database, "draft_self_repair", "user_self_repair", "先试错再修复")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_self_repair")
+	agenttest.InsertAgentMessage(t, database, "draft_self_repair", "user_self_repair", "先试错再修复")
 	service, err := NewService(t.Context(), database, &selfRepairServiceModel{})
 	if err != nil {
 		t.Fatal(err)
@@ -635,8 +636,8 @@ func TestServiceReturnsToolFailureToModelForSelfRepair(t *testing.T) {
 
 func TestServiceReturnsDeterministicToolFailureInOneVisibleTrace(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_retry_trace")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_retry_trace")
 	assetResult, assetErr := reducer.Apply(t.Context(), database, []contracts.Event{
 		{Type: "AssetImported", Payload: map[string]any{
 			"asset_id": "asset_present", "job_id": "job_present", "kind": "video",
@@ -649,7 +650,7 @@ func TestServiceReturnsDeterministicToolFailureInOneVisibleTrace(t *testing.T) {
 	if assetErr != nil || assetResult.Status != reducer.StatusApplied {
 		t.Fatalf("asset status=%s err=%v", assetResult.Status, assetErr)
 	}
-	insertAgentMessage(t, database, "draft_retry_trace", "user_retry_trace", "分析不存在的音频")
+	agenttest.InsertAgentMessage(t, database, "draft_retry_trace", "user_retry_trace", "分析不存在的音频")
 	service, err := NewService(t.Context(), database, &failingReadToolServiceModel{})
 	if err != nil {
 		t.Fatal(err)
@@ -676,9 +677,9 @@ func TestServiceReturnsDeterministicToolFailureInOneVisibleTrace(t *testing.T) {
 
 func TestDecisionAnswerObservationResumesAgent(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_decision_continue")
-	insertAgentMessage(t, database, "draft_decision_continue", "user_decision_continue", "帮我做一个混剪")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_decision_continue")
+	agenttest.InsertAgentMessage(t, database, "draft_decision_continue", "user_decision_continue", "帮我做一个混剪")
 	chatModel := &decisionContinuationModel{}
 	service, err := NewService(t.Context(), database, chatModel)
 	if err != nil {
@@ -735,9 +736,9 @@ func TestDecisionAnswerObservationResumesAgent(t *testing.T) {
 
 func TestTerminalJobObservationResumesAgentWithFailureContext(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_job_continue")
-	insertAgentMessage(t, database, "draft_job_continue", "user_job_continue", "生成预览并检查")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_job_continue")
+	agenttest.InsertAgentMessage(t, database, "draft_job_continue", "user_job_continue", "生成预览并检查")
 	chatModel := &decisionContinuationModel{}
 	service, err := NewService(t.Context(), database, chatModel)
 	if err != nil {
@@ -771,9 +772,9 @@ func TestTerminalJobObservationResumesAgentWithFailureContext(t *testing.T) {
 
 func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_job_dedup")
-	insertAgentMessage(t, database, "draft_job_dedup", "user_job_dedup", "渲染预览并检查")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_job_dedup")
+	agenttest.InsertAgentMessage(t, database, "draft_job_dedup", "user_job_dedup", "渲染预览并检查")
 	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
 		Actor: contracts.ActorAgent, ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
 			ID: "tool_inspected", DraftID: "draft_job_dedup", Role: "system", Kind: "tool",
@@ -846,9 +847,9 @@ func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 
 func TestToolReporterPairsSameNameCallsByCallIDAndPersistsPreviewID(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_reporter_call_ids"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -897,9 +898,9 @@ func TestToolReporterPairsSameNameCallsByCallIDAndPersistsPreviewID(t *testing.T
 
 func TestToolRecoveryPersistsPreviewIDFromSyntheticStartedArguments(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_reporter_recovery_preview"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -935,9 +936,9 @@ func TestCompletedPreviewObservationIncludesStructuredVerificationReport(t *test
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_job_report")
-	insertAgentMessage(t, database, "draft_job_report", "user_job_report", "生成预览并按合同检查")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_job_report")
+	agenttest.InsertAgentMessage(t, database, "draft_job_report", "user_job_report", "生成预览并按合同检查")
 	chatModel := &decisionContinuationModel{}
 	service, err := NewService(t.Context(), database, chatModel)
 	if err != nil {
@@ -1031,9 +1032,9 @@ func TestCompletedPreviewObservationIncludesStructuredVerificationReport(t *test
 }
 
 func TestCompletedPreviewObservationContinuesWhenAutomaticInspectionFails(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_job_degraded_report")
-	insertAgentMessage(t, database, "draft_job_degraded_report", "user_job_degraded_report", "生成预览")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_job_degraded_report")
+	agenttest.InsertAgentMessage(t, database, "draft_job_degraded_report", "user_job_degraded_report", "生成预览")
 	chatModel := &decisionContinuationModel{}
 	service, err := NewService(t.Context(), database, chatModel)
 	if err != nil {
@@ -1087,8 +1088,8 @@ func TestCompletedPreviewObservationContinuesWhenAutomaticInspectionFails(t *tes
 
 func TestServiceCancellationPropagatesToTurnContext(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_cancel")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_cancel")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1127,9 +1128,9 @@ func TestServiceCancellationPropagatesToTurnContext(t *testing.T) {
 // turn_failure 系统消息，否则会把用户自己的中止误报成系统失败（issue #95 H2）。
 func TestUserCancelledTurnPersistsNoFailureMessage(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_cancel_no_failure")
-	insertAgentMessage(t, database, "draft_cancel_no_failure", "user_cancel_no_failure", "等待取消")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_cancel_no_failure")
+	agenttest.InsertAgentMessage(t, database, "draft_cancel_no_failure", "user_cancel_no_failure", "等待取消")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1184,9 +1185,9 @@ func TestUserCancelledTurnPersistsNoFailureMessage(t *testing.T) {
 // 依赖 ctx.Err() 兜底，而非只看错误链（issue #95 H2）。
 func TestModelExecutionCancelledPersistsNoFailureMessage(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_cancel_model_exec")
-	insertAgentMessage(t, database, "draft_cancel_model_exec", "user_cancel_model_exec", "在模型执行中取消")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_cancel_model_exec")
+	agenttest.InsertAgentMessage(t, database, "draft_cancel_model_exec", "user_cancel_model_exec", "在模型执行中取消")
 	chatModel := &cancelDuringModelExecModel{entered: make(chan struct{})}
 	service, err := NewService(t.Context(), database, chatModel)
 	if err != nil {
@@ -1237,8 +1238,8 @@ func TestModelExecutionCancelledPersistsNoFailureMessage(t *testing.T) {
 
 func TestJobObservationBridgeWakesAgentForWaitedTerminalJob(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_bridge")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_bridge")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1290,8 +1291,8 @@ func TestJobObservationBridgeWakesAgentForWaitedTerminalJob(t *testing.T) {
 
 func TestJobObservationBridgeRecoversBacklogAfterServiceRestart(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_bridge_restart")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_bridge_restart")
 	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
 		{Type: "JobEnqueued", DraftID: "draft_bridge_restart", Payload: map[string]any{
 			"job_id": "job_restart", "kind": "render_preview",
@@ -1336,8 +1337,8 @@ func TestJobObservationBridgeRecoversBacklogAfterServiceRestart(t *testing.T) {
 
 func TestJobObservationBridgeReplaysCommittedUndeliveredObservation(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_bridge_outbox")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_bridge_outbox")
 	event := map[string]any{
 		"event": "JobSucceeded", "draft_id": "draft_bridge_outbox",
 		"payload": map[string]any{
@@ -1392,8 +1393,8 @@ func TestJobObservationBridgeReplaysCommittedUndeliveredObservation(t *testing.T
 
 func TestJobObservationBridgeRetriesObservationAfterRunnerFailure(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_bridge_retry")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_bridge_retry")
 	event := map[string]any{
 		"event": "JobSucceeded", "draft_id": "draft_bridge_retry",
 		"payload": map[string]any{
@@ -1456,10 +1457,10 @@ func TestJobObservationBridgeSuppressesUserCancelledTurns(t *testing.T) {
 			name = "pending"
 		}
 		t.Run(name, func(t *testing.T) {
-			database := agentTestDatabase(t)
+			database := agenttest.AgentTestDatabase(t)
 			draftID := "draft_bridge_cancel_" + name
 			jobID := "job_bridge_cancel_" + name
-			createAgentDraft(t, database, draftID)
+			agenttest.CreateAgentDraft(t, database, draftID)
 			event := map[string]any{
 				"event": "JobSucceeded", "draft_id": draftID,
 				"payload": map[string]any{
@@ -1549,10 +1550,10 @@ func TestJobObservationBridgeSuppressesUserCancelledTurns(t *testing.T) {
 
 func TestJobObservationBridgeHonorsPersistentTurnCancellationSuppression(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	draftID := "draft_bridge_persistent_suppression"
 	jobID := "job_bridge_persistent_suppression"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	event := map[string]any{
 		"event": "JobSucceeded", "draft_id": draftID,
 		"payload": map[string]any{
@@ -1600,9 +1601,9 @@ func TestJobObservationBridgeHonorsPersistentTurnCancellationSuppression(t *test
 }
 
 func TestJobObservationBridgeReleasesInflightAndHandlesClosedDependencies(t *testing.T) {
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	draftID := "draft_bridge_failure_paths"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	queue := NewTurnQueue(t.Context(), func(context.Context, QueueItem) error {
@@ -1646,7 +1647,7 @@ func TestJobObservationBridgeReleasesInflightAndHandlesClosedDependencies(t *tes
 		t.Fatalf("拒绝入队后 inflight 未释放: %d", inflight)
 	}
 
-	closedDatabase := agentTestDatabase(t)
+	closedDatabase := agenttest.AgentTestDatabase(t)
 	if err := closedDatabase.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1666,8 +1667,8 @@ func TestJobObservationBridgeReleasesInflightAndHandlesClosedDependencies(t *tes
 
 func TestJobObservationBridgeRevisitsOldestAfterInflightClears(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_bridge_page")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_bridge_page")
 	makeObservations := func(first, last int) []reducer.AgentJobObservationRow {
 		observations := make([]reducer.AgentJobObservationRow, 0, last-first+1)
 		for index := first; index <= last; index++ {
@@ -1747,8 +1748,8 @@ func TestJobObservationBridgeRevisitsOldestAfterInflightClears(t *testing.T) {
 
 func TestJobObservationBridgeDispatchesOnePagePerIteration(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_bridge_limit")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_bridge_limit")
 	observations := make([]reducer.AgentJobObservationRow, 0, 201)
 	for index := 1; index <= 201; index++ {
 		jobID := fmt.Sprintf("job_limit_%03d", index)
@@ -1799,8 +1800,8 @@ func TestJobObservationBridgeDispatchesOnePagePerIteration(t *testing.T) {
 
 func TestJobObservationBridgeQuarantinesFullMalformedPage(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_bridge_malformed")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_bridge_malformed")
 	observations := make([]reducer.AgentJobObservationRow, 0, jobObservationDispatchLimit+1)
 	for index := 1; index <= jobObservationDispatchLimit+1; index++ {
 		jobID := fmt.Sprintf("job_malformed_%d", index)
@@ -1865,8 +1866,8 @@ func TestJobObservationBridgeQuarantinesFullMalformedPage(t *testing.T) {
 
 func TestJobObservationBridgeDeduplicatesJobAndSplitsCancellationReason(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_bridge_cancel")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_bridge_cancel")
 	for _, item := range []struct {
 		id, reason string
 	}{{"job_turn_cancel", "turn_cancelled"}, {"job_manual_cancel", "user_cancelled"}} {
@@ -1939,8 +1940,8 @@ func TestJobObservationBridgeDeduplicatesJobAndSplitsCancellationReason(t *testi
 
 func TestUnderstandingRepeatedRunsAllocateNewSummaryVersion(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_understand_repeat")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_understand_repeat")
 	font := filepath.Join(database.Paths.Temporary, "repeat.otf")
 	if err := os.WriteFile(font, []byte("font fixture"), 0o644); err != nil {
 		t.Fatal(err)
@@ -2007,8 +2008,8 @@ func TestUnderstandingRepeatedRunsAllocateNewSummaryVersion(t *testing.T) {
 
 func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_timeline_tools")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_timeline_tools")
 	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
 		{Type: "AssetImported", Payload: map[string]any{
 			"asset_id": "asset_timeline", "job_id": "job_asset", "storage_mode": "reference",
@@ -2166,8 +2167,8 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_full")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_full")
 	source := filepath.Join(database.Paths.Temporary, "full-mainline.mp4")
 	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y", "-f", "lavfi", "-i",
 		"testsrc2=size=320x240:rate=30:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", source); err != nil {
@@ -2391,9 +2392,9 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 }
 
 func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T) {
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_confirmation_preconditions"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -2466,8 +2467,8 @@ func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T)
 
 func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_empty")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_empty")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -2531,8 +2532,8 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	if _, err := NewService(t.Context(), nil, nil); err == nil {
 		t.Fatal("nil database should fail")
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_failures")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_failures")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -2582,7 +2583,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	createAgentDraft(t, database, "draft_assets_filter")
+	agenttest.CreateAgentDraft(t, database, "draft_assets_filter")
 	for _, item := range []struct {
 		id     string
 		kind   string
@@ -2688,8 +2689,8 @@ func TestAudioBeatAnalysisToolReturnsIntegerFrameGrid(t *testing.T) {
 	if _, err := exec.LookPath("aubiotrack"); err != nil {
 		t.Skip("aubio 未安装")
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_beats")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_beats")
 	source := filepath.Join(database.Paths.Temporary, "metronome.wav")
 	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y", "-f", "lavfi", "-i",
 		`aevalsrc=if(lt(mod(t\,0.5)\,0.03)\,0.9*sin(2*PI*1000*t)\,0):s=44100:d=5`,
@@ -2740,8 +2741,8 @@ func TestSpeechPauseAnalysisSupportsVideoAudioAndTimelineMapping(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_speech_pauses")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_speech_pauses")
 	source := filepath.Join(database.Paths.Temporary, "talking-head.mp4")
 	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y",
 		"-f", "lavfi", "-i", "color=c=black:s=160x90:r=30:d=3",
@@ -2805,8 +2806,8 @@ func TestBeatRecutToolAcceptsModelChosenSFXFrameAndKeepsSeparateTrack(t *testing
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_beat_recut")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_beat_recut")
 	source := filepath.Join(database.Paths.Temporary, "fake-audio.wav")
 	if err := os.WriteFile(source, []byte("fake audio source"), 0o600); err != nil {
 		t.Fatal(err)
@@ -2946,8 +2947,8 @@ func TestBeatRecutToolRebuildsFullLengthMixFromSourceAssets(t *testing.T) {
 	}
 	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_full_beat_mix")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_full_beat_mix")
 	source := filepath.Join(database.Paths.Temporary, "beat-mix-source.wav")
 	if err := os.WriteFile(source, []byte("fake source"), 0o600); err != nil {
 		t.Fatal(err)
@@ -3400,9 +3401,9 @@ func TestAudioLayoutDataWarnsWhenSFXDoesNotAccentBGM(t *testing.T) {
 
 func TestModelFailureStillRepliesAndEndsTurn(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_model_error")
-	insertAgentMessage(t, database, "draft_model_error", "user_error", "fail")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_model_error")
+	agenttest.InsertAgentMessage(t, database, "draft_model_error", "user_error", "fail")
 	service, err := NewService(t.Context(), database, &failingServiceModel{})
 	if err != nil {
 		t.Fatal(err)
@@ -3451,9 +3452,9 @@ func TestModelFailureStillRepliesAndEndsTurn(t *testing.T) {
 
 func TestEmptyModelReplyStillProducesVisibleFailure(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_empty_model")
-	insertAgentMessage(t, database, "draft_empty_model", "user_empty_model", "不要静默")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_empty_model")
+	agenttest.InsertAgentMessage(t, database, "draft_empty_model", "user_empty_model", "不要静默")
 	service, err := NewService(t.Context(), database, &emptyServiceModel{})
 	if err != nil {
 		t.Fatal(err)
@@ -3485,9 +3486,9 @@ func TestEmptyModelReplyStillProducesVisibleFailure(t *testing.T) {
 
 func TestExhaustedRecoveryReplyIsVisibleAndMarkedFailed(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_bounded_recovery")
-	insertAgentMessage(t, database, "draft_bounded_recovery", "user_bounded_recovery", "不要循环")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_bounded_recovery")
+	agenttest.InsertAgentMessage(t, database, "draft_bounded_recovery", "user_bounded_recovery", "不要循环")
 	service, err := NewService(t.Context(), database, &terminatingFailureLoopModel{})
 	if err != nil {
 		t.Fatal(err)
@@ -3542,9 +3543,9 @@ func TestExhaustedRecoveryReplyIsVisibleAndMarkedFailed(t *testing.T) {
 
 func TestRepeatedFailedToolLoopStillRepliesAndEndsTurn(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_tool_loop")
-	insertAgentMessage(t, database, "draft_tool_loop", "user_tool_loop", "loop")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_tool_loop")
+	agenttest.InsertAgentMessage(t, database, "draft_tool_loop", "user_tool_loop", "loop")
 	service, err := NewService(t.Context(), database, &loopingFailureServiceModel{})
 	if err != nil {
 		t.Fatal(err)
@@ -3578,7 +3579,7 @@ func TestRepeatedFailedToolLoopStillRepliesAndEndsTurn(t *testing.T) {
 
 func TestJobBridgeSkipsMalformedAndUnrelatedEvents(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -3606,8 +3607,8 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 	if stringPointerValue("") != nil {
 		t.Fatal("空字符串不应生成指针")
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_closed")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_closed")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -3663,36 +3664,4 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 	}
 	reporter := service.toolReporter(t.Context(), "draft_closed")
 	reporter(t.Context(), "orphan", "finished", nil, nil, errors.New("tool failed"))
-}
-
-func agentTestDatabase(t *testing.T) *storage.DB {
-	t.Helper()
-	database, err := storage.Open(t.Context(), t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	return database
-}
-
-func createAgentDraft(t *testing.T, database *storage.DB, draftID string) {
-	t.Helper()
-	result, err := reducer.Apply(t.Context(), database, []contracts.Event{{
-		Type: "DraftCreated", DraftID: draftID, Payload: map[string]any{"name": draftID},
-	}}, reducer.Options{Actor: contracts.ActorUser})
-	if err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("create status=%s err=%v", result.Status, err)
-	}
-}
-
-func insertAgentMessage(t *testing.T, database *storage.DB, draftID, messageID, content string) {
-	t.Helper()
-	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
-		Actor: contracts.ActorUser, ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
-			ID: messageID, DraftID: draftID, Role: "user", Kind: "user", Content: content,
-		}},
-	})
-	if err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("message status=%s err=%v", result.Status, err)
-	}
 }

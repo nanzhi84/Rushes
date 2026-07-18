@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -18,8 +19,8 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 		draftID = "draft_understand_evidence_budget"
 		assetID = "zzzz_target_understand_evidence"
 	)
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, draftID)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	events := make([]contracts.Event, 0, 240)
 	for index := range 80 {
 		fillerID := fmt.Sprintf("asset_filler_%03d_%s", index, strings.Repeat("x", 72))
@@ -42,13 +43,13 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 		t.Fatalf("fillers result=%#v err=%v", result, err)
 	}
 	addUnderstandRoutingAsset(t, database, draftID, assetID)
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
+	t.Cleanup(exec.Close)
 	input := rushestools.UnderstandInput{AssetIDs: []string{assetID}, Depth: "deep"}
-	queued, err := service.toolUnderstand(t.Context(), draftID, input)
+	queued, err := exec.toolUnderstand(t.Context(), draftID, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +79,7 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 		t.Fatalf("fixture 未触发 material catalog 截断: %s", rawSnapshot)
 	}
 
-	message, err := service.executor.UnderstandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
+	message, err := exec.executor.UnderstandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,11 +125,11 @@ func TestUnderstandJobEvidenceAndTerminalReuseSelectJobSpecificSummary(t *testin
 		oldMarker     = "OLD_GLOBAL_BEST_MARKER"
 		currentMarker = "CURRENT_JOB_MARKER"
 	)
-	database, service := setupUnderstandRoutingService(t, draftID, assetID)
+	database, exec := setupUnderstandRoutingService(t, draftID, assetID)
 	input := rushestools.UnderstandInput{
 		AssetIDs: []string{assetID}, Focus: "只识别 logo 颜色", Depth: "deep",
 	}
-	queued, err := service.toolUnderstand(t.Context(), draftID, input)
+	queued, err := exec.toolUnderstand(t.Context(), draftID, input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +192,7 @@ func TestUnderstandJobEvidenceAndTerminalReuseSelectJobSpecificSummary(t *testin
 		t.Fatalf("terminal=%#v err=%v", terminal, err)
 	}
 
-	message, err := service.executor.UnderstandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
+	message, err := exec.executor.UnderstandJobEvidenceMessage(t.Context(), draftID, queued.JobID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +203,7 @@ func TestUnderstandJobEvidenceAndTerminalReuseSelectJobSpecificSummary(t *testin
 		t.Fatalf("长 tag 后 evidence runes=%d budget=%d",
 			len([]rune(message.Content)), understandJobEvidenceRuneBudget)
 	}
-	repeated, err := service.toolUnderstand(t.Context(), draftID, input)
+	repeated, err := exec.toolUnderstand(t.Context(), draftID, input)
 	if err != nil || repeated.JobID != queued.JobID || repeated.Status != "completed" ||
 		len(repeated.Summaries) != 1 || repeated.Summaries[0].Overall != currentMarker {
 		t.Fatalf("terminal reuse=%#v err=%v", repeated, err)

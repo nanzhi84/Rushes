@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -16,8 +17,8 @@ import (
 
 func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_context_latest")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_context_latest")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -103,8 +104,8 @@ func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *te
 
 func TestContextBuilderInjectsPersistentCompactMaterialCatalog(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_context_summaries")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_context_summaries")
 	for index := 0; index < 30; index++ {
 		assetID := fmt.Sprintf("asset_summary_%02d", index)
 		if _, err := database.Write().ExecContext(t.Context(), `
@@ -226,7 +227,7 @@ func TestContextBuilderInjectsPersistentCompactMaterialCatalog(t *testing.T) {
 
 func TestMaterialCatalogKeepsAudioRoleAndStopsAtBudget(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	items, available, err := NewContextBuilder(database).materialCatalogContext(t.Context(), []storage.Asset{
 		{
 			ID: "audio_catalog", Filename: "IGNIS BGM.wav", Kind: "audio",
@@ -247,8 +248,8 @@ func TestMaterialCatalogKeepsAudioRoleAndStopsAtBudget(t *testing.T) {
 
 func TestContextBuilderShowsPlanHintAndDeduplicatesAudioRoles(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_plan_hint")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_plan_hint")
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(
 			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
@@ -277,7 +278,7 @@ func TestContextBuilderShowsPlanHintAndDeduplicatesAudioRoles(t *testing.T) {
 
 func TestMaterialCatalogPrioritizesUsedAndTranscriptAssetsWithStableOutput(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const transcriptID = "asset_catalog_119"
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(

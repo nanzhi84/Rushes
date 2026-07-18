@@ -1,44 +1,44 @@
-package agent
+package agentexec
 
 import (
 	"encoding/json"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 func TestRenderOrientationParticipatesInIdempotencyWithoutNumericKnobs(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_orientation")
-	service, err := NewService(t.Context(), database, nil)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_orientation")
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 	document, err := timeline.ComposeInitial("draft_orientation", 1, []timeline.Selection{{
 		AssetID: "fixture", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.persistTimeline(t.Context(), "draft_orientation", document, "orientation_fixture"); err != nil {
+	if _, err := exec.persistTimeline(t.Context(), "draft_orientation", document, "orientation_fixture"); err != nil {
 		t.Fatal(err)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_orientation")
-	autoRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
+	autoRaw, err := exec.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	portraitRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{Orientation: "portrait"})
+	portraitRaw, err := exec.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{Orientation: "portrait"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	portraitAgainRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{Orientation: "portrait"})
+	portraitAgainRaw, err := exec.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{Orientation: "portrait"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	landscapeRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{Orientation: "landscape"})
+	landscapeRaw, err := exec.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{Orientation: "landscape"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestRenderOrientationParticipatesInIdempotencyWithoutNumericKnobs(t *testin
 	if err := rows.Err(); err != nil || count != 3 || !orientations["auto"] || !orientations["portrait"] || !orientations["landscape"] {
 		t.Fatalf("count=%d orientations=%#v err=%v", count, orientations, err)
 	}
-	if _, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{Orientation: "square"}); err == nil {
+	if _, err := exec.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{Orientation: "square"}); err == nil {
 		t.Fatal("unknown orientation should fail")
 	}
 }

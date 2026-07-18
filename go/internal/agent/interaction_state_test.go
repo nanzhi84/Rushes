@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -28,8 +29,8 @@ func TestNormalizeDecisionTypeMapsKnownScenarios(t *testing.T) {
 
 func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_same_turn_decision")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_same_turn_decision")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -127,8 +128,8 @@ func TestAdjudicateDecisionAnswerTrustedOptionPayloadWins(t *testing.T) {
 
 func TestAskUserRejectsCreativeApprovalAndVerboseCriticalQuestion(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_autonomous_editing")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_autonomous_editing")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -205,9 +206,9 @@ func TestBlockingDecisionSerializesParallelToolCalls(t *testing.T) {
 
 func TestDecisionAnswerValidatesOwnershipStateAndAnswer(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_decision_owner")
-	createAgentDraft(t, database, "draft_decision_other")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_decision_owner")
+	agenttest.CreateAgentDraft(t, database, "draft_decision_other")
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)

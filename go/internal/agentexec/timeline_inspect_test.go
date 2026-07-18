@@ -1,22 +1,22 @@
-package agent
+package agentexec
 
 import (
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 func TestTimelineInspectReportsMissingTimelineWithoutFailure(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_inspect_empty")
-	service, err := NewService(t.Context(), database, nil)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_inspect_empty")
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
-	resultRaw, err := service.ExecuteTool(
+	resultRaw, err := exec.ExecuteTool(
 		rushestools.WithDraftID(t.Context(), "draft_inspect_empty"),
 		"timeline.inspect",
 		rushestools.TimelineInspectInput{},
@@ -32,13 +32,12 @@ func TestTimelineInspectReportsMissingTimelineWithoutFailure(t *testing.T) {
 }
 
 func TestTimelineInspectReturnsWaveTwoEditingState(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_inspect_wave_two")
-	service, err := NewService(t.Context(), database, nil)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_inspect_wave_two")
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 	document, err := timeline.ComposeInitial("draft_inspect_wave_two", 1, []timeline.Selection{{
 		AssetID: "asset_video", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 90,
 	}})
@@ -56,10 +55,10 @@ func TestTimelineInspectReturnsWaveTwoEditingState(t *testing.T) {
 			t.Fatalf("operation=%#v err=%v", operation, err)
 		}
 	}
-	if _, err := service.persistTimeline(t.Context(), "draft_inspect_wave_two", document, "inspect_wave_two_fixture"); err != nil {
+	if _, err := exec.persistTimeline(t.Context(), "draft_inspect_wave_two", document, "inspect_wave_two_fixture"); err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.toolInspectTimeline(t.Context(), "draft_inspect_wave_two", rushestools.TimelineInspectInput{})
+	result, err := exec.toolInspectTimeline(t.Context(), "draft_inspect_wave_two", rushestools.TimelineInspectInput{})
 	if err != nil {
 		t.Fatal(err)
 	}

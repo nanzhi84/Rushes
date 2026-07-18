@@ -1,19 +1,19 @@
-package agent
+package agentexec
 
 import (
 	"encoding/json"
 	"strings"
 	"testing"
 
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_contract")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_contract")
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(asset_id,storage_mode,reference_path,kind,source,filename,hash,size,probe_json,ingest_status,understanding_status,usable)
 		VALUES
@@ -25,26 +25,25 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 	`); err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
-	if report, configured, err := service.executor.VerifyContentContract(t.Context(), "draft_contract", timeline.Empty("draft_contract", 1)); err != nil || configured || len(report.Items) != 0 {
+	if report, configured, err := exec.VerifyContentContract(t.Context(), "draft_contract", timeline.Empty("draft_contract", 1)); err != nil || configured || len(report.Items) != 0 {
 		t.Fatalf("empty contract report=%#v configured=%v err=%v", report, configured, err)
 	}
 	invalidRatio := 1.1
 	invalid := rushestools.PlanUpdateInput{Plan: map[string]any{}, Contract: &rushestools.ContentPlanContract{
 		MinOnBeatRatio: &invalidRatio,
 	}}
-	result, err := service.toolPlanUpdate(t.Context(), "draft_contract", invalid)
+	result, err := exec.toolPlanUpdate(t.Context(), "draft_contract", invalid)
 	if err != nil || result.Status != "failed" || !strings.Contains(result.Observation, "0 到 1") {
 		t.Fatalf("invalid result=%#v err=%v", result, err)
 	}
 	minRatio := 0.9
 	tolerance := 2
 	minDensity, maxDensity := 10.0, 19.0
-	result, err = service.toolPlanUpdate(t.Context(), "draft_contract", rushestools.PlanUpdateInput{
+	result, err = exec.toolPlanUpdate(t.Context(), "draft_contract", rushestools.PlanUpdateInput{
 		Plan: map[string]any{"goal": "合同测试"},
 		Contract: &rushestools.ContentPlanContract{
 			TargetDurationFrames: 120, DurationToleranceFrames: &tolerance,
@@ -74,11 +73,11 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		TimelineStartFrame: 0, TimelineEndFrame: 90, SourceStartFrame: 0, SourceEndFrame: 90,
 		Effects: []map[string]any{{"kind": "beat_grid", "beat_frames": []int{30, 60}}},
 	}}
-	report, configured, err := service.executor.VerifyContentContract(t.Context(), "draft_contract", failing)
-	if err != nil || !configured || report.Pass || len(agentexec.ContractFailureItems(report)) != 5 {
+	report, configured, err := exec.VerifyContentContract(t.Context(), "draft_contract", failing)
+	if err != nil || !configured || report.Pass || len(ContractFailureItems(report)) != 5 {
 		t.Fatalf("failing report=%#v configured=%v err=%v", report, configured, err)
 	}
-	byCheck := map[string]agentexec.ContractVerificationItem{}
+	byCheck := map[string]ContractVerificationItem{}
 	for _, item := range report.Items {
 		byCheck[item.Check] = item
 	}
@@ -87,16 +86,16 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		len(byCheck["on_beat_ratio"].Frames) != 1 {
 		t.Fatalf("missing anchors report=%#v", report)
 	}
-	persisted, err := service.persistTimeline(t.Context(), "draft_contract", failing, "contract_fixture")
+	persisted, err := exec.persistTimeline(t.Context(), "draft_contract", failing, "contract_fixture")
 	if err != nil || !strings.Contains(persisted.Observation, "验收合同未通过项") || persisted.Data["contract_failures"] == nil {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
 	assertPersistedContractReport(t, database, "draft_contract", 1, false)
-	validated, err := service.toolValidateTimeline(t.Context(), "draft_contract")
+	validated, err := exec.toolValidateTimeline(t.Context(), "draft_contract")
 	if err != nil || validated.Status != "succeeded" ||
 		!strings.Contains(validated.Observation, "验收合同未通过项") ||
-		len(validated.Data["contract_failures"].([]agentexec.ContractVerificationItem)) != 5 ||
-		validated.Data["content_contract"].(agentexec.ContractVerificationReport).Pass {
+		len(validated.Data["contract_failures"].([]ContractVerificationItem)) != 5 ||
+		validated.Data["content_contract"].(ContractVerificationReport).Pass {
 		t.Fatalf("validated failing contract=%#v err=%v", validated, err)
 	}
 
@@ -116,20 +115,20 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		TimelineStartFrame: 0, TimelineEndFrame: 120, SourceStartFrame: 0, SourceEndFrame: 120,
 		Effects: []map[string]any{{"kind": "beat_grid", "beat_frames": []int{30}}},
 	}}
-	report, configured, err = service.executor.VerifyContentContract(t.Context(), "draft_contract", compliant)
-	if err != nil || !configured || !report.Pass || len(agentexec.ContractFailureItems(report)) != 0 {
+	report, configured, err = exec.VerifyContentContract(t.Context(), "draft_contract", compliant)
+	if err != nil || !configured || !report.Pass || len(ContractFailureItems(report)) != 0 {
 		t.Fatalf("compliant report=%#v configured=%v err=%v", report, configured, err)
 	}
-	persisted, err = service.persistTimeline(t.Context(), "draft_contract", compliant, "contract_compliant_fixture")
+	persisted, err = exec.persistTimeline(t.Context(), "draft_contract", compliant, "contract_compliant_fixture")
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertPersistedContractReport(t, database, "draft_contract", 2, true)
-	validated, err = service.toolValidateTimeline(t.Context(), "draft_contract")
+	validated, err = exec.toolValidateTimeline(t.Context(), "draft_contract")
 	if err != nil || validated.Status != "succeeded" ||
 		!strings.Contains(validated.Observation, "验收合同全部通过") ||
-		len(validated.Data["contract_failures"].([]agentexec.ContractVerificationItem)) != 0 ||
-		!validated.Data["content_contract"].(agentexec.ContractVerificationReport).Pass {
+		len(validated.Data["contract_failures"].([]ContractVerificationItem)) != 0 ||
+		!validated.Data["content_contract"].(ContractVerificationReport).Pass {
 		t.Fatalf("validated passing contract=%#v err=%v", validated, err)
 	}
 	for index := range compliant.Tracks {
@@ -141,23 +140,22 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 			}}
 		}
 	}
-	missing, anchors, err := service.missingRequiredUtterances(t.Context(), compliant, []string{"utt_keep"})
+	missing, anchors, err := exec.missingRequiredUtterances(t.Context(), compliant, []string{"utt_keep"})
 	if err != nil || len(missing) != 1 || missing[0] != "utt_keep" || len(anchors) != 2 {
 		t.Fatalf("explicit audio must drive speech contract: missing=%#v anchors=%#v err=%v", missing, anchors, err)
 	}
 }
 
 func TestContentContractReportsMissingBeatGrid(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_missing_beat_grid")
-	service, err := NewService(t.Context(), database, nil)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_missing_beat_grid")
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 
 	minRatio := 0.8
-	updated, err := service.toolPlanUpdate(t.Context(), "draft_missing_beat_grid", rushestools.PlanUpdateInput{
+	updated, err := exec.toolPlanUpdate(t.Context(), "draft_missing_beat_grid", rushestools.PlanUpdateInput{
 		Plan:     map[string]any{"goal": "缺节拍网格合同测试"},
 		Contract: &rushestools.ContentPlanContract{MinOnBeatRatio: &minRatio},
 	})
@@ -165,7 +163,7 @@ func TestContentContractReportsMissingBeatGrid(t *testing.T) {
 		t.Fatalf("plan update=%#v err=%v", updated, err)
 	}
 	document := timeline.Empty("draft_missing_beat_grid", 1)
-	report, configured, err := service.executor.VerifyContentContract(t.Context(), "draft_missing_beat_grid", document)
+	report, configured, err := exec.VerifyContentContract(t.Context(), "draft_missing_beat_grid", document)
 	if err != nil || !configured || report.Pass || len(report.Items) != 1 {
 		t.Fatalf("report=%#v configured=%v err=%v", report, configured, err)
 	}
@@ -174,7 +172,7 @@ func TestContentContractReportsMissingBeatGrid(t *testing.T) {
 	if item.Check != "on_beat_ratio" || item.Pass || item.ErrorCode != "missing_beat_grid" || item.Message != guidance {
 		t.Fatalf("item=%#v", item)
 	}
-	persisted, err := service.persistTimeline(t.Context(), "draft_missing_beat_grid", document, "missing_beat_grid_fixture")
+	persisted, err := exec.persistTimeline(t.Context(), "draft_missing_beat_grid", document, "missing_beat_grid_fixture")
 	if err != nil || !strings.Contains(persisted.Observation, guidance) {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
@@ -190,7 +188,7 @@ func assertPersistedContractReport(t *testing.T, database *storage.DB, draftID s
 		t.Fatal(err)
 	}
 	report := struct {
-		ContentContract agentexec.ContractVerificationReport `json:"content_contract"`
+		ContentContract ContractVerificationReport `json:"content_contract"`
 	}{}
 	if err := json.Unmarshal([]byte(raw), &report); err != nil || report.ContentContract.Pass != wantPass || len(report.ContentContract.Items) == 0 {
 		t.Fatalf("validation_report_json=%s report=%#v err=%v", raw, report, err)
@@ -202,28 +200,27 @@ func TestContentContractRejectsUnknownFieldsWithoutRestrictingPlan(t *testing.T)
 		"free_form_extension": map[string]any{"anything": true},
 		"contract":            map[string]any{"target_duration_frame": 120},
 	}
-	if _, err := agentexec.ContentPlanContract(plan); err == nil {
+	if _, err := ContentPlanContract(plan); err == nil {
 		t.Fatal("拼错的合同字段必须被拒绝")
 	}
 	plan["contract"] = map[string]any{"target_duration_frames": 120}
-	if _, err := agentexec.ContentPlanContract(plan); err != nil {
+	if _, err := ContentPlanContract(plan); err != nil {
 		t.Fatalf("合同外的 plan 自由字段不应受限: %v", err)
 	}
 }
 
 func TestContentContractDistinguishesOmittedAndExplicitZeroTolerance(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_tolerance")
-	service, err := NewService(t.Context(), database, nil)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_tolerance")
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 	document := timeline.Empty("draft_tolerance", 1)
 	document.FPS = 30
 	document.DurationFrames = 130
 
-	verify := func(contract map[string]any) agentexec.ContractVerificationReport {
+	verify := func(contract map[string]any) ContractVerificationReport {
 		draft, getErr := storage.GetDraft(t.Context(), database.Read(), "draft_tolerance")
 		if getErr != nil {
 			t.Fatal(getErr)
@@ -236,7 +233,7 @@ func TestContentContractDistinguishesOmittedAndExplicitZeroTolerance(t *testing.
 		if _, updateErr := database.Write().ExecContext(t.Context(), `UPDATE drafts SET content_plan_json=? WHERE draft_id=?`, string(encoded), draft.ID); updateErr != nil {
 			t.Fatal(updateErr)
 		}
-		report, configured, verifyErr := service.executor.VerifyContentContract(t.Context(), draft.ID, document)
+		report, configured, verifyErr := exec.VerifyContentContract(t.Context(), draft.ID, document)
 		if verifyErr != nil || !configured {
 			t.Fatalf("report=%#v configured=%v err=%v", report, configured, verifyErr)
 		}
@@ -255,8 +252,8 @@ func TestContentContractDistinguishesOmittedAndExplicitZeroTolerance(t *testing.
 }
 
 func TestMissingRequiredUtterancesAggregatesDuplicateIDsAcrossAssetsDeterministically(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_duplicate_utterance")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_duplicate_utterance")
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO assets(asset_id,storage_mode,reference_path,kind,source,filename,hash,size,probe_json,ingest_status,understanding_status,usable)
 		VALUES
@@ -269,11 +266,10 @@ func TestMissingRequiredUtterancesAggregatesDuplicateIDsAcrossAssetsDeterministi
 	`); err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 
 	document := timeline.Empty("draft_duplicate_utterance", 1)
 	document.Tracks[0].Clips = []timeline.Clip{
@@ -281,7 +277,7 @@ func TestMissingRequiredUtterancesAggregatesDuplicateIDsAcrossAssetsDeterministi
 		{AssetID: "asset_b", SourceStartFrame: 0, SourceEndFrame: 10, TimelineStartFrame: 30, TimelineEndFrame: 40},
 	}
 	for iteration := 0; iteration < 100; iteration++ {
-		missing, anchors, verifyErr := service.missingRequiredUtterances(t.Context(), document, []string{"utt_1"})
+		missing, anchors, verifyErr := exec.missingRequiredUtterances(t.Context(), document, []string{"utt_1"})
 		if verifyErr != nil || len(missing) != 0 || len(anchors) != 0 {
 			t.Fatalf("iteration=%d missing=%#v anchors=%#v err=%v", iteration, missing, anchors, verifyErr)
 		}
@@ -290,7 +286,7 @@ func TestMissingRequiredUtterancesAggregatesDuplicateIDsAcrossAssetsDeterministi
 	document.Tracks[0].Clips[0].SourceEndFrame = 10
 	document.Tracks[0].Clips[0].TimelineEndFrame = 10
 	for iteration := 0; iteration < 100; iteration++ {
-		missing, anchors, verifyErr := service.missingRequiredUtterances(t.Context(), document, []string{"utt_1"})
+		missing, anchors, verifyErr := exec.missingRequiredUtterances(t.Context(), document, []string{"utt_1"})
 		if verifyErr != nil || len(missing) != 1 || missing[0] != "utt_1" || len(anchors) != 2 || anchors[0] != 0 || anchors[1] != 30 {
 			t.Fatalf("iteration=%d missing=%#v anchors=%#v err=%v", iteration, missing, anchors, verifyErr)
 		}
@@ -303,7 +299,7 @@ func TestContentContractRejectsInvalidRangesAndDensity(t *testing.T) {
 		{"contract": map[string]any{"broll_coverage_ranges": []any{map[string]any{"start_frame": 20, "end_frame": 10}}}},
 		{"contract": map[string]any{"min_cut_density_per_minute": minDensity, "max_cut_density_per_minute": maxDensity}},
 	} {
-		if _, err := agentexec.ContentPlanContract(plan); err == nil {
+		if _, err := ContentPlanContract(plan); err == nil {
 			t.Fatalf("plan should fail: %#v", plan)
 		}
 	}
@@ -311,13 +307,13 @@ func TestContentContractRejectsInvalidRangesAndDensity(t *testing.T) {
 
 func TestContentContractNormalizesAndRejectsEmptyUtteranceIDs(t *testing.T) {
 	for _, ids := range []any{[]any{}, []any{""}, []any{" "}, []any{"valid", ""}} {
-		if _, err := agentexec.ContentPlanContract(map[string]any{
+		if _, err := ContentPlanContract(map[string]any{
 			"contract": map[string]any{"must_keep_utterance_ids": ids},
 		}); err == nil {
 			t.Fatalf("empty utterance id must fail: %#v", ids)
 		}
 	}
-	contract, err := agentexec.ContentPlanContract(map[string]any{
+	contract, err := ContentPlanContract(map[string]any{
 		"contract": map[string]any{"must_keep_utterance_ids": []any{" utt_a ", "utt_a", "utt_b"}},
 	})
 	if err != nil {
@@ -330,13 +326,12 @@ func TestContentContractNormalizesAndRejectsEmptyUtteranceIDs(t *testing.T) {
 }
 
 func TestPlanUpdateTypedContractPreservesMustKeepUtteranceValidation(t *testing.T) {
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_typed_contract")
-	service, err := NewService(t.Context(), database, nil)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_typed_contract")
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
 
 	tests := []struct {
 		name       string
@@ -354,7 +349,7 @@ func TestPlanUpdateTypedContractPreservesMustKeepUtteranceValidation(t *testing.
 			if err := json.Unmarshal([]byte(test.payload), &input); err != nil {
 				t.Fatal(err)
 			}
-			result, err := service.toolPlanUpdate(t.Context(), "draft_typed_contract", input)
+			result, err := exec.toolPlanUpdate(t.Context(), "draft_typed_contract", input)
 			if err != nil || result.Status != test.wantStatus {
 				t.Fatalf("result=%#v err=%v", result, err)
 			}
@@ -382,20 +377,20 @@ func TestContentPreservingClipsHonorAudioSolo(t *testing.T) {
 	}}
 
 	document.Tracks[3].Solo = true
-	if clips := agentexec.ContentPreservingClips(document); len(clips) != 1 || clips[0].AssetID != "voice" {
+	if clips := ContentPreservingClips(document); len(clips) != 1 || clips[0].AssetID != "voice" {
 		t.Fatalf("voiceover solo clips=%#v", clips)
 	}
 	document.Tracks[3].Solo = false
 	document.Tracks[2].Solo = true
-	if clips := agentexec.ContentPreservingClips(document); len(clips) != 1 || clips[0].AssetID != "implicit" {
+	if clips := ContentPreservingClips(document); len(clips) != 1 || clips[0].AssetID != "implicit" {
 		t.Fatalf("implicit original solo clips=%#v", clips)
 	}
 	document.Tracks[2].Muted = true
-	if clips := agentexec.ContentPreservingClips(document); len(clips) != 1 || clips[0].AssetID != "voice" {
+	if clips := ContentPreservingClips(document); len(clips) != 1 || clips[0].AssetID != "voice" {
 		t.Fatalf("muted solo must not suppress audible tracks: %#v", clips)
 	}
 	document.Tracks[4].Solo = true
-	if clips := agentexec.ContentPreservingClips(document); len(clips) != 0 {
+	if clips := ContentPreservingClips(document); len(clips) != 0 {
 		t.Fatalf("bgm solo must suppress speech clips: %#v", clips)
 	}
 }
@@ -405,30 +400,30 @@ func TestUtteranceCoverageAcceptsOnlyContinuousLosslessSplits(t *testing.T) {
 		{AssetID: "asset", SourceStartFrame: 0, SourceEndFrame: 15, TimelineStartFrame: 10, TimelineEndFrame: 25, PlaybackRate: 1},
 		{AssetID: "asset", SourceStartFrame: 15, SourceEndFrame: 30, TimelineStartFrame: 25, TimelineEndFrame: 40, PlaybackRate: 1},
 	}
-	if !agentexec.UtteranceCoveredByClips(split, "asset", 0, 30) {
+	if !UtteranceCoveredByClips(split, "asset", 0, 30) {
 		t.Fatal("source- and timeline-continuous split must preserve utterance")
 	}
 	sourceGap := append([]timeline.Clip(nil), split...)
 	sourceGap[1].SourceStartFrame = 16
-	if agentexec.UtteranceCoveredByClips(sourceGap, "asset", 0, 30) {
+	if UtteranceCoveredByClips(sourceGap, "asset", 0, 30) {
 		t.Fatal("source gap must fail")
 	}
 	timelineGap := append([]timeline.Clip(nil), split...)
 	timelineGap[1].TimelineStartFrame = 26
 	timelineGap[1].TimelineEndFrame = 41
-	if agentexec.UtteranceCoveredByClips(timelineGap, "asset", 0, 30) {
+	if UtteranceCoveredByClips(timelineGap, "asset", 0, 30) {
 		t.Fatal("timeline gap must fail")
 	}
 	invalidRate := append([]timeline.Clip(nil), split...)
 	invalidRate[1].PlaybackRate = 2
-	if agentexec.UtteranceCoveredByClips(invalidRate, "asset", 0, 30) {
+	if UtteranceCoveredByClips(invalidRate, "asset", 0, 30) {
 		t.Fatal("clip whose timeline duration disagrees with playback rate must fail")
 	}
 	changedRate := []timeline.Clip{
 		split[0],
 		{AssetID: "asset", SourceStartFrame: 15, SourceEndFrame: 29, TimelineStartFrame: 25, TimelineEndFrame: 32, PlaybackRate: 2},
 	}
-	if agentexec.UtteranceCoveredByClips(changedRate, "asset", 0, 29) {
+	if UtteranceCoveredByClips(changedRate, "asset", 0, 29) {
 		t.Fatal("split with a playback-rate discontinuity is not lossless")
 	}
 }

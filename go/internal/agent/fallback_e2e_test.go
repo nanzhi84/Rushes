@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -18,8 +19,8 @@ func TestUnderstandingAsyncScaffoldEnqueuesCancellableMultiAssetJob(t *testing.T
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_understand_cancel")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_understand_cancel")
 	source := filepath.Join(database.Paths.Temporary, "understand-cancel.mp4")
 	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", source); err != nil {
 		t.Fatal(err)
@@ -83,7 +84,7 @@ func TestUnderstandingAsyncScaffoldEnqueuesCancellableMultiAssetJob(t *testing.T
 
 func TestE2EFallbackScaffoldDeclinesOrdinaryInput(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)

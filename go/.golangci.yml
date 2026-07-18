@@ -106,6 +106,17 @@ linters:
             - github.com/nanzhi84/Rushes/go/internal/storage
             - github.com/nanzhi84/Rushes/go/internal/timeline
 
+        agenttest:
+          list-mode: strict
+          files:
+            - "**/internal/agenttest/*.go"
+            - "**/internal/agenttest/**/*.go"
+          allow:
+            - $gostd
+            - github.com/nanzhi84/Rushes/go/internal/contracts
+            - github.com/nanzhi84/Rushes/go/internal/reducer
+            - github.com/nanzhi84/Rushes/go/internal/storage
+
         agentexec:
           list-mode: strict
           files:

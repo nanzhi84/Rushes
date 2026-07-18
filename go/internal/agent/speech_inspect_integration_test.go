@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -21,8 +22,8 @@ func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
 	if key == "" || source == "" {
 		t.Fatal("真实 speech.inspect 测试需要 API key 与 RUSHES_ASR_LIVE_SOURCE")
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_live_fun_asr")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_live_fun_asr")
 	// 真实素材目录可能带同名 SRT；该验收必须覆盖 DashScope ASR，而不是被
 	// sidecar 快路径替代，因此用不同 basename 的符号链接读取同一真实视频。
 	linkedSource := filepath.Join(t.TempDir(), "live-aroll-no-sidecar"+filepath.Ext(source))

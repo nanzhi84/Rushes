@@ -15,6 +15,7 @@ import (
 
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -104,8 +105,8 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 			t.Fatalf("验收素材不可读 %s: %v", path, err)
 		}
 	}
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_talking_head_real")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_talking_head_real")
 	assetIDs := make([]string, 0, len(selectedPaths))
 	for index, path := range selectedPaths {
 		assetID := fmt.Sprintf("asset_real_%02d", index)

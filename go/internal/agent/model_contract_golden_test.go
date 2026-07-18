@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -30,7 +31,7 @@ type modelContractPrompts struct {
 }
 
 func TestModelContractGolden(t *testing.T) {
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)

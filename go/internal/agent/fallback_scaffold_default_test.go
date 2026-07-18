@@ -5,14 +5,15 @@ package agent
 import (
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
 
 func TestProductionFallbackDoesNotInstallOrRecognizeE2EScaffold(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_production_fallback"
-	createAgentDraft(t, database, draftID)
+	agenttest.CreateAgentDraft(t, database, draftID)
 	before, err := storage.GetDraft(t.Context(), database.Read(), draftID)
 	if err != nil {
 		t.Fatal(err)

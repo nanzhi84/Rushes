@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -56,20 +57,20 @@ func TestQueueMemoryEvidenceUsesOnlyUserOwnedInputs(t *testing.T) {
 
 func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_memory_tool")
-	insertAgentMessage(t, database, "draft_memory_tool", "message_memory_tool", "以后都快一点，字幕别遮脸")
-	service, err := NewService(t.Context(), database, nil)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_tool")
+	agenttest.InsertAgentMessage(t, database, "draft_memory_tool", "message_memory_tool", "以后都快一点，字幕别遮脸")
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
+	t.Cleanup(exec.Close)
 	ctx := rushestools.WithDraftID(
 		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_memory_tool"),
 		"draft_memory_tool",
 	)
 
-	raw, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+	raw, err := exec.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
 		Entries: []rushestools.MemoryEntryInput{
 			{Key: "pacing", Kind: "preference", Statement: "成片节奏偏快"},
 			{Key: "subtitle_style", Kind: "correction", Statement: "字幕不要遮挡人物面部"},
@@ -90,7 +91,7 @@ func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.
 		}
 	}
 
-	raw, err = service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+	raw, err = exec.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
 		RemoveKeys: []string{"pacing"},
 	})
 	result = raw.(rushestools.ToolResult)
@@ -105,8 +106,8 @@ func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.
 
 func TestMemoryUpdateAcceptsAnsweredDecisionEvidence(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_memory_decision")
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_decision")
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO decisions(
 			decision_id,scope_type,draft_id,type,question,options_json,
@@ -115,16 +116,16 @@ func TestMemoryUpdateAcceptsAnsweredDecisionEvidence(t *testing.T) {
 			1,'answered','{"free_text":"以后都快一点"}',1)`); err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(t.Context(), database, nil)
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
+	t.Cleanup(exec.Close)
 	ctx := rushestools.WithDraftID(
 		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceDecision, "decision_memory"),
 		"draft_memory_decision",
 	)
-	raw, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+	raw, err := exec.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
 		Entries: []rushestools.MemoryEntryInput{{
 			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
 		}},
@@ -143,13 +144,13 @@ func TestMemoryUpdateAcceptsAnsweredDecisionEvidence(t *testing.T) {
 
 func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_memory_reject")
-	service, err := NewService(t.Context(), database, nil)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_reject")
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
+	t.Cleanup(exec.Close)
 	input := rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{
 		Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
 	}}}
@@ -174,7 +175,7 @@ func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			raw, executeErr := service.ExecuteTool(test.ctx, "memory.update", input)
+			raw, executeErr := exec.ExecuteTool(test.ctx, "memory.update", input)
 			result := raw.(rushestools.ToolResult)
 			if executeErr != nil || result.Status != "validation_failed" ||
 				result.Data["error_code"] != test.code || result.Data["current_memory_unchanged"] != true {
@@ -190,14 +191,14 @@ func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 
 func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
 	t.Parallel()
-	database := agentTestDatabase(t)
-	createAgentDraft(t, database, "draft_memory_input")
-	insertAgentMessage(t, database, "draft_memory_input", "message_memory_input", "记住")
-	service, err := NewService(t.Context(), database, nil)
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_input")
+	agenttest.InsertAgentMessage(t, database, "draft_memory_input", "message_memory_input", "记住")
+	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(service.Close)
+	t.Cleanup(exec.Close)
 	ctx := rushestools.WithDraftID(
 		withMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_memory_input"),
 		"draft_memory_input",
@@ -280,7 +281,7 @@ func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			raw, executeErr := service.ExecuteTool(ctx, "memory.update", test.input)
+			raw, executeErr := exec.ExecuteTool(ctx, "memory.update", test.input)
 			result := raw.(rushestools.ToolResult)
 			if executeErr != nil || result.Status != "validation_failed" || result.Data["error_code"] != test.code {
 				t.Fatalf("result=%#v err=%v", result, executeErr)

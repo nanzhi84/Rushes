@@ -16,6 +16,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -81,7 +82,7 @@ func TestLiveUserMemoryModelContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	service, err := NewServiceWithModels(t.Context(), database, tiers.Chat, tiers.Vision)
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +162,7 @@ func TestLiveToolCallingStability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	database := agentTestDatabase(t)
+	database := agenttest.AgentTestDatabase(t)
 	service, err := NewServiceWithModels(t.Context(), database, tiers.Chat, tiers.Vision)
 	if err != nil {
 		t.Fatal(err)
