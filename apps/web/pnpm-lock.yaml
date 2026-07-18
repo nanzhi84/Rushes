@@ -53,6 +53,9 @@ importers:
       wavesurfer.js:
         specifier: ^7.12.8
         version: 7.12.8
+      web-vitals:
+        specifier: ^5.3.0
+        version: 5.3.0
       zustand:
         specifier: ^5.0.0
         version: 5.0.14(@types/react@19.2.17)(immer@10.2.0)(react@19.2.7)(use-sync-external-store@1.6.0(react@19.2.7))
@@ -2021,6 +2024,9 @@ packages:
 
   wavesurfer.js@7.12.8:
     resolution: {integrity: sha512-G3nxzcC4X+ZWrLtcIV17kCWHVq3ysJCS4dS0YkGKILrQ2esAb8cScw965zKNKYxUvpiZsPK93KLWgWTYdIBQiw==}
+
+  web-vitals@5.3.0:
+    resolution: {integrity: sha512-q6LWsLatGYZp5VGBIOvbTj6JBV2nOmC8KvWztXBmwJcfFAzhwKwbOxhUH306XY3CcaZDUlSmSuNPBsCn0bFu+g==}
 
   webidl-conversions@7.0.0:
     resolution: {integrity: sha512-VwddBukDzu71offAQR975unBIGqfKZpM+8ZX6ySk8nYhVoo5CYaZyzt3YBvYtRtO+aoGlqxPg/B87NGVZ/fu6g==}
@@ -4145,6 +4151,8 @@ snapshots:
       xml-name-validator: 5.0.0
 
   wavesurfer.js@7.12.8: {}
+
+  web-vitals@5.3.0: {}
 
   webidl-conversions@7.0.0: {}
 

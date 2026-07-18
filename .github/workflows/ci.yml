@@ -108,6 +108,8 @@ jobs:
       - run: pnpm --dir apps/web typecheck
       - run: pnpm --dir apps/web test -- --run
       - run: pnpm --dir apps/web build
+      - name: Enforce web bundle budget
+        run: pnpm --dir apps/web run check:bundle
 
   e2e:
     name: Playwright against Go API and worker
