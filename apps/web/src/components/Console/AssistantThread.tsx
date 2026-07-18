@@ -4,7 +4,7 @@ import {
   ChevronRight,
   CornerDownRight,
   LoaderCircle,
-  RotateCcw,
+  Pencil,
   TerminalSquare
 } from "lucide-react";
 import { Markdown } from "./Markdown";
@@ -53,8 +53,8 @@ export function AssistantThread({
   subagentProgress = [],
   onCancelJob,
   cancelPendingJobId = null,
-  rewindCheckpointByItem = {},
-  onOpenRewind
+  onResendMessage,
+  resendPendingMessageId = null
 }: {
   runtime: ConsoleExternalStoreRuntime;
   onAnswerDecision: AnswerDecisionHandler;
@@ -65,8 +65,8 @@ export function AssistantThread({
   subagentProgress?: SubagentProgressEntry[];
   onCancelJob?: CancelJobHandler;
   cancelPendingJobId?: string | null;
-  rewindCheckpointByItem?: Record<string, string>;
-  onOpenRewind?: (checkpointId: string) => void;
+  onResendMessage?: (messageId: string, content: string) => void;
+  resendPendingMessageId?: string | null;
 }): ReactElement {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const followLatestRef = useRef(true);
@@ -170,8 +170,6 @@ export function AssistantThread({
                   steps={block.steps}
                   activeToolStepId={null}
                   progress={[]}
-                  rewindCheckpointByItem={rewindCheckpointByItem}
-                  onOpenRewind={onOpenRewind}
                 />
               ) : (
                 <MessageRow
@@ -182,8 +180,8 @@ export function AssistantThread({
                   highlighted={highlightedMessageId === block.message.id}
                   onCancelJob={onCancelJob}
                   cancelPendingJobId={cancelPendingJobId}
-                  rewindCheckpointId={rewindCheckpointByItem[block.message.id]}
-                  onOpenRewind={onOpenRewind}
+                  onResendMessage={onResendMessage}
+                  resendPending={resendPendingMessageId === block.message.id}
                 />
               )
             )}
@@ -199,8 +197,8 @@ export function AssistantThread({
                   streaming={block.message.kind === "assistant"}
                   onCancelJob={onCancelJob}
                   cancelPendingJobId={cancelPendingJobId}
-                  rewindCheckpointId={rewindCheckpointByItem[block.message.message_id]}
-                  onOpenRewind={onOpenRewind}
+                  onResendMessage={onResendMessage}
+                  resendPending={resendPendingMessageId === block.message.message_id}
                 />
               ) : (
                 <ToolActivityGroup
@@ -208,8 +206,6 @@ export function AssistantThread({
                   steps={block.steps}
                   activeToolStepId={activeToolStepId}
                   progress={subagentProgress}
-                  rewindCheckpointByItem={rewindCheckpointByItem}
-                  onOpenRewind={onOpenRewind}
                 />
               )
             )}
@@ -226,8 +222,8 @@ export function AssistantThread({
                 highlighted={highlightedMessageId === structuredMessage.id}
                 onCancelJob={onCancelJob}
                 cancelPendingJobId={cancelPendingJobId}
-                rewindCheckpointId={rewindCheckpointByItem[structuredMessage.id]}
-                onOpenRewind={onOpenRewind}
+                onResendMessage={onResendMessage}
+                resendPending={resendPendingMessageId === structuredMessage.id}
               />
             ) : null}
           </div>
@@ -296,6 +292,121 @@ function toStreamMessage(item: StreamMessageItem): ConsoleAssistantMessage {
   };
 }
 
+function userMessageText(message: ConsoleAssistantMessage): string {
+  return message.content
+    .filter((part): part is { type: "text"; text: string } => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+// 用户消息气泡：hover 出「编辑并重发」，点击后就地进入编辑态（避免动到主输入框里
+// 用户正在打的草稿）；确认即调 resend 端点回退到该消息之前并以新内容开启新回合。
+function UserMessageRow({
+  message,
+  highlighted,
+  onResendMessage,
+  resendPending = false
+}: {
+  message: ConsoleAssistantMessage;
+  highlighted: boolean;
+  onResendMessage?: (messageId: string, content: string) => void;
+  resendPending?: boolean;
+}): ReactElement {
+  const originalText = userMessageText(message);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(originalText);
+  // 乐观插入的本地消息尚未落库，没有可回退到的检查点，不能编辑重发。
+  const canEdit = Boolean(onResendMessage) && !message.id.startsWith("local_");
+
+  const submit = () => {
+    const next = draft.trim();
+    if (!next || !onResendMessage) {
+      return;
+    }
+    setEditing(false);
+    onResendMessage(message.id, next);
+  };
+
+  if (editing) {
+    return (
+      <article
+        data-message-kind={message.metadata.messageKind ?? undefined}
+        className="flex w-full justify-end"
+      >
+        <div className="w-full max-w-[85%] rounded-sm border border-accent/60 bg-raised p-1.5">
+          <textarea
+            aria-label="编辑消息"
+            autoFocus
+            className="h-16 w-full resize-none bg-transparent px-1.5 py-1 text-[13px] leading-5 text-fg outline-none"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                submit();
+              } else if (event.key === "Escape") {
+                setEditing(false);
+              }
+            }}
+          />
+          <div className="flex items-center justify-end gap-1.5 pt-1">
+            <button
+              type="button"
+              className="rounded-sm px-2 py-1 text-2xs text-fg-muted hover:bg-hover hover:text-fg"
+              onClick={() => setEditing(false)}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="rounded-sm bg-accent px-2 py-1 text-2xs font-medium text-white hover:bg-accent-strong disabled:opacity-40"
+              disabled={resendPending || draft.trim().length === 0}
+              onClick={submit}
+            >
+              重发
+            </button>
+          </div>
+        </div>
+      </article>
+    );
+  }
+
+  return (
+    <article
+      data-message-kind={message.metadata.messageKind ?? undefined}
+      className="group/user flex w-full items-start justify-end gap-1"
+    >
+      {canEdit ? (
+        <button
+          type="button"
+          className="mt-1 grid size-6 shrink-0 place-items-center rounded-sm text-fg-faint opacity-0 transition-opacity hover:bg-hover hover:text-fg focus-visible:opacity-100 group-hover/user:opacity-100 disabled:opacity-40"
+          aria-label="编辑并重发"
+          title="编辑并重发"
+          disabled={resendPending}
+          onClick={() => {
+            setDraft(originalText);
+            setEditing(true);
+          }}
+        >
+          <Pencil size={12} strokeWidth={1.8} aria-hidden />
+        </button>
+      ) : null}
+      <div
+        data-user-message=""
+        className={`${highlightClass(highlighted)} w-fit max-w-[85%] rounded-sm bg-user-bubble px-3 py-1.5 text-[13px] leading-5 text-fg`}
+      >
+        {message.content.map((part, index) =>
+          part.type === "text" ? (
+            <p key={`${message.id}:${index}`} className="break-words whitespace-pre-wrap">
+              {part.text}
+            </p>
+          ) : null
+        )}
+      </div>
+    </article>
+  );
+}
+
 function MessageRow({
   message,
   onAnswerDecision,
@@ -304,8 +415,8 @@ function MessageRow({
   streaming = false,
   onCancelJob,
   cancelPendingJobId,
-  rewindCheckpointId,
-  onOpenRewind
+  onResendMessage,
+  resendPending
 }: {
   message: ConsoleAssistantMessage;
   onAnswerDecision: AnswerDecisionHandler;
@@ -314,8 +425,8 @@ function MessageRow({
   streaming?: boolean;
   onCancelJob?: CancelJobHandler;
   cancelPendingJobId?: string | null;
-  rewindCheckpointId?: string;
-  onOpenRewind?: (checkpointId: string) => void;
+  onResendMessage?: (messageId: string, content: string) => void;
+  resendPending?: boolean;
 }): ReactElement {
   if (message.metadata.messageKind === "turn_failure") {
     return <TurnFailureRow message={message} highlighted={highlighted} />;
@@ -364,34 +475,12 @@ function MessageRow({
 
   if (message.role === "user") {
     return (
-      <article
-        data-message-kind={message.metadata.messageKind ?? undefined}
-        className="flex w-full items-start justify-end gap-1"
-      >
-        {rewindCheckpointId && onOpenRewind ? (
-          <button
-            type="button"
-            className="mt-1 grid size-6 shrink-0 place-items-center rounded-sm text-fg-faint hover:bg-hover hover:text-fg"
-            aria-label="回到此消息"
-            title="回到此消息"
-            onClick={() => onOpenRewind(rewindCheckpointId)}
-          >
-            <RotateCcw size={12} strokeWidth={1.8} aria-hidden />
-          </button>
-        ) : null}
-        <div
-          data-user-message=""
-          className={`${highlightClass(highlighted)} w-fit max-w-[85%] rounded-sm bg-user-bubble px-3 py-1.5 text-[13px] leading-5 text-fg`}
-        >
-          {message.content.map((part, index) =>
-            part.type === "text" ? (
-              <p key={`${message.id}:${index}`} className="break-words whitespace-pre-wrap">
-                {part.text}
-              </p>
-            ) : null
-          )}
-        </div>
-      </article>
+      <UserMessageRow
+        message={message}
+        highlighted={highlighted}
+        onResendMessage={onResendMessage}
+        resendPending={resendPending}
+      />
     );
   }
 
@@ -500,15 +589,11 @@ function BackgroundActivityGroup({
 function ToolActivityGroup({
   steps,
   activeToolStepId,
-  progress,
-  rewindCheckpointByItem = {},
-  onOpenRewind
+  progress
 }: {
   steps: StreamToolItem[];
   activeToolStepId: string | null;
   progress: SubagentProgressEntry[];
-  rewindCheckpointByItem?: Record<string, string>;
-  onOpenRewind?: (checkpointId: string) => void;
 }): ReactElement {
   const isActive = steps.some((step) => step.status === "running");
   const hasIssue = steps.some((step) => ["failed", "deny", "ask", "requires_user"].includes(step.status));
@@ -554,8 +639,6 @@ function ToolActivityGroup({
             key={step.step_id}
             step={step}
             progress={step.step_id === activeToolStepId ? progress : []}
-            rewindCheckpointId={rewindCheckpointByItem[step.step_id]}
-            onOpenRewind={onOpenRewind}
           />
         ))}
       </div>
@@ -565,19 +648,15 @@ function ToolActivityGroup({
 
 function ToolStepRow({
   step,
-  progress = [],
-  rewindCheckpointId,
-  onOpenRewind
+  progress = []
 }: {
   step: StreamToolItem;
   progress?: SubagentProgressEntry[];
-  rewindCheckpointId?: string;
-  onOpenRewind?: (checkpointId: string) => void;
 }): ReactElement {
   const label = TOOL_STEP_LABELS[step.tool] ?? step.tool;
   const hasDetails = Boolean(step.argsSummary || step.observation);
   const summaryRow = (
-    <span className={`flex min-w-0 flex-1 items-start gap-1.5 ${rewindCheckpointId ? "pr-6" : ""}`}>
+    <span className="flex min-w-0 flex-1 items-start gap-1.5">
       <StatusDot status={step.status} />
       <span className="min-w-0 flex-1 break-words text-xs text-fg-muted">{label}</span>
       <span className={`shrink-0 text-2xs ${toolStatusToneClass(step.status)}`}>
@@ -618,18 +697,6 @@ function ToolStepRow({
       ) : (
         summaryRow
       )}
-      {rewindCheckpointId && onOpenRewind ? (
-        <button
-          type="button"
-          className="absolute right-0 top-0 grid size-5 place-items-center rounded-sm text-fg-faint hover:bg-hover hover:text-fg"
-          aria-label={`回到工具批次 ${label}`}
-          title="回到此工具批次"
-          onClick={() => onOpenRewind(rewindCheckpointId)}
-        >
-          <RotateCcw size={11} strokeWidth={1.8} aria-hidden />
-        </button>
-      ) : null}
-
       {progress.length > 0 ? (
         <ul className="mt-1 space-y-1 pl-5" aria-label="子代理进度">
           {progress.map((entry) => (

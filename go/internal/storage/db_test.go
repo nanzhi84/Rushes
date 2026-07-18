@@ -393,3 +393,103 @@ func TestV10MigrationIndexesOnlyUndeliveredAgentObservations(t *testing.T) {
 		t.Fatalf("未交付扫描未使用 partial index: %s", plan)
 	}
 }
+
+func TestOpenMigratesV14RewindCheckpointsToMessageBoundary(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	database, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 退回到 v14 形态：删除 v15 追加的 new_message_id 列，并按旧模型播种存量检查点。
+	if _, err := database.Write().ExecContext(t.Context(),
+		"ALTER TABLE rewind_restore_requests DROP COLUMN new_message_id"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO drafts(draft_id,name,created_at,updated_at)
+		VALUES('draft_v15','迁移保留','now','now');
+		INSERT INTO messages(message_id,draft_id,role,kind,content,created_at)
+		VALUES('msg-before','draft_v15','user','user','前一条','now'),
+		      ('msg-anchor','draft_v15','user','user','锚点','now');
+		INSERT INTO rewind_checkpoints(
+			checkpoint_id,draft_id,trigger_kind,anchor_message_id,created_at
+		) VALUES
+		  ('rewind:message:msg-anchor','draft_v15','user_message','msg-anchor','now'),
+		  ('rewind:timeline:v1','draft_v15','timeline_write','msg-anchor','now'),
+		  ('rewind:restore:r1','draft_v15','restore','msg-anchor','now');
+		INSERT INTO rewind_checkpoint_messages(checkpoint_id,message_id) VALUES
+		  ('rewind:message:msg-anchor','msg-before'),
+		  ('rewind:message:msg-anchor','msg-anchor'),
+		  ('rewind:timeline:v1','msg-before'),
+		  ('rewind:timeline:v1','msg-anchor'),
+		  ('rewind:restore:r1','msg-before');
+		PRAGMA user_version = 14`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = migrated.Close() })
+
+	var version int
+	if err := migrated.Read().QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("user_version=%d", version)
+	}
+	// new_message_id 列被补回。
+	var hasColumn int
+	if err := migrated.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM pragma_table_info('rewind_restore_requests') WHERE name='new_message_id'`,
+	).Scan(&hasColumn); err != nil || hasColumn != 1 {
+		t.Fatalf("new_message_id column=%d err=%v", hasColumn, err)
+	}
+	// timeline_write 检查点及其可见集行整体删除。
+	var timelineWrite, timelineWriteMembers int
+	if err := migrated.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM rewind_checkpoints WHERE trigger_kind='timeline_write'",
+	).Scan(&timelineWrite); err != nil || timelineWrite != 0 {
+		t.Fatalf("timeline_write checkpoints=%d err=%v", timelineWrite, err)
+	}
+	if err := migrated.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM rewind_checkpoint_messages WHERE checkpoint_id='rewind:timeline:v1'",
+	).Scan(&timelineWriteMembers); err != nil || timelineWriteMembers != 0 {
+		t.Fatalf("timeline_write members=%d err=%v", timelineWriteMembers, err)
+	}
+	// user_message 检查点可见集对齐“消息之前”：锚点自身被移除，前序消息保留。
+	messageMembers := readCheckpointMembers(t, migrated, "rewind:message:msg-anchor")
+	if strings.Join(messageMembers, ",") != "msg-before" {
+		t.Fatalf("message checkpoint members=%v", messageMembers)
+	}
+	// restore 检查点及其可见集不受影响。
+	restoreMembers := readCheckpointMembers(t, migrated, "rewind:restore:r1")
+	if strings.Join(restoreMembers, ",") != "msg-before" {
+		t.Fatalf("restore checkpoint members=%v", restoreMembers)
+	}
+}
+
+func readCheckpointMembers(t *testing.T, database *DB, checkpointID string) []string {
+	t.Helper()
+	rows, err := database.Read().QueryContext(t.Context(),
+		"SELECT message_id FROM rewind_checkpoint_messages WHERE checkpoint_id=? ORDER BY message_id", checkpointID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var members []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		members = append(members, id)
+	}
+	return members
+}

@@ -1794,120 +1794,11 @@
         "title": "MessagesResponse",
         "type": "object"
       },
-      "RewindCheckpoint": {
+      "MessageResendRequest": {
         "additionalProperties": false,
         "properties": {
-          "anchor_event_id": {
-            "anyOf": [
-              { "type": "integer" },
-              { "type": "null" }
-            ],
-            "title": "Anchor Event Id"
-          },
-          "anchor_message_id": {
-            "anyOf": [
-              { "type": "string" },
-              { "type": "null" }
-            ],
-            "title": "Anchor Message Id"
-          },
-          "anchor_turn_id": {
-            "anyOf": [
-              { "type": "string" },
-              { "type": "null" }
-            ],
-            "title": "Anchor Turn Id"
-          },
-          "checkpoint_id": {
-            "title": "Checkpoint Id",
-            "type": "string"
-          },
-          "clip_count": {
-            "minimum": 0,
-            "title": "Clip Count",
-            "type": "integer"
-          },
-          "clip_count_delta": {
-            "title": "Clip Count Delta",
-            "type": "integer"
-          },
-          "created_at": {
-            "title": "Created At",
-            "type": "string"
-          },
-          "duration_frames": {
-            "minimum": 0,
-            "title": "Duration Frames",
-            "type": "integer"
-          },
-          "duration_frames_delta": {
-            "title": "Duration Frames Delta",
-            "type": "integer"
-          },
-          "patch_id": {
-            "anyOf": [
-              { "type": "string" },
-              { "type": "null" }
-            ],
-            "title": "Patch Id"
-          },
-          "summary": {
-            "title": "Summary",
-            "type": "string"
-          },
-          "timeline_version": {
-            "anyOf": [
-              { "minimum": 1, "type": "integer" },
-              { "type": "null" }
-            ],
-            "title": "Timeline Version"
-          },
-          "track_count": {
-            "minimum": 0,
-            "title": "Track Count",
-            "type": "integer"
-          },
-          "track_count_delta": {
-            "title": "Track Count Delta",
-            "type": "integer"
-          },
-          "trigger_kind": {
-            "enum": ["user_message", "timeline_write", "restore"],
-            "title": "Trigger Kind",
-            "type": "string"
-          }
-        },
-        "required": [
-          "checkpoint_id", "trigger_kind", "anchor_message_id", "anchor_turn_id", "anchor_event_id",
-          "timeline_version", "patch_id", "summary", "clip_count", "duration_frames", "track_count",
-          "clip_count_delta", "duration_frames_delta", "track_count_delta", "created_at"
-        ],
-        "title": "RewindCheckpoint",
-        "type": "object"
-      },
-      "RewindCheckpointsResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "checkpoints": {
-            "items": { "$ref": "#/components/schemas/RewindCheckpoint" },
-            "title": "Checkpoints",
-            "type": "array"
-          },
-          "draft_id": {
-            "title": "Draft Id",
-            "type": "string"
-          }
-        },
-        "required": ["draft_id", "checkpoints"],
-        "title": "RewindCheckpointsResponse",
-        "type": "object"
-      },
-      "RewindRestoreRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "checkpoint_id": {
-            "minLength": 1,
-            "title": "Checkpoint Id",
+          "content": {
+            "title": "Content",
             "type": "string"
           },
           "idempotency_key": {
@@ -1915,41 +1806,52 @@
             "minLength": 1,
             "title": "Idempotency Key",
             "type": "string"
-          },
-          "mode": {
-            "enum": ["timeline", "conversation", "both"],
-            "title": "Mode",
-            "type": "string"
           }
         },
-        "required": ["checkpoint_id", "idempotency_key", "mode"],
-        "title": "RewindRestoreRequest",
+        "required": [
+          "content",
+          "idempotency_key"
+        ],
+        "title": "MessageResendRequest",
         "type": "object"
       },
-      "RewindRestoreResponse": {
+      "MessageResendResponse": {
         "additionalProperties": false,
         "properties": {
-          "cancelled_decisions": { "minimum": 0, "title": "Cancelled Decisions", "type": "integer" },
-          "cancelled_jobs": { "minimum": 0, "title": "Cancelled Jobs", "type": "integer" },
-          "checkpoint_id": { "title": "Checkpoint Id", "type": "string" },
-          "draft_id": { "title": "Draft Id", "type": "string" },
-          "event_ids": { "items": { "type": "integer" }, "title": "Event Ids", "type": "array" },
-          "mode": { "enum": ["timeline", "conversation", "both"], "title": "Mode", "type": "string" },
-          "rewound_message_count": { "minimum": 0, "title": "Rewound Message Count", "type": "integer" },
-          "status": { "const": "restored", "title": "Status", "type": "string" },
-          "timeline_version": {
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "message_id": {
+            "title": "Message Id",
+            "type": "string"
+          },
+          "restored_timeline_version": {
             "anyOf": [
               { "minimum": 1, "type": "integer" },
               { "type": "null" }
             ],
-            "title": "Timeline Version"
+            "title": "Restored Timeline Version"
+          },
+          "rewound_message_count": {
+            "minimum": 0,
+            "title": "Rewound Message Count",
+            "type": "integer"
+          },
+          "status": {
+            "const": "resent",
+            "title": "Status",
+            "type": "string"
           }
         },
         "required": [
-          "draft_id", "checkpoint_id", "mode", "status", "timeline_version",
-          "rewound_message_count", "cancelled_jobs", "cancelled_decisions", "event_ids"
+          "draft_id",
+          "message_id",
+          "status",
+          "restored_timeline_version",
+          "rewound_message_count"
         ],
-        "title": "RewindRestoreResponse",
+        "title": "MessageResendResponse",
         "type": "object"
       },
       "PendingDecisionsResponse": {
@@ -3647,86 +3549,36 @@
         "summary": "Clear Draft Conversation"
       }
     },
-    "/api/drafts/{draft_id}/rewind/checkpoints": {
-      "get": {
-        "operationId": "list_rewind_checkpoints_api_drafts__draft_id__rewind_checkpoints_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "draft_id",
-            "required": true,
-            "schema": { "title": "Draft Id", "type": "string" }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/RewindCheckpointsResponse" }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/SecurityRefusalResponse" }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/SecurityRefusalResponse" }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/ErrorResponse" }
-              }
-            },
-            "description": "Not Found"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "#/components/schemas/HTTPValidationError" }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "List Rewind Checkpoints"
-      }
-    },
-    "/api/drafts/{draft_id}/rewind": {
+    "/api/drafts/{draft_id}/messages/{message_id}/resend": {
       "post": {
-        "operationId": "restore_rewind_checkpoint_api_drafts__draft_id__rewind_post",
+        "operationId": "resend_message_api_drafts__draft_id__messages__message_id__resend_post",
         "parameters": [
           {
             "in": "path",
             "name": "draft_id",
             "required": true,
             "schema": { "title": "Draft Id", "type": "string" }
+          },
+          {
+            "in": "path",
+            "name": "message_id",
+            "required": true,
+            "schema": { "title": "Message Id", "type": "string" }
           }
         ],
         "requestBody": {
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/RewindRestoreRequest" }
+              "schema": { "$ref": "#/components/schemas/MessageResendRequest" }
             }
           },
           "required": true
         },
         "responses": {
-          "200": {
+          "202": {
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/RewindRestoreResponse" }
+                "schema": { "$ref": "#/components/schemas/MessageResendResponse" }
               }
             },
             "description": "Successful Response"
@@ -3796,7 +3648,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Restore Rewind Checkpoint"
+        "summary": "Resend Message"
       }
     },
     "/api/drafts/{draft_id}/messages": {

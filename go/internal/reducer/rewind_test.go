@@ -10,7 +10,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
 
-func TestRewindCreatesAppendOnlyBranchesAndSoftConversationCutoffs(t *testing.T) {
+func TestRewindEditResendBranchesTimelineAndSoftShadowsConversation(t *testing.T) {
 	t.Parallel()
 	database := openTestDB(t)
 	draftID := "draft-rewind"
@@ -19,27 +19,26 @@ func TestRewindCreatesAppendOnlyBranchesAndSoftConversationCutoffs(t *testing.T)
 	createRewindTestTimeline(t, database, draftID, 1, "clip-1", 30)
 	insertRewindTestMessage(t, database, draftID, "user-2", "第二轮")
 	createRewindTestTimeline(t, database, draftID, 2, "clip-2", 60)
+	insertRewindTestMessage(t, database, draftID, "user-3", "第三轮")
 
+	// 收敛后只保留每条用户消息一个检查点：无 timeline_write 来源。
 	checkpoints, err := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-	if err != nil || len(checkpoints) != 4 {
+	if err != nil || len(checkpoints) != 3 {
 		t.Fatalf("checkpoints=%#v err=%v", checkpoints, err)
 	}
-	var versionOne, versionTwo storage.RewindCheckpoint
 	for _, checkpoint := range checkpoints {
-		if checkpoint.TimelineVersion == nil {
-			continue
-		}
-		switch *checkpoint.TimelineVersion {
-		case 1:
-			versionOne = checkpoint
-		case 2:
-			versionTwo = checkpoint
+		if checkpoint.TriggerKind != "user_message" {
+			t.Fatalf("unexpected trigger kind %q in %#v", checkpoint.TriggerKind, checkpoint)
 		}
 	}
-	if versionOne.ID == "" || versionTwo.ID == "" || versionOne.AnchorMessageID == nil ||
-		*versionOne.AnchorMessageID != "user-1" {
-		t.Fatalf("timeline checkpoints=%#v", checkpoints)
+	// user-2 的检查点在 v1 之后、v2 之前记录，故捕获 timeline v1。
+	target := messageCheckpoint(t, database, draftID, "user-2")
+	if target.TimelineVersion == nil || *target.TimelineVersion != 1 ||
+		target.AnchorMessageID == nil || *target.AnchorMessageID != "user-2" {
+		t.Fatalf("user-2 checkpoint=%#v", target)
 	}
+	// 可见集边界取“消息之前”：user-2 自身不在其检查点可见集内。
+	assertCheckpointVisibleSet(t, database, target.ID, "user-1")
 
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO decisions(
@@ -56,84 +55,108 @@ func TestRewindCreatesAppendOnlyBranchesAndSoftConversationCutoffs(t *testing.T)
 	result, err := Apply(t.Context(), database, []contracts.Event{{
 		Type: "TimelineVersionRestored", DraftID: draftID,
 		Payload: map[string]any{
-			"checkpoint_id": versionOne.ID, "mode": "both", "timeline_version": 3,
+			"checkpoint_id": target.ID, "mode": "both", "timeline_version": 3,
 			"restore_checkpoint_id": "rewind:restore:both",
 		},
 	}}, Options{
 		Actor: contracts.ActorUser, BaseVersion: &base,
 		ResultRows: ResultRows{Message: &MessageRow{
-			ID: "rewind-observation", DraftID: draftID, Role: "system_observation",
-			Kind: "rewind", Content: "已恢复",
+			ID: "user-2b", DraftID: draftID, Role: "user", Kind: "user", Content: "第二轮改写",
 		}},
 	})
 	if err != nil || result.Status != StatusApplied {
 		t.Fatalf("restore both result=%#v err=%v", result, err)
 	}
 	assertRewindTimeline(t, database, draftID, 3, 1, "clip-1")
+	// 恢复到 user-2 之前：user-1 保留，user-2/user-3 遮蔽，新的 user-2b 可见。
 	visible, err := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
-	if err != nil || len(visible) != 2 || visible[0].ID != "user-1" || visible[1].ID != "rewind-observation" {
+	if err != nil || len(visible) != 2 || visible[0].ID != "user-1" || visible[1].ID != "user-2b" {
 		t.Fatalf("visible messages=%#v err=%v", visible, err)
 	}
-	var rewoundAt *string
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT rewound_at FROM messages WHERE message_id='user-2'`).Scan(&rewoundAt); err != nil || rewoundAt == nil {
-		t.Fatalf("user-2 rewound_at=%v err=%v", rewoundAt, err)
+	for _, shadowed := range []string{"user-2", "user-3"} {
+		var rewoundAt *string
+		if err := database.Read().QueryRowContext(t.Context(),
+			"SELECT rewound_at FROM messages WHERE message_id=?", shadowed,
+		).Scan(&rewoundAt); err != nil || rewoundAt == nil {
+			t.Fatalf("%s rewound_at=%v err=%v", shadowed, rewoundAt, err)
+		}
 	}
 	var decisionStatus string
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT status FROM decisions WHERE decision_id='decision-after'`).Scan(&decisionStatus); err != nil || decisionStatus != "cancelled" {
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT status FROM decisions WHERE decision_id='decision-after'",
+	).Scan(&decisionStatus); err != nil || decisionStatus != "cancelled" {
 		t.Fatalf("decision status=%q err=%v", decisionStatus, err)
 	}
 	var contextCount int
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*) FROM agent_context_checkpoints WHERE draft_id=?`, draftID).Scan(&contextCount); err != nil || contextCount != 0 {
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM agent_context_checkpoints WHERE draft_id=?", draftID,
+	).Scan(&contextCount); err != nil || contextCount != 0 {
 		t.Fatalf("context checkpoints=%d err=%v", contextCount, err)
 	}
-
-	draft, _ = storage.GetDraft(t.Context(), database.Read(), draftID)
-	base = draft.StateVersion
-	if result, err = Apply(t.Context(), database, []contracts.Event{{
-		Type: "TimelineVersionRestored", DraftID: draftID,
-		Payload: map[string]any{
-			"checkpoint_id": versionTwo.ID, "mode": "timeline", "timeline_version": 4,
-			"restore_checkpoint_id": "rewind:restore:forward",
-		},
-	}}, Options{Actor: contracts.ActorUser, BaseVersion: &base}); err != nil || result.Status != StatusApplied {
-		t.Fatalf("forward restore result=%#v err=%v", result, err)
-	}
-	assertRewindTimeline(t, database, draftID, 4, 2, "clip-2")
-	visibleAfterForward, _ := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
-	if len(visibleAfterForward) != len(visible) {
-		t.Fatalf("timeline-only changed conversation: before=%#v after=%#v", visible, visibleAfterForward)
-	}
-	draft, _ = storage.GetDraft(t.Context(), database.Read(), draftID)
-	base = draft.StateVersion
-	if result, err = Apply(t.Context(), database, []contracts.Event{{
-		Type: "TimelineVersionRestored", DraftID: draftID,
-		Payload: map[string]any{
-			"checkpoint_id": versionTwo.ID, "mode": "conversation",
-			"restore_checkpoint_id": "rewind:restore:conversation",
-		},
-	}}, Options{Actor: contracts.ActorUser, BaseVersion: &base}); err != nil || result.Status != StatusApplied {
-		t.Fatalf("conversation restore result=%#v err=%v", result, err)
-	}
-	draft, _ = storage.GetDraft(t.Context(), database.Read(), draftID)
-	if draft.TimelineCurrentVersion == nil || *draft.TimelineCurrentVersion != 4 {
-		t.Fatalf("conversation-only changed timeline: %#v", draft.TimelineCurrentVersion)
-	}
-	visibleAfterConversation, _ := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
-	if len(visibleAfterConversation) != 2 || visibleAfterConversation[1].ID != "user-2" {
-		t.Fatalf("conversation forward messages=%#v", visibleAfterConversation)
-	}
-	var timelineRows, restoreEvents int
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?`, draftID).Scan(&timelineRows); err != nil || timelineRows != 4 {
+	// 恢复既追加新时间线版本（4 行）也留下 restore 审计检查点。
+	var timelineRows, restoreCheckpoints int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?", draftID,
+	).Scan(&timelineRows); err != nil || timelineRows != 3 {
 		t.Fatalf("timeline rows=%d err=%v", timelineRows, err)
 	}
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*) FROM event_log WHERE draft_id=? AND event_type='TimelineVersionRestored'`, draftID,
-	).Scan(&restoreEvents); err != nil || restoreEvents != 3 {
-		t.Fatalf("restore events=%d err=%v", restoreEvents, err)
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM rewind_checkpoints WHERE draft_id=? AND trigger_kind='restore'", draftID,
+	).Scan(&restoreCheckpoints); err != nil || restoreCheckpoints != 1 {
+		t.Fatalf("restore checkpoints=%d err=%v", restoreCheckpoints, err)
+	}
+}
+
+func TestRewindTimelineOnlyAndConversationOnlyModes(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	draftID := "draft-rewind-modes"
+	createDraft(t, database, draftID)
+	createRewindTestTimeline(t, database, draftID, 1, "clip-1", 30)
+	insertRewindTestMessage(t, database, draftID, "mode-1", "第一轮")
+	createRewindTestTimeline(t, database, draftID, 2, "clip-2", 60)
+	insertRewindTestMessage(t, database, draftID, "mode-2", "第二轮")
+
+	target := messageCheckpoint(t, database, draftID, "mode-1")
+	if target.TimelineVersion == nil || *target.TimelineVersion != 1 {
+		t.Fatalf("mode-1 checkpoint=%#v", target)
+	}
+
+	// timeline-only：时间线回到 v1（新版本 v3），会话不动。
+	draft, _ := storage.GetDraft(t.Context(), database.Read(), draftID)
+	if result, err := Apply(t.Context(), database, []contracts.Event{{
+		Type: "TimelineVersionRestored", DraftID: draftID,
+		Payload: map[string]any{
+			"checkpoint_id": target.ID, "mode": "timeline", "timeline_version": 3,
+			"restore_checkpoint_id": "rewind:restore:timeline-only",
+		},
+	}}, Options{Actor: contracts.ActorUser, BaseVersion: &draft.StateVersion}); err != nil || result.Status != StatusApplied {
+		t.Fatalf("timeline-only result=%#v err=%v", result, err)
+	}
+	assertRewindTimeline(t, database, draftID, 3, 1, "clip-1")
+	visible, _ := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
+	if len(visible) != 2 {
+		t.Fatalf("timeline-only changed conversation: %#v", visible)
+	}
+
+	// conversation-only：会话回到 mode-1 之前（仅 mode-2 遮蔽，mode-1 也遮蔽），时间线不动。
+	draft, _ = storage.GetDraft(t.Context(), database.Read(), draftID)
+	if result, err := Apply(t.Context(), database, []contracts.Event{{
+		Type: "TimelineVersionRestored", DraftID: draftID,
+		Payload: map[string]any{
+			"checkpoint_id": target.ID, "mode": "conversation",
+			"restore_checkpoint_id": "rewind:restore:conversation-only",
+		},
+	}}, Options{Actor: contracts.ActorUser, BaseVersion: &draft.StateVersion}); err != nil || result.Status != StatusApplied {
+		t.Fatalf("conversation-only result=%#v err=%v", result, err)
+	}
+	draft, _ = storage.GetDraft(t.Context(), database.Read(), draftID)
+	if draft.TimelineCurrentVersion == nil || *draft.TimelineCurrentVersion != 3 {
+		t.Fatalf("conversation-only changed timeline: %#v", draft.TimelineCurrentVersion)
+	}
+	visibleAfter, _ := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
+	if len(visibleAfter) != 0 {
+		t.Fatalf("conversation-only should shadow mode-1 and mode-2: %#v", visibleAfter)
 	}
 }
 
@@ -160,26 +183,21 @@ func TestConversationRewindDoesNotResurrectMessagesFromAnAbandonedBranch(t *test
 		}
 	}
 
-	restoreConversation("rewind:message:branch-m1", "rewind:restore:old-branch")
+	// 回到 branch-m2 之前：branch-m2 遮蔽，branch-m1 保留（不在 m2 的可见集边界内）。
+	restoreConversation("rewind:message:branch-m2", "rewind:restore:old-branch")
 	insertRewindTestMessage(t, database, draftID, "branch-m3", "新分支")
-	var branchMembers int
-	var branchMemberIDs string
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*),GROUP_CONCAT(message_id, ',') FROM rewind_checkpoint_messages
-		WHERE checkpoint_id='rewind:message:branch-m3'`,
-	).Scan(&branchMembers, &branchMemberIDs); err != nil || branchMembers != 2 {
-		t.Fatalf("new branch members=%d ids=%s err=%v", branchMembers, branchMemberIDs, err)
-	}
+	// 新检查点的可见集边界排除自身，只含 branch-m1。
+	assertCheckpointVisibleSet(t, database, "rewind:message:branch-m3", "branch-m1")
 	restoreConversation("rewind:message:branch-m3", "rewind:restore:new-branch")
 
 	visible, err := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
-	if err != nil || len(visible) != 2 || visible[0].ID != "branch-m1" || visible[1].ID != "branch-m3" {
-		t.Fatalf("visible=%#v branch_members=%s err=%v", visible, branchMemberIDs, err)
+	if err != nil || len(visible) != 1 || visible[0].ID != "branch-m1" {
+		t.Fatalf("visible=%#v err=%v", visible, err)
 	}
 	var hidden int
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*) FROM messages WHERE message_id='branch-m2' AND rewound_at IS NOT NULL`,
-	).Scan(&hidden); err != nil || hidden != 1 {
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM messages WHERE message_id IN ('branch-m2','branch-m3') AND rewound_at IS NOT NULL",
+	).Scan(&hidden); err != nil || hidden != 2 {
 		t.Fatalf("abandoned branch hidden=%d err=%v", hidden, err)
 	}
 }
@@ -189,11 +207,10 @@ func TestRewindBothRollsBackTimelineWhenConversationMutationFails(t *testing.T) 
 	database := openTestDB(t)
 	draftID := "draft-rewind-atomic"
 	createDraft(t, database, draftID)
-	insertRewindTestMessage(t, database, draftID, "user-anchor", "锚点")
 	createRewindTestTimeline(t, database, draftID, 1, "clip-anchor", 30)
+	insertRewindTestMessage(t, database, draftID, "user-anchor", "锚点")
 	insertRewindTestMessage(t, database, draftID, "user-later", "稍后")
-	checkpoints, _ := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-	target := checkpointForVersion(t, checkpoints, 1)
+	target := messageCheckpoint(t, database, draftID, "user-anchor")
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO decisions(
 			decision_id,scope_type,draft_id,type,question,options_json,status,blocking
@@ -238,31 +255,31 @@ func TestRewindBothRollsBackTimelineWhenConversationMutationFails(t *testing.T) 
 		t.Fatal("forced conversation failure should abort both restore")
 	}
 	var timelineRows, hidden, restoreEvents int
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?`, draftID).Scan(&timelineRows); err != nil || timelineRows != 1 {
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?", draftID).Scan(&timelineRows); err != nil || timelineRows != 1 {
 		t.Fatalf("timeline rows=%d err=%v", timelineRows, err)
 	}
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*) FROM messages WHERE draft_id=? AND rewound_at IS NOT NULL`, draftID).Scan(&hidden); err != nil || hidden != 0 {
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM messages WHERE draft_id=? AND rewound_at IS NOT NULL", draftID).Scan(&hidden); err != nil || hidden != 0 {
 		t.Fatalf("hidden messages=%d err=%v", hidden, err)
 	}
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*) FROM event_log WHERE draft_id=? AND event_type='TimelineVersionRestored'`, draftID,
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM event_log WHERE draft_id=? AND event_type='TimelineVersionRestored'", draftID,
 	).Scan(&restoreEvents); err != nil || restoreEvents != 0 {
 		t.Fatalf("restore events=%d err=%v", restoreEvents, err)
 	}
 	var jobStatus, decisionStatus string
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT status FROM jobs WHERE job_id='atomic-job'`).Scan(&jobStatus); err != nil || jobStatus != "pending" {
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT status FROM jobs WHERE job_id='atomic-job'").Scan(&jobStatus); err != nil || jobStatus != "pending" {
 		t.Fatalf("job status=%s err=%v", jobStatus, err)
 	}
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT status FROM decisions WHERE decision_id='atomic-decision'`).Scan(&decisionStatus); err != nil || decisionStatus != "pending" {
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT status FROM decisions WHERE decision_id='atomic-decision'").Scan(&decisionStatus); err != nil || decisionStatus != "pending" {
 		t.Fatalf("decision status=%s err=%v", decisionStatus, err)
 	}
 	var suppressions int
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*) FROM agent_job_observation_suppressions WHERE job_id='atomic-job'`,
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM agent_job_observation_suppressions WHERE job_id='atomic-job'",
 	).Scan(&suppressions); err != nil || suppressions != 0 {
 		t.Fatalf("suppressions=%d err=%v", suppressions, err)
 	}
@@ -284,75 +301,6 @@ func TestRewindCheckpointRetentionKeepsLatestFifty(t *testing.T) {
 	if checkpoints[0].AnchorMessageID == nil || *checkpoints[0].AnchorMessageID != "user-55" ||
 		checkpoints[49].AnchorMessageID == nil || *checkpoints[49].AnchorMessageID != "user-06" {
 		t.Fatalf("retained boundaries newest=%#v oldest=%#v", checkpoints[0], checkpoints[49])
-	}
-}
-
-func TestTimelineToolTraceAnchorsTheMatchingCheckpoint(t *testing.T) {
-	t.Parallel()
-	database := openTestDB(t)
-	draftID := "draft-rewind-tool-anchor"
-	createDraft(t, database, draftID)
-	insertRewindTestMessage(t, database, draftID, "user-tool-anchor", "请生成初剪")
-	for index, content := range []string{
-		`not-json`,
-		`{"tool":"assets.list","status":"succeeded"}`,
-		`{"tool":"timeline.compose_initial","status":"succeeded"}`,
-	} {
-		result, err := Apply(t.Context(), database, nil, Options{
-			Actor: contracts.ActorAgent,
-			ResultRows: ResultRows{Message: &MessageRow{
-				ID: fmt.Sprintf("ignored-tool-%d", index), DraftID: draftID,
-				Role: "system", Kind: "tool", Content: content,
-			}},
-		})
-		if err != nil || result.Status != StatusApplied {
-			t.Fatalf("ignored tool %d result=%#v err=%v", index, result, err)
-		}
-	}
-	createRewindTestTimeline(t, database, draftID, 1, "clip-tool-anchor", 30)
-
-	result, err := Apply(t.Context(), database, nil, Options{
-		Actor: contracts.ActorAgent,
-		ResultRows: ResultRows{Message: &MessageRow{
-			ID: "step-compose", DraftID: draftID, Role: "system", Kind: "tool",
-			Content: `{"tool":"timeline.compose_initial","status":"succeeded"}`,
-		}},
-	})
-	if err != nil || result.Status != StatusApplied {
-		t.Fatalf("tool trace result=%#v err=%v", result, err)
-	}
-	checkpoints, err := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-	if err != nil {
-		t.Fatal(err)
-	}
-	timelineCheckpoint := checkpointForVersion(t, checkpoints, 1)
-	if timelineCheckpoint.AnchorMessageID == nil || *timelineCheckpoint.AnchorMessageID != "step-compose" ||
-		timelineCheckpoint.Summary != "工具批次 timeline.compose_initial" {
-		t.Fatalf("timeline checkpoint=%#v", timelineCheckpoint)
-	}
-	insertRewindTestMessage(t, database, draftID, "user-after-tool", "继续修改")
-	draft, _ := storage.GetDraft(t.Context(), database.Read(), draftID)
-	result, err = Apply(t.Context(), database, []contracts.Event{{
-		Type: "TimelineVersionRestored", DraftID: draftID,
-		Payload: map[string]any{
-			"checkpoint_id": timelineCheckpoint.ID, "mode": "conversation",
-			"restore_checkpoint_id": "rewind:restore:tool-anchor",
-		},
-	}}, Options{Actor: contracts.ActorUser, BaseVersion: &draft.StateVersion})
-	if err != nil || result.Status != StatusApplied {
-		t.Fatalf("restore tool checkpoint result=%#v err=%v", result, err)
-	}
-	visible, err := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
-	if err != nil {
-		t.Fatal(err)
-	}
-	visibleIDs := make([]string, 0, len(visible))
-	for _, message := range visible {
-		visibleIDs = append(visibleIDs, message.ID)
-	}
-	if !strings.Contains(strings.Join(visibleIDs, ","), "step-compose") ||
-		strings.Contains(strings.Join(visibleIDs, ","), "user-after-tool") {
-		t.Fatalf("tool checkpoint visibility=%v", visibleIDs)
 	}
 }
 
@@ -393,6 +341,39 @@ func TestConversationRewindCanReturnBeforeTheFirstMessage(t *testing.T) {
 	}
 }
 
+func TestConversationRewindDropsShadowedContextResetAnchor(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	draftID := "draft-rewind-context-anchor"
+	createDraft(t, database, draftID)
+	insertRewindTestMessage(t, database, draftID, "anchor-first", "第一轮")
+	target := messageCheckpoint(t, database, draftID, "anchor-first")
+	// 在锚点消息之后设置上下文重置点，使其落在回退遮蔽范围内。
+	insertRewindTestMessage(t, database, draftID, "anchor-reset", "清空点")
+	if _, err := database.Write().ExecContext(t.Context(),
+		"UPDATE drafts SET messages_tail_ref='anchor-reset' WHERE draft_id=?", draftID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	draft, _ := storage.GetDraft(t.Context(), database.Read(), draftID)
+	if result, err := Apply(t.Context(), database, []contracts.Event{{
+		Type: "TimelineVersionRestored", DraftID: draftID,
+		Payload: map[string]any{
+			"checkpoint_id": target.ID, "mode": "conversation",
+			"restore_checkpoint_id": "rewind:restore:context-anchor",
+		},
+	}}, Options{Actor: contracts.ActorUser, BaseVersion: &draft.StateVersion}); err != nil || result.Status != StatusApplied {
+		t.Fatalf("restore result=%#v err=%v", result, err)
+	}
+	// 被遮蔽的重置锚点会撤销那次清空，messages_tail_ref 回落 NULL。
+	var tailRef *string
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT messages_tail_ref FROM drafts WHERE draft_id=?", draftID,
+	).Scan(&tailRef); err != nil || tailRef != nil {
+		t.Fatalf("messages_tail_ref=%v err=%v", tailRef, err)
+	}
+}
+
 func TestRewindRejectsUnavailableOrCorruptTimelineTargets(t *testing.T) {
 	t.Parallel()
 	t.Run("checkpoint without timeline", func(t *testing.T) {
@@ -400,12 +381,12 @@ func TestRewindRejectsUnavailableOrCorruptTimelineTargets(t *testing.T) {
 		draftID := "draft-rewind-no-timeline"
 		createDraft(t, database, draftID)
 		insertRewindTestMessage(t, database, draftID, "user-no-timeline", "尚无时间线")
-		checkpoints, _ := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
+		target := messageCheckpoint(t, database, draftID, "user-no-timeline")
 		draft, _ := storage.GetDraft(t.Context(), database.Read(), draftID)
 		_, err := Apply(t.Context(), database, []contracts.Event{{
 			Type: "TimelineVersionRestored", DraftID: draftID,
 			Payload: map[string]any{
-				"checkpoint_id": checkpoints[0].ID, "mode": "timeline", "timeline_version": 1,
+				"checkpoint_id": target.ID, "mode": "timeline", "timeline_version": 1,
 				"restore_checkpoint_id": "rewind-invalid-no-timeline",
 			},
 		}}, Options{Actor: contracts.ActorUser, BaseVersion: &draft.StateVersion})
@@ -418,12 +399,11 @@ func TestRewindRejectsUnavailableOrCorruptTimelineTargets(t *testing.T) {
 		database := openTestDB(t)
 		draftID := "draft-rewind-corrupt-timeline"
 		createDraft(t, database, draftID)
-		insertRewindTestMessage(t, database, draftID, "user-corrupt", "创建时间线")
 		createRewindTestTimeline(t, database, draftID, 1, "clip-corrupt", 30)
-		checkpoints, _ := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-		target := checkpointForVersion(t, checkpoints, 1)
-		if _, err := database.Write().ExecContext(t.Context(), `
-			UPDATE timeline_versions SET document_json='{' WHERE draft_id=? AND version=1`, draftID,
+		insertRewindTestMessage(t, database, draftID, "user-corrupt", "创建时间线")
+		target := messageCheckpoint(t, database, draftID, "user-corrupt")
+		if _, err := database.Write().ExecContext(t.Context(),
+			"UPDATE timeline_versions SET document_json='{' WHERE draft_id=? AND version=1", draftID,
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -446,6 +426,9 @@ func TestRewindCheckpointHelpersRejectInvalidRowsAndBoundSummaries(t *testing.T)
 	if got := truncateCheckpointSummary("  " + strings.Repeat("回", 130) + "  "); !strings.HasSuffix(got, "…") || len([]rune(got)) != 118 {
 		t.Fatalf("summary=%q runes=%d", got, len([]rune(got)))
 	}
+	if got := truncateCheckpointSummary("  简短  "); got != "简短" {
+		t.Fatalf("short summary=%q", got)
+	}
 	database := openTestDB(t)
 	tx, err := database.Write().BeginTx(t.Context(), nil)
 	if err != nil {
@@ -457,46 +440,25 @@ func TestRewindCheckpointHelpersRejectInvalidRowsAndBoundSummaries(t *testing.T)
 	}
 }
 
-func TestRewindCheckpointRecordingHandlesMissingAndCorruptTimelineState(t *testing.T) {
+func TestRewindMessageCheckpointHandlesMissingAndCorruptTimelineState(t *testing.T) {
 	t.Parallel()
+	// 无时间线时用户消息检查点照常记录，TimelineVersion 为空。
 	database := openTestDB(t)
 	draftID := "draft-rewind-checkpoint-edge"
 	createDraft(t, database, draftID)
-	result, err := Apply(t.Context(), database, nil, Options{
-		Actor: contracts.ActorAgent,
-		ResultRows: ResultRows{Message: &MessageRow{
-			ID: "tool-before-timeline", DraftID: draftID, Role: "system", Kind: "tool",
-			Content: `{"tool":"timeline.apply_patch","status":"succeeded"}`,
-		}},
-	})
-	if err != nil || result.Status != StatusApplied {
-		t.Fatalf("tool result=%#v err=%v", result, err)
+	insertRewindTestMessage(t, database, draftID, "user-no-timeline", "尚无时间线")
+	checkpoint := messageCheckpoint(t, database, draftID, "user-no-timeline")
+	if checkpoint.TimelineVersion != nil || checkpoint.PatchID != nil {
+		t.Fatalf("checkpoint=%#v", checkpoint)
 	}
-	draft, _ := storage.GetDraft(t.Context(), database.Read(), draftID)
-	document := map[string]any{
-		"timeline_id": draftID + ":v1", "draft_id": draftID, "version": 1,
-		"fps": 30, "duration_frames": 30, "tracks": []any{},
-	}
-	result, err = Apply(t.Context(), database, []contracts.Event{{
-		Type: "TimelineVersionCreated", DraftID: draftID,
-		Payload: map[string]any{
-			"timeline_id": draftID + ":v1", "timeline_version": 1, "document_json": document,
-		},
-	}}, Options{Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion})
-	if err != nil || result.Status != StatusApplied {
-		t.Fatalf("timeline result=%#v err=%v", result, err)
-	}
-	checkpoints, err := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-	if err != nil || len(checkpoints) != 1 || checkpoints[0].Summary != "时间线编辑" ||
-		checkpoints[0].PatchID != nil {
-		t.Fatalf("checkpoints=%#v err=%v", checkpoints, err)
-	}
-	if _, err := database.Write().ExecContext(t.Context(), `
-		UPDATE timeline_versions SET document_json='{' WHERE draft_id=? AND version=1`, draftID,
+	// 当前时间线快照损坏时，记录消息检查点必须失败并回滚整条 Apply。
+	createRewindTestTimeline(t, database, draftID, 1, "edge-clip", 30)
+	if _, err := database.Write().ExecContext(t.Context(),
+		"UPDATE timeline_versions SET document_json='{' WHERE draft_id=? AND version=1", draftID,
 	); err != nil {
 		t.Fatal(err)
 	}
-	result, err = Apply(t.Context(), database, nil, Options{
+	result, err := Apply(t.Context(), database, nil, Options{
 		Actor: contracts.ActorUser,
 		ResultRows: ResultRows{Message: &MessageRow{
 			ID: "user-after-corruption", DraftID: draftID, Role: "user", Kind: "user", Content: "继续",
@@ -513,10 +475,9 @@ func TestRewindStorageFailuresRollbackWithoutChangingTheDraft(t *testing.T) {
 		database := openTestDB(t)
 		draftID := "draft-rewind-missing-snapshot"
 		createDraft(t, database, draftID)
-		insertRewindTestMessage(t, database, draftID, "missing-snapshot-user", "初版")
 		createRewindTestTimeline(t, database, draftID, 1, "missing-snapshot-clip", 30)
-		checkpoints, _ := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-		target := checkpointForVersion(t, checkpoints, 1)
+		insertRewindTestMessage(t, database, draftID, "missing-snapshot-user", "初版")
+		target := messageCheckpoint(t, database, draftID, "missing-snapshot-user")
 		if _, err := database.Write().ExecContext(t.Context(),
 			"DELETE FROM timeline_versions WHERE draft_id=? AND version=1", draftID,
 		); err != nil {
@@ -539,10 +500,9 @@ func TestRewindStorageFailuresRollbackWithoutChangingTheDraft(t *testing.T) {
 		database := openTestDB(t)
 		draftID := "draft-rewind-duplicate-version"
 		createDraft(t, database, draftID)
-		insertRewindTestMessage(t, database, draftID, "duplicate-version-user", "初版")
 		createRewindTestTimeline(t, database, draftID, 1, "duplicate-version-clip", 30)
-		checkpoints, _ := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-		target := checkpointForVersion(t, checkpoints, 1)
+		insertRewindTestMessage(t, database, draftID, "duplicate-version-user", "初版")
+		target := messageCheckpoint(t, database, draftID, "duplicate-version-user")
 		draft, _ := storage.GetDraft(t.Context(), database.Read(), draftID)
 		_, err := Apply(t.Context(), database, []contracts.Event{{
 			Type: "TimelineVersionRestored", DraftID: draftID,
@@ -562,10 +522,9 @@ func TestRewindStorageFailuresRollbackWithoutChangingTheDraft(t *testing.T) {
 		createDraft(t, database, draftID)
 		createRewindTestTimeline(t, database, draftID, 1, "corrupt-conversation-clip", 30)
 		insertRewindTestMessage(t, database, draftID, "corrupt-conversation-user", "锚点")
-		checkpoints, _ := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-		target := checkpoints[0]
-		if _, err := database.Write().ExecContext(t.Context(), `
-			UPDATE timeline_versions SET document_json='{' WHERE draft_id=? AND version=1`, draftID,
+		target := messageCheckpoint(t, database, draftID, "corrupt-conversation-user")
+		if _, err := database.Write().ExecContext(t.Context(),
+			"UPDATE timeline_versions SET document_json='{' WHERE draft_id=? AND version=1", draftID,
 		); err != nil {
 			t.Fatal(err)
 		}
@@ -587,7 +546,7 @@ func TestRewindStorageFailuresRollbackWithoutChangingTheDraft(t *testing.T) {
 		draftID := "draft-rewind-missing-context-table"
 		createDraft(t, database, draftID)
 		insertRewindTestMessage(t, database, draftID, "missing-context-user", "锚点")
-		checkpoints, _ := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
+		target := messageCheckpoint(t, database, draftID, "missing-context-user")
 		if _, err := database.Write().ExecContext(t.Context(), "DROP TABLE agent_context_checkpoints"); err != nil {
 			t.Fatal(err)
 		}
@@ -595,7 +554,7 @@ func TestRewindStorageFailuresRollbackWithoutChangingTheDraft(t *testing.T) {
 		_, err := Apply(t.Context(), database, []contracts.Event{{
 			Type: "TimelineVersionRestored", DraftID: draftID,
 			Payload: map[string]any{
-				"checkpoint_id": checkpoints[0].ID, "mode": "conversation",
+				"checkpoint_id": target.ID, "mode": "conversation",
 				"restore_checkpoint_id": "rewind-missing-context-result",
 			},
 		}}, Options{Actor: contracts.ActorUser, BaseVersion: &draft.StateVersion})
@@ -610,10 +569,9 @@ func TestRewindInternalGuardsRejectInvalidVersionAndCheckpointRows(t *testing.T)
 	database := openTestDB(t)
 	draftID := "draft-rewind-internal-guards"
 	createDraft(t, database, draftID)
-	insertRewindTestMessage(t, database, draftID, "internal-guard-user", "锚点")
 	createRewindTestTimeline(t, database, draftID, 1, "internal-guard-clip", 30)
-	checkpoints, _ := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-	target := checkpointForVersion(t, checkpoints, 1)
+	insertRewindTestMessage(t, database, draftID, "internal-guard-user", "锚点")
+	target := messageCheckpoint(t, database, draftID, "internal-guard-user")
 	tx, err := database.Write().BeginTx(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -648,12 +606,11 @@ func TestRewindInternalGuardsRejectInvalidVersionAndCheckpointRows(t *testing.T)
 func TestRewindInternalGuardsRejectIncompleteRestorePayloads(t *testing.T) {
 	t.Parallel()
 	database := openTestDB(t)
-	draftID := "draft-rewind-internal-guards"
+	draftID := "draft-rewind-incomplete"
 	createDraft(t, database, draftID)
-	insertRewindTestMessage(t, database, draftID, "guard-anchor", "锚点")
 	createRewindTestTimeline(t, database, draftID, 1, "guard-clip", 30)
-	checkpoints, _ := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-	target := checkpointForVersion(t, checkpoints, 1)
+	insertRewindTestMessage(t, database, draftID, "guard-anchor", "锚点")
+	target := messageCheckpoint(t, database, draftID, "guard-anchor")
 	tx, err := database.Write().BeginTx(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -687,8 +644,8 @@ func TestRewindPropagatesCorruptPersistentState(t *testing.T) {
 		mutate func(t *testing.T, database *storage.DB, draftID, checkpointID string)
 	}{
 		{"current timeline snapshot", func(t *testing.T, database *storage.DB, draftID, _ string) {
-			_, err := database.Write().ExecContext(t.Context(), `
-				UPDATE timeline_versions SET document_json='{' WHERE draft_id=? AND version=1`, draftID)
+			_, err := database.Write().ExecContext(t.Context(),
+				"UPDATE timeline_versions SET document_json='{' WHERE draft_id=? AND version=1", draftID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -709,10 +666,9 @@ func TestRewindPropagatesCorruptPersistentState(t *testing.T) {
 			database := openTestDB(t)
 			draftID := "draft-corrupt-" + strings.ReplaceAll(test.name, " ", "-")
 			createDraft(t, database, draftID)
-			insertRewindTestMessage(t, database, draftID, "corrupt-anchor", "锚点")
 			createRewindTestTimeline(t, database, draftID, 1, "corrupt-clip", 30)
-			checkpoints, _ := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-			target := checkpointForVersion(t, checkpoints, 1)
+			insertRewindTestMessage(t, database, draftID, "corrupt-anchor", "锚点")
+			target := messageCheckpoint(t, database, draftID, "corrupt-anchor")
 			test.mutate(t, database, draftID, target.ID)
 			draft, _ := storage.GetDraft(t.Context(), database.Read(), draftID)
 			_, err := Apply(t.Context(), database, []contracts.Event{{
@@ -733,8 +689,8 @@ func TestRewindPropagatesCorruptPersistentState(t *testing.T) {
 		draftID := "draft-corrupt-message-checkpoint"
 		createDraft(t, database, draftID)
 		createRewindTestTimeline(t, database, draftID, 1, "corrupt-message-clip", 30)
-		if _, err := database.Write().ExecContext(t.Context(), `
-			UPDATE timeline_versions SET document_json='{' WHERE draft_id=? AND version=1`, draftID); err != nil {
+		if _, err := database.Write().ExecContext(t.Context(),
+			"UPDATE timeline_versions SET document_json='{' WHERE draft_id=? AND version=1", draftID); err != nil {
 			t.Fatal(err)
 		}
 		_, err := Apply(t.Context(), database, nil, Options{
@@ -833,10 +789,9 @@ func TestRewindRestoreRollsBackOnPersistenceFailures(t *testing.T) {
 			database := openTestDB(t)
 			draftID := "draft-rewind-failure-" + strings.ReplaceAll(test.name, " ", "-")
 			createDraft(t, database, draftID)
-			insertRewindTestMessage(t, database, draftID, "failure-anchor", "锚点")
 			createRewindTestTimeline(t, database, draftID, 1, "failure-clip", 30)
-			checkpoints, _ := storage.ListRewindCheckpoints(t.Context(), database.Read(), draftID, 50)
-			target := checkpointForVersion(t, checkpoints, 1)
+			insertRewindTestMessage(t, database, draftID, "failure-anchor", "锚点")
+			target := messageCheckpoint(t, database, draftID, "failure-anchor")
 			test.setup(t, database)
 			draft, _ := storage.GetDraft(t.Context(), database.Read(), draftID)
 			payload := map[string]any{
@@ -906,20 +861,45 @@ func createRewindTestTimeline(
 	}
 }
 
-func checkpointForVersion(
+func messageCheckpoint(
 	t *testing.T,
-	checkpoints []storage.RewindCheckpoint,
-	version int,
+	database *storage.DB,
+	draftID string,
+	messageID string,
 ) storage.RewindCheckpoint {
 	t.Helper()
-	for _, checkpoint := range checkpoints {
-		if checkpoint.TimelineVersion != nil && *checkpoint.TimelineVersion == version &&
-			checkpoint.TriggerKind == "timeline_write" {
-			return checkpoint
-		}
+	checkpoint, err := storage.GetRewindCheckpoint(
+		t.Context(), database.Read(), draftID, "rewind:message:"+messageID)
+	if err != nil {
+		t.Fatalf("checkpoint for %s: %v", messageID, err)
 	}
-	t.Fatalf("missing checkpoint for version %d: %#v", version, checkpoints)
-	return storage.RewindCheckpoint{}
+	return checkpoint
+}
+
+func assertCheckpointVisibleSet(
+	t *testing.T,
+	database *storage.DB,
+	checkpointID string,
+	wantMessageIDs ...string,
+) {
+	t.Helper()
+	rows, err := database.Read().QueryContext(t.Context(),
+		"SELECT message_id FROM rewind_checkpoint_messages WHERE checkpoint_id=? ORDER BY message_id", checkpointID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var got []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, id)
+	}
+	if strings.Join(got, ",") != strings.Join(wantMessageIDs, ",") {
+		t.Fatalf("checkpoint %s visible set=%v want=%v", checkpointID, got, wantMessageIDs)
+	}
 }
 
 func assertRewindTimeline(
