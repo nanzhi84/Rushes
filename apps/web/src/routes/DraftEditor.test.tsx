@@ -5,9 +5,18 @@ import {
   createRouter,
   RouterContextProvider
 } from "@tanstack/react-router";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Decision, DecisionAnswer } from "../api/client";
+import type { Decision, DecisionAnswer, MessageRecord } from "../api/client";
+import { useConsoleExternalStoreRuntime } from "../components/Console/runtime";
 import { storeAuthToken } from "../auth";
 import {
   itemFromEvent,
@@ -16,6 +25,7 @@ import {
 } from "../components/Console/StructuredInteractionRenderer";
 import type { DomainSsePayload } from "../components/Console/StructuredInteractionRenderer";
 import { DEFAULT_MATERIALS_PANEL_WIDTH, useUiStore } from "../state/ui_store";
+import { normalizeConsoleRole, toConsoleMessage } from "../components/Console/ConsolePanel";
 import { DraftEditorView } from "./DraftEditor";
 
 type MockPreviewProps = {
@@ -199,6 +209,41 @@ class MockEventSource {
     }
   }
 }
+
+describe("刷新后从 DB 读回：turn_failure 系统消息透传到 UI 失败行判定", () => {
+  it("role=system/kind=turn_failure 经 toConsoleMessage 与 runtime 适配后仍带 messageKind=turn_failure", () => {
+    // 回合失败终态以 role=system/kind=turn_failure 落库；刷新页面时经此链路回放，
+    // 而非走 live turn-stream。此路径此前无覆盖（issue #95 H2 审查修理 P2#4）。
+    const record: MessageRecord = {
+      message_id: "f1",
+      role: "system",
+      kind: "turn_failure",
+      content: "本轮没有完成：模型响应超时，系统已停止重试。",
+      created_at: "2026-07-18T00:00:00Z"
+    };
+
+    // normalizeConsoleRole 必须原样保留 system，否则失败行会退化成普通助手气泡。
+    expect(normalizeConsoleRole("system")).toBe("system");
+
+    const consoleMessage = toConsoleMessage(record);
+    expect(consoleMessage.role).toBe("system");
+    expect(consoleMessage.kind).toBe("turn_failure");
+
+    // 经 assistant-ui 适配后，AssistantThread 依据 metadata.messageKind 判定失败行。
+    const { result } = renderHook(() =>
+      useConsoleExternalStoreRuntime({
+        messages: [consoleMessage],
+        structuredItems: [],
+        isRunning: false,
+        canSubmit: true,
+        submit: vi.fn()
+      })
+    );
+    const uiMessage = result.current.messages[0];
+    expect(uiMessage.role).toBe("system");
+    expect(uiMessage.metadata.messageKind).toBe("turn_failure");
+  });
+});
 
 describe("DraftEditorView", () => {
   afterEach(() => {

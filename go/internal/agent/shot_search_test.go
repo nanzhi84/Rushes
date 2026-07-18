@@ -323,3 +323,80 @@ func TestShotSearchRanksSegmentEvidenceAboveSharedFilename(t *testing.T) {
 		t.Fatalf("backlight ranking=%#v", backlight.Shots)
 	}
 }
+
+func TestShotSearchReportsUnderstandingCoverageGap(t *testing.T) {
+	t.Parallel()
+	database := agentTestDatabase(t)
+	createAgentDraft(t, database, "draft_coverage")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, fixture := range []struct {
+		assetID       string
+		filename      string
+		understanding string
+	}{
+		{assetID: "video_ready", filename: "已理解展示.mp4", understanding: "ready"},
+		{assetID: "video_pending", filename: "未理解补充.mov", understanding: "none"},
+	} {
+		if _, err := database.Write().ExecContext(t.Context(), `
+			INSERT INTO assets(
+				asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
+				probe_json,ingest_status,understanding_status,usable
+			) VALUES(?, 'reference', ?, 'video', 'local_path', ?, ?, 1,
+				'{"duration_sec":4}', 'ready', ?, 1);
+			INSERT INTO draft_asset_links(draft_id,asset_id,rel_dir,linked_at)
+			VALUES('draft_coverage', ?, 'Broll', ?);`,
+			fixture.assetID, "/tmp/"+fixture.filename, fixture.filename, fixture.assetID,
+			fixture.understanding, fixture.assetID, now,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertSummary := func(assetID, overall string) {
+		t.Helper()
+		summary, _ := json.Marshal(map[string]any{
+			"asset_id": assetID, "overall": overall, "analysis_depth": "deep", "semantic_role": "b_roll",
+			"segments": []map[string]any{{
+				"source_start_frame": 0, "source_end_frame": 60,
+				"description": overall, "quality": "usable",
+			}},
+		})
+		if _, err := database.Write().ExecContext(t.Context(), `
+			INSERT INTO material_summaries(
+				summary_id,asset_id,version,status,summary_json,fingerprint,prompt_version,created_at
+			) VALUES(?, ?, 1, 'ready', ?, ?, 'v3', ?)`,
+			"summary_"+assetID, assetID, string(summary), "fingerprint_"+assetID, now,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertSummary("video_ready", "室内产品展示特写")
+
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(t.Context(), "draft_coverage")
+
+	gapRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gap := gapRaw.(rushestools.ShotSearchResult)
+	if len(gap.MissingUnderstandingAssetIDs) != 1 ||
+		!strings.Contains(gap.UnderstandingCoverageNote, "1 个") ||
+		!strings.Contains(gap.UnderstandingCoverageNote, "understand.materials") {
+		t.Fatalf("存在未理解素材时应报告覆盖缺口: %#v", gap)
+	}
+
+	insertSummary("video_pending", "户外街景空镜")
+
+	fullRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := fullRaw.(rushestools.ShotSearchResult)
+	if len(full.MissingUnderstandingAssetIDs) != 0 || full.UnderstandingCoverageNote != "" {
+		t.Fatalf("全部理解后不应再有覆盖提示: %#v", full)
+	}
+}

@@ -48,4 +48,4 @@ turn-stream 固定 `event: turn_stream`，data.type 为：`turn_started`、`text
 
 ## 依赖方向
 
-depguard 将允许的导入方向固化在 `go/.golangci.yml`：contracts/storage/reducer 位于底层；providers、media、timeline 不反向依赖 Agent；tools 是能力聚合层；Agent 是统一工具执行入口；API 与 worker 只在最外层装配。违反分层会在 CI 直接失败。
+depguard 将允许的导入方向固化在 `go/.golangci.yml`：contracts/storage/reducer 位于底层；providers、media、timeline 不反向依赖 Agent；tools 是能力聚合层；Agent 是统一工具执行入口；API 与 worker 只在最外层装配。违反分层会在 CI 直接失败。各规则的 allow 列表按最小实际依赖维护，只列真正被源码 import 的内部包；新增跨包依赖时须同步更新该列表并说明理由。

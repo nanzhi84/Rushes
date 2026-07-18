@@ -2,8 +2,8 @@ import { useCallback, useEffect, useReducer, useRef } from "react";
 import { useDocumentVisibility } from "../../app/use_document_visibility";
 import { acquireApiEventSource } from "../../auth";
 
-// text_delta 阶段是 assistant；完成后区分叙述、正式回复和后台观察。
-type TurnStreamMessageKind = "assistant" | "narration" | "reply" | "observation";
+// text_delta 阶段是 assistant；完成后区分叙述、正式回复、后台观察和回合失败终态。
+type TurnStreamMessageKind = "assistant" | "narration" | "reply" | "observation" | "turn_failure";
 
 export type StreamMessageItem = {
   type: "message";
@@ -84,7 +84,7 @@ export type TurnStreamEvent =
   | {
       type: "message_completed";
       message_id: string;
-      kind: "narration" | "reply" | "observation";
+      kind: "narration" | "reply" | "observation" | "turn_failure";
       content: string;
     }
   | { type: "tool_step_started"; step_id: string; tool: string; args_summary?: string }
@@ -386,7 +386,7 @@ function upsertProgress(
 }
 
 function normalizeCompletedKind(kind: unknown): TurnStreamMessageKind {
-  if (kind === "narration" || kind === "observation") {
+  if (kind === "narration" || kind === "observation" || kind === "turn_failure") {
     return kind;
   }
   return "reply";
