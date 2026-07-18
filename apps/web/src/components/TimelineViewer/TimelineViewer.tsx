@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import WaveSurfer from "wavesurfer.js";
 import { api } from "../../api/client";
+import { markEnd, markStart, perfSpan } from "../../perf/marks";
 
 export type TimelineJson = {
   fps: number;
@@ -284,7 +285,9 @@ export const TimelineViewer = memo(
     }
     scrollRafRef.current = requestAnimationFrame(() => {
       scrollRafRef.current = null;
+      const endSpan = perfSpan("timeline:scroll-window");
       measureViewport();
+      endSpan();
     });
   }, [measureViewport]);
 
@@ -419,8 +422,10 @@ export const TimelineViewer = memo(
       if (next === pxPerSec) {
         return;
       }
+      const endSpan = perfSpan("timeline:zoom");
       pendingZoomRef.current = { anchorSec, viewportX };
       onZoomChange(next);
+      endSpan();
     },
     [durationSec, onZoomChange, pxPerSec]
   );
@@ -491,8 +496,10 @@ export const TimelineViewer = memo(
         lastEmittedSec: sec
       };
       event.currentTarget.setPointerCapture?.(event.pointerId);
+      const endSpan = perfSpan("timeline:seek");
       updatePlayhead(sec, false);
       onSeek(sec);
+      endSpan();
     },
     [onDeselect, onSeek, seekSecAt, updatePlayhead]
   );
@@ -617,6 +624,7 @@ export const TimelineViewer = memo(
       if (!drag || drag.pointerId !== event.pointerId) {
         return;
       }
+      markStart("timeline:clip-drag");
       const preview = calculateDragPreview(event, drag);
       const deltaX = ((preview.targetFrame - drag.clip.startFrame) / safeFps) * pxPerSec;
       const deltaY =
@@ -629,6 +637,7 @@ export const TimelineViewer = memo(
       drag.moved = drag.moved || Math.abs(event.clientX - drag.startClientX) >= 4 || deltaY !== 0;
       showSnapGuide(preview.candidate);
       showDropHighlight(preview.targetTrackIndex, preview.valid);
+      markEnd("timeline:clip-drag");
     },
     [calculateDragPreview, pxPerSec, safeFps, showDropHighlight, showSnapGuide]
   );
