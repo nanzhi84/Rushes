@@ -440,7 +440,7 @@ func TestPlanUpdateRejectsInvalidPlansWithoutChangingStoredContent(t *testing.T)
 		items[0].(map[string]any)["version"] != float64(1) || details["timeline_id"] != "business-label" {
 		t.Fatalf("allowed business keys were stripped from WorldState: %#v", worldPlan)
 	}
-	if toolCanRetrySafely("plan.update") {
+	if sharedEffectRetrySafe()("plan.update") {
 		t.Fatal("plan.update 是写工具，不得自动重放")
 	}
 }

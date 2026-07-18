@@ -173,6 +173,85 @@ func TestAssetManifestModelFacingFieldsHaveDescriptions(t *testing.T) {
 	}
 }
 
+func TestEveryToolHasValidEffect(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, spec := range registry.Specs(true) {
+		if !spec.Effect.Valid() {
+			t.Fatalf("工具 %s 缺少合法 Effect 分级: %q", spec.Name, spec.Effect)
+		}
+		effect, ok := registry.Effect(spec.Name)
+		if !ok || effect != spec.Effect {
+			t.Fatalf("registry.Effect(%s)=%q,%v 与 spec.Effect=%q 不一致", spec.Name, effect, ok, spec.Effect)
+		}
+	}
+	if _, ok := registry.Effect("does.not.exist"); ok {
+		t.Fatal("未注册工具的 Effect 应返回 false")
+	}
+}
+
+// TestToolEffectClassificationTable 把 #103 G1 的全量分类表锁成可执行断言：任何工具的
+// Effect 被误改或新增工具未标注都会在此失败。speech.inspect 刻意偏离 issue 的 ReadOnly
+// 归为可逆——首次调用落盘 transcript、并发首调不安全（见 registry.go 注释与 G3a spike）；
+// memory.update 因 remove_keys 删除路径归破坏性。
+func TestToolEffectClassificationTable(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string]Effect{
+		"asset.import_local_file":     EffectReversible, // harness-only
+		"asset.list_assets":           EffectReadOnly,
+		"media.search_shots":          EffectReadOnly,
+		"audio.analyze_beats":         EffectReadOnly,
+		"audio.analyze_speech_pauses": EffectReadOnly,
+		"timeline.inspect":            EffectReadOnly,
+		"render.status":               EffectReadOnly,
+		"render.inspect_preview":      EffectReadOnly,
+		"understand.materials":        EffectReversible,
+		"speech.inspect":              EffectReversible,
+		"plan.update":                 EffectReversible,
+		"interaction.ask_user":        EffectReversible,
+		"decision.answer":             EffectReversible,
+		"interaction.confirm_action":  EffectReversible,
+		"timeline.compose_initial":    EffectReversible,
+		"timeline.apply_patches":      EffectReversible,
+		"timeline.recut_to_beats":     EffectReversible,
+		"timeline.edit_talking_head":  EffectReversible,
+		"timeline.validate":           EffectReversible,
+		"render.preview":              EffectReversible,
+		"render.final_mp4":            EffectReversible,
+		"memory.update":               EffectDestructive,
+	}
+	specs := registry.Specs(true)
+	if len(specs) != len(expected) {
+		t.Fatalf("注册工具数 %d 与分类表 %d 不一致，新增/删除工具后请同步分类表", len(specs), len(expected))
+	}
+	for _, spec := range specs {
+		want, ok := expected[spec.Name]
+		if !ok {
+			t.Fatalf("工具 %s 不在 Effect 分类表内", spec.Name)
+		}
+		if spec.Effect != want {
+			t.Fatalf("工具 %s 的 Effect=%q，分类表期望 %q", spec.Name, spec.Effect, want)
+		}
+	}
+}
+
 func TestLLMToolInputFieldsHaveDescriptions(t *testing.T) {
 	t.Parallel()
 	database, err := storage.Open(t.Context(), t.TempDir())
@@ -744,17 +823,27 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 	}
 
 	registry := &Registry{database: database, executor: failingExecutor{}, specs: map[string]Spec{}}
-	if err := addTool[cleanInput, ToolResult](registry, "clean", "clean", nil, ExposureLLM, false); err != nil {
+	if err := addTool[cleanInput, ToolResult](registry, "clean", "clean", nil, ExposureLLM, EffectReadOnly, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := addTool[cleanInput, ToolResult](registry, "clean", "duplicate", nil, ExposureLLM, false); err == nil {
+	if err := addTool[cleanInput, ToolResult](registry, "clean", "duplicate", nil, ExposureLLM, EffectReadOnly, false); err == nil {
 		t.Fatal("duplicate tool should fail")
 	}
-	if err := addTool[prohibitedPathInput, ToolResult](registry, "bad", "bad", nil, ExposureLLM, false); err == nil {
+	if err := addTool[prohibitedPathInput, ToolResult](registry, "bad", "bad", nil, ExposureLLM, EffectReadOnly, false); err == nil {
 		t.Fatal("prohibited field should fail")
 	}
-	if err := addTool[prohibitedNestedInput, ToolResult](registry, "nested_bad", "bad", nil, ExposureLLM, false); err == nil {
+	if err := addTool[prohibitedNestedInput, ToolResult](registry, "nested_bad", "bad", nil, ExposureLLM, EffectReadOnly, false); err == nil {
 		t.Fatal("nested prohibited field should fail")
+	}
+	// Effect 与 PolicyGate 同为注册期强约束：缺省或非法枚举必须在注册期报错。
+	if err := addTool[cleanInput, ToolResult](registry, "no_effect", "missing effect", nil, ExposureLLM, "", false); err == nil {
+		t.Fatal("missing Effect should fail registration")
+	}
+	if err := addTool[cleanInput, ToolResult](registry, "bogus_effect", "bad effect", nil, ExposureLLM, Effect("weird"), false); err == nil {
+		t.Fatal("invalid Effect should fail registration")
+	}
+	if _, exists := registry.specs["no_effect"]; exists {
+		t.Fatal("未标注 Effect 的工具不得进入注册表")
 	}
 
 	tool := registry.specs["clean"].Implementation.(einotool.InvokableTool)
