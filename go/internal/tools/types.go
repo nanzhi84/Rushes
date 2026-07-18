@@ -325,6 +325,7 @@ type SpeechWordEvidence struct {
 	TimelineEndFrame   *int   `json:"timeline_end_frame,omitempty"`
 	Text               string `json:"text"`
 	Punctuation        string `json:"punctuation,omitempty"`
+	Clamped            bool   `json:"clamped,omitempty"`
 }
 
 type SpeechUtteranceEvidence struct {
@@ -336,6 +337,7 @@ type SpeechUtteranceEvidence struct {
 	Text               string               `json:"text"`
 	Language           string               `json:"language,omitempty"`
 	Emotion            string               `json:"emotion,omitempty"`
+	Clamped            bool                 `json:"clamped,omitempty"`
 	Words              []SpeechWordEvidence `json:"words,omitempty"`
 }
 
@@ -350,6 +352,7 @@ type SpeechPauseEvidence struct {
 	DurationFrames             int    `json:"duration_frames"`
 	DeleteDurationFrames       int    `json:"delete_duration_frames"`
 	DetectionMethod            string `json:"detection_method,omitempty"`
+	Clamped                    bool   `json:"clamped,omitempty"`
 	PreviousText               string `json:"previous_text,omitempty"`
 	NextText                   string `json:"next_text,omitempty"`
 	PreviousWordID             string `json:"previous_word_id,omitempty"`
