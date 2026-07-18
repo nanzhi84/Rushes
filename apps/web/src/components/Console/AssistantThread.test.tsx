@@ -345,7 +345,7 @@ describe("AssistantThread Claude Code 式消息流", () => {
         onAnswerDecision={vi.fn()}
         answerPending={false}
         streamItems={[
-          { type: "memory", id: "memory_0", written_keys: ["pacing"], removed_keys: [], total: 1 }
+          { type: "memory", id: "memory_0", written_keys: ["pacing"], removed_keys: [] }
         ]}
         onOpenMemorySettings={onOpenMemorySettings}
       />

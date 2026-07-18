@@ -139,10 +139,13 @@ export function WorkspaceSettingsDialog({
                     }
                     disabled={mutationPending}
                     onDelete={() => handleDelete(memory.memory_key)}
-                    onSave={(statement) => {
+                    onSave={async (statement) => {
                       clearMemories.reset();
                       deleteMemory.reset();
-                      updateMemory.mutate({ memoryKey: memory.memory_key, statement });
+                      await updateMemory.mutateAsync({
+                        memoryKey: memory.memory_key,
+                        statement
+                      });
                     }}
                   />
                 ))}
@@ -259,19 +262,25 @@ function MemoryRow({
   saving: boolean;
   disabled: boolean;
   onDelete: () => void;
-  onSave: (statement: string) => void;
+  onSave: (statement: string) => Promise<void>;
 }): ReactElement {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(memory.statement);
   const trimmed = draft.trim();
   const canSave = trimmed.length > 0 && trimmed.length <= 200 && trimmed !== memory.statement;
 
-  const submit = (): void => {
+  const submit = async (): Promise<void> => {
     if (!canSave) {
       return;
     }
-    onSave(trimmed);
-    setEditing(false);
+    // 保存期间保持编辑态到 settled，「正在保存」才可见；成功后退出，失败保留草稿文本，
+    // 错误提示由父组件的 updateMemory.isError 展示。
+    try {
+      await onSave(trimmed);
+      setEditing(false);
+    } catch {
+      // 保留编辑态与草稿，供用户重试。
+    }
   };
 
   if (editing) {
@@ -304,7 +313,9 @@ function MemoryRow({
             type="button"
             className="rounded-sm bg-accent px-2 py-1 text-2xs font-medium text-white transition-colors hover:bg-accent-strong disabled:opacity-40"
             disabled={!canSave || saving}
-            onClick={submit}
+            onClick={() => {
+              void submit();
+            }}
           >
             {saving ? "正在保存" : "保存"}
           </button>

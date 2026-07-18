@@ -214,7 +214,6 @@ func (service *Service) toolMemoryUpdate(
 			"type":         TurnStreamMemoryUpdated,
 			"written_keys": result.UserMemory.WrittenKeys,
 			"removed_keys": result.UserMemory.RemovedKeys,
-			"total":        result.UserMemory.Total,
 		})
 	}
 	return rushestools.ToolResult{

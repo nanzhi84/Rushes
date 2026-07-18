@@ -27,7 +27,6 @@ export type StreamMemoryItem = {
   id: string;
   written_keys: string[];
   removed_keys: string[];
-  total: number;
 };
 
 // 消息、工具步与记忆卡片合并成按到达顺序排列的单一列表：前端据此把工具行内嵌在
@@ -119,7 +118,7 @@ export type TurnStreamEvent =
   | { type: "stream_gap" }
   | ({ type: "turn_ended" } & TurnEndedEvent)
   | { type: "turn_error"; message: string }
-  | { type: "memory_updated"; written_keys?: string[]; removed_keys?: string[]; total?: number };
+  | { type: "memory_updated"; written_keys?: string[]; removed_keys?: string[] };
 
 export type UseTurnStreamOptions = {
   onTurnEnded?: (event: TurnEndedEvent) => void;
@@ -254,8 +253,7 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
             type: "memory",
             id: `memory_${memoryCount}`,
             written_keys: written,
-            removed_keys: removed,
-            total: typeof event.total === "number" ? event.total : written.length
+            removed_keys: removed
           }
         ]
       };
