@@ -139,6 +139,7 @@ type ContextManifest struct {
 	HistoryVersion     int
 	HistoryItems       int
 	HasWorldStatePatch bool
+	HistoryTokens      int
 	NeedsCompaction    bool
 }
 
@@ -265,12 +266,19 @@ func (manager *ContextManager) build(
 		return ContextBuild{}, err
 	}
 	historyTokens := estimateHistoryTokens(checkpoint.Summary, history)
+	summaryTokens := approximateTokens(checkpoint.Summary)
+	// H3：上下文四段 token（reference/patch/summary/history）进度量，供上下文膨胀曲线观测。
+	recordContextSegmentTokens(
+		contextReferenceTokens(base), contextPatchTokens(patch),
+		summaryTokens, historyTokens-summaryTokens,
+	)
 	manifest := ContextManifest{
 		WindowID: checkpoint.WindowID, WindowNumber: checkpoint.WindowNumber,
 		ReferenceHash: baseHash, CurrentHash: currentHash,
 		HistoryVersion:     checkpoint.HistoryVersion + len(history),
 		HistoryItems:       len(history),
 		HasWorldStatePatch: len(patch) > 0,
+		HistoryTokens:      historyTokens,
 	}
 	manifest.NeedsCompaction = len(history) > manager.historyItemLimit ||
 		historyTokens > manager.historyTokenLimit
@@ -497,6 +505,28 @@ func estimateHistoryTokens(summary string, history []contextHistoryItem) int {
 		total += approximateTokens(item.message.Content) + 8
 	}
 	return total
+}
+
+// contextReferenceTokens 估算世界态参考快照段的 token；序列化失败时返回 0（度量尽力而为，
+// 绝不阻断上下文组装）。
+func contextReferenceTokens(base WorldStateSnapshot) int {
+	raw, err := base.Marshal()
+	if err != nil {
+		return 0
+	}
+	return approximateTokens(string(raw))
+}
+
+// contextPatchTokens 估算 RFC-7396 增量段的 token；无增量或失败时返回 0。
+func contextPatchTokens(patch map[string]any) int {
+	if len(patch) == 0 {
+		return 0
+	}
+	raw, err := json.Marshal(patch)
+	if err != nil {
+		return 0
+	}
+	return approximateTokens(string(raw))
 }
 
 func approximateTokens(value string) int {

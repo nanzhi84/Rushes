@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/cloudwego/eino/components/model"
@@ -142,6 +143,8 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	service.hub.Record(item.DraftID, StreamEvent{
 		"type": TurnStreamTurnStarted, "turn_id": turnID,
 	})
+	startedAt := time.Now()
+	slog.Info("turn_started", "turn_id", turnID, "draft_id", item.DraftID, "kind", string(item.Kind))
 	ctx = rushestools.WithDraftID(ctx, item.DraftID)
 	if item.Kind == QueueUserMessage {
 		ctx = withContextMessageBoundary(ctx, item.ItemID)
@@ -161,7 +164,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	// 只落 cancelled 终态，绝不合成 turn_failure；ctx.Err() 兜住后一种，与
 	// model_retry.go 的既有护栏写法一致。
 	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-		service.recordTurnEnded(item.DraftID, "cancelled", "user_cancelled", turnBudget, false)
+		service.recordTurnEnded(item.DraftID, turnID, startedAt, "cancelled", "user_cancelled", turnBudget, false)
 		return err
 	}
 	// H7:终态回复质检——夹带自我怀疑/中途推翻等过程性语句时,要求模型重述一次(最多 1 次)。
@@ -238,7 +241,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	if outcome == "finished" {
 		service.touchInjectedMemories(ctx, item.DraftID, injectedMemory.snapshot())
 	}
-	service.recordTurnEnded(item.DraftID, outcome, reason, turnBudget, reflectionRestated)
+	service.recordTurnEnded(item.DraftID, turnID, startedAt, outcome, reason, turnBudget, reflectionRestated)
 	return nil
 }
 
@@ -253,8 +256,21 @@ func observationDelivery(item QueueItem) *reducer.AgentJobObservationDeliveryRow
 	return &reducer.AgentJobObservationDeliveryRow{JobID: item.ItemID, ClaimToken: claimToken}
 }
 
+// lateToolCallDedupKey 为「终态直通后晚到的 tool_call」生成去重键：优先用 call ID，缺失时
+// 退回流式分片索引，再退回函数名，保证同一 call 的多个流片只计一次（#95 H5，H-B P2）。
+func lateToolCallDedupKey(call schema.ToolCall) string {
+	if call.ID != "" {
+		return call.ID
+	}
+	if call.Index != nil {
+		return fmt.Sprintf("idx:%d", *call.Index)
+	}
+	return "name:" + call.Function.Name
+}
+
 func (service *Service) recordTurnEnded(
-	draftID, outcome string, reason any, turnBudget *turnBudgetState, reflectionRestated bool,
+	draftID, turnID string, startedAt time.Time, outcome string, reason any,
+	turnBudget *turnBudgetState, reflectionRestated bool,
 ) {
 	turnEnded := StreamEvent{"type": TurnStreamTurnEnded, "outcome": outcome, "reason": reason}
 	if usage := turnBudget.usageSnapshot(); usage != nil {
@@ -265,6 +281,25 @@ func (service *Service) recordTurnEnded(
 		turnEnded["reflection_restated"] = true
 	}
 	service.hub.Record(draftID, turnEnded)
+
+	// H3 度量 + 结构化落盘：SSE 事件本身不动，以下都是附加侧信道（回合时长/结局分类、
+	// 累计 token 供缓存命中率、turn_ended 的 token 快照进结构化日志）。
+	durationMS := time.Since(startedAt).Milliseconds()
+	metricTurnDurationMS.Observe(durationMS)
+	recordTurnOutcome(outcome)
+	if reflectionRestated {
+		metricReflectionRestated.Inc()
+	}
+	modelCalls, promptTokens, cachedTokens := turnBudget.telemetrySnapshot()
+	metricPromptTokensTotal.Add(int64(promptTokens))
+	metricCachedPromptTokensTotal.Add(int64(cachedTokens))
+	slog.Info("turn_ended",
+		"turn_id", turnID, "draft_id", draftID, "outcome", outcome,
+		"duration_ms", durationMS, "model_calls", modelCalls,
+		"tool_rounds", max(0, modelCalls-1),
+		"prompt_tokens", promptTokens, "cached_prompt_tokens", cachedTokens,
+		"reflection_restated", reflectionRestated,
+	)
 }
 
 // touchInjectedMemories 在回合成功收尾后刷新本回合注入的用户记忆 last_used_at。
@@ -346,6 +381,7 @@ func (service *Service) streamAgent(
 	defer stream.Close()
 	var output strings.Builder
 	var roundUsage *schema.TokenUsage
+	seenLateToolCalls := map[string]struct{}{}
 	for {
 		message, receiveErr := stream.Recv()
 		if errors.Is(receiveErr, io.EOF) {
@@ -362,10 +398,20 @@ func (service *Service) streamAgent(
 		// 被执行。后果有界（用户看到未执行工具的正文，可继续下一轮），但必须可观测——告警 + 计数，
 		// 让假设在真实模型上可证伪、坏了能经 H3 聚合发现（#95 H5，决策 2 观测保护）。
 		if len(message.ToolCalls) > 0 {
-			passthroughLateToolCallCount.Add(1)
-			slog.Warn("终态轮直通后出现未执行的 tool_call，模型可能在正文之后才发起工具调用",
-				"draft_id", draftID, "message_id", messageID,
-				"tool_name", message.ToolCalls[0].Function.Name, "tool_calls", len(message.ToolCalls))
+			// 按 tool-call 去重计数：流式里同一个 call 会分多片抵达，只应计一次（H-B P2）；
+			// ID 缺失时退回 index/函数名做去重键。
+			for _, call := range message.ToolCalls {
+				key := lateToolCallDedupKey(call)
+				if _, seen := seenLateToolCalls[key]; seen {
+					continue
+				}
+				seenLateToolCalls[key] = struct{}{}
+				passthroughLateToolCallCount.Add(1)
+				metricPassthroughLateToolCalls.Inc()
+				slog.Warn("终态轮直通后出现未执行的 tool_call，模型可能在正文之后才发起工具调用",
+					"draft_id", draftID, "message_id", messageID,
+					"tool_name", call.Function.Name, "tool_call_id", call.ID)
+			}
 		}
 		// 终态回复直通流式（#95 H5）下，Stream 不再缓冲统计这一轮的用量；末片携带的 Usage
 		// 随流抵达，取最新一份（供应商通常在末片给全量），回合读尽后记一次账。
@@ -587,6 +633,9 @@ func (service *Service) modelMessages(ctx context.Context, draftID string) ([]*s
 		return nil, err
 	}
 	if build.Manifest.NeedsCompaction {
+		// H3：压缩触发计数 + 触发时的历史 token（供阈值校准，H-B P2）。
+		metricCompactionTriggered.Inc()
+		metricCompactionTriggerTokens.Observe(int64(build.Manifest.HistoryTokens))
 		if err := service.compactModelContext(ctx, draftID, build, true); err != nil {
 			return nil, err
 		}
@@ -626,6 +675,7 @@ func (service *Service) contextSummary(ctx context.Context, draftID, source stri
 		if err != nil {
 			reason = agentexec.TruncateText(err.Error(), 500)
 		}
+		metricCompactionDegraded.Inc()
 		service.hub.Record(draftID, StreamEvent{
 			"type": TurnStreamContextCompactionFailed, "reason": reason,
 			"fallback": "deterministic_bounded_summary",

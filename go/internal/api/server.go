@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/nanzhi84/Rushes/go/internal/agent"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
+	"github.com/nanzhi84/Rushes/go/internal/telemetry"
 )
 
 type Picker func(context.Context, string) ([]string, bool)
@@ -101,6 +102,9 @@ func (server *Server) Handler() http.Handler {
 	router.Get("/healthz", func(writer http.ResponseWriter, _ *http.Request) {
 		writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	// H3：进程级度量走 expvar，挂在 /debug 而非 /api 下——securityMiddleware 只守 /api/*，
+	// 故本地可直接读，且不入 OpenAPI 冻结面（make contracts 零 diff）。
+	router.Handle("/debug/metrics", telemetry.Handler())
 	return HandlerFromMuxWithBaseURL(server, router, "")
 }
 

@@ -78,8 +78,7 @@ func (state *toolRecoveryState) beforeCall(name, arguments string) recoveryDecis
 	if previous, exists := state.failedCalls[fingerprint]; exists {
 		state.repairFailures++
 		state.cumulativeRepairFailures++
-		state.exhausted = state.repairFailures >= maxModelRepairAttempts ||
-			state.cumulativeRepairFailures >= maxCumulativeRepairAttempts
+		state.evaluateExhaustion()
 		state.latest = previous
 		return recoveryDecision{
 			blocked: true, duplicate: true, exhausted: state.exhausted,
@@ -99,8 +98,7 @@ func (state *toolRecoveryState) recordFailure(snapshot toolFailureSnapshot) reco
 	} else {
 		state.repairFailures++
 	}
-	state.exhausted = state.repairFailures >= maxModelRepairAttempts ||
-		state.cumulativeRepairFailures >= maxCumulativeRepairAttempts
+	state.evaluateExhaustion()
 	state.failedCalls[toolCallFingerprint(snapshot.Tool, snapshot.Arguments)] = snapshot
 	state.latest = snapshot
 	return recoveryDecision{
@@ -122,9 +120,30 @@ func (state *toolRecoveryState) recordSuccess(_ string) {
 	state.rootTool = ""
 	state.repairFailures = 0
 	// 累计修复计数是 turn 级、不因单次成功重置（#95 H4）：交替 fail→success 不能无限
-	// 刷新预算。连击照常清零，但累计到阈值仍维持穷尽。
-	state.exhausted = state.cumulativeRepairFailures >= maxCumulativeRepairAttempts
+	// 刷新预算。连击照常清零，但累计到阈值仍维持穷尽（evaluateExhaustion 会把这类
+	// 「连击已清零、累计仍超」的穷尽记成 cumulative 分因，即 H-B P2「预算重叠」信号）。
+	state.evaluateExhaustion()
 	state.latest = toolFailureSnapshot{}
+}
+
+// evaluateExhaustion 在持锁下把穷尽从 false 翻成 true（累计计数只增不减，不会反向），并按
+// 分因记度量一次：streak = 连击超限；cumulative = 连击未超但 turn 级累计超限（交替
+// fail→success 被累计计数挡住，H4 / H-B P2「预算重叠」）。
+func (state *toolRecoveryState) evaluateExhaustion() {
+	if state.exhausted {
+		return
+	}
+	streak := state.repairFailures >= maxModelRepairAttempts
+	cumulative := state.cumulativeRepairFailures >= maxCumulativeRepairAttempts
+	if !streak && !cumulative {
+		return
+	}
+	state.exhausted = true
+	if cumulative && !streak {
+		metricRecoveryCumulativeExhausted.Inc()
+	} else {
+		metricRecoveryStreakExhausted.Inc()
+	}
 }
 
 func (state *toolRecoveryState) unresolved() bool {

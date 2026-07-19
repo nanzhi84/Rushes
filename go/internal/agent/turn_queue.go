@@ -200,6 +200,7 @@ func (queue *TurnQueue) enqueue(item QueueItem, onlyIfIdle bool) bool {
 	worker.pending.Add(1)
 	worker.producers.Add(1)
 	worker.pendingCount++
+	metricTurnQueueDepth.Add(1)
 	worker.mu.Unlock()
 	queue.mu.Unlock()
 	select {
@@ -529,6 +530,7 @@ func (queue *TurnQueue) runWorker(worker *draftWorker) {
 func (queue *TurnQueue) finishPending(worker *draftWorker) {
 	worker.mu.Lock()
 	worker.pendingCount--
+	metricTurnQueueDepth.Add(-1)
 	if worker.pendingCount == 0 {
 		close(worker.drained)
 	}

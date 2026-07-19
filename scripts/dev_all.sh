@@ -145,7 +145,7 @@ if [[ "$ready" != 1 ]]; then
   exit 1
 fi
 
-RUSHES_WORKSPACE_PATH="$WORKSPACE" \
+RUSHES_WORKSPACE_PATH="$WORKSPACE" RUSHES_WORKER_METRICS_ADDR="127.0.0.1:$((API_PORT + 1))" \
   "$BIN_DIR/rushes-worker" -env-file "$ROOT/.env" -workspace "$WORKSPACE" &
 pids+=("$!")
 
@@ -160,6 +160,8 @@ echo "  Rushes Go 全栈已启动："
 echo "  日常访问：http://127.0.0.1:$WEB_PORT"
 echo "  首次登录：http://127.0.0.1:$WEB_PORT/#t=$TOKEN"
 echo "  API :$API_PORT · workspace: $WORKSPACE · Ctrl+C 全停"
+echo "  日志 :$WORKSPACE/logs/{api,worker}.log（JSON 结构化，按大小轮转，同时镜像到本终端）"
+echo "  度量 :API http://127.0.0.1:$API_PORT/debug/metrics · worker http://127.0.0.1:$((API_PORT + 1))/debug/metrics"
 echo "════════════════════════════════════════════════════"
 
 while true; do

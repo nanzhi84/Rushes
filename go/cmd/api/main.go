@@ -21,6 +21,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
+	"github.com/nanzhi84/Rushes/go/internal/telemetry"
 )
 
 func main() {
@@ -53,6 +54,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// H3：把结构化 JSON 日志落盘到 workspace logs/api.log（按大小轮转），同时镜像到 stderr
+	// 让 dev 终端仍可见。defer 先注册、后于 database.Close 执行，保证关库时的错误日志能落盘。
+	logCloser, err := telemetry.InstallJSONLogger(database.Paths.Logs, "api", os.Stderr)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = logCloser.Close() }()
 	media.ConfigureFFmpegSandbox(
 		[]string{database.Paths.Objects, database.Paths.Temporary, database.Paths.Segments, database.Paths.Cache},
 		[]string{database.Paths.Temporary},
