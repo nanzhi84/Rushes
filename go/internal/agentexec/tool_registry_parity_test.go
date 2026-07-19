@@ -53,7 +53,10 @@ func TestExecutorRoutesEveryRegisteredLLMTool(t *testing.T) {
 // 因空参数或空 draft 返回的业务错误、甚至 panic，都说明 case 存在、路由成立，返回空串。
 func executorFailedToRoute(ctx context.Context, exec *Executor, name string, input any) (unrouted string) {
 	defer func() {
-		// case 命中后领域逻辑对零值参数的 panic 与 parity 无关，恢复即视为已路由。
+		// 前置假设：Executor.ExecuteTool 的 default（未路由）分支只 return 一个 error，绝不
+		// panic。因此任何被这里恢复的 panic 都必然来自某个已命中的 case 里的领域逻辑（对零值
+		// 参数），即路由已成立、与 parity 无关，恢复即视为已路由。若哪天 default 改成会 panic，
+		// 本兜底会掩盖漏 case——故该前置假设必须随 default 分支一起维护。
 		_ = recover()
 	}()
 	if _, err := exec.ExecuteTool(ctx, name, input); err != nil &&

@@ -25,6 +25,15 @@ func internalRoot(t *testing.T) string {
 // errorCodeLiteralPatterns 覆盖仓库里 error_code 字面量的三种写法：JSON 键映射、结构体
 // 字面量字段、结构体字段赋值。结构体字段定义（ErrorCode string `json:"error_code,..."`）
 // 与字段读取（item.ErrorCode = issue.ErrorCode）都不带 `: "值"`，刻意不匹配。
+//
+// 已知边界（评审记录）：
+//   - 扫描器不解析 Go 语法，注释里出现的 error_code 字面量也会被计入。这是刻意从严——宁可
+//     要求注释示例码也登记，也不放过真实漏登记；文档若要举一个未登记的假想码，避开
+//     `"error_code": "x"` 这个精确形态即可。
+//   - 间接置码路径（如 plan.update 经 planUpdateFailure 把 data["reason"] 复制进 error_code）
+//     不产生 `"error_code": "literal"` 形态，扫描器看不到。这类路径靠「reason 值一律引用
+//     ErrCode* 常量」的约定保证登记，而非本扫描；agent/agentexec 零裸字面量的守卫兜底了
+//     「有人改回裸串」的回归。
 var errorCodeLiteralPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`"error_code"\s*:\s*"([^"]+)"`),
 	regexp.MustCompile(`\bErrorCode\s*:\s*"([^"]+)"`),
@@ -144,16 +153,16 @@ func TestToolVocabularyAccessors(t *testing.T) {
 	if ToolErrorCodeRegistered("definitely_not_registered") {
 		t.Error("未声明的 error_code 不应被识别为已注册")
 	}
-	if got := RegisteredToolErrorCodes(); len(got) != len(allToolErrorCodes) {
-		t.Errorf("RegisteredToolErrorCodes 返回 %d 项，期望 %d", len(got), len(allToolErrorCodes))
+	if got := listRegisteredToolErrorCodes(); len(got) != len(allToolErrorCodes) {
+		t.Errorf("listRegisteredToolErrorCodes 返回 %d 项，期望 %d", len(got), len(allToolErrorCodes))
 	}
-	if !ToolStatusRegistered(string(StatusSucceeded)) {
+	if !toolStatusRegistered(string(StatusSucceeded)) {
 		t.Error("已声明的 status 应被识别为已注册")
 	}
-	if ToolStatusRegistered("definitely_not_a_status") {
+	if toolStatusRegistered("definitely_not_a_status") {
 		t.Error("未声明的 status 不应被识别为已注册")
 	}
-	if got := RegisteredToolStatuses(); len(got) != len(allToolStatuses) {
-		t.Errorf("RegisteredToolStatuses 返回 %d 项，期望 %d", len(got), len(allToolStatuses))
+	if got := listRegisteredToolStatuses(); len(got) != len(allToolStatuses) {
+		t.Errorf("listRegisteredToolStatuses 返回 %d 项，期望 %d", len(got), len(allToolStatuses))
 	}
 }

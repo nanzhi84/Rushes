@@ -13,6 +13,12 @@ package tools
 // （agentexec/tool_exec_render.go 的 renderJobResult：pending/running 归一为 queued，
 // succeeded 保持，其余 job 状态如 failed 原样透传）。因此 ToolResult.Status 不是封闭枚举，
 // 这里的常量只登记 harness 自身直接产出的规范状态，render 透传路径刻意不迁移为常量。
+//
+// 口径说明：与 ToolErrorCode 不同，ToolStatus 是「集中定义、不做棘轮守卫」——不对源码做
+// status 字面量扫描。原因有二：Status 是众多非 ToolResult 结构体（job/asset/understand 等）
+// 的通用字段名，逐字面量扫描会大量误伤且需维护排除清单；render 透传路径本就动态、无法登记。
+// 故这里只提供集中定义与集合完整性校验（无重复/无空值），ToolResult.Status 迁移的完备性靠
+// golden/contract/race 全绿佐证，而非源码棘轮。
 type ToolStatus string
 
 const (
@@ -147,24 +153,26 @@ var registeredToolStatuses = func() map[ToolStatus]struct{} {
 	return set
 }()
 
-// ToolErrorCodeRegistered 报告给定字面量是否属于中央注册集合。
+// ToolErrorCodeRegistered 报告给定字面量是否属于中央注册集合。它支撑 error_code 扫描守卫，
+// 是本文件唯一对外导出的查询接口；其余查询辅助仅测试消费，保持非导出。
 func ToolErrorCodeRegistered(code string) bool {
 	_, ok := registeredToolErrorCodes[ToolErrorCode(code)]
 	return ok
 }
 
-// RegisteredToolErrorCodes 返回注册集合的副本，供守卫测试与诊断使用。
-func RegisteredToolErrorCodes() []ToolErrorCode {
+// listRegisteredToolErrorCodes 返回注册集合的副本，仅供同包测试做完整性/诊断使用。
+func listRegisteredToolErrorCodes() []ToolErrorCode {
 	return append([]ToolErrorCode(nil), allToolErrorCodes...)
 }
 
-// ToolStatusRegistered 报告给定字面量是否属于规范状态集合（不含 render 透传的 job 状态）。
-func ToolStatusRegistered(status string) bool {
+// toolStatusRegistered 报告给定字面量是否属于规范状态集合（不含 render 透传的 job 状态），
+// 仅供同包测试使用。
+func toolStatusRegistered(status string) bool {
 	_, ok := registeredToolStatuses[ToolStatus(status)]
 	return ok
 }
 
-// RegisteredToolStatuses 返回规范状态集合的副本。
-func RegisteredToolStatuses() []ToolStatus {
+// listRegisteredToolStatuses 返回规范状态集合的副本，仅供同包测试使用。
+func listRegisteredToolStatuses() []ToolStatus {
 	return append([]ToolStatus(nil), allToolStatuses...)
 }
