@@ -27,6 +27,14 @@ export type StreamMemoryItem = {
   id: string;
   written_keys: string[];
   removed_keys: string[];
+  entries: StreamMemoryEntry[];
+};
+
+export type StreamMemoryEntry = {
+  key: string;
+  kind: string;
+  statement: string;
+  evidence_quote: string;
 };
 
 // 消息、工具步与记忆卡片合并成按到达顺序排列的单一列表：前端据此把工具行内嵌在
@@ -118,7 +126,12 @@ export type TurnStreamEvent =
   | { type: "stream_gap" }
   | ({ type: "turn_ended" } & TurnEndedEvent)
   | { type: "turn_error"; message: string }
-  | { type: "memory_updated"; written_keys?: string[]; removed_keys?: string[] };
+  | {
+      type: "memory_updated";
+      written_keys?: string[];
+      removed_keys?: string[];
+      entries?: unknown[];
+    };
 
 export type UseTurnStreamOptions = {
   onTurnEnded?: (event: TurnEndedEvent) => void;
@@ -237,6 +250,30 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
       const removed = Array.isArray(event.removed_keys)
         ? event.removed_keys.filter((key): key is string => typeof key === "string")
         : [];
+      const entries = Array.isArray(event.entries)
+        ? event.entries.flatMap((entry) => {
+            if (typeof entry !== "object" || entry === null) {
+              return [];
+            }
+            const value = entry as Record<string, unknown>;
+            if (
+              typeof value.key !== "string" ||
+              typeof value.kind !== "string" ||
+              typeof value.statement !== "string" ||
+              typeof value.evidence_quote !== "string"
+            ) {
+              return [];
+            }
+            return [
+              {
+                key: value.key,
+                kind: value.kind,
+                statement: value.statement,
+                evidence_quote: value.evidence_quote
+              }
+            ];
+          })
+        : [];
       if (written.length === 0 && removed.length === 0) {
         return state;
       }
@@ -253,7 +290,8 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
             type: "memory",
             id: `memory_${memoryCount}`,
             written_keys: written,
-            removed_keys: removed
+            removed_keys: removed,
+            entries
           }
         ]
       };

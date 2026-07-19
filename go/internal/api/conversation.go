@@ -108,7 +108,7 @@ func (server *Server) ClearDraftConversationApiDraftsDraftIdConversationClearPos
 		return
 	}
 	if result.Status != reducer.StatusApplied {
-		writeReducerResult(writer, result)
+		server.writeConversationClearReducerResult(writer, result)
 		return
 	}
 	writeJSON(writer, http.StatusOK, ConversationClearResponse{
@@ -116,6 +116,19 @@ func (server *Server) ClearDraftConversationApiDraftsDraftIdConversationClearPos
 		Preserved: []string{"assets", "material_understanding", "timeline", "preview"},
 		Status:    ConversationClearResponseStatus("cleared"),
 	})
+}
+
+func (server *Server) writeConversationClearReducerResult(writer http.ResponseWriter, result reducer.Result) {
+	// IsBusy 只是快速前检；前检后若回合抢先写入，BaseVersion 冲突才是最终
+	// 并发判据。此端点只有清空对话这一种带版本写入，冲突即说明前检后状态已被
+	// 其他回合推进；稳定映射为 turn_active，不能再读取可能已结束的瞬时队列状态。
+	if result.Status == reducer.StatusVersionConflict {
+		writeJSON(writer, http.StatusConflict, map[string]any{
+			"detail": map[string]string{"reason": "turn_active"},
+		})
+		return
+	}
+	writeReducerResult(writer, result)
 }
 
 func (server *Server) ListDraftMessagesApiDraftsDraftIdMessagesGet(
@@ -170,6 +183,23 @@ func (server *Server) CancelCurrentTurnApiDraftsDraftIdTurnCancelPost(
 		return
 	}
 	barrier, stopped := server.agent.Queue().BeginDraftCancellation(draftID)
+	if stopped {
+		// 取消本身必须成为持久会话事实，否则“最后可见消息仍是 user”的草稿会在
+		// 下次启动时被 O1 对账误判为崩溃丢回合并复活。它不是 assistant 回复，
+		// 只是一条现有 messages 事实源中的系统观察，因此不新增表或 SSE 契约。
+		result, persistErr := reducer.Apply(request.Context(), server.database, nil, reducer.Options{
+			Actor: contracts.ActorUser,
+			ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
+				ID: newID("turn_cancelled"), DraftID: draftID,
+				Role: "system_observation", Kind: "turn_cancelled", Content: "用户已停止当前任务。",
+			}},
+		})
+		if persistErr != nil || result.Status != reducer.StatusApplied {
+			barrier.Abandon()
+			server.internalError(writer, errors.Join(persistErr, fmt.Errorf("持久化 turn 取消状态: %s", result.Status)))
+			return
+		}
+	}
 	cleanupCtx, cancelCleanup := turnCancellationContext(request.Context())
 	defer cancelCleanup()
 	jobBoundary, err := server.turnCancellationJobBoundary(cleanupCtx)

@@ -102,7 +102,7 @@ func run() error {
 			return err
 		}
 	}
-	agentService, err := agent.NewServiceWithModels(context.Background(), database, tiers.Chat, tiers.Vision)
+	agentService, err := agent.NewServiceWithModelsForStartup(context.Background(), database, tiers.Chat, tiers.Vision)
 	if err != nil {
 		return err
 	}
@@ -122,6 +122,13 @@ func run() error {
 		}
 		agentService.SetSpeechRecognizer(recognizer)
 	}
+	// O1：消息/决策先经 reducer 落库、再进入内存 TurnQueue。若进程在两步之间
+	// 崩溃，启动时从持久状态推导未完成回合并补驱；监听端口前同步完成扫描，查询
+	// 失败则拒绝以“看似可用、实际遗留对话永远卡住”的状态启动。
+	if err := agentService.ReconcilePersistedTurns(context.Background()); err != nil {
+		return fmt.Errorf("启动对账未完成回合: %w", err)
+	}
+	agentService.StartJobObservationBridge()
 
 	server, err := api.NewServer(api.Config{
 		Database: database, Token: token, Port: port,

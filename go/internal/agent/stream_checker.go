@@ -32,6 +32,31 @@ const (
 // 检测并 +1（同时 slog.Warn），H3 度量落地后据此聚合暴露（#95 H5，决策 2 观测保护）。
 var passthroughLateToolCallCount atomic.Int64
 
+// defaultStreamToolCallChecker 与 Eino ReAct 默认 checker 对齐：跳过前导空块，只看
+// 第一块可判定内容。自建并发图允许调用方传 nil 时必须回退到它，不能 nil dereference。
+func defaultStreamToolCallChecker(
+	_ context.Context,
+	stream *schema.StreamReader[*schema.Message],
+) (bool, error) {
+	defer stream.Close()
+	for {
+		message, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if message != nil && len(message.ToolCalls) > 0 {
+			return true, nil
+		}
+		if message == nil || len(message.Content) == 0 {
+			continue
+		}
+		return false, nil
+	}
+}
+
 // classifyModelChunk 按「先到先判」规则归类单个分片：首个 tool_call 判工具调用轮、首个非空
 // Content 判终态文本轮，二者都未出现时是前导分片。它依赖当前工具模型的约定——真正的工具轮在
 // tool_call 之前不会吐可见 Content（思考走 ReasoningContent）。这个约定让终态文本轮能在首个

@@ -173,6 +173,14 @@ func (service *Service) pendingJobObservations(ctx context.Context) ([]bridgeObs
 }
 
 func (service *Service) dispatchJobObservation(ctx context.Context, observation bridgeObservation) bool {
+	return service.enqueueJobObservation(ctx, observation, false)
+}
+
+func (service *Service) enqueueJobObservation(
+	ctx context.Context,
+	observation bridgeObservation,
+	onlyIfIdle bool,
+) bool {
 	jobID, draftID, claimToken := observation.jobID, observation.draftID, observation.claimToken
 	event := observation.event
 	if event == nil {
@@ -209,7 +217,7 @@ func (service *Service) dispatchJobObservation(ctx context.Context, observation 
 		}
 		service.releaseJobObservation(jobID)
 	}
-	if !service.queue.Enqueue(item) {
+	if !service.queue.enqueue(item, onlyIfIdle) {
 		service.releaseJobObservation(jobID)
 		return false
 	}

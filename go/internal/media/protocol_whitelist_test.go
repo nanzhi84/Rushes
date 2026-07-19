@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -183,12 +186,52 @@ func TestMediaExecConfinedToProcessWrapper(t *testing.T) {
 			t.Fatalf("读取 %s 失败: %v", name, err)
 		}
 		if bytes.Contains(data, []byte("exec.Command")) {
-			t.Errorf("%s 直接调用 exec.Command，绕过了 process.go 的协议白名单封装；请改用 RunCommand/RunFFmpegProgress", name)
+			t.Errorf("%s 直接调用 exec.Command，绕过了 process.go 的媒体进程封装；请改用 RunCommand/RunFFmpegProgress/RunFFmpegLines", name)
 		}
 	}
 }
 
-func TestNoRawFFmpegExecInRepo(t *testing.T) {
+func TestProcessWrapperHasExactlyThreeCommandContextEntrypoints(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "process.go", nil, 0)
+	if err != nil {
+		t.Fatalf("解析 process.go 失败: %v", err)
+	}
+	want := map[string]int{
+		"RunCommand": 1, "RunFFmpegProgress": 1, "RunFFmpegLines": 1,
+	}
+	got := make(map[string]int, len(want))
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || function.Body == nil {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "CommandContext" {
+				return true
+			}
+			packageName, ok := selector.X.(*ast.Ident)
+			if ok && packageName.Name == "exec" {
+				got[function.Name.Name]++
+			}
+			return true
+		})
+	}
+	if len(got) != len(want) {
+		t.Fatalf("process.go 的 exec.CommandContext 只能位于三个媒体 wrapper，实际分布=%v", got)
+	}
+	for function, count := range want {
+		if got[function] != count {
+			t.Errorf("%s 应恰有 %d 个 exec.CommandContext，实际 %d（完整分布=%v）", function, count, got[function], got)
+		}
+	}
+}
+
+func TestNoRawMediaExecInRepo(t *testing.T) {
 	goRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
 	if err != nil {
 		t.Fatalf("定位 go 模块根失败: %v", err)
@@ -214,13 +257,17 @@ func TestNoRawFFmpegExecInRepo(t *testing.T) {
 		if !bytes.Contains(data, []byte("exec.Command")) {
 			return nil
 		}
-		if !bytes.Contains(data, []byte("ffmpeg")) && !bytes.Contains(data, []byte("ffprobe")) {
+		mentionsMediaTool := false
+		for _, name := range []string{"ffmpeg", "ffprobe", "aubiotrack", "aubioonset", "fc-scan"} {
+			mentionsMediaTool = mentionsMediaTool || bytes.Contains(data, []byte(name))
+		}
+		if !mentionsMediaTool {
 			return nil
 		}
 		if filepath.Base(path) == "process.go" && filepath.Base(filepath.Dir(path)) == "media" {
 			return nil
 		}
-		t.Errorf("%s 直接 exec 执行 ffmpeg/ffprobe，绕过了 media/process.go 的协议白名单封装", path)
+		t.Errorf("%s 直接 exec 执行媒体解析器，绕过了 RunCommand/RunFFmpegProgress/RunFFmpegLines", path)
 		return nil
 	})
 	if walkErr != nil {

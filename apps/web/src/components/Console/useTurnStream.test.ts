@@ -256,7 +256,19 @@ describe("reduceTurnStream · memory_updated", () => {
   it("写入成功追加一张记忆卡片项，id 稳定且 replay 可重建", () => {
     const events: TurnStreamEvent[] = [
       { type: "turn_started", turn_id: "turn_1" },
-      { type: "memory_updated", written_keys: ["pacing"], removed_keys: [] }
+      {
+        type: "memory_updated",
+        written_keys: ["pacing"],
+        removed_keys: [],
+        entries: [
+          {
+            key: "pacing",
+            kind: "preference",
+            statement: "成片节奏偏快",
+            evidence_quote: "以后都快一点"
+          }
+        ]
+      }
     ];
     const first = apply(events);
     const memories = first.items.filter((item) => item.type === "memory");
@@ -265,7 +277,15 @@ describe("reduceTurnStream · memory_updated", () => {
       type: "memory",
       id: "memory_0",
       written_keys: ["pacing"],
-      removed_keys: []
+      removed_keys: [],
+      entries: [
+        {
+          key: "pacing",
+          kind: "preference",
+          statement: "成片节奏偏快",
+          evidence_quote: "以后都快一点"
+        }
+      ]
     });
     // 相同事件序列重放得到同样的 id，保证虚拟化 key 稳定。
     expect(apply(events)).toEqual(first);
@@ -274,8 +294,24 @@ describe("reduceTurnStream · memory_updated", () => {
   it("既无写入也无移除的记忆事件被忽略", () => {
     const state = apply([
       { type: "turn_started", turn_id: "turn_1" },
-      { type: "memory_updated", written_keys: [], removed_keys: [] }
+      { type: "memory_updated", written_keys: [], removed_keys: [], entries: [] }
     ]);
     expect(state.items.filter((item) => item.type === "memory")).toHaveLength(0);
+  });
+
+  it("兼容没有 entries 的旧 memory_updated 回放帧", () => {
+    const state = apply([
+      { type: "turn_started", turn_id: "turn_legacy" },
+      { type: "memory_updated", written_keys: ["pacing"], removed_keys: [] }
+    ]);
+    expect(state.items.filter((item) => item.type === "memory")).toEqual([
+      {
+        type: "memory",
+        id: "memory_0",
+        written_keys: ["pacing"],
+        removed_keys: [],
+        entries: []
+      }
+    ]);
   });
 });

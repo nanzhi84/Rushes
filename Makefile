@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 PNPM := npx -y pnpm@10.13.1
 
-.PHONY: dev install-web generate contracts test coverage lint web e2e check
+.PHONY: dev install-web generate contracts test coverage lint vet-integration web e2e check
 
 dev:
 	bash scripts/dev_all.sh
@@ -26,6 +26,9 @@ coverage:
 lint:
 	cd go && go vet ./...
 	cd go && golangci-lint run --timeout=5m
+
+vet-integration:
+	cd go && go vet -tags=integration ./...
 
 web:
 	$(PNPM) --dir apps/web typecheck

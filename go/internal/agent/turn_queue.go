@@ -267,13 +267,30 @@ func (queue *TurnQueue) EnqueueJobObservation(draftID, jobID string, event map[s
 }
 
 func (queue *TurnQueue) EnqueueUIObservation(draftID, itemID, observationType string, payload map[string]any) bool {
+	return queue.enqueueUIObservation(draftID, itemID, observationType, payload, false)
+}
+
+// EnqueueUIObservationIfIdle 是启动对账的决策续跑入口。与 user-message 补驱共用
+// pendingCount 原子空闲守卫，重复扫描或同一轮扫描里的并发调用至多补入一个回合。
+func (queue *TurnQueue) EnqueueUIObservationIfIdle(
+	draftID, itemID, observationType string,
+	payload map[string]any,
+) bool {
+	return queue.enqueueUIObservation(draftID, itemID, observationType, payload, true)
+}
+
+func (queue *TurnQueue) enqueueUIObservation(
+	draftID, itemID, observationType string,
+	payload map[string]any,
+	onlyIfIdle bool,
+) bool {
 	values := map[string]any{"observation_type": observationType}
 	for key, value := range payload {
 		values[key] = value
 	}
-	return queue.Enqueue(QueueItem{
+	return queue.enqueue(QueueItem{
 		DraftID: draftID, Kind: QueueUIObservation, ItemID: itemID, Payload: values,
-	})
+	}, onlyIfIdle)
 }
 
 func (queue *TurnQueue) RequestStop(draftID string) bool {

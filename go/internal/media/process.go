@@ -46,8 +46,8 @@ func (err *CommandError) Unwrap() error { return err.Err }
 const ffmpegProtocolWhitelist = "file,pipe"
 
 // isFFmpegFamily 按可执行文件基名判断是否为 ffmpeg 或 ffprobe，容忍绝对路径与
-// Windows 的 .exe 后缀。fc-scan、aubiotrack、aubioonset 等其它外部命令不在此列，
-// 不会被注入协议白名单。
+// Windows 的 .exe 后缀。其它媒体解析器也走 Seatbelt，但不支持 ffmpeg 的协议参数，
+// 因而不会被注入协议白名单。
 func isFFmpegFamily(name string) bool {
 	base := strings.ToLower(filepath.Base(name))
 	base = strings.TrimSuffix(base, ".exe")
@@ -175,7 +175,9 @@ func RunFFmpegLines(
 ) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	command := exec.CommandContext(ctx, ffmpeg, injectProtocolWhitelist(ffmpeg, args)...)
+	plan := planSandbox(ffmpeg, injectProtocolWhitelist(ffmpeg, args))
+	defer plan.cleanup()
+	command := exec.CommandContext(ctx, plan.name, plan.args...)
 	configureProcess(command)
 	stdout, err := command.StdoutPipe()
 	if err != nil {

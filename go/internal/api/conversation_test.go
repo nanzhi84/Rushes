@@ -28,6 +28,22 @@ type cancellationBlockingModel struct {
 	release chan struct{}
 }
 
+func TestConversationClearVersionConflictAlwaysMapsToTurnActive(t *testing.T) {
+	server, _ := testServer(t, t.TempDir(), 0)
+	recorder := httptest.NewRecorder()
+	server.writeConversationClearReducerResult(recorder, reducer.Result{
+		Status: reducer.StatusVersionConflict,
+		Conflict: &reducer.VersionConflict{
+			DraftID: "draft_idle", ActualStateVersion: 3, EventType: "ConversationContextCleared",
+		},
+	})
+	if recorder.Code != http.StatusConflict ||
+		!strings.Contains(recorder.Body.String(), `"reason":"turn_active"`) ||
+		strings.Contains(recorder.Body.String(), `"reason":"version_conflict"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func (stub *cancellationBlockingModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return stub, nil
 }
@@ -342,6 +358,14 @@ func TestCancelCurrentTurnReturnsBoundedAndProtectsLaterJobs(t *testing.T) {
 	}
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"requested":true`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var markerRole, markerKind, markerContent string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT role,kind,content FROM messages
+		WHERE draft_id='draft_bounded_cancel' ORDER BY rowid DESC LIMIT 1`,
+	).Scan(&markerRole, &markerKind, &markerContent); err != nil ||
+		markerRole != "system_observation" || markerKind != "turn_cancelled" || markerContent == "" {
+		t.Fatalf("取消持久标记 role=%q kind=%q content=%q err=%v", markerRole, markerKind, markerContent, err)
 	}
 	var status string
 	if err := database.Read().QueryRowContext(t.Context(),

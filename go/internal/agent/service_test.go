@@ -488,11 +488,16 @@ done:
 
 func TestReactAgentMakesBudgetVisibleAndAllowsFortyToolRounds(t *testing.T) {
 	t.Parallel()
-	if maxToolRoundsPerTurn != 40 || maxReActStepsPerTurn != 81 {
+	if maxToolRoundsPerTurn != 40 || maxReActStepsPerTurn != reactStepsForToolRounds(maxToolRoundsPerTurn) {
 		t.Fatalf(
 			"budget policy hard=%d steps=%d",
 			maxToolRoundsPerTurn, maxReActStepsPerTurn,
 		)
+	}
+	for rounds, want := range map[int]int{-1: 1, 0: 1, 1: 3, 40: 81} {
+		if got := reactStepsForToolRounds(rounds); got != want {
+			t.Fatalf("reactStepsForToolRounds(%d)=%d want=%d", rounds, got, want)
+		}
 	}
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_tool_round_budget")

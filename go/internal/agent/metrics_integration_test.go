@@ -100,6 +100,8 @@ func TestTurnEmitsStructuredLogAndMetrics(t *testing.T) {
 	for _, name := range []string{
 		"agent_turn_finished_total", "agent_model_call_ms", "agent_turn_duration_ms",
 		"agent_context_history_tokens", "agent_cached_prompt_hit_ratio",
+		"agent_user_memory_total", "agent_user_memory_injected", "agent_user_memory_omitted",
+		"agent_user_memory_section_runes", "agent_user_memory_truncated",
 	} {
 		if !strings.Contains(body, name) {
 			t.Fatalf("/debug/metrics 缺少度量 %q", name)

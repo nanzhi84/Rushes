@@ -196,10 +196,25 @@ func (exec *Executor) toolMemoryUpdate(
 	// 写入成功发专门 turn-stream 事件，前端据此渲染「已记住/已更新长期记忆」卡片并直链设置面板。
 	// 执行器不依赖引擎 hub，经注入的 recordProgress 上报;引擎装配把它接到 hub.Record。
 	if len(result.UserMemory.WrittenKeys) > 0 || len(result.UserMemory.RemovedKeys) > 0 {
+		written := make(map[string]struct{}, len(result.UserMemory.WrittenKeys))
+		for _, key := range result.UserMemory.WrittenKeys {
+			written[key] = struct{}{}
+		}
+		entries := make([]map[string]any, 0, len(written))
+		for _, row := range rows {
+			if _, ok := written[row.Key]; !ok {
+				continue
+			}
+			entries = append(entries, map[string]any{
+				"key": row.Key, "kind": row.Kind,
+				"statement": row.Statement, "evidence_quote": row.EvidenceQuote,
+			})
+		}
 		exec.recordProgress(draftID, map[string]any{
-			"type":         TurnStreamMemoryUpdated,
+			"type":         contracts.TurnStreamMemoryUpdated,
 			"written_keys": result.UserMemory.WrittenKeys,
 			"removed_keys": result.UserMemory.RemovedKeys,
+			"entries":      entries,
 		})
 	}
 	return rushestools.ToolResult{

@@ -28,10 +28,17 @@ const (
 	// 单个工具节点会执行该 assistant 消息中的全部 tool_calls，因此这里限制
 	// 的是模型与工具的往返轮数。预留最后一次模型节点生成终态回复。
 	maxToolRoundsPerTurn               = 40
-	maxReActStepsPerTurn               = maxToolRoundsPerTurn*2 + 1
 	contextCompactionSummaryRuneLimit  = 4000
 	contextCompactionFallbackRuneLimit = 3000
 )
+
+var maxReActStepsPerTurn = reactStepsForToolRounds(maxToolRoundsPerTurn)
+
+// reactStepsForToolRounds 把“模型→工具”往返预算换成 Eino 图节点预算，并预留最后
+// 一个模型节点生成终态回复。图结构若改变，守卫测试会要求同步修改这条换算。
+func reactStepsForToolRounds(toolRounds int) int {
+	return max(0, toolRounds)*2 + 1
+}
 
 type Service struct {
 	database         *storage.DB
@@ -45,7 +52,9 @@ type Service struct {
 	speechRecognizer contracts.SpeechRecognizer
 	contextManager   *ContextManager
 	fallbackScaffold fallbackScaffold
+	ctx              context.Context
 	cancel           context.CancelFunc
+	bridgeStartOnce  sync.Once
 	bridgeWG         sync.WaitGroup
 	bridgeMu         sync.Mutex
 	bridgeInflight   map[string]struct{}
@@ -66,13 +75,34 @@ func NewServiceWithModels(
 	chatModel model.ToolCallingChatModel,
 	visionModel model.ToolCallingChatModel,
 ) (*Service, error) {
+	return newServiceWithModels(parent, database, chatModel, visionModel, true)
+}
+
+// NewServiceWithModelsForStartup 暂不启动持久 job observation bridge，保证进程入口
+// 先补驱遗留 user/decision 回合；ReconcilePersistedTurns 成功后再显式启动 bridge。
+func NewServiceWithModelsForStartup(
+	parent context.Context,
+	database *storage.DB,
+	chatModel model.ToolCallingChatModel,
+	visionModel model.ToolCallingChatModel,
+) (*Service, error) {
+	return newServiceWithModels(parent, database, chatModel, visionModel, false)
+}
+
+func newServiceWithModels(
+	parent context.Context,
+	database *storage.DB,
+	chatModel model.ToolCallingChatModel,
+	visionModel model.ToolCallingChatModel,
+	startBridge bool,
+) (*Service, error) {
 	if database == nil {
 		return nil, errors.New("agent service 缺少数据库")
 	}
 	ctx, cancel := context.WithCancel(parent)
 	chatModel = newTimeoutRetryChatModel(chatModel)
 	service := &Service{
-		database: database, hub: NewTurnStreamHub(0), cancel: cancel,
+		database: database, hub: NewTurnStreamHub(0), ctx: ctx, cancel: cancel,
 		chatModel: chatModel, analyzer: understanding.NewAnalyzer(visionModel),
 		contextManager: NewContextManager(database),
 		bridgeInflight: map[string]struct{}{},
@@ -116,8 +146,18 @@ func NewServiceWithModels(
 		}
 	}
 	service.queue = NewTurnQueue(ctx, service.runTurn)
-	service.startJobObservationBridge(ctx)
+	if startBridge {
+		service.StartJobObservationBridge()
+	}
 	return service, nil
+}
+
+// StartJobObservationBridge 只启动一次持久 job bridge；重复调用安全无副作用。
+func (service *Service) StartJobObservationBridge() {
+	if service == nil {
+		return
+	}
+	service.bridgeStartOnce.Do(func() { service.startJobObservationBridge(service.ctx) })
 }
 
 func (service *Service) Queue() *TurnQueue { return service.queue }
@@ -146,6 +186,9 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	startedAt := time.Now()
 	slog.Info("turn_started", "turn_id", turnID, "draft_id", item.DraftID, "kind", string(item.Kind))
 	ctx = rushestools.WithDraftID(ctx, item.DraftID)
+	if delivery := observationDelivery(item); delivery != nil {
+		ctx = agentexec.WithJobObservationDelivery(ctx, delivery.JobID, delivery.ClaimToken)
+	}
 	if item.Kind == QueueUserMessage {
 		ctx = withContextMessageBoundary(ctx, item.ItemID)
 	}
@@ -208,7 +251,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		resultRows := reducer.ResultRows{Message: &reducer.MessageRow{
 			ID: messageID, DraftID: item.DraftID, Role: messageRole, Kind: messageKind, Content: content,
 		}}
-		if delivery := observationDelivery(item); delivery != nil {
+		if delivery := observationDeliveryFromContext(ctx, item); delivery != nil {
 			resultRows.AgentJobObservationDelivery = delivery
 		}
 		result, applyErr := reducer.Apply(ctx, service.database, nil, reducer.Options{
@@ -226,7 +269,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 			"type": TurnStreamMessageCompleted, "message_id": messageID,
 			"kind": messageKind, "content": content,
 		})
-	} else if delivery := observationDelivery(item); delivery != nil {
+	} else if delivery := observationDeliveryFromContext(ctx, item); delivery != nil {
 		result, applyErr := reducer.Apply(ctx, service.database, nil, reducer.Options{
 			Actor:      contracts.ActorAgent,
 			ResultRows: reducer.ResultRows{AgentJobObservationDelivery: delivery},
@@ -254,6 +297,13 @@ func observationDelivery(item QueueItem) *reducer.AgentJobObservationDeliveryRow
 		return nil
 	}
 	return &reducer.AgentJobObservationDeliveryRow{JobID: item.ItemID, ClaimToken: claimToken}
+}
+
+func observationDeliveryFromContext(ctx context.Context, item QueueItem) *reducer.AgentJobObservationDeliveryRow {
+	if delivery, tracked := agentexec.JobObservationDelivery(ctx); tracked {
+		return delivery
+	}
+	return observationDelivery(item)
 }
 
 // lateToolCallDedupKey 为「终态直通后晚到的 tool_call」生成去重键：优先用 call ID，缺失时

@@ -337,24 +337,103 @@ describe("AssistantThread Claude Code 式消息流", () => {
     expect(scroller.scrollTop).toBe(300);
   });
 
-  it("记忆写入渲染「已记住」卡片，可点击直链设置面板", () => {
+  it("记忆写入展示陈述与原话，并支持逐条撤回和直链设置", async () => {
     const onOpenMemorySettings = vi.fn();
+    const onRetractMemory = vi.fn().mockResolvedValue("retracted");
     render(
       <AssistantThread
         runtime={runtime([], false)}
         onAnswerDecision={vi.fn()}
         answerPending={false}
         streamItems={[
-          { type: "memory", id: "memory_0", written_keys: ["pacing"], removed_keys: [] }
+          {
+            type: "memory",
+            id: "memory_0",
+            written_keys: ["pacing"],
+            removed_keys: [],
+            entries: [
+              {
+                key: "pacing",
+                kind: "preference",
+                statement: "成片节奏偏快",
+                evidence_quote: "以后都快一点"
+              }
+            ]
+          }
         ]}
         onOpenMemorySettings={onOpenMemorySettings}
+        onRetractMemory={onRetractMemory}
       />
     );
     const card = screen.getByTestId("memory-updated-card");
     expect(card.textContent).toContain("已记住长期记忆");
+    expect(card.textContent).toContain("成片节奏偏快");
+    expect(card.textContent).toContain("原话：“以后都快一点”");
     expect(card.textContent).toContain("pacing");
+    fireEvent.click(screen.getByRole("button", { name: "撤回" }));
+    await waitFor(() =>
+      expect(onRetractMemory).toHaveBeenCalledWith({
+        key: "pacing",
+        kind: "preference",
+        statement: "成片节奏偏快",
+        evidence_quote: "以后都快一点"
+      })
+    );
+    expect(screen.getByText("已撤回")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "在设置中查看和编辑" }));
     expect(onOpenMemorySettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("同 key 被后续回执覆盖后旧卡失效，只允许撤回最新值", async () => {
+    const onRetractMemory = vi.fn().mockResolvedValue("retracted");
+    render(
+      <AssistantThread
+        runtime={runtime([], false)}
+        onAnswerDecision={vi.fn()}
+        answerPending={false}
+        streamItems={[
+          {
+            type: "memory",
+            id: "memory_0",
+            written_keys: ["pacing"],
+            removed_keys: [],
+            entries: [
+              {
+                key: "pacing",
+                kind: "preference",
+                statement: "成片节奏偏快",
+                evidence_quote: "以后都快一点"
+              }
+            ]
+          },
+          {
+            type: "memory",
+            id: "memory_1",
+            written_keys: ["pacing"],
+            removed_keys: [],
+            entries: [
+              {
+                key: "pacing",
+                kind: "preference",
+                statement: "成片节奏舒缓",
+                evidence_quote: "还是慢一点"
+              }
+            ]
+          }
+        ]}
+        onRetractMemory={onRetractMemory}
+      />
+    );
+
+    expect(screen.getByText("已被后续更新")).toBeTruthy();
+    const retractButtons = screen.getAllByRole("button", { name: "撤回" });
+    expect(retractButtons).toHaveLength(1);
+    fireEvent.click(retractButtons[0]);
+    await waitFor(() =>
+      expect(onRetractMemory).toHaveBeenCalledWith(
+        expect.objectContaining({ key: "pacing", statement: "成片节奏舒缓" })
+      )
+    );
   });
 });
 

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
@@ -83,6 +85,37 @@ func TestToolRecoveryRetriesSafeErrorsAndReturnsThemToModel(t *testing.T) {
 	harness := data["harness_recovery"].(map[string]any)
 	if harness["automatic_retries"] != float64(5) || !state.unresolved() {
 		t.Fatalf("harness=%#v state=%#v", harness, state)
+	}
+}
+
+func TestToolRecoveryObservesOversizeResultWithoutTruncating(t *testing.T) {
+	largeResult := strings.Repeat("中", toolResultSoftLimitBytes)
+	oversizeBefore := metricToolResultOversize.Value()
+	countBefore, _, _, _ := metricToolResultBytes.Snapshot()
+	middleware := newToolRecoveryMiddleware(testRetrySafe(t))
+	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+		return &compose.ToolOutput{Result: largeResult}, nil
+	})
+	output, err := endpoint(t.Context(), &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output == nil || output.Result != largeResult {
+		t.Fatalf("超限结果被改写: got_bytes=%d want_bytes=%d", len(output.Result), len(largeResult))
+	}
+	if metricToolResultOversize.Value() != oversizeBefore+1 {
+		t.Fatalf("oversize=%d want=%d", metricToolResultOversize.Value(), oversizeBefore+1)
+	}
+	countAfter, _, _, _ := metricToolResultBytes.Snapshot()
+	if countAfter != countBefore+1 {
+		t.Fatalf("result histogram count=%d want=%d", countAfter, countBefore+1)
+	}
+}
+
+func TestTruncateTextUsesRuneBoundaries(t *testing.T) {
+	got := agentexec.TruncateText(" 你好世界 ", 3)
+	if got != "你好世…" || !utf8.ValidString(got) || strings.ContainsRune(got, utf8.RuneError) {
+		t.Fatalf("rune-safe truncate=%q valid=%v", got, utf8.ValidString(got))
 	}
 }
 

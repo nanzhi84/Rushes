@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"log/slog"
 	"math"
@@ -11,6 +12,33 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestJSONLoggerRedactsSensitiveAttributeKeys(t *testing.T) {
+	var sink bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&sink, &slog.HandlerOptions{
+		ReplaceAttr: redactSensitiveLogAttribute,
+	}))
+	logger.Info("redaction probe",
+		"api_key", "key-value-secret",
+		"accessToken", "token-value-secret",
+		"client_secret", "client-secret-value",
+		"Authorization", "Bearer authorization-value",
+		"monkey", "contains-key-marker",
+		"draft_id", "draft-visible",
+	)
+	output := sink.String()
+	for _, secret := range []string{
+		"key-value-secret", "token-value-secret", "client-secret-value",
+		"authorization-value", "contains-key-marker",
+	} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("敏感值泄漏: %q in %s", secret, output)
+		}
+	}
+	if strings.Count(output, "[REDACTED]") != 5 || !strings.Contains(output, "draft-visible") {
+		t.Fatalf("redacted output=%s", output)
+	}
+}
 
 func TestCounterAndGauge(t *testing.T) {
 	counter := NewCounter("test_counter_basic")
