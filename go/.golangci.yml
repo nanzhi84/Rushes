@@ -42,6 +42,14 @@ linters:
             - modernc.org/sqlite
             - golang.org/x/sys/unix
 
+        telemetry:
+          list-mode: strict
+          files:
+            - "**/internal/telemetry/*.go"
+            - "**/internal/telemetry/**/*.go"
+          allow:
+            - $gostd
+
         reducer:
           list-mode: strict
           files:
@@ -51,6 +59,7 @@ linters:
             - $gostd
             - github.com/nanzhi84/Rushes/go/internal/contracts
             - github.com/nanzhi84/Rushes/go/internal/storage
+            - github.com/nanzhi84/Rushes/go/internal/telemetry
 
         providers:
           list-mode: strict
@@ -147,6 +156,7 @@ linters:
             - github.com/nanzhi84/Rushes/go/internal/media
             - github.com/nanzhi84/Rushes/go/internal/reducer
             - github.com/nanzhi84/Rushes/go/internal/storage
+            - github.com/nanzhi84/Rushes/go/internal/telemetry
             - github.com/nanzhi84/Rushes/go/internal/timeline
             - github.com/nanzhi84/Rushes/go/internal/tools
             - github.com/nanzhi84/Rushes/go/internal/understanding
@@ -166,6 +176,7 @@ linters:
             - github.com/nanzhi84/Rushes/go/internal/media
             - github.com/nanzhi84/Rushes/go/internal/reducer
             - github.com/nanzhi84/Rushes/go/internal/storage
+            - github.com/nanzhi84/Rushes/go/internal/telemetry
             - github.com/nanzhi84/Rushes/go/internal/timeline
             - github.com/nanzhi84/Rushes/go/internal/tools
 
@@ -180,6 +191,7 @@ linters:
             - github.com/nanzhi84/Rushes/go/internal/media
             - github.com/nanzhi84/Rushes/go/internal/reducer
             - github.com/nanzhi84/Rushes/go/internal/storage
+            - github.com/nanzhi84/Rushes/go/internal/telemetry
             - github.com/nanzhi84/Rushes/go/internal/timeline
             - github.com/nanzhi84/Rushes/go/internal/understanding
   exclusions:

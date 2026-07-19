@@ -122,8 +122,10 @@ func (retry *timeoutRetryChatModel) Generate(
 ) (*schema.Message, error) {
 	messages := input
 	for completedRetries := 0; ; {
+		callStart := time.Now()
 		response, err := retry.inner.Generate(ctx, messages, options...)
 		if err == nil {
+			observeModelCall(ctx, time.Since(callStart).Milliseconds())
 			recordModelResponseUsage(ctx, response)
 			return response, nil
 		}
@@ -141,6 +143,7 @@ func (retry *timeoutRetryChatModel) Stream(
 ) (*schema.StreamReader[*schema.Message], error) {
 	messages := input
 	for completedRetries := 0; ; {
+		callStart := time.Now()
 		stream, err := retry.inner.Stream(ctx, messages, options...)
 		if err != nil {
 			completedRetries, messages, err = retry.nextAttempt(ctx, input, completedRetries, err)
@@ -178,6 +181,7 @@ func (retry *timeoutRetryChatModel) Stream(
 				}
 				continue
 			}
+			observeModelCall(ctx, time.Since(callStart).Milliseconds())
 			if response, concatErr := schema.ConcatMessages(buffered); concatErr == nil {
 				recordModelResponseUsage(ctx, response)
 			}
@@ -185,6 +189,7 @@ func (retry *timeoutRetryChatModel) Stream(
 		}
 		// 终态文本轮直通：downstream 副本仍从流首开始（含已 peek 的前导与首个正文，后续为
 		// live 流），用量随末片抵达、由消费端 streamAgent 统计，故此处不缓冲、不记账、不再重试。
+		observeModelCall(ctx, time.Since(callStart).Milliseconds())
 		return downstream, nil
 	}
 }
@@ -281,6 +286,13 @@ func (retry *timeoutRetryChatModel) nextAttempt(
 	reportModelRetry(ctx, modelRetryNotice{
 		Attempt: retryAttempt, MaxRetries: retry.maxRetries, Delay: delay, Reason: reason.label(),
 	})
+	metricModelRetriesTotal.Inc()
+	switch reason {
+	case modelRetryReasonContextLength:
+		metricModelRetryContextLength.Inc()
+	case modelRetryReasonTimeout:
+		metricModelRetryTimeout.Inc()
+	}
 	if err := retry.wait(ctx, delay); err != nil {
 		return completedRetries, nil, err
 	}

@@ -298,6 +298,7 @@ func Apply(
 		normalized = append(normalized, event)
 	}
 
+	txStart := time.Now()
 	tx, err := database.Write().BeginTx(ctx, nil)
 	if err != nil {
 		return Result{}, err
@@ -446,6 +447,7 @@ func Apply(
 		return Result{}, err
 	}
 	committed = true
+	metricWriteTxMS.Observe(time.Since(txStart).Milliseconds())
 	return Result{
 		Status: StatusApplied, AppliedEvents: applied, DraftStateVersions: versions,
 		SkippedEvents: state.skipped, UserMemory: userMemory,

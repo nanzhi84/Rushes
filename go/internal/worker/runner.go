@@ -342,6 +342,7 @@ func (runner *Runner) emitTerminal(
 	if applyResult.Status != reducer.StatusApplied {
 		return fmt.Errorf("job 终态写入失败: %s", applyResult.Status)
 	}
+	recordJobTerminalMetrics(eventType, job, runner.now())
 	return nil
 }
 

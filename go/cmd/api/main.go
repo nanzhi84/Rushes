@@ -21,6 +21,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
+	"github.com/nanzhi84/Rushes/go/internal/telemetry"
 )
 
 func main() {
@@ -53,6 +54,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// H3：把结构化 JSON 日志落盘到 workspace logs/api.log（按大小轮转），同时镜像到 stderr
+	// 让 dev 终端仍可见。defer 先注册、后于 database.Close 执行，保证关库时的错误日志能落盘。
+	logCloser, err := telemetry.InstallJSONLogger(database.Paths.Logs, "api", os.Stderr)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = logCloser.Close() }()
 	media.ConfigureFFmpegSandbox(
 		[]string{database.Paths.Objects, database.Paths.Temporary, database.Paths.Segments, database.Paths.Cache},
 		[]string{database.Paths.Temporary},
@@ -132,9 +140,12 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 首登 URL 含 token：只 fmt 打到 stdout 给本地用户看，绝不经会落盘的 slog（#95 H3 P1：
+	// 防 token 持久化进 logs/api.log）。持久化的 ready 记录只留不含密钥的端口。
+	_, _ = fmt.Fprintf(os.Stdout, "Rushes Go API ready: http://127.0.0.1:%d/#t=%s\n", port, token)
 	errChannel := make(chan error, 1)
 	go func() {
-		slog.Info("Rushes Go API ready", "url", fmt.Sprintf("http://127.0.0.1:%d/#t=%s", port, token))
+		slog.Info("Rushes Go API ready", "port", port)
 		errChannel <- httpServer.ListenAndServe()
 	}()
 	select {

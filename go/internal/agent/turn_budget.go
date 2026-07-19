@@ -52,6 +52,17 @@ func (state *turnBudgetState) usageSnapshot() map[string]any {
 	}
 }
 
+// telemetrySnapshot 返回本回合的模型往返数与累计 prompt/cached token，用于 H3 度量与结构化
+// 日志（与 usageSnapshot 分开：后者面向 SSE 事件，这里面向度量，且对 nil 安全）。
+func (state *turnBudgetState) telemetrySnapshot() (modelCalls, promptTokens, cachedTokens int) {
+	if state == nil {
+		return 0, 0, 0
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.modelCalls, state.promptTokens, state.cachedTokens
+}
+
 func newTurnBudgetState(maxToolRounds int) *turnBudgetState {
 	return &turnBudgetState{maxToolRounds: max(0, maxToolRounds)}
 }
