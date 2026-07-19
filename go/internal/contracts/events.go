@@ -4,8 +4,37 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 )
+
+const TurnCancelledObservationKind = "turn_cancelled"
+
+// TurnCancelledObservationContent 把一次取消覆盖的内存回合数写进既有 messages
+// 事实源。显式计数表示新语义：只统计屏障接管的、尚未持久终态的回合；历史无计数
+// 文案则由解析器按旧语义兼容，不新增表或 API/SSE 契约。
+func TurnCancelledObservationContent(count int) string {
+	if count < 1 {
+		count = 1
+	}
+	return fmt.Sprintf("用户已停止当前任务（已取消 %d 个回合）。", count)
+}
+
+// ParseTurnCancelledObservation 解析计数并报告它是否采用新精确语义。历史标记和
+// 异常文案保守按 1 个旧语义终态处理，避免异常数据一次核销过多用户请求。
+func ParseTurnCancelledObservation(content string) (count int, exact bool) {
+	const prefix = "用户已停止当前任务（已取消 "
+	const suffix = " 个回合）。"
+	if !strings.HasPrefix(content, prefix) || !strings.HasSuffix(content, suffix) {
+		return 1, false
+	}
+	value := strings.TrimSuffix(strings.TrimPrefix(content, prefix), suffix)
+	count, err := strconv.Atoi(value)
+	if err != nil || count < 1 {
+		return 1, false
+	}
+	return count, true
+}
 
 type VersionMode string
 

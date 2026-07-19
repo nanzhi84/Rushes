@@ -25,10 +25,11 @@ type persistedTurnCandidate struct {
 }
 
 type persistedTurnFact struct {
-	created           time.Time
-	candidate         *persistedTurnCandidate
-	decisionCreatedID string
-	terminal          bool
+	created                   time.Time
+	candidate                 *persistedTurnCandidate
+	decisionCreatedID         string
+	terminalCount             int
+	terminalIncludesCoalesced bool
 }
 
 // ReconcilePersistedTurns 补驱“reducer 已提交、内存 TurnQueue 未接住”的 user 消息和
@@ -246,7 +247,7 @@ func (service *Service) persistedTurnCandidates(ctx context.Context) ([]persiste
 			return nil, fmt.Errorf("解析 job observation 交付时间: %w", err)
 		}
 		facts[draftID] = append(facts[draftID], persistedTurnFact{
-			created: deliveredTime, terminal: true,
+			created: deliveredTime, terminalCount: 1, terminalIncludesCoalesced: true,
 		})
 	}
 	if err := deliveryRows.Err(); err != nil {
@@ -258,7 +259,7 @@ func (service *Service) persistedTurnCandidates(ctx context.Context) ([]persiste
 	}
 
 	terminalRows, err := service.database.Read().QueryContext(ctx, `
-		SELECT m.draft_id,m.created_at
+		SELECT m.draft_id,m.kind,m.content,m.created_at
 		FROM messages m JOIN drafts d ON d.draft_id=m.draft_id
 		WHERE d.status!='trashed' AND m.rewound_at IS NULL
 		AND m.rowid >= COALESCE((
@@ -274,8 +275,8 @@ func (service *Service) persistedTurnCandidates(ctx context.Context) ([]persiste
 		return nil, err
 	}
 	for terminalRows.Next() {
-		var draftID, created string
-		if err := terminalRows.Scan(&draftID, &created); err != nil {
+		var draftID, kind, content, created string
+		if err := terminalRows.Scan(&draftID, &kind, &content, &created); err != nil {
 			_ = terminalRows.Close()
 			return nil, err
 		}
@@ -289,8 +290,10 @@ func (service *Service) persistedTurnCandidates(ctx context.Context) ([]persiste
 			_ = terminalRows.Close()
 			return nil, fmt.Errorf("解析回合终态消息时间: %w", err)
 		}
+		terminalCount, includesCoalesced := persistedTerminal(kind, content)
 		facts[draftID] = append(facts[draftID], persistedTurnFact{
-			created: createdAt, terminal: true,
+			created: createdAt, terminalCount: terminalCount,
+			terminalIncludesCoalesced: includesCoalesced,
 		})
 	}
 	if err := terminalRows.Err(); err != nil {
@@ -370,12 +373,18 @@ func (service *Service) persistedTurnCandidates(ctx context.Context) ([]persiste
 				blockingDecisions[fact.decisionCreatedID] = true
 				continue
 			}
-			if fact.terminal && coalesceDecisionTerminal != "" {
+			terminalCount := fact.terminalCount
+			if terminalCount > 0 && coalesceDecisionTerminal != "" {
 				coalesceDecisionTerminal = ""
-				continue
+				if fact.terminalIncludesCoalesced {
+					terminalCount--
+				}
 			}
-			if len(unmatched) > 0 {
-				unmatched = unmatched[1:]
+			if terminalCount > len(unmatched) {
+				terminalCount = len(unmatched)
+			}
+			if terminalCount > 0 {
+				unmatched = unmatched[terminalCount:]
 			}
 		}
 		for _, candidate := range unmatched {
@@ -385,4 +394,12 @@ func (service *Service) persistedTurnCandidates(ctx context.Context) ([]persiste
 		}
 	}
 	return candidates, nil
+}
+
+func persistedTerminal(kind, content string) (count int, includesCoalesced bool) {
+	if kind == contracts.TurnCancelledObservationKind {
+		count, exact := contracts.ParseTurnCancelledObservation(content)
+		return count, !exact
+	}
+	return 1, true
 }

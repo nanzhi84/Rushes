@@ -191,7 +191,8 @@ func (server *Server) CancelCurrentTurnApiDraftsDraftIdTurnCancelPost(
 			Actor: contracts.ActorUser,
 			ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
 				ID: newID("turn_cancelled"), DraftID: draftID,
-				Role: "system_observation", Kind: "turn_cancelled", Content: "用户已停止当前任务。",
+				Role: "system_observation", Kind: contracts.TurnCancelledObservationKind,
+				Content: contracts.TurnCancelledObservationContent(barrier.CoveredTurns()),
 			}},
 		})
 		if persistErr != nil || result.Status != reducer.StatusApplied {

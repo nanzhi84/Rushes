@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -337,6 +338,16 @@ func TestCancelCurrentTurnReturnsBoundedAndProtectsLaterJobs(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("阻塞模型未启动")
 	}
+	for index := range 2 {
+		queuedFollowUp := httptest.NewRecorder()
+		handler.ServeHTTP(queuedFollowUp, apiRequest(t, http.MethodPost,
+			"/api/drafts/draft_bounded_cancel/messages", map[string]any{
+				"message_id": fmt.Sprintf("queued_cancelled_%d", index), "content": "也不要继续",
+			}))
+		if queuedFollowUp.Code != http.StatusAccepted {
+			t.Fatalf("queue follow-up %d status=%d body=%s", index, queuedFollowUp.Code, queuedFollowUp.Body.String())
+		}
+	}
 	now := time.Now().UTC()
 	result, err := reducer.Apply(t.Context(), database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: "draft_bounded_cancel", Payload: map[string]any{
@@ -364,7 +375,8 @@ func TestCancelCurrentTurnReturnsBoundedAndProtectsLaterJobs(t *testing.T) {
 		SELECT role,kind,content FROM messages
 		WHERE draft_id='draft_bounded_cancel' ORDER BY rowid DESC LIMIT 1`,
 	).Scan(&markerRole, &markerKind, &markerContent); err != nil ||
-		markerRole != "system_observation" || markerKind != "turn_cancelled" || markerContent == "" {
+		markerRole != "system_observation" || markerKind != contracts.TurnCancelledObservationKind ||
+		markerContent != contracts.TurnCancelledObservationContent(3) {
 		t.Fatalf("取消持久标记 role=%q kind=%q content=%q err=%v", markerRole, markerKind, markerContent, err)
 	}
 	var status string

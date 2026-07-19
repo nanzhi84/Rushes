@@ -373,6 +373,64 @@ func TestPersistedTurnCandidatesDecisionCreatedCrashDoesNotReplayCompletedContin
 	}
 }
 
+func TestExactCancellationAfterBlockingDecisionConsumesOnlyQueuedTurn(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_reconcile_exact_cancel_after_decision"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	base := time.Date(2026, 7, 19, 14, 30, 0, 0, time.UTC)
+	for index, row := range []reducer.MessageRow{
+		{ID: "user_before_exact_cancel", DraftID: draftID, Role: "user", Kind: "user", Content: "先执行"},
+		{ID: "user_queued_exact_cancel", DraftID: draftID, Role: "user", Kind: "user", Content: "排队任务应被取消"},
+	} {
+		if result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+			Actor: contracts.ActorUser, CreatedAt: base.Add(time.Duration(index) * time.Second),
+			ResultRows: reducer.ResultRows{Message: &row},
+		}); err != nil || result.Status != reducer.StatusApplied {
+			t.Fatalf("seed user %d result=%#v err=%v", index, result, err)
+		}
+	}
+	decisionResult := seedPendingDecisionAt(
+		t, database, draftID, "decision_before_exact_cancel", base.Add(2*time.Second),
+	)
+	cancelMarker := reducer.MessageRow{
+		ID: "exact_cancel_marker", DraftID: draftID, Role: "system_observation",
+		Kind:    contracts.TurnCancelledObservationKind,
+		Content: contracts.TurnCancelledObservationContent(1),
+	}
+	if result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorUser, CreatedAt: base.Add(3 * time.Second),
+		ResultRows: reducer.ResultRows{Message: &cancelMarker},
+	}); err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("seed exact cancel result=%#v err=%v", result, err)
+	}
+	answeredVersion := decisionResult.DraftStateVersions[draftID]
+	if result, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "DecisionAnswered", DraftID: draftID,
+		Payload: map[string]any{
+			"decision_id": "decision_before_exact_cancel",
+			"answer":      map[string]any{"option_id": "yes", "answered_via": "button"},
+		},
+	}}, reducer.Options{
+		Actor: contracts.ActorUser, BaseVersion: &answeredVersion, CreatedAt: base.Add(4 * time.Second),
+	}); err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("answer result=%#v err=%v", result, err)
+	}
+
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	candidates, err := service.persistedTurnCandidates(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].kind != QueueUIObservation ||
+		candidates[0].itemID != "decision_before_exact_cancel" {
+		t.Fatalf("exact cancel must keep only decision continuation: %#v", candidates)
+	}
+}
+
 func TestPersistedTurnCandidatesIgnoreDeliveredJobReplyWhenPairingUser(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_reconcile_delivered_job_reply"
@@ -732,8 +790,11 @@ func TestReconcilePersistedTurnIgnoresCancellationMarkerAndRewoundDecision(t *te
 	const cancelledDraft = "draft_reconcile_cancelled"
 	agenttest.CreateAgentDraft(t, database, cancelledDraft)
 	for index, row := range []reducer.MessageRow{
-		{ID: "user_cancelled", DraftID: cancelledDraft, Role: "user", Kind: "user", Content: "不要继续"},
-		{ID: "cancel_marker", DraftID: cancelledDraft, Role: "system_observation", Kind: "turn_cancelled", Content: "用户已停止当前任务。"},
+		{ID: "user_cancelled_1", DraftID: cancelledDraft, Role: "user", Kind: "user", Content: "不要继续"},
+		{ID: "user_cancelled_2", DraftID: cancelledDraft, Role: "user", Kind: "user", Content: "排队的也停掉"},
+		{ID: "user_cancelled_3", DraftID: cancelledDraft, Role: "user", Kind: "user", Content: "全部停止"},
+		{ID: "cancel_marker", DraftID: cancelledDraft, Role: "system_observation",
+			Kind: contracts.TurnCancelledObservationKind, Content: contracts.TurnCancelledObservationContent(3)},
 	} {
 		result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
 			Actor: contracts.ActorUser, CreatedAt: time.Date(2026, 7, 19, 12, 0, index, 0, time.UTC),

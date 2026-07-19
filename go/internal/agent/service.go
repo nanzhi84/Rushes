@@ -197,6 +197,9 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	recoveryState := newToolRecoveryState()
 	ctx = withToolRecoveryState(ctx, recoveryState)
 	ctx = agentexec.WithTurnInteractionState(ctx, agentexec.NewTurnInteractionState())
+	ctx = agentexec.WithDurableTerminalCommit(ctx, func(commit func() (bool, error)) (bool, error) {
+		return service.queue.CommitCurrentDurableTerminal(item, commit)
+	})
 	turnBudget := newTurnBudgetState(maxToolRoundsPerTurn)
 	ctx = withTurnBudgetState(ctx, turnBudget)
 	ctx = service.withModelRetryReporting(ctx, item.DraftID)
@@ -254,9 +257,14 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		if delivery := observationDeliveryFromContext(ctx, item); delivery != nil {
 			resultRows.AgentJobObservationDelivery = delivery
 		}
-		result, applyErr := reducer.Apply(ctx, service.database, nil, reducer.Options{
-			Actor:      contracts.ActorAgent,
-			ResultRows: resultRows,
+		var result reducer.Result
+		_, applyErr := agentexec.CommitDurableTerminal(ctx, func() (bool, error) {
+			var err error
+			result, err = reducer.Apply(ctx, service.database, nil, reducer.Options{
+				Actor:      contracts.ActorAgent,
+				ResultRows: resultRows,
+			})
+			return err == nil && result.Status == reducer.StatusApplied, err
 		})
 		if applyErr != nil {
 			service.hub.Record(item.DraftID, StreamEvent{"type": TurnStreamTurnError, "message": applyErr.Error()})
@@ -270,9 +278,14 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 			"kind": messageKind, "content": content,
 		})
 	} else if delivery := observationDeliveryFromContext(ctx, item); delivery != nil {
-		result, applyErr := reducer.Apply(ctx, service.database, nil, reducer.Options{
-			Actor:      contracts.ActorAgent,
-			ResultRows: reducer.ResultRows{AgentJobObservationDelivery: delivery},
+		var result reducer.Result
+		_, applyErr := agentexec.CommitDurableTerminal(ctx, func() (bool, error) {
+			var err error
+			result, err = reducer.Apply(ctx, service.database, nil, reducer.Options{
+				Actor:      contracts.ActorAgent,
+				ResultRows: reducer.ResultRows{AgentJobObservationDelivery: delivery},
+			})
+			return err == nil && result.Status == reducer.StatusApplied, err
 		})
 		if applyErr != nil {
 			return applyErr

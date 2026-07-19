@@ -339,8 +339,9 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
         if (!current) {
           return "retracted";
         }
-        // SSE 回执没有新增版本字段（M7 要求 OpenAPI 零变更）。删除前用既有列表端点
-        // 核对当前值；同 key 已被后续写入或人工修订时让旧回执失效，绝不误删新值。
+        // SSE 回执没有新增版本字段（M7 要求 OpenAPI 零变更）。先用既有列表端点
+        // 取得当前值，再把它作为内部条件随 DELETE 发送；reducer 在同一事务里比对并删除，
+        // 同 key 被后续写入或人工修订时只会安全 no-op，旧回执绝不误删新值。
         if (
           current.statement !== entry.statement ||
           current.kind !== entry.kind ||
@@ -349,7 +350,10 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
           return "stale";
         }
         try {
-          await api.deleteMemory(entry.key);
+          const result = await api.deleteMemory(entry.key, current);
+          if (!result.deleted_memory_keys.includes(entry.key)) {
+            return "stale";
+          }
         } catch (error) {
           if (!(error instanceof ApiError && error.status === 404)) {
             throw error;

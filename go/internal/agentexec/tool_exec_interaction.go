@@ -72,18 +72,28 @@ func (exec *Executor) toolAskUser(
 	if blocking {
 		resultRows.AgentJobObservationDelivery = PendingJobObservationDelivery(ctx)
 	}
-	result, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
-		Type: "DecisionCreated", DraftID: draftID,
-		Payload: map[string]any{
-			"decision_id": decisionID, "scope_type": "draft", "type": decisionType,
-			"question": input.Question, "options": options, "blocking": blocking,
-			"allow_free_text": allowFreeText, "pending_tool_call": pendingPayload,
-			"pending_tool_call_status": pendingStatus,
-			"created_by_tool_call_id":  nullableToolCallID(ctx),
-		},
-	}}, reducer.Options{
-		Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion, ResultRows: resultRows,
-	})
+	var result reducer.Result
+	applyDecision := func() (bool, error) {
+		var applyErr error
+		result, applyErr = reducer.Apply(ctx, exec.database, []contracts.Event{{
+			Type: "DecisionCreated", DraftID: draftID,
+			Payload: map[string]any{
+				"decision_id": decisionID, "scope_type": "draft", "type": decisionType,
+				"question": input.Question, "options": options, "blocking": blocking,
+				"allow_free_text": allowFreeText, "pending_tool_call": pendingPayload,
+				"pending_tool_call_status": pendingStatus,
+				"created_by_tool_call_id":  nullableToolCallID(ctx),
+			},
+		}}, reducer.Options{
+			Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion, ResultRows: resultRows,
+		})
+		return applyErr == nil && result.Status == reducer.StatusApplied, applyErr
+	}
+	if blocking {
+		_, err = CommitDurableTerminal(ctx, applyDecision)
+	} else {
+		_, err = applyDecision()
+	}
 	if err != nil || result.Status != reducer.StatusApplied {
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("reducer status: %s", result.Status))
 	}

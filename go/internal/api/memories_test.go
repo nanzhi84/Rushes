@@ -2,8 +2,10 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -74,6 +76,83 @@ func TestMemoryGovernanceEndpointsListDeleteAndClear(t *testing.T) {
 	handler.ServeHTTP(empty, apiRequest(t, http.MethodDelete, "/api/memories", map[string]any{"confirm": true}))
 	if empty.Code != http.StatusOK || !strings.Contains(empty.Body.String(), `"deleted_count":0`) {
 		t.Fatalf("empty clear status=%d body=%s", empty.Code, empty.Body.String())
+	}
+}
+
+func TestMemoryReceiptConditionalDeleteDoesNotRemoveNewerValue(t *testing.T) {
+	t.Parallel()
+	server, handler := testServer(t, t.TempDir(), 0)
+	seedAPIMemory(t, server, "pacing", "preference", "成片节奏偏快")
+	old, err := storage.GetUserMemory(t.Context(), server.database.Read(), "pacing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	conditionHeader := func(memory storage.UserMemory) string {
+		encoded, marshalErr := json.Marshal(memoryConditionalDelete{
+			Kind: memory.Kind, Statement: memory.Statement, SourceDraftID: memory.SourceDraftID,
+			CreatedAt: memory.CreatedAt, LastConfirmedAt: memory.LastConfirmedAt,
+			ManuallyRevisedAt: memory.ManuallyRevisedAt,
+		})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		return url.QueryEscape(string(encoded))
+	}
+
+	edited := httptest.NewRecorder()
+	handler.ServeHTTP(edited, apiRequest(t, http.MethodPatch, "/api/memories/pacing",
+		map[string]any{"statement": "后续写入的新值"}))
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit status=%d body=%s", edited.Code, edited.Body.String())
+	}
+
+	staleDelete := apiRequest(t, http.MethodDelete, "/api/memories/pacing", nil)
+	staleDelete.Header.Set(memoryConditionalDeleteHeader, conditionHeader(old))
+	stale := httptest.NewRecorder()
+	handler.ServeHTTP(stale, staleDelete)
+	if stale.Code != http.StatusOK || !strings.Contains(stale.Body.String(), `"deleted_count":0`) ||
+		!strings.Contains(stale.Body.String(), `"deleted_memory_keys":[]`) {
+		t.Fatalf("stale delete status=%d body=%s", stale.Code, stale.Body.String())
+	}
+	current, err := storage.GetUserMemory(t.Context(), server.database.Read(), "pacing")
+	if err != nil || current.Statement != "后续写入的新值" {
+		t.Fatalf("newer memory=%#v err=%v", current, err)
+	}
+
+	currentDelete := apiRequest(t, http.MethodDelete, "/api/memories/pacing", nil)
+	currentDelete.Header.Set(memoryConditionalDeleteHeader, conditionHeader(current))
+	deleted := httptest.NewRecorder()
+	handler.ServeHTTP(deleted, currentDelete)
+	if deleted.Code != http.StatusOK ||
+		!strings.Contains(deleted.Body.String(), `"deleted_memory_keys":["pacing"]`) {
+		t.Fatalf("current delete status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	if _, err := storage.GetUserMemory(t.Context(), server.database.Read(), "pacing"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("memory should be removed: %v", err)
+	}
+
+	invalid := apiRequest(t, http.MethodDelete, "/api/memories/missing_key", nil)
+	invalid.Header.Set(memoryConditionalDeleteHeader, "%zz")
+	invalidResponse := httptest.NewRecorder()
+	handler.ServeHTTP(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusBadRequest ||
+		!strings.Contains(invalidResponse.Body.String(), "invalid_memory_precondition") {
+		t.Fatalf("invalid condition status=%d body=%s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+	emptyCondition := apiRequest(t, http.MethodDelete, "/api/memories/missing_key", nil)
+	emptyCondition.Header.Set(memoryConditionalDeleteHeader, url.QueryEscape(`{}`))
+	emptyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(emptyResponse, emptyCondition)
+	if emptyResponse.Code != http.StatusBadRequest ||
+		!strings.Contains(emptyResponse.Body.String(), "invalid_memory_precondition") {
+		t.Fatalf("empty condition status=%d body=%s", emptyResponse.Code, emptyResponse.Body.String())
+	}
+	oversized := apiRequest(t, http.MethodDelete, "/api/memories/missing_key", nil)
+	oversized.Header.Set(memoryConditionalDeleteHeader, strings.Repeat("x", 4097))
+	oversizedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(oversizedResponse, oversized)
+	if oversizedResponse.Code != http.StatusBadRequest {
+		t.Fatalf("oversized condition status=%d body=%s", oversizedResponse.Code, oversizedResponse.Body.String())
 	}
 }
 

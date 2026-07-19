@@ -291,6 +291,108 @@ func TestCancelAndJoinDraftCancelsAcceptedItemBeforeWorkerStarts(t *testing.T) {
 	queue.Close()
 }
 
+func TestDraftCancellationBarrierReportsEveryCoveredTurn(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{})
+	queue := NewTurnQueue(t.Context(), func(ctx context.Context, _ QueueItem) error {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	t.Cleanup(queue.Close)
+	for index := range 3 {
+		if !queue.EnqueueUserMessage("draft_batch_cancel", fmt.Sprintf("message_%d", index), "取消") {
+			t.Fatalf("enqueue %d failed", index)
+		}
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not start")
+	}
+	barrier, requested := queue.BeginDraftCancellation("draft_batch_cancel")
+	if !requested || barrier == nil || barrier.CoveredTurns() != 3 {
+		t.Fatalf("requested=%v barrier=%v covered=%d", requested, barrier, barrier.CoveredTurns())
+	}
+	if !barrier.Wait(t.Context()) {
+		t.Fatal("cancelled turns did not drain")
+	}
+	barrier.Release()
+}
+
+func TestCancellationExcludesCurrentTurnAfterAtomicDurableTerminalCommit(t *testing.T) {
+	t.Parallel()
+	commitStarted := make(chan struct{})
+	allowCommit := make(chan struct{})
+	var queue *TurnQueue
+	queue = NewTurnQueue(t.Context(), func(_ context.Context, item QueueItem) error {
+		_, err := queue.CommitCurrentDurableTerminal(item, func() (bool, error) {
+			close(commitStarted)
+			<-allowCommit
+			return true, nil
+		})
+		return err
+	})
+	t.Cleanup(queue.Close)
+	if !queue.EnqueueUserMessage("draft_terminal_race", "message_done", "已经完成") {
+		t.Fatal("enqueue failed")
+	}
+	select {
+	case <-commitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("terminal commit did not start")
+	}
+
+	type cancellationResult struct {
+		barrier   *DraftCancellationBarrier
+		requested bool
+	}
+	result := make(chan cancellationResult, 1)
+	go func() {
+		barrier, requested := queue.BeginDraftCancellation("draft_terminal_race")
+		result <- cancellationResult{barrier: barrier, requested: requested}
+	}()
+	select {
+	case <-result:
+		t.Fatal("cancellation must serialize with the terminal commit")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(allowCommit)
+	cancelled := <-result
+	if cancelled.barrier == nil || cancelled.requested || cancelled.barrier.CoveredTurns() != 0 {
+		t.Fatalf("barrier=%v requested=%v covered=%d",
+			cancelled.barrier, cancelled.requested, cancelled.barrier.CoveredTurns())
+	}
+	if !cancelled.barrier.Wait(t.Context()) {
+		t.Fatal("durable current turn did not drain")
+	}
+	cancelled.barrier.Release()
+}
+
+func TestDurableTerminalHelpersHandleMissingBarrierAndWorker(t *testing.T) {
+	t.Parallel()
+	var barrier *DraftCancellationBarrier
+	if covered := barrier.CoveredTurns(); covered != 0 {
+		t.Fatalf("nil barrier covered=%d", covered)
+	}
+	queue := NewTurnQueue(t.Context(), nil)
+	t.Cleanup(queue.Close)
+	commitCalls := 0
+	applied, err := queue.CommitCurrentDurableTerminal(QueueItem{
+		DraftID: "missing_draft", Kind: QueueUserMessage, ItemID: "missing_item",
+	}, func() (bool, error) {
+		commitCalls++
+		return true, nil
+	})
+	if err != nil || !applied || commitCalls != 1 {
+		t.Fatalf("applied=%v calls=%d err=%v", applied, commitCalls, err)
+	}
+}
+
 func TestCancelAndJoinDraftAbandonsRunnerThatIgnoresCancellation(t *testing.T) {
 	started := make(chan struct{})
 	releaseRunner := make(chan struct{})

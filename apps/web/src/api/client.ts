@@ -226,10 +226,23 @@ export const api = {
     return apiFetch<MemoriesResponse>("/api/memories");
   },
 
-  deleteMemory(memoryKey: string): Promise<MemoryMutationResponse> {
+  deleteMemory(memoryKey: string, expected?: MemoryRecord): Promise<MemoryMutationResponse> {
+    const headers: Record<string, string> = { ...JSON_MUTATION_HEADERS };
+    if (expected) {
+      headers["X-Rushes-Memory-If-Match"] = encodeURIComponent(
+        JSON.stringify({
+          kind: expected.kind,
+          statement: expected.statement,
+          source_draft_id: expected.source_draft_id,
+          created_at: expected.created_at,
+          last_confirmed_at: expected.last_confirmed_at,
+          manually_revised_at: expected.manually_revised_at
+        })
+      );
+    }
     return apiFetch<MemoryMutationResponse>(`/api/memories/${encodeURIComponent(memoryKey)}`, {
       method: "DELETE",
-      headers: JSON_MUTATION_HEADERS
+      headers
     });
   },
 

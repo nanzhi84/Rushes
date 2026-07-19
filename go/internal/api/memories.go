@@ -1,13 +1,27 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
+
+const memoryConditionalDeleteHeader = "X-Rushes-Memory-If-Match"
+
+type memoryConditionalDelete struct {
+	Kind              string `json:"kind"`
+	Statement         string `json:"statement"`
+	SourceDraftID     string `json:"source_draft_id"`
+	CreatedAt         string `json:"created_at"`
+	LastConfirmedAt   string `json:"last_confirmed_at"`
+	ManuallyRevisedAt string `json:"manually_revised_at"`
+}
 
 func (server *Server) ListMemoriesApiMemoriesGet(
 	writer http.ResponseWriter,
@@ -34,6 +48,35 @@ func (server *Server) DeleteMemoryApiMemoriesMemoryKeyDelete(
 		writeBadRequest(writer, "invalid_memory_key")
 		return
 	}
+	condition, err := decodeMemoryConditionalDelete(request)
+	if err != nil {
+		writeBadRequest(writer, "invalid_memory_precondition")
+		return
+	}
+	if condition != nil {
+		result, applyErr := reducer.Apply(request.Context(), server.database, nil, reducer.Options{
+			Actor: contracts.ActorUser,
+			ResultRows: reducer.ResultRows{UserMemoryConditionalRemove: &reducer.UserMemoryConditionalRemoveRow{
+				Key: memoryKey, Kind: condition.Kind, Statement: condition.Statement,
+				SourceDraftID: condition.SourceDraftID, CreatedAt: condition.CreatedAt,
+				LastConfirmedAt:   condition.LastConfirmedAt,
+				ManuallyRevisedAt: condition.ManuallyRevisedAt,
+			}},
+		})
+		if applyErr != nil {
+			server.internalError(writer, applyErr)
+			return
+		}
+		if result.Status != reducer.StatusApplied || result.UserMemory == nil {
+			server.internalError(writer, reducer.ErrUserMemoryInput)
+			return
+		}
+		removed := nonNilMemoryKeys(result.UserMemory.RemovedKeys)
+		writeJSON(writer, http.StatusOK, MemoryMutationResponse{
+			DeletedCount: len(removed), DeletedMemoryKeys: removed,
+		})
+		return
+	}
 	removed, err := server.removeMemories(request, []string{memoryKey})
 	if err != nil {
 		server.internalError(writer, err)
@@ -46,6 +89,40 @@ func (server *Server) DeleteMemoryApiMemoriesMemoryKeyDelete(
 	writeJSON(writer, http.StatusOK, MemoryMutationResponse{
 		DeletedCount: len(removed), DeletedMemoryKeys: removed,
 	})
+}
+
+func decodeMemoryConditionalDelete(request *http.Request) (*memoryConditionalDelete, error) {
+	raw := request.Header.Get(memoryConditionalDeleteHeader)
+	if raw == "" {
+		return nil, nil
+	}
+	if len(raw) > 4096 {
+		return nil, reducer.ErrUserMemoryInput
+	}
+	decoded, err := url.QueryUnescape(raw)
+	if err != nil {
+		return nil, err
+	}
+	var condition memoryConditionalDelete
+	if err := json.Unmarshal([]byte(decoded), &condition); err != nil {
+		return nil, err
+	}
+	if !storage.ValidUserMemoryKind(condition.Kind) ||
+		!storage.ValidUserMemoryStatement(condition.Statement) || condition.SourceDraftID == "" {
+		return nil, reducer.ErrUserMemoryInput
+	}
+	if _, err := time.Parse(time.RFC3339Nano, condition.CreatedAt); err != nil {
+		return nil, err
+	}
+	if _, err := time.Parse(time.RFC3339Nano, condition.LastConfirmedAt); err != nil {
+		return nil, err
+	}
+	if condition.ManuallyRevisedAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, condition.ManuallyRevisedAt); err != nil {
+			return nil, err
+		}
+	}
+	return &condition, nil
 }
 
 func (server *Server) ClearMemoriesApiMemoriesDelete(
@@ -77,10 +154,17 @@ func (server *Server) ClearMemoriesApiMemoriesDelete(
 		server.internalError(writer, reducer.ErrUserMemoryInput)
 		return
 	}
-	removed := result.UserMemory.RemovedKeys
+	removed := nonNilMemoryKeys(result.UserMemory.RemovedKeys)
 	writeJSON(writer, http.StatusOK, MemoryMutationResponse{
 		DeletedCount: len(removed), DeletedMemoryKeys: removed,
 	})
+}
+
+func nonNilMemoryKeys(keys []string) []string {
+	if keys == nil {
+		return []string{}
+	}
+	return keys
 }
 
 func (server *Server) removeMemories(request *http.Request, keys []string) ([]string, error) {
