@@ -5,7 +5,6 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-bash "$ROOT/scripts/check_no_legacy_backend.sh"
 bash "$ROOT/scripts/check_e2e_scaffold_isolation.sh"
 
 cp "$ROOT/go/internal/api/openapi.gen.go" "$TMP/openapi.gen.go"

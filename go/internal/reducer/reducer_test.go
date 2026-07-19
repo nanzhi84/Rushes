@@ -1217,7 +1217,7 @@ func eventTypes(events []contracts.Event) []string {
 func TestReducerWorkspaceDecisionNoDraftJobAndEmptyApplyBranches(t *testing.T) {
 	t.Parallel()
 	database := openTestDB(t)
-	if result, err := Apply(t.Context(), database, nil, Options{Actor: contracts.ActorSystem}); err != nil ||
+	if result, err := Apply(t.Context(), database, nil, Options{Actor: contracts.ActorAgent}); err != nil ||
 		result.Status != StatusApplied || len(result.DraftStateVersions) != 0 {
 		t.Fatalf("empty result=%#v err=%v", result, err)
 	}
@@ -1229,7 +1229,7 @@ func TestReducerWorkspaceDecisionNoDraftJobAndEmptyApplyBranches(t *testing.T) {
 			"decision_id": "workspace-decision", "scope_type": "workspace", "question": "全局？",
 			"blocking": false,
 		},
-	}}, Options{Actor: contracts.ActorSystem})
+	}}, Options{Actor: contracts.ActorAgent})
 	if err != nil || created.Status != StatusApplied {
 		t.Fatalf("created=%#v err=%v", created, err)
 	}
@@ -1243,7 +1243,7 @@ func TestReducerWorkspaceDecisionNoDraftJobAndEmptyApplyBranches(t *testing.T) {
 	}
 	job, err := Apply(t.Context(), database, []contracts.Event{{
 		Type: "JobEnqueued", Payload: map[string]any{"job_id": "workspace-job", "kind": "noop"},
-	}}, Options{Actor: contracts.ActorSystem})
+	}}, Options{Actor: contracts.ActorAgent})
 	if err != nil || job.Status != StatusApplied {
 		t.Fatalf("job=%#v err=%v", job, err)
 	}

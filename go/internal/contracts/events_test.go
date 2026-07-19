@@ -108,6 +108,8 @@ func TestEventValidationSerializationAndRoutingBranches(t *testing.T) {
 	invalid := []Event{
 		{Type: "Missing", Actor: ActorUser, Payload: map[string]any{}},
 		{Type: "DraftCreated", Actor: Actor("robot"), DraftID: "d", Payload: map[string]any{}},
+		// actor="system" 是已移除的旧 Python 后端受理值，必须保持被拒。
+		{Type: "DraftCreated", Actor: Actor("system"), DraftID: "d", Payload: map[string]any{}},
 		{Type: "DraftCreated", Actor: ActorUser, DraftID: "d"},
 		{Type: "DraftCreated", Actor: ActorUser, Payload: map[string]any{}},
 		{Type: "AssetImported", Actor: ActorUser, Payload: map[string]any{"asset_id": "a"}},
@@ -117,7 +119,7 @@ func TestEventValidationSerializationAndRoutingBranches(t *testing.T) {
 			t.Fatalf("invalid[%d] unexpectedly valid", index)
 		}
 	}
-	for _, actor := range []Actor{ActorUser, ActorAgent, ActorJob, ActorSystem} {
+	for _, actor := range []Actor{ActorUser, ActorAgent, ActorJob} {
 		if !actor.Valid() {
 			t.Fatalf("actor %s invalid", actor)
 		}
