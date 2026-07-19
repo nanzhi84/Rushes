@@ -22,8 +22,20 @@ func (counter *countingQuerier) QueryContext(
 	return counter.Querier.QueryContext(ctx, query, args...)
 }
 
+func seedBatchAsset(t *testing.T, database *DB, assetID string) {
+	t.Helper()
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO assets(asset_id,storage_mode,kind,source,filename,hash,size,ingest_status,understanding_status,usable)
+		VALUES(?,'reference','video','local','clip.mp4',?,12,'ready','ready',1)`,
+		assetID, assetID+"_hash",
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // H6:批量取 best-summary/latest-transcript 与逐 asset 单查结果逐字节等价,且查询数与素材
-// 数解耦——N 个 asset 各 1 次 QueryContext(共 2),而非逐 asset 的 2N 次。
+// 数解耦——N 个 asset 各 1 次 QueryContext(共 2),而非逐 asset 的 2N 次。另覆盖两个边界:
+// (2) 无 ready 摘要的 asset 不入 map;(3) 版本更高但分更低的 v2 不盖过 v1。
 func TestBatchMaterialLookupsMatchSingleAndCutQueries(t *testing.T) {
 	t.Parallel()
 	database, err := Open(t.Context(), t.TempDir())
@@ -34,17 +46,11 @@ func TestBatchMaterialLookupsMatchSingleAndCutQueries(t *testing.T) {
 
 	const assetCount = 100
 	now := "2026-07-18T00:00:00Z"
-	assetIDs := make([]string, 0, assetCount)
+	assetIDs := make([]string, 0, assetCount+2)
 	for index := 0; index < assetCount; index++ {
 		assetID := fmt.Sprintf("asset_%03d", index)
 		assetIDs = append(assetIDs, assetID)
-		if _, err := database.Write().ExecContext(t.Context(), `
-			INSERT INTO assets(asset_id,storage_mode,kind,source,filename,hash,size,ingest_status,understanding_status,usable)
-			VALUES(?,'reference','video','local','clip.mp4',?,12,'ready','ready',1)`,
-			assetID, assetID+"_hash",
-		); err != nil {
-			t.Fatal(err)
-		}
+		seedBatchAsset(t, database, assetID)
 		// 每 asset 两个 ready 摘要版本(rich 段更多、分更高),验证批量逐 asset 选优与单条一致。
 		if _, err := database.Write().ExecContext(t.Context(), `
 			INSERT INTO material_summaries(summary_id,asset_id,version,status,summary_json,fingerprint,created_at)
@@ -68,6 +74,28 @@ func TestBatchMaterialLookupsMatchSingleAndCutQueries(t *testing.T) {
 		}
 	}
 
+	// (2) 只有 pending 摘要:批量与单条都应判「无」。
+	seedBatchAsset(t, database, "asset_no_summary")
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO material_summaries(summary_id,asset_id,version,status,summary_json,fingerprint,created_at)
+		VALUES('asset_no_summary_p','asset_no_summary',1,'pending','{"overall":"x","segments":[]}','fp_ns',?)`,
+		now); err != nil {
+		t.Fatal(err)
+	}
+	assetIDs = append(assetIDs, "asset_no_summary")
+
+	// (3) v1 段更多(分更高),v2 版本更高但分更低:best 应取 v1。
+	seedBatchAsset(t, database, "asset_v1_wins")
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO material_summaries(summary_id,asset_id,version,status,summary_json,fingerprint,created_at)
+		VALUES
+		('asset_v1_wins_1','asset_v1_wins',1,'ready','{"overall":"rich","segments":[{"description":"火焰","tags":["火焰","人物"]},{"description":"海边","tags":["海边"]}]}','fp_v1',?),
+		('asset_v1_wins_2','asset_v1_wins',2,'ready','{"overall":"shallow","segments":[{"description":"人物","tags":["人物"]}]}','fp_v2',?)`,
+		now, now); err != nil {
+		t.Fatal(err)
+	}
+	assetIDs = append(assetIDs, "asset_v1_wins")
+
 	summaries, err := BestMaterialSummariesForAssets(t.Context(), database.Read(), assetIDs)
 	if err != nil {
 		t.Fatal(err)
@@ -77,26 +105,38 @@ func TestBatchMaterialLookupsMatchSingleAndCutQueries(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, assetID := range assetIDs {
-		single, singleErr := BestMaterialSummary(t.Context(), database.Read(), assetID)
-		if singleErr != nil {
-			t.Fatalf("single summary %s: %v", assetID, singleErr)
-		}
-		if !reflect.DeepEqual(summaries[assetID], single) {
-			t.Fatalf("summary mismatch %s: batch=%#v single=%#v", assetID, summaries[assetID], single)
+		single, summaryErr := BestMaterialSummary(t.Context(), database.Read(), assetID)
+		switch {
+		case errors.Is(summaryErr, ErrNotFound):
+			if _, ok := summaries[assetID]; ok {
+				t.Fatalf("batch 有摘要但单条 %s 判无", assetID)
+			}
+		case summaryErr != nil:
+			t.Fatalf("single summary %s: %v", assetID, summaryErr)
+		default:
+			if !reflect.DeepEqual(summaries[assetID], single) {
+				t.Fatalf("summary mismatch %s: batch=%#v single=%#v", assetID, summaries[assetID], single)
+			}
 		}
 		singleTranscript, transcriptErr := LatestTranscript(t.Context(), database.Read(), assetID)
-		if errors.Is(transcriptErr, ErrNotFound) {
+		switch {
+		case errors.Is(transcriptErr, ErrNotFound):
 			if _, ok := transcripts[assetID]; ok {
 				t.Fatalf("batch 有转写但单条 %s 判无", assetID)
 			}
-			continue
-		}
-		if transcriptErr != nil {
+		case transcriptErr != nil:
 			t.Fatalf("single transcript %s: %v", assetID, transcriptErr)
+		default:
+			if !reflect.DeepEqual(transcripts[assetID], singleTranscript) {
+				t.Fatalf("transcript mismatch %s", assetID)
+			}
 		}
-		if !reflect.DeepEqual(transcripts[assetID], singleTranscript) {
-			t.Fatalf("transcript mismatch %s", assetID)
-		}
+	}
+	if _, ok := summaries["asset_no_summary"]; ok {
+		t.Fatal("无 ready 摘要的 asset 不应进 map")
+	}
+	if best := summaries["asset_v1_wins"]; best["overall"] != "rich" {
+		t.Fatalf("v2 版本更高但分更低,best 应取 v1(rich): %#v", best)
 	}
 
 	summaryCounter := &countingQuerier{Querier: database.Read()}
@@ -109,6 +149,6 @@ func TestBatchMaterialLookupsMatchSingleAndCutQueries(t *testing.T) {
 	}
 	if summaryCounter.queries != 1 || transcriptCounter.queries != 1 {
 		t.Fatalf("批量应各 1 次 QueryContext(共 2),实际 summary=%d transcript=%d;逐 asset 会是 %d",
-			summaryCounter.queries, transcriptCounter.queries, 2*assetCount)
+			summaryCounter.queries, transcriptCounter.queries, 2*len(assetIDs))
 	}
 }
