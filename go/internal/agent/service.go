@@ -13,7 +13,6 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
@@ -40,7 +39,7 @@ type Service struct {
 	tools            *rushestools.Registry
 	executor         *agentexec.Executor
 	chatModel        model.ToolCallingChatModel
-	react            *react.Agent
+	react            *concurrentReactAgent
 	analyzer         *understanding.Analyzer
 	speechRecognizer contracts.SpeechRecognizer
 	contextManager   *ContextManager
@@ -92,20 +91,24 @@ func NewServiceWithModels(
 	registry.Use(destructiveConfirmationInterceptor)
 	recordModelToolSchemaSize(ctx, registry)
 	if chatModel != nil {
-		service.react, err = react.NewAgent(ctx, &react.AgentConfig{
-			ToolCallingModel: chatModel,
-			ToolsConfig: compose.ToolsNodeConfig{
+		// #103 G3b：react 图的 Rushes 复刻,把单个 ToolsNode 换成按 registry.Effect 逐消息路由的
+		// toolRouter(全只读并行、含写串行)。ExecuteSequentially 由 toolRouter 逐节点决定,不在此设;
+		// 模型侧 H5 直通模型 / StreamToolCallChecker / H1b MessageModifier / MaxStep 全部原样保留。
+		service.react, err = newConcurrentReactAgent(
+			ctx,
+			chatModel,
+			compose.ToolsNodeConfig{
 				Tools:               registry.EinoTools(true, false),
-				ExecuteSequentially: true,
 				UnknownToolsHandler: unknownToolRecoveryHandler,
 				ToolCallMiddlewares: []compose.ToolMiddleware{newToolRecoveryMiddleware(retrySafeFromEffect(registry.Effect))},
 			},
-			// 多主题口播可能需要 30 轮以上的模型/工具往返，因此将真实预算
-			// 保留到 40 轮；最后 5 轮由 MessageModifier 注入收敛提醒。
-			MaxStep:               maxReActStepsPerTurn,
-			StreamToolCallChecker: FullStreamToolCallChecker,
-			MessageModifier:       turnBudgetMessageModifier,
-		})
+			registry.Effect,
+			// 多主题口播可能需要 30 轮以上的模型/工具往返，因此将真实预算保留到 40 轮；
+			// 最后 5 轮由 MessageModifier 注入收敛提醒。
+			maxReActStepsPerTurn,
+			FullStreamToolCallChecker,
+			turnBudgetMessageModifier,
+		)
 		if err != nil {
 			cancel()
 			return nil, err
