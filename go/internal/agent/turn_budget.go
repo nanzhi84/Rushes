@@ -91,6 +91,10 @@ func turnBudgetInstruction(remainingToolRounds int) string {
 	)
 }
 
+// turnToolResultCompactionInstruction 在回合内工具结果被主动压缩时注入，引导模型先固化
+// 结论再收敛，而不是因摘要丢了细节而重复检索（#95 H1b）。
+const turnToolResultCompactionInstruction = "【上下文压缩提醒】历史工具结果已超出软预算并被有界摘要，细节可能已丢失。请先用 plan.update 把已经确认的结论与关键 ID（素材、镜头、时间线片段等）固化进内容计划，再收敛输出最终回复；不要因为摘要丢了细节而重复检索同样的信息。"
+
 func turnBudgetMessageModifier(
 	ctx context.Context,
 	messages []*schema.Message,
@@ -100,6 +104,11 @@ func turnBudgetMessageModifier(
 		if instruction := turnBudgetInstruction(state.beginModelCall()); instruction != "" {
 			prompt += "\n\n" + instruction
 		}
+	}
+	// 回合内软预算：工具结果累计超阈值时先做有界摘要，再追加收敛提示（#95 H1b）。
+	if compacted, didCompact := compactTurnToolResults(messages); didCompact {
+		messages = compacted
+		prompt += "\n\n" + turnToolResultCompactionInstruction
 	}
 	return append([]*schema.Message{schema.SystemMessage(prompt)}, messages...)
 }

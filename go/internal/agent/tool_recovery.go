@@ -22,6 +22,9 @@ const (
 	maxToolExecutionRetries = 5
 	// 工具把结构化失败回灌模型后，最多允许 5 次“修改方案再试”。
 	maxModelRepairAttempts = 5
+	// 交替 fail→success 会不断清空连击预算（recordSuccess），单靠 maxModelRepairAttempts
+	// 无法收敛（#95 H4）。turn 级累计计数不因成功重置，累计到此阈值同样触发穷尽。
+	maxCumulativeRepairAttempts = 10
 )
 
 type toolRecoveryContextKey struct{}
@@ -34,13 +37,14 @@ type toolFailureSnapshot struct {
 }
 
 type toolRecoveryState struct {
-	mu             sync.Mutex
-	failedCalls    map[string]toolFailureSnapshot
-	hadFailure     bool
-	rootTool       string
-	repairFailures int
-	exhausted      bool
-	latest         toolFailureSnapshot
+	mu                       sync.Mutex
+	failedCalls              map[string]toolFailureSnapshot
+	hadFailure               bool
+	rootTool                 string
+	repairFailures           int
+	cumulativeRepairFailures int
+	exhausted                bool
+	latest                   toolFailureSnapshot
 }
 
 type recoveryDecision struct {
@@ -73,7 +77,9 @@ func (state *toolRecoveryState) beforeCall(name, arguments string) recoveryDecis
 	fingerprint := toolCallFingerprint(name, arguments)
 	if previous, exists := state.failedCalls[fingerprint]; exists {
 		state.repairFailures++
-		state.exhausted = state.repairFailures >= maxModelRepairAttempts
+		state.cumulativeRepairFailures++
+		state.exhausted = state.repairFailures >= maxModelRepairAttempts ||
+			state.cumulativeRepairFailures >= maxCumulativeRepairAttempts
 		state.latest = previous
 		return recoveryDecision{
 			blocked: true, duplicate: true, exhausted: state.exhausted,
@@ -86,13 +92,15 @@ func (state *toolRecoveryState) beforeCall(name, arguments string) recoveryDecis
 func (state *toolRecoveryState) recordFailure(snapshot toolFailureSnapshot) recoveryDecision {
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	state.cumulativeRepairFailures++
 	if !state.hadFailure {
 		state.hadFailure = true
 		state.rootTool = snapshot.Tool
 	} else {
 		state.repairFailures++
 	}
-	state.exhausted = state.repairFailures >= maxModelRepairAttempts
+	state.exhausted = state.repairFailures >= maxModelRepairAttempts ||
+		state.cumulativeRepairFailures >= maxCumulativeRepairAttempts
 	state.failedCalls[toolCallFingerprint(snapshot.Tool, snapshot.Arguments)] = snapshot
 	state.latest = snapshot
 	return recoveryDecision{
@@ -113,7 +121,9 @@ func (state *toolRecoveryState) recordSuccess(_ string) {
 	state.hadFailure = false
 	state.rootTool = ""
 	state.repairFailures = 0
-	state.exhausted = false
+	// 累计修复计数是 turn 级、不因单次成功重置（#95 H4）：交替 fail→success 不能无限
+	// 刷新预算。连击照常清零，但累计到阈值仍维持穷尽。
+	state.exhausted = state.cumulativeRepairFailures >= maxCumulativeRepairAttempts
 	state.latest = toolFailureSnapshot{}
 }
 
@@ -136,12 +146,14 @@ func (state *toolRecoveryState) summary() string {
 		return ""
 	}
 	return fmt.Sprintf(
-		"工具：%s；参数：%s；最后错误：%s；模型修复失败次数：%d/%d",
+		"工具：%s；参数：%s；最后错误：%s；模型修复失败次数：%d/%d（本回合累计 %d/%d）",
 		state.latest.Tool,
 		agentexec.TruncateText(canonicalToolArguments(state.latest.Arguments), 320),
 		agentexec.TruncateText(state.latest.Observation, 600),
 		state.repairFailures,
 		maxModelRepairAttempts,
+		state.cumulativeRepairFailures,
+		maxCumulativeRepairAttempts,
 	)
 }
 
@@ -362,6 +374,7 @@ func recoveryMetadata(decision recoveryDecision, executionAttempts int) map[stri
 	remaining := max(0, maxModelRepairAttempts-decision.repairAttempt)
 	action := "读取 observation 和 data，修改参数后再调用；不得原样重复同一工具调用"
 	if decision.exhausted {
+		remaining = 0
 		action = "停止工具调用，向用户明确说明失败原因并等待下一步指令"
 	}
 	return map[string]any{

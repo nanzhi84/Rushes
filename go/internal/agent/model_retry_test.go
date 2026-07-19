@@ -197,48 +197,100 @@ func TestTimeoutRetryChatModelStreamRetriesOnlyBeforeFirstChunk(t *testing.T) {
 	}
 }
 
-type partialTimeoutModel struct {
-	mu    sync.Mutex
-	calls int
+// scriptedStreamModel 按脚本逐次返回 Stream 结果，用于精确复现终态回复直通流式的重试边界
+// （#95 H5）：工具调用轮与「前导阶段」失败仍缓冲后重试，一旦越过首个可见正文的直通承诺点就
+// 不再重试。
+type scriptedStreamModel struct {
+	mu      sync.Mutex
+	calls   int
+	scripts []func() (*schema.StreamReader[*schema.Message], error)
 }
 
-func (stub *partialTimeoutModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+func (stub *scriptedStreamModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return stub, nil
 }
 
-func (*partialTimeoutModel) Generate(
+func (*scriptedStreamModel) Generate(
 	context.Context, []*schema.Message, ...model.Option,
 ) (*schema.Message, error) {
 	return nil, errors.New("unused")
 }
 
-func (stub *partialTimeoutModel) Stream(
+func (stub *scriptedStreamModel) Stream(
 	context.Context, []*schema.Message, ...model.Option,
 ) (*schema.StreamReader[*schema.Message], error) {
 	stub.mu.Lock()
+	index := stub.calls
 	stub.calls++
-	call := stub.calls
 	stub.mu.Unlock()
-	if call > 1 {
-		return schema.StreamReaderFromArray([]*schema.Message{
-			schema.AssistantMessage("恢复成功", nil),
-		}), nil
+	if index >= len(stub.scripts) {
+		return nil, fmt.Errorf("脚本已用尽：第 %d 次调用", index+1)
 	}
-	reader, writer := schema.Pipe[*schema.Message](2)
-	writer.Send(schema.AssistantMessage("不完整输出", nil), nil)
-	writer.Send(nil, context.DeadlineExceeded)
-	writer.Close()
-	return reader, nil
+	return stub.scripts[index]()
 }
 
-func TestTimeoutRetryChatModelDiscardsPartialStreamAndRetriesBeforeSideEffects(t *testing.T) {
-	t.Parallel()
-	stub := &partialTimeoutModel{}
-	retry := &timeoutRetryChatModel{
-		inner: stub, maxRetries: maxModelTimeoutRetries,
+// streamChunksThenError 构造一条先逐块推送、再（当 err 非 nil 时）以该错误终止的模型流副本。
+func streamChunksThenError(chunks []*schema.Message, err error) func() (*schema.StreamReader[*schema.Message], error) {
+	return func() (*schema.StreamReader[*schema.Message], error) {
+		reader, writer := schema.Pipe[*schema.Message](len(chunks) + 1)
+		for _, chunk := range chunks {
+			writer.Send(chunk, nil)
+		}
+		if err != nil {
+			writer.Send(nil, err)
+		}
+		writer.Close()
+		return reader, nil
+	}
+}
+
+func newTestStreamRetry(inner model.ToolCallingChatModel) *timeoutRetryChatModel {
+	return &timeoutRetryChatModel{
+		inner: inner, maxRetries: maxModelTimeoutRetries,
 		delay: func(int) time.Duration { return 0 },
 		wait:  func(context.Context, time.Duration) error { return nil },
 	}
+}
+
+func TestStreamToolRoundBuffersAndRetriesPartialFailure(t *testing.T) {
+	t.Parallel()
+	toolChunk := func() *schema.Message {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "call_edit", Function: schema.FunctionCall{Name: "timeline.edit_talking_head", Arguments: `{}`},
+		}})
+	}
+	stub := &scriptedStreamModel{scripts: []func() (*schema.StreamReader[*schema.Message], error){
+		// 工具调用轮中途断流：已判为工具轮，完整缓冲时撞到超时 → 丢弃后重试。
+		streamChunksThenError([]*schema.Message{toolChunk()}, context.DeadlineExceeded),
+		// 重试成功：完整的工具调用轮。
+		streamChunksThenError([]*schema.Message{toolChunk()}, nil),
+	}}
+	retry := newTestStreamRetry(stub)
+	notices := 0
+	ctx := withModelRetryReporter(t.Context(), func(modelRetryNotice) { notices++ })
+	stream, err := retry.Stream(ctx, []*schema.Message{schema.UserMessage("继续")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	message, err := stream.Recv()
+	if err != nil || len(message.ToolCalls) != 1 || message.ToolCalls[0].ID != "call_edit" {
+		t.Fatalf("工具轮重试后应产出完整 tool_call：message=%#v err=%v", message, err)
+	}
+	if _, err := stream.Recv(); !errors.Is(err, io.EOF) || stub.calls != 2 || notices != 1 {
+		t.Fatalf("工具轮 partial 失败应缓冲后重试一次：err=%v calls=%d notices=%d", err, stub.calls, notices)
+	}
+}
+
+func TestStreamRetriesOnPreambleFailureBeforeVisibleContent(t *testing.T) {
+	t.Parallel()
+	stub := &scriptedStreamModel{scripts: []func() (*schema.StreamReader[*schema.Message], error){
+		// 前导（纯思考）分片后断流：尚未越过直通承诺点 → 安全重试。
+		streamChunksThenError([]*schema.Message{{Role: schema.Assistant, ReasoningContent: "先想想"}}, context.DeadlineExceeded),
+		// 重试成功：终态文本轮。
+		streamChunksThenError([]*schema.Message{schema.AssistantMessage("恢复成功", nil)}, nil),
+	}}
+	retry := newTestStreamRetry(stub)
 	notices := 0
 	ctx := withModelRetryReporter(t.Context(), func(modelRetryNotice) { notices++ })
 	stream, err := retry.Stream(ctx, []*schema.Message{schema.UserMessage("继续")})
@@ -248,10 +300,38 @@ func TestTimeoutRetryChatModelDiscardsPartialStreamAndRetriesBeforeSideEffects(t
 	defer stream.Close()
 	message, err := stream.Recv()
 	if err != nil || message.Content != "恢复成功" {
-		t.Fatalf("first=%#v err=%v", message, err)
+		t.Fatalf("前导失败应重试到成功：message=%#v err=%v", message, err)
 	}
-	if _, err = stream.Recv(); !errors.Is(err, io.EOF) || stub.calls != 2 || notices != 1 {
-		t.Fatalf("final err=%v calls=%d notices=%d", err, stub.calls, notices)
+	if stub.calls != 2 || notices != 1 {
+		t.Fatalf("前导失败应重试一次：calls=%d notices=%d", stub.calls, notices)
+	}
+}
+
+func TestStreamFinalRoundStreamsThroughWithoutRetryAfterContent(t *testing.T) {
+	t.Parallel()
+	stub := &scriptedStreamModel{scripts: []func() (*schema.StreamReader[*schema.Message], error){
+		// 终态文本轮：首个可见正文后 provider 断流 → 已直通、不再重试，错误原样直达消费端。
+		streamChunksThenError([]*schema.Message{schema.AssistantMessage("开始回答", nil)}, context.DeadlineExceeded),
+		// 若错误地重试就会取到这条，断言不应到达。
+		streamChunksThenError([]*schema.Message{schema.AssistantMessage("不应重试", nil)}, nil),
+	}}
+	retry := newTestStreamRetry(stub)
+	notices := 0
+	ctx := withModelRetryReporter(t.Context(), func(modelRetryNotice) { notices++ })
+	stream, err := retry.Stream(ctx, []*schema.Message{schema.UserMessage("继续")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	message, err := stream.Recv()
+	if err != nil || message.Content != "开始回答" {
+		t.Fatalf("终态轮首个正文应直通：message=%#v err=%v", message, err)
+	}
+	if _, err := stream.Recv(); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("直通后 provider 断流应原样透出、不重试：err=%v", err)
+	}
+	if stub.calls != 1 || notices != 0 {
+		t.Fatalf("直通轮不得重试：calls=%d notices=%d", stub.calls, notices)
 	}
 }
 
@@ -803,5 +883,78 @@ func TestContextLengthRetryFinishesTurnAndReportsUsage(t *testing.T) {
 	usage, _ := turnEnded["token_usage"].(map[string]any)
 	if usage["model_calls"] != 1 || usage["total_tokens"] != 820 {
 		t.Fatalf("turn_ended 未计入重试后的用量: %#v", turnEnded)
+	}
+}
+
+func TestCompactTurnToolResultsBoundsHistoryAndInjectsHint(t *testing.T) {
+	t.Parallel()
+	makeToolMsg := func(id string, repeat int) *schema.Message {
+		payload := map[string]any{
+			"asset_id": id,
+			"segments": strings.Repeat("很长的逐镜头语义描述与标签，", repeat),
+		}
+		encoded, _ := json.Marshal(payload)
+		return &schema.Message{Role: schema.Tool, Content: string(encoded)}
+	}
+
+	// 小历史：累计不超软预算，不压缩、不注入提示。
+	small := []*schema.Message{schema.UserMessage("剪辑"), makeToolMsg("solo", 5)}
+	if _, did := compactTurnToolResults(small); did {
+		t.Fatal("小历史不应触发压缩")
+	}
+
+	// 大历史：12 条大工具结果，累计远超 turnToolResultSoftBudgetRunes。
+	messages := []*schema.Message{schema.UserMessage("请理解全部素材并剪辑")}
+	ids := make([]string, 0, 12)
+	for i := 0; i < 12; i++ {
+		id := fmt.Sprintf("asset_key_%02d", i)
+		ids = append(ids, id)
+		messages = append(messages, makeToolMsg(id, 500))
+	}
+	before := 0
+	for _, m := range messages {
+		if m.Role == schema.Tool {
+			before += utf8.RuneCountInString(m.Content)
+		}
+	}
+	if before <= turnToolResultSoftBudgetRunes {
+		t.Fatalf("fixture 未超软预算：%d", before)
+	}
+
+	compacted, did := compactTurnToolResults(messages)
+	if !did {
+		t.Fatal("超软预算的工具历史应触发压缩")
+	}
+	after := 0
+	for _, m := range compacted {
+		if m.Role == schema.Tool {
+			after += utf8.RuneCountInString(m.Content)
+		}
+	}
+	if after >= before || after > turnToolResultSoftBudgetRunes+len(ids)*160 {
+		t.Fatalf("压缩后未有界：before=%d after=%d", before, after)
+	}
+	// 最新工具结果优先保细节：关键 ID 必须保留（模型据此 plan.update 固化）。
+	if newest := compacted[len(compacted)-1]; !strings.Contains(newest.Content, ids[len(ids)-1]) {
+		t.Fatalf("最新工具结果关键 ID 丢失：%s not in %s", ids[len(ids)-1], newest.Content)
+	}
+	// compactTurnToolResults 不得改动传入切片：原始 messages 累计 rune 应不变。
+	stillOriginal := 0
+	for _, m := range messages {
+		if m.Role == schema.Tool {
+			stillOriginal += utf8.RuneCountInString(m.Content)
+		}
+	}
+	if stillOriginal != before {
+		t.Fatalf("原始 messages 被就地改写：before=%d now=%d", before, stillOriginal)
+	}
+
+	// 修饰器在压缩时追加收敛提示；未压缩时不追加。
+	modified := turnBudgetMessageModifier(t.Context(), messages)
+	if modified[0].Role != schema.System || !strings.Contains(modified[0].Content, "上下文压缩提醒") {
+		t.Fatalf("压缩时应注入收敛提示：%s", modified[0].Content)
+	}
+	if smallModified := turnBudgetMessageModifier(t.Context(), small); strings.Contains(smallModified[0].Content, "上下文压缩提醒") {
+		t.Fatal("未压缩时不应注入压缩提示")
 	}
 }
