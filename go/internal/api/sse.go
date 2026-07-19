@@ -88,11 +88,17 @@ func (server *Server) streamEvents(
 		return true
 	}
 
-	for {
+	// H9:领域事件查询只在 50ms poll tick(与初次进入)时做,不再随每个回合流帧回到
+	// 循环顶部重查。流式期一个 text_delta 走 turnStream 分支即时转发、不触发 DB 查询;
+	// 领域事件时延仍受 poll 间隔(50ms)约束,与改动前一致、不劣化。
+	pollDomainEvents := func() (shouldReturn bool) {
+		if server.sseDomainPollObserver != nil {
+			server.sseDomainPollObserver()
+		}
 		rows, err := storage.ListEventsAfter(request.Context(), server.database.Read(), cursor, draftID, 256)
 		if err != nil {
 			server.logger.Error("SSE 查询失败", "error", err)
-			return
+			return true
 		}
 		for _, row := range rows {
 			cursor = row.ID
@@ -107,18 +113,29 @@ func (server *Server) streamEvents(
 			frame, err := encodeSSE(row.ID, event)
 			if err != nil {
 				server.logger.Error("SSE 编码失败", "error", err)
-				return
+				return true
 			}
 			if _, err := io.WriteString(writer, frame); err != nil {
-				return
+				return true
 			}
 			if err := controller.Flush(); err != nil {
-				return
+				return true
 			}
 			emitted++
 			if server.sseMaxEvents > 0 && emitted >= server.sseMaxEvents {
+				return true
+			}
+		}
+		return false
+	}
+
+	pollDomain := true
+	for {
+		if pollDomain {
+			if pollDomainEvents() {
 				return
 			}
+			pollDomain = false
 		}
 		// 先重放持久化领域事件，再补当前回合快照。这样 Last-Event-ID 仍只属于
 		// 领域事件，同时一个草稿页只需一条 SSE 连接。
@@ -161,6 +178,7 @@ func (server *Server) streamEvents(
 				return
 			}
 		case <-poll.C:
+			pollDomain = true
 		}
 	}
 }
