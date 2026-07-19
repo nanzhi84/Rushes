@@ -140,9 +140,12 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 首登 URL 含 token：只 fmt 打到 stdout 给本地用户看，绝不经会落盘的 slog（#95 H3 P1：
+	// 防 token 持久化进 logs/api.log）。持久化的 ready 记录只留不含密钥的端口。
+	_, _ = fmt.Fprintf(os.Stdout, "Rushes Go API ready: http://127.0.0.1:%d/#t=%s\n", port, token)
 	errChannel := make(chan error, 1)
 	go func() {
-		slog.Info("Rushes Go API ready", "url", fmt.Sprintf("http://127.0.0.1:%d/#t=%s", port, token))
+		slog.Info("Rushes Go API ready", "port", port)
 		errChannel <- httpServer.ListenAndServe()
 	}()
 	select {

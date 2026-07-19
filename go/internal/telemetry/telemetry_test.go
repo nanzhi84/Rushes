@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"math"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -135,5 +136,22 @@ func TestInstallJSONLoggerWritesStructuredRecords(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("未找到结构化回合日志记录")
+	}
+}
+
+func TestHandlerExcludesCmdlineExposesMetrics(t *testing.T) {
+	NewCounter("test_handler_metric").Inc()
+	recorder := httptest.NewRecorder()
+	Handler().ServeHTTP(recorder, httptest.NewRequest("GET", "/debug/metrics", nil))
+	body := recorder.Body.String()
+	// 无鉴权端点必须跳过 expvar 默认的 cmdline（可能含 -token 等密钥）。
+	if strings.Contains(body, "cmdline") {
+		t.Fatal("Handler 不应暴露 cmdline")
+	}
+	if !strings.Contains(body, "test_handler_metric") {
+		t.Fatal("Handler 应包含已注册度量")
+	}
+	if !json.Valid(recorder.Body.Bytes()) {
+		t.Fatalf("Handler 输出非法 JSON: %s", body)
 	}
 }

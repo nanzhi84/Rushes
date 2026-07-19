@@ -76,6 +76,8 @@ persist_generated_token() {
 
 API_PORT="${RUSHES_API_PORT:-8010}"
 WEB_PORT="${RUSHES_WEB_PORT:-8011}"
+# worker 度量端口取 API_PORT+2，避开 WEB_PORT(默认 API_PORT+1) 撞车（#95 H3 P1）。
+WORKER_METRICS_PORT="${RUSHES_WORKER_METRICS_PORT:-$((API_PORT + 2))}"
 WORKSPACE="${RUSHES_WORKSPACE_PATH:-$ROOT/.rushes}"
 case "$WORKSPACE" in
   /*) ;;
@@ -91,7 +93,7 @@ else
 fi
 BIN_DIR="$WORKSPACE/bin"
 
-for port in "$API_PORT" "$WEB_PORT"; do
+for port in "$API_PORT" "$WEB_PORT" "$WORKER_METRICS_PORT"; do
   if port_in_use "$port"; then
     echo "错误：端口 $port 已被占用。请设置 RUSHES_API_PORT / RUSHES_WEB_PORT 后重试。" >&2
     exit 1
@@ -125,7 +127,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 RUSHES_WORKSPACE_PATH="$WORKSPACE" RUSHES_API_TOKEN="$TOKEN" RUSHES_API_PORT="$API_PORT" \
-  "$BIN_DIR/rushes-api" -env-file "$ROOT/.env" -workspace "$WORKSPACE" -port "$API_PORT" -token "$TOKEN" &
+  "$BIN_DIR/rushes-api" -env-file "$ROOT/.env" -workspace "$WORKSPACE" -port "$API_PORT" &
 pids+=("$!")
 
 ready=0
@@ -145,7 +147,7 @@ if [[ "$ready" != 1 ]]; then
   exit 1
 fi
 
-RUSHES_WORKSPACE_PATH="$WORKSPACE" RUSHES_WORKER_METRICS_ADDR="127.0.0.1:$((API_PORT + 1))" \
+RUSHES_WORKSPACE_PATH="$WORKSPACE" RUSHES_WORKER_METRICS_ADDR="127.0.0.1:$WORKER_METRICS_PORT" \
   "$BIN_DIR/rushes-worker" -env-file "$ROOT/.env" -workspace "$WORKSPACE" &
 pids+=("$!")
 
@@ -161,7 +163,7 @@ echo "  日常访问：http://127.0.0.1:$WEB_PORT"
 echo "  首次登录：http://127.0.0.1:$WEB_PORT/#t=$TOKEN"
 echo "  API :$API_PORT · workspace: $WORKSPACE · Ctrl+C 全停"
 echo "  日志 :$WORKSPACE/logs/{api,worker}.log（JSON 结构化，按大小轮转，同时镜像到本终端）"
-echo "  度量 :API http://127.0.0.1:$API_PORT/debug/metrics · worker http://127.0.0.1:$((API_PORT + 1))/debug/metrics"
+echo "  度量 :API http://127.0.0.1:$API_PORT/debug/metrics · worker http://127.0.0.1:$WORKER_METRICS_PORT/debug/metrics"
 echo "════════════════════════════════════════════════════"
 
 while true; do

@@ -62,7 +62,8 @@ func TestTurnEmitsStructuredLogAndMetrics(t *testing.T) {
 
 	_, stream, unsubscribe := service.Hub().Subscribe("draft_metrics")
 	defer unsubscribe()
-	if !service.Queue().EnqueueUserMessage("draft_metrics", "user_1", "把开头剪短一点") {
+	const userUtterance = "把开头剪短一点 token=SENTINEL_SECRET_do_not_persist_9z8y7x"
+	if !service.Queue().EnqueueUserMessage("draft_metrics", "user_1", userUtterance) {
 		t.Fatal("enqueue failed")
 	}
 	service.Queue().JoinDraft("draft_metrics")
@@ -107,6 +108,10 @@ func TestTurnEmitsStructuredLogAndMetrics(t *testing.T) {
 	if !json.Valid(recorder.Body.Bytes()) {
 		t.Fatal("/debug/metrics 输出非法 JSON")
 	}
+	// P1 回归护栏：无鉴权的 /debug/metrics 绝不能暴露 expvar 默认的 cmdline（os.Args 可能含 -token）。
+	if strings.Contains(body, "cmdline") {
+		t.Fatal("/debug/metrics 不应包含 cmdline（可能泄漏命令行密钥）")
+	}
 
 	// 验收 1：日志文件含回合开始/结束结构化记录（按 draft 归属过滤）。
 	_ = closer.Close()
@@ -144,5 +149,16 @@ func TestTurnEmitsStructuredLogAndMetrics(t *testing.T) {
 	}
 	if !sawStart || !sawEnd || !sawModelCall {
 		t.Fatalf("日志应含 turn_started(%v)/turn_ended(%v)/model_call(%v) 记录", sawStart, sawEnd, sawModelCall)
+	}
+
+	// P1 回归护栏：结构化日志绝不含用户话原文与其中的伪密钥（结构化日志只记 ID/计数，不记内容）。
+	rawLog, err := os.ReadFile(filepath.Join(logDir, "agenttest.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"SENTINEL_SECRET_do_not_persist_9z8y7x", userUtterance} {
+		if strings.Contains(string(rawLog), forbidden) {
+			t.Fatalf("日志泄漏了用户内容/密钥: %q", forbidden)
+		}
 	}
 }
