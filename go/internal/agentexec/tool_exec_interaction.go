@@ -23,7 +23,7 @@ func (exec *Executor) toolAskUser(
 	if len(pending) == 0 {
 		if decisionType != "critical" {
 			return rushestools.ToolResult{
-				Status:      "failed",
+				Status:      string(rushestools.StatusFailed),
 				Observation: "该问题未声明为无法安全推断的关键分歧。可逆的镜头取舍、删保项、气口、B-roll、节奏、字幕、转场、调色和 BGM 等细节必须由 Agent 根据证据自主决定并继续执行，不得创建首剪或 EDL 审批卡。",
 				Data: map[string]any{
 					"autonomous_decision_required": true,
@@ -33,7 +33,7 @@ func (exec *Executor) toolAskUser(
 		}
 		if utf8.RuneCountInString(input.Question) > 240 || len(input.Options) > 3 {
 			return rushestools.ToolResult{
-				Status:      "failed",
+				Status:      string(rushestools.StatusFailed),
 				Observation: "关键决策卡只能聚焦一个核心分歧，问题不得超过 240 个字符，结构化方向不得超过 3 个；不要附带方案清单或逐项审批。",
 				Data: map[string]any{
 					"autonomous_decision_required": false,
@@ -84,7 +84,7 @@ func (exec *Executor) toolAskUser(
 	MarkDecisionCreatedThisTurn(ctx, decisionID, blocking)
 	if !blocking {
 		return rushestools.ToolResult{
-			Status:      "succeeded",
+			Status:      string(rushestools.StatusSucceeded),
 			Observation: "已创建非阻塞决策卡；当前任务可以继续执行。",
 			Data: map[string]any{
 				"decision_id": decisionID, "decision_type": decisionType,
@@ -93,7 +93,7 @@ func (exec *Executor) toolAskUser(
 		}, nil
 	}
 	return rushestools.ToolResult{
-		Status:      "waiting",
+		Status:      string(rushestools.StatusWaiting),
 		Observation: "已创建决策卡。本回合必须停止调用工具；等待真实用户回答后，系统会自动继续。",
 		Data: map[string]any{
 			"decision_id": decisionID, "decision_type": decisionType,
@@ -145,7 +145,7 @@ func (exec *Executor) ToolDecisionAnswer(
 	if err != nil || result.Status != reducer.StatusApplied {
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("reducer status: %s", result.Status))
 	}
-	return rushestools.ToolResult{Status: "succeeded", Observation: "决策已回答"}, nil
+	return rushestools.ToolResult{Status: string(rushestools.StatusSucceeded), Observation: "决策已回答"}, nil
 }
 
 // DecisionAnswerError reports a stable API reason for rejected answer content.

@@ -248,7 +248,7 @@ func (exec *Executor) runUnderstandInline(
 				Type: "MaterialUnderstandingFailed",
 				Payload: map[string]any{
 					"asset_id": asset.ID, "job_id": runID, "cancelled": cancelled,
-					"failure": map[string]any{"error_code": "understanding_failed", "message": analyzeErr.Error()},
+					"failure": map[string]any{"error_code": string(rushestools.ErrCodeUnderstandingFailed), "message": analyzeErr.Error()},
 				},
 			}}, reducer.Options{Actor: contracts.ActorAgent})
 			return rushestools.UnderstandResult{}, analyzeErr

@@ -215,10 +215,9 @@ func (exec *Executor) toolRecutCurrentClipsToBeats(
 	input rushestools.TimelineBeatRecutInput,
 ) (rushestools.ToolResult, error) {
 	failed := func(message string, data map[string]any) (rushestools.ToolResult, error) {
-		if data == nil {
-			data = map[string]any{}
-		}
-		return rushestools.ToolResult{Status: "failed", Observation: message, Data: data}, nil
+		// 收口不变量：任何经 failed 返回的结构化失败都必带非空 recovery（#95 T5）。
+		data = rushestools.EnsureFailureRecovery(data)
+		return rushestools.ToolResult{Status: string(rushestools.StatusFailed), Observation: message, Data: data}, nil
 	}
 	current, err := timeline.Latest(ctx, exec.database, draftID)
 	if errors.Is(err, storage.ErrNotFound) {

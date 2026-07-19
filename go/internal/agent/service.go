@@ -676,7 +676,7 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 		if err != nil {
 			status, observation = "failed", err.Error()
 		} else if result, ok := output.(rushestools.ToolResult); ok &&
-			(result.Status == "failed" || result.Status == "validation_failed") {
+			(result.Status == string(rushestools.StatusFailed) || result.Status == string(rushestools.StatusValidationFailed)) {
 			status = "failed"
 		}
 		service.hub.Record(draftID, StreamEvent{

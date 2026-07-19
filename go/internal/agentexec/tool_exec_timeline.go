@@ -49,9 +49,9 @@ func (exec *Executor) toolComposeInitial(
 	document, err := timeline.ComposeInitial(draftID, version, selections)
 	if err != nil {
 		return rushestools.ToolResult{
-			Status: "failed", Observation: "初版时间线参数校验失败，当前时间线未更新",
+			Status: string(rushestools.StatusFailed), Observation: "初版时间线参数校验失败，当前时间线未更新",
 			Data: map[string]any{
-				"error_code": "compose_initial_invalid", "reason": err.Error(),
+				"error_code": string(rushestools.ErrCodeComposeInitialInvalid), "reason": err.Error(),
 				"current_timeline_unchanged": true,
 				"recovery":                   "根据 failed_clip 与 asset_facts 修正源帧范围或素材类型后重试。",
 			},
@@ -74,10 +74,10 @@ func composeInitialFailure(
 		assetID = clip.AssetID
 	}
 	return rushestools.ToolResult{
-		Status:      "failed",
+		Status:      string(rushestools.StatusFailed),
 		Observation: fmt.Sprintf("初版时间线第 %d 个片段参数无效，当前时间线未更新", index+1),
 		Data: map[string]any{
-			"error_code": "compose_initial_invalid", "failed_clip_index": index + 1,
+			"error_code": string(rushestools.ErrCodeComposeInitialInvalid), "failed_clip_index": index + 1,
 			"failed_clip": map[string]any{
 				"asset_id": clip.AssetID, "source_start_frame": clip.SourceStartFrame,
 				"source_end_frame": clip.SourceEndFrame, "role": clip.Role,
@@ -126,7 +126,7 @@ func (exec *Executor) toolApplyPatches(
 			}
 			message := fmt.Sprintf("第 %d 个时间线补丁失败: %v", index+1, err)
 			return rushestools.ToolResult{
-				Status: "failed", Observation: message,
+				Status: string(rushestools.StatusFailed), Observation: message,
 				Data: map[string]any{
 					"failed_op_index":            index + 1,
 					"failed_op":                  operation,
@@ -140,7 +140,7 @@ func (exec *Executor) toolApplyPatches(
 	}
 	if restoreErr := RestoreIndependentAudioTracks(&document, preservedAudio); restoreErr != nil {
 		return rushestools.ToolResult{
-			Status:      "failed",
+			Status:      string(rushestools.StatusFailed),
 			Observation: "批量主视频编辑会破坏未被本批直接编辑的 BGM/SFX，当前时间线未更新",
 			Data: map[string]any{
 				"reason":                     restoreErr.Error(),
@@ -153,7 +153,7 @@ func (exec *Executor) toolApplyPatches(
 	attachedBeatGrids, beatWarnings := exec.attachMissingBGMBeatGrids(ctx, draftID, &document)
 	if report := timeline.Validate(document); !report.Valid {
 		return rushestools.ToolResult{
-			Status:      "failed",
+			Status:      string(rushestools.StatusFailed),
 			Observation: "批量补丁结果未通过时间线校验，当前时间线未更新",
 			Data: map[string]any{
 				"failed_op_index":            len(plannedOperations),
@@ -358,7 +358,7 @@ func (exec *Executor) toolInspectTimeline(
 	document, err := timeline.Latest(ctx, exec.database, draftID)
 	if errors.Is(err, storage.ErrNotFound) {
 		return rushestools.ToolResult{
-			Status:      "succeeded",
+			Status:      string(rushestools.StatusSucceeded),
 			Observation: "当前草稿尚无时间线；请先选择素材并创建初版时间线。",
 			Data: map[string]any{
 				"timeline_exists": false,
@@ -407,7 +407,7 @@ func (exec *Executor) toolInspectTimeline(
 		tracks = append(tracks, trackData)
 	}
 	return rushestools.ToolResult{
-		Status: "succeeded", Observation: timeline.Inspect(document),
+		Status: string(rushestools.StatusSucceeded), Observation: timeline.Inspect(document),
 		Data: map[string]any{
 			"timeline_exists": true,
 			"fps":             document.FPS, "duration_frames": document.DurationFrames, "tracks": tracks,

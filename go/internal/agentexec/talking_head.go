@@ -1288,11 +1288,10 @@ func (exec *Executor) toolEditTalkingHead(
 		len(input.RemovePauseIDs) > 0 || len(input.PauseDecisions) > 0 ||
 		len(input.RepetitionDecisions) > 0 || len(input.ShortFragmentDecisions) > 0
 	failed := func(message string, data map[string]any) (rushestools.ToolResult, error) {
-		if data == nil {
-			data = map[string]any{}
-		}
+		// 收口不变量：任何经 failed 返回的结构化失败都必带非空 recovery（#95 T5）。
+		data = rushestools.EnsureFailureRecovery(data)
 		data["current_timeline_unchanged"] = true
-		return rushestools.ToolResult{Status: "failed", Observation: message, Data: data}, nil
+		return rushestools.ToolResult{Status: string(rushestools.StatusFailed), Observation: message, Data: data}, nil
 	}
 	if len(input.RemoveUtteranceIDs) == 0 && len(input.RemoveWordRanges) == 0 &&
 		len(input.RemovePauseIDs) == 0 && len(input.BrollAssignments) == 0 &&
@@ -1763,6 +1762,7 @@ func (exec *Executor) toolEditTalkingHead(
 		if err != nil {
 			return failed("B-roll 叠加无法合法应用", map[string]any{
 				"assignment_index": index, "reason": err.Error(),
+				"recovery": "根据 reason 调整该 B-roll 的锚点或时长（避开已占用的 visual_overlay 区间），或改选与该语义窗口不冲突的镜头后重试；其余分配无需改动。",
 			})
 		}
 		// 电影语言：给 B-roll 叠加默认的视觉溶入/溶出，软切入切出而不是硬跳。放置硬下限

@@ -29,8 +29,9 @@ func destructiveConfirmationInterceptor(ctx context.Context, spec rushestools.Sp
 	return &rushestools.InterceptorRejection{
 		Observation: "该操作会造成不可逆或影响 agent 之外的改动，必须先经 interaction.confirm_action 获得用户确认后才能执行。",
 		Data: map[string]any{
-			"error_code":  "confirmation_required",
+			"error_code":  string(rushestools.ErrCodeConfirmationRequired),
 			"tool":        spec.Name,
+			"recovery":    "先经 interaction.confirm_action 取得用户确认；确认后系统会自动重放本次调用。",
 			"next_action": "调用 interaction.confirm_action，在 tool_name 传本工具名、arguments 原样传本次参数；用户确认后系统会自动重放执行。",
 		},
 	}
@@ -65,7 +66,7 @@ func isInterceptorRejection(err error) bool {
 // 模型据 observation/next_action 改走 confirm_action，但它不进恢复账（中间件不记失败）。
 func marshalInterceptorRejection(rejection *rushestools.InterceptorRejection) string {
 	encoded, _ := json.Marshal(map[string]any{
-		"status":      "failed",
+		"status":      string(rushestools.StatusFailed),
 		"observation": rejection.Observation,
 		"data":        rejection.Data,
 	})
@@ -76,7 +77,7 @@ func marshalInterceptorRejection(rejection *rushestools.InterceptorRejection) st
 // 工具执行失败。
 func rejectionToolResult(rejection *rushestools.InterceptorRejection) rushestools.ToolResult {
 	return rushestools.ToolResult{
-		Status:      "failed",
+		Status:      string(rushestools.StatusFailed),
 		Observation: rejection.Observation,
 		Data:        rejection.Data,
 	}

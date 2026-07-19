@@ -137,7 +137,7 @@ func (exec *Executor) toolRenderStatus(ctx context.Context, draftID string) (rus
 		return rushestools.ToolResult{}, err
 	}
 	return rushestools.ToolResult{
-		Status: "succeeded", Observation: "已读取渲染状态",
+		Status: string(rushestools.StatusSucceeded), Observation: "已读取渲染状态",
 		Data: map[string]any{
 			"preview_id": draft.PreviewCurrentID, "export_id": draft.ExportCurrentID,
 			"running_jobs": draft.RunningJobs,

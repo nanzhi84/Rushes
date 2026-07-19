@@ -28,7 +28,7 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 	defer release()
 	if blockingDecisionID != "" {
 		return rushestools.ToolResult{
-			Status:      "waiting",
+			Status:      string(rushestools.StatusWaiting),
 			Observation: "本回合已经创建阻塞决策卡；必须停止调用工具并等待真实用户回答。",
 			Data: map[string]any{
 				"decision_id": blockingDecisionID, "blocked_tool": name,
@@ -43,10 +43,10 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 		confirmation := input.(rushestools.ConfirmActionInput)
 		if err := service.tools.ValidateConfirmation(ctx, confirmation.ToolName, confirmation.Arguments); err != nil {
 			return rushestools.ToolResult{
-				Status:      "validation_failed",
+				Status:      string(rushestools.StatusValidationFailed),
 				Observation: "无法创建确认卡：" + err.Error(),
 				Data: map[string]any{
-					"error_code": "invalid_confirmation_target",
+					"error_code": string(rushestools.ErrCodeInvalidConfirmationTarget),
 					"tool_name":  confirmation.ToolName,
 					"recovery":   "改用已注册的非 interaction 模型工具，并严格按该工具输入 schema 修正 arguments 后重试。",
 				},

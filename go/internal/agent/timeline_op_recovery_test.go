@@ -476,7 +476,7 @@ func TestApplyPatchesSplitFailureUsesFailedPointFactsAndStaysAtomic(t *testing.T
 func TestTimelineOpExpectedSchemasFollowCatalogAndHideInjectedFields(t *testing.T) {
 	t.Parallel()
 	for _, spec := range timeline.Catalog {
-		schema := agentexec.TimelineOpExpectedSchema(spec)
+		schema := rushestools.TimelineOpExpectedSchema(spec)
 		properties := schema["properties"].(map[string]any)
 		kind := properties["kind"].(map[string]any)
 		if kind["const"] != spec.Kind || schema["additionalProperties"] != false {
@@ -502,10 +502,10 @@ func TestTimelineOpExpectedSchemasFollowCatalogAndHideInjectedFields(t *testing.
 	if !ok {
 		t.Fatal("insert_clip missing")
 	}
-	first := agentexec.TimelineOpExpectedSchema(*insertSpec)
+	first := rushestools.TimelineOpExpectedSchema(*insertSpec)
 	metadata := first["properties"].(map[string]any)["metadata"].(map[string]any)
 	metadata["examples"].([]any)[0].(map[string]any)["source"] = "mutated"
-	second := agentexec.TimelineOpExpectedSchema(*insertSpec)
+	second := rushestools.TimelineOpExpectedSchema(*insertSpec)
 	secondMetadata := second["properties"].(map[string]any)["metadata"].(map[string]any)
 	if secondMetadata["examples"].([]any)[0].(map[string]any)["source"] != "catalog_example" {
 		t.Fatal("expected_schema 暴露了 Catalog 的可变示例")
