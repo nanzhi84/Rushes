@@ -172,18 +172,39 @@ func TestAskUserRejectsCreativeApprovalAndVerboseCriticalQuestion(t *testing.T) 
 	}
 }
 
+func TestReadOnlyToolCallsShareExecutionLock(t *testing.T) {
+	t.Parallel()
+	state := agentexec.NewTurnInteractionState()
+	ctx := agentexec.WithTurnInteractionState(t.Context(), state)
+	// 第一个只读工具持共享 RLock。
+	release1, _ := beginTurnToolCall(ctx, true)
+	defer release1()
+	// 第二个只读工具应能并发取得 RLock,不被第一个阻塞（#103 G3b）。
+	acquired := make(chan struct{}, 1)
+	go func() {
+		release2, _ := beginTurnToolCall(ctx, true)
+		defer release2()
+		acquired <- struct{}{}
+	}()
+	select {
+	case <-acquired:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("两个只读工具被互相串行化了")
+	}
+}
+
 func TestBlockingDecisionSerializesParallelToolCalls(t *testing.T) {
 	t.Parallel()
 	state := agentexec.NewTurnInteractionState()
 	ctx := agentexec.WithTurnInteractionState(t.Context(), state)
-	release, blocked := beginTurnToolCall(ctx)
+	release, blocked := beginTurnToolCall(ctx, false)
 	if blocked != "" {
 		t.Fatalf("unexpected initial block %q", blocked)
 	}
 
 	acquired := make(chan string, 1)
 	go func() {
-		unlock, decisionID := beginTurnToolCall(ctx)
+		unlock, decisionID := beginTurnToolCall(ctx, false)
 		defer unlock()
 		acquired <- decisionID
 	}()
