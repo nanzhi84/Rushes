@@ -18,8 +18,9 @@ const (
 	MinTalkingHeadRetainedIslandFrames = 2 * timeline.DefaultFPS
 	// minTalkingHeadResidualBreathFrames 是口播质检列出残留气口的时长下限（0.3 秒）。
 	MinTalkingHeadResidualBreathFrames = timeline.DefaultFPS * 3 / 10
-	// minTalkingHeadBrollQualityFrames 是口播质检提示过短 B-roll 的时长下限（1.5 秒），
-	// 比放置时的硬失败下限 minTalkingHeadBrollDurationFrames（0.5 秒）更宽，只作复检提示。
+	// MinTalkingHeadBrollQualityFrames 是口播质检提示过短 B-roll 的时长下限（1.5 秒），与放置
+	// 硬下限 MinTalkingHeadBrollDurationFrames 同为 1.5 秒：放置这关（edit_talking_head）先挡住，
+	// 本项只兜底 insert_clip 直插或历史时间线里遗留的过短 B-roll。
 	MinTalkingHeadBrollQualityFrames = timeline.DefaultFPS * 3 / 2
 )
 

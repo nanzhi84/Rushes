@@ -1,6 +1,7 @@
 package media
 
 import (
+	"context"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -85,9 +86,9 @@ func TestAudioFilterEmitsSeamDeclick(t *testing.T) {
 	}
 }
 
-// TestSeamDeclickReducesRMSJump 行为验证：对同一个波纹接缝拼接，加上 audioFilter 会发出的
+// TestSeamDeclickReducesSeamPeakTransient 行为验证：对同一个波纹接缝拼接，加上 audioFilter 会发出的
 // 那对 12ms 微淡后，接缝处的宽带瞬变(咔哒声的能量)显著下降。用高通后的峰值电平作咔哒代理。
-func TestSeamDeclickReducesRMSJump(t *testing.T) {
+func TestSeamDeclickReducesSeamPeakTransient(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")
 	}
@@ -136,4 +137,53 @@ func TestSeamDeclickReducesRMSJump(t *testing.T) {
 		t.Fatalf("去咔哒未显著降低接缝瞬变: 硬拼=%.1fdB 去咔哒=%.1fdB", hard, soft)
 	}
 	t.Logf("接缝瞬变高频峰值: 硬拼=%.1fdB → 去咔哒=%.1fdB (降 %.1fdB)", hard, soft, hard-soft)
+}
+
+// TestSeamDeclickWiredThroughRender 集成验证（堵「静默失效」盲区）：不直接调 audioFilter，
+// 而是构造带同素材波纹接缝的主视觉轨、走完整 appendAudioMix 装配，断言最终滤镜图含 12ms
+// 去咔哒微淡——这样 baseAudioSeams 检测或 appendAudioMix 接线任一环断掉都会被抓到；并加源
+// 连续的负向对照证明无接缝时不加。
+func TestSeamDeclickWiredThroughRender(t *testing.T) {
+	document := timeline.Empty("render_seam_integration", 1)
+	document.DurationFrames = 120
+	setBase := func(clips []timeline.Clip) {
+		for index := range document.Tracks {
+			if document.Tracks[index].TrackID == "visual_base" {
+				document.Tracks[index].Clips = clips
+			}
+		}
+	}
+	// 同素材、时间线首尾相接(60==60)、源不连续(60!=100) → 波纹接缝。
+	seamClips := []timeline.Clip{
+		{TimelineClipID: "b1", TrackID: "visual_base", AssetID: "a1", AssetKind: "video", Role: "a_roll",
+			TimelineStartFrame: 0, TimelineEndFrame: 60, SourceStartFrame: 0, SourceEndFrame: 60, PlaybackRate: 1},
+		{TimelineClipID: "b2", TrackID: "visual_base", AssetID: "a1", AssetKind: "video", Role: "a_roll",
+			TimelineStartFrame: 60, TimelineEndFrame: 120, SourceStartFrame: 100, SourceEndFrame: 160, PlaybackRate: 1},
+	}
+	setBase(seamClips)
+	inputs := []preparedPrimaryInput{
+		{clip: seamClips[0], inputIndex: 0, kind: "video", probe: Probe{HasAudio: true}},
+		{clip: seamClips[1], inputIndex: 1, kind: "video", probe: Probe{HasAudio: true}},
+	}
+	_, _, filters, _, err := appendAudioMix(context.Background(), nil, document, inputs, []string{"-y"}, nil, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(filters, "\n"), "d=0.012000") {
+		t.Fatalf("接缝素材的滤镜图应含 12ms 去咔哒微淡，实际=%v", filters)
+	}
+
+	// 负向对照：把 b2 源改成与 b1 连续(60→60)，接缝消失，滤镜图不应再有微淡。
+	continuous := append([]timeline.Clip(nil), seamClips...)
+	continuous[1].SourceStartFrame = 60
+	continuous[1].SourceEndFrame = 120
+	setBase(continuous)
+	inputs[1].clip = continuous[1]
+	_, _, filters2, _, err := appendAudioMix(context.Background(), nil, document, inputs, []string{"-y"}, nil, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(filters2, "\n"), "d=0.012000") {
+		t.Fatalf("源连续无接缝时不应有去咔哒微淡，实际=%v", filters2)
+	}
 }
