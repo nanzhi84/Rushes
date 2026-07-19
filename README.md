@@ -100,7 +100,7 @@ Qwen 与 Ark 都注入同一个 `http.Client`：`DialContext` 固定 `tcp4`，`P
 ## 开发与验收
 
 ```bash
-make contracts   # 禁止旧 Python 后端回流 + OpenAPI/SSE 契约零漂移
+make contracts   # OpenAPI/SSE 契约零漂移
 make test        # Go 全量 -race（含 macOS/Linux 语义）
 make coverage    # 手写 Go 核心总覆盖率 >= 90%
 make lint        # go vet + golangci-lint/depguard
