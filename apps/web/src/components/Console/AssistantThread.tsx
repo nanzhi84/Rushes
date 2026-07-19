@@ -26,6 +26,7 @@ import type {
 } from "./runtime";
 import type {
   ModelRetryState,
+  StreamMemoryEntry,
   StreamMemoryItem,
   StreamMessageItem,
   StreamToolItem,
@@ -40,6 +41,8 @@ const FOLLOW_THRESHOLD_PX = 48;
 const VIRTUALIZE_THRESHOLD = 40;
 const ROW_ESTIMATE_PX = 72;
 const ROW_GAP_PX = 10; // 对齐直渲染路径的 space-y-2.5 行距
+
+export type MemoryRetractionResult = "retracted" | "stale";
 
 type HistoryBlock =
   | { type: "message"; message: ConsoleAssistantMessage }
@@ -70,7 +73,8 @@ export function AssistantThread({
   cancelPendingJobId = null,
   onResendMessage,
   resendPendingMessageId = null,
-  onOpenMemorySettings
+  onOpenMemorySettings,
+  onRetractMemory
 }: {
   runtime: ConsoleExternalStoreRuntime;
   onAnswerDecision: AnswerDecisionHandler;
@@ -84,6 +88,7 @@ export function AssistantThread({
   onResendMessage?: (messageId: string, content: string) => void;
   resendPendingMessageId?: string | null;
   onOpenMemorySettings?: () => void;
+  onRetractMemory?: (entry: StreamMemoryEntry) => Promise<MemoryRetractionResult>;
 }): ReactElement {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const followLatestRef = useRef(true);
@@ -100,6 +105,18 @@ export function AssistantThread({
     runtime.messages.find((message) => message.id === STRUCTURED_MESSAGE_ID) ?? null;
   const historyBlocks = useMemo(() => groupHistoryMessages(regularMessages), [regularMessages]);
   const streamBlocks = useMemo(() => groupStreamItems(streamItems), [streamItems]);
+  const latestMemoryReceiptByKey = useMemo(() => {
+    const latest = new Map<string, string>();
+    for (const item of streamItems) {
+      if (item.type !== "memory") {
+        continue;
+      }
+      for (const entry of item.entries) {
+        latest.set(entry.key, item.id);
+      }
+    }
+    return latest;
+  }, [streamItems]);
   const activeToolStepId = findActiveToolStepId(streamItems);
   const isEmpty =
     historyBlocks.length === 0 &&
@@ -115,7 +132,7 @@ export function AssistantThread({
             return `${item.message_id}:${item.kind}:${item.text.length}`;
           }
           if (item.type === "memory") {
-            return `mem:${item.id}:${item.written_keys.length}:${item.removed_keys.length}`;
+            return `mem:${item.id}:${item.written_keys.length}:${item.removed_keys.length}:${item.entries.length}`;
           }
           return `${item.step_id}:${item.status}:${item.observation?.length ?? 0}`;
         })
@@ -234,7 +251,14 @@ export function AssistantThread({
         );
       }
       if (block.type === "memory") {
-        return <MemoryCardRow item={block.item} onOpenSettings={onOpenMemorySettings} />;
+        return (
+          <MemoryCardRow
+            item={block.item}
+            onOpenSettings={onOpenMemorySettings}
+            onRetractMemory={onRetractMemory}
+            latestReceiptByKey={latestMemoryReceiptByKey}
+          />
+        );
       }
       return (
         <MessageRow
@@ -392,17 +416,88 @@ function TurnActivityIndicator({
 // 长期记忆写入成功的可见卡片：列出已记住/已移除的键并直链设置面板；只追加不更新。
 function MemoryCardRowImpl({
   item,
-  onOpenSettings
+  onOpenSettings,
+  onRetractMemory,
+  latestReceiptByKey
 }: {
   item: StreamMemoryItem;
   onOpenSettings?: () => void;
+  onRetractMemory?: (entry: StreamMemoryEntry) => Promise<MemoryRetractionResult>;
+  latestReceiptByKey: ReadonlyMap<string, string>;
 }): ReactElement {
   const written = item.written_keys;
   const removed = item.removed_keys;
+  const [retractedKeys, setRetractedKeys] = useState<string[]>([]);
+  const [staleKeys, setStaleKeys] = useState<string[]>([]);
+  const [retractingKey, setRetractingKey] = useState<string | null>(null);
+  const [retractErrorKey, setRetractErrorKey] = useState<string | null>(null);
+
+  const retract = async (entry: StreamMemoryEntry): Promise<void> => {
+    const memoryKey = entry.key;
+    if (!onRetractMemory || retractingKey !== null || retractedKeys.includes(memoryKey)) {
+      return;
+    }
+    setRetractingKey(memoryKey);
+    setRetractErrorKey(null);
+    try {
+      const result = await onRetractMemory(entry);
+      if (result === "stale") {
+        setStaleKeys((current) => [...current, memoryKey]);
+      } else {
+        setRetractedKeys((current) => [...current, memoryKey]);
+      }
+    } catch {
+      setRetractErrorKey(memoryKey);
+    } finally {
+      setRetractingKey(null);
+    }
+  };
+
   return (
     <MemoryCardShell testId="memory-updated-card">
       <p className="font-medium">{written.length > 0 ? "已记住长期记忆" : "已移除长期记忆"}</p>
-      {written.length > 0 ? (
+      {item.entries.length > 0 ? (
+        <ul className="mt-1.5 space-y-2" data-testid="memory-updated-entries">
+          {item.entries.map((entry) => {
+            const retracted = retractedKeys.includes(entry.key);
+            const stale =
+              staleKeys.includes(entry.key) || latestReceiptByKey.get(entry.key) !== item.id;
+            const retracting = retractingKey === entry.key;
+            return (
+              <li key={entry.key} className="rounded-sm border border-line px-2 py-1.5 text-xs">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="break-words font-medium text-fg">{entry.statement}</p>
+                    <p className="mt-0.5 break-words text-fg-faint">
+                      原话：“{entry.evidence_quote}”
+                    </p>
+                    <p className="mt-0.5 font-mono text-2xs text-fg-faint">{entry.key}</p>
+                  </div>
+                  {retracted ? (
+                    <span className="shrink-0 text-2xs text-fg-faint">已撤回</span>
+                  ) : stale ? (
+                    <span className="shrink-0 text-2xs text-fg-faint">已被后续更新</span>
+                  ) : onRetractMemory ? (
+                    <button
+                      type="button"
+                      className="shrink-0 text-xs font-medium text-danger transition-opacity hover:opacity-80 disabled:opacity-45"
+                      disabled={retractingKey !== null}
+                      onClick={() => void retract(entry)}
+                    >
+                      {retracting ? "撤回中…" : "撤回"}
+                    </button>
+                  ) : null}
+                </div>
+                {retractErrorKey === entry.key ? (
+                  <p className="mt-1 text-2xs text-danger" role="alert">
+                    撤回失败，请重试。
+                  </p>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      ) : written.length > 0 ? (
         <p className="mt-0.5 break-words text-xs text-fg-muted">
           记住了 <span className="font-mono text-fg">{written.join("、")}</span>
         </p>

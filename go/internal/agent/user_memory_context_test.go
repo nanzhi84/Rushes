@@ -50,6 +50,9 @@ func TestUserMemoryWorldStateIsStableAcrossDraftsAndRemoval(t *testing.T) {
 	if _, exists := section["omitted_keys"]; exists {
 		t.Fatalf("未截断时不应出现 omitted_keys: %#v", section)
 	}
+	if keys := worldStateStringSlice(section["keys"]); len(keys) != 1 || keys[0] != "pacing" {
+		t.Fatalf("完整记忆 key 目录=%v", keys)
+	}
 
 	applyUserMemories(t, database, nil, []string{"pacing"})
 	afterRemoval, err := builder.Snapshot(t.Context(), "draft_memory_target")
@@ -124,6 +127,80 @@ func TestUserMemoryWorldStateUsesWholeEntryBudget(t *testing.T) {
 	}
 	if len(covered) != storage.UserMemoryLimit {
 		t.Fatalf("entries 与 omitted_keys 合起来未覆盖全部 %d 条记忆，实际 %d", storage.UserMemoryLimit, len(covered))
+	}
+	if keys := worldStateStringSlice(section["keys"]); len(keys) != storage.UserMemoryLimit {
+		t.Fatalf("keys 必须始终完整: got=%d want=%d", len(keys), storage.UserMemoryLimit)
+	}
+}
+
+func TestUserMemoryWorstCaseKeyDirectoryFitsBudget(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_worst_keys")
+	agenttest.InsertAgentMessage(t, database, "draft_memory_worst_keys", "message_memory_worst_keys", "请记住这些长期偏好")
+	memories := make([]reducer.UserMemoryRow, 0, storage.UserMemoryLimit)
+	for index := 0; index < storage.UserMemoryLimit; index++ {
+		memories = append(memories, reducer.UserMemoryRow{
+			Key: fmt.Sprintf("%02d%s", index, strings.Repeat("k", 38)), Kind: "preference",
+			Statement:    strings.Repeat("偏", storage.UserMemoryStatementRuneLimit),
+			EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "长期偏好",
+			EvidenceID: "message_memory_worst_keys", SourceDraftID: "draft_memory_worst_keys",
+		})
+	}
+	applyUserMemories(t, database, memories, nil)
+	snapshot, err := NewContextBuilder(database).Snapshot(t.Context(), "draft_memory_worst_keys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	section := userMemorySection(t, snapshot)
+	encoded, err := json.Marshal(section)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runes := utf8.RuneCount(encoded); runes > contextUserMemoryRuneBudget {
+		t.Fatalf("最坏 key 目录 section=%d runes，预算=%d", runes, contextUserMemoryRuneBudget)
+	}
+	if entries := agentexec.WorldStateObjectSlice(section["entries"]); len(entries) < 1 {
+		t.Fatal("最坏 key 目录挤掉了全部 statement")
+	}
+	if keys := worldStateStringSlice(section["keys"]); len(keys) != storage.UserMemoryLimit {
+		t.Fatalf("最坏 key 目录不完整: %d", len(keys))
+	}
+}
+
+func TestUserMemoryInjectionMetricsIncreaseOnTruncation(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_memory_metrics")
+	agenttest.InsertAgentMessage(t, database, "draft_memory_metrics", "message_memory_metrics", "请记住这些长期偏好")
+	memories := make([]reducer.UserMemoryRow, 0, storage.UserMemoryLimit)
+	for index := 0; index < storage.UserMemoryLimit; index++ {
+		memories = append(memories, reducer.UserMemoryRow{
+			Key: fmt.Sprintf("metric_%02d", index), Kind: "preference",
+			Statement:    strings.Repeat("偏", storage.UserMemoryStatementRuneLimit),
+			EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "长期偏好",
+			EvidenceID: "message_memory_metrics", SourceDraftID: "draft_memory_metrics",
+		})
+	}
+	applyUserMemories(t, database, memories, nil)
+	totalBefore := metricUserMemoryTotal.Value()
+	injectedBefore := metricUserMemoryInjected.Value()
+	omittedBefore := metricUserMemoryOmitted.Value()
+	truncatedBefore := metricUserMemoryTruncated.Value()
+	runeCountBefore, _, _, _ := metricUserMemoryRunes.Snapshot()
+	if _, err := NewContextBuilder(database).Snapshot(t.Context(), "draft_memory_metrics"); err != nil {
+		t.Fatal(err)
+	}
+	if metricUserMemoryTotal.Value()-totalBefore != storage.UserMemoryLimit {
+		t.Fatalf("total metric delta=%d", metricUserMemoryTotal.Value()-totalBefore)
+	}
+	if metricUserMemoryInjected.Value() <= injectedBefore || metricUserMemoryOmitted.Value() <= omittedBefore {
+		t.Fatal("injected/omitted metrics 未同时增长")
+	}
+	if metricUserMemoryTruncated.Value() != truncatedBefore+1 {
+		t.Fatal("truncated metric 未增长")
+	}
+	if count, _, _, _ := metricUserMemoryRunes.Snapshot(); count != runeCountBefore+1 {
+		t.Fatal("section_runes histogram 未记录")
 	}
 }
 

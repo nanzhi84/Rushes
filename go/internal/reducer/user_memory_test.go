@@ -725,3 +725,87 @@ func TestUserMemoryManualStatementEditMarksRevisionAndGuardsActor(t *testing.T) 
 		t.Fatalf("不存在的键不应报编辑: result=%#v err=%v", missing, err)
 	}
 }
+
+func TestUserMemoryConditionalRemoveIsAtomicAndUserOnly(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	createDraft(t, database, "draft_conditional_remove")
+	seedUserMemoryMessage(t, database, "draft_conditional_remove", "message_conditional_remove")
+	createdAt := time.Date(2026, 7, 19, 1, 2, 3, 4, time.UTC)
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorAgent, CreatedAt: createdAt,
+		ResultRows: ResultRows{UserMemoryUpserts: []UserMemoryRow{{
+			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快",
+			EvidenceKind: storage.UserMemoryEvidenceMessage, EvidenceQuote: "偏好",
+			EvidenceID: "message_conditional_remove", SourceDraftID: "draft_conditional_remove",
+		}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	memory, err := storage.GetUserMemory(t.Context(), database.Read(), "pacing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := UserMemoryConditionalRemoveRow{
+		Key: memory.Key, Kind: memory.Kind, Statement: memory.Statement,
+		SourceDraftID: memory.SourceDraftID, CreatedAt: memory.CreatedAt,
+		LastConfirmedAt: memory.LastConfirmedAt, ManuallyRevisedAt: memory.ManuallyRevisedAt,
+	}
+
+	stale := expected
+	stale.Statement = "旧回执中的不同值"
+	result, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorUser, ResultRows: ResultRows{UserMemoryConditionalRemove: &stale},
+	})
+	if err != nil || result.UserMemory == nil || len(result.UserMemory.RemovedKeys) != 0 {
+		t.Fatalf("stale condition result=%#v err=%v", result, err)
+	}
+	if _, err := storage.GetUserMemory(t.Context(), database.Read(), "pacing"); err != nil {
+		t.Fatalf("stale condition removed current row: %v", err)
+	}
+
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorAgent, ResultRows: ResultRows{UserMemoryConditionalRemove: &expected},
+	}); !errors.Is(err, ErrUserMemoryInput) {
+		t.Fatalf("agent conditional remove should fail: %v", err)
+	}
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorUser, ResultRows: ResultRows{
+			UserMemoryConditionalRemove: &expected, UserMemoryRemoveKeys: []string{"pacing"},
+		},
+	}); !errors.Is(err, ErrUserMemoryInput) {
+		t.Fatalf("mixed conditional remove should fail: %v", err)
+	}
+	invalid := expected
+	invalid.CreatedAt = "not-a-time"
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorUser, ResultRows: ResultRows{UserMemoryConditionalRemove: &invalid},
+	}); !errors.Is(err, ErrUserMemoryInput) {
+		t.Fatalf("invalid conditional remove should fail: %v", err)
+	}
+	invalid = expected
+	invalid.LastConfirmedAt = "not-a-time"
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorUser, ResultRows: ResultRows{UserMemoryConditionalRemove: &invalid},
+	}); !errors.Is(err, ErrUserMemoryInput) {
+		t.Fatalf("invalid last-confirmed condition should fail: %v", err)
+	}
+	invalid = expected
+	invalid.ManuallyRevisedAt = "not-a-time"
+	if _, err := Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorUser, ResultRows: ResultRows{UserMemoryConditionalRemove: &invalid},
+	}); !errors.Is(err, ErrUserMemoryInput) {
+		t.Fatalf("invalid manual-revision condition should fail: %v", err)
+	}
+
+	result, err = Apply(t.Context(), database, nil, Options{
+		Actor: contracts.ActorUser, ResultRows: ResultRows{UserMemoryConditionalRemove: &expected},
+	})
+	if err != nil || result.UserMemory == nil ||
+		len(result.UserMemory.RemovedKeys) != 1 || result.UserMemory.RemovedKeys[0] != "pacing" {
+		t.Fatalf("matching condition result=%#v err=%v", result, err)
+	}
+	if _, err := storage.GetUserMemory(t.Context(), database.Read(), "pacing"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("matching condition did not remove row: %v", err)
+	}
+}

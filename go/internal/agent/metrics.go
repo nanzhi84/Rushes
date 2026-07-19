@@ -57,6 +57,23 @@ var (
 	// （H-B P2「预算重叠」）。
 	metricRecoveryStreakExhausted     = telemetry.NewCounter("agent_recovery_streak_exhausted_total")
 	metricRecoveryCumulativeExhausted = telemetry.NewCounter("agent_recovery_cumulative_exhausted_total")
+
+	// 工作区用户记忆注入规模（M6/M8）：三个累计条数、实际 section rune 分布与发生
+	// 截断的构建次数。omitted ratio 由累计 omitted/total 派生，供容量继续校准。
+	metricUserMemoryTotal    = telemetry.NewCounter("agent_user_memory_total")
+	metricUserMemoryInjected = telemetry.NewCounter("agent_user_memory_injected")
+	metricUserMemoryOmitted  = telemetry.NewCounter("agent_user_memory_omitted")
+	metricUserMemoryRunes    = telemetry.NewHistogram(
+		"agent_user_memory_section_runes", []int64{256, 512, 1000, 2000, 3000, 4000, 5000},
+	)
+	metricUserMemoryTruncated = telemetry.NewCounter("agent_user_memory_truncated")
+
+	// 工具结果体量软护栏（T6）：完整结果仍回灌模型，只告警并计数；字节直方图供
+	// 观察真实分布后决定是否需要硬截断以及按工具分档。
+	metricToolResultBytes = telemetry.NewHistogram(
+		"agent_tool_result_bytes", []int64{1024, 4096, 16384, 65536, 131072, 524288},
+	)
+	metricToolResultOversize = telemetry.NewCounter("tool_result_oversize_total")
 )
 
 // observeModelCall 记录一次模型调用延迟：进直方图度量 + 一条结构化日志（AC1「每次模型调用
@@ -79,6 +96,24 @@ func init() {
 		}
 		return float64(metricCachedPromptTokensTotal.Value()) / float64(prompt)
 	})
+	telemetry.PublishRatio("agent_user_memory_omitted_ratio", func() float64 {
+		total := metricUserMemoryTotal.Value()
+		if total == 0 {
+			return 0
+		}
+		return float64(metricUserMemoryOmitted.Value()) / float64(total)
+	})
+}
+
+func recordUserMemoryInjection(total, included, sectionRunes int) {
+	metricUserMemoryTotal.Add(int64(total))
+	metricUserMemoryInjected.Add(int64(included))
+	omitted := max(0, total-included)
+	metricUserMemoryOmitted.Add(int64(omitted))
+	metricUserMemoryRunes.Observe(int64(sectionRunes))
+	if omitted > 0 {
+		metricUserMemoryTruncated.Inc()
+	}
 }
 
 // recordTurnOutcome 按结局把回合计入对应计数器。

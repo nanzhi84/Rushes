@@ -32,6 +32,14 @@ linters:
           allow:
             - $gostd
 
+        config:
+          list-mode: strict
+          files:
+            - "**/internal/config/*.go"
+            - "**/internal/config/**/*.go"
+          allow:
+            - $gostd
+
         storage:
           list-mode: strict
           files:

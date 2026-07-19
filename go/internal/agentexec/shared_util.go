@@ -53,10 +53,10 @@ func InterfaceString(value any) string {
 
 func TruncateText(value string, limit int) string {
 	value = strings.TrimSpace(value)
-	if limit <= 0 || len(value) <= limit {
+	if limit <= 0 {
 		return value
 	}
-	return value[:limit] + "…"
+	return TruncateRunes(value, limit)
 }
 
 // One frame is about 33ms at 30fps, below the perceptible threshold for beat alignment.
@@ -76,10 +76,6 @@ func RandomID(prefix string) string {
 }
 
 func BoolPointer(value bool) *bool { return &value }
-
-// TurnStreamMemoryUpdated 与 agent 侧 knownTurnStreamTypes 同名同值:执行器经
-// recordProgress 发射,hub 用 agent 侧清单校验类型。字符串一致即可,不跨包依赖。
-const TurnStreamMemoryUpdated = "memory_updated"
 
 func TruncateRunes(value string, limit int) string {
 	runes := []rune(value)

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -20,8 +21,8 @@ const (
 // 轮转），并附带固定 component 字段。alsoStderr 非空时同时镜像到该 writer（dev 下传
 // os.Stderr，让终端仍能看到日志）。返回的 io.Closer 关闭底层文件。
 //
-// 安全约定：本函数只负责落盘管道，不做内容脱敏；调用方（各 slog.* 点）必须自行保证不打印
-// 密钥与用户素材全文——落盘只是把既有 slog 记录持久化，不改变其内容（#95 H3 验收）。
+// 调用方仍不得主动记录密钥或用户素材全文；ReplaceAttr 再对 key/token/secret/
+// authorization 类属性做落盘前兜底打码，避免未来一次疏忽把凭证写进轮转日志。
 func InstallJSONLogger(dir, component string, alsoStderr io.Writer) (io.Closer, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("创建日志目录 %s: %w", dir, err)
@@ -36,9 +37,29 @@ func InstallJSONLogger(dir, component string, alsoStderr io.Writer) (io.Closer, 
 	if alsoStderr != nil {
 		sink = io.MultiWriter(writer, alsoStderr)
 	}
-	handler := slog.NewJSONHandler(sink, &slog.HandlerOptions{Level: slog.LevelInfo})
+	handler := slog.NewJSONHandler(sink, &slog.HandlerOptions{
+		Level:       slog.LevelInfo,
+		ReplaceAttr: redactSensitiveLogAttribute,
+	})
 	slog.SetDefault(slog.New(handler).With("component", component))
 	return writer, nil
+}
+
+func redactSensitiveLogAttribute(_ []string, attr slog.Attr) slog.Attr {
+	if sensitiveLogAttribute(attr.Key) {
+		return slog.String(attr.Key, "[REDACTED]")
+	}
+	return attr
+}
+
+func sensitiveLogAttribute(key string) bool {
+	lower := strings.ToLower(key)
+	for _, marker := range []string{"key", "token", "secret", "authorization"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // rotatingWriter 是纯 Go 的按大小轮转 io.WriteCloser：写满 maxBytes 就把当前文件顺次改名为

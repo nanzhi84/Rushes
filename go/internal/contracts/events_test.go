@@ -259,3 +259,22 @@ func TestMaterialUnderstandingMergeKeysKeepLegacyEventsAndIsolateJobs(t *testing
 		}
 	}
 }
+
+func TestTurnCancelledObservationCountRoundTripAndLegacyFallback(t *testing.T) {
+	t.Parallel()
+	if content := TurnCancelledObservationContent(1); content != "用户已停止当前任务（已取消 1 个回合）。" {
+		t.Fatalf("single content=%q", content)
+	}
+	if content := TurnCancelledObservationContent(0); content != "用户已停止当前任务（已取消 1 个回合）。" {
+		t.Fatalf("zero content=%q", content)
+	}
+	content := TurnCancelledObservationContent(3)
+	if count, exact := ParseTurnCancelledObservation(content); count != 3 || !exact {
+		t.Fatalf("content=%q count=%d exact=%v", content, count, exact)
+	}
+	for _, content := range []string{"用户已停止当前任务。", "损坏的取消标记", "用户已停止当前任务（已取消 0 个回合）。"} {
+		if count, exact := ParseTurnCancelledObservation(content); count != 1 || exact {
+			t.Fatalf("legacy content=%q count=%d exact=%v", content, count, exact)
+		}
+	}
+}

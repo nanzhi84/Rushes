@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -26,6 +27,22 @@ type cancellationBlockingModel struct {
 	blocked bool
 	started chan struct{}
 	release chan struct{}
+}
+
+func TestConversationClearVersionConflictAlwaysMapsToTurnActive(t *testing.T) {
+	server, _ := testServer(t, t.TempDir(), 0)
+	recorder := httptest.NewRecorder()
+	server.writeConversationClearReducerResult(recorder, reducer.Result{
+		Status: reducer.StatusVersionConflict,
+		Conflict: &reducer.VersionConflict{
+			DraftID: "draft_idle", ActualStateVersion: 3, EventType: "ConversationContextCleared",
+		},
+	})
+	if recorder.Code != http.StatusConflict ||
+		!strings.Contains(recorder.Body.String(), `"reason":"turn_active"`) ||
+		strings.Contains(recorder.Body.String(), `"reason":"version_conflict"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
 }
 
 func (stub *cancellationBlockingModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
@@ -321,6 +338,16 @@ func TestCancelCurrentTurnReturnsBoundedAndProtectsLaterJobs(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("阻塞模型未启动")
 	}
+	for index := range 2 {
+		queuedFollowUp := httptest.NewRecorder()
+		handler.ServeHTTP(queuedFollowUp, apiRequest(t, http.MethodPost,
+			"/api/drafts/draft_bounded_cancel/messages", map[string]any{
+				"message_id": fmt.Sprintf("queued_cancelled_%d", index), "content": "也不要继续",
+			}))
+		if queuedFollowUp.Code != http.StatusAccepted {
+			t.Fatalf("queue follow-up %d status=%d body=%s", index, queuedFollowUp.Code, queuedFollowUp.Body.String())
+		}
+	}
 	now := time.Now().UTC()
 	result, err := reducer.Apply(t.Context(), database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: "draft_bounded_cancel", Payload: map[string]any{
@@ -342,6 +369,15 @@ func TestCancelCurrentTurnReturnsBoundedAndProtectsLaterJobs(t *testing.T) {
 	}
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"requested":true`) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	var markerRole, markerKind, markerContent string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT role,kind,content FROM messages
+		WHERE draft_id='draft_bounded_cancel' ORDER BY rowid DESC LIMIT 1`,
+	).Scan(&markerRole, &markerKind, &markerContent); err != nil ||
+		markerRole != "system_observation" || markerKind != contracts.TurnCancelledObservationKind ||
+		markerContent != contracts.TurnCancelledObservationContent(3) {
+		t.Fatalf("取消持久标记 role=%q kind=%q content=%q err=%v", markerRole, markerKind, markerContent, err)
 	}
 	var status string
 	if err := database.Read().QueryRowContext(t.Context(),

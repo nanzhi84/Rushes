@@ -56,6 +56,14 @@ func TestSandboxInputPaths(t *testing.T) {
 	if len(got) != 0 {
 		t.Fatalf("管道输入不应计入文件: %v", got)
 	}
+	got = sandboxInputPaths("aubiotrack", []string{"-i", "/audio/in.wav"})
+	if len(got) != 1 || got[0] != "/audio/in.wav" {
+		t.Fatalf("aubio inputs=%v", got)
+	}
+	got = sandboxInputPaths("fc-scan", []string{"--format=%{family[0]}", "/fonts/untrusted.ttf"})
+	if len(got) != 1 || got[0] != "/fonts/untrusted.ttf" {
+		t.Fatalf("fc-scan inputs=%v", got)
+	}
 }
 
 func TestBuildSeatbeltProfileStructure(t *testing.T) {
@@ -99,12 +107,12 @@ func TestPlanSandboxDisabledPassthrough(t *testing.T) {
 	}
 }
 
-func TestPlanSandboxNonFFmpegPassthrough(t *testing.T) {
+func TestPlanSandboxUnrelatedCommandPassthrough(t *testing.T) {
 	t.Setenv("RUSHES_FFMPEG_SANDBOX", "1")
-	plan := planSandbox("aubiotrack", []string{"-i", "x"})
+	plan := planSandbox("osascript", []string{"-e", "1"})
 	defer plan.cleanup()
-	if plan.name != "aubiotrack" {
-		t.Fatalf("非 ffmpeg 命令不应被沙箱，实际 name=%s", plan.name)
+	if plan.name != "osascript" {
+		t.Fatalf("非媒体解析命令不应被沙箱，实际 name=%s", plan.name)
 	}
 }
 
@@ -167,10 +175,92 @@ func TestPlanSandboxUnconfiguredPassthrough(t *testing.T) {
 	})
 	t.Setenv("RUSHES_FFMPEG_SANDBOX", "1")
 	ConfigureFFmpegSandbox(nil, nil)
+	buf := newWarnBuffer(t)
 	plan := planSandbox("ffmpeg", []string{"-i", "x", "out.mp4"})
 	defer plan.cleanup()
 	if plan.name != "ffmpeg" {
 		t.Fatalf("未注入对象库根应直跑，实际 name=%s", plan.name)
+	}
+	if !strings.Contains(buf.String(), "尚未配置") {
+		t.Fatalf("未配置沙箱根必须告警，实际: %q", buf.String())
+	}
+}
+
+func TestPlanSandboxWrapsAubioAndFontScanWithPerToolProfiles(t *testing.T) {
+	restoreSandboxProbes(t, "darwin", func(name string) (string, error) {
+		if name == "sandbox-exec" {
+			return "/usr/bin/sandbox-exec", nil
+		}
+		return "/opt/testbin/" + name, nil
+	})
+	t.Setenv("RUSHES_FFMPEG_SANDBOX", "1")
+	store := t.TempDir()
+	ConfigureFFmpegSandbox([]string{store}, []string{store})
+	t.Cleanup(func() { ConfigureFFmpegSandbox(nil, nil) })
+
+	for _, test := range []struct {
+		name  string
+		args  []string
+		input string
+	}{
+		{name: "aubiotrack", args: []string{"-i", filepath.Join(store, "beat.wav")}, input: filepath.Join(store, "beat.wav")},
+		{name: "aubioonset", args: []string{"-i", filepath.Join(store, "voice.wav")}, input: filepath.Join(store, "voice.wav")},
+		{name: "fc-scan", args: []string{"--format=%{family[0]}", filepath.Join(store, "font.ttf")}, input: filepath.Join(store, "font.ttf")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			plan := planSandbox(test.name, test.args)
+			defer plan.cleanup()
+			if plan.name != "sandbox-exec" || len(plan.args) < 3 {
+				t.Fatalf("%s 未走 Seatbelt: %#v", test.name, plan)
+			}
+			profileData, err := os.ReadFile(plan.args[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			profile := string(profileData)
+			if !strings.Contains(profile, "(literal "+sandboxQuote(resolveSandboxPath(test.input))) {
+				t.Fatalf("%s profile 未放行输入:\n%s", test.name, profile)
+			}
+			if test.name == "fc-scan" {
+				writeSection := strings.Split(profile, "(deny file-read*")[0]
+				if strings.Contains(writeSection, "(subpath "+sandboxQuote(resolveSandboxPath(store))) {
+					t.Fatalf("fc-scan 只读 profile 不应放行对象库写入:\n%s", profile)
+				}
+			}
+		})
+	}
+}
+
+func TestRunFFmpegLinesUsesSandboxPlan(t *testing.T) {
+	bin := t.TempDir()
+	capture := filepath.Join(t.TempDir(), "sandbox-args.txt")
+	writeExecutable := func(name, script string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExecutable("sandbox-exec", "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$RUSHES_TEST_SANDBOX_CAPTURE\"\nshift 2\nexec \"$@\"\n")
+	writeExecutable("ffmpeg", "#!/bin/sh\necho sandboxed-line\n")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("RUSHES_TEST_SANDBOX_CAPTURE", capture)
+	t.Setenv("RUSHES_FFMPEG_SANDBOX", "1")
+	restoreSandboxProbes(t, "darwin", exec.LookPath)
+	ConfigureFFmpegSandbox([]string{t.TempDir()}, []string{t.TempDir()})
+	t.Cleanup(func() { ConfigureFFmpegSandbox(nil, nil) })
+	var lines []string
+	if err := RunFFmpegLines(t.Context(), "ffmpeg", []string{"-i", "pipe:0"}, func(line string) bool {
+		lines = append(lines, line)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	args, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal("RunFFmpegLines 未经过 fake sandbox-exec")
+	}
+	if !strings.HasPrefix(string(args), "-f\n") || len(lines) != 1 || lines[0] != "sandboxed-line" {
+		t.Fatalf("sandbox args=%q lines=%v", args, lines)
 	}
 }
 
@@ -317,5 +407,52 @@ func TestSeatbeltAllowsRealFFmpegChain(t *testing.T) {
 	}
 	if fi, err := os.Stat(out); err != nil || fi.Size() == 0 {
 		t.Fatalf("缩略图未生成: %v", err)
+	}
+}
+
+func TestSeatbeltAllowsRealPeaksBeatsAndFontScan(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Seatbelt 仅 macOS")
+	}
+	for _, binary := range []string{"sandbox-exec", "ffmpeg", "aubiotrack", "aubioonset", "fc-scan"} {
+		if _, err := exec.LookPath(binary); err != nil {
+			t.Skipf("缺 %s", binary)
+		}
+	}
+	store, err := os.MkdirTemp("/tmp", "x3-real-media-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(store) })
+	audio := filepath.Join(store, "clicks.wav")
+	clickSource := `aevalsrc=if(lt(mod(t\,0.5)\,0.05)\,sin(2*PI*1000*t)\,0):s=44100:d=4`
+	generate := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", clickSource, audio)
+	if output, err := generate.CombinedOutput(); err != nil {
+		t.Fatalf("生成节拍测试音频失败: %v\n%s", err, output)
+	}
+	fontSource := "/System/Library/Fonts/SFNS.ttf"
+	fontData, err := os.ReadFile(fontSource)
+	if err != nil {
+		t.Skipf("缺系统测试字体: %v", err)
+	}
+	font := filepath.Join(store, "untrusted.ttf")
+	if err := os.WriteFile(font, fontData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ConfigureFFmpegSandbox([]string{store}, []string{store})
+	t.Cleanup(func() { ConfigureFFmpegSandbox(nil, nil) })
+	t.Setenv("RUSHES_FFMPEG_SANDBOX", "1")
+
+	peaks, err := AnalyzeWaveformPeaks(t.Context(), audio, 4)
+	if err != nil || len(peaks.Peaks) == 0 {
+		t.Fatalf("沙箱开启下 peaks 全链路失败: peaks=%d err=%v", len(peaks.Peaks), err)
+	}
+	beats, err := AnalyzeBeatGrid(t.Context(), audio, 30, 64)
+	if err != nil || len(beats.BeatFrames) < 2 {
+		t.Fatalf("沙箱开启下 aubio 全链路失败: beats=%v err=%v", beats.BeatFrames, err)
+	}
+	if family := subtitleFontFamily(t.Context(), font); family == "" || family == "untrusted" {
+		t.Fatalf("沙箱开启下 fc-scan 未读取字体 family: %q", family)
 	}
 }

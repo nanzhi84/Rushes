@@ -71,12 +71,39 @@ jobs:
       - name: Go vet
         working-directory: go
         run: go vet ./...
+      - name: Compile and vet integration-tagged tests
+        run: make vet-integration
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.12.2
           working-directory: go
           args: --timeout=5m
+      - name: Verify depguard rejects a forbidden import
+        working-directory: go
+        run: |
+          fixture=internal/contracts/depguard_negative_fixture.go
+          trap 'rm -f "$fixture"' EXIT
+          cat > "$fixture" <<'EOF'
+          package contracts
+
+          import _ "github.com/nanzhi84/Rushes/go/internal/storage"
+          EOF
+          set +e
+          output=$(golangci-lint run --timeout=5m --enable-only=depguard ./internal/contracts 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [[ $status -eq 0 ]]; then
+            echo "depguard did not reject the injected forbidden import"
+            exit 1
+          fi
+          for needle in depguard_negative_fixture.go depguard internal/storage; do
+            if ! grep -F "$needle" <<<"$output" >/dev/null; then
+              echo "depguard self-check failed for an unrelated reason: missing $needle"
+              exit 1
+            fi
+          done
       - name: Generate race-enabled coverage profile
         run: bash scripts/check_go_coverage.sh
       - name: Enforce 90 percent coverage

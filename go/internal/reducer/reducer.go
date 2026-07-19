@@ -147,6 +147,18 @@ type UserMemoryStatementEditRow struct {
 	Statement string
 }
 
+// UserMemoryConditionalRemoveRow 是旧回执撤回使用的事务内前置条件。所有字段都来自
+// 既有 MemoryRecord；只有当前行仍与这些值完全一致时才删除，避免先读后删的 TOCTOU。
+type UserMemoryConditionalRemoveRow struct {
+	Key               string
+	Kind              string
+	Statement         string
+	SourceDraftID     string
+	CreatedAt         string
+	LastConfirmedAt   string
+	ManuallyRevisedAt string
+}
+
 type UserMemoryOutcome struct {
 	WrittenKeys []string
 	RemovedKeys []string
@@ -204,6 +216,7 @@ type ResultRows struct {
 	AgentJobObservationSuppressions []AgentJobObservationSuppressionRow
 	UserMemoryUpserts               []UserMemoryRow
 	UserMemoryRemoveKeys            []string
+	UserMemoryConditionalRemove     *UserMemoryConditionalRemoveRow
 	UserMemoryClearAll              bool
 	UserMemoryMutationEvidence      *UserMemoryEvidenceRow
 	// UserMemoryTouchKeys 是本回合成功收尾时需要刷新 last_used_at 的记忆键（被注入
@@ -377,13 +390,22 @@ func Apply(
 			return Result{Status: StatusValidationFailed}, nil
 		}
 	}
-	if options.ResultRows.UserMemoryStatementEdit != nil && options.Actor != contracts.ActorUser {
-		return Result{}, fmt.Errorf("%w: 手动修订记忆仅限用户", ErrUserMemoryInput)
+	if (options.ResultRows.UserMemoryStatementEdit != nil ||
+		options.ResultRows.UserMemoryConditionalRemove != nil) && options.Actor != contracts.ActorUser {
+		return Result{}, fmt.Errorf("%w: 记忆治理写入仅限用户", ErrUserMemoryInput)
+	}
+	if options.ResultRows.UserMemoryConditionalRemove != nil &&
+		(len(options.ResultRows.UserMemoryUpserts) > 0 ||
+			len(options.ResultRows.UserMemoryRemoveKeys) > 0 || options.ResultRows.UserMemoryClearAll ||
+			options.ResultRows.UserMemoryMutationEvidence != nil ||
+			options.ResultRows.UserMemoryStatementEdit != nil) {
+		return Result{}, fmt.Errorf("%w: 条件删除不能与其它记忆写入并用", ErrUserMemoryInput)
 	}
 	var userMemory *UserMemoryOutcome
 	if len(options.ResultRows.UserMemoryUpserts) > 0 ||
 		len(options.ResultRows.UserMemoryRemoveKeys) > 0 || options.ResultRows.UserMemoryClearAll ||
-		options.ResultRows.UserMemoryStatementEdit != nil {
+		options.ResultRows.UserMemoryStatementEdit != nil ||
+		options.ResultRows.UserMemoryConditionalRemove != nil {
 		userMemory = &UserMemoryOutcome{}
 	}
 	if err := persistResultRows(ctx, tx, options.ResultRows, state.createdAt, userMemory); err != nil {
@@ -1489,6 +1511,17 @@ func persistResultRows(
 	if userMemoryOutcome != nil {
 		*userMemoryOutcome = userMemory
 	}
+	if rows.UserMemoryConditionalRemove != nil {
+		removed, err := conditionallyRemoveUserMemory(ctx, tx, *rows.UserMemoryConditionalRemove)
+		if err != nil {
+			return err
+		}
+		if removed && userMemoryOutcome != nil {
+			userMemoryOutcome.RemovedKeys = append(
+				userMemoryOutcome.RemovedKeys, rows.UserMemoryConditionalRemove.Key,
+			)
+		}
+	}
 	if err := touchUserMemories(ctx, tx, rows.UserMemoryTouchKeys, defaultCreatedAt); err != nil {
 		return err
 	}
@@ -2030,6 +2063,45 @@ func editUserMemoryStatement(ctx context.Context, tx *sql.Tx, edit UserMemorySta
 	return affected == 1, nil
 }
 
+func conditionallyRemoveUserMemory(
+	ctx context.Context,
+	tx *sql.Tx,
+	expected UserMemoryConditionalRemoveRow,
+) (bool, error) {
+	if !storage.ValidUserMemoryKey(expected.Key) ||
+		!storage.ValidUserMemoryKind(expected.Kind) ||
+		!storage.ValidUserMemoryStatement(expected.Statement) || expected.SourceDraftID == "" {
+		return false, fmt.Errorf("%w: 条件删除字段无效", ErrUserMemoryInput)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, expected.CreatedAt); err != nil {
+		return false, fmt.Errorf("%w: 条件删除 created_at: %v", ErrUserMemoryInput, err)
+	}
+	if _, err := time.Parse(time.RFC3339Nano, expected.LastConfirmedAt); err != nil {
+		return false, fmt.Errorf("%w: 条件删除 last_confirmed_at: %v", ErrUserMemoryInput, err)
+	}
+	if expected.ManuallyRevisedAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, expected.ManuallyRevisedAt); err != nil {
+			return false, fmt.Errorf("%w: 条件删除 manually_revised_at: %v", ErrUserMemoryInput, err)
+		}
+	}
+	result, err := tx.ExecContext(ctx, `
+		DELETE FROM user_memories
+		WHERE memory_key=? AND kind=? AND statement=? AND source_draft_id=?
+		  AND created_at=? AND last_confirmed_at=?
+		  AND COALESCE(manually_revised_at,'')=?`,
+		expected.Key, expected.Kind, expected.Statement, expected.SourceDraftID,
+		expected.CreatedAt, expected.LastConfirmedAt, expected.ManuallyRevisedAt,
+	)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected == 1, nil
+}
+
 // touchUserMemories 刷新记忆的 last_used_at。只更新已存在的键（被淘汰的键静默跳过），
 // 是回合成功收尾后 M2 价值感知的用侧信号；与其它写入同处一个 reducer 事务。
 func touchUserMemories(ctx context.Context, tx *sql.Tx, keys []string, at string) error {
@@ -2146,7 +2218,7 @@ func emptyResultRows(rows ResultRows) bool {
 		len(rows.AgentJobObservationSuppressions) == 0 &&
 		len(rows.UserMemoryUpserts) == 0 && len(rows.UserMemoryRemoveKeys) == 0 &&
 		!rows.UserMemoryClearAll && len(rows.UserMemoryTouchKeys) == 0 &&
-		rows.UserMemoryStatementEdit == nil
+		rows.UserMemoryStatementEdit == nil && rows.UserMemoryConditionalRemove == nil
 }
 
 func sortedKeys(values map[string]struct{}) []string {

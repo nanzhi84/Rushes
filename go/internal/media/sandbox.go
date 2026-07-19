@@ -11,9 +11,9 @@ import (
 )
 
 // ffmpeg Seatbelt 沙箱是 X1 收窄协议面之后的 OS 级第二道兜底：即便解码器漏洞被恶意
-// 样本触发，被 sandbox-exec 关进 Seatbelt 的 ffmpeg/ffprobe 也无法联网、无法写对象库
-// 以外的路径、无法读用户家目录里的私密文件。封装点与 X1 同在 process.go 的 RunCommand
-// 与 RunFFmpegProgress，作为所有媒体子进程的单一收口。
+// 样本触发，被 sandbox-exec 关进 Seatbelt 的 ffmpeg/ffprobe/aubio/fc-scan 也无法联网、
+// 无法写允许路径、无法读用户家目录里的私密文件。封装点与 X1 同在 process.go 的
+// RunCommand、RunFFmpegProgress 与 RunFFmpegLines，作为所有媒体子进程的单一收口。
 
 const seatbeltSystemProfile = "/System/Library/Sandbox/Profiles/system.sb"
 
@@ -63,14 +63,14 @@ type sandboxPlan struct {
 
 func noopCleanup() {}
 
-// planSandbox 决定是否用 Seatbelt 包住 ffmpeg/ffprobe 调用：
-//   - 非 ffmpeg 家族命令：原样直跑；
+// planSandbox 决定是否用 Seatbelt 包住会解析不可信媒体/字体的外部命令：
+//   - 非媒体解析命令：原样直跑；
 //   - 显式关闭：原样直跑（用户选择，不记日志）；
 //   - 开启但不可用（非 darwin / 缺 sandbox-exec / profile 落盘失败）：降级直跑并记一条
 //     警告日志（非静默降级），失去 OS 级兜底但不影响功能。
 func planSandbox(name string, args []string) sandboxPlan {
 	passthrough := sandboxPlan{name: name, args: args, cleanup: noopCleanup}
-	if !isFFmpegFamily(name) || !ffmpegSandboxRequested() {
+	if !isSandboxedMediaTool(name) || !ffmpegSandboxRequested() {
 		return passthrough
 	}
 	if sandboxGOOS != "darwin" {
@@ -87,6 +87,7 @@ func planSandbox(name string, args []string) sandboxPlan {
 	if !configured {
 		// 未注入对象库允许根（尚未 ConfigureFFmpegSandbox，或在不涉及对象库的测试里）：
 		// 沙箱无从界定可写/可读范围，直跑而非用空 profile 拒死一切。生产由 main 注入根。
+		warnSandboxDegraded("尚未配置媒体沙箱允许根")
 		return passthrough
 	}
 	execPath, ok := resolveSandboxExecutable(name)
@@ -120,8 +121,21 @@ func planSandbox(name string, args []string) sandboxPlan {
 
 func warnSandboxDegraded(reason string) {
 	sandboxWarnOnce.Do(func() {
-		slog.Warn("ffmpeg Seatbelt 沙箱不可用，降级为直接执行（媒体解码将失去 OS 级隔离兜底）", "reason", reason)
+		slog.Warn("媒体 Seatbelt 沙箱不可用，降级为直接执行（媒体解析将失去 OS 级隔离兜底）", "reason", reason)
 	})
+}
+
+func isSandboxedMediaTool(name string) bool {
+	switch sandboxBaseName(name) {
+	case "ffmpeg", "ffprobe", "aubiotrack", "aubioonset", "fc-scan":
+		return true
+	default:
+		return false
+	}
+}
+
+func sandboxToolAllowsWrites(name string) bool {
+	return sandboxBaseName(name) != "fc-scan"
 }
 
 // buildSeatbeltProfile 按调用生成 SBPL profile，所有路径解析为内核真实路径。写默认全拒、
@@ -150,9 +164,11 @@ func buildSeatbeltProfile(name string, args []string) string {
 	b.WriteString("(deny file-write*)\n")
 	b.WriteString("(allow file-write*\n")
 	b.WriteString("  (literal \"/dev/null\") (literal \"/dev/stdout\") (literal \"/dev/stderr\")\n")
-	writeSandboxSubpath(&b, tmpDir)
-	for _, r := range writeRoots {
-		writeSandboxSubpath(&b, r)
+	if sandboxToolAllowsWrites(name) {
+		writeSandboxSubpath(&b, tmpDir)
+		for _, r := range writeRoots {
+			writeSandboxSubpath(&b, r)
+		}
 	}
 	b.WriteString(")\n")
 	if home != "" {
@@ -177,8 +193,8 @@ func buildSeatbeltProfile(name string, args []string) string {
 	return b.String()
 }
 
-// sandboxInputPaths 从（已注入协议白名单的）参数里提取输入文件：每个 -i 的取值，以及
-// ffprobe 的位置参数输入。管道/stdin（-、pipe:）不是文件，跳过。
+// sandboxInputPaths 从参数里提取输入文件：ffmpeg/aubio 的每个 -i，ffprobe 与 fc-scan
+// 的位置参数输入。管道/stdin（-、pipe:）不是文件，跳过。
 func sandboxInputPaths(name string, args []string) []string {
 	var inputs []string
 	for i := 0; i < len(args); i++ {
@@ -189,7 +205,7 @@ func sandboxInputPaths(name string, args []string) []string {
 			i++
 		}
 	}
-	if sandboxBaseName(name) == "ffprobe" && len(args) > 0 {
+	if (sandboxBaseName(name) == "ffprobe" || sandboxBaseName(name) == "fc-scan") && len(args) > 0 {
 		if last := args[len(args)-1]; isSandboxFilePath(last) {
 			inputs = append(inputs, last)
 		}

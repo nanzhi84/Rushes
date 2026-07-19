@@ -22,8 +22,12 @@ const (
 	contextRecentEditLimit           = 20
 	contextRecentEditRuneBudget      = 6000
 	contextMaterialCatalogRuneBudget = 12000
-	contextUserMemoryRuneBudget      = 4000
-	contextResidentWaveformPoints    = 24
+	// 5000 rune 是本期的 schema 推导暂定下限：即使 50 个 key 都取 40-rune 上限，
+	// 完整 keys/omitted_keys 目录与至少一条 200-rune statement 仍能同时放入。statement
+	// 明确按最近确认/使用顺序取 top-N；真实工作区 omitted 分布仍须由 M6 度量继续校准，
+	// 因此这里是可观测的暂定策略，不是已经由生产样本证明的容量结论。
+	contextUserMemoryRuneBudget   = 5000
+	contextResidentWaveformPoints = 24
 )
 
 // ContextBuilder 每次模型调用前从 SQLite 重建客观上下文。它只读取当前时间线
@@ -198,10 +202,9 @@ func (builder *ContextBuilder) buildSnapshotMap(
 }
 
 // userMemoryContext 把工作区级用户记忆按 last_confirmed_at DESC 顺序装进预算。
-// 逼近预算时不再静默少放：被折叠的记忆以 omitted_keys 显式列出（只列 key，几乎
-// 不占预算），模型至少知道还有哪些长期记忆存在但未展开；同时把注入规模落进结构化
-// 日志，让截断在真实会话中变得可观测。omitted_keys 参与预算裁剪，保证最终快照连同
-// 该列表一起仍不超过 contextUserMemoryRuneBudget。
+// statement 明确按最近确认/使用顺序注入 top-N；完整 keys 始终提供复用锚点，折叠项另以
+// omitted_keys 标出。两份 key 目录都参与预算裁剪，最终快照不超过预算。规模同时进入
+// expvar 与结构化日志，omitted 比率可据真实会话继续校准。
 func (builder *ContextBuilder) userMemoryContext(
 	ctx context.Context,
 	draftID string,
@@ -210,10 +213,9 @@ func (builder *ContextBuilder) userMemoryContext(
 	if err != nil {
 		return nil, err
 	}
-	// memories 非空时 included 必 ≥1：单条 entry 的 statement≤200 rune、key≤40，加上其余
-	// 记忆的 omitted_keys（每个 key≤40、总数≤UserMemoryLimit）在最坏情况下仍远低于 4000 rune
-	// 预算，首条一定进得去——不会退化成「entries 空、omitted_keys 兜住全部」。若日后放宽
-	// key/statement 长度上限或压低预算，需重新核这条不变量。
+	// memories 非空时 included 必 ≥1：预算已按 key/statement 与存储条数的 schema 上限
+	// 校准，完整 keys、omitted_keys 与首条最大 entry 可同时容纳。若日后放宽这些上限或
+	// 压低预算，TestUserMemoryWorstCaseKeyDirectoryFitsBudget 会直接转红。
 	included := 0
 	for included < len(memories) {
 		encoded, err := json.Marshal(
@@ -241,6 +243,7 @@ func (builder *ContextBuilder) userMemoryContext(
 		"section_runes", utf8.RuneCount(encoded),
 		"truncated", included < len(memories),
 	)
+	recordUserMemoryInjection(len(memories), included, utf8.RuneCount(encoded))
 	recordInjectedMemoryKeys(ctx, userMemoryKeys(memories[:included]))
 	return section, nil
 }
@@ -303,6 +306,7 @@ func userMemorySnapshotSection(included, omitted []storage.UserMemory) map[strin
 	}
 	section := map[string]any{
 		"entries":   entries,
+		"keys":      userMemoryKeys(append(append([]storage.UserMemory(nil), included...), omitted...)),
 		"total":     len(included) + len(omitted),
 		"truncated": len(omitted) > 0,
 	}

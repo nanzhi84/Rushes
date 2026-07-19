@@ -43,16 +43,19 @@ type TurnQueue struct {
 }
 
 type draftWorker struct {
-	queue        chan QueueItem
-	mu           sync.Mutex
-	currentStop  context.CancelCauseFunc
-	canceling    bool
-	retired      bool
-	retire       chan struct{}
-	pending      sync.WaitGroup
-	producers    sync.WaitGroup
-	pendingCount int
-	drained      chan struct{}
+	queue                  chan QueueItem
+	mu                     sync.Mutex
+	currentStop            context.CancelCauseFunc
+	currentKind            QueueItemKind
+	currentItem            string
+	currentDurableTerminal bool
+	canceling              bool
+	retired                bool
+	retire                 chan struct{}
+	pending                sync.WaitGroup
+	producers              sync.WaitGroup
+	pendingCount           int
+	drained                chan struct{}
 }
 
 // DraftCancellationBarrier keeps later turns out of a draft until every turn
@@ -62,7 +65,18 @@ type DraftCancellationBarrier struct {
 	draftID string
 	worker  *draftWorker
 	done    <-chan struct{}
+	covered int
 	release sync.Once
+}
+
+// CoveredTurns reports how many accepted turns are fenced by this cancellation.
+// The API persists this count so crash reconciliation consumes every cancelled
+// running or queued turn rather than reviving all but the first one.
+func (barrier *DraftCancellationBarrier) CoveredTurns() int {
+	if barrier == nil {
+		return 0
+	}
+	return barrier.covered
 }
 
 // Wait reports whether all turns accepted before the barrier finished before
@@ -267,13 +281,30 @@ func (queue *TurnQueue) EnqueueJobObservation(draftID, jobID string, event map[s
 }
 
 func (queue *TurnQueue) EnqueueUIObservation(draftID, itemID, observationType string, payload map[string]any) bool {
+	return queue.enqueueUIObservation(draftID, itemID, observationType, payload, false)
+}
+
+// EnqueueUIObservationIfIdle 是启动对账的决策续跑入口。与 user-message 补驱共用
+// pendingCount 原子空闲守卫，重复扫描或同一轮扫描里的并发调用至多补入一个回合。
+func (queue *TurnQueue) EnqueueUIObservationIfIdle(
+	draftID, itemID, observationType string,
+	payload map[string]any,
+) bool {
+	return queue.enqueueUIObservation(draftID, itemID, observationType, payload, true)
+}
+
+func (queue *TurnQueue) enqueueUIObservation(
+	draftID, itemID, observationType string,
+	payload map[string]any,
+	onlyIfIdle bool,
+) bool {
 	values := map[string]any{"observation_type": observationType}
 	for key, value := range payload {
 		values[key] = value
 	}
-	return queue.Enqueue(QueueItem{
+	return queue.enqueue(QueueItem{
 		DraftID: draftID, Kind: QueueUIObservation, ItemID: itemID, Payload: values,
-	})
+	}, onlyIfIdle)
 }
 
 func (queue *TurnQueue) RequestStop(draftID string) bool {
@@ -290,6 +321,36 @@ func (queue *TurnQueue) RequestStop(draftID string) bool {
 	}
 	worker.currentStop(errTurnCancelledByUser)
 	return true
+}
+
+// CommitCurrentDurableTerminal serializes a running turn's terminal reducer
+// commit with BeginDraftCancellation. A successful commit is marked before the
+// cancellation barrier can snapshot pendingCount, so a reply already durable
+// in SQLite is not counted again and cannot make the marker consume a later
+// request that only crossed CanEnqueue.
+func (queue *TurnQueue) CommitCurrentDurableTerminal(
+	item QueueItem,
+	commit func() (bool, error),
+) (bool, error) {
+	queue.mu.Lock()
+	worker := queue.workers[item.DraftID]
+	if worker == nil {
+		queue.mu.Unlock()
+		return commit()
+	}
+	worker.mu.Lock()
+	if worker.currentStop == nil || worker.currentKind != item.Kind || worker.currentItem != item.ItemID {
+		worker.mu.Unlock()
+		queue.mu.Unlock()
+		return commit()
+	}
+	queue.mu.Unlock()
+	applied, err := commit()
+	if applied {
+		worker.currentDurableTerminal = true
+	}
+	worker.mu.Unlock()
+	return applied, err
 }
 
 func (queue *TurnQueue) IsBusy(draftID string) bool {
@@ -329,10 +390,15 @@ func (queue *TurnQueue) BeginDraftCancellation(draftID string) (*DraftCancellati
 	worker := queue.workers[draftID]
 	queue.cancelLeases[draftID]++
 	requested := false
+	covered := 0
 	done := closedChannel()
 	if worker != nil {
 		worker.mu.Lock()
-		requested = worker.pendingCount > 0
+		covered = worker.pendingCount
+		if worker.currentStop != nil && worker.currentDurableTerminal && covered > 0 {
+			covered--
+		}
+		requested = covered > 0
 		worker.canceling = true
 		done = worker.drained
 		if worker.currentStop != nil {
@@ -342,7 +408,7 @@ func (queue *TurnQueue) BeginDraftCancellation(draftID string) (*DraftCancellati
 	}
 	queue.mu.Unlock()
 	return &DraftCancellationBarrier{
-		queue: queue, draftID: draftID, worker: worker, done: done,
+		queue: queue, draftID: draftID, worker: worker, done: done, covered: covered,
 	}, requested
 }
 
@@ -504,6 +570,9 @@ func (queue *TurnQueue) runWorker(worker *draftWorker) {
 			worker.mu.Lock()
 			retired := worker.retired
 			worker.currentStop = stop
+			worker.currentKind = item.Kind
+			worker.currentItem = item.ItemID
+			worker.currentDurableTerminal = false
 			if worker.canceling || retired {
 				stop(errTurnCancelledByUser)
 			}
@@ -521,19 +590,27 @@ func (queue *TurnQueue) runWorker(worker *draftWorker) {
 			stop(nil)
 			worker.mu.Lock()
 			worker.currentStop = nil
+			worker.currentKind = ""
+			worker.currentItem = ""
+			worker.currentDurableTerminal = false
+			queue.finishPendingLocked(worker)
 			worker.mu.Unlock()
-			queue.finishPending(worker)
+			worker.pending.Done()
 		}
 	}
 }
 
 func (queue *TurnQueue) finishPending(worker *draftWorker) {
 	worker.mu.Lock()
+	queue.finishPendingLocked(worker)
+	worker.mu.Unlock()
+	worker.pending.Done()
+}
+
+func (queue *TurnQueue) finishPendingLocked(worker *draftWorker) {
 	worker.pendingCount--
 	metricTurnQueueDepth.Add(-1)
 	if worker.pendingCount == 0 {
 		close(worker.drained)
 	}
-	worker.mu.Unlock()
-	worker.pending.Done()
 }

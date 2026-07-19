@@ -43,6 +43,9 @@ func newConcurrentReactAgent(
 	toolCallChecker func(context.Context, *schema.StreamReader[*schema.Message]) (bool, error),
 	messageModifier func(context.Context, []*schema.Message) []*schema.Message,
 ) (*concurrentReactAgent, error) {
+	if toolCallChecker == nil {
+		toolCallChecker = defaultStreamToolCallChecker
+	}
 	toolInfos, err := toolInfosFromConfig(ctx, toolsConfig)
 	if err != nil {
 		return nil, err
@@ -87,8 +90,12 @@ func newConcurrentReactAgent(
 		state.Messages = append(state.Messages, input)
 		return input, nil
 	}
-	routerLambda := compose.InvokableLambda(func(ctx context.Context, input *schema.Message) ([]*schema.Message, error) {
-		return router.Invoke(ctx, input)
+	routerLambda := compose.InvokableLambdaWithOption(func(
+		ctx context.Context,
+		input *schema.Message,
+		opts ...compose.ToolsNodeOption,
+	) ([]*schema.Message, error) {
+		return router.Invoke(ctx, input, opts...)
 	})
 	if err := graph.AddLambdaNode(concurrentNodeTools, routerLambda, compose.WithStatePreHandler(toolsPreHandle)); err != nil {
 		return nil, err
@@ -126,12 +133,20 @@ func newConcurrentReactAgent(
 
 // Generate 与 Stream 与 react.Agent 对齐:分别走底层 runnable 的 Invoke/Stream。生产 turn 流走
 // Stream(H5 直通);脚本模型测试走 Generate。
-func (reactAgent *concurrentReactAgent) Generate(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
-	return reactAgent.runnable.Invoke(ctx, messages)
+func (reactAgent *concurrentReactAgent) Generate(
+	ctx context.Context,
+	messages []*schema.Message,
+	opts ...einoagent.AgentOption,
+) (*schema.Message, error) {
+	return reactAgent.runnable.Invoke(ctx, messages, einoagent.GetComposeOptions(opts...)...)
 }
 
-func (reactAgent *concurrentReactAgent) Stream(ctx context.Context, messages []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
-	return reactAgent.runnable.Stream(ctx, messages)
+func (reactAgent *concurrentReactAgent) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	opts ...einoagent.AgentOption,
+) (*schema.StreamReader[*schema.Message], error) {
+	return reactAgent.runnable.Stream(ctx, messages, einoagent.GetComposeOptions(opts...)...)
 }
 
 func toolInfosFromConfig(ctx context.Context, config compose.ToolsNodeConfig) ([]*schema.ToolInfo, error) {

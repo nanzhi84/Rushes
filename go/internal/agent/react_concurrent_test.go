@@ -8,6 +8,9 @@ import (
 	"testing"
 
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
+	einoagent "github.com/cloudwego/eino/flow/agent"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -22,6 +25,69 @@ type g3bWireModel struct {
 	round           int
 	round1ToolOrder []string
 	round2ToolOrder []string
+}
+
+type reactOptionForwardModel struct {
+	round int
+}
+
+func (scriptModel *reactOptionForwardModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return scriptModel, nil
+}
+
+func (scriptModel *reactOptionForwardModel) Generate(
+	_ context.Context, messages []*schema.Message, _ ...model.Option,
+) (*schema.Message, error) {
+	scriptModel.round++
+	if scriptModel.round == 1 {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID:       "call_dynamic",
+			Function: schema.FunctionCall{Name: "dynamic.option", Arguments: "{}"},
+		}}), nil
+	}
+	for _, message := range messages {
+		if message.Role == schema.Tool && message.ToolCallID == "call_dynamic" && message.Content == "dynamic.option" {
+			return schema.AssistantMessage("运行时工具选项已转发", nil), nil
+		}
+	}
+	return nil, fmt.Errorf("未收到动态工具结果: %#v", messages)
+}
+
+func (scriptModel *reactOptionForwardModel) Stream(
+	ctx context.Context, messages []*schema.Message, opts ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := scriptModel.Generate(ctx, messages, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func TestConcurrentReactAgentDefaultsNilCheckerAndForwardsRuntimeToolOptions(t *testing.T) {
+	dynamicTool := newRouterNoopTool("dynamic.option")
+	agentValue, err := newConcurrentReactAgent(
+		t.Context(),
+		&reactOptionForwardModel{},
+		compose.ToolsNodeConfig{Tools: []tool.BaseTool{newRouterNoopTool("base.option")}},
+		func(string) (rushestools.Effect, bool) { return rushestools.EffectReadOnly, true },
+		5,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := agentValue.Generate(
+		t.Context(),
+		[]*schema.Message{schema.UserMessage("使用动态工具")},
+		einoagent.WithComposeOptions(compose.WithLambdaOption(compose.WithToolList(dynamicTool))),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response == nil || response.Content != "运行时工具选项已转发" {
+		t.Fatalf("response=%#v", response)
+	}
 }
 
 func (scriptModel *g3bWireModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {

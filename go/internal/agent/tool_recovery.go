@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -25,6 +26,8 @@ const (
 	// 交替 fail→success 会不断清空连击预算（recordSuccess），单靠 maxModelRepairAttempts
 	// 无法收敛（#95 H4）。turn 级累计计数不因成功重置，累计到此阈值同样触发穷尽。
 	maxCumulativeRepairAttempts = 10
+	// 64 KiB 仅是早期观测阈值，不改变结果语义；speech.inspect 等合法大结果仍完整回灌。
+	toolResultSoftLimitBytes = 64 << 10
 )
 
 type toolRecoveryContextKey struct{}
@@ -307,10 +310,24 @@ func newToolRecoveryMiddleware(retrySafe func(string) bool) compose.ToolMiddlewa
 				} else if state != nil {
 					state.recordSuccess(input.Name)
 				}
+				observeToolResultSize(input.Name, output.Result)
 				return output, nil
 			}
 		},
 	}
+}
+
+func observeToolResultSize(name, result string) {
+	bytes := len([]byte(result))
+	metricToolResultBytes.Observe(int64(bytes))
+	if bytes <= toolResultSoftLimitBytes {
+		return
+	}
+	metricToolResultOversize.Inc()
+	slog.Warn(
+		"工具结果超过软上限，保持完整回灌并记录观测",
+		"tool", name, "result_bytes", bytes, "soft_limit_bytes", toolResultSoftLimitBytes,
+	)
 }
 
 func unknownToolRecoveryHandler(ctx context.Context, name, arguments string) (string, error) {

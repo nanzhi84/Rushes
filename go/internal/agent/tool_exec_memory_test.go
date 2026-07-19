@@ -7,6 +7,7 @@ import (
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
+	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
@@ -454,13 +455,22 @@ func TestMemoryUpdateEmitsMemoryUpdatedTurnStreamEvent(t *testing.T) {
 	}
 	found := false
 	for _, event := range service.Hub().Snapshot("draft_evt") {
-		if event["type"] != TurnStreamMemoryUpdated {
+		if event["type"] != contracts.TurnStreamMemoryUpdated {
 			continue
 		}
 		found = true
 		keys, ok := event["written_keys"].([]string)
 		if !ok || len(keys) != 1 || keys[0] != "pacing" {
 			t.Fatalf("memory_updated written_keys=%#v", event["written_keys"])
+		}
+		entries, ok := event["entries"].([]map[string]any)
+		if !ok || len(entries) != 1 {
+			t.Fatalf("memory_updated entries=%#v", event["entries"])
+		}
+		entry := entries[0]
+		if entry["key"] != "pacing" ||
+			entry["statement"] != "成片节奏偏快" || entry["evidence_quote"] != "都快一点" {
+			t.Fatalf("memory_updated entries=%#v", event["entries"])
 		}
 	}
 	if !found {

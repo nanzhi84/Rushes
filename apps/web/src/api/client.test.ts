@@ -119,6 +119,37 @@ describe("draft api client functions", () => {
     expect(init?.body).toBe(JSON.stringify({ reason: "user_cancelled" }));
   });
 
+  it("旧记忆回执撤回携带当前值前置条件", async () => {
+    const fetchMock = vi.fn(async (..._args: unknown[]) =>
+      jsonResponse({ deleted_count: 1, deleted_memory_keys: ["pacing"] })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.deleteMemory("pacing", {
+      memory_key: "pacing",
+      kind: "preference",
+      statement: "成片节奏偏快",
+      source_draft_id: "draft_1",
+      created_at: "2026-07-19T00:00:00.000000000Z",
+      last_confirmed_at: "2026-07-19T00:01:00.000000000Z",
+      manually_revised_at: ""
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
+    const headers = init?.headers as Headers;
+    expect(init?.method).toBe("DELETE");
+    expect(
+      JSON.parse(decodeURIComponent(headers.get("X-Rushes-Memory-If-Match") ?? ""))
+    ).toEqual({
+      kind: "preference",
+      statement: "成片节奏偏快",
+      source_draft_id: "draft_1",
+      created_at: "2026-07-19T00:00:00.000000000Z",
+      last_confirmed_at: "2026-07-19T00:01:00.000000000Z",
+      manually_revised_at: ""
+    });
+  });
+
   it("编辑并重发使用消息专用路由", async () => {
     const fetchMock = vi.fn(async (..._args: unknown[]) =>
       jsonResponse({

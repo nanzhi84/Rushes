@@ -21,10 +21,10 @@ import { DRAFT_EVENT_TYPES } from "../../api/event_types";
 import { queryKeys } from "../../app/query_client";
 import { useDocumentVisibility } from "../../app/use_document_visibility";
 import { acquireApiEventSource, ApiError } from "../../auth";
-import { AssistantThread } from "./AssistantThread";
+import { AssistantThread, type MemoryRetractionResult } from "./AssistantThread";
 import { AffectedMemoriesCard } from "./MemoryCards";
 import { WorkspaceSettingsDialog } from "../Shell/WorkspaceSettingsDialog";
-import { useTurnStream } from "./useTurnStream";
+import { useTurnStream, type StreamMemoryEntry } from "./useTurnStream";
 import {
   markDecisionAnswered,
   mergeCurrentDecisionItem,
@@ -224,7 +224,7 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
     // 会重建全部消息对象，击穿 AssistantThread 里所有消息行的 memo。
     const liveItemIdsKey = streamItems
       .map((item) => (item.type === "message" ? item.message_id : item.type === "memory" ? item.id : item.step_id))
-      .join(" ");
+      .join("\\u0000");
     const messages = useMemo<ConsoleMessage[]>(() => {
       const liveItemIds = new Set(
         streamItems.map((item) => (item.type === "message" ? item.message_id : item.type === "memory" ? item.id : item.step_id))
@@ -329,6 +329,47 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
       },
       onError: () => setConversationError("撤回记忆失败,请稍后重试。")
     });
+
+    // 写入回执卡逐条撤回：复用既有单键删除端点，成功后刷新全局设置面板缓存。
+    // 404 表示该键已从其他入口删除，同样视为目标已达成。
+    const retractStreamMemory = useMutation({
+      mutationFn: async (entry: StreamMemoryEntry): Promise<MemoryRetractionResult> => {
+        const response = await api.listMemories();
+        const current = response.memories.find((memory) => memory.memory_key === entry.key);
+        if (!current) {
+          return "retracted";
+        }
+        // SSE 回执没有新增版本字段（M7 要求 OpenAPI 零变更）。先用既有列表端点
+        // 取得当前值，再把它作为内部条件随 DELETE 发送；reducer 在同一事务里比对并删除，
+        // 同 key 被后续写入或人工修订时只会安全 no-op，旧回执绝不误删新值。
+        if (
+          current.statement !== entry.statement ||
+          current.kind !== entry.kind ||
+          current.source_draft_id !== draftId
+        ) {
+          return "stale";
+        }
+        try {
+          const result = await api.deleteMemory(entry.key, current);
+          if (!result.deleted_memory_keys.includes(entry.key)) {
+            return "stale";
+          }
+        } catch (error) {
+          if (!(error instanceof ApiError && error.status === 404)) {
+            throw error;
+          }
+        }
+        return "retracted";
+      },
+      onSuccess: async () => {
+        await queryClient.invalidateQueries({ queryKey: ["memories"] });
+      },
+      onError: () => setConversationError("撤回记忆失败，请稍后重试。")
+    });
+    const retractMemoryFromReceipt = useCallback(
+      (entry: StreamMemoryEntry) => retractStreamMemory.mutateAsync(entry),
+      [retractStreamMemory.mutateAsync]
+    );
 
     const clearConversation = useMutation({
       mutationFn: () => api.clearDraftConversation(draftId),
@@ -519,6 +560,7 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
             resendMessage.isPending ? (resendMessage.variables?.messageId ?? null) : null
           }
           onOpenMemorySettings={openMemorySettings}
+          onRetractMemory={retractMemoryFromReceipt}
         />
 
         <WorkspaceSettingsDialog
