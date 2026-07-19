@@ -319,7 +319,11 @@ func isContextLengthExceeded(err error) bool {
 	return false
 }
 
-func compactModelRetryInput(input []*schema.Message, retryAttempt int) []*schema.Message {
+// compactToolResultMessages 把工具结果消息按「最新详细、更早最小」策略压进 totalBudget，
+// 每条上限 perTool。失败重试压缩与回合内主动压缩（#95 H1b）共用此核心，返回是否真正改写。
+func compactToolResultMessages(
+	input []*schema.Message, totalBudget, perTool, retryAttempt int,
+) ([]*schema.Message, bool) {
 	result := append([]*schema.Message(nil), input...)
 	toolIndexes := make([]int, 0)
 	for index, message := range input {
@@ -328,20 +332,11 @@ func compactModelRetryInput(input []*schema.Message, retryAttempt int) []*schema
 		}
 	}
 	if len(toolIndexes) == 0 {
-		return result
+		return result, false
 	}
-
-	policyIndex := retryAttempt - 1
-	if policyIndex < 0 {
-		policyIndex = 0
-	}
-	if policyIndex >= len(modelRetryTotalRuneBudgets) {
-		policyIndex = len(modelRetryTotalRuneBudgets) - 1
-	}
-	remaining := modelRetryTotalRuneBudgets[policyIndex]
-	perTool := modelRetryPerToolBudgets[policyIndex]
 	const minimumToolBudget = 160
-
+	remaining := totalBudget
+	changed := false
 	// 最新工具结果优先获得细节，同时为每个更早的结果保留最小摘要预算。
 	for position := len(toolIndexes) - 1; position >= 0; position-- {
 		index := toolIndexes[position]
@@ -355,13 +350,54 @@ func compactModelRetryInput(input []*schema.Message, retryAttempt int) []*schema
 		}
 		cloned := *input[index]
 		cloned.Content = compactToolResultForRetry(cloned.Content, budget, retryAttempt)
+		if cloned.Content != input[index].Content {
+			changed = true
+		}
 		result[index] = &cloned
 		remaining -= utf8.RuneCountInString(cloned.Content)
 		if remaining < 0 {
 			remaining = 0
 		}
 	}
+	return result, changed
+}
+
+func compactModelRetryInput(input []*schema.Message, retryAttempt int) []*schema.Message {
+	policyIndex := retryAttempt - 1
+	if policyIndex < 0 {
+		policyIndex = 0
+	}
+	if policyIndex >= len(modelRetryTotalRuneBudgets) {
+		policyIndex = len(modelRetryTotalRuneBudgets) - 1
+	}
+	result, _ := compactToolResultMessages(
+		input, modelRetryTotalRuneBudgets[policyIndex], modelRetryPerToolBudgets[policyIndex], retryAttempt,
+	)
 	return result
+}
+
+const (
+	// 工具结果累计 rune 超过软预算即在 react 循环内主动做有界摘要，避免 40 轮工具往返裸
+	// 累积撞上下文上限（#95 H1b）。阈值取重试首次压缩的总预算，使主动压缩在「即将触发
+	// context-length 重试」之前先行收敛。
+	turnToolResultSoftBudgetRunes = 24000
+	turnToolResultPerToolRunes    = 8000
+)
+
+// compactTurnToolResults 在工具结果累计 rune 超过软预算时，于 react 循环内主动压缩历史工具
+// 消息。压缩仅作用于本次模型输入，不改动 eino 内部历史或落库记录；配合注入的收敛提示，
+// 引导模型在细节被摘要前先用 plan.update 固化关键结论与 ID。返回是否发生压缩。
+func compactTurnToolResults(messages []*schema.Message) ([]*schema.Message, bool) {
+	cumulative := 0
+	for _, message := range messages {
+		if message != nil && message.Role == schema.Tool {
+			cumulative += utf8.RuneCountInString(message.Content)
+		}
+	}
+	if cumulative <= turnToolResultSoftBudgetRunes {
+		return messages, false
+	}
+	return compactToolResultMessages(messages, turnToolResultSoftBudgetRunes, turnToolResultPerToolRunes, 1)
 }
 
 func compactToolResultForRetry(content string, budget, retryAttempt int) string {

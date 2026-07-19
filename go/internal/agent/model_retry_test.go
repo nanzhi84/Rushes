@@ -805,3 +805,76 @@ func TestContextLengthRetryFinishesTurnAndReportsUsage(t *testing.T) {
 		t.Fatalf("turn_ended 未计入重试后的用量: %#v", turnEnded)
 	}
 }
+
+func TestCompactTurnToolResultsBoundsHistoryAndInjectsHint(t *testing.T) {
+	t.Parallel()
+	makeToolMsg := func(id string, repeat int) *schema.Message {
+		payload := map[string]any{
+			"asset_id": id,
+			"segments": strings.Repeat("很长的逐镜头语义描述与标签，", repeat),
+		}
+		encoded, _ := json.Marshal(payload)
+		return &schema.Message{Role: schema.Tool, Content: string(encoded)}
+	}
+
+	// 小历史：累计不超软预算，不压缩、不注入提示。
+	small := []*schema.Message{schema.UserMessage("剪辑"), makeToolMsg("solo", 5)}
+	if _, did := compactTurnToolResults(small); did {
+		t.Fatal("小历史不应触发压缩")
+	}
+
+	// 大历史：12 条大工具结果，累计远超 turnToolResultSoftBudgetRunes。
+	messages := []*schema.Message{schema.UserMessage("请理解全部素材并剪辑")}
+	ids := make([]string, 0, 12)
+	for i := 0; i < 12; i++ {
+		id := fmt.Sprintf("asset_key_%02d", i)
+		ids = append(ids, id)
+		messages = append(messages, makeToolMsg(id, 500))
+	}
+	before := 0
+	for _, m := range messages {
+		if m.Role == schema.Tool {
+			before += utf8.RuneCountInString(m.Content)
+		}
+	}
+	if before <= turnToolResultSoftBudgetRunes {
+		t.Fatalf("fixture 未超软预算：%d", before)
+	}
+
+	compacted, did := compactTurnToolResults(messages)
+	if !did {
+		t.Fatal("超软预算的工具历史应触发压缩")
+	}
+	after := 0
+	for _, m := range compacted {
+		if m.Role == schema.Tool {
+			after += utf8.RuneCountInString(m.Content)
+		}
+	}
+	if after >= before || after > turnToolResultSoftBudgetRunes+len(ids)*160 {
+		t.Fatalf("压缩后未有界：before=%d after=%d", before, after)
+	}
+	// 最新工具结果优先保细节：关键 ID 必须保留（模型据此 plan.update 固化）。
+	if newest := compacted[len(compacted)-1]; !strings.Contains(newest.Content, ids[len(ids)-1]) {
+		t.Fatalf("最新工具结果关键 ID 丢失：%s not in %s", ids[len(ids)-1], newest.Content)
+	}
+	// compactTurnToolResults 不得改动传入切片：原始 messages 累计 rune 应不变。
+	stillOriginal := 0
+	for _, m := range messages {
+		if m.Role == schema.Tool {
+			stillOriginal += utf8.RuneCountInString(m.Content)
+		}
+	}
+	if stillOriginal != before {
+		t.Fatalf("原始 messages 被就地改写：before=%d now=%d", before, stillOriginal)
+	}
+
+	// 修饰器在压缩时追加收敛提示；未压缩时不追加。
+	modified := turnBudgetMessageModifier(t.Context(), messages)
+	if modified[0].Role != schema.System || !strings.Contains(modified[0].Content, "上下文压缩提醒") {
+		t.Fatalf("压缩时应注入收敛提示：%s", modified[0].Content)
+	}
+	if smallModified := turnBudgetMessageModifier(t.Context(), small); strings.Contains(smallModified[0].Content, "上下文压缩提醒") {
+		t.Fatal("未压缩时不应注入压缩提示")
+	}
+}
