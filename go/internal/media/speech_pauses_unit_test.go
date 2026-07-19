@@ -13,31 +13,13 @@ func TestCombineDetectionMethods(t *testing.T) {
 		{"", "rms_breath", "rms_breath"},                                                  // 左空取右
 		{"rms_silence", "", "rms_silence"},                                                // 右空取左
 		{"rms_silence", "rms_silence", "rms_silence"},                                     // 相同不重复
-		{"rms_silence", "rms_breath", "rms_silence+rms_breath"},                           // 不同则拼接
-		{"rms_silence+rms_breath", "rms_breath", "rms_silence+rms_breath"},                // 已含则不再拼
-		{"rms_silence+rms_breath", "rms_lipsmack", "rms_silence+rms_breath+rms_lipsmack"}, // 追加第三种
+		{"rms_silence", "rms_breath", "rms_breath+rms_silence"},                           // 不同则拼接
+		{"rms_silence+rms_breath", "rms_breath", "rms_breath+rms_silence"},                // 已含则不再拼
+		{"rms_silence+rms_breath", "rms_lipsmack", "rms_breath+rms_lipsmack+rms_silence"}, // 追加第三种
 	}
 	for _, tc := range cases {
 		if got := combineDetectionMethods(tc.left, tc.right); got != tc.want {
 			t.Errorf("combineDetectionMethods(%q,%q)=%q, want %q", tc.left, tc.right, got, tc.want)
-		}
-	}
-}
-
-func TestSplitPlus(t *testing.T) {
-	cases := []struct {
-		in   string
-		want []string
-	}{
-		{"", []string{""}},
-		{"rms_silence", []string{"rms_silence"}},
-		{"rms_silence+rms_breath", []string{"rms_silence", "rms_breath"}},
-		{"a+b+c", []string{"a", "b", "c"}},
-		{"trailing+", []string{"trailing", ""}},
-	}
-	for _, tc := range cases {
-		if got := splitPlus(tc.in); !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("splitPlus(%q)=%v, want %v", tc.in, got, tc.want)
 		}
 	}
 }
@@ -54,7 +36,7 @@ func TestMergePausesWithBreath(t *testing.T) {
 
 	want := []SpeechPause{
 		// 静音1 + 呼吸21..26 合并：源扩到 26、删边扩到 [12,26]、method 拼接。
-		{SourceStartFrame: 10, SourceEndFrame: 26, DeleteStartFrame: 12, DeleteEndFrame: 26, Method: "rms_silence+rms_breath"},
+		{SourceStartFrame: 10, SourceEndFrame: 26, DeleteStartFrame: 12, DeleteEndFrame: 26, Method: "rms_breath+rms_silence"},
 		{SourceStartFrame: 40, SourceEndFrame: 48, DeleteStartFrame: 40, DeleteEndFrame: 48, Method: "rms_breath"},
 		{SourceStartFrame: 60, SourceEndFrame: 70, DeleteStartFrame: 62, DeleteEndFrame: 68, Method: "rms_silence"},
 		{SourceStartFrame: 90, SourceEndFrame: 95, DeleteStartFrame: 90, DeleteEndFrame: 95, Method: "rms_breath"},
@@ -121,5 +103,39 @@ func TestMatchFloat(t *testing.T) {
 	// 捕获到非法浮点(多个小数点)→ParseFloat 失败分支。
 	if _, ok := matchFloat(pat, []byte("v=1.2.3")); ok {
 		t.Error("非法浮点应返回 false")
+	}
+}
+
+func TestCombineDetectionMethodsOrderIndependent(t *testing.T) {
+	// 规范形与输入顺序无关：silence+breath 与 breath+silence 结果一致。
+	if combineDetectionMethods("rms_silence", "rms_breath") != combineDetectionMethods("rms_breath", "rms_silence") {
+		t.Error("合并应与输入顺序无关")
+	}
+}
+
+// TestMergePausesWithBreathBreathFirst 覆盖 breath-first 顺序：呼吸段起点在静音段之前、
+// 二者相邻合并，仍产出排序去重的规范 method。
+func TestMergePausesWithBreathBreathFirst(t *testing.T) {
+	silence := []SpeechPause{
+		{SourceStartFrame: 60, SourceEndFrame: 70, DeleteStartFrame: 62, DeleteEndFrame: 68, Method: "rms_silence"},
+	}
+	// 呼吸段 54..59 排在静音段之前，且相邻(gap=2, 60<=59+2)→合并。
+	got := mergePausesWithBreath(silence, [][2]int{{54, 59}}, 2)
+	want := []SpeechPause{
+		{SourceStartFrame: 54, SourceEndFrame: 70, DeleteStartFrame: 54, DeleteEndFrame: 68, Method: "rms_breath+rms_silence"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("breath-first 合并结果不符\n got=%+v\nwant=%+v", got, want)
+	}
+}
+
+func TestDropBoundaryRanges(t *testing.T) {
+	// 触及首(start==0)与尾(end>=durationFrames)的呼吸段被丢弃，只留中间段。
+	got := dropBoundaryRanges([][2]int{{0, 5}, {10, 20}, {55, 60}}, 60)
+	if !reflect.DeepEqual(got, [][2]int{{10, 20}}) {
+		t.Fatalf("dropBoundaryRanges=%v, want [[10 20]]", got)
+	}
+	if got := dropBoundaryRanges(nil, 60); len(got) != 0 {
+		t.Errorf("空输入应返回空, got=%v", got)
 	}
 }

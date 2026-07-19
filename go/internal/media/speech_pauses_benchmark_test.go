@@ -20,6 +20,9 @@ import (
 //	[0.80-1.30] 响元音正弦          帧 24-39
 //	[1.30-1.70] 真静音              帧 39-51  ← GT 静音气口
 //	[1.70-2.20] 响元音正弦          帧 51-66
+//
+// 依赖 ffmpeg ≥ 5.0 的 aspectralstats(谱平坦度)滤镜；呼吸判据的平坦度阈值按其数值定标，
+// CI 两平台(ubuntu/macos)的 ffmpeg 均满足该版本且数值稳定。
 func TestAnalyzeSpeechPausesBreathRecallBenchmark(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")

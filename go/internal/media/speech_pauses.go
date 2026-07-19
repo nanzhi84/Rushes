@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 type SpeechPauseOptions struct {
@@ -102,9 +103,14 @@ func AnalyzeSpeechPauses(
 	analysisMethod := "ffmpeg-silencedetect-rms"
 	if breathRanges, breathErr := detectBreathRanges(
 		ctx, source, fps, options.ThresholdDB, durationFrames, options.MinPauseFrames, options.KeepEdgeFrames,
-	); breathErr == nil && len(breathRanges) > 0 {
-		pauses = mergePausesWithBreath(pauses, breathRanges, options.KeepEdgeFrames)
-		analysisMethod = "ffmpeg-silencedetect-rms+spectral-breath"
+	); breathErr == nil {
+		if !options.IncludeBoundaries {
+			breathRanges = dropBoundaryRanges(breathRanges, durationFrames)
+		}
+		if len(breathRanges) > 0 {
+			pauses = mergePausesWithBreath(pauses, breathRanges, options.KeepEdgeFrames)
+			analysisMethod = "ffmpeg-silencedetect-rms+spectral-breath"
+		}
 	}
 	sort.Slice(pauses, func(left, right int) bool {
 		return pauses[left].SourceStartFrame < pauses[right].SourceStartFrame
@@ -150,31 +156,34 @@ func mergePausesWithBreath(silencePauses []SpeechPause, breathRanges [][2]int, m
 	return merged
 }
 
+// combineDetectionMethods 把两个检出来源合并成排序去重的规范形（与 agentexec 的
+// joinSpeechDetectionMethods 同口径：跨包不复用，但保持一致），例如 rms_breath+rms_silence。
 func combineDetectionMethods(left, right string) string {
-	if left == "" {
-		return right
-	}
-	if right == "" || left == right {
-		return left
-	}
-	for _, part := range splitPlus(left) {
-		if part == right {
-			return left
+	seen := map[string]struct{}{}
+	for _, value := range strings.Split(left+"+"+right, "+") {
+		if value = strings.TrimSpace(value); value != "" {
+			seen[value] = struct{}{}
 		}
 	}
-	return left + "+" + right
+	ordered := make([]string, 0, len(seen))
+	for value := range seen {
+		ordered = append(ordered, value)
+	}
+	sort.Strings(ordered)
+	return strings.Join(ordered, "+")
 }
 
-func splitPlus(value string) []string {
-	parts := make([]string, 0, 2)
-	start := 0
-	for index := 0; index < len(value); index++ {
-		if value[index] == '+' {
-			parts = append(parts, value[start:index])
-			start = index + 1
+// dropBoundaryRanges 丢弃触及素材首尾的呼吸段（start==0 或 end>=durationFrames），与静音
+// 路径的 !IncludeBoundaries 守卫对称：clip 首尾的呼吸不标记为可删。
+func dropBoundaryRanges(ranges [][2]int, durationFrames int) [][2]int {
+	kept := make([][2]int, 0, len(ranges))
+	for _, item := range ranges {
+		if item[0] == 0 || item[1] >= durationFrames {
+			continue
 		}
+		kept = append(kept, item)
 	}
-	return append(parts, value[start:])
+	return kept
 }
 
 func normalizeSpeechPauseOptions(options SpeechPauseOptions, fps int) SpeechPauseOptions {

@@ -8,6 +8,8 @@ import (
 
 // 生成「响元音(低平坦度) + 安静吸气(高平坦度噪声) + 静音」，断言呼吸检测只圈出吸气段，
 // 不误判元音（能量在阈内但谱平坦度低）也不圈静音。
+// 依赖 ffmpeg ≥ 5.0 的 aspectralstats(谱平坦度)滤镜；breathFlatnessThreshold 按其数值定标，
+// CI 两平台(ubuntu/macos)的 ffmpeg 均满足该版本且平坦度数值稳定。
 func TestDetectBreathRangesCatchesBreathNotVowel(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")
