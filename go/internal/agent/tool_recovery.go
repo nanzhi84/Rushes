@@ -334,6 +334,7 @@ func decorateToolFailure(
 	if err != nil {
 		return marshalToolFailure("工具失败，且失败详情无法序列化", map[string]any{
 			"error_code": string(rushestools.ErrCodeFailureSerialization),
+			"recovery":   "重试上一步工具调用；若仍失败，缩小参数范围或改用其他工具。",
 		})
 	}
 	return string(encoded)
@@ -342,12 +343,15 @@ func decorateToolFailure(
 func blockedToolCallOutput(input *compose.ToolInput, decision recoveryDecision) string {
 	observation := "检测到与之前完全相同的失败工具调用，已跳过重复执行。必须修改参数、先读取最新状态，或改用其他工具。"
 	errorCode := rushestools.ErrCodeDuplicateFailedToolCall
+	recovery := "必须修改参数、先读取最新状态，或改用其他工具后再重试，不要原样重复同一调用。"
 	if decision.exhausted {
 		observation = "工具自修复次数已经用尽。停止继续调用工具，立即向用户说明未完成的步骤、最后错误，并等待下一步指令。"
 		errorCode = rushestools.ErrCodeToolRecoveryExhausted
+		recovery = "停止继续调用工具，立即向用户说明未完成的步骤与最后错误，并等待下一步指令。"
 	}
 	return marshalToolFailure(observation, map[string]any{
 		"error_code":       string(errorCode),
+		"recovery":         recovery,
 		"tool":             input.Name,
 		"last_failure":     agentexec.TruncateText(decision.latest.Observation, 600),
 		"harness_recovery": recoveryMetadata(decision, decision.latest.ExecutionAttempts),

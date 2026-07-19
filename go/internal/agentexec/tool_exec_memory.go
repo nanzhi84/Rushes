@@ -220,13 +220,9 @@ func memoryUpdateFailure(
 	recovery string,
 	extra map[string]any,
 ) rushestools.ToolResult {
-	data := map[string]any{
-		"error_code": string(errorCode), "recovery": recovery, "current_memory_unchanged": true,
-	}
+	data := map[string]any{"current_memory_unchanged": true}
 	for key, value := range extra {
 		data[key] = value
 	}
-	return rushestools.ToolResult{
-		Status: string(rushestools.StatusValidationFailed), Observation: observation, Data: data,
-	}
+	return rushestools.ToolFailure(rushestools.StatusValidationFailed, observation, errorCode, recovery, data)
 }

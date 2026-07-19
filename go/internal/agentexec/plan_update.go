@@ -254,5 +254,10 @@ func planUpdateFailure(observation string, data map[string]any) rushestools.Tool
 	if reason, _ := data["reason"].(string); reason != "" {
 		data["error_code"] = reason
 	}
+	// 统一保证 plan.update 失败带非空 recovery（#95 T5）：已给出具体指引的（如 plan_conflict）
+	// 保持不变，其余套用通用兜底，避免模型收到无恢复线索的裸失败。
+	if recovery, _ := data["recovery"].(string); recovery == "" {
+		data["recovery"] = "读取 observation 与 reason 定位问题后修正 plan.update 参数再调用；不要原样重发失败请求。"
+	}
 	return rushestools.ToolResult{Status: string(rushestools.StatusFailed), Observation: observation, Data: data}
 }
