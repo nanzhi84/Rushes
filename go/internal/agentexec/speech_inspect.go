@@ -1597,11 +1597,15 @@ func (exec *Executor) loadOrBuildSpeechTranscript(
 	}
 	pauses := make([]SpeechPause, 0, len(pauseAnalysis.Pauses))
 	for _, pause := range pauseAnalysis.Pauses {
+		method := pause.Method
+		if method == "" {
+			method = "rms_silence"
+		}
 		pauses = append(pauses, SpeechPause{
 			ID:         StableSpeechID("pause", asset.ID, pause.SourceStartFrame, pause.SourceEndFrame, ""),
 			StartFrame: pause.SourceStartFrame, EndFrame: pause.SourceEndFrame,
 			DeleteStart: pause.DeleteStartFrame, DeleteEnd: pause.DeleteEndFrame,
-			Method: "rms_silence",
+			Method: method,
 		})
 	}
 
