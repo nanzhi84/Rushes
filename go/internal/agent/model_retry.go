@@ -150,34 +150,86 @@ func (retry *timeoutRetryChatModel) Stream(
 			continue
 		}
 
-		// Eino 只有在这里返回 stream 后才会消费模型输出并执行 tool_call。
-		// 因此必须先完整收齐一次模型响应：供应商经常先发送空增量、思考增量
-		// 或未闭合的 tool_call，随后才因请求超时终止。把“收到首片段”当成
-		// 已产生副作用会让这种超时绕过重试，正是长 ASR 结果后任务静止的原因。
-		// 完整缓冲后，中途失败的响应尚未离开此边界，可以安全丢弃、压缩输入
-		// 并重试；成功时仍按原始 chunk 顺序交给 ReAct，语义不会改变。
-		buffered, receiveErr := bufferCompleteModelStream(stream)
-		if receiveErr == nil {
+		// 责任分界（#95 H5）：用一个流副本探测本轮类别，另一副本留给下游消费。
+		// 工具调用轮必须完整缓冲——供应商常先发空增量、思考增量或未闭合 tool_call 再超时，
+		// 把这些前导当副作用会让超时绕过重试，正是长 ASR 结果后任务静止的原因；完整缓冲后
+		// 中途失败的响应尚未离开此边界，可以安全丢弃、压缩输入并重试。终态文本轮则一旦出现
+		// 可见正文即直通，让首 token 直达用户；已直通的内容不可撤回，故越过该点不再重试（按
+		// 现有 turn_error 处理）。分类规则与 stream_checker.go 的 FullStreamToolCallChecker
+		// 同源（classifyModelChunk），保证 Stream 直通与 checker 路由逐块一致。
+		copies := stream.Copy(2)
+		probe, downstream := copies[0], copies[1]
+		signal, probeErr := probeModelRound(probe)
+		if probeErr != nil {
+			// 只有在越过直通承诺点之前（仍在前导分片）才会到这：安全丢弃、压缩后重试。
+			downstream.Close()
+			completedRetries, messages, probeErr = retry.nextAttempt(ctx, input, completedRetries, probeErr)
+			if probeErr != nil {
+				return nil, probeErr
+			}
+			continue
+		}
+		if signal == modelRoundSignalToolCall {
+			buffered, bufferErr := bufferCompleteModelStream(downstream)
+			if bufferErr != nil {
+				completedRetries, messages, bufferErr = retry.nextAttempt(ctx, input, completedRetries, bufferErr)
+				if bufferErr != nil {
+					return nil, bufferErr
+				}
+				continue
+			}
 			if response, concatErr := schema.ConcatMessages(buffered); concatErr == nil {
 				recordModelResponseUsage(ctx, response)
 			}
 			return schema.StreamReaderFromArray(buffered), nil
 		}
-		completedRetries, messages, receiveErr = retry.nextAttempt(
-			ctx, input, completedRetries, receiveErr,
-		)
-		if receiveErr != nil {
-			return nil, receiveErr
+		// 终态文本轮直通：downstream 副本仍从流首开始（含已 peek 的前导与首个正文，后续为
+		// live 流），用量随末片抵达、由消费端 streamAgent 统计，故此处不缓冲、不记账、不再重试。
+		return downstream, nil
+	}
+}
+
+// probeModelRound 消费一个模型流副本，直到能判定本轮是工具调用轮还是终态文本轮：命中首个
+// tool_call 或首个可见正文即返回；整流读尽（EOF）仍未见二者时按终态文本轮处理（空回复）。
+// 返回错误只会发生在前导分片阶段——判定一旦确定即返回、不再往后读——因此调用方可据此安全
+// 重试。分类与 stream_checker.go 同源（classifyModelChunk）。
+func probeModelRound(stream *schema.StreamReader[*schema.Message]) (modelRoundSignal, error) {
+	defer stream.Close()
+	for {
+		message, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			return modelRoundSignalText, nil
+		}
+		if err != nil {
+			return modelRoundSignalNone, err
+		}
+		if signal := classifyModelChunk(message); signal != modelRoundSignalNone {
+			return signal, nil
 		}
 	}
 }
 
 func recordModelResponseUsage(ctx context.Context, response *schema.Message) {
-	if response == nil || response.ResponseMeta == nil || response.ResponseMeta.Usage == nil {
+	recordTokenUsage(ctx, messageTokenUsage(response))
+}
+
+// messageTokenUsage 取出分片携带的 token 用量，缺省为 nil。
+func messageTokenUsage(message *schema.Message) *schema.TokenUsage {
+	if message == nil || message.ResponseMeta == nil {
+		return nil
+	}
+	return message.ResponseMeta.Usage
+}
+
+// recordTokenUsage 把一次模型响应的 token 用量计入回合预算。终态回复直通流式（#95 H5）下，
+// 缓冲的工具调用轮由 Stream 内的 recordModelResponseUsage 记账，直通的终态文本轮则由消费端
+// streamAgent 在读到末片后调用本函数记账，二者各对本轮记一次、互不重复。
+func recordTokenUsage(ctx context.Context, usage *schema.TokenUsage) {
+	if usage == nil {
 		return
 	}
 	if state := turnBudgetFromContext(ctx); state != nil {
-		state.recordUsage(response.ResponseMeta.Usage)
+		state.recordUsage(usage)
 	}
 }
 

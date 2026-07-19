@@ -331,6 +331,7 @@ func (service *Service) streamAgent(
 	}
 	defer stream.Close()
 	var output strings.Builder
+	var roundUsage *schema.TokenUsage
 	for {
 		message, receiveErr := stream.Recv()
 		if errors.Is(receiveErr, io.EOF) {
@@ -339,7 +340,25 @@ func (service *Service) streamAgent(
 		if receiveErr != nil {
 			return "", receiveErr
 		}
-		if message == nil || message.Content == "" {
+		if message == nil {
+			continue
+		}
+		// 直通承诺后若仍出现 tool_call 分片，说明模型违反了「工具轮不在 tool_call 前吐正文」的
+		// 假设（见 stream_checker.go classifyModelChunk）：该轮已被判终态并直通，此 tool_call 不会
+		// 被执行。后果有界（用户看到未执行工具的正文，可继续下一轮），但必须可观测——告警 + 计数，
+		// 让假设在真实模型上可证伪、坏了能经 H3 聚合发现（#95 H5，决策 2 观测保护）。
+		if len(message.ToolCalls) > 0 {
+			passthroughLateToolCallCount.Add(1)
+			slog.Warn("终态轮直通后出现未执行的 tool_call，模型可能在正文之后才发起工具调用",
+				"draft_id", draftID, "message_id", messageID,
+				"tool_name", message.ToolCalls[0].Function.Name, "tool_calls", len(message.ToolCalls))
+		}
+		// 终态回复直通流式（#95 H5）下，Stream 不再缓冲统计这一轮的用量；末片携带的 Usage
+		// 随流抵达，取最新一份（供应商通常在末片给全量），回合读尽后记一次账。
+		if usage := messageTokenUsage(message); usage != nil {
+			roundUsage = usage
+		}
+		if message.Content == "" {
 			continue
 		}
 		output.WriteString(message.Content)
@@ -348,6 +367,7 @@ func (service *Service) streamAgent(
 			"kind": "assistant", "delta": message.Content,
 		})
 	}
+	recordTokenUsage(ctx, roundUsage)
 	return output.String(), nil
 }
 
