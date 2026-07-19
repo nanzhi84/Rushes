@@ -88,6 +88,10 @@ func TestExecutorStructuredFailuresCarryRecovery(t *testing.T) {
 		{"apply_patches_unknown_kind", "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
 			"kind": "remove_clip", "timeline_clip_id": "clip_v1_001",
 		}}}},
+		// 经 edit_talking_head / recut_to_beats 的 failed 闭包路径，验证闭包 recovery 兜底
+		// 已让这两条主线的结构化失败机械带 recovery（覆盖 talking_head.go:1752 同类闭包）。
+		{"talking_head_no_decisions", "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{ARollTimelineClipID: "clip_v1_001"}},
+		{"recut_missing_inputs", "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{}},
 	}
 	for _, test := range cases {
 		raw, err := service.ExecuteTool(ctx, test.tool, test.input)

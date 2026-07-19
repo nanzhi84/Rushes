@@ -31,7 +31,7 @@ func destructiveConfirmationInterceptor(ctx context.Context, spec rushestools.Sp
 		Data: map[string]any{
 			"error_code":  string(rushestools.ErrCodeConfirmationRequired),
 			"tool":        spec.Name,
-			"recovery":    "调用 interaction.confirm_action，在 tool_name 传本工具名、arguments 原样传本次参数；用户确认后系统会自动重放执行。",
+			"recovery":    "先经 interaction.confirm_action 取得用户确认；确认后系统会自动重放本次调用。",
 			"next_action": "调用 interaction.confirm_action，在 tool_name 传本工具名、arguments 原样传本次参数；用户确认后系统会自动重放执行。",
 		},
 	}

@@ -216,6 +216,8 @@ func timelineOpJSONType(fieldType timeline.OpFieldType) string {
 	case timeline.OpFieldStringArray:
 		return "array"
 	default:
-		return ""
+		// 保留恢复侧旧兜底：未知字段类型回退 "string"。Catalog 现有类型均命中上面的
+		// case，此分支不影响任何 golden 字节，只是让未来新增未登记类型时仍产出合法 JSON type。
+		return "string"
 	}
 }
