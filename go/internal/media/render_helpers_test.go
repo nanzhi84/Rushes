@@ -82,7 +82,7 @@ func TestAppendAudioMixUsesPrimaryAudioFallback(t *testing.T) {
 		TimelineStartFrame: 15, TimelineEndFrame: 75,
 		SourceStartFrame: 0, SourceEndFrame: 60, PlaybackRate: 1,
 		FadeInFrames: 6, FadeOutFrames: 12,
-	}, -3, document, "faded")
+	}, -3, document, "faded", audioSeam{})
 	for _, expected := range []string{
 		"afade=t=in:st=0:d=0.200000",
 		"afade=t=out:st=1.600000:d=0.400000",
@@ -109,7 +109,7 @@ func TestLinkedVideoFadesReachFinalVideoAndOriginalAudioFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 	video := primaryVideoFilter(0, document.Tracks[0].Clips[0], document, RenderProfile{Width: 160, Height: 90}, 0, 2, 2)
-	audio := audioFilter(0, document.Tracks[2].Clips[0], 0, document, "audio")
+	audio := audioFilter(0, document.Tracks[2].Clips[0], 0, document, "audio", audioSeam{})
 	for _, expected := range []string{"fade=t=in:st=0:d=0.200000", "fade=t=out:st=1.600000:d=0.400000"} {
 		if !strings.Contains(video, expected) {
 			t.Fatalf("video filter missing %q: %s", expected, video)

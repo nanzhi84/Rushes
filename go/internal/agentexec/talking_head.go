@@ -23,7 +23,14 @@ const (
 	maxTalkingHeadUnvoicedBridgeFrames = 12
 	MinTalkingHeadPauseCandidateFrames = 12
 	MinTalkingHeadPauseResidualFrames  = 5
-	MinTalkingHeadBrollDurationFrames  = timeline.DefaultFPS / 2
+	// MinTalkingHeadBrollDurationFrames 是放置 B-roll 的时长硬下限（1.5 秒）：更短的叠加
+	// 是闪帧式插入、不成电影语言，直接判失败。它与口播质检的过短提示阈值
+	// MinTalkingHeadBrollQualityFrames 同为 1.5 秒——放置这关先挡住，质检那关只兜底
+	// 外部/历史时间线里遗留的过短 B-roll。
+	MinTalkingHeadBrollDurationFrames = timeline.DefaultFPS * 3 / 2
+	// TalkingHeadBrollFadeFrames 是放置 B-roll 时默认的视觉溶入/溶出时长（约 0.23 秒 / 7 帧），
+	// 让叠加软切入切出而不是硬跳。放置下限已保证片段足够容纳两端淡化。
+	TalkingHeadBrollFadeFrames = timeline.DefaultFPS / 4
 )
 
 func AttachTalkingHeadUnreviewedEvidence(
@@ -697,16 +704,19 @@ func TalkingHeadAssignmentSourceRange(
 		if !startOK || !endOK || startRemoved || endRemoved || start.StartFrame > end.StartFrame {
 			return TalkingHeadRange{}, errors.New("utterance_id 未知、已删除或逆序")
 		}
-		if start.StartFrame < clip.SourceStartFrame || end.EndFrame > clip.SourceEndFrame {
-			return TalkingHeadRange{}, errors.New("utterance 语义范围不完整地落在指定 A-roll clip 内")
+		// 交集解析（与 Q1 删除口径一致）：语义范围裁剪到 clip 已裁剪源区间，交集非空即合法，
+		// 仅当完全落在 clip 之外才判非法；锚点 clamp 后区间同样确定，不再因跨界整体拒绝。
+		clampedStart, clampedEnd, _ := ClampSpeechRangeToClip(clip, start.StartFrame, end.EndFrame)
+		if clampedEnd <= clampedStart {
+			return TalkingHeadRange{}, errors.New("utterance 语义范围与指定 A-roll clip 源区间无交集")
 		}
 		if anchorText != "" {
 			return TalkingHeadAnchorTextSourceRange(
-				anchorText, start.StartFrame, end.EndFrame, utterances, words,
+				anchorText, clampedStart, clampedEnd, utterances, words,
 				removedUtterances, removedWords,
 			)
 		}
-		return TalkingHeadRange{Start: start.StartFrame, End: end.EndFrame}, nil
+		return TalkingHeadRange{Start: clampedStart, End: clampedEnd}, nil
 	}
 	if assignment.StartWordID == "" {
 		return TalkingHeadRange{}, errors.New("缺少 start_word_id")
@@ -737,10 +747,12 @@ func TalkingHeadAssignmentSourceRange(
 		}
 	}
 	start, end := words[startIndex].StartFrame, words[endIndex].EndFrame
-	if start < clip.SourceStartFrame || end > clip.SourceEndFrame {
-		return TalkingHeadRange{}, errors.New("word 语义范围不完整地落在指定 A-roll clip 内")
+	// 交集解析（与 Q1 删除口径一致）：裁剪到 clip 源区间，交集非空即合法。
+	clampedStart, clampedEnd, _ := ClampSpeechRangeToClip(clip, start, end)
+	if clampedEnd <= clampedStart {
+		return TalkingHeadRange{}, errors.New("word 语义范围与指定 A-roll clip 源区间无交集")
 	}
-	return TalkingHeadRange{Start: start, End: end}, nil
+	return TalkingHeadRange{Start: clampedStart, End: clampedEnd}, nil
 }
 
 func TalkingHeadAnchorTextSourceRange(
@@ -1673,9 +1685,9 @@ func (exec *Executor) toolEditTalkingHead(
 		}
 	}
 	if len(shortBrollIssues) > 0 {
-		return failed("B-roll 语义锚点不足半秒，会形成闪帧式孤立片段", map[string]any{
+		return failed("B-roll 语义锚点不足 1.5 秒，会形成闪帧式孤立片段", map[string]any{
 			"short_b_roll_assignments": shortBrollIssues,
-			"recovery":                 "在同一保留台词中改用更完整且仍精确对应画面的连续 anchor_text/word_id 范围，使每段至少覆盖 15 帧；不能用无关整句硬凑时长。",
+			"recovery":                 "在同一保留台词中改用更完整且仍精确对应画面的连续 anchor_text/word_id 范围，使每段至少覆盖 45 帧（1.5 秒）；不能用无关整句硬凑时长。",
 		})
 	}
 	if len(anchorPrecisionIssues) > 0 {
@@ -1753,9 +1765,21 @@ func (exec *Executor) toolEditTalkingHead(
 				"assignment_index": index, "reason": err.Error(),
 			})
 		}
+		// 电影语言：给 B-roll 叠加默认的视觉溶入/溶出，软切入切出而不是硬跳。放置硬下限
+		// (MinTalkingHeadBrollDurationFrames，1.5 秒) 已保证片段远长于两端淡化之和，直接用常量。
+		document, err = timeline.ApplyPatch(document, map[string]any{
+			"kind": "set_clip_fades", "timeline_clip_id": clipID,
+			"fade_in_frames": TalkingHeadBrollFadeFrames, "fade_out_frames": TalkingHeadBrollFadeFrames,
+		})
+		if err != nil {
+			return failed("B-roll 视觉淡化无法合法应用", map[string]any{
+				"assignment_index": index, "reason": err.Error(),
+			})
+		}
 		inserted = append(inserted, map[string]any{
 			"timeline_clip_id": clipID, "shot_id": assignment.ShotID,
 			"timeline_start_frame": placement.Start, "timeline_end_frame": placement.End,
+			"fade_in_frames": TalkingHeadBrollFadeFrames, "fade_out_frames": TalkingHeadBrollFadeFrames,
 			"semantic_window_start_frame": coverage.Start,
 			"semantic_window_end_frame":   coverage.End,
 			"start_utterance_id":          assignment.StartUtteranceID,

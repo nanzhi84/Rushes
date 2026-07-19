@@ -352,6 +352,7 @@ func appendAudioMix(
 	}
 	trackLabels := []audioTrackLabel{}
 	audioNumber := 0
+	baseSeams := baseAudioSeams(document)
 	for _, track := range audioTracks {
 		clipLabels := []string{}
 		duckingKeyLabels := []string{}
@@ -363,6 +364,7 @@ func appendAudioMix(
 				label := fmt.Sprintf("audio%d", audioNumber)
 				filters = append(filters, audioFilter(
 					input.inputIndex, input.clip, track.GainDB, document, label,
+					baseSeams[input.clip.TimelineClipID],
 				))
 				label, keyLabel, splitFilter := splitDuckingKey(label, duckingTriggers[track.TrackID])
 				if splitFilter != "" {
@@ -394,7 +396,7 @@ func appendAudioMix(
 					"-ss", formatSeconds(sourceStart), "-t", formatSeconds(max(sourceDuration, 0.04)), "-i", source,
 				)
 				label := fmt.Sprintf("audio%d", audioNumber)
-				filters = append(filters, audioFilter(inputIndex, clip, track.GainDB, document, label))
+				filters = append(filters, audioFilter(inputIndex, clip, track.GainDB, document, label, audioSeam{}))
 				label, keyLabel, splitFilter := splitDuckingKey(label, duckingTriggers[track.TrackID])
 				if splitFilter != "" {
 					filters = append(filters, splitFilter)
@@ -544,12 +546,59 @@ func buildDuckingFilterGraph(
 	return labels, filters
 }
 
+// audioSeamDeclickSec 是 A-roll 波纹删除接缝两侧音频微淡的时长（12ms，落在 10-20ms 区间）。
+// 同素材内部切点会把两段本不相邻的波形硬拼在一起，产生阶跃不连续（爆音）；两侧各做一个
+// 这么短的淡入/淡出让波形在接缝处连续归零，消掉爆音，又短到不改变时间线时长、不留可闻空档。
+const audioSeamDeclickSec = 0.012
+
+// audioSeam 标注一个音频片段的首/尾是否落在同素材波纹删除接缝上。
+type audioSeam struct {
+	In  bool
+	Out bool
+}
+
+// sameAssetRippleSeam 判断 left 尾接 right 头是否为「同素材内部切点」：时间线首尾相接、
+// 同一 asset，但源帧不连续（left 的源尾 != right 的源头）——正是波纹删除留下的硬拼接。
+func sameAssetRippleSeam(left, right timeline.Clip) bool {
+	return left.AssetID != "" && left.AssetID == right.AssetID &&
+		left.TimelineEndFrame == right.TimelineStartFrame &&
+		left.SourceEndFrame != right.SourceStartFrame
+}
+
+// baseAudioSeams 按时间线顺序扫描主视觉轨，标出每个 clip 的首/尾是否落在同素材波纹删除
+// 接缝上，供 A-roll 原声去咔哒。返回 map 只含确有接缝的 clip。
+func baseAudioSeams(document timeline.Document) map[string]audioSeam {
+	seams := map[string]audioSeam{}
+	track := timelineTrack(document, "visual_base")
+	if track == nil {
+		return seams
+	}
+	clips := append([]timeline.Clip(nil), track.Clips...)
+	sort.SliceStable(clips, func(i, j int) bool {
+		return clips[i].TimelineStartFrame < clips[j].TimelineStartFrame
+	})
+	for index, clip := range clips {
+		seam := audioSeam{}
+		if index > 0 && sameAssetRippleSeam(clips[index-1], clip) {
+			seam.In = true
+		}
+		if index+1 < len(clips) && sameAssetRippleSeam(clip, clips[index+1]) {
+			seam.Out = true
+		}
+		if seam.In || seam.Out {
+			seams[clip.TimelineClipID] = seam
+		}
+	}
+	return seams
+}
+
 func audioFilter(
 	inputIndex int,
 	clip timeline.Clip,
 	trackGain float64,
 	document timeline.Document,
 	label string,
+	seam audioSeam,
 ) string {
 	parts := []string{
 		fmt.Sprintf("[%d:a]atrim=duration=%s", inputIndex, formatSeconds(
@@ -576,6 +625,19 @@ func audioFilter(
 		parts = append(parts, fmt.Sprintf(
 			"afade=t=out:st=%s:d=%s",
 			formatSeconds(max(0, timelineDuration-fadeDuration)), formatSeconds(fadeDuration),
+		))
+	}
+	// A-roll 波纹删除接缝去咔哒：同素材切点两侧各做一个约 12ms 的微淡，让波形在接缝处
+	// 连续归零、消除硬拼接爆音；已有显式淡化的一侧不再叠加（那侧本就从静音起落）。
+	if seam.In && clip.FadeInFrames == 0 {
+		parts = append(parts, fmt.Sprintf(
+			"afade=t=in:st=0:d=%s", formatSeconds(audioSeamDeclickSec),
+		))
+	}
+	if seam.Out && clip.FadeOutFrames == 0 {
+		parts = append(parts, fmt.Sprintf(
+			"afade=t=out:st=%s:d=%s",
+			formatSeconds(max(0, timelineDuration-audioSeamDeclickSec)), formatSeconds(audioSeamDeclickSec),
 		))
 	}
 	parts = append(parts, fmt.Sprintf("adelay=%d:all=1", int(math.Round(
