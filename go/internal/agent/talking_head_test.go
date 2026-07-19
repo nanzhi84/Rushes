@@ -48,7 +48,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 		"asset_id": "asset_broll_fingerprint", "semantic_role": "b_roll",
 		"overall": "键盘右上角指纹识别区域的产品特写",
 		"segments": []map[string]any{{
-			"source_start_frame": 0, "source_end_frame": 40,
+			"source_start_frame": 0, "source_end_frame": 60,
 			"description": "手指按压键盘右上角的指纹解锁键，产品近景",
 			"tags":        []string{"键盘", "指纹", "解锁", "产品特写"}, "quality": "usable",
 		}},
@@ -162,7 +162,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 		BrollAssignments: []rushestools.TalkingHeadBrollAssignment{{
 			ShotID: search.Shots[0].ShotID, StartWordID: "w_touchpad_short",
 		}},
-	}, "不足半秒")
+	}, "不足 1.5 秒")
 	assertTalkingHeadFailure(t, service, ctx, rushestools.TalkingHeadEditInput{
 		ARollTimelineClipID: "clip_v1_001",
 		BrollAssignments: []rushestools.TalkingHeadBrollAssignment{{
@@ -214,7 +214,8 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 	overlays := timelineTrackClips(latest, "visual_overlay")
 	if len(overlays) != 1 || overlays[0].AssetID != "asset_broll_fingerprint" ||
 		overlays[0].Role != "b_roll" || overlays[0].TimelineStartFrame != 63 ||
-		overlays[0].TimelineEndFrame != 103 ||
+		overlays[0].TimelineEndFrame != 123 ||
+		overlays[0].FadeInFrames != 7 || overlays[0].FadeOutFrames != 7 ||
 		overlays[0].Metadata["shot_id"] != search.Shots[0].ShotID ||
 		overlays[0].Metadata["start_word_id"] != "w_fingerprint" ||
 		overlays[0].Metadata["transcript_text"] != "指纹解锁按键位于键盘右上角。" ||

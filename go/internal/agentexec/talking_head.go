@@ -23,7 +23,14 @@ const (
 	maxTalkingHeadUnvoicedBridgeFrames = 12
 	MinTalkingHeadPauseCandidateFrames = 12
 	MinTalkingHeadPauseResidualFrames  = 5
-	MinTalkingHeadBrollDurationFrames  = timeline.DefaultFPS / 2
+	// MinTalkingHeadBrollDurationFrames 是放置 B-roll 的时长硬下限（1.5 秒）：更短的叠加
+	// 是闪帧式插入、不成电影语言，直接判失败。它与口播质检的过短提示阈值
+	// MinTalkingHeadBrollQualityFrames 同为 1.5 秒——放置这关先挡住，质检那关只兜底
+	// 外部/历史时间线里遗留的过短 B-roll。
+	MinTalkingHeadBrollDurationFrames = timeline.DefaultFPS * 3 / 2
+	// TalkingHeadBrollFadeFrames 是放置 B-roll 时默认的视觉溶入/溶出时长（约 0.23 秒 / 7 帧），
+	// 让叠加软切入切出而不是硬跳。放置下限已保证片段足够容纳两端淡化。
+	TalkingHeadBrollFadeFrames = timeline.DefaultFPS / 4
 )
 
 func AttachTalkingHeadUnreviewedEvidence(
@@ -1673,9 +1680,9 @@ func (exec *Executor) toolEditTalkingHead(
 		}
 	}
 	if len(shortBrollIssues) > 0 {
-		return failed("B-roll 语义锚点不足半秒，会形成闪帧式孤立片段", map[string]any{
+		return failed("B-roll 语义锚点不足 1.5 秒，会形成闪帧式孤立片段", map[string]any{
 			"short_b_roll_assignments": shortBrollIssues,
-			"recovery":                 "在同一保留台词中改用更完整且仍精确对应画面的连续 anchor_text/word_id 范围，使每段至少覆盖 15 帧；不能用无关整句硬凑时长。",
+			"recovery":                 "在同一保留台词中改用更完整且仍精确对应画面的连续 anchor_text/word_id 范围，使每段至少覆盖 45 帧（1.5 秒）；不能用无关整句硬凑时长。",
 		})
 	}
 	if len(anchorPrecisionIssues) > 0 {
@@ -1753,9 +1760,24 @@ func (exec *Executor) toolEditTalkingHead(
 				"assignment_index": index, "reason": err.Error(),
 			})
 		}
+		// 电影语言：给 B-roll 叠加默认的视觉溶入/溶出，软切入切出而不是硬跳；片段长度
+		// 已被下限保证足够容纳两端淡化，这里再按 duration/3 兜底极端情况。
+		brollFadeFrames := min(TalkingHeadBrollFadeFrames, duration/3)
+		if brollFadeFrames > 0 {
+			document, err = timeline.ApplyPatch(document, map[string]any{
+				"kind": "set_clip_fades", "timeline_clip_id": clipID,
+				"fade_in_frames": brollFadeFrames, "fade_out_frames": brollFadeFrames,
+			})
+			if err != nil {
+				return failed("B-roll 视觉淡化无法合法应用", map[string]any{
+					"assignment_index": index, "reason": err.Error(),
+				})
+			}
+		}
 		inserted = append(inserted, map[string]any{
 			"timeline_clip_id": clipID, "shot_id": assignment.ShotID,
 			"timeline_start_frame": placement.Start, "timeline_end_frame": placement.End,
+			"fade_in_frames": brollFadeFrames, "fade_out_frames": brollFadeFrames,
 			"semantic_window_start_frame": coverage.Start,
 			"semantic_window_end_frame":   coverage.End,
 			"start_utterance_id":          assignment.StartUtteranceID,
