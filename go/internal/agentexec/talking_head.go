@@ -1280,7 +1280,7 @@ func (exec *Executor) toolEditTalkingHead(
 			data = map[string]any{}
 		}
 		data["current_timeline_unchanged"] = true
-		return rushestools.ToolResult{Status: "failed", Observation: message, Data: data}, nil
+		return rushestools.ToolResult{Status: string(rushestools.StatusFailed), Observation: message, Data: data}, nil
 	}
 	if len(input.RemoveUtteranceIDs) == 0 && len(input.RemoveWordRanges) == 0 &&
 		len(input.RemovePauseIDs) == 0 && len(input.BrollAssignments) == 0 &&

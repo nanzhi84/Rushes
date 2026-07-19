@@ -42,7 +42,7 @@ func (exec *Executor) toolMemoryUpdate(
 	if !ok {
 		return memoryUpdateFailure(
 			"长期记忆只能锚定当前真实用户消息或当前决策回答；后台续跑和其他 UI 观察不得修改记忆。",
-			"memory_evidence_unavailable",
+			rushestools.ErrCodeMemoryEvidenceUnavailable,
 			"等待下一条真实用户消息，或在用户刚回答决策后的继续回合再调用 memory.update。",
 			nil,
 		), nil
@@ -50,7 +50,7 @@ func (exec *Executor) toolMemoryUpdate(
 	if len(input.Entries) == 0 && len(input.RemoveKeys) == 0 {
 		return memoryUpdateFailure(
 			"memory.update 至少需要一条 entries 或 remove_keys。",
-			"memory_update_empty",
+			rushestools.ErrCodeMemoryUpdateEmpty,
 			"只提交用户本回合明确表达的稳定偏好，或用户明确要求忘记的已有键。",
 			nil,
 		), nil
@@ -58,7 +58,7 @@ func (exec *Executor) toolMemoryUpdate(
 	if len(input.Entries) > MemoryUpdateEntryLimit {
 		return memoryUpdateFailure(
 			fmt.Sprintf("单次最多写入 %d 条长期记忆。", MemoryUpdateEntryLimit),
-			"memory_entries_limit",
+			rushestools.ErrCodeMemoryEntriesLimit,
 			"合并语义重复项，只保留用户明确表达的稳定偏好后重试。",
 			map[string]any{"entry_count": len(input.Entries), "limit": MemoryUpdateEntryLimit},
 		), nil
@@ -66,7 +66,7 @@ func (exec *Executor) toolMemoryUpdate(
 	if len(input.RemoveKeys) > storage.UserMemoryLimit {
 		return memoryUpdateFailure(
 			fmt.Sprintf("单次最多删除 %d 条长期记忆。", storage.UserMemoryLimit),
-			"memory_remove_limit",
+			rushestools.ErrCodeMemoryRemoveLimit,
 			"删除键不得超过当前记忆容量上限。",
 			map[string]any{"remove_count": len(input.RemoveKeys), "limit": storage.UserMemoryLimit},
 		), nil
@@ -79,7 +79,7 @@ func (exec *Executor) toolMemoryUpdate(
 		if !storage.ValidUserMemoryKey(entry.Key) {
 			return memoryUpdateFailure(
 				fmt.Sprintf("长期记忆键 %q 无效。", entry.Key),
-				"memory_key_invalid",
+				rushestools.ErrCodeMemoryKeyInvalid,
 				"key 必须匹配 [a-z0-9_]{2,40}，并表达稳定语义，例如 pacing 或 subtitle_style。",
 				map[string]any{"memory_key": entry.Key},
 			), nil
@@ -87,7 +87,7 @@ func (exec *Executor) toolMemoryUpdate(
 		if _, duplicate := seenEntries[entry.Key]; duplicate {
 			return memoryUpdateFailure(
 				fmt.Sprintf("entries 中重复出现长期记忆键 %q。", entry.Key),
-				"memory_key_duplicate",
+				rushestools.ErrCodeMemoryKeyDuplicate,
 				"同一请求中每个 key 只能出现一次。",
 				map[string]any{"memory_key": entry.Key},
 			), nil
@@ -96,7 +96,7 @@ func (exec *Executor) toolMemoryUpdate(
 		if !storage.ValidUserMemoryKind(entry.Kind) {
 			return memoryUpdateFailure(
 				fmt.Sprintf("长期记忆 %q 的 kind 无效。", entry.Key),
-				"memory_kind_invalid",
+				rushestools.ErrCodeMemoryKindInvalid,
 				"kind 只能是 preference、correction 或 habit。",
 				map[string]any{"memory_key": entry.Key, "kind": entry.Kind},
 			), nil
@@ -104,7 +104,7 @@ func (exec *Executor) toolMemoryUpdate(
 		if !storage.ValidUserMemoryStatement(statement) {
 			return memoryUpdateFailure(
 				fmt.Sprintf("长期记忆 %q 的 statement 为空或超过 200 字。", entry.Key),
-				"memory_statement_invalid",
+				rushestools.ErrCodeMemoryStatementInvalid,
 				"用一句不超过 200 字的简体中文陈述用户明确表达的稳定偏好，不要写模型判断。",
 				map[string]any{
 					"memory_key": entry.Key, "limit_runes": storage.UserMemoryStatementRuneLimit,
@@ -115,7 +115,7 @@ func (exec *Executor) toolMemoryUpdate(
 		if !storage.ValidUserMemoryEvidenceQuote(quote) {
 			return memoryUpdateFailure(
 				fmt.Sprintf("长期记忆 %q 缺少有效的 evidence_quote。", entry.Key),
-				"memory_evidence_quote_invalid",
+				rushestools.ErrCodeMemoryEvidenceQuoteInvalid,
 				"evidence_quote 必须从当前这条用户消息或决策回答里逐字摘录一段原文（至少两个字），用来佐证该记忆确有用户依据；改写或拼接都会被拒绝。",
 				map[string]any{"memory_key": entry.Key},
 			), nil
@@ -130,7 +130,7 @@ func (exec *Executor) toolMemoryUpdate(
 		if !storage.ValidUserMemoryKey(key) {
 			return memoryUpdateFailure(
 				fmt.Sprintf("待删除的长期记忆键 %q 无效。", key),
-				"memory_remove_key_invalid",
+				rushestools.ErrCodeMemoryRemoveKeyInvalid,
 				"remove_keys 中的键必须匹配 [a-z0-9_]{2,40}。",
 				map[string]any{"memory_key": key},
 			), nil
@@ -138,7 +138,7 @@ func (exec *Executor) toolMemoryUpdate(
 		if _, duplicate := seenRemovals[key]; duplicate {
 			return memoryUpdateFailure(
 				fmt.Sprintf("remove_keys 中重复出现长期记忆键 %q。", key),
-				"memory_remove_key_duplicate",
+				rushestools.ErrCodeMemoryRemoveKeyDuplicate,
 				"同一请求中每个删除键只能出现一次。",
 				map[string]any{"memory_key": key},
 			), nil
@@ -146,7 +146,7 @@ func (exec *Executor) toolMemoryUpdate(
 		if _, overlap := seenEntries[key]; overlap {
 			return memoryUpdateFailure(
 				fmt.Sprintf("长期记忆键 %q 不能在同一请求中同时写入和删除。", key),
-				"memory_key_conflict",
+				rushestools.ErrCodeMemoryKeyConflict,
 				"根据用户本回合的最终表达，只保留 entries 或 remove_keys 中的一种操作。",
 				map[string]any{"memory_key": key},
 			), nil
@@ -174,7 +174,7 @@ func (exec *Executor) toolMemoryUpdate(
 	if errors.Is(err, reducer.ErrUserMemoryEvidence) {
 		return memoryUpdateFailure(
 			"当前长期记忆证据未通过数据库核验，未修改任何记忆。",
-			"memory_evidence_invalid",
+			rushestools.ErrCodeMemoryEvidenceInvalid,
 			"不要重试或替换 evidence；等待下一条真实用户消息后再依据新消息调用。",
 			nil,
 		), nil
@@ -182,7 +182,7 @@ func (exec *Executor) toolMemoryUpdate(
 	if errors.Is(err, reducer.ErrUserMemoryInput) {
 		return memoryUpdateFailure(
 			"长期记忆请求未通过持久化约束，未修改任何记忆。",
-			"memory_input_invalid",
+			rushestools.ErrCodeMemoryInputInvalid,
 			"按工具 schema 修正 key、kind、statement 与重复键后重试。",
 			nil,
 		), nil
@@ -203,7 +203,7 @@ func (exec *Executor) toolMemoryUpdate(
 		})
 	}
 	return rushestools.ToolResult{
-		Status:      "succeeded",
+		Status:      string(rushestools.StatusSucceeded),
 		Observation: "已按当前真实用户证据更新并持久保存长期记忆。",
 		Data: map[string]any{
 			"written_keys": result.UserMemory.WrittenKeys,
@@ -216,17 +216,17 @@ func (exec *Executor) toolMemoryUpdate(
 
 func memoryUpdateFailure(
 	observation string,
-	errorCode string,
+	errorCode rushestools.ToolErrorCode,
 	recovery string,
 	extra map[string]any,
 ) rushestools.ToolResult {
 	data := map[string]any{
-		"error_code": errorCode, "recovery": recovery, "current_memory_unchanged": true,
+		"error_code": string(errorCode), "recovery": recovery, "current_memory_unchanged": true,
 	}
 	for key, value := range extra {
 		data[key] = value
 	}
 	return rushestools.ToolResult{
-		Status: "validation_failed", Observation: observation, Data: data,
+		Status: string(rushestools.StatusValidationFailed), Observation: observation, Data: data,
 	}
 }

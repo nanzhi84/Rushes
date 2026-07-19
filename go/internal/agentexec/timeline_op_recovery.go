@@ -13,7 +13,7 @@ func timelineOpFieldFailure(
 	failedIndex int,
 ) rushestools.ToolResult {
 	data := map[string]any{
-		"error_code":                 "timeline_op_field_error",
+		"error_code":                 string(rushestools.ErrCodeTimelineOpFieldError),
 		"op_kind":                    fieldErr.Kind,
 		"invalid_field":              fieldErr.Field,
 		"reason":                     fieldErr.Error(),
@@ -32,7 +32,7 @@ func timelineOpFieldFailure(
 		data["recovery"] = "从 op_catalog 选择受支持的 kind，再按该操作的字段约定重新调用。"
 	}
 	return rushestools.ToolResult{
-		Status:      "failed",
+		Status:      string(rushestools.StatusFailed),
 		Observation: "时间线补丁字段预校验失败：" + fieldErr.Error(),
 		Data:        data,
 	}

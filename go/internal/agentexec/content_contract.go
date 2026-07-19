@@ -305,7 +305,7 @@ func (exec *Executor) VerifyContentContract(
 		}
 		if beatAlignment["beat_grid_present"] != true {
 			item.Pass = false
-			item.ErrorCode = "missing_beat_grid"
+			item.ErrorCode = string(rushestools.ErrCodeMissingBeatGrid)
 			item.Message = "无法核对卡拍比例：当前 BGM 无节拍网格，请先 audio.analyze_beats 或用 recut_to_beats 重建"
 		}
 		report.Items = append(report.Items, item)

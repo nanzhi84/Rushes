@@ -113,7 +113,7 @@ func TimelineOpFailureAt(
 		return rushestools.ToolResult{}, false
 	}
 	data := map[string]any{
-		"error_code":                 "timeline_op_semantic_error",
+		"error_code":                 string(rushestools.ErrCodeTimelineOpSemanticError),
 		"semantic_error_kind":        semanticErr.Kind,
 		"failed_op":                  operation,
 		"reason":                     semanticErr.Error(),
@@ -143,7 +143,7 @@ func TimelineOpFailureAt(
 		data["locked_track_id"] = semanticErr.TrackID
 	}
 	return rushestools.ToolResult{
-		Status: "failed", Observation: "时间线补丁语义校验失败：" + semanticErr.Error(), Data: data,
+		Status: string(rushestools.StatusFailed), Observation: "时间线补丁语义校验失败：" + semanticErr.Error(), Data: data,
 	}, true
 }
 

@@ -218,7 +218,7 @@ func (exec *Executor) toolRecutCurrentClipsToBeats(
 		if data == nil {
 			data = map[string]any{}
 		}
-		return rushestools.ToolResult{Status: "failed", Observation: message, Data: data}, nil
+		return rushestools.ToolResult{Status: string(rushestools.StatusFailed), Observation: message, Data: data}, nil
 	}
 	current, err := timeline.Latest(ctx, exec.database, draftID)
 	if errors.Is(err, storage.ErrNotFound) {

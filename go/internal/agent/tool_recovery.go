@@ -292,7 +292,7 @@ func unknownToolRecoveryHandler(ctx context.Context, name, arguments string) (st
 	raw := marshalToolFailure(
 		"模型调用了不存在的工具："+name,
 		map[string]any{
-			"error_code": "unknown_tool",
+			"error_code": string(rushestools.ErrCodeUnknownTool),
 			"recovery":   "只使用当前系统实际注册的工具名，并根据工具 schema 重新调用",
 		},
 	)
@@ -309,9 +309,9 @@ func decorateToolFailure(
 ) string {
 	payload := map[string]any{}
 	if json.Unmarshal([]byte(raw), &payload) != nil {
-		payload = map[string]any{"status": "failed", "observation": agentexec.TruncateText(raw, 1000)}
+		payload = map[string]any{"status": string(rushestools.StatusFailed), "observation": agentexec.TruncateText(raw, 1000)}
 	}
-	payload["status"] = "failed"
+	payload["status"] = string(rushestools.StatusFailed)
 	observation, _ := payload["observation"].(string)
 	data, _ := payload["data"].(map[string]any)
 	if data == nil {
@@ -333,7 +333,7 @@ func decorateToolFailure(
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return marshalToolFailure("工具失败，且失败详情无法序列化", map[string]any{
-			"error_code": "failure_serialization_error",
+			"error_code": string(rushestools.ErrCodeFailureSerialization),
 		})
 	}
 	return string(encoded)
@@ -341,13 +341,13 @@ func decorateToolFailure(
 
 func blockedToolCallOutput(input *compose.ToolInput, decision recoveryDecision) string {
 	observation := "检测到与之前完全相同的失败工具调用，已跳过重复执行。必须修改参数、先读取最新状态，或改用其他工具。"
-	errorCode := "duplicate_failed_tool_call"
+	errorCode := rushestools.ErrCodeDuplicateFailedToolCall
 	if decision.exhausted {
 		observation = "工具自修复次数已经用尽。停止继续调用工具，立即向用户说明未完成的步骤、最后错误，并等待下一步指令。"
-		errorCode = "tool_recovery_exhausted"
+		errorCode = rushestools.ErrCodeToolRecoveryExhausted
 	}
 	return marshalToolFailure(observation, map[string]any{
-		"error_code":       errorCode,
+		"error_code":       string(errorCode),
 		"tool":             input.Name,
 		"last_failure":     agentexec.TruncateText(decision.latest.Observation, 600),
 		"harness_recovery": recoveryMetadata(decision, decision.latest.ExecutionAttempts),
@@ -378,7 +378,7 @@ func executionErrorOutput(name string, err error, attempts int, retryable bool) 
 		recovery = "已完成有限次自动重试；请根据最终错误调整方案，不要原样重复"
 	}
 	return marshalToolFailure("工具 "+name+" 执行失败："+agentexec.TruncateText(err.Error(), 800), map[string]any{
-		"error_code":         "tool_execution_error",
+		"error_code":         string(rushestools.ErrCodeToolExecutionError),
 		"retryable":          retryable,
 		"execution_attempts": attempts,
 		"recovery":           recovery,
@@ -387,7 +387,7 @@ func executionErrorOutput(name string, err error, attempts int, retryable bool) 
 
 func marshalToolFailure(observation string, data map[string]any) string {
 	encoded, _ := json.Marshal(map[string]any{
-		"status": "failed", "observation": observation, "data": data,
+		"status": string(rushestools.StatusFailed), "observation": observation, "data": data,
 	})
 	return string(encoded)
 }
@@ -399,7 +399,7 @@ func isStructuredToolFailure(raw string) bool {
 	if json.Unmarshal([]byte(raw), &payload) != nil {
 		return false
 	}
-	return payload.Status == "failed" || payload.Status == "validation_failed"
+	return payload.Status == string(rushestools.StatusFailed) || payload.Status == string(rushestools.StatusValidationFailed)
 }
 
 // retrySafeFromEffect 从工具注册表的 Effect 分级派生「瞬时失败可重试」白名单（#103 G1），

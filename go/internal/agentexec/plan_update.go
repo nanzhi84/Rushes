@@ -34,31 +34,31 @@ func (exec *Executor) ToolPlanUpdateWithBeforeApply(
 ) (rushestools.ToolResult, error) {
 	if input.Plan == nil {
 		return planUpdateFailure("plan.update 缺少 plan 对象", map[string]any{
-			"reason": "plan_required",
+			"reason": string(rushestools.ErrCodePlanRequired),
 		}), nil
 	}
 	patch, err := CanonicalContentPlan(input.Plan)
 	if err != nil {
 		return planUpdateFailure("创作计划本只能包含可编码为 JSON 的内容", map[string]any{
-			"reason": "plan_not_json",
+			"reason": string(rushestools.ErrCodePlanNotJSON),
 		}), nil
 	}
 	if input.Contract != nil {
 		if input.Contract.MustKeepUtteranceIDs != nil && len(input.Contract.MustKeepUtteranceIDs) == 0 {
 			return planUpdateFailure("must_keep_utterance_ids 不能为空", map[string]any{
-				"reason": "contract_invalid",
+				"reason": string(rushestools.ErrCodeContractInvalid),
 			}), nil
 		}
 		contractMap, contractErr := canonicalContentPlanValue(input.Contract)
 		if contractErr != nil {
-			return planUpdateFailure("验收合同无法编码为 JSON", map[string]any{"reason": "contract_not_json"}), nil
+			return planUpdateFailure("验收合同无法编码为 JSON", map[string]any{"reason": string(rushestools.ErrCodeContractNotJSON)}), nil
 		}
 		patch["contract"] = contractMap
 	}
 	if key := reservedContentPlanKey(patch); key != "" {
 		return planUpdateFailure(
 			fmt.Sprintf("创作计划本不能使用保留键 %q；该键属于 WorldState 客观状态", key),
-			map[string]any{"reason": "reserved_key", "reserved_key": key},
+			map[string]any{"reason": string(rushestools.ErrCodeReservedKey), "reserved_key": key},
 		), nil
 	}
 
@@ -80,18 +80,18 @@ func (exec *Executor) ToolPlanUpdateWithBeforeApply(
 		if key := reservedContentPlanKey(updated); key != "" {
 			return planUpdateFailure(
 				fmt.Sprintf("现有创作计划本含保留键 %q；请用 reset=true 写入不含保留键的干净计划", key),
-				map[string]any{"reason": "stored_reserved_key", "reserved_key": key},
+				map[string]any{"reason": string(rushestools.ErrCodeStoredReservedKey), "reserved_key": key},
 			), nil
 		}
 		if contract, contractErr := ContentPlanContract(updated); contractErr != nil {
-			return planUpdateFailure(contractErr.Error(), map[string]any{"reason": "contract_invalid"}), nil
+			return planUpdateFailure(contractErr.Error(), map[string]any{"reason": string(rushestools.ErrCodeContractInvalid)}), nil
 		} else if contract != nil {
 			updated["contract"] = contract
 		}
 		encoded, err := json.Marshal(updated)
 		if err != nil {
 			return planUpdateFailure("创作计划本只能包含可编码为 JSON 的内容", map[string]any{
-				"reason": "plan_not_json",
+				"reason": string(rushestools.ErrCodePlanNotJSON),
 			}), nil
 		}
 		runes := utf8.RuneCount(encoded)
@@ -99,7 +99,7 @@ func (exec *Executor) ToolPlanUpdateWithBeforeApply(
 			return planUpdateFailure(
 				"创作计划本超出 8000 字上限；请只记纲要，细节留在对应工具按需检索",
 				map[string]any{
-					"reason": "plan_too_large", "plan_runes": runes,
+					"reason": string(rushestools.ErrCodePlanTooLarge), "plan_runes": runes,
 					"limit_runes": ContentPlanRuneLimit, "current_plan_unchanged": true,
 				},
 			), nil
@@ -130,7 +130,7 @@ func (exec *Executor) ToolPlanUpdateWithBeforeApply(
 			return rushestools.ToolResult{}, fmt.Errorf("创作计划本写入状态异常: %s", result.Status)
 		}
 		return rushestools.ToolResult{
-			Status:      "succeeded",
+			Status:      string(rushestools.StatusSucceeded),
 			Observation: "已更新持久创作计划本；下一个用户回合重建 WorldState 后会从 draft.content_plan 读取最新内容",
 			Data: map[string]any{
 				"mode": mode, "plan_runes": runes,
@@ -140,7 +140,7 @@ func (exec *Executor) ToolPlanUpdateWithBeforeApply(
 	return planUpdateFailure(
 		"创作计划本连续发生并发冲突；请重新读取 WorldState 后再重试 plan.update",
 		map[string]any{
-			"reason":                 "plan_conflict",
+			"reason":                 string(rushestools.ErrCodePlanConflict),
 			"current_plan_unchanged": false,
 			"recovery":               "重新读取 WorldState 后重试 plan.update",
 		},
@@ -254,5 +254,5 @@ func planUpdateFailure(observation string, data map[string]any) rushestools.Tool
 	if reason, _ := data["reason"].(string); reason != "" {
 		data["error_code"] = reason
 	}
-	return rushestools.ToolResult{Status: "failed", Observation: observation, Data: data}
+	return rushestools.ToolResult{Status: string(rushestools.StatusFailed), Observation: observation, Data: data}
 }

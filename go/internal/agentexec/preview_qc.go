@@ -119,7 +119,7 @@ func degradedPreviewVerificationReport(result any) map[string]any {
 	issue := map[string]any{
 		"check":      "inspection",
 		"severity":   "warning",
-		"error_code": "preview_inspection_unavailable",
+		"error_code": string(rushestools.ErrCodePreviewInspectionUnavailable),
 		"message":    "自动质检暂不可用，请稍后重试。",
 	}
 	return map[string]any{
