@@ -436,3 +436,56 @@ func decodeRecoveryPayload(t *testing.T, raw string) map[string]any {
 	}
 	return payload
 }
+
+func TestToolRecoveryCumulativeRepairBudgetSurvivesAlternatingSuccess(t *testing.T) {
+	state := newToolRecoveryState()
+	ctx := withToolRecoveryState(t.Context(), state)
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			if input.Name == "asset.list_assets" {
+				return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"fresh state"}`}, nil
+			}
+			return &compose.ToolOutput{Result: marshalToolFailure("still not ready", nil)}, nil
+		},
+	)
+	failing := &compose.ToolInput{Name: "timeline.inspect", Arguments: `{}`}
+	recovering := &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`}
+
+	// 交替 fail→success：每次成功清空连击链（repairFailures 回 0），旧行为下 exhaustion 永不
+	// 触发。前 maxCumulativeRepairAttempts-1 次失败都不应穷尽，且连击成功后确实被清空。
+	for i := 1; i < maxCumulativeRepairAttempts; i++ {
+		if _, err := endpoint(ctx, failing); err != nil {
+			t.Fatal(err)
+		}
+		if state.recoveryExhausted() {
+			t.Fatalf("第 %d 次失败即穷尽，累计阈值应为 %d", i, maxCumulativeRepairAttempts)
+		}
+		if _, err := endpoint(ctx, recovering); err != nil {
+			t.Fatal(err)
+		}
+		if state.unresolved() {
+			t.Fatalf("交替成功后连击链未清空（i=%d）", i)
+		}
+	}
+
+	// 第 maxCumulativeRepairAttempts 次失败：连击仍是「首次」（上一步成功已清零），但 turn 级
+	// 累计计数到达阈值，仍触发穷尽——这正是交替模式此前无法收敛的缺口。
+	last, err := endpoint(ctx, failing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.recoveryExhausted() {
+		t.Fatalf("累计 %d 次失败应触发穷尽", maxCumulativeRepairAttempts)
+	}
+	harness := decodeRecoveryPayload(t, last.Result)["data"].(map[string]any)["harness_recovery"].(map[string]any)
+	if harness["exhausted"] != true || harness["remaining_model_repairs"] != float64(0) {
+		t.Fatalf("穷尽未反映到 harness_recovery：%#v", harness)
+	}
+
+	// 穷尽后任何后续工具调用（哪怕本会成功的只读工具）都被拦截。
+	blocked, err := endpoint(ctx, recovering)
+	if err != nil ||
+		decodeRecoveryPayload(t, blocked.Result)["data"].(map[string]any)["error_code"] != "tool_recovery_exhausted" {
+		t.Fatalf("穷尽后未拦截后续调用：blocked=%s err=%v", blocked.Result, err)
+	}
+}
