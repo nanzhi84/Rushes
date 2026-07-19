@@ -36,7 +36,7 @@ func TestClaimPriorityHeartbeatRetryAndStaleRecovery(t *testing.T) {
 				"priority": item.priority, "max_retries": 3,
 				"next_run_at": now.Format(time.RFC3339Nano),
 			},
-		}}, contracts.ActorSystem, now)
+		}}, contracts.ActorJob, now)
 	}
 	job, err := Claim(t.Context(), database, "worker_a", now)
 	if err != nil || job == nil || job.ID != "job_first" {
@@ -113,7 +113,7 @@ func TestRecoverStaleIncrementsAttemptsAndDeadLettersExhaustedJobs(t *testing.T)
 				"idempotency_key":       job.id, "attempts": job.attempts,
 				"max_retries": job.maxRetries, "next_run_at": now.Format(time.RFC3339Nano),
 			},
-		}}, contracts.ActorSystem, now)
+		}}, contracts.ActorJob, now)
 	}
 	apply(t, database, []contracts.Event{{
 		Type: "JobCancelled", DraftID: "draft_stale_budget", Payload: map[string]any{
@@ -268,7 +268,7 @@ func TestRunnerRetriesRenderThenEmitsSingleSuccess(t *testing.T) {
 			"job_id": "job_retry", "kind": "render_preview", "idempotency_key": "job_retry",
 			"max_retries": 2, "next_run_at": now.Format(time.RFC3339Nano),
 		},
-	}}, contracts.ActorSystem, now)
+	}}, contracts.ActorJob, now)
 	registry := NewRegistry()
 	calls := 0
 	if err := registry.Register("render_preview", func(
@@ -329,7 +329,7 @@ func TestRunnerFailsRenderAfterRetryBudgetWithLastError(t *testing.T) {
 			"idempotency_key": "job_render_failure", "max_retries": 2,
 			"next_run_at": now.Format(time.RFC3339Nano),
 		},
-	}}, contracts.ActorSystem, now)
+	}}, contracts.ActorJob, now)
 	registry := NewRegistry()
 	calls := 0
 	if err := registry.Register("render_final", func(
@@ -388,7 +388,7 @@ func TestRunnerRecoversHandlerPanicThroughRetryPolicy(t *testing.T) {
 			"job_id": "job_panic", "kind": "panic_once", "idempotency_key": "panic_once",
 			"max_retries": 1, "next_run_at": now.Format(time.RFC3339Nano),
 		},
-	}}, contracts.ActorSystem, now)
+	}}, contracts.ActorJob, now)
 	registry := NewRegistry()
 	calls := 0
 	if err := registry.Register("panic_once", func(
@@ -444,7 +444,7 @@ func TestProgressReporterThrottlesAndForwardsOptionalDetail(t *testing.T) {
 			"job_id": "job_progress", "kind": "understand", "idempotency_key": "progress",
 			"next_run_at": now.Format(time.RFC3339Nano),
 		},
-	}}, contracts.ActorSystem, now)
+	}}, contracts.ActorJob, now)
 	job, err := Claim(t.Context(), database, "progress-worker", now)
 	if err != nil || job == nil {
 		t.Fatalf("claim=%#v err=%v", job, err)
@@ -506,7 +506,7 @@ func TestProgressReporterKeepsSameProgressWithNewDetail(t *testing.T) {
 			"job_id": "job_progress_detail", "kind": "understand", "idempotency_key": "detail",
 			"next_run_at": now.Format(time.RFC3339Nano),
 		},
-	}}, contracts.ActorSystem, now)
+	}}, contracts.ActorJob, now)
 	job, err := Claim(t.Context(), database, "progress-worker", now)
 	if err != nil || job == nil {
 		t.Fatalf("claim=%#v err=%v", job, err)
@@ -554,7 +554,7 @@ func TestRunnerPeriodicallyRecoversJobsThatBecomeStale(t *testing.T) {
 			"job_id": "job_periodic", "kind": "noop", "idempotency_key": "periodic",
 			"max_retries": 2, "next_run_at": now.Format(time.RFC3339Nano),
 		},
-	}}, contracts.ActorSystem, now)
+	}}, contracts.ActorJob, now)
 	if job, err := Claim(t.Context(), database, "dead-worker", now); err != nil || job == nil {
 		t.Fatalf("dead claim=%#v err=%v", job, err)
 	}
@@ -595,7 +595,7 @@ func TestRunnerRecoversAfterTransientTerminalEventWriteFailure(t *testing.T) {
 			"job_id": "job_terminal", "kind": "noop", "idempotency_key": "terminal",
 			"max_retries": 1, "next_run_at": now.Format(time.RFC3339Nano),
 		},
-	}}, contracts.ActorSystem, now)
+	}}, contracts.ActorJob, now)
 	registry := NewRegistry()
 	if err := registry.Register("noop", func(
 		context.Context, Job, ProgressReporter,
@@ -1254,7 +1254,7 @@ func TestRunnerLoopRegistryAndTerminalFailureBranches(t *testing.T) {
 	apply(t, database, []contracts.Event{{Type: "JobEnqueued", DraftID: "draft_noop", Payload: map[string]any{
 		"job_id": "job_noop", "kind": "noop", "idempotency_key": "noop",
 		"next_run_at": now.Format(time.RFC3339Nano),
-	}}}, contracts.ActorSystem, now)
+	}}}, contracts.ActorJob, now)
 	if worked, err := runner.RunOnce(t.Context()); err != nil || !worked {
 		t.Fatalf("noop worked=%v err=%v", worked, err)
 	}
@@ -1306,7 +1306,7 @@ func TestRunnerFailsUnknownJobWithoutRetry(t *testing.T) {
 			"job_id": "job_unknown", "kind": "unknown", "idempotency_key": "unknown",
 			"next_run_at": now.Format(time.RFC3339Nano), "max_retries": 0,
 		},
-	}}, contracts.ActorSystem, now)
+	}}, contracts.ActorJob, now)
 	runner, err := NewRunner(RunnerConfig{Database: database, Registry: NewRegistry(), WorkerID: "unknown"})
 	if err != nil {
 		t.Fatal(err)
@@ -1857,7 +1857,7 @@ func staleRecoveryTerminalFixture(
 			"job_id": jobID, "kind": "render_preview", "idempotency_key": jobID,
 			"max_retries": 0, "next_run_at": now.Format(time.RFC3339Nano),
 		},
-	}}, contracts.ActorSystem, now)
+	}}, contracts.ActorJob, now)
 	startedAt := now.Add(-3 * time.Minute).Format(time.RFC3339Nano)
 	heartbeatAt := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
 	if _, err := database.Write().ExecContext(t.Context(), `

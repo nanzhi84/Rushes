@@ -63,7 +63,7 @@ func TestClaimMatchingSeparatesRenderAndGeneralJobs(t *testing.T) {
 				"job_id": fixture.id, "kind": fixture.kind, "idempotency_key": fixture.id,
 				"priority": fixture.priority, "next_run_at": now.Format(time.RFC3339Nano),
 			},
-		}}, contracts.ActorSystem, now)
+		}}, contracts.ActorJob, now)
 	}
 	renderKinds := contracts.JobKindsByExecutionClass(contracts.JobExecutionRender)
 	general, err := ClaimMatching(t.Context(), database, "general", now, ClaimFilter{ExcludeKinds: renderKinds})
@@ -92,7 +92,7 @@ func TestClaimMatchingReturnsTheJobClaimedByThisCall(t *testing.T) {
 				"job_id": jobID, "kind": "understand", "idempotency_key": jobID,
 				"priority": 1, "next_run_at": now.Format(time.RFC3339Nano),
 			},
-		}}, contracts.ActorSystem, now)
+		}}, contracts.ActorJob, now)
 	}
 	first, err := ClaimMatching(t.Context(), database, "same-worker", now, ClaimFilter{})
 	if err != nil || first == nil || first.ID != "job_a" {
@@ -123,7 +123,7 @@ func TestRunnerKeepsGeneralLaneMovingWhileRenderLaneIsBlocked(t *testing.T) {
 				"job_id": fixture.id, "kind": fixture.kind, "idempotency_key": fixture.id,
 				"priority": fixture.priority, "next_run_at": now.Format(time.RFC3339Nano),
 			},
-		}}, contracts.ActorSystem, now)
+		}}, contracts.ActorJob, now)
 	}
 	registry := NewRegistry()
 	renderStarted := make(chan struct{})
