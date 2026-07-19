@@ -25,48 +25,88 @@ func (TimelineOp) JSONSchema() *jsonschema.Schema {
 	}
 }
 
-func timelineOpBranchSchema(spec timeline.OpSpec) *jsonschema.Schema {
-	properties := jsonschema.NewProperties()
-	properties.Set("kind", &jsonschema.Schema{
-		Type:        "string",
-		Const:       spec.Kind,
-		Description: spec.Summary,
-	})
-	branch := &jsonschema.Schema{
-		Type:                 "object",
-		Title:                spec.Kind,
-		Description:          spec.Summary,
-		Properties:           properties,
-		Required:             []string{"kind"},
-		AdditionalProperties: jsonschema.FalseSchema,
-		Examples:             []any{timeline.CorrectOpExample(spec)},
-	}
+// —— 单一 Catalog→schema 派生（#95 T4）——
+//
+// timelineOpBranchPlan 把「遍历非注入字段、展开别名、归组 required / anyOf」这套结构逻辑
+// 收敛为一次遍历。前向 oneOf schema（*jsonschema.Schema，模型可见）与失败恢复 expected_schema
+// （map[string]any，回灌模型的纠错提示）两个渲染器都从同一个 plan 生成，不再各写一份同构遍历。
+// 两侧输出的格式差异（前向带 title/branch example/别名 example，恢复 additionalProperties:false、
+// 别名描述后缀且不带 example）由各自的渲染器保留，逐字不变。
 
+type timelineOpProperty struct {
+	name     string
+	jsonType string
+	desc     string // 基础描述；别名前缀/后缀由各渲染器套用
+	isArray  bool
+	aliasFor string // "" 表示主字段，否则为所对应的主字段名
+	example  any    // 原始 field.Example（可能为 nil）；前向渲染器使用
+}
+
+type timelineOpBranchPlan struct {
+	kind        string
+	summary     string
+	properties  []timelineOpProperty // 顺序：每个字段先主字段、再其别名
+	required    []string             // 无别名的必填字段，按字段顺序
+	anyOfGroups [][]string           // 别名组（字段顺序）后接 RequireAny 组
+}
+
+func timelineOpBranchPlanFor(spec timeline.OpSpec) timelineOpBranchPlan {
+	plan := timelineOpBranchPlan{kind: spec.Kind, summary: spec.Summary}
 	for _, field := range spec.Fields {
 		if field.Injected {
 			continue
 		}
-		properties.Set(field.Name, timelineOpFieldSchema(field, ""))
+		jsonType := timelineOpJSONType(field.Type)
+		isArray := field.Type == timeline.OpFieldStringArray
+		plan.properties = append(plan.properties, timelineOpProperty{
+			name: field.Name, jsonType: jsonType, desc: field.Desc,
+			isArray: isArray, aliasFor: "", example: field.Example,
+		})
 		for _, alias := range field.Aliases {
-			properties.Set(alias, timelineOpFieldSchema(field, field.Name))
+			plan.properties = append(plan.properties, timelineOpProperty{
+				name: alias, jsonType: jsonType, desc: field.Desc,
+				isArray: isArray, aliasFor: field.Name, example: field.Example,
+			})
 		}
 		if !field.Required {
 			continue
 		}
 		if len(field.Aliases) == 0 {
-			branch.Required = append(branch.Required, field.Name)
+			plan.required = append(plan.required, field.Name)
 			continue
 		}
-		alternatives := make([]*jsonschema.Schema, 0, len(field.Aliases)+1)
-		alternatives = append(alternatives, &jsonschema.Schema{Required: []string{field.Name}})
-		for _, alias := range field.Aliases {
-			alternatives = append(alternatives, &jsonschema.Schema{Required: []string{alias}})
-		}
-		branch.AllOf = append(branch.AllOf, &jsonschema.Schema{AnyOf: alternatives})
+		plan.anyOfGroups = append(plan.anyOfGroups, append([]string{field.Name}, field.Aliases...))
 	}
 	if len(spec.RequireAny) > 0 {
-		alternatives := make([]*jsonschema.Schema, 0, len(spec.RequireAny))
-		for _, name := range spec.RequireAny {
+		plan.anyOfGroups = append(plan.anyOfGroups, append([]string(nil), spec.RequireAny...))
+	}
+	return plan
+}
+
+// timelineOpBranchSchema 是前向 oneOf 分支渲染器：把 plan 编译成模型可见的 *jsonschema.Schema。
+func timelineOpBranchSchema(spec timeline.OpSpec) *jsonschema.Schema {
+	plan := timelineOpBranchPlanFor(spec)
+	properties := jsonschema.NewProperties()
+	properties.Set("kind", &jsonschema.Schema{
+		Type:        "string",
+		Const:       plan.kind,
+		Description: plan.summary,
+	})
+	branch := &jsonschema.Schema{
+		Type:                 "object",
+		Title:                plan.kind,
+		Description:          plan.summary,
+		Properties:           properties,
+		Required:             append([]string{"kind"}, plan.required...),
+		AdditionalProperties: jsonschema.FalseSchema,
+		Examples:             []any{timeline.CorrectOpExample(spec)},
+	}
+	for _, property := range plan.properties {
+		properties.Set(property.name, timelineOpForwardFieldSchema(property))
+	}
+	for _, group := range plan.anyOfGroups {
+		alternatives := make([]*jsonschema.Schema, 0, len(group))
+		for _, name := range group {
 			alternatives = append(alternatives, &jsonschema.Schema{Required: []string{name}})
 		}
 		branch.AllOf = append(branch.AllOf, &jsonschema.Schema{AnyOf: alternatives})
@@ -74,20 +114,68 @@ func timelineOpBranchSchema(spec timeline.OpSpec) *jsonschema.Schema {
 	return branch
 }
 
-func timelineOpFieldSchema(field timeline.OpField, aliasFor string) *jsonschema.Schema {
-	description := field.Desc
-	if aliasFor != "" {
-		description = "兼容别名，对应 " + aliasFor + "；" + description
+func timelineOpForwardFieldSchema(property timelineOpProperty) *jsonschema.Schema {
+	description := property.desc
+	if property.aliasFor != "" {
+		description = "兼容别名，对应 " + property.aliasFor + "；" + description
 	}
 	schema := &jsonschema.Schema{
-		Type:        timelineOpJSONType(field.Type),
+		Type:        property.jsonType,
 		Description: description,
 	}
-	if field.Example != nil {
-		schema.Examples = []any{cloneTimelineOpSchemaExample(field.Example)}
+	if property.example != nil {
+		schema.Examples = []any{cloneTimelineOpSchemaExample(property.example)}
 	}
-	if field.Type == timeline.OpFieldStringArray {
+	if property.isArray {
 		schema.Items = &jsonschema.Schema{Type: "string"}
+	}
+	return schema
+}
+
+// TimelineOpExpectedSchema 是失败恢复渲染器：把同一个 plan 渲染成 expected_schema map，
+// 供 apply_patches 字段/语义失败时回灌模型。与前向 schema 同源于 timelineOpBranchPlanFor，
+// 因此新增 op 字段只需改 timeline.Catalog 一处。
+func TimelineOpExpectedSchema(spec timeline.OpSpec) map[string]any {
+	plan := timelineOpBranchPlanFor(spec)
+	// 示例值沿用 Catalog 的正确示例并逐次深拷贝，保持与前向一致、且回灌 map 不暴露可变引用。
+	correctExample := timeline.CorrectOpExample(spec)
+	properties := map[string]any{
+		"kind": map[string]any{
+			"type": "string", "const": plan.kind, "description": plan.summary,
+		},
+	}
+	for _, property := range plan.properties {
+		if property.aliasFor != "" {
+			properties[property.name] = map[string]any{
+				"type":        property.jsonType,
+				"description": property.desc + "（兼容别名，对应 " + property.aliasFor + "）",
+			}
+			continue
+		}
+		field := map[string]any{"type": property.jsonType, "description": property.desc}
+		if property.isArray {
+			field["items"] = map[string]any{"type": "string"}
+		}
+		if example, exists := correctExample[property.name]; exists {
+			field["examples"] = []any{example}
+		}
+		properties[property.name] = field
+	}
+	schema := map[string]any{
+		"type": "object", "properties": properties,
+		"required":             append([]string{"kind"}, plan.required...),
+		"additionalProperties": false,
+	}
+	if len(plan.anyOfGroups) > 0 {
+		allOf := make([]map[string]any, 0, len(plan.anyOfGroups))
+		for _, group := range plan.anyOfGroups {
+			choices := make([]map[string]any, 0, len(group))
+			for _, name := range group {
+				choices = append(choices, map[string]any{"required": []string{name}})
+			}
+			allOf = append(allOf, map[string]any{"anyOf": choices})
+		}
+		schema["allOf"] = allOf
 	}
 	return schema
 }

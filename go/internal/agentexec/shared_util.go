@@ -124,7 +124,7 @@ func TimelineOpFailureAt(
 		data["failed_op_index"] = failedIndex
 	}
 	if spec, exists := timeline.LookupOpSpec(InterfaceString(operation["kind"])); exists {
-		data["expected_schema"] = TimelineOpExpectedSchema(*spec)
+		data["expected_schema"] = rushestools.TimelineOpExpectedSchema(*spec)
 		data["correct_example"] = timeline.CorrectOpExample(*spec)
 	}
 	switch semanticErr.Kind {
