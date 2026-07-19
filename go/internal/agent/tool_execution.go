@@ -19,7 +19,12 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 	if _, err := rushestools.DraftID(ctx); err != nil {
 		return nil, err
 	}
-	release, blockingDecisionID := beginTurnToolCall(ctx)
+	// 只读工具取共享锁并发执行,副作用工具独占——分类事实源是 registry.Effect（#103 G3b）。
+	readOnly := false
+	if effect, ok := service.tools.Effect(name); ok {
+		readOnly = effect == rushestools.EffectReadOnly
+	}
+	release, blockingDecisionID := beginTurnToolCall(ctx, readOnly)
 	defer release()
 	if blockingDecisionID != "" {
 		return rushestools.ToolResult{
