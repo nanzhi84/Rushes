@@ -26,6 +26,39 @@ func LatestTranscript(ctx context.Context, query Querier, assetID string) (Trans
 	))
 }
 
+// LatestTranscriptsForAssets 是 LatestTranscript 的批量版:一条查询取回每个 asset 的最新
+// 转写(按 rowid 最大,与单条版 ORDER BY rowid DESC LIMIT 1 同义)。无转写的 asset 不入
+// map。返回 asset_id→Transcript。
+func LatestTranscriptsForAssets(
+	ctx context.Context,
+	query Querier,
+	assetIDs []string,
+) (map[string]Transcript, error) {
+	result := map[string]Transcript{}
+	if len(assetIDs) == 0 {
+		return result, nil
+	}
+	placeholders, args := inClausePlaceholders(assetIDs)
+	rows, err := query.QueryContext(ctx, `
+		SELECT `+transcriptColumns+` FROM transcripts
+		WHERE rowid IN (
+			SELECT MAX(rowid) FROM transcripts
+			WHERE asset_id IN (`+placeholders+`) GROUP BY asset_id
+		)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		transcript, err := scanTranscript(rows)
+		if err != nil {
+			return nil, err
+		}
+		result[transcript.AssetID] = transcript
+	}
+	return result, rows.Err()
+}
+
 func scanTranscript(row rowScanner) (Transcript, error) {
 	var transcript Transcript
 	var rawPreserved int

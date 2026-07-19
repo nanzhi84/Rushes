@@ -49,6 +49,21 @@ func GetDraft(ctx context.Context, query Querier, draftID string) (Draft, error)
 
 type rowScanner interface{ Scan(...any) error }
 
+// inClausePlaceholders builds "?,?,?" and the matching args for a SQL IN clause,
+// letting batch lookups replace N per-row queries with one WHERE ... IN (...).
+func inClausePlaceholders(ids []string) (string, []any) {
+	placeholders := make([]byte, 0, len(ids)*2)
+	args := make([]any, len(ids))
+	for index, id := range ids {
+		if index > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, '?')
+		args[index] = id
+	}
+	return string(placeholders), args
+}
+
 func scanDraft(row rowScanner) (Draft, error) {
 	var draft Draft
 	var defaults, runningJobs, brief string

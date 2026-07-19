@@ -158,8 +158,13 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	// 只落 cancelled 终态，绝不合成 turn_failure；ctx.Err() 兜住后一种，与
 	// model_retry.go 的既有护栏写法一致。
 	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-		service.recordTurnEnded(item.DraftID, "cancelled", "user_cancelled", turnBudget)
+		service.recordTurnEnded(item.DraftID, "cancelled", "user_cancelled", turnBudget, false)
 		return err
+	}
+	// H7:终态回复质检——夹带自我怀疑/中途推翻等过程性语句时,要求模型重述一次(最多 1 次)。
+	reflectionRestated := false
+	if err == nil && content != "" {
+		content, reflectionRestated = service.qualityCheckedFinalReply(ctx, item.DraftID, messageID, content)
 	}
 	outcome := "finished"
 	var reason any
@@ -230,7 +235,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	if outcome == "finished" {
 		service.touchInjectedMemories(ctx, item.DraftID, injectedMemory.snapshot())
 	}
-	service.recordTurnEnded(item.DraftID, outcome, reason, turnBudget)
+	service.recordTurnEnded(item.DraftID, outcome, reason, turnBudget, reflectionRestated)
 	return nil
 }
 
@@ -245,10 +250,16 @@ func observationDelivery(item QueueItem) *reducer.AgentJobObservationDeliveryRow
 	return &reducer.AgentJobObservationDeliveryRow{JobID: item.ItemID, ClaimToken: claimToken}
 }
 
-func (service *Service) recordTurnEnded(draftID, outcome string, reason any, turnBudget *turnBudgetState) {
+func (service *Service) recordTurnEnded(
+	draftID, outcome string, reason any, turnBudget *turnBudgetState, reflectionRestated bool,
+) {
 	turnEnded := StreamEvent{"type": TurnStreamTurnEnded, "outcome": outcome, "reason": reason}
 	if usage := turnBudget.usageSnapshot(); usage != nil {
 		turnEnded["token_usage"] = usage
+	}
+	// H7:重述率进 H3 度量——本回合终态回复被质检重述过时打标,便于聚合。正常回合不带此字段。
+	if reflectionRestated {
+		turnEnded["reflection_restated"] = true
 	}
 	service.hub.Record(draftID, turnEnded)
 }

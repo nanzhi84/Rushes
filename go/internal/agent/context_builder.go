@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -332,6 +331,20 @@ func (builder *ContextBuilder) materialCatalogContext(
 		base        map[string]any
 	}
 	candidates := make([]candidate, 0, len(assets))
+	assetIDs := make([]string, len(assets))
+	for index, asset := range assets {
+		assetIDs[index] = asset.ID
+	}
+	// H6:一次批量取代每 asset 各一次的 BestMaterialSummary+LatestTranscript(2N→2),
+	// 逐 asset 选优规则不变,快照内容逐字节等价。
+	summaries, err := storage.BestMaterialSummariesForAssets(ctx, builder.database.Read(), assetIDs)
+	if err != nil {
+		return nil, 0, err
+	}
+	transcripts, err := storage.LatestTranscriptsForAssets(ctx, builder.database.Read(), assetIDs)
+	if err != nil {
+		return nil, 0, err
+	}
 	for linkedIndex, asset := range assets {
 		durationSec, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
 		relDir := ""
@@ -356,8 +369,7 @@ func (builder *ContextBuilder) materialCatalogContext(
 		}
 		item := cloneContextMap(base)
 		hasTranscript := false
-		raw, summaryErr := storage.BestMaterialSummary(ctx, builder.database.Read(), asset.ID)
-		if summaryErr == nil {
+		if raw, ok := summaries[asset.ID]; ok {
 			encoded, _ := json.Marshal(raw)
 			var summary understanding.Summary
 			if json.Unmarshal(encoded, &summary) == nil {
@@ -374,18 +386,12 @@ func (builder *ContextBuilder) materialCatalogContext(
 					item["analysis_depth"] = summary.AnalysisDepth
 				}
 			}
-		} else if !errors.Is(summaryErr, storage.ErrNotFound) {
-			return nil, 0, summaryErr
 		}
-		if transcript, transcriptErr := storage.LatestTranscript(
-			ctx, builder.database.Read(), asset.ID,
-		); transcriptErr == nil {
+		if transcript, ok := transcripts[asset.ID]; ok {
 			hasTranscript = true
 			item["speech_searchable"] = true
 			item["utterance_count"] = len(transcript.Utterances)
 			item["transcript_provider"] = transcript.ProviderID
-		} else if !errors.Is(transcriptErr, storage.ErrNotFound) {
-			return nil, 0, transcriptErr
 		}
 		priority := 3
 		if _, used := usedAssetIDs[asset.ID]; used {

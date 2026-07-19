@@ -38,13 +38,16 @@ type Server struct {
 	port         int
 	fsRoots      []string
 	sseMaxEvents int
-	logger       *slog.Logger
-	picker       Picker
-	pickerMu     sync.Mutex
-	agent        *agent.Service
-	ownsAgent    bool
-	rewindMu     sync.Mutex
-	rewindDrain  map[string]*agent.DraftCancellationBarrier
+	// sseDomainPollObserver 仅测试注入:每次 SSE 循环真正执行领域事件查询时回调一次,
+	// 用于验证 H9 的领域轮询频率与回合流帧解耦。生产为 nil、零开销。
+	sseDomainPollObserver func()
+	logger                *slog.Logger
+	picker                Picker
+	pickerMu              sync.Mutex
+	agent                 *agent.Service
+	ownsAgent             bool
+	rewindMu              sync.Mutex
+	rewindDrain           map[string]*agent.DraftCancellationBarrier
 }
 
 var _ ServerInterface = (*Server)(nil)

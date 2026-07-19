@@ -214,6 +214,65 @@ func BestMaterialSummary(ctx context.Context, query Querier, assetID string) (ma
 	return best, nil
 }
 
+// BestMaterialSummariesForAssets 是 BestMaterialSummary 的批量版:一条 WHERE asset_id IN
+// 查询取回所有 asset 的 ready 摘要,再按逐 asset 相同的打分/版本平票规则各选最优,返回
+// asset_id→最优摘要。无 ready 摘要的 asset 不入 map(等价于单条版的 ErrNotFound)。逐 asset
+// 选优逻辑与 BestMaterialSummary 完全一致,故快照内容逐字节等价。
+func BestMaterialSummariesForAssets(
+	ctx context.Context,
+	query Querier,
+	assetIDs []string,
+) (map[string]map[string]any, error) {
+	result := map[string]map[string]any{}
+	if len(assetIDs) == 0 {
+		return result, nil
+	}
+	placeholders, args := inClausePlaceholders(assetIDs)
+	rows, err := query.QueryContext(ctx, `
+		SELECT asset_id, summary_json, version FROM material_summaries
+		WHERE asset_id IN (`+placeholders+`) AND status='ready'
+		ORDER BY asset_id, version`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	type best struct {
+		summary map[string]any
+		score   int
+		version int
+	}
+	bestByAsset := map[string]*best{}
+	for rows.Next() {
+		var assetID, raw string
+		var version int
+		if err := rows.Scan(&assetID, &raw, &version); err != nil {
+			return nil, err
+		}
+		var summary map[string]any
+		if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+			continue
+		}
+		score := materialSummaryQualityScore(summary)
+		current := bestByAsset[assetID]
+		if current == nil {
+			current = &best{score: -1, version: -1}
+			bestByAsset[assetID] = current
+		}
+		if score > current.score || score == current.score && version > current.version {
+			current.summary, current.score, current.version = summary, score, version
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for assetID, entry := range bestByAsset {
+		if entry.summary != nil {
+			result[assetID] = entry.summary
+		}
+	}
+	return result, nil
+}
+
 func materialSummaryQualityScore(summary map[string]any) int {
 	segments, _ := summary["segments"].([]any)
 	semanticSegments, details := 0, 0
