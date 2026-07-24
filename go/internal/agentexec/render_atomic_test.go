@@ -1,7 +1,9 @@
 package agentexec
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
@@ -109,6 +111,45 @@ func TestRenderStartTargetsOneTimelineAndJobReadStaysPure(t *testing.T) {
 		result["object_hash"] != nil ||
 		result["local_path"] != nil {
 		t.Fatalf("completed=%#v", completed)
+	}
+
+	failedStartRaw, err := exec.ExecuteTool(ctx, "render.start", rushestools.RenderStartInput{
+		Kind: "final", TimelineID: document.TimelineID, Orientation: "portrait",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedJobID, _ := failedStartRaw.(rushestools.ToolResult).Data["job_id"].(string)
+	secretPath := "/Users/editor/private/source.mp4"
+	longMessage := "ffmpeg failed at " + secretPath + ": " + strings.Repeat("错误输出", 300)
+	applied, err = reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobFailed", DraftID: draftID,
+		Payload: map[string]any{
+			"job_id": failedJobID,
+			"error": map[string]any{
+				"error_code": strings.Repeat("render_", 20),
+				"message":    longMessage, "retryable": true,
+			},
+		},
+	}}, reducer.Options{Actor: contracts.ActorJob})
+	if err != nil || applied.Status != reducer.StatusApplied {
+		t.Fatalf("job failure status=%s err=%v", applied.Status, err)
+	}
+	failedReadRaw, err := exec.ExecuteTool(
+		ctx, "job.read", rushestools.JobReadInput{JobID: failedJobID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure, _ := failedReadRaw.(rushestools.ToolResult).Data["error"].(map[string]any)
+	failureMessage, _ := failure["message"].(string)
+	failureCode, _ := failure["error_code"].(string)
+	if strings.Contains(failureMessage, secretPath) ||
+		!strings.Contains(failureMessage, "<local-path>") ||
+		utf8.RuneCountInString(failureMessage) > jobFailureMessageRuneLimit ||
+		utf8.RuneCountInString(failureCode) > jobFailureCodeRuneLimit ||
+		failure["retryable"] != true {
+		t.Fatalf("unbounded job failure=%#v", failure)
 	}
 
 	const foreignDraftID = "draft_render_atomic_foreign"

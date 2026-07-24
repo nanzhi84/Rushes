@@ -260,9 +260,8 @@ func inferModelToolSurface(
 		if requestsPreviewCheck(text) && hasAllowedTool(specs, "preview.check") {
 			return rushestools.SurfacePreviewCheck
 		}
-		if containsSurfaceKeyword(text,
-			"渲染", "导出", "最终成片", "mp4", "render.start", "job.read",
-		) && hasAnyAllowedTool(specs, "timeline.check", "render.start", "job.read") {
+		if requestsRenderWorkflow(text) &&
+			hasAnyAllowedTool(specs, "timeline.check", "render.start", "job.read") {
 			return rushestools.SurfaceRender
 		}
 	}
@@ -288,6 +287,12 @@ func inferModelToolSurface(
 		explicitEdit != 0 {
 		return explicitEdit
 	}
+	// “渲染新预览并质检”必须先精确渲染当前 timeline_id。草稿中可能仍有旧
+	// preview；只有新 job.read 返回成功产物后，recentSuccessfulWorkflowSurface
+	// 才会把后续轮次推进 PreviewCheck。
+	if explicit == rushestools.SurfacePreviewCheck && requestsRenderWorkflow(text) {
+		return rushestools.SurfaceRender
+	}
 	if explicit != 0 {
 		return explicit
 	}
@@ -298,6 +303,8 @@ func inferModelToolSurface(
 		return rushestools.SurfaceControl
 	case pendingEditingSurface(text) != 0:
 		return pendingEditingSurface(text)
+	case requestsRenderWorkflow(text):
+		return rushestools.SurfaceRender
 	case requestsPreviewCheck(text):
 		return rushestools.SurfacePreviewCheck
 	case requestsTalkingHeadWorkflow(text):
@@ -309,8 +316,6 @@ func inferModelToolSurface(
 		return rushestools.SurfaceDiscovery
 	case requestsAssetSearchForTimelineEdit(text):
 		return rushestools.SurfaceDiscovery
-	case containsSurfaceKeyword(text, "渲染", "导出", "最终成片", "mp4", "render.start", "job.read"):
-		return rushestools.SurfaceRender
 	case strings.Contains(text, "时间线"):
 		return rushestools.SurfaceTimelineEdit
 	case containsSurfaceKeyword(text,
@@ -574,6 +579,8 @@ func remainingWorkflowSurface(text string) rushestools.Surface {
 	switch {
 	case pendingEditingSurface(text) != 0:
 		return pendingEditingSurface(text)
+	case requestsRenderWorkflow(text):
+		return rushestools.SurfaceRender
 	case requestsPreviewCheck(text):
 		return rushestools.SurfacePreviewCheck
 	case requestsTalkingHeadWorkflow(text):
@@ -582,8 +589,6 @@ func remainingWorkflowSurface(text string) rushestools.Surface {
 		return rushestools.SurfaceBeatEdit
 	case requestsAssetSearchForTimelineEdit(text):
 		return rushestools.SurfaceDiscovery
-	case containsSurfaceKeyword(text, "渲染", "导出", "最终成片", "mp4", "render.start", "job.read"):
-		return rushestools.SurfaceRender
 	case containsSurfaceKeyword(text,
 		"组装初版时间线", "建立时间线", "创建时间线", "初版时间线", "首剪"):
 		return rushestools.SurfaceDiscovery
@@ -631,6 +636,12 @@ func requestsPreviewCheck(text string) bool {
 	return containsSurfaceKeyword(text,
 		"质检", "黑帧", "静帧", "静音", "响度", "解码", "inspect_preview",
 		"render_preview 已完成", "preview_",
+	)
+}
+
+func requestsRenderWorkflow(text string) bool {
+	return containsSurfaceKeyword(text,
+		"渲染", "导出", "最终成片", "mp4", "render.start", "job.read",
 	)
 }
 

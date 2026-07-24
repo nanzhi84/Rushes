@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 	"time"
 
@@ -342,12 +343,38 @@ func boundedJobResult(result map[string]any) map[string]any {
 
 func boundedJobFailure(failure map[string]any) map[string]any {
 	filtered := map[string]any{}
-	for _, key := range []string{"error_code", "message", "retryable"} {
-		if value, exists := failure[key]; exists {
-			filtered[key] = value
-		}
+	if code, ok := failure["error_code"].(string); ok {
+		filtered["error_code"] = boundedJobFailureText(code, jobFailureCodeRuneLimit)
+	}
+	if message, ok := failure["message"].(string); ok {
+		filtered["message"] = boundedJobFailureText(message, jobFailureMessageRuneLimit)
+	}
+	if retryable, ok := failure["retryable"].(bool); ok {
+		filtered["retryable"] = retryable
 	}
 	return filtered
+}
+
+const (
+	jobFailureCodeRuneLimit    = 64
+	jobFailureMessageRuneLimit = 320
+)
+
+var absoluteJobPathPattern = regexp.MustCompile(
+	`(^|[\s=:('"\\[])(/(?:[^ \t\r\n,;)'"\]]+)|[A-Za-z]:\\(?:[^ \t\r\n,;)'"\]]+))`,
+)
+
+func boundedJobFailureText(value string, limit int) string {
+	value = strings.TrimSpace(value)
+	value = absoluteJobPathPattern.ReplaceAllString(value, `${1}<local-path>`)
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	if limit <= 1 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-1]) + "…"
 }
 
 func (exec *Executor) toolRenderStatus(ctx context.Context, draftID string) (rushestools.ToolResult, error) {

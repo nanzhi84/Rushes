@@ -524,6 +524,10 @@ func TestAutomaticRenderContinuationUsesPersistedPreviewWithoutToolTrace(t *test
 	seedSurfaceAsset(t, service, draftID)
 	setSurfaceTimelineState(t, service, draftID, true)
 	seedSurfacePreview(t, service, draftID)
+	if _, err := service.database.Write().ExecContext(t.Context(), `
+		UPDATE drafts SET timeline_current_version=2 WHERE draft_id=?`, draftID); err != nil {
+		t.Fatal(err)
+	}
 
 	specs, err := selectModelToolSurface(
 		rushestools.WithDraftID(t.Context(), draftID),
@@ -1062,6 +1066,35 @@ func TestSuccessfulPreviewJobAdvancesWorkflowToInspection(t *testing.T) {
 	if names := surfaceNames(specs); !containsName(names, "preview.check") ||
 		containsName(names, "render.start") {
 		t.Fatalf("preview completed surface=%v", names)
+	}
+}
+
+func TestRenderAndInspectIgnoresPreviewFromOlderTimeline(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_preview_stale_transition"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	seedSurfaceAsset(t, service, draftID)
+	setSurfaceTimelineState(t, service, draftID, true)
+	seedSurfacePreview(t, service, draftID)
+
+	specs, err := selectModelToolSurface(
+		rushestools.WithDraftID(t.Context(), draftID),
+		service.tools,
+		[]*schema.Message{
+			schema.UserMessage("当前时间线已更新，请渲染新预览并检查黑帧"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := surfaceNames(specs)
+	if !containsName(names, "render.start") || containsName(names, "preview.check") {
+		t.Fatalf("旧 preview 不得跳过当前目标渲染，surface=%v", names)
 	}
 }
 
