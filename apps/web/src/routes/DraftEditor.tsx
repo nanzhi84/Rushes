@@ -183,13 +183,18 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
       await queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) });
     } catch (error) {
       const partial = timelinePatchPartialFailure(error);
+      const message = timelinePatchErrorMessage(error);
       if (partial) {
-        session.rejectPartiallySaved(partial.latest.timeline, partial.appliedCount, error);
+        session.rejectPartiallySaved(
+          partial.latest.timeline,
+          partial.appliedCount,
+          new Error(message)
+        );
         queryClient.setQueryData(queryKeys.timeline(draftId), partial.latest);
       } else {
         session.rejectSave(error);
       }
-      setTimelineEditError(timelinePatchErrorMessage(error));
+      setTimelineEditError(partial ? (session.snapshot().error ?? message) : message);
     }
   }, [draftId, queryClient]);
 
