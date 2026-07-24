@@ -88,26 +88,12 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 		return exec.toolMemorySet(ctx, draftID, input.(rushestools.MemorySetInput))
 	case "memory.remove":
 		return exec.toolMemoryRemove(ctx, draftID, input.(rushestools.MemoryRemoveInput))
-	case "timeline.compose_initial":
-		return exec.toolComposeInitial(ctx, draftID, input.(rushestools.ComposeInitialInput))
-	case "timeline.apply_patches":
-		return exec.toolApplyPatches(ctx, draftID, input.(rushestools.TimelinePatchBatchInput))
 	case "timeline.insert", "timeline.delete", "timeline.update", "timeline.split":
 		return exec.toolAtomicTimelineEdit(ctx, draftID, name, input)
-	case "timeline.recut_to_beats":
-		return exec.toolRecutToBeats(ctx, draftID, input.(rushestools.TimelineBeatRecutInput))
-	case "timeline.edit_talking_head":
-		return exec.toolEditTalkingHead(ctx, draftID, input.(rushestools.TalkingHeadEditInput))
 	case "timeline.check":
-		return exec.toolCheckTimeline(ctx, draftID)
+		return exec.toolCheckTimeline(ctx, draftID, input.(rushestools.TimelineCheckInput))
 	case "timeline.inspect":
 		return exec.toolInspectTimeline(ctx, draftID, input.(rushestools.TimelineInspectInput))
-	case "render.preview":
-		return exec.toolEnqueueRender(ctx, draftID, "render_preview", input.(rushestools.RenderPreviewInput).Orientation, nil)
-	case "render.final_mp4":
-		return exec.toolEnqueueRender(ctx, draftID, "render_final", input.(rushestools.RenderFinalInput).Orientation, nil)
-	case "render.status":
-		return exec.toolRenderStatus(ctx, draftID)
 	case "render.start":
 		return exec.toolStartRender(ctx, draftID, input.(rushestools.RenderStartInput))
 	case "job.read":

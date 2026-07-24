@@ -165,6 +165,9 @@ func selectModelToolSurface(
 	lane := inferModelToolSurface(allowed, messages)
 	lane = surfaceWithAvailablePrerequisites(allowed, lane, latestUserSurfaceText(messages))
 	selected := filterSurface(allowed, lane)
+	if lane == rushestools.SurfaceControl {
+		selected = selectControlToolSurface(allowed, messages)
+	}
 	if lane == rushestools.SurfaceTimelineEdit &&
 		requestsTalkingHeadWorkflow(latestUserSurfaceText(messages)) {
 		// 口播删剪后仍需重新观察 source→timeline 映射和按保留台词检索 B-roll。
@@ -226,6 +229,127 @@ func filterSurface(specs []rushestools.Spec, lane rushestools.Surface) []rushest
 	return selected
 }
 
+func selectControlToolSurface(
+	specs []rushestools.Spec,
+	messages []*schema.Message,
+) []rushestools.Spec {
+	if pendingDecisionInMessages(messages) {
+		return filterSpecsByName(specs, "decision.answer")
+	}
+	if needsPlanUpdateSurface(messages) {
+		return filterSpecsByName(specs, "plan.update")
+	}
+	if confirmationRequiredSinceLatestUser(messages) {
+		return filterSpecsByName(specs, "interaction.confirm_action")
+	}
+	text := latestUserSurfaceText(messages)
+	if containsSurfaceKeyword(text, "确认卡", "破坏性", "confirm_action", "确认操作") {
+		return filterSpecsByName(specs, "interaction.confirm_action")
+	}
+	names := make([]string, 0, 2)
+	if containsSurfaceKeyword(text,
+		"忘记", "删除长期记忆", "移除记忆", "清除记忆", "memory.remove") {
+		names = append(names, "memory.remove")
+	} else if containsSurfaceKeyword(text,
+		"记住", "长期偏好", "用户画像", "memory.set") {
+		names = append(names, "memory.set")
+	}
+	if containsSurfaceKeyword(text, "更新计划", "plan.update", "plan.") {
+		names = append(names, "plan.update")
+	}
+	if containsSurfaceKeyword(text, "decision.answer", "decision.") {
+		names = append(names, "decision.answer")
+	}
+	return filterSpecsByName(specs, names...)
+}
+
+func confirmationRequiredSinceLatestUser(messages []*schema.Message) bool {
+	for index := len(messages) - 1; index >= 0; index-- {
+		message := messages[index]
+		if message == nil {
+			continue
+		}
+		if message.Role == schema.User {
+			return false
+		}
+		if message.Role == schema.Tool &&
+			toolMessageErrorCode(message.Content) == string(rushestools.ErrCodeConfirmationRequired) {
+			return true
+		}
+	}
+	return false
+}
+
+func toolMessageErrorCode(content string) string {
+	var payload map[string]any
+	if json.Unmarshal([]byte(content), &payload) != nil {
+		return ""
+	}
+	key := "error_" + "code"
+	if value, _ := payload[key].(string); value != "" {
+		return value
+	}
+	data, _ := payload["data"].(map[string]any)
+	value, _ := data[key].(string)
+	return value
+}
+
+func pendingDecisionInMessages(messages []*schema.Message) bool {
+	pending := false
+	initialized := false
+	for _, message := range messages {
+		if message == nil || message.Role != schema.System {
+			continue
+		}
+		phase, _ := message.Extra["context_phase"].(string)
+		if phase != "world_state_reference" && phase != "world_state_update" {
+			continue
+		}
+		payload, ok := worldStateMessagePayload(message.Content)
+		if !ok {
+			continue
+		}
+		sections, _ := payload["sections"].(map[string]any)
+		if phase == "world_state_reference" {
+			pending = false
+			initialized = true
+		}
+		draftValue, draftPresent := sections["draft"]
+		if !draftPresent {
+			continue
+		}
+		if draftValue == nil {
+			pending = false
+			initialized = true
+			continue
+		}
+		draft, _ := draftValue.(map[string]any)
+		value, present := draft["pending_decision_id"]
+		if !present {
+			continue
+		}
+		decisionID, _ := value.(string)
+		pending = strings.TrimSpace(decisionID) != ""
+		initialized = true
+	}
+	return initialized && pending
+}
+
+func worldStateMessagePayload(content string) (map[string]any, bool) {
+	_, raw, found := strings.Cut(content, "\n")
+	if !found {
+		return nil, false
+	}
+	if line, _, hasMore := strings.Cut(raw, "\n"); hasMore {
+		raw = line
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(strings.TrimSpace(raw)), &payload) != nil {
+		return nil, false
+	}
+	return payload, true
+}
+
 func latestUserSurfaceText(messages []*schema.Message) string {
 	for index := len(messages) - 1; index >= 0; index-- {
 		message := messages[index]
@@ -250,6 +374,9 @@ func inferModelToolSurface(
 	messages []*schema.Message,
 ) rushestools.Surface {
 	text := latestUserSurfaceText(messages)
+	if pendingDecisionInMessages(messages) {
+		return rushestools.SurfaceControl
+	}
 	if needsPlanUpdateSurface(messages) {
 		return rushestools.SurfaceControl
 	}
@@ -651,7 +778,7 @@ func requestsTimelineMutation(text string) bool {
 
 func requestsPreviewCheck(text string) bool {
 	return containsSurfaceKeyword(text,
-		"质检", "黑帧", "静帧", "静音", "响度", "解码", "inspect_preview",
+		"质检", "黑帧", "静帧", "静音", "响度", "解码",
 		"render_preview 已完成", "preview_",
 	)
 }

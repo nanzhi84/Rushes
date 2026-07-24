@@ -546,7 +546,8 @@ func TestUnderstandJobStateReconciliationAcrossConcurrentJobs(t *testing.T) {
 		t.Helper()
 		apply([]contracts.Event{{Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
 			"job_id": jobID, "kind": "understand", "requested_by_draft_id": draftID,
-			"idempotency_key": jobID, "job_payload": map[string]any{"asset_ids": []string{assetID}},
+			"asset_id": assetID, "idempotency_key": jobID,
+			"job_payload": map[string]any{"asset_id": assetID},
 		}}}, ResultRows{})
 	}
 	terminal := func(eventType, jobID string, payload map[string]any) {
@@ -591,65 +592,90 @@ func TestUnderstandJobStateReconciliationAcrossConcurrentJobs(t *testing.T) {
 	assertAsset("ready", "")
 }
 
-func TestAggregateUnderstandJobReconcilesEveryPayloadAsset(t *testing.T) {
+func TestUnderstandJobRequiresSingleOuterAsset(t *testing.T) {
 	t.Parallel()
-	const draftID = "draft-understand-aggregate-state"
 	database := openTestDB(t)
-	assetIDs := []string{"asset-aggregate-one", "asset-aggregate-two"}
-	events := []contracts.Event{{
-		Type: "DraftCreated", DraftID: draftID, Payload: map[string]any{"name": "聚合理解"},
-	}}
-	for _, assetID := range assetIDs {
-		events = append(events,
-			contracts.Event{Type: "AssetImported", Payload: map[string]any{
-				"asset_id": assetID, "job_id": "import-" + assetID,
-				"filename": assetID + ".mov", "kind": "video", "ingest_status": "ready", "usable": true,
-			}},
-			contracts.Event{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{"asset_id": assetID}},
-		)
-	}
-	result, err := Apply(t.Context(), database, events, Options{Actor: contracts.ActorUser})
-	if err != nil || result.Status != StatusApplied {
-		t.Fatalf("fixture result=%#v err=%v", result, err)
-	}
-	result, err = Apply(t.Context(), database, []contracts.Event{{
-		Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
-			"job_id": "job-understand-aggregate", "kind": "understand",
-			"requested_by_draft_id": draftID, "idempotency_key": "understand-aggregate",
-			"job_payload": map[string]any{"asset_ids": []any{assetIDs[0], 42, assetIDs[1]}},
+	result, err := Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobEnqueued", Payload: map[string]any{
+			"job_id": "job-understand-invalid", "kind": "understand",
+			"idempotency_key": "understand-invalid",
+			"job_payload":     map[string]any{"asset_ids": []string{"asset-a", "asset-b"}},
 		},
 	}}, Options{Actor: contracts.ActorAgent})
+	if err == nil || result.Status == StatusApplied ||
+		!strings.Contains(err.Error(), "缺少 asset_id") {
+		t.Fatalf("batch-shaped understand job result=%#v err=%v", result, err)
+	}
+}
+
+func TestPersistedLegacyUnderstandJobsReconcileSharedAsset(t *testing.T) {
+	t.Parallel()
+	database := openTestDB(t)
+	const (
+		draftID = "draft-legacy-understand-shared"
+		assetID = "asset-legacy-understand-shared"
+	)
+	now := time.Date(2026, 7, 24, 18, 0, 0, 0, time.UTC)
+	result, err := Apply(t.Context(), database, []contracts.Event{
+		{Type: "DraftCreated", DraftID: draftID, Payload: map[string]any{"name": "旧理解任务迁移"}},
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "import-" + assetID,
+			"filename": "shared.mov", "kind": "video",
+			"ingest_status": "ready", "understanding_status": "running", "usable": true,
+		}},
+		{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{"asset_id": assetID}},
+	}, Options{Actor: contracts.ActorAgent, CreatedAt: now})
 	if err != nil || result.Status != StatusApplied {
-		t.Fatalf("enqueue result=%#v err=%v", result, err)
+		t.Fatalf("setup result=%#v err=%v", result, err)
 	}
-	var outerAsset sql.NullString
-	if err := database.Read().QueryRowContext(t.Context(),
-		"SELECT asset_id FROM jobs WHERE job_id='job-understand-aggregate'",
-	).Scan(&outerAsset); err != nil || outerAsset.Valid {
-		t.Fatalf("aggregate outer asset=%#v err=%v", outerAsset, err)
-	}
-	for _, assetID := range assetIDs {
-		asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
-		if err != nil || asset.UnderstandingStatus != "running" {
-			t.Fatalf("asset=%s status=%s err=%v", assetID, asset.UnderstandingStatus, err)
+	for _, jobID := range []string{"job-legacy-a", "job-legacy-b"} {
+		if _, err := database.Write().ExecContext(t.Context(), `
+			INSERT INTO jobs(
+				job_id, kind, status, draft_id, requested_by_draft_id, asset_id,
+				idempotency_key, payload_json, next_run_at, created_at
+			) VALUES(?, 'understand', 'pending', ?, ?, NULL, ?,
+				'{"asset_ids":["asset-legacy-understand-shared"]}', ?, ?)`,
+			jobID, draftID, draftID, jobID,
+			now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		); err != nil {
+			t.Fatal(err)
 		}
 	}
-	result, err = Apply(t.Context(), database, []contracts.Event{{
-		Type: "JobCancelled", DraftID: draftID, Payload: map[string]any{
-			"job_id": "job-understand-aggregate", "kind": "understand",
-			"requested_by_draft_id": draftID,
-		},
-	}}, Options{Actor: contracts.ActorUser})
-	if err != nil || result.Status != StatusApplied {
-		t.Fatalf("cancel result=%#v err=%v", result, err)
-	}
-	for _, assetID := range assetIDs {
-		asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
-		if err != nil || asset.UnderstandingStatus != "none" || len(asset.Failure) != 0 {
-			t.Fatalf("asset=%s status=%s failure=%#v err=%v",
-				assetID, asset.UnderstandingStatus, asset.Failure, err)
+	applyTerminal := func(eventType, jobID string, payload map[string]any) {
+		t.Helper()
+		payload["job_id"] = jobID
+		payload["kind"] = "understand"
+		payload["requested_by_draft_id"] = draftID
+		result, err := Apply(t.Context(), database, []contracts.Event{{
+			Type: eventType, DraftID: draftID, Payload: payload,
+		}}, Options{Actor: contracts.ActorJob, CreatedAt: now})
+		if err != nil || result.Status != StatusApplied {
+			t.Fatalf("%s %s result=%#v err=%v", eventType, jobID, result, err)
 		}
 	}
+	assertAsset := func(wantStatus, wantFailure string) {
+		t.Helper()
+		asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if asset.UnderstandingStatus != wantStatus ||
+			stringFrom(asset.Failure["message"], "") != wantFailure {
+			t.Fatalf("asset status=%s failure=%#v want=%s/%q",
+				asset.UnderstandingStatus, asset.Failure, wantStatus, wantFailure)
+		}
+	}
+
+	applyTerminal("JobProgress", "job-legacy-a", map[string]any{"progress": 0.25})
+	assertAsset("running", "")
+	applyTerminal("JobFailed", "job-legacy-a", map[string]any{
+		"error": map[string]any{"message": "旧任务 A 失败"},
+	})
+	// B 仍 pending，因此 A 的失败不能提前覆盖素材的 running 状态。
+	assertAsset("running", "")
+	applyTerminal("JobCancelled", "job-legacy-b", map[string]any{})
+	// B 取消后应恢复 A 的持久化失败，而不是错误回到 none。
+	assertAsset("failed", "旧任务 A 失败")
 }
 
 func TestInlineUnderstandingFailureUsesCurrentErrorOverHistoricalJob(t *testing.T) {
@@ -663,8 +689,8 @@ func TestInlineUnderstandingFailureUsesCurrentErrorOverHistoricalJob(t *testing.
 		}},
 		{Type: "JobEnqueued", Payload: map[string]any{
 			"job_id": "job-old-understand-failure", "kind": "understand",
-			"idempotency_key": "job-old-understand-failure",
-			"job_payload":     map[string]any{"asset_ids": []string{assetID}},
+			"asset_id": assetID, "idempotency_key": "job-old-understand-failure",
+			"job_payload": map[string]any{"asset_id": assetID},
 		}},
 	}, Options{Actor: contracts.ActorAgent})
 	if err != nil || result.Status != StatusApplied {
@@ -1114,7 +1140,7 @@ func TestReducerMaterializesCompleteCoreEventLifecycle(t *testing.T) {
 	applyStrict(contracts.Event{Type: "DecisionCreated", DraftID: "draft-all", Payload: map[string]any{
 		"decision_id": "decision-all", "scope_type": "draft", "question": "继续？",
 		"options":           []any{map[string]any{"option_id": "yes", "label": "继续"}},
-		"pending_tool_call": map[string]any{"tool_name": "render.preview"}, "blocking": true,
+		"pending_tool_call": map[string]any{"tool_name": "render.start"}, "blocking": true,
 	}})
 	applyStrict(contracts.Event{Type: "DecisionAnswered", DraftID: "draft-all", Payload: map[string]any{
 		"decision_id": "decision-all", "option_id": "yes", "free_text": "", "answered_via": "button",

@@ -115,9 +115,10 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 			return
 		}
 		if result.Status != "succeeded" {
+			status, reason := timelinePatchToolFailure(result)
 			server.writeTimelinePatchFailure(
-				writer, request.Context(), draftID, http.StatusBadRequest,
-				"timeline_patch_validation_failed", index, index,
+				writer, request.Context(), draftID, status,
+				reason, index, index,
 			)
 			return
 		}
@@ -154,6 +155,16 @@ func (server *Server) writeTimelinePatchFailure(
 			"latest":        latest,
 		},
 	})
+}
+
+func timelinePatchToolFailure(result tools.ToolResult) (int, string) {
+	if result.Data != nil &&
+		result.Data["error_code"] == string(tools.ErrCodeStaleTarget) &&
+		result.Data["expected_state_version"] != nil &&
+		result.Data["actual_state_version"] != nil {
+		return http.StatusConflict, "timeline_patch_stale_target"
+	}
+	return http.StatusBadRequest, "timeline_patch_validation_failed"
 }
 
 func timelinePatchOperations(value any) ([]map[string]any, bool) {

@@ -41,7 +41,7 @@ test("异步素材理解显示真实进度，可取消 job 并停止 worker", as
 
   const cancel = page.getByRole("button", { name: "取消理解素材" });
   await expect(cancel).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText(/理解素材 \d+\/\d+：understanding-cancel-.*\.mp4/)).toBeVisible();
+  await expect(page.getByText(/理解素材：understanding-cancel-.*\.mp4 .+/)).toBeVisible();
   await cancel.click();
 
   await expect(page.getByText("已取消", { exact: true })).toBeVisible();

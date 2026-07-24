@@ -78,7 +78,7 @@ func (modelValue *understandBridgeChatModel) Generate(
 			return nil, errors.New("后台续跑没有从最新 WorldState 读到素材理解摘要")
 		}
 		if modelValue.continuationEvidence == "" {
-			return nil, errors.New("后台续跑没有收到按 job asset_ids 定向注入的持久化素材证据")
+			return nil, errors.New("后台续跑没有收到按 job asset_id 定向注入的持久化素材证据")
 		}
 		return schema.AssistantMessage(
 			"已依据真实素材理解继续处理："+firstVisionMarker+"。",

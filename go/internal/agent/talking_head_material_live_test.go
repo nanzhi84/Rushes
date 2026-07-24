@@ -202,14 +202,14 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 	}
 	probe, _ := media.ProbeFile(t.Context(), selectedPaths[0])
 	arollFrames = int(math.Round(probe.DurationSec * timeline.DefaultFPS))
-	var composed rushestools.ToolResult
-	invokeRegisteredTool(t, service, ctx, "timeline.compose_initial", rushestools.ComposeInitialInput{
-		Clips: []rushestools.ComposeClip{{
-			AssetID: assetIDs[0], SourceStartFrame: 0, SourceEndFrame: arollFrames, Role: "a_roll",
-		}},
-	}, &composed)
-	if composed.Status != "succeeded" {
-		t.Fatalf("compose=%#v", composed)
+	var insertedARoll rushestools.ToolResult
+	invokeRegisteredTool(t, service, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "track_id": "visual_base",
+		"asset_id": assetIDs[0], "role": "a_roll",
+		"source_start_frame": 0, "source_end_frame": arollFrames,
+	}, &insertedARoll)
+	if insertedARoll.Status != "succeeded" {
+		t.Fatalf("insert A-roll=%#v", insertedARoll)
 	}
 	var transcribed rushestools.SpeechTranscribeResult
 	invokeRegisteredTool(t, service, ctx, "speech.transcribe", rushestools.SpeechTranscribeInput{
@@ -274,11 +274,13 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 		t.Fatalf("真实 B-roll 语义检索率 %.2f%% 低于 95%%", report.BrollAccuracy*100)
 	}
 	fingerprintUtterance := ""
+	fingerprintText := ""
 	fingerprintStartWord := ""
 	fingerprintEndWord := ""
 	for _, utterance := range speech.Utterances {
 		if strings.Contains(utterance.Text, "指纹") {
 			fingerprintUtterance = utterance.UtteranceID
+			fingerprintText = utterance.Text
 			fingerprintStartWord, fingerprintEndWord, _ = semanticWordRange(
 				utterance.Words, "指纹", fingerprintShot.DurationFrames,
 			)
@@ -289,22 +291,11 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 		t.Fatal("没有取得指纹台词、词级语义锚点或对应 B-roll 镜头")
 	}
 	pause := speech.Pauses[0]
-	beforePauseDelete, err := timeline.Latest(t.Context(), database, "draft_talking_head_real")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pauseStart, pauseEnd, mapped := sourceRangeOnCurrentTimeline(
-		beforePauseDelete, assetIDs[0], pause.DeleteStartFrame, pause.DeleteEndFrame,
-	)
-	if !mapped || pauseEnd <= pauseStart {
-		t.Fatalf(
-			"气口安全删除区间没有当前时间线映射: source=%d-%d",
-			pause.DeleteStartFrame, pause.DeleteEndFrame,
-		)
-	}
 	var pauseDelete rushestools.ToolResult
 	invokeRegisteredTool(t, service, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
-		"kind": "delete_range", "start_frame": pauseStart, "end_frame": pauseEnd,
+		"kind": "delete_source_range", "asset_id": assetIDs[0],
+		"source_start_frame": pause.DeleteStartFrame,
+		"source_end_frame":   pause.DeleteEndFrame,
 	}, &pauseDelete)
 	if pauseDelete.Status != "succeeded" {
 		t.Fatalf("delete pause=%#v", pauseDelete)
@@ -322,15 +313,39 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 			}
 		}
 	}
-	latest, err := timeline.Latest(t.Context(), database, "draft_talking_head_real")
-	if err != nil {
-		t.Fatal(err)
-	}
-	anchorStart, anchorEnd, mapped := sourceRangeOnCurrentTimeline(
-		latest, assetIDs[0], wordSourceStart, wordSourceEnd,
+	var inspected rushestools.ToolResult
+	invokeRegisteredTool(
+		t, service, ctx, "timeline.inspect", rushestools.TimelineInspectInput{}, &inspected,
 	)
-	if !mapped || anchorEnd-anchorStart < 45 {
-		t.Fatalf("指纹台词清理后映射过短: source=%d-%d timeline=%d-%d", wordSourceStart, wordSourceEnd, anchorStart, anchorEnd)
+	if inspected.Status != "succeeded" {
+		t.Fatalf("inspect after delete=%#v", inspected)
+	}
+	currentARollClipID, found := inspectedTimelineClipForSourceRange(
+		inspected.Data, assetIDs[0], wordSourceStart, wordSourceEnd,
+	)
+	if !found {
+		t.Fatalf(
+			"删除后 inspect 未找到覆盖指纹台词 source range 的当前 A-roll clip: source=%d-%d data=%#v",
+			wordSourceStart, wordSourceEnd, inspected.Data,
+		)
+	}
+	includeFalse := false
+	var anchoredSpeech rushestools.SpeechSearchResult
+	invokeRegisteredTool(t, service, ctx, "speech.search", rushestools.SpeechSearchInput{
+		TimelineClipID: currentARollClipID,
+		Query:          fingerprintText,
+		MaxUtterances:  5,
+		IncludePauses:  &includeFalse,
+		IncludeSimilar: &includeFalse,
+	}, &anchoredSpeech)
+	anchorStart, anchorEnd, anchored := anchoredSpeechRange(
+		anchoredSpeech, wordSourceStart, wordSourceEnd,
+	)
+	if !anchored || anchorEnd-anchorStart < 45 {
+		t.Fatalf(
+			"删除后 speech.search 未返回可直接使用的当前时间线锚点: clip=%s source=%d-%d speech=%#v",
+			currentARollClipID, wordSourceStart, wordSourceEnd, anchoredSpeech,
+		)
 	}
 	brollFrames := min(fingerprintShot.DurationFrames, anchorEnd-anchorStart)
 	if brollFrames < 45 {
@@ -352,7 +367,7 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 		t.Fatalf("insert B-roll=%#v", inserted)
 	}
 	report.AtomicEditCount++
-	latest, err = timeline.Latest(t.Context(), database, "draft_talking_head_real")
+	latest, err := timeline.Latest(t.Context(), database, "draft_talking_head_real")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,9 +405,30 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 	if !report.TimelineValid || !report.FullTranscriptAbsent {
 		t.Fatalf("timeline_valid=%v full_transcript_absent=%v", report.TimelineValid, report.FullTranscriptAbsent)
 	}
+	allowedTraceTools := map[string]bool{
+		"media.detect_shots": true,
+		"speech.transcribe":  true,
+		"speech.search":      true,
+		"shot.search":        true,
+		"timeline.inspect":   true,
+		"timeline.insert":    true,
+		"timeline.delete":    true,
+		"timeline.update":    true,
+		"timeline.check":     true,
+	}
+	seenTraceTools := map[string]bool{}
 	for _, entry := range report.Trace {
-		if entry.Tool == "timeline.edit_talking_head" {
-			t.Fatalf("真实口播验收仍调用旧高层工具: %#v", report.Trace)
+		if !allowedTraceTools[entry.Tool] {
+			t.Fatalf("真实口播验收调用了非原子工作流工具 %q: %#v", entry.Tool, report.Trace)
+		}
+		seenTraceTools[entry.Tool] = true
+	}
+	for _, required := range []string{
+		"speech.search", "shot.search", "timeline.inspect", "timeline.insert",
+		"timeline.delete", "timeline.update", "timeline.check",
+	} {
+		if !seenTraceTools[required] {
+			t.Fatalf("真实口播验收缺少原子工具 %s: %#v", required, report.Trace)
 		}
 	}
 	writeTalkingHeadMaterialReport(t, report)
@@ -423,6 +459,68 @@ func semanticWordRange(
 		}
 	}
 	return "", "", false
+}
+
+func inspectedTimelineClipForSourceRange(
+	data map[string]any,
+	assetID string,
+	sourceStart int,
+	sourceEnd int,
+) (string, bool) {
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return "", false
+	}
+	var inspected struct {
+		Tracks []struct {
+			TrackID string `json:"track_id"`
+			Clips   []struct {
+				TimelineClipID   string `json:"timeline_clip_id"`
+				AssetID          string `json:"asset_id"`
+				Role             string `json:"role"`
+				SourceStartFrame int    `json:"source_start_frame"`
+				SourceEndFrame   int    `json:"source_end_frame"`
+			} `json:"clips"`
+		} `json:"tracks"`
+	}
+	if err := json.Unmarshal(encoded, &inspected); err != nil {
+		return "", false
+	}
+	for _, track := range inspected.Tracks {
+		if track.TrackID != "visual_base" {
+			continue
+		}
+		for _, clip := range track.Clips {
+			if clip.AssetID == assetID && clip.Role == "a_roll" &&
+				sourceStart >= clip.SourceStartFrame &&
+				sourceEnd <= clip.SourceEndFrame {
+				return clip.TimelineClipID, clip.TimelineClipID != ""
+			}
+		}
+	}
+	return "", false
+}
+
+func anchoredSpeechRange(
+	result rushestools.SpeechSearchResult,
+	sourceStart int,
+	sourceEnd int,
+) (int, int, bool) {
+	if result.Status != string(rushestools.StatusSucceeded) ||
+		result.TimelineClipID == "" {
+		return 0, 0, false
+	}
+	for _, utterance := range result.Utterances {
+		if sourceStart < utterance.SourceStartFrame ||
+			sourceEnd > utterance.SourceEndFrame ||
+			utterance.TimelineStartFrame == nil ||
+			utterance.TimelineEndFrame == nil ||
+			*utterance.TimelineEndFrame <= *utterance.TimelineStartFrame {
+			continue
+		}
+		return *utterance.TimelineStartFrame, *utterance.TimelineEndFrame, true
+	}
+	return 0, 0, false
 }
 
 func sourceRangeOnCurrentTimeline(

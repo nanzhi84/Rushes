@@ -280,9 +280,14 @@ func SemanticTokens(text string) map[string]struct{} {
 	return result
 }
 
-func OverlapsAny(target BeatMixSourceRange, values []BeatMixSourceRange) bool {
+type sourceRange struct {
+	startFrame int
+	endFrame   int
+}
+
+func overlapsAny(target sourceRange, values []sourceRange) bool {
 	for _, value := range values {
-		if target.StartFrame < value.EndFrame && value.StartFrame < target.EndFrame {
+		if target.startFrame < value.endFrame && value.startFrame < target.endFrame {
 			return true
 		}
 	}
@@ -291,7 +296,7 @@ func OverlapsAny(target BeatMixSourceRange, values []BeatMixSourceRange) bool {
 
 type indexedShot struct {
 	candidate rushestools.ShotCandidate
-	rangeInfo BeatMixSourceRange
+	rangeInfo sourceRange
 }
 
 func (exec *Executor) toolSearchShots(
@@ -325,7 +330,7 @@ func (exec *Executor) toolSearchShots(
 		return rushestools.ShotSearchResult{}, err
 	}
 
-	used := map[string][]BeatMixSourceRange{}
+	used := map[string][]sourceRange{}
 	if input.ExcludeUsed {
 		if document, timelineErr := timeline.Latest(ctx, exec.database, draftID); timelineErr == nil {
 			for _, track := range document.Tracks {
@@ -333,8 +338,8 @@ func (exec *Executor) toolSearchShots(
 					if clip.AssetID == "" || clip.SourceEndFrame <= clip.SourceStartFrame {
 						continue
 					}
-					used[clip.AssetID] = append(used[clip.AssetID], BeatMixSourceRange{
-						StartFrame: clip.SourceStartFrame, EndFrame: clip.SourceEndFrame,
+					used[clip.AssetID] = append(used[clip.AssetID], sourceRange{
+						startFrame: clip.SourceStartFrame, endFrame: clip.SourceEndFrame,
 					})
 				}
 			}
@@ -357,7 +362,7 @@ func (exec *Executor) toolSearchShots(
 			input.MaxDurationFrames > 0 && candidate.DurationFrames > input.MaxDurationFrames {
 			continue
 		}
-		if candidate.Quality == "unusable" || OverlapsAny(shot.rangeInfo, used[candidate.AssetID]) {
+		if candidate.Quality == "unusable" || overlapsAny(shot.rangeInfo, used[candidate.AssetID]) {
 			continue
 		}
 		semanticText := ShotSemanticText(candidate)
@@ -396,11 +401,36 @@ func (exec *Executor) toolSearchShots(
 		if matches[left].AssetID != matches[right].AssetID {
 			return matches[left].AssetID < matches[right].AssetID
 		}
-		return matches[left].SourceStartFrame < matches[right].SourceStartFrame
+		if matches[left].SourceStartFrame != matches[right].SourceStartFrame {
+			return matches[left].SourceStartFrame < matches[right].SourceStartFrame
+		}
+		if matches[left].SourceEndFrame != matches[right].SourceEndFrame {
+			return matches[left].SourceEndFrame < matches[right].SourceEndFrame
+		}
+		return matches[left].ShotID < matches[right].ShotID
 	})
 	total := len(matches)
-	if len(matches) > limit {
-		matches = matches[:limit]
+	start := 0
+	if input.AfterShotID != "" {
+		found := false
+		for index := range matches {
+			if matches[index].ShotID == input.AfterShotID {
+				start = index + 1
+				found = true
+				break
+			}
+		}
+		if !found {
+			return rushestools.ShotSearchResult{}, errors.New(
+				"after_shot_id 不属于当前查询结果；请保持查询条件不变，或从第一页重新读取",
+			)
+		}
+	}
+	end := min(start+limit, total)
+	page := append([]rushestools.ShotCandidate(nil), matches[start:end]...)
+	nextAfterShotID := ""
+	if end < total && len(page) > 0 {
+		nextAfterShotID = page[len(page)-1].ShotID
 	}
 	missingIDs := make([]string, 0, len(missing))
 	for _, candidate := range missing {
@@ -410,7 +440,8 @@ func (exec *Executor) toolSearchShots(
 		missing, input.Query, input.Tags, roleFilter, min(limit, 20),
 	)
 	result := rushestools.ShotSearchResult{
-		Query: input.Query, Shots: matches, TotalMatches: total, Truncated: total > len(matches),
+		Query: input.Query, Shots: page, TotalMatches: total, Truncated: end < total,
+		NextAfterShotID:      nextAfterShotID,
 		MissingIndexAssetIDs: missingIDs, DetectionCandidates: understandingCandidates,
 	}
 	if len(missing) > 0 {
@@ -528,7 +559,7 @@ func (exec *Executor) draftShotIndex(
 					SharpnessScore: segment.SharpnessScore,
 					BoundaryKind:   segment.BoundaryKind, BoundaryVerified: segment.BoundaryVerified,
 				},
-				rangeInfo: BeatMixSourceRange{StartFrame: start, EndFrame: end},
+				rangeInfo: sourceRange{startFrame: start, endFrame: end},
 			})
 		}
 	}

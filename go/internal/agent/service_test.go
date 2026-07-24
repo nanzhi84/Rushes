@@ -26,7 +26,6 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
-	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
 type serviceToolModel struct {
@@ -1850,9 +1849,11 @@ func TestJobObservationBridgeDeduplicatesJobAndSplitsCancellationReason(t *testi
 	for _, item := range []struct {
 		id, reason string
 	}{{"job_turn_cancel", "turn_cancelled"}, {"job_manual_cancel", "user_cancelled"}} {
+		agenttest.InsertJobFixtureAsset(t, database, "asset_"+item.id)
 		if _, err := reducer.Apply(t.Context(), database, []contracts.Event{
 			{Type: "JobEnqueued", DraftID: "draft_bridge_cancel", Payload: map[string]any{
 				"job_id": item.id, "kind": "understand",
+				"asset_id":              "asset_" + item.id,
 				"requested_by_draft_id": "draft_bridge_cancel",
 			}},
 			{Type: "JobCancelled", DraftID: "draft_bridge_cancel", Payload: map[string]any{
@@ -1994,163 +1995,6 @@ func TestUnderstandingRepeatedRunsAllocateNewSummaryVersion(t *testing.T) {
 	}
 }
 
-func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testing.T) {
-	t.Parallel()
-	database := agenttest.AgentTestDatabase(t)
-	agenttest.CreateAgentDraft(t, database, "draft_timeline_tools")
-	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
-		{Type: "AssetImported", Payload: map[string]any{
-			"asset_id": "asset_timeline", "job_id": "job_asset", "storage_mode": "reference",
-			"reference_path": "/tmp/not-read-during-compose.mp4", "kind": "video",
-			"source": "local_path", "filename": "clip.mp4", "hash": "hash", "size": 1,
-			"probe": map[string]any{"duration_sec": 3}, "ingest_status": "ready",
-		}},
-		{Type: "AssetLinked", DraftID: "draft_timeline_tools", Payload: map[string]any{"asset_id": "asset_timeline"}},
-	}, reducer.Options{Actor: contracts.ActorUser})
-	if err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("assets status=%s err=%v", result.Status, err)
-	}
-	service, err := NewService(t.Context(), database, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(service.Close)
-	ctx := rushestools.WithDraftID(t.Context(), "draft_timeline_tools")
-	if _, err := service.ExecuteTool(ctx, "timeline.compose_initial", rushestools.ComposeInitialInput{
-		Clips: []rushestools.ComposeClip{{
-			AssetID: "asset_timeline", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll",
-		}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	draft, _ := storage.GetDraft(t.Context(), database.Read(), "draft_timeline_tools")
-	if draft.TimelineCurrentVersion == nil || *draft.TimelineCurrentVersion != 1 || !draft.TimelineValidated {
-		t.Fatalf("draft after compose=%#v", draft)
-	}
-	if _, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
-		"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -2.0,
-	}}}); err != nil {
-		t.Fatal(err)
-	}
-	batchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{
-		{"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -3.0},
-		{"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 1.25},
-	}})
-	if err != nil || batchRaw.(rushestools.ToolResult).Status != "succeeded" {
-		t.Fatalf("batch=%#v err=%v", batchRaw, err)
-	}
-	failedBatchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
-		"kind": "insert_clip", "track_id": "sfx", "timeline_start_frame": 1000,
-		"asset_id": "missing", "asset_kind": "audio", "source_start_frame": 0, "source_end_frame": 30,
-	}}})
-	if err != nil || failedBatchRaw.(rushestools.ToolResult).Status != "failed" {
-		t.Fatalf("failed batch=%#v err=%v", failedBatchRaw, err)
-	}
-	invalidBatchRaw, err := service.ExecuteTool(ctx, "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{
-		{
-			"kind": "insert_clip", "track_id": "sfx", "timeline_start_frame": 20,
-			"asset_id": "sfx", "asset_kind": "audio", "source_start_frame": 0, "source_end_frame": 20,
-		},
-		{
-			"kind": "trim_clip", "timeline_clip_id": "clip_v1_001",
-			"source_start_frame": 0, "source_end_frame": 20,
-		},
-	}})
-	if err != nil || invalidBatchRaw.(rushestools.ToolResult).Status != "failed" {
-		t.Fatalf("invalid batch=%#v err=%v", invalidBatchRaw, err)
-	}
-	latestAfterInvalid, err := timeline.Latest(t.Context(), database, "draft_timeline_tools")
-	if err != nil || latestAfterInvalid.Version != 3 {
-		t.Fatalf("invalid batch must not persist: latest=%#v err=%v", latestAfterInvalid, err)
-	}
-	inspected, err := service.ExecuteTool(ctx, "timeline.inspect", rushestools.TimelineInspectInput{})
-	inspectResult := inspected.(rushestools.ToolResult)
-	tracks, tracksOK := inspectResult.Data["tracks"].([]map[string]any)
-	if err != nil || inspectResult.Observation == "" || !tracksOK || len(tracks) != 7 {
-		t.Fatalf("inspect=%#v err=%v", inspected, err)
-	}
-	firstRenderRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondRenderRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstRender := firstRenderRaw.(rushestools.ToolResult)
-	secondRender := secondRenderRaw.(rushestools.ToolResult)
-	if firstRender.Status != "queued" || secondRender.Status != "queued" ||
-		firstRender.Data["job_id"] != secondRender.Data["job_id"] {
-		t.Fatalf("render idempotency first=%#v second=%#v", firstRender, secondRender)
-	}
-	var renderJobs, minRenderRetries, maxRenderRetries int
-	if err := database.Read().QueryRowContext(t.Context(),
-		`SELECT COUNT(*),MIN(max_retries),MAX(max_retries)
-		 FROM jobs WHERE kind='render_preview' AND status='pending'`,
-	).Scan(&renderJobs, &minRenderRetries, &maxRenderRetries); err != nil ||
-		renderJobs != 1 || minRenderRetries != 2 || maxRenderRetries != 2 {
-		t.Fatalf("render jobs=%d retries=%d..%d err=%v",
-			renderJobs, minRenderRetries, maxRenderRetries, err)
-	}
-	if _, err := database.Write().ExecContext(t.Context(),
-		"UPDATE jobs SET status='failed' WHERE job_id=?", firstRender.Data["job_id"]); err != nil {
-		t.Fatal(err)
-	}
-	retriedRenderRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	retriedRender := retriedRenderRaw.(rushestools.ToolResult)
-	if retriedRender.Status != "queued" || retriedRender.Data["job_id"] == firstRender.Data["job_id"] {
-		t.Fatalf("failed render retry=%#v", retriedRender)
-	}
-	reusedRetryRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reusedRetryRaw.(rushestools.ToolResult).Data["job_id"] != retriedRender.Data["job_id"] {
-		t.Fatalf("active retry not reused=%#v", reusedRetryRaw)
-	}
-	if _, err := database.Write().ExecContext(t.Context(),
-		"UPDATE jobs SET status='cancelled' WHERE job_id=?", retriedRender.Data["job_id"]); err != nil {
-		t.Fatal(err)
-	}
-	secondRetryRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondRetry := secondRetryRaw.(rushestools.ToolResult)
-	if secondRetry.Status != "queued" || secondRetry.Data["job_id"] == retriedRender.Data["job_id"] {
-		t.Fatalf("cancelled render retry=%#v", secondRetry)
-	}
-	if _, err := database.Write().ExecContext(t.Context(),
-		"UPDATE jobs SET status='succeeded' WHERE job_id=?", secondRetry.Data["job_id"]); err != nil {
-		t.Fatal(err)
-	}
-	completedRenderRaw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	completedRender := completedRenderRaw.(rushestools.ToolResult)
-	if completedRender.Status != "succeeded" || completedRender.Data["job_id"] != secondRetry.Data["job_id"] {
-		t.Fatalf("completed render idempotency=%#v", completedRender)
-	}
-	var retryJobs, minRetryBudget, maxRetryBudget int
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*),MIN(max_retries),MAX(max_retries)
-		FROM jobs WHERE kind='render_preview'`,
-	).Scan(&retryJobs, &minRetryBudget, &maxRetryBudget); err != nil || retryJobs != 3 ||
-		minRetryBudget != 2 || maxRetryBudget != 2 {
-		t.Fatalf("render retry jobs=%d retries=%d..%d err=%v",
-			retryJobs, minRetryBudget, maxRetryBudget, err)
-	}
-	var timelineRows, latestTimelineVersion int
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*),MAX(version) FROM timeline_versions WHERE draft_id='draft_timeline_tools'`).Scan(&timelineRows, &latestTimelineVersion); err != nil || timelineRows != latestTimelineVersion {
-		t.Fatalf("timeline rows=%d latest=%d err=%v", timelineRows, latestTimelineVersion, err)
-	}
-}
-
 func TestRewoundTimelineIsSynchronouslyRevalidatedAndQueuedForRender(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
@@ -2162,15 +2006,14 @@ func TestRewoundTimelineIsSynchronouslyRevalidatedAndQueuedForRender(t *testing.
 	}
 	t.Cleanup(service.Close)
 
-	versionOne, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+	versionOne, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
 		AssetID: "fixture", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, persistErr := service.executor.PersistTimeline(
-		t.Context(), draftID, versionOne, "rewind_render_v1",
-	); persistErr != nil || result.Status != "succeeded" {
+	if result, persistErr := seedTimelineVersion(service,
+		t.Context(), draftID, versionOne, "rewind_render_v1", nil); persistErr != nil || result.Status != "succeeded" {
 		t.Fatalf("persist v1=%#v err=%v", result, persistErr)
 	}
 	agenttest.InsertAgentMessage(t, database, draftID, "user_rewind_render", "保留这个版本")
@@ -2180,15 +2023,14 @@ func TestRewoundTimelineIsSynchronouslyRevalidatedAndQueuedForRender(t *testing.
 	if err != nil || checkpoint.TimelineVersion == nil || *checkpoint.TimelineVersion != 1 {
 		t.Fatalf("checkpoint=%#v err=%v", checkpoint, err)
 	}
-	versionTwo, err := timeline.ComposeInitial(draftID, 2, []timeline.Selection{{
+	versionTwo, err := agenttest.ComposeTimeline(draftID, 2, []agenttest.TimelineSelection{{
 		AssetID: "fixture", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result, persistErr := service.executor.PersistTimeline(
-		t.Context(), draftID, versionTwo, "rewind_render_v2",
-	); persistErr != nil || result.Status != "succeeded" {
+	if result, persistErr := seedTimelineVersion(service,
+		t.Context(), draftID, versionTwo, "rewind_render_v2", nil); persistErr != nil || result.Status != "succeeded" {
 		t.Fatalf("persist v2=%#v err=%v", result, persistErr)
 	}
 	draft, err := storage.GetDraft(t.Context(), database.Read(), draftID)
@@ -2381,13 +2223,6 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 		{Question: "错误字段？", ToolName: "timeline.inspect", Arguments: map[string]any{"unknown": true}},
 		{Question: "空参数？", ToolName: "media.detect_shots", Arguments: nil},
 		{Question: "缺少素材？", ToolName: "media.detect_shots", Arguments: map[string]any{}},
-		{Question: "空画幅？", ToolName: "render.final_mp4", Arguments: map[string]any{"orientation": nil}},
-		{Question: "片段参数缺失？", ToolName: "timeline.compose_initial", Arguments: map[string]any{"clips": []any{map[string]any{}}}},
-		{Question: "空批量补丁？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{nil}}},
-		{Question: "空补丁？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{map[string]any{}}}},
-		{Question: "缺少片段？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{map[string]any{"kind": "delete_clip"}}}},
-		{Question: "未知补丁？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{map[string]any{"kind": "unknown"}}}},
-		{Question: "补丁附加字段？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}}}},
 	} {
 		raw, executeErr := service.ExecuteTool(ctx, "interaction.confirm_action", invalid)
 		if executeErr != nil {
@@ -2425,41 +2260,6 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 		"answer":            map[string]any{"option_id": "confirm"},
 	}}); err == nil {
 		t.Fatal("nil confirmation arguments must fail replay validation")
-	}
-	for _, arguments := range []map[string]any{
-		{"ops": []any{map[string]any{}}},
-		{"ops": []any{map[string]any{"kind": "delete_clip"}}},
-		{"ops": []any{map[string]any{"kind": "unknown"}}},
-		{"ops": []any{map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}}},
-	} {
-		if _, err := service.replayPendingTool(ctx, QueueItem{DraftID: "draft_full", Payload: map[string]any{
-			"pending_tool_call": map[string]any{"tool_name": "timeline.apply_patches", "arguments": arguments},
-			"answer":            map[string]any{"option_id": "confirm"},
-		}}); err == nil {
-			t.Fatalf("invalid timeline patch must fail replay validation: %#v", arguments)
-		}
-	}
-	beforeNullReplay, err := timeline.Latest(t.Context(), database, "draft_full")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, arguments := range map[string]map[string]any{
-		"render.final_mp4":       {"orientation": nil},
-		"timeline.apply_patches": {"ops": []any{nil}},
-	} {
-		if _, err := service.replayPendingTool(ctx, QueueItem{DraftID: "draft_full", Payload: map[string]any{
-			"pending_tool_call": map[string]any{"tool_name": name, "arguments": arguments},
-			"answer":            map[string]any{"option_id": "confirm"},
-		}}); err == nil {
-			t.Fatalf("explicit null must fail replay validation: %s %#v", name, arguments)
-		}
-	}
-	afterNullReplay, err := timeline.Latest(t.Context(), database, "draft_full")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if afterNullReplay.Version != beforeNullReplay.Version {
-		t.Fatalf("explicit null replay modified timeline: before=%d after=%d", beforeNullReplay.Version, afterNullReplay.Version)
 	}
 	if observed, err := service.replayPendingTool(ctx, QueueItem{DraftID: "draft_full"}); err != nil || observed == "" {
 		t.Fatalf("observed=%q err=%v", observed, err)
@@ -2505,9 +2305,6 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	if _, err := service.ExecuteTool(ctx, "unknown", struct{}{}); err == nil {
 		t.Fatal("unknown tool should fail")
 	}
-	if _, err := service.ExecuteTool(t.Context(), "render.status", rushestools.RenderStatusInput{}); err == nil {
-		t.Fatal("tool without draft should fail")
-	}
 }
 
 func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T) {
@@ -2542,13 +2339,13 @@ func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T)
 		t.Fatalf("invalid confirmation decision count=%d err=%v", decisionCount, err)
 	}
 
-	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
 		AssetID: "asset_confirmation", AssetKind: "video", SourceEndFrame: 30,
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.executor.PersistTimeline(t.Context(), draftID, document, "confirmation_precondition_fixture"); err != nil {
+	if _, err := seedTimelineVersion(service, t.Context(), draftID, document, "confirmation_precondition_fixture", nil); err != nil {
 		t.Fatal(err)
 	}
 	confirmRaw, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
@@ -2600,16 +2397,15 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	if _, err := service.fallbackTurn(ctx, "draft_empty", "msg", "ASK_USER"); err != nil {
 		t.Fatal(err)
 	}
-	document, err := timeline.ComposeInitial("draft_empty", 1, []timeline.Selection{{
+	document, err := agenttest.ComposeTimeline("draft_empty", 1, []agenttest.TimelineSelection{{
 		AssetID: "fixture", AssetKind: "video",
 		SourceStartFrame: 0, SourceEndFrame: 30, Role: "b_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.executor.PersistTimeline(
-		t.Context(), "draft_empty", document, "fallback_export_fixture",
-	); err != nil {
+	if _, err := seedTimelineVersion(service,
+		t.Context(), "draft_empty", document, "fallback_export_fixture", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := service.fallbackTurn(ctx, "draft_empty", "msg", "导出"); err != nil {
@@ -2635,19 +2431,6 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	}
 	for _, value := range []any{"yes", agentexec.StringPointerValue("pointer"), (*string)(nil), 1} {
 		_ = agentexec.InterfaceString(value)
-	}
-	replayed, err := service.tools.DecodeInput("timeline.apply_patches", map[string]any{
-		"ops": []any{map[string]any{"kind": "delete_clip", "clip_id": "clip_replay"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	patchInput, ok := replayed.(rushestools.TimelinePatchBatchInput)
-	if !ok || len(patchInput.Ops) != 1 || reflect.TypeOf(patchInput.Ops[0]) != reflect.TypeFor[rushestools.TimelineOp]() {
-		t.Fatalf("replayed timeline patch type=%T ops=%#v", replayed, patchInput.Ops)
-	}
-	if patchInput.Ops[0]["kind"] != "delete_clip" || patchInput.Ops[0]["clip_id"] != "clip_replay" {
-		t.Fatalf("replayed timeline op=%#v", patchInput.Ops)
 	}
 	replayedPlan, err := service.tools.DecodeInput("plan.update", map[string]any{
 		"plan": map[string]any{"style": "cinematic"}, "reset": true,
@@ -2684,24 +2467,14 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 		"media.detect_shots":          rushestools.DetectShotsInput{},
 		"audio.analyze_beats":         rushestools.AudioBeatAnalysisInput{},
 		"audio.analyze_speech_pauses": rushestools.SpeechPauseAnalysisInput{},
-		"timeline.apply_patches":      rushestools.TimelinePatchBatchInput{},
-		"timeline.recut_to_beats":     rushestools.TimelineBeatRecutInput{},
 		"timeline.check":              rushestools.TimelineCheckInput{},
 		"timeline.inspect":            rushestools.TimelineInspectInput{},
-		"render.preview":              rushestools.RenderPreviewInput{},
-		"render.final_mp4":            rushestools.RenderFinalInput{},
 		"decision.answer":             rushestools.DecisionAnswerInput{DecisionID: "missing"},
 	} {
 		output, err := service.ExecuteTool(ctx, name, input)
 		if name == "timeline.inspect" {
 			result := output.(rushestools.ToolResult)
 			if err != nil || result.Status != "succeeded" || result.Data["timeline_exists"] != false {
-				t.Fatalf("%s output=%#v err=%v", name, output, err)
-			}
-			continue
-		}
-		if name == "timeline.recut_to_beats" {
-			if err != nil || output.(rushestools.ToolResult).Status != "failed" {
 				t.Fatalf("%s output=%#v err=%v", name, output, err)
 			}
 			continue
@@ -2715,7 +2488,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	invalid.Tracks[0].Clips = []timeline.Clip{{
 		TimelineClipID: "bad", TrackID: "visual_base", AssetID: "a", TimelineEndFrame: 1, SourceEndFrame: 1,
 	}}
-	result, err := service.executor.PersistTimeline(ctx, "draft_failures", invalid, "invalid")
+	result, err := seedTimelineVersion(service, ctx, "draft_failures", invalid, "invalid", nil)
 	if err != nil || result.Status != "validation_failed" {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
@@ -2774,9 +2547,9 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 		TimelineClipID: "objective_clip", TrackID: "visual_base", AssetID: "a", AssetKind: "video",
 		Role: "video", TimelineEndFrame: 1, SourceEndFrame: 1, PlaybackRate: 1,
 	}}
-	timelineResult, err := service.executor.PersistTimeline(
-		t.Context(), "draft_assets_filter", validObjectiveTimeline, "objective_valid",
-	)
+	timelineResult, err := seedTimelineVersion(service,
+		t.Context(), "draft_assets_filter", validObjectiveTimeline, "objective_valid", nil)
+
 	if err != nil || timelineResult.Status != "succeeded" {
 		t.Fatalf("valid objective timeline=%#v err=%v", timelineResult, err)
 	}
@@ -2788,15 +2561,79 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	invalidObjectiveTimeline.TimelineID = "draft_assets_filter:v2"
 	invalidObjectiveTimeline.Version = 2
 	invalidObjectiveTimeline.FPS = 0
-	timelineResult, err = service.executor.PersistTimeline(
-		t.Context(), "draft_assets_filter", invalidObjectiveTimeline, "objective_invalid",
-	)
+	timelineResult, err = seedTimelineVersion(service,
+		t.Context(), "draft_assets_filter", invalidObjectiveTimeline, "objective_invalid", nil)
+
 	if err != nil || timelineResult.Status != "validation_failed" {
 		t.Fatalf("invalid objective timeline=%#v err=%v", timelineResult, err)
 	}
 	objectiveContext, err = service.contextManager.builder.Build(t.Context(), "draft_assets_filter")
 	if err != nil || !strings.Contains(objectiveContext, `"validated":false`) {
 		t.Fatalf("unvalidated objective context=%q err=%v", objectiveContext, err)
+	}
+}
+
+func TestSpeechPauseAnalysisSupportsVideoAudioAndTimelineMapping(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg 未安装")
+	}
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_speech_pauses")
+	source := filepath.Join(database.Paths.Temporary, "talking-head.mp4")
+	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y",
+		"-f", "lavfi", "-i", "color=c=black:s=160x90:r=30:d=3",
+		"-f", "lavfi", "-i", `aevalsrc=if(between(t\,1\,2)\,0\,0.7*sin(2*PI*440*t)):s=44100:d=3`,
+		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", source,
+	); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "talk_video", "job_id": "job_talk_video", "storage_mode": "reference",
+			"reference_path": source, "kind": "video", "source": "local_path", "filename": "talking-head.mp4",
+			"hash": "talk_video_hash", "size": info.Size(), "ingest_status": "ready", "usable": true,
+			"probe": map[string]any{"duration_sec": 3, "has_audio": true, "fps": 30},
+		}},
+		{Type: "AssetLinked", DraftID: "draft_speech_pauses", Payload: map[string]any{"asset_id": "talk_video"}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("asset status=%s err=%v", result.Status, err)
+	}
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(t.Context(), "draft_speech_pauses")
+	document, err := agenttest.ComposeTimeline("draft_speech_pauses", 1, []agenttest.TimelineSelection{{
+		AssetID: "talk_video", AssetKind: "video", SourceEndFrame: 90, Role: "a_roll",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted, persistErr := seedTimelineVersion(service,
+		t.Context(), "draft_speech_pauses", document, "speech_pause_fixture", nil); persistErr != nil || persisted.Status != "succeeded" {
+		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
+	}
+	output, err := service.ExecuteTool(ctx, "audio.analyze_speech_pauses", rushestools.SpeechPauseAnalysisInput{
+		TimelineClipID: "clip_v1_001", ThresholdDB: -35, MinPauseFrames: 6, KeepEdgeFrames: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	analysis := output.(rushestools.SpeechPauseAnalysisResult)
+	if analysis.AssetID != "talk_video" || analysis.TimelineFPS != 30 || len(analysis.Pauses) != 1 {
+		t.Fatalf("analysis=%#v", analysis)
+	}
+	pause := analysis.Pauses[0]
+	if pause.TimelineStartFrame == nil || pause.TimelineEndFrame == nil ||
+		*pause.TimelineStartFrame < 25 || *pause.TimelineEndFrame > 65 ||
+		*pause.TimelineEndFrame <= *pause.TimelineStartFrame {
+		t.Fatalf("pause=%#v", pause)
 	}
 }
 
@@ -2874,645 +2711,6 @@ func TestAudioBeatAnalysisToolReturnsIntegerFrameGrid(t *testing.T) {
 		!strings.Contains(beats.PhaseNote, "不能自动等同于高潮或好剪辑") ||
 		beats.WaveformUsageNote != agentexec.AudioWaveformUsageNote {
 		t.Fatalf("beats=%#v", beats)
-	}
-}
-
-func TestSpeechPauseAnalysisSupportsVideoAudioAndTimelineMapping(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg 未安装")
-	}
-	database := agenttest.AgentTestDatabase(t)
-	agenttest.CreateAgentDraft(t, database, "draft_speech_pauses")
-	source := filepath.Join(database.Paths.Temporary, "talking-head.mp4")
-	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y",
-		"-f", "lavfi", "-i", "color=c=black:s=160x90:r=30:d=3",
-		"-f", "lavfi", "-i", `aevalsrc=if(between(t\,1\,2)\,0\,0.7*sin(2*PI*440*t)):s=44100:d=3`,
-		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", source,
-	); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
-		{Type: "AssetImported", Payload: map[string]any{
-			"asset_id": "talk_video", "job_id": "job_talk_video", "storage_mode": "reference",
-			"reference_path": source, "kind": "video", "source": "local_path", "filename": "talking-head.mp4",
-			"hash": "talk_video_hash", "size": info.Size(), "ingest_status": "ready", "usable": true,
-			"probe": map[string]any{"duration_sec": 3, "has_audio": true, "fps": 30},
-		}},
-		{Type: "AssetLinked", DraftID: "draft_speech_pauses", Payload: map[string]any{"asset_id": "talk_video"}},
-	}, reducer.Options{Actor: contracts.ActorUser})
-	if err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("asset status=%s err=%v", result.Status, err)
-	}
-	service, err := NewService(t.Context(), database, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(service.Close)
-	ctx := rushestools.WithDraftID(t.Context(), "draft_speech_pauses")
-	if _, err := service.ExecuteTool(ctx, "timeline.compose_initial", rushestools.ComposeInitialInput{
-		Clips: []rushestools.ComposeClip{{
-			AssetID: "talk_video", SourceStartFrame: 0, SourceEndFrame: 90, Role: "a_roll",
-		}},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	output, err := service.ExecuteTool(ctx, "audio.analyze_speech_pauses", rushestools.SpeechPauseAnalysisInput{
-		TimelineClipID: "clip_v1_001", ThresholdDB: -35, MinPauseFrames: 6, KeepEdgeFrames: 2,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	analysis := output.(rushestools.SpeechPauseAnalysisResult)
-	if analysis.AssetID != "talk_video" || analysis.TimelineFPS != 30 || len(analysis.Pauses) != 1 {
-		t.Fatalf("analysis=%#v", analysis)
-	}
-	pause := analysis.Pauses[0]
-	if pause.TimelineStartFrame == nil || pause.TimelineEndFrame == nil ||
-		*pause.TimelineStartFrame < 25 || *pause.TimelineEndFrame > 65 ||
-		*pause.TimelineEndFrame <= *pause.TimelineStartFrame {
-		t.Fatalf("pause=%#v", pause)
-	}
-}
-
-func TestBeatRecutToolAcceptsModelChosenSFXFrameAndKeepsSeparateTrack(t *testing.T) {
-	fakeBin := t.TempDir()
-	fakeAubio := filepath.Join(fakeBin, "aubiotrack")
-	if err := os.WriteFile(fakeAubio, []byte("#!/bin/sh\nprintf '1.000000\\n1.333333\\n1.666667\\n2.000000\\n2.333333\\n2.666667\\n3.000000\\n3.333333\\n3.666667\\n4.000000\\n4.333333\\n4.666667\\n'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	database := agenttest.AgentTestDatabase(t)
-	agenttest.CreateAgentDraft(t, database, "draft_beat_recut")
-	source := filepath.Join(database.Paths.Temporary, "fake-audio.wav")
-	if err := os.WriteFile(source, []byte("fake audio source"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
-		{Type: "AssetImported", Payload: map[string]any{
-			"asset_id": "bgm_audio", "job_id": "job_bgm", "storage_mode": "reference",
-			"reference_path": source, "kind": "audio", "source": "local_path", "filename": "bgm.wav",
-			"hash": "bgm_hash", "size": 17, "ingest_status": "ready", "usable": true,
-			"probe": map[string]any{"duration_sec": 4.0, "has_audio": true},
-		}},
-		{Type: "AssetLinked", DraftID: "draft_beat_recut", Payload: map[string]any{"asset_id": "bgm_audio", "linked_at": now}},
-		{Type: "AssetImported", Payload: map[string]any{
-			"asset_id": "sfx_audio", "job_id": "job_sfx", "storage_mode": "reference",
-			"reference_path": source, "kind": "audio", "source": "local_path", "filename": "fire.wav",
-			"hash": "sfx_hash", "size": 17, "ingest_status": "ready", "usable": true,
-			"probe": map[string]any{"duration_sec": 1.0, "has_audio": true},
-		}},
-		{Type: "AssetLinked", DraftID: "draft_beat_recut", Payload: map[string]any{"asset_id": "sfx_audio", "linked_at": now}},
-	}, reducer.Options{Actor: contracts.ActorUser})
-	if err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("assets status=%s err=%v", result.Status, err)
-	}
-
-	document, err := timeline.ComposeInitial("draft_beat_recut", 1, []timeline.Selection{
-		{AssetID: "video_1", AssetKind: "video", SourceEndFrame: 50},
-		{AssetID: "video_2", AssetKind: "video", SourceEndFrame: 50},
-		{AssetID: "video_3", AssetKind: "video", SourceEndFrame: 50},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	document.Tracks[4].Clips = []timeline.Clip{{
-		TimelineClipID: "bgm", TrackID: "bgm", AssetID: "bgm_audio", AssetKind: "audio", Role: "bgm",
-		TimelineStartFrame: 0, TimelineEndFrame: 120, SourceEndFrame: 120, PlaybackRate: 1,
-	}}
-	document.Tracks[6].Clips = []timeline.Clip{{
-		TimelineClipID: "old_sfx", TrackID: "sfx", AssetID: "sfx_audio", AssetKind: "audio", Role: "sfx",
-		TimelineStartFrame: 120, TimelineEndFrame: 150, SourceEndFrame: 30, PlaybackRate: 1,
-	}}
-	service, err := NewService(t.Context(), database, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(service.Close)
-	if persisted, err := service.executor.PersistTimeline(t.Context(), "draft_beat_recut", document, "fixture"); err != nil || persisted.Status != "succeeded" {
-		t.Fatalf("persisted=%#v err=%v", persisted, err)
-	}
-	ctx := rushestools.WithDraftID(t.Context(), "draft_beat_recut")
-	expectFailed := func(name string, input rushestools.TimelineBeatRecutInput) {
-		t.Helper()
-		output, callErr := service.ExecuteTool(ctx, "timeline.recut_to_beats", input)
-		if callErr != nil || output.(rushestools.ToolResult).Status != "failed" {
-			t.Fatalf("%s output=%#v err=%v", name, output, callErr)
-		}
-	}
-	expectFailed("missing bgm", rushestools.TimelineBeatRecutInput{
-		BGMTimelineClipID: "missing", CutFrames: []int{30, 70, 110},
-	})
-	expectFailed("wrong cut count", rushestools.TimelineBeatRecutInput{
-		BGMTimelineClipID: "bgm", CutFrames: []int{30},
-	})
-	expectFailed("non increasing cuts", rushestools.TimelineBeatRecutInput{
-		BGMTimelineClipID: "bgm", CutFrames: []int{30, 30, 110},
-	})
-	expectFailed("non beat cut", rushestools.TimelineBeatRecutInput{
-		BGMTimelineClipID: "bgm", CutFrames: []int{31, 70, 110},
-	})
-	expectFailed("clip too short", rushestools.TimelineBeatRecutInput{
-		BGMTimelineClipID: "bgm", CutFrames: []int{70, 110, 150},
-	})
-	expectFailed("missing sfx start", rushestools.TimelineBeatRecutInput{
-		BGMTimelineClipID: "bgm", CutFrames: []int{30, 70, 110},
-		SFX: &rushestools.BeatRecutSFXInput{AssetID: "sfx_audio", DurationFrames: 10},
-	})
-	nonBeatStart, validStart := 40, 70
-	expectFailed("sfx outside timeline", rushestools.TimelineBeatRecutInput{
-		BGMTimelineClipID: "bgm", CutFrames: []int{30, 70, 110},
-		SFX: &rushestools.BeatRecutSFXInput{AssetID: "sfx_audio", StartFrame: &validStart, DurationFrames: 50},
-	})
-	expectFailed("missing sfx asset", rushestools.TimelineBeatRecutInput{
-		BGMTimelineClipID: "bgm", CutFrames: []int{30, 70, 110},
-		SFX: &rushestools.BeatRecutSFXInput{AssetID: "missing", StartFrame: &validStart, DurationFrames: 10},
-	})
-	loudGain := 13.0
-	expectFailed("invalid sfx gain", rushestools.TimelineBeatRecutInput{
-		BGMTimelineClipID: "bgm", CutFrames: []int{30, 70, 110},
-		SFX: &rushestools.BeatRecutSFXInput{AssetID: "sfx_audio", StartFrame: &validStart, DurationFrames: 10, GainDB: &loudGain},
-	})
-	output, err := service.ExecuteTool(ctx, "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{
-		BGMTimelineClipID: "bgm",
-		CutFrames:         []int{30, 70, 110},
-		SFX: &rushestools.BeatRecutSFXInput{
-			AssetID: "sfx_audio", StartFrame: &nonBeatStart, DurationFrames: 10,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	toolResult := output.(rushestools.ToolResult)
-	if toolResult.Status != "succeeded" || toolResult.Data["duration_frames"] != 110 {
-		t.Fatalf("result=%#v", toolResult)
-	}
-	latest, err := timeline.Latest(t.Context(), database, "draft_beat_recut")
-	if err != nil || latest.Version != 2 || latest.DurationFrames != 110 || !timeline.Validate(latest).Valid {
-		t.Fatalf("latest=%#v err=%v", latest, err)
-	}
-	if got := []int{
-		latest.Tracks[0].Clips[0].TimelineEndFrame,
-		latest.Tracks[0].Clips[1].TimelineEndFrame,
-		latest.Tracks[0].Clips[2].TimelineEndFrame,
-	}; !reflect.DeepEqual(got, []int{30, 70, 110}) {
-		t.Fatalf("cuts=%v", got)
-	}
-	if bgm := latest.Tracks[4].Clips[0]; bgm.TimelineStartFrame != 0 || bgm.TimelineEndFrame != 110 {
-		t.Fatalf("bgm=%#v", bgm)
-	}
-	if len(latest.Tracks[6].Clips) != 1 || latest.Tracks[6].Clips[0].TimelineStartFrame != 40 ||
-		latest.Tracks[6].Clips[0].TimelineEndFrame != 50 || latest.Tracks[6].Clips[0].GainDB != -12 {
-		t.Fatalf("sfx=%#v", latest.Tracks[6].Clips)
-	}
-	if warnings := agentexec.AudioLayoutData(latest)["warnings"].([]string); len(warnings) != 0 {
-		t.Fatalf("warnings=%v", warnings)
-	}
-}
-
-func TestBeatRecutToolRebuildsFullLengthMixFromSourceAssets(t *testing.T) {
-	fakeBin := t.TempDir()
-	fakeAubio := filepath.Join(fakeBin, "aubiotrack")
-	if err := os.WriteFile(fakeAubio, []byte("#!/bin/sh\nprintf '1.000000\\n1.333333\\n1.666667\\n2.000000\\n2.333333\\n2.666667\\n3.000000\\n3.333333\\n3.666667\\n4.000000\\n'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	fakeOnset := filepath.Join(fakeBin, "aubioonset")
-	if err := os.WriteFile(fakeOnset, []byte("#!/bin/sh\nprintf '1.000000\\n2.333333\\n3.666667\\n'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	database := agenttest.AgentTestDatabase(t)
-	agenttest.CreateAgentDraft(t, database, "draft_full_beat_mix")
-	source := filepath.Join(database.Paths.Temporary, "beat-mix-source.wav")
-	if err := os.WriteFile(source, []byte("fake source"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	events := []contracts.Event{
-		{Type: "AssetImported", Payload: map[string]any{
-			"asset_id": "mix_bgm", "job_id": "job_mix_bgm", "storage_mode": "reference",
-			"reference_path": source, "kind": "audio", "source": "local_path", "filename": "background-music.wav",
-			"hash": "mix_bgm_hash", "size": 11, "ingest_status": "ready", "usable": true,
-			"probe": map[string]any{"duration_sec": 4.0, "has_audio": true},
-		}},
-		{Type: "AssetLinked", DraftID: "draft_full_beat_mix", Payload: map[string]any{"asset_id": "mix_bgm", "linked_at": now}},
-		{Type: "AssetImported", Payload: map[string]any{
-			"asset_id": "mix_sfx", "job_id": "job_mix_sfx", "storage_mode": "reference",
-			"reference_path": source, "kind": "audio", "source": "local_path", "filename": "fire-sfx.wav",
-			"hash": "mix_sfx_hash", "size": 11, "ingest_status": "ready", "usable": true,
-			"probe": map[string]any{"duration_sec": 1.0, "has_audio": true},
-		}},
-		{Type: "AssetLinked", DraftID: "draft_full_beat_mix", Payload: map[string]any{"asset_id": "mix_sfx", "linked_at": now}},
-	}
-	for index := 1; index <= 4; index++ {
-		assetID := fmt.Sprintf("mix_video_%d", index)
-		events = append(events,
-			contracts.Event{Type: "AssetImported", Payload: map[string]any{
-				"asset_id": assetID, "job_id": "job_" + assetID, "storage_mode": "reference",
-				"reference_path": source, "kind": "video", "source": "local_path",
-				"filename": assetID + ".mov", "hash": assetID + "_hash", "size": 11,
-				"ingest_status": "ready", "usable": true,
-				"probe": map[string]any{"duration_sec": 10.0, "has_audio": true},
-			}},
-			contracts.Event{Type: "AssetLinked", DraftID: "draft_full_beat_mix", Payload: map[string]any{
-				"asset_id": assetID, "linked_at": now,
-			}},
-		)
-	}
-	for _, fixture := range []struct {
-		id          string
-		kind        string
-		filename    string
-		durationSec float64
-	}{
-		{id: "mix_short", kind: "video", filename: "short.mov", durationSec: 0.5},
-		{id: "mix_zero_video", kind: "video", filename: "zero.mov", durationSec: 0},
-	} {
-		events = append(events,
-			contracts.Event{Type: "AssetImported", Payload: map[string]any{
-				"asset_id": fixture.id, "job_id": "job_" + fixture.id, "storage_mode": "reference",
-				"reference_path": source, "kind": fixture.kind, "source": "local_path",
-				"filename": fixture.filename, "hash": fixture.id + "_hash", "size": 11,
-				"ingest_status": "ready", "usable": true,
-				"probe": map[string]any{"duration_sec": fixture.durationSec, "has_audio": fixture.kind == "audio"},
-			}},
-			contracts.Event{Type: "AssetLinked", DraftID: "draft_full_beat_mix", Payload: map[string]any{
-				"asset_id": fixture.id, "linked_at": now,
-			}},
-		)
-	}
-	result, err := reducer.Apply(t.Context(), database, events, reducer.Options{Actor: contracts.ActorUser})
-	if err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("assets status=%s err=%v", result.Status, err)
-	}
-	understandingResult, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
-		Actor: contracts.ActorAgent,
-		ResultRows: reducer.ResultRows{MaterialSummaries: []reducer.MaterialSummaryRow{{
-			ID: "summary_mix_video_1", AssetID: "mix_video_1", Status: "ready",
-			Summary: map[string]any{
-				"asset_id": "mix_video_1", "version": 2,
-				"segments": []map[string]any{{
-					"source_start_frame": 120, "source_end_frame": 220,
-					"quality": "usable", "description": "角色抬手并转身，适合作为动作切点。",
-				}},
-			},
-		}}},
-	})
-	if err != nil || understandingResult.Status != reducer.StatusApplied {
-		t.Fatalf("understanding status=%s err=%v", understandingResult.Status, err)
-	}
-
-	// 真实故障的起点：草稿已有素材但还没有时间线。高层卡点工具必须直接
-	// 原子建片，不能被迫先走 compose_initial 再手工补 BGM/SFX。
-	service, err := NewService(t.Context(), database, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(service.Close)
-
-	ctx := rushestools.WithDraftID(t.Context(), "draft_full_beat_mix")
-	nonBeatSFXStart := 40
-	output, err := service.ExecuteTool(ctx, "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", CoverEntireBGM: true, UseAllVideoAssets: true,
-		VideoAssetIDs: []string{"mix_video_1", "mix_video_2", "mix_video_3", "mix_video_4"},
-		SFX: &rushestools.BeatRecutSFXInput{
-			AssetID: "mix_sfx", StartFrame: &nonBeatSFXStart, DurationFrames: 10,
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	toolResult := output.(rushestools.ToolResult)
-	if toolResult.Status != "succeeded" || toolResult.Data["duration_frames"] != 120 ||
-		toolResult.Data["sfx_start_frame"] != 40 ||
-		toolResult.Data["used_all_video_assets"] != true {
-		t.Fatalf("result=%#v", toolResult)
-	}
-	expectBeatMixFailed := func(name string, input rushestools.TimelineBeatRecutInput, want string) {
-		t.Helper()
-		failedOutput, callErr := service.ExecuteTool(ctx, "timeline.recut_to_beats", input)
-		if callErr != nil {
-			t.Fatalf("%s err=%v", name, callErr)
-		}
-		failedResult := failedOutput.(rushestools.ToolResult)
-		if failedResult.Status != "failed" || !strings.Contains(failedResult.Observation, want) {
-			t.Fatalf("%s result=%#v", name, failedResult)
-		}
-	}
-	expectBeatMixFailed("unknown bgm", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "missing", TargetDurationFrames: 120,
-	}, "bgm_asset_id")
-	expectBeatMixFailed("negative target", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: -1,
-	}, "必须为正数")
-	expectBeatMixFailed("target beyond bgm", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 121,
-	}, "超过 BGM")
-	expectBeatMixFailed("infer unique bgm", rushestools.TimelineBeatRecutInput{
-		CoverEntireBGM: true, VideoAssetIDs: []string{"missing"},
-	}, "video_asset_ids")
-	bgmClipID, _ := toolResult.Data["bgm_timeline_clip_id"].(string)
-	expectBeatMixFailed("resolve bgm from current clip", rushestools.TimelineBeatRecutInput{
-		BGMTimelineClipID: bgmClipID, TargetDurationFrames: 120,
-		VideoAssetIDs: []string{"missing"},
-	}, "video_asset_ids")
-	expectBeatMixFailed("reject non video", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
-		VideoAssetIDs: []string{"mix_sfx"},
-	}, "video_asset_ids")
-	expectBeatMixFailed("zero duration video", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
-		VideoAssetIDs: []string{"mix_zero_video"},
-	}, "没有可用于")
-	expectBeatMixFailed("video too short", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
-		VideoAssetIDs: []string{"mix_short"},
-	}, "没有足够长")
-	expectBeatMixFailed("missing sfx", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
-		VideoAssetIDs: []string{"mix_video_1"},
-		SFX:           &rushestools.BeatRecutSFXInput{AssetID: "missing", DurationFrames: 10},
-	}, "SFX 素材")
-	expectBeatMixFailed("sfx duration", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
-		VideoAssetIDs: []string{"mix_video_1"},
-		SFX:           &rushestools.BeatRecutSFXInput{AssetID: "mix_sfx", DurationFrames: 0},
-	}, "duration_frames")
-	expectBeatMixFailed("sfx source too short", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
-		VideoAssetIDs: []string{"mix_video_1"},
-		SFX:           &rushestools.BeatRecutSFXInput{AssetID: "mix_sfx", DurationFrames: 31},
-	}, "超过素材时长")
-	expectBeatMixFailed("missing sfx start", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 20,
-		VideoAssetIDs: []string{"mix_video_1"},
-		SFX:           &rushestools.BeatRecutSFXInput{AssetID: "mix_sfx", DurationFrames: 10},
-	}, "start_frame 必须显式提供")
-	validStart, loudGain := 70, 13.0
-	expectBeatMixFailed("invalid sfx gain", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 120,
-		VideoAssetIDs: []string{"mix_video_1"},
-		SFX: &rushestools.BeatRecutSFXInput{
-			AssetID: "mix_sfx", StartFrame: &validStart, DurationFrames: 10, GainDB: &loudGain,
-		},
-	}, "gain_db")
-	expectBeatMixFailed("deduplicate video ids", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 20,
-		VideoAssetIDs: []string{"mix_video_1", "mix_video_1"},
-		SFX:           &rushestools.BeatRecutSFXInput{AssetID: "missing", DurationFrames: 10},
-	}, "SFX 素材")
-	expectBeatMixFailed("use all requires one cut per video", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 120, UseAllVideoAssets: true,
-		VideoAssetIDs: []string{"mix_video_1", "mix_video_2", "mix_video_3"},
-		CutFrames:     []int{30, 120},
-	}, "cut_frames 数量")
-
-	additional, err := reducer.Apply(t.Context(), database, []contracts.Event{
-		{Type: "AssetImported", Payload: map[string]any{
-			"asset_id": "mix_zero_bgm", "job_id": "job_mix_zero_bgm", "storage_mode": "reference",
-			"reference_path": source, "kind": "audio", "source": "local_path", "filename": "second-music.wav",
-			"hash": "mix_zero_bgm_hash", "size": 11, "ingest_status": "ready", "usable": true,
-			"probe": map[string]any{"duration_sec": 0.0, "has_audio": true},
-		}},
-		{Type: "AssetLinked", DraftID: "draft_full_beat_mix", Payload: map[string]any{
-			"asset_id": "mix_zero_bgm", "linked_at": now,
-		}},
-	}, reducer.Options{Actor: contracts.ActorUser})
-	if err != nil || additional.Status != reducer.StatusApplied {
-		t.Fatalf("additional assets status=%s err=%v", additional.Status, err)
-	}
-	expectBeatMixFailed("ambiguous inferred bgm", rushestools.TimelineBeatRecutInput{
-		CoverEntireBGM: true,
-	}, "无法唯一确定 BGM")
-	expectBeatMixFailed("bgm without duration", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_zero_bgm", TargetDurationFrames: 20,
-	}, "缺少可用时长")
-
-	latest, err := timeline.Latest(t.Context(), database, "draft_full_beat_mix")
-	if err != nil || latest.DurationFrames != 120 || !timeline.Validate(latest).Valid {
-		t.Fatalf("latest=%#v err=%v", latest, err)
-	}
-	if got := []int{
-		latest.Tracks[0].Clips[0].TimelineEndFrame,
-		latest.Tracks[0].Clips[1].TimelineEndFrame,
-		latest.Tracks[0].Clips[2].TimelineEndFrame,
-		latest.Tracks[0].Clips[3].TimelineEndFrame,
-	}; !reflect.DeepEqual(got, []int{30, 70, 110, 120}) {
-		t.Fatalf("cuts=%v", got)
-	}
-	if len(latest.Tracks[2].Clips) != 0 {
-		t.Fatalf("beat mix should keep source audio out of the default mix: %#v", latest.Tracks[2].Clips)
-	}
-	if latest.Tracks[0].Clips[0].SourceStartFrame != 120 ||
-		toolResult.Data["understanding_source_ranges_used"] != 1 {
-		t.Fatalf("understanding-aware source selection latest=%#v result=%#v", latest.Tracks[0].Clips[0], toolResult)
-	}
-	if len(latest.Tracks[4].Clips) != 1 || latest.Tracks[4].Clips[0].TimelineEndFrame != 120 {
-		t.Fatalf("bgm=%#v", latest.Tracks[4].Clips)
-	} else if effects := latest.Tracks[4].Clips[0].Effects; len(effects) != 1 || effects[0]["kind"] != "beat_grid" {
-		t.Fatalf("bgm beat metadata=%#v", effects)
-	}
-	if len(latest.Tracks[6].Clips) != 1 || latest.Tracks[6].Clips[0].TimelineStartFrame != 40 ||
-		latest.Tracks[6].Clips[0].TimelineEndFrame != 50 || latest.Tracks[6].Clips[0].GainDB != -12 {
-		t.Fatalf("sfx=%#v", latest.Tracks[6].Clips)
-	}
-
-	// 回归真实故障：模型同时传 bgm_asset_id、目标时长和显式 cut_frames 时，
-	// 必须走完整源素材重建，不能误入只会裁短当前 clip 的旧路径。
-	explicitOutput, explicitErr := service.ExecuteTool(ctx, "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 120, CoverEntireBGM: true,
-		UseAllVideoAssets: true,
-		VideoAssetIDs:     []string{"mix_video_1", "mix_video_2", "mix_video_3"},
-		CutFrames:         []int{30, 70, 120},
-	})
-	if explicitErr != nil {
-		t.Fatal(explicitErr)
-	}
-	explicitResult := explicitOutput.(rushestools.ToolResult)
-	if explicitResult.Status != "succeeded" || !reflect.DeepEqual(explicitResult.Data["cut_frames"], []int{30, 70, 120}) {
-		t.Fatalf("explicit cut rebuild=%#v", explicitResult)
-	}
-	explicitLatest, latestErr := timeline.Latest(t.Context(), database, "draft_full_beat_mix")
-	if latestErr != nil || len(explicitLatest.Tracks[0].Clips) != 3 ||
-		explicitLatest.Tracks[0].Clips[2].TimelineEndFrame != 120 {
-		t.Fatalf("explicit latest=%#v err=%v", explicitLatest, latestErr)
-	}
-
-	// 切点可以多于素材数；每个素材至少出现一次，额外片段必须从同一
-	// 素材的其他不重叠源区间取得。
-	multiOutput, multiErr := service.ExecuteTool(ctx, "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 120, UseAllVideoAssets: true,
-		VideoAssetIDs: []string{"mix_video_1", "mix_video_2", "mix_video_3", "mix_video_4"},
-		CutFrames:     []int{30, 50, 70, 90, 120},
-	})
-	if multiErr != nil {
-		t.Fatal(multiErr)
-	}
-	multiResult := multiOutput.(rushestools.ToolResult)
-	if multiResult.Status != "succeeded" || multiResult.Data["used_all_video_assets"] != true {
-		t.Fatalf("multi-source recut=%#v", multiResult)
-	}
-	multiLatest, multiLatestErr := timeline.Latest(t.Context(), database, "draft_full_beat_mix")
-	if multiLatestErr != nil || len(multiLatest.Tracks[0].Clips) != 5 {
-		t.Fatalf("multi latest=%#v err=%v", multiLatest, multiLatestErr)
-	}
-	usedByAsset := map[string][]agentexec.BeatMixSourceRange{}
-	for _, clip := range multiLatest.Tracks[0].Clips {
-		candidate := agentexec.BeatMixSourceRange{StartFrame: clip.SourceStartFrame, EndFrame: clip.SourceEndFrame}
-		if agentexec.OverlapsAny(candidate, usedByAsset[clip.AssetID]) {
-			t.Fatalf("同一素材源区间重叠: asset=%s ranges=%#v candidate=%#v", clip.AssetID, usedByAsset[clip.AssetID], candidate)
-		}
-		usedByAsset[clip.AssetID] = append(usedByAsset[clip.AssetID], candidate)
-	}
-	if len(usedByAsset) != 4 {
-		t.Fatalf("use_all 未覆盖全部素材: %#v", usedByAsset)
-	}
-
-	searchOutput, searchErr := service.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
-		Query: "角色转身 动作切点", AssetIDs: []string{"mix_video_1"}, MinDurationFrames: 30,
-	})
-	if searchErr != nil {
-		t.Fatal(searchErr)
-	}
-	searchResult := searchOutput.(rushestools.ShotSearchResult)
-	if len(searchResult.Shots) != 1 || searchResult.Shots[0].SourceStartFrame != 120 {
-		t.Fatalf("shot search=%#v", searchResult)
-	}
-	shotOutput, shotErr := service.ExecuteTool(ctx, "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "mix_bgm", TargetDurationFrames: 30,
-		VideoAssetIDs: []string{"mix_video_1"}, CutFrames: []int{30},
-		ShotIDs: []string{searchResult.Shots[0].ShotID},
-	})
-	if shotErr != nil || shotOutput.(rushestools.ToolResult).Status != "succeeded" {
-		t.Fatalf("shot recut=%#v err=%v", shotOutput, shotErr)
-	}
-	shotLatest, shotLatestErr := timeline.Latest(t.Context(), database, "draft_full_beat_mix")
-	if shotLatestErr != nil || shotLatest.Tracks[0].Clips[0].SourceStartFrame != 120 {
-		t.Fatalf("shot latest=%#v err=%v", shotLatest, shotLatestErr)
-	}
-}
-
-func TestBeatMixCutHelpersCoverFallbackAndBounds(t *testing.T) {
-	if cuts := agentexec.ChooseBeatMixCuts(nil, nil, 0, 3); cuts != nil {
-		t.Fatalf("invalid cuts=%v", cuts)
-	}
-	if cuts := agentexec.ChooseBeatMixCuts(nil, []int{0, 20, 20, 100}, 20, 1); !reflect.DeepEqual(cuts, []int{20}) {
-		t.Fatalf("single cut=%v", cuts)
-	}
-	cuts := agentexec.ChooseBeatMixCuts([]int{0, 10, 20, 30, 40, 50, 60, 100}, nil, 100, 3)
-	if len(cuts) != 3 || cuts[2] != 100 || cuts[0] >= cuts[1] {
-		t.Fatalf("distributed cuts=%v", cuts)
-	}
-	fallbackCuts := agentexec.ChooseAllBeatMixCuts([]int{10}, []int{10, 20, 30, 40, 50}, 60, 4)
-	if len(fallbackCuts) != 4 || fallbackCuts[3] != 60 {
-		t.Fatalf("full beat fallback cuts=%v", fallbackCuts)
-	}
-	// 真实素材回归：三段视频总长足够覆盖 900 帧，但旧规划在真实
-	// 四拍网格上会选出 [306,570,900]，最后一段 330 帧超过第三条
-	// 素材的 303 帧容量。自动规划必须在真实拍点上移动前两刀。
-	capacityBeatFrames := []int{
-		89, 100, 110, 121, 132, 143, 154, 173, 183, 194, 204, 214, 224, 235,
-		245, 255, 265, 276, 286, 296, 306, 317, 327, 340, 353, 366, 379, 392,
-		405, 421, 434, 447, 460, 473, 486, 500, 513, 528, 542, 556, 570, 585,
-		600, 615, 630, 645, 660, 675, 690, 705, 720, 735, 750, 765, 780, 795,
-		810, 825, 840, 855, 870, 884,
-	}
-	capacityFourBeatFrames := []int{89, 132, 183, 224, 265, 306, 353, 405, 460, 513, 570, 630, 690, 750, 810, 870}
-	capacities := []int{325, 327, 303}
-	legacyCuts := agentexec.ChooseAllBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, len(capacities))
-	if !reflect.DeepEqual(legacyCuts, []int{306, 570, 900}) {
-		t.Fatalf("legacy cuts=%v", legacyCuts)
-	}
-	if legacyCuts[2]-legacyCuts[1] <= capacities[2] {
-		t.Fatalf("legacy planner unexpectedly fits capacities: cuts=%v capacities=%v", legacyCuts, capacities)
-	}
-	capacityCuts := agentexec.ChooseCapacityAwareBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, capacities)
-	if !reflect.DeepEqual(capacityCuts, []int{306, 630, 900}) {
-		t.Fatalf("capacity-aware cuts=%v", capacityCuts)
-	}
-	if repeated := agentexec.ChooseCapacityAwareBeatMixCuts(capacityFourBeatFrames, capacityBeatFrames, 900, capacities); !reflect.DeepEqual(repeated, capacityCuts) {
-		t.Fatalf("capacity-aware planner is not deterministic: first=%v repeated=%v", capacityCuts, repeated)
-	}
-	if len(capacityCuts) != 3 || capacityCuts[2] != 900 {
-		t.Fatalf("capacity-aware cuts=%v", capacityCuts)
-	}
-	previous := 0
-	for index, cut := range capacityCuts {
-		if duration := cut - previous; duration <= 0 || duration > capacities[index] {
-			t.Fatalf("capacity-aware segment=%d duration=%d cuts=%v", index, duration, capacityCuts)
-		}
-		if cut != 900 && !agentexec.ContainsFrame(capacityBeatFrames, cut) {
-			t.Fatalf("capacity-aware cut not on beat: %v", capacityCuts)
-		}
-		previous = cut
-	}
-	if fallback := agentexec.ChooseCapacityAwareBeatMixCuts([]int{296, 585}, capacityBeatFrames, 900, capacities); !reflect.DeepEqual(fallback, []int{296, 600, 900}) {
-		t.Fatalf("capacity-aware full-beat fallback=%v", fallback)
-	}
-	if cuts, ok := agentexec.DistributeCapacityAwareBeatMixCuts([]int{30, 60}, 100, []int{30, 30, 30}); ok || cuts != nil {
-		t.Fatalf("insufficient capacity cuts=%v ok=%v", cuts, ok)
-	}
-	if cuts := agentexec.ChooseCapacityAwareBeatMixCuts(nil, nil, 0, nil); cuts != nil {
-		t.Fatalf("invalid capacity-aware cuts=%v", cuts)
-	}
-	if cuts, ok := agentexec.DistributeCapacityAwareBeatMixCuts(nil, 30, []int{30}); !ok || !reflect.DeepEqual(cuts, []int{30}) {
-		t.Fatalf("single capacity cuts=%v ok=%v", cuts, ok)
-	}
-	if cuts, ok := agentexec.DistributeCapacityAwareBeatMixCuts(nil, 31, []int{30}); ok || cuts != nil {
-		t.Fatalf("single short capacity cuts=%v ok=%v", cuts, ok)
-	}
-	if cuts, ok := agentexec.DistributeCapacityAwareBeatMixCuts([]int{10}, 20, []int{0, 20}); ok || cuts != nil {
-		t.Fatalf("zero capacity cuts=%v ok=%v", cuts, ok)
-	}
-	if cuts, ok := agentexec.DistributeCapacityAwareBeatMixCuts([]int{10}, 20, []int{10, 10, 10}); ok || cuts != nil {
-		t.Fatalf("insufficient beat candidates cuts=%v ok=%v", cuts, ok)
-	}
-	if candidates := agentexec.BeatCandidatesWithin([]int{-1, 0, 10, 10, 20, 30}, 30); !reflect.DeepEqual(candidates, []int{10, 20}) {
-		t.Fatalf("candidates=%v", candidates)
-	}
-	if !agentexec.ContainsFrame([]int{10, 20, 30}, 20) || !agentexec.ContainsFrame([]int{10, 20, 30}, 19) ||
-		!agentexec.ContainsFrame([]int{10, 20, 30}, 21) || agentexec.ContainsFrame([]int{10, 20, 30}, 18) ||
-		agentexec.ContainsFrame([]int{10, 20, 30}, 22) || agentexec.ContainsFrame([]int{10, 20, 30}, 25) {
-		t.Fatal("containsFrame bounds failed")
-	}
-	if agentexec.AbsInt(-4) != 4 || agentexec.AbsInt(4) != 4 {
-		t.Fatal("absInt failed")
-	}
-	ranges := []agentexec.BeatMixSourceRange{{StartFrame: 120, EndFrame: 220}}
-	usedRanges := []agentexec.BeatMixSourceRange{{StartFrame: 120, EndFrame: 150}}
-	if start, ok := agentexec.ChooseUnusedBeatMixSourceStart(300, 30, ranges, usedRanges, -1, true); !ok || start != 150 {
-		t.Fatalf("unused semantic gap start=%d ok=%v", start, ok)
-	}
-	if _, ok := agentexec.ChooseUnusedBeatMixSourceStart(300, 120, ranges, nil, 0, true); ok {
-		t.Fatal("strict short semantic range should not fit")
-	}
-	if start, ok := agentexec.ChooseUnusedBeatMixSourceStart(300, 120, ranges, nil, 0, false); !ok || start != 0 {
-		t.Fatalf("full-source fallback start=%d ok=%v", start, ok)
-	}
-	if _, ok := agentexec.ChooseUnusedBeatMixSourceStart(20, 30, nil, nil, 0, false); ok {
-		t.Fatal("short full source should not fit")
-	}
-	coalesced := agentexec.BeatMixRangesFromUnderstanding([]understanding.Segment{
-		{SourceStartFrame: 0, SourceEndFrame: 100, Quality: "usable", BoundaryKind: "video_start"},
-		{SourceStartFrame: 100, SourceEndFrame: 200, Quality: "usable", BoundaryKind: "analysis_window"},
-		{SourceStartFrame: 200, SourceEndFrame: 300, Quality: "usable", BoundaryKind: "analysis_window"},
-		{SourceStartFrame: 300, SourceEndFrame: 400, Quality: "usable", BoundaryKind: "visual_cut"},
-	}, 400)
-	if !agentexec.SourceRangeContains(coalesced, 0, 250) || agentexec.SourceRangeContains(coalesced, 200, 350) {
-		t.Fatalf("analysis-window coalescing=%#v", coalesced)
-	}
-	invalidRanges := agentexec.BeatMixRangesFromUnderstanding([]understanding.Segment{
-		{SourceStartFrame: 0, SourceEndFrame: 50, Quality: "unusable", BoundaryKind: "video_start"},
-		{SourceStartFrame: 80, SourceEndFrame: 80, Quality: "usable", BoundaryKind: "analysis_window"},
-	}, 100)
-	if len(invalidRanges) != 0 {
-		t.Fatalf("invalid ranges=%#v", invalidRanges)
 	}
 }
 
@@ -3767,14 +2965,8 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 		"interaction.ask_user":        rushestools.AskUserInput{Question: "?", DecisionType: "critical"},
 		"decision.answer":             rushestools.DecisionAnswerInput{DecisionID: "decision"},
 		"plan.update":                 rushestools.PlanUpdateInput{Plan: map[string]any{"status": "closed-db"}},
-		"timeline.compose_initial":    rushestools.ComposeInitialInput{},
-		"timeline.apply_patches":      rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{"kind": "noop"}}},
-		"timeline.recut_to_beats":     rushestools.TimelineBeatRecutInput{CutFrames: []int{30}, BGMTimelineClipID: "bgm"},
 		"timeline.check":              rushestools.TimelineCheckInput{},
 		"timeline.inspect":            rushestools.TimelineInspectInput{},
-		"render.preview":              rushestools.RenderPreviewInput{},
-		"render.final_mp4":            rushestools.RenderFinalInput{},
-		"render.status":               rushestools.RenderStatusInput{},
 		"preview.check":               rushestools.PreviewCheckInput{PreviewID: "preview", Check: "decode"},
 	} {
 		if _, err := service.ExecuteTool(ctx, name, input); err == nil {
@@ -3790,7 +2982,7 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 	if _, err := service.fallbackMainline(ctx, "draft_closed"); err == nil {
 		t.Fatal("closed fallback mainline 应失败")
 	}
-	if _, err := service.executor.PersistTimeline(ctx, "draft_closed", timeline.Empty("draft_closed", 1), "closed"); err == nil {
+	if _, err := seedTimelineVersion(service, ctx, "draft_closed", timeline.Empty("draft_closed", 1), "closed", nil); err == nil {
 		t.Fatal("closed persist timeline 应失败")
 	}
 	if err := service.runTurn(t.Context(), QueueItem{

@@ -1305,9 +1305,6 @@ func SourceRangesOverlap(leftStart, leftEnd, rightStart, rightEnd int) bool {
 	return leftStart < rightEnd && rightStart < leftEnd
 }
 
-// clampSpeechRangeToClip 把源帧证据区间裁剪到 clip 的已裁剪源区间，返回裁剪后的
-// 区间与是否发生了裁剪。调用方对交集为空（end <= start）的项自行决定跳过或判非法，
-// 使 speech.search 返回的证据坐标与 timeline.edit_talking_head 的交集校验一致。
 func ClampSpeechRangeToClip(clip timeline.Clip, start, end int) (int, int, bool) {
 	clampedStart := max(start, clip.SourceStartFrame)
 	clampedEnd := min(end, clip.SourceEndFrame)
@@ -1534,9 +1531,15 @@ func (exec *Executor) toolSearchSpeech(
 		"intra_utterance_repetitions 会优先列出全部相邻同词证据，并自带 repetition_id 与前后两段精确 word_id（数字拆词和叠词也可能是正常表达）；模型必须结合 context_text 明确选择删除较早一遍、较晚一遍或保留。" +
 		"pauses 默认按可安全删除时长从长到短排列，previous_context、next_context 与 joined_context 用于判断气口是否影响表达；工具不会按时长替模型决定删除。" +
 		"不属于现成 repetition/fragment 证据的句内卡壳或半句重说，才需要 include_words=true 取得连续 word_id 与 source frame；short_speech_fragments 中 earlier_take_before_repeated_phrase_restart 会暴露共同短语、分叉尾部与停顿组成的完整较早说法，避免只删尾部留下半句。" +
-		"执行时先用 timeline.inspect 把明确选定的 source range 映射到当前时间线，再用 timeline.delete 一次删除一个连续范围；前一步改变映射后必须重新读取，不能猜测片段 ID。"
+		"执行删除时优先把明确选定的 asset_id 与 source range 原样交给 timeline.delete(kind=delete_source_range, asset_id, source_start_frame, source_end_frame)；" +
+		"source 坐标跨前序 ripple 保持稳定，服务端只在当前 visual_base 存在唯一连续映射时执行，映射缺失、断裂或歧义会失败且不会猜测替代目标。" +
+		"只有操作本身以 timeline range 为目标时，才先用 timeline.inspect 读取当前映射并调用 delete_range；依赖易变 timeline clip ID 或坐标的其它后续编辑，在前一步改变映射后必须重新读取。" +
+		"波纹删除后为保留台词放置 B-roll 时，先从 timeline.inspect 取得覆盖目标 source range 的最新 A-roll timeline_clip_id，再用该 ID 重查原句；直接采用返回的 timeline_start_frame，不得拿 clip 起点或自行估算偏移。"
 	if includeWords && wordTotal == 0 {
 		usageNote += "当前持久化索引没有词级时间戳（例如来源仅为 SRT）；不能猜 word_id，可使用逐句证据或配置带词时间戳的 ASR 后重新转写。"
+	}
+	if strings.TrimSpace(input.Query) != "" && len(evidence) == 0 {
+		usageNote += "本次 query 在当前 asset/clip 范围没有命中台词；不得把所查 clip 的起点或相似文本当成该句锚点。需要定位该句时，改用 asset_id 扩大到整段素材或调整 query 后重新检索。"
 	}
 	return rushestools.SpeechSearchResult{
 		Status:       string(rushestools.StatusSucceeded),

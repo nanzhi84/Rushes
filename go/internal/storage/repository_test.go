@@ -34,7 +34,7 @@ func TestRepositoriesRoundTripAllMaterializedViews(t *testing.T) {
 		INSERT INTO decisions(decision_id,scope_type,draft_id,type,question,options_json,allow_free_text,status,
 			answer_json,pending_tool_call_json,pending_tool_call_status,consumed_at,replayed_tool_call_id,blocking,created_by_tool_call_id)
 		VALUES('decision_pending','draft','draft_active','generic','继续？','[{"option_id":"yes","label":"继续"}]',0,'pending',
-			NULL,'{"tool_name":"render.preview","arguments":{}}','pending',NULL,NULL,1,'call_1'),
+			NULL,'{"tool_name":"render.start","arguments":{}}','pending',NULL,NULL,1,'call_1'),
 		      ('decision_answered','draft','draft_active','generic','完成？','[]',1,'answered',
 			'{"option_id":"yes"}',NULL,NULL,?, 'replay_1',0,NULL);
 		INSERT INTO jobs(job_id,kind,status,draft_id,requested_by_draft_id,asset_id,idempotency_key,payload_json,

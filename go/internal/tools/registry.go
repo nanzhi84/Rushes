@@ -14,7 +14,6 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
-	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
 
 type Exposure string
@@ -204,11 +203,8 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 		registerAssetImport, registerAssetList, registerDetectShots, registerShotSearch, registerAudioBeatAnalysis,
 		registerSpeechPauseAnalysis, registerSpeechTranscribe, registerSpeechSearch, registerAskUser,
 		registerDecisionAnswer, registerPlanUpdate, registerMemorySet, registerMemoryRemove,
-		registerComposeInitial, registerApplyPatchBatch,
 		registerTimelineInsert, registerTimelineDelete, registerTimelineUpdate, registerTimelineSplit,
-		registerBeatRecut, registerTalkingHeadEdit,
-		registerTimelineCheck, registerTimelineInspect, registerRenderPreview,
-		registerRenderFinal, registerRenderStatus, registerRenderStart, registerJobRead, registerPreviewCheck,
+		registerTimelineCheck, registerTimelineInspect, registerRenderStart, registerJobRead, registerPreviewCheck,
 		registerConfirmAction,
 	}
 	for _, builder := range builders {
@@ -274,16 +270,6 @@ func validateRequiredFields(input reflect.Type, value any, path string) error {
 	}
 	if value == nil {
 		return fmt.Errorf("%s 不允许为 null", path)
-	}
-	if input == reflect.TypeFor[TimelineOp]() {
-		operation, ok := value.(map[string]any)
-		if !ok {
-			return fmt.Errorf("%s 必须是 JSON 对象", path)
-		}
-		if err := validateTimelineOp(operation); err != nil {
-			return fmt.Errorf("%s: %w", path, err)
-		}
-		return nil
 	}
 	if toolName, atomic := atomicTimelineToolForType(input); atomic {
 		operation, ok := value.(map[string]any)
@@ -362,30 +348,6 @@ func atomicTimelineInputValue(input reflect.Type, operation map[string]any) any 
 	default:
 		return nil
 	}
-}
-
-func validateTimelineOp(operation map[string]any) error {
-	if err := timeline.ValidateOpFields(operation); err != nil {
-		return err
-	}
-	kind := operation["kind"].(string)
-	spec, _ := timeline.LookupOpSpec(kind)
-	allowed := map[string]bool{"kind": true}
-	for _, field := range spec.Fields {
-		if field.Injected {
-			continue
-		}
-		allowed[field.Name] = true
-		for _, alias := range field.Aliases {
-			allowed[alias] = true
-		}
-	}
-	for name := range operation {
-		if !allowed[name] {
-			return fmt.Errorf("时间线补丁 %s 包含未声明字段 %s", kind, name)
-		}
-	}
-	return nil
 }
 
 func schemaTagContains(tag, option string) bool {
@@ -487,6 +449,9 @@ func addTool[I, O any](
 	}
 	implementation, err := utils.InferTool(name, description, func(ctx context.Context, input I) (O, error) {
 		spec := registry.specs[name]
+		if failure, failed := atomicTimelinePreflightFailure(name, input); failed {
+			return convertResult[O](failure)
+		}
 		for _, interceptor := range registry.admissionInterceptors {
 			if err := interceptor(ctx, spec, input); err != nil {
 				var zero O
@@ -578,14 +543,6 @@ func strictUnmarshalToolArguments[I any](_ context.Context, name, arguments stri
 			err = errors.New("包含多个 JSON 值")
 		}
 		return nil, err
-	}
-	if _, atomic := timelineAtomicKinds[name]; atomic {
-		if _, err := TimelineAtomicOperation(name, any(input)); err != nil {
-			var fieldErr *timeline.OpFieldError
-			if !errors.As(err, &fieldErr) {
-				return nil, err
-			}
-		}
 	}
 	return input, nil
 }
@@ -746,7 +703,7 @@ func registerSpeechSearch(registry *Registry) error {
 		registry,
 		"speech.search",
 		"只读搜索已有 transcript；按台词语义、稳定 ID 或源帧范围返回逐句、词级、气口和相似台词证据。缺少索引时返回 index_missing，并提示调用 speech.transcribe；绝不触发 ASR、创建 job 或写入 transcript",
-		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
+		[]string{"usable_asset_exists", "transcript_index_exists"}, ExposureLLM, EffectReadOnly, false,
 		metadata(FamilyRead, CostStandard, SurfaceTalkingHead),
 	)
 }
@@ -798,21 +755,6 @@ func registerMemoryRemove(registry *Registry) error {
 	)
 }
 
-func registerComposeInitial(registry *Registry) error {
-	return addTool[ComposeInitialInput, ToolResult](registry, "timeline.compose_initial", "旧版初版组装；仅供迁移期 harness 回归，生产模型逐次调用 timeline.insert", []string{"usable_asset_exists", "timeline_absent"}, ExposureHarness, EffectReversible, false,
-		metadata(FamilyEdit, CostHigh, SurfaceDiscovery, SurfaceTalkingHead))
-}
-
-func registerApplyPatchBatch(registry *Registry) error {
-	return addTool[TimelinePatchBatchInput, ToolResult](
-		registry,
-		"timeline.apply_patches",
-		"应用旧版批量时间线补丁；仅供 REST/harness 迁移调用，模型使用 timeline.insert/delete/update/split",
-		[]string{"timeline_exists"}, ExposureHarness, EffectReversible, false,
-		metadata(FamilyEdit, CostHigh, SurfaceTimelineEdit),
-	)
-}
-
 func registerTimelineInsert(registry *Registry) error {
 	return addTool[TimelineInsertInput, ToolResult](
 		registry,
@@ -828,7 +770,7 @@ func registerTimelineDelete(registry *Registry) error {
 	return addTool[TimelineDeleteInput, ToolResult](
 		registry,
 		"timeline.delete",
-		"只删除一个 clip、一个连续帧范围或一个非主视觉轨内容集合；需要多个目标时按稳定顺序多次调用",
+		"只删除一个 clip、一个连续帧范围、一个素材的连续源帧范围或一个非主视觉轨内容集合；多个目标必须分成多次调用",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
 		metadata(FamilyEdit, CostStandard, SurfaceBeatEdit, SurfaceTimelineEdit),
 	)
@@ -854,49 +796,14 @@ func registerTimelineSplit(registry *Registry) error {
 	)
 }
 
-func registerBeatRecut(registry *Registry) error {
-	return addTool[TimelineBeatRecutInput, ToolResult](
-		registry,
-		"timeline.recut_to_beats",
-		"旧版卡点复合重剪；仅供迁移期 harness 回归，生产模型组合 audio.analyze_beats、shot.search 与原子时间线编辑",
-		[]string{"usable_asset_exists"}, ExposureHarness, EffectReversible, false,
-		metadata(FamilyEdit, CostHigh, SurfaceBeatEdit),
-	)
-}
-
-func registerTalkingHeadEdit(registry *Registry) error {
-	return addTool[TalkingHeadEditInput, ToolResult](
-		registry,
-		"timeline.edit_talking_head",
-		"旧版口播复合编辑；仅供迁移期 harness 回归，生产模型使用 speech.search、shot.search 与 timeline.insert/delete/update/split 组合",
-		[]string{"timeline_exists"}, ExposureHarness, EffectReversible, false,
-		metadata(FamilyEdit, CostHigh, SurfaceTalkingHead),
-	)
-}
-
 func registerTimelineCheck(registry *Registry) error {
-	return addTool[TimelineCheckInput, ToolResult](registry, "timeline.check", "只读检查当前时间线的结构不变量、内容合同、节拍对齐与口播质量；不写 validation event、draft state 或 timeline version", []string{"timeline_exists"}, ExposureLLM, EffectReadOnly, false,
+	return addTool[TimelineCheckInput, ToolResult](registry, "timeline.check", "只读检查当前时间线或指定稳定 timeline_id 的结构不变量、内容合同、节拍对齐与口播质量；不写 validation event、draft state 或 timeline version", []string{"timeline_exists"}, ExposureLLM, EffectReadOnly, false,
 		metadata(FamilyCheck, CostStandard, SurfaceRender, SurfaceTimelineEdit, SurfaceBeatEdit))
 }
 
 func registerTimelineInspect(registry *Registry) error {
-	return addTool[TimelineInspectInput, ToolResult](registry, "timeline.inspect", "读取可编辑的时间线摘要与完整 track/clip ID、素材、角色和帧范围；尚无时间线时返回 timeline_exists=false，而不是失败", nil, ExposureLLM, EffectReadOnly, false,
+	return addTool[TimelineInspectInput, ToolResult](registry, "timeline.inspect", "读取当前时间线或指定稳定 timeline_id 的完整 track/clip ID、素材、角色和帧范围；尚无时间线时返回 timeline_exists=false，而不是失败", nil, ExposureLLM, EffectReadOnly, false,
 		metadata(FamilyRead, CostLow, SurfaceTimelineEdit, SurfaceTalkingHead, SurfaceBeatEdit, SurfaceRender, SurfacePreviewCheck))
-}
-
-func registerRenderPreview(registry *Registry) error {
-	return addTool[RenderPreviewInput, ToolResult](registry, "render.preview", "旧版预览排队入口；仅供迁移期 harness 回归，生产模型使用 render.start", []string{"timeline_exists"}, ExposureHarness, EffectReversible, false,
-		metadata(FamilyEdit, CostHigh, SurfaceRender))
-}
-
-func registerRenderFinal(registry *Registry) error {
-	return addTool[RenderFinalInput, ToolResult](registry, "render.final_mp4", "旧版最终导出入口；仅供迁移期 harness 回归，生产模型使用 render.start", []string{"timeline_exists"}, ExposureHarness, EffectReversible, false,
-		metadata(FamilyEdit, CostHigh, SurfaceRender))
-}
-
-func registerRenderStatus(registry *Registry) error {
-	return addTool[RenderStatusInput, ToolResult](registry, "render.status", "旧版草稿级渲染状态；仅供迁移期 harness 回归，生产模型使用 job.read", []string{"timeline_exists"}, ExposureHarness, EffectReadOnly, false,
-		metadata(FamilyRead, CostLow, SurfaceRender, SurfacePreviewCheck))
 }
 
 func registerRenderStart(registry *Registry) error {

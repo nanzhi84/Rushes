@@ -8,7 +8,6 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
-	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -20,17 +19,35 @@ func TestRenderStartTargetsOneTimelineAndJobReadStaysPure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
 		AssetID: "fixture", AssetKind: "video",
 		SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := exec.PersistTimeline(t.Context(), draftID, document, "render_atomic_fixture"); err != nil {
+	if _, err := seedTimelineVersion(exec, t.Context(), draftID, document, "render_atomic_fixture", nil); err != nil {
 		t.Fatal(err)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	for _, invalid := range []rushestools.RenderStartInput{
+		{Kind: "preview"},
+		{Kind: "gif", TimelineID: document.TimelineID},
+	} {
+		raw, err := exec.ExecuteTool(ctx, "render.start", invalid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result := raw.(rushestools.ToolResult); result.Status != "failed" ||
+			result.Data["current_timeline_unchanged"] != true {
+			t.Fatalf("invalid render.start=%#v", result)
+		}
+	}
+	if _, err := exec.ExecuteTool(ctx, "render.start", rushestools.RenderStartInput{
+		Kind: "preview", TimelineID: document.TimelineID, Orientation: "square",
+	}); err == nil {
+		t.Fatal("unknown orientation should fail")
+	}
 	input := rushestools.RenderStartInput{
 		Kind: "preview", TimelineID: document.TimelineID, Orientation: "portrait",
 	}
@@ -112,6 +129,16 @@ func TestRenderStartTargetsOneTimelineAndJobReadStaysPure(t *testing.T) {
 		result["local_path"] != nil {
 		t.Fatalf("completed=%#v", completed)
 	}
+	completedAgainRaw, err := exec.ExecuteTool(ctx, "render.start", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completedAgain := completedAgainRaw.(rushestools.ToolResult)
+	if completedAgain.Status != "succeeded" ||
+		completedAgain.Data["job_id"] != jobID ||
+		completedAgain.Data["job_status"] != "succeeded" {
+		t.Fatalf("completed render retry=%#v", completedAgain)
+	}
 
 	failedStartRaw, err := exec.ExecuteTool(ctx, "render.start", rushestools.RenderStartInput{
 		Kind: "final", TimelineID: document.TimelineID, Orientation: "portrait",
@@ -155,6 +182,24 @@ func TestRenderStartTargetsOneTimelineAndJobReadStaysPure(t *testing.T) {
 		failure["retryable"] != true {
 		t.Fatalf("unbounded job failure=%#v", failure)
 	}
+	retryRaw, err := exec.ExecuteTool(ctx, "render.start", rushestools.RenderStartInput{
+		Kind: "final", TimelineID: document.TimelineID, Orientation: "portrait",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := retryRaw.(rushestools.ToolResult)
+	retryJobID, _ := retry.Data["job_id"].(string)
+	if retry.Status != "queued" || retryJobID == "" || retryJobID == failedJobID {
+		t.Fatalf("retry=%#v failed_job_id=%s", retry, failedJobID)
+	}
+	var retryOf string
+	if err := database.Read().QueryRowContext(t.Context(),
+		`SELECT json_extract(payload_json, '$.retry_of_job_id') FROM jobs WHERE job_id=?`,
+		retryJobID,
+	).Scan(&retryOf); err != nil || retryOf != failedJobID {
+		t.Fatalf("retry_of_job_id=%q err=%v", retryOf, err)
+	}
 
 	const foreignDraftID = "draft_render_atomic_foreign"
 	agenttest.CreateAgentDraft(t, database, foreignDraftID)
@@ -169,5 +214,9 @@ func TestRenderStartTargetsOneTimelineAndJobReadStaysPure(t *testing.T) {
 	foreign := foreignRaw.(rushestools.ToolResult)
 	if foreign.Status != "failed" || foreign.Data["job_id"] != jobID {
 		t.Fatalf("foreign=%#v", foreign)
+	}
+	if boundedJobFailureText("short", 64) != "short" ||
+		boundedJobFailureText("long", 1) != "l" {
+		t.Fatal("job failure text bounds mismatch")
 	}
 }

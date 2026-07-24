@@ -25,7 +25,7 @@ func locateClip(document *Document, clipID string) (clipLocation, error) {
 }
 
 func editableLocation(document *Document, operation map[string]any) (clipLocation, error) {
-	id := valueOr(stringValue(operation["timeline_clip_id"]), stringValue(operation["clip_id"]))
+	id := stringValue(operation["timeline_clip_id"])
 	if id == "" {
 		return clipLocation{}, errors.New("patch op 缺少 timeline_clip_id")
 	}

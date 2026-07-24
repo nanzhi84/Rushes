@@ -17,14 +17,14 @@ func TestRenderRejectsInvalidCurrentTimelineWithoutCreatingJob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
 		AssetID: "fixture", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	document.DurationFrames = 0
-	persisted, err := exec.PersistTimeline(t.Context(), draftID, document, "invalid_render_fixture")
+	persisted, err := seedTimelineVersion(exec, t.Context(), draftID, document, "invalid_render_fixture", nil)
 	if err != nil || persisted.Status != string(rushestools.StatusValidationFailed) {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
@@ -38,8 +38,8 @@ func TestRenderRejectsInvalidCurrentTimelineWithoutCreatingJob(t *testing.T) {
 
 	raw, err := exec.ExecuteTool(
 		rushestools.WithDraftID(t.Context(), draftID),
-		"render.preview",
-		rushestools.RenderPreviewInput{},
+		"render.start",
+		rushestools.RenderStartInput{Kind: "preview", TimelineID: draftID + ":v1"},
 	)
 	if err != nil {
 		t.Fatal(err)

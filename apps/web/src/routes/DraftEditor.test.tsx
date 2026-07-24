@@ -515,33 +515,33 @@ describe("DraftEditorView", () => {
 
     const stream = turnStreamSource();
     emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
-    emitTurnStream(stream, { type: "tool_step_started", step_id: "s1", tool: "timeline.apply_patch" });
-    emitTurnStream(stream, { type: "tool_step_started", step_id: "s2", tool: "render.preview" });
+    emitTurnStream(stream, { type: "tool_step_started", step_id: "s1", tool: "timeline.update" });
+    emitTurnStream(stream, { type: "tool_step_started", step_id: "s2", tool: "timeline.insert" });
     emitTurnStream(stream, { type: "tool_step_started", step_id: "s3", tool: "future.mystery_tool" });
 
-    const step1 = (await screen.findByText("修改时间线")).closest(
+    const step1 = (await screen.findByText("更新时间线目标")).closest(
       "[data-tool-step-id]"
     ) as HTMLElement;
     expect(step1.getAttribute("data-tool-status")).toBe("running");
-    expect(screen.getByText("渲染预览")).toBeTruthy();
+    expect(screen.getByText("插入时间线内容")).toBeTruthy();
     // 未映射的工具名原样展示
     expect(screen.getByText("future.mystery_tool")).toBeTruthy();
 
     emitTurnStream(stream, {
       type: "tool_step_finished",
       step_id: "s1",
-      tool: "timeline.apply_patch",
+      tool: "timeline.update",
       status: "succeeded"
     });
     emitTurnStream(stream, {
       type: "tool_step_finished",
       step_id: "s2",
-      tool: "render.preview",
+      tool: "timeline.insert",
       status: "failed"
     });
 
     await waitFor(() => expect(step1.getAttribute("data-tool-status")).toBe("succeeded"));
-    const step2 = screen.getByText("渲染预览").closest("[data-tool-step-id]") as HTMLElement;
+    const step2 = screen.getByText("插入时间线内容").closest("[data-tool-step-id]") as HTMLElement;
     expect(step2.getAttribute("data-tool-status")).toBe("failed");
   });
 
@@ -613,7 +613,7 @@ describe("DraftEditorView", () => {
       status: "succeeded"
     });
     // 下一个工具进行中，但上一批的进度不应串过来。
-    emitTurnStream(stream, { type: "tool_step_started", step_id: "s2", tool: "timeline.compose_initial" });
+    emitTurnStream(stream, { type: "tool_step_started", step_id: "s2", tool: "timeline.insert" });
 
     await waitFor(() => expect(screen.queryByText("转写音频中")).toBeNull());
     expect(screen.queryByLabelText("子代理进度")).toBeNull();
@@ -970,7 +970,7 @@ describe("DraftEditorView", () => {
 
     const progress = await screen.findByRole("progressbar", { name: "理解素材 进度" });
     expect(progress.getAttribute("aria-valuenow")).toBe("42");
-    expect(screen.getByText("理解素材 2/5：采访.mp4 正在调用 VLM")).toBeTruthy();
+    expect(screen.getByText("理解素材：采访.mp4 正在调用 VLM")).toBeTruthy();
 
     act(() => {
       draftEventsSource().emit("JobProgress", jobProgressPayload(0.8));
@@ -1749,10 +1749,10 @@ function jobProgressPayload(progress: number): DomainSsePayload {
         kind: "understand",
         progress,
         current_asset_id: "asset_2",
-        done: 1,
-        total: 5,
+        done: 0,
+        total: 1,
         stage: "view_frames",
-        detail: "理解素材 2/5：采访.mp4 正在调用 VLM"
+        detail: "理解素材：采访.mp4 正在调用 VLM"
       }
     }
   };

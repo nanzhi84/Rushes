@@ -81,7 +81,7 @@ func TestRenderTimelineAndInspectSnapshot(t *testing.T) {
 		source, info.ModTime().UnixNano(), info.Size()); err != nil {
 		t.Fatal(err)
 	}
-	document, err := timeline.ComposeInitial("draft", 1, []timeline.Selection{{
+	document, err := composeMediaTimeline("draft", 1, []mediaTimelineSelection{{
 		AssetID: "render_asset", AssetKind: "video", HasAudio: true,
 		SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
 	}})
@@ -344,7 +344,7 @@ func TestRenderedDuckingLowersBGMUnderVoiceAndDisabledPreservesStaticMix(t *test
 			t.Fatal(err)
 		}
 	}
-	document, err := timeline.ComposeInitial("duck_render", 1, []timeline.Selection{{
+	document, err := composeMediaTimeline("duck_render", 1, []mediaTimelineSelection{{
 		AssetID: "duck_video", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 120, Role: "a_roll",
 	}})
 	if err != nil {
@@ -461,7 +461,7 @@ func TestRenderedVideoFadesApproachBlackAtBothEnds(t *testing.T) {
 		source, info.ModTime().UnixNano(), info.Size()); err != nil {
 		t.Fatal(err)
 	}
-	document, err := timeline.ComposeInitial("fade_render", 1, []timeline.Selection{{
+	document, err := composeMediaTimeline("fade_render", 1, []mediaTimelineSelection{{
 		AssetID: "fade_video", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
 	}})
 	if err != nil {
@@ -506,7 +506,7 @@ func TestRenderedOverlayFadesRevealUnderlyingVideo(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	document, err := timeline.ComposeInitial("overlay_fade_render", 1, []timeline.Selection{{
+	document, err := composeMediaTimeline("overlay_fade_render", 1, []mediaTimelineSelection{{
 		AssetID: "overlay_base", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
 	}})
 	if err != nil {
@@ -690,7 +690,7 @@ func TestRenderTimelineAutoOrientationUsesDisplayRotation(t *testing.T) {
 				assetID, source, filepath.Base(source), assetID, info.ModTime().UnixNano(), info.Size()); err != nil {
 				t.Fatal(err)
 			}
-			document, err := timeline.ComposeInitial("rotation_render", 1, []timeline.Selection{{
+			document, err := composeMediaTimeline("rotation_render", 1, []mediaTimelineSelection{{
 				AssetID: assetID, AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 12, Role: "a_roll",
 			}})
 			if err != nil {
@@ -879,7 +879,7 @@ func TestMediaKindShortcutsResolveAndRenderValidation(t *testing.T) {
 	if _, err := RenderTimeline(t.Context(), database, badFPS, PreviewProfile, nil); err == nil {
 		t.Fatal("bad fps should fail")
 	}
-	missingAsset, _ := timeline.ComposeInitial("d", 1, []timeline.Selection{{AssetID: "missing", SourceEndFrame: 30}})
+	missingAsset, _ := composeMediaTimeline("d", 1, []mediaTimelineSelection{{AssetID: "missing", SourceEndFrame: 30}})
 	if _, err := RenderTimeline(t.Context(), database, missingAsset, PreviewProfile, nil); err == nil {
 		t.Fatal("missing clip asset should fail")
 	}
@@ -947,7 +947,7 @@ func TestMediaAudioImageAndProcessBoundaryPaths(t *testing.T) {
 		image, info.ModTime().UnixNano(), info.Size()); err != nil {
 		t.Fatal(err)
 	}
-	document, err := timeline.ComposeInitial("image_draft", 1, []timeline.Selection{{
+	document, err := composeMediaTimeline("image_draft", 1, []mediaTimelineSelection{{
 		AssetID: "image_render", SourceStartFrame: 0, SourceEndFrame: 6, Role: "b_roll",
 	}})
 	if err != nil {

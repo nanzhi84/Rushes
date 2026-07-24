@@ -23,7 +23,6 @@ const (
 // 或纠错示例，模型只能引用读取结果里的现有稳定 ID。
 type OpField struct {
 	Name      string
-	Aliases   []string
 	Type      OpFieldType
 	Required  bool
 	Injected  bool
@@ -171,6 +170,15 @@ var Catalog = []OpSpec{
 		},
 	},
 	{
+		Kind:    "delete_source_range",
+		Summary: "按一个素材的连续源帧范围删除其在当前主视觉中的唯一连续映射",
+		Fields: []OpField{
+			field("asset_id", OpFieldString, true, "speech.search 等证据返回的素材 ID", "asset_001"),
+			field("source_start_frame", OpFieldInteger, true, "要删除的素材源帧起点", 30),
+			field("source_end_frame", OpFieldInteger, true, "要删除的素材源帧终点，须大于起点", 60),
+		},
+	},
+	{
 		Kind:    "insert_clip",
 		Summary: "把素材片段插入指定轨道",
 		Fields: []OpField{
@@ -179,19 +187,12 @@ var Catalog = []OpSpec{
 			field("source_end_frame", OpFieldInteger, true, "素材出点整数帧", 150),
 			field("track_id", OpFieldString, false, "目标轨道 ID，默认 visual_base", "visual_base"),
 			field("timeline_start_frame", OpFieldInteger, false, "非主视觉片段的时间线起点整数帧", 0),
-			field("role", OpFieldString, false, "片段角色，默认 b_roll", "b_roll"),
+			field("role", OpFieldString, false, "片段角色；省略时由目标轨道推导，视觉轨为 b_roll，音频轨与 track_id 同名", "b_roll"),
 			generatedField("timeline_clip_id", OpFieldString, "由服务端生成的片段 ID", "clip_v2_001"),
 			generatedField("parent_block_id", OpFieldString, "由服务端生成的联动组 ID", "link_clip_v2_001"),
 			field("metadata", OpFieldObject, false, "可选片段元数据对象", map[string]any{"source": "catalog_example"}),
 			injectedField("asset_kind", OpFieldString, "由服务端根据 asset_id 注入的素材类型", "video"),
 			injectedField("include_original_audio", OpFieldBoolean, "由服务端为主视觉视频注入的原声联动标志", true),
-		},
-	},
-	{
-		Kind:    "sync_original_audio",
-		Summary: "根据最新主视觉片段原子重建原声音轨",
-		Fields: []OpField{
-			injectedField("audio_asset_ids", OpFieldStringArray, "由服务端注入的带音频视频素材 ID 列表", []string{"asset_001"}),
 		},
 	},
 	{
@@ -274,7 +275,6 @@ func CorrectOpExample(spec OpSpec) map[string]any {
 
 // ValidateOpFields 只负责目录可判定的字段存在性和类型检查。范围、轨道锁定、
 // 音画联动等依赖当前 Document 的语义约束仍由各 ApplyPatch handler 校验。
-// 为兼容程序化调用和历史客户端，这里不会拒绝目录之外的附加字段。
 func ValidateOpFields(operation map[string]any) error {
 	rawKind, exists := operation["kind"]
 	if !exists {
@@ -289,24 +289,16 @@ func ValidateOpFields(operation map[string]any) error {
 		return &OpFieldError{Kind: kind, Field: "kind", Reason: "不是受支持的操作类型"}
 	}
 
+	allowed := map[string]struct{}{"kind": {}}
 	for _, field := range spec.Fields {
-		names := make([]string, 0, len(field.Aliases)+1)
-		names = append(names, field.Name)
-		names = append(names, field.Aliases...)
-		provided := false
-		for _, name := range names {
-			value, found := operation[name]
-			if !found {
-				continue
-			}
-			provided = true
-			if !validOpFieldValue(field.Type, value) {
-				return &OpFieldError{
-					Kind:   kind,
-					Field:  name,
-					Reason: "类型必须是" + opFieldTypeDescription(field.Type),
-					Spec:   spec,
-				}
+		allowed[field.Name] = struct{}{}
+		value, provided := operation[field.Name]
+		if provided && !validOpFieldValue(field.Type, value) {
+			return &OpFieldError{
+				Kind:   kind,
+				Field:  field.Name,
+				Reason: "类型必须是" + opFieldTypeDescription(field.Type),
+				Spec:   spec,
 			}
 		}
 		if field.Required && !field.Injected && !provided {
@@ -314,6 +306,16 @@ func ValidateOpFields(operation map[string]any) error {
 				Kind:   kind,
 				Field:  field.Name,
 				Reason: "缺少必填字段",
+				Spec:   spec,
+			}
+		}
+	}
+	for name := range operation {
+		if _, exists := allowed[name]; !exists {
+			return &OpFieldError{
+				Kind:   kind,
+				Field:  name,
+				Reason: "不是该操作支持的字段",
 				Spec:   spec,
 			}
 		}
@@ -349,10 +351,9 @@ func generatedField(name string, fieldType OpFieldType, desc string, example any
 func clipIDField() OpField {
 	return OpField{
 		Name:     "timeline_clip_id",
-		Aliases:  []string{"clip_id"},
 		Type:     OpFieldString,
 		Required: true,
-		Desc:     "目标时间线片段 ID；兼容别名 clip_id",
+		Desc:     "目标时间线片段 ID",
 		Example:  "clip_v1_001",
 	}
 }

@@ -1,14 +1,15 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/eino-contrib/jsonschema"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
 
-// TimelineOp 是 timeline.apply_patches harness 路径使用的单个语义补丁。
-//
 // 运行时仍保留 map 语义；JSONSchema 则把 timeline.Catalog 编译成 oneOf，
 // 让模型只看到所选 kind 的合法字段，并隐藏由服务端注入的字段。
 type TimelineOp map[string]any
@@ -23,7 +24,7 @@ type TimelineSplitInput map[string]any
 
 var timelineAtomicKinds = map[string][]string{
 	"timeline.insert": {"insert_clip", "insert_subtitle"},
-	"timeline.delete": {"delete_clip", "delete_range", "remove_track_clips"},
+	"timeline.delete": {"delete_clip", "delete_range", "delete_source_range", "remove_track_clips"},
 	"timeline.update": {
 		"trim_clip",
 		"reorder_clip",
@@ -42,34 +43,32 @@ var timelineAtomicKinds = map[string][]string{
 }
 
 func (TimelineInsertInput) JSONSchema() *jsonschema.Schema {
-	return timelineAtomicOpSchema("插入一个 clip 或一条字幕", timelineAtomicKinds["timeline.insert"])
+	return timelineAtomicOpSchema(timelineAtomicKinds["timeline.insert"])
 }
 
 func (TimelineDeleteInput) JSONSchema() *jsonschema.Schema {
-	return timelineAtomicOpSchema("删除一个 clip、一个连续范围或一条非主视觉轨的内容", timelineAtomicKinds["timeline.delete"])
+	return timelineAtomicOpSchema(timelineAtomicKinds["timeline.delete"])
 }
 
 func (TimelineUpdateInput) JSONSchema() *jsonschema.Schema {
-	schema := timelineAtomicOpSchema("只更新一个 clip、track 或 subtitle 目标", timelineAtomicKinds["timeline.update"])
+	schema := timelineAtomicOpSchema(timelineAtomicKinds["timeline.update"])
 	schema.Not = &jsonschema.Schema{Required: []string{"timeline_clip_id", "track_id"}}
 	return schema
 }
 
 func (TimelineSplitInput) JSONSchema() *jsonschema.Schema {
-	return timelineAtomicOpSchema("在一个时间线帧位置切分一个 clip", timelineAtomicKinds["timeline.split"])
+	return timelineAtomicOpSchema(timelineAtomicKinds["timeline.split"])
 }
 
-func timelineAtomicOpSchema(description string, kinds []string) *jsonschema.Schema {
+func timelineAtomicOpSchema(kinds []string) *jsonschema.Schema {
 	branches := make([]*jsonschema.Schema, 0, len(kinds))
 	properties := jsonschema.NewProperties()
-	kindValues := make([]any, 0, len(kinds))
 	properties.Set("kind", &jsonschema.Schema{Type: "string"})
 	for _, kind := range kinds {
 		spec, exists := timeline.LookupOpSpec(kind)
 		if !exists {
 			continue
 		}
-		kindValues = append(kindValues, kind)
 		for _, field := range spec.Fields {
 			if field.Injected || field.Generated {
 				continue
@@ -85,35 +84,42 @@ func timelineAtomicOpSchema(description string, kinds []string) *jsonschema.Sche
 		}
 		branches = append(branches, timelineAtomicOpBranchSchema(*spec))
 	}
-	kindSchema, _ := properties.Get("kind")
-	kindSchema.Enum = kindValues
 	return &jsonschema.Schema{
-		Type:                 "object",
-		Description:          description + "；kind 决定唯一 Catalog op",
-		Properties:           properties,
-		Required:             []string{"kind"},
-		AdditionalProperties: jsonschema.FalseSchema,
-		OneOf:                branches,
+		Type:       "object",
+		Properties: properties,
+		OneOf:      branches,
 	}
 }
 
-// timelineAtomicOpBranchSchema 不复用旧批量工具的教学型 schema（title、分支摘要、
-// 完整示例和兼容别名），只保留 provider 约束执行所需的信息。字段类型在根级只声明
-// 一次；每个分支只声明 kind const 与 required。额外组合由同源 Catalog 在 Registry
-// 解码阶段、进入 executor 前拒绝，不为 12 个 update 分支重复字段白名单。
+// timelineAtomicOpBranchSchema 用 required + maxProperties 锁住无可选字段的
+// kind；存在可选字段时再用 propertyNames pattern 声明精确白名单。字段类型仍在根层
+// 只声明一次，避免 12 个 update 分支重复后突破模型 schema 预算。
 func timelineAtomicOpBranchSchema(spec timeline.OpSpec) *jsonschema.Schema {
 	properties := jsonschema.NewProperties()
-	properties.Set("kind", &jsonschema.Schema{Type: "string", Const: spec.Kind})
+	properties.Set("kind", &jsonschema.Schema{Const: spec.Kind})
 	branch := &jsonschema.Schema{
 		Properties: properties,
 		Required:   []string{"kind"},
 	}
+	allowedNames := []string{"kind"}
 	for _, field := range spec.Fields {
 		if field.Injected || field.Generated {
 			continue
 		}
+		allowedNames = append(allowedNames, field.Name)
 		if field.Required {
 			branch.Required = append(branch.Required, field.Name)
+		}
+	}
+	maxProperties := uint64(len(allowedNames))
+	branch.MaxProperties = &maxProperties
+	if len(branch.Required) < len(allowedNames) {
+		escaped := make([]string, 0, len(allowedNames))
+		for _, name := range allowedNames {
+			escaped = append(escaped, regexp.QuoteMeta(name))
+		}
+		branch.PropertyNames = &jsonschema.Schema{
+			Pattern: "^(?:" + strings.Join(escaped, "|") + ")$",
 		}
 	}
 	if spec.Kind == "insert_clip" {
@@ -139,10 +145,11 @@ func TimelineAtomicOperation(toolName string, input any) (TimelineOp, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validateTimelineOp(operation); err != nil {
-		return nil, err
+	if err := timeline.ValidateOpFields(operation); err != nil {
+		return TimelineOp(operation), err
 	}
 	kind, _ := operation["kind"].(string)
+	spec, _ := timeline.LookupOpSpec(kind)
 	allowed := false
 	for _, candidate := range timelineAtomicKinds[toolName] {
 		if candidate == kind {
@@ -151,9 +158,12 @@ func TimelineAtomicOperation(toolName string, input any) (TimelineOp, error) {
 		}
 	}
 	if !allowed {
-		return nil, fmt.Errorf("%s 不接受 Catalog op %s", toolName, kind)
+		owner, _ := TimelineAtomicToolForKind(kind)
+		return TimelineOp(operation), &timeline.OpFieldError{
+			Kind: kind, Field: "kind", Spec: spec,
+			Reason: fmt.Sprintf("属于 %s，不属于 %s", owner, toolName),
+		}
 	}
-	spec, _ := timeline.LookupOpSpec(kind)
 	stableFields := map[string]bool{"kind": true}
 	for _, field := range spec.Fields {
 		if !field.Injected && !field.Generated {
@@ -192,6 +202,80 @@ func TimelineAtomicToolForKind(kind string) (string, bool) {
 	return "", false
 }
 
+func atomicTimelinePreflightFailure(toolName string, input any) (ToolResult, bool) {
+	if _, atomic := timelineAtomicKinds[toolName]; !atomic {
+		return ToolResult{}, false
+	}
+	operation, err := TimelineAtomicOperation(toolName, input)
+	if err == nil {
+		return ToolResult{}, false
+	}
+	var fieldErr *timeline.OpFieldError
+	if errors.As(err, &fieldErr) {
+		return TimelineAtomicFieldFailure(toolName, fieldErr, map[string]any(operation)), true
+	}
+	return ToolResult{
+		Status:      string(StatusFailed),
+		Observation: "原子时间线编辑输入不属于当前工具",
+		Data: map[string]any{
+			"reason":                     err.Error(),
+			"current_timeline_unchanged": true,
+			"recovery":                   "按当前工具 schema 只提交一个受支持的 kind；多个目标必须拆成多个工具调用。",
+		},
+	}, true
+}
+
+// TimelineAtomicFieldFailure is shared by Registry preflight and direct
+// executor calls. Model invocations receive structured repair evidence without
+// entering the executor; internal calls retain the same recovery contract.
+func TimelineAtomicFieldFailure(
+	toolName string,
+	fieldErr *timeline.OpFieldError,
+	operation map[string]any,
+) ToolResult {
+	data := map[string]any{
+		"error_code":                 string(ErrCodeTimelineOpFieldError),
+		"op_kind":                    fieldErr.Kind,
+		"invalid_field":              fieldErr.Field,
+		"failed_op":                  operation,
+		"reason":                     fieldErr.Error(),
+		"current_timeline_unchanged": true,
+	}
+	if fieldErr.Spec != nil {
+		if expected := TimelineOpExpectedSchema(toolName, *fieldErr.Spec); expected != nil {
+			data["expected_schema"] = expected
+			data["correct_example"] = timeline.CorrectOpExample(*fieldErr.Spec)
+			data["recovery"] = "只修正当前 op 的字段名与类型后重新调用；不要原样重发失败参数。"
+		} else if owner, exists := TimelineAtomicToolForKind(fieldErr.Spec.Kind); exists {
+			data["required_tool"] = owner
+			data["op_catalog"] = timelineAtomicCatalogIndex(toolName)
+			data["recovery"] = "该 kind 属于 required_tool；不要在当前工具中修补或重发。改用 required_tool，并按其 schema 补齐字段。"
+		} else {
+			data["op_catalog"] = timelineAtomicCatalogIndex(toolName)
+			data["recovery"] = "从当前工具的 op_catalog 选择受支持的 kind，再按字段约定重新调用。"
+		}
+	} else {
+		data["op_catalog"] = timelineAtomicCatalogIndex(toolName)
+		data["recovery"] = "从 op_catalog 选择受支持的 kind，再按该操作的字段约定重新调用。"
+	}
+	return ToolResult{
+		Status:      string(StatusFailed),
+		Observation: "时间线补丁字段预校验失败：" + fieldErr.Error(),
+		Data:        data,
+	}
+}
+
+func timelineAtomicCatalogIndex(toolName string) []map[string]string {
+	specs := TimelineAtomicCatalog(toolName)
+	index := make([]map[string]string, 0, len(specs))
+	for _, spec := range specs {
+		index = append(index, map[string]string{
+			"kind": spec.Kind, "summary": spec.Summary,
+		})
+	}
+	return index
+}
+
 func atomicInsertTrackAllowed(trackID string) bool {
 	switch trackID {
 	case "visual_base", "visual_overlay", "voiceover", "bgm", "sfx":
@@ -223,173 +307,63 @@ func timelineAtomicInputMap(toolName string, input any) (map[string]any, error) 
 	return nil, fmt.Errorf("%s 输入类型不匹配: %T", toolName, input)
 }
 
-// JSONSchema 为 Eino 的参数反射提供 Catalog 驱动的主动 schema。
-// 必须使用值接收者：jsonschema v1.0.3 通过非指针类型的方法集识别自定义 schema。
-func (TimelineOp) JSONSchema() *jsonschema.Schema {
-	branches := make([]*jsonschema.Schema, 0, len(timeline.Catalog))
-	for _, spec := range timeline.Catalog {
-		branches = append(branches, timelineOpBranchSchema(spec))
+// TimelineOpExpectedSchema 为当前原子工具的失败恢复生成 expected_schema。
+// 它只暴露该工具实际接受的正式模型字段，不包含兼容别名、注入字段或生成字段。
+func TimelineOpExpectedSchema(toolName string, spec timeline.OpSpec) map[string]any {
+	owner, exposed := TimelineAtomicToolForKind(spec.Kind)
+	if !exposed || owner != toolName {
+		return nil
 	}
-	return &jsonschema.Schema{
-		Type:        "object",
-		Description: "从 oneOf 选择一种扁平时间线语义补丁；kind 与字段由同一 Catalog 约束",
-		OneOf:       branches,
-	}
-}
-
-// —— 单一 Catalog→schema 派生（#95 T4）——
-//
-// timelineOpBranchPlan 把「遍历非注入字段、展开别名、归组 required / anyOf」这套结构逻辑
-// 收敛为一次遍历。前向 oneOf schema（*jsonschema.Schema，模型可见）与失败恢复 expected_schema
-// （map[string]any，回灌模型的纠错提示）两个渲染器都从同一个 plan 生成，不再各写一份同构遍历。
-// 两侧输出的格式差异（前向带 title/branch example/别名 example，恢复 additionalProperties:false、
-// 别名描述后缀且不带 example）由各自的渲染器保留，逐字不变。
-
-type timelineOpProperty struct {
-	name     string
-	jsonType string
-	desc     string // 基础描述；别名前缀/后缀由各渲染器套用
-	isArray  bool
-	aliasFor string // "" 表示主字段，否则为所对应的主字段名
-	example  any    // 原始 field.Example（可能为 nil）；前向渲染器使用
-}
-
-type timelineOpBranchPlan struct {
-	kind        string
-	summary     string
-	properties  []timelineOpProperty // 顺序：每个字段先主字段、再其别名
-	required    []string             // 无别名的必填字段，按字段顺序
-	anyOfGroups [][]string           // 别名组（字段顺序）后接 RequireAny 组
-}
-
-func timelineOpBranchPlanFor(spec timeline.OpSpec) timelineOpBranchPlan {
-	plan := timelineOpBranchPlan{kind: spec.Kind, summary: spec.Summary}
-	for _, field := range spec.Fields {
-		if field.Injected {
-			continue
-		}
-		jsonType := timelineOpJSONType(field.Type)
-		isArray := field.Type == timeline.OpFieldStringArray
-		plan.properties = append(plan.properties, timelineOpProperty{
-			name: field.Name, jsonType: jsonType, desc: field.Desc,
-			isArray: isArray, aliasFor: "", example: field.Example,
-		})
-		for _, alias := range field.Aliases {
-			plan.properties = append(plan.properties, timelineOpProperty{
-				name: alias, jsonType: jsonType, desc: field.Desc,
-				isArray: isArray, aliasFor: field.Name, example: field.Example,
-			})
-		}
-		if !field.Required {
-			continue
-		}
-		if len(field.Aliases) == 0 {
-			plan.required = append(plan.required, field.Name)
-			continue
-		}
-		plan.anyOfGroups = append(plan.anyOfGroups, append([]string{field.Name}, field.Aliases...))
-	}
-	if len(spec.RequireAny) > 0 {
-		plan.anyOfGroups = append(plan.anyOfGroups, append([]string(nil), spec.RequireAny...))
-	}
-	return plan
-}
-
-// timelineOpBranchSchema 是前向 oneOf 分支渲染器：把 plan 编译成模型可见的 *jsonschema.Schema。
-func timelineOpBranchSchema(spec timeline.OpSpec) *jsonschema.Schema {
-	plan := timelineOpBranchPlanFor(spec)
-	properties := jsonschema.NewProperties()
-	properties.Set("kind", &jsonschema.Schema{
-		Type:        "string",
-		Const:       plan.kind,
-		Description: plan.summary,
-	})
-	branch := &jsonschema.Schema{
-		Type:                 "object",
-		Title:                plan.kind,
-		Description:          plan.summary,
-		Properties:           properties,
-		Required:             append([]string{"kind"}, plan.required...),
-		AdditionalProperties: jsonschema.FalseSchema,
-		Examples:             []any{timeline.CorrectOpExample(spec)},
-	}
-	for _, property := range plan.properties {
-		properties.Set(property.name, timelineOpForwardFieldSchema(property))
-	}
-	for _, group := range plan.anyOfGroups {
-		alternatives := make([]*jsonschema.Schema, 0, len(group))
-		for _, name := range group {
-			alternatives = append(alternatives, &jsonschema.Schema{Required: []string{name}})
-		}
-		branch.AllOf = append(branch.AllOf, &jsonschema.Schema{AnyOf: alternatives})
-	}
-	return branch
-}
-
-func timelineOpForwardFieldSchema(property timelineOpProperty) *jsonschema.Schema {
-	description := property.desc
-	if property.aliasFor != "" {
-		description = "兼容别名，对应 " + property.aliasFor + "；" + description
-	}
-	schema := &jsonschema.Schema{
-		Type:        property.jsonType,
-		Description: description,
-	}
-	if property.example != nil {
-		schema.Examples = []any{cloneTimelineOpSchemaExample(property.example)}
-	}
-	if property.isArray {
-		schema.Items = &jsonschema.Schema{Type: "string"}
-	}
-	return schema
-}
-
-// TimelineOpExpectedSchema 是失败恢复渲染器：把同一个 plan 渲染成 expected_schema map，
-// 供 apply_patches 字段/语义失败时回灌模型。与前向 schema 同源于 timelineOpBranchPlanFor，
-// 因此新增 op 字段只需改 timeline.Catalog 一处。
-func TimelineOpExpectedSchema(spec timeline.OpSpec) map[string]any {
-	plan := timelineOpBranchPlanFor(spec)
-	// 示例值沿用 Catalog 的正确示例并逐次深拷贝，保持与前向一致、且回灌 map 不暴露可变引用。
 	correctExample := timeline.CorrectOpExample(spec)
 	properties := map[string]any{
 		"kind": map[string]any{
-			"type": "string", "const": plan.kind, "description": plan.summary,
+			"type": "string", "const": spec.Kind, "description": spec.Summary,
 		},
 	}
-	for _, property := range plan.properties {
-		if property.aliasFor != "" {
-			properties[property.name] = map[string]any{
-				"type":        property.jsonType,
-				"description": property.desc + "（兼容别名，对应 " + property.aliasFor + "）",
-			}
+	required := []string{"kind"}
+	for _, opField := range spec.Fields {
+		if opField.Injected || opField.Generated {
 			continue
 		}
-		field := map[string]any{"type": property.jsonType, "description": property.desc}
-		if property.isArray {
+		field := map[string]any{
+			"type": timelineOpJSONType(opField.Type), "description": opField.Desc,
+		}
+		if opField.Type == timeline.OpFieldStringArray {
 			field["items"] = map[string]any{"type": "string"}
 		}
-		if example, exists := correctExample[property.name]; exists {
+		if example, exists := correctExample[opField.Name]; exists {
 			field["examples"] = []any{example}
 		}
-		properties[property.name] = field
+		properties[opField.Name] = field
+		if opField.Required {
+			required = append(required, opField.Name)
+		}
 	}
 	schema := map[string]any{
 		"type": "object", "properties": properties,
-		"required":             append([]string{"kind"}, plan.required...),
+		"required":             required,
 		"additionalProperties": false,
 	}
-	if len(plan.anyOfGroups) > 0 {
-		allOf := make([]map[string]any, 0, len(plan.anyOfGroups))
-		for _, group := range plan.anyOfGroups {
-			choices := make([]map[string]any, 0, len(group))
-			for _, name := range group {
-				choices = append(choices, map[string]any{"required": []string{name}})
-			}
-			allOf = append(allOf, map[string]any{"anyOf": choices})
+	if len(spec.RequireAny) > 0 {
+		choices := make([]map[string]any, 0, len(spec.RequireAny))
+		for _, name := range spec.RequireAny {
+			choices = append(choices, map[string]any{"required": []string{name}})
 		}
-		schema["allOf"] = allOf
+		schema["allOf"] = []map[string]any{{"anyOf": choices}}
 	}
 	return schema
+}
+
+// TimelineAtomicCatalog 返回当前原子工具可接受的 Catalog 子集。
+func TimelineAtomicCatalog(toolName string) []timeline.OpSpec {
+	kinds := timelineAtomicKinds[toolName]
+	result := make([]timeline.OpSpec, 0, len(kinds))
+	for _, kind := range kinds {
+		if spec, exists := timeline.LookupOpSpec(kind); exists {
+			result = append(result, *spec)
+		}
+	}
+	return result
 }
 
 func cloneTimelineOpSchemaExample(value any) any {
@@ -428,8 +402,7 @@ func timelineOpJSONType(fieldType timeline.OpFieldType) string {
 	case timeline.OpFieldStringArray:
 		return "array"
 	default:
-		// 保留恢复侧旧兜底：未知字段类型回退 "string"。Catalog 现有类型均命中上面的
-		// case，此分支不影响任何 golden 字节，只是让未来新增未登记类型时仍产出合法 JSON type。
+		// Catalog 现有类型均命中上面的 case；未来新增未登记类型时仍产出合法 JSON type。
 		return "string"
 	}
 }

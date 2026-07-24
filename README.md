@@ -143,13 +143,16 @@ CI 在 Ubuntu 与 macOS 上执行 Go `-race`，并运行契约对拍、90% 覆�
 cd go
 set -a; source ../.env; set +a
 RUSHES_LIVE_TOOL_EVAL=1 RUSHES_TOOL_EVAL_RUNS=5 \
-  go test ./internal/agent -run TestLiveToolCallingStability -count=1 -v
+  ../scripts/run_go_test_exact.sh ./internal/agent TestLiveToolCallingStability \
+  -timeout=30m
 RUSHES_TALKING_HEAD_EVAL=1 \
-  go test ./internal/agent -run TestTalkingHeadRealMaterialAcceptance -count=1 -v
+  ../scripts/run_go_test_exact.sh ./internal/agent TestTalkingHeadRealMaterialAcceptance \
+  -timeout=30m
 RUSHES_REQUIRE_LIVE_MODELS=1 \
 RUSHES_ASR_LIVE_SOURCE=/absolute/path/to/aroll-without-sidecar.mp4 \
-  go test -tags=integration ./internal/agent \
-  -run TestSpeechInspectBuildsRealFunASRTranscript -count=1 -v
+  ../scripts/run_go_test_exact.sh ./internal/agent \
+  TestSpeechTranscribeThenSearchBuildsRealFunASRTranscript \
+  -tags=integration -timeout=30m
 ```
 
 三项验收的硬门槛均为 95%；第二项会通过工具注册表调用真实练习素材，检查 A/B-roll 角色、逐句索引、气口删除、B-roll 语义检索、时间线不变量与上下文全文隔离；第三项必须使用没有同名 SRT 的真实口播，覆盖 DashScope 分块转写、空分块容错、SQLite 持久化与重复工具调用成功率。

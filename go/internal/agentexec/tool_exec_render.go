@@ -23,7 +23,7 @@ import (
 func (exec *Executor) toolEnqueueRender(
 	ctx context.Context,
 	draftID, kind, orientation string,
-	expectedTimelineID *string,
+	expectedTimelineID string,
 ) (rushestools.ToolResult, error) {
 	orientation, err := normalizeRenderOrientation(orientation)
 	if err != nil {
@@ -41,13 +41,13 @@ func (exec *Executor) toolEnqueueRender(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	if expectedTimelineID != nil && *expectedTimelineID != document.TimelineID {
+	if expectedTimelineID != document.TimelineID {
 		return rushestools.ToolResult{
 			Status:      string(rushestools.StatusFailed),
 			Observation: "目标时间线已经变化，未创建渲染任务",
 			Data: map[string]any{
 				"error_code":                 string(rushestools.ErrCodeStaleTarget),
-				"requested_timeline_id":      *expectedTimelineID,
+				"requested_timeline_id":      expectedTimelineID,
 				"current_timeline_id":        document.TimelineID,
 				"current_timeline_version":   timelineVersion,
 				"current_timeline_unchanged": true,
@@ -183,7 +183,7 @@ func (exec *Executor) toolStartRender(
 		}, nil
 	}
 	return exec.toolEnqueueRender(
-		ctx, draftID, kind, input.Orientation, &input.TimelineID,
+		ctx, draftID, kind, input.Orientation, input.TimelineID,
 	)
 }
 
@@ -390,20 +390,6 @@ func boundedJobFailureText(value string, limit int) string {
 		return string(runes[:limit])
 	}
 	return string(runes[:limit-1]) + "…"
-}
-
-func (exec *Executor) toolRenderStatus(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
-	draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
-	if err != nil {
-		return rushestools.ToolResult{}, err
-	}
-	return rushestools.ToolResult{
-		Status: string(rushestools.StatusSucceeded), Observation: "已读取渲染状态",
-		Data: map[string]any{
-			"preview_id": draft.PreviewCurrentID, "export_id": draft.ExportCurrentID,
-			"running_jobs": draft.RunningJobs,
-		},
-	}, nil
 }
 
 func (exec *Executor) toolCheckPreview(

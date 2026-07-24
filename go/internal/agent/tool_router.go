@@ -8,6 +8,7 @@ import (
 
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -212,5 +213,6 @@ func (router *toolRouter) node(message *schema.Message) *compose.ToolsNode {
 func (router *toolRouter) Invoke(
 	ctx context.Context, input *schema.Message, opts ...compose.ToolsNodeOption,
 ) ([]*schema.Message, error) {
+	ctx = agentexec.WithAtomicEditAdmission(ctx)
 	return router.node(input).Invoke(ctx, input, opts...)
 }

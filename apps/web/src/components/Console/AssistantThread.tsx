@@ -1216,9 +1216,8 @@ const TOOL_STEP_LABELS: Record<string, string> = {
   "audio.analyze_beats": "分析音乐节拍",
   "audio.analyze_speech_pauses": "分析口播气口",
   "decision.answer": "记录你的回答",
-  // timeline.apply_patch 自 #100 起已从 LLM 工具面移除，此标签仅供历史轨迹展示回放，勿随工具删除清理。
+  // 此表同时保留旧工具标签用于历史轨迹回放；标签存在不代表 Registry 或 executor 仍可调用对应旧工具。
   "timeline.apply_patch": "修改时间线",
-  // apply_patches 仅供编辑器 REST/harness 与历史轨迹；模型使用下面四个原子入口。
   "timeline.apply_patches": "批量修改时间线",
   "timeline.insert": "插入时间线内容",
   "timeline.delete": "删除时间线内容",
@@ -1226,6 +1225,7 @@ const TOOL_STEP_LABELS: Record<string, string> = {
   "timeline.split": "切分时间线片段",
   "timeline.recut_to_beats": "按节拍重剪",
   "timeline.compose_initial": "生成初版时间线",
+  "timeline.edit_talking_head": "编辑口播视频",
   "timeline.check": "检查时间线",
   "timeline.inspect": "查看时间线",
   "render.preview": "渲染预览",

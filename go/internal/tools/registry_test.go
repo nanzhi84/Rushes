@@ -11,7 +11,6 @@ import (
 
 	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
-	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
 
 type fakeExecutor struct{}
@@ -126,6 +125,17 @@ type cleanInput struct {
 	Value string `json:"value"`
 }
 
+type requiredNestedInput struct {
+	Value string `json:"value" jsonschema:"required"`
+}
+
+type requiredEnvelopeInput struct {
+	Item    *requiredNestedInput  `json:"item" jsonschema:"required"`
+	Items   []requiredNestedInput `json:"items"`
+	Ignored string                `json:"-"`
+	private string
+}
+
 type failingExecutor struct{}
 
 func (failingExecutor) ExecuteTool(context.Context, string, any) (any, error) {
@@ -151,6 +161,66 @@ func TestDetectShotsResultJSONUsesSingleAssetShape(t *testing.T) {
 	if decoded.Status != "completed" || decoded.AssetID != "asset" {
 		t.Fatalf("单素材 JSON 无法解码: %#v", decoded)
 	}
+}
+
+func TestValidateRequiredFieldsRejectsMalformedAtomicInputs(t *testing.T) {
+	t.Parallel()
+	assertError := func(name string, input reflect.Type, value any) {
+		t.Helper()
+		if err := validateRequiredFields(input, value, "arguments"); err == nil {
+			t.Fatalf("%s should fail", name)
+		}
+	}
+
+	assertError("nil pointer", reflect.TypeFor[*requiredNestedInput](), nil)
+	assertError("atomic input is not object", reflect.TypeFor[TimelineInsertInput](), []any{})
+	assertError(
+		"atomic input missing fields",
+		reflect.TypeFor[TimelineInsertInput](),
+		map[string]any{},
+	)
+	assertError(
+		"nested required field missing",
+		reflect.TypeFor[requiredEnvelopeInput](),
+		map[string]any{"item": map[string]any{}},
+	)
+	assertError(
+		"slice contains null",
+		reflect.TypeFor[[]requiredNestedInput](),
+		[]any{nil},
+	)
+
+	if err := validateRequiredFields(
+		reflect.TypeFor[requiredEnvelopeInput](),
+		"not-an-object",
+		"arguments",
+	); err != nil {
+		t.Fatalf("non-object struct is handled by JSON decoding before required validation: %v", err)
+	}
+	if err := validateRequiredFields(
+		reflect.TypeFor[[]requiredNestedInput](),
+		"not-an-array",
+		"arguments",
+	); err != nil {
+		t.Fatalf("non-array slice is handled by JSON decoding before required validation: %v", err)
+	}
+	if name, atomic := atomicTimelineToolForType(reflect.TypeFor[string]()); atomic || name != "" {
+		t.Fatalf("non-atomic type classified as %q", name)
+	}
+	if value := atomicTimelineInputValue(reflect.TypeFor[string](), map[string]any{}); value != nil {
+		t.Fatalf("non-atomic value=%#v", value)
+	}
+	if err := validateRequiredFields(
+		reflect.TypeFor[requiredEnvelopeInput](),
+		map[string]any{
+			"item":  map[string]any{"value": "ok"},
+			"items": []any{},
+		},
+		"arguments",
+	); err != nil {
+		t.Fatalf("valid nested input=%v", err)
+	}
+	_ = requiredEnvelopeInput{private: "not-model-facing"}
 }
 
 func TestAssetManifestModelFacingFieldsHaveDescriptions(t *testing.T) {
@@ -225,7 +295,6 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		"audio.analyze_beats":         EffectReadOnly,
 		"audio.analyze_speech_pauses": EffectReadOnly,
 		"timeline.inspect":            EffectReadOnly,
-		"render.status":               EffectReadOnly,
 		"job.read":                    EffectReadOnly,
 		"preview.check":               EffectReadOnly,
 		"media.detect_shots":          EffectReversible,
@@ -235,17 +304,11 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		"interaction.ask_user":        EffectReversible,
 		"decision.answer":             EffectReversible,
 		"interaction.confirm_action":  EffectReversible,
-		"timeline.compose_initial":    EffectReversible,
-		"timeline.apply_patches":      EffectReversible,
 		"timeline.insert":             EffectReversible,
 		"timeline.delete":             EffectReversible,
 		"timeline.update":             EffectReversible,
 		"timeline.split":              EffectReversible,
-		"timeline.recut_to_beats":     EffectReversible,
-		"timeline.edit_talking_head":  EffectReversible,
 		"timeline.check":              EffectReadOnly,
-		"render.preview":              EffectReversible,
-		"render.final_mp4":            EffectReversible,
 		"render.start":                EffectReversible,
 		"memory.set":                  EffectReversible,
 		"memory.remove":               EffectDestructive,
@@ -290,19 +353,12 @@ func TestToolPrimitiveClassificationMatchesEffectAndSurface(t *testing.T) {
 		"plan.update":                 FamilyControl,
 		"memory.set":                  FamilyControl,
 		"memory.remove":               FamilyControl,
-		"timeline.compose_initial":    FamilyEdit,
-		"timeline.apply_patches":      FamilyEdit,
 		"timeline.insert":             FamilyEdit,
 		"timeline.delete":             FamilyEdit,
 		"timeline.update":             FamilyEdit,
 		"timeline.split":              FamilyEdit,
-		"timeline.recut_to_beats":     FamilyEdit,
-		"timeline.edit_talking_head":  FamilyEdit,
 		"timeline.check":              FamilyCheck,
 		"timeline.inspect":            FamilyRead,
-		"render.preview":              FamilyEdit,
-		"render.final_mp4":            FamilyEdit,
-		"render.status":               FamilyRead,
 		"render.start":                FamilyEdit,
 		"job.read":                    FamilyRead,
 		"preview.check":               FamilyCheck,
@@ -408,10 +464,13 @@ func TestAdmissionInterceptorRunsBeforePreconditionGuard(t *testing.T) {
 		}
 	})
 
-	renderFinal := registry.specs["render.final_mp4"].Implementation.(einotool.InvokableTool)
-	_, err = renderFinal.InvokableRun(WithDraftID(t.Context(), "draft_admission"), `{}`)
+	deleteClip := registry.specs["timeline.delete"].Implementation.(einotool.InvokableTool)
+	_, err = deleteClip.InvokableRun(
+		WithDraftID(t.Context(), "draft_admission"),
+		`{"kind":"delete_clip","timeline_clip_id":"missing"}`,
+	)
 	var rejection *InterceptorRejection
-	if !errors.As(err, &rejection) || rejection.Data["tool"] != "render.final_mp4" {
+	if !errors.As(err, &rejection) || rejection.Data["tool"] != "timeline.delete" {
 		t.Fatalf("准入拦截器应先于 timeline_exists guard 拒绝: %v", err)
 	}
 }
@@ -467,30 +526,6 @@ func TestRegistryDecodeInputCoversEveryLLMTool(t *testing.T) {
 		t.Fatal("没有覆盖任何 LLM 工具")
 	}
 
-	talkingHead, err := registry.DecodeInput("timeline.edit_talking_head", map[string]any{
-		"a_roll_timeline_clip_id": "clip_v1_001",
-		"remove_utterance_ids":    []any{"utt_1"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	talkingHeadInput := talkingHead.(TalkingHeadEditInput)
-	if talkingHeadInput.ARollTimelineClipID != "clip_v1_001" || len(talkingHeadInput.RemoveUtteranceIDs) != 1 {
-		t.Fatalf("talking head input=%#v", talkingHeadInput)
-	}
-	if _, err := registry.DecodeInput("timeline.edit_talking_head", map[string]any{
-		"a_roll_timeline_clip_id":      "clip_v1_001",
-		"preserve_speech_fragment_ids": []any{"legacy_fragment"},
-	}); err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("legacy fragment preservation input must be rejected: %v", err)
-	}
-	talkingHeadTool := registry.specs["timeline.edit_talking_head"].Implementation.(einotool.InvokableTool)
-	if _, err := talkingHeadTool.InvokableRun(
-		WithDraftID(t.Context(), "draft"),
-		`{"a_roll_timeline_clip_id":"clip_v1_001","remove_utterance_ids":["utt_1"],"preserve_speech_fragment_ids":["legacy_fragment"]}`,
-	); err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("production tool path must reject legacy fragment preservation input: %v", err)
-	}
 	speech, err := registry.DecodeInput("speech.search", map[string]any{
 		"timeline_clip_id": "clip_v1_001", "query": "口播",
 	})
@@ -502,14 +537,6 @@ func TestRegistryDecodeInputCoversEveryLLMTool(t *testing.T) {
 	}
 	if _, err := registry.DecodeInput("missing", map[string]any{}); err == nil {
 		t.Fatal("未注册工具必须拒绝解码")
-	}
-	for name, arguments := range map[string]map[string]any{
-		"render.final_mp4":       {"orientation": nil},
-		"timeline.apply_patches": {"ops": []any{nil}},
-	} {
-		if _, err := registry.DecodeInput(name, arguments); err == nil || !strings.Contains(err.Error(), "不允许为 null") {
-			t.Errorf("DecodeInput(%s) explicit null err=%v", name, err)
-		}
 	}
 }
 
@@ -541,13 +568,6 @@ func TestRegistryConfirmationValidationRejectsUnsafeTargets(t *testing.T) {
 		{name: "timeline.inspect", args: map[string]any{"unknown": true}},
 		{name: "media.detect_shots", args: nil},
 		{name: "media.detect_shots", args: map[string]any{}},
-		{name: "render.final_mp4", args: map[string]any{"orientation": nil}},
-		{name: "timeline.compose_initial", args: map[string]any{"clips": []any{map[string]any{}}}},
-		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{nil}}},
-		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{map[string]any{}}}},
-		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{map[string]any{"kind": "delete_clip"}}}},
-		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{map[string]any{"kind": "unknown"}}}},
-		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{map[string]any{"kind": "delete_clip", "clip_id": "clip_1", "extra": true}}}},
 	} {
 		if err := registry.ValidateConfirmation(ctx, fixture.name, fixture.args); err == nil {
 			t.Errorf("ValidateConfirmation(%s) should fail", fixture.name)
@@ -600,9 +620,6 @@ func minimalDecodeArguments(input reflect.Type) map[string]any {
 func minimalDecodeValue(value reflect.Type) any {
 	for value.Kind() == reflect.Pointer {
 		value = value.Elem()
-	}
-	if value == reflect.TypeFor[TimelineOp]() {
-		return timeline.CorrectOpExample(timeline.Catalog[0])
 	}
 	switch value.Kind() {
 	case reflect.String:
@@ -746,25 +763,12 @@ func TestCoreInferToolRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := registry.Specs(false)
-	if len(core) != 28 {
-		t.Fatalf("core tools=%d", len(core))
-	}
-	if len(registry.Specs(true)) != 30 {
-		t.Fatalf("all tools=%d", len(registry.Specs(true)))
-	}
 	for _, spec := range registry.Specs(true) {
 		info, infoErr := spec.Implementation.Info(t.Context())
 		if infoErr != nil || info.Name != spec.Name || info.Desc == "" {
 			t.Fatalf("spec=%s info=%#v err=%v", spec.Name, info, infoErr)
 		}
 	}
-	if got := len(registry.EinoTools(false, false)); got != 20 {
-		t.Fatalf("LLM core tools=%d", got)
-	}
-	if got := len(registry.EinoTools(false, true)); got != 28 {
-		t.Fatalf("含 harness core tools=%d", got)
-	}
-
 	ctx := WithDraftID(t.Context(), "draft_tools")
 	var listTool einotool.InvokableTool
 	for _, spec := range core {
@@ -933,6 +937,9 @@ func TestDecisionAnswerSchemaRequiresAnAnswerForm(t *testing.T) {
 
 func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	t.Parallel()
+	if _, exists := PreconditionRegistry["timeline_absent"]; exists {
+		t.Fatal("已删除的 compose_initial 不得留下 timeline_absent 准入分支")
+	}
 	database, err := storage.Open(t.Context(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -948,8 +955,8 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if containsSpec(allowed, "timeline.compose_initial") || containsSpec(allowed, "render.preview") {
-		t.Fatalf("空草稿错误放行: %#v", allowed)
+	if !containsSpec(allowed, "timeline.insert") {
+		t.Fatal("空时间线应始终保留首个原子 insert，具体素材 ID 由执行器校验")
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := database.Write().ExecContext(t.Context(), `
@@ -968,19 +975,24 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	if !containsSpec(allowed, "audio.analyze_speech_pauses") {
 		t.Fatal("可用素材存在后气口分析未放行")
 	}
-	for _, old := range []string{"timeline.compose_initial", "timeline.recut_to_beats"} {
-		if containsSpec(allowed, old) {
-			t.Fatalf("迁移后的模型工具面不应放行 %s", old)
-		}
+	if containsSpec(allowed, "speech.search") {
+		t.Fatal("没有任何 transcript 索引时不应披露 speech.search")
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO transcripts(
+			transcript_id,asset_id,provider_id,raw_preserved,utterances_json,vad_segments_json
+		) VALUES('transcript_gate','asset','fixture',0,'[]','[]')`); err != nil {
+		t.Fatal(err)
+	}
+	allowed, _ = registry.Allowed(ctx, true)
+	if !containsSpec(allowed, "speech.search") {
+		t.Fatal("任一关联可用素材已有 transcript 索引后应披露 speech.search")
 	}
 	if _, err := database.Write().ExecContext(t.Context(),
 		"UPDATE drafts SET timeline_current_version=1, timeline_validated=0 WHERE draft_id='draft_gate'"); err != nil {
 		t.Fatal(err)
 	}
 	allowed, _ = registry.Allowed(ctx, true)
-	if containsSpec(allowed, "timeline.compose_initial") {
-		t.Fatal("已有时间线时 compose_initial 不应放行")
-	}
 	for _, name := range []string{
 		"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
 		"timeline.check", "timeline.inspect", "render.start", "job.read",

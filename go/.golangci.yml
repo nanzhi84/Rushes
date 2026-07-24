@@ -130,10 +130,12 @@ linters:
             - "**/internal/agenttest/**/*.go"
           allow:
             - $gostd
+            - github.com/nanzhi84/Rushes/go/internal/agenttest/timelinefixture
             - github.com/nanzhi84/Rushes/go/internal/contracts
             - github.com/nanzhi84/Rushes/go/internal/media
             - github.com/nanzhi84/Rushes/go/internal/reducer
             - github.com/nanzhi84/Rushes/go/internal/storage
+            - github.com/nanzhi84/Rushes/go/internal/timeline
 
         agentexec:
           list-mode: strict

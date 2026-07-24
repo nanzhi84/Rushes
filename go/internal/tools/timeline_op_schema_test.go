@@ -1,11 +1,11 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"reflect"
-	"runtime"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
@@ -14,54 +14,6 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
-
-func TestTimelineApplyPatchesInfoCompilesCatalogToOneOf(t *testing.T) {
-	t.Parallel()
-	database, err := storage.Open(t.Context(), t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	registry, err := NewRegistry(database, fakeExecutor{})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var applyPatches Spec
-	for _, spec := range registry.Specs(true) {
-		if spec.Name == "timeline.apply_patches" {
-			applyPatches = spec
-			break
-		}
-	}
-	if applyPatches.Implementation == nil {
-		t.Fatal("timeline.apply_patches 未注册")
-	}
-	info, err := applyPatches.Implementation.Info(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	parameters, err := info.ToJSONSchema()
-	if err != nil {
-		t.Fatal(err)
-	}
-	opsSchema, exists := parameters.Properties.Get("ops")
-	if !exists || opsSchema.Type != "array" || opsSchema.Items == nil {
-		t.Fatalf("timeline.apply_patches ops schema=%#v", opsSchema)
-	}
-	assertTimelineOpCatalogSchema(t, opsSchema.Items)
-}
-
-// 这个快照测试有意锁定 Eino v0.9.12 与 jsonschema v1.0.3 的自定义类型反射链。
-// 升级任一依赖时，必须先确认 TimelineOp{} 仍被反射为主动 oneOf，而不是普通 map。
-func TestTimelineOpReflectionSnapshotPinsOneOf(t *testing.T) {
-	t.Parallel()
-	reflector := jsonschema.Reflector{Anonymous: true, DoNotReference: true}
-	reflected := reflector.Reflect(TimelineOp{})
-	assertTimelineOpCatalogSchema(t, reflected)
-	assertGoModDependencyVersion(t, "github.com/cloudwego/eino", "v0.9.12")
-	assertGoModDependencyVersion(t, "github.com/eino-contrib/jsonschema", "v1.0.3")
-}
 
 func TestAtomicTimelineSchemasPartitionCatalogWithoutBatchOrInjectedFields(t *testing.T) {
 	t.Parallel()
@@ -90,12 +42,24 @@ func TestAtomicTimelineSchemasPartitionCatalogWithoutBatchOrInjectedFields(t *te
 				t.Fatalf("Catalog op %s 同时属于 %s 与 %s", kind, owner, fixture.name)
 			}
 			seen[kind] = fixture.name
+			spec, _ := timeline.LookupOpSpec(kind)
+			allowedNames := modelFacingTimelineOpFieldNames(*spec)
+			if branch.MaxProperties == nil ||
+				*branch.MaxProperties != uint64(len(allowedNames)) {
+				t.Errorf(
+					"%s.%s maxProperties=%v want=%d",
+					fixture.name, kind, branch.MaxProperties, len(allowedNames),
+				)
+			}
 			for _, hidden := range []string{
 				"ops", "asset_kind", "include_original_audio", "audio_asset_ids",
 			} {
-				if _, exposed := branch.Properties.Get(hidden); exposed {
+				if _, exposed := fixture.schema.Properties.Get(hidden); exposed {
 					t.Errorf("%s.%s 暴露字段 %s", fixture.name, kind, hidden)
 				}
+			}
+			if len(branch.Required) < len(allowedNames) {
+				assertPropertyNameWhitelist(t, fixture.name, kind, branch, allowedNames)
 			}
 		}
 	}
@@ -105,11 +69,8 @@ func TestAtomicTimelineSchemasPartitionCatalogWithoutBatchOrInjectedFields(t *te
 		!containsString(updateSchema.Not.Required, "track_id") {
 		t.Fatalf("timeline.update 未在 schema 层拒绝双 target: %#v", updateSchema.Not)
 	}
-	if _, exposed := seen["sync_original_audio"]; exposed {
-		t.Fatal("sync_original_audio 不得进入模型可见原子 schema")
-	}
-	if len(seen) != len(timeline.Catalog)-1 {
-		t.Fatalf("原子 schema 覆盖 %d 个 op，期望排除 sync_original_audio 后为 %d", len(seen), len(timeline.Catalog)-1)
+	if len(seen) != len(timeline.Catalog) {
+		t.Fatalf("原子 schema 覆盖 %d 个 op，期望完整覆盖 %d", len(seen), len(timeline.Catalog))
 	}
 	insertSchema := (TimelineInsertInput{}).JSONSchema()
 	for _, generated := range []string{"timeline_clip_id", "parent_block_id"} {
@@ -121,6 +82,16 @@ func TestAtomicTimelineSchemasPartitionCatalogWithoutBatchOrInjectedFields(t *te
 	if _, exposed := splitSchema.Properties.Get("new_timeline_clip_id"); exposed {
 		t.Error("timeline.split 暴露服务端生成字段 new_timeline_clip_id")
 	}
+	adjustGain := timelineOpBranchByKind(t, updateSchema, "adjust_gain")
+	if adjustGain.MaxProperties == nil || *adjustGain.MaxProperties != 3 ||
+		len(adjustGain.Required) != 3 {
+		t.Fatalf("adjust_gain 未用 required+maxProperties 拒绝跨 kind 字段: %#v", adjustGain)
+	}
+	setFades := timelineOpBranchByKind(t, updateSchema, "set_clip_fades")
+	if setFades.MaxProperties == nil || *setFades.MaxProperties != 4 ||
+		len(setFades.Required) != 4 {
+		t.Fatalf("set_clip_fades 未用 required+maxProperties 拒绝跨 kind 字段: %#v", setFades)
+	}
 	insertClip := timelineOpBranchByKind(t, insertSchema, "insert_clip")
 	trackID, exists := insertClip.Properties.Get("track_id")
 	if !exists || !reflect.DeepEqual(
@@ -128,6 +99,198 @@ func TestAtomicTimelineSchemasPartitionCatalogWithoutBatchOrInjectedFields(t *te
 		[]any{"visual_base", "visual_overlay", "voiceover", "bgm", "sfx"},
 	) {
 		t.Fatalf("timeline.insert track_id enum=%#v", trackID)
+	}
+}
+
+func TestTimelineOpRecoverySchemaMatchesAtomicToolSurface(t *testing.T) {
+	t.Parallel()
+
+	deleteSpec, exists := timeline.LookupOpSpec("delete_clip")
+	if !exists {
+		t.Fatal("delete_clip spec missing")
+	}
+	deleteSchema := TimelineOpExpectedSchema("timeline.delete", *deleteSpec)
+	deleteProperties, ok := deleteSchema["properties"].(map[string]any)
+	if !ok || deleteProperties["timeline_clip_id"] == nil {
+		t.Fatalf("delete recovery properties=%#v", deleteSchema["properties"])
+	}
+	if deleteProperties["clip_id"] != nil {
+		t.Fatalf("delete recovery 暴露兼容别名 clip_id: %#v", deleteProperties)
+	}
+	if required, ok := deleteSchema["required"].([]string); !ok ||
+		!containsString(required, "timeline_clip_id") {
+		t.Fatalf("delete recovery required=%#v", deleteSchema["required"])
+	}
+	if TimelineOpExpectedSchema("timeline.update", *deleteSpec) != nil {
+		t.Fatal("跨工具家族不得生成 recovery schema")
+	}
+
+	insertSpec, exists := timeline.LookupOpSpec("insert_clip")
+	if !exists {
+		t.Fatal("insert_clip spec missing")
+	}
+	insertSchema := TimelineOpExpectedSchema("timeline.insert", *insertSpec)
+	insertProperties, ok := insertSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("insert recovery properties=%#v", insertSchema["properties"])
+	}
+	for _, hidden := range []string{
+		"asset_kind", "include_original_audio", "timeline_clip_id", "parent_block_id", "clip_id",
+	} {
+		if insertProperties[hidden] != nil {
+			t.Errorf("insert recovery 暴露服务端或兼容字段 %s", hidden)
+		}
+	}
+
+	catalog := TimelineAtomicCatalog("timeline.delete")
+	if len(catalog) != len(timelineAtomicKinds["timeline.delete"]) {
+		t.Fatalf("delete catalog=%v", catalog)
+	}
+	for _, spec := range catalog {
+		owner, exposed := TimelineAtomicToolForKind(spec.Kind)
+		if !exposed || owner != "timeline.delete" {
+			t.Errorf("delete catalog 暴露跨家族 kind=%s owner=%s", spec.Kind, owner)
+		}
+	}
+	if catalog := TimelineAtomicCatalog("timeline.unknown"); len(catalog) != 0 {
+		t.Fatalf("unknown tool catalog=%v", catalog)
+	}
+}
+
+func TestAtomicForwardAndRecoverySchemasStayInCatalogParity(t *testing.T) {
+	t.Parallel()
+	forwardSchemas := map[string]*jsonschema.Schema{
+		"timeline.insert": (TimelineInsertInput{}).JSONSchema(),
+		"timeline.delete": (TimelineDeleteInput{}).JSONSchema(),
+		"timeline.update": (TimelineUpdateInput{}).JSONSchema(),
+		"timeline.split":  (TimelineSplitInput{}).JSONSchema(),
+	}
+	for toolName, kinds := range timelineAtomicKinds {
+		forwardSchema := forwardSchemas[toolName]
+		forwardMap := marshalSchemaMap(t, forwardSchema)
+		forwardProperties, _ := forwardMap["properties"].(map[string]any)
+		expectedRootProperties := map[string]struct{}{"kind": {}}
+		for _, kind := range kinds {
+			spec, exists := timeline.LookupOpSpec(kind)
+			if !exists {
+				t.Fatalf("%s Catalog spec missing", kind)
+			}
+			expectedProperties := map[string]struct{}{"kind": {}}
+			for _, field := range spec.Fields {
+				if field.Injected || field.Generated {
+					continue
+				}
+				expectedProperties[field.Name] = struct{}{}
+				expectedRootProperties[field.Name] = struct{}{}
+			}
+
+			recovery := marshalSchemaMap(t, TimelineOpExpectedSchema(toolName, *spec))
+			recoveryProperties, _ := recovery["properties"].(map[string]any)
+			if got, want := mapKeys(recoveryProperties), setKeys(expectedProperties); !reflect.DeepEqual(got, want) {
+				t.Errorf("%s.%s recovery properties=%v want=%v", toolName, kind, got, want)
+			}
+			branch := marshalSchemaMap(t, timelineOpBranchByKind(t, forwardSchema, kind))
+			if branch["maxProperties"] != float64(len(expectedProperties)) {
+				t.Errorf(
+					"%s.%s maxProperties=%v want=%d",
+					toolName, kind, branch["maxProperties"], len(expectedProperties),
+				)
+			}
+			for fieldName := range expectedProperties {
+				forwardField, forwardExists := forwardProperties[fieldName].(map[string]any)
+				recoveryField, recoveryExists := recoveryProperties[fieldName].(map[string]any)
+				if !forwardExists || !recoveryExists {
+					t.Errorf(
+						"%s.%s field=%s forward=%v recovery=%v",
+						toolName, kind, fieldName, forwardExists, recoveryExists,
+					)
+					continue
+				}
+				if forwardField["type"] != recoveryField["type"] {
+					t.Errorf(
+						"%s.%s field=%s type forward=%v recovery=%v",
+						toolName, kind, fieldName, forwardField["type"], recoveryField["type"],
+					)
+				}
+			}
+
+			if got, want := schemaRequiredNames(branch), sortedStrings(recovery["required"]); !reflect.DeepEqual(got, want) {
+				t.Errorf("%s.%s required forward=%v recovery=%v", toolName, kind, got, want)
+			}
+			if got, want := schemaAnyOfRequiredGroups(branch), schemaAnyOfRequiredGroups(recovery); !reflect.DeepEqual(got, want) {
+				t.Errorf("%s.%s require-any forward=%v recovery=%v", toolName, kind, got, want)
+			}
+		}
+		if got, want := mapKeys(forwardProperties), setKeys(expectedRootProperties); !reflect.DeepEqual(got, want) {
+			t.Errorf("%s root properties=%v want Catalog union=%v", toolName, got, want)
+		}
+	}
+}
+
+type countingAtomicExecutor struct {
+	calls int
+}
+
+func (executor *countingAtomicExecutor) ExecuteTool(
+	context.Context,
+	string,
+	any,
+) (any, error) {
+	executor.calls++
+	return ToolResult{Status: string(StatusSucceeded)}, nil
+}
+
+func TestAtomicRegistryPreflightRejectsCrossKindFieldsBeforeExecutor(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	executor := &countingAtomicExecutor{}
+	registry, err := NewRegistry(database, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := map[string]any{
+		"kind": "adjust_gain", "timeline_clip_id": "clip_1",
+		"gain_db": -3, "fade_in_frames": 7,
+	}
+	if _, err := registry.DecodeInput("timeline.update", arguments); err == nil ||
+		!strings.Contains(err.Error(), "fade_in_frames 不是该操作支持的字段") {
+		t.Fatalf("DecodeInput cross-kind field err=%v", err)
+	}
+	encoded, err := json.Marshal(arguments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := registry.specs["timeline.update"].Implementation.(einotool.InvokableTool)
+	output, err := update.InvokableRun(
+		WithDraftID(t.Context(), "draft_atomic_preflight"),
+		string(encoded),
+	)
+	if err != nil {
+		t.Fatalf("structured preflight failed as transport error: %v", err)
+	}
+	var failure ToolResult
+	if err := json.Unmarshal([]byte(output), &failure); err != nil {
+		t.Fatal(err)
+	}
+	if failure.Status != string(StatusFailed) ||
+		failure.Data["invalid_field"] != "fade_in_frames" ||
+		failure.Data["expected_schema"] == nil ||
+		failure.Data["current_timeline_unchanged"] != true {
+		t.Fatalf("preflight failure=%#v", failure)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("invalid cross-kind input reached executor %d times", executor.calls)
+	}
+	if _, err := strictUnmarshalToolArguments[TimelineUpdateInput](
+		t.Context(),
+		"timeline.update",
+		`{"kind":"adjust_gain","timeline_clip_id":"clip_1","gain_db":-3}`,
+	); err != nil {
+		t.Fatalf("valid adjust_gain rejected: %v", err)
 	}
 }
 
@@ -149,18 +312,23 @@ func TestTimelineAtomicOperationRejectsWrongFamilyAndInjectedFields(t *testing.T
 	t.Parallel()
 	if _, err := TimelineAtomicOperation("timeline.delete", TimelineDeleteInput{
 		"kind": "insert_clip", "asset_id": "asset", "source_start_frame": 0, "source_end_frame": 30,
-	}); err == nil || !strings.Contains(err.Error(), "不接受") {
+	}); err == nil || !strings.Contains(err.Error(), "属于 timeline.insert") {
 		t.Fatalf("wrong family err=%v", err)
 	}
 	if _, err := TimelineAtomicOperation("timeline.insert", TimelineInsertInput{
 		"kind": "insert_clip", "asset_id": "asset", "source_start_frame": 0, "source_end_frame": 30,
 		"asset_kind": "video",
-	}); err == nil || !strings.Contains(err.Error(), "未声明字段 asset_kind") {
+	}); err == nil || !strings.Contains(err.Error(), "不接受字段 asset_kind") {
 		t.Fatalf("injected field err=%v", err)
 	}
 	if _, err := TimelineAtomicOperation("timeline.delete", TimelineDeleteInput{
+		"kind": "delete_clip", "timeline_clip_id": "clip_1", "undeclared": true,
+	}); err == nil || !strings.Contains(err.Error(), "undeclared 不是该操作支持的字段") {
+		t.Fatalf("undeclared field err=%v", err)
+	}
+	if _, err := TimelineAtomicOperation("timeline.delete", TimelineDeleteInput{
 		"kind": "delete_clip", "clip_id": "legacy_clip_id",
-	}); err == nil || !strings.Contains(err.Error(), "不接受字段 clip_id") {
+	}); err == nil || !strings.Contains(err.Error(), "timeline_clip_id 缺少必填字段") {
 		t.Fatalf("legacy alias err=%v", err)
 	}
 	for field, input := range map[string]TimelineInsertInput{
@@ -196,6 +364,33 @@ func TestTimelineAtomicOperationRejectsWrongFamilyAndInjectedFields(t *testing.T
 	if err != nil || operation["kind"] != "split_clip" || len(operation) != 3 {
 		t.Fatalf("operation=%#v err=%v", operation, err)
 	}
+	if _, err := TimelineAtomicOperation("timeline.insert", TimelineUpdateInput{
+		"kind": "adjust_gain", "timeline_clip_id": "clip_1", "gain_db": -3,
+	}); err == nil || !strings.Contains(err.Error(), "输入类型不匹配") {
+		t.Fatalf("mismatched input type err=%v", err)
+	}
+}
+
+func TestTimelineOpSchemaExamplesAreDeepCloned(t *testing.T) {
+	t.Parallel()
+	originalStrings := []string{"voiceover", "original_audio"}
+	original := map[string]any{
+		"nested":  map[string]any{"value": "kept"},
+		"choices": []any{map[string]any{"name": "first"}},
+		"tracks":  originalStrings,
+	}
+	cloned := cloneTimelineOpSchemaExample(original).(map[string]any)
+	cloned["nested"].(map[string]any)["value"] = "changed"
+	cloned["choices"].([]any)[0].(map[string]any)["name"] = "changed"
+	cloned["tracks"].([]string)[0] = "changed"
+	if original["nested"].(map[string]any)["value"] != "kept" ||
+		original["choices"].([]any)[0].(map[string]any)["name"] != "first" ||
+		originalStrings[0] != "voiceover" {
+		t.Fatalf("schema example clone mutated source: original=%#v cloned=%#v", original, cloned)
+	}
+	if got := timelineOpJSONType(timeline.OpFieldType("future_type")); got != "string" {
+		t.Fatalf("unknown Catalog field type fallback=%q", got)
+	}
 }
 
 func TestAtomicTimelineToolRejectsInvalidCatalogCombinationBeforeExecutor(t *testing.T) {
@@ -205,155 +400,34 @@ func TestAtomicTimelineToolRejectsInvalidCatalogCombinationBeforeExecutor(t *tes
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = database.Close() })
-	registry, err := NewRegistry(database, fakeExecutor{})
+	executor := &countingAtomicExecutor{}
+	registry, err := NewRegistry(database, executor)
 	if err != nil {
 		t.Fatal(err)
 	}
 	insert := registry.specs["timeline.insert"].Implementation.(einotool.InvokableTool)
 	ctx := WithDraftID(t.Context(), "draft_atomic_decode")
 	for _, arguments := range []string{
-		`{"kind":"delete_clip","timeline_clip_id":"clip_1"}`,
 		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"asset_kind":"video"}`,
-		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"timeline_clip_id":"a","clip_id":"b"}`,
 		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"timeline_clip_id":"model_chosen"}`,
 		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"track_id":"original_audio"}`,
 	} {
-		if _, err := insert.InvokableRun(ctx, arguments); err == nil {
-			t.Errorf("非法原子参数进入 executor 并返回成功: %s", arguments)
+		output, runErr := insert.InvokableRun(ctx, arguments)
+		if runErr != nil {
+			t.Errorf("invalid atomic input should return structured preflight failure: %v", runErr)
+			continue
+		}
+		var failure ToolResult
+		if err := json.Unmarshal([]byte(output), &failure); err != nil {
+			t.Fatal(err)
+		}
+		if failure.Status != string(StatusFailed) ||
+			failure.Data["current_timeline_unchanged"] != true {
+			t.Errorf("invalid atomic input failure=%#v arguments=%s", failure, arguments)
 		}
 	}
-}
-
-func TestTimelineOpSchemaCallsDoNotShareMutableExamples(t *testing.T) {
-	t.Parallel()
-	first := (TimelineOp{}).JSONSchema()
-	insert := timelineOpBranchByKind(t, first, "insert_clip")
-	metadata, exists := insert.Properties.Get("metadata")
-	if !exists || len(metadata.Examples) != 1 {
-		t.Fatalf("insert_clip.metadata examples=%#v", metadata)
-	}
-	firstExample, ok := metadata.Examples[0].(map[string]any)
-	if !ok {
-		t.Fatalf("metadata example type=%T", metadata.Examples[0])
-	}
-	firstExample["source"] = "mutated"
-
-	second := (TimelineOp{}).JSONSchema()
-	metadata, exists = timelineOpBranchByKind(t, second, "insert_clip").Properties.Get("metadata")
-	if !exists || metadata.Examples[0].(map[string]any)["source"] != "catalog_example" {
-		t.Fatalf("不同 schema 调用共享了可变示例: %#v", metadata)
-	}
-}
-
-func TestTimelinePatchBatchInputJSONKeepsNamedMapRuntimeSemantics(t *testing.T) {
-	t.Parallel()
-	var decoded TimelinePatchBatchInput
-	if err := json.Unmarshal([]byte(`{"ops":[{"kind":"delete_clip","clip_id":"clip_1"}]}`), &decoded); err != nil {
-		t.Fatal(err)
-	}
-	if len(decoded.Ops) != 1 || decoded.Ops[0]["kind"] != "delete_clip" || decoded.Ops[0]["clip_id"] != "clip_1" {
-		t.Fatalf("decoded ops=%#v", decoded.Ops)
-	}
-	if err := timeline.ValidateOpFields(map[string]any(decoded.Ops[0])); err != nil {
-		t.Fatalf("命名 map 未保留运行时语义: %v", err)
-	}
-}
-
-func assertTimelineOpCatalogSchema(t *testing.T, schema *jsonschema.Schema) {
-	t.Helper()
-	if len(timeline.Catalog) != 19 {
-		t.Fatalf("timeline.Catalog kinds=%d want=19", len(timeline.Catalog))
-	}
-	if schema == nil || schema.Type != "object" {
-		t.Fatalf("TimelineOp root=%#v want object", schema)
-	}
-	if len(schema.OneOf) != len(timeline.Catalog) {
-		t.Fatalf("op.oneOf branches=%d want=%d", len(schema.OneOf), len(timeline.Catalog))
-	}
-
-	seenKinds := make(map[string]bool, len(timeline.Catalog))
-	for index, spec := range timeline.Catalog {
-		branch := schema.OneOf[index]
-		if branch == nil || branch.Type != "object" || branch.Properties == nil {
-			t.Fatalf("branch[%d]=%#v want object properties", index, branch)
-		}
-		kindSchema, exists := branch.Properties.Get("kind")
-		if !exists {
-			t.Fatalf("branch[%d] 缺少 kind", index)
-		}
-		kind, ok := kindSchema.Const.(string)
-		if !ok || kind == "" {
-			t.Fatalf("branch[%d] kind.const=%#v", index, kindSchema.Const)
-		}
-		if kind != spec.Kind {
-			t.Fatalf("branch[%d] kind=%q want=%q", index, kind, spec.Kind)
-		}
-		if seenKinds[kind] {
-			t.Fatalf("kind.const 重复: %s", kind)
-		}
-		seenKinds[kind] = true
-		if !containsString(branch.Required, "kind") {
-			t.Errorf("%s 未要求 kind", kind)
-		}
-		assertFalseSchema(t, kind, branch.AdditionalProperties)
-
-		expectedPropertyCount := 1
-		for _, field := range spec.Fields {
-			if field.Injected {
-				if _, exposed := branch.Properties.Get(field.Name); exposed {
-					t.Errorf("%s 暴露服务端注入字段 %s", kind, field.Name)
-				}
-				continue
-			}
-			expectedPropertyCount += 1 + len(field.Aliases)
-			property, exists := branch.Properties.Get(field.Name)
-			if !exists {
-				t.Errorf("%s 缺少字段 %s", kind, field.Name)
-				continue
-			}
-			if property.Type != expectedTimelineOpJSONType(field.Type) {
-				t.Errorf("%s.%s type=%q want=%q", kind, field.Name, property.Type, expectedTimelineOpJSONType(field.Type))
-			}
-			for _, alias := range field.Aliases {
-				if _, exists := branch.Properties.Get(alias); !exists {
-					t.Errorf("%s.%s 缺少兼容别名 %s", kind, field.Name, alias)
-				}
-			}
-			if !field.Required {
-				continue
-			}
-			if len(field.Aliases) == 0 {
-				if !containsString(branch.Required, field.Name) {
-					t.Errorf("%s 未要求字段 %s", kind, field.Name)
-				}
-				continue
-			}
-			alternatives := append([]string{field.Name}, field.Aliases...)
-			if !hasRequiredAlternatives(branch.AllOf, alternatives) {
-				t.Errorf("%s 缺少 %v 的 required anyOf", kind, alternatives)
-			}
-		}
-		if branch.Properties.Len() != expectedPropertyCount {
-			t.Errorf("%s properties=%d want=%d", kind, branch.Properties.Len(), expectedPropertyCount)
-		}
-		if len(spec.RequireAny) > 0 && !hasRequiredAlternatives(branch.AllOf, spec.RequireAny) {
-			t.Errorf("%s 缺少 RequireAny %v", kind, spec.RequireAny)
-		}
-	}
-
-	trimEdge := timelineOpBranchByKind(t, schema, "trim_clip_edge")
-	if _, exists := trimEdge.Properties.Get("timeline_frame"); !exists {
-		t.Error("trim_clip_edge 缺少 timeline_frame")
-	}
-	if _, exists := trimEdge.Properties.Get("target_frame"); exists {
-		t.Error("trim_clip_edge 错误暴露 target_frame")
-	}
-	for _, injected := range []string{"asset_kind", "include_original_audio", "audio_asset_ids"} {
-		for _, branch := range schema.OneOf {
-			if _, exists := branch.Properties.Get(injected); exists {
-				t.Errorf("op.oneOf 暴露服务端注入字段 %s", injected)
-			}
-		}
+	if executor.calls != 0 {
+		t.Fatalf("invalid atomic inputs reached executor %d times", executor.calls)
 	}
 }
 
@@ -372,39 +446,37 @@ func timelineOpBranchByKind(t *testing.T, schema *jsonschema.Schema, kind string
 	return nil
 }
 
-func hasRequiredAlternatives(constraints []*jsonschema.Schema, names []string) bool {
-	want := make(map[string]bool, len(names))
-	for _, name := range names {
-		want[name] = true
-	}
-	for _, constraint := range constraints {
-		if constraint == nil || len(constraint.AnyOf) != len(want) {
-			continue
-		}
-		seen := make(map[string]bool, len(want))
-		valid := true
-		for _, alternative := range constraint.AnyOf {
-			if alternative == nil || len(alternative.Required) != 1 || !want[alternative.Required[0]] {
-				valid = false
-				break
-			}
-			seen[alternative.Required[0]] = true
-		}
-		if valid && len(seen) == len(want) {
-			return true
+func modelFacingTimelineOpFieldNames(spec timeline.OpSpec) []string {
+	names := []string{"kind"}
+	for _, field := range spec.Fields {
+		if !field.Injected && !field.Generated {
+			names = append(names, field.Name)
 		}
 	}
-	return false
+	return names
 }
 
-func assertFalseSchema(t *testing.T, kind string, schema *jsonschema.Schema) {
+func assertPropertyNameWhitelist(
+	t *testing.T,
+	toolName, kind string,
+	branch *jsonschema.Schema,
+	allowedNames []string,
+) {
 	t.Helper()
-	encoded, err := json.Marshal(schema)
-	if err != nil {
-		t.Fatal(err)
+	if branch.PropertyNames == nil || branch.PropertyNames.Pattern == "" {
+		t.Fatalf("%s.%s 缺少可选字段白名单", toolName, kind)
 	}
-	if string(encoded) != "false" {
-		t.Errorf("%s additionalProperties=%s want=false", kind, encoded)
+	compiled, err := regexp.Compile(branch.PropertyNames.Pattern)
+	if err != nil {
+		t.Fatalf("%s.%s propertyNames pattern=%q: %v", toolName, kind, branch.PropertyNames.Pattern, err)
+	}
+	for _, name := range allowedNames {
+		if !compiled.MatchString(name) {
+			t.Errorf("%s.%s 白名单漏掉 %s", toolName, kind, name)
+		}
+	}
+	if compiled.MatchString("cross_kind_field") {
+		t.Errorf("%s.%s 白名单错误接受跨 kind 字段", toolName, kind)
 	}
 }
 
@@ -417,37 +489,75 @@ func containsString(values []string, target string) bool {
 	return false
 }
 
-func expectedTimelineOpJSONType(fieldType timeline.OpFieldType) string {
-	switch fieldType {
-	case timeline.OpFieldString:
-		return "string"
-	case timeline.OpFieldInteger:
-		return "integer"
-	case timeline.OpFieldNumber:
-		return "number"
-	case timeline.OpFieldBoolean:
-		return "boolean"
-	case timeline.OpFieldObject:
-		return "object"
-	case timeline.OpFieldStringArray:
-		return "array"
-	default:
-		return ""
+func marshalSchemaMap(t *testing.T, value any) map[string]any {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal schema: %v", err)
 	}
+	var result map[string]any
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	return result
 }
 
-func assertGoModDependencyVersion(t *testing.T, path, want string) {
-	t.Helper()
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("无法定位 timeline_op_schema_test.go")
+func mapKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
 	}
-	contents, err := os.ReadFile(filepath.Join(filepath.Dir(filename), "..", "..", "go.mod"))
-	if err != nil {
-		t.Fatal(err)
+	sort.Strings(keys)
+	return keys
+}
+
+func setKeys(values map[string]struct{}) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
 	}
-	needle := "\t" + path + " " + want + "\n"
-	if !strings.Contains(string(contents), needle) {
-		t.Fatalf("go.mod 未直接锁定 %s %s", path, want)
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedStrings(value any) []string {
+	values := make([]string, 0)
+	switch typed := value.(type) {
+	case []string:
+		values = append(values, typed...)
+	case []any:
+		for _, item := range typed {
+			if text, ok := item.(string); ok {
+				values = append(values, text)
+			}
+		}
 	}
+	sort.Strings(values)
+	return values
+}
+
+func schemaRequiredNames(schema map[string]any) []string {
+	return sortedStrings(schema["required"])
+}
+
+func schemaAnyOfRequiredGroups(schema map[string]any) [][]string {
+	rawAllOf, _ := schema["allOf"].([]any)
+	groups := make([][]string, 0, len(rawAllOf))
+	for _, rawConstraint := range rawAllOf {
+		constraint, _ := rawConstraint.(map[string]any)
+		rawAnyOf, _ := constraint["anyOf"].([]any)
+		group := make([]string, 0, len(rawAnyOf))
+		for _, rawChoice := range rawAnyOf {
+			choice, _ := rawChoice.(map[string]any)
+			group = append(group, sortedStrings(choice["required"])...)
+		}
+		sort.Strings(group)
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		left, _ := json.Marshal(groups[i])
+		right, _ := json.Marshal(groups[j])
+		return string(left) < string(right)
+	})
+	return groups
 }

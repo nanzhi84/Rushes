@@ -112,7 +112,7 @@ describe("AssistantThread Claude Code 式消息流", () => {
       {
         type: "tool",
         step_id: "s2",
-        tool: "timeline.compose_initial",
+        tool: "timeline.insert",
         status: "running",
         argsSummary: null,
         observation: null

@@ -145,13 +145,13 @@ func TestReactAgentRepairsTimelineOpFromJITFieldFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
 		AssetID: "talk", AssetKind: "video", SourceEndFrame: 60, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixtureResult, err := service.executor.PersistTimeline(t.Context(), draftID, document, "react_repair_fixture")
+	fixtureResult, err := seedTimelineVersion(service, t.Context(), draftID, document, "react_repair_fixture", nil)
 	if err != nil || fixtureResult.Status != "succeeded" {
 		t.Fatalf("fixture result=%#v err=%v", fixtureResult, err)
 	}

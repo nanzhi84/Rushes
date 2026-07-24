@@ -49,12 +49,12 @@ func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *te
 			},
 		}},
 	}}
-	first, err := service.executor.PersistTimeline(
-		t.Context(), "draft_context_latest", document, "context_first", []map[string]any{{
+	first, err := seedTimelineVersion(service,
+		t.Context(), "draft_context_latest", document, "context_first", map[string]any{
 			"kind": "adjust_gain", "timeline_clip_id": "clip_context", "gain_db": -3,
 			"timeline_revision": 24,
 			"nested":            map[string]any{"timeline_version": 1, "version": 1, "timeline_id": "old"},
-		}},
+		},
 	)
 	if err != nil || first.Status != "succeeded" {
 		t.Fatalf("first=%#v err=%v", first, err)
@@ -64,11 +64,11 @@ func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *te
 	document.TimelineID = "draft_context_latest:v2"
 	document.Tracks[0].Clips[0].GainDB = -9
 	manualContext := rushestools.WithTimelineMutationOrigin(t.Context(), "manual")
-	second, err := service.executor.PersistTimeline(
-		manualContext, "draft_context_latest", document, "context_second", []map[string]any{{
+	second, err := seedTimelineVersion(service,
+		manualContext, "draft_context_latest", document, "context_second", map[string]any{
 			"kind": "adjust_gain", "timeline_clip_id": "clip_context", "gain_db": -9,
 			"timeline_version": 2, "draft_id": "draft_context_latest",
-		}},
+		},
 	)
 	if err != nil || second.Status != "succeeded" {
 		t.Fatalf("second=%#v err=%v", second, err)
@@ -161,9 +161,8 @@ func TestContextBuilderInjectsPersistentCompactMaterialCatalog(t *testing.T) {
 		TimelineStartFrame: 0, TimelineEndFrame: 30,
 		SourceStartFrame: 0, SourceEndFrame: 30, PlaybackRate: 1,
 	}}
-	if result, err := service.executor.PersistTimeline(
-		t.Context(), "draft_context_summaries", document, "summary_context",
-	); err != nil || result.Status != "succeeded" {
+	if result, err := seedTimelineVersion(service,
+		t.Context(), "draft_context_summaries", document, "summary_context", nil); err != nil || result.Status != "succeeded" {
 		t.Fatalf("persist=%#v err=%v", result, err)
 	}
 
@@ -508,6 +507,44 @@ func TestContextCompactionHandlesBeatGridAndMalformedStoredSummary(t *testing.T)
 	}
 }
 
+func TestCompactSemanticAnchorContextKeepsOnlyBoundedModelFields(t *testing.T) {
+	t.Parallel()
+	if compactSemanticAnchorContext(nil) != nil ||
+		compactSemanticAnchorContext(map[string]any{"kind": "other"}) != nil {
+		t.Fatal("非语义锚点元数据不应进入模型上下文")
+	}
+	anchor := compactSemanticAnchorContext(map[string]any{
+		"kind":                      "b_roll_semantic_anchor",
+		"shot_id":                   "shot_1",
+		"a_roll_asset_id":           "asset_a",
+		"a_roll_source_start_frame": 10,
+		"a_roll_source_end_frame":   40,
+		"start_utterance_id":        "utterance_1",
+		"end_utterance_id":          "utterance_2",
+		"start_word_id":             "word_1",
+		"end_word_id":               "word_2",
+		"b_roll_asset_id":           "asset_b",
+		"b_roll_filename":           "b.mp4",
+		"transcript_text":           "  " + strings.Repeat("台词", 100) + "  ",
+		"b_roll_description":        strings.Repeat("画面", 100),
+		"empty_field":               "",
+		"internal_score":            0.97,
+	})
+	if anchor["kind"] != "b_roll_semantic_anchor" ||
+		anchor["shot_id"] != "shot_1" ||
+		anchor["a_roll_source_start_frame"] != 10 ||
+		anchor["b_roll_filename"] != "b.mp4" {
+		t.Fatalf("anchor=%#v", anchor)
+	}
+	if len([]rune(anchor["transcript_text"].(string))) > 161 ||
+		len([]rune(anchor["b_roll_description"].(string))) > 161 {
+		t.Fatalf("语义锚点文本未压缩: %#v", anchor)
+	}
+	if _, exists := anchor["internal_score"]; exists {
+		t.Fatalf("内部元数据不应进入模型上下文: %#v", anchor)
+	}
+}
+
 func TestCompactWaveformContextKeepsBoundedResidentEnvelope(t *testing.T) {
 	t.Parallel()
 	frames := make([]int, 200)
@@ -556,7 +593,54 @@ func TestCompactWaveformContextKeepsBoundedResidentEnvelope(t *testing.T) {
 	}
 }
 
-func TestCompressTimelineEditBatchesCancelsTransientInsertDelete(t *testing.T) {
+func TestCompactWaveformContextRejectsMalformedCoordinatesAndBoundsStoredPoints(t *testing.T) {
+	t.Parallel()
+	for name, value := range map[string]any{
+		"not_object": "waveform",
+		"zero_interval": map[string]any{
+			"sample_interval_frames": 0,
+			"samples":                []int{1},
+		},
+		"fractional_interval": map[string]any{
+			"sample_interval_frames": 1.5,
+			"samples":                []int{1},
+		},
+		"no_samples": map[string]any{
+			"sample_interval_frames": 15,
+		},
+		"negative_frame": map[string]any{
+			"sample_interval_frames": 15,
+			"sample_frames":          []int{-1},
+			"samples":                []int{1},
+		},
+		"non_increasing_frames": map[string]any{
+			"sample_interval_frames": 15,
+			"sample_frames":          []int{0, 0},
+			"samples":                []int{1, 2},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if compact := compactWaveformContext(value); compact != nil {
+				t.Fatalf("malformed waveform entered context: %#v", compact)
+			}
+		})
+	}
+
+	samples := make([]int, 300)
+	for index := range samples {
+		samples[index] = index % 101
+	}
+	compact := compactWaveformContext(map[string]any{
+		"sample_interval_frames": 15,
+		"samples":                samples,
+	})
+	if compact == nil || compact["point_count"] != 256 {
+		t.Fatalf("stored waveform must be capped before resident compaction: %#v", compact)
+	}
+}
+
+func TestCompressTimelineEditHistoryCancelsTransientInsertDelete(t *testing.T) {
 	t.Parallel()
 	batches := []struct {
 		actor, origin string
@@ -570,76 +654,12 @@ func TestCompressTimelineEditBatchesCancelsTransientInsertDelete(t *testing.T) {
 		}}},
 	}
 	converted := makeTimelineEditBatches(batches)
-	if compressed := compressTimelineEditBatches(converted, 20); len(compressed) != 0 {
+	if compressed := compressTimelineEditHistoryMap(converted, 20); len(compressed) != 0 {
 		t.Fatalf("短暂插入后删除不应进入模型历史: %#v", compressed)
 	}
 }
 
-func TestCompressTimelineEditBatchesSummarizesAndDeduplicatesWholeTimelineRecuts(t *testing.T) {
-	t.Parallel()
-	largeCuts := make([]int, 0, 2000)
-	largeAssets := make([]string, 0, 2000)
-	largeRanges := make([]map[string]any, 0, 2000)
-	largeShots := make([]string, 0, 2000)
-	for index := 0; index < 2000; index++ {
-		largeCuts = append(largeCuts, (index+1)*15)
-		largeAssets = append(largeAssets, fmt.Sprintf("asset_%d", index%24))
-		largeRanges = append(largeRanges, map[string]any{
-			"asset_id":           fmt.Sprintf("asset_%d", index%24),
-			"source_start_frame": index * 30, "source_end_frame": index*30 + 15,
-		})
-		largeShots = append(largeShots, fmt.Sprintf("shot_%d", index))
-	}
-	makeRecut := func(bgm string, target int) map[string]any {
-		return map[string]any{
-			"kind": "recut_to_beats", "bgm_asset_id": bgm,
-			"target_duration_frames": target, "video_asset_ids": largeAssets,
-			"cut_frames": largeCuts, "source_range_usage": largeRanges,
-			"shot_ids": largeShots, "sfx_asset_id": "sfx_fire", "sfx_start_frame": 1372,
-		}
-	}
-	batches := makeTimelineEditBatches([]struct {
-		actor, origin string
-		ops           []map[string]any
-	}{
-		{"agent", "tool", []map[string]any{makeRecut("bgm_old", 1200)}},
-		{"user", "manual", []map[string]any{{
-			"kind": "adjust_gain", "timeline_clip_id": "old_clip", "gain_db": -8,
-		}}},
-		{"agent", "tool", []map[string]any{makeRecut("bgm_latest", 1440)}},
-		{"user", "manual", []map[string]any{{
-			"kind": "adjust_gain", "timeline_clip_id": "bgm_latest_clip", "gain_db": -10,
-		}}},
-	})
-
-	compressed := compressTimelineEditBatches(batches, contextRecentEditLimit)
-	if len(compressed) != 2 {
-		t.Fatalf("compressed=%#v", compressed)
-	}
-	recut := compressed[0]["op"].(map[string]any)
-	if recut["kind"] != "recut_to_beats" || recut["bgm_asset_id"] != "bgm_latest" ||
-		recut["clip_count"] != 2000 || recut["video_asset_count"] != 24 ||
-		recut["source_range_count"] != 2000 || recut["shot_count"] != 2000 ||
-		recut["uses_explicit_shots"] != true || recut["first_cut_frame"] != 15 ||
-		recut["last_cut_frame"] != 30000 {
-		t.Fatalf("recut summary=%#v", recut)
-	}
-	encoded, err := json.Marshal(compressed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(encoded)
-	for _, forbidden := range []string{"cut_frames", "video_asset_ids", "source_range_usage", "shot_ids", "bgm_old", "old_clip"} {
-		if strings.Contains(text, `"`+forbidden+`"`) || strings.Contains(text, forbidden) {
-			t.Fatalf("压缩历史仍包含冗余字段 %s: %s", forbidden, text)
-		}
-	}
-	if len([]rune(text)) > contextRecentEditRuneBudget {
-		t.Fatalf("recent_edit_history 超出预算: %d", len([]rune(text)))
-	}
-}
-
-func TestCompressTimelineEditBatchesBoundsGenericLargeCollections(t *testing.T) {
+func TestCompressTimelineEditHistoryBoundsGenericLargeCollections(t *testing.T) {
 	t.Parallel()
 	operations := make([]map[string]any, 0, 30)
 	for index := 0; index < 30; index++ {
@@ -648,7 +668,7 @@ func TestCompressTimelineEditBatchesBoundsGenericLargeCollections(t *testing.T) 
 			"notes": strings.Repeat("语义说明", 400), "frames": make([]int, 2000),
 		})
 	}
-	compressed := compressTimelineEditBatches(makeTimelineEditBatches([]struct {
+	compressed := compressTimelineEditHistoryMap(makeTimelineEditBatches([]struct {
 		actor, origin string
 		ops           []map[string]any
 	}{{"user", "manual", operations}}), contextRecentEditLimit)
@@ -733,13 +753,43 @@ func TestContextCompressionHelpersBoundAndSanitizeHistory(t *testing.T) {
 	if emptyContextValue(1) || emptyContextValue(true) || emptyContextValue(struct{}{}) {
 		t.Fatal("非空值被误判")
 	}
+
+	deep := compactEditHistoryValue(map[string]any{"payload": "x"}, 5).(map[string]any)
+	if deep["compacted"] != true {
+		t.Fatalf("deep compact=%#v", deep)
+	}
+	wide := map[string]any{"kind": "custom"}
+	for index := 0; index < 30; index++ {
+		wide[fmt.Sprintf("field_%02d", index)] = index
+	}
+	wideCompact := compactEditHistoryValue(wide, 0).(map[string]any)
+	if wideCompact["kind"] != "custom" || wideCompact["omitted_field_count"] != 7 {
+		t.Fatalf("wide compact=%#v", wideCompact)
+	}
+	shortCollection := compactEditHistoryValue([]any{
+		"first",
+		map[string]any{"nested": "second"},
+	}, 0).([]any)
+	if len(shortCollection) != 2 || shortCollection[0] != "first" {
+		t.Fatalf("short collection=%#v", shortCollection)
+	}
+	if minInt(2, 1) != 1 {
+		t.Fatal("collection helper defensive branches mismatch")
+	}
+	minimal := minimalEditHistoryEntry(map[string]any{
+		"_history_key": "b1-o1", "actor": "agent", "origin": "tool",
+		"op": map[string]any{"kind": "delete_clip", "timeline_clip_id": "clip_1"},
+	})
+	if minimal["_history_key"] != "b1-o1" {
+		t.Fatalf("minimal=%#v", minimal)
+	}
 }
 
 func TestEditHistoryIndexKeysCoverAllCoalescibleOperations(t *testing.T) {
 	t.Parallel()
 	entries := []map[string]any{
 		{"op": map[string]any{"kind": "insert_clip", "timeline_clip_id": "clip_a"}},
-		{"op": map[string]any{"kind": "move_clip", "clip_id": "clip_a"}},
+		{"op": map[string]any{"kind": "move_clip", "timeline_clip_id": "clip_a"}},
 		{"op": map[string]any{"kind": "trim_clip_edge", "timeline_clip_id": "clip_a", "edge": "end"}},
 		{"op": map[string]any{"kind": "set_track_state", "track_id": "bgm"}},
 	}
@@ -754,10 +804,6 @@ func TestEditHistoryIndexKeysCoverAllCoalescibleOperations(t *testing.T) {
 		if coalesceOperationKey(kind, map[string]any{}, "clip") != kind+":clip" {
 			t.Fatalf("missing coalesce key for %s", kind)
 		}
-	}
-	if coalesceOperationKey("recut_to_beats", map[string]any{}, "") != "recut_to_beats" ||
-		coalesceOperationKey("compose_initial", map[string]any{}, "") != "compose_initial" {
-		t.Fatal("整时间线替换操作必须折叠为单条最新摘要")
 	}
 	if coalesceOperationKey("delete_clip", map[string]any{}, "clip") != "" ||
 		operationTarget(map[string]any{"unknown": true}) != "" {

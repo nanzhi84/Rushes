@@ -37,15 +37,13 @@ func testRetrySafe(t *testing.T) func(string) bool {
 	return retrySafeFromEffect(registry.Effect)
 }
 
-// TestRetrySafeFromEffectAllowlist 锁定 Effect 派生的重试白名单：九个纯读工具允许自动重试，
-// 包括 timeline.check 与 speech.search；检测、编辑、控制和交互工具一律不重试。
 func TestRetrySafeFromEffectAllowlist(t *testing.T) {
 	t.Parallel()
 	retrySafe := testRetrySafe(t)
 	for _, name := range []string{
 		"asset.list_assets", "shot.search", "audio.analyze_beats",
 		"audio.analyze_speech_pauses", "speech.search", "timeline.inspect",
-		"timeline.check", "render.status", "preview.check",
+		"timeline.check", "preview.check",
 	} {
 		if !retrySafe(name) {
 			t.Fatalf("%s 应为重试安全", name)
@@ -53,8 +51,6 @@ func TestRetrySafeFromEffectAllowlist(t *testing.T) {
 	}
 	for _, name := range []string{
 		"media.detect_shots", "speech.transcribe", "plan.update", "memory.set", "memory.remove",
-		"timeline.compose_initial", "timeline.apply_patches", "timeline.recut_to_beats",
-		"timeline.edit_talking_head", "render.preview", "render.final_mp4",
 		"interaction.ask_user", "interaction.confirm_action", "decision.answer",
 		"asset.import_local_file", "unknown.tool",
 	} {
@@ -193,7 +189,7 @@ func TestToolRecoveryDoesNotBlindlyReplayMutations(t *testing.T) {
 	})
 	output, err := endpoint(
 		withToolRecoveryState(t.Context(), newToolRecoveryState()),
-		&compose.ToolInput{Name: "timeline.apply_patches", Arguments: `{"ops":[{"kind":"split_clip"}]}`},
+		&compose.ToolInput{Name: "timeline.update", Arguments: `{"ops":[{"kind":"split_clip"}]}`},
 	)
 	if err != nil || calls != 1 {
 		t.Fatalf("calls=%d output=%#v err=%v", calls, output, err)
@@ -249,13 +245,17 @@ func TestToolRecoveryPreservesStructuredBusinessFailureForModel(t *testing.T) {
 			return &compose.ToolOutput{Result: `{
 				"status":"validation_failed",
 				"observation":"片段相互重叠",
-				"data":{"error_code":"timeline_invalid","failed_op_index":3,"recovery":"修正第三个操作"}
+				"data":{"error_code":"timeline_invalid","failed_op":{"kind":"trim_clip","timeline_clip_id":"clip_1"},"recovery":"修正当前操作"}
 			}`}, nil
 		},
 	)
 	output, err := endpoint(
 		withToolRecoveryState(t.Context(), state),
-		&compose.ToolInput{Name: "timeline.apply_patches", Arguments: `{"ops":[]}`},
+		&compose.ToolInput{
+			Name: "timeline.update",
+			Arguments: `{"kind":"trim_clip","timeline_clip_id":"clip_1",` +
+				`"source_start_frame":0,"source_end_frame":30}`,
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -263,8 +263,8 @@ func TestToolRecoveryPreservesStructuredBusinessFailureForModel(t *testing.T) {
 	payload := decodeRecoveryPayload(t, output.Result)
 	data := payload["data"].(map[string]any)
 	if payload["status"] != "failed" || payload["observation"] != "片段相互重叠" ||
-		data["error_code"] != "timeline_invalid" || data["failed_op_index"] != float64(3) ||
-		data["recovery"] != "修正第三个操作" || data["harness_recovery"] == nil {
+		data["error_code"] != "timeline_invalid" || data["failed_op"] == nil ||
+		data["recovery"] != "修正当前操作" || data["harness_recovery"] == nil {
 		t.Fatalf("structured business failure was not preserved: payload=%#v", payload)
 	}
 }
@@ -311,7 +311,7 @@ func TestToolRecoveryBlocksDuplicateFailuresAndExhaustsRepairBudget(t *testing.T
 			"error_code": "invalid_clip",
 		})}, nil
 	})
-	input := &compose.ToolInput{Name: "timeline.recut_to_beats", Arguments: `{"bgm_asset_id":"bad"}`}
+	input := &compose.ToolInput{Name: "timeline.update", Arguments: `{"bgm_asset_id":"bad"}`}
 	first, err := endpoint(ctx, input)
 	if err != nil || calls != 1 || !state.unresolved() {
 		t.Fatalf("first=%#v calls=%d err=%v", first, calls, err)
@@ -352,12 +352,12 @@ func TestToolRecoveryCanonicalizesDuplicateJSONArguments(t *testing.T) {
 		},
 	)
 	if _, err := endpoint(ctx, &compose.ToolInput{
-		Name: "timeline.apply_patches", Arguments: `{"b":2,"a":1}`,
+		Name: "timeline.update", Arguments: `{"b":2,"a":1}`,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	blocked, err := endpoint(ctx, &compose.ToolInput{
-		Name: "timeline.apply_patches", Arguments: `{ "a": 1, "b": 2 }`,
+		Name: "timeline.update", Arguments: `{ "a": 1, "b": 2 }`,
 	})
 	if err != nil || calls != 1 {
 		t.Fatalf("canonical duplicate executed: calls=%d blocked=%#v err=%v", calls, blocked, err)
@@ -382,7 +382,7 @@ func TestToolRecoveryCapsDistinctModelRepairFailures(t *testing.T) {
 	for attempt := 0; attempt <= maxModelRepairAttempts; attempt++ {
 		var err error
 		last, err = endpoint(ctx, &compose.ToolInput{
-			Name: "timeline.apply_patches", Arguments: `{"attempt":` + string(rune('0'+attempt)) + `}`,
+			Name: "timeline.update", Arguments: `{"attempt":` + string(rune('0'+attempt)) + `}`,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -416,10 +416,10 @@ func TestToolRecoveryLetsModelCorrectArguments(t *testing.T) {
 		}
 		return &compose.ToolOutput{Result: marshalToolFailure("change value", nil)}, nil
 	})
-	if _, err := endpoint(ctx, &compose.ToolInput{Name: "timeline.recut_to_beats", Arguments: `{"value":"bad"}`}); err != nil {
+	if _, err := endpoint(ctx, &compose.ToolInput{Name: "timeline.update", Arguments: `{"value":"bad"}`}); err != nil {
 		t.Fatal(err)
 	}
-	corrected, err := endpoint(ctx, &compose.ToolInput{Name: "timeline.recut_to_beats", Arguments: `{"value":"good"}`})
+	corrected, err := endpoint(ctx, &compose.ToolInput{Name: "timeline.update", Arguments: `{"value":"good"}`})
 	if err != nil || calls != 2 || state.unresolved() || !json.Valid([]byte(corrected.Result)) {
 		t.Fatalf("corrected=%#v calls=%d unresolved=%v err=%v", corrected, calls, state.unresolved(), err)
 	}

@@ -1020,7 +1020,7 @@ function operationCoalesceKey(operation: TimelineOperation): string | null {
 }
 
 function targetClipId(operation: TimelineOperation, required = true): string {
-  const value = operation.timeline_clip_id ?? operation.clip_id;
+  const value = operation.timeline_clip_id;
   if (typeof value === "string" && value) {
     return value;
   }

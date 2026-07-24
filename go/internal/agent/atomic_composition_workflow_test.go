@@ -72,9 +72,6 @@ func TestInitialCompositionFixtureUsesSearchAndAtomicInserts(t *testing.T) {
 		!timeline.Validate(document).Valid {
 		t.Fatalf("document=%#v err=%v", document, err)
 	}
-	if slices.Contains(trace, "timeline.compose_initial") {
-		t.Fatalf("initial trace used composite tool: %v", trace)
-	}
 	for _, want := range []string{"asset.list_assets", "shot.search", "timeline.insert", "timeline.check"} {
 		if !slices.Contains(trace, want) {
 			t.Fatalf("initial trace=%v missing %s", trace, want)
@@ -206,9 +203,6 @@ func TestBeatCompositionFixtureUsesDetectorSearchAndAtomicEdits(t *testing.T) {
 		len(timelineTrackClips(final, "sfx")) != 1 ||
 		timelineTrackClips(final, "sfx")[0].GainDB != -12 {
 		t.Fatalf("final=%#v err=%v", final, err)
-	}
-	if slices.Contains(trace, "timeline.recut_to_beats") {
-		t.Fatalf("beat trace used composite tool: %v", trace)
 	}
 	var singleOperationBatches int
 	if err := database.Read().QueryRowContext(t.Context(), `

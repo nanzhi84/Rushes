@@ -1,10 +1,14 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 func TestTimelineMutationEndpointsRejectMissingAndInvalidInputs(t *testing.T) {
@@ -55,5 +59,51 @@ func TestTimelineMutationEndpointsRejectMissingAndInvalidInputs(t *testing.T) {
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("malformed path=%s status=%d body=%s", path, response.Code, response.Body.String())
 		}
+	}
+}
+
+func TestTimelinePatchStaleTargetMapsToConflict(t *testing.T) {
+	t.Parallel()
+	status, reason := timelinePatchToolFailure(tools.ToolResult{
+		Status: string(tools.StatusFailed),
+		Data: map[string]any{
+			"error_code":             string(tools.ErrCodeStaleTarget),
+			"timeline_id":            "draft_race:v2",
+			"expected_state_version": 1,
+			"actual_state_version":   2,
+		},
+	})
+	if status != http.StatusConflict || reason != "timeline_patch_stale_target" {
+		t.Fatalf("status=%d reason=%s", status, reason)
+	}
+	status, reason = timelinePatchToolFailure(tools.ToolResult{
+		Status: string(tools.StatusFailed),
+	})
+	if status != http.StatusBadRequest || reason != "timeline_patch_validation_failed" {
+		t.Fatalf("status=%d reason=%s", status, reason)
+	}
+}
+
+func TestTimelinePatchOpenAPIIncludesConflictResponse(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile("../../../apps/web/openapi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var spec struct {
+		Paths map[string]struct {
+			Post struct {
+				Responses map[string]json.RawMessage `json:"responses"`
+			} `json:"post"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(raw, &spec); err != nil {
+		t.Fatal(err)
+	}
+	response := spec.Paths["/api/drafts/{draft_id}/timeline/patch"].
+		Post.Responses["409"]
+	if len(response) == 0 ||
+		!strings.Contains(string(response), "TimelinePatchFailureResponse") {
+		t.Fatalf("timeline patch 409 response=%s", response)
 	}
 }

@@ -11,7 +11,7 @@ import (
 
 func TestComposeValidateInspectAndStore(t *testing.T) {
 	t.Parallel()
-	document, err := ComposeInitial("draft_timeline", 1, []Selection{
+	document, err := composeTimelineFixture("draft_timeline", 1, []timelineFixtureSelection{
 		{AssetID: "a", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll"},
 		{AssetID: "b", SourceStartFrame: 30, SourceEndFrame: 75, Role: "b_roll"},
 	})
@@ -54,14 +54,11 @@ func TestComposeValidateInspectAndStore(t *testing.T) {
 	if err != nil || loaded.DurationFrames != 105 {
 		t.Fatalf("loaded=%#v err=%v", loaded, err)
 	}
-	if next, err := NextVersion(t.Context(), database, "draft_timeline"); err != nil || next != 2 {
-		t.Fatalf("next=%d err=%v", next, err)
-	}
 }
 
 func TestLinkedAVValidationAtomicEditsAndOriginalAudioSync(t *testing.T) {
 	t.Parallel()
-	base, err := ComposeInitial("draft_linked_integrity", 1, []Selection{
+	base, err := composeTimelineFixture("draft_linked_integrity", 1, []timelineFixtureSelection{
 		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 10, SourceEndFrame: 40, Role: "a_roll", HasAudio: true},
 		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 60, SourceEndFrame: 90, Role: "a_roll", HasAudio: true},
 	})
@@ -79,9 +76,7 @@ func TestLinkedAVValidationAtomicEditsAndOriginalAudioSync(t *testing.T) {
 		t.Fatalf("drifted report=%#v", report)
 	}
 
-	repaired, err := ApplyPatch(drifted, map[string]any{
-		"kind": "sync_original_audio", "audio_asset_ids": []string{"talk"},
-	})
+	repaired, err := DeriveOriginalAudio(drifted, []string{"talk"})
 	if err != nil || !Validate(repaired).Valid || len(repaired.Tracks[2].Clips) != len(repaired.Tracks[0].Clips) {
 		t.Fatalf("repaired=%#v report=%#v err=%v", repaired.Tracks[2], Validate(repaired), err)
 	}
@@ -133,6 +128,157 @@ func TestLinkedAVValidationAtomicEditsAndOriginalAudioSync(t *testing.T) {
 	}
 }
 
+func TestDeleteSourceRangeResolvesLatestUniqueContinuousMapping(t *testing.T) {
+	t.Parallel()
+	document, err := composeTimelineFixture("draft_source_delete", 1, []timelineFixtureSelection{
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 90, Role: "a_roll", HasAudio: true},
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 90, SourceEndFrame: 240, Role: "a_roll", HasAudio: true},
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 240, SourceEndFrame: 420, Role: "a_roll", HasAudio: true},
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 420, SourceEndFrame: 600, Role: "a_roll", HasAudio: true},
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 600, SourceEndFrame: 780, Role: "a_roll", HasAudio: true},
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 780, SourceEndFrame: 1080, Role: "a_roll", HasAudio: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := ApplyPatch(document, map[string]any{
+		"kind": "delete_source_range", "asset_id": "talk",
+		"source_start_frame": 240, "source_end_frame": 600,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted.Version != 2 || deleted.DurationFrames != 720 || !Validate(deleted).Valid {
+		t.Fatalf("deleted version=%d duration=%d report=%#v", deleted.Version, deleted.DurationFrames, Validate(deleted))
+	}
+	for _, trackID := range []string{"visual_base", "original_audio"} {
+		for _, clip := range trackByID(&deleted, trackID).Clips {
+			if clip.AssetID == "talk" &&
+				max(240, clip.SourceStartFrame) < min(600, clip.SourceEndFrame) {
+				t.Fatalf("%s 仍覆盖已删除 source range: %#v", trackID, clip)
+			}
+		}
+	}
+
+	deletedAgain, err := ApplyPatch(deleted, map[string]any{
+		"kind": "delete_source_range", "asset_id": "talk",
+		"source_start_frame": 720, "source_end_frame": 780,
+	})
+	if err != nil || deletedAgain.Version != 3 || deletedAgain.DurationFrames != 660 ||
+		!Validate(deletedAgain).Valid {
+		t.Fatalf(
+			"second delete version=%d duration=%d report=%#v err=%v",
+			deletedAgain.Version, deletedAgain.DurationFrames, Validate(deletedAgain), err,
+		)
+	}
+	if _, err := ApplyPatch(deletedAgain, map[string]any{
+		"kind": "delete_source_range", "asset_id": "talk",
+		"source_start_frame": 240, "source_end_frame": 600,
+	}); err == nil {
+		t.Fatal("已经删除的 source range 不得猜测或重复映射")
+	}
+}
+
+func TestDeleteSourceRangeRequiresExactRateBoundariesAndSupportsMixedRates(t *testing.T) {
+	t.Parallel()
+	document, err := composeTimelineFixture("draft_source_rate", 1, []timelineFixtureSelection{
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 20, Role: "a_roll"},
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 20, SourceEndFrame: 30, Role: "a_roll"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rated, err := ApplyPatch(document, map[string]any{
+		"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 2.0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ApplyPatch(rated, map[string]any{
+		"kind": "delete_source_range", "asset_id": "talk",
+		"source_start_frame": 0, "source_end_frame": 1,
+	}); err == nil || !strings.Contains(err.Error(), "精确映射") {
+		t.Fatalf("2x 非对齐边界 err=%v", err)
+	}
+	aligned, err := ApplyPatch(rated, map[string]any{
+		"kind": "delete_source_range", "asset_id": "talk",
+		"source_start_frame": 0, "source_end_frame": 2,
+	})
+	if err != nil || aligned.DurationFrames != rated.DurationFrames-1 ||
+		aligned.Tracks[0].Clips[0].SourceStartFrame != 2 {
+		t.Fatalf("2x 对齐删除 aligned=%#v err=%v", aligned, err)
+	}
+	mixed, err := ApplyPatch(rated, map[string]any{
+		"kind": "delete_source_range", "asset_id": "talk",
+		"source_start_frame": 2, "source_end_frame": 22,
+	})
+	if err != nil || mixed.DurationFrames != 9 || !Validate(mixed).Valid {
+		t.Fatalf("mixed-rate delete=%#v report=%#v err=%v", mixed, Validate(mixed), err)
+	}
+}
+
+func TestDeleteSourceRangeRejectsDuplicateSourceGapAndTimelineGap(t *testing.T) {
+	t.Parallel()
+	fixtures := []struct {
+		name       string
+		selections []timelineFixtureSelection
+		mutate     func(*Document)
+		start, end int
+		want       string
+	}{
+		{
+			name: "duplicate",
+			selections: []timelineFixtureSelection{
+				{AssetID: "talk", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 20},
+				{AssetID: "talk", AssetKind: "video", SourceStartFrame: 10, SourceEndFrame: 30},
+			},
+			start: 10, end: 20, want: "重复映射",
+		},
+		{
+			name: "source_gap",
+			selections: []timelineFixtureSelection{
+				{AssetID: "talk", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 10},
+				{AssetID: "talk", AssetKind: "video", SourceStartFrame: 20, SourceEndFrame: 30},
+			},
+			start: 0, end: 30, want: "source 映射不连续",
+		},
+		{
+			name: "timeline_gap",
+			selections: []timelineFixtureSelection{
+				{AssetID: "talk", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 10},
+				{AssetID: "talk", AssetKind: "video", SourceStartFrame: 10, SourceEndFrame: 20},
+			},
+			mutate: func(document *Document) {
+				document.Tracks[0].Clips[1].TimelineStartFrame += 5
+				document.Tracks[0].Clips[1].TimelineEndFrame += 5
+				document.DurationFrames += 5
+			},
+			start: 0, end: 20, want: "timeline 映射不连续",
+		},
+	}
+	for _, fixture := range fixtures {
+		fixture := fixture
+		t.Run(fixture.name, func(t *testing.T) {
+			t.Parallel()
+			document, err := composeTimelineFixture(
+				"draft_"+fixture.name, 1, fixture.selections,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fixture.mutate != nil {
+				fixture.mutate(&document)
+			}
+			if _, err := ApplyPatch(document, map[string]any{
+				"kind": "delete_source_range", "asset_id": "talk",
+				"source_start_frame": fixture.start, "source_end_frame": fixture.end,
+			}); err == nil || !strings.Contains(err.Error(), fixture.want) {
+				t.Fatalf("err=%v want=%q", err, fixture.want)
+			}
+		})
+	}
+}
+
 func validationHasCode(report ValidationReport, code string) bool {
 	for _, issue := range report.Issues {
 		if issue.Code == code {
@@ -144,7 +290,7 @@ func validationHasCode(report ValidationReport, code string) bool {
 
 func TestApplyPatchSubsetTable(t *testing.T) {
 	t.Parallel()
-	base, err := ComposeInitial("draft_patch", 1, []Selection{
+	base, err := composeTimelineFixture("draft_patch", 1, []timelineFixtureSelection{
 		{AssetID: "a", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll"},
 		{AssetID: "b", SourceStartFrame: 0, SourceEndFrame: 60, Role: "b_roll"},
 	})
@@ -176,13 +322,14 @@ func TestApplyPatchSubsetTable(t *testing.T) {
 		{"insert", map[string]any{"kind": "insert_clip", "asset_id": "c", "source_start_frame": 0, "source_end_frame": 30}, func(value Document) bool { return value.DurationFrames == 150 && len(value.Tracks[0].Clips) == 3 }},
 		{"insert bgm", map[string]any{
 			"kind": "insert_clip", "track_id": "bgm", "timeline_clip_id": "bgm_1",
-			"asset_id": "music", "asset_kind": "audio", "role": "bgm",
+			"asset_id": "music", "asset_kind": "audio",
 			"timeline_start_frame": 15, "source_start_frame": 0, "source_end_frame": 30,
 		}, func(value Document) bool {
 			return value.DurationFrames == 120 && len(value.Tracks[4].Clips) == 1 &&
 				value.Tracks[4].Clips[0].TimelineStartFrame == 15 &&
 				value.Tracks[4].Clips[0].TimelineEndFrame == 45 &&
-				value.Tracks[4].Clips[0].AssetKind == "audio" && Validate(value).Valid
+				value.Tracks[4].Clips[0].AssetKind == "audio" &&
+				value.Tracks[4].Clips[0].Role == "bgm" && Validate(value).Valid
 		}},
 		{"replace", map[string]any{"kind": "replace_clip", "timeline_clip_id": "clip_v1_001", "asset_id": "c"}, func(value Document) bool { return value.Tracks[0].Clips[0].AssetID == "c" }},
 		{"rate", map[string]any{"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 2.0}, func(value Document) bool { return value.DurationFrames == 90 }},
@@ -220,7 +367,7 @@ func TestApplyPatchSubsetTable(t *testing.T) {
 
 func TestTrimAndPlaybackRateOnFreeTrackDoNotChangeCompositionDuration(t *testing.T) {
 	t.Parallel()
-	document, err := ComposeInitial("draft_free_audio", 1, []Selection{{
+	document, err := composeTimelineFixture("draft_free_audio", 1, []timelineFixtureSelection{{
 		AssetID: "video", AssetKind: "video", SourceEndFrame: 120,
 	}})
 	if err != nil {
@@ -248,7 +395,7 @@ func TestTrimAndPlaybackRateOnFreeTrackDoNotChangeCompositionDuration(t *testing
 
 func TestLinkedAudioAndProfessionalEditingOperations(t *testing.T) {
 	t.Parallel()
-	base, err := ComposeInitial("draft_pro_edit", 1, []Selection{
+	base, err := composeTimelineFixture("draft_pro_edit", 1, []timelineFixtureSelection{
 		{AssetID: "a", AssetKind: "video", SourceEndFrame: 30, Role: "a_roll", HasAudio: true},
 		{AssetID: "b", AssetKind: "video", SourceEndFrame: 30, Role: "a_roll", HasAudio: true},
 		{AssetID: "c", AssetKind: "video", SourceEndFrame: 30, Role: "a_roll", HasAudio: true},
@@ -419,7 +566,7 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 		t.Fatalf("report=%#v", report)
 	}
 
-	base, err := ComposeInitial("draft_errors", 1, []Selection{{AssetID: "a", SourceEndFrame: 60}})
+	base, err := composeTimelineFixture("draft_errors", 1, []timelineFixtureSelection{{AssetID: "a", SourceEndFrame: 60}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -474,24 +621,11 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 			t.Fatalf("operation should fail: %#v", operation)
 		}
 	}
-	for index, selection := range []Selection{
-		{},
-		{AssetID: "a", SourceStartFrame: -1, SourceEndFrame: 1},
-		{AssetID: "a", SourceStartFrame: 2, SourceEndFrame: 1},
-		{AssetID: "a", AssetKind: "audio", SourceEndFrame: 1},
-	} {
-		if _, err := ComposeInitial("draft", 1, []Selection{selection}); err == nil {
-			t.Fatalf("selection[%d] should fail", index)
-		}
-	}
-	if _, err := ComposeInitial("", 1, []Selection{{AssetID: "a", SourceEndFrame: 1}}); err == nil {
-		t.Fatal("empty draft should fail")
-	}
 }
 
 func TestValidatePresentationFields(t *testing.T) {
 	t.Parallel()
-	base, err := ComposeInitial("draft_presentation_validation", 1, []Selection{{AssetID: "a", SourceEndFrame: 60}})
+	base, err := composeTimelineFixture("draft_presentation_validation", 1, []timelineFixtureSelection{{AssetID: "a", SourceEndFrame: 60}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +753,7 @@ func TestTimelineStoreMissingAndPreviewLookup(t *testing.T) {
 		t.Fatalf("missing preview=%v err=%v", preview, err)
 	}
 
-	document, _ := ComposeInitial("draft_preview", 1, []Selection{{AssetID: "a", SourceEndFrame: 30}})
+	document, _ := composeTimelineFixture("draft_preview", 1, []timelineFixtureSelection{{AssetID: "a", SourceEndFrame: 30}})
 	data, _ := json.Marshal(document)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	hash := strings.Repeat("a", 64)
@@ -648,26 +782,5 @@ func TestTimelineStoreMissingAndPreviewLookup(t *testing.T) {
 	}
 	if valueOr("  ", "fallback") != "fallback" || valueOr("value", "fallback") != "value" {
 		t.Fatal("valueOr mismatch")
-	}
-}
-
-func TestNextVersionFollowsOnlyCurrentTimeline(t *testing.T) {
-	t.Parallel()
-	database, err := storage.Open(t.Context(), t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := database.Write().ExecContext(t.Context(), `
-		INSERT INTO drafts(
-			draft_id,name,state_version,status,defaults_json,running_jobs_json,brief_json,
-			timeline_current_version,timeline_validated,created_at,updated_at
-			) VALUES('draft_nav','d',0,'active','{}','[]','{}',4,1,?,?)`, now, now); err != nil {
-		t.Fatal(err)
-	}
-	version, err := NextVersion(t.Context(), database, "draft_nav")
-	if err != nil || version != 5 {
-		t.Fatalf("next version=%d err=%v", version, err)
 	}
 }
