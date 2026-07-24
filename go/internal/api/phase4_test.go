@@ -127,3 +127,66 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 		t.Fatalf("viewed status=%d body=%s", viewed.Code, viewed.Body.String())
 	}
 }
+
+func TestTimelineBatchFailureReportsDurablePrefixAndLatestSnapshot(t *testing.T) {
+	t.Parallel()
+	server, handler := testServer(t, t.TempDir(), 0)
+	const draftID = "draft_timeline_partial"
+	createDraftThroughAPI(t, handler, draftID)
+	result, err := reducer.Apply(t.Context(), server.database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset_timeline_partial", "job_id": "job_timeline_partial",
+			"storage_mode": "reference", "reference_path": "/tmp/partial.mp4",
+			"kind": "video", "source": "local_path", "filename": "partial.mp4",
+			"hash": "partial", "size": 1, "ingest_status": "ready",
+		}},
+		{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{"asset_id": "asset_timeline_partial"}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("assets status=%s err=%v", result.Status, err)
+	}
+	ctx := tools.WithDraftID(t.Context(), draftID)
+	if _, err := server.agent.ExecuteTool(ctx, "timeline.insert", tools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "asset_timeline_partial", "role": "a_roll",
+		"source_start_frame": 0, "source_end_frame": 60,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, apiRequest(t, http.MethodPost,
+		"/api/drafts/"+draftID+"/timeline/patch", map[string]any{"op": map[string]any{
+			"kind": "batch", "ops": []any{
+				map[string]any{
+					"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -6,
+				},
+				map[string]any{
+					"kind": "split_clip", "timeline_clip_id": "missing_clip", "split_frame": 30,
+				},
+				map[string]any{
+					"kind": "set_track_state", "track_id": "bgm", "muted": true,
+				},
+			},
+		}}))
+	body := response.Body.String()
+	if response.Code != http.StatusBadRequest ||
+		!strings.Contains(body, `"reason":"timeline_patch_validation_failed"`) ||
+		!strings.Contains(body, `"applied_count":1`) ||
+		!strings.Contains(body, `"failed_index":1`) ||
+		!strings.Contains(body, `"timeline_version":2`) ||
+		!strings.Contains(body, `"gain_db":-6`) {
+		t.Fatalf("partial patch status=%d body=%s", response.Code, body)
+	}
+	var currentVersion, manualBatches int
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT timeline_current_version FROM drafts WHERE draft_id=?`, draftID,
+	).Scan(&currentVersion); err != nil || currentVersion != 2 {
+		t.Fatalf("current version=%d err=%v", currentVersion, err)
+	}
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM timeline_edit_batches
+		WHERE draft_id=? AND origin='manual'`, draftID,
+	).Scan(&manualBatches); err != nil || manualBatches != 1 {
+		t.Fatalf("manual batches=%d err=%v", manualBatches, err)
+	}
+}

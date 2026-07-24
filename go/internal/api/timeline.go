@@ -50,7 +50,10 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 	}
 	var payload TimelinePatchRequest
 	if err := decodeJSON(request, &payload); err != nil || len(payload.Op) == 0 {
-		writeBadRequest(writer, "timeline_patch_invalid")
+		server.writeTimelinePatchFailure(
+			writer, request.Context(), draftID, http.StatusBadRequest,
+			"timeline_patch_invalid", 0, 0,
+		)
 		return
 	}
 	ctx := tools.WithTimelineMutationOrigin(
@@ -61,35 +64,61 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 	if kind, _ := payload.Op["kind"].(string); kind == "batch" {
 		expanded, valid := timelinePatchOperations(payload.Op["ops"])
 		if !valid || len(expanded) == 0 || len(expanded) > 100 {
-			writeBadRequest(writer, "timeline_patch_invalid")
+			server.writeTimelinePatchFailure(
+				writer, request.Context(), draftID, http.StatusBadRequest,
+				"timeline_patch_invalid", 0, 0,
+			)
 			return
 		}
 		operations = expanded
 	}
-	for _, operation := range operations {
+	type invocation struct {
+		name  string
+		input any
+	}
+	invocations := make([]invocation, 0, len(operations))
+	for index, operation := range operations {
 		kind, _ := operation["kind"].(string)
 		toolName, ok := tools.TimelineAtomicToolForKind(kind)
 		if !ok {
-			writeBadRequest(writer, "timeline_patch_invalid")
+			server.writeTimelinePatchFailure(
+				writer, request.Context(), draftID, http.StatusBadRequest,
+				"timeline_patch_invalid", 0, index,
+			)
 			return
 		}
 		input, decodeErr := server.agent.Tools().DecodeInput(toolName, operation)
 		if decodeErr != nil {
-			writeBadRequest(writer, "timeline_patch_invalid: "+decodeErr.Error())
+			server.writeTimelinePatchFailure(
+				writer, request.Context(), draftID, http.StatusBadRequest,
+				"timeline_patch_invalid: "+decodeErr.Error(), 0, index,
+			)
 			return
 		}
-		raw, executeErr := server.agent.ExecuteTool(ctx, toolName, input)
+		invocations = append(invocations, invocation{name: toolName, input: input})
+	}
+	for index, current := range invocations {
+		raw, executeErr := server.agent.ExecuteTool(ctx, current.name, current.input)
 		if executeErr != nil {
-			writeBadRequest(writer, "timeline_patch_invalid: "+executeErr.Error())
+			server.writeTimelinePatchFailure(
+				writer, request.Context(), draftID, http.StatusBadRequest,
+				"timeline_patch_invalid: "+executeErr.Error(), index, index,
+			)
 			return
 		}
 		result, resultOK := raw.(tools.ToolResult)
 		if !resultOK {
-			server.internalError(writer, errors.New("timeline patch 返回类型无效"))
+			server.writeTimelinePatchFailure(
+				writer, request.Context(), draftID, http.StatusInternalServerError,
+				"timeline_patch_result_invalid", index, index,
+			)
 			return
 		}
 		if result.Status != "succeeded" {
-			writeBadRequest(writer, "timeline_patch_validation_failed")
+			server.writeTimelinePatchFailure(
+				writer, request.Context(), draftID, http.StatusBadRequest,
+				"timeline_patch_validation_failed", index, index,
+			)
 			return
 		}
 	}
@@ -102,6 +131,29 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 		return
 	}
 	writeJSON(writer, http.StatusOK, response)
+}
+
+func (server *Server) writeTimelinePatchFailure(
+	writer http.ResponseWriter,
+	ctx context.Context,
+	draftID string,
+	status int,
+	reason string,
+	appliedCount int,
+	failedIndex int,
+) {
+	var latest any
+	if response, err := server.draftTimelineResponse(ctx, draftID); err == nil {
+		latest = response
+	}
+	writeJSON(writer, status, map[string]any{
+		"detail": map[string]any{
+			"reason":        reason,
+			"applied_count": appliedCount,
+			"failed_index":  failedIndex,
+			"latest":        latest,
+		},
+	})
 }
 
 func timelinePatchOperations(value any) ([]map[string]any, bool) {

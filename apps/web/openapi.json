@@ -996,6 +996,56 @@
         "title": "TimelinePatchRequest",
         "type": "object"
       },
+      "TimelinePatchFailureDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "applied_count": {
+            "minimum": 0,
+            "title": "Applied Count",
+            "type": "integer"
+          },
+          "failed_index": {
+            "minimum": 0,
+            "title": "Failed Index",
+            "type": "integer"
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DraftTimelineResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason",
+          "applied_count",
+          "failed_index",
+          "latest"
+        ],
+        "title": "TimelinePatchFailureDetail",
+        "type": "object"
+      },
+      "TimelinePatchFailureResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/TimelinePatchFailureDetail"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "TimelinePatchFailureResponse",
+        "type": "object"
+      },
       "DraftUpdateRequest": {
         "additionalProperties": false,
         "properties": {
@@ -4079,7 +4129,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/TimelinePatchFailureResponse"
                 }
               }
             },

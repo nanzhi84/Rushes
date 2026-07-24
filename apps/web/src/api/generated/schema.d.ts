@@ -929,6 +929,20 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        /** TimelinePatchFailureDetail */
+        TimelinePatchFailureDetail: {
+            /** Applied Count */
+            applied_count: number;
+            /** Failed Index */
+            failed_index: number;
+            latest: components["schemas"]["DraftTimelineResponse"] | null;
+            /** Reason */
+            reason: string;
+        };
+        /** TimelinePatchFailureResponse */
+        TimelinePatchFailureResponse: {
+            detail: components["schemas"]["TimelinePatchFailureDetail"];
+        };
         /** DraftUpdateRequest */
         DraftUpdateRequest: {
             /** Name */
@@ -2952,7 +2966,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
+                    "application/json": components["schemas"]["TimelinePatchFailureResponse"];
                 };
             };
             /** @description Unauthorized */

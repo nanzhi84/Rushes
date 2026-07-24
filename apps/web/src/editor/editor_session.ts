@@ -80,6 +80,32 @@ export class EditorSession {
     this.emit();
   }
 
+  rejectPartiallySaved(
+    serverTimeline: TimelineJson,
+    appliedCount: number,
+    error: unknown
+  ): void {
+    if (
+      !Number.isInteger(appliedCount) ||
+      appliedCount < 0 ||
+      appliedCount > this.inFlight.length
+    ) {
+      this.rejectSave(error);
+      return;
+    }
+    const remaining = this.inFlight.slice(appliedCount);
+    this.inFlight = [];
+    this.pending = compactEditorOperations([...remaining, ...this.pending]);
+    let rebased = cloneTimeline(serverTimeline);
+    for (const operation of this.pending) {
+      rebased = applyLocalTimelineOperation(rebased, operation);
+    }
+    this.timeline = rebased;
+    this.state = "error";
+    this.error = error instanceof Error ? error.message : "时间线保存失败";
+    this.emit();
+  }
+
   replaceFromServer(serverTimeline: TimelineJson): void {
     if (this.pending.length > 0 || this.inFlight.length > 0) {
       return;

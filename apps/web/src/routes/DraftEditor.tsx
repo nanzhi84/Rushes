@@ -34,7 +34,10 @@ import {
   type ConsoleConnectionState,
   type ConsolePanelHandle
 } from "../components/Console/ConsolePanel";
-import { timelinePatchErrorMessage } from "../components/Console/error_messages";
+import {
+  timelinePatchErrorMessage,
+  timelinePatchPartialFailure
+} from "../components/Console/error_messages";
 import { DiffusionPreviewPlayer } from "../components/PreviewPlayer";
 import { EntityActionDialog } from "../components/Shell/EntityActionDialog";
 import { ResizeHandle } from "../components/Shell/ResizeHandle";
@@ -179,7 +182,13 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
       setTimelineEditError(null);
       await queryClient.invalidateQueries({ queryKey: queryKeys.draft(draftId) });
     } catch (error) {
-      session.rejectSave(error);
+      const partial = timelinePatchPartialFailure(error);
+      if (partial) {
+        session.rejectPartiallySaved(partial.latest.timeline, partial.appliedCount, error);
+        queryClient.setQueryData(queryKeys.timeline(draftId), partial.latest);
+      } else {
+        session.rejectSave(error);
+      }
       setTimelineEditError(timelinePatchErrorMessage(error));
     }
   }, [draftId, queryClient]);

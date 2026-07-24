@@ -131,6 +131,35 @@ describe("EditorSession", () => {
     ]);
   });
 
+  it("批量保存部分成功后只重试未执行后缀，并基于服务端最新时间线重放", () => {
+    const initial = fixtureTimeline();
+    const session = new EditorSession(initial);
+    const split = { kind: "split_clip", timeline_clip_id: "visual_a", split_frame: 15 };
+    const mute = { kind: "set_track_state", track_id: "bgm", muted: true };
+    session.apply(split);
+    session.apply(mute);
+    expect(session.beginSave()).toEqual([split, mute]);
+    session.apply({ kind: "adjust_gain", timeline_clip_id: "music_a", gain_db: -9 });
+
+    const serverAfterSplit = applyLocalTimelineOperation(initial, split);
+    session.rejectPartiallySaved(serverAfterSplit, 1, new Error("第二项保存失败"));
+
+    const snapshot = session.snapshot();
+    expect(snapshot).toMatchObject({
+      saveState: "error",
+      pendingCount: 2,
+      error: "第二项保存失败"
+    });
+    expect(findTrack(snapshot.timeline, "visual_base").clips?.map((clip) => clip.timeline_clip_id))
+      .toContain("visual_a_split_15");
+    expect(findTrack(snapshot.timeline, "bgm").muted).toBe(true);
+    expect(findClip(snapshot.timeline, "music_a").gain_db).toBe(-9);
+    expect(session.beginSave()).toEqual([
+      mute,
+      { kind: "adjust_gain", timeline_clip_id: "music_a", gain_db: -9 }
+    ]);
+  });
+
   it("字幕样式在编辑、插入和保存失败后保持前后端同义", () => {
     const initial = fixtureTimeline();
     findTrack(initial, "subtitles").clips = [{

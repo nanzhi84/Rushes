@@ -1,4 +1,44 @@
 import { ApiError } from "../../auth";
+import type { DraftTimelineResponse } from "../../api/client";
+
+export type TimelinePatchPartialFailure = {
+  appliedCount: number;
+  failedIndex: number;
+  latest: DraftTimelineResponse;
+};
+
+export function timelinePatchPartialFailure(
+  error: unknown
+): TimelinePatchPartialFailure | null {
+  if (!(error instanceof ApiError) || !error.payload || typeof error.payload !== "object") {
+    return null;
+  }
+  const detail = Reflect.get(error.payload, "detail");
+  if (!detail || typeof detail !== "object") {
+    return null;
+  }
+  const appliedCount = Reflect.get(detail, "applied_count");
+  const failedIndex = Reflect.get(detail, "failed_index");
+  const latest = Reflect.get(detail, "latest");
+  if (
+    !Number.isInteger(appliedCount) ||
+    appliedCount < 0 ||
+    !Number.isInteger(failedIndex) ||
+    failedIndex < 0 ||
+    !latest ||
+    typeof latest !== "object" ||
+    typeof Reflect.get(latest, "timeline_version") !== "number" ||
+    !Reflect.get(latest, "timeline") ||
+    typeof Reflect.get(latest, "timeline") !== "object"
+  ) {
+    return null;
+  }
+  return {
+    appliedCount,
+    failedIndex,
+    latest: latest as DraftTimelineResponse
+  };
+}
 
 // 从后端错误里提取可读 reason：优先取 ApiError.payload.detail.reason，否则回退到
 // error.message。时间线写路径与会话（清空/取消任务/回退）共用这一层，故抽成叶子模块，

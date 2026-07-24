@@ -840,6 +840,19 @@ type SecurityRefusalResponseError string
 // StorageMode defines model for StorageMode.
 type StorageMode string
 
+// TimelinePatchFailureDetail defines model for TimelinePatchFailureDetail.
+type TimelinePatchFailureDetail struct {
+	AppliedCount int                   `json:"applied_count"`
+	FailedIndex  int                   `json:"failed_index"`
+	Latest       DraftTimelineResponse `json:"latest"`
+	Reason       string                `json:"reason"`
+}
+
+// TimelinePatchFailureResponse defines model for TimelinePatchFailureResponse.
+type TimelinePatchFailureResponse struct {
+	Detail TimelinePatchFailureDetail `json:"detail"`
+}
+
 // TimelinePatchRequest defines model for TimelinePatchRequest.
 type TimelinePatchRequest struct {
 	Op map[string]interface{} `json:"op"`

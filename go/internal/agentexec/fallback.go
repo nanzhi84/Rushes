@@ -2,6 +2,7 @@ package agentexec
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -35,9 +36,16 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 	}
 	if len(understandIDs) > 0 {
 		for _, assetID := range understandIDs {
-			if _, err := runReported(ctx, "media.detect_shots", rushestools.DetectShotsInput{
+			output, err := runReported(ctx, "media.detect_shots", rushestools.DetectShotsInput{
 				AssetID: assetID, Depth: "scan", Focus: "混剪可用画面",
-			}); err != nil {
+			})
+			if err != nil {
+				return "", err
+			}
+			if err := requireFallbackToolStatus(
+				"media.detect_shots", output,
+				"completed", string(rushestools.StatusQueued),
+			); err != nil {
 				return "", err
 			}
 		}
@@ -48,10 +56,16 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 			endFrame = timeline.DefaultFPS
 		}
 		endFrame = min(endFrame, 5*timeline.DefaultFPS)
-		if _, err := runReported(ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		output, err := runReported(ctx, "timeline.insert", rushestools.TimelineInsertInput{
 			"kind": "insert_clip", "asset_id": asset.AssetID, "role": "b_roll",
 			"source_start_frame": 0, "source_end_frame": endFrame,
-		}); err != nil {
+		})
+		if err != nil {
+			return "", err
+		}
+		if err := requireFallbackToolStatus(
+			"timeline.insert", output, string(rushestools.StatusSucceeded),
+		); err != nil {
 			return "", err
 		}
 	}
@@ -59,10 +73,39 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 	if err != nil {
 		return "", err
 	}
-	if _, err := runReported(ctx, "render.start", rushestools.RenderStartInput{
+	output, err := runReported(ctx, "render.start", rushestools.RenderStartInput{
 		Kind: "preview", TimelineID: document.TimelineID,
-	}); err != nil {
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := requireFallbackToolStatus(
+		"render.start", output,
+		string(rushestools.StatusQueued), string(rushestools.StatusSucceeded),
+	); err != nil {
 		return "", err
 	}
 	return "已完成素材理解与初版时间线，并开始渲染预览。", nil
+}
+
+func requireFallbackToolStatus(
+	name string,
+	output any,
+	allowed ...string,
+) error {
+	var status, observation string
+	switch result := output.(type) {
+	case rushestools.ToolResult:
+		status, observation = result.Status, result.Observation
+	case rushestools.DetectShotsResult:
+		status, observation = result.Status, result.UsageNote
+	default:
+		return fmt.Errorf("%s 返回类型无效", name)
+	}
+	for _, allowedStatus := range allowed {
+		if status == allowedStatus {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s 未完成: status=%s observation=%s", name, status, observation)
 }
