@@ -121,7 +121,7 @@ func newServiceWithModels(
 	}
 	service.tools = registry
 	registry.UseAdmission(modelToolSurfaceInterceptor)
-	// G2：破坏性工具（当前仅 memory.update 携带 remove_keys）在模型主路径上必须先经
+	// G2：破坏性工具（当前为 memory.remove）在模型主路径上必须先经
 	// interaction.confirm_action 确认；确认后的重放走直连路径、绕过本拦截器（#103 G2）。
 	registry.Use(destructiveConfirmationInterceptor)
 	recordModelToolCatalog(ctx, registry)

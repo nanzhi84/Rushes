@@ -530,7 +530,7 @@ func recentSuccessfulWorkflowSurface(
 			continue
 		}
 		switch message.ToolName {
-		case "plan.update", "memory.update":
+		case "plan.update", "memory.set", "memory.remove":
 			return remainingWorkflowSurface(userText)
 		case "media.detect_shots", "speech.transcribe":
 			return remainingWorkflowSurface(userText)
@@ -573,7 +573,8 @@ func recentSuccessfulWorkflowSurface(
 func isWorkflowTransitionTool(name string) bool {
 	switch name {
 	case "plan.update",
-		"memory.update",
+		"memory.set",
+		"memory.remove",
 		"media.detect_shots",
 		"speech.transcribe",
 		"speech.search",

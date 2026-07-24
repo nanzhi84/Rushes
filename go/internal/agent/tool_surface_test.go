@@ -181,7 +181,7 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 	)
 	assertSurface(
 		"记住我的长期偏好并更新计划",
-		[]string{"memory.update", "plan.update", "interaction.confirm_action"},
+		[]string{"memory.set", "memory.remove", "plan.update", "interaction.confirm_action"},
 		[]string{"timeline.update", "speech.search"},
 	)
 }
@@ -1390,7 +1390,9 @@ func TestPlanUpdateIsAvailableAcrossWorkflowSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	names = surfaceNames(specs)
-	if !containsName(names, "timeline.update") || containsName(names, "memory.update") {
+	if !containsName(names, "timeline.update") ||
+		containsName(names, "memory.set") ||
+		containsName(names, "memory.remove") {
 		t.Fatalf("计划固化后 surface=%v", names)
 	}
 
@@ -1434,7 +1436,7 @@ func TestSuccessfulControlActionAdvancesCompositeRequest(t *testing.T) {
 		wantTool string
 	}{
 		{"更新计划，然后剪掉开头三秒并导出", "plan.update", "timeline.update"},
-		{"记住我偏好短片，然后剪掉开头三秒", "memory.update", "timeline.update"},
+		{"记住我偏好短片，然后剪掉开头三秒", "memory.set", "timeline.update"},
 	} {
 		messages := []*schema.Message{
 			schema.UserMessage(test.prompt),
@@ -1449,7 +1451,9 @@ func TestSuccessfulControlActionAdvancesCompositeRequest(t *testing.T) {
 			t.Fatal(selectErr)
 		}
 		names := surfaceNames(specs)
-		if !containsName(names, test.wantTool) || containsName(names, "memory.update") {
+		if !containsName(names, test.wantTool) ||
+			containsName(names, "memory.set") ||
+			containsName(names, "memory.remove") {
 			t.Errorf("%q after %s surface=%v", test.prompt, test.toolName, names)
 		}
 	}

@@ -30,10 +30,9 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 		t.Fatalf("assets status=%s err=%v", result.Status, err)
 	}
 	ctx := tools.WithDraftID(t.Context(), "draft_timeline_api")
-	if _, err := server.agent.ExecuteTool(ctx, "timeline.compose_initial", tools.ComposeInitialInput{
-		Clips: []tools.ComposeClip{{
-			AssetID: "asset_timeline_api", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll",
-		}},
+	if _, err := server.agent.ExecuteTool(ctx, "timeline.insert", tools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "asset_timeline_api", "role": "a_roll",
+		"source_start_frame": 0, "source_end_frame": 60,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +71,7 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 				map[string]any{"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -6},
 			},
 		}}))
-	if patched.Code != http.StatusOK || !strings.Contains(patched.Body.String(), `"timeline_version":2`) ||
+	if patched.Code != http.StatusOK || !strings.Contains(patched.Body.String(), `"timeline_version":3`) ||
 		!strings.Contains(patched.Body.String(), `"clip_v1_001_split_30"`) {
 		t.Fatalf("patch status=%d body=%s", patched.Code, patched.Body.String())
 	}
@@ -83,7 +82,7 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 			"target_frame": 10, "edge": "end",
 		}}))
 	if invalidPatch.Code != http.StatusBadRequest ||
-		!strings.Contains(invalidPatch.Body.String(), "timeline_patch_validation_failed") {
+		!strings.Contains(invalidPatch.Body.String(), "timeline_patch_invalid") {
 		t.Fatalf("invalid patch status=%d body=%s", invalidPatch.Code, invalidPatch.Body.String())
 	}
 	var renderJobs int
@@ -95,24 +94,24 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 	var currentVersion, timelineRows int
 	if err := server.database.Read().QueryRowContext(t.Context(), `
 		SELECT timeline_current_version FROM drafts WHERE draft_id='draft_timeline_api'`,
-	).Scan(&currentVersion); err != nil || currentVersion != 2 {
+	).Scan(&currentVersion); err != nil || currentVersion != 3 {
 		t.Fatalf("current version=%d err=%v", currentVersion, err)
 	}
 	if err := server.database.Read().QueryRowContext(t.Context(), `
 		SELECT COUNT(*) FROM timeline_versions WHERE draft_id='draft_timeline_api'`,
-	).Scan(&timelineRows); err != nil || timelineRows != 2 {
+	).Scan(&timelineRows); err != nil || timelineRows != 3 {
 		t.Fatalf("timeline rows=%d err=%v", timelineRows, err)
 	}
 	var manualBatches, operationCount int
 	var actor, origin string
 	if err := server.database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*), actor, origin, json_array_length(operations_json)
+		SELECT COUNT(*), MIN(actor), MIN(origin), SUM(json_array_length(operations_json))
 		FROM timeline_edit_batches
 		WHERE draft_id='draft_timeline_api' AND origin='manual'`,
 	).Scan(&manualBatches, &actor, &origin, &operationCount); err != nil {
 		t.Fatal(err)
 	}
-	if manualBatches != 1 || actor != string(contracts.ActorUser) || origin != "manual" || operationCount != 2 {
+	if manualBatches != 2 || actor != string(contracts.ActorUser) || origin != "manual" || operationCount != 2 {
 		t.Fatalf("manual batches=%d actor=%s origin=%s ops=%d", manualBatches, actor, origin, operationCount)
 	}
 	removedRestore := httptest.NewRecorder()

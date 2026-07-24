@@ -519,9 +519,12 @@ type MemoryEntryInput struct {
 	EvidenceQuote string `json:"evidence_quote" jsonschema:"required" jsonschema_description:"从当前这条用户消息或决策回答里逐字摘录的原文片段，用于佐证该记忆确有用户依据；必须是原文连续子串，改写、拼接或与本条陈述无关的摘录都会被拒绝"`
 }
 
-type MemoryUpdateInput struct {
-	Entries    []MemoryEntryInput `json:"entries,omitempty" jsonschema_description:"要写入或覆盖的长期记忆，单次最多 8 条；一次性项目要求不要入库"`
-	RemoveKeys []string           `json:"remove_keys,omitempty" jsonschema_description:"用户本回合明确要求忘记的长期记忆键；不得与 entries 中的 key 重复"`
+type MemorySetInput struct {
+	Entries []MemoryEntryInput `json:"entries" jsonschema:"required" jsonschema_description:"要写入或覆盖的长期记忆，单次最多 8 条；一次性项目要求不要入库"`
+}
+
+type MemoryRemoveInput struct {
+	Keys []string `json:"keys" jsonschema:"required" jsonschema_description:"用户本回合明确要求忘记的长期记忆键"`
 }
 
 type ComposeClip struct {

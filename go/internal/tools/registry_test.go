@@ -206,7 +206,7 @@ func TestEveryToolHasValidEffect(t *testing.T) {
 
 // TestToolEffectClassificationTable 把 #103 G1 的全量分类表锁成可执行断言：任何工具的
 // Effect 被误改或新增工具未标注都会在此失败。speech.transcribe 负责持久化索引，
-// speech.search 与 timeline.check 必须严格只读；memory.update 因 remove_keys 删除路径归破坏性。
+// speech.search 与 timeline.check 必须严格只读；memory.set 可逆，memory.remove 归破坏性。
 func TestToolEffectClassificationTable(t *testing.T) {
 	t.Parallel()
 	database, err := storage.Open(t.Context(), t.TempDir())
@@ -247,7 +247,8 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		"render.preview":              EffectReversible,
 		"render.final_mp4":            EffectReversible,
 		"render.start":                EffectReversible,
-		"memory.update":               EffectDestructive,
+		"memory.set":                  EffectReversible,
+		"memory.remove":               EffectDestructive,
 	}
 	specs := registry.Specs(true)
 	if len(specs) != len(expected) {
@@ -287,7 +288,8 @@ func TestToolPrimitiveClassificationMatchesEffectAndSurface(t *testing.T) {
 		"interaction.ask_user":        FamilyControl,
 		"decision.answer":             FamilyControl,
 		"plan.update":                 FamilyControl,
-		"memory.update":               FamilyControl,
+		"memory.set":                  FamilyControl,
+		"memory.remove":               FamilyControl,
 		"timeline.compose_initial":    FamilyEdit,
 		"timeline.apply_patches":      FamilyEdit,
 		"timeline.insert":             FamilyEdit,
@@ -744,10 +746,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := registry.Specs(false)
-	if len(core) != 27 {
+	if len(core) != 28 {
 		t.Fatalf("core tools=%d", len(core))
 	}
-	if len(registry.Specs(true)) != 29 {
+	if len(registry.Specs(true)) != 30 {
 		t.Fatalf("all tools=%d", len(registry.Specs(true)))
 	}
 	for _, spec := range registry.Specs(true) {
@@ -756,10 +758,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 			t.Fatalf("spec=%s info=%#v err=%v", spec.Name, info, infoErr)
 		}
 	}
-	if got := len(registry.EinoTools(false, false)); got != 19 {
+	if got := len(registry.EinoTools(false, false)); got != 20 {
 		t.Fatalf("LLM core tools=%d", got)
 	}
-	if got := len(registry.EinoTools(false, true)); got != 27 {
+	if got := len(registry.EinoTools(false, true)); got != 28 {
 		t.Fatalf("含 harness core tools=%d", got)
 	}
 
@@ -832,7 +834,7 @@ func TestPlanUpdateIsAlwaysAvailableWithTypedSchema(t *testing.T) {
 	}
 }
 
-func TestMemoryUpdateSchemaCannotAcceptModelSuppliedEvidence(t *testing.T) {
+func TestMemorySchemasSeparateSetFromDestructiveRemove(t *testing.T) {
 	t.Parallel()
 	database, err := storage.Open(t.Context(), t.TempDir())
 	if err != nil {
@@ -843,38 +845,47 @@ func TestMemoryUpdateSchemaCannotAcceptModelSuppliedEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var memoryUpdate Spec
+	var memorySet, memoryRemove Spec
 	for _, spec := range registry.Specs(true) {
-		if spec.Name == "memory.update" {
-			memoryUpdate = spec
-			break
+		switch spec.Name {
+		case "memory.set":
+			memorySet = spec
+		case "memory.remove":
+			memoryRemove = spec
 		}
 	}
-	if memoryUpdate.Implementation == nil || memoryUpdate.Exposure != ExposureLLM ||
-		memoryUpdate.Optional || len(memoryUpdate.Requires) != 0 ||
-		memoryUpdate.InputType != reflect.TypeFor[MemoryUpdateInput]() {
-		t.Fatalf("memory.update spec=%#v", memoryUpdate)
+	if memorySet.Implementation == nil || memorySet.Exposure != ExposureLLM ||
+		memorySet.Optional || len(memorySet.Requires) != 0 ||
+		memorySet.InputType != reflect.TypeFor[MemorySetInput]() ||
+		memorySet.Effect != EffectReversible {
+		t.Fatalf("memory.set spec=%#v", memorySet)
 	}
-	if field := prohibitedField(reflect.TypeFor[MemoryUpdateInput]()); field != "" {
-		t.Fatalf("MemoryUpdateInput 触发 PolicyGate: %s", field)
+	if memoryRemove.Implementation == nil || memoryRemove.Exposure != ExposureLLM ||
+		memoryRemove.Optional || len(memoryRemove.Requires) != 0 ||
+		memoryRemove.InputType != reflect.TypeFor[MemoryRemoveInput]() ||
+		memoryRemove.Effect != EffectDestructive {
+		t.Fatalf("memory.remove spec=%#v", memoryRemove)
 	}
-	info, err := memoryUpdate.Implementation.Info(t.Context())
+	for _, inputType := range []reflect.Type{
+		reflect.TypeFor[MemorySetInput](), reflect.TypeFor[MemoryRemoveInput](),
+	} {
+		if field := prohibitedField(inputType); field != "" {
+			t.Fatalf("%s 触发 PolicyGate: %s", inputType, field)
+		}
+	}
+	info, err := memorySet.Implementation.Info(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
 	parameters, err := info.ToJSONSchema()
-	if err != nil || parameters == nil || parameters.Properties == nil || len(parameters.AnyOf) != 2 {
-		t.Fatalf("memory.update parameters=%#v err=%v", parameters, err)
+	if err != nil || parameters == nil || parameters.Properties == nil ||
+		!containsString(parameters.Required, "entries") {
+		t.Fatalf("memory.set parameters=%#v err=%v", parameters, err)
 	}
 	entries, entriesOK := parameters.Properties.Get("entries")
-	removals, removalsOK := parameters.Properties.Get("remove_keys")
 	if !entriesOK || entries.MinItems == nil || *entries.MinItems != 1 ||
-		entries.MaxItems == nil || *entries.MaxItems != 8 || entries.Items == nil ||
-		!removalsOK || removals.MinItems == nil || *removals.MinItems != 1 ||
-		removals.MaxItems == nil || *removals.MaxItems != 50 ||
-		!containsString(parameters.AnyOf[0].Required, "entries") ||
-		!containsString(parameters.AnyOf[1].Required, "remove_keys") {
-		t.Fatalf("entries=%#v removals=%#v anyOf=%#v", entries, removals, parameters.AnyOf)
+		entries.MaxItems == nil || *entries.MaxItems != 8 || entries.Items == nil {
+		t.Fatalf("entries=%#v", entries)
 	}
 	kind, kindOK := entries.Items.Properties.Get("kind")
 	key, keyOK := entries.Items.Properties.Get("key")
@@ -886,13 +897,27 @@ func TestMemoryUpdateSchemaCannotAcceptModelSuppliedEvidence(t *testing.T) {
 		!containsString(entries.Items.Required, "evidence_quote") {
 		t.Fatalf("entry schema=%#v", entries.Items)
 	}
-	if _, err := registry.DecodeInput("memory.update", map[string]any{
+	if _, err := registry.DecodeInput("memory.set", map[string]any{
 		"entries": []any{map[string]any{
 			"key": "pacing", "kind": "preference", "statement": "偏快",
 			"evidence_id": "forged",
 		}},
 	}); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("模型伪造 evidence 应被严格解码拒绝: %v", err)
+	}
+	removeInfo, err := memoryRemove.Implementation.Info(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeParameters, err := removeInfo.ToJSONSchema()
+	if err != nil || removeParameters == nil || removeParameters.Properties == nil ||
+		!containsString(removeParameters.Required, "keys") {
+		t.Fatalf("memory.remove parameters=%#v err=%v", removeParameters, err)
+	}
+	keys, ok := removeParameters.Properties.Get("keys")
+	if !ok || keys.MinItems == nil || *keys.MinItems != 1 ||
+		keys.MaxItems == nil || *keys.MaxItems != 50 {
+		t.Fatalf("memory.remove keys=%#v", keys)
 	}
 }
 

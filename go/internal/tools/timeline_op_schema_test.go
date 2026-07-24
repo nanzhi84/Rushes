@@ -131,6 +131,20 @@ func TestAtomicTimelineSchemasPartitionCatalogWithoutBatchOrInjectedFields(t *te
 	}
 }
 
+func TestTimelineAtomicToolForKindCoversCatalogPartition(t *testing.T) {
+	for toolName, kinds := range timelineAtomicKinds {
+		for _, kind := range kinds {
+			got, ok := TimelineAtomicToolForKind(kind)
+			if !ok || got != toolName {
+				t.Fatalf("kind=%s tool=%s ok=%v want=%s", kind, got, ok, toolName)
+			}
+		}
+	}
+	if toolName, ok := TimelineAtomicToolForKind("batch"); ok || toolName != "" {
+		t.Fatalf("batch 不得映射到原子工具: tool=%q ok=%v", toolName, ok)
+	}
+}
+
 func TestTimelineAtomicOperationRejectsWrongFamilyAndInjectedFields(t *testing.T) {
 	t.Parallel()
 	if _, err := TimelineAtomicOperation("timeline.delete", TimelineDeleteInput{

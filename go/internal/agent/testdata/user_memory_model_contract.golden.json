@@ -20,10 +20,10 @@
         }
       },
       "available_tools": [
-        "memory.update",
+        "memory.set",
         "plan.update"
       ],
-      "required_tool": "memory.update",
+      "required_tool": "memory.set",
       "forbidden_tools": [],
       "expected_memory": {
         "key": "pacing",
@@ -33,7 +33,7 @@
       "mock_response": {
         "tool_calls": [
           {
-            "name": "memory.update",
+            "name": "memory.set",
             "arguments": "{\"entries\":[{\"key\":\"pacing\",\"kind\":\"preference\",\"statement\":\"用户长期偏好成片节奏偏快\",\"evidence_quote\":\"节奏都要快一点\"}]}"
           }
         ]
@@ -59,12 +59,12 @@
         }
       },
       "available_tools": [
-        "memory.update",
+        "memory.set",
         "plan.update"
       ],
       "required_tool": "",
       "forbidden_tools": [
-        "memory.update"
+        "memory.set"
       ],
       "mock_response": {
         "tool_calls": [
@@ -144,10 +144,10 @@
         }
       },
       "available_tools": [
-        "memory.update",
+        "memory.set",
         "plan.update"
       ],
-      "required_tool": "memory.update",
+      "required_tool": "memory.set",
       "forbidden_tools": [],
       "expected_memory": {
         "key": "broll_coverage",
@@ -157,7 +157,7 @@
       "mock_response": {
         "tool_calls": [
           {
-            "name": "memory.update",
+            "name": "memory.set",
             "arguments": "{\"entries\":[{\"key\":\"broll_coverage\",\"kind\":\"correction\",\"statement\":\"用户纠正：以后成片一律多铺 B-roll，提高覆盖率\",\"evidence_quote\":\"一律多铺 B-roll\"}]}"
           }
         ]
@@ -183,12 +183,12 @@
         }
       },
       "available_tools": [
-        "memory.update",
+        "memory.set",
         "plan.update"
       ],
       "required_tool": "",
       "forbidden_tools": [
-        "memory.update"
+        "memory.set"
       ],
       "mock_response": {
         "tool_calls": [

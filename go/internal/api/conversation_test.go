@@ -520,10 +520,9 @@ func TestClearConversationHidesHistoryAndPreservesObjectiveState(t *testing.T) {
 		t.Fatalf("asset setup=%#v err=%v", result, err)
 	}
 	ctx := tools.WithDraftID(t.Context(), "draft_clear_context")
-	if _, err := server.agent.ExecuteTool(ctx, "timeline.compose_initial", tools.ComposeInitialInput{
-		Clips: []tools.ComposeClip{{
-			AssetID: "asset_keep", SourceStartFrame: 0, SourceEndFrame: 30, Role: "video",
-		}},
+	if _, err := server.agent.ExecuteTool(ctx, "timeline.insert", tools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "asset_keep", "role": "video",
+		"source_start_frame": 0, "source_end_frame": 30,
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -84,8 +84,10 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 		return exec.ToolDecisionAnswer(ctx, draftID, input.(rushestools.DecisionAnswerInput))
 	case "plan.update":
 		return exec.toolPlanUpdate(ctx, draftID, input.(rushestools.PlanUpdateInput))
-	case "memory.update":
-		return exec.toolMemoryUpdate(ctx, draftID, input.(rushestools.MemoryUpdateInput))
+	case "memory.set":
+		return exec.toolMemorySet(ctx, draftID, input.(rushestools.MemorySetInput))
+	case "memory.remove":
+		return exec.toolMemoryRemove(ctx, draftID, input.(rushestools.MemoryRemoveInput))
 	case "timeline.compose_initial":
 		return exec.toolComposeInitial(ctx, draftID, input.(rushestools.ComposeInitialInput))
 	case "timeline.apply_patches":

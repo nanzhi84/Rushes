@@ -66,23 +66,32 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 		}
 		operations = expanded
 	}
-	typedOperations := make([]tools.TimelineOp, len(operations))
-	for index := range operations {
-		typedOperations[index] = tools.TimelineOp(operations[index])
-	}
-	raw, err := server.agent.ExecuteTool(ctx, "timeline.apply_patches", tools.TimelinePatchBatchInput{Ops: typedOperations})
-	if err != nil {
-		writeBadRequest(writer, "timeline_patch_invalid: "+err.Error())
-		return
-	}
-	result, ok := raw.(tools.ToolResult)
-	if !ok {
-		server.internalError(writer, errors.New("timeline patch 返回类型无效"))
-		return
-	}
-	if result.Status != "succeeded" {
-		writeBadRequest(writer, "timeline_patch_validation_failed")
-		return
+	for _, operation := range operations {
+		kind, _ := operation["kind"].(string)
+		toolName, ok := tools.TimelineAtomicToolForKind(kind)
+		if !ok {
+			writeBadRequest(writer, "timeline_patch_invalid")
+			return
+		}
+		input, decodeErr := server.agent.Tools().DecodeInput(toolName, operation)
+		if decodeErr != nil {
+			writeBadRequest(writer, "timeline_patch_invalid: "+decodeErr.Error())
+			return
+		}
+		raw, executeErr := server.agent.ExecuteTool(ctx, toolName, input)
+		if executeErr != nil {
+			writeBadRequest(writer, "timeline_patch_invalid: "+executeErr.Error())
+			return
+		}
+		result, resultOK := raw.(tools.ToolResult)
+		if !resultOK {
+			server.internalError(writer, errors.New("timeline patch 返回类型无效"))
+			return
+		}
+		if result.Status != "succeeded" {
+			writeBadRequest(writer, "timeline_patch_validation_failed")
+			return
+		}
 	}
 	// 手动编辑由浏览器 EditorSession 乐观更新，并由 Diffusion Studio Core 即时预览；
 	// 这里只原子保存最新逻辑时间线。

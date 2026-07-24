@@ -12,7 +12,7 @@ import (
 type RunReportedFunc func(ctx context.Context, name string, input any) (any, error)
 
 // FallbackMainline 是无模型密钥兜底下的确定性「混剪主线」:列可用视觉素材 → 逐个理解
-// → 组装初版时间线 → 起预览。领域编排归领域包,引擎侧只保留关键词委托与非域兜底。
+// → 原子插入初版时间线 → 起预览。领域编排归领域包,引擎侧只保留关键词委托与非域兜底。
 func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runReported RunReportedFunc) (string, error) {
 	listed, err := exec.ToolListAssets(ctx, draftID, rushestools.AssetListInput{OnlyUsable: BoolPointer(true)})
 	if err != nil {
@@ -42,21 +42,26 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 			}
 		}
 	}
-	clips := make([]rushestools.ComposeClip, 0, len(visualAssets))
 	for _, asset := range visualAssets {
 		endFrame := asset.DurationFrames
 		if endFrame <= 0 {
 			endFrame = timeline.DefaultFPS
 		}
 		endFrame = min(endFrame, 5*timeline.DefaultFPS)
-		clips = append(clips, rushestools.ComposeClip{
-			AssetID: asset.AssetID, SourceStartFrame: 0, SourceEndFrame: endFrame, Role: "b_roll",
-		})
+		if _, err := runReported(ctx, "timeline.insert", rushestools.TimelineInsertInput{
+			"kind": "insert_clip", "asset_id": asset.AssetID, "role": "b_roll",
+			"source_start_frame": 0, "source_end_frame": endFrame,
+		}); err != nil {
+			return "", err
+		}
 	}
-	if _, err := runReported(ctx, "timeline.compose_initial", rushestools.ComposeInitialInput{Clips: clips}); err != nil {
+	document, err := timeline.Latest(ctx, exec.database, draftID)
+	if err != nil {
 		return "", err
 	}
-	if _, err := runReported(ctx, "render.preview", rushestools.RenderPreviewInput{}); err != nil {
+	if _, err := runReported(ctx, "render.start", rushestools.RenderStartInput{
+		Kind: "preview", TimelineID: document.TimelineID,
+	}); err != nil {
 		return "", err
 	}
 	return "已完成素材理解与初版时间线，并开始渲染预览。", nil

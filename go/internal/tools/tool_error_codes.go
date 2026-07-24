@@ -68,7 +68,7 @@ const (
 
 	// —— 长期记忆（agentexec/tool_exec_memory.go）——
 	ErrCodeMemoryEvidenceUnavailable  ToolErrorCode = "memory_evidence_unavailable"
-	ErrCodeMemoryUpdateEmpty          ToolErrorCode = "memory_update_empty"
+	ErrCodeMemoryMutationEmpty        ToolErrorCode = "memory_mutation_empty"
 	ErrCodeMemoryEntriesLimit         ToolErrorCode = "memory_entries_limit"
 	ErrCodeMemoryRemoveLimit          ToolErrorCode = "memory_remove_limit"
 	ErrCodeMemoryKeyInvalid           ToolErrorCode = "memory_key_invalid"
@@ -78,7 +78,6 @@ const (
 	ErrCodeMemoryEvidenceQuoteInvalid ToolErrorCode = "memory_evidence_quote_invalid"
 	ErrCodeMemoryRemoveKeyInvalid     ToolErrorCode = "memory_remove_key_invalid"
 	ErrCodeMemoryRemoveKeyDuplicate   ToolErrorCode = "memory_remove_key_duplicate"
-	ErrCodeMemoryKeyConflict          ToolErrorCode = "memory_key_conflict"
 	ErrCodeMemoryEvidenceInvalid      ToolErrorCode = "memory_evidence_invalid"
 	ErrCodeMemoryInputInvalid         ToolErrorCode = "memory_input_invalid"
 
@@ -121,7 +120,7 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodePlanTooLarge,
 	ErrCodePlanConflict,
 	ErrCodeMemoryEvidenceUnavailable,
-	ErrCodeMemoryUpdateEmpty,
+	ErrCodeMemoryMutationEmpty,
 	ErrCodeMemoryEntriesLimit,
 	ErrCodeMemoryRemoveLimit,
 	ErrCodeMemoryKeyInvalid,
@@ -131,7 +130,6 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodeMemoryEvidenceQuoteInvalid,
 	ErrCodeMemoryRemoveKeyInvalid,
 	ErrCodeMemoryRemoveKeyDuplicate,
-	ErrCodeMemoryKeyConflict,
 	ErrCodeMemoryEvidenceInvalid,
 	ErrCodeMemoryInputInvalid,
 	ErrCodeUnderstandingFailed,
