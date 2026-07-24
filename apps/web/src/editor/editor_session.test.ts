@@ -198,6 +198,27 @@ describe("EditorSession", () => {
     expect(session.beginSave()).toEqual([legal]);
   });
 
+  it("预校验在后项失败且零提交时保留失败项前后的其他操作", () => {
+    const initial = fixtureTimeline();
+    const session = new EditorSession(initial);
+    const first = { kind: "set_track_state", track_id: "bgm", gain_db: -8 };
+    const poison = { kind: "set_track_state", track_id: "sfx", muted: true };
+    const suffix = { kind: "adjust_gain", timeline_clip_id: "music_a", gain_db: -10 };
+    session.apply(first);
+    session.apply(poison);
+    session.apply(suffix);
+    expect(session.beginSave()).toEqual([first, poison, suffix]);
+
+    session.rejectPartiallySaved(initial, 0, 1, new Error("第二项 schema 无效"));
+
+    expect(session.snapshot()).toMatchObject({
+      saveState: "error",
+      pendingCount: 2,
+      error: expect.stringContaining("已隔离 1 项冲突操作")
+    });
+    expect(session.beginSave()).toEqual([first, suffix]);
+  });
+
   it("字幕样式在编辑、插入和保存失败后保持前后端同义", () => {
     const initial = fixtureTimeline();
     findTrack(initial, "subtitles").clips = [{
