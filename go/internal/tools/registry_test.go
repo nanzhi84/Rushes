@@ -252,6 +252,73 @@ func TestToolEffectClassificationTable(t *testing.T) {
 	}
 }
 
+func TestToolPrimitiveClassificationMatchesEffectAndSurface(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedFamily := map[string]Family{
+		"asset.import_local_file":     FamilyEdit,
+		"asset.list_assets":           FamilyRead,
+		"understand.materials":        FamilyDetect,
+		"media.search_shots":          FamilyRead,
+		"audio.analyze_beats":         FamilyDetect,
+		"audio.analyze_speech_pauses": FamilyDetect,
+		"speech.inspect":              FamilyDetect,
+		"interaction.ask_user":        FamilyControl,
+		"decision.answer":             FamilyControl,
+		"plan.update":                 FamilyControl,
+		"memory.update":               FamilyControl,
+		"timeline.compose_initial":    FamilyEdit,
+		"timeline.apply_patches":      FamilyEdit,
+		"timeline.recut_to_beats":     FamilyEdit,
+		"timeline.edit_talking_head":  FamilyEdit,
+		"timeline.validate":           FamilyCheck,
+		"timeline.inspect":            FamilyRead,
+		"render.preview":              FamilyEdit,
+		"render.final_mp4":            FamilyEdit,
+		"render.status":               FamilyRead,
+		"render.inspect_preview":      FamilyCheck,
+		"interaction.confirm_action":  FamilyControl,
+	}
+	families := map[Family]bool{}
+	for _, spec := range registry.Specs(true) {
+		if expectedFamily[spec.Name] != spec.Family {
+			t.Errorf("%s family=%q want=%q", spec.Name, spec.Family, expectedFamily[spec.Name])
+		}
+		if !spec.Family.Valid() || !spec.Cost.Valid() {
+			t.Errorf("%s classification invalid: family=%q cost=%q", spec.Name, spec.Family, spec.Cost)
+		}
+		if err := validateFamilyEffect(spec.Name, spec.Family, spec.Effect); err != nil {
+			t.Error(err)
+		}
+		if spec.Parallelizable() != (spec.Effect == EffectReadOnly) {
+			t.Errorf("%s parallelizable drifted from Effect", spec.Name)
+		}
+		if spec.Exposure == ExposureLLM {
+			if spec.Surfaces == 0 || !spec.Surfaces.Includes(spec.PrimarySurface) {
+				t.Errorf("%s surface metadata invalid: primary=%d surfaces=%d",
+					spec.Name, spec.PrimarySurface, spec.Surfaces)
+			}
+		}
+		families[spec.Family] = true
+	}
+	if len(expectedFamily) != len(registry.Specs(true)) {
+		t.Fatalf("family table=%d specs=%d", len(expectedFamily), len(registry.Specs(true)))
+	}
+	for _, family := range []Family{FamilyDetect, FamilyRead, FamilyEdit, FamilyCheck, FamilyControl} {
+		if !families[family] {
+			t.Errorf("registry missing family %q", family)
+		}
+	}
+}
+
 func TestInterceptorChainRunsInOrderAndCanReject(t *testing.T) {
 	t.Parallel()
 	database, err := storage.Open(t.Context(), t.TempDir())
@@ -299,6 +366,32 @@ func TestInterceptorChainRunsInOrderAndCanReject(t *testing.T) {
 	}
 	if len(order) != 2 || order[0] != "a:timeline.inspect" || order[1] != "b:timeline.inspect" {
 		t.Fatalf("放行路径拦截器未按序运行: %v", order)
+	}
+}
+
+func TestAdmissionInterceptorRunsBeforePreconditionGuard(t *testing.T) {
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	insertToolDraft(t, database, "draft_admission")
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.UseAdmission(func(_ context.Context, spec Spec, _ any) error {
+		return &InterceptorRejection{
+			Observation: "not admitted",
+			Data:        map[string]any{"tool": spec.Name},
+		}
+	})
+
+	renderFinal := registry.specs["render.final_mp4"].Implementation.(einotool.InvokableTool)
+	_, err = renderFinal.InvokableRun(WithDraftID(t.Context(), "draft_admission"), `{}`)
+	var rejection *InterceptorRejection
+	if !errors.As(err, &rejection) || rejection.Data["tool"] != "render.final_mp4" {
+		t.Fatalf("准入拦截器应先于 timeline_validated guard 拒绝: %v", err)
 	}
 }
 
@@ -814,6 +907,9 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	allowed, _ = registry.Allowed(ctx, true)
+	if containsSpec(allowed, "timeline.compose_initial") {
+		t.Fatal("已有时间线时 compose_initial 不应放行")
+	}
 	for _, name := range []string{"timeline.apply_patches", "timeline.recut_to_beats", "timeline.validate", "timeline.inspect", "render.preview", "render.final_mp4", "render.status"} {
 		if !containsSpec(allowed, name) {
 			t.Fatalf("%s 未放行", name)
@@ -835,6 +931,29 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	}
 	if passed, err := EvaluatePrecondition(ctx, database, "draft_gate", "unknown"); err == nil || passed {
 		t.Fatalf("unknown predicate passed=%v err=%v", passed, err)
+	}
+}
+
+func TestAllowedPropagatesPreconditionEvaluationErrors(t *testing.T) {
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertToolDraft(t, database, "draft_allowed_error")
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	allowed, err := registry.Allowed(WithDraftID(t.Context(), "draft_allowed_error"), true)
+	if err == nil {
+		t.Fatalf("关闭数据库后 Allowed=%v，预期传播查询错误", allowed)
+	}
+	if !strings.Contains(err.Error(), "判断工具") || !strings.Contains(err.Error(), "database is closed") {
+		t.Fatalf("Allowed error=%v", err)
 	}
 }
 
@@ -873,24 +992,49 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 	}
 
 	registry := &Registry{database: database, executor: failingExecutor{}, specs: map[string]Spec{}}
-	if err := addTool[cleanInput, ToolResult](registry, "clean", "clean", nil, ExposureLLM, EffectReadOnly, false); err != nil {
+	readMetadata := metadata(FamilyRead, CostLow, SurfaceDiscovery)
+	if err := addTool[cleanInput, ToolResult](registry, "clean", "clean", nil, ExposureLLM, EffectReadOnly, false, readMetadata); err != nil {
 		t.Fatal(err)
 	}
-	if err := addTool[cleanInput, ToolResult](registry, "clean", "duplicate", nil, ExposureLLM, EffectReadOnly, false); err == nil {
+	if err := addTool[cleanInput, ToolResult](registry, "clean", "duplicate", nil, ExposureLLM, EffectReadOnly, false, readMetadata); err == nil {
 		t.Fatal("duplicate tool should fail")
 	}
-	if err := addTool[prohibitedPathInput, ToolResult](registry, "bad", "bad", nil, ExposureLLM, EffectReadOnly, false); err == nil {
+	if err := addTool[prohibitedPathInput, ToolResult](registry, "bad", "bad", nil, ExposureLLM, EffectReadOnly, false, readMetadata); err == nil {
 		t.Fatal("prohibited field should fail")
 	}
-	if err := addTool[prohibitedNestedInput, ToolResult](registry, "nested_bad", "bad", nil, ExposureLLM, EffectReadOnly, false); err == nil {
+	if err := addTool[prohibitedNestedInput, ToolResult](registry, "nested_bad", "bad", nil, ExposureLLM, EffectReadOnly, false, readMetadata); err == nil {
 		t.Fatal("nested prohibited field should fail")
 	}
 	// Effect 与 PolicyGate 同为注册期强约束：缺省或非法枚举必须在注册期报错。
-	if err := addTool[cleanInput, ToolResult](registry, "no_effect", "missing effect", nil, ExposureLLM, "", false); err == nil {
+	if err := addTool[cleanInput, ToolResult](registry, "no_effect", "missing effect", nil, ExposureLLM, "", false, readMetadata); err == nil {
 		t.Fatal("missing Effect should fail registration")
 	}
-	if err := addTool[cleanInput, ToolResult](registry, "bogus_effect", "bad effect", nil, ExposureLLM, Effect("weird"), false); err == nil {
+	if err := addTool[cleanInput, ToolResult](registry, "bogus_effect", "bad effect", nil, ExposureLLM, Effect("weird"), false, readMetadata); err == nil {
 		t.Fatal("invalid Effect should fail registration")
+	}
+	if err := addTool[cleanInput, ToolResult](registry, "no_family", "missing family", nil, ExposureLLM, EffectReadOnly, false,
+		metadata("", CostLow, SurfaceDiscovery)); err == nil {
+		t.Fatal("missing Family should fail registration")
+	}
+	if err := addTool[cleanInput, ToolResult](registry, "no_cost", "missing cost", nil, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyRead, "", SurfaceDiscovery)); err == nil {
+		t.Fatal("missing Cost should fail registration")
+	}
+	if err := addTool[cleanInput, ToolResult](registry, "no_surface", "missing surface", nil, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyRead, CostLow)); err == nil {
+		t.Fatal("missing LLM Surface should fail registration")
+	}
+	if err := addTool[cleanInput, ToolResult](registry, "unknown_surface", "unknown surface", nil, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyRead, CostLow, Surface(1<<20))); err == nil {
+		t.Fatal("unknown LLM Surface should fail registration")
+	}
+	if err := addTool[cleanInput, ToolResult](registry, "compound_primary", "compound primary", nil, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyRead, CostLow, Surfaces(SurfaceDiscovery, SurfaceTalkingHead))); err == nil {
+		t.Fatal("compound PrimarySurface should fail registration")
+	}
+	if err := addTool[cleanInput, ToolResult](registry, "bad_family_effect", "bad classification", nil, ExposureLLM, EffectReversible, false,
+		metadata(FamilyRead, CostLow, SurfaceDiscovery)); err == nil {
+		t.Fatal("inconsistent Family and Effect should fail registration")
 	}
 	if _, exists := registry.specs["no_effect"]; exists {
 		t.Fatal("未标注 Effect 的工具不得进入注册表")

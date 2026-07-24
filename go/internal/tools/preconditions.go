@@ -11,6 +11,7 @@ import (
 
 var PreconditionRegistry = map[string]struct{}{
 	"usable_asset_exists": {},
+	"timeline_absent":     {},
 	"timeline_exists":     {},
 	"timeline_validated":  {},
 	"any_preview_exists":  {},
@@ -36,6 +37,9 @@ func EvaluatePrecondition(
 	case "timeline_exists":
 		err = database.Read().QueryRowContext(ctx,
 			"SELECT timeline_current_version IS NOT NULL FROM drafts WHERE draft_id=?", draftID).Scan(&value)
+	case "timeline_absent":
+		err = database.Read().QueryRowContext(ctx,
+			"SELECT timeline_current_version IS NULL FROM drafts WHERE draft_id=?", draftID).Scan(&value)
 	case "timeline_validated":
 		err = database.Read().QueryRowContext(ctx,
 			"SELECT timeline_current_version IS NOT NULL AND timeline_validated=1 FROM drafts WHERE draft_id=?", draftID).Scan(&value)

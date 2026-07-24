@@ -40,6 +40,8 @@ const (
 	ErrCodeToolExecutionError      ToolErrorCode = "tool_execution_error"
 	ErrCodeDuplicateFailedToolCall ToolErrorCode = "duplicate_failed_tool_call"
 	ErrCodeToolRecoveryExhausted   ToolErrorCode = "tool_recovery_exhausted"
+	// ErrCodeToolNotInSurface 由 #141 动态工具面拦截器产出。
+	ErrCodeToolNotInSurface ToolErrorCode = "tool_not_in_surface"
 	// ErrCodeConfirmationRequired 由 #128 的破坏性强制确认拦截器产出。
 	ErrCodeConfirmationRequired      ToolErrorCode = "confirmation_required"
 	ErrCodeInvalidConfirmationTarget ToolErrorCode = "invalid_confirmation_target"
@@ -98,6 +100,7 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodeToolExecutionError,
 	ErrCodeDuplicateFailedToolCall,
 	ErrCodeToolRecoveryExhausted,
+	ErrCodeToolNotInSurface,
 	ErrCodeConfirmationRequired,
 	ErrCodeInvalidConfirmationTarget,
 	ErrCodeTimelineOpSemanticError,

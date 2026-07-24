@@ -117,20 +117,23 @@ func newServiceWithModels(
 		return nil, err
 	}
 	service.tools = registry
+	registry.UseAdmission(modelToolSurfaceInterceptor)
 	// G2：破坏性工具（当前仅 memory.update 携带 remove_keys）在模型主路径上必须先经
 	// interaction.confirm_action 确认；确认后的重放走直连路径、绕过本拦截器（#103 G2）。
 	registry.Use(destructiveConfirmationInterceptor)
 	recordModelToolCatalog(ctx, registry)
 	if chatModel != nil {
-		boundTools := registry.EinoTools(true, false)
 		// #103 G3b：react 图的 Rushes 复刻,把单个 ToolsNode 换成按 registry.Effect 逐消息路由的
 		// toolRouter(全只读并行、含写串行)。ExecuteSequentially 由 toolRouter 逐节点决定,不在此设;
 		// 模型侧 H5 直通模型 / StreamToolCallChecker / H1b MessageModifier / MaxStep 全部原样保留。
 		service.react, err = newConcurrentReactAgent(
 			ctx,
-			chatModel,
+			&dynamicToolSurfaceModel{inner: chatModel, registry: registry},
 			compose.ToolsNodeConfig{
-				Tools:               boundTools,
+				// ToolsNode 持有 Registry 全量目录用于实际分发；dynamicToolSurfaceModel
+				// 每次 provider 调用只绑定当前状态/阶段允许的子集，并由 interceptor
+				// 阻止模型绕过未披露能力。
+				Tools:               registry.EinoTools(true, false),
 				UnknownToolsHandler: unknownToolRecoveryHandler,
 				ToolCallMiddlewares: []compose.ToolMiddleware{newToolRecoveryMiddleware(retrySafeFromEffect(registry.Effect))},
 			},
@@ -145,7 +148,6 @@ func newServiceWithModels(
 			cancel()
 			return nil, err
 		}
-		recordBoundModelToolSurface(ctx, boundTools)
 	}
 	service.queue = NewTurnQueue(ctx, service.runTurn)
 	if startBridge {
@@ -195,6 +197,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		ctx = withContextMessageBoundary(ctx, item.ItemID)
 	}
 	ctx = withQueueMemoryEvidence(ctx, item)
+	ctx = withModelToolSurfaceSession(ctx)
 	ctx, injectedMemory := withInjectedMemoryCollector(ctx)
 	recoveryState := newToolRecoveryState()
 	ctx = withToolRecoveryState(ctx, recoveryState)

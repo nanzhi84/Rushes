@@ -24,6 +24,80 @@ const (
 	ExposureHarness Exposure = "harness_only"
 )
 
+// Family 描述模型看到的能力原语：检测生成一种证据，读取/检索不写状态，编辑提交
+// 一个可回滚写入，检查只返回报告，控制面维护 Harness 状态。它与 Effect 正交：
+// detect 允许持久化证据，而 read 必须严格只读。
+type Family string
+
+const (
+	FamilyDetect  Family = "detect"
+	FamilyRead    Family = "read"
+	FamilyEdit    Family = "edit"
+	FamilyCheck   Family = "check"
+	FamilyControl Family = "control"
+)
+
+func (family Family) Valid() bool {
+	switch family {
+	case FamilyDetect, FamilyRead, FamilyEdit, FamilyCheck, FamilyControl:
+		return true
+	default:
+		return false
+	}
+}
+
+// Cost 是工具单次调用的相对成本，只用于动态披露和可观测性，不进入模型 schema。
+type Cost string
+
+const (
+	CostLow      Cost = "low"
+	CostStandard Cost = "standard"
+	CostHigh     Cost = "high"
+)
+
+func (cost Cost) Valid() bool {
+	switch cost {
+	case CostLow, CostStandard, CostHigh:
+		return true
+	default:
+		return false
+	}
+}
+
+// Surface 是模型工具面的阶段标签。一个工具可属于多个阶段，但阶段清单只保存在
+// Registry Spec 中；agent 只选择阶段，不维护第二份工具目录。
+type Surface uint32
+
+const (
+	SurfaceDiscovery Surface = 1 << iota
+	SurfaceTalkingHead
+	SurfaceBeatEdit
+	SurfaceTimelineEdit
+	SurfaceRender
+	SurfacePreviewCheck
+	SurfaceControl
+)
+
+const allSurfaces = SurfaceDiscovery |
+	SurfaceTalkingHead |
+	SurfaceBeatEdit |
+	SurfaceTimelineEdit |
+	SurfaceRender |
+	SurfacePreviewCheck |
+	SurfaceControl
+
+func Surfaces(values ...Surface) Surface {
+	var result Surface
+	for _, value := range values {
+		result |= value
+	}
+	return result
+}
+
+func (surface Surface) Includes(value Surface) bool { return surface&value != 0 }
+func (surface Surface) Valid() bool                 { return surface != 0 && surface&^allSurfaces == 0 }
+func (surface Surface) Single() bool                { return surface.Valid() && surface&(surface-1) == 0 }
+
 // Effect 是工具副作用风险的显式分级，注册期必填（缺省与 PolicyGate 同为注册期
 // 强约束）。它是「只读并发调度 / 破坏性强制确认 / 瞬时失败可重试」等治理策略的
 // 单一事实源（#103 G1），替代此前散落在硬编码白名单与工具描述里的隐式副本。
@@ -54,23 +128,47 @@ type Spec struct {
 	Description    string
 	Requires       []string
 	Exposure       Exposure
+	Family         Family
+	Cost           Cost
+	PrimarySurface Surface
+	Surfaces       Surface
 	Effect         Effect
 	Optional       bool
 	InputType      reflect.Type
 	Implementation tool.BaseTool
 }
 
-type Registry struct {
-	database     *storage.DB
-	executor     Executor
-	specs        map[string]Spec
-	interceptors []Interceptor
+// Parallelizable 从 Effect 单一事实源派生；不额外维护会漂移的并发布尔字段。
+func (spec Spec) Parallelizable() bool { return spec.Effect == EffectReadOnly }
+
+type specMetadata struct {
+	family   Family
+	cost     Cost
+	primary  Surface
+	surfaces Surface
 }
 
-// Interceptor 在 guard 通过后、executor 执行前按注册序运行，可对具体调用行使否决权
-// （#103 G2）。返回非 nil error 时该调用不进入 executor。返回 *InterceptorRejection
-// 表示策略拒绝（如破坏性工具缺确认）：回灌模型一条结构化提示，不算工具执行失败、不触发
-// 自动重试、不消耗恢复预算；返回其它 error 则按普通工具错误处理。
+func metadata(family Family, cost Cost, surfaces ...Surface) specMetadata {
+	var primary Surface
+	if len(surfaces) > 0 {
+		primary = surfaces[0]
+	}
+	return specMetadata{
+		family: family, cost: cost, primary: primary, surfaces: Surfaces(surfaces...),
+	}
+}
+
+type Registry struct {
+	database              *storage.DB
+	executor              Executor
+	specs                 map[string]Spec
+	admissionInterceptors []Interceptor
+	interceptors          []Interceptor
+}
+
+// Interceptor 可用于 guard 前的执行准入或 guard 后的策略检查。返回非 nil error 时该调用
+// 不进入 executor。返回 *InterceptorRejection 表示策略拒绝：回灌模型一条结构化提示，
+// 不算工具执行失败、不触发自动重试、不消耗恢复预算。
 type Interceptor func(ctx context.Context, spec Spec, input any) error
 
 // InterceptorRejection 是拦截器的策略拒绝载荷；agent 恢复中间件据此回灌模型一条结构化
@@ -86,6 +184,14 @@ func (rejection *InterceptorRejection) Error() string { return rejection.Observa
 func (registry *Registry) Use(interceptor Interceptor) {
 	if interceptor != nil {
 		registry.interceptors = append(registry.interceptors, interceptor)
+	}
+}
+
+// UseAdmission 追加 guard 前的执行准入拦截器。它只适合不依赖工具前置条件的能力边界，
+// 例如拒绝模型调用本轮未披露的工具；普通策略拦截仍应使用 Use 保持 guard 后语义。
+func (registry *Registry) UseAdmission(interceptor Interceptor) {
+	if interceptor != nil {
+		registry.admissionInterceptors = append(registry.admissionInterceptors, interceptor)
 	}
 }
 
@@ -287,8 +393,13 @@ func (registry *Registry) Allowed(ctx context.Context, includeOptional bool) ([]
 		if spec.Exposure != ExposureLLM {
 			continue
 		}
-		if err := registry.guard(ctx, spec); err == nil {
+		err := registry.guard(ctx, spec)
+		if err == nil {
 			result = append(result, spec)
+			continue
+		}
+		if !errors.Is(err, errPreconditionNotMet) {
+			return nil, fmt.Errorf("判断工具 %s 是否可用: %w", spec.Name, err)
 		}
 	}
 	return result, nil
@@ -301,12 +412,31 @@ func addTool[I, O any](
 	exposure Exposure,
 	effect Effect,
 	optional bool,
+	classification specMetadata,
 ) error {
 	if _, exists := registry.specs[name]; exists {
 		return fmt.Errorf("工具重复注册: %s", name)
 	}
 	if !effect.Valid() {
 		return fmt.Errorf("工具 %s 缺少合法 Effect 风险分级: %q", name, effect)
+	}
+	if !classification.family.Valid() {
+		return fmt.Errorf("工具 %s 缺少合法 Family 分类: %q", name, classification.family)
+	}
+	if !classification.cost.Valid() {
+		return fmt.Errorf("工具 %s 缺少合法 Cost 分类: %q", name, classification.cost)
+	}
+	if exposure == ExposureLLM && !classification.surfaces.Valid() {
+		return fmt.Errorf("模型工具 %s 缺少动态 Surface 阶段", name)
+	}
+	if exposure == ExposureLLM && !classification.primary.Single() {
+		return fmt.Errorf("模型工具 %s 的 PrimarySurface 必须是单个合法阶段", name)
+	}
+	if exposure == ExposureLLM && !classification.surfaces.Includes(classification.primary) {
+		return fmt.Errorf("模型工具 %s 的 PrimarySurface 不属于 Surfaces", name)
+	}
+	if err := validateFamilyEffect(name, classification.family, effect); err != nil {
+		return err
 	}
 	inputType := reflect.TypeFor[I]()
 	if exposure == ExposureLLM {
@@ -316,6 +446,12 @@ func addTool[I, O any](
 	}
 	implementation, err := utils.InferTool(name, description, func(ctx context.Context, input I) (O, error) {
 		spec := registry.specs[name]
+		for _, interceptor := range registry.admissionInterceptors {
+			if err := interceptor(ctx, spec, input); err != nil {
+				var zero O
+				return zero, err
+			}
+		}
 		if err := registry.guard(ctx, spec); err != nil {
 			var zero O
 			return zero, err
@@ -344,8 +480,28 @@ func addTool[I, O any](
 	}
 	registry.specs[name] = Spec{
 		Name: name, Description: description, Requires: append([]string(nil), requires...),
-		Exposure: exposure, Effect: effect, Optional: optional,
+		Exposure: exposure, Family: classification.family, Cost: classification.cost,
+		PrimarySurface: classification.primary, Surfaces: classification.surfaces,
+		Effect: effect, Optional: optional,
 		InputType: inputType, Implementation: implementation,
+	}
+	return nil
+}
+
+func validateFamilyEffect(name string, family Family, effect Effect) error {
+	valid := false
+	switch family {
+	case FamilyRead:
+		valid = effect == EffectReadOnly
+	case FamilyDetect, FamilyCheck:
+		valid = effect == EffectReadOnly || effect == EffectReversible
+	case FamilyEdit:
+		valid = effect == EffectReversible || effect == EffectDestructive
+	case FamilyControl:
+		valid = effect == EffectReversible || effect == EffectDestructive
+	}
+	if !valid {
+		return fmt.Errorf("工具 %s 的 Family=%q 与 Effect=%q 不一致", name, family, effect)
 	}
 	return nil
 }
@@ -376,6 +532,8 @@ func strictUnmarshalToolArguments[I any](_ context.Context, arguments string) (a
 	return input, nil
 }
 
+var errPreconditionNotMet = errors.New("工具前置条件不满足")
+
 func (registry *Registry) guard(ctx context.Context, spec Spec) error {
 	draftID, err := DraftID(ctx)
 	if err != nil {
@@ -387,7 +545,7 @@ func (registry *Registry) guard(ctx context.Context, spec Spec) error {
 			return evaluateErr
 		}
 		if !passed {
-			return fmt.Errorf("工具 %s 未满足前置条件 %s", spec.Name, predicate)
+			return fmt.Errorf("%w: 工具 %s 未满足 %s", errPreconditionNotMet, spec.Name, predicate)
 		}
 	}
 	return nil
@@ -471,15 +629,18 @@ func prohibitedFieldAtDepth(input reflect.Type, depth int, active map[reflect.Ty
 
 func registerAssetImport(registry *Registry) error {
 	// 仅 harness 调用；写入素材行并触发导入，可通过移除素材回滚，故归可逆。
-	return addTool[AssetImportInput, ToolResult](registry, "asset.import_local_file", "导入用户已确认的本地素材", nil, ExposureHarness, EffectReversible, false)
+	return addTool[AssetImportInput, ToolResult](registry, "asset.import_local_file", "导入用户已确认的本地素材", nil, ExposureHarness, EffectReversible, false,
+		metadata(FamilyEdit, CostStandard))
 }
 
 func registerAssetList(registry *Registry) error {
-	return addTool[AssetListInput, AssetListResult](registry, "asset.list_assets", "列出当前草稿可用素材", nil, ExposureLLM, EffectReadOnly, false)
+	return addTool[AssetListInput, AssetListResult](registry, "asset.list_assets", "列出当前草稿可用素材", nil, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyRead, CostLow, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit))
 }
 
 func registerUnderstand(registry *Registry) error {
-	return addTool[UnderstandInput, UnderstandResult](registry, "understand.materials", "幂等理解所选素材并生成可检索的逐镜头时间证据；相同素材和参数默认直接复用持久化结果，只有用户明确要求重新分析时才设置 force_refresh=true；旧强制任务终态后再次重跑完全相同分析才更换 refresh_nonce；多素材、deep 或 force_refresh 可能返回 queued，后台完成后会自动续跑当前任务，不要轮询", nil, ExposureLLM, EffectReversible, false)
+	return addTool[UnderstandInput, UnderstandResult](registry, "understand.materials", "幂等理解所选素材并生成可检索的逐镜头时间证据；相同素材和参数默认直接复用持久化结果，只有用户明确要求重新分析时才设置 force_refresh=true；旧强制任务终态后再次重跑完全相同分析才更换 refresh_nonce；多素材、deep 或 force_refresh 可能返回 queued，后台完成后会自动续跑当前任务，不要轮询", nil, ExposureLLM, EffectReversible, false,
+		metadata(FamilyDetect, CostHigh, SurfaceDiscovery))
 }
 
 func registerShotSearch(registry *Registry) error {
@@ -488,6 +649,7 @@ func registerShotSearch(registry *Registry) error {
 		"media.search_shots",
 		"像检索代码一样按创作意图搜索已理解视频中的镜头级源区间；返回稳定 shot_id、精确源帧、语义、匹配证据和剪辑提示。若更匹配的文件尚未理解，understanding_candidates 会返回文件名与 asset_id；先对候选调用 understand.materials，再用同一意图重搜，禁止把候选文件臆造为 shot_id",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyRead, CostStandard, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit),
 	)
 }
 
@@ -497,6 +659,7 @@ func registerAudioBeatAnalysis(registry *Registry) error {
 		"audio.analyze_beats",
 		"读取音频的 BPM、普通拍点、强瞬态、推断小节第一拍和按时间顺序压缩的 RMS 波形。拍点坐标使用整数帧；波形使用固定 0-100 编码并返回采样间隔，不标注高潮、低潮或剪辑好坏",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyDetect, CostStandard, SurfaceBeatEdit),
 	)
 }
 
@@ -506,6 +669,7 @@ func registerSpeechPauseAnalysis(registry *Registry) error {
 		"audio.analyze_speech_pauses",
 		"分析音频或视频内音轨的停顿/气口，返回源素材整数帧；传 timeline_clip_id 时同时映射为当前时间线帧，可用于剪口播。结果是 RMS 静音候选，不会把语义停顿或口头禅误报成已确认删除项",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyDetect, CostStandard, SurfaceTalkingHead),
 	)
 }
 
@@ -519,15 +683,18 @@ func registerSpeechInspect(registry *Registry) error {
 		"speech.inspect",
 		"建立或复用带整数帧坐标的口播索引，并像 grep 一样按台词语义或源帧范围读取逐句 ASR、气口和相似台词证据。要检查句内卡壳、重复词或半句重说时设置 include_words=true，取得稳定 word_id 与词级帧。工具只提供可核验信息，不决定哪些内容应删除；完整转写持久化在本地，后续调用默认命中缓存",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyDetect, CostHigh, SurfaceTalkingHead),
 	)
 }
 
 func registerAskUser(registry *Registry) error {
-	return addTool[AskUserInput, ToolResult](registry, "interaction.ask_user", "仅在缺少会实质改变成片目标、且无法从素材或上下文安全推断的关键决策时，通过简短结构化决策卡向用户提问；已有可用素材时，成片类型、时长、风格和节奏等可逆首剪细节必须结合 user_memory 与安全默认值自主决定，不得用此工具追问", nil, ExposureLLM, EffectReversible, false)
+	return addTool[AskUserInput, ToolResult](registry, "interaction.ask_user", "仅在缺少会实质改变成片目标、且无法从素材或上下文安全推断的关键决策时，通过简短结构化决策卡向用户提问；已有可用素材时，成片类型、时长、风格和节奏等可逆首剪细节必须结合 user_memory 与安全默认值自主决定，不得用此工具追问", nil, ExposureLLM, EffectReversible, false,
+		metadata(FamilyControl, CostLow, SurfaceControl, SurfaceDiscovery))
 }
 
 func registerDecisionAnswer(registry *Registry) error {
-	return addTool[DecisionAnswerInput, ToolResult](registry, "decision.answer", "提交结构化决策答案", nil, ExposureLLM, EffectReversible, false)
+	return addTool[DecisionAnswerInput, ToolResult](registry, "decision.answer", "提交结构化决策答案", nil, ExposureLLM, EffectReversible, false,
+		metadata(FamilyControl, CostLow, SurfaceControl))
 }
 
 func registerPlanUpdate(registry *Registry) error {
@@ -536,6 +703,14 @@ func registerPlanUpdate(registry *Registry) error {
 		"plan.update",
 		"以 RFC 7396 语义增量合并 plan；reset=true 时先清空旧计划再应用该对象，用于在跨回合继续工作前保存已确定的计划结构；素材可用但请求宽泛时，用此工具记录基于长期画像作出的首剪默认决定并继续执行，不要转去追问可回滚细节",
 		nil, ExposureLLM, EffectReversible, false,
+		metadata(FamilyControl, CostStandard,
+			SurfaceControl,
+			SurfaceDiscovery,
+			SurfaceTalkingHead,
+			SurfaceBeatEdit,
+			SurfaceRender,
+			SurfacePreviewCheck,
+		),
 	)
 }
 
@@ -549,11 +724,13 @@ func registerMemoryUpdate(registry *Registry) error {
 		"memory.update",
 		"仅当当前用户明确表达跨项目稳定的偏好、习惯、纠正，或明确要求忘记已有长期记忆时更新用户画像；一次性草稿要求和模型自己的创作判断不得写入",
 		nil, ExposureLLM, EffectDestructive, false,
+		metadata(FamilyControl, CostStandard, SurfaceControl),
 	)
 }
 
 func registerComposeInitial(registry *Registry) error {
-	return addTool[ComposeInitialInput, ToolResult](registry, "timeline.compose_initial", "按整数帧源区间组装时间线；只传入 video/image 主视觉素材，不能传 audio/font；先从 asset.list_assets 读取 kind、duration_frames 与 timeline_fps", []string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false)
+	return addTool[ComposeInitialInput, ToolResult](registry, "timeline.compose_initial", "按整数帧源区间组装时间线；只传入 video/image 主视觉素材，不能传 audio/font；先从 asset.list_assets 读取 kind、duration_frames 与 timeline_fps", []string{"usable_asset_exists", "timeline_absent"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyEdit, CostHigh, SurfaceDiscovery, SurfaceTalkingHead))
 }
 
 func registerApplyPatchBatch(registry *Registry) error {
@@ -562,6 +739,7 @@ func registerApplyPatchBatch(registry *Registry) error {
 		"timeline.apply_patches",
 		"原子应用多个时间线语义补丁，整批只写入一次当前时间线；整批替换主视频时把新 insert_clip 和旧 delete_clip 放在同一次调用，工具会规划安全执行顺序，并默认保护未被本批直接编辑的 BGM/SFX；卡点剪辑必须改用 timeline.recut_to_beats",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyEdit, CostHigh, SurfaceTimelineEdit),
 	)
 }
 
@@ -571,6 +749,7 @@ func registerBeatRecut(registry *Registry) error {
 		"timeline.recut_to_beats",
 		"从空时间线或已有时间线原子完成卡点混剪：传 bgm_asset_id 后按真实拍点重建主视频；优先传 media.search_shots 返回的有序 shot_ids，工具会解析精确源帧。cut_frames 可多于视频素材数，同一素材会使用不同且不重叠的源区间；use_all_video_assets=true 表示每个素材至少一次；cover_entire_bgm=true 覆盖整首音乐；SFX 始终独立分轨。禁止用 compose_initial 加几十个低层补丁替代",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyEdit, CostHigh, SurfaceBeatEdit),
 	)
 }
 
@@ -580,37 +759,45 @@ func registerTalkingHeadEdit(registry *Registry) error {
 		"timeline.edit_talking_head",
 		"按模型已经选定的 utterance_id、pause/repetition/fragment 决定、连续 word_id 范围和 b_roll shot_id 原子剪辑口播。模型结合两侧原文自主选择 remove/preserve；工具只校验稳定 ID 与合法范围、波纹删除整句/句内卡壳/气口，并把 B-roll 放到独立叠加轨。B-roll 的 utterance、anchor_text 或 word_id 必须以本次全部删除决定展开后的保留台词为准：anchor_text 要从 speech.inspect 原文逐字复制，不能包含同次将删除的卡壳、重复词或短片段。短镜头可用保留 utterance 内的唯一连续 anchor_text，或直接使用保留的 start/end_word_id。若删气口会把保留台词夹成不足 2 秒的孤立碎片，工具会保守撤回最短的相邻气口删除并在 auto_preserved_pause_ids 中报告；语义删除造成的孤片或落在口误证据上的保留岛会失败，并在 island_counter_proposals 里给出可直接采纳的合并删除区间。未处理的内容候选作为非阻塞证据随成功结果返回，工具不替模型判断内容好坏",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyEdit, CostHigh, SurfaceTalkingHead),
 	)
 }
 
 func registerTimelineValidate(registry *Registry) error {
 	// 归可逆而非只读：写 TimelineValidated/TimelineValidationFailed 校验事件（reducer.Apply）。
 	// 校验事件按 merge key 幂等、顺序重放安全，故仍属重试安全，由 retrySafeFromEffect 单独放行。
-	return addTool[TimelineValidateInput, ToolResult](registry, "timeline.validate", "验证当前时间线不变量", []string{"timeline_exists"}, ExposureLLM, EffectReversible, false)
+	return addTool[TimelineValidateInput, ToolResult](registry, "timeline.validate", "验证当前时间线不变量", []string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyCheck, CostStandard, SurfaceRender, SurfaceTimelineEdit))
 }
 
 func registerTimelineInspect(registry *Registry) error {
-	return addTool[TimelineInspectInput, ToolResult](registry, "timeline.inspect", "读取可编辑的时间线摘要与完整 track/clip ID、素材、角色和帧范围；尚无时间线时返回 timeline_exists=false，而不是失败", nil, ExposureLLM, EffectReadOnly, false)
+	return addTool[TimelineInspectInput, ToolResult](registry, "timeline.inspect", "读取可编辑的时间线摘要与完整 track/clip ID、素材、角色和帧范围；尚无时间线时返回 timeline_exists=false，而不是失败", nil, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyRead, CostLow, SurfaceTimelineEdit, SurfaceTalkingHead, SurfaceBeatEdit, SurfaceRender, SurfacePreviewCheck))
 }
 
 func registerRenderPreview(registry *Registry) error {
-	return addTool[RenderPreviewInput, ToolResult](registry, "render.preview", "排队渲染当前已验证时间线预览", []string{"timeline_validated"}, ExposureLLM, EffectReversible, false)
+	return addTool[RenderPreviewInput, ToolResult](registry, "render.preview", "排队渲染当前已验证时间线预览", []string{"timeline_validated"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyEdit, CostHigh, SurfaceRender))
 }
 
 func registerRenderFinal(registry *Registry) error {
-	return addTool[RenderFinalInput, ToolResult](registry, "render.final_mp4", "排队导出最终 MP4", []string{"timeline_validated"}, ExposureLLM, EffectReversible, false)
+	return addTool[RenderFinalInput, ToolResult](registry, "render.final_mp4", "排队导出最终 MP4", []string{"timeline_validated"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyEdit, CostHigh, SurfaceRender))
 }
 
 func registerRenderStatus(registry *Registry) error {
-	return addTool[RenderStatusInput, ToolResult](registry, "render.status", "读取渲染任务与产物状态", []string{"timeline_exists"}, ExposureLLM, EffectReadOnly, false)
+	return addTool[RenderStatusInput, ToolResult](registry, "render.status", "读取渲染任务与产物状态", []string{"timeline_exists"}, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyRead, CostLow, SurfaceRender, SurfacePreviewCheck))
 }
 
 func registerInspectPreview(registry *Registry) error {
-	return addTool[RenderInspectInput, PreviewInspectionResult](registry, "render.inspect_preview", "检查预览的流、解码、黑帧、静帧、静音和响度；传 visual 可追加切点、B-roll 与字幕 contact sheet 视觉检查", []string{"any_preview_exists"}, ExposureLLM, EffectReadOnly, true)
+	return addTool[RenderInspectInput, PreviewInspectionResult](registry, "render.inspect_preview", "检查预览的流、解码、黑帧、静帧、静音和响度；传 visual 可追加切点、B-roll 与字幕 contact sheet 视觉检查", []string{"any_preview_exists"}, ExposureLLM, EffectReadOnly, true,
+		metadata(FamilyCheck, CostHigh, SurfacePreviewCheck))
 }
 
 func registerConfirmAction(registry *Registry) error {
 	// 创建确认决策是一次可逆写入（决策行）；G2 的强制确认拦截器读 EffectDestructive，
 	// confirm_action 本身不是被拦截对象，故按其写行为归可逆。
-	return addTool[ConfirmActionInput, ToolResult](registry, "interaction.confirm_action", "为破坏性动作创建确认决策", nil, ExposureLLM, EffectReversible, true)
+	return addTool[ConfirmActionInput, ToolResult](registry, "interaction.confirm_action", "为破坏性动作创建确认决策", nil, ExposureLLM, EffectReversible, true,
+		metadata(FamilyControl, CostLow, SurfaceControl))
 }
