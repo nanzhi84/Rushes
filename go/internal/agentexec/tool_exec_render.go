@@ -364,6 +364,10 @@ var quotedAbsoluteJobPathPattern = regexp.MustCompile(
 	`"(?:/[^"\r\n]+|[A-Za-z]:\\[^"\r\n]+)"|'(?:/[^'\r\n]+|[A-Za-z]:\\[^'\r\n]+)'`,
 )
 
+var delimitedAbsoluteJobPathPattern = regexp.MustCompile(
+	`(^|[\s=('"\\[])(/[^\r\n]*?|[A-Za-z]:\\[^\r\n]*?)(: |$)`,
+)
+
 var absoluteJobFilePathPattern = regexp.MustCompile(
 	`(?i)(^|[\s=:('"\\[])(/(?:[^\r\n:;,"')\]]*?\.[[:alnum:]]{1,8})|[A-Za-z]:\\(?:[^\r\n:;,"')\]]*?\.[[:alnum:]]{1,8}))($|[\s:;,)'"\]])`,
 )
@@ -375,6 +379,7 @@ var absoluteJobPathTokenPattern = regexp.MustCompile(
 func boundedJobFailureText(value string, limit int) string {
 	value = strings.TrimSpace(value)
 	value = quotedAbsoluteJobPathPattern.ReplaceAllString(value, `<local-path>`)
+	value = delimitedAbsoluteJobPathPattern.ReplaceAllString(value, `${1}<local-path>${3}`)
 	value = absoluteJobFilePathPattern.ReplaceAllString(value, `${1}<local-path>${3}`)
 	value = absoluteJobPathTokenPattern.ReplaceAllString(value, `${1}<local-path>`)
 	runes := []rune(value)

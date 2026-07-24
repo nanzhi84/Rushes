@@ -120,10 +120,10 @@ func TestRenderStartTargetsOneTimelineAndJobReadStaysPure(t *testing.T) {
 		t.Fatal(err)
 	}
 	failedJobID, _ := failedStartRaw.(rushestools.ToolResult).Data["job_id"].(string)
-	posixSecretPath := "/Users/editor/Private Clips/客户素材.mov"
-	windowsSecretPath := `C:\Users\editor\Private Clips\客户素材.mov`
-	longMessage := "ffmpeg failed at " + posixSecretPath + ": open \"" +
-		windowsSecretPath + "\": " + strings.Repeat("错误输出", 300)
+	posixSecretPath := "/Users/editor/Private Clips/客户素材"
+	windowsSecretPath := `C:\Users\editor\Private Clips\客户素材`
+	longMessage := "mkdir " + posixSecretPath + ": permission denied; mkdir " +
+		windowsSecretPath + ": " + strings.Repeat("错误输出", 300)
 	applied, err = reducer.Apply(t.Context(), database, []contracts.Event{{
 		Type: "JobFailed", DraftID: draftID,
 		Payload: map[string]any{
