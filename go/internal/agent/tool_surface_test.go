@@ -124,7 +124,7 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 	assertSurface(
 		"请先看看有哪些素材",
 		[]string{"asset.list_assets"},
-		[]string{"timeline.apply_patches", "timeline.compose_initial"},
+		[]string{"timeline.update", "timeline.compose_initial"},
 	)
 
 	seedSurfaceAsset(t, service, draftID)
@@ -134,46 +134,49 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 			"speech.transcribe", "speech.search", "audio.analyze_speech_pauses",
 			"media.detect_shots", "shot.search", "timeline.compose_initial",
 		},
-		[]string{"timeline.edit_talking_head", "timeline.apply_patches"},
+		[]string{"timeline.edit_talking_head", "timeline.update"},
 	)
 	assertSurface(
 		"请组装初版时间线",
 		[]string{"timeline.compose_initial", "asset.list_assets", "shot.search"},
-		[]string{"timeline.apply_patches"},
+		[]string{"timeline.update"},
 	)
 
 	setSurfaceTimelineState(t, service, draftID, false)
 	assertSurface(
 		"只把当前时间线片段音量调低",
-		[]string{"timeline.apply_patches", "timeline.inspect"},
+		[]string{
+			"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
+			"timeline.inspect",
+		},
 		[]string{"timeline.edit_talking_head", "timeline.recut_to_beats"},
 	)
 	assertSurface(
 		"完成口播气口和重说清理",
 		[]string{"timeline.edit_talking_head", "speech.search", "media.detect_shots", "timeline.inspect"},
-		[]string{"timeline.apply_patches", "timeline.recut_to_beats", "timeline.compose_initial"},
+		[]string{"timeline.update", "timeline.recut_to_beats", "timeline.compose_initial"},
 	)
 	assertSurface(
 		"根据节拍和 BGM 做卡点",
 		[]string{"timeline.recut_to_beats", "audio.analyze_beats", "media.detect_shots", "shot.search"},
-		[]string{"timeline.apply_patches", "timeline.edit_talking_head"},
+		[]string{"timeline.update", "timeline.edit_talking_head"},
 	)
 	assertSurface(
 		"验证时间线后渲染预览",
 		[]string{"timeline.check", "timeline.inspect", "render.preview", "render.final_mp4", "render.status"},
-		[]string{"timeline.apply_patches"},
+		[]string{"timeline.update"},
 	)
 
 	setSurfaceTimelineState(t, service, draftID, true)
 	assertSurface(
 		"渲染预览并导出最终 MP4",
 		[]string{"render.preview", "render.final_mp4", "timeline.check"},
-		[]string{"timeline.apply_patches"},
+		[]string{"timeline.update"},
 	)
 	assertSurface(
 		"记住我的长期偏好并更新计划",
 		[]string{"memory.update", "plan.update", "interaction.confirm_action"},
-		[]string{"timeline.apply_patches", "speech.search"},
+		[]string{"timeline.update", "speech.search"},
 	)
 }
 
@@ -228,6 +231,75 @@ func TestEveryConfiguredModelSurfaceFitsBudgetAcrossDraftStates(t *testing.T) {
 	assertBudgets("timeline-validated-with-preview")
 }
 
+func TestLegacyCompositeAndAtomicTimelineToolsNeverShareOneModelSurface(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_no_mixed_edit_surface"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	seedSurfaceAsset(t, service, draftID)
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+
+	assertNotMixed := func(prompt string) []string {
+		t.Helper()
+		specs, selectErr := selectModelToolSurface(
+			ctx,
+			service.tools,
+			[]*schema.Message{schema.UserMessage(prompt)},
+		)
+		if selectErr != nil {
+			t.Fatal(selectErr)
+		}
+		names := surfaceNames(specs)
+		hasAtomic := false
+		for _, name := range []string{
+			"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
+		} {
+			hasAtomic = hasAtomic || containsName(names, name)
+		}
+		hasComposite := false
+		for _, name := range []string{
+			"timeline.compose_initial", "timeline.edit_talking_head", "timeline.recut_to_beats",
+		} {
+			hasComposite = hasComposite || containsName(names, name)
+		}
+		if hasAtomic && hasComposite {
+			t.Fatalf("%q 同时暴露新旧编辑工具: %v", prompt, names)
+		}
+		return names
+	}
+
+	composeNames := assertNotMixed("请组装初版时间线")
+	if !containsName(composeNames, "timeline.compose_initial") {
+		t.Fatalf("compose surface=%v", composeNames)
+	}
+	firstInsertNames := assertNotMixed("调用 timeline.insert 插入第一个 visual_base clip")
+	if !containsName(firstInsertNames, "timeline.insert") ||
+		containsName(firstInsertNames, "timeline.compose_initial") {
+		t.Fatalf("first insert surface=%v", firstInsertNames)
+	}
+	setSurfaceTimelineState(t, service, draftID, false)
+	talkingHeadNames := assertNotMixed("完成口播气口和重说清理")
+	if !containsName(talkingHeadNames, "timeline.edit_talking_head") {
+		t.Fatalf("talking-head surface=%v", talkingHeadNames)
+	}
+	beatNames := assertNotMixed("根据节拍和 BGM 做卡点")
+	if !containsName(beatNames, "timeline.recut_to_beats") {
+		t.Fatalf("beat surface=%v", beatNames)
+	}
+	atomicNames := assertNotMixed("只把当前时间线片段音量调低")
+	for _, name := range []string{
+		"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
+	} {
+		if !containsName(atomicNames, name) {
+			t.Fatalf("atomic surface=%v missing %s", atomicNames, name)
+		}
+	}
+}
+
 func TestTimelineEditSurfaceCanDiscoverAndInsertNewShot(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_timeline_insert_surface"
@@ -258,8 +330,8 @@ func TestTimelineEditSurfaceCanDiscoverAndInsertNewShot(t *testing.T) {
 			t.Errorf("surface=%v missing %s", names, name)
 		}
 	}
-	if containsName(names, "timeline.apply_patches") {
-		t.Fatalf("检索完成前 surface=%v unexpectedly exposes timeline.apply_patches", names)
+	if containsName(names, "timeline.update") {
+		t.Fatalf("检索完成前 surface=%v unexpectedly exposes timeline.update", names)
 	}
 
 	specs, err = selectModelToolSurface(
@@ -279,7 +351,7 @@ func TestTimelineEditSurfaceCanDiscoverAndInsertNewShot(t *testing.T) {
 	}
 	names = surfaceNames(specs)
 	if !containsName(names, "timeline.inspect") ||
-		!containsName(names, "timeline.apply_patches") ||
+		!containsName(names, "timeline.update") ||
 		containsName(names, "shot.search") {
 		t.Fatalf("检索完成后 surface=%v", names)
 	}
@@ -311,7 +383,7 @@ func TestTimelineEditSurfaceDoesNotAdvanceAfterEmptyOrFailedShotSearch(t *testin
 		}
 		names := surfaceNames(specs)
 		if !containsName(names, "shot.search") ||
-			containsName(names, "timeline.apply_patches") {
+			containsName(names, "timeline.update") {
 			t.Fatalf("search result=%s surface=%v", result, names)
 		}
 	}
@@ -350,16 +422,16 @@ func TestSuccessfulShotSearchPreservesSpecializedWorkflowIntent(t *testing.T) {
 		{
 			name: "talking_head", prompt: "清理口播并找一个 B-roll 镜头插入",
 			required:  "timeline.edit_talking_head",
-			forbidden: []string{"timeline.apply_patches", "timeline.recut_to_beats"},
+			forbidden: []string{"timeline.update", "timeline.recut_to_beats"},
 		},
 		{
 			name: "beat_edit", prompt: "按 BGM 卡点并找一个镜头插入",
 			required:  "timeline.recut_to_beats",
-			forbidden: []string{"timeline.apply_patches", "timeline.edit_talking_head"},
+			forbidden: []string{"timeline.update", "timeline.edit_talking_head"},
 		},
 		{
 			name: "generic_timeline_edit", prompt: "在时间线里找一个海边镜头插入",
-			required:  "timeline.apply_patches",
+			required:  "timeline.update",
 			forbidden: []string{"timeline.edit_talking_head", "timeline.recut_to_beats"},
 		},
 	} {
@@ -422,7 +494,7 @@ func TestAutomaticContinuationPreservesTalkingHeadIntentAfterCompose(t *testing.
 	}
 	names := surfaceNames(specs)
 	if !containsName(names, "timeline.edit_talking_head") ||
-		containsName(names, "timeline.apply_patches") ||
+		containsName(names, "timeline.update") ||
 		containsName(names, "timeline.compose_initial") {
 		t.Fatalf("后台续跑后的口播 surface=%v", names)
 	}
@@ -457,7 +529,7 @@ func TestAutomaticRenderContinuationUsesPersistedPreviewWithoutToolTrace(t *test
 	}
 	names := surfaceNames(specs)
 	if !containsName(names, "preview.check") ||
-		containsName(names, "timeline.apply_patches") {
+		containsName(names, "timeline.update") {
 		t.Fatalf("真实跨回合续跑 surface=%v", names)
 	}
 }
@@ -483,7 +555,7 @@ func TestUnclassifiedEditLanguageConservativelyKeepsTimelineTools(t *testing.T) 
 			t.Fatal(selectErr)
 		}
 		names := surfaceNames(specs)
-		if !containsName(names, "timeline.apply_patches") ||
+		if !containsName(names, "timeline.update") ||
 			!containsName(names, "timeline.check") ||
 			containsName(names, "render.final_mp4") {
 			t.Errorf("%q surface=%v", prompt, names)
@@ -610,12 +682,12 @@ func TestExplicitIntentAdvancesAfterSuccessfulWorkflowWrite(t *testing.T) {
 		{
 			name: "compose", prompt: "请组装初版时间线",
 			toolName: "timeline.compose_initial",
-			required: "timeline.apply_patches", forbidden: "timeline.compose_initial",
+			required: "timeline.update", forbidden: "timeline.compose_initial",
 		},
 		{
 			name: "talking_head_after_compose", prompt: "完成口播气口和重说清理",
 			toolName: "timeline.compose_initial",
-			required: "timeline.edit_talking_head", forbidden: "timeline.apply_patches",
+			required: "timeline.edit_talking_head", forbidden: "timeline.update",
 		},
 		{
 			name: "talking_head", prompt: "完成口播气口和重说清理",
@@ -666,7 +738,7 @@ func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 		prompt   string
 		editTool string
 	}{
-		{"剪掉开头三秒然后导出 MP4", "timeline.apply_patches"},
+		{"剪掉开头三秒然后导出 MP4", "timeline.update"},
 		{"清理口播气口和重说后导出", "timeline.edit_talking_head"},
 		{"按 BGM 卡点后渲染预览", "timeline.recut_to_beats"},
 	}
@@ -696,7 +768,7 @@ func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 			}
 			names = surfaceNames(specs)
 			if !containsName(names, "timeline.check") ||
-				(test.editTool != "timeline.apply_patches" && containsName(names, test.editTool)) {
+				(test.editTool != "timeline.update" && containsName(names, test.editTool)) {
 				t.Fatalf("编辑完成后 surface=%v", names)
 			}
 		})
@@ -728,7 +800,7 @@ func TestCompositeEditRenderAndPreviewCheckPreservesStageOrder(t *testing.T) {
 
 	for _, prompt := range []string{
 		"剪掉开头三秒，渲染预览并检查黑帧",
-		"先调用 timeline.apply_patches，再调用 preview.check",
+		"先调用 timeline.update，再调用 preview.check",
 	} {
 		specs, selectErr := selectModelToolSurface(ctx, service.tools, []*schema.Message{
 			schema.UserMessage(prompt),
@@ -737,7 +809,7 @@ func TestCompositeEditRenderAndPreviewCheckPreservesStageOrder(t *testing.T) {
 			t.Fatal(selectErr)
 		}
 		names := surfaceNames(specs)
-		if !containsName(names, "timeline.apply_patches") ||
+		if !containsName(names, "timeline.update") ||
 			containsName(names, "preview.check") {
 			t.Errorf("%q initial surface=%v", prompt, names)
 		}
@@ -760,7 +832,7 @@ func TestWorkflowTransitionIgnoresUnrelatedFailureButLatestSameToolWins(t *testi
 	success := schema.ToolMessage(
 		`{"status":"succeeded"}`,
 		"call_apply_success",
-		schema.WithToolName("timeline.apply_patches"),
+		schema.WithToolName("timeline.update"),
 	)
 	planFailure := schema.ToolMessage(
 		`{"status":"failed","error_code":"invalid_arguments"}`,
@@ -778,7 +850,7 @@ func TestWorkflowTransitionIgnoresUnrelatedFailureButLatestSameToolWins(t *testi
 		}
 		names := surfaceNames(specs)
 		if !containsName(names, "timeline.check") ||
-			!containsName(names, "timeline.apply_patches") {
+			!containsName(names, "timeline.update") {
 			t.Fatalf("unrelated failure messages=%v surface=%v", messages, names)
 		}
 	}
@@ -789,14 +861,14 @@ func TestWorkflowTransitionIgnoresUnrelatedFailureButLatestSameToolWins(t *testi
 		schema.ToolMessage(
 			`{"status":"failed","error_code":"invalid_arguments"}`,
 			"call_apply_failure",
-			schema.WithToolName("timeline.apply_patches"),
+			schema.WithToolName("timeline.update"),
 		),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	names := surfaceNames(specs)
-	if !containsName(names, "timeline.apply_patches") {
+	if !containsName(names, "timeline.update") {
 		t.Fatalf("newer same-tool failure surface=%v", names)
 	}
 }
@@ -818,7 +890,7 @@ func TestGenericEditSurfaceRemainsAvailableUntilExplicitValidation(t *testing.T)
 		schema.ToolMessage(
 			`{"status":"succeeded"}`,
 			"call_insert",
-			schema.WithToolName("timeline.apply_patches"),
+			schema.WithToolName("timeline.update"),
 		),
 	}
 
@@ -827,7 +899,7 @@ func TestGenericEditSurfaceRemainsAvailableUntilExplicitValidation(t *testing.T)
 		t.Fatal(err)
 	}
 	names := surfaceNames(specs)
-	if !containsName(names, "timeline.apply_patches") ||
+	if !containsName(names, "timeline.update") ||
 		!containsName(names, "timeline.inspect") ||
 		!containsName(names, "timeline.check") ||
 		containsName(names, "render.preview") {
@@ -847,7 +919,7 @@ func TestGenericEditSurfaceRemainsAvailableUntilExplicitValidation(t *testing.T)
 	}
 	names = surfaceNames(specs)
 	if !containsName(names, "render.preview") ||
-		containsName(names, "timeline.apply_patches") {
+		containsName(names, "timeline.update") {
 		t.Fatalf("显式验证后 surface=%v", names)
 	}
 }
@@ -880,7 +952,7 @@ func TestSuccessfulPreviewAdvancesCompositeWorkflowToInspection(t *testing.T) {
 		schema.ToolMessage(
 			`{"status":"succeeded"}`,
 			"call_apply",
-			schema.WithToolName("timeline.apply_patches"),
+			schema.WithToolName("timeline.update"),
 		),
 		schema.ToolMessage(
 			`{"status":"succeeded"}`,
@@ -936,14 +1008,14 @@ func TestExplicitCompositeEditThenRenderStartsWithEditOnValidatedTimeline(t *tes
 		rushestools.WithDraftID(t.Context(), draftID),
 		service.tools,
 		[]*schema.Message{
-			schema.UserMessage("先调用 timeline.apply_patches，再调用 render.final_mp4"),
+			schema.UserMessage("先调用 timeline.update，再调用 render.final_mp4"),
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	names := surfaceNames(specs)
-	if !containsName(names, "timeline.apply_patches") ||
+	if !containsName(names, "timeline.update") ||
 		containsName(names, "render.final_mp4") {
 		t.Fatalf("已验证时间线的精确复合请求 surface=%v", names)
 	}
@@ -968,19 +1040,19 @@ func TestLatestWorkflowFailureDoesNotReuseOlderSuccess(t *testing.T) {
 			schema.ToolMessage(
 				`{"status":"succeeded"}`,
 				"call_apply_success",
-				schema.WithToolName("timeline.apply_patches"),
+				schema.WithToolName("timeline.update"),
 			),
 			schema.ToolMessage(
 				`{"status":"failed","observation":"补丁重试失败"}`,
 				"call_apply_failed",
-				schema.WithToolName("timeline.apply_patches"),
+				schema.WithToolName("timeline.update"),
 			),
 		})
 		if selectErr != nil {
 			t.Fatal(selectErr)
 		}
 		names := surfaceNames(specs)
-		if !containsName(names, "timeline.apply_patches") {
+		if !containsName(names, "timeline.update") {
 			t.Fatalf("最新编辑失败后 surface=%v", names)
 		}
 	})
@@ -1022,7 +1094,7 @@ func TestLatestWorkflowFailureDoesNotReuseOlderSuccess(t *testing.T) {
 		}
 		names := surfaceNames(specs)
 		if !containsName(names, "shot.search") ||
-			containsName(names, "timeline.apply_patches") {
+			containsName(names, "timeline.update") {
 			t.Fatalf("最新镜头检索为空后 surface=%v", names)
 		}
 	})
@@ -1054,7 +1126,7 @@ func TestCompositeSpecializedAndGenericEditsFinishBeforeRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := surfaceNames(specs)
-	if !containsName(names, "timeline.apply_patches") ||
+	if !containsName(names, "timeline.update") ||
 		containsName(names, "timeline.edit_talking_head") {
 		t.Fatalf("专用编辑完成后 surface=%v", names)
 	}
@@ -1063,7 +1135,7 @@ func TestCompositeSpecializedAndGenericEditsFinishBeforeRender(t *testing.T) {
 		schema.ToolMessage(
 			`{"status":"succeeded"}`,
 			"call_apply_patches",
-			schema.WithToolName("timeline.apply_patches"),
+			schema.WithToolName("timeline.update"),
 		),
 	))
 	if err != nil {
@@ -1071,7 +1143,7 @@ func TestCompositeSpecializedAndGenericEditsFinishBeforeRender(t *testing.T) {
 	}
 	names = surfaceNames(specs)
 	if !containsName(names, "timeline.check") ||
-		!containsName(names, "timeline.apply_patches") {
+		!containsName(names, "timeline.update") {
 		t.Fatalf("全部编辑完成后 surface=%v", names)
 	}
 
@@ -1080,7 +1152,7 @@ func TestCompositeSpecializedAndGenericEditsFinishBeforeRender(t *testing.T) {
 		schema.ToolMessage(
 			`{"status":"succeeded"}`,
 			"call_apply_patches",
-			schema.WithToolName("timeline.apply_patches"),
+			schema.WithToolName("timeline.update"),
 		),
 		schema.ToolMessage(
 			`{"status":"succeeded"}`,
@@ -1092,7 +1164,7 @@ func TestCompositeSpecializedAndGenericEditsFinishBeforeRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	names = surfaceNames(specs)
-	if !containsName(names, "render.preview") || containsName(names, "timeline.apply_patches") {
+	if !containsName(names, "render.preview") || containsName(names, "timeline.update") {
 		t.Fatalf("验证完成后 surface=%v", names)
 	}
 }
@@ -1148,7 +1220,7 @@ func TestPlanUpdateIsAvailableAcrossWorkflowSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := surfaceNames(specs)
-	if !containsName(names, "plan.update") || containsName(names, "timeline.apply_patches") {
+	if !containsName(names, "plan.update") || containsName(names, "timeline.update") {
 		t.Fatalf("预算提醒 surface=%v", names)
 	}
 
@@ -1163,7 +1235,7 @@ func TestPlanUpdateIsAvailableAcrossWorkflowSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	names = surfaceNames(specs)
-	if !containsName(names, "timeline.apply_patches") || containsName(names, "memory.update") {
+	if !containsName(names, "timeline.update") || containsName(names, "memory.update") {
 		t.Fatalf("计划固化后 surface=%v", names)
 	}
 
@@ -1183,7 +1255,7 @@ func TestPlanUpdateIsAvailableAcrossWorkflowSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	names = surfaceNames(specs)
-	if !containsName(names, "plan.update") || containsName(names, "timeline.apply_patches") {
+	if !containsName(names, "plan.update") || containsName(names, "timeline.update") {
 		t.Fatalf("最新计划失败 surface=%v", names)
 	}
 }
@@ -1206,8 +1278,8 @@ func TestSuccessfulControlActionAdvancesCompositeRequest(t *testing.T) {
 		toolName string
 		wantTool string
 	}{
-		{"更新计划，然后剪掉开头三秒并导出", "plan.update", "timeline.apply_patches"},
-		{"记住我偏好短片，然后剪掉开头三秒", "memory.update", "timeline.apply_patches"},
+		{"更新计划，然后剪掉开头三秒并导出", "plan.update", "timeline.update"},
+		{"记住我偏好短片，然后剪掉开头三秒", "memory.update", "timeline.update"},
 	} {
 		messages := []*schema.Message{
 			schema.UserMessage(test.prompt),
@@ -1255,7 +1327,7 @@ func TestPreviewCheckIntentTakesPriorityOverMediaNouns(t *testing.T) {
 		names := surfaceNames(specs)
 		if !containsName(names, "preview.check") ||
 			containsName(names, "audio.analyze_beats") ||
-			containsName(names, "timeline.apply_patches") {
+			containsName(names, "timeline.update") {
 			t.Errorf("%q surface=%v", prompt, names)
 		}
 	}
@@ -1280,7 +1352,7 @@ func TestBroadRequestAdvancesSurfaceWhenDraftStateChanges(t *testing.T) {
 	}
 	beforeNames := surfaceNames(before)
 	if !containsName(beforeNames, "timeline.compose_initial") ||
-		containsName(beforeNames, "timeline.apply_patches") {
+		containsName(beforeNames, "timeline.update") {
 		t.Fatalf("初始 surface=%v", beforeNames)
 	}
 
@@ -1297,7 +1369,7 @@ func TestBroadRequestAdvancesSurfaceWhenDraftStateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	afterNames := surfaceNames(after)
-	if !containsName(afterNames, "timeline.apply_patches") ||
+	if !containsName(afterNames, "timeline.update") ||
 		containsName(afterNames, "timeline.compose_initial") {
 		t.Fatalf("状态推进后 surface=%v", afterNames)
 	}
@@ -1307,7 +1379,7 @@ func TestBroadRequestAdvancesSurfaceWhenDraftStateChanges(t *testing.T) {
 		schema.ToolMessage(
 			`{"status":"succeeded","observation":"时间线补丁已应用"}`,
 			"call_apply",
-			schema.WithToolName("timeline.apply_patches"),
+			schema.WithToolName("timeline.update"),
 		),
 	)
 	afterEdit, err := selectModelToolSurface(ctx, service.tools, afterEditMessages)
@@ -1316,7 +1388,7 @@ func TestBroadRequestAdvancesSurfaceWhenDraftStateChanges(t *testing.T) {
 	}
 	afterEditNames := surfaceNames(afterEdit)
 	if !containsName(afterEditNames, "timeline.check") ||
-		!containsName(afterEditNames, "timeline.apply_patches") {
+		!containsName(afterEditNames, "timeline.update") {
 		t.Fatalf("编辑完成后 surface=%v", afterEditNames)
 	}
 
@@ -1334,7 +1406,7 @@ func TestBroadRequestAdvancesSurfaceWhenDraftStateChanges(t *testing.T) {
 	afterValidationNames := surfaceNames(afterValidation)
 	if !containsName(afterValidationNames, "render.preview") ||
 		!containsName(afterValidationNames, "render.final_mp4") ||
-		containsName(afterValidationNames, "timeline.apply_patches") {
+		containsName(afterValidationNames, "timeline.update") {
 		t.Fatalf("验证完成后 surface=%v", afterValidationNames)
 	}
 }
@@ -1423,10 +1495,17 @@ func TestDynamicModelRebindsDifferentSurfaceOnEveryModelCall(t *testing.T) {
 	if reflect.DeepEqual(history[0], history[1]) {
 		t.Fatalf("不同阶段不应绑定相同工具面: %v", history)
 	}
-	if !containsName(history[0], "speech.search") || containsName(history[0], "timeline.apply_patches") {
+	if !containsName(history[0], "speech.search") || containsName(history[0], "timeline.update") {
 		t.Fatalf("talking-head surface=%v", history[0])
 	}
-	if !reflect.DeepEqual(history[1], []string{"timeline.apply_patches", "timeline.check", "timeline.inspect"}) {
+	if !reflect.DeepEqual(history[1], []string{
+		"timeline.check",
+		"timeline.delete",
+		"timeline.insert",
+		"timeline.inspect",
+		"timeline.split",
+		"timeline.update",
+	}) {
 		t.Fatalf("timeline-edit surface=%v", history[1])
 	}
 }

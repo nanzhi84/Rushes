@@ -49,6 +49,8 @@ const (
 	// —— 时间线补丁（agentexec/shared_util.go、timeline_op_recovery.go、tool_exec_timeline.go）——
 	ErrCodeTimelineOpSemanticError ToolErrorCode = "timeline_op_semantic_error"
 	ErrCodeTimelineOpFieldError    ToolErrorCode = "timeline_op_field_error"
+	ErrCodeTimelineAbsent          ToolErrorCode = "timeline_absent"
+	ErrCodeStaleTarget             ToolErrorCode = "stale_target"
 	ErrCodeComposeInitialInvalid   ToolErrorCode = "compose_initial_invalid"
 
 	// —— 内容合同校验（agentexec/content_contract.go）——
@@ -106,6 +108,8 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodeInvalidConfirmationTarget,
 	ErrCodeTimelineOpSemanticError,
 	ErrCodeTimelineOpFieldError,
+	ErrCodeTimelineAbsent,
+	ErrCodeStaleTarget,
 	ErrCodeComposeInitialInvalid,
 	ErrCodeMissingBeatGrid,
 	ErrCodePlanRequired,

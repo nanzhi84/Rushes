@@ -47,7 +47,8 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 		"audio": {agentexec.AudioTrackPlaybook, []string{"持续音乐", "短时点缀", "叠加"}},
 		"beat":  {agentexec.BeatEditingPlaybook, []string{"节拍与完整动态证据", "可核验镜头", "自主规划", "不要求用户审批", "卡点重剪"}},
 		"timeline": {agentexec.TimelineEditingPlaybook, []string{
-			"两个或更多片段", "原子批次", "自主决定", "直接组装可回滚的初版",
+			"timeline.insert", "一次调用只提交一个 kind", "多个独立目标按稳定顺序分别调用",
+			"禁止提交 ops[]", "自主决定", "直接组装可回滚的初版",
 		}},
 		"talking_head": {agentexec.TalkingHeadPlaybook, []string{
 			"已有时间线", "尚无时间线", "建立初版", "逐句语音证据", "词级标识",

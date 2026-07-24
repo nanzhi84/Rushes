@@ -345,13 +345,16 @@ func (exec *Executor) enrichTimelineOperations(
 			operation[key] = value
 		}
 		switch StringValue(operation["kind"]) {
-		case "insert_clip":
+		case "insert_clip", "replace_clip":
 			asset, exists := assetByID[StringValue(operation["asset_id"])]
 			if !exists {
 				break
 			}
 			if StringValue(operation["asset_kind"]) == "" {
 				operation["asset_kind"] = asset.Kind
+			}
+			if StringValue(operation["kind"]) == "replace_clip" {
+				break
 			}
 			if ValueOr(StringValue(operation["track_id"]), "visual_base") != "visual_base" {
 				break

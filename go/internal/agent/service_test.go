@@ -2506,11 +2506,11 @@ func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T)
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	arguments := map[string]any{
-		"ops": []any{map[string]any{"kind": "delete_clip", "timeline_clip_id": "clip_v1_001"}},
+		"kind": "delete_clip", "timeline_clip_id": "clip_v1_001",
 	}
 
 	missingRaw, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
-		Question: "确认删除片段？", ToolName: "timeline.apply_patches", Arguments: arguments,
+		Question: "确认删除片段？", ToolName: "timeline.delete", Arguments: arguments,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2537,7 +2537,7 @@ func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T)
 		t.Fatal(err)
 	}
 	confirmRaw, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
-		Question: "确认删除片段？", ToolName: "timeline.apply_patches", Arguments: arguments,
+		Question: "确认删除片段？", ToolName: "timeline.delete", Arguments: arguments,
 	})
 	if err != nil {
 		t.Fatal(err)

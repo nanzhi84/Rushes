@@ -236,6 +236,10 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		"interaction.confirm_action":  EffectReversible,
 		"timeline.compose_initial":    EffectReversible,
 		"timeline.apply_patches":      EffectReversible,
+		"timeline.insert":             EffectReversible,
+		"timeline.delete":             EffectReversible,
+		"timeline.update":             EffectReversible,
+		"timeline.split":              EffectReversible,
 		"timeline.recut_to_beats":     EffectReversible,
 		"timeline.edit_talking_head":  EffectReversible,
 		"timeline.check":              EffectReadOnly,
@@ -284,6 +288,10 @@ func TestToolPrimitiveClassificationMatchesEffectAndSurface(t *testing.T) {
 		"memory.update":               FamilyControl,
 		"timeline.compose_initial":    FamilyEdit,
 		"timeline.apply_patches":      FamilyEdit,
+		"timeline.insert":             FamilyEdit,
+		"timeline.delete":             FamilyEdit,
+		"timeline.update":             FamilyEdit,
+		"timeline.split":              FamilyEdit,
 		"timeline.recut_to_beats":     FamilyEdit,
 		"timeline.edit_talking_head":  FamilyEdit,
 		"timeline.check":              FamilyCheck,
@@ -548,6 +556,23 @@ func minimalDecodeArguments(input reflect.Type) map[string]any {
 	for input.Kind() == reflect.Pointer {
 		input = input.Elem()
 	}
+	switch input {
+	case reflect.TypeFor[TimelineInsertInput]():
+		return map[string]any{
+			"kind": "insert_clip", "asset_id": "asset_1",
+			"source_start_frame": 0, "source_end_frame": 30,
+		}
+	case reflect.TypeFor[TimelineDeleteInput]():
+		return map[string]any{"kind": "delete_clip", "timeline_clip_id": "clip_1"}
+	case reflect.TypeFor[TimelineUpdateInput]():
+		return map[string]any{
+			"kind": "adjust_gain", "timeline_clip_id": "clip_1", "gain_db": -3,
+		}
+	case reflect.TypeFor[TimelineSplitInput]():
+		return map[string]any{
+			"kind": "split_clip", "timeline_clip_id": "clip_1", "split_frame": 15,
+		}
+	}
 	arguments := map[string]any{}
 	if input.Kind() != reflect.Struct {
 		return arguments
@@ -669,8 +694,17 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		"plan.update": {
 			"RFC 7396", "reset=true", "跨回合",
 		},
-		"timeline.apply_patches": {
-			"insert_clip", "delete_clip", "同一次调用", "BGM/SFX", "timeline.recut_to_beats",
+		"timeline.insert": {
+			"一个素材 clip", "空时间线", "原声联动", "服务端派生",
+		},
+		"timeline.delete": {
+			"一个 clip", "一个连续帧范围", "多个目标", "多次调用",
+		},
+		"timeline.update": {
+			"一个 clip", "track", "subtitle", "淡入淡出",
+		},
+		"timeline.split": {
+			"一个 timeline_clip_id", "一个时间线整数帧",
 		},
 		"timeline.recut_to_beats": {
 			"shot_ids", "cut_frames 可多于视频素材数", "use_all_video_assets=true",
@@ -707,10 +741,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := registry.Specs(false)
-	if len(core) != 21 {
+	if len(core) != 25 {
 		t.Fatalf("core tools=%d", len(core))
 	}
-	if len(registry.Specs(true)) != 23 {
+	if len(registry.Specs(true)) != 27 {
 		t.Fatalf("all tools=%d", len(registry.Specs(true)))
 	}
 	for _, spec := range registry.Specs(true) {
@@ -719,10 +753,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 			t.Fatalf("spec=%s info=%#v err=%v", spec.Name, info, infoErr)
 		}
 	}
-	if got := len(registry.EinoTools(false, false)); got != 20 {
+	if got := len(registry.EinoTools(false, false)); got != 23 {
 		t.Fatalf("LLM core tools=%d", got)
 	}
-	if got := len(registry.EinoTools(false, true)); got != 21 {
+	if got := len(registry.EinoTools(false, true)); got != 25 {
 		t.Fatalf("含 harness core tools=%d", got)
 	}
 
@@ -917,7 +951,11 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	if containsSpec(allowed, "timeline.compose_initial") {
 		t.Fatal("已有时间线时 compose_initial 不应放行")
 	}
-	for _, name := range []string{"timeline.apply_patches", "timeline.recut_to_beats", "timeline.check", "timeline.inspect", "render.preview", "render.final_mp4", "render.status"} {
+	for _, name := range []string{
+		"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
+		"timeline.recut_to_beats", "timeline.check", "timeline.inspect",
+		"render.preview", "render.final_mp4", "render.status",
+	} {
 		if !containsSpec(allowed, name) {
 			t.Fatalf("已有但未标记 validated 的时间线也应放行 %s，由渲染入口同步校验", name)
 		}

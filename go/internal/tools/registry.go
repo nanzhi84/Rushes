@@ -205,6 +205,7 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 		registerSpeechPauseAnalysis, registerSpeechTranscribe, registerSpeechSearch, registerAskUser,
 		registerDecisionAnswer, registerPlanUpdate, registerMemoryUpdate,
 		registerComposeInitial, registerApplyPatchBatch,
+		registerTimelineInsert, registerTimelineDelete, registerTimelineUpdate, registerTimelineSplit,
 		registerBeatRecut, registerTalkingHeadEdit,
 		registerTimelineCheck, registerTimelineInspect, registerRenderPreview,
 		registerRenderFinal, registerRenderStatus, registerPreviewCheck,
@@ -284,6 +285,16 @@ func validateRequiredFields(input reflect.Type, value any, path string) error {
 		}
 		return nil
 	}
+	if toolName, atomic := atomicTimelineToolForType(input); atomic {
+		operation, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s 必须是 JSON 对象", path)
+		}
+		if _, err := TimelineAtomicOperation(toolName, atomicTimelineInputValue(input, operation)); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		return nil
+	}
 	switch input.Kind() {
 	case reflect.Struct:
 		object, ok := value.(map[string]any)
@@ -321,6 +332,36 @@ func validateRequiredFields(input reflect.Type, value any, path string) error {
 		}
 	}
 	return nil
+}
+
+func atomicTimelineToolForType(input reflect.Type) (string, bool) {
+	switch input {
+	case reflect.TypeFor[TimelineInsertInput]():
+		return "timeline.insert", true
+	case reflect.TypeFor[TimelineDeleteInput]():
+		return "timeline.delete", true
+	case reflect.TypeFor[TimelineUpdateInput]():
+		return "timeline.update", true
+	case reflect.TypeFor[TimelineSplitInput]():
+		return "timeline.split", true
+	default:
+		return "", false
+	}
+}
+
+func atomicTimelineInputValue(input reflect.Type, operation map[string]any) any {
+	switch input {
+	case reflect.TypeFor[TimelineInsertInput]():
+		return TimelineInsertInput(operation)
+	case reflect.TypeFor[TimelineDeleteInput]():
+		return TimelineDeleteInput(operation)
+	case reflect.TypeFor[TimelineUpdateInput]():
+		return TimelineUpdateInput(operation)
+	case reflect.TypeFor[TimelineSplitInput]():
+		return TimelineSplitInput(operation)
+	default:
+		return nil
+	}
 }
 
 func validateTimelineOp(operation map[string]any) error {
@@ -474,7 +515,9 @@ func addTool[I, O any](
 			reporter(ctx, name, "finished", input, output, executeErr)
 		}
 		return output, executeErr
-	}, utils.WithUnmarshalArguments(strictUnmarshalToolArguments[I]))
+	}, utils.WithUnmarshalArguments(func(ctx context.Context, arguments string) (any, error) {
+		return strictUnmarshalToolArguments[I](ctx, name, arguments)
+	}))
 	if err != nil {
 		return err
 	}
@@ -523,7 +566,7 @@ func (registry *Registry) Spec(name string) (Spec, bool) {
 	return spec, exists
 }
 
-func strictUnmarshalToolArguments[I any](_ context.Context, arguments string) (any, error) {
+func strictUnmarshalToolArguments[I any](_ context.Context, name, arguments string) (any, error) {
 	var input I
 	decoder := json.NewDecoder(strings.NewReader(arguments))
 	decoder.DisallowUnknownFields()
@@ -535,6 +578,14 @@ func strictUnmarshalToolArguments[I any](_ context.Context, arguments string) (a
 			err = errors.New("包含多个 JSON 值")
 		}
 		return nil, err
+	}
+	if _, atomic := timelineAtomicKinds[name]; atomic {
+		if _, err := TimelineAtomicOperation(name, any(input)); err != nil {
+			var fieldErr *timeline.OpFieldError
+			if !errors.As(err, &fieldErr) {
+				return nil, err
+			}
+		}
 	}
 	return input, nil
 }
@@ -750,9 +801,49 @@ func registerApplyPatchBatch(registry *Registry) error {
 	return addTool[TimelinePatchBatchInput, ToolResult](
 		registry,
 		"timeline.apply_patches",
-		"原子应用多个时间线语义补丁，整批只写入一次当前时间线；整批替换主视频时把新 insert_clip 和旧 delete_clip 放在同一次调用，工具会规划安全执行顺序，并默认保护未被本批直接编辑的 BGM/SFX；卡点剪辑必须改用 timeline.recut_to_beats",
-		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
+		"应用旧版批量时间线补丁；仅供 REST/harness 迁移调用，模型使用 timeline.insert/delete/update/split",
+		[]string{"timeline_exists"}, ExposureHarness, EffectReversible, false,
 		metadata(FamilyEdit, CostHigh, SurfaceTimelineEdit),
+	)
+}
+
+func registerTimelineInsert(registry *Registry) error {
+	return addTool[TimelineInsertInput, ToolResult](
+		registry,
+		"timeline.insert",
+		"插入一个素材 clip 或一条字幕；空时间线只允许先插入 visual_base clip，素材类型和原声联动由服务端派生",
+		nil, ExposureLLM, EffectReversible, false,
+		metadata(FamilyEdit, CostStandard, SurfaceTimelineEdit),
+	)
+}
+
+func registerTimelineDelete(registry *Registry) error {
+	return addTool[TimelineDeleteInput, ToolResult](
+		registry,
+		"timeline.delete",
+		"只删除一个 clip、一个连续帧范围或一个非主视觉轨内容集合；需要多个目标时按稳定顺序多次调用",
+		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyEdit, CostStandard, SurfaceTimelineEdit),
+	)
+}
+
+func registerTimelineUpdate(registry *Registry) error {
+	return addTool[TimelineUpdateInput, ToolResult](
+		registry,
+		"timeline.update",
+		"只更新一个 clip、track 或 subtitle 目标；kind 选择裁剪、移动、重排、替换、速率、音量、淡入淡出、联动、轨道状态或字幕内容",
+		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyEdit, CostStandard, SurfaceTimelineEdit),
+	)
+}
+
+func registerTimelineSplit(registry *Registry) error {
+	return addTool[TimelineSplitInput, ToolResult](
+		registry,
+		"timeline.split",
+		"只在一个 timeline_clip_id 的一个时间线整数帧位置切分片段",
+		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyEdit, CostStandard, SurfaceTimelineEdit),
 	)
 }
 

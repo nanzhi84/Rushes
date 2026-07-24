@@ -254,7 +254,7 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 	}
 }
 
-const modelToolSchemaTotalBaselineRunes = 32761
+const modelToolSchemaTotalBaselineRunes = 23366
 
 var modelToolSchemaBaselineRunes = map[string]int{
 	"asset.list_assets":           435,
@@ -267,18 +267,21 @@ var modelToolSchemaBaselineRunes = map[string]int{
 	"memory.update":               1260,
 	"plan.update":                 1573,
 	"preview.check":               420,
-	"render.final_mp4":            218,
-	"render.preview":              220,
+	"render.final_mp4":            234,
+	"render.preview":              230,
 	"render.status":               128,
 	"shot.search":                 870,
 	"speech.search":               1144,
-	"speech.transcribe":           481,
-	"timeline.apply_patches":      14719,
+	"speech.transcribe":           486,
 	"timeline.check":              199,
 	"timeline.compose_initial":    826,
+	"timeline.delete":             790,
 	"timeline.edit_talking_head":  4091,
+	"timeline.insert":             1004,
 	"timeline.inspect":            195,
 	"timeline.recut_to_beats":     1846,
+	"timeline.split":              514,
+	"timeline.update":             2985,
 }
 
 func modelToolSchemaRuneLimit(baseline int) int {
@@ -314,6 +317,12 @@ func TestModelToolSchemaRuneBudgetCoversEveryLLMTool(t *testing.T) {
 		t.Errorf("total schema runes shrank to %d; lower the reviewed baseline %d in this change", metrics.TotalRunes, modelToolSchemaTotalBaselineRunes)
 	}
 	for name, runes := range metrics.PerToolRunes {
+		if strings.HasPrefix(name, "timeline.") &&
+			(name == "timeline.insert" || name == "timeline.delete" ||
+				name == "timeline.update" || name == "timeline.split") &&
+			runes > 3000 {
+			t.Errorf("tool %s schema runes=%d exceeds hard per-tool limit=3000", name, runes)
+		}
 		baseline, exists := modelToolSchemaBaselineRunes[name]
 		if !exists {
 			t.Errorf("LLM tool %s has no reviewed schema baseline", name)
