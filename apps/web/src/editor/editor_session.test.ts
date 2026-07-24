@@ -160,6 +160,36 @@ describe("EditorSession", () => {
     ]);
   });
 
+  it("部分成功后的失败目标已消失时安全落到服务端快照并保留未提交队列", () => {
+    const initial = fixtureTimeline();
+    const session = new EditorSession(initial);
+    const split = { kind: "split_clip", timeline_clip_id: "visual_a", split_frame: 15 };
+    const gain = { kind: "adjust_gain", timeline_clip_id: "visual_b", gain_db: -6 };
+    session.apply(split);
+    session.apply(gain);
+    expect(session.beginSave()).toEqual([split, gain]);
+
+    const serverAfterPrefixAndConcurrentDelete = applyLocalTimelineOperation(
+      applyLocalTimelineOperation(initial, split),
+      { kind: "delete_clip", timeline_clip_id: "visual_b" }
+    );
+    expect(() =>
+      session.rejectPartiallySaved(
+        serverAfterPrefixAndConcurrentDelete,
+        1,
+        new Error("第二项保存失败")
+      )
+    ).not.toThrow();
+
+    const snapshot = session.snapshot();
+    expect(snapshot.saveState).toBe("error");
+    expect(snapshot.pendingCount).toBe(1);
+    expect(snapshot.error).toContain("未保存操作与最新时间线冲突");
+    expect(findTrack(snapshot.timeline, "visual_base").clips?.map((clip) => clip.timeline_clip_id))
+      .toContain("visual_a_split_15");
+    expect(() => findClip(snapshot.timeline, "visual_b")).toThrow("missing clip visual_b");
+  });
+
   it("字幕样式在编辑、插入和保存失败后保持前后端同义", () => {
     const initial = fixtureTimeline();
     findTrack(initial, "subtitles").clips = [{

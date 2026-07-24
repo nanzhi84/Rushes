@@ -94,15 +94,28 @@ export class EditorSession {
       return;
     }
     const remaining = this.inFlight.slice(appliedCount);
-    this.inFlight = [];
-    this.pending = compactEditorOperations([...remaining, ...this.pending]);
+    const pending = compactEditorOperations([...remaining, ...this.pending]);
     let rebased = cloneTimeline(serverTimeline);
-    for (const operation of this.pending) {
-      rebased = applyLocalTimelineOperation(rebased, operation);
+    let replayError: unknown = null;
+    try {
+      for (const operation of pending) {
+        rebased = applyLocalTimelineOperation(rebased, operation);
+      }
+    } catch (error) {
+      // 失败操作的目标可能已因前缀提交或并发编辑从 latest 消失。恢复必须一次性提交
+      // session 状态，不能在清空 inFlight 后把异常抛给 React；保留待处理队列并明确
+      // 展示服务端真相，由用户基于最新时间线继续编辑。
+      rebased = cloneTimeline(serverTimeline);
+      replayError = error;
     }
+    this.inFlight = [];
+    this.pending = pending;
     this.timeline = rebased;
     this.state = "error";
-    this.error = error instanceof Error ? error.message : "时间线保存失败";
+    const saveError = error instanceof Error ? error.message : "时间线保存失败";
+    this.error = replayError instanceof Error
+      ? `${saveError}；未保存操作与最新时间线冲突：${replayError.message}`
+      : saveError;
     this.emit();
   }
 
