@@ -7,7 +7,7 @@ const AudioTrackPlaybook = `【音频分轨】
 
 const BeatEditingPlaybook = `【卡点工作流】
 先并行取得 audio.analyze_beats 的完整拍点/动态证据与 shot.search 的可核验镜头；拍点强弱只是声音事实，不直接代表高潮或剪法。你必须自主选择镜头顺序、每个 cut frame 和精确 source range，不要求用户审批可逆首剪表。
-空时间线先按选定顺序逐次 timeline.insert 主视觉片段，让每段结束帧落在明确选择的 beat frame；已有时间线用单目标 insert/delete/update/split 收敛，不得要求工具自动重建完整方案。每次成功后若下一步依赖当前 ID 或坐标，先 timeline.inspect。
+空时间线先按选定顺序逐次 timeline.insert 主视觉片段，让每段结束帧落在明确选择的 beat frame；已有时间线用单目标 insert/delete/update 收敛，不得要求工具自动重建完整方案。每次成功后若下一步依赖当前 ID 或坐标，先 timeline.inspect。
 主视觉总时长确定后，用 timeline.insert 单独插入 bgm，并把本轮 audio.analyze_beats 返回的完整 bpm、beat_frames、strong_beat_frames、downbeat_frames、bar_phase 与 analysis_method 原样放在 metadata 的 beat_grid 字段；SFX 作为另一次 sfx 插入，音量再用一次 timeline.update。不得让 BGM 或 SFX 混入主视觉素材，也不得自动换镜头凑时长。
 最后 timeline.check，确认 beat_grid_present、切点覆盖与结构合同；失败只修正对应的一个镜头、音轨或参数，不重跑已成功原语。`
 
