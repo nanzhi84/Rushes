@@ -22,7 +22,7 @@ import (
 
 // TestToolEffectMatchesExecutorWriteFootprint 对拍工具的 Effect 分级与执行器真实写行为
 // （#103 G1 验收）：全部只读工具执行后事件日志零增长且业务表快照不变；可逆工具经 reducer 落盘（事件或 ResultRows）；
-// 破坏性 memory.update 的 remove_keys 真正删记忆。Effect 事实源取自由同一执行器构造的注册表，
+// memory.set 可逆写入、memory.remove 破坏性删除。Effect 事实源取自由同一执行器构造的注册表，
 // 与被执行的方法闭环对拍。
 func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
@@ -154,18 +154,21 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 		}
 	})
 
-	t.Run("destructive memory.update remove_keys deletes the stored memory", func(t *testing.T) {
+	t.Run("memory set and destructive remove match their effects", func(t *testing.T) {
 		const draftID = "draft_effect_memory"
 		agenttest.CreateAgentDraft(t, database, draftID)
 		agenttest.InsertAgentMessage(t, database, draftID, "message_effect_memory", "以后都快一点")
-		if effect := effectOf("memory.update"); effect != rushestools.EffectDestructive {
-			t.Fatalf("memory.update Effect=%q，期望 destructive", effect)
+		if effect := effectOf("memory.set"); effect != rushestools.EffectReversible {
+			t.Fatalf("memory.set Effect=%q，期望 reversible", effect)
+		}
+		if effect := effectOf("memory.remove"); effect != rushestools.EffectDestructive {
+			t.Fatalf("memory.remove Effect=%q，期望 destructive", effect)
 		}
 		ctx := rushestools.WithDraftID(
 			WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_effect_memory"),
 			draftID,
 		)
-		if _, err := exec.toolMemoryUpdate(ctx, draftID, rushestools.MemoryUpdateInput{
+		if _, err := exec.toolMemorySet(ctx, draftID, rushestools.MemorySetInput{
 			Entries: []rushestools.MemoryEntryInput{{
 				Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都快一点",
 			}},
@@ -175,13 +178,13 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 		if memories, err := storage.ListUserMemories(t.Context(), database.Read()); err != nil || len(memories) != 1 {
 			t.Fatalf("新增记忆未落盘: memories=%#v err=%v", memories, err)
 		}
-		if _, err := exec.toolMemoryUpdate(ctx, draftID, rushestools.MemoryUpdateInput{
-			RemoveKeys: []string{"pacing"},
+		if _, err := exec.toolMemoryRemove(ctx, draftID, rushestools.MemoryRemoveInput{
+			Keys: []string{"pacing"},
 		}); err != nil {
 			t.Fatal(err)
 		}
 		if memories, err := storage.ListUserMemories(t.Context(), database.Read()); err != nil || len(memories) != 0 {
-			t.Fatalf("remove_keys 未删除记忆: memories=%#v err=%v", memories, err)
+			t.Fatalf("memory.remove 未删除记忆: memories=%#v err=%v", memories, err)
 		}
 	})
 }

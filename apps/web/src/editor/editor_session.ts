@@ -80,6 +80,54 @@ export class EditorSession {
     this.emit();
   }
 
+  rejectPartiallySaved(
+    serverTimeline: TimelineJson,
+    appliedCount: number,
+    failedIndex: number,
+    error: unknown
+  ): void {
+    if (
+      !Number.isInteger(appliedCount) ||
+      appliedCount < 0 ||
+      appliedCount > this.inFlight.length ||
+      !Number.isInteger(failedIndex) ||
+      failedIndex < appliedCount ||
+      failedIndex >= this.inFlight.length
+    ) {
+      this.rejectSave(error);
+      return;
+    }
+    // failedIndex 对应服务端已经明确拒绝的 poison operation，不能再次放回普通
+    // pending。preflight schema 失败时 failedIndex 可能大于 appliedCount，因此保留
+    // appliedCount 之后除失败项外的全部未执行操作。
+    const candidates = [
+      ...this.inFlight.filter((_, index) => index >= appliedCount && index !== failedIndex),
+      ...this.pending
+    ];
+    const pending: TimelineOperation[] = [];
+    let rebased = cloneTimeline(serverTimeline);
+    const replayErrors: string[] = [];
+    for (const operation of candidates) {
+      try {
+        rebased = applyLocalTimelineOperation(rebased, operation);
+        pending.push(operation);
+      } catch (replayError) {
+        replayErrors.push(
+          replayError instanceof Error ? replayError.message : `无法重放 ${operation.kind}`
+        );
+      }
+    }
+    this.inFlight = [];
+    this.pending = compactEditorOperations(pending);
+    this.timeline = rebased;
+    this.state = "error";
+    const saveError = error instanceof Error ? error.message : "时间线保存失败";
+    const isolatedCount = 1 + replayErrors.length;
+    const replayDetail = replayErrors.length > 0 ? `：${replayErrors.join("；")}` : "";
+    this.error = `${saveError}；已隔离 ${isolatedCount} 项冲突操作，请基于最新时间线重做${replayDetail}`;
+    this.emit();
+  }
+
   replaceFromServer(serverTimeline: TimelineJson): void {
     if (this.pending.length > 0 || this.inFlight.length > 0) {
       return;

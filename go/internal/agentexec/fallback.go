@@ -2,6 +2,7 @@ package agentexec
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -12,7 +13,7 @@ import (
 type RunReportedFunc func(ctx context.Context, name string, input any) (any, error)
 
 // FallbackMainline 是无模型密钥兜底下的确定性「混剪主线」:列可用视觉素材 → 逐个理解
-// → 组装初版时间线 → 起预览。领域编排归领域包,引擎侧只保留关键词委托与非域兜底。
+// → 原子插入初版时间线 → 起预览。领域编排归领域包,引擎侧只保留关键词委托与非域兜底。
 func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runReported RunReportedFunc) (string, error) {
 	listed, err := exec.ToolListAssets(ctx, draftID, rushestools.AssetListInput{OnlyUsable: BoolPointer(true)})
 	if err != nil {
@@ -35,29 +36,76 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 	}
 	if len(understandIDs) > 0 {
 		for _, assetID := range understandIDs {
-			if _, err := runReported(ctx, "media.detect_shots", rushestools.DetectShotsInput{
+			output, err := runReported(ctx, "media.detect_shots", rushestools.DetectShotsInput{
 				AssetID: assetID, Depth: "scan", Focus: "混剪可用画面",
-			}); err != nil {
+			})
+			if err != nil {
+				return "", err
+			}
+			if err := requireFallbackToolStatus(
+				"media.detect_shots", output,
+				"completed", string(rushestools.StatusQueued),
+			); err != nil {
 				return "", err
 			}
 		}
 	}
-	clips := make([]rushestools.ComposeClip, 0, len(visualAssets))
 	for _, asset := range visualAssets {
 		endFrame := asset.DurationFrames
 		if endFrame <= 0 {
 			endFrame = timeline.DefaultFPS
 		}
 		endFrame = min(endFrame, 5*timeline.DefaultFPS)
-		clips = append(clips, rushestools.ComposeClip{
-			AssetID: asset.AssetID, SourceStartFrame: 0, SourceEndFrame: endFrame, Role: "b_roll",
+		output, err := runReported(ctx, "timeline.insert", rushestools.TimelineInsertInput{
+			"kind": "insert_clip", "asset_id": asset.AssetID, "role": "b_roll",
+			"source_start_frame": 0, "source_end_frame": endFrame,
 		})
+		if err != nil {
+			return "", err
+		}
+		if err := requireFallbackToolStatus(
+			"timeline.insert", output, string(rushestools.StatusSucceeded),
+		); err != nil {
+			return "", err
+		}
 	}
-	if _, err := runReported(ctx, "timeline.compose_initial", rushestools.ComposeInitialInput{Clips: clips}); err != nil {
+	document, err := timeline.Latest(ctx, exec.database, draftID)
+	if err != nil {
 		return "", err
 	}
-	if _, err := runReported(ctx, "render.preview", rushestools.RenderPreviewInput{}); err != nil {
+	output, err := runReported(ctx, "render.start", rushestools.RenderStartInput{
+		Kind: "preview", TimelineID: document.TimelineID,
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := requireFallbackToolStatus(
+		"render.start", output,
+		string(rushestools.StatusQueued), string(rushestools.StatusSucceeded),
+	); err != nil {
 		return "", err
 	}
 	return "已完成素材理解与初版时间线，并开始渲染预览。", nil
+}
+
+func requireFallbackToolStatus(
+	name string,
+	output any,
+	allowed ...string,
+) error {
+	var status, observation string
+	switch result := output.(type) {
+	case rushestools.ToolResult:
+		status, observation = result.Status, result.Observation
+	case rushestools.DetectShotsResult:
+		status, observation = result.Status, result.UsageNote
+	default:
+		return fmt.Errorf("%s 返回类型无效", name)
+	}
+	for _, allowedStatus := range allowed {
+		if status == allowedStatus {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s 未完成: status=%s observation=%s", name, status, observation)
 }

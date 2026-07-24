@@ -2,16 +2,17 @@ package tools
 
 import "github.com/eino-contrib/jsonschema"
 
-// JSONSchema mirrors the runtime limits so the model cannot produce a shape
-// that is schema-valid but guaranteed to fail memory.update validation.
-func (MemoryUpdateInput) JSONSchema() *jsonschema.Schema {
-	keySchema := &jsonschema.Schema{
+func memoryKeySchema() *jsonschema.Schema {
+	return &jsonschema.Schema{
 		Type: "string", Pattern: "^[a-z0-9_]{2,40}$",
 		MinLength: uint64Pointer(2), MaxLength: uint64Pointer(40),
 		Description: "稳定语义主键，例如 pacing、subtitle_style；同键覆盖旧记忆",
 	}
+}
+
+func memoryEntrySchema() *jsonschema.Schema {
 	entryProperties := jsonschema.NewProperties()
-	entryProperties.Set("key", keySchema)
+	entryProperties.Set("key", memoryKeySchema())
 	entryProperties.Set("kind", &jsonschema.Schema{
 		Type: "string", Enum: []any{"preference", "correction", "habit"},
 		Description: "preference 长期偏好，correction 用户纠正，habit 稳定使用习惯",
@@ -31,23 +32,33 @@ func (MemoryUpdateInput) JSONSchema() *jsonschema.Schema {
 		Required:             []string{"key", "kind", "statement", "evidence_quote"},
 		AdditionalProperties: jsonschema.FalseSchema,
 	}
+	return entrySchema
+}
+
+// JSONSchema mirrors runtime limits so schema-valid memory.set calls are executable.
+func (MemorySetInput) JSONSchema() *jsonschema.Schema {
 	properties := jsonschema.NewProperties()
 	properties.Set("entries", &jsonschema.Schema{
-		Type: "array", Items: entrySchema,
+		Type: "array", Items: memoryEntrySchema(),
 		MinItems: uint64Pointer(1), MaxItems: uint64Pointer(8), UniqueItems: true,
 		Description: "要写入或覆盖的长期记忆；一次性草稿要求不要入库",
 	})
-	properties.Set("remove_keys", &jsonschema.Schema{
-		Type: "array", Items: keySchema,
+	return &jsonschema.Schema{
+		Type: "object", Properties: properties, Required: []string{"entries"},
+		AdditionalProperties: jsonschema.FalseSchema,
+	}
+}
+
+// JSONSchema keeps memory.remove a distinct destructive action.
+func (MemoryRemoveInput) JSONSchema() *jsonschema.Schema {
+	properties := jsonschema.NewProperties()
+	properties.Set("keys", &jsonschema.Schema{
+		Type: "array", Items: memoryKeySchema(),
 		MinItems: uint64Pointer(1), MaxItems: uint64Pointer(50), UniqueItems: true,
-		Description: "用户当前明确要求忘记的长期记忆键；不得与 entries 中的 key 重复",
+		Description: "用户当前明确要求忘记的长期记忆键",
 	})
 	return &jsonschema.Schema{
-		Type: "object", Properties: properties,
-		AnyOf: []*jsonschema.Schema{
-			{Required: []string{"entries"}},
-			{Required: []string{"remove_keys"}},
-		},
+		Type: "object", Properties: properties, Required: []string{"keys"},
 		AdditionalProperties: jsonschema.FalseSchema,
 	}
 }

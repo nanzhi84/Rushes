@@ -412,7 +412,7 @@ func TestConversationDecisionAndMediaStateErrors(t *testing.T) {
 		ID: "d", ScopeType: "draft", DraftID: &draftID, Type: "generic", Question: "q",
 		Options: []map[string]any{{"option_id": "yes", "label": "Yes", "description": "desc"}},
 		Answer:  answer, PendingToolCall: map[string]any{
-			"tool_name": "render.preview", "arguments": "bad", "idempotency_key": "key", "argument_fingerprint": "fp",
+			"tool_name": "render.start", "arguments": "bad", "idempotency_key": "key", "argument_fingerprint": "fp",
 		}, PendingToolCallStatus: &pendingStatus, Status: "answered",
 	})
 	if recorded.Answer == nil || recorded.Answer.FreeText == nil || recorded.PendingToolCall == nil ||

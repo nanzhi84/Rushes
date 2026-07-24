@@ -181,6 +181,17 @@ func TimelineAtomicOperation(toolName string, input any) (TimelineOp, error) {
 	return cloned, nil
 }
 
+func TimelineAtomicToolForKind(kind string) (string, bool) {
+	for toolName, kinds := range timelineAtomicKinds {
+		for _, candidate := range kinds {
+			if candidate == kind {
+				return toolName, true
+			}
+		}
+	}
+	return "", false
+}
+
 func atomicInsertTrackAllowed(trackID string) bool {
 	switch trackID {
 	case "visual_base", "visual_overlay", "voiceover", "bgm", "sfx":

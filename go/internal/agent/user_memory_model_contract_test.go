@@ -254,7 +254,7 @@ func TestUserMemoryModelContractRejectsMemoryPollution(t *testing.T) {
 
 func memoryEvalToolCall(arguments string) schema.ToolCall {
 	return schema.ToolCall{
-		ID: "memory_eval", Function: schema.FunctionCall{Name: "memory.update", Arguments: arguments},
+		ID: "memory_eval", Function: schema.FunctionCall{Name: "memory.set", Arguments: arguments},
 	}
 }
 
@@ -293,8 +293,8 @@ func loadUserMemoryModelEvalCases(t *testing.T) []userMemoryModelEvalCase {
 			}
 		}
 		if evalCase.ExpectedMemory != nil {
-			if evalCase.RequiredTool != "memory.update" {
-				t.Fatalf("%s 声明 expected_memory 但没有要求 memory.update", evalCase.Name)
+			if evalCase.RequiredTool != "memory.set" {
+				t.Fatalf("%s 声明 expected_memory 但没有要求 memory.set", evalCase.Name)
 			}
 			if evalCase.ExpectedMemory.Semantic == "" {
 				t.Fatalf("%s 的 expected_memory 缺少 semantic", evalCase.Name)
@@ -388,24 +388,21 @@ func validateUserMemoryModelResponse(
 	}
 	if evalCase.ExpectedMemory != nil {
 		if len(requiredCalls) != 1 {
-			return fmt.Errorf("memory.update 必须恰好调用一次，实际 %d 次", len(requiredCalls))
+			return fmt.Errorf("memory.set 必须恰好调用一次，实际 %d 次", len(requiredCalls))
 		}
-		var input rushestools.MemoryUpdateInput
+		var input rushestools.MemorySetInput
 		if err := json.Unmarshal([]byte(requiredCalls[0].Function.Arguments), &input); err != nil {
-			return fmt.Errorf("解析 memory.update: %w", err)
+			return fmt.Errorf("解析 memory.set: %w", err)
 		}
-		if len(input.Entries) != 1 || len(input.RemoveKeys) != 0 {
-			return fmt.Errorf(
-				"memory.update 只能写入一条预期记忆且不得删除，entries=%d remove_keys=%d",
-				len(input.Entries), len(input.RemoveKeys),
-			)
+		if len(input.Entries) != 1 {
+			return fmt.Errorf("memory.set 必须只写入一条预期记忆，entries=%d", len(input.Entries))
 		}
 		entry := input.Entries[0]
 		if entry.Key != evalCase.ExpectedMemory.Key || entry.Kind != evalCase.ExpectedMemory.Kind {
-			return fmt.Errorf("memory.update 未精确写入预期长期记忆: %s", requiredCalls[0].Function.Arguments)
+			return fmt.Errorf("memory.set 未精确写入预期长期记忆: %s", requiredCalls[0].Function.Arguments)
 		}
 		if err := validateUserMemorySemantic(evalCase.ExpectedMemory.Semantic, entry.Statement); err != nil {
-			return fmt.Errorf("memory.update 记忆语义错误: %w", err)
+			return fmt.Errorf("memory.set 记忆语义错误: %w", err)
 		}
 	}
 	if evalCase.RequiredToolSemantic != "" {

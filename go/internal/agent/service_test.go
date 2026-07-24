@@ -2331,8 +2331,16 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	if inspected, err := service.ExecuteTool(ctx, "timeline.inspect", rushestools.TimelineInspectInput{}); err != nil || inspected.(rushestools.ToolResult).Status != "succeeded" {
 		t.Fatalf("inspect=%#v err=%v", inspected, err)
 	}
-	status, err := service.ExecuteTool(ctx, "render.status", rushestools.RenderStatusInput{})
-	if err != nil || status.(rushestools.ToolResult).Data["running_jobs"] == nil {
+	var previewJobID string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT job_id FROM jobs
+		WHERE draft_id='draft_full' AND kind='render_preview'
+		ORDER BY created_at DESC LIMIT 1`,
+	).Scan(&previewJobID); err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.ExecuteTool(ctx, "job.read", rushestools.JobReadInput{JobID: previewJobID})
+	if err != nil || status.(rushestools.ToolResult).Data["job_status"] == nil {
 		t.Fatalf("status=%#v err=%v", status, err)
 	}
 	allowFreeText, blocking := false, false
@@ -2352,8 +2360,8 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	}
 
 	confirm, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
-		Question: "确认忘记？", ToolName: "memory.update",
-		Arguments: map[string]any{"remove_keys": []any{"unused_preference"}},
+		Question: "确认忘记？", ToolName: "memory.remove",
+		Arguments: map[string]any{"keys": []any{"unused_preference"}},
 	})
 	if err != nil {
 		t.Fatal(err)

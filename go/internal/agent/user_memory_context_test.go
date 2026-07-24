@@ -273,7 +273,7 @@ func TestUserMemoryWorldStateSupportsOldReferencesAndBuildPriority(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, fragment := range []string{"\"user_memory\"", "跨草稿", "当前用户指令冲突", "本回合指令为准", "memory.update"} {
+	for _, fragment := range []string{"\"user_memory\"", "跨草稿", "当前用户指令冲突", "本回合指令为准", "memory.set"} {
 		if !strings.Contains(contextText, fragment) {
 			t.Fatalf("context build lost priority fragment %q", fragment)
 		}

@@ -52,7 +52,7 @@ func TestRetrySafeFromEffectAllowlist(t *testing.T) {
 		}
 	}
 	for _, name := range []string{
-		"media.detect_shots", "speech.transcribe", "plan.update", "memory.update",
+		"media.detect_shots", "speech.transcribe", "plan.update", "memory.set", "memory.remove",
 		"timeline.compose_initial", "timeline.apply_patches", "timeline.recut_to_beats",
 		"timeline.edit_talking_head", "render.preview", "render.final_mp4",
 		"interaction.ask_user", "interaction.confirm_action", "decision.answer",

@@ -57,7 +57,7 @@ func TestQueueMemoryEvidenceUsesOnlyUserOwnedInputs(t *testing.T) {
 	}
 }
 
-func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.T) {
+func TestMemorySetAndRemovePersistCurrentUserEvidence(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_memory_tool")
@@ -72,7 +72,7 @@ func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.
 		"draft_memory_tool",
 	)
 
-	raw, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+	raw, err := service.ExecuteTool(ctx, "memory.set", rushestools.MemorySetInput{
 		Entries: []rushestools.MemoryEntryInput{
 			{Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都快一点"},
 			{Key: "subtitle_style", Kind: "correction", Statement: "字幕不要遮挡人物面部", EvidenceQuote: "字幕别遮脸"},
@@ -93,8 +93,8 @@ func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.
 		}
 	}
 
-	raw, err = service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
-		RemoveKeys: []string{"pacing"},
+	raw, err = service.ExecuteTool(ctx, "memory.remove", rushestools.MemoryRemoveInput{
+		Keys: []string{"pacing"},
 	})
 	result = raw.(rushestools.ToolResult)
 	if err != nil || result.Status != "succeeded" || result.Data["total"] != 1 {
@@ -106,7 +106,7 @@ func TestMemoryUpdatePersistsCurrentUserEvidenceAndRemovesAtomically(t *testing.
 	}
 }
 
-func TestMemoryUpdateAcceptsAnsweredDecisionEvidence(t *testing.T) {
+func TestMemorySetAcceptsAnsweredDecisionEvidence(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_memory_decision")
@@ -127,7 +127,7 @@ func TestMemoryUpdateAcceptsAnsweredDecisionEvidence(t *testing.T) {
 		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceDecision, "decision_memory"),
 		"draft_memory_decision",
 	)
-	raw, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+	raw, err := service.ExecuteTool(ctx, "memory.set", rushestools.MemorySetInput{
 		Entries: []rushestools.MemoryEntryInput{{
 			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都快一点",
 		}},
@@ -144,7 +144,7 @@ func TestMemoryUpdateAcceptsAnsweredDecisionEvidence(t *testing.T) {
 	}
 }
 
-func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
+func TestMemorySetRejectsMissingOrForgedEvidence(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_memory_reject")
@@ -153,7 +153,7 @@ func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	input := rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{
+	input := rushestools.MemorySetInput{Entries: []rushestools.MemoryEntryInput{{
 		Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "偏快",
 	}}}
 
@@ -177,7 +177,7 @@ func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			raw, executeErr := service.ExecuteTool(test.ctx, "memory.update", input)
+			raw, executeErr := service.ExecuteTool(test.ctx, "memory.set", input)
 			result := raw.(rushestools.ToolResult)
 			if executeErr != nil || result.Status != "validation_failed" ||
 				result.Data["error_code"] != test.code || result.Data["current_memory_unchanged"] != true {
@@ -191,7 +191,7 @@ func TestMemoryUpdateRejectsMissingOrForgedEvidence(t *testing.T) {
 	}
 }
 
-func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
+func TestMemorySetValidatesInputBeforeWriting(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_memory_input")
@@ -205,7 +205,7 @@ func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
 		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_memory_input"),
 		"draft_memory_input",
 	)
-	tooManyEntries := make([]rushestools.MemoryEntryInput, agentexec.MemoryUpdateEntryLimit+1)
+	tooManyEntries := make([]rushestools.MemoryEntryInput, agentexec.MemorySetEntryLimit+1)
 	for index := range tooManyEntries {
 		tooManyEntries[index] = rushestools.MemoryEntryInput{
 			Key: "key_" + strings.Repeat("x", index+1), Kind: "habit", Statement: "稳定习惯",
@@ -217,80 +217,81 @@ func TestMemoryUpdateValidatesInputBeforeWriting(t *testing.T) {
 	}
 	cases := []struct {
 		name  string
-		input rushestools.MemoryUpdateInput
+		tool  string
+		input any
 		code  string
 	}{
-		{name: "empty", code: "memory_update_empty"},
+		{name: "empty set", tool: "memory.set", input: rushestools.MemorySetInput{}, code: "memory_mutation_empty"},
 		{
 			name:  "too many entries",
-			input: rushestools.MemoryUpdateInput{Entries: tooManyEntries},
+			tool:  "memory.set",
+			input: rushestools.MemorySetInput{Entries: tooManyEntries},
 			code:  "memory_entries_limit",
 		},
 		{
 			name:  "too many removals",
-			input: rushestools.MemoryUpdateInput{RemoveKeys: tooManyRemovals},
+			tool:  "memory.remove",
+			input: rushestools.MemoryRemoveInput{Keys: tooManyRemovals},
 			code:  "memory_remove_limit",
 		},
 		{
 			name: "invalid key",
-			input: rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{
+			tool: "memory.set",
+			input: rushestools.MemorySetInput{Entries: []rushestools.MemoryEntryInput{{
 				Key: "Bad-Key", Kind: "preference", Statement: "偏快",
 			}}},
 			code: "memory_key_invalid",
 		},
 		{
 			name: "invalid kind",
-			input: rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{
+			tool: "memory.set",
+			input: rushestools.MemorySetInput{Entries: []rushestools.MemoryEntryInput{{
 				Key: "pacing", Kind: "guess", Statement: "偏快",
 			}}},
 			code: "memory_kind_invalid",
 		},
 		{
 			name: "statement too long",
-			input: rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{
+			tool: "memory.set",
+			input: rushestools.MemorySetInput{Entries: []rushestools.MemoryEntryInput{{
 				Key: "pacing", Kind: "preference", Statement: strings.Repeat("快", 201),
 			}}},
 			code: "memory_statement_invalid",
 		},
 		{
 			name: "missing evidence quote",
-			input: rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{
+			tool: "memory.set",
+			input: rushestools.MemorySetInput{Entries: []rushestools.MemoryEntryInput{{
 				Key: "pacing", Kind: "preference", Statement: "偏快",
 			}}},
 			code: "memory_evidence_quote_invalid",
 		},
 		{
 			name: "duplicate entry",
-			input: rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{
+			tool: "memory.set",
+			input: rushestools.MemorySetInput{Entries: []rushestools.MemoryEntryInput{
 				{Key: "pacing", Kind: "preference", Statement: "偏快", EvidenceQuote: "偏快"},
 				{Key: "pacing", Kind: "correction", Statement: "更快", EvidenceQuote: "更快"},
 			}},
 			code: "memory_key_duplicate",
 		},
 		{
-			name: "entry remove conflict",
-			input: rushestools.MemoryUpdateInput{
-				Entries: []rushestools.MemoryEntryInput{{
-					Key: "pacing", Kind: "preference", Statement: "偏快", EvidenceQuote: "偏快",
-				}},
-				RemoveKeys: []string{"pacing"},
-			},
-			code: "memory_key_conflict",
-		},
-		{
 			name:  "invalid remove key",
-			input: rushestools.MemoryUpdateInput{RemoveKeys: []string{"Bad-Key"}},
+			tool:  "memory.remove",
+			input: rushestools.MemoryRemoveInput{Keys: []string{"Bad-Key"}},
 			code:  "memory_remove_key_invalid",
 		},
 		{
 			name:  "duplicate remove key",
-			input: rushestools.MemoryUpdateInput{RemoveKeys: []string{"pacing", "pacing"}},
+			tool:  "memory.remove",
+			input: rushestools.MemoryRemoveInput{Keys: []string{"pacing", "pacing"}},
 			code:  "memory_remove_key_duplicate",
 		},
+		{name: "empty remove", tool: "memory.remove", input: rushestools.MemoryRemoveInput{}, code: "memory_mutation_empty"},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			raw, executeErr := service.ExecuteTool(ctx, "memory.update", test.input)
+			raw, executeErr := service.ExecuteTool(ctx, test.tool, test.input)
 			result := raw.(rushestools.ToolResult)
 			if executeErr != nil || result.Status != "validation_failed" || result.Data["error_code"] != test.code {
 				t.Fatalf("result=%#v err=%v", result, executeErr)
@@ -313,7 +314,7 @@ func TestInjectedMemoryCollectorTouchesLastUsedAtOnSuccess(t *testing.T) {
 		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_touch"),
 		"draft_touch",
 	)
-	if _, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+	if _, err := service.ExecuteTool(ctx, "memory.set", rushestools.MemorySetInput{
 		Entries: []rushestools.MemoryEntryInput{{
 			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都快一点",
 		}},
@@ -344,7 +345,7 @@ func TestInjectedMemoryCollectorTouchesLastUsedAtOnSuccess(t *testing.T) {
 	service.touchInjectedMemories(t.Context(), "draft_touch", nil)
 }
 
-func TestMemoryUpdateMapsRewrittenQuoteToQuoteInvalidNotEvidenceInvalid(t *testing.T) {
+func TestMemorySetMapsRewrittenQuoteToQuoteInvalidNotEvidenceInvalid(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_quote_map")
@@ -361,7 +362,7 @@ func TestMemoryUpdateMapsRewrittenQuoteToQuoteInvalidNotEvidenceInvalid(t *testi
 	// 引文有 ≥2 字、过工具预检，但被模型改写，不是证据原文子串：由 reducer 拦下。
 	// 必须映射到 memory_evidence_quote_invalid（逐字重摘可救回），而非 memory_evidence_invalid
 	// （等下一条消息）——后者对最常见的改写失败是反向误导，会让合法记忆静默流失。
-	raw, executeErr := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+	raw, executeErr := service.ExecuteTool(ctx, "memory.set", rushestools.MemorySetInput{
 		Entries: []rushestools.MemoryEntryInput{{
 			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都慢一点",
 		}},
@@ -378,11 +379,11 @@ func TestMemoryUpdateMapsRewrittenQuoteToQuoteInvalidNotEvidenceInvalid(t *testi
 	}
 }
 
-// TestMemoryUpdateNegativeSetLocksEvidenceMappings 是 M5 的确定性负例集：锁住 #113 拆分出的
+// TestMemorySetNegativeSetLocksEvidenceMappings 是 M5 的确定性负例集：锁住 #113 拆分出的
 // 两类证据错误映射不退化——引文语义不符（同义改写 / 跨字段拼接 / 过短）走 quote_mismatch →
 // memory_evidence_quote_invalid（逐字重摘可救回），证据缺失 / 伪造走 evidence_invalid /
 // unavailable（重试无益）。任何一条都不得落库。
-func TestMemoryUpdateNegativeSetLocksEvidenceMappings(t *testing.T) {
+func TestMemorySetNegativeSetLocksEvidenceMappings(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_neg")
@@ -398,8 +399,8 @@ func TestMemoryUpdateNegativeSetLocksEvidenceMappings(t *testing.T) {
 	forgedCtx := rushestools.WithDraftID(
 		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_absent"), "draft_neg")
 	noEvidenceCtx := rushestools.WithDraftID(t.Context(), "draft_neg")
-	entry := func(quote string) rushestools.MemoryUpdateInput {
-		return rushestools.MemoryUpdateInput{Entries: []rushestools.MemoryEntryInput{{
+	entry := func(quote string) rushestools.MemorySetInput {
+		return rushestools.MemorySetInput{Entries: []rushestools.MemoryEntryInput{{
 			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: quote,
 		}}}
 	}
@@ -407,7 +408,7 @@ func TestMemoryUpdateNegativeSetLocksEvidenceMappings(t *testing.T) {
 	for _, test := range []struct {
 		name  string
 		ctx   context.Context
-		input rushestools.MemoryUpdateInput
+		input rushestools.MemorySetInput
 		code  string
 	}{
 		// 引文语义不符 → quote_mismatch → memory_evidence_quote_invalid
@@ -420,7 +421,7 @@ func TestMemoryUpdateNegativeSetLocksEvidenceMappings(t *testing.T) {
 		{"无证据上下文", noEvidenceCtx, entry("节奏都要快一点"), "memory_evidence_unavailable"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			raw, execErr := service.ExecuteTool(test.ctx, "memory.update", test.input)
+			raw, execErr := service.ExecuteTool(test.ctx, "memory.set", test.input)
 			result := raw.(rushestools.ToolResult)
 			if execErr != nil || result.Status != "validation_failed" ||
 				result.Data["error_code"] != test.code || result.Data["current_memory_unchanged"] != true {
@@ -434,7 +435,7 @@ func TestMemoryUpdateNegativeSetLocksEvidenceMappings(t *testing.T) {
 	}
 }
 
-func TestMemoryUpdateEmitsMemoryUpdatedTurnStreamEvent(t *testing.T) {
+func TestMemorySetEmitsMemoryUpdatedTurnStreamEvent(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_evt")
@@ -446,7 +447,7 @@ func TestMemoryUpdateEmitsMemoryUpdatedTurnStreamEvent(t *testing.T) {
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(
 		agentexec.WithMemoryEvidence(t.Context(), storage.UserMemoryEvidenceMessage, "message_evt"), "draft_evt")
-	if _, err := service.ExecuteTool(ctx, "memory.update", rushestools.MemoryUpdateInput{
+	if _, err := service.ExecuteTool(ctx, "memory.set", rushestools.MemorySetInput{
 		Entries: []rushestools.MemoryEntryInput{{
 			Key: "pacing", Kind: "preference", Statement: "成片节奏偏快", EvidenceQuote: "都快一点",
 		}},
@@ -474,6 +475,6 @@ func TestMemoryUpdateEmitsMemoryUpdatedTurnStreamEvent(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatal("memory.update 成功后应发专门的 memory_updated turn-stream 事件")
+		t.Fatal("memory.set 成功后应发专门的 memory_updated turn-stream 事件")
 	}
 }

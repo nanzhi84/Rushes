@@ -27,7 +27,7 @@ func TestTimelineMutationEndpointsRejectMissingAndInvalidInputs(t *testing.T) {
 	createDraftThroughAPI(t, handler, "timeline_errors")
 	// 手动 REST 补丁入口对结构非法输入必须 400 拒绝并回明确错误码：空 body / 未知 kind
 	// 命中前置守卫，空 ops、含空 op 的 batch 命中 timelinePatchOperations 展开守卫，
-	// 全部在 apply_patches 执行前返回 timeline_patch_invalid（既不是 404，也不进入校验路径）。
+	// 全部在原子工具执行前返回 timeline_patch_invalid（既不是 404，也不进入校验路径）。
 	for _, item := range []struct {
 		path       string
 		body       any

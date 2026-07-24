@@ -203,7 +203,7 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 	builders := []func(*Registry) error{
 		registerAssetImport, registerAssetList, registerDetectShots, registerShotSearch, registerAudioBeatAnalysis,
 		registerSpeechPauseAnalysis, registerSpeechTranscribe, registerSpeechSearch, registerAskUser,
-		registerDecisionAnswer, registerPlanUpdate, registerMemoryUpdate,
+		registerDecisionAnswer, registerPlanUpdate, registerMemorySet, registerMemoryRemove,
 		registerComposeInitial, registerApplyPatchBatch,
 		registerTimelineInsert, registerTimelineDelete, registerTimelineUpdate, registerTimelineSplit,
 		registerBeatRecut, registerTalkingHeadEdit,
@@ -778,15 +778,21 @@ func registerPlanUpdate(registry *Registry) error {
 	)
 }
 
-func registerMemoryUpdate(registry *Registry) error {
-	// remove_keys 删除用户长期记忆是不可逆、且影响 agent 之外的持久画像，故归破坏性。
-	// 注意：Effect 是工具级信号，对 memory.update 必要不充分——纯新增/更新路径可逆，
-	// G2 验收明确其不受强制确认影响。因此 G2 拦截器不能只按 spec.Effect 拦截，必须再检查
-	// 本次 input 是否携带 remove_keys，据此豁免纯新增/更新路径、只拦真正的删除。
-	return addTool[MemoryUpdateInput, ToolResult](
+func registerMemorySet(registry *Registry) error {
+	return addTool[MemorySetInput, ToolResult](
 		registry,
-		"memory.update",
-		"仅当当前用户明确表达跨项目稳定的偏好、习惯、纠正，或明确要求忘记已有长期记忆时更新用户画像；一次性草稿要求和模型自己的创作判断不得写入",
+		"memory.set",
+		"仅当当前用户明确表达跨项目稳定的偏好、习惯或纠正时写入用户画像；一次性草稿要求和模型自己的创作判断不得写入",
+		nil, ExposureLLM, EffectReversible, false,
+		metadata(FamilyControl, CostStandard, SurfaceControl),
+	)
+}
+
+func registerMemoryRemove(registry *Registry) error {
+	return addTool[MemoryRemoveInput, ToolResult](
+		registry,
+		"memory.remove",
+		"仅当当前用户明确要求忘记已有长期记忆时删除指定键；此操作必须先获得破坏性确认",
 		nil, ExposureLLM, EffectDestructive, false,
 		metadata(FamilyControl, CostStandard, SurfaceControl),
 	)
