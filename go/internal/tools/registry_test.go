@@ -753,7 +753,7 @@ func TestCoreInferToolRegistry(t *testing.T) {
 			t.Fatalf("spec=%s info=%#v err=%v", spec.Name, info, infoErr)
 		}
 	}
-	if got := len(registry.EinoTools(false, false)); got != 23 {
+	if got := len(registry.EinoTools(false, false)); got != 22 {
 		t.Fatalf("LLM core tools=%d", got)
 	}
 	if got := len(registry.EinoTools(false, true)); got != 25 {

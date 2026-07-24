@@ -51,8 +51,9 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 			"禁止提交 ops[]", "自主决定", "直接组装可回滚的初版",
 		}},
 		"talking_head": {agentexec.TalkingHeadPlaybook, []string{
-			"已有时间线", "尚无时间线", "建立初版", "逐句语音证据", "词级标识",
-			"自主判断", "不向用户逐项审批",
+			"已有时间线", "尚无时间线", "建立初版", "timeline.inspect", "speech.search",
+			"明确选择删哪一侧或保留", "从后向前提交", "不得重跑已成功删除",
+			"timeline.insert", "timeline.update", "timeline.check", "不向用户逐项审批",
 		}},
 	} {
 		for _, fragment := range check.fragments {

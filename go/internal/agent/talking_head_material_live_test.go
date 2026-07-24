@@ -42,6 +42,8 @@ type talkingHeadMaterialReport struct {
 	BrollCorrect         int                        `json:"broll_correct"`
 	BrollTotal           int                        `json:"broll_total"`
 	BrollAccuracy        float64                    `json:"broll_accuracy"`
+	AtomicEditCount      int                        `json:"atomic_edit_count"`
+	TimelineVersion      int                        `json:"timeline_version"`
 	TimelineValid        bool                       `json:"timeline_valid"`
 	ContextRunes         int                        `json:"context_runes"`
 	FullTranscriptAbsent bool                       `json:"full_transcript_absent"`
@@ -286,20 +288,88 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 	if fingerprintUtterance == "" || fingerprintStartWord == "" || fingerprintShot.ShotID == "" {
 		t.Fatal("没有取得指纹台词、词级语义锚点或对应 B-roll 镜头")
 	}
-	var edited rushestools.ToolResult
-	invokeRegisteredTool(t, service, ctx, "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{
-		ARollTimelineClipID: "clip_v1_001", RemovePauseIDs: []string{speech.Pauses[0].PauseID},
-		BrollAssignments: []rushestools.TalkingHeadBrollAssignment{{
-			ShotID: fingerprintShot.ShotID, StartWordID: fingerprintStartWord, EndWordID: fingerprintEndWord,
-		}},
-	}, &edited)
-	if edited.Status != "succeeded" {
-		t.Fatalf("edit=%#v", edited)
+	pause := speech.Pauses[0]
+	if pause.TimelineStartFrame == nil || pause.TimelineEndFrame == nil {
+		t.Fatalf("气口没有当前时间线映射: %#v", pause)
+	}
+	var pauseDelete rushestools.ToolResult
+	invokeRegisteredTool(t, service, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+		"kind": "delete_range", "start_frame": *pause.TimelineStartFrame,
+		"end_frame": *pause.TimelineEndFrame,
+	}, &pauseDelete)
+	if pauseDelete.Status != "succeeded" {
+		t.Fatalf("delete pause=%#v", pauseDelete)
+	}
+	report.AtomicEditCount++
+
+	wordSourceStart, wordSourceEnd := 0, 0
+	for _, utterance := range speech.Utterances {
+		for _, word := range utterance.Words {
+			if word.WordID == fingerprintStartWord {
+				wordSourceStart = word.SourceStartFrame
+			}
+			if word.WordID == fingerprintEndWord {
+				wordSourceEnd = word.SourceEndFrame
+			}
+		}
 	}
 	latest, err := timeline.Latest(t.Context(), database, "draft_talking_head_real")
 	if err != nil {
 		t.Fatal(err)
 	}
+	anchorStart, anchorEnd, mapped := sourceRangeOnCurrentTimeline(
+		latest, assetIDs[0], wordSourceStart, wordSourceEnd,
+	)
+	if !mapped || anchorEnd-anchorStart < 45 {
+		t.Fatalf("指纹台词清理后映射过短: source=%d-%d timeline=%d-%d", wordSourceStart, wordSourceEnd, anchorStart, anchorEnd)
+	}
+	brollFrames := min(fingerprintShot.DurationFrames, anchorEnd-anchorStart)
+	if brollFrames < 45 {
+		t.Fatalf("指纹 B-roll 可用时长不足: %d", brollFrames)
+	}
+	var inserted rushestools.ToolResult
+	invokeRegisteredTool(t, service, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "track_id": "visual_overlay",
+		"asset_id": fingerprintShot.AssetID, "role": "b_roll",
+		"source_start_frame":   fingerprintShot.SourceStartFrame,
+		"source_end_frame":     fingerprintShot.SourceStartFrame + brollFrames,
+		"timeline_start_frame": anchorStart,
+		"metadata": map[string]any{
+			"shot_id": fingerprintShot.ShotID, "anchor_start_word_id": fingerprintStartWord,
+			"anchor_end_word_id": fingerprintEndWord,
+		},
+	}, &inserted)
+	if inserted.Status != "succeeded" {
+		t.Fatalf("insert B-roll=%#v", inserted)
+	}
+	report.AtomicEditCount++
+	latest, err = timeline.Latest(t.Context(), database, "draft_talking_head_real")
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlays := talkingHeadTrackClips(latest, "visual_overlay")
+	if len(overlays) != 1 {
+		t.Fatalf("B-roll insert overlays=%#v", overlays)
+	}
+	var faded rushestools.ToolResult
+	invokeRegisteredTool(t, service, ctx, "timeline.update", rushestools.TimelineUpdateInput{
+		"kind": "set_clip_fades", "timeline_clip_id": overlays[0].TimelineClipID,
+		"fade_in_frames": 7, "fade_out_frames": 7,
+	}, &faded)
+	if faded.Status != "succeeded" {
+		t.Fatalf("fade B-roll=%#v", faded)
+	}
+	report.AtomicEditCount++
+	latest, err = timeline.Latest(t.Context(), database, "draft_talking_head_real")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checked rushestools.ToolResult
+	invokeRegisteredTool(t, service, ctx, "timeline.check", rushestools.TimelineCheckInput{}, &checked)
+	if checked.Status != "succeeded" {
+		t.Fatalf("timeline check=%#v", checked)
+	}
+	report.TimelineVersion = latest.Version
 	report.TimelineValid = timeline.Validate(latest).Valid
 	contextText, err := NewContextBuilder(database).Build(t.Context(), "draft_talking_head_real")
 	if err != nil {
@@ -311,11 +381,17 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 	if !report.TimelineValid || !report.FullTranscriptAbsent {
 		t.Fatalf("timeline_valid=%v full_transcript_absent=%v", report.TimelineValid, report.FullTranscriptAbsent)
 	}
+	for _, entry := range report.Trace {
+		if entry.Tool == "timeline.edit_talking_head" {
+			t.Fatalf("真实口播验收仍调用旧高层工具: %#v", report.Trace)
+		}
+	}
 	writeTalkingHeadMaterialReport(t, report)
 	t.Logf(
-		"TALKING_HEAD_ACCEPTANCE role=%d/%d broll=%d/%d utterances=%d pauses=%d timeline_valid=%v context_runes=%d trace_events=%d",
+		"TALKING_HEAD_ACCEPTANCE role=%d/%d broll=%d/%d utterances=%d pauses=%d atomic_edits=%d timeline_version=%d timeline_valid=%v context_runes=%d trace_events=%d",
 		report.RoleCorrect, report.RoleTotal, report.BrollCorrect, report.BrollTotal,
-		report.UtteranceCount, report.PauseCount, report.TimelineValid, report.ContextRunes, len(report.Trace),
+		report.UtteranceCount, report.PauseCount, report.AtomicEditCount, report.TimelineVersion,
+		report.TimelineValid, report.ContextRunes, len(report.Trace),
 	)
 }
 
@@ -338,6 +414,49 @@ func semanticWordRange(
 		}
 	}
 	return "", "", false
+}
+
+func sourceRangeOnCurrentTimeline(
+	document timeline.Document,
+	assetID string,
+	sourceStart int,
+	sourceEnd int,
+) (int, int, bool) {
+	mappedStart, mappedEnd := 0, 0
+	found := false
+	for _, clip := range talkingHeadTrackClips(document, "visual_base") {
+		if clip.AssetID != assetID {
+			continue
+		}
+		start := max(sourceStart, clip.SourceStartFrame)
+		end := min(sourceEnd, clip.SourceEndFrame)
+		if end <= start {
+			continue
+		}
+		rate := clip.PlaybackRate
+		if rate <= 0 {
+			rate = 1
+		}
+		timelineStart := clip.TimelineStartFrame + int(math.Round(float64(start-clip.SourceStartFrame)/rate))
+		timelineEnd := clip.TimelineStartFrame + int(math.Round(float64(end-clip.SourceStartFrame)/rate))
+		if !found || timelineStart < mappedStart {
+			mappedStart = timelineStart
+		}
+		if !found || timelineEnd > mappedEnd {
+			mappedEnd = timelineEnd
+		}
+		found = true
+	}
+	return mappedStart, mappedEnd, found
+}
+
+func talkingHeadTrackClips(document timeline.Document, trackID string) []timeline.Clip {
+	for _, track := range document.Tracks {
+		if track.TrackID == trackID {
+			return track.Clips
+		}
+	}
+	return nil
 }
 
 func realTalkingHeadVideos(t *testing.T, root string) []string {

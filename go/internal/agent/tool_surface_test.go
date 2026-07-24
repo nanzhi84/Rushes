@@ -153,8 +153,11 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 	)
 	assertSurface(
 		"完成口播气口和重说清理",
-		[]string{"timeline.edit_talking_head", "speech.search", "media.detect_shots", "timeline.inspect"},
-		[]string{"timeline.update", "timeline.recut_to_beats", "timeline.compose_initial"},
+		[]string{"speech.search", "shot.search", "media.detect_shots", "timeline.inspect"},
+		[]string{
+			"timeline.edit_talking_head", "timeline.update",
+			"timeline.recut_to_beats", "timeline.compose_initial",
+		},
 	)
 	assertSurface(
 		"根据节拍和 BGM 做卡点",
@@ -283,7 +286,8 @@ func TestLegacyCompositeAndAtomicTimelineToolsNeverShareOneModelSurface(t *testi
 	}
 	setSurfaceTimelineState(t, service, draftID, false)
 	talkingHeadNames := assertNotMixed("完成口播气口和重说清理")
-	if !containsName(talkingHeadNames, "timeline.edit_talking_head") {
+	if !containsName(talkingHeadNames, "speech.search") ||
+		containsName(talkingHeadNames, "timeline.edit_talking_head") {
 		t.Fatalf("talking-head surface=%v", talkingHeadNames)
 	}
 	beatNames := assertNotMixed("根据节拍和 BGM 做卡点")
@@ -421,8 +425,10 @@ func TestSuccessfulShotSearchPreservesSpecializedWorkflowIntent(t *testing.T) {
 	}{
 		{
 			name: "talking_head", prompt: "清理口播并找一个 B-roll 镜头插入",
-			required:  "timeline.edit_talking_head",
-			forbidden: []string{"timeline.update", "timeline.recut_to_beats"},
+			required: "speech.search",
+			forbidden: []string{
+				"timeline.edit_talking_head", "timeline.update", "timeline.recut_to_beats",
+			},
 		},
 		{
 			name: "beat_edit", prompt: "按 BGM 卡点并找一个镜头插入",
@@ -493,7 +499,8 @@ func TestAutomaticContinuationPreservesTalkingHeadIntentAfterCompose(t *testing.
 		t.Fatal(err)
 	}
 	names := surfaceNames(specs)
-	if !containsName(names, "timeline.edit_talking_head") ||
+	if !containsName(names, "speech.search") ||
+		containsName(names, "timeline.edit_talking_head") ||
 		containsName(names, "timeline.update") ||
 		containsName(names, "timeline.compose_initial") {
 		t.Fatalf("后台续跑后的口播 surface=%v", names)
@@ -687,12 +694,12 @@ func TestExplicitIntentAdvancesAfterSuccessfulWorkflowWrite(t *testing.T) {
 		{
 			name: "talking_head_after_compose", prompt: "完成口播气口和重说清理",
 			toolName: "timeline.compose_initial",
-			required: "timeline.edit_talking_head", forbidden: "timeline.update",
+			required: "speech.search", forbidden: "timeline.update",
 		},
 		{
-			name: "talking_head", prompt: "完成口播气口和重说清理",
-			toolName: "timeline.edit_talking_head",
-			required: "timeline.check", forbidden: "timeline.edit_talking_head",
+			name: "talking_head_evidence", prompt: "完成口播气口和重说清理",
+			toolName: "speech.search",
+			required: "timeline.delete", forbidden: "timeline.edit_talking_head",
 		},
 		{
 			name: "beat", prompt: "根据节拍和 BGM 做卡点",
@@ -739,7 +746,6 @@ func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 		editTool string
 	}{
 		{"剪掉开头三秒然后导出 MP4", "timeline.update"},
-		{"清理口播气口和重说后导出", "timeline.edit_talking_head"},
 		{"按 BGM 卡点后渲染预览", "timeline.recut_to_beats"},
 	}
 	for _, test := range tests {
@@ -772,6 +778,48 @@ func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 				t.Fatalf("编辑完成后 surface=%v", names)
 			}
 		})
+	}
+
+	talkingMessages := []*schema.Message{schema.UserMessage("清理口播气口和重说后导出")}
+	specs, err := selectModelToolSurface(ctx, service.tools, talkingMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := surfaceNames(specs); !containsName(names, "speech.search") ||
+		containsName(names, "timeline.edit_talking_head") ||
+		containsName(names, "render.final_mp4") {
+		t.Fatalf("口播证据阶段 surface=%v", names)
+	}
+	talkingMessages = append(talkingMessages, schema.ToolMessage(
+		`{"status":"succeeded","transcript_id":"transcript_1","utterances":[]}`,
+		"call_speech_search",
+		schema.WithToolName("speech.search"),
+	))
+	specs, err = selectModelToolSurface(ctx, service.tools, talkingMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := surfaceNames(specs); !containsName(names, "timeline.delete") ||
+		!containsName(names, "speech.search") ||
+		!containsName(names, "shot.search") ||
+		containsName(names, "timeline.edit_talking_head") ||
+		containsName(names, "render.final_mp4") {
+		t.Fatalf("口播原子编辑阶段 surface=%v", names)
+	}
+	talkingMessages = append(talkingMessages, schema.ToolMessage(
+		`{"status":"succeeded","timeline_version":2}`,
+		"call_delete",
+		schema.WithToolName("timeline.delete"),
+	))
+	specs, err = selectModelToolSurface(ctx, service.tools, talkingMessages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := surfaceNames(specs); !containsName(names, "timeline.inspect") ||
+		!containsName(names, "speech.search") ||
+		!containsName(names, "shot.search") ||
+		containsName(names, "timeline.edit_talking_head") {
+		t.Fatalf("口播删剪后的重新观察 surface=%v", names)
 	}
 }
 
@@ -1116,9 +1164,9 @@ func TestCompositeSpecializedAndGenericEditsFinishBeforeRender(t *testing.T) {
 	messages := []*schema.Message{
 		schema.UserMessage("清理口播并添加字幕后导出"),
 		schema.ToolMessage(
-			`{"status":"succeeded"}`,
-			"call_talking_head",
-			schema.WithToolName("timeline.edit_talking_head"),
+			`{"status":"succeeded","transcript_id":"transcript_1","utterances":[]}`,
+			"call_speech_search",
+			schema.WithToolName("speech.search"),
 		),
 	}
 	specs, err := selectModelToolSurface(ctx, service.tools, messages)
@@ -1128,7 +1176,7 @@ func TestCompositeSpecializedAndGenericEditsFinishBeforeRender(t *testing.T) {
 	names := surfaceNames(specs)
 	if !containsName(names, "timeline.update") ||
 		containsName(names, "timeline.edit_talking_head") {
-		t.Fatalf("专用编辑完成后 surface=%v", names)
+		t.Fatalf("口播证据读取后 surface=%v", names)
 	}
 
 	specs, err = selectModelToolSurface(ctx, service.tools, append(messages,

@@ -1531,10 +1531,10 @@ func (exec *Executor) toolSearchSpeech(
 		shortFragments = shortFragments[:MaxSimilarPairs]
 	}
 	usageNote := "utterance_id、word_id、pause_id 与帧坐标是客观证据；传入 timeline_clip_id 时 clamped=true 表示该证据已按当前 clip 裁剪，utterance/word 文本与 pause 声学边界保持完整，只有帧坐标、删除范围与词列表取落在 clip 内的子集；similarity、intra_utterance_repetitions 与 short_speech_fragments 只是单句、连续台词块、句内重复或停顿前短语音岛的证据，不代表必须删除。" +
-		"intra_utterance_repetitions 会优先列出全部相邻同词证据，并自带 repetition_id 与前后两段精确 word_id（其中数字拆词和叠词也可能是正常表达）；模型应结合 context_text 自主逐项判断并一次性通过 repetition_decisions 提交 remove_earlier/remove_later/preserve；" +
-		"pauses 默认按可安全删除时长从长到短排列，previous_context、next_context 与 joined_context 用于判断气口是否影响表达；口播删剪时应对可见的显著候选一次性通过 pause_decisions 提交 remove/preserve，工具不会按时长替模型判断；" +
-		"不属于现成 repetition/fragment 证据的句内卡壳或半句重说，才需要设置 include_words=true 并把连续 word_id 范围传给 timeline.edit_talking_head；" +
-		"short_speech_fragments 应一次性通过 short_fragment_decisions 提交 remove/preserve 决定；其中 earlier_take_before_repeated_phrase_restart 暴露共同短语、分叉尾部与停顿共同组成的完整较早一遍说法，避免只删尾部后留下半句；模型也可继续按 query 或源帧范围检索。"
+		"intra_utterance_repetitions 会优先列出全部相邻同词证据，并自带 repetition_id 与前后两段精确 word_id（数字拆词和叠词也可能是正常表达）；模型必须结合 context_text 明确选择删除较早一遍、较晚一遍或保留。" +
+		"pauses 默认按可安全删除时长从长到短排列，previous_context、next_context 与 joined_context 用于判断气口是否影响表达；工具不会按时长替模型决定删除。" +
+		"不属于现成 repetition/fragment 证据的句内卡壳或半句重说，才需要 include_words=true 取得连续 word_id 与 source frame；short_speech_fragments 中 earlier_take_before_repeated_phrase_restart 会暴露共同短语、分叉尾部与停顿组成的完整较早说法，避免只删尾部留下半句。" +
+		"执行时先用 timeline.inspect 把明确选定的 source range 映射到当前时间线，再用 timeline.delete 一次删除一个连续范围；前一步改变映射后必须重新读取，不能猜测片段 ID。"
 	if includeWords && wordTotal == 0 {
 		usageNote += "当前持久化索引没有词级时间戳（例如来源仅为 SRT）；不能猜 word_id，可使用逐句证据或配置带词时间戳的 ASR 后重新转写。"
 	}

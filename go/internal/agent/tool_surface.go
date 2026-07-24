@@ -165,6 +165,17 @@ func selectModelToolSurface(
 	lane := inferModelToolSurface(allowed, messages)
 	lane = surfaceWithAvailablePrerequisites(allowed, lane, latestUserSurfaceText(messages))
 	selected := filterSurface(allowed, lane)
+	if lane == rushestools.SurfaceTimelineEdit &&
+		requestsTalkingHeadWorkflow(latestUserSurfaceText(messages)) {
+		// 口播删剪后仍需重新观察 source→timeline 映射和按保留台词检索 B-roll。
+		// 这些证据工具与原子编辑共享当前轮工具面，但不会把旧复合编辑带回来。
+		selected = append(selected, filterSpecsByName(
+			allowed,
+			"media.detect_shots",
+			"shot.search",
+			"speech.search",
+		)...)
+	}
 	if lane == rushestools.SurfaceTimelineEdit && requestsTimelineInspect(latestUserSurfaceText(messages)) {
 		selected = filterSpecsByName(selected, "timeline.inspect")
 	}
@@ -385,7 +396,7 @@ func surfaceWithAvailablePrerequisites(
 			"audio.analyze_speech_pauses",
 			"shot.search",
 			"timeline.compose_initial",
-			"timeline.edit_talking_head",
+			"timeline.inspect",
 		) {
 			return rushestools.SurfaceDiscovery
 		}
@@ -505,8 +516,15 @@ func recentSuccessfulWorkflowSurface(
 			return rushestools.SurfaceTimelineEdit
 		case "media.detect_shots", "speech.transcribe":
 			return remainingWorkflowSurface(userText)
+		case "speech.search":
+			if requestsTalkingHeadWorkflow(userText) {
+				return rushestools.SurfaceTimelineEdit
+			}
 		case "shot.search":
 			if requestsTalkingHeadWorkflow(userText) {
+				if successfulToolCallSinceLatestUser(messages, "speech.search") {
+					return rushestools.SurfaceTimelineEdit
+				}
 				return rushestools.SurfaceTalkingHead
 			}
 			if requestsBeatEditWorkflow(userText) {
@@ -515,7 +533,7 @@ func recentSuccessfulWorkflowSurface(
 			if requestsAssetSearchForTimelineEdit(userText) {
 				return rushestools.SurfaceTimelineEdit
 			}
-		case "timeline.edit_talking_head", "timeline.recut_to_beats":
+		case "timeline.recut_to_beats":
 			if requestsRemainingTimelinePatch(userText) &&
 				!successfulAtomicTimelineEditSinceLatestUser(messages) {
 				return rushestools.SurfaceTimelineEdit
@@ -542,8 +560,8 @@ func isWorkflowTransitionTool(name string) bool {
 		"timeline.compose_initial",
 		"media.detect_shots",
 		"speech.transcribe",
+		"speech.search",
 		"shot.search",
-		"timeline.edit_talking_head",
 		"timeline.recut_to_beats",
 		"timeline.insert",
 		"timeline.delete",
@@ -648,8 +666,8 @@ func requestsBeatEditWorkflow(text string) bool {
 	return containsSurfaceKeyword(text, "卡点", "拍点", "节拍", "音频", "bpm", "bgm", "beat")
 }
 
-// requestsRemainingTimelinePatch 只识别专用口播/卡点工具不会完成的通用时间线修改。
-// “插入 B-roll”不在此列，因为 edit_talking_head 和 recut_to_beats 本身会消费检索结果。
+// requestsRemainingTimelinePatch 只识别卡点重剪或口播证据阶段之外的通用时间线修改。
+// 口播流程完成 speech.search 后会直接进入原子编辑面，因此无需在这里特判 B-roll。
 func requestsRemainingTimelinePatch(text string) bool {
 	return containsSurfaceKeyword(text,
 		"timeline.insert", "timeline.delete", "timeline.update", "timeline.split", "patch",
