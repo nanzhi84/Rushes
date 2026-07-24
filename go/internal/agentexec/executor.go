@@ -101,11 +101,15 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 	case "timeline.inspect":
 		return exec.toolInspectTimeline(ctx, draftID, input.(rushestools.TimelineInspectInput))
 	case "render.preview":
-		return exec.toolEnqueueRender(ctx, draftID, "render_preview", input.(rushestools.RenderPreviewInput).Orientation)
+		return exec.toolEnqueueRender(ctx, draftID, "render_preview", input.(rushestools.RenderPreviewInput).Orientation, nil)
 	case "render.final_mp4":
-		return exec.toolEnqueueRender(ctx, draftID, "render_final", input.(rushestools.RenderFinalInput).Orientation)
+		return exec.toolEnqueueRender(ctx, draftID, "render_final", input.(rushestools.RenderFinalInput).Orientation, nil)
 	case "render.status":
 		return exec.toolRenderStatus(ctx, draftID)
+	case "render.start":
+		return exec.toolStartRender(ctx, draftID, input.(rushestools.RenderStartInput))
+	case "job.read":
+		return exec.toolReadJob(ctx, draftID, input.(rushestools.JobReadInput))
 	case "preview.check":
 		return exec.toolCheckPreview(ctx, draftID, input.(rushestools.PreviewCheckInput))
 	default:

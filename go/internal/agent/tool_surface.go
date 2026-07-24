@@ -256,13 +256,13 @@ func inferModelToolSurface(
 	if recent := recentSuccessfulWorkflowSurface(messages, text); recent != 0 {
 		return recent
 	}
-	if latestUserIsAutomaticContinuation(messages) {
-		if requestsPreviewCheck(text) && hasAllowedTool(specs, "preview.check") {
+	if kind, status, ok := latestJobContinuation(messages); ok && kind == "render_preview" {
+		if status == "成功" &&
+			requestsPreviewCheck(text) &&
+			hasAllowedTool(specs, "preview.check") {
 			return rushestools.SurfacePreviewCheck
 		}
-		if containsSurfaceKeyword(text,
-			"渲染", "导出", "最终成片", "mp4", "render.preview", "render.final",
-		) && hasAnyAllowedTool(specs, "timeline.check", "render.preview", "render.final_mp4") {
+		if hasAnyAllowedTool(specs, "timeline.check", "render.start", "job.read") {
 			return rushestools.SurfaceRender
 		}
 	}
@@ -288,6 +288,12 @@ func inferModelToolSurface(
 		explicitEdit != 0 {
 		return explicitEdit
 	}
+	// “渲染新预览并质检”必须先精确渲染当前 timeline_id。草稿中可能仍有旧
+	// preview；只有新 job.read 返回成功产物后，recentSuccessfulWorkflowSurface
+	// 才会把后续轮次推进 PreviewCheck。
+	if explicit == rushestools.SurfacePreviewCheck && requestsRenderWorkflow(text) {
+		return rushestools.SurfaceRender
+	}
 	if explicit != 0 {
 		return explicit
 	}
@@ -298,6 +304,8 @@ func inferModelToolSurface(
 		return rushestools.SurfaceControl
 	case pendingEditingSurface(text) != 0:
 		return pendingEditingSurface(text)
+	case requestsRenderWorkflow(text):
+		return rushestools.SurfaceRender
 	case requestsPreviewCheck(text):
 		return rushestools.SurfacePreviewCheck
 	case requestsTalkingHeadWorkflow(text):
@@ -309,8 +317,6 @@ func inferModelToolSurface(
 		return rushestools.SurfaceDiscovery
 	case requestsAssetSearchForTimelineEdit(text):
 		return rushestools.SurfaceDiscovery
-	case containsSurfaceKeyword(text, "渲染", "导出", "最终成片", "mp4", "render.preview", "render.final"):
-		return rushestools.SurfaceRender
 	case strings.Contains(text, "时间线"):
 		return rushestools.SurfaceTimelineEdit
 	case containsSurfaceKeyword(text,
@@ -328,14 +334,29 @@ func inferModelToolSurface(
 	}
 }
 
-func latestUserIsAutomaticContinuation(messages []*schema.Message) bool {
+func latestJobContinuation(messages []*schema.Message) (string, string, bool) {
 	for index := len(messages) - 1; index >= 0; index-- {
 		message := messages[index]
-		if message != nil && message.Role == schema.User {
-			return isAutomaticContinuationSurfaceMessage(message.Content)
+		if message == nil || message.Role != schema.User {
+			continue
 		}
+		content := strings.TrimSpace(message.Content)
+		if !strings.Contains(content, "这是原任务的自动续跑，不是新的用户请求。") {
+			return "", "", false
+		}
+		var kind, status string
+		for _, line := range strings.Split(content, "\n") {
+			line = strings.TrimSpace(line)
+			if value, exists := strings.CutPrefix(line, "任务："); exists {
+				kind = strings.TrimSpace(value)
+			}
+			if value, exists := strings.CutPrefix(line, "状态："); exists {
+				status = strings.TrimSpace(value)
+			}
+		}
+		return kind, status, kind != "" && status != ""
 	}
-	return false
+	return "", "", false
 }
 
 func isEditingSurface(surface rushestools.Surface) bool {
@@ -395,7 +416,7 @@ func surfaceWithAvailablePrerequisites(
 			"speech.search",
 			"audio.analyze_speech_pauses",
 			"shot.search",
-			"timeline.compose_initial",
+			"timeline.insert",
 			"timeline.inspect",
 		) {
 			return rushestools.SurfaceDiscovery
@@ -404,7 +425,10 @@ func surfaceWithAvailablePrerequisites(
 		if !hasAnyAllowedTool(specs,
 			"audio.analyze_beats",
 			"shot.search",
-			"timeline.recut_to_beats",
+			"timeline.insert",
+			"timeline.delete",
+			"timeline.update",
+			"timeline.split",
 		) {
 			return rushestools.SurfaceDiscovery
 		}
@@ -431,15 +455,14 @@ func surfaceWithAvailablePrerequisites(
 		}
 	case rushestools.SurfaceRender:
 		if !hasAllowedTool(specs, "timeline.check") &&
-			!hasAllowedTool(specs, "render.preview") &&
-			!hasAllowedTool(specs, "render.final_mp4") {
+			!hasAllowedTool(specs, "render.start") &&
+			(!hasAllowedTool(specs, "job.read") || !strings.Contains(text, "job.read")) {
 			return rushestools.SurfaceDiscovery
 		}
 	case rushestools.SurfacePreviewCheck:
 		if !hasAllowedTool(specs, "preview.check") {
 			if hasAllowedTool(specs, "timeline.check") ||
-				hasAllowedTool(specs, "render.preview") ||
-				hasAllowedTool(specs, "render.final_mp4") {
+				hasAllowedTool(specs, "render.start") {
 				return rushestools.SurfaceRender
 			}
 			return rushestools.SurfaceDiscovery
@@ -509,11 +532,6 @@ func recentSuccessfulWorkflowSurface(
 		switch message.ToolName {
 		case "plan.update", "memory.update":
 			return remainingWorkflowSurface(userText)
-		case "timeline.compose_initial":
-			if requestsTalkingHeadWorkflow(userText) {
-				return rushestools.SurfaceTalkingHead
-			}
-			return rushestools.SurfaceTimelineEdit
 		case "media.detect_shots", "speech.transcribe":
 			return remainingWorkflowSurface(userText)
 		case "speech.search":
@@ -533,18 +551,17 @@ func recentSuccessfulWorkflowSurface(
 			if requestsAssetSearchForTimelineEdit(userText) {
 				return rushestools.SurfaceTimelineEdit
 			}
-		case "timeline.recut_to_beats":
-			if requestsRemainingTimelinePatch(userText) &&
-				!successfulAtomicTimelineEditSinceLatestUser(messages) {
-				return rushestools.SurfaceTimelineEdit
-			}
-			return rushestools.SurfaceRender
 		case "timeline.insert", "timeline.delete", "timeline.update", "timeline.split":
+			if requestsBeatEditWorkflow(userText) {
+				return rushestools.SurfaceBeatEdit
+			}
 			return rushestools.SurfaceTimelineEdit
 		case "timeline.check":
 			return rushestools.SurfaceRender
-		case "render.preview":
-			if requestsPreviewCheck(userText) {
+		case "render.start":
+			return rushestools.SurfaceRender
+		case "job.read":
+			if requestsPreviewCheck(userText) && completedPreviewJob(message.Content) {
 				return rushestools.SurfacePreviewCheck
 			}
 			return rushestools.SurfaceRender
@@ -557,18 +574,17 @@ func isWorkflowTransitionTool(name string) bool {
 	switch name {
 	case "plan.update",
 		"memory.update",
-		"timeline.compose_initial",
 		"media.detect_shots",
 		"speech.transcribe",
 		"speech.search",
 		"shot.search",
-		"timeline.recut_to_beats",
 		"timeline.insert",
 		"timeline.delete",
 		"timeline.update",
 		"timeline.split",
 		"timeline.check",
-		"render.preview":
+		"render.start",
+		"job.read":
 		return true
 	default:
 		return false
@@ -579,6 +595,8 @@ func remainingWorkflowSurface(text string) rushestools.Surface {
 	switch {
 	case pendingEditingSurface(text) != 0:
 		return pendingEditingSurface(text)
+	case requestsRenderWorkflow(text):
+		return rushestools.SurfaceRender
 	case requestsPreviewCheck(text):
 		return rushestools.SurfacePreviewCheck
 	case requestsTalkingHeadWorkflow(text):
@@ -587,8 +605,6 @@ func remainingWorkflowSurface(text string) rushestools.Surface {
 		return rushestools.SurfaceBeatEdit
 	case requestsAssetSearchForTimelineEdit(text):
 		return rushestools.SurfaceDiscovery
-	case containsSurfaceKeyword(text, "渲染", "导出", "最终成片", "mp4", "render.preview", "render.final"):
-		return rushestools.SurfaceRender
 	case containsSurfaceKeyword(text,
 		"组装初版时间线", "建立时间线", "创建时间线", "初版时间线", "首剪"):
 		return rushestools.SurfaceDiscovery
@@ -639,6 +655,12 @@ func requestsPreviewCheck(text string) bool {
 	)
 }
 
+func requestsRenderWorkflow(text string) bool {
+	return containsSurfaceKeyword(text,
+		"渲染", "导出", "最终成片", "mp4", "render.start", "job.read",
+	)
+}
+
 func workflowToolCallSucceeded(message *schema.Message) bool {
 	if message.ToolName == "shot.search" {
 		var result struct {
@@ -653,7 +675,19 @@ func workflowToolCallSucceeded(message *schema.Message) bool {
 		return false
 	}
 	return result.Status == "succeeded" ||
-		(message.ToolName == "render.preview" && result.Status == "queued")
+		(message.ToolName == "render.start" && result.Status == "queued")
+}
+
+func completedPreviewJob(content string) bool {
+	var result struct {
+		Data struct {
+			Kind      string `json:"kind"`
+			JobStatus string `json:"job_status"`
+		} `json:"data"`
+	}
+	return json.Unmarshal([]byte(content), &result) == nil &&
+		result.Data.Kind == "render_preview" &&
+		result.Data.JobStatus == "succeeded"
 }
 
 func requestsTalkingHeadWorkflow(text string) bool {
@@ -664,30 +698,6 @@ func requestsTalkingHeadWorkflow(text string) bool {
 
 func requestsBeatEditWorkflow(text string) bool {
 	return containsSurfaceKeyword(text, "卡点", "拍点", "节拍", "音频", "bpm", "bgm", "beat")
-}
-
-// requestsRemainingTimelinePatch 只识别卡点重剪或口播证据阶段之外的通用时间线修改。
-// 口播流程完成 speech.search 后会直接进入原子编辑面，因此无需在这里特判 B-roll。
-func requestsRemainingTimelinePatch(text string) bool {
-	return containsSurfaceKeyword(text,
-		"timeline.insert", "timeline.delete", "timeline.update", "timeline.split", "patch",
-		"字幕", "音量", "淡入", "淡出", "移动片段", "分割",
-		"剪掉开头", "剪掉结尾", "裁剪", "裁到",
-	)
-}
-
-func successfulAtomicTimelineEditSinceLatestUser(messages []*schema.Message) bool {
-	for _, name := range []string{
-		"timeline.insert",
-		"timeline.delete",
-		"timeline.update",
-		"timeline.split",
-	} {
-		if successfulToolCallSinceLatestUser(messages, name) {
-			return true
-		}
-	}
-	return false
 }
 
 func requestsAssetSearchForTimelineEdit(text string) bool {

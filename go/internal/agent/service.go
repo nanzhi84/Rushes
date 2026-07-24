@@ -19,6 +19,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
+	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
@@ -657,9 +658,19 @@ func (service *Service) fallbackTurn(
 		return service.fallbackMainline(ctx, draftID)
 	}
 	if strings.Contains(content, "导出") {
-		_, err := service.executeReported(ctx, draftID, "interaction.confirm_action", rushestools.ConfirmActionInput{
+		document, err := timeline.Latest(ctx, service.database, draftID)
+		if errors.Is(err, storage.ErrNotFound) {
+			return "当前草稿还没有可导出的时间线。", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		_, err = service.executeReported(ctx, draftID, "interaction.confirm_action", rushestools.ConfirmActionInput{
 			Question: "确认导出当前已验证时间线的最终 MP4？",
-			ToolName: "render.final_mp4", Arguments: map[string]any{},
+			ToolName: "render.start",
+			Arguments: map[string]any{
+				"kind": "final", "timeline_id": document.TimelineID,
+			},
 		})
 		if err != nil {
 			return "", err

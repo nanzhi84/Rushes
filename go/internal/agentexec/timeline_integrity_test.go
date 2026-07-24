@@ -244,6 +244,21 @@ func TestBeatAlignmentDataDistinguishesStructureFromBeatSync(t *testing.T) {
 		aligned["on_accent_cut_count"] != 2 || aligned["all_cuts_on_beat_grid"] != true {
 		t.Fatalf("aligned=%#v", aligned)
 	}
+	document.Tracks[4].Clips[0].Effects = nil
+	document.Tracks[4].Clips[0].Metadata = map[string]any{
+		"beat_grid": map[string]any{
+			"bpm": 120, "beat_frames": []any{30.0, 45.0, 60.0},
+			"strong_beat_frames": []int{60}, "downbeat_frames": []int{30},
+			"analysis_method": "fixture",
+		},
+	}
+	metadataAligned := BeatAlignmentData(document)
+	if metadataAligned["beat_grid_present"] != true ||
+		metadataAligned["on_beat_cut_count"] != 2 ||
+		metadataAligned["on_accent_cut_count"] != 2 ||
+		metadataAligned["all_cuts_on_beat_grid"] != true {
+		t.Fatalf("metadata aligned=%#v", metadataAligned)
+	}
 }
 
 func TestBeatAlignmentDataUsesToleranceAndExcludesContinuousSourceSplits(t *testing.T) {

@@ -132,13 +132,13 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 		"读取口播台词和气口证据",
 		[]string{
 			"speech.transcribe", "speech.search", "audio.analyze_speech_pauses",
-			"media.detect_shots", "shot.search", "timeline.compose_initial",
+			"media.detect_shots", "shot.search", "timeline.insert",
 		},
 		[]string{"timeline.edit_talking_head", "timeline.update"},
 	)
 	assertSurface(
 		"请组装初版时间线",
-		[]string{"timeline.compose_initial", "asset.list_assets", "shot.search"},
+		[]string{"timeline.insert", "asset.list_assets", "shot.search"},
 		[]string{"timeline.update"},
 	)
 
@@ -161,19 +161,22 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 	)
 	assertSurface(
 		"根据节拍和 BGM 做卡点",
-		[]string{"timeline.recut_to_beats", "audio.analyze_beats", "media.detect_shots", "shot.search"},
-		[]string{"timeline.update", "timeline.edit_talking_head"},
+		[]string{
+			"audio.analyze_beats", "media.detect_shots", "shot.search",
+			"timeline.insert", "timeline.delete", "timeline.update",
+		},
+		[]string{"timeline.recut_to_beats", "timeline.edit_talking_head"},
 	)
 	assertSurface(
 		"验证时间线后渲染预览",
-		[]string{"timeline.check", "timeline.inspect", "render.preview", "render.final_mp4", "render.status"},
+		[]string{"timeline.check", "timeline.inspect", "render.start", "job.read"},
 		[]string{"timeline.update"},
 	)
 
 	setSurfaceTimelineState(t, service, draftID, true)
 	assertSurface(
 		"渲染预览并导出最终 MP4",
-		[]string{"render.preview", "render.final_mp4", "timeline.check"},
+		[]string{"render.start", "job.read", "timeline.check"},
 		[]string{"timeline.update"},
 	)
 	assertSurface(
@@ -276,8 +279,9 @@ func TestLegacyCompositeAndAtomicTimelineToolsNeverShareOneModelSurface(t *testi
 	}
 
 	composeNames := assertNotMixed("请组装初版时间线")
-	if !containsName(composeNames, "timeline.compose_initial") {
-		t.Fatalf("compose surface=%v", composeNames)
+	if !containsName(composeNames, "timeline.insert") ||
+		containsName(composeNames, "timeline.compose_initial") {
+		t.Fatalf("initial surface=%v", composeNames)
 	}
 	firstInsertNames := assertNotMixed("调用 timeline.insert 插入第一个 visual_base clip")
 	if !containsName(firstInsertNames, "timeline.insert") ||
@@ -291,7 +295,9 @@ func TestLegacyCompositeAndAtomicTimelineToolsNeverShareOneModelSurface(t *testi
 		t.Fatalf("talking-head surface=%v", talkingHeadNames)
 	}
 	beatNames := assertNotMixed("根据节拍和 BGM 做卡点")
-	if !containsName(beatNames, "timeline.recut_to_beats") {
+	if !containsName(beatNames, "timeline.insert") ||
+		!containsName(beatNames, "timeline.update") ||
+		containsName(beatNames, "timeline.recut_to_beats") {
 		t.Fatalf("beat surface=%v", beatNames)
 	}
 	atomicNames := assertNotMixed("只把当前时间线片段音量调低")
@@ -432,8 +438,8 @@ func TestSuccessfulShotSearchPreservesSpecializedWorkflowIntent(t *testing.T) {
 		},
 		{
 			name: "beat_edit", prompt: "按 BGM 卡点并找一个镜头插入",
-			required:  "timeline.recut_to_beats",
-			forbidden: []string{"timeline.update", "timeline.edit_talking_head"},
+			required:  "timeline.insert",
+			forbidden: []string{"timeline.recut_to_beats", "timeline.edit_talking_head"},
 		},
 		{
 			name: "generic_timeline_edit", prompt: "在时间线里找一个海边镜头插入",
@@ -466,7 +472,7 @@ func TestSuccessfulShotSearchPreservesSpecializedWorkflowIntent(t *testing.T) {
 	}
 }
 
-func TestAutomaticContinuationPreservesTalkingHeadIntentAfterCompose(t *testing.T) {
+func TestAutomaticContinuationPreservesTalkingHeadIntentAfterInitialInsert(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_talking_head_continuation_surface"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -485,9 +491,9 @@ func TestAutomaticContinuationPreservesTalkingHeadIntentAfterCompose(t *testing.
 				"这是原任务的自动续跑，不是新的用户请求。请继续。",
 		),
 		schema.ToolMessage(
-			`{"status":"succeeded"}`,
-			"call_compose_after_understand",
-			schema.WithToolName("timeline.compose_initial"),
+			`{"status":"succeeded","data":{"timeline_id":"draft_talking_head_continuation_surface:v1"}}`,
+			"call_insert_after_understand",
+			schema.WithToolName("timeline.insert"),
 		),
 	}
 	specs, err := selectModelToolSurface(
@@ -501,7 +507,6 @@ func TestAutomaticContinuationPreservesTalkingHeadIntentAfterCompose(t *testing.
 	names := surfaceNames(specs)
 	if !containsName(names, "speech.search") ||
 		containsName(names, "timeline.edit_talking_head") ||
-		containsName(names, "timeline.update") ||
 		containsName(names, "timeline.compose_initial") {
 		t.Fatalf("后台续跑后的口播 surface=%v", names)
 	}
@@ -519,6 +524,10 @@ func TestAutomaticRenderContinuationUsesPersistedPreviewWithoutToolTrace(t *test
 	seedSurfaceAsset(t, service, draftID)
 	setSurfaceTimelineState(t, service, draftID, true)
 	seedSurfacePreview(t, service, draftID)
+	if _, err := service.database.Write().ExecContext(t.Context(), `
+		UPDATE drafts SET timeline_current_version=2 WHERE draft_id=?`, draftID); err != nil {
+		t.Fatal(err)
+	}
 
 	specs, err := selectModelToolSurface(
 		rushestools.WithDraftID(t.Context(), draftID),
@@ -538,6 +547,55 @@ func TestAutomaticRenderContinuationUsesPersistedPreviewWithoutToolTrace(t *test
 	if !containsName(names, "preview.check") ||
 		containsName(names, "timeline.update") {
 		t.Fatalf("真实跨回合续跑 surface=%v", names)
+	}
+}
+
+func TestAutomaticContinuationRequiresSuccessfulPreviewTerminal(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_render_continuation_terminal_guard"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	seedSurfaceAsset(t, service, draftID)
+	setSurfaceTimelineState(t, service, draftID, true)
+	seedSurfacePreview(t, service, draftID)
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+
+	for _, status := range []string{"失败", "已取消"} {
+		t.Run(status, func(t *testing.T) {
+			specs, selectErr := selectModelToolSurface(ctx, service.tools, []*schema.Message{
+				schema.UserMessage("渲染新预览并检查黑帧"),
+				schema.UserMessage(
+					"你等待的后台任务已到终态。\n任务：render_preview\n状态：" + status + "\n" +
+						"这是原任务的自动续跑，不是新的用户请求。请继续。",
+				),
+			})
+			if selectErr != nil {
+				t.Fatal(selectErr)
+			}
+			names := surfaceNames(specs)
+			if !containsName(names, "render.start") || containsName(names, "preview.check") {
+				t.Fatalf("%s render continuation surface=%v", status, names)
+			}
+		})
+	}
+
+	specs, err := selectModelToolSurface(ctx, service.tools, []*schema.Message{
+		schema.UserMessage("剪掉开头三秒，渲染预览并检查黑帧"),
+		schema.UserMessage(
+			"用户刚刚回答了你此前提出的选择题。\n问题：保留开头吗？\n回答：删除\n" +
+				"这是同一条任务的继续，不是新的请求。请继续。",
+		),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := surfaceNames(specs)
+	if !containsName(names, "timeline.update") || containsName(names, "preview.check") {
+		t.Fatalf("decision continuation surface=%v", names)
 	}
 }
 
@@ -618,7 +676,7 @@ func TestDynamicModelToolSurfaceFallsBackToPrerequisiteStage(t *testing.T) {
 			t.Fatal(selectErr)
 		}
 		names := surfaceNames(specs)
-		if !containsName(names, "timeline.compose_initial") ||
+		if !containsName(names, "timeline.insert") ||
 			containsName(names, "timeline.inspect") {
 			t.Errorf("%q surface=%v want discovery prerequisite tools", prompt, names)
 		}
@@ -632,7 +690,7 @@ func TestDynamicModelToolSurfaceFallsBackToPrerequisiteStage(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := surfaceNames(specs)
-	if !containsName(names, "render.preview") || containsName(names, "preview.check") {
+	if !containsName(names, "render.start") || containsName(names, "preview.check") {
 		t.Fatalf("缺少预览时 surface=%v want render prerequisite tools", names)
 	}
 }
@@ -687,14 +745,14 @@ func TestExplicitIntentAdvancesAfterSuccessfulWorkflowWrite(t *testing.T) {
 		forbidden string
 	}{
 		{
-			name: "compose", prompt: "请组装初版时间线",
-			toolName: "timeline.compose_initial",
+			name: "initial_insert", prompt: "请组装初版时间线",
+			toolName: "timeline.insert",
 			required: "timeline.update", forbidden: "timeline.compose_initial",
 		},
 		{
-			name: "talking_head_after_compose", prompt: "完成口播气口和重说清理",
-			toolName: "timeline.compose_initial",
-			required: "speech.search", forbidden: "timeline.update",
+			name: "talking_head_after_initial_insert", prompt: "完成口播气口和重说清理",
+			toolName: "timeline.insert",
+			required: "speech.search", forbidden: "timeline.edit_talking_head",
 		},
 		{
 			name: "talking_head_evidence", prompt: "完成口播气口和重说清理",
@@ -703,7 +761,7 @@ func TestExplicitIntentAdvancesAfterSuccessfulWorkflowWrite(t *testing.T) {
 		},
 		{
 			name: "beat", prompt: "根据节拍和 BGM 做卡点",
-			toolName: "timeline.recut_to_beats",
+			toolName: "timeline.insert",
 			required: "timeline.check", forbidden: "timeline.recut_to_beats",
 		},
 	}
@@ -746,7 +804,7 @@ func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 		editTool string
 	}{
 		{"剪掉开头三秒然后导出 MP4", "timeline.update"},
-		{"按 BGM 卡点后渲染预览", "timeline.recut_to_beats"},
+		{"按 BGM 卡点后渲染预览", "timeline.insert"},
 	}
 	for _, test := range tests {
 		t.Run(test.editTool, func(t *testing.T) {
@@ -774,7 +832,7 @@ func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 			}
 			names = surfaceNames(specs)
 			if !containsName(names, "timeline.check") ||
-				(test.editTool != "timeline.update" && containsName(names, test.editTool)) {
+				containsName(names, "render.start") {
 				t.Fatalf("编辑完成后 surface=%v", names)
 			}
 		})
@@ -950,7 +1008,7 @@ func TestGenericEditSurfaceRemainsAvailableUntilExplicitValidation(t *testing.T)
 	if !containsName(names, "timeline.update") ||
 		!containsName(names, "timeline.inspect") ||
 		!containsName(names, "timeline.check") ||
-		containsName(names, "render.preview") {
+		containsName(names, "render.start") {
 		t.Fatalf("首次 patch 后 surface=%v", names)
 	}
 
@@ -966,13 +1024,13 @@ func TestGenericEditSurfaceRemainsAvailableUntilExplicitValidation(t *testing.T)
 		t.Fatal(err)
 	}
 	names = surfaceNames(specs)
-	if !containsName(names, "render.preview") ||
+	if !containsName(names, "render.start") ||
 		containsName(names, "timeline.update") {
 		t.Fatalf("显式验证后 surface=%v", names)
 	}
 }
 
-func TestSuccessfulPreviewAdvancesCompositeWorkflowToInspection(t *testing.T) {
+func TestSuccessfulPreviewJobAdvancesWorkflowToInspection(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_preview_success_transition"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -1013,30 +1071,79 @@ func TestSuccessfulPreviewAdvancesCompositeWorkflowToInspection(t *testing.T) {
 		schema.ToolMessage(
 			`{"status":"failed","error_code":"render_failed"}`,
 			"call_preview_failed",
-			schema.WithToolName("render.preview"),
+			schema.WithToolName("render.start"),
 		),
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if names := surfaceNames(specs); !containsName(names, "render.preview") ||
+	if names := surfaceNames(specs); !containsName(names, "render.start") ||
 		containsName(names, "preview.check") {
 		t.Fatalf("preview failure surface=%v", names)
 	}
 
 	specs, err = selectModelToolSurface(ctx, service.tools, append(base,
 		schema.ToolMessage(
-			`{"status":"queued","data":{"job_id":"preview_job","job_status":"pending"}}`,
+			`{"status":"queued","data":{"job_id":"preview_job","job_status":"pending","render_kind":"preview"}}`,
 			"call_preview_success",
-			schema.WithToolName("render.preview"),
+			schema.WithToolName("render.start"),
+		),
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := surfaceNames(specs); !containsName(names, "job.read") ||
+		containsName(names, "preview.check") {
+		t.Fatalf("preview queued surface=%v", names)
+	}
+
+	specs, err = selectModelToolSurface(ctx, service.tools, append(base,
+		schema.ToolMessage(
+			`{"status":"queued","data":{"job_id":"preview_job","job_status":"pending","render_kind":"preview"}}`,
+			"call_preview_success",
+			schema.WithToolName("render.start"),
+		),
+		schema.ToolMessage(
+			`{"status":"succeeded","data":{"job_id":"preview_job","kind":"render_preview","job_status":"succeeded","result":{"artifact_id":"transition_preview"}}}`,
+			"call_job_read",
+			schema.WithToolName("job.read"),
 		),
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if names := surfaceNames(specs); !containsName(names, "preview.check") ||
-		containsName(names, "render.preview") {
-		t.Fatalf("preview success surface=%v", names)
+		containsName(names, "render.start") {
+		t.Fatalf("preview completed surface=%v", names)
+	}
+}
+
+func TestRenderAndInspectIgnoresPreviewFromOlderTimeline(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_preview_stale_transition"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	seedSurfaceAsset(t, service, draftID)
+	setSurfaceTimelineState(t, service, draftID, true)
+	seedSurfacePreview(t, service, draftID)
+
+	specs, err := selectModelToolSurface(
+		rushestools.WithDraftID(t.Context(), draftID),
+		service.tools,
+		[]*schema.Message{
+			schema.UserMessage("当前时间线已更新，请渲染新预览并检查黑帧"),
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := surfaceNames(specs)
+	if !containsName(names, "render.start") || containsName(names, "preview.check") {
+		t.Fatalf("旧 preview 不得跳过当前目标渲染，surface=%v", names)
 	}
 }
 
@@ -1056,7 +1163,7 @@ func TestExplicitCompositeEditThenRenderStartsWithEditOnValidatedTimeline(t *tes
 		rushestools.WithDraftID(t.Context(), draftID),
 		service.tools,
 		[]*schema.Message{
-			schema.UserMessage("先调用 timeline.update，再调用 render.final_mp4"),
+			schema.UserMessage("先调用 timeline.update，再调用 render.start 导出 final"),
 		},
 	)
 	if err != nil {
@@ -1064,7 +1171,7 @@ func TestExplicitCompositeEditThenRenderStartsWithEditOnValidatedTimeline(t *tes
 	}
 	names := surfaceNames(specs)
 	if !containsName(names, "timeline.update") ||
-		containsName(names, "render.final_mp4") {
+		containsName(names, "render.start") {
 		t.Fatalf("已验证时间线的精确复合请求 surface=%v", names)
 	}
 }
@@ -1212,7 +1319,7 @@ func TestCompositeSpecializedAndGenericEditsFinishBeforeRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	names = surfaceNames(specs)
-	if !containsName(names, "render.preview") || containsName(names, "timeline.update") {
+	if !containsName(names, "render.start") || containsName(names, "timeline.update") {
 		t.Fatalf("验证完成后 surface=%v", names)
 	}
 }
@@ -1399,7 +1506,7 @@ func TestBroadRequestAdvancesSurfaceWhenDraftStateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	beforeNames := surfaceNames(before)
-	if !containsName(beforeNames, "timeline.compose_initial") ||
+	if !containsName(beforeNames, "timeline.insert") ||
 		containsName(beforeNames, "timeline.update") {
 		t.Fatalf("初始 surface=%v", beforeNames)
 	}
@@ -1407,9 +1514,9 @@ func TestBroadRequestAdvancesSurfaceWhenDraftStateChanges(t *testing.T) {
 	setSurfaceTimelineState(t, service, draftID, true)
 	afterComposeMessages := append(messages,
 		schema.ToolMessage(
-			`{"status":"succeeded","observation":"初版时间线已建立"}`,
-			"call_compose",
-			schema.WithToolName("timeline.compose_initial"),
+			`{"status":"succeeded","observation":"首个片段已插入"}`,
+			"call_insert",
+			schema.WithToolName("timeline.insert"),
 		),
 	)
 	after, err := selectModelToolSurface(ctx, service.tools, afterComposeMessages)
@@ -1452,8 +1559,8 @@ func TestBroadRequestAdvancesSurfaceWhenDraftStateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	afterValidationNames := surfaceNames(afterValidation)
-	if !containsName(afterValidationNames, "render.preview") ||
-		!containsName(afterValidationNames, "render.final_mp4") ||
+	if !containsName(afterValidationNames, "render.start") ||
+		!containsName(afterValidationNames, "job.read") ||
 		containsName(afterValidationNames, "timeline.update") {
 		t.Fatalf("验证完成后 surface=%v", afterValidationNames)
 	}
@@ -1594,15 +1701,15 @@ func TestModelCannotExecuteRegisteredToolOutsideBoundSurface(t *testing.T) {
 
 	var finalRenderTool einotool.InvokableTool
 	for _, spec := range service.tools.Specs(true) {
-		if spec.Name == "render.final_mp4" {
+		if spec.Name == "render.start" {
 			finalRenderTool = spec.Implementation.(einotool.InvokableTool)
 			break
 		}
 	}
 	if finalRenderTool == nil {
-		t.Fatal("render.final_mp4 missing")
+		t.Fatal("render.start missing")
 	}
-	_, err = finalRenderTool.InvokableRun(ctx, `{}`)
+	_, err = finalRenderTool.InvokableRun(ctx, `{"kind":"final","timeline_id":"draft:v1"}`)
 	rejection = nil
 	if !errors.As(err, &rejection) ||
 		rejection.Data["error_code"] != string(rushestools.ErrCodeToolNotInSurface) {

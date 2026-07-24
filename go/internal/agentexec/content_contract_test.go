@@ -168,7 +168,7 @@ func TestContentContractReportsMissingBeatGrid(t *testing.T) {
 		t.Fatalf("report=%#v configured=%v err=%v", report, configured, err)
 	}
 	item := report.Items[0]
-	const guidance = "无法核对卡拍比例：当前 BGM 无节拍网格，请先 audio.analyze_beats 或用 recut_to_beats 重建"
+	const guidance = "无法核对卡拍比例：当前 BGM 无节拍网格；先调用 audio.analyze_beats，再把完整证据原样放入 BGM insert 的 metadata.beat_grid"
 	if item.Check != "on_beat_ratio" || item.Pass || item.ErrorCode != "missing_beat_grid" || item.Message != guidance {
 		t.Fatalf("item=%#v", item)
 	}

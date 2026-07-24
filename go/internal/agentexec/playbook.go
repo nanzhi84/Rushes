@@ -6,10 +6,15 @@ const AudioTrackPlaybook = `【音频分轨】
 把持续音乐与短时点缀视为两种并行职责：前者保持在音乐底轨，后者叠加到音效轨；不能把点缀接在音乐尾部冒充连续配乐。`
 
 const BeatEditingPlaybook = `【卡点工作流】
-先取得本轮音乐的节拍与完整动态证据，再按创作意图取得可核验镜头；镜头顺序、拍点和时长由你自主规划，并交给卡点重剪高层能力一次完成，不要求用户审批首剪表。拍点强弱只是声音证据，不直接代表高潮或剪法。高层调用失败时依据返回的新证据修正同一路径，不改用初版组装或成串低层编辑。`
+先并行取得 audio.analyze_beats 的完整拍点/动态证据与 shot.search 的可核验镜头；拍点强弱只是声音事实，不直接代表高潮或剪法。你必须自主选择镜头顺序、每个 cut frame 和精确 source range，不要求用户审批可逆首剪表。
+空时间线先按选定顺序逐次 timeline.insert 主视觉片段，让每段结束帧落在明确选择的 beat frame；已有时间线用单目标 insert/delete/update 收敛，不得要求工具自动重建完整方案。每次成功后若下一步依赖当前 ID 或坐标，先 timeline.inspect。
+主视觉总时长确定后，用 timeline.insert 单独插入 bgm，并把本轮 audio.analyze_beats 返回的完整 bpm、beat_frames、strong_beat_frames、downbeat_frames、bar_phase 与 analysis_method 原样放在 metadata 的 beat_grid 字段；SFX 作为另一次 sfx 插入，音量再用一次 timeline.update。不得让 BGM 或 SFX 混入主视觉素材，也不得自动换镜头凑时长。
+最后 timeline.check，确认 beat_grid_present、切点覆盖与结构合同；失败只修正对应的一个镜头、音轨或参数，不重跑已成功原语。`
 
 const TimelineEditingPlaybook = `【时间线编辑】
-选择或修改片段前先读取现有轨道与稳定片段标识；仅做校验、渲染或状态查询时直接执行对应目标。首次建立初版时间线时根据用户目标和素材证据自主决定片段顺序、源区间、目标时长与取舍，直接组装可回滚的初版。普通编辑只使用 timeline.insert、timeline.delete、timeline.update、timeline.split；一次调用只提交一个 kind 和一个目标或连续范围。多个独立目标按稳定顺序分别调用，每次成功产生一个可 Rewind 版本；若后一步依赖新 ID 或前一步令旧目标失效，先读取最新时间线，不得猜测。禁止提交 ops[] 或把多个目标塞进同一调用。全部编辑完成后执行 timeline.check；结构合法不能单独证明卡点已完成。`
+选择或修改片段前先读取现有轨道与稳定片段标识。首次建立初版时根据用户目标和素材证据自主决定片段顺序、源区间、目标时长与取舍：第一次 timeline.insert visual_base 自动创建 v1，后续片段逐次追加；不得改用一次接收整张 EDL 的组装工具，也不要求用户审批可逆首剪。
+所有编辑只使用 timeline.insert、timeline.delete、timeline.update、timeline.split；一次调用只提交一个 kind 和一个目标或连续范围。多个独立目标按稳定顺序分别调用，每次成功产生一个可 Rewind 版本；若后一步依赖新 ID 或前一步令旧目标失效，先读取最新时间线，不得猜测。禁止提交 ops[] 或把多个目标塞进同一调用。
+全部编辑完成后执行 timeline.check。要渲染时读取当前 timeline_id，只用一次 render.start 创建 preview 或 final job，再用 job.read 读取该 job；目标变化时重新检查，不得让渲染工具猜新目标。这个稳定标识唯一锁定当时版本，模型不要自行解析或改写。preview 完成后可在同一轮并行调用多个 preview.check，分别覆盖解码、黑帧、静帧、静音、响度或视觉语义；模型汇总证据并自行决定是否继续原子编辑，检查工具不得自动修复。`
 
 const TalkingHeadPlaybook = `【口播工作流】
 已有时间线时先并行读取 timeline.inspect、speech.search 与已有 shot.search 证据；尚无时间线时先选主讲素材建立初版。需要精确剪词时让 speech.search 返回 word_id 和源帧。相似台词、句内重说、气口和残句都只是证据：你必须结合上下文明确选择删哪一侧或保留，不向用户逐项审批可逆首剪。

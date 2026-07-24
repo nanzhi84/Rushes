@@ -36,6 +36,7 @@ func TestBeatMixRealMaterialAcceptance(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_beat_mix_real")
 	now := time.Now().UTC()
+	videoDurations := map[string]int{}
 	for index, asset := range assets {
 		path := filepath.Join(root, asset.relative)
 		info, err := os.Stat(path)
@@ -45,6 +46,9 @@ func TestBeatMixRealMaterialAcceptance(t *testing.T) {
 		probe, err := media.ProbeFile(t.Context(), path)
 		if err != nil {
 			t.Fatal(err)
+		}
+		if asset.kind == "video" {
+			videoDurations[asset.id] = int(probe.DurationSec * 30)
 		}
 		probeJSON, err := json.Marshal(probe)
 		if err != nil {
@@ -79,16 +83,47 @@ func TestBeatMixRealMaterialAcceptance(t *testing.T) {
 	if beats.BPM <= 0 || beats.DurationFrames < 1400 || len(beats.BeatFrames) < 20 || len(beats.Waveform.Samples) == 0 {
 		t.Fatalf("beats=%#v", beats)
 	}
-	recutOutput, err := service.ExecuteTool(ctx, "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{
-		BGMAssetID: "beat_bgm", CoverEntireBGM: true,
-		VideoAssetIDs: []string{"beat_video_1", "beat_video_2", "beat_video_3"}, UseAllVideoAssets: true,
-	})
-	if err != nil {
-		t.Fatal(err)
+	videoIDs := []string{"beat_video_1", "beat_video_2", "beat_video_3"}
+	cuts, ok := chooseThreeAtomicBeatSegments(beats.BeatFrames, beats.DurationFrames, videoIDs, videoDurations)
+	if !ok {
+		t.Fatalf("三个真实视频不足以按真实拍点覆盖 BGM: target=%d durations=%v", beats.DurationFrames, videoDurations)
 	}
-	recut := recutOutput.(rushestools.ToolResult)
-	if recut.Status != "succeeded" {
-		t.Fatalf("recut=%#v", recut)
+	trace := []string{"audio.analyze_beats"}
+	start := 0
+	for index, end := range cuts {
+		raw, executeErr := service.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
+			"kind": "insert_clip", "asset_id": videoIDs[index], "role": "b_roll",
+			"source_start_frame": 0, "source_end_frame": end - start,
+		})
+		if executeErr != nil || raw.(rushestools.ToolResult).Status != string(rushestools.StatusSucceeded) {
+			t.Fatalf("visual insert %d=%#v err=%v", index, raw, executeErr)
+		}
+		trace = append(trace, "timeline.insert")
+		start = end
+	}
+	bgmRaw, err := service.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "track_id": "bgm", "asset_id": "beat_bgm", "role": "bgm",
+		"timeline_start_frame": 0, "source_start_frame": 0, "source_end_frame": beats.DurationFrames,
+		"metadata": map[string]any{"beat_grid": map[string]any{
+			"bpm": beats.BPM, "beat_frames": beats.BeatFrames,
+			"strong_beat_frames": beats.StrongBeatFrames,
+			"downbeat_frames":    beats.DownbeatFrames,
+			"bar_phase":          beats.BarPhase,
+			"analysis_method":    beats.AnalysisMethod,
+		}},
+	})
+	if err != nil || bgmRaw.(rushestools.ToolResult).Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("bgm insert=%#v err=%v", bgmRaw, err)
+	}
+	trace = append(trace, "timeline.insert")
+	checkRaw, err := service.ExecuteTool(ctx, "timeline.check", rushestools.TimelineCheckInput{})
+	if err != nil || checkRaw.(rushestools.ToolResult).Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("timeline.check=%#v err=%v", checkRaw, err)
+	}
+	trace = append(trace, "timeline.check")
+	alignment, _ := checkRaw.(rushestools.ToolResult).Data["beat_alignment"].(map[string]any)
+	if alignment["all_cuts_on_beat_grid"] != true {
+		t.Fatalf("beat alignment=%#v", alignment)
 	}
 	document, err := timeline.Latest(t.Context(), database, "draft_beat_mix_real")
 	if err != nil {
@@ -145,10 +180,49 @@ func TestBeatMixRealMaterialAcceptance(t *testing.T) {
 		}
 	}
 	t.Logf(
-		"BEAT_MIX_ACCEPTANCE bpm=%.2f beats=%d duration_frames=%d cuts=%v rendered=%dx%d bytes=%d",
-		beats.BPM, len(beats.BeatFrames), beats.DurationFrames, recut.Data["cut_frames"],
+		"BEAT_MIX_ACCEPTANCE bpm=%.2f beats=%d duration_frames=%d cuts=%v trace=%v rendered=%dx%d bytes=%d",
+		beats.BPM, len(beats.BeatFrames), beats.DurationFrames, cuts[:len(cuts)-1], trace,
 		rendered.Width, rendered.Height, rendered.Object.Size,
 	)
+}
+
+func chooseThreeAtomicBeatSegments(
+	beatFrames []int,
+	target int,
+	videoIDs []string,
+	durations map[string]int,
+) ([]int, bool) {
+	if len(videoIDs) != 3 || target <= 0 {
+		return nil, false
+	}
+	bestCuts := []int(nil)
+	bestDistance := int(^uint(0) >> 1)
+	for _, first := range beatFrames {
+		if first <= 0 || first >= target || first > durations[videoIDs[0]] {
+			continue
+		}
+		for _, second := range beatFrames {
+			if second <= first || second >= target ||
+				second-first > durations[videoIDs[1]] ||
+				target-second > durations[videoIDs[2]] {
+				continue
+			}
+			distance := absBeatFrameDistance(first-target/3) +
+				absBeatFrameDistance(second-target*2/3)
+			if distance < bestDistance {
+				bestDistance = distance
+				bestCuts = []int{first, second, target}
+			}
+		}
+	}
+	return bestCuts, len(bestCuts) == 3
+}
+
+func absBeatFrameDistance(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 func copyBeatMixArtifact(source, destination string) error {
