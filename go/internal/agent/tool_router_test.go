@@ -65,23 +65,29 @@ func TestToolRouterRunsReadOnlyMessagesInParallel(t *testing.T) {
 	probe := &concurrencyProbe{}
 	const delay = 80 * time.Millisecond
 	router := newRouterForTest(t,
-		map[string]rushestools.Effect{"read.a": rushestools.EffectReadOnly, "read.b": rushestools.EffectReadOnly},
-		probe.tool("read.a", delay), probe.tool("read.b", delay))
+		map[string]rushestools.Effect{
+			"read.a": rushestools.EffectReadOnly,
+			"read.b": rushestools.EffectReadOnly,
+			"read.c": rushestools.EffectReadOnly,
+		},
+		probe.tool("read.a", delay), probe.tool("read.b", delay), probe.tool("read.c", delay))
 
 	start := time.Now()
-	results, err := router.Invoke(t.Context(), routerMessage("read.a", "read.b"))
+	results, err := router.Invoke(t.Context(), routerMessage("read.a", "read.b", "read.c"))
 	elapsed := time.Since(start)
-	if err != nil || len(results) != 2 {
+	if err != nil || len(results) != 3 {
 		t.Fatalf("results=%#v err=%v", results, err)
 	}
-	if results[0].ToolCallID != "call_read.a" || results[1].ToolCallID != "call_read.b" {
-		t.Fatalf("并发结果未按原下标保序: %s,%s", results[0].ToolCallID, results[1].ToolCallID)
+	if results[0].ToolCallID != "call_read.a" || results[1].ToolCallID != "call_read.b" ||
+		results[2].ToolCallID != "call_read.c" {
+		t.Fatalf("并发结果未按原下标保序: %s,%s,%s",
+			results[0].ToolCallID, results[1].ToolCallID, results[2].ToolCallID)
 	}
-	if probe.maxSeen.Load() != 2 {
+	if probe.maxSeen.Load() != 3 {
 		t.Fatalf("只读消息未并发执行: 并发峰值=%d", probe.maxSeen.Load())
 	}
-	if elapsed >= 2*delay {
-		t.Fatalf("wall-clock 未低于串行和: elapsed=%v serial≈%v", elapsed, 2*delay)
+	if elapsed >= 3*delay {
+		t.Fatalf("wall-clock 未低于串行和: elapsed=%v serial≈%v", elapsed, 3*delay)
 	}
 }
 

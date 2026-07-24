@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -330,5 +331,128 @@ func TestModelToolSchemaRuneBudgetCoversEveryLLMTool(t *testing.T) {
 		if _, exists := metrics.PerToolRunes[name]; !exists {
 			t.Errorf("schema baseline for removed or hidden tool %s must be reviewed", name)
 		}
+	}
+}
+
+type toolSurfaceBindingModel struct {
+	withToolsErr error
+	boundNames   []string
+}
+
+func (stub *toolSurfaceBindingModel) WithTools(infos []*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	if stub.withToolsErr != nil {
+		return nil, stub.withToolsErr
+	}
+	stub.boundNames = make([]string, 0, len(infos))
+	for _, info := range infos {
+		stub.boundNames = append(stub.boundNames, info.Name)
+	}
+	return stub, nil
+}
+
+func (*toolSurfaceBindingModel) Generate(
+	context.Context,
+	[]*schema.Message,
+	...model.Option,
+) (*schema.Message, error) {
+	return schema.AssistantMessage("ok", nil), nil
+}
+
+func (stub *toolSurfaceBindingModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := stub.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func TestModelToolSurfaceMetricsFollowSuccessfulGraphBinding(t *testing.T) {
+	// 写入哨兵值，确保下面的无模型构造本身刷新 Catalog，而不是误读更早测试
+	// 留下的进程级 gauge 值。一次性约束仅用于目录日志，不阻止 gauge 刷新。
+	metricModelToolCatalogCount.Set(-1)
+	metricModelToolCatalogSchemaRunes.Set(-1)
+
+	boundCountBefore, boundCountSumBefore, _, _ := metricModelToolBoundCount.Snapshot()
+	boundRunesBefore, boundRunesSumBefore, _, _ := metricModelToolBoundSchemaRunes.Snapshot()
+
+	nilModelDatabase := agenttest.AgentTestDatabase(t)
+	nilModelService, err := NewService(t.Context(), nilModelDatabase, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nilModelService.Close)
+	nilModelCatalog, err := modelToolSchemaSize(t.Context(), nilModelService.tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := metricModelToolCatalogCount.Value(); got != int64(len(nilModelCatalog.PerToolRunes)) {
+		t.Fatalf("无模型模式 catalog count gauge=%d want=%d", got, len(nilModelCatalog.PerToolRunes))
+	}
+	if got := metricModelToolCatalogSchemaRunes.Value(); got != int64(nilModelCatalog.TotalRunes) {
+		t.Fatalf("无模型模式 catalog schema runes gauge=%d want=%d", got, nilModelCatalog.TotalRunes)
+	}
+	if count, sum, _, _ := metricModelToolBoundCount.Snapshot(); count != boundCountBefore || sum != boundCountSumBefore {
+		t.Fatalf("无模型模式不应记录 bound count: before=(%d,%d) after=(%d,%d)",
+			boundCountBefore, boundCountSumBefore, count, sum)
+	}
+	if count, sum, _, _ := metricModelToolBoundSchemaRunes.Snapshot(); count != boundRunesBefore || sum != boundRunesSumBefore {
+		t.Fatalf("无模型模式不应记录 bound schema runes: before=(%d,%d) after=(%d,%d)",
+			boundRunesBefore, boundRunesSumBefore, count, sum)
+	}
+
+	failingDatabase := agenttest.AgentTestDatabase(t)
+	failingModel := &toolSurfaceBindingModel{withToolsErr: errors.New("bind failed")}
+	if service, err := NewService(t.Context(), failingDatabase, failingModel); err == nil {
+		service.Close()
+		t.Fatal("模型工具绑定失败时 NewService 应返回错误")
+	}
+	if count, sum, _, _ := metricModelToolBoundCount.Snapshot(); count != boundCountBefore || sum != boundCountSumBefore {
+		t.Fatalf("失败建图不应记录 bound count: before=(%d,%d) after=(%d,%d)",
+			boundCountBefore, boundCountSumBefore, count, sum)
+	}
+	if count, sum, _, _ := metricModelToolBoundSchemaRunes.Snapshot(); count != boundRunesBefore || sum != boundRunesSumBefore {
+		t.Fatalf("失败建图不应记录 bound schema runes: before=(%d,%d) after=(%d,%d)",
+			boundRunesBefore, boundRunesSumBefore, count, sum)
+	}
+
+	database := agenttest.AgentTestDatabase(t)
+	successModel := &toolSurfaceBindingModel{}
+	service, err := NewService(t.Context(), database, successModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	catalog, err := modelToolSchemaSize(t.Context(), service.tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundTools := service.tools.EinoTools(true, false)
+	bound, err := modelToolSchemaSizeFromTools(t.Context(), boundTools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := metricModelToolCatalogCount.Value(); got != int64(len(catalog.PerToolRunes)) {
+		t.Fatalf("catalog count gauge=%d want=%d", got, len(catalog.PerToolRunes))
+	}
+	if got := metricModelToolCatalogSchemaRunes.Value(); got != int64(catalog.TotalRunes) {
+		t.Fatalf("catalog schema runes gauge=%d want=%d", got, catalog.TotalRunes)
+	}
+	if !reflect.DeepEqual(successModel.boundNames, bound.Names) {
+		t.Fatalf("模型实际收到工具=%v want=%v", successModel.boundNames, bound.Names)
+	}
+	if count, sum, _, _ := metricModelToolBoundCount.Snapshot(); count != boundCountBefore+1 ||
+		sum != boundCountSumBefore+int64(len(bound.PerToolRunes)) {
+		t.Fatalf("bound count after=(%d,%d) want=(%d,%d)",
+			count, sum, boundCountBefore+1, boundCountSumBefore+int64(len(bound.PerToolRunes)))
+	}
+	if count, sum, _, _ := metricModelToolBoundSchemaRunes.Snapshot(); count != boundRunesBefore+1 ||
+		sum != boundRunesSumBefore+int64(bound.TotalRunes) {
+		t.Fatalf("bound schema runes after=(%d,%d) want=(%d,%d)",
+			count, sum, boundRunesBefore+1, boundRunesSumBefore+int64(bound.TotalRunes))
 	}
 }

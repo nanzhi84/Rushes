@@ -102,6 +102,8 @@ func TestTurnEmitsStructuredLogAndMetrics(t *testing.T) {
 		"agent_context_history_tokens", "agent_cached_prompt_hit_ratio",
 		"agent_user_memory_total", "agent_user_memory_injected", "agent_user_memory_omitted",
 		"agent_user_memory_section_runes", "agent_user_memory_truncated",
+		"agent_model_tool_catalog_count", "agent_model_tool_catalog_schema_runes",
+		"agent_model_tool_bound_count", "agent_model_tool_bound_schema_runes",
 	} {
 		if !strings.Contains(body, name) {
 			t.Fatalf("/debug/metrics 缺少度量 %q", name)

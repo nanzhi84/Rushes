@@ -120,8 +120,9 @@ func newServiceWithModels(
 	// G2：破坏性工具（当前仅 memory.update 携带 remove_keys）在模型主路径上必须先经
 	// interaction.confirm_action 确认；确认后的重放走直连路径、绕过本拦截器（#103 G2）。
 	registry.Use(destructiveConfirmationInterceptor)
-	recordModelToolSchemaSize(ctx, registry)
+	recordModelToolCatalog(ctx, registry)
 	if chatModel != nil {
+		boundTools := registry.EinoTools(true, false)
 		// #103 G3b：react 图的 Rushes 复刻,把单个 ToolsNode 换成按 registry.Effect 逐消息路由的
 		// toolRouter(全只读并行、含写串行)。ExecuteSequentially 由 toolRouter 逐节点决定,不在此设;
 		// 模型侧 H5 直通模型 / StreamToolCallChecker / H1b MessageModifier / MaxStep 全部原样保留。
@@ -129,7 +130,7 @@ func newServiceWithModels(
 			ctx,
 			chatModel,
 			compose.ToolsNodeConfig{
-				Tools:               registry.EinoTools(true, false),
+				Tools:               boundTools,
 				UnknownToolsHandler: unknownToolRecoveryHandler,
 				ToolCallMiddlewares: []compose.ToolMiddleware{newToolRecoveryMiddleware(retrySafeFromEffect(registry.Effect))},
 			},
@@ -144,6 +145,7 @@ func newServiceWithModels(
 			cancel()
 			return nil, err
 		}
+		recordBoundModelToolSurface(ctx, boundTools)
 	}
 	service.queue = NewTurnQueue(ctx, service.runTurn)
 	if startBridge {

@@ -74,6 +74,18 @@ var (
 		"agent_tool_result_bytes", []int64{1024, 4096, 16384, 65536, 131072, 524288},
 	)
 	metricToolResultOversize = telemetry.NewCounter("tool_result_oversize_total")
+
+	// 模型工具目录与实际绑定面的规模基线（#141 PR1）。目录是 Registry 的全量 LLM
+	// Catalog；bound 是实际传给某次 ReAct 图的工具面。当前二者仍相同，后续动态披露
+	// 会让 bound 直方图下降，而 Catalog gauge 保持全量事实源规模。
+	metricModelToolCatalogCount       = telemetry.NewGauge("agent_model_tool_catalog_count")
+	metricModelToolCatalogSchemaRunes = telemetry.NewGauge("agent_model_tool_catalog_schema_runes")
+	metricModelToolBoundCount         = telemetry.NewHistogram(
+		"agent_model_tool_bound_count", []int64{5, 10, 15, 20, 25},
+	)
+	metricModelToolBoundSchemaRunes = telemetry.NewHistogram(
+		"agent_model_tool_bound_schema_runes", []int64{4000, 8000, 16000, 24000, 32000, 40000},
+	)
 )
 
 // observeModelCall 记录一次模型调用延迟：进直方图度量 + 一条结构化日志（AC1「每次模型调用
