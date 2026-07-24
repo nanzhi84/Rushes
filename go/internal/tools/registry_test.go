@@ -226,6 +226,7 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		"audio.analyze_speech_pauses": EffectReadOnly,
 		"timeline.inspect":            EffectReadOnly,
 		"render.status":               EffectReadOnly,
+		"job.read":                    EffectReadOnly,
 		"preview.check":               EffectReadOnly,
 		"media.detect_shots":          EffectReversible,
 		"speech.transcribe":           EffectReversible,
@@ -245,6 +246,7 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		"timeline.check":              EffectReadOnly,
 		"render.preview":              EffectReversible,
 		"render.final_mp4":            EffectReversible,
+		"render.start":                EffectReversible,
 		"memory.update":               EffectDestructive,
 	}
 	specs := registry.Specs(true)
@@ -299,6 +301,8 @@ func TestToolPrimitiveClassificationMatchesEffectAndSurface(t *testing.T) {
 		"render.preview":              FamilyEdit,
 		"render.final_mp4":            FamilyEdit,
 		"render.status":               FamilyRead,
+		"render.start":                FamilyEdit,
+		"job.read":                    FamilyRead,
 		"preview.check":               FamilyCheck,
 		"interaction.confirm_action":  FamilyControl,
 	}
@@ -688,9 +692,6 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		"shot.search": {
 			"detection_candidates", "media.detect_shots", "禁止把候选素材臆造为 shot_id",
 		},
-		"timeline.compose_initial": {
-			"video/image", "不能传 audio/font", "asset.list_assets", "duration_frames", "timeline_fps",
-		},
 		"plan.update": {
 			"RFC 7396", "reset=true", "跨回合",
 		},
@@ -706,9 +707,11 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		"timeline.split": {
 			"一个 timeline_clip_id", "一个时间线整数帧",
 		},
-		"timeline.recut_to_beats": {
-			"shot_ids", "cut_frames 可多于视频素材数", "use_all_video_assets=true",
-			"cover_entire_bgm=true", "SFX 始终独立分轨", "禁止用 compose_initial",
+		"render.start": {
+			"timeline_id", "一个 preview/final", "失败不排队", "不会自动质检",
+		},
+		"job.read": {
+			"一个当前草稿所属 job", "严格只读", "不启动", "或取消",
 		},
 		"timeline.inspect": {
 			"完整 track/clip ID", "timeline_exists=false",
@@ -741,10 +744,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := registry.Specs(false)
-	if len(core) != 25 {
+	if len(core) != 27 {
 		t.Fatalf("core tools=%d", len(core))
 	}
-	if len(registry.Specs(true)) != 27 {
+	if len(registry.Specs(true)) != 29 {
 		t.Fatalf("all tools=%d", len(registry.Specs(true)))
 	}
 	for _, spec := range registry.Specs(true) {
@@ -753,10 +756,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 			t.Fatalf("spec=%s info=%#v err=%v", spec.Name, info, infoErr)
 		}
 	}
-	if got := len(registry.EinoTools(false, false)); got != 22 {
+	if got := len(registry.EinoTools(false, false)); got != 19 {
 		t.Fatalf("LLM core tools=%d", got)
 	}
-	if got := len(registry.EinoTools(false, true)); got != 25 {
+	if got := len(registry.EinoTools(false, true)); got != 27 {
 		t.Fatalf("含 harness core tools=%d", got)
 	}
 
@@ -931,8 +934,8 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	allowed, _ = registry.Allowed(ctx, true)
-	if !containsSpec(allowed, "timeline.compose_initial") {
-		t.Fatal("可用素材存在后 compose 未放行")
+	if !containsSpec(allowed, "timeline.insert") {
+		t.Fatal("空时间线应允许模型用首个原子 insert 建立 v1")
 	}
 	if !containsSpec(allowed, "audio.analyze_beats") {
 		t.Fatal("可用素材存在后节拍分析未放行")
@@ -940,8 +943,10 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	if !containsSpec(allowed, "audio.analyze_speech_pauses") {
 		t.Fatal("可用素材存在后气口分析未放行")
 	}
-	if !containsSpec(allowed, "timeline.recut_to_beats") {
-		t.Fatal("可用素材存在后，空时间线应直接放行卡点重剪")
+	for _, old := range []string{"timeline.compose_initial", "timeline.recut_to_beats"} {
+		if containsSpec(allowed, old) {
+			t.Fatalf("迁移后的模型工具面不应放行 %s", old)
+		}
 	}
 	if _, err := database.Write().ExecContext(t.Context(),
 		"UPDATE drafts SET timeline_current_version=1, timeline_validated=0 WHERE draft_id='draft_gate'"); err != nil {
@@ -953,8 +958,7 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	}
 	for _, name := range []string{
 		"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
-		"timeline.recut_to_beats", "timeline.check", "timeline.inspect",
-		"render.preview", "render.final_mp4", "render.status",
+		"timeline.check", "timeline.inspect", "render.start", "job.read",
 	} {
 		if !containsSpec(allowed, name) {
 			t.Fatalf("已有但未标记 validated 的时间线也应放行 %s，由渲染入口同步校验", name)

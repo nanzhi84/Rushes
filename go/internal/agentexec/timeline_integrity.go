@@ -174,6 +174,11 @@ func BeatAlignmentData(document timeline.Document) map[string]any {
 			continue
 		}
 		for _, clip := range track.Clips {
+			if explicitGrid, ok := clip.Metadata["beat_grid"].(map[string]any); ok {
+				beatFrames = append(beatFrames, mapEffectFramesToTimeline(clip, explicitGrid["beat_frames"])...)
+				strongFrames = append(strongFrames, mapEffectFramesToTimeline(clip, explicitGrid["strong_beat_frames"])...)
+				downbeatFrames = append(downbeatFrames, mapEffectFramesToTimeline(clip, explicitGrid["downbeat_frames"])...)
+			}
 			for _, effect := range clip.Effects {
 				if StringValue(effect["kind"]) != "beat_grid" {
 					continue

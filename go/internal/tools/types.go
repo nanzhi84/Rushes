@@ -615,8 +615,18 @@ type RenderFinalInput struct {
 
 type RenderStatusInput struct{}
 
+type RenderStartInput struct {
+	Kind        string `json:"kind" jsonschema:"required" jsonschema_description:"本次唯一渲染产物：preview 或 final"`
+	TimelineID  string `json:"timeline_id" jsonschema:"required" jsonschema_description:"timeline.inspect 返回的当前稳定 timeline_id；它精确指向一个版本，若已变化则返回 stale_target，不猜测新目标"`
+	Orientation string `json:"orientation,omitempty" jsonschema_description:"成片画幅方向：auto、portrait 或 landscape；默认 auto"`
+}
+
+type JobReadInput struct {
+	JobID string `json:"job_id" jsonschema:"required" jsonschema_description:"检测或 render.start 返回的单个 job_id"`
+}
+
 type PreviewCheckInput struct {
-	PreviewID string `json:"preview_id" jsonschema:"required" jsonschema_description:"render.preview 成功产物返回的 preview_id"`
+	PreviewID string `json:"preview_id" jsonschema:"required" jsonschema_description:"render.start(kind=preview) 完成后 job.read 返回的 artifact_id"`
 	Check     string `json:"check" jsonschema:"required" jsonschema_description:"本次唯一检查项：decode、black、freeze、silence、loudness 或 visual"`
 }
 

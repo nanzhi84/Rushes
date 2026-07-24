@@ -208,7 +208,7 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 		registerTimelineInsert, registerTimelineDelete, registerTimelineUpdate, registerTimelineSplit,
 		registerBeatRecut, registerTalkingHeadEdit,
 		registerTimelineCheck, registerTimelineInspect, registerRenderPreview,
-		registerRenderFinal, registerRenderStatus, registerPreviewCheck,
+		registerRenderFinal, registerRenderStatus, registerRenderStart, registerJobRead, registerPreviewCheck,
 		registerConfirmAction,
 	}
 	for _, builder := range builders {
@@ -793,7 +793,7 @@ func registerMemoryUpdate(registry *Registry) error {
 }
 
 func registerComposeInitial(registry *Registry) error {
-	return addTool[ComposeInitialInput, ToolResult](registry, "timeline.compose_initial", "按整数帧源区间组装时间线；只传入 video/image 主视觉素材，不能传 audio/font；先从 asset.list_assets 读取 kind、duration_frames 与 timeline_fps", []string{"usable_asset_exists", "timeline_absent"}, ExposureLLM, EffectReversible, false,
+	return addTool[ComposeInitialInput, ToolResult](registry, "timeline.compose_initial", "旧版初版组装；仅供迁移期 harness 回归，生产模型逐次调用 timeline.insert", []string{"usable_asset_exists", "timeline_absent"}, ExposureHarness, EffectReversible, false,
 		metadata(FamilyEdit, CostHigh, SurfaceDiscovery, SurfaceTalkingHead))
 }
 
@@ -811,9 +811,10 @@ func registerTimelineInsert(registry *Registry) error {
 	return addTool[TimelineInsertInput, ToolResult](
 		registry,
 		"timeline.insert",
-		"插入一个素材 clip 或一条字幕；空时间线只允许先插入 visual_base clip，素材类型和原声联动由服务端派生",
+		"插入一个素材 clip 或一条字幕；空时间线先插入一个 visual_base clip 即创建 v1，后续片段逐次追加。原声联动由服务端派生，只维护确定性音画不变量。插入 BGM 时把对应检测结果的完整拍点证据原样放入 metadata.beat_grid，供 timeline.check 校验切点",
 		nil, ExposureLLM, EffectReversible, false,
-		metadata(FamilyEdit, CostStandard, SurfaceTimelineEdit),
+		metadata(FamilyEdit, CostStandard,
+			SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit, SurfaceTimelineEdit),
 	)
 }
 
@@ -823,7 +824,7 @@ func registerTimelineDelete(registry *Registry) error {
 		"timeline.delete",
 		"只删除一个 clip、一个连续帧范围或一个非主视觉轨内容集合；需要多个目标时按稳定顺序多次调用",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
-		metadata(FamilyEdit, CostStandard, SurfaceTimelineEdit),
+		metadata(FamilyEdit, CostStandard, SurfaceBeatEdit, SurfaceTimelineEdit),
 	)
 }
 
@@ -833,7 +834,7 @@ func registerTimelineUpdate(registry *Registry) error {
 		"timeline.update",
 		"只更新一个 clip、track 或 subtitle 目标；kind 选择裁剪、移动、重排、替换、速率、音量、淡入淡出、联动、轨道状态或字幕内容",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
-		metadata(FamilyEdit, CostStandard, SurfaceTimelineEdit),
+		metadata(FamilyEdit, CostStandard, SurfaceBeatEdit, SurfaceTimelineEdit),
 	)
 }
 
@@ -851,8 +852,8 @@ func registerBeatRecut(registry *Registry) error {
 	return addTool[TimelineBeatRecutInput, ToolResult](
 		registry,
 		"timeline.recut_to_beats",
-		"从空时间线或已有时间线原子完成卡点混剪：传 bgm_asset_id 后按真实拍点重建主视频；优先传 shot.search 返回的有序 shot_ids，工具会解析精确源帧。cut_frames 可多于视频素材数，同一素材会使用不同且不重叠的源区间；use_all_video_assets=true 表示每个素材至少一次；cover_entire_bgm=true 覆盖整首音乐；SFX 始终独立分轨。禁止用 compose_initial 加几十个低层补丁替代",
-		[]string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
+		"旧版卡点复合重剪；仅供迁移期 harness 回归，生产模型组合 audio.analyze_beats、shot.search 与原子时间线编辑",
+		[]string{"usable_asset_exists"}, ExposureHarness, EffectReversible, false,
 		metadata(FamilyEdit, CostHigh, SurfaceBeatEdit),
 	)
 }
@@ -869,7 +870,7 @@ func registerTalkingHeadEdit(registry *Registry) error {
 
 func registerTimelineCheck(registry *Registry) error {
 	return addTool[TimelineCheckInput, ToolResult](registry, "timeline.check", "只读检查当前时间线的结构不变量、内容合同、节拍对齐与口播质量；不写 validation event、draft state 或 timeline version", []string{"timeline_exists"}, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyCheck, CostStandard, SurfaceRender, SurfaceTimelineEdit))
+		metadata(FamilyCheck, CostStandard, SurfaceRender, SurfaceTimelineEdit, SurfaceBeatEdit))
 }
 
 func registerTimelineInspect(registry *Registry) error {
@@ -878,18 +879,38 @@ func registerTimelineInspect(registry *Registry) error {
 }
 
 func registerRenderPreview(registry *Registry) error {
-	return addTool[RenderPreviewInput, ToolResult](registry, "render.preview", "校验当前时间线并原子排队渲染预览；失败不创建任务", []string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
+	return addTool[RenderPreviewInput, ToolResult](registry, "render.preview", "旧版预览排队入口；仅供迁移期 harness 回归，生产模型使用 render.start", []string{"timeline_exists"}, ExposureHarness, EffectReversible, false,
 		metadata(FamilyEdit, CostHigh, SurfaceRender))
 }
 
 func registerRenderFinal(registry *Registry) error {
-	return addTool[RenderFinalInput, ToolResult](registry, "render.final_mp4", "校验当前时间线并原子排队导出 MP4；失败不创建任务", []string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
+	return addTool[RenderFinalInput, ToolResult](registry, "render.final_mp4", "旧版最终导出入口；仅供迁移期 harness 回归，生产模型使用 render.start", []string{"timeline_exists"}, ExposureHarness, EffectReversible, false,
 		metadata(FamilyEdit, CostHigh, SurfaceRender))
 }
 
 func registerRenderStatus(registry *Registry) error {
-	return addTool[RenderStatusInput, ToolResult](registry, "render.status", "读取渲染任务与产物状态", []string{"timeline_exists"}, ExposureLLM, EffectReadOnly, false,
+	return addTool[RenderStatusInput, ToolResult](registry, "render.status", "旧版草稿级渲染状态；仅供迁移期 harness 回归，生产模型使用 job.read", []string{"timeline_exists"}, ExposureHarness, EffectReadOnly, false,
 		metadata(FamilyRead, CostLow, SurfaceRender, SurfacePreviewCheck))
+}
+
+func registerRenderStart(registry *Registry) error {
+	return addTool[RenderStartInput, ToolResult](
+		registry,
+		"render.start",
+		"只为一个明确 timeline_id 创建或复用一个 preview/final 渲染 job；timeline_id 精确指向一个版本，同步重验目标，失败不排队，也不会自动质检或修改时间线",
+		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyEdit, CostHigh, SurfaceRender),
+	)
+}
+
+func registerJobRead(registry *Registry) error {
+	return addTool[JobReadInput, ToolResult](
+		registry,
+		"job.read",
+		"严格只读一个当前草稿所属 job 的状态、进度与有界结果；不启动、重试或取消任务",
+		nil, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyRead, CostLow, SurfaceRender, SurfacePreviewCheck),
+	)
 }
 
 func registerPreviewCheck(registry *Registry) error {

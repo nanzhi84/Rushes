@@ -2215,7 +2215,7 @@ func TestRewoundTimelineIsSynchronouslyRevalidatedAndQueuedForRender(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, toolName := range []string{"render.preview", "render.final_mp4"} {
+	for _, toolName := range []string{"render.start", "job.read"} {
 		found := false
 		for _, spec := range allowed {
 			found = found || spec.Name == toolName
@@ -2224,7 +2224,13 @@ func TestRewoundTimelineIsSynchronouslyRevalidatedAndQueuedForRender(t *testing.
 			t.Fatalf("回退后工具面未放行 %s: %#v", toolName, allowed)
 		}
 	}
-	raw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
+	currentTimeline, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := service.ExecuteTool(ctx, "render.start", rushestools.RenderStartInput{
+		Kind: "preview", TimelineID: currentTimeline.TimelineID,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2346,7 +2352,8 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	}
 
 	confirm, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
-		Question: "确认导出？", ToolName: "render.final_mp4", Arguments: map[string]any{},
+		Question: "确认忘记？", ToolName: "memory.update",
+		Arguments: map[string]any{"remove_keys": []any{"unused_preference"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -2585,8 +2592,29 @@ func TestFallbackAndReplayHelperBranches(t *testing.T) {
 	if _, err := service.fallbackTurn(ctx, "draft_empty", "msg", "ASK_USER"); err != nil {
 		t.Fatal(err)
 	}
+	document, err := timeline.ComposeInitial("draft_empty", 1, []timeline.Selection{{
+		AssetID: "fixture", AssetKind: "video",
+		SourceStartFrame: 0, SourceEndFrame: 30, Role: "b_roll",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.executor.PersistTimeline(
+		t.Context(), "draft_empty", document, "fallback_export_fixture",
+	); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := service.fallbackTurn(ctx, "draft_empty", "msg", "导出"); err != nil {
 		t.Fatal(err)
+	}
+	pending, err := storage.ListPendingDecisions(t.Context(), database.Read(), "draft_empty")
+	if err != nil || len(pending) == 0 ||
+		pending[len(pending)-1].PendingToolCall["tool_name"] != "render.start" {
+		t.Fatalf("fallback export decision=%#v err=%v", pending, err)
+	}
+	arguments, _ := pending[len(pending)-1].PendingToolCall["arguments"].(map[string]any)
+	if arguments["kind"] != "final" || arguments["timeline_id"] != "draft_empty:v1" {
+		t.Fatalf("fallback export arguments=%#v", arguments)
 	}
 	if chunks := runeChunks("abcdef", 0); len(chunks) != 6 {
 		t.Fatalf("chunks=%v", chunks)

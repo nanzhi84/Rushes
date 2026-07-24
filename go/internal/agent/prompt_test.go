@@ -45,10 +45,10 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 			"可逆创作细节", "Rewind", "decision_type=critical", "不得把首剪方案",
 		}},
 		"audio": {agentexec.AudioTrackPlaybook, []string{"持续音乐", "短时点缀", "叠加"}},
-		"beat":  {agentexec.BeatEditingPlaybook, []string{"节拍与完整动态证据", "可核验镜头", "自主规划", "不要求用户审批", "卡点重剪"}},
+		"beat":  {agentexec.BeatEditingPlaybook, []string{"完整拍点/动态证据", "可核验镜头", "自主选择", "不要求用户审批", "卡点工作流"}},
 		"timeline": {agentexec.TimelineEditingPlaybook, []string{
 			"timeline.insert", "一次调用只提交一个 kind", "多个独立目标按稳定顺序分别调用",
-			"禁止提交 ops[]", "自主决定", "直接组装可回滚的初版",
+			"禁止提交 ops[]", "自主决定", "建立初版", "可 Rewind 版本",
 		}},
 		"talking_head": {agentexec.TalkingHeadPlaybook, []string{
 			"已有时间线", "尚无时间线", "建立初版", "timeline.inspect", "speech.search",

@@ -74,6 +74,7 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 			"timeline.inspect":  {input: rushestools.TimelineInspectInput{}},
 			"shot.search":       {input: rushestools.ShotSearchInput{Query: "人物"}},
 			"render.status":     {input: rushestools.RenderStatusInput{}},
+			"job.read":          {input: rushestools.JobReadInput{JobID: "missing_job"}},
 			"preview.check": {
 				input:      rushestools.PreviewCheckInput{PreviewID: previewID, Check: "decode"},
 				skipReason: dependencySkipReason(ffmpegErr, "ffmpeg"),

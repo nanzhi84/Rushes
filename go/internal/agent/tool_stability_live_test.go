@@ -364,21 +364,21 @@ func liveSchemaCases() []liveToolEvalCase {
 		{Name: "ask_user", Prompt: "用户要求的核心叙事目标存在两种实质冲突，素材和上下文都无法推断，且没有安全默认值。请用 decision_type=critical 发出一张允许自由输入的阻塞性二选一决策卡，只问这个核心分歧。", Expected: []string{"interaction.ask_user"}},
 		{Name: "decision_answer", Prompt: "请提交决策 decision_style_1 的答案 option_id=fast，补充说明为强节奏。", Expected: []string{"decision.answer"}},
 		{Name: "plan_update", Prompt: "请把已确定的创作计划持久记录下来：风格是克制电影感，节奏决定为前缓后快；使用增量合并，不要整体重置。", Expected: []string{"plan.update"}},
-		{Name: "compose", Prompt: "请立即组装初版时间线：asset_video_1 使用源 0到90帧，asset_video_2 使用源 30到120帧，两段都是 b_roll。", Expected: []string{"timeline.compose_initial"}},
+		{Name: "initial_first_insert", Prompt: "当前没有时间线。请开始初版组装，只先把 asset_video_1 的源 0 到 90 帧作为 b_roll 插入 visual_base；后续片段等拿到新版本后再插。", Expected: []string{"timeline.insert"}},
 		{Name: "timeline_insert", Prompt: "请只插入一个字幕：0 到 90 帧，文本为‘示例字幕’，样式 default。", Expected: []string{"timeline.insert"}},
 		{Name: "timeline_delete", Prompt: "请只删除时间线片段 clip_v1_002。", Expected: []string{"timeline.delete"}},
 		{Name: "timeline_update", Prompt: "请将时间线片段 clip_v1_001 的结尾裁到第 75 帧，只更新这一个目标。", Expected: []string{"timeline.update"}},
 		{Name: "timeline_split", Prompt: "请在第 45 帧切分时间线片段 clip_v1_001。", Expected: []string{"timeline.split"}},
-		{Name: "beat_recut", Prompt: "请用 BGM asset_bgm_1 和视频 asset_video_1、asset_video_2 卡点重剪到 1440 帧，覆盖整首音乐，并将 asset_sfx_1 作为 45 帧的独立音效点缀。", Expected: []string{"timeline.recut_to_beats"}},
+		{Name: "beat_bgm_insert", Prompt: "卡点主视频已按真实拍点逐段插入，总长 1440 帧。请只把 asset_bgm_1 的源 0 到 1440 帧插入 bgm 轨，起点 0；metadata.beat_grid 使用已检测的 bpm=120、beat_frames=[0,30,60,90]、strong_beat_frames=[0,60]、downbeat_frames=[0]、bar_phase=0、analysis_method=aubio。", Expected: []string{"timeline.insert"}},
 		{Name: "talking_head_delete", Prompt: "口播证据和当前时间线已经读取；我明确选择删除较早一遍重说，它当前映射为时间线 360 到 480 帧。请只删除这个连续范围。", Expected: []string{"timeline.delete"}},
 		{Name: "talking_head_broll_insert", Prompt: "口播已清理并重新读取；请把 B-roll 素材 asset_video_1 的源 30 到 120 帧作为 visual_overlay 插入当前时间线第 600 帧，只做这一次插入。", Expected: []string{"timeline.insert"}},
 		{Name: "talking_head_broll_fade", Prompt: "请只给刚插入的 B-roll 片段 clip_v4_001 设置 7 帧淡入和 7 帧淡出。", Expected: []string{"timeline.update"}},
 		{Name: "validate", Prompt: "请校验当前时间线不变量和节拍对齐数据。", Expected: []string{"timeline.check"}},
 		{Name: "inspect", Prompt: "请读取当前时间线的完整轨道、clip ID 和帧范围。", Expected: []string{"timeline.inspect"}},
-		{Name: "preview", Prompt: "时间线已验证，请排队生成可分享的预览。", Expected: []string{"render.preview"}},
-		{Name: "final", Prompt: "时间线已验证，请排队导出最终 MP4。", Expected: []string{"render.final_mp4"}},
-		{Name: "status", Prompt: "请读取当前草稿的渲染任务和产物状态。", Expected: []string{"render.status"}},
-		{Name: "inspect_preview", Prompt: "请检查预览 preview_123 的解码、黑帧、静帧、静音和响度。", Expected: []string{"preview.check"}},
+		{Name: "preview", Prompt: "时间线已验证，当前 timeline_id=draft_eval:v7。请只启动一个可分享的 preview 渲染 job。", Expected: []string{"render.start"}},
+		{Name: "final", Prompt: "时间线已验证，当前 timeline_id=draft_eval:v7。请只启动一个 final 渲染 job。", Expected: []string{"render.start"}},
+		{Name: "status", Prompt: "请严格只读 job_render_123 的任务状态。", Expected: []string{"job.read"}},
+		{Name: "inspect_preview", Prompt: "请只检查预览 preview_123 是否存在黑帧。", Expected: []string{"preview.check"}},
 		{Name: "confirm", Prompt: "请为危险的时间线清空操作创建确认：工具 timeline.delete，参数 kind=remove_track_clips、track_id=sfx。", Expected: []string{"interaction.confirm_action"}},
 	}
 	for index := range cases {
@@ -388,7 +388,7 @@ func liveSchemaCases() []liveToolEvalCase {
 }
 
 func liveRoutingCases() []liveToolEvalCase {
-	const contextPrefix = `已读取当前客观状态：timeline_fps=30；A-roll asset_aroll_1 已有持久化逐句索引，主视频 clip 为 clip_v1_001；B-roll asset_video_1、asset_video_2 已完成逐镜头理解；BGM asset_bgm_1；SFX asset_sfx_1；当前时间线存在且已验证，预览为 preview_123。`
+	const contextPrefix = `已读取当前客观状态：timeline_fps=30；当前 timeline_id=draft_eval:v7；A-roll asset_aroll_1 已有持久化逐句索引，主视频 clip 为 clip_v1_001；B-roll asset_video_1、asset_video_2 已完成逐镜头理解；BGM asset_bgm_1；SFX asset_sfx_1；当前时间线存在且已验证，预览为 preview_123，渲染任务为 job_render_123。`
 	cases := []liveToolEvalCase{
 		{Name: "route_list", Prompt: contextPrefix + "\n用户：列出当前草稿的所有素材。", Expected: []string{"asset.list_assets"}},
 		{Name: "route_understand", Prompt: contextPrefix + "\n用户：素材 ID 已确认，请立即深度理解 asset_video_1 的动作和可剪区间。", Expected: []string{"media.detect_shots"}},
@@ -400,15 +400,15 @@ func liveRoutingCases() []liveToolEvalCase {
 		{Name: "route_inspect", Prompt: contextPrefix + "\n用户：查看当前时间线的真实 clip 明细。", Expected: []string{"timeline.inspect"}},
 		{Name: "route_patch", Prompt: contextPrefix + "\n用户：已取得真实 ID，只把 clip_v1_001 音量调到 -6dB。", Expected: []string{"timeline.update"}},
 		{Name: "route_batch", Prompt: contextPrefix + "\n用户：已取得真实 ID，按稳定顺序逐个设置淡出；现在先把 clip_v1_001 的淡出设为 8 帧。", Expected: []string{"timeline.update"}},
-		{Name: "route_recut", Prompt: contextPrefix + "\n节拍分析已完成，asset_bgm_1 的完整可用长度正好是 1440 帧；音效 asset_sfx_1 已确定从 900 帧开始、持续 45 帧、增益 -12dB，所有创作选择都已确定，无需提问。用户：现在直接覆盖整首 BGM 完成卡点重剪。", Expected: []string{"timeline.recut_to_beats"}},
-		{Name: "route_recut_after_recoverable_failure", Prompt: contextPrefix + "\n上一工具结果：{\"status\":\"failed\",\"observation\":\"所选镜头无法覆盖对应节拍片段，或其源区间已被重复使用\",\"data\":{\"shot_id\":\"shot_video_2\",\"required_frames\":120,\"shot_duration_frames\":80,\"recovery\":\"用 shot.search 按该片段 min_duration_frames 重新检索，且不要重复传同一 shot_id\"}}。检索已经完成，新候选 shot_video_2b 长 180 帧；原用户目标仍是用既定 BGM、节拍和其余镜头覆盖整首音乐完成卡点成片。请选择下一步工具。", Expected: []string{"timeline.recut_to_beats"}},
+		{Name: "route_beat_insert", Prompt: contextPrefix + "\n节拍和镜头选择已完成；下一段明确使用 asset_video_2 的源 180 到 300 帧，作为 b_roll 追加到 visual_base，片尾正好落在选定拍点。现在只提交这一段插入。", Expected: []string{"timeline.insert"}},
+		{Name: "route_beat_insert_after_recoverable_failure", Prompt: contextPrefix + "\n上一原子插入因所选 shot 只有 80 帧而失败，当前时间线未变化。shot.search 已返回替代镜头 shot_video_2b：asset_video_2 源 180 到 300 帧，正好 120 帧；创作选择不变。现在只重试这一个失败的插入，不重做其他已成功片段。", Expected: []string{"timeline.insert"}},
 		{Name: "route_batch_after_single_patch_failure", Prompt: contextPrefix + "\n上一工具结果：{\"status\":\"failed\",\"observation\":\"时间线补丁字段预校验失败：时间线补丁 trim_clip_edge 的字段 timeline_frame 缺少必填字段\",\"data\":{\"op_kind\":\"trim_clip_edge\",\"invalid_field\":\"timeline_frame\",\"expected_schema\":{\"required\":[\"kind\",\"timeline_clip_id\",\"timeline_frame\",\"edge\"]},\"correct_example\":{\"kind\":\"trim_clip_edge\",\"timeline_clip_id\":\"clip_v1_001\",\"timeline_frame\":75,\"edge\":\"end\"},\"recovery\":\"只修正当前 op 的字段名与类型后重新调用；不要原样重发失败参数。\"}}。字段错误已明确；按原子顺序先把 clip_v1_001 的结尾裁到 75 帧。请选择下一步工具。", Expected: []string{"timeline.update"}},
 		{Name: "route_talking_head_delete", Prompt: contextPrefix + "\n逐句证据与最新时间线已读取；较早一遍重说当前映射为时间线 360 到 480 帧，我明确选择删除它。现在只提交这个连续范围。", Expected: []string{"timeline.delete"}},
 		{Name: "route_validate", Prompt: contextPrefix + "\n用户：校验时间线和卡点对齐。", Expected: []string{"timeline.check"}},
-		{Name: "route_preview", Prompt: contextPrefix + "\n用户：生成一个可分享的预览。", Expected: []string{"render.preview"}},
+		{Name: "route_preview", Prompt: contextPrefix + "\n用户：基于当前 timeline_id 生成一个可分享的预览。", Expected: []string{"render.start"}},
 		{Name: "route_preview_inspect", Prompt: contextPrefix + "\n用户：质检 preview_123 是否有黑帧、静音和解码问题。", Expected: []string{"preview.check"}},
-		{Name: "route_export", Prompt: contextPrefix + "\n用户：导出最终 MP4，不要只生成预览。", Expected: []string{"render.final_mp4"}},
-		{Name: "route_status", Prompt: contextPrefix + "\n用户：查看当前渲染任务的状态。", Expected: []string{"render.status"}},
+		{Name: "route_export", Prompt: contextPrefix + "\n用户：基于当前 timeline_id 导出最终 MP4，不要只生成预览。", Expected: []string{"render.start"}},
+		{Name: "route_status", Prompt: contextPrefix + "\n用户：只读取 job_render_123 的状态。", Expected: []string{"job.read"}},
 	}
 	snapshot := liveFullTaskSnapshot()
 	for index := range cases {
@@ -554,10 +554,11 @@ func liveRoutingAblationCases() []liveRoutingVariant {
 			Snapshot: liveFullTaskSnapshot(),
 		}},
 		liveRoutingVariant{Name: "first_cut_autonomous", IncludePlaybook: true, Case: liveToolEvalCase{
-			Name: "first_cut_executes_without_approval", Expected: []string{"timeline.compose_initial"},
+			Name: "first_cut_executes_without_approval", Expected: []string{"timeline.insert"},
 			Prompt: "WorldState 已确认尚无时间线；逐句证据也已读取：utt_1=开场介绍（保留），" +
 				"utt_2=重复口误（删除），utt_3=核心结论（保留）。素材和目标均已明确，" +
-				"请直接制作第一次完整口播首剪，不要询问可逆的删保或 B-roll 细节。",
+				"请直接开始第一次口播首剪：先把 asset_aroll_1 的源 0 到 900 帧作为 a_roll 插入 visual_base，" +
+				"后续删除和 B-roll 等拿到首个版本后再做；不要询问可逆细节。",
 			Snapshot: NewWorldStateSnapshot(map[string]any{
 				"assets": map[string]any{
 					"audio_roles": []any{},
@@ -584,7 +585,7 @@ func liveSnapshotForSchemaCase(name string) WorldStateSnapshot {
 	}
 	sections := map[string]any{"assets": assets, "timeline": nil}
 	switch name {
-	case "beats", "beat_recut":
+	case "beats", "beat_bgm_insert":
 		assets["audio_roles"] = []any{map[string]any{
 			"asset_id": "asset_bgm_1", "suggested_role": "bgm",
 		}}

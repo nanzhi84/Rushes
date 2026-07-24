@@ -254,7 +254,7 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 	}
 }
 
-const modelToolSchemaTotalBaselineRunes = 19254
+const modelToolSchemaTotalBaselineRunes = 16870
 
 var modelToolSchemaBaselineRunes = map[string]int{
 	"asset.list_assets":           435,
@@ -263,22 +263,19 @@ var modelToolSchemaBaselineRunes = map[string]int{
 	"decision.answer":             566,
 	"interaction.ask_user":        1079,
 	"interaction.confirm_action":  387,
+	"job.read":                    246,
 	"media.detect_shots":          813,
 	"memory.update":               1260,
 	"plan.update":                 1573,
-	"preview.check":               420,
-	"render.final_mp4":            234,
-	"render.preview":              230,
-	"render.status":               128,
+	"preview.check":               442,
+	"render.start":                522,
 	"shot.search":                 870,
 	"speech.search":               1144,
 	"speech.transcribe":           486,
 	"timeline.check":              199,
-	"timeline.compose_initial":    826,
 	"timeline.delete":             790,
-	"timeline.insert":             1024,
+	"timeline.insert":             1114,
 	"timeline.inspect":            195,
-	"timeline.recut_to_beats":     1846,
 	"timeline.split":              473,
 	"timeline.update":             2985,
 }

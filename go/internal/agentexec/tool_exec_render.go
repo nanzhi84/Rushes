@@ -3,6 +3,7 @@ package agentexec
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -21,6 +22,7 @@ import (
 func (exec *Executor) toolEnqueueRender(
 	ctx context.Context,
 	draftID, kind, orientation string,
+	expectedTimelineID *string,
 ) (rushestools.ToolResult, error) {
 	orientation, err := normalizeRenderOrientation(orientation)
 	if err != nil {
@@ -37,6 +39,20 @@ func (exec *Executor) toolEnqueueRender(
 	document, err := timeline.Get(ctx, exec.database, draftID, timelineVersion)
 	if err != nil {
 		return rushestools.ToolResult{}, err
+	}
+	if expectedTimelineID != nil && *expectedTimelineID != document.TimelineID {
+		return rushestools.ToolResult{
+			Status:      string(rushestools.StatusFailed),
+			Observation: "目标时间线已经变化，未创建渲染任务",
+			Data: map[string]any{
+				"error_code":                 string(rushestools.ErrCodeStaleTarget),
+				"requested_timeline_id":      *expectedTimelineID,
+				"current_timeline_id":        document.TimelineID,
+				"current_timeline_version":   timelineVersion,
+				"current_timeline_unchanged": true,
+				"recovery":                   "调用 timeline.inspect 读取当前 timeline_id；确认仍符合目标后，只重试这一个 render.start。",
+			},
+		}, nil
 	}
 	validationReport, valid, err := exec.timelineValidationReport(ctx, draftID, document)
 	if err != nil {
@@ -87,7 +103,7 @@ func (exec *Executor) toolEnqueueRender(
 					)
 				}
 			}
-			return renderJobResult(kind, existing.ID, existing.Status), nil
+			return renderJobResult(kind, existing.ID, existing.Status, timelineVersion), nil
 		}
 		retryOfJobID = existing.ID
 		idempotencyKey = fmt.Sprintf("%s:retry:%s", baseIdempotencyKey, existing.ID)
@@ -126,11 +142,48 @@ func (exec *Executor) toolEnqueueRender(
 		if existing, found, lookupErr := exec.FindRenderJob(ctx, kind, idempotencyKey, false); lookupErr != nil {
 			return rushestools.ToolResult{}, errors.Join(err, lookupErr)
 		} else if found {
-			return renderJobResult(kind, existing.ID, existing.Status), nil
+			return renderJobResult(kind, existing.ID, existing.Status, timelineVersion), nil
 		}
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("reducer status: %s", result.Status))
 	}
-	return renderJobResult(kind, jobID, "pending"), nil
+	return renderJobResult(kind, jobID, "pending", timelineVersion), nil
+}
+
+func (exec *Executor) toolStartRender(
+	ctx context.Context,
+	draftID string,
+	input rushestools.RenderStartInput,
+) (rushestools.ToolResult, error) {
+	input.TimelineID = strings.TrimSpace(input.TimelineID)
+	if input.TimelineID == "" {
+		return rushestools.ToolResult{
+			Status:      string(rushestools.StatusFailed),
+			Observation: "render.start 需要 timeline.inspect 返回的 timeline_id",
+			Data: map[string]any{
+				"current_timeline_unchanged": true,
+				"recovery":                   "先调用 timeline.inspect，再原样传入当前 timeline_id。",
+			},
+		}, nil
+	}
+	var kind string
+	switch strings.ToLower(strings.TrimSpace(input.Kind)) {
+	case "preview":
+		kind = "render_preview"
+	case "final":
+		kind = "render_final"
+	default:
+		return rushestools.ToolResult{
+			Status:      string(rushestools.StatusFailed),
+			Observation: "render.start kind 只支持 preview 或 final",
+			Data: map[string]any{
+				"current_timeline_unchanged": true,
+				"recovery":                   "根据用户要预览还是最终成片，只选择一个 kind 后重试。",
+			},
+		}, nil
+	}
+	return exec.toolEnqueueRender(
+		ctx, draftID, kind, input.Orientation, &input.TimelineID,
+	)
 }
 
 func normalizeRenderOrientation(value string) (string, error) {
@@ -176,7 +229,7 @@ func (exec *Executor) FindRenderJob(
 	return job, true, nil
 }
 
-func renderJobResult(kind, jobID, jobStatus string) rushestools.ToolResult {
+func renderJobResult(kind, jobID, jobStatus string, timelineVersion int) rushestools.ToolResult {
 	status := jobStatus
 	observation := kind + " 任务已存在"
 	switch jobStatus {
@@ -186,10 +239,115 @@ func renderJobResult(kind, jobID, jobStatus string) rushestools.ToolResult {
 	case "succeeded":
 		observation = kind + " 任务已完成"
 	}
+	renderKind := strings.TrimPrefix(kind, "render_")
 	return rushestools.ToolResult{
 		Status: status, Observation: observation,
-		Data: map[string]any{"job_id": jobID, "job_status": jobStatus},
+		Data: map[string]any{
+			"job_id": jobID, "job_status": jobStatus,
+			"render_kind": renderKind, "timeline_version": timelineVersion,
+		},
 	}
+}
+
+func (exec *Executor) toolReadJob(
+	ctx context.Context,
+	draftID string,
+	input rushestools.JobReadInput,
+) (rushestools.ToolResult, error) {
+	jobID := strings.TrimSpace(input.JobID)
+	if jobID == "" {
+		return rushestools.ToolResult{
+			Status:      string(rushestools.StatusFailed),
+			Observation: "job.read 需要一个 job_id",
+			Data: map[string]any{
+				"current_state_unchanged": true,
+				"recovery":                "使用检测工具或 render.start 返回的 job_id。",
+			},
+		}, nil
+	}
+	var kind, status string
+	var assetID, resultJSON, errorJSON sql.NullString
+	var progress sql.NullFloat64
+	var attempts, maxRetries int
+	err := exec.database.Read().QueryRowContext(ctx, `
+		SELECT kind,status,asset_id,progress,result_json,error_json,attempts,max_retries
+		FROM jobs
+		WHERE job_id=? AND (draft_id=? OR requested_by_draft_id=?)`,
+		jobID, draftID, draftID,
+	).Scan(
+		&kind, &status, &assetID, &progress, &resultJSON, &errorJSON,
+		&attempts, &maxRetries,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return rushestools.ToolResult{
+			Status:      string(rushestools.StatusFailed),
+			Observation: "job 不存在或不属于当前草稿",
+			Data: map[string]any{
+				"error_code":              string(rushestools.ErrCodeStaleTarget),
+				"job_id":                  jobID,
+				"current_state_unchanged": true,
+			},
+		}, nil
+	}
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	data := map[string]any{
+		"job_id": jobID, "kind": kind, "job_status": status,
+		"attempts": attempts, "max_retries": maxRetries,
+	}
+	if assetID.Valid && assetID.String != "" {
+		data["asset_id"] = assetID.String
+	}
+	if progress.Valid {
+		data["progress"] = progress.Float64
+	}
+	if resultJSON.Valid {
+		var result map[string]any
+		if json.Unmarshal([]byte(resultJSON.String), &result) == nil {
+			if filtered := boundedJobResult(result); len(filtered) > 0 {
+				data["result"] = filtered
+			}
+		}
+	}
+	if errorJSON.Valid {
+		var failure map[string]any
+		if json.Unmarshal([]byte(errorJSON.String), &failure) == nil {
+			if filtered := boundedJobFailure(failure); len(filtered) > 0 {
+				data["error"] = filtered
+			}
+		}
+	}
+	return rushestools.ToolResult{
+		Status: string(rushestools.StatusSucceeded),
+		Observation: fmt.Sprintf(
+			"job %s 状态为 %s", jobID, status,
+		),
+		Data: data,
+	}, nil
+}
+
+func boundedJobResult(result map[string]any) map[string]any {
+	filtered := map[string]any{}
+	for _, key := range []string{
+		"artifact_id", "timeline_version", "profile", "orientation",
+		"summary_id", "transcript_id", "asset_id",
+	} {
+		if value, exists := result[key]; exists {
+			filtered[key] = value
+		}
+	}
+	return filtered
+}
+
+func boundedJobFailure(failure map[string]any) map[string]any {
+	filtered := map[string]any{}
+	for _, key := range []string{"error_code", "message", "retryable"} {
+		if value, exists := failure[key]; exists {
+			filtered[key] = value
+		}
+	}
+	return filtered
 }
 
 func (exec *Executor) toolRenderStatus(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
