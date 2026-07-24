@@ -120,8 +120,10 @@ func TestRenderStartTargetsOneTimelineAndJobReadStaysPure(t *testing.T) {
 		t.Fatal(err)
 	}
 	failedJobID, _ := failedStartRaw.(rushestools.ToolResult).Data["job_id"].(string)
-	secretPath := "/Users/editor/private/source.mp4"
-	longMessage := "ffmpeg failed at " + secretPath + ": " + strings.Repeat("错误输出", 300)
+	posixSecretPath := "/Users/editor/Private Clips/客户素材.mov"
+	windowsSecretPath := `C:\Users\editor\Private Clips\客户素材.mov`
+	longMessage := "ffmpeg failed at " + posixSecretPath + ": open \"" +
+		windowsSecretPath + "\": " + strings.Repeat("错误输出", 300)
 	applied, err = reducer.Apply(t.Context(), database, []contracts.Event{{
 		Type: "JobFailed", DraftID: draftID,
 		Payload: map[string]any{
@@ -144,8 +146,10 @@ func TestRenderStartTargetsOneTimelineAndJobReadStaysPure(t *testing.T) {
 	failure, _ := failedReadRaw.(rushestools.ToolResult).Data["error"].(map[string]any)
 	failureMessage, _ := failure["message"].(string)
 	failureCode, _ := failure["error_code"].(string)
-	if strings.Contains(failureMessage, secretPath) ||
-		!strings.Contains(failureMessage, "<local-path>") ||
+	if strings.Contains(failureMessage, "Private Clips") ||
+		strings.Contains(failureMessage, "客户素材") ||
+		strings.Contains(failureMessage, `C:\Users`) ||
+		strings.Count(failureMessage, "<local-path>") != 2 ||
 		utf8.RuneCountInString(failureMessage) > jobFailureMessageRuneLimit ||
 		utf8.RuneCountInString(failureCode) > jobFailureCodeRuneLimit ||
 		failure["retryable"] != true {

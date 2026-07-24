@@ -360,13 +360,23 @@ const (
 	jobFailureMessageRuneLimit = 320
 )
 
-var absoluteJobPathPattern = regexp.MustCompile(
+var quotedAbsoluteJobPathPattern = regexp.MustCompile(
+	`"(?:/[^"\r\n]+|[A-Za-z]:\\[^"\r\n]+)"|'(?:/[^'\r\n]+|[A-Za-z]:\\[^'\r\n]+)'`,
+)
+
+var absoluteJobFilePathPattern = regexp.MustCompile(
+	`(?i)(^|[\s=:('"\\[])(/(?:[^\r\n:;,"')\]]*?\.[[:alnum:]]{1,8})|[A-Za-z]:\\(?:[^\r\n:;,"')\]]*?\.[[:alnum:]]{1,8}))($|[\s:;,)'"\]])`,
+)
+
+var absoluteJobPathTokenPattern = regexp.MustCompile(
 	`(^|[\s=:('"\\[])(/(?:[^ \t\r\n,;)'"\]]+)|[A-Za-z]:\\(?:[^ \t\r\n,;)'"\]]+))`,
 )
 
 func boundedJobFailureText(value string, limit int) string {
 	value = strings.TrimSpace(value)
-	value = absoluteJobPathPattern.ReplaceAllString(value, `${1}<local-path>`)
+	value = quotedAbsoluteJobPathPattern.ReplaceAllString(value, `<local-path>`)
+	value = absoluteJobFilePathPattern.ReplaceAllString(value, `${1}<local-path>${3}`)
+	value = absoluteJobPathTokenPattern.ReplaceAllString(value, `${1}<local-path>`)
 	runes := []rune(value)
 	if len(runes) <= limit {
 		return value

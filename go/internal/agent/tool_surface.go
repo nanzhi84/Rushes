@@ -256,12 +256,13 @@ func inferModelToolSurface(
 	if recent := recentSuccessfulWorkflowSurface(messages, text); recent != 0 {
 		return recent
 	}
-	if latestUserIsAutomaticContinuation(messages) {
-		if requestsPreviewCheck(text) && hasAllowedTool(specs, "preview.check") {
+	if kind, status, ok := latestJobContinuation(messages); ok && kind == "render_preview" {
+		if status == "成功" &&
+			requestsPreviewCheck(text) &&
+			hasAllowedTool(specs, "preview.check") {
 			return rushestools.SurfacePreviewCheck
 		}
-		if requestsRenderWorkflow(text) &&
-			hasAnyAllowedTool(specs, "timeline.check", "render.start", "job.read") {
+		if hasAnyAllowedTool(specs, "timeline.check", "render.start", "job.read") {
 			return rushestools.SurfaceRender
 		}
 	}
@@ -333,14 +334,29 @@ func inferModelToolSurface(
 	}
 }
 
-func latestUserIsAutomaticContinuation(messages []*schema.Message) bool {
+func latestJobContinuation(messages []*schema.Message) (string, string, bool) {
 	for index := len(messages) - 1; index >= 0; index-- {
 		message := messages[index]
-		if message != nil && message.Role == schema.User {
-			return isAutomaticContinuationSurfaceMessage(message.Content)
+		if message == nil || message.Role != schema.User {
+			continue
 		}
+		content := strings.TrimSpace(message.Content)
+		if !strings.Contains(content, "这是原任务的自动续跑，不是新的用户请求。") {
+			return "", "", false
+		}
+		var kind, status string
+		for _, line := range strings.Split(content, "\n") {
+			line = strings.TrimSpace(line)
+			if value, exists := strings.CutPrefix(line, "任务："); exists {
+				kind = strings.TrimSpace(value)
+			}
+			if value, exists := strings.CutPrefix(line, "状态："); exists {
+				status = strings.TrimSpace(value)
+			}
+		}
+		return kind, status, kind != "" && status != ""
 	}
-	return false
+	return "", "", false
 }
 
 func isEditingSurface(surface rushestools.Surface) bool {

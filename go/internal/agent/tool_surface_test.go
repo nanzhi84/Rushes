@@ -550,6 +550,55 @@ func TestAutomaticRenderContinuationUsesPersistedPreviewWithoutToolTrace(t *test
 	}
 }
 
+func TestAutomaticContinuationRequiresSuccessfulPreviewTerminal(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_render_continuation_terminal_guard"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	seedSurfaceAsset(t, service, draftID)
+	setSurfaceTimelineState(t, service, draftID, true)
+	seedSurfacePreview(t, service, draftID)
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+
+	for _, status := range []string{"失败", "已取消"} {
+		t.Run(status, func(t *testing.T) {
+			specs, selectErr := selectModelToolSurface(ctx, service.tools, []*schema.Message{
+				schema.UserMessage("渲染新预览并检查黑帧"),
+				schema.UserMessage(
+					"你等待的后台任务已到终态。\n任务：render_preview\n状态：" + status + "\n" +
+						"这是原任务的自动续跑，不是新的用户请求。请继续。",
+				),
+			})
+			if selectErr != nil {
+				t.Fatal(selectErr)
+			}
+			names := surfaceNames(specs)
+			if !containsName(names, "render.start") || containsName(names, "preview.check") {
+				t.Fatalf("%s render continuation surface=%v", status, names)
+			}
+		})
+	}
+
+	specs, err := selectModelToolSurface(ctx, service.tools, []*schema.Message{
+		schema.UserMessage("剪掉开头三秒，渲染预览并检查黑帧"),
+		schema.UserMessage(
+			"用户刚刚回答了你此前提出的选择题。\n问题：保留开头吗？\n回答：删除\n" +
+				"这是同一条任务的继续，不是新的请求。请继续。",
+		),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := surfaceNames(specs)
+	if !containsName(names, "timeline.update") || containsName(names, "preview.check") {
+		t.Fatalf("decision continuation surface=%v", names)
+	}
+}
+
 func TestUnclassifiedEditLanguageConservativelyKeepsTimelineTools(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_unclassified_edit_surface"
