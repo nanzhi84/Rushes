@@ -551,10 +551,10 @@ describe("DraftEditorView", () => {
 
     const stream = turnStreamSource();
     emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
-    emitTurnStream(stream, { type: "tool_step_started", step_id: "s1", tool: "understand.materials" });
+    emitTurnStream(stream, { type: "tool_step_started", step_id: "s1", tool: "media.detect_shots" });
     emitTurnStream(stream, {
       type: "subagent_progress",
-      tool: "understand.materials",
+      tool: "media.detect_shots",
       completed: 3,
       total: 20,
       note: "理解中 3/20"
@@ -578,9 +578,9 @@ describe("DraftEditorView", () => {
     expect(within(progressList).getByText("asset_09f3")).toBeTruthy();
 
     // 进度行确实挂在 understand 工具行的同一容器里（不是独立漂浮在消息流末尾）。
-    const understandRow = document.querySelector('[data-tool-step-id="s1"]') as HTMLElement;
-    expect(within(understandRow).getByText("理解素材")).toBeTruthy();
-    expect(understandRow.parentElement?.contains(progressList)).toBe(true);
+    const detectRow = document.querySelector('[data-tool-step-id="s1"]') as HTMLElement;
+    expect(within(detectRow).getByText("检测镜头")).toBeTruthy();
+    expect(detectRow.parentElement?.contains(progressList)).toBe(true);
     expect(screen.queryByLabelText("素材理解中 3/20")).toBeNull();
     expect(screen.queryByRole("button", { name: "取消素材理解" })).toBeNull();
 
@@ -601,7 +601,7 @@ describe("DraftEditorView", () => {
 
     const stream = turnStreamSource();
     emitTurnStream(stream, { type: "turn_started", turn_id: "turn_1" });
-    emitTurnStream(stream, { type: "tool_step_started", step_id: "s1", tool: "understand.materials" });
+    emitTurnStream(stream, { type: "tool_step_started", step_id: "s1", tool: "media.detect_shots" });
     emitTurnStream(stream, { type: "subagent_progress", asset_id: "asset_01a2", note: "转写音频中" });
 
     expect(await screen.findByText("转写音频中")).toBeTruthy();
@@ -609,7 +609,7 @@ describe("DraftEditorView", () => {
     emitTurnStream(stream, {
       type: "tool_step_finished",
       step_id: "s1",
-      tool: "understand.materials",
+      tool: "media.detect_shots",
       status: "succeeded"
     });
     // 下一个工具进行中，但上一批的进度不应串过来。

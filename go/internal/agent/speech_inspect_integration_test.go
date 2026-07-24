@@ -13,14 +13,14 @@ import (
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
+func TestSpeechTranscribeThenSearchBuildsRealFunASRTranscript(t *testing.T) {
 	if os.Getenv("RUSHES_REQUIRE_LIVE_MODELS") != "1" {
-		t.Skip("设置 RUSHES_REQUIRE_LIVE_MODELS=1 才运行真实 speech.inspect ASR")
+		t.Skip("设置 RUSHES_REQUIRE_LIVE_MODELS=1 才运行真实 speech.transcribe ASR")
 	}
 	key := strings.TrimSpace(os.Getenv("RUSHES_DASHSCOPE_API_KEY"))
 	source := strings.TrimSpace(os.Getenv("RUSHES_ASR_LIVE_SOURCE"))
 	if key == "" || source == "" {
-		t.Fatal("真实 speech.inspect 测试需要 API key 与 RUSHES_ASR_LIVE_SOURCE")
+		t.Fatal("真实 speech.transcribe 测试需要 API key 与 RUSHES_ASR_LIVE_SOURCE")
 	}
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_live_fun_asr")
@@ -44,8 +44,14 @@ func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
 		t.Fatal(err)
 	}
 	service.SetSpeechRecognizer(recognizer)
-	result, err := executeInspectSpeech(t, service, "draft_live_fun_asr", rushestools.SpeechInspectInput{
-		AssetID: "asset_live_aroll", Language: "zh", MaxUtterances: 200,
+	ctx := rushestools.WithDraftID(t.Context(), "draft_live_fun_asr")
+	if _, err := service.ExecuteTool(ctx, "speech.transcribe", rushestools.SpeechTranscribeInput{
+		AssetID: "asset_live_aroll", Language: "zh",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := executeInspectSpeech(t, service, "draft_live_fun_asr", rushestools.SpeechSearchInput{
+		AssetID: "asset_live_aroll", MaxUtterances: 200,
 		IncludeWords: true, MaxWords: 2000,
 	})
 	if err != nil {
@@ -73,15 +79,15 @@ func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
 	const executionRuns = 20
 	succeeded := 1
 	for run := 1; run < executionRuns; run++ {
-		cached, cacheErr := executeInspectSpeech(t, service, "draft_live_fun_asr", rushestools.SpeechInspectInput{
+		cached, cacheErr := executeInspectSpeech(t, service, "draft_live_fun_asr", rushestools.SpeechSearchInput{
 			AssetID: "asset_live_aroll", Query: result.Utterances[0].Text, MaxUtterances: 5,
 		})
-		if cacheErr == nil && cached.CacheHit && len(cached.Utterances) > 0 {
+		if cacheErr == nil && len(cached.Utterances) > 0 {
 			succeeded++
 		}
 	}
 	if float64(succeeded)/float64(executionRuns) < 0.95 {
-		t.Fatalf("speech.inspect 实际执行成功率 %d/%d 低于 95%%", succeeded, executionRuns)
+		t.Fatalf("speech.search 实际执行成功率 %d/%d 低于 95%%", succeeded, executionRuns)
 	}
 	t.Logf(
 		"SPEECH_INSPECT_FUN_ASR_OK provider=%s utterances=%d words=%d pauses=%d execution_success=%d/%d",
@@ -89,22 +95,22 @@ func TestSpeechInspectBuildsRealFunASRTranscript(t *testing.T) {
 	)
 }
 
-// executeInspectSpeech 把 speech.inspect 经引擎装饰器 ExecuteTool 路由到领域执行器。
+// executeInspectSpeech 把 speech.search 经引擎装饰器 ExecuteTool 路由到领域执行器。
 // 工具错误照常回传由调用点判定；仅在不可能的类型不符时 t.Fatal（本文件调用点均在测试主 goroutine）。
 func executeInspectSpeech(
 	t *testing.T,
 	service *Service,
 	draftID string,
-	input rushestools.SpeechInspectInput,
-) (rushestools.SpeechInspectResult, error) {
+	input rushestools.SpeechSearchInput,
+) (rushestools.SpeechSearchResult, error) {
 	t.Helper()
-	raw, err := service.ExecuteTool(rushestools.WithDraftID(t.Context(), draftID), "speech.inspect", input)
+	raw, err := service.ExecuteTool(rushestools.WithDraftID(t.Context(), draftID), "speech.search", input)
 	if err != nil {
-		return rushestools.SpeechInspectResult{}, err
+		return rushestools.SpeechSearchResult{}, err
 	}
-	result, ok := raw.(rushestools.SpeechInspectResult)
+	result, ok := raw.(rushestools.SpeechSearchResult)
 	if !ok {
-		t.Fatalf("speech.inspect 返回类型异常: %T", raw)
+		t.Fatalf("speech.search 返回类型异常: %T", raw)
 	}
 	return result, nil
 }

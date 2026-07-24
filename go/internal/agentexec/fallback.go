@@ -35,8 +35,8 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 	}
 	if len(understandIDs) > 0 {
 		for _, assetID := range understandIDs {
-			if _, err := runReported(ctx, "understand.materials", rushestools.UnderstandInput{
-				AssetIDs: []string{assetID}, Depth: "scan", Focus: "混剪可用画面",
+			if _, err := runReported(ctx, "media.detect_shots", rushestools.DetectShotsInput{
+				AssetID: assetID, Depth: "scan", Focus: "混剪可用画面",
 			}); err != nil {
 				return "", err
 			}

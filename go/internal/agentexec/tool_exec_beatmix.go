@@ -207,7 +207,7 @@ func (exec *Executor) toolBuildBeatMix(
 		if len(invalidShotIDs) > 0 {
 			return failed("shot_ids 包含不存在、已失效或不属于 video_asset_ids 的镜头", map[string]any{
 				"invalid_shot_ids": invalidShotIDs,
-				"recovery":         "重新调用 media.search_shots，并原样使用返回的 shot_id",
+				"recovery":         "重新调用 shot.search，并原样使用返回的 shot_id",
 			})
 		}
 	}
@@ -317,7 +317,7 @@ func (exec *Executor) toolBuildBeatMix(
 				return failed("所选镜头无法覆盖对应节拍片段，或其源区间已被重复使用", map[string]any{
 					"shot_id": selectedShotID, "required_frames": duration,
 					"shot_duration_frames": shot.candidate.DurationFrames,
-					"recovery":             "用 media.search_shots 按该片段 min_duration_frames 重新检索，且不要重复传同一 shot_id",
+					"recovery":             "用 shot.search 按该片段 min_duration_frames 重新检索，且不要重复传同一 shot_id",
 				})
 			}
 		} else {
@@ -347,7 +347,7 @@ func (exec *Executor) toolBuildBeatMix(
 				"segment_start_frame": cursor,
 				"segment_end_frame":   cutFrame,
 				"required_frames":     duration,
-				"recovery":            "减少切点密度、补充素材，或用 media.search_shots 选择更长的镜头区间",
+				"recovery":            "减少切点密度、补充素材，或用 shot.search 选择更长的镜头区间",
 			})
 		}
 		selected := videoSources[selectedIndex]

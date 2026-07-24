@@ -96,15 +96,15 @@ func clipBySourceRange(t *testing.T, document timeline.Document, start, end int)
 
 func inspectClip(
 	t *testing.T, service *Service, ctx context.Context, clipID string,
-) rushestools.SpeechInspectResult {
+) rushestools.SpeechSearchResult {
 	t.Helper()
-	raw, err := service.ExecuteTool(ctx, "speech.inspect", rushestools.SpeechInspectInput{
+	raw, err := service.ExecuteTool(ctx, "speech.search", rushestools.SpeechSearchInput{
 		TimelineClipID: clipID, IncludeWords: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return raw.(rushestools.SpeechInspectResult)
+	return raw.(rushestools.SpeechSearchResult)
 }
 
 func editTalkingHead(
@@ -312,7 +312,7 @@ func TestTalkingHeadEvidenceCoordsRepairsStraddlingEvidence(t *testing.T) {
 }
 
 // TestTalkingHeadEvidenceCoordsInspectEditContract 遍历多种「多次裁剪/拆分」时间线，
-// 断言 speech.inspect(clip) 返回的每条证据都能被 edit_talking_head(同 clip) 的选择器
+// 断言 speech.search(clip) 返回的每条证据都能被 edit_talking_head(同 clip) 的选择器
 // 接受——彻底消除「inspect 给的 ID edit 不认」。
 func TestTalkingHeadEvidenceCoordsInspectEditContract(t *testing.T) {
 	t.Parallel()

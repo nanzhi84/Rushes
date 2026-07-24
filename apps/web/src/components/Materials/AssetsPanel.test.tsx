@@ -217,12 +217,12 @@ describe("AssetsPanel 单击试看 / 右键摘要", () => {
 });
 
 describe("MaterialSummaryPanel 理解语义澄清", () => {
-  it("未理解时提示理解是对话里按需调用的工具（understand.materials）", () => {
+  it("未理解时提示镜头检测是对话里按需调用的工具（media.detect_shots）", () => {
     renderSummary(makeAsset({ understanding_status: "none" }));
 
     expect(
       screen.getByText(
-        /尚未理解。剪辑对话中，代理会按需调用理解工具（understand\.materials）生成摘要/
+        /尚未理解。剪辑对话中，代理会按需调用镜头检测工具（media\.detect_shots）生成摘要/
       )
     ).toBeTruthy();
   });

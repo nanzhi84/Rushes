@@ -1298,7 +1298,7 @@ func (exec *Executor) toolEditTalkingHead(
 		len(input.PauseDecisions) == 0 && len(input.RepetitionDecisions) == 0 &&
 		len(input.ShortFragmentDecisions) == 0 {
 		return failed("timeline.edit_talking_head 至少需要一个删除项或 B-roll 对应关系", map[string]any{
-			"recovery": "先调用 speech.inspect 和 media.search_shots，再传模型已选择的稳定 ID",
+			"recovery": "先调用 speech.search 和 shot.search，再传模型已选择的稳定 ID",
 		})
 	}
 	document, err := timeline.Latest(ctx, exec.database, draftID)
@@ -1325,7 +1325,7 @@ func (exec *Executor) toolEditTalkingHead(
 	if errors.Is(err, storage.ErrNotFound) {
 		return failed("A-roll 尚无持久化逐句索引", map[string]any{
 			"asset_id": asset.ID,
-			"recovery": "先对该 timeline_clip_id 调用 speech.inspect；它会复用同名 SRT 或调用已配置 ASR",
+			"recovery": "先对该 asset_id 调用 speech.transcribe 建立逐句索引，再调用只读的 speech.search 检索",
 		})
 	}
 	if err != nil {
@@ -1350,7 +1350,7 @@ func (exec *Executor) toolEditTalkingHead(
 	if len(invalidPauseDecisions) > 0 {
 		return failed("pause_decisions 包含未知、重复、冲突或非法决定", map[string]any{
 			"invalid_pause_decisions": invalidPauseDecisions,
-			"recovery":                "重新读取 speech.inspect.pauses；每个 pause_id 只提交一次，action 只能是 remove 或 preserve，且 preserve 不能同时出现在 remove_pause_ids。",
+			"recovery":                "重新读取 speech.search.pauses；每个 pause_id 只提交一次，action 只能是 remove 或 preserve，且 preserve 不能同时出现在 remove_pause_ids。",
 		})
 	}
 	repetitions := IntraUtteranceSpeechRepetitions(asset.ID, utterances, MaxSimilarPairs)
@@ -1366,7 +1366,7 @@ func (exec *Executor) toolEditTalkingHead(
 	if len(invalidRepetitionDecisions) > 0 {
 		return failed("repetition_decisions 包含未知、重复或非法决定", map[string]any{
 			"invalid_repetition_decisions": invalidRepetitionDecisions,
-			"recovery":                     "重新读取 speech.inspect.intra_utterance_repetitions；每个 repetition_id 只提交一次，action 只能是 remove_earlier、remove_later 或 preserve。",
+			"recovery":                     "重新读取 speech.search.intra_utterance_repetitions；每个 repetition_id 只提交一次，action 只能是 remove_earlier、remove_later 或 preserve。",
 		})
 	}
 	shortFragments := ShortLeadingSpeechFragments(asset.ID, utterances, pauses, MaxSimilarPairs)
@@ -1379,7 +1379,7 @@ func (exec *Executor) toolEditTalkingHead(
 	if len(fragmentExpansion.Invalid) > 0 {
 		return failed("short_fragment_decisions 包含未知、重复或非法决定", map[string]any{
 			"invalid_fragment_decisions": fragmentExpansion.Invalid,
-			"recovery":                   "重新读取 speech.inspect.short_speech_fragments；每个 fragment_id 只提交一次，action 只能是 remove 或 preserve。",
+			"recovery":                   "重新读取 speech.search.short_speech_fragments；每个 fragment_id 只提交一次，action 只能是 remove 或 preserve。",
 		})
 	}
 	if len(input.RemoveUtteranceIDs) == 0 && len(input.RemoveWordRanges) == 0 &&
@@ -1432,7 +1432,7 @@ func (exec *Executor) toolEditTalkingHead(
 		data := map[string]any{
 			"invalid_utterance_ids": invalidUtterances, "invalid_word_ranges": invalidWordRanges,
 			"invalid_pause_ids": invalidPauses,
-			"recovery":          "逐条核对：evidence_current_clips 会指出证据当前所属的 timeline_clip_id，请改用该 clip 重新调用；其余为未知 ID，需重新对当前 a_roll_timeline_clip_id 调用 speech.inspect（句内删剪设 include_words=true）。inspect 返回的证据已按该 clip 裁剪，可直接使用其中的 ID。",
+			"recovery":          "逐条核对：evidence_current_clips 会指出证据当前所属的 timeline_clip_id，请改用该 clip 重新调用；其余为未知 ID，需重新对当前 a_roll_timeline_clip_id 调用 speech.search（句内删剪设 include_words=true）。inspect 返回的证据已按该 clip 裁剪，可直接使用其中的 ID。",
 		}
 		if hints := TalkingHeadEvidenceClipHints(
 			document, asset.ID, invalidUtterances, utteranceByID,
@@ -1495,7 +1495,7 @@ func (exec *Executor) toolEditTalkingHead(
 	if len(invalidAssignments) > 0 {
 		return failed("B-roll 对应关系引用了未知、已删除、逆序或不属于该 A-roll clip 的语义 ID", map[string]any{
 			"invalid_assignments": invalidAssignments,
-			"recovery":            "用 speech.inspect 返回的未删除 utterance_id，并可在其中附带唯一的原文 anchor_text；若原文不唯一则改用连续 word_id。utterance 与 word 两种锚点二选一",
+			"recovery":            "用 speech.search 返回的未删除 utterance_id，并可在其中附带唯一的原文 anchor_text；若原文不唯一则改用连续 word_id。utterance 与 word 两种锚点二选一",
 		})
 	}
 	semanticDeleteRanges := make([]TalkingHeadRange, 0, len(removedUtteranceRanges)+len(removedWordRanges))
@@ -1530,7 +1530,7 @@ func (exec *Executor) toolEditTalkingHead(
 		)
 	if len(sourceDeleteRanges) == 0 && len(input.BrollAssignments) == 0 {
 		message := "本次没有可安全应用的实际编辑"
-		recovery := "重新读取 speech.inspect，只提交会产生实际时间线变化的删除项。"
+		recovery := "重新读取 speech.search，只提交会产生实际时间线变化的删除项。"
 		if len(autoPreservedPauses) > 0 {
 			message = "所选气口均会制造孤立语音，本次没有可安全应用的实际编辑"
 			recovery = "结合保留台词重新决定相邻语义是否也应删除；若台词应保留，则无需继续删除这些气口。"
@@ -1610,7 +1610,7 @@ func (exec *Executor) toolEditTalkingHead(
 		if err != nil {
 			return failed("口播波纹删除无法合法应用", map[string]any{
 				"reason": err.Error(), "failed_range": deleteRanges[index],
-				"recovery": "减少相互覆盖的删除项，或重新调用 speech.inspect 读取当前片段证据",
+				"recovery": "减少相互覆盖的删除项，或重新调用 speech.search 读取当前片段证据",
 			})
 		}
 	}
@@ -1635,14 +1635,14 @@ func (exec *Executor) toolEditTalkingHead(
 		if coverageErr != nil {
 			return failed("删除后无法把 B-roll 语义范围唯一映射到当前时间线", map[string]any{
 				"assignment_index": index, "reason": coverageErr.Error(),
-				"recovery": "重新调用 timeline.inspect 与 speech.inspect，缩小到连续的未删除台词范围",
+				"recovery": "重新调用 timeline.inspect 与 speech.search，缩小到连续的未删除台词范围",
 			})
 		}
 		shot, exists := shotByID[assignment.ShotID]
 		if !exists || shot.candidate.SemanticRole != "b_roll" {
 			return failed("B-roll 对应关系包含不存在、已失效或角色不是 b_roll 的 shot_id", map[string]any{
 				"assignment_index": index, "shot_id": assignment.ShotID,
-				"recovery": "调用 media.search_shots，并设置 semantic_roles=[\"b_roll\"]",
+				"recovery": "调用 shot.search，并设置 semantic_roles=[\"b_roll\"]",
 			})
 		}
 		duration := min(coverage.End-coverage.Start, shot.candidate.DurationFrames)
@@ -1692,7 +1692,7 @@ func (exec *Executor) toolEditTalkingHead(
 	if len(anchorPrecisionIssues) > 0 {
 		return failed("短 B-roll 的逐句语义窗口过宽，无法确定它应落在窗口内的具体台词位置", map[string]any{
 			"anchor_precision_required": anchorPrecisionIssues,
-			"recovery":                  "在返回的 utterance 范围内原样摘录与 B-roll 画面直接对应且唯一的连续台词作为 anchor_text；若短语不唯一，再调用 speech.inspect(include_words=true) 读取连续 start_word_id/end_word_id。",
+			"recovery":                  "在返回的 utterance 范围内原样摘录与 B-roll 画面直接对应且唯一的连续台词作为 anchor_text；若短语不唯一，再调用 speech.search(include_words=true) 读取连续 start_word_id/end_word_id。",
 		})
 	}
 	inserted := make([]map[string]any, 0, len(input.BrollAssignments))
@@ -1704,14 +1704,14 @@ func (exec *Executor) toolEditTalkingHead(
 		if coverageErr != nil {
 			return failed("删除后无法把 B-roll 语义范围唯一映射到当前时间线", map[string]any{
 				"assignment_index": index, "reason": coverageErr.Error(),
-				"recovery": "重新调用 timeline.inspect 与 speech.inspect，缩小到连续的未删除台词范围",
+				"recovery": "重新调用 timeline.inspect 与 speech.search，缩小到连续的未删除台词范围",
 			})
 		}
 		shot, exists := shotByID[assignment.ShotID]
 		if !exists || shot.candidate.SemanticRole != "b_roll" {
 			return failed("B-roll 对应关系包含不存在、已失效或角色不是 b_roll 的 shot_id", map[string]any{
 				"assignment_index": index, "shot_id": assignment.ShotID,
-				"recovery": "调用 media.search_shots，并设置 semantic_roles=[\"b_roll\"]",
+				"recovery": "调用 shot.search，并设置 semantic_roles=[\"b_roll\"]",
 			})
 		}
 		// 语义范围是镜头允许出现的台词窗口，而不是要求 B-roll 必须完整覆盖的
@@ -1854,7 +1854,7 @@ func (exec *Executor) toolEditTalkingHead(
 		result.Observation += " " + drift["summary"].(string)
 	}
 	// 时间线此时已持久化成功，质检报告只是增强：读取失败时跳过附加，
-	// 不把成功的编辑伪装成失败去诱导模型重试（timeline.validate 仍是持久验收面）。
+	// 不把成功的编辑伪装成失败去诱导模型重试（timeline.check 仍是持久验收面）。
 	if quality, qualityErr := exec.SpeechQualityReport(ctx, document); qualityErr == nil {
 		result.Data["speech_quality"] = quality
 		result.Observation += TalkingHeadQualitySummary(quality)

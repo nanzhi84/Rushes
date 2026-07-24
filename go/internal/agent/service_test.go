@@ -780,14 +780,22 @@ func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_job_dedup")
 	agenttest.InsertAgentMessage(t, database, "draft_job_dedup", "user_job_dedup", "渲染预览并检查")
-	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
-		Actor: contracts.ActorAgent, ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
-			ID: "tool_inspected", DraftID: "draft_job_dedup", Role: "system", Kind: "tool",
-			Content: `{"tool":"render.inspect_preview","preview_id":"preview_done","args_summary":"{truncated...","observation":"{\"summary\":\"ok\"}","status":"succeeded"}`,
-		}},
-	})
-	if err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("tool message status=%s err=%v", result.Status, err)
+	var result reducer.Result
+	for index, check := range []string{"decode", "black", "freeze", "silence", "loudness"} {
+		var err error
+		result, err = reducer.Apply(t.Context(), database, nil, reducer.Options{
+			Actor: contracts.ActorAgent, ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
+				ID: fmt.Sprintf("tool_inspected_%d", index), DraftID: "draft_job_dedup",
+				Role: "system", Kind: "tool",
+				Content: fmt.Sprintf(
+					`{"tool":"preview.check","preview_id":"preview_done","preview_check":%q,"args_summary":"{truncated...","observation":"{\"summary\":\"ok\"}","status":"succeeded"}`,
+					check,
+				),
+			}},
+		})
+		if err != nil || result.Status != reducer.StatusApplied {
+			t.Fatalf("tool message status=%s err=%v", result.Status, err)
+		}
 	}
 	chatModel := &decisionContinuationModel{}
 	service, err := NewService(t.Context(), database, chatModel)
@@ -814,10 +822,10 @@ func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 	}
 	for index, content := range []string{
 		`not-json`,
-		`{"tool":"render.inspect_preview","preview_id":"preview_done","status":"failed"}`,
-		`{"tool":"render.inspect_preview","args_summary":"{\"preview_id\":\"preview_legacy\"}","status":"succeeded"}`,
+		`{"tool":"preview.check","preview_id":"preview_done","status":"failed"}`,
+		`{"tool":"preview.check","args_summary":"{\"preview_id\":\"preview_legacy\"}","status":"succeeded"}`,
 	} {
-		result, err = reducer.Apply(t.Context(), database, nil, reducer.Options{
+		result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
 			Actor: contracts.ActorAgent, ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
 				ID: fmt.Sprintf("tool_ignored_%d", index), DraftID: "draft_job_dedup",
 				Role: "system", Kind: "tool", Content: content,
@@ -833,11 +841,35 @@ func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 	if !service.executor.PreviewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_done"}) {
 		t.Fatal("应兼容 preview_id 形式的终态结果")
 	}
-	if !service.executor.PreviewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_legacy"}) {
-		t.Fatal("升级后应兼容未截断的旧 args_summary trace")
+	if service.executor.PreviewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_legacy"}) {
+		t.Fatal("单个旧 trace 不应冒充完整的五项原子质检")
 	}
 	if service.executor.PreviewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"artifact_id": "preview_other"}) {
 		t.Fatal("不同预览不应被误去重")
+	}
+	result, err = reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent, ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
+			ID: "tool_decode_failed", DraftID: "draft_job_dedup", Role: "system", Kind: "tool",
+			Content: `{"tool":"preview.check","preview_id":"preview_done","preview_check":"decode","status":"failed"}`,
+		}},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("failed check status=%s err=%v", result.Status, err)
+	}
+	if service.executor.PreviewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_done"}) {
+		t.Fatal("最新一次原子检查失败时不应被更早的成功 trace 掩盖")
+	}
+	result, err = reducer.Apply(t.Context(), database, nil, reducer.Options{
+		Actor: contracts.ActorAgent, ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
+			ID: "tool_decode_recovered", DraftID: "draft_job_dedup", Role: "system", Kind: "tool",
+			Content: `{"tool":"preview.check","preview_id":"preview_done","preview_check":"decode","status":"succeeded"}`,
+		}},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("recovered check status=%s err=%v", result.Status, err)
+	}
+	if !service.executor.PreviewAlreadyInspected(t.Context(), "draft_job_dedup", map[string]any{"preview_id": "preview_done"}) {
+		t.Fatal("原子检查重试成功后应恢复为已完成")
 	}
 	cancelledContext, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -845,8 +877,13 @@ func TestCompletedPreviewObservationSkipsDuplicateInspection(t *testing.T) {
 		t.Fatal("读取历史失败时应保守地继续后台回调")
 	}
 	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_job_dedup", 20)
-	if err != nil || len(messages) != 5 {
+	if err != nil || len(messages) != 11 {
 		t.Fatalf("去重后不应生成重复回复: messages=%#v err=%v", messages, err)
+	}
+	for _, message := range messages {
+		if message.Kind == "reply" {
+			t.Fatalf("去重后不应生成回复: %#v", message)
+		}
 	}
 }
 
@@ -864,14 +901,14 @@ func TestToolReporterPairsSameNameCallsByCallIDAndPersistsPreviewID(t *testing.T
 	reporter := service.toolReporter(t.Context(), draftID)
 	firstCtx := rushestools.WithToolCallID(t.Context(), "call_first")
 	secondCtx := rushestools.WithToolCallID(t.Context(), "call_second")
-	firstInput := rushestools.RenderInspectInput{
-		PreviewID: "preview_first", Checks: []string{strings.Repeat("visual", 80)},
+	firstInput := rushestools.PreviewCheckInput{
+		PreviewID: "preview_first", Check: strings.Repeat("visual", 80),
 	}
-	secondInput := rushestools.RenderInspectInput{PreviewID: "preview_second"}
-	reporter(firstCtx, "render.inspect_preview", "started", firstInput, nil, nil)
-	reporter(secondCtx, "render.inspect_preview", "started", secondInput, nil, nil)
-	reporter(firstCtx, "render.inspect_preview", "finished", firstInput, rushestools.ToolResult{Status: "succeeded"}, nil)
-	reporter(secondCtx, "render.inspect_preview", "finished", secondInput, rushestools.ToolResult{Status: "succeeded"}, nil)
+	secondInput := rushestools.PreviewCheckInput{PreviewID: "preview_second"}
+	reporter(firstCtx, "preview.check", "started", firstInput, nil, nil)
+	reporter(secondCtx, "preview.check", "started", secondInput, nil, nil)
+	reporter(firstCtx, "preview.check", "finished", firstInput, rushestools.ToolResult{Status: "succeeded"}, nil)
+	reporter(secondCtx, "preview.check", "finished", secondInput, rushestools.ToolResult{Status: "succeeded"}, nil)
 
 	events := service.Hub().Snapshot(draftID)
 	if len(events) != 4 || events[0]["step_id"] != events[2]["step_id"] ||
@@ -901,6 +938,47 @@ func TestToolReporterPairsSameNameCallsByCallIDAndPersistsPreviewID(t *testing.T
 	}
 }
 
+func TestToolReporterPersistsTypedIndexMissingAsFailure(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_reporter_index_missing"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	reporter := service.toolReporter(t.Context(), draftID)
+	ctx := rushestools.WithToolCallID(t.Context(), "call_index_missing")
+	input := rushestools.SpeechSearchInput{AssetID: "asset_missing_index"}
+	output := rushestools.SpeechSearchResult{
+		Status: string(rushestools.StatusFailed), AssetID: "asset_missing_index",
+		ErrorCode: string(rushestools.ErrCodeIndexMissing),
+		Recovery:  "先调用 speech.transcribe。",
+	}
+	reporter(ctx, "speech.search", "started", input, nil, nil)
+	reporter(ctx, "speech.search", "finished", input, output, nil)
+
+	events := service.Hub().Snapshot(draftID)
+	if len(events) != 2 || events[1]["status"] != "failed" {
+		t.Fatalf("tool events=%#v", events)
+	}
+	messages, err := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
+	if err != nil || len(messages) != 1 {
+		t.Fatalf("messages=%#v err=%v", messages, err)
+	}
+	var trace struct {
+		Status      string `json:"status"`
+		Observation string `json:"observation"`
+	}
+	if err := json.Unmarshal([]byte(messages[0].Content), &trace); err != nil ||
+		trace.Status != "failed" ||
+		!strings.Contains(trace.Observation, string(rushestools.ErrCodeIndexMissing)) {
+		t.Fatalf("trace=%#v err=%v", trace, err)
+	}
+}
+
 func TestToolRecoveryPersistsPreviewIDFromSyntheticStartedArguments(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
@@ -919,15 +997,15 @@ func TestToolRecoveryPersistsPreviewIDFromSyntheticStartedArguments(t *testing.T
 			if !ok {
 				t.Fatal("tool recovery lost reporter")
 			}
-			typed := rushestools.RenderInspectInput{PreviewID: "preview_production"}
+			typed := rushestools.PreviewCheckInput{PreviewID: "preview_production", Check: "decode"}
 			reporter(ctx, input.Name, "started", typed, nil, nil)
 			reporter(ctx, input.Name, "finished", typed, rushestools.ToolResult{Status: "succeeded"}, nil)
 			return &compose.ToolOutput{Result: `{"status":"succeeded"}`}, nil
 		},
 	)
 	if _, err := endpoint(ctx, &compose.ToolInput{
-		Name: "render.inspect_preview", CallID: "call_production",
-		Arguments: `{"preview_id":"preview_production","checks":["decode"]}`,
+		Name: "preview.check", CallID: "call_production",
+		Arguments: `{"preview_id":"preview_production","check":"decode"}`,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -937,156 +1015,52 @@ func TestToolRecoveryPersistsPreviewIDFromSyntheticStartedArguments(t *testing.T
 	}
 }
 
-func TestCompletedPreviewObservationIncludesStructuredVerificationReport(t *testing.T) {
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg 未安装")
-	}
+func TestCompletedPreviewObservationRequestsAtomicChecks(t *testing.T) {
+	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
-	agenttest.CreateAgentDraft(t, database, "draft_job_report")
-	agenttest.InsertAgentMessage(t, database, "draft_job_report", "user_job_report", "生成预览并按合同检查")
+	const draftID = "draft_job_atomic_checks"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	agenttest.InsertAgentMessage(t, database, draftID, "user_job_atomic_checks", "生成预览并检查")
 	chatModel := &decisionContinuationModel{}
 	service, err := NewService(t.Context(), database, chatModel)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	planResult := executePlanUpdate(t, service, "draft_job_report", rushestools.PlanUpdateInput{
-		Plan: map[string]any{}, Contract: &rushestools.ContentPlanContract{TargetDurationFrames: 30},
-	})
-	if planResult.Status != "succeeded" {
-		t.Fatalf("plan=%#v", planResult)
-	}
-	document, err := timeline.ComposeInitial("draft_job_report", 1, []timeline.Selection{{
-		AssetID: "fixture", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.executor.PersistTimeline(t.Context(), "draft_job_report", document, "preview_report_fixture"); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(database.Paths.Temporary, "preview-report.mp4")
-	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y",
-		"-f", "lavfi", "-i", "testsrc2=s=64x64:d=1:r=30",
-		"-f", "lavfi", "-i", "sine=frequency=440:duration=1",
-		"-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-c:a", "aac", path,
-	); err != nil {
-		t.Fatal(err)
-	}
-	object, err := media.NewObjectStore(database.Paths).PutFile(t.Context(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fakeBin := filepath.Join(t.TempDir(), "bin")
-	if err := os.Mkdir(fakeBin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	fakeFFmpeg := filepath.Join(fakeBin, "ffmpeg")
-	fakeScript := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = \"-v\" ]; then\n  echo 'decoder leaked %s %s' >&2\n  exit 1\nfi\nexit 0\n", object.Hash, object.Path)
-	if err := os.WriteFile(fakeFFmpeg, []byte(fakeScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	applyResult, err := reducer.Apply(t.Context(), database, []contracts.Event{{
-		Type: "PreviewRendered", DraftID: "draft_job_report", Payload: map[string]any{
-			"artifact_id": "preview_report", "timeline_version": 1,
-			"object_hash": object.Hash, "object_size": object.Size,
-			"render_width": 64, "render_height": 64, "render_fps": 30,
-			"expected_duration_sec": 1,
-		},
-	}}, reducer.Options{Actor: contracts.ActorJob})
-	if err != nil || applyResult.Status != reducer.StatusApplied {
-		t.Fatalf("preview status=%s err=%v", applyResult.Status, err)
-	}
-	skip, report := service.executor.PreviewVerification(t.Context(), "draft_job_report", map[string]any{"artifact_id": "preview_report"})
-	if skip {
-		t.Fatal("preview 尚未质检，PreviewVerification 不应返回 skip")
-	}
-	encodedReport, err := json.Marshal(report)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, expected := range []string{`"error_code":"preview_decode_failed"`, "预览视频无法完整解码。"} {
-		if !strings.Contains(string(encodedReport), expected) {
-			t.Fatalf("verification report missing %q: %s", expected, encodedReport)
-		}
-	}
-	if !service.Queue().EnqueueJobObservation("draft_job_report", "job_report", map[string]any{
+	if !service.Queue().EnqueueJobObservation(draftID, "job_atomic_checks", map[string]any{
 		"event": "JobSucceeded",
 		"payload": map[string]any{
-			"job_id": "job_report", "kind": "render_preview",
-			"result": map[string]any{"artifact_id": "preview_report"},
+			"job_id": "job_atomic_checks", "kind": "render_preview",
+			"result": map[string]any{"artifact_id": "preview_atomic"},
 		},
 	}) {
 		t.Fatal("job observation 未入队")
 	}
-	service.Queue().JoinDraft("draft_job_report")
+	service.Queue().JoinDraft(draftID)
 	prompt := chatModel.lastPrompt()
 	for _, expected := range []string{
-		"verification_report", "render_inspection", "content_contract", `"pass":true`, "preview_report",
+		"状态：成功", "preview_atomic", "preview.check", "decode", "black", "freeze",
+		"silence", "loudness", "独立检查可并行", "visual",
 	} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("prompt missing %q: %s", expected, prompt)
 		}
 	}
-	for _, sensitive := range []string{object.Path, object.Hash, "decoder leaked", "ffmpeg"} {
-		if strings.Contains(prompt, sensitive) {
-			t.Fatalf("prompt leaked decode detail %q: %s", sensitive, prompt)
-		}
-	}
-}
-
-func TestCompletedPreviewObservationContinuesWhenAutomaticInspectionFails(t *testing.T) {
-	database := agenttest.AgentTestDatabase(t)
-	agenttest.CreateAgentDraft(t, database, "draft_job_degraded_report")
-	agenttest.InsertAgentMessage(t, database, "draft_job_degraded_report", "user_job_degraded_report", "生成预览")
-	chatModel := &decisionContinuationModel{}
-	service, err := NewService(t.Context(), database, chatModel)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(service.Close)
-	document, err := timeline.ComposeInitial("draft_job_degraded_report", 1, []timeline.Selection{{
-		AssetID: "fixture", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := service.executor.PersistTimeline(t.Context(), "draft_job_degraded_report", document, "preview_degraded_fixture"); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	missingHash := strings.Repeat("a", 64)
-	if _, err := database.Write().ExecContext(t.Context(), `
-		INSERT INTO objects(hash,rel_path,size,created_at) VALUES(?,?,1,?);
-		INSERT INTO previews(preview_id,draft_id,timeline_version,object_hash,quality_json,created_at)
-		VALUES('preview_degraded','draft_job_degraded_report',1,?,'{}',?)`,
-		missingHash, missingHash, now, missingHash, now,
-	); err != nil {
-		t.Fatal(err)
-	}
-	if !service.Queue().EnqueueJobObservation("draft_job_degraded_report", "job_degraded_report", map[string]any{
-		"event": "JobSucceeded",
-		"payload": map[string]any{
-			"job_id": "job_degraded_report", "kind": "render_preview",
-			"result": map[string]any{"artifact_id": "preview_degraded"},
-		},
-	}) {
-		t.Fatal("job observation 未入队")
-	}
-	service.Queue().JoinDraft("draft_job_degraded_report")
-	prompt := chatModel.lastPrompt()
-	for _, expected := range []string{
-		"状态：成功", "verification_report", `"degraded":true`, `"check":"inspection"`,
-		`"error_code":"preview_inspection_unavailable"`, "自动质检暂不可用，请稍后重试。", "preview_degraded",
+	for _, forbidden := range []string{
+		"verification_report", "render_inspection", "content_contract",
+		`"degraded":true`, "preview_inspection_unavailable", "自动质检",
 	} {
-		if !strings.Contains(prompt, expected) {
-			t.Fatalf("prompt missing %q: %s", expected, prompt)
+		if strings.Contains(prompt, forbidden) {
+			t.Fatalf("job bridge 不应注入组合质检字段 %q: %s", forbidden, prompt)
 		}
 	}
-	for _, sensitive := range []string{database.Paths.Objects, missingHash, "ffprobe", "No such file", "no such file"} {
-		if strings.Contains(prompt, sensitive) {
-			t.Fatalf("prompt leaked inspection detail %q: %s", sensitive, prompt)
+	messages, err := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range messages {
+		if message.Kind == "tool" {
+			t.Fatalf("job bridge 不应替模型执行 preview.check: %#v", message)
 		}
 	}
 }
@@ -1947,15 +1921,24 @@ func TestUnderstandingRepeatedRunsAllocateNewSummaryVersion(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_understand_repeat")
-	font := filepath.Join(database.Paths.Temporary, "repeat.otf")
-	if err := os.WriteFile(font, []byte("font fixture"), 0o644); err != nil {
+	video := filepath.Join(database.Paths.Temporary, "repeat.mp4")
+	if _, err := media.RunCommand(
+		t.Context(), "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "color=c=green:s=64x64:r=5:d=0.4",
+		"-c:v", "libx264", "-pix_fmt", "yuv420p", video,
+	); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(video)
+	if err != nil {
 		t.Fatal(err)
 	}
 	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
 		{Type: "AssetImported", Payload: map[string]any{
 			"asset_id": "asset_repeat", "job_id": "job_repeat", "storage_mode": "reference",
-			"reference_path": font, "kind": "font", "source": "local_path",
-			"filename": "repeat.otf", "hash": "repeat", "size": 1, "ingest_status": "ready",
+			"reference_path": video, "kind": "video", "source": "local_path",
+			"filename": "repeat.mp4", "hash": "repeat", "size": info.Size(),
+			"ingest_status": "ready", "usable": true,
 		}},
 		{Type: "AssetLinked", DraftID: "draft_understand_repeat", Payload: map[string]any{
 			"asset_id": "asset_repeat",
@@ -1972,20 +1955,20 @@ func TestUnderstandingRepeatedRunsAllocateNewSummaryVersion(t *testing.T) {
 	ctx := rushestools.WithDraftID(t.Context(), "draft_understand_repeat")
 	cacheHits := 0
 	for _, focus := range []string{"首次", "更深入", "更深入"} {
-		output, err := service.ExecuteTool(ctx, "understand.materials", rushestools.UnderstandInput{
-			AssetIDs: []string{"asset_repeat"}, Focus: focus,
+		output, err := service.ExecuteTool(ctx, "media.detect_shots", rushestools.DetectShotsInput{
+			AssetID: "asset_repeat", Focus: focus,
 		})
 		if err != nil {
 			t.Fatalf("focus=%s err=%v", focus, err)
 		}
-		understood := output.(rushestools.UnderstandResult)
-		if len(understood.Summaries) != 1 || understood.Summaries[0].AssetID != "asset_repeat" ||
-			understood.Summaries[0].Overall == "" || len(understood.Summaries[0].Evidence) != 1 ||
-			understood.Summaries[0].Evidence[0].SourceEndFrame <=
-				understood.Summaries[0].Evidence[0].SourceStartFrame {
+		understood := output.(rushestools.DetectShotsResult)
+		if understood.Summary == nil || understood.Summary.AssetID != "asset_repeat" ||
+			understood.Summary.Overall == "" || len(understood.Summary.Evidence) != 1 ||
+			understood.Summary.Evidence[0].SourceEndFrame <=
+				understood.Summary.Evidence[0].SourceStartFrame {
 			t.Fatalf("understand 同回合缺少摘要或时间证据: %#v", understood)
 		}
-		if len(understood.CacheHitAssetIDs) > 0 {
+		if understood.CacheHit {
 			cacheHits++
 		}
 	}
@@ -2168,6 +2151,120 @@ func TestTimelineToolsComposePatchValidateInspectRestoreAndQueueRender(t *testin
 	}
 }
 
+func TestRewoundTimelineIsSynchronouslyRevalidatedAndQueuedForRender(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_rewind_render"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	versionOne, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+		AssetID: "fixture", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, persistErr := service.executor.PersistTimeline(
+		t.Context(), draftID, versionOne, "rewind_render_v1",
+	); persistErr != nil || result.Status != "succeeded" {
+		t.Fatalf("persist v1=%#v err=%v", result, persistErr)
+	}
+	agenttest.InsertAgentMessage(t, database, draftID, "user_rewind_render", "保留这个版本")
+	checkpoint, err := storage.GetRewindCheckpoint(
+		t.Context(), database.Read(), draftID, "rewind:message:user_rewind_render",
+	)
+	if err != nil || checkpoint.TimelineVersion == nil || *checkpoint.TimelineVersion != 1 {
+		t.Fatalf("checkpoint=%#v err=%v", checkpoint, err)
+	}
+	versionTwo, err := timeline.ComposeInitial(draftID, 2, []timeline.Selection{{
+		AssetID: "fixture", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, persistErr := service.executor.PersistTimeline(
+		t.Context(), draftID, versionTwo, "rewind_render_v2",
+	); persistErr != nil || result.Status != "succeeded" {
+		t.Fatalf("persist v2=%#v err=%v", result, persistErr)
+	}
+	draft, err := storage.GetDraft(t.Context(), database.Read(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoreResult, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "TimelineVersionRestored", DraftID: draftID,
+		Payload: map[string]any{
+			"checkpoint_id": checkpoint.ID, "mode": "timeline", "timeline_version": 3,
+			"restore_checkpoint_id": "rewind:restore:render",
+		},
+	}}, reducer.Options{Actor: contracts.ActorUser, BaseVersion: &draft.StateVersion})
+	if err != nil || restoreResult.Status != reducer.StatusApplied {
+		t.Fatalf("restore=%#v err=%v", restoreResult, err)
+	}
+	rewound, err := storage.GetDraft(t.Context(), database.Read(), draftID)
+	if err != nil || rewound.TimelineCurrentVersion == nil ||
+		*rewound.TimelineCurrentVersion != 3 || rewound.TimelineValidated {
+		t.Fatalf("rewound draft=%#v err=%v", rewound, err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	allowed, err := service.Tools().Allowed(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, toolName := range []string{"render.preview", "render.final_mp4"} {
+		found := false
+		for _, spec := range allowed {
+			found = found || spec.Name == toolName
+		}
+		if !found {
+			t.Fatalf("回退后工具面未放行 %s: %#v", toolName, allowed)
+		}
+	}
+	raw, err := service.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	renderResult := raw.(rushestools.ToolResult)
+	if renderResult.Status != "queued" {
+		t.Fatalf("render result=%#v", renderResult)
+	}
+	afterRender, err := storage.GetDraft(t.Context(), database.Read(), draftID)
+	if err != nil || !afterRender.TimelineValidated ||
+		afterRender.TimelineCurrentVersion == nil || *afterRender.TimelineCurrentVersion != 3 {
+		t.Fatalf("after render=%#v err=%v", afterRender, err)
+	}
+	var validationEvents int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM event_log
+		WHERE draft_id=? AND event_type='TimelineValidated'`, draftID,
+	).Scan(&validationEvents); err != nil || validationEvents != 3 {
+		t.Fatalf("validation events=%d err=%v", validationEvents, err)
+	}
+	var validationReportJSON *string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT validation_report_json FROM timeline_versions
+		WHERE draft_id=? AND version=3`, draftID,
+	).Scan(&validationReportJSON); err != nil || validationReportJSON == nil {
+		t.Fatalf("rewound validation report=%v err=%v", validationReportJSON, err)
+	}
+	var payloadJSON string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT payload_json FROM jobs
+		WHERE draft_id=? AND kind='render_preview'`, draftID,
+	).Scan(&payloadJSON); err != nil {
+		t.Fatal(err)
+	}
+	payload := map[string]any{}
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil ||
+		payload["timeline_version"] != float64(3) {
+		t.Fatalf("job payload=%#v err=%v", payload, err)
+	}
+}
+
 func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")
@@ -2215,7 +2312,7 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	if service.Tools() == nil {
 		t.Fatal("registry missing")
 	}
-	validatedRaw, err := service.ExecuteTool(ctx, "timeline.validate", rushestools.TimelineValidateInput{})
+	validatedRaw, err := service.ExecuteTool(ctx, "timeline.check", rushestools.TimelineCheckInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2267,8 +2364,8 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 		{Question: "未知工具？", ToolName: "missing", Arguments: map[string]any{}},
 		{Question: "嵌套确认？", ToolName: "interaction.confirm_action", Arguments: map[string]any{}},
 		{Question: "错误字段？", ToolName: "timeline.inspect", Arguments: map[string]any{"unknown": true}},
-		{Question: "空参数？", ToolName: "understand.materials", Arguments: nil},
-		{Question: "缺少素材？", ToolName: "understand.materials", Arguments: map[string]any{}},
+		{Question: "空参数？", ToolName: "media.detect_shots", Arguments: nil},
+		{Question: "缺少素材？", ToolName: "media.detect_shots", Arguments: map[string]any{}},
 		{Question: "空画幅？", ToolName: "render.final_mp4", Arguments: map[string]any{"orientation": nil}},
 		{Question: "片段参数缺失？", ToolName: "timeline.compose_initial", Arguments: map[string]any{"clips": []any{map[string]any{}}}},
 		{Question: "空批量补丁？", ToolName: "timeline.apply_patches", Arguments: map[string]any{"ops": []any{nil}}},
@@ -2309,7 +2406,7 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 		t.Fatalf("cancelled=%q err=%v", cancelled, err)
 	}
 	if _, err := service.replayPendingTool(ctx, QueueItem{DraftID: "draft_full", Payload: map[string]any{
-		"pending_tool_call": map[string]any{"tool_name": "understand.materials", "arguments": nil},
+		"pending_tool_call": map[string]any{"tool_name": "media.detect_shots", "arguments": nil},
 		"answer":            map[string]any{"option_id": "confirm"},
 	}}); err == nil {
 		t.Fatal("nil confirmation arguments must fail replay validation")
@@ -2368,21 +2465,23 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("preview status=%s err=%v", result.Status, err)
 	}
-	preview, err := service.ExecuteTool(ctx, "render.inspect_preview", rushestools.RenderInspectInput{
-		PreviewID: "preview_inspect", Checks: []string{"decode"},
+	preview, err := service.ExecuteTool(ctx, "preview.check", rushestools.PreviewCheckInput{
+		PreviewID: "preview_inspect", Check: "decode",
 	})
 	if err != nil || preview.(rushestools.PreviewInspectionResult).Summary == "" {
 		t.Fatalf("preview=%#v err=%v", preview, err)
 	}
-	visualPreview, err := service.ExecuteTool(ctx, "render.inspect_preview", rushestools.RenderInspectInput{
-		PreviewID: "preview_inspect", Checks: []string{"visual"},
+	visualPreview, err := service.ExecuteTool(ctx, "preview.check", rushestools.PreviewCheckInput{
+		PreviewID: "preview_inspect", Check: "visual",
 	})
 	visualResult := visualPreview.(rushestools.PreviewInspectionResult)
 	if err != nil || !visualResult.Degraded || visualResult.VisualFrameCount == 0 ||
 		len(visualResult.Issues) != 1 || visualResult.Issues[0]["check"] != "dependencies" {
 		t.Fatalf("visual preview=%#v err=%v", visualResult, err)
 	}
-	if _, err := service.ExecuteTool(ctx, "render.inspect_preview", rushestools.RenderInspectInput{PreviewID: "missing"}); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := service.ExecuteTool(ctx, "preview.check", rushestools.PreviewCheckInput{
+		PreviewID: "missing", Check: "decode",
+	}); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("missing preview err=%v", err)
 	}
 	if _, err := service.ExecuteTool(ctx, "asset.import_local_file", rushestools.AssetImportInput{}); err == nil {
@@ -2546,12 +2645,12 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_failures")
 	for name, input := range map[string]any{
-		"understand.materials":        rushestools.UnderstandInput{},
+		"media.detect_shots":          rushestools.DetectShotsInput{},
 		"audio.analyze_beats":         rushestools.AudioBeatAnalysisInput{},
 		"audio.analyze_speech_pauses": rushestools.SpeechPauseAnalysisInput{},
 		"timeline.apply_patches":      rushestools.TimelinePatchBatchInput{},
 		"timeline.recut_to_beats":     rushestools.TimelineBeatRecutInput{},
-		"timeline.validate":           rushestools.TimelineValidateInput{},
+		"timeline.check":              rushestools.TimelineCheckInput{},
 		"timeline.inspect":            rushestools.TimelineInspectInput{},
 		"render.preview":              rushestools.RenderPreviewInput{},
 		"render.final_mp4":            rushestools.RenderFinalInput{},
@@ -2584,7 +2683,7 @@ func TestServiceAndToolFailureBranches(t *testing.T) {
 	if err != nil || result.Status != "validation_failed" {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
-	if _, err := service.ExecuteTool(ctx, "timeline.validate", rushestools.TimelineValidateInput{}); err != nil {
+	if _, err := service.ExecuteTool(ctx, "timeline.check", rushestools.TimelineCheckInput{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3239,7 +3338,7 @@ func TestBeatRecutToolRebuildsFullLengthMixFromSourceAssets(t *testing.T) {
 		t.Fatalf("use_all 未覆盖全部素材: %#v", usedByAsset)
 	}
 
-	searchOutput, searchErr := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	searchOutput, searchErr := service.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
 		Query: "角色转身 动作切点", AssetIDs: []string{"mix_video_1"}, MinDurationFrames: 30,
 	})
 	if searchErr != nil {
@@ -3625,8 +3724,8 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 	ctx := rushestools.WithDraftID(t.Context(), "draft_closed")
 	for name, input := range map[string]any{
 		"asset.list_assets":           rushestools.AssetListInput{},
-		"understand.materials":        rushestools.UnderstandInput{AssetIDs: []string{"asset"}},
-		"media.search_shots":          rushestools.ShotSearchInput{},
+		"media.detect_shots":          rushestools.DetectShotsInput{AssetID: "asset"},
+		"shot.search":                 rushestools.ShotSearchInput{},
 		"audio.analyze_beats":         rushestools.AudioBeatAnalysisInput{AssetID: "asset"},
 		"audio.analyze_speech_pauses": rushestools.SpeechPauseAnalysisInput{AssetID: "asset"},
 		"interaction.ask_user":        rushestools.AskUserInput{Question: "?", DecisionType: "critical"},
@@ -3635,12 +3734,12 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 		"timeline.compose_initial":    rushestools.ComposeInitialInput{},
 		"timeline.apply_patches":      rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{"kind": "noop"}}},
 		"timeline.recut_to_beats":     rushestools.TimelineBeatRecutInput{CutFrames: []int{30}, BGMTimelineClipID: "bgm"},
-		"timeline.validate":           rushestools.TimelineValidateInput{},
+		"timeline.check":              rushestools.TimelineCheckInput{},
 		"timeline.inspect":            rushestools.TimelineInspectInput{},
 		"render.preview":              rushestools.RenderPreviewInput{},
 		"render.final_mp4":            rushestools.RenderFinalInput{},
 		"render.status":               rushestools.RenderStatusInput{},
-		"render.inspect_preview":      rushestools.RenderInspectInput{PreviewID: "preview"},
+		"preview.check":               rushestools.PreviewCheckInput{PreviewID: "preview", Check: "decode"},
 	} {
 		if _, err := service.ExecuteTool(ctx, name, input); err == nil {
 			t.Fatalf("closed database: %s 应失败", name)

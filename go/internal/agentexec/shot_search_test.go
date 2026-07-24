@@ -73,23 +73,23 @@ func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_shot_search")
-	if _, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	if _, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
 		MinDurationFrames: 90, MaxDurationFrames: 30,
 	}); err == nil {
 		t.Fatal("无效时长范围应失败")
 	}
-	if _, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	if _, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
 		AssetIDs: []string{"missing"},
 	}); err == nil {
 		t.Fatal("未知素材过滤应失败")
 	}
-	if _, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	if _, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
 		SemanticRoles: []string{"supporting"},
 	}); err == nil {
 		t.Fatal("未知视觉角色应失败")
 	}
 
-	output, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	output, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
 		Query: "夜晚火焰人物 高潮", Tags: []string{"火焰"},
 		MinDurationFrames: 30, MaxDurationFrames: 90, SemanticRoles: []string{"b_roll"},
 	})
@@ -99,27 +99,27 @@ func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 	result := output.(rushestools.ShotSearchResult)
 	if len(result.Shots) != 1 || result.Shots[0].SourceStartFrame != 0 ||
 		result.Shots[0].ShotID == "" || result.Shots[0].SemanticRole != "b_roll" ||
-		len(result.MissingUnderstandingAssetIDs) != 1 ||
+		len(result.MissingIndexAssetIDs) != 1 ||
 		len(result.Shots[0].MatchedQueryTerms) == 0 || len(result.Shots[0].MatchEvidence) == 0 {
 		t.Fatalf("search result=%#v", result)
 	}
 
-	missingOutput, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	missingOutput, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
 		Query: "键盘指纹解锁", SemanticRoles: []string{"b_roll"}, Limit: 5,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	missing := missingOutput.(rushestools.ShotSearchResult)
-	if len(missing.Shots) != 0 || len(missing.UnderstandingCandidates) != 1 ||
-		missing.UnderstandingCandidates[0].AssetID != "video_missing" ||
-		missing.UnderstandingCandidates[0].Filename != "键盘指纹聚焦.mov" ||
-		len(missing.UnderstandingCandidates[0].MatchedQueryTerms) == 0 ||
-		len(missing.UnderstandingCandidates[0].MatchEvidence) == 0 {
+	if len(missing.Shots) != 0 || len(missing.DetectionCandidates) != 1 ||
+		missing.DetectionCandidates[0].AssetID != "video_missing" ||
+		missing.DetectionCandidates[0].Filename != "键盘指纹聚焦.mov" ||
+		len(missing.DetectionCandidates[0].MatchedQueryTerms) == 0 ||
+		len(missing.DetectionCandidates[0].MatchEvidence) == 0 {
 		t.Fatalf("missing understanding search=%#v", missing)
 	}
 
-	allOutput, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Limit: 1})
+	allOutput, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{Limit: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 	if persisted, err := exec.PersistTimeline(t.Context(), "draft_shot_search", document, "shot_search_fixture"); err != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
-	excludedOutput, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	excludedOutput, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
 		Query: "火焰", ExcludeUsed: true,
 	})
 	if err != nil {
@@ -181,7 +181,7 @@ func TestShotSearchJoinsTranscriptByOverlapAndMarksTermSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_transcript_search")
-	crossRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "跨段口令"})
+	crossRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{Query: "跨段口令"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +201,7 @@ func TestShotSearchJoinsTranscriptByOverlapAndMarksTermSource(t *testing.T) {
 			t.Fatalf("shot=%#v", shot)
 		}
 	}
-	secondRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "第二专属词"})
+	secondRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{Query: "第二专属词"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestShotSearchJoinsTranscriptByOverlapAndMarksTermSource(t *testing.T) {
 	if len(second.Shots) != 1 || second.Shots[0].SourceStartFrame != 60 || !strings.Contains(second.Shots[0].Transcript, "第二专属词") {
 		t.Fatalf("second shots=%#v", second.Shots)
 	}
-	qualityRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{Query: "人物口播"})
+	qualityRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{Query: "人物口播"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +299,7 @@ func TestShotSearchRanksSegmentEvidenceAboveSharedFilename(t *testing.T) {
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_segment_ranking")
 
-	yearRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	yearRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
 		Query: "2015年 MacBook Force Touch 触控板 历史", AssetIDs: []string{"video_year"}, Limit: 5,
 	})
 	if err != nil {
@@ -310,7 +310,7 @@ func TestShotSearchRanksSegmentEvidenceAboveSharedFilename(t *testing.T) {
 		t.Fatalf("year ranking=%#v", year.Shots)
 	}
 
-	backlightRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	backlightRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
 		Query: "键盘背光 无背光 晚上打字", AssetIDs: []string{"video_backlight"}, Limit: 5,
 	})
 	if err != nil {
@@ -375,25 +375,25 @@ func TestShotSearchReportsUnderstandingCoverageGap(t *testing.T) {
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_coverage")
 
-	gapRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{})
+	gapRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	gap := gapRaw.(rushestools.ShotSearchResult)
-	if len(gap.MissingUnderstandingAssetIDs) != 1 ||
-		!strings.Contains(gap.UnderstandingCoverageNote, "1 个") ||
-		!strings.Contains(gap.UnderstandingCoverageNote, "understand.materials") {
+	if len(gap.MissingIndexAssetIDs) != 1 ||
+		!strings.Contains(gap.IndexCoverageNote, "1 个") ||
+		!strings.Contains(gap.IndexCoverageNote, "media.detect_shots") {
 		t.Fatalf("存在未理解素材时应报告覆盖缺口: %#v", gap)
 	}
 
 	insertSummary("video_pending", "户外街景空镜")
 
-	fullRaw, err := exec.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{})
+	fullRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	full := fullRaw.(rushestools.ShotSearchResult)
-	if len(full.MissingUnderstandingAssetIDs) != 0 || full.UnderstandingCoverageNote != "" {
+	if len(full.MissingIndexAssetIDs) != 0 || full.IndexCoverageNote != "" {
 		t.Fatalf("全部理解后不应再有覆盖提示: %#v", full)
 	}
 }

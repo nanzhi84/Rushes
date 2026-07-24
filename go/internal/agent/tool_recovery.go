@@ -26,7 +26,7 @@ const (
 	// 交替 fail→success 会不断清空连击预算（recordSuccess），单靠 maxModelRepairAttempts
 	// 无法收敛（#95 H4）。turn 级累计计数不因成功重置，累计到此阈值同样触发穷尽。
 	maxCumulativeRepairAttempts = 10
-	// 64 KiB 仅是早期观测阈值，不改变结果语义；speech.inspect 等合法大结果仍完整回灌。
+	// 64 KiB 仅是早期观测阈值，不改变结果语义；speech.search 等合法大结果仍完整回灌。
 	toolResultSoftLimitBytes = 64 << 10
 )
 
@@ -455,24 +455,12 @@ func isStructuredToolFailure(raw string) bool {
 	return payload.Status == string(rushestools.StatusFailed) || payload.Status == string(rushestools.StatusValidationFailed)
 }
 
-// retrySafeFromEffect 从工具注册表的 Effect 分级派生「瞬时失败可重试」白名单（#103 G1），
-// 取代此前硬编码的九工具白名单。只读工具一律重试安全；timeline.validate 与 speech.inspect
-// 虽被归为 EffectReversible，却仍然重试安全——两者都经事务型 reducer 按稳定键落盘，顺序
-// 重放幂等，重试瞬时失败不会重复提交已生效状态。该白名单刻意宽于 G3 的只读并发集合（后者
-// 必须严格 EffectReadOnly）：重试是顺序执行，speech.inspect「并发首调重复建索引」这一
-// 使它无法归 EffectReadOnly 的隐患在顺序重试下并不成立。
+// retrySafeFromEffect 从工具注册表的 Effect 分级派生「瞬时失败可重试」白名单（#103 G1）。
+// 只有纯 read/check 由 EffectReadOnly 自动放行；任何持久化调用在提交结果未知时都不能盲目重放。
 func retrySafeFromEffect(effectOf func(string) (rushestools.Effect, bool)) func(string) bool {
 	return func(name string) bool {
-		if effect, ok := effectOf(name); ok && effect == rushestools.EffectReadOnly {
-			return true
-		}
-		switch name {
-		case "timeline.validate", "speech.inspect":
-			return true
-		default:
-			// 写时间线、创建决策、排队理解/渲染等调用不能在提交状态未知时盲目重放。
-			return false
-		}
+		effect, ok := effectOf(name)
+		return ok && effect == rushestools.EffectReadOnly
 	}
 }
 

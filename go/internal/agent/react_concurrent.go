@@ -22,8 +22,8 @@ type concurrentReactState struct {
 }
 
 // concurrentReactAgent 是 eino react 图的 Rushes 复刻(#103 G3b 路线 2a)。唯一实质差异:把单个
-// ToolsNode 换成按 registry.Effect 逐消息路由的 toolRouter——一条 assistant 消息的 tool_calls
-// 全为只读则并行执行、含写则串行(保序是正确性)。模型侧语义全部原样保留:同一 H5 直通包装模型、
+// ToolsNode 换成按 Registry Spec 逐消息路由的 toolRouter——纯读与资源隔离 detector 并行，
+// edit/control 及重复 detector 资源串行保序。模型侧语义全部原样保留:同一 H5 直通包装模型、
 // 同一 StreamToolCallChecker(含 H5 早退)、同一 MessageModifier(H1b turnBudget)、同一
 // modelPreHandle/toolsPreHandle 状态累积、同一 MaxStep/AnyPredecessor 编译。
 //
@@ -38,7 +38,7 @@ func newConcurrentReactAgent(
 	ctx context.Context,
 	chatModel model.ToolCallingChatModel,
 	toolsConfig compose.ToolsNodeConfig,
-	effectOf func(string) (rushestools.Effect, bool),
+	specOf func(string) (rushestools.Spec, bool),
 	maxStep int,
 	toolCallChecker func(context.Context, *schema.StreamReader[*schema.Message]) (bool, error),
 	messageModifier func(context.Context, []*schema.Message) []*schema.Message,
@@ -54,7 +54,7 @@ func newConcurrentReactAgent(
 	if err != nil {
 		return nil, err
 	}
-	router, err := newToolRouter(ctx, toolsConfig, effectOf)
+	router, err := newToolRouter(ctx, toolsConfig, specOf)
 	if err != nil {
 		return nil, err
 	}

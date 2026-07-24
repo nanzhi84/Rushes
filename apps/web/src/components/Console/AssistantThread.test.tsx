@@ -32,7 +32,7 @@ describe("AssistantThread Claude Code 式消息流", () => {
           {
             type: "tool",
             step_id: "s1",
-            tool: "understand.materials",
+            tool: "media.detect_shots",
             status: "running",
             argsSummary: null,
             observation: null
@@ -40,7 +40,7 @@ describe("AssistantThread Claude Code 式消息流", () => {
         ]}
       />
     );
-    expect(indicator.getAttribute("data-turn-activity")).toBe("正在理解素材");
+    expect(indicator.getAttribute("data-turn-activity")).toBe("正在检测镜头");
     expect(screen.getByText(/00:03/)).toBeTruthy();
 
     view.rerender(
@@ -52,7 +52,7 @@ describe("AssistantThread Claude Code 式消息流", () => {
           {
             type: "tool",
             step_id: "s2",
-            tool: "media.search_shots",
+            tool: "shot.search",
             status: "running",
             argsSummary: null,
             observation: null
@@ -104,7 +104,7 @@ describe("AssistantThread Claude Code 式消息流", () => {
       {
         type: "tool",
         step_id: "s1",
-        tool: "understand.materials",
+        tool: "media.detect_shots",
         status: "running",
         argsSummary: "{\"asset_ids\":[\"a1\"]}",
         observation: null

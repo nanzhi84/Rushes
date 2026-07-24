@@ -107,14 +107,14 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_talking_head")
 
-	inspectRaw, err := service.ExecuteTool(ctx, "speech.inspect", rushestools.SpeechInspectInput{
+	inspectRaw, err := service.ExecuteTool(ctx, "speech.search", rushestools.SpeechSearchInput{
 		TimelineClipID: "clip_v1_001", Query: "指纹解锁",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	inspect := inspectRaw.(rushestools.SpeechInspectResult)
-	if !inspect.CacheHit || inspect.ProviderID != "sidecar-srt" || len(inspect.Utterances) != 1 ||
+	inspect := inspectRaw.(rushestools.SpeechSearchResult)
+	if inspect.ProviderID != "sidecar-srt" || len(inspect.Utterances) != 1 ||
 		inspect.Utterances[0].UtteranceID != "utt_fingerprint" || len(inspect.Pauses) != 1 {
 		t.Fatalf("inspect=%#v", inspect)
 	}
@@ -128,7 +128,7 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 		t.Fatalf("口播上下文索引或全文隔离无效: %s", contextText)
 	}
 
-	searchRaw, err := service.ExecuteTool(ctx, "media.search_shots", rushestools.ShotSearchInput{
+	searchRaw, err := service.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
 		Query: "指纹解锁 键盘右上角", SemanticRoles: []string{"b_roll"}, Limit: 5,
 	})
 	if err != nil {
@@ -713,14 +713,14 @@ func TestTalkingHeadEditDeletesExactWordRangeWithoutSwallowingRetainedSpeech(t *
 		t.Fatalf("persist=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_talking_head_words")
-	inspectRaw, err := service.ExecuteTool(ctx, "speech.inspect", rushestools.SpeechInspectInput{
+	inspectRaw, err := service.ExecuteTool(ctx, "speech.search", rushestools.SpeechSearchInput{
 		TimelineClipID: "clip_v1_001", IncludeWords: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	inspect := inspectRaw.(rushestools.SpeechInspectResult)
-	if !inspect.CacheHit || inspect.WordTotal != 5 || len(inspect.Utterances) != 1 ||
+	inspect := inspectRaw.(rushestools.SpeechSearchResult)
+	if inspect.WordTotal != 5 || len(inspect.Utterances) != 1 ||
 		len(inspect.Utterances[0].Words) != 5 {
 		t.Fatalf("inspect=%#v", inspect)
 	}

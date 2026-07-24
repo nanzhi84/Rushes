@@ -36,7 +36,7 @@ func (recognizer *fakeSpeechRecognizer) Recognize(
 	}, nil
 }
 
-func TestSpeechInspectSkipsOnlyChunksWithoutWords(t *testing.T) {
+func TestSpeechTranscribeSkipsOnlyChunksWithoutWords(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_speech_partial")
@@ -48,7 +48,7 @@ func TestSpeechInspectSkipsOnlyChunksWithoutWords(t *testing.T) {
 	}
 	recognizer := &fakeSpeechRecognizer{noWordsCalls: map[int]bool{1: true}}
 	exec.SetSpeechRecognizer(recognizer)
-	result, err := exec.toolInspectSpeech(t.Context(), "draft_speech_partial", rushestools.SpeechInspectInput{
+	result, err := exec.toolTranscribeSpeech(t.Context(), "draft_speech_partial", rushestools.SpeechTranscribeInput{
 		AssetID: "asset_speech_partial", Language: "zh",
 	})
 	if err != nil {
@@ -60,7 +60,7 @@ func TestSpeechInspectSkipsOnlyChunksWithoutWords(t *testing.T) {
 	}
 }
 
-func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
+func TestSpeechTranscribeBuildsSidecarAndSearchStaysReadOnly(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_speech_sidecar")
@@ -77,25 +77,47 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := exec.toolInspectSpeech(
-		t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{},
+	if _, err := exec.toolSearchSpeech(
+		t.Context(), "draft_speech_sidecar", rushestools.SpeechSearchInput{},
 	); err == nil {
 		t.Fatal("缺少 asset_id/timeline_clip_id 应失败")
 	}
-	if _, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+	if _, err := exec.toolSearchSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechSearchInput{
 		AssetID: "missing",
 	}); err == nil {
 		t.Fatal("未知素材应失败")
 	}
-	first, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+	beforeMissingSearch := databaseBusinessSnapshot(t, database)
+	missing, err := exec.toolSearchSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechSearchInput{
+		AssetID: "asset_speech_sidecar",
+	})
+	if err != nil || missing.ErrorCode != string(rushestools.ErrCodeIndexMissing) {
+		t.Fatalf("missing=%#v err=%v", missing, err)
+	}
+	if after := databaseBusinessSnapshot(t, database); after != beforeMissingSearch {
+		t.Fatal("缺失索引的 speech.search 写入了业务状态")
+	}
+	firstTranscript, err := exec.toolTranscribeSpeech(
+		t.Context(),
+		"draft_speech_sidecar",
+		rushestools.SpeechTranscribeInput{AssetID: "asset_speech_sidecar"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeIndexedSearch := databaseBusinessSnapshot(t, database)
+	first, err := exec.toolSearchSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechSearchInput{
 		AssetID: "asset_speech_sidecar", IncludeSimilar: BoolPointer(true), IncludePauses: BoolPointer(false),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.CacheHit || first.ProviderID != "sidecar-srt" || first.UtteranceTotal != 2 ||
+	if firstTranscript.CacheHit || first.ProviderID != "sidecar-srt" || first.UtteranceTotal != 2 ||
 		len(first.SimilarPairs) != 1 || len(first.Pauses) != 0 {
 		t.Fatalf("first=%#v", first)
+	}
+	if after := databaseBusinessSnapshot(t, database); after != beforeIndexedSearch {
+		t.Fatal("命中索引的 speech.search 写入了业务状态")
 	}
 	for _, required := range []string{
 		"repetition_decisions", "按可安全删除时长从长到短", "previous_context",
@@ -105,30 +127,38 @@ func TestSpeechInspectBuildsSidecarTranscriptThenReusesCache(t *testing.T) {
 			t.Fatalf("usage note missing %q: %s", required, first.UsageNote)
 		}
 	}
-	second, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+	second, err := exec.toolSearchSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechSearchInput{
 		AssetID: "asset_speech_sidecar", Query: "第一句", MaxUtterances: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !second.CacheHit || len(second.Utterances) != 1 || !second.Truncated {
+	if len(second.Utterances) != 1 || !second.Truncated {
 		t.Fatalf("second=%#v", second)
 	}
-	refreshed, err := exec.toolInspectSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechInspectInput{
+	cachedTranscript, err := exec.toolTranscribeSpeech(
+		t.Context(),
+		"draft_speech_sidecar",
+		rushestools.SpeechTranscribeInput{AssetID: "asset_speech_sidecar"},
+	)
+	if err != nil || !cachedTranscript.CacheHit {
+		t.Fatalf("cached=%#v err=%v", cachedTranscript, err)
+	}
+	refreshed, err := exec.toolTranscribeSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechTranscribeInput{
 		AssetID: "asset_speech_sidecar", ForceRefresh: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if refreshed.CacheHit || refreshed.TranscriptID == first.TranscriptID {
-		t.Fatalf("refreshed=%#v first=%#v", refreshed, first)
+	if refreshed.CacheHit || refreshed.TranscriptID == firstTranscript.TranscriptID {
+		t.Fatalf("refreshed=%#v first=%#v", refreshed, firstTranscript)
 	}
 	if _, err := storage.LatestTranscript(t.Context(), database.Read(), "asset_speech_sidecar"); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestSpeechInspectUsesChunkedRecognizerWithoutSidecar(t *testing.T) {
+func TestSpeechTranscribeUsesChunkedRecognizerWithoutSidecar(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_speech_asr")
@@ -138,20 +168,26 @@ func TestSpeechInspectUsesChunkedRecognizerWithoutSidecar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := exec.toolInspectSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechInspectInput{
+	if _, err := exec.toolTranscribeSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechTranscribeInput{
 		AssetID: "asset_speech_asr",
 	}); err == nil {
 		t.Fatal("无 sidecar 且未配置 ASR 应失败")
 	}
 	recognizer := &fakeSpeechRecognizer{}
 	exec.SetSpeechRecognizer(recognizer)
-	result, err := exec.toolInspectSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechInspectInput{
+	transcribed, err := exec.toolTranscribeSpeech(t.Context(), "draft_speech_asr", rushestools.SpeechTranscribeInput{
 		AssetID: "asset_speech_asr", Language: "zh",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recognizer.calls != 1 || result.ProviderID != "fake-asr+local-frame-alignment" ||
+	result, err := exec.toolSearchSpeech(
+		t.Context(), "draft_speech_asr", rushestools.SpeechSearchInput{AssetID: "asset_speech_asr"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recognizer.calls != 1 || transcribed.ProviderID != "fake-asr+local-frame-alignment" ||
 		result.UtteranceTotal != 2 || result.Utterances[0].Language != "zh" ||
 		result.Utterances[0].Emotion != "neutral" {
 		t.Fatalf("calls=%d result=%#v", recognizer.calls, result)
@@ -329,9 +365,9 @@ func TestIntraUtteranceSpeechRepetitionsExposeRepeatedTakesAndAdjacentWords(t *t
 	}
 }
 
-func TestSpeechInspectResultSerializesDecisionEvidenceBeforeUtterances(t *testing.T) {
+func TestSpeechSearchResultSerializesDecisionEvidenceBeforeUtterances(t *testing.T) {
 	t.Parallel()
-	encoded, err := json.Marshal(rushestools.SpeechInspectResult{
+	encoded, err := json.Marshal(rushestools.SpeechSearchResult{
 		Repetitions:    []rushestools.SpeechRepetitionEvidence{{RepetitionID: "repeat_1"}},
 		ShortFragments: []rushestools.SpeechFragmentEvidence{{FragmentID: "fragment_1"}},
 		Pauses:         []rushestools.SpeechPauseEvidence{{PauseID: "pause_1"}},

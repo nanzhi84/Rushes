@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 
@@ -11,24 +10,17 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
-func TestNormalizePreviewInspectionChecks(t *testing.T) {
+func TestNormalizePreviewCheck(t *testing.T) {
 	t.Parallel()
-	for _, checks := range [][]string{{"visaul"}, {" "}, {"decode", "unknown"}} {
-		if _, err := agentexec.NormalizePreviewInspectionChecks(checks); err == nil {
-			t.Fatalf("checks=%q should fail", checks)
+	for _, check := range []string{"visaul", " "} {
+		if _, err := agentexec.NormalizePreviewCheck(check); err == nil {
+			t.Fatalf("check=%q should fail", check)
 		}
 	}
-	for _, test := range []struct {
-		checks []string
-		want   []string
-	}{
-		{checks: nil, want: []string{}},
-		{checks: []string{" decode ", "decode", "visual"}, want: []string{"decode", "visual"}},
-		{checks: []string{"visual"}, want: []string{"visual"}},
-	} {
-		got, err := agentexec.NormalizePreviewInspectionChecks(test.checks)
-		if err != nil || !reflect.DeepEqual(got, test.want) {
-			t.Fatalf("checks=%q got=%q want=%q err=%v", test.checks, got, test.want, err)
+	for _, check := range []string{"decode", "black", "freeze", "silence", "loudness", "visual"} {
+		got, err := agentexec.NormalizePreviewCheck(" " + check + " ")
+		if err != nil || got != check {
+			t.Fatalf("check=%q got=%q err=%v", check, got, err)
 		}
 	}
 }

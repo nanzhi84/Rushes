@@ -62,11 +62,11 @@ func TestAgentRecoveryMiddlewareFailuresCarryRecovery(t *testing.T) {
 	}
 	assertFailureJSONHasRecovery(t, "unknown_tool", unknown)
 	assertFailureJSONHasRecovery(t, "execution_error",
-		executionErrorOutput("timeline.validate", errors.New("boom"), 1, false))
+		executionErrorOutput("timeline.check", errors.New("boom"), 1, false))
 	assertFailureJSONHasRecovery(t, "blocked_duplicate",
-		blockedToolCallOutput(&compose.ToolInput{Name: "timeline.validate"}, recoveryDecision{duplicate: true}))
+		blockedToolCallOutput(&compose.ToolInput{Name: "timeline.check"}, recoveryDecision{duplicate: true}))
 	assertFailureJSONHasRecovery(t, "blocked_exhausted",
-		blockedToolCallOutput(&compose.ToolInput{Name: "timeline.validate"}, recoveryDecision{exhausted: true}))
+		blockedToolCallOutput(&compose.ToolInput{Name: "timeline.check"}, recoveryDecision{exhausted: true}))
 }
 
 // TestExecutorStructuredFailuresCarryRecovery 通过 Service.ExecuteTool 触发领域层代表性结构化

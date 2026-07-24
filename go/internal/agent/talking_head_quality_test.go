@@ -126,7 +126,7 @@ func TestSpeechQualityReportMatchesAnchorShapedTimeline(t *testing.T) {
 	}
 }
 
-// TestSpeechQualityReportSurfacesInValidateAndEdit 验证报告进两处：timeline.validate
+// TestSpeechQualityReportSurfacesInValidateAndEdit 验证报告进两处：timeline.check
 // 的 Data 与 edit_talking_head 成功 observation。
 func TestSpeechQualityReportSurfacesInValidateAndEdit(t *testing.T) {
 	t.Parallel()
@@ -158,7 +158,7 @@ func TestSpeechQualityReportSurfacesInValidateAndEdit(t *testing.T) {
 	}
 	ctx := rushestools.WithDraftID(t.Context(), "draft_q6_surface")
 
-	validateRaw, err := service.ExecuteTool(ctx, "timeline.validate", rushestools.TimelineValidateInput{})
+	validateRaw, err := service.ExecuteTool(ctx, "timeline.check", rushestools.TimelineCheckInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,14 +471,14 @@ func TestValidateTimelineSoftSkipsBrokenQualityReport(t *testing.T) {
 	}
 
 	validatedRaw, err := service.ExecuteTool(
-		rushestools.WithDraftID(t.Context(), "draft_validate_softskip"), "timeline.validate", rushestools.TimelineValidateInput{},
+		rushestools.WithDraftID(t.Context(), "draft_validate_softskip"), "timeline.check", rushestools.TimelineCheckInput{},
 	)
 	if err != nil {
 		t.Fatalf("validate 应软跳过质检读取失败，却返回错误：%v", err)
 	}
 	validated, ok := validatedRaw.(rushestools.ToolResult)
 	if !ok {
-		t.Fatalf("timeline.validate 返回类型异常: %T", validatedRaw)
+		t.Fatalf("timeline.check 返回类型异常: %T", validatedRaw)
 	}
 	if validated.Status != "succeeded" {
 		t.Fatalf("validate status=%q，期望 succeeded（结构合法的时间线不应因质检读取失败降级）", validated.Status)

@@ -22,6 +22,28 @@ import (
 
 const assetListUsageNote = "asset_id 是后续调用使用的稳定素材 ID；filename 只用于识别素材，不是本地路径；kind 决定 video/audio/image/font 类型。duration_frames 的标尺是 timeline_fps；usable=false 的素材不可用于剪辑，ingest_status 与 understanding_status 分别表示导入和素材理解状态。rel_dir 与 suggested_visual_role 用于识别 A-roll/B-roll，音频按 suggested_role 区分 bgm/sfx。"
 
+// understandInput/understandResult 是现有异步素材理解 job 的内部批处理载荷。
+// 模型契约只通过 DetectShotsInput/DetectShotsResult 暴露单素材调用。
+type understandInput struct {
+	AssetIDs         []string
+	Depth            string
+	Focus            string
+	MaxStepsPerAsset int
+	ForceRefresh     bool
+	RefreshNonce     string
+}
+
+type understandResult struct {
+	DraftID          string
+	JobID            string
+	AssetIDs         []string
+	Status           string
+	Summaries        []rushestools.MaterialUnderstandingSummary
+	CacheHitAssetIDs []string
+	AnalyzedAssetIDs []string
+	UsageNote        string
+}
+
 func (exec *Executor) ToolListAssets(
 	ctx context.Context,
 	draftID string,
@@ -86,23 +108,61 @@ func (exec *Executor) ToolListAssets(
 	return result, nil
 }
 
-func (exec *Executor) toolUnderstand(
+func (exec *Executor) toolDetectShots(
 	ctx context.Context,
 	draftID string,
-	input rushestools.UnderstandInput,
-) (rushestools.UnderstandResult, error) {
+	input rushestools.DetectShotsInput,
+) (rushestools.DetectShotsResult, error) {
+	assetID := strings.TrimSpace(input.AssetID)
+	if assetID == "" {
+		return rushestools.DetectShotsResult{}, errors.New("media.detect_shots 需要一个非空 asset_id")
+	}
+	internal, err := exec.executeDetectShots(ctx, draftID, understandInput{
+		AssetIDs: []string{assetID}, Depth: input.Depth, Focus: input.Focus,
+		MaxStepsPerAsset: input.MaxStepsPerAsset, ForceRefresh: input.ForceRefresh,
+		RefreshNonce: input.RefreshNonce,
+	})
+	if err != nil {
+		return rushestools.DetectShotsResult{}, err
+	}
+	result := rushestools.DetectShotsResult{
+		DraftID: internal.DraftID, JobID: internal.JobID, AssetID: assetID,
+		Status: internal.Status, UsageNote: internal.UsageNote,
+		CacheHit: containsString(internal.CacheHitAssetIDs, assetID),
+		Analyzed: containsString(internal.AnalyzedAssetIDs, assetID),
+	}
+	if len(internal.Summaries) > 0 {
+		result.Summary = &internal.Summaries[0]
+	}
+	return result, nil
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func (exec *Executor) executeDetectShots(
+	ctx context.Context,
+	draftID string,
+	input understandInput,
+) (understandResult, error) {
 	request, err := exec.prepareUnderstandRequest(ctx, draftID, input)
 	if err != nil {
-		return rushestools.UnderstandResult{}, err
+		return understandResult{}, err
 	}
 	idempotencyKey, err := understandIdempotencyKey(
 		draftID, request, input.ForceRefresh, input.RefreshNonce,
 	)
 	if err != nil {
-		return rushestools.UnderstandResult{}, err
+		return understandResult{}, err
 	}
 	if existing, found, findErr := exec.findUnderstandJob(ctx, idempotencyKey); findErr != nil {
-		return rushestools.UnderstandResult{}, findErr
+		return understandResult{}, findErr
 	} else if found {
 		if !input.ForceRefresh && request.AllCacheHit &&
 			(existing.Status == "failed" || existing.Status == "cancelled") {
@@ -133,10 +193,10 @@ type preparedUnderstandRequest struct {
 func (exec *Executor) prepareUnderstandRequest(
 	ctx context.Context,
 	draftID string,
-	input rushestools.UnderstandInput,
+	input understandInput,
 ) (preparedUnderstandRequest, error) {
 	if len(input.AssetIDs) == 0 {
-		return preparedUnderstandRequest{}, errors.New("understand.materials 至少需要一个 asset_id")
+		return preparedUnderstandRequest{}, errors.New("media.detect_shots 需要一个 asset_id")
 	}
 	linkedAssets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
@@ -151,14 +211,27 @@ func (exec *Executor) prepareUnderstandRequest(
 	for _, rawAssetID := range input.AssetIDs {
 		assetID := strings.TrimSpace(rawAssetID)
 		if assetID == "" {
-			return preparedUnderstandRequest{}, errors.New("understand.materials 的 asset_id 不能为空")
+			return preparedUnderstandRequest{}, errors.New("media.detect_shots 的 asset_id 不能为空")
 		}
 		if _, exists := seen[assetID]; exists {
 			continue
 		}
 		seen[assetID] = struct{}{}
-		if _, exists := assetByID[assetID]; !exists {
+		asset, exists := assetByID[assetID]
+		if !exists {
 			return preparedUnderstandRequest{}, fmt.Errorf("素材 %s 不属于当前草稿", assetID)
+		}
+		if asset.Kind != "video" {
+			return preparedUnderstandRequest{}, fmt.Errorf(
+				"media.detect_shots 只接受可用 video 素材；素材 %s 的 kind=%s",
+				assetID, asset.Kind,
+			)
+		}
+		if !asset.Usable {
+			return preparedUnderstandRequest{}, fmt.Errorf(
+				"media.detect_shots 只接受可用 video 素材；素材 %s 当前不可用",
+				assetID,
+			)
 		}
 		assetIDs = append(assetIDs, assetID)
 	}
@@ -204,7 +277,7 @@ func (exec *Executor) runUnderstandInline(
 	ctx context.Context,
 	draftID string,
 	request preparedUnderstandRequest,
-) (rushestools.UnderstandResult, error) {
+) (understandResult, error) {
 	runID := ""
 	for _, prepared := range request.Assets {
 		if !prepared.CacheHit {
@@ -216,13 +289,13 @@ func (exec *Executor) runUnderstandInline(
 	analyzedAssetIDs := make([]string, 0, len(request.Assets))
 	for index, prepared := range request.Assets {
 		if err := ctx.Err(); err != nil {
-			return rushestools.UnderstandResult{}, err
+			return understandResult{}, err
 		}
 		asset := prepared.Asset
 		if prepared.CacheHit {
 			summary, err := exec.bestUnderstandingSummary(ctx, asset)
 			if err != nil {
-				return rushestools.UnderstandResult{}, err
+				return understandResult{}, err
 			}
 			summaries = append(summaries, summary)
 			continue
@@ -232,12 +305,12 @@ func (exec *Executor) runUnderstandInline(
 			Payload: map[string]any{"asset_id": asset.ID, "job_id": runID},
 		}}, reducer.Options{Actor: contracts.ActorAgent})
 		if err != nil || started.Status != reducer.StatusApplied {
-			return rushestools.UnderstandResult{}, errors.Join(err, fmt.Errorf("start reducer status: %s", started.Status))
+			return understandResult{}, errors.Join(err, fmt.Errorf("start reducer status: %s", started.Status))
 		}
 		summary, analyzeErr := exec.analyzer.AnalyzeWithOptions(
 			ctx, exec.database, asset, prepared.Options, func(note string) {
 				exec.recordProgress(draftID, map[string]any{
-					"type": contracts.TurnStreamSubagentProgress, "tool": "understand.materials",
+					"type": contracts.TurnStreamSubagentProgress, "tool": "media.detect_shots",
 					"asset_id": asset.ID, "note": note, "completed": index, "total": len(request.Assets),
 				})
 			},
@@ -251,7 +324,7 @@ func (exec *Executor) runUnderstandInline(
 					"failure": map[string]any{"error_code": string(rushestools.ErrCodeUnderstandingFailed), "message": analyzeErr.Error()},
 				},
 			}}, reducer.Options{Actor: contracts.ActorAgent})
-			return rushestools.UnderstandResult{}, analyzeErr
+			return understandResult{}, analyzeErr
 		}
 		var summaryMap map[string]any
 		encoded, _ := json.Marshal(summary)
@@ -270,20 +343,20 @@ func (exec *Executor) runUnderstandInline(
 			}}},
 		})
 		if err != nil || completed.Status != reducer.StatusApplied {
-			return rushestools.UnderstandResult{}, errors.Join(err, fmt.Errorf("complete reducer status: %s", completed.Status))
+			return understandResult{}, errors.Join(err, fmt.Errorf("complete reducer status: %s", completed.Status))
 		}
 		bestSummary, err := exec.bestUnderstandingSummary(ctx, asset)
 		if err != nil {
-			return rushestools.UnderstandResult{}, err
+			return understandResult{}, err
 		}
 		summaries = append(summaries, bestSummary)
 		analyzedAssetIDs = append(analyzedAssetIDs, asset.ID)
 		exec.recordProgress(draftID, map[string]any{
-			"type": contracts.TurnStreamSubagentProgress, "tool": "understand.materials",
+			"type": contracts.TurnStreamSubagentProgress, "tool": "media.detect_shots",
 			"asset_id": asset.ID, "note": "摘要已完成", "completed": index + 1, "total": len(request.Assets),
 		})
 	}
-	return rushestools.UnderstandResult{
+	return understandResult{
 		DraftID: draftID, JobID: runID, AssetIDs: request.AssetIDs, Status: "completed",
 		Summaries: summaries, CacheHitAssetIDs: request.CacheHitAssetIDs, AnalyzedAssetIDs: analyzedAssetIDs,
 	}, nil
@@ -308,10 +381,10 @@ func (exec *Executor) bestUnderstandingSummary(
 func (exec *Executor) enqueueUnderstand(
 	ctx context.Context,
 	draftID string,
-	input rushestools.UnderstandInput,
+	input understandInput,
 	request preparedUnderstandRequest,
 	idempotencyKey string,
-) (rushestools.UnderstandResult, error) {
+) (understandResult, error) {
 	jobID := RandomID("job")
 	firstOptions := request.Assets[0].Options
 	fingerprints := make(map[string]string, len(request.Assets))
@@ -335,11 +408,11 @@ func (exec *Executor) enqueueUnderstand(
 	}}, reducer.Options{Actor: contracts.ActorAgent})
 	if err != nil || result.Status != reducer.StatusApplied {
 		if existing, found, lookupErr := exec.findUnderstandJob(ctx, idempotencyKey); lookupErr != nil {
-			return rushestools.UnderstandResult{}, errors.Join(err, lookupErr)
+			return understandResult{}, errors.Join(err, lookupErr)
 		} else if found {
 			return exec.existingUnderstandResult(ctx, draftID, existing, request)
 		}
-		return rushestools.UnderstandResult{}, errors.Join(err, fmt.Errorf("understand enqueue reducer status: %s", result.Status))
+		return understandResult{}, errors.Join(err, fmt.Errorf("understand enqueue reducer status: %s", result.Status))
 	}
 	return queuedUnderstandResult(draftID, jobID, request), nil
 }
@@ -370,7 +443,7 @@ func (exec *Executor) existingUnderstandResult(
 	draftID string,
 	job understandJobRef,
 	request preparedUnderstandRequest,
-) (rushestools.UnderstandResult, error) {
+) (understandResult, error) {
 	switch job.Status {
 	case "pending", "running":
 		return queuedUnderstandResult(draftID, job.ID, request), nil
@@ -381,30 +454,30 @@ func (exec *Executor) existingUnderstandResult(
 				ctx, job.ID, prepared.Asset.ID, prepared.Fingerprint,
 			)
 			if err != nil {
-				return rushestools.UnderstandResult{}, fmt.Errorf(
+				return understandResult{}, fmt.Errorf(
 					"understand job %s 已成功但素材 %s 缺少持久化摘要: %w", job.ID, prepared.Asset.ID, err,
 				)
 			}
 			encoded, _ := json.Marshal(raw)
 			var summary understanding.Summary
 			if err := json.Unmarshal(encoded, &summary); err != nil {
-				return rushestools.UnderstandResult{}, err
+				return understandResult{}, err
 			}
 			summaries = append(summaries, CompactUnderstandingSummary(prepared.Asset, summary, 12))
 		}
-		return rushestools.UnderstandResult{
+		return understandResult{
 			DraftID: draftID, JobID: job.ID, AssetIDs: request.AssetIDs, Status: "completed",
 			Summaries: summaries, CacheHitAssetIDs: request.CacheHitAssetIDs,
 			UsageNote: "同参数素材理解任务已完成，结果来自持久化摘要；无需重复调用。",
 		}, nil
 	case "failed", "cancelled":
-		return rushestools.UnderstandResult{
+		return understandResult{
 			DraftID: draftID, JobID: job.ID, AssetIDs: request.AssetIDs, Status: job.Status,
 			CacheHitAssetIDs: request.CacheHitAssetIDs,
 			UsageNote:        "同参数素材理解任务已到终态；请先读取失败信息，确需新任务时须调整素材或理解参数。",
 		}, nil
 	default:
-		return rushestools.UnderstandResult{}, fmt.Errorf("understand job %s 状态无效: %s", job.ID, job.Status)
+		return understandResult{}, fmt.Errorf("understand job %s 状态无效: %s", job.ID, job.Status)
 	}
 }
 
@@ -443,8 +516,8 @@ func queuedUnderstandResult(
 	draftID string,
 	jobID string,
 	request preparedUnderstandRequest,
-) rushestools.UnderstandResult {
-	return rushestools.UnderstandResult{
+) understandResult {
+	return understandResult{
 		DraftID: draftID, JobID: jobID, AssetIDs: request.AssetIDs, Status: "queued",
 		CacheHitAssetIDs: request.CacheHitAssetIDs,
 		UsageNote:        "素材理解已在后台排队；任务终态会自动续跑当前请求，请勿轮询或重复调用。",

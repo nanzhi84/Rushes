@@ -91,7 +91,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
 	assertPersistedContractReport(t, database, "draft_contract", 1, false)
-	validated, err := exec.toolValidateTimeline(t.Context(), "draft_contract")
+	validated, err := exec.toolCheckTimeline(t.Context(), "draft_contract")
 	if err != nil || validated.Status != "succeeded" ||
 		!strings.Contains(validated.Observation, "验收合同未通过项") ||
 		len(validated.Data["contract_failures"].([]ContractVerificationItem)) != 5 ||
@@ -124,7 +124,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		t.Fatal(err)
 	}
 	assertPersistedContractReport(t, database, "draft_contract", 2, true)
-	validated, err = exec.toolValidateTimeline(t.Context(), "draft_contract")
+	validated, err = exec.toolCheckTimeline(t.Context(), "draft_contract")
 	if err != nil || validated.Status != "succeeded" ||
 		!strings.Contains(validated.Observation, "验收合同全部通过") ||
 		len(validated.Data["contract_failures"].([]ContractVerificationItem)) != 0 ||

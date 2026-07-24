@@ -51,6 +51,7 @@ type Service struct {
 	analyzer         *understanding.Analyzer
 	speechRecognizer contracts.SpeechRecognizer
 	contextManager   *ContextManager
+	indexedResources *agentexec.IndexedResourceCoordinator
 	fallbackScaffold fallbackScaffold
 	ctx              context.Context
 	cancel           context.CancelFunc
@@ -104,8 +105,9 @@ func newServiceWithModels(
 	service := &Service{
 		database: database, hub: NewTurnStreamHub(0), ctx: ctx, cancel: cancel,
 		chatModel: chatModel, analyzer: understanding.NewAnalyzer(visionModel),
-		contextManager: NewContextManager(database),
-		bridgeInflight: map[string]struct{}{},
+		contextManager:   NewContextManager(database),
+		indexedResources: agentexec.NewIndexedResourceCoordinator(),
+		bridgeInflight:   map[string]struct{}{},
 	}
 	service.executor = agentexec.New(database, service.analyzer, nil, func(draftID string, event map[string]any) {
 		service.hub.Record(draftID, event)
@@ -123,8 +125,8 @@ func newServiceWithModels(
 	registry.Use(destructiveConfirmationInterceptor)
 	recordModelToolCatalog(ctx, registry)
 	if chatModel != nil {
-		// #103 G3b：react 图的 Rushes 复刻,把单个 ToolsNode 换成按 registry.Effect 逐消息路由的
-		// toolRouter(全只读并行、含写串行)。ExecuteSequentially 由 toolRouter 逐节点决定,不在此设;
+		// #103 G3b/#141：react 图把单个 ToolsNode 换成按 Registry Spec 逐消息路由的
+		// toolRouter（纯读和资源隔离 detector 并行，edit/control 与重复资源串行）。
 		// 模型侧 H5 直通模型 / StreamToolCallChecker / H1b MessageModifier / MaxStep 全部原样保留。
 		service.react, err = newConcurrentReactAgent(
 			ctx,
@@ -137,7 +139,7 @@ func newServiceWithModels(
 				UnknownToolsHandler: unknownToolRecoveryHandler,
 				ToolCallMiddlewares: []compose.ToolMiddleware{newToolRecoveryMiddleware(retrySafeFromEffect(registry.Effect))},
 			},
-			registry.Effect,
+			registry.Spec,
 			// 多主题口播可能需要 30 轮以上的模型/工具往返，因此将真实预算保留到 40 轮；
 			// 最后 5 轮由 MessageModifier 注入收敛提醒。
 			maxReActStepsPerTurn,
@@ -201,7 +203,10 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	ctx, injectedMemory := withInjectedMemoryCollector(ctx)
 	recoveryState := newToolRecoveryState()
 	ctx = withToolRecoveryState(ctx, recoveryState)
-	ctx = agentexec.WithTurnInteractionState(ctx, agentexec.NewTurnInteractionState())
+	ctx = agentexec.WithTurnInteractionState(
+		ctx,
+		agentexec.NewTurnInteractionState(service.indexedResources),
+	)
 	ctx = agentexec.WithDurableTerminalCommit(ctx, func(commit func() (bool, error)) (bool, error) {
 		return service.queue.CommitCurrentDurableTerminal(item, commit)
 	})
@@ -568,14 +573,9 @@ func (service *Service) continueAfterJobObservation(
 		}
 		return fmt.Sprintf("%s 任务 %s 失败：%s", kind, jobID, details), nil
 	}
-	verificationReport := ""
 	if succeeded && kind == "render_preview" {
-		skip, report := service.executor.PreviewVerification(ctx, item.DraftID, terminalDetails)
-		if skip {
+		if service.executor.PreviewAlreadyInspected(ctx, item.DraftID, terminalDetails) {
 			return "", nil
-		}
-		if report != nil {
-			verificationReport = "\nverification_report：" + compactJSON(report)
 		}
 	}
 	status := "成功"
@@ -592,12 +592,11 @@ func (service *Service) continueAfterJobObservation(
 		nextAction = "明确说明后台任务已被取消；保留现有成果，不要自动重试，也不要把取消说成失败。"
 	}
 	prompt := fmt.Sprintf(
-		"你等待的后台任务已到终态。\n任务：%s\njob_id：%s\n状态：%s\n终态详情：%s%s\n这是原任务的自动续跑，不是新的用户请求。%s 不要重复询问已经回答的问题，也不要仅回复泛化的“后台已完成”。",
+		"你等待的后台任务已到终态。\n任务：%s\njob_id：%s\n状态：%s\n终态详情：%s\n这是原任务的自动续跑，不是新的用户请求。%s 不要重复询问已经回答的问题，也不要仅回复泛化的“后台已完成”。",
 		kind,
 		jobID,
 		status,
 		details,
-		verificationReport,
 		nextAction,
 	)
 	messages, err := service.modelMessages(ctx, item.DraftID)
@@ -782,9 +781,10 @@ user_memories 已持久保存的偏好不要重复写入摘要；只保留尚未
 
 func (service *Service) toolReporter(ctx context.Context, draftID string) rushestools.Reporter {
 	type activeStep struct {
-		id          string
-		argsSummary string
-		previewID   string
+		id           string
+		argsSummary  string
+		previewID    string
+		previewCheck string
 	}
 	var mu sync.Mutex
 	steps := map[string]activeStep{}
@@ -799,7 +799,11 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 			stepID := agentexec.RandomID("step")
 			argsSummary := compactJSON(input)
 			previewID := previewIDFromToolReport(name, input)
-			steps[key] = activeStep{id: stepID, argsSummary: argsSummary, previewID: previewID}
+			previewCheck := previewCheckFromToolReport(name, input)
+			steps[key] = activeStep{
+				id: stepID, argsSummary: argsSummary,
+				previewID: previewID, previewCheck: previewCheck,
+			}
 			service.hub.Record(draftID, StreamEvent{
 				"type": TurnStreamToolStepStarted, "step_id": stepID, "tool": name,
 				"args_summary": argsSummary,
@@ -816,8 +820,7 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 		observation := compactJSON(output)
 		if err != nil {
 			status, observation = "failed", err.Error()
-		} else if result, ok := output.(rushestools.ToolResult); ok &&
-			(result.Status == string(rushestools.StatusFailed) || result.Status == string(rushestools.StatusValidationFailed)) {
+		} else if structuredToolOutputFailed(output) {
 			status = "failed"
 		}
 		service.hub.Record(draftID, StreamEvent{
@@ -826,19 +829,24 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 		})
 		_ = service.persistToolTrace(
 			context.WithoutCancel(ctx), draftID, stepID, name, status, step.argsSummary, observation,
-			step.previewID,
+			step.previewID, step.previewCheck,
 		)
 	}
 }
 
+func structuredToolOutputFailed(output any) bool {
+	encoded, err := json.Marshal(output)
+	return err == nil && isStructuredToolFailure(string(encoded))
+}
+
 func previewIDFromToolReport(name string, input any) string {
-	if name != "render.inspect_preview" {
+	if name != "preview.check" {
 		return ""
 	}
 	switch typed := input.(type) {
-	case rushestools.RenderInspectInput:
+	case rushestools.PreviewCheckInput:
 		return strings.TrimSpace(typed.PreviewID)
-	case *rushestools.RenderInspectInput:
+	case *rushestools.PreviewCheckInput:
 		if typed != nil {
 			return strings.TrimSpace(typed.PreviewID)
 		}
@@ -848,11 +856,28 @@ func previewIDFromToolReport(name string, input any) string {
 	return ""
 }
 
+func previewCheckFromToolReport(name string, input any) string {
+	if name != "preview.check" {
+		return ""
+	}
+	switch typed := input.(type) {
+	case rushestools.PreviewCheckInput:
+		return strings.TrimSpace(typed.Check)
+	case *rushestools.PreviewCheckInput:
+		if typed != nil {
+			return strings.TrimSpace(typed.Check)
+		}
+	case map[string]any:
+		return strings.TrimSpace(agentexec.InterfaceString(typed["check"]))
+	}
+	return ""
+}
+
 // 工具折叠区在刷新后仍需存在，因此完成态通过 Reducer 持久化为 system/tool 消息。
 // 该消息只供 UI 回放，modelMessages 会过滤，避免工具 JSON 污染模型上下文。
 func (service *Service) persistToolTrace(
 	ctx context.Context,
-	draftID, stepID, name, status, argsSummary, observation, previewID string,
+	draftID, stepID, name, status, argsSummary, observation, previewID, previewCheck string,
 ) error {
 	record := map[string]any{
 		"step_id": stepID, "tool": name, "status": status,
@@ -860,6 +885,9 @@ func (service *Service) persistToolTrace(
 	}
 	if previewID != "" {
 		record["preview_id"] = previewID
+	}
+	if previewCheck != "" {
+		record["preview_check"] = previewCheck
 	}
 	content, err := json.Marshal(record)
 	if err != nil {

@@ -16,3 +16,13 @@ func beginTurnToolCall(ctx context.Context, readOnly bool) (func(), string) {
 	}
 	return state.BeginToolCall(readOnly)
 }
+
+func beginIndexedTurnToolCalls(
+	ctx context.Context, accesses []agentexec.IndexedResourceAccess,
+) (func(), string) {
+	state := agentexec.InteractionStateFromContext(ctx)
+	if state == nil {
+		return func() {}, ""
+	}
+	return state.BeginIndexedToolCalls(accesses)
+}

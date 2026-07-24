@@ -8,9 +8,9 @@
 4. 渲染工具只入队。worker 完成后写终态事件，job observation bridge 再唤醒同一草稿的 Agent 回合。
 5. 前端领域 SSE 只做 query invalidation；媒体由带 query token 的 Range/HEAD 端点直接播放。
 
-素材理解以 `asset hash + 分析参数 + prompt version` 作为持久化 fingerprint；相同输入直接复用 SQLite 结果。Agent 每回合常驻读取精简 `material_catalog`，逐镜头语义与精确源帧由 `media.search_shots` 按创作意图检索，再以稳定 `shot_id` 交给高层时间线工具执行。
+素材理解以 `asset hash + 分析参数 + prompt version` 作为持久化 fingerprint；`media.detect_shots` 每次只为一个可用视频建立或刷新镜头证据，相同输入直接复用 SQLite 结果。Agent 每回合常驻读取精简 `material_catalog`，逐镜头语义与精确源帧由只读的 `shot.search` 按创作意图检索，再以稳定 `shot_id` 交给时间线工具执行。
 
-口播是同一套“目录常驻、证据按需检索”模式：`material_catalog` 只常驻 `a_roll/b_roll`、`speech_searchable` 和逐句数量；`speech.inspect` 从 SQLite 按台词语义或源帧范围读取 SRT/ASR、VAD 气口及相似文本证据。模型自行判断口误、重复和配画面语义，`timeline.edit_talking_head` 只解析稳定 ID、校验范围并原子执行源区间正确的波纹删除与独立 B-roll 叠加。完整转写和重复 cut 数据都不进入长期 Context。
+口播是同一套“目录常驻、证据按需检索”模式：`material_catalog` 只常驻 `a_roll/b_roll`、`speech_searchable` 和逐句数量；`speech.transcribe` 单独建立或刷新 SRT/ASR 与 VAD 索引，`speech.search` 严格只从 SQLite 按台词语义、稳定 ID 或源帧范围读取气口及相似文本证据。模型自行判断口误、重复和配画面语义，当前口播编辑工具只解析稳定 ID、校验范围并执行源区间正确的修改。完整转写和重复 cut 数据都不进入长期 Context。
 
 ## Agent 上下文窗口
 

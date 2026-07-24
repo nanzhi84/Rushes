@@ -1209,8 +1209,10 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
 const TOOL_STEP_LABELS: Record<string, string> = {
   "asset.list_assets": "清点素材",
   "asset.import_local_file": "导入本地素材",
-  "understand.materials": "理解素材",
-  "media.search_shots": "检索镜头",
+  "media.detect_shots": "检测镜头",
+  "shot.search": "检索镜头",
+  "speech.transcribe": "建立口播索引",
+  "speech.search": "检索口播",
   "audio.analyze_beats": "分析音乐节拍",
   "audio.analyze_speech_pauses": "分析口播气口",
   "decision.answer": "记录你的回答",
@@ -1219,12 +1221,12 @@ const TOOL_STEP_LABELS: Record<string, string> = {
   "timeline.apply_patches": "批量修改时间线",
   "timeline.recut_to_beats": "按节拍重剪",
   "timeline.compose_initial": "生成初版时间线",
-  "timeline.validate": "校验时间线",
+  "timeline.check": "检查时间线",
   "timeline.inspect": "查看时间线",
   "render.preview": "渲染预览",
   "render.final_mp4": "导出成片",
   "render.status": "查询渲染进度",
-  "render.inspect_preview": "检查成片",
+  "preview.check": "检查预览",
   "interaction.ask_user": "向你提问",
   "interaction.confirm_action": "请求确认"
 };

@@ -129,7 +129,7 @@ func (exec *Executor) UnderstandJobEvidenceMessage(
 		if marshalErr != nil {
 			return nil, marshalErr
 		}
-		content = header + string(encoded) + "\n逐镜头证据需要时再调用 media.search_shots；不要重复调用 understand.materials。"
+		content = header + string(encoded) + "\n逐镜头证据需要时再调用 shot.search；不要重复调用 media.detect_shots。"
 		if len([]rune(content)) <= UnderstandJobEvidenceRuneBudget {
 			break
 		}

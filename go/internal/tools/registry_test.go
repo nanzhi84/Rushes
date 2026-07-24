@@ -21,17 +21,22 @@ func (fakeExecutor) ExecuteTool(ctx context.Context, name string, _ any) (any, e
 	switch name {
 	case "asset.list_assets":
 		return AssetListResult{DraftID: draftID, Assets: []AssetManifest{}, Total: 0}, nil
-	case "understand.materials":
-		return UnderstandResult{DraftID: draftID, JobID: "job", Status: "queued"}, nil
-	case "media.search_shots":
+	case "media.detect_shots":
+		return DetectShotsResult{DraftID: draftID, JobID: "job", AssetID: "asset", Status: "queued"}, nil
+	case "shot.search":
 		return ShotSearchResult{Shots: []ShotCandidate{}, TotalMatches: 0}, nil
 	case "audio.analyze_beats":
 		return AudioBeatAnalysisResult{AssetID: "audio", BPM: 120, BeatFrames: []int{0, 15}}, nil
 	case "audio.analyze_speech_pauses":
 		return SpeechPauseAnalysisResult{AssetID: "audio", TimelineFPS: 30, Pauses: []SpeechPauseCandidate{}}, nil
-	case "speech.inspect":
-		return SpeechInspectResult{AssetID: "video", TimelineFPS: 30, Utterances: []SpeechUtteranceEvidence{}}, nil
-	case "render.inspect_preview":
+	case "speech.search":
+		return SpeechSearchResult{
+			Status: "succeeded", AssetID: "video", TimelineFPS: 30,
+			Utterances: []SpeechUtteranceEvidence{},
+		}, nil
+	case "speech.transcribe":
+		return SpeechTranscribeResult{AssetID: "video", TimelineFPS: 30}, nil
+	case "preview.check":
 		return PreviewInspectionResult{Summary: "ok", Issues: []map[string]interface{}{}}, nil
 	default:
 		return ToolResult{Status: "succeeded", Observation: name}, nil
@@ -127,23 +132,24 @@ func (failingExecutor) ExecuteTool(context.Context, string, any) (any, error) {
 	return map[string]any{"status": "failed"}, errors.New("executor failed")
 }
 
-func TestUnderstandResultJSONRemainsBackwardCompatible(t *testing.T) {
+func TestDetectShotsResultJSONUsesSingleAssetShape(t *testing.T) {
 	t.Parallel()
-	legacy, err := json.Marshal(UnderstandResult{
-		DraftID: "draft", JobID: "job", AssetIDs: []string{"asset"}, Status: "completed",
+	encoded, err := json.Marshal(DetectShotsResult{
+		DraftID: "draft", JobID: "job", AssetID: "asset", Status: "completed",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(legacy) != `{"draft_id":"draft","job_id":"job","asset_ids":["asset"],"status":"completed"}` {
-		t.Fatalf("旧结果 JSON 形状被破坏: %s", legacy)
+	if strings.Contains(string(encoded), "asset_ids") ||
+		!strings.Contains(string(encoded), `"asset_id":"asset"`) {
+		t.Fatalf("检测结果不是单素材形状: %s", encoded)
 	}
-	var decoded UnderstandResult
-	if err := json.Unmarshal([]byte(`{"draft_id":"draft","job_id":"job","asset_ids":["asset"],"status":"completed"}`), &decoded); err != nil {
+	var decoded DetectShotsResult
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Status != "completed" || decoded.Summaries != nil {
-		t.Fatalf("旧 JSON 无法兼容解码: %#v", decoded)
+	if decoded.Status != "completed" || decoded.AssetID != "asset" {
+		t.Fatalf("单素材 JSON 无法解码: %#v", decoded)
 	}
 }
 
@@ -199,9 +205,8 @@ func TestEveryToolHasValidEffect(t *testing.T) {
 }
 
 // TestToolEffectClassificationTable 把 #103 G1 的全量分类表锁成可执行断言：任何工具的
-// Effect 被误改或新增工具未标注都会在此失败。speech.inspect 刻意偏离 issue 的 ReadOnly
-// 归为可逆——首次调用落盘 transcript、并发首调不安全（见 registry.go 注释与 G3a spike）；
-// memory.update 因 remove_keys 删除路径归破坏性。
+// Effect 被误改或新增工具未标注都会在此失败。speech.transcribe 负责持久化索引，
+// speech.search 与 timeline.check 必须严格只读；memory.update 因 remove_keys 删除路径归破坏性。
 func TestToolEffectClassificationTable(t *testing.T) {
 	t.Parallel()
 	database, err := storage.Open(t.Context(), t.TempDir())
@@ -216,14 +221,15 @@ func TestToolEffectClassificationTable(t *testing.T) {
 	expected := map[string]Effect{
 		"asset.import_local_file":     EffectReversible, // harness-only
 		"asset.list_assets":           EffectReadOnly,
-		"media.search_shots":          EffectReadOnly,
+		"shot.search":                 EffectReadOnly,
 		"audio.analyze_beats":         EffectReadOnly,
 		"audio.analyze_speech_pauses": EffectReadOnly,
 		"timeline.inspect":            EffectReadOnly,
 		"render.status":               EffectReadOnly,
-		"render.inspect_preview":      EffectReadOnly,
-		"understand.materials":        EffectReversible,
-		"speech.inspect":              EffectReversible,
+		"preview.check":               EffectReadOnly,
+		"media.detect_shots":          EffectReversible,
+		"speech.transcribe":           EffectReversible,
+		"speech.search":               EffectReadOnly,
 		"plan.update":                 EffectReversible,
 		"interaction.ask_user":        EffectReversible,
 		"decision.answer":             EffectReversible,
@@ -232,7 +238,7 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		"timeline.apply_patches":      EffectReversible,
 		"timeline.recut_to_beats":     EffectReversible,
 		"timeline.edit_talking_head":  EffectReversible,
-		"timeline.validate":           EffectReversible,
+		"timeline.check":              EffectReadOnly,
 		"render.preview":              EffectReversible,
 		"render.final_mp4":            EffectReversible,
 		"memory.update":               EffectDestructive,
@@ -266,11 +272,12 @@ func TestToolPrimitiveClassificationMatchesEffectAndSurface(t *testing.T) {
 	expectedFamily := map[string]Family{
 		"asset.import_local_file":     FamilyEdit,
 		"asset.list_assets":           FamilyRead,
-		"understand.materials":        FamilyDetect,
-		"media.search_shots":          FamilyRead,
+		"media.detect_shots":          FamilyDetect,
+		"shot.search":                 FamilyRead,
 		"audio.analyze_beats":         FamilyDetect,
 		"audio.analyze_speech_pauses": FamilyDetect,
-		"speech.inspect":              FamilyDetect,
+		"speech.transcribe":           FamilyDetect,
+		"speech.search":               FamilyRead,
 		"interaction.ask_user":        FamilyControl,
 		"decision.answer":             FamilyControl,
 		"plan.update":                 FamilyControl,
@@ -279,12 +286,12 @@ func TestToolPrimitiveClassificationMatchesEffectAndSurface(t *testing.T) {
 		"timeline.apply_patches":      FamilyEdit,
 		"timeline.recut_to_beats":     FamilyEdit,
 		"timeline.edit_talking_head":  FamilyEdit,
-		"timeline.validate":           FamilyCheck,
+		"timeline.check":              FamilyCheck,
 		"timeline.inspect":            FamilyRead,
 		"render.preview":              FamilyEdit,
 		"render.final_mp4":            FamilyEdit,
 		"render.status":               FamilyRead,
-		"render.inspect_preview":      FamilyCheck,
+		"preview.check":               FamilyCheck,
 		"interaction.confirm_action":  FamilyControl,
 	}
 	families := map[Family]bool{}
@@ -391,7 +398,7 @@ func TestAdmissionInterceptorRunsBeforePreconditionGuard(t *testing.T) {
 	_, err = renderFinal.InvokableRun(WithDraftID(t.Context(), "draft_admission"), `{}`)
 	var rejection *InterceptorRejection
 	if !errors.As(err, &rejection) || rejection.Data["tool"] != "render.final_mp4" {
-		t.Fatalf("准入拦截器应先于 timeline_validated guard 拒绝: %v", err)
+		t.Fatalf("准入拦截器应先于 timeline_exists guard 拒绝: %v", err)
 	}
 }
 
@@ -470,10 +477,10 @@ func TestRegistryDecodeInputCoversEveryLLMTool(t *testing.T) {
 	); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("production tool path must reject legacy fragment preservation input: %v", err)
 	}
-	speech, err := registry.DecodeInput("speech.inspect", map[string]any{
+	speech, err := registry.DecodeInput("speech.search", map[string]any{
 		"timeline_clip_id": "clip_v1_001", "query": "口播",
 	})
-	if err != nil || speech.(SpeechInspectInput).Query != "口播" {
+	if err != nil || speech.(SpeechSearchInput).Query != "口播" {
 		t.Fatalf("speech input=%#v err=%v", speech, err)
 	}
 	if _, err := registry.DecodeInput("timeline.inspect", map[string]any{"unknown": true}); err == nil || !strings.Contains(err.Error(), "unknown field") {
@@ -518,8 +525,8 @@ func TestRegistryConfirmationValidationRejectsUnsafeTargets(t *testing.T) {
 		{name: "interaction.confirm_action", args: map[string]any{}},
 		{name: "decision.answer", args: map[string]any{}},
 		{name: "timeline.inspect", args: map[string]any{"unknown": true}},
-		{name: "understand.materials", args: nil},
-		{name: "understand.materials", args: map[string]any{}},
+		{name: "media.detect_shots", args: nil},
+		{name: "media.detect_shots", args: map[string]any{}},
 		{name: "render.final_mp4", args: map[string]any{"orientation": nil}},
 		{name: "timeline.compose_initial", args: map[string]any{"clips": []any{map[string]any{}}}},
 		{name: "timeline.apply_patches", args: map[string]any{"ops": []any{nil}}},
@@ -532,7 +539,7 @@ func TestRegistryConfirmationValidationRejectsUnsafeTargets(t *testing.T) {
 			t.Errorf("ValidateConfirmation(%s) should fail", fixture.name)
 		}
 	}
-	if _, err := registry.DecodeInput("understand.materials", nil); err == nil || !strings.Contains(err.Error(), "必须是 JSON 对象") {
+	if _, err := registry.DecodeInput("media.detect_shots", nil); err == nil || !strings.Contains(err.Error(), "必须是 JSON 对象") {
 		t.Fatalf("DecodeInput nil arguments err=%v", err)
 	}
 }
@@ -650,11 +657,11 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		"asset.list_assets": {
 			"当前草稿", "可用素材",
 		},
-		"understand.materials": {
-			"默认直接复用持久化结果", "force_refresh=true",
+		"media.detect_shots": {
+			"一个 asset_id", "相同参数默认复用", "force_refresh",
 		},
-		"media.search_shots": {
-			"understanding_candidates", "understand.materials", "禁止把候选文件臆造为 shot_id",
+		"shot.search": {
+			"detection_candidates", "media.detect_shots", "禁止把候选素材臆造为 shot_id",
 		},
 		"timeline.compose_initial": {
 			"video/image", "不能传 audio/font", "asset.list_assets", "duration_frames", "timeline_fps",
@@ -700,10 +707,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := registry.Specs(false)
-	if len(core) != 20 {
+	if len(core) != 21 {
 		t.Fatalf("core tools=%d", len(core))
 	}
-	if len(registry.Specs(true)) != 22 {
+	if len(registry.Specs(true)) != 23 {
 		t.Fatalf("all tools=%d", len(registry.Specs(true)))
 	}
 	for _, spec := range registry.Specs(true) {
@@ -712,10 +719,10 @@ func TestCoreInferToolRegistry(t *testing.T) {
 			t.Fatalf("spec=%s info=%#v err=%v", spec.Name, info, infoErr)
 		}
 	}
-	if got := len(registry.EinoTools(false, false)); got != 19 {
+	if got := len(registry.EinoTools(false, false)); got != 20 {
 		t.Fatalf("LLM core tools=%d", got)
 	}
-	if got := len(registry.EinoTools(false, true)); got != 20 {
+	if got := len(registry.EinoTools(false, true)); got != 21 {
 		t.Fatalf("含 harness core tools=%d", got)
 	}
 
@@ -903,19 +910,19 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 		t.Fatal("可用素材存在后，空时间线应直接放行卡点重剪")
 	}
 	if _, err := database.Write().ExecContext(t.Context(),
-		"UPDATE drafts SET timeline_current_version=1, timeline_validated=1 WHERE draft_id='draft_gate'"); err != nil {
+		"UPDATE drafts SET timeline_current_version=1, timeline_validated=0 WHERE draft_id='draft_gate'"); err != nil {
 		t.Fatal(err)
 	}
 	allowed, _ = registry.Allowed(ctx, true)
 	if containsSpec(allowed, "timeline.compose_initial") {
 		t.Fatal("已有时间线时 compose_initial 不应放行")
 	}
-	for _, name := range []string{"timeline.apply_patches", "timeline.recut_to_beats", "timeline.validate", "timeline.inspect", "render.preview", "render.final_mp4", "render.status"} {
+	for _, name := range []string{"timeline.apply_patches", "timeline.recut_to_beats", "timeline.check", "timeline.inspect", "render.preview", "render.final_mp4", "render.status"} {
 		if !containsSpec(allowed, name) {
-			t.Fatalf("%s 未放行", name)
+			t.Fatalf("已有但未标记 validated 的时间线也应放行 %s，由渲染入口同步校验", name)
 		}
 	}
-	if containsSpec(allowed, "render.inspect_preview") {
+	if containsSpec(allowed, "preview.check") {
 		t.Fatal("没有 preview 时不应放行 inspect_preview")
 	}
 	now = time.Now().UTC().Format(time.RFC3339Nano)
@@ -926,7 +933,7 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	allowed, _ = registry.Allowed(ctx, true)
-	if !containsSpec(allowed, "render.inspect_preview") {
+	if !containsSpec(allowed, "preview.check") {
 		t.Fatal("preview 存在后 inspect_preview 未放行")
 	}
 	if passed, err := EvaluatePrecondition(ctx, database, "draft_gate", "unknown"); err == nil || passed {

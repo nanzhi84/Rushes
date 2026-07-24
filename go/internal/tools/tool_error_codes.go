@@ -82,10 +82,11 @@ const (
 
 	// —— 素材理解（agentexec/tool_exec_understand.go）——
 	ErrCodeUnderstandingFailed ToolErrorCode = "understanding_failed"
+	// —— 纯检索（agentexec/speech_inspect.go、shot_search.go）——
+	ErrCodeIndexMissing ToolErrorCode = "index_missing"
 
-	// —— 预览质检（agentexec/preview_qc.go 与 media/render.go；media 因 depguard 保留字面量）——
-	ErrCodePreviewInspectionUnavailable ToolErrorCode = "preview_inspection_unavailable"
-	ErrCodePreviewDecodeFailed          ToolErrorCode = "preview_decode_failed"
+	// —— 预览质检（media/render.go 因 depguard 保留字面量）——
+	ErrCodePreviewDecodeFailed ToolErrorCode = "preview_decode_failed"
 
 	// —— 后台 job（worker/job.go、worker/runner.go；worker 因 depguard 保留字面量）——
 	ErrCodeStaleRecoveryExhausted ToolErrorCode = "stale_recovery_exhausted"
@@ -130,7 +131,7 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodeMemoryEvidenceInvalid,
 	ErrCodeMemoryInputInvalid,
 	ErrCodeUnderstandingFailed,
-	ErrCodePreviewInspectionUnavailable,
+	ErrCodeIndexMissing,
 	ErrCodePreviewDecodeFailed,
 	ErrCodeStaleRecoveryExhausted,
 	ErrCodeJobHandlerFailed,

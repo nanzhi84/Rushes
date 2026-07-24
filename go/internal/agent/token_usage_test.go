@@ -254,30 +254,31 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 	}
 }
 
-const modelToolSchemaTotalBaselineRunes = 32604
+const modelToolSchemaTotalBaselineRunes = 32761
 
 var modelToolSchemaBaselineRunes = map[string]int{
 	"asset.list_assets":           435,
 	"audio.analyze_beats":         493,
 	"audio.analyze_speech_pauses": 798,
 	"decision.answer":             566,
-	"interaction.ask_user":        1027,
+	"interaction.ask_user":        1079,
 	"interaction.confirm_action":  387,
-	"media.search_shots":          917,
+	"media.detect_shots":          813,
 	"memory.update":               1260,
-	"plan.update":                 1524,
+	"plan.update":                 1573,
+	"preview.check":               420,
 	"render.final_mp4":            218,
-	"render.inspect_preview":      452,
 	"render.preview":              220,
 	"render.status":               128,
-	"speech.inspect":              1326,
+	"shot.search":                 870,
+	"speech.search":               1144,
+	"speech.transcribe":           481,
 	"timeline.apply_patches":      14719,
+	"timeline.check":              199,
 	"timeline.compose_initial":    826,
-	"timeline.edit_talking_head":  4056,
+	"timeline.edit_talking_head":  4091,
 	"timeline.inspect":            195,
-	"timeline.recut_to_beats":     1860,
-	"timeline.validate":           131,
-	"understand.materials":        912,
+	"timeline.recut_to_beats":     1846,
 }
 
 func modelToolSchemaRuneLimit(baseline int) int {
