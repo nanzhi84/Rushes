@@ -136,26 +136,29 @@ describe("EditorSession", () => {
     const session = new EditorSession(initial);
     const split = { kind: "split_clip", timeline_clip_id: "visual_a", split_frame: 15 };
     const mute = { kind: "set_track_state", track_id: "bgm", muted: true };
+    const muteSfx = { kind: "set_track_state", track_id: "sfx", muted: true };
     session.apply(split);
     session.apply(mute);
-    expect(session.beginSave()).toEqual([split, mute]);
+    session.apply(muteSfx);
+    expect(session.beginSave()).toEqual([split, mute, muteSfx]);
     session.apply({ kind: "adjust_gain", timeline_clip_id: "music_a", gain_db: -9 });
 
     const serverAfterSplit = applyLocalTimelineOperation(initial, split);
-    session.rejectPartiallySaved(serverAfterSplit, 1, new Error("第二项保存失败"));
+    session.rejectPartiallySaved(serverAfterSplit, 1, 1, new Error("第二项保存失败"));
 
     const snapshot = session.snapshot();
     expect(snapshot).toMatchObject({
       saveState: "error",
       pendingCount: 2,
-      error: "第二项保存失败"
+      error: expect.stringContaining("已隔离 1 项冲突操作")
     });
     expect(findTrack(snapshot.timeline, "visual_base").clips?.map((clip) => clip.timeline_clip_id))
       .toContain("visual_a_split_15");
-    expect(findTrack(snapshot.timeline, "bgm").muted).toBe(true);
+    expect(findTrack(snapshot.timeline, "bgm").muted).not.toBe(true);
+    expect(findTrack(snapshot.timeline, "sfx").muted).toBe(true);
     expect(findClip(snapshot.timeline, "music_a").gain_db).toBe(-9);
     expect(session.beginSave()).toEqual([
-      mute,
+      muteSfx,
       { kind: "adjust_gain", timeline_clip_id: "music_a", gain_db: -9 }
     ]);
   });
@@ -177,17 +180,22 @@ describe("EditorSession", () => {
       session.rejectPartiallySaved(
         serverAfterPrefixAndConcurrentDelete,
         1,
+        1,
         new Error("第二项保存失败")
       )
     ).not.toThrow();
 
     const snapshot = session.snapshot();
     expect(snapshot.saveState).toBe("error");
-    expect(snapshot.pendingCount).toBe(1);
-    expect(snapshot.error).toContain("未保存操作与最新时间线冲突");
+    expect(snapshot.pendingCount).toBe(0);
+    expect(snapshot.error).toContain("已隔离 1 项冲突操作");
     expect(findTrack(snapshot.timeline, "visual_base").clips?.map((clip) => clip.timeline_clip_id))
       .toContain("visual_a_split_15");
     expect(() => findClip(snapshot.timeline, "visual_b")).toThrow("missing clip visual_b");
+
+    const legal = { kind: "set_track_state", track_id: "bgm", muted: true };
+    session.apply(legal);
+    expect(session.beginSave()).toEqual([legal]);
   });
 
   it("字幕样式在编辑、插入和保存失败后保持前后端同义", () => {

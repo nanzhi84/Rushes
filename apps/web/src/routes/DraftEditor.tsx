@@ -188,6 +188,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         session.rejectPartiallySaved(
           partial.latest.timeline,
           partial.appliedCount,
+          partial.failedIndex,
           new Error(message)
         );
         queryClient.setQueryData(queryKeys.timeline(draftId), partial.latest);

@@ -83,39 +83,48 @@ export class EditorSession {
   rejectPartiallySaved(
     serverTimeline: TimelineJson,
     appliedCount: number,
+    failedIndex: number,
     error: unknown
   ): void {
     if (
       !Number.isInteger(appliedCount) ||
       appliedCount < 0 ||
-      appliedCount > this.inFlight.length
+      appliedCount > this.inFlight.length ||
+      !Number.isInteger(failedIndex) ||
+      failedIndex < appliedCount ||
+      failedIndex >= this.inFlight.length
     ) {
       this.rejectSave(error);
       return;
     }
-    const remaining = this.inFlight.slice(appliedCount);
-    const pending = compactEditorOperations([...remaining, ...this.pending]);
+    // failedIndex 对应服务端已经明确拒绝的 poison operation，不能再次放回普通
+    // pending。preflight schema 失败时 failedIndex 可能大于 appliedCount，因此保留
+    // appliedCount 之后除失败项外的全部未执行操作。
+    const candidates = [
+      ...this.inFlight.filter((_, index) => index >= appliedCount && index !== failedIndex),
+      ...this.pending
+    ];
+    const pending: TimelineOperation[] = [];
     let rebased = cloneTimeline(serverTimeline);
-    let replayError: unknown = null;
-    try {
-      for (const operation of pending) {
+    const replayErrors: string[] = [];
+    for (const operation of candidates) {
+      try {
         rebased = applyLocalTimelineOperation(rebased, operation);
+        pending.push(operation);
+      } catch (replayError) {
+        replayErrors.push(
+          replayError instanceof Error ? replayError.message : `无法重放 ${operation.kind}`
+        );
       }
-    } catch (error) {
-      // 失败操作的目标可能已因前缀提交或并发编辑从 latest 消失。恢复必须一次性提交
-      // session 状态，不能在清空 inFlight 后把异常抛给 React；保留待处理队列并明确
-      // 展示服务端真相，由用户基于最新时间线继续编辑。
-      rebased = cloneTimeline(serverTimeline);
-      replayError = error;
     }
     this.inFlight = [];
-    this.pending = pending;
+    this.pending = compactEditorOperations(pending);
     this.timeline = rebased;
     this.state = "error";
     const saveError = error instanceof Error ? error.message : "时间线保存失败";
-    this.error = replayError instanceof Error
-      ? `${saveError}；未保存操作与最新时间线冲突：${replayError.message}`
-      : saveError;
+    const isolatedCount = 1 + replayErrors.length;
+    const replayDetail = replayErrors.length > 0 ? `：${replayErrors.join("；")}` : "";
+    this.error = `${saveError}；已隔离 ${isolatedCount} 项冲突操作，请基于最新时间线重做${replayDetail}`;
     this.emit();
   }
 
