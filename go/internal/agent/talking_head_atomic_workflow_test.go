@@ -94,10 +94,19 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 	}
 
 	selections := make([]timeline.Selection, 0, 8)
-	for start := 0; start < 1560; start += 195 {
+	for _, sourceRange := range [][2]int{
+		{0, 90},
+		{90, 240},
+		{240, 420},
+		{420, 600},
+		{600, 780},
+		{780, 1080},
+		{1080, 1320},
+		{1320, 1560},
+	} {
 		selections = append(selections, timeline.Selection{
 			AssetID: aRollID, AssetKind: "video", HasAudio: true,
-			SourceStartFrame: start, SourceEndFrame: start + 195, Role: "a_roll",
+			SourceStartFrame: sourceRange[0], SourceEndFrame: sourceRange[1], Role: "a_roll",
 		})
 	}
 	document, err := timeline.ComposeInitial(draftID, 1, selections)
@@ -106,6 +115,14 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 	}
 	if len(timelineTrackClips(document, "visual_base")) != 8 {
 		t.Fatalf("fixture 未形成至少 7 个当前 A-roll clip: %#v", document.Tracks[0])
+	}
+	staleRepetitionClipID, ok := exactSourceRangeClipID(document, aRollID, 0, 90)
+	if !ok {
+		t.Fatalf("fixture 未把句内重说较早一遍建成稳定 clip: %#v", document.Tracks)
+	}
+	currentDocument, err := timeline.ComposeInitial(draftID, 2, selections)
+	if err != nil {
+		t.Fatal(err)
 	}
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
@@ -116,6 +133,11 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 		t.Context(), draftID, document, "issue_140_fixture",
 	); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
+	}
+	if persisted, persistErr := service.executor.PersistTimeline(
+		t.Context(), draftID, currentDocument, "issue_140_fixture_refresh",
+	); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("refreshed=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	trace := []string{}
@@ -168,7 +190,7 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 				t.Fatal(latestErr)
 			}
 			failedRaw, failedErr := service.ExecuteTool(ctx, "timeline.delete", rushestools.TimelineDeleteInput{
-				"kind": "delete_clip", "timeline_clip_id": "clip_stale_issue_140",
+				"kind": "delete_clip", "timeline_clip_id": staleRepetitionClipID,
 			})
 			if failedErr != nil {
 				t.Fatal(failedErr)
@@ -179,6 +201,8 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 				t.Fatal(latestErr)
 			}
 			if failed.Status != string(rushestools.StatusFailed) ||
+				failed.Data["error_code"] != string(rushestools.ErrCodeStaleTarget) ||
+				failed.Data["current_timeline_unchanged"] != true ||
 				afterFailure.Version != beforeFailure.Version ||
 				sourceCoverage(afterFailure, aRollID, similarity.EarlierSourceStartFrame, similarity.EarlierSourceEndFrame) != 0 {
 				t.Fatalf(
@@ -188,6 +212,41 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 			}
 			failedAtomicAttempts++
 			trace = append(trace, "timeline.delete:failed")
+			refreshed, latestErr := timeline.Latest(t.Context(), database, draftID)
+			if latestErr != nil {
+				t.Fatal(latestErr)
+			}
+			currentRepetitionClipID, found := exactSourceRangeClipID(
+				refreshed, aRollID, selected[0], selected[1],
+			)
+			if !found || currentRepetitionClipID == staleRepetitionClipID {
+				t.Fatalf(
+					"同一待删 source range 未映射到新 clip: stale=%s current=%s",
+					staleRepetitionClipID, currentRepetitionClipID,
+				)
+			}
+			retryRaw, retryErr := service.ExecuteTool(ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+				"kind": "delete_clip", "timeline_clip_id": currentRepetitionClipID,
+			})
+			if retryErr != nil ||
+				retryRaw.(rushestools.ToolResult).Status != string(rushestools.StatusSucceeded) {
+				t.Fatalf("同一语义删除重试=%#v err=%v", retryRaw, retryErr)
+			}
+			afterRetry, latestErr := timeline.Latest(t.Context(), database, draftID)
+			if latestErr != nil {
+				t.Fatal(latestErr)
+			}
+			if afterRetry.Version != beforeFailure.Version+1 ||
+				sourceCoverage(afterRetry, aRollID, selected[0], selected[1]) != 0 ||
+				sourceCoverage(afterRetry, aRollID, similarity.EarlierSourceStartFrame, similarity.EarlierSourceEndFrame) != 0 {
+				t.Fatalf(
+					"只重试失败原语后版本/范围不符: before=%d after=%d",
+					beforeFailure.Version, afterRetry.Version,
+				)
+			}
+			successfulAtomicEdits++
+			trace = append(trace, "timeline.delete:retry")
+			continue
 		}
 		deleteIssue140SourceRange(t, service, ctx, draftID, aRollID, selected[0], selected[1])
 		successfulAtomicEdits++
@@ -257,7 +316,7 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if final.Version != 6 || !timeline.Validate(final).Valid {
+	if final.Version != 7 || !timeline.Validate(final).Valid {
 		t.Fatalf("final version=%d report=%#v", final.Version, timeline.Validate(final))
 	}
 	visualCoverage := clipSourceRanges(timelineTrackClips(final, "visual_base"))
@@ -402,4 +461,20 @@ func clipSourceRanges(clips []timeline.Clip) [][2]int {
 		result = append(result, [2]int{clip.SourceStartFrame, clip.SourceEndFrame})
 	}
 	return result
+}
+
+func exactSourceRangeClipID(
+	document timeline.Document,
+	assetID string,
+	sourceStart int,
+	sourceEnd int,
+) (string, bool) {
+	for _, clip := range timelineTrackClips(document, "visual_base") {
+		if clip.AssetID == assetID &&
+			clip.SourceStartFrame == sourceStart &&
+			clip.SourceEndFrame == sourceEnd {
+			return clip.TimelineClipID, true
+		}
+	}
+	return "", false
 }
