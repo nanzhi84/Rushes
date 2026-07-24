@@ -289,13 +289,22 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 		t.Fatal("没有取得指纹台词、词级语义锚点或对应 B-roll 镜头")
 	}
 	pause := speech.Pauses[0]
-	if pause.TimelineStartFrame == nil || pause.TimelineEndFrame == nil {
-		t.Fatalf("气口没有当前时间线映射: %#v", pause)
+	beforePauseDelete, err := timeline.Latest(t.Context(), database, "draft_talking_head_real")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pauseStart, pauseEnd, mapped := sourceRangeOnCurrentTimeline(
+		beforePauseDelete, assetIDs[0], pause.DeleteStartFrame, pause.DeleteEndFrame,
+	)
+	if !mapped || pauseEnd <= pauseStart {
+		t.Fatalf(
+			"气口安全删除区间没有当前时间线映射: source=%d-%d",
+			pause.DeleteStartFrame, pause.DeleteEndFrame,
+		)
 	}
 	var pauseDelete rushestools.ToolResult
 	invokeRegisteredTool(t, service, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
-		"kind": "delete_range", "start_frame": *pause.TimelineStartFrame,
-		"end_frame": *pause.TimelineEndFrame,
+		"kind": "delete_range", "start_frame": pauseStart, "end_frame": pauseEnd,
 	}, &pauseDelete)
 	if pauseDelete.Status != "succeeded" {
 		t.Fatalf("delete pause=%#v", pauseDelete)
