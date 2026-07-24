@@ -250,10 +250,9 @@ func TestTalkingHeadWorkflowUsesPersistentEvidenceAndAtomicSourceCorrectEdits(t 
 		t.Fatal("未找到用于确认重放的剩余口播片段")
 	}
 	confirmRaw, err := service.ExecuteTool(ctx, "interaction.confirm_action", rushestools.ConfirmActionInput{
-		Question: "确认删除末尾触控板台词？", ToolName: "timeline.edit_talking_head",
+		Question: "确认删除末尾触控板台词？", ToolName: "timeline.delete",
 		Arguments: map[string]any{
-			"a_roll_timeline_clip_id": remainingClipID,
-			"remove_utterance_ids":    []any{"utt_touchpad"},
+			"kind": "delete_range", "start_frame": 138, "end_frame": 228,
 		},
 	})
 	if err != nil {

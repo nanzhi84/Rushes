@@ -544,12 +544,8 @@ func seedTalkingHeadAutoPreserveScenario(
 	}
 }
 
-// TestReplayPendingEditTalkingHeadEmitsPlanDrift 锁定 P2-2 生产链路：
-// replayPendingTool → executeReported → ExecuteTool → toolEditTalkingHead 的确认重放
-// ctx 透传。summary 与 Data["plan_drift"] 在 toolEditTalkingHead 的同一 if drift != nil
-// 分支一同写入，而 replayPendingTool 只回传 Observation，故 summary 出现在返回观察里即为
-// 「Data["plan_drift"] 非空且确认重放 ctx 一路透传到 talkingHeadPlanDrift」的端到端证据。
-func TestReplayPendingEditTalkingHeadEmitsPlanDrift(t *testing.T) {
+// 旧口播复合工具降为 harness-only 后，历史确认卡不得把它重新带回生产模型写路径。
+func TestReplayPendingEditTalkingHeadRejectsHarnessOnlyTarget(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
@@ -563,7 +559,7 @@ func TestReplayPendingEditTalkingHeadEmitsPlanDrift(t *testing.T) {
 	seedTalkingHeadAutoPreserveScenario(t, database, service, draftID, "asset_plan_drift_replay")
 
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
-	observation, err := service.replayPendingTool(ctx, QueueItem{
+	_, err = service.replayPendingTool(ctx, QueueItem{
 		DraftID: draftID,
 		Payload: map[string]any{
 			"pending_tool_call": map[string]any{
@@ -576,12 +572,8 @@ func TestReplayPendingEditTalkingHeadEmitsPlanDrift(t *testing.T) {
 			"answer": map[string]any{"option_id": "confirm"},
 		},
 	})
-	if err != nil {
-		t.Fatalf("replayPendingTool err=%v", err)
-	}
-	if !strings.Contains(observation, "为避免制造不足 2 秒的保留孤岛") ||
-		!strings.Contains(observation, "如实向用户说明这一偏差") {
-		t.Fatalf("确认重放未透传 plan_drift 偏差告知：%q", observation)
+	if err == nil || !strings.Contains(err.Error(), "不可由模型确认后执行") {
+		t.Fatalf("harness-only 口播工具确认重放 err=%v", err)
 	}
 }
 

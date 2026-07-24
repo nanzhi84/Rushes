@@ -370,10 +370,9 @@ func liveSchemaCases() []liveToolEvalCase {
 		{Name: "timeline_update", Prompt: "请将时间线片段 clip_v1_001 的结尾裁到第 75 帧，只更新这一个目标。", Expected: []string{"timeline.update"}},
 		{Name: "timeline_split", Prompt: "请在第 45 帧切分时间线片段 clip_v1_001。", Expected: []string{"timeline.split"}},
 		{Name: "beat_recut", Prompt: "请用 BGM asset_bgm_1 和视频 asset_video_1、asset_video_2 卡点重剪到 1440 帧，覆盖整首音乐，并将 asset_sfx_1 作为 45 帧的独立音效点缀。", Expected: []string{"timeline.recut_to_beats"}},
-		{
-			Name: "talking_head_edit", Prompt: "请对 A-roll clip_v1_001 原子执行口播剪辑：删除台词 utt_repeat_1 和气口 pause_2；short_speech_fragments 中 fragment_keep_1 的 fragment.text 是‘但是没有同时’，restart_anchor_text 是‘这次键盘苹果’，请把它标为 preserve，理由填写‘原文但是没有同时接到这次键盘苹果后仍表达同一转折条件，句法和语义均完整，因此保留’。", Expected: []string{"timeline.edit_talking_head"},
-			ValidateArguments: validateLiveTalkingHeadPreserveDecision,
-		},
+		{Name: "talking_head_delete", Prompt: "口播证据和当前时间线已经读取；我明确选择删除较早一遍重说，它当前映射为时间线 360 到 480 帧。请只删除这个连续范围。", Expected: []string{"timeline.delete"}},
+		{Name: "talking_head_broll_insert", Prompt: "口播已清理并重新读取；请把 B-roll 素材 asset_video_1 的源 30 到 120 帧作为 visual_overlay 插入当前时间线第 600 帧，只做这一次插入。", Expected: []string{"timeline.insert"}},
+		{Name: "talking_head_broll_fade", Prompt: "请只给刚插入的 B-roll 片段 clip_v4_001 设置 7 帧淡入和 7 帧淡出。", Expected: []string{"timeline.update"}},
 		{Name: "validate", Prompt: "请校验当前时间线不变量和节拍对齐数据。", Expected: []string{"timeline.check"}},
 		{Name: "inspect", Prompt: "请读取当前时间线的完整轨道、clip ID 和帧范围。", Expected: []string{"timeline.inspect"}},
 		{Name: "preview", Prompt: "时间线已验证，请排队生成可分享的预览。", Expected: []string{"render.preview"}},
@@ -404,7 +403,7 @@ func liveRoutingCases() []liveToolEvalCase {
 		{Name: "route_recut", Prompt: contextPrefix + "\n节拍分析已完成，asset_bgm_1 的完整可用长度正好是 1440 帧；音效 asset_sfx_1 已确定从 900 帧开始、持续 45 帧、增益 -12dB，所有创作选择都已确定，无需提问。用户：现在直接覆盖整首 BGM 完成卡点重剪。", Expected: []string{"timeline.recut_to_beats"}},
 		{Name: "route_recut_after_recoverable_failure", Prompt: contextPrefix + "\n上一工具结果：{\"status\":\"failed\",\"observation\":\"所选镜头无法覆盖对应节拍片段，或其源区间已被重复使用\",\"data\":{\"shot_id\":\"shot_video_2\",\"required_frames\":120,\"shot_duration_frames\":80,\"recovery\":\"用 shot.search 按该片段 min_duration_frames 重新检索，且不要重复传同一 shot_id\"}}。检索已经完成，新候选 shot_video_2b 长 180 帧；原用户目标仍是用既定 BGM、节拍和其余镜头覆盖整首音乐完成卡点成片。请选择下一步工具。", Expected: []string{"timeline.recut_to_beats"}},
 		{Name: "route_batch_after_single_patch_failure", Prompt: contextPrefix + "\n上一工具结果：{\"status\":\"failed\",\"observation\":\"时间线补丁字段预校验失败：时间线补丁 trim_clip_edge 的字段 timeline_frame 缺少必填字段\",\"data\":{\"op_kind\":\"trim_clip_edge\",\"invalid_field\":\"timeline_frame\",\"expected_schema\":{\"required\":[\"kind\",\"timeline_clip_id\",\"timeline_frame\",\"edge\"]},\"correct_example\":{\"kind\":\"trim_clip_edge\",\"timeline_clip_id\":\"clip_v1_001\",\"timeline_frame\":75,\"edge\":\"end\"},\"recovery\":\"只修正当前 op 的字段名与类型后重新调用；不要原样重发失败参数。\"}}。字段错误已明确；按原子顺序先把 clip_v1_001 的结尾裁到 75 帧。请选择下一步工具。", Expected: []string{"timeline.update"}},
-		{Name: "route_talking_head_edit", Prompt: contextPrefix + "\n逐句和镜头证据已读取，我已选定删除 utt_repeat_1、pause_2，并用 shot_keyboard_1 覆盖 utt_fingerprint_1。请一次原子应用口播剪辑。", Expected: []string{"timeline.edit_talking_head"}},
+		{Name: "route_talking_head_delete", Prompt: contextPrefix + "\n逐句证据与最新时间线已读取；较早一遍重说当前映射为时间线 360 到 480 帧，我明确选择删除它。现在只提交这个连续范围。", Expected: []string{"timeline.delete"}},
 		{Name: "route_validate", Prompt: contextPrefix + "\n用户：校验时间线和卡点对齐。", Expected: []string{"timeline.check"}},
 		{Name: "route_preview", Prompt: contextPrefix + "\n用户：生成一个可分享的预览。", Expected: []string{"render.preview"}},
 		{Name: "route_preview_inspect", Prompt: contextPrefix + "\n用户：质检 preview_123 是否有黑帧、静音和解码问题。", Expected: []string{"preview.check"}},
@@ -529,9 +528,9 @@ func liveRoutingAblationCases() []liveRoutingVariant {
 		fullByName[evalCase.Name] = evalCase
 	}
 	minimal := map[string]WorldStateSnapshot{
-		"route_beats":             liveSnapshotForSchemaCase("beats"),
-		"route_talking_head_edit": liveSnapshotForSchemaCase("talking_head_edit"),
-		"route_patch":             liveSnapshotForSchemaCase("single_patch"),
+		"route_beats":               liveSnapshotForSchemaCase("beats"),
+		"route_talking_head_delete": liveSnapshotForSchemaCase("talking_head_delete"),
+		"route_patch":               liveSnapshotForSchemaCase("single_patch"),
 		"route_plan_update": NewWorldStateSnapshot(map[string]any{
 			"assets":   map[string]any{"audio_roles": []any{}, "material_catalog": []any{}},
 			"timeline": nil,
@@ -592,7 +591,7 @@ func liveSnapshotForSchemaCase(name string) WorldStateSnapshot {
 		assets["material_catalog"] = []any{map[string]any{
 			"asset_id": "asset_bgm_1", "suggested_role": "bgm",
 		}}
-	case "speech_inspect", "talking_head_edit":
+	case "speech_inspect", "talking_head_delete", "talking_head_broll_insert", "talking_head_broll_fade":
 		assets["material_catalog"] = []any{map[string]any{
 			"asset_id": "asset_aroll_1", "transcript_provider": "qwen_asr",
 		}}
@@ -683,30 +682,6 @@ func liveAtomicTimelineInput(value any) (string, any, bool) {
 	}
 }
 
-func validateLiveTalkingHeadPreserveDecision(raw string) error {
-	var input rushestools.TalkingHeadEditInput
-	if err := json.Unmarshal([]byte(raw), &input); err != nil {
-		return fmt.Errorf("口播剪辑参数无法解析: %w", err)
-	}
-	for _, decision := range input.ShortFragmentDecisions {
-		if strings.TrimSpace(decision.FragmentID) != "fragment_keep_1" ||
-			strings.ToLower(strings.TrimSpace(decision.Action)) != "preserve" {
-			continue
-		}
-		fragment := rushestools.SpeechFragmentEvidence{
-			FragmentID:        "fragment_keep_1",
-			Kind:              "restart_prefix_before_repeated_take",
-			Text:              "但是没有同时",
-			RestartAnchorText: "这次键盘苹果",
-		}
-		if !agentexec.ValidRestartFragmentPreserveReason(fragment, decision.Reason) {
-			return errors.New("fragment_keep_1 的 preserve 理由必须至少 20 字并原样引用 fragment.text 与 restart_anchor_text")
-		}
-		return nil
-	}
-	return errors.New("缺少 fragment_keep_1 的 preserve short_fragment_decisions")
-}
-
 func validateLiveTimelineOp(operation rushestools.TimelineOp) error {
 	plain := map[string]any(operation)
 	if err := timeline.ValidateOpFields(plain); err != nil {
@@ -781,24 +756,6 @@ func TestValidateLiveToolArgumentsChecksAtomicTimelineContract(t *testing.T) {
 	} {
 		if err := validateLiveToolArguments(spec, raw); err == nil {
 			t.Errorf("非法原子 update 错误通过 raw=%s", raw)
-		}
-	}
-}
-
-func TestValidateLiveTalkingHeadPreserveDecision(t *testing.T) {
-	t.Parallel()
-	valid := `{"a_roll_timeline_clip_id":"clip_v1_001","short_fragment_decisions":[{"fragment_id":"fragment_keep_1","action":"preserve","reason":"原文但是没有同时接到这次键盘苹果后仍表达同一转折条件，句法和语义均完整，因此保留"}]}`
-	if err := validateLiveTalkingHeadPreserveDecision(valid); err != nil {
-		t.Fatalf("合法保留决定被拒绝: %v", err)
-	}
-	invalid := []string{
-		`{"a_roll_timeline_clip_id":"clip_v1_001"}`,
-		`{"a_roll_timeline_clip_id":"clip_v1_001","short_fragment_decisions":[{"fragment_id":"fragment_keep_1","action":"remove","reason":"原文但是没有同时接到这次键盘苹果后仍表达同一转折条件，句法和语义均完整，因此保留"}]}`,
-		`{"a_roll_timeline_clip_id":"clip_v1_001","short_fragment_decisions":[{"fragment_id":"fragment_keep_1","action":"preserve","reason":"语义完整，所以保留"}]}`,
-	}
-	for _, raw := range invalid {
-		if err := validateLiveTalkingHeadPreserveDecision(raw); err == nil {
-			t.Errorf("非法保留决定错误通过 raw=%s", raw)
 		}
 	}
 }

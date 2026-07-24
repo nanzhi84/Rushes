@@ -256,7 +256,7 @@ func TestStreamToolRoundBuffersAndRetriesPartialFailure(t *testing.T) {
 	t.Parallel()
 	toolChunk := func() *schema.Message {
 		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID: "call_edit", Function: schema.FunctionCall{Name: "timeline.edit_talking_head", Arguments: `{}`},
+			ID: "call_edit", Function: schema.FunctionCall{Name: "timeline.update", Arguments: `{}`},
 		}})
 	}
 	stub := &scriptedStreamModel{scripts: []func() (*schema.StreamReader[*schema.Message], error){

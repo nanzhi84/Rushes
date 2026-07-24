@@ -120,8 +120,8 @@ func TestSpeechTranscribeBuildsSidecarAndSearchStaysReadOnly(t *testing.T) {
 		t.Fatal("命中索引的 speech.search 写入了业务状态")
 	}
 	for _, required := range []string{
-		"repetition_decisions", "按可安全删除时长从长到短", "previous_context",
-		"pause_decisions", "short_fragment_decisions",
+		"按可安全删除时长从长到短", "previous_context", "timeline.inspect",
+		"timeline.delete", "一次删除一个连续范围",
 	} {
 		if !strings.Contains(first.UsageNote, required) {
 			t.Fatalf("usage note missing %q: %s", required, first.UsageNote)
