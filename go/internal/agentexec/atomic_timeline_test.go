@@ -2,7 +2,10 @@ package agentexec
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
@@ -167,6 +170,149 @@ func TestAtomicTimelineStaleTargetDoesNotCreateVersion(t *testing.T) {
 	latest, err := timeline.Latest(t.Context(), database, draftID)
 	if err != nil || latest.Version != 1 {
 		t.Fatalf("stale target wrote version: %#v err=%v", latest, err)
+	}
+}
+
+func TestAtomicTimelineTrimRejectsSourceRangeBeyondAsset(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_atomic_trim_bounds"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	insertAtomicTimelineAsset(t, database, draftID, "talk", "video", 4, false)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "talk",
+		"source_start_frame": 0, "source_end_frame": 60,
+	})
+	before, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := exec.ExecuteTool(ctx, "timeline.update", rushestools.TimelineUpdateInput{
+		"kind": "trim_clip", "timeline_clip_id": before.Tracks[0].Clips[0].TimelineClipID,
+		"source_start_frame": 0, "source_end_frame": 100000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := raw.(rushestools.ToolResult)
+	facts, _ := result.Data["asset_facts"].(map[string]any)
+	if result.Status != string(rushestools.StatusFailed) ||
+		facts["duration_frames"] != 120 {
+		t.Fatalf("out-of-bounds trim result=%#v", result)
+	}
+	after, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || after.Version != before.Version ||
+		after.Tracks[0].Clips[0].SourceEndFrame != before.Tracks[0].Clips[0].SourceEndFrame {
+		t.Fatalf("out-of-bounds trim wrote timeline: before=%#v after=%#v err=%v", before, after, err)
+	}
+}
+
+func TestAtomicTimelineInsertRejectsDerivedOriginalAudioTrack(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_atomic_original_audio_target"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	insertAtomicTimelineAsset(t, database, draftID, "talk", "video", 2, true)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "talk",
+		"source_start_frame": 0, "source_end_frame": 60,
+	})
+
+	raw, err := exec.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "track_id": "original_audio", "asset_id": "talk",
+		"timeline_start_frame": 0, "source_start_frame": 0, "source_end_frame": 60,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := raw.(rushestools.ToolResult)
+	if result.Status != string(rushestools.StatusFailed) ||
+		result.Data["current_timeline_unchanged"] != true {
+		t.Fatalf("derived track insert result=%#v", result)
+	}
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 1 || len(latest.Tracks[2].Clips) != 1 {
+		t.Fatalf("derived track insert wrote timeline: %#v err=%v", latest, err)
+	}
+}
+
+func TestAtomicTimelineEditDoesNotAnalyzeOrModifyUntouchedBGM(t *testing.T) {
+	fakeBin := t.TempDir()
+	for name, body := range map[string]string{
+		"aubiotrack": "#!/bin/sh\nprintf '0.333333\\n0.666667\\n1.000000\\n1.333333\\n1.666667\\n2.000000\\n'\n",
+		"aubioonset": "#!/bin/sh\nprintf '0.333333\\n1.000000\\n1.666667\\n'\n",
+	} {
+		if err := os.WriteFile(filepath.Join(fakeBin, name), []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_atomic_untouched_bgm"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	insertAtomicTimelineAsset(t, database, draftID, "talk", "video", 2, false)
+	source := filepath.Join(database.Paths.Temporary, "atomic-bgm.wav")
+	if err := os.WriteFile(source, []byte("fake source"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	assetResult, err := reducer.Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "music", "job_id": "job_music", "storage_mode": "reference",
+			"reference_path": source, "kind": "audio", "source": "local_path",
+			"filename": "music.wav", "hash": "atomic_bgm_hash", "size": 11,
+			"ingest_status": "ready", "usable": true,
+			"probe": map[string]any{"duration_sec": 2.0, "has_audio": true},
+		}},
+		{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{
+			"asset_id": "music", "linked_at": now,
+		}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || assetResult.Status != reducer.StatusApplied {
+		t.Fatalf("music asset status=%s err=%v", assetResult.Status, err)
+	}
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+		AssetID: "talk", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 60,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Tracks[4].Clips = []timeline.Clip{{
+		TimelineClipID: "bgm_existing", TrackID: "bgm", AssetID: "music", AssetKind: "audio",
+		Role: "bgm", TimelineStartFrame: 0, TimelineEndFrame: 60,
+		SourceStartFrame: 0, SourceEndFrame: 60, PlaybackRate: 1,
+	}}
+	if persisted, persistErr := exec.PersistTimeline(
+		t.Context(), draftID, document, "fixture",
+	); persistErr != nil || persisted.Status != "succeeded" {
+		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
+	}
+
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	result := executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_subtitle", "start_frame": 0, "end_frame": 30, "text": "只改字幕",
+	})
+	if result.Data["beat_grid_attached_count"] != nil {
+		t.Fatalf("atomic result leaked hidden BGM analysis: %#v", result.Data)
+	}
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 2 || len(latest.Tracks[4].Clips) != 1 ||
+		len(latest.Tracks[4].Clips[0].Effects) != 0 {
+		t.Fatalf("untouched BGM changed: %#v err=%v", latest.Tracks[4], err)
 	}
 }
 

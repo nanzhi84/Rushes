@@ -906,6 +906,16 @@
               "kind": {
                 "const": "insert_clip",
                 "type": "string"
+              },
+              "track_id": {
+                "enum": [
+                  "visual_base",
+                  "visual_overlay",
+                  "voiceover",
+                  "bgm",
+                  "sfx"
+                ],
+                "type": "string"
               }
             },
             "required": [
@@ -954,12 +964,6 @@
             "type": "integer"
           },
           "role": {
-            "type": "string"
-          },
-          "timeline_clip_id": {
-            "type": "string"
-          },
-          "parent_block_id": {
             "type": "string"
           },
           "metadata": {
@@ -1105,9 +1109,6 @@
           },
           "split_frame": {
             "type": "integer"
-          },
-          "new_timeline_clip_id": {
-            "type": "string"
           }
         },
         "additionalProperties": false,

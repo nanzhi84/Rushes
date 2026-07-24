@@ -259,7 +259,6 @@ func (exec *Executor) toolAtomicTimelineEdit(
 			return atomicTimelineApplyFailure(appliedOperation, err), nil
 		}
 	}
-	attachedBeatGrids, beatWarnings := exec.attachMissingBGMBeatGrids(ctx, draftID, &document)
 	if report := timeline.Validate(document); !report.Valid {
 		return rushestools.ToolResult{
 			Status:      string(rushestools.StatusFailed),
@@ -294,7 +293,6 @@ func (exec *Executor) toolAtomicTimelineEdit(
 	result.Data["applied_operation"] = appliedOperation
 	result.Data["changed_targets"] = changedTargets
 	result.Data["validation_summary"] = result.Data["validation_report"]
-	appendBeatMetadataResult(&result, attachedBeatGrids, beatWarnings)
 	return result, nil
 }
 
@@ -318,8 +316,18 @@ func (exec *Executor) validateAtomicTimelineAsset(
 	operation map[string]any,
 ) *rushestools.ToolResult {
 	kind := StringValue(operation["kind"])
-	if kind != "insert_clip" && kind != "replace_clip" {
+	if kind != "insert_clip" && kind != "replace_clip" && kind != "trim_clip" {
 		return nil
+	}
+	assetID := StringValue(operation["asset_id"])
+	var target timeline.Clip
+	targetExists := false
+	if kind == "trim_clip" {
+		target, targetExists = atomicTimelineClip(current, StringValue(operation["timeline_clip_id"]))
+		if !targetExists {
+			return nil
+		}
+		assetID = target.AssetID
 	}
 	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
@@ -329,7 +337,7 @@ func (exec *Executor) validateAtomicTimelineAsset(
 	var asset storage.Asset
 	found := false
 	for _, candidate := range assets {
-		if candidate.ID == StringValue(operation["asset_id"]) {
+		if candidate.ID == assetID {
 			asset = candidate
 			found = true
 			break
@@ -338,7 +346,7 @@ func (exec *Executor) validateAtomicTimelineAsset(
 	if !found {
 		result := atomicTimelineApplyFailure(
 			operation,
-			fmt.Errorf("素材 %s 不属于当前草稿", StringValue(operation["asset_id"])),
+			fmt.Errorf("素材 %s 不属于当前草稿", assetID),
 		)
 		result.Data["error_code"] = string(rushestools.ErrCodeStaleTarget)
 		result.Data["recovery"] = "先调用 asset.list_assets 读取当前草稿的稳定 asset_id，再重试这一个操作。"
@@ -369,6 +377,31 @@ func (exec *Executor) validateAtomicTimelineAsset(
 				return &result
 			}
 		}
+	}
+	if kind == "trim_clip" {
+		trackID = target.TrackID
+		start, startOK := NumericValue(operation["source_start_frame"])
+		end, endOK := NumericValue(operation["source_end_frame"])
+		durationSec, _ := NumericValue(asset.Probe["duration_sec"])
+		durationFrames := int(math.Round(durationSec * timeline.DefaultFPS))
+		if !startOK || !endOK || start < 0 || end <= start ||
+			durationFrames > 0 && int(end) > durationFrames {
+			result := atomicTimelineApplyFailure(
+				operation,
+				fmt.Errorf("素材源帧范围无效；asset=%s duration_frames=%d", asset.ID, durationFrames),
+			)
+			result.Data["asset_facts"] = map[string]any{
+				"asset_id": asset.ID, "kind": asset.Kind, "duration_frames": durationFrames,
+			}
+			return &result
+		}
+	}
+	if kind == "insert_clip" && trackID == "original_audio" {
+		result := atomicTimelineApplyFailure(
+			operation,
+			errors.New("original_audio 是服务端派生轨，不能直接插入片段"),
+		)
+		return &result
 	}
 	if (trackID == "visual_base" || trackID == "visual_overlay") &&
 		asset.Kind != "video" && asset.Kind != "image" {

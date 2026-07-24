@@ -71,7 +71,7 @@ func timelineAtomicOpSchema(description string, kinds []string) *jsonschema.Sche
 		}
 		kindValues = append(kindValues, kind)
 		for _, field := range spec.Fields {
-			if field.Injected {
+			if field.Injected || field.Generated {
 				continue
 			}
 			if _, exists := properties.Get(field.Name); exists {
@@ -109,12 +109,18 @@ func timelineAtomicOpBranchSchema(spec timeline.OpSpec) *jsonschema.Schema {
 		Required:   []string{"kind"},
 	}
 	for _, field := range spec.Fields {
-		if field.Injected {
+		if field.Injected || field.Generated {
 			continue
 		}
 		if field.Required {
 			branch.Required = append(branch.Required, field.Name)
 		}
+	}
+	if spec.Kind == "insert_clip" {
+		branch.Properties.Set("track_id", &jsonschema.Schema{
+			Type: "string",
+			Enum: []any{"visual_base", "visual_overlay", "voiceover", "bgm", "sfx"},
+		})
 	}
 	if len(spec.RequireAny) > 0 {
 		choices := make([]*jsonschema.Schema, 0, len(spec.RequireAny))
@@ -127,7 +133,7 @@ func timelineAtomicOpBranchSchema(spec timeline.OpSpec) *jsonschema.Schema {
 }
 
 // TimelineAtomicOperation 校验工具与 kind 的归属，并返回一份独立 op map。
-// 注入字段不属于模型输入，仍由 validateTimelineOp 拒绝。
+// 注入字段和服务端生成字段都不属于模型输入。
 func TimelineAtomicOperation(toolName string, input any) (TimelineOp, error) {
 	operation, err := timelineAtomicInputMap(toolName, input)
 	if err != nil {
@@ -150,7 +156,7 @@ func TimelineAtomicOperation(toolName string, input any) (TimelineOp, error) {
 	spec, _ := timeline.LookupOpSpec(kind)
 	stableFields := map[string]bool{"kind": true}
 	for _, field := range spec.Fields {
-		if !field.Injected {
+		if !field.Injected && !field.Generated {
 			stableFields[field.Name] = true
 		}
 	}
@@ -159,11 +165,29 @@ func TimelineAtomicOperation(toolName string, input any) (TimelineOp, error) {
 			return nil, fmt.Errorf("%s 的 Catalog op %s 不接受字段 %s", toolName, kind, name)
 		}
 	}
+	if kind == "insert_clip" {
+		trackID, _ := operation["track_id"].(string)
+		if trackID == "" {
+			trackID = "visual_base"
+		}
+		if !atomicInsertTrackAllowed(trackID) {
+			return nil, fmt.Errorf("timeline.insert 的 insert_clip 不允许写入轨道 %s", trackID)
+		}
+	}
 	cloned := make(TimelineOp, len(operation))
 	for key, value := range operation {
 		cloned[key] = cloneTimelineOpSchemaExample(value)
 	}
 	return cloned, nil
+}
+
+func atomicInsertTrackAllowed(trackID string) bool {
+	switch trackID {
+	case "visual_base", "visual_overlay", "voiceover", "bgm", "sfx":
+		return true
+	default:
+		return false
+	}
 }
 
 func timelineAtomicInputMap(toolName string, input any) (map[string]any, error) {

@@ -18,16 +18,18 @@ const (
 	OpFieldStringArray OpFieldType = "string_array"
 )
 
-// OpField 描述一个时间线补丁字段。Injected 字段由服务端补齐，模型侧
-// schema 和纠错示例应隐藏它，但运行时仍会校验调用方显式提供的值。
+// OpField 描述一个时间线补丁字段。Injected 字段由服务端补齐；
+// Generated 字段只允许 harness 调用方覆盖。两者都不进入原子模型 schema
+// 或纠错示例，模型只能引用读取结果里的现有稳定 ID。
 type OpField struct {
-	Name     string
-	Aliases  []string
-	Type     OpFieldType
-	Required bool
-	Injected bool
-	Desc     string
-	Example  any
+	Name      string
+	Aliases   []string
+	Type      OpFieldType
+	Required  bool
+	Injected  bool
+	Generated bool
+	Desc      string
+	Example   any
 }
 
 // OpSpec 是一种时间线补丁的完整字段目录。
@@ -82,7 +84,7 @@ var Catalog = []OpSpec{
 		Fields: []OpField{
 			clipIDField(),
 			field("split_frame", OpFieldInteger, true, "切点的时间线整数帧", 75),
-			field("new_timeline_clip_id", OpFieldString, false, "可选的右侧新片段 ID", "clip_v2_002"),
+			generatedField("new_timeline_clip_id", OpFieldString, "由服务端生成的右侧新片段 ID", "clip_v2_002"),
 		},
 	},
 	{
@@ -157,7 +159,7 @@ var Catalog = []OpSpec{
 			field("end_frame", OpFieldInteger, true, "字幕结束的时间线整数帧", 90),
 			field("text", OpFieldString, true, "非空字幕文字", "示例字幕"),
 			field("style", OpFieldString, false, "字幕样式：default、large_center、top_bar、minimal 或 bold_bottom", "default"),
-			field("timeline_clip_id", OpFieldString, false, "可选字幕片段 ID，缺省时自动生成", "subtitle_v2_001"),
+			generatedField("timeline_clip_id", OpFieldString, "由服务端生成的字幕片段 ID", "subtitle_v2_001"),
 		},
 	},
 	{
@@ -178,8 +180,8 @@ var Catalog = []OpSpec{
 			field("track_id", OpFieldString, false, "目标轨道 ID，默认 visual_base", "visual_base"),
 			field("timeline_start_frame", OpFieldInteger, false, "非主视觉片段的时间线起点整数帧", 0),
 			field("role", OpFieldString, false, "片段角色，默认 b_roll", "b_roll"),
-			field("timeline_clip_id", OpFieldString, false, "可选片段 ID，缺省时自动生成", "clip_v2_001"),
-			field("parent_block_id", OpFieldString, false, "可选联动组 ID", "link_clip_v2_001"),
+			generatedField("timeline_clip_id", OpFieldString, "由服务端生成的片段 ID", "clip_v2_001"),
+			generatedField("parent_block_id", OpFieldString, "由服务端生成的联动组 ID", "link_clip_v2_001"),
 			field("metadata", OpFieldObject, false, "可选片段元数据对象", map[string]any{"source": "catalog_example"}),
 			injectedField("asset_kind", OpFieldString, "由服务端根据 asset_id 注入的素材类型", "video"),
 			injectedField("include_original_audio", OpFieldBoolean, "由服务端为主视觉视频注入的原声联动标志", true),
@@ -262,7 +264,7 @@ func CorrectOpExample(spec OpSpec) map[string]any {
 	example := make(map[string]any, len(spec.Fields)+1)
 	example["kind"] = spec.Kind
 	for _, field := range spec.Fields {
-		if field.Injected || field.Example == nil {
+		if field.Injected || field.Generated || field.Example == nil {
 			continue
 		}
 		example[field.Name] = cloneOpExampleValue(field.Example)
@@ -338,6 +340,10 @@ func field(name string, fieldType OpFieldType, required bool, desc string, examp
 
 func injectedField(name string, fieldType OpFieldType, desc string, example any) OpField {
 	return OpField{Name: name, Type: fieldType, Injected: true, Desc: desc, Example: example}
+}
+
+func generatedField(name string, fieldType OpFieldType, desc string, example any) OpField {
+	return OpField{Name: name, Type: fieldType, Generated: true, Desc: desc, Example: example}
 }
 
 func clipIDField() OpField {

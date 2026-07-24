@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -110,6 +111,24 @@ func TestAtomicTimelineSchemasPartitionCatalogWithoutBatchOrInjectedFields(t *te
 	if len(seen) != len(timeline.Catalog)-1 {
 		t.Fatalf("原子 schema 覆盖 %d 个 op，期望排除 sync_original_audio 后为 %d", len(seen), len(timeline.Catalog)-1)
 	}
+	insertSchema := (TimelineInsertInput{}).JSONSchema()
+	for _, generated := range []string{"timeline_clip_id", "parent_block_id"} {
+		if _, exposed := insertSchema.Properties.Get(generated); exposed {
+			t.Errorf("timeline.insert 暴露服务端生成字段 %s", generated)
+		}
+	}
+	splitSchema := (TimelineSplitInput{}).JSONSchema()
+	if _, exposed := splitSchema.Properties.Get("new_timeline_clip_id"); exposed {
+		t.Error("timeline.split 暴露服务端生成字段 new_timeline_clip_id")
+	}
+	insertClip := timelineOpBranchByKind(t, insertSchema, "insert_clip")
+	trackID, exists := insertClip.Properties.Get("track_id")
+	if !exists || !reflect.DeepEqual(
+		trackID.Enum,
+		[]any{"visual_base", "visual_overlay", "voiceover", "bgm", "sfx"},
+	) {
+		t.Fatalf("timeline.insert track_id enum=%#v", trackID)
+	}
 }
 
 func TestTimelineAtomicOperationRejectsWrongFamilyAndInjectedFields(t *testing.T) {
@@ -129,6 +148,33 @@ func TestTimelineAtomicOperationRejectsWrongFamilyAndInjectedFields(t *testing.T
 		"kind": "delete_clip", "clip_id": "legacy_clip_id",
 	}); err == nil || !strings.Contains(err.Error(), "不接受字段 clip_id") {
 		t.Fatalf("legacy alias err=%v", err)
+	}
+	for field, input := range map[string]TimelineInsertInput{
+		"timeline_clip_id": {
+			"kind": "insert_clip", "asset_id": "asset", "source_start_frame": 0, "source_end_frame": 30,
+			"timeline_clip_id": "model_chosen",
+		},
+		"parent_block_id": {
+			"kind": "insert_clip", "asset_id": "asset", "source_start_frame": 0, "source_end_frame": 30,
+			"parent_block_id": "model_chosen",
+		},
+	} {
+		if _, err := TimelineAtomicOperation("timeline.insert", input); err == nil ||
+			!strings.Contains(err.Error(), "不接受字段 "+field) {
+			t.Errorf("generated field %s err=%v", field, err)
+		}
+	}
+	if _, err := TimelineAtomicOperation("timeline.split", TimelineSplitInput{
+		"kind": "split_clip", "timeline_clip_id": "clip_1", "split_frame": 15,
+		"new_timeline_clip_id": "model_chosen",
+	}); err == nil || !strings.Contains(err.Error(), "不接受字段 new_timeline_clip_id") {
+		t.Errorf("split generated ID err=%v", err)
+	}
+	if _, err := TimelineAtomicOperation("timeline.insert", TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "asset", "source_start_frame": 0, "source_end_frame": 30,
+		"track_id": "original_audio",
+	}); err == nil || !strings.Contains(err.Error(), "不允许写入轨道 original_audio") {
+		t.Errorf("derived track err=%v", err)
 	}
 	operation, err := TimelineAtomicOperation("timeline.split", TimelineSplitInput{
 		"kind": "split_clip", "timeline_clip_id": "clip_1", "split_frame": 15,
@@ -155,6 +201,8 @@ func TestAtomicTimelineToolRejectsInvalidCatalogCombinationBeforeExecutor(t *tes
 		`{"kind":"delete_clip","timeline_clip_id":"clip_1"}`,
 		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"asset_kind":"video"}`,
 		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"timeline_clip_id":"a","clip_id":"b"}`,
+		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"timeline_clip_id":"model_chosen"}`,
+		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"track_id":"original_audio"}`,
 	} {
 		if _, err := insert.InvokableRun(ctx, arguments); err == nil {
 			t.Errorf("非法原子参数进入 executor 并返回成功: %s", arguments)
