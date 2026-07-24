@@ -13,6 +13,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
+	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 type usageServiceModel struct {
@@ -405,10 +406,18 @@ func TestModelToolSurfaceMetricsFollowSuccessfulGraphBinding(t *testing.T) {
 	}
 
 	failingDatabase := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, failingDatabase, "draft_surface_failure")
 	failingModel := &toolSurfaceBindingModel{withToolsErr: errors.New("bind failed")}
-	if service, err := NewService(t.Context(), failingDatabase, failingModel); err == nil {
-		service.Close()
-		t.Fatal("模型工具绑定失败时 NewService 应返回错误")
+	failingService, err := NewService(t.Context(), failingDatabase, failingModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(failingService.Close)
+	failingCtx := rushestools.WithDraftID(t.Context(), "draft_surface_failure")
+	if _, err := failingService.react.Generate(failingCtx, []*schema.Message{
+		schema.UserMessage("列出素材"),
+	}); err == nil {
+		t.Fatal("动态模型工具绑定失败时 Generate 应返回错误")
 	}
 	if count, sum, _, _ := metricModelToolBoundCount.Snapshot(); count != boundCountBefore || sum != boundCountSumBefore {
 		t.Fatalf("失败建图不应记录 bound count: before=(%d,%d) after=(%d,%d)",
@@ -420,6 +429,7 @@ func TestModelToolSurfaceMetricsFollowSuccessfulGraphBinding(t *testing.T) {
 	}
 
 	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_surface_success")
 	successModel := &toolSurfaceBindingModel{}
 	service, err := NewService(t.Context(), database, successModel)
 	if err != nil {
@@ -431,8 +441,13 @@ func TestModelToolSurfaceMetricsFollowSuccessfulGraphBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	boundTools := service.tools.EinoTools(true, false)
-	bound, err := modelToolSchemaSizeFromTools(t.Context(), boundTools)
+	messages := []*schema.Message{schema.UserMessage("列出素材")}
+	successCtx := rushestools.WithDraftID(t.Context(), "draft_surface_success")
+	specs, err := selectModelToolSurface(successCtx, service.tools, messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := modelToolSchemaSizeFromTools(t.Context(), implementationsForSpecs(specs))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,6 +456,9 @@ func TestModelToolSurfaceMetricsFollowSuccessfulGraphBinding(t *testing.T) {
 	}
 	if got := metricModelToolCatalogSchemaRunes.Value(); got != int64(catalog.TotalRunes) {
 		t.Fatalf("catalog schema runes gauge=%d want=%d", got, catalog.TotalRunes)
+	}
+	if _, err := service.react.Generate(successCtx, messages); err != nil {
+		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(successModel.boundNames, bound.Names) {
 		t.Fatalf("模型实际收到工具=%v want=%v", successModel.boundNames, bound.Names)
