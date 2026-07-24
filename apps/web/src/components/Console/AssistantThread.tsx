@@ -1218,7 +1218,12 @@ const TOOL_STEP_LABELS: Record<string, string> = {
   "decision.answer": "记录你的回答",
   // timeline.apply_patch 自 #100 起已从 LLM 工具面移除，此标签仅供历史轨迹展示回放，勿随工具删除清理。
   "timeline.apply_patch": "修改时间线",
+  // apply_patches 仅供编辑器 REST/harness 与历史轨迹；模型使用下面四个原子入口。
   "timeline.apply_patches": "批量修改时间线",
+  "timeline.insert": "插入时间线内容",
+  "timeline.delete": "删除时间线内容",
+  "timeline.update": "更新时间线目标",
+  "timeline.split": "切分时间线片段",
   "timeline.recut_to_beats": "按节拍重剪",
   "timeline.compose_initial": "生成初版时间线",
   "timeline.check": "检查时间线",

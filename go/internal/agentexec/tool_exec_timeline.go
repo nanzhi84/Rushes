@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
@@ -175,6 +177,377 @@ func (exec *Executor) toolApplyPatches(
 	result, err := exec.PersistTimeline(ctx, draftID, document, "apply_patches", plannedOperations)
 	appendBeatMetadataResult(&result, attachedBeatGrids, beatWarnings)
 	return result, err
+}
+
+func (exec *Executor) toolAtomicTimelineEdit(
+	ctx context.Context,
+	draftID string,
+	toolName string,
+	input any,
+) (rushestools.ToolResult, error) {
+	operation, err := rushestools.TimelineAtomicOperation(toolName, input)
+	if err != nil {
+		if failure, ok := TimelineOpFailureAt(err, map[string]any(operation), 0, timeline.Document{}); ok {
+			return failure, nil
+		}
+		return rushestools.ToolResult{
+			Status:      string(rushestools.StatusFailed),
+			Observation: "原子时间线编辑输入不属于当前工具",
+			Data: map[string]any{
+				"reason":                     err.Error(),
+				"current_timeline_unchanged": true,
+				"recovery":                   "按当前工具 schema 只提交一个受支持的 kind；多个目标必须拆成多个工具调用。",
+			},
+		}, nil
+	}
+
+	current, err := timeline.Latest(ctx, exec.database, draftID)
+	previousTimelineID := ""
+	if errors.Is(err, storage.ErrNotFound) {
+		if toolName != "timeline.insert" ||
+			StringValue(operation["kind"]) != "insert_clip" ||
+			ValueOr(StringValue(operation["track_id"]), "visual_base") != "visual_base" {
+			return rushestools.ToolResult{
+				Status:      string(rushestools.StatusFailed),
+				Observation: "当前草稿尚无时间线，只有 visual_base clip 可以作为第一次原子插入",
+				Data: map[string]any{
+					"error_code":                 string(rushestools.ErrCodeTimelineAbsent),
+					"current_timeline_unchanged": true,
+					"recovery":                   "先用 timeline.insert 插入一个 visual_base clip，再继续字幕、叠加或其它编辑。",
+				},
+			}, nil
+		}
+		current = timeline.Empty(draftID, 0)
+		current.DurationFrames = 0
+	} else if err != nil {
+		return rushestools.ToolResult{}, err
+	} else {
+		previousTimelineID = current.TimelineID
+	}
+
+	enriched, err := exec.enrichTimelineOperations(ctx, draftID, []map[string]any{operation})
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	appliedOperation := enriched[0]
+	if failure := exec.validateAtomicTimelineAsset(ctx, draftID, current, appliedOperation); failure != nil {
+		return *failure, nil
+	}
+
+	planned, preservedAudio := PrepareTimelineBatch(current, enriched)
+	document, err := timeline.ApplyPatch(current, planned[0])
+	if err != nil {
+		if failure, ok := TimelineOpFailureAt(err, appliedOperation, 0, current); ok {
+			if semanticKind, _ := failure.Data["semantic_error_kind"].(timeline.SemanticErrorKind); semanticKind == timeline.SemanticClipNotFound {
+				failure.Data["error_code"] = string(rushestools.ErrCodeStaleTarget)
+				failure.Data["recovery"] = "目标可能已被前一个原子编辑改写；先调用 timeline.inspect 读取最新稳定 ID，再继续剩余编辑。"
+			}
+			return failure, nil
+		}
+		return atomicTimelineApplyFailure(appliedOperation, err), nil
+	}
+	if restoreErr := RestoreIndependentAudioTracks(&document, preservedAudio); restoreErr != nil {
+		return atomicTimelineApplyFailure(appliedOperation, restoreErr), nil
+	}
+	if atomicReplaceTouchesPrimary(current, appliedOperation) {
+		audioAssetIDs, listErr := exec.draftAudioVideoAssetIDs(ctx, draftID)
+		if listErr != nil {
+			return rushestools.ToolResult{}, listErr
+		}
+		document, err = timeline.DeriveOriginalAudio(document, audioAssetIDs)
+		if err != nil {
+			return atomicTimelineApplyFailure(appliedOperation, err), nil
+		}
+	}
+	if report := timeline.Validate(document); !report.Valid {
+		return rushestools.ToolResult{
+			Status:      string(rushestools.StatusFailed),
+			Observation: "原子编辑结果未通过结构校验，当前时间线未更新",
+			Data: map[string]any{
+				"failed_operation":           appliedOperation,
+				"current_timeline_unchanged": true,
+				"validation_summary": map[string]any{
+					"valid": report.Valid, "checks": report.Checks, "issues": report.Issues,
+				},
+				"recovery": "读取 validation_summary；只修正这一个原子操作后重试。",
+			},
+		}, nil
+	}
+
+	changedTargets := atomicChangedTargets(current, document)
+	result, err := exec.PersistTimeline(
+		ctx,
+		draftID,
+		document,
+		strings.TrimPrefix(toolName, "timeline."),
+		[]map[string]any{appliedOperation},
+	)
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	if result.Data == nil {
+		result.Data = map[string]any{}
+	}
+	result.Data["previous_timeline_id"] = previousTimelineID
+	result.Data["timeline_id"] = document.TimelineID
+	result.Data["applied_operation"] = appliedOperation
+	result.Data["changed_targets"] = changedTargets
+	result.Data["validation_summary"] = result.Data["validation_report"]
+	return result, nil
+}
+
+func atomicTimelineApplyFailure(operation map[string]any, err error) rushestools.ToolResult {
+	return rushestools.ToolResult{
+		Status:      string(rushestools.StatusFailed),
+		Observation: "原子时间线编辑失败，当前时间线未更新",
+		Data: map[string]any{
+			"failed_operation":           operation,
+			"reason":                     err.Error(),
+			"current_timeline_unchanged": true,
+			"recovery":                   "读取当前时间线事实并只修正这个操作；不要把多个目标合并到一次调用。",
+		},
+	}
+}
+
+func (exec *Executor) validateAtomicTimelineAsset(
+	ctx context.Context,
+	draftID string,
+	current timeline.Document,
+	operation map[string]any,
+) *rushestools.ToolResult {
+	kind := StringValue(operation["kind"])
+	if kind != "insert_clip" && kind != "replace_clip" && kind != "trim_clip" {
+		return nil
+	}
+	assetID := StringValue(operation["asset_id"])
+	var target timeline.Clip
+	targetExists := false
+	if kind == "trim_clip" {
+		target, targetExists = atomicTimelineClip(current, StringValue(operation["timeline_clip_id"]))
+		if !targetExists {
+			return nil
+		}
+		assetID = target.AssetID
+	}
+	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
+	if err != nil {
+		result := atomicTimelineApplyFailure(operation, err)
+		return &result
+	}
+	var asset storage.Asset
+	found := false
+	for _, candidate := range assets {
+		if candidate.ID == assetID {
+			asset = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		result := atomicTimelineApplyFailure(
+			operation,
+			fmt.Errorf("素材 %s 不属于当前草稿", assetID),
+		)
+		result.Data["error_code"] = string(rushestools.ErrCodeStaleTarget)
+		result.Data["recovery"] = "先调用 asset.list_assets 读取当前草稿的稳定 asset_id，再重试这一个操作。"
+		return &result
+	}
+
+	trackID := ValueOr(StringValue(operation["track_id"]), "visual_base")
+	if kind == "replace_clip" {
+		clipID := ValueOr(
+			StringValue(operation["timeline_clip_id"]),
+			StringValue(operation["clip_id"]),
+		)
+		trackID = atomicClipTrackID(current, clipID)
+		if target, exists := atomicTimelineClip(current, clipID); exists {
+			durationSec, _ := NumericValue(asset.Probe["duration_sec"])
+			durationFrames := int(math.Round(durationSec * timeline.DefaultFPS))
+			if durationFrames > 0 && target.SourceEndFrame > durationFrames {
+				result := atomicTimelineApplyFailure(
+					operation,
+					fmt.Errorf(
+						"替换素材 %s 只有 %d 帧，无法覆盖目标源区间 %d-%d",
+						asset.ID, durationFrames, target.SourceStartFrame, target.SourceEndFrame,
+					),
+				)
+				result.Data["asset_facts"] = map[string]any{
+					"asset_id": asset.ID, "kind": asset.Kind, "duration_frames": durationFrames,
+				}
+				return &result
+			}
+		}
+	}
+	if kind == "trim_clip" {
+		trackID = target.TrackID
+		start, startOK := NumericValue(operation["source_start_frame"])
+		end, endOK := NumericValue(operation["source_end_frame"])
+		durationSec, _ := NumericValue(asset.Probe["duration_sec"])
+		durationFrames := int(math.Round(durationSec * timeline.DefaultFPS))
+		if !startOK || !endOK || start < 0 || end <= start ||
+			durationFrames > 0 && int(end) > durationFrames {
+			result := atomicTimelineApplyFailure(
+				operation,
+				fmt.Errorf("素材源帧范围无效；asset=%s duration_frames=%d", asset.ID, durationFrames),
+			)
+			result.Data["asset_facts"] = map[string]any{
+				"asset_id": asset.ID, "kind": asset.Kind, "duration_frames": durationFrames,
+			}
+			return &result
+		}
+	}
+	if kind == "insert_clip" && trackID == "original_audio" {
+		result := atomicTimelineApplyFailure(
+			operation,
+			errors.New("original_audio 是服务端派生轨，不能直接插入片段"),
+		)
+		return &result
+	}
+	if (trackID == "visual_base" || trackID == "visual_overlay") &&
+		asset.Kind != "video" && asset.Kind != "image" {
+		result := atomicTimelineApplyFailure(operation, fmt.Errorf("%s 轨只支持 video/image 素材", trackID))
+		return &result
+	}
+	if trackID == "voiceover" || trackID == "bgm" || trackID == "sfx" {
+		if asset.Kind != "audio" && asset.Kind != "video" {
+			result := atomicTimelineApplyFailure(operation, fmt.Errorf("%s 轨只支持 audio/video 素材", trackID))
+			return &result
+		}
+	}
+	if kind == "insert_clip" {
+		start, startOK := NumericValue(operation["source_start_frame"])
+		end, endOK := NumericValue(operation["source_end_frame"])
+		durationSec, _ := NumericValue(asset.Probe["duration_sec"])
+		durationFrames := int(math.Round(durationSec * timeline.DefaultFPS))
+		if !startOK || !endOK || start < 0 || end <= start ||
+			durationFrames > 0 && int(end) > durationFrames {
+			result := atomicTimelineApplyFailure(
+				operation,
+				fmt.Errorf("素材源帧范围无效；asset=%s duration_frames=%d", asset.ID, durationFrames),
+			)
+			result.Data["asset_facts"] = map[string]any{
+				"asset_id": asset.ID, "kind": asset.Kind, "duration_frames": durationFrames,
+			}
+			return &result
+		}
+	}
+	return nil
+}
+
+func atomicReplaceTouchesPrimary(current timeline.Document, operation map[string]any) bool {
+	if StringValue(operation["kind"]) != "replace_clip" {
+		return false
+	}
+	clipID := ValueOr(StringValue(operation["timeline_clip_id"]), StringValue(operation["clip_id"]))
+	return atomicClipTrackID(current, clipID) == "visual_base"
+}
+
+func atomicClipTrackID(document timeline.Document, clipID string) string {
+	clip, exists := atomicTimelineClip(document, clipID)
+	if !exists {
+		return ""
+	}
+	return clip.TrackID
+}
+
+func atomicTimelineClip(document timeline.Document, clipID string) (timeline.Clip, bool) {
+	for _, track := range document.Tracks {
+		for _, clip := range track.Clips {
+			if clip.TimelineClipID == clipID {
+				return clip, true
+			}
+		}
+	}
+	return timeline.Clip{}, false
+}
+
+func (exec *Executor) draftAudioVideoAssetIDs(ctx context.Context, draftID string) ([]string, error) {
+	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		hasAudio, _ := asset.Probe["has_audio"].(bool)
+		if asset.Kind == "video" && hasAudio {
+			result = append(result, asset.ID)
+		}
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func atomicChangedTargets(before, after timeline.Document) []map[string]any {
+	type clipTarget struct {
+		trackID string
+		clip    timeline.Clip
+	}
+	beforeClips := map[string]clipTarget{}
+	afterClips := map[string]clipTarget{}
+	beforeTracks := map[string]timeline.Track{}
+	afterTracks := map[string]timeline.Track{}
+	for _, track := range before.Tracks {
+		trackCopy := track
+		trackCopy.Clips = nil
+		beforeTracks[track.TrackID] = trackCopy
+		for _, clip := range track.Clips {
+			beforeClips[clip.TimelineClipID] = clipTarget{trackID: track.TrackID, clip: clip}
+		}
+	}
+	for _, track := range after.Tracks {
+		trackCopy := track
+		trackCopy.Clips = nil
+		afterTracks[track.TrackID] = trackCopy
+		for _, clip := range track.Clips {
+			afterClips[clip.TimelineClipID] = clipTarget{trackID: track.TrackID, clip: clip}
+		}
+	}
+	targets := []map[string]any{}
+	clipIDs := map[string]struct{}{}
+	for clipID := range beforeClips {
+		clipIDs[clipID] = struct{}{}
+	}
+	for clipID := range afterClips {
+		clipIDs[clipID] = struct{}{}
+	}
+	sortedClipIDs := make([]string, 0, len(clipIDs))
+	for clipID := range clipIDs {
+		sortedClipIDs = append(sortedClipIDs, clipID)
+	}
+	sort.Strings(sortedClipIDs)
+	for _, clipID := range sortedClipIDs {
+		previous, existedBefore := beforeClips[clipID]
+		current, existsAfter := afterClips[clipID]
+		if existedBefore && existsAfter && reflect.DeepEqual(previous, current) {
+			continue
+		}
+		change := "updated"
+		trackID := current.trackID
+		if !existedBefore {
+			change = "inserted"
+		} else if !existsAfter {
+			change = "deleted"
+			trackID = previous.trackID
+		}
+		targets = append(targets, map[string]any{
+			"target_type": "clip", "timeline_clip_id": clipID,
+			"track_id": trackID, "change": change,
+		})
+	}
+	trackIDs := make([]string, 0, len(afterTracks))
+	for trackID := range afterTracks {
+		trackIDs = append(trackIDs, trackID)
+	}
+	sort.Strings(trackIDs)
+	for _, trackID := range trackIDs {
+		if reflect.DeepEqual(beforeTracks[trackID], afterTracks[trackID]) {
+			continue
+		}
+		targets = append(targets, map[string]any{
+			"target_type": "track", "track_id": trackID, "change": "updated",
+		})
+	}
+	return targets
 }
 
 func appendBeatMetadataResult(

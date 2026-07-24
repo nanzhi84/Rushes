@@ -1,15 +1,216 @@
 package tools
 
 import (
+	"fmt"
+
 	"github.com/eino-contrib/jsonschema"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
 
-// TimelineOp 是 timeline.apply_patches 面向模型的单个语义补丁。
+// TimelineOp 是 timeline.apply_patches harness 路径使用的单个语义补丁。
 //
 // 运行时仍保留 map 语义；JSONSchema 则把 timeline.Catalog 编译成 oneOf，
 // 让模型只看到所选 kind 的合法字段，并隐藏由服务端注入的字段。
 type TimelineOp map[string]any
+
+// 四种原子时间线输入直接承载一个 Catalog op，不再使用 ops[] 外壳。
+// Go 运行时保留 map 以复用 timeline.ApplyPatch；模型侧 schema 则按工具职责
+// 只编译允许的 kind，避免让一次调用跨 target 或跨操作族。
+type TimelineInsertInput map[string]any
+type TimelineDeleteInput map[string]any
+type TimelineUpdateInput map[string]any
+type TimelineSplitInput map[string]any
+
+var timelineAtomicKinds = map[string][]string{
+	"timeline.insert": {"insert_clip", "insert_subtitle"},
+	"timeline.delete": {"delete_clip", "delete_range", "remove_track_clips"},
+	"timeline.update": {
+		"trim_clip",
+		"reorder_clip",
+		"move_clip",
+		"trim_clip_edge",
+		"set_track_state",
+		"set_track_ducking",
+		"set_clip_linked",
+		"replace_clip",
+		"set_playback_rate",
+		"adjust_gain",
+		"set_clip_fades",
+		"edit_subtitle_text",
+	},
+	"timeline.split": {"split_clip"},
+}
+
+func (TimelineInsertInput) JSONSchema() *jsonschema.Schema {
+	return timelineAtomicOpSchema("插入一个 clip 或一条字幕", timelineAtomicKinds["timeline.insert"])
+}
+
+func (TimelineDeleteInput) JSONSchema() *jsonschema.Schema {
+	return timelineAtomicOpSchema("删除一个 clip、一个连续范围或一条非主视觉轨的内容", timelineAtomicKinds["timeline.delete"])
+}
+
+func (TimelineUpdateInput) JSONSchema() *jsonschema.Schema {
+	schema := timelineAtomicOpSchema("只更新一个 clip、track 或 subtitle 目标", timelineAtomicKinds["timeline.update"])
+	schema.Not = &jsonschema.Schema{Required: []string{"timeline_clip_id", "track_id"}}
+	return schema
+}
+
+func (TimelineSplitInput) JSONSchema() *jsonschema.Schema {
+	return timelineAtomicOpSchema("在一个时间线帧位置切分一个 clip", timelineAtomicKinds["timeline.split"])
+}
+
+func timelineAtomicOpSchema(description string, kinds []string) *jsonschema.Schema {
+	branches := make([]*jsonschema.Schema, 0, len(kinds))
+	properties := jsonschema.NewProperties()
+	kindValues := make([]any, 0, len(kinds))
+	properties.Set("kind", &jsonschema.Schema{Type: "string"})
+	for _, kind := range kinds {
+		spec, exists := timeline.LookupOpSpec(kind)
+		if !exists {
+			continue
+		}
+		kindValues = append(kindValues, kind)
+		for _, field := range spec.Fields {
+			if field.Injected || field.Generated {
+				continue
+			}
+			if _, exists := properties.Get(field.Name); exists {
+				continue
+			}
+			fieldSchema := &jsonschema.Schema{Type: timelineOpJSONType(field.Type)}
+			if field.Type == timeline.OpFieldStringArray {
+				fieldSchema.Items = &jsonschema.Schema{Type: "string"}
+			}
+			properties.Set(field.Name, fieldSchema)
+		}
+		branches = append(branches, timelineAtomicOpBranchSchema(*spec))
+	}
+	kindSchema, _ := properties.Get("kind")
+	kindSchema.Enum = kindValues
+	return &jsonschema.Schema{
+		Type:                 "object",
+		Description:          description + "；kind 决定唯一 Catalog op",
+		Properties:           properties,
+		Required:             []string{"kind"},
+		AdditionalProperties: jsonschema.FalseSchema,
+		OneOf:                branches,
+	}
+}
+
+// timelineAtomicOpBranchSchema 不复用旧批量工具的教学型 schema（title、分支摘要、
+// 完整示例和兼容别名），只保留 provider 约束执行所需的信息。字段类型在根级只声明
+// 一次；每个分支只声明 kind const 与 required。额外组合由同源 Catalog 在 Registry
+// 解码阶段、进入 executor 前拒绝，不为 12 个 update 分支重复字段白名单。
+func timelineAtomicOpBranchSchema(spec timeline.OpSpec) *jsonschema.Schema {
+	properties := jsonschema.NewProperties()
+	properties.Set("kind", &jsonschema.Schema{Type: "string", Const: spec.Kind})
+	branch := &jsonschema.Schema{
+		Properties: properties,
+		Required:   []string{"kind"},
+	}
+	for _, field := range spec.Fields {
+		if field.Injected || field.Generated {
+			continue
+		}
+		if field.Required {
+			branch.Required = append(branch.Required, field.Name)
+		}
+	}
+	if spec.Kind == "insert_clip" {
+		branch.Properties.Set("track_id", &jsonschema.Schema{
+			Type: "string",
+			Enum: []any{"visual_base", "visual_overlay", "voiceover", "bgm", "sfx"},
+		})
+	}
+	if len(spec.RequireAny) > 0 {
+		choices := make([]*jsonschema.Schema, 0, len(spec.RequireAny))
+		for _, name := range spec.RequireAny {
+			choices = append(choices, &jsonschema.Schema{Required: []string{name}})
+		}
+		branch.AllOf = []*jsonschema.Schema{{AnyOf: choices}}
+	}
+	return branch
+}
+
+// TimelineAtomicOperation 校验工具与 kind 的归属，并返回一份独立 op map。
+// 注入字段和服务端生成字段都不属于模型输入。
+func TimelineAtomicOperation(toolName string, input any) (TimelineOp, error) {
+	operation, err := timelineAtomicInputMap(toolName, input)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateTimelineOp(operation); err != nil {
+		return nil, err
+	}
+	kind, _ := operation["kind"].(string)
+	allowed := false
+	for _, candidate := range timelineAtomicKinds[toolName] {
+		if candidate == kind {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return nil, fmt.Errorf("%s 不接受 Catalog op %s", toolName, kind)
+	}
+	spec, _ := timeline.LookupOpSpec(kind)
+	stableFields := map[string]bool{"kind": true}
+	for _, field := range spec.Fields {
+		if !field.Injected && !field.Generated {
+			stableFields[field.Name] = true
+		}
+	}
+	for name := range operation {
+		if !stableFields[name] {
+			return nil, fmt.Errorf("%s 的 Catalog op %s 不接受字段 %s", toolName, kind, name)
+		}
+	}
+	if kind == "insert_clip" {
+		trackID, _ := operation["track_id"].(string)
+		if trackID == "" {
+			trackID = "visual_base"
+		}
+		if !atomicInsertTrackAllowed(trackID) {
+			return nil, fmt.Errorf("timeline.insert 的 insert_clip 不允许写入轨道 %s", trackID)
+		}
+	}
+	cloned := make(TimelineOp, len(operation))
+	for key, value := range operation {
+		cloned[key] = cloneTimelineOpSchemaExample(value)
+	}
+	return cloned, nil
+}
+
+func atomicInsertTrackAllowed(trackID string) bool {
+	switch trackID {
+	case "visual_base", "visual_overlay", "voiceover", "bgm", "sfx":
+		return true
+	default:
+		return false
+	}
+}
+
+func timelineAtomicInputMap(toolName string, input any) (map[string]any, error) {
+	switch typed := input.(type) {
+	case TimelineInsertInput:
+		if toolName == "timeline.insert" {
+			return map[string]any(typed), nil
+		}
+	case TimelineDeleteInput:
+		if toolName == "timeline.delete" {
+			return map[string]any(typed), nil
+		}
+	case TimelineUpdateInput:
+		if toolName == "timeline.update" {
+			return map[string]any(typed), nil
+		}
+	case TimelineSplitInput:
+		if toolName == "timeline.split" {
+			return map[string]any(typed), nil
+		}
+	}
+	return nil, fmt.Errorf("%s 输入类型不匹配: %T", toolName, input)
+}
 
 // JSONSchema 为 Eino 的参数反射提供 Catalog 驱动的主动 schema。
 // 必须使用值接收者：jsonschema v1.0.3 通过非指针类型的方法集识别自定义 schema。

@@ -307,11 +307,11 @@ func inferModelToolSurface(
 		"搜索镜头", "查找镜头", "找镜头", "asset.", "shot"):
 		return rushestools.SurfaceDiscovery
 	default:
-		for _, spec := range specs {
-			if spec.Family == rushestools.FamilyEdit &&
-				spec.Surfaces.Includes(rushestools.SurfaceTimelineEdit) {
-				return rushestools.SurfaceTimelineEdit
-			}
+		// 空时间线时只有 timeline.insert 可用；宽泛请求仍先在 Discovery
+		// 获取素材/镜头事实。只有已有时间线（delete/update/split 至少一个可用）
+		// 或用户明确点名原子编辑时，才进入 TimelineEdit。
+		if hasAnyAllowedTool(specs, "timeline.delete", "timeline.update", "timeline.split") {
+			return rushestools.SurfaceTimelineEdit
 		}
 		return rushestools.SurfaceDiscovery
 	}
@@ -398,7 +398,24 @@ func surfaceWithAvailablePrerequisites(
 			return rushestools.SurfaceDiscovery
 		}
 	case rushestools.SurfaceTimelineEdit:
-		if !hasAllowedTool(specs, "timeline.apply_patches") && !requestsTimelineInspect(text) {
+		hasExistingTimelineEdits := hasAnyAllowedTool(
+			specs,
+			"timeline.delete",
+			"timeline.update",
+			"timeline.split",
+		)
+		if !hasExistingTimelineEdits &&
+			hasAllowedTool(specs, "timeline.insert") &&
+			!requestsTimelineInspect(text) &&
+			!strings.Contains(text, "timeline.insert") {
+			return rushestools.SurfaceDiscovery
+		}
+		if !hasAnyAllowedTool(specs,
+			"timeline.insert",
+			"timeline.delete",
+			"timeline.update",
+			"timeline.split",
+		) && !requestsTimelineInspect(text) {
 			return rushestools.SurfaceDiscovery
 		}
 	case rushestools.SurfaceRender:
@@ -500,11 +517,11 @@ func recentSuccessfulWorkflowSurface(
 			}
 		case "timeline.edit_talking_head", "timeline.recut_to_beats":
 			if requestsRemainingTimelinePatch(userText) &&
-				!successfulToolCallSinceLatestUser(messages, "timeline.apply_patches") {
+				!successfulAtomicTimelineEditSinceLatestUser(messages) {
 				return rushestools.SurfaceTimelineEdit
 			}
 			return rushestools.SurfaceRender
-		case "timeline.apply_patches":
+		case "timeline.insert", "timeline.delete", "timeline.update", "timeline.split":
 			return rushestools.SurfaceTimelineEdit
 		case "timeline.check":
 			return rushestools.SurfaceRender
@@ -528,7 +545,10 @@ func isWorkflowTransitionTool(name string) bool {
 		"shot.search",
 		"timeline.edit_talking_head",
 		"timeline.recut_to_beats",
-		"timeline.apply_patches",
+		"timeline.insert",
+		"timeline.delete",
+		"timeline.update",
+		"timeline.split",
 		"timeline.check",
 		"render.preview":
 		return true
@@ -632,10 +652,24 @@ func requestsBeatEditWorkflow(text string) bool {
 // “插入 B-roll”不在此列，因为 edit_talking_head 和 recut_to_beats 本身会消费检索结果。
 func requestsRemainingTimelinePatch(text string) bool {
 	return containsSurfaceKeyword(text,
-		"timeline.apply_patches", "patch",
+		"timeline.insert", "timeline.delete", "timeline.update", "timeline.split", "patch",
 		"字幕", "音量", "淡入", "淡出", "移动片段", "分割",
 		"剪掉开头", "剪掉结尾", "裁剪", "裁到",
 	)
+}
+
+func successfulAtomicTimelineEditSinceLatestUser(messages []*schema.Message) bool {
+	for _, name := range []string{
+		"timeline.insert",
+		"timeline.delete",
+		"timeline.update",
+		"timeline.split",
+	} {
+		if successfulToolCallSinceLatestUser(messages, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func requestsAssetSearchForTimelineEdit(text string) bool {

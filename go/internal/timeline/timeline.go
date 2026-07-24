@@ -849,6 +849,38 @@ func insertClip(document *Document, operation map[string]any) error {
 }
 
 func syncOriginalAudio(document *Document, operation map[string]any) error {
+	audioAssetIDs, err := stringSetValue(operation["audio_asset_ids"])
+	if err != nil {
+		return err
+	}
+	if len(audioAssetIDs) == 0 {
+		return errors.New("sync_original_audio 缺少带音频的视频素材")
+	}
+	return rebuildOriginalAudio(document, audioAssetIDs)
+}
+
+// DeriveOriginalAudio 返回不增加 timeline version 的原声联动派生结果。
+// 它只供单个业务 Catalog op 成功后恢复服务端不变量；不是第二个模型操作，
+// 也不会出现在 edit_operations 中。空集合表示当前没有带原声的视频素材，
+// 此时会清空 original_audio 并取消对应主视觉联动。
+func DeriveOriginalAudio(document Document, audioAssetIDs []string) (Document, error) {
+	copy, err := clone(document)
+	if err != nil {
+		return Document{}, err
+	}
+	audioAssets := make(map[string]struct{}, len(audioAssetIDs))
+	for _, assetID := range audioAssetIDs {
+		if assetID != "" {
+			audioAssets[assetID] = struct{}{}
+		}
+	}
+	if err := rebuildOriginalAudio(&copy, audioAssets); err != nil {
+		return Document{}, err
+	}
+	return copy, nil
+}
+
+func rebuildOriginalAudio(document *Document, audioAssetIDs map[string]struct{}) error {
 	primary := trackByID(document, "visual_base")
 	originalAudio := trackByID(document, "original_audio")
 	if primary == nil || originalAudio == nil {
@@ -860,12 +892,13 @@ func syncOriginalAudio(document *Document, operation map[string]any) error {
 		}
 		return trackLockedError(originalAudio.TrackID)
 	}
-	audioAssetIDs, err := stringSetValue(operation["audio_asset_ids"])
-	if err != nil {
-		return err
-	}
-	if len(audioAssetIDs) == 0 {
-		return errors.New("sync_original_audio 缺少带音频的视频素材")
+	existingByID := make(map[string]Clip, len(originalAudio.Clips))
+	existingByParent := make(map[string]Clip, len(originalAudio.Clips))
+	for _, clip := range originalAudio.Clips {
+		existingByID[clip.TimelineClipID] = clip
+		if clip.ParentBlockID != "" {
+			existingByParent[clip.ParentBlockID] = clip
+		}
 	}
 	rebuilt := make([]Clip, 0, len(primary.Clips))
 	for index := range primary.Clips {
@@ -883,20 +916,23 @@ func syncOriginalAudio(document *Document, operation map[string]any) error {
 		}
 		visual.Linked = true
 		visual.ParentBlockID = parentBlockID
-		rebuilt = append(rebuilt, Clip{
-			TimelineClipID:     visual.TimelineClipID + "_audio",
-			TrackID:            "original_audio",
-			AssetID:            visual.AssetID,
-			AssetKind:          visual.AssetKind,
-			Role:               "original_audio",
-			TimelineStartFrame: visual.TimelineStartFrame,
-			TimelineEndFrame:   visual.TimelineEndFrame,
-			SourceStartFrame:   visual.SourceStartFrame,
-			SourceEndFrame:     visual.SourceEndFrame,
-			PlaybackRate:       effectiveRate(*visual),
-			ParentBlockID:      parentBlockID,
-			Linked:             true,
-		})
+		audio, exists := existingByParent[parentBlockID]
+		if !exists {
+			audio = existingByID[visual.TimelineClipID+"_audio"]
+		}
+		audio.TimelineClipID = visual.TimelineClipID + "_audio"
+		audio.TrackID = "original_audio"
+		audio.AssetID = visual.AssetID
+		audio.AssetKind = visual.AssetKind
+		audio.Role = "original_audio"
+		audio.TimelineStartFrame = visual.TimelineStartFrame
+		audio.TimelineEndFrame = visual.TimelineEndFrame
+		audio.SourceStartFrame = visual.SourceStartFrame
+		audio.SourceEndFrame = visual.SourceEndFrame
+		audio.PlaybackRate = effectiveRate(*visual)
+		audio.ParentBlockID = parentBlockID
+		audio.Linked = true
+		rebuilt = append(rebuilt, audio)
 	}
 	originalAudio.Clips = rebuilt
 	sortTrack(originalAudio)
@@ -910,6 +946,9 @@ func replaceClip(document *Document, operation map[string]any) error {
 			return errors.New("replace_clip 缺少 asset_id")
 		}
 		clip.AssetID = assetID
+		if assetKind := stringValue(operation["asset_kind"]); assetKind != "" {
+			clip.AssetKind = assetKind
+		}
 		if role := stringValue(operation["role"]); role != "" {
 			clip.Role = role
 		}

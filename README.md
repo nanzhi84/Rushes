@@ -123,6 +123,12 @@ go test -tags=integration ./spikes -run 'TestQwen|TestArk' -v
 
 CI 在 Ubuntu 与 macOS 上执行 Go `-race`，并运行契约对拍、90% 覆盖率、golangci-lint、govulncheck、前端三连和 Playwright。
 
+### 原子时间线编辑
+
+模型侧通用时间线写入只暴露 `timeline.insert`、`timeline.delete`、`timeline.update` 与 `timeline.split`。每次调用只能提交一个 Catalog op，并独立产生一个可 Rewind 的 timeline version；同一 draft 的多个写调用按模型顺序串行，不同 draft 可并行。素材类型、主视频原声联动和生成 ID 由服务端派生，不进入模型 schema。成功结果包含 `previous_timeline_id`、`timeline_id`、`applied_operation`、`changed_targets` 与 `validation_summary`；失效的 clip/asset ID 返回 `stale_target`，调用方应先重新读取时间线或素材列表。
+
+旧 `timeline.apply_patches` 仅保留给编辑器 REST/harness 的批量保存迁移路径，不会绑定到生产模型。
+
 ### 口播工具验收
 
 口播工作流不把完整 ASR 塞进每轮上下文。`speech.transcribe` 负责复用同名 SRT 或把单声道 16 kHz 短音频块交给 `fun-asr-flash-2026-06-15`，再将句/词时间戳换算为源帧并持久化逐句、气口与稳定 ID；严格只读的 `speech.search` 随后按台词、稳定 ID 或源帧范围检索，缺少索引时只返回 `index_missing`。`shot.search` 可用 `semantic_roles=["b_roll"]` 限定配画面候选，模型完成语义判断后再用 `timeline.edit_talking_head` 提交当前口播编辑。

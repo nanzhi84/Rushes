@@ -90,6 +90,8 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 		return exec.toolComposeInitial(ctx, draftID, input.(rushestools.ComposeInitialInput))
 	case "timeline.apply_patches":
 		return exec.toolApplyPatches(ctx, draftID, input.(rushestools.TimelinePatchBatchInput))
+	case "timeline.insert", "timeline.delete", "timeline.update", "timeline.split":
+		return exec.toolAtomicTimelineEdit(ctx, draftID, name, input)
 	case "timeline.recut_to_beats":
 		return exec.toolRecutToBeats(ctx, draftID, input.(rushestools.TimelineBeatRecutInput))
 	case "timeline.edit_talking_head":

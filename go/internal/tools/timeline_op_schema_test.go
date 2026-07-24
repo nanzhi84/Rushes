@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
 
+	einotool "github.com/cloudwego/eino/components/tool"
 	"github.com/eino-contrib/jsonschema"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -59,6 +61,153 @@ func TestTimelineOpReflectionSnapshotPinsOneOf(t *testing.T) {
 	assertTimelineOpCatalogSchema(t, reflected)
 	assertGoModDependencyVersion(t, "github.com/cloudwego/eino", "v0.9.12")
 	assertGoModDependencyVersion(t, "github.com/eino-contrib/jsonschema", "v1.0.3")
+}
+
+func TestAtomicTimelineSchemasPartitionCatalogWithoutBatchOrInjectedFields(t *testing.T) {
+	t.Parallel()
+	fixtures := []struct {
+		name   string
+		schema *jsonschema.Schema
+		kinds  []string
+	}{
+		{"timeline.insert", (TimelineInsertInput{}).JSONSchema(), timelineAtomicKinds["timeline.insert"]},
+		{"timeline.delete", (TimelineDeleteInput{}).JSONSchema(), timelineAtomicKinds["timeline.delete"]},
+		{"timeline.update", (TimelineUpdateInput{}).JSONSchema(), timelineAtomicKinds["timeline.update"]},
+		{"timeline.split", (TimelineSplitInput{}).JSONSchema(), timelineAtomicKinds["timeline.split"]},
+	}
+	seen := map[string]string{}
+	for _, fixture := range fixtures {
+		if fixture.schema.Type != "object" || len(fixture.schema.OneOf) != len(fixture.kinds) {
+			t.Fatalf("%s schema=%#v", fixture.name, fixture.schema)
+		}
+		for index, kind := range fixture.kinds {
+			branch := fixture.schema.OneOf[index]
+			kindSchema, exists := branch.Properties.Get("kind")
+			if !exists || kindSchema.Const != kind {
+				t.Fatalf("%s branch[%d] kind=%#v want=%s", fixture.name, index, kindSchema.Const, kind)
+			}
+			if owner := seen[kind]; owner != "" {
+				t.Fatalf("Catalog op %s 同时属于 %s 与 %s", kind, owner, fixture.name)
+			}
+			seen[kind] = fixture.name
+			for _, hidden := range []string{
+				"ops", "asset_kind", "include_original_audio", "audio_asset_ids",
+			} {
+				if _, exposed := branch.Properties.Get(hidden); exposed {
+					t.Errorf("%s.%s 暴露字段 %s", fixture.name, kind, hidden)
+				}
+			}
+		}
+	}
+	updateSchema := (TimelineUpdateInput{}).JSONSchema()
+	if updateSchema.Not == nil ||
+		!containsString(updateSchema.Not.Required, "timeline_clip_id") ||
+		!containsString(updateSchema.Not.Required, "track_id") {
+		t.Fatalf("timeline.update 未在 schema 层拒绝双 target: %#v", updateSchema.Not)
+	}
+	if _, exposed := seen["sync_original_audio"]; exposed {
+		t.Fatal("sync_original_audio 不得进入模型可见原子 schema")
+	}
+	if len(seen) != len(timeline.Catalog)-1 {
+		t.Fatalf("原子 schema 覆盖 %d 个 op，期望排除 sync_original_audio 后为 %d", len(seen), len(timeline.Catalog)-1)
+	}
+	insertSchema := (TimelineInsertInput{}).JSONSchema()
+	for _, generated := range []string{"timeline_clip_id", "parent_block_id"} {
+		if _, exposed := insertSchema.Properties.Get(generated); exposed {
+			t.Errorf("timeline.insert 暴露服务端生成字段 %s", generated)
+		}
+	}
+	splitSchema := (TimelineSplitInput{}).JSONSchema()
+	if _, exposed := splitSchema.Properties.Get("new_timeline_clip_id"); exposed {
+		t.Error("timeline.split 暴露服务端生成字段 new_timeline_clip_id")
+	}
+	insertClip := timelineOpBranchByKind(t, insertSchema, "insert_clip")
+	trackID, exists := insertClip.Properties.Get("track_id")
+	if !exists || !reflect.DeepEqual(
+		trackID.Enum,
+		[]any{"visual_base", "visual_overlay", "voiceover", "bgm", "sfx"},
+	) {
+		t.Fatalf("timeline.insert track_id enum=%#v", trackID)
+	}
+}
+
+func TestTimelineAtomicOperationRejectsWrongFamilyAndInjectedFields(t *testing.T) {
+	t.Parallel()
+	if _, err := TimelineAtomicOperation("timeline.delete", TimelineDeleteInput{
+		"kind": "insert_clip", "asset_id": "asset", "source_start_frame": 0, "source_end_frame": 30,
+	}); err == nil || !strings.Contains(err.Error(), "不接受") {
+		t.Fatalf("wrong family err=%v", err)
+	}
+	if _, err := TimelineAtomicOperation("timeline.insert", TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "asset", "source_start_frame": 0, "source_end_frame": 30,
+		"asset_kind": "video",
+	}); err == nil || !strings.Contains(err.Error(), "未声明字段 asset_kind") {
+		t.Fatalf("injected field err=%v", err)
+	}
+	if _, err := TimelineAtomicOperation("timeline.delete", TimelineDeleteInput{
+		"kind": "delete_clip", "clip_id": "legacy_clip_id",
+	}); err == nil || !strings.Contains(err.Error(), "不接受字段 clip_id") {
+		t.Fatalf("legacy alias err=%v", err)
+	}
+	for field, input := range map[string]TimelineInsertInput{
+		"timeline_clip_id": {
+			"kind": "insert_clip", "asset_id": "asset", "source_start_frame": 0, "source_end_frame": 30,
+			"timeline_clip_id": "model_chosen",
+		},
+		"parent_block_id": {
+			"kind": "insert_clip", "asset_id": "asset", "source_start_frame": 0, "source_end_frame": 30,
+			"parent_block_id": "model_chosen",
+		},
+	} {
+		if _, err := TimelineAtomicOperation("timeline.insert", input); err == nil ||
+			!strings.Contains(err.Error(), "不接受字段 "+field) {
+			t.Errorf("generated field %s err=%v", field, err)
+		}
+	}
+	if _, err := TimelineAtomicOperation("timeline.split", TimelineSplitInput{
+		"kind": "split_clip", "timeline_clip_id": "clip_1", "split_frame": 15,
+		"new_timeline_clip_id": "model_chosen",
+	}); err == nil || !strings.Contains(err.Error(), "不接受字段 new_timeline_clip_id") {
+		t.Errorf("split generated ID err=%v", err)
+	}
+	if _, err := TimelineAtomicOperation("timeline.insert", TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "asset", "source_start_frame": 0, "source_end_frame": 30,
+		"track_id": "original_audio",
+	}); err == nil || !strings.Contains(err.Error(), "不允许写入轨道 original_audio") {
+		t.Errorf("derived track err=%v", err)
+	}
+	operation, err := TimelineAtomicOperation("timeline.split", TimelineSplitInput{
+		"kind": "split_clip", "timeline_clip_id": "clip_1", "split_frame": 15,
+	})
+	if err != nil || operation["kind"] != "split_clip" || len(operation) != 3 {
+		t.Fatalf("operation=%#v err=%v", operation, err)
+	}
+}
+
+func TestAtomicTimelineToolRejectsInvalidCatalogCombinationBeforeExecutor(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := registry.specs["timeline.insert"].Implementation.(einotool.InvokableTool)
+	ctx := WithDraftID(t.Context(), "draft_atomic_decode")
+	for _, arguments := range []string{
+		`{"kind":"delete_clip","timeline_clip_id":"clip_1"}`,
+		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"asset_kind":"video"}`,
+		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"timeline_clip_id":"a","clip_id":"b"}`,
+		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"timeline_clip_id":"model_chosen"}`,
+		`{"kind":"insert_clip","asset_id":"asset","source_start_frame":0,"source_end_frame":30,"track_id":"original_audio"}`,
+	} {
+		if _, err := insert.InvokableRun(ctx, arguments); err == nil {
+			t.Errorf("非法原子参数进入 executor 并返回成功: %s", arguments)
+		}
+	}
 }
 
 func TestTimelineOpSchemaCallsDoNotShareMutableExamples(t *testing.T) {
