@@ -209,18 +209,13 @@ func (exec *Executor) PersistTimeline(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	report := timeline.Validate(document)
+	reportMap, valid, err := exec.timelineValidationReport(ctx, draftID, document)
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
 	validationType := "TimelineValidated"
-	if !report.Valid {
+	if !valid {
 		validationType = "TimelineValidationFailed"
-	}
-	reportMap := map[string]any{"valid": report.Valid, "checks": report.Checks, "issues": report.Issues}
-	contractReport, hasContract, contractErr := exec.VerifyContentContract(ctx, draftID, document)
-	if contractErr != nil {
-		return rushestools.ToolResult{}, contractErr
-	}
-	if hasContract {
-		reportMap["content_contract"] = contractReport
 	}
 	actor := contracts.ActorAgent
 	origin := rushestools.TimelineMutationOrigin(ctx)
@@ -253,7 +248,7 @@ func (exec *Executor) PersistTimeline(
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("timeline reducer status: %s", result.Status))
 	}
 	status := "succeeded"
-	if !report.Valid {
+	if !valid {
 		status = "validation_failed"
 	}
 	toolResult := rushestools.ToolResult{
@@ -263,7 +258,7 @@ func (exec *Executor) PersistTimeline(
 			"beat_alignment":    BeatAlignmentData(document),
 		},
 	}
-	if hasContract {
+	if contractReport, hasContract := reportMap["content_contract"].(ContractVerificationReport); hasContract {
 		failures := ContractFailureItems(contractReport)
 		if len(failures) > 0 {
 			encoded, _ := json.Marshal(failures)
@@ -274,12 +269,27 @@ func (exec *Executor) PersistTimeline(
 	return toolResult, nil
 }
 
-func (exec *Executor) toolValidateTimeline(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
-	document, err := timeline.Latest(ctx, exec.database, draftID)
-	if err != nil {
-		return rushestools.ToolResult{}, err
+func (exec *Executor) timelineValidationReport(
+	ctx context.Context,
+	draftID string,
+	document timeline.Document,
+) (map[string]any, bool, error) {
+	report := timeline.Validate(document)
+	reportMap := map[string]any{
+		"valid": report.Valid, "checks": report.Checks, "issues": report.Issues,
 	}
-	draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
+	contractReport, hasContract, err := exec.VerifyContentContract(ctx, draftID, document)
+	if err != nil {
+		return nil, false, err
+	}
+	if hasContract {
+		reportMap["content_contract"] = contractReport
+	}
+	return reportMap, report.Valid, nil
+}
+
+func (exec *Executor) toolCheckTimeline(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
+	document, err := timeline.Latest(ctx, exec.database, draftID)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -294,20 +304,6 @@ func (exec *Executor) toolValidateTimeline(ctx context.Context, draftID string) 
 	}
 	if hasContract {
 		validationReport["content_contract"] = contractReport
-	}
-	eventType := "TimelineValidated"
-	if !report.Valid {
-		eventType = "TimelineValidationFailed"
-	}
-	result, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
-		Type: eventType, DraftID: draftID,
-		Payload: map[string]any{
-			"timeline_version":  document.Version,
-			"validation_report": validationReport,
-		},
-	}}, reducer.Options{Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion})
-	if err != nil || result.Status != reducer.StatusApplied {
-		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("validation reducer status: %s", result.Status))
 	}
 	observation := timeline.Inspect(document)
 	if report.Valid {
@@ -324,7 +320,7 @@ func (exec *Executor) toolValidateTimeline(ctx context.Context, draftID string) 
 		"validation_report": validationReport,
 		"beat_alignment":    beatAlignment,
 	}
-	// validate 是只读诊断：口播质检读取失败（如 transcript 缺失/损坏）时跳过附加，
+	// timeline.check 是只读诊断：口播质检读取失败（如 transcript 缺失/损坏）时跳过附加，
 	// 不让合法时间线因增强信息读取失败而报错（与 toolEditTalkingHead 的软跳过一致）。
 	if quality, qualityErr := exec.SpeechQualityReport(ctx, document); qualityErr == nil {
 		if present, _ := quality["a_roll_present"].(bool); present {

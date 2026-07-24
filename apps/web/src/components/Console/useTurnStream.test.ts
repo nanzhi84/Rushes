@@ -148,17 +148,17 @@ describe("reduceTurnStream · subagent_progress", () => {
   it("不为无素材详情的批次进度创建额外 UI 状态", () => {
     const state = apply([
       { type: "turn_started", turn_id: "turn_1" },
-      { type: "tool_step_started", step_id: "s1", tool: "understand.materials" },
+      { type: "tool_step_started", step_id: "s1", tool: "media.detect_shots" },
       {
         type: "subagent_progress",
-        tool: "understand.materials",
+        tool: "media.detect_shots",
         completed: 0,
         total: 3,
         note: "理解中 0/3"
       },
       {
         type: "subagent_progress",
-        tool: "understand.materials",
+        tool: "media.detect_shots",
         completed: 2,
         total: 3,
         note: "理解中 2/3"
@@ -224,9 +224,9 @@ describe("reduceTurnStream · subagent_progress", () => {
   it("tool_step_finished 清空进度，避免残留串到下一个工具行", () => {
     const state = apply([
       { type: "turn_started", turn_id: "turn_1" },
-      { type: "tool_step_started", step_id: "s1", tool: "understand.materials" },
+      { type: "tool_step_started", step_id: "s1", tool: "media.detect_shots" },
       { type: "subagent_progress", asset_id: "asset_01a2", note: "转写音频中" },
-      { type: "tool_step_finished", step_id: "s1", tool: "understand.materials", status: "succeeded" }
+      { type: "tool_step_finished", step_id: "s1", tool: "media.detect_shots", status: "succeeded" }
     ]);
     expect(state.subagentProgress).toEqual([]);
   });
@@ -244,7 +244,7 @@ describe("reduceTurnStream · subagent_progress", () => {
   it("text_delta / tool_step_started 不会丢掉已累积的进度", () => {
     const state = apply([
       { type: "turn_started", turn_id: "turn_1" },
-      { type: "tool_step_started", step_id: "s1", tool: "understand.materials" },
+      { type: "tool_step_started", step_id: "s1", tool: "media.detect_shots" },
       { type: "subagent_progress", asset_id: "asset_01a2", note: "转写音频中" },
       { type: "text_delta", message_id: "m1", kind: "assistant", delta: "继续" }
     ]);

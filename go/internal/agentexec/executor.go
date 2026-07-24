@@ -57,16 +57,18 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 	switch name {
 	case "asset.list_assets":
 		return exec.ToolListAssets(ctx, draftID, input.(rushestools.AssetListInput))
-	case "understand.materials":
-		return exec.toolUnderstand(ctx, draftID, input.(rushestools.UnderstandInput))
-	case "media.search_shots":
+	case "media.detect_shots":
+		return exec.toolDetectShots(ctx, draftID, input.(rushestools.DetectShotsInput))
+	case "shot.search":
 		return exec.toolSearchShots(ctx, draftID, input.(rushestools.ShotSearchInput))
 	case "audio.analyze_beats":
 		return exec.toolAnalyzeAudioBeats(ctx, draftID, input.(rushestools.AudioBeatAnalysisInput))
 	case "audio.analyze_speech_pauses":
 		return exec.toolAnalyzeSpeechPauses(ctx, draftID, input.(rushestools.SpeechPauseAnalysisInput))
-	case "speech.inspect":
-		return exec.toolInspectSpeech(ctx, draftID, input.(rushestools.SpeechInspectInput))
+	case "speech.transcribe":
+		return exec.toolTranscribeSpeech(ctx, draftID, input.(rushestools.SpeechTranscribeInput))
+	case "speech.search":
+		return exec.toolSearchSpeech(ctx, draftID, input.(rushestools.SpeechSearchInput))
 	case "interaction.ask_user":
 		return exec.toolAskUser(ctx, draftID, input.(rushestools.AskUserInput), nil)
 	case "interaction.confirm_action":
@@ -92,8 +94,8 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 		return exec.toolRecutToBeats(ctx, draftID, input.(rushestools.TimelineBeatRecutInput))
 	case "timeline.edit_talking_head":
 		return exec.toolEditTalkingHead(ctx, draftID, input.(rushestools.TalkingHeadEditInput))
-	case "timeline.validate":
-		return exec.toolValidateTimeline(ctx, draftID)
+	case "timeline.check":
+		return exec.toolCheckTimeline(ctx, draftID)
 	case "timeline.inspect":
 		return exec.toolInspectTimeline(ctx, draftID, input.(rushestools.TimelineInspectInput))
 	case "render.preview":
@@ -102,8 +104,8 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 		return exec.toolEnqueueRender(ctx, draftID, "render_final", input.(rushestools.RenderFinalInput).Orientation)
 	case "render.status":
 		return exec.toolRenderStatus(ctx, draftID)
-	case "render.inspect_preview":
-		return exec.ToolInspectPreview(ctx, draftID, input.(rushestools.RenderInspectInput))
+	case "preview.check":
+		return exec.toolCheckPreview(ctx, draftID, input.(rushestools.PreviewCheckInput))
 	default:
 		return nil, fmt.Errorf("工具未注册执行器: %s", name)
 	}

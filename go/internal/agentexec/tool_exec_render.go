@@ -30,16 +30,63 @@ func (exec *Executor) toolEnqueueRender(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	if draft.TimelineCurrentVersion == nil || !draft.TimelineValidated {
-		return rushestools.ToolResult{}, errors.New("当前时间线尚未验证")
+	if draft.TimelineCurrentVersion == nil {
+		return rushestools.ToolResult{}, errors.New("当前草稿没有时间线")
 	}
-	baseIdempotencyKey := fmt.Sprintf("%s:%s:%d:%s", kind, draftID, *draft.TimelineCurrentVersion, orientation)
+	timelineVersion := *draft.TimelineCurrentVersion
+	document, err := timeline.Get(ctx, exec.database, draftID, timelineVersion)
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	validationReport, valid, err := exec.timelineValidationReport(ctx, draftID, document)
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	if !valid {
+		result, applyErr := reducer.Apply(ctx, exec.database, []contracts.Event{{
+			Type: "TimelineValidationFailed", DraftID: draftID,
+			Payload: map[string]any{
+				"timeline_version": timelineVersion, "validation_report": validationReport,
+			},
+		}}, reducer.Options{Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion})
+		if applyErr != nil || result.Status != reducer.StatusApplied {
+			return rushestools.ToolResult{}, errors.Join(
+				applyErr,
+				fmt.Errorf("render validation reducer status: %s", result.Status),
+			)
+		}
+		return rushestools.ToolResult{
+			Status:      string(rushestools.StatusValidationFailed),
+			Observation: "当前时间线未通过渲染前校验，未创建渲染任务",
+			Data: map[string]any{
+				"reason":                     "validation_failed",
+				"current_timeline_unchanged": true,
+				"validation_report":          validationReport,
+				"recovery":                   "根据 validation_report 修复当前时间线后重试渲染。",
+			},
+		}, nil
+	}
+	baseIdempotencyKey := fmt.Sprintf("%s:%s:%d:%s", kind, draftID, timelineVersion, orientation)
 	idempotencyKey := baseIdempotencyKey
 	retryOfJobID := ""
 	if existing, found, err := exec.FindRenderJob(ctx, kind, baseIdempotencyKey, true); err != nil {
 		return rushestools.ToolResult{}, err
 	} else if found {
 		if existing.Status != "failed" && existing.Status != "cancelled" {
+			if !draft.TimelineValidated {
+				result, applyErr := reducer.Apply(ctx, exec.database, []contracts.Event{{
+					Type: "TimelineValidated", DraftID: draftID,
+					Payload: map[string]any{
+						"timeline_version": timelineVersion, "validation_report": validationReport,
+					},
+				}}, reducer.Options{Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion})
+				if applyErr != nil || result.Status != reducer.StatusApplied {
+					return rushestools.ToolResult{}, errors.Join(
+						applyErr,
+						fmt.Errorf("render validation reducer status: %s", result.Status),
+					)
+				}
+			}
 			return renderJobResult(kind, existing.ID, existing.Status), nil
 		}
 		retryOfJobID = existing.ID
@@ -50,7 +97,15 @@ func (exec *Executor) toolEnqueueRender(
 	if retryOfJobID != "" {
 		jobPayload["retry_of_job_id"] = retryOfJobID
 	}
-	result, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
+	// JobEnqueued 是 merge 事件，会忽略 BaseVersion。始终同批附带 exact target 的
+	// strict TimelineValidated，才能在验证 vN 后若 current 已变成 vN+1 时让整批冲突，
+	// 阻止旧版本 job 入队。
+	events := []contracts.Event{{
+		Type: "TimelineValidated", DraftID: draftID,
+		Payload: map[string]any{
+			"timeline_version": timelineVersion, "validation_report": validationReport,
+		},
+	}, {
 		Type: "JobEnqueued", DraftID: draftID,
 		Payload: map[string]any{
 			"job_id": jobID, "kind": kind, "requested_by_draft_id": draftID,
@@ -60,7 +115,13 @@ func (exec *Executor) toolEnqueueRender(
 			"priority":        30,
 			"max_retries":     2,
 		},
-	}}, reducer.Options{Actor: contracts.ActorAgent})
+	}}
+	result, err := reducer.Apply(
+		ctx,
+		exec.database,
+		events,
+		reducer.Options{Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion},
+	)
 	if err != nil || result.Status != reducer.StatusApplied {
 		if existing, found, lookupErr := exec.FindRenderJob(ctx, kind, idempotencyKey, false); lookupErr != nil {
 			return rushestools.ToolResult{}, errors.Join(err, lookupErr)
@@ -145,23 +206,31 @@ func (exec *Executor) toolRenderStatus(ctx context.Context, draftID string) (rus
 	}, nil
 }
 
-func (exec *Executor) ToolInspectPreview(
+func (exec *Executor) toolCheckPreview(
 	ctx context.Context,
 	draftID string,
-	input rushestools.RenderInspectInput,
+	input rushestools.PreviewCheckInput,
 ) (rushestools.PreviewInspectionResult, error) {
-	checks, err := NormalizePreviewInspectionChecks(input.Checks)
+	check, err := NormalizePreviewCheck(input.Check)
 	if err != nil {
 		return rushestools.PreviewInspectionResult{}, err
 	}
-	input.Checks = checks
+	return exec.inspectPreviewCheck(ctx, draftID, input.PreviewID, check)
+}
+
+func (exec *Executor) inspectPreviewCheck(
+	ctx context.Context,
+	draftID string,
+	previewID string,
+	check string,
+) (rushestools.PreviewInspectionResult, error) {
 	var hash string
 	var timelineVersion int
 	var width, height sql.NullInt64
 	var fps, duration sql.NullFloat64
-	err = exec.database.Read().QueryRowContext(ctx, `
+	err := exec.database.Read().QueryRowContext(ctx, `
 		SELECT object_hash,timeline_version,render_width,render_height,render_fps,expected_duration_sec
-		FROM previews WHERE preview_id=? AND draft_id=?`, input.PreviewID, draftID).Scan(
+		FROM previews WHERE preview_id=? AND draft_id=?`, previewID, draftID).Scan(
 		&hash, &timelineVersion, &width, &height, &fps, &duration,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -186,12 +255,12 @@ func (exec *Executor) ToolInspectPreview(
 	expected.Height = int(height.Int64)
 	expected.FPS = fps.Float64
 	expected.DurationSec = duration.Float64
-	inspection, err := media.InspectVideo(ctx, path, expected, input.Checks)
+	inspection, err := media.InspectVideo(ctx, path, expected, []string{check})
 	if err != nil {
 		return rushestools.PreviewInspectionResult{}, err
 	}
 	result := rushestools.PreviewInspectionResult{}
-	if ContainsString(input.Checks, "visual") {
+	if check == "visual" {
 		frameContext, contextErr := exec.PreviewInspectionFrameContext(
 			ctx, document, understanding.PreviewInspectionFrameNumbers(document),
 		)
@@ -234,33 +303,26 @@ func (exec *Executor) ToolInspectPreview(
 		}
 		issues = append(issues, item)
 	}
+	result.PreviewID = previewID
+	result.Check = check
 	result.Summary = inspection.Summary
 	result.Degraded = inspection.Degraded
 	result.Issues = issues
 	return result, nil
 }
 
-func NormalizePreviewInspectionChecks(checks []string) ([]string, error) {
+func NormalizePreviewCheck(raw string) (string, error) {
 	allowed := map[string]struct{}{
 		"decode": {}, "black": {}, "freeze": {}, "silence": {}, "loudness": {}, "visual": {},
 	}
-	normalized := make([]string, 0, len(checks))
-	seen := make(map[string]struct{}, len(checks))
-	for _, raw := range checks {
-		check := strings.TrimSpace(raw)
-		if check == "" {
-			return nil, errors.New("checks 不能包含空白检查项")
-		}
-		if _, ok := allowed[check]; !ok {
-			return nil, fmt.Errorf("未知的预览质检项 %q；只支持 decode、black、freeze、silence、loudness 或 visual", check)
-		}
-		if _, duplicate := seen[check]; duplicate {
-			continue
-		}
-		seen[check] = struct{}{}
-		normalized = append(normalized, check)
+	check := strings.TrimSpace(raw)
+	if check == "" {
+		return "", errors.New("preview.check 需要一个 check")
 	}
-	return normalized, nil
+	if _, ok := allowed[check]; !ok {
+		return "", fmt.Errorf("未知的预览质检项 %q；只支持 decode、black、freeze、silence、loudness 或 visual", check)
+	}
+	return check, nil
 }
 
 func (exec *Executor) PreviewInspectionFrameContext(

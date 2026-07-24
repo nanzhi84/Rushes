@@ -150,7 +150,7 @@ func (lateToolCallReplyModel) Stream(
 	reader, writer := schema.Pipe[*schema.Message](3)
 	writer.Send(schema.AssistantMessage("先给你个结论", nil), nil)
 	writer.Send(schema.AssistantMessage("", []schema.ToolCall{{
-		ID: "late_call", Function: schema.FunctionCall{Name: "timeline.validate", Arguments: "{}"},
+		ID: "late_call", Function: schema.FunctionCall{Name: "timeline.check", Arguments: "{}"},
 	}}), nil)
 	writer.Close()
 	return reader, nil

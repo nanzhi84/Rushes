@@ -670,7 +670,7 @@ func TestContextLengthErrorTriggersCompactionRetryThenSucceeds(t *testing.T) {
 	}
 	toolMessage := &schema.Message{
 		Role: schema.Tool, Content: string(toolPayload),
-		ToolCallID: "call_inspect", ToolName: "speech.inspect",
+		ToolCallID: "call_inspect", ToolName: "speech.search",
 	}
 	originalContent := toolMessage.Content
 	input := []*schema.Message{schema.UserMessage("继续剪辑"), toolMessage}
@@ -702,7 +702,7 @@ func TestContextLengthErrorTriggersCompactionRetryThenSucceeds(t *testing.T) {
 		t.Fatal("重试压缩修改了原始消息")
 	}
 	compacted := stub.inputs[1][1]
-	if compacted.ToolCallID != "call_inspect" || compacted.ToolName != "speech.inspect" {
+	if compacted.ToolCallID != "call_inspect" || compacted.ToolName != "speech.search" {
 		t.Fatalf("压缩丢失工具关联: %#v", compacted)
 	}
 	if utf8.RuneCountInString(compacted.Content) >= utf8.RuneCountInString(originalContent) {

@@ -69,7 +69,11 @@ func TestConcurrentReactAgentDefaultsNilCheckerAndForwardsRuntimeToolOptions(t *
 		t.Context(),
 		&reactOptionForwardModel{},
 		compose.ToolsNodeConfig{Tools: []tool.BaseTool{newRouterNoopTool("base.option")}},
-		func(string) (rushestools.Effect, bool) { return rushestools.EffectReadOnly, true },
+		func(name string) (rushestools.Spec, bool) {
+			return rushestools.Spec{
+				Name: name, Family: rushestools.FamilyRead, Effect: rushestools.EffectReadOnly,
+			}, true
+		},
 		5,
 		nil,
 		nil,

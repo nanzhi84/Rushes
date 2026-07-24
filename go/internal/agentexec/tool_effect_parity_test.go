@@ -70,14 +70,19 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 			skipReason string
 		}
 		cases := map[string]readOnlyCase{
-			"asset.list_assets":  {input: rushestools.AssetListInput{}},
-			"timeline.inspect":   {input: rushestools.TimelineInspectInput{}},
-			"media.search_shots": {input: rushestools.ShotSearchInput{Query: "人物"}},
-			"render.status":      {input: rushestools.RenderStatusInput{}},
-			"render.inspect_preview": {
-				input:      rushestools.RenderInspectInput{PreviewID: previewID, Checks: []string{"decode"}},
+			"asset.list_assets": {input: rushestools.AssetListInput{}},
+			"timeline.inspect":  {input: rushestools.TimelineInspectInput{}},
+			"shot.search":       {input: rushestools.ShotSearchInput{Query: "人物"}},
+			"render.status":     {input: rushestools.RenderStatusInput{}},
+			"preview.check": {
+				input:      rushestools.PreviewCheckInput{PreviewID: previewID, Check: "decode"},
 				skipReason: dependencySkipReason(ffmpegErr, "ffmpeg"),
 			},
+			"speech.search": {
+				input:      rushestools.SpeechSearchInput{AssetID: audioAssetID},
+				skipReason: dependencySkipReason(ffmpegErr, "ffmpeg"),
+			},
+			"timeline.check": {input: rushestools.TimelineCheckInput{}},
 			"audio.analyze_beats": {
 				input: rushestools.AudioBeatAnalysisInput{AssetID: audioAssetID, MaxBeats: 32, WaveformPoints: 32},
 				skipReason: firstNonEmptySkip(
@@ -124,30 +129,6 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 					t.Fatalf("%s 改变了业务表快照", name)
 				}
 			})
-		}
-	})
-
-	t.Run("reversible timeline.validate appends a validation event via the reducer", func(t *testing.T) {
-		const draftID = "draft_effect_validate"
-		agenttest.CreateAgentDraft(t, database, draftID)
-		if effect := effectOf("timeline.validate"); effect != rushestools.EffectReversible {
-			t.Fatalf("timeline.validate Effect=%q，期望 reversible", effect)
-		}
-		document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
-			AssetID: "asset_video", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 90,
-		}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := exec.PersistTimeline(t.Context(), draftID, document, "effect_validate_fixture"); err != nil {
-			t.Fatal(err)
-		}
-		before := countEvents(draftID)
-		if _, err := exec.toolValidateTimeline(t.Context(), draftID); err != nil {
-			t.Fatal(err)
-		}
-		if after := countEvents(draftID); after <= before {
-			t.Fatalf("timeline.validate 未写入校验事件: before=%d after=%d", before, after)
 		}
 	})
 

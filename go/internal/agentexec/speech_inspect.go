@@ -1307,37 +1307,79 @@ func SourceRangesOverlap(leftStart, leftEnd, rightStart, rightEnd int) bool {
 
 // clampSpeechRangeToClip 把源帧证据区间裁剪到 clip 的已裁剪源区间，返回裁剪后的
 // 区间与是否发生了裁剪。调用方对交集为空（end <= start）的项自行决定跳过或判非法，
-// 使 speech.inspect 返回的证据坐标与 timeline.edit_talking_head 的交集校验一致。
+// 使 speech.search 返回的证据坐标与 timeline.edit_talking_head 的交集校验一致。
 func ClampSpeechRangeToClip(clip timeline.Clip, start, end int) (int, int, bool) {
 	clampedStart := max(start, clip.SourceStartFrame)
 	clampedEnd := min(end, clip.SourceEndFrame)
 	return clampedStart, clampedEnd, clampedStart != start || clampedEnd != end
 }
 
-func (exec *Executor) toolInspectSpeech(
+func (exec *Executor) toolTranscribeSpeech(
 	ctx context.Context,
 	draftID string,
-	input rushestools.SpeechInspectInput,
-) (rushestools.SpeechInspectResult, error) {
+	input rushestools.SpeechTranscribeInput,
+) (rushestools.SpeechTranscribeResult, error) {
+	asset, _, err := exec.resolveSpeechAsset(ctx, draftID, input.AssetID, "")
+	if err != nil {
+		return rushestools.SpeechTranscribeResult{}, err
+	}
+	transcript, cacheHit, err := exec.loadOrBuildSpeechTranscript(
+		ctx, draftID, asset, strings.TrimSpace(input.Language), input.ForceRefresh, true,
+	)
+	if err != nil {
+		return rushestools.SpeechTranscribeResult{}, err
+	}
+	utterances, err := DecodeSpeechUtterances(transcript.Utterances)
+	if err != nil {
+		return rushestools.SpeechTranscribeResult{}, err
+	}
+	pauses, err := DecodeSpeechPauses(transcript.VADSegments)
+	if err != nil {
+		return rushestools.SpeechTranscribeResult{}, err
+	}
+	wordTotal := 0
+	for _, utterance := range utterances {
+		wordTotal += len(utterance.Words)
+	}
+	return rushestools.SpeechTranscribeResult{
+		TranscriptID: transcript.ID, AssetID: asset.ID, TimelineFPS: timeline.DefaultFPS,
+		ProviderID: transcript.ProviderID, CacheHit: cacheHit,
+		UtteranceTotal: len(utterances), WordTotal: wordTotal, PauseTotal: len(pauses),
+	}, nil
+}
+
+func (exec *Executor) toolSearchSpeech(
+	ctx context.Context,
+	draftID string,
+	input rushestools.SpeechSearchInput,
+) (rushestools.SpeechSearchResult, error) {
 	includeWords := input.IncludeWords || strings.TrimSpace(input.Query) != "" ||
 		input.SourceStartFrame != nil || input.SourceEndFrame != nil
 	asset, timelineClip, err := exec.resolveSpeechAsset(ctx, draftID, input.AssetID, input.TimelineClipID)
 	if err != nil {
-		return rushestools.SpeechInspectResult{}, err
+		return rushestools.SpeechSearchResult{}, err
 	}
-	transcript, cacheHit, err := exec.loadOrBuildSpeechTranscript(
-		ctx, draftID, asset, strings.TrimSpace(input.Language), input.ForceRefresh, includeWords,
-	)
+	transcript, err := storage.LatestTranscript(ctx, exec.database.Read(), asset.ID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return rushestools.SpeechSearchResult{
+			Status: string(rushestools.StatusFailed), AssetID: asset.ID,
+			TimelineClipID: input.TimelineClipID, TimelineFPS: timeline.DefaultFPS,
+			ErrorCode:  string(rushestools.ErrCodeIndexMissing),
+			Recovery:   "先对这个 asset_id 调用 speech.transcribe，完成后再用相同检索参数调用 speech.search。",
+			Utterances: []rushestools.SpeechUtteranceEvidence{},
+			UsageNote:  "当前素材没有持久化 transcript；speech.search 保持只读，未调用 ASR、未创建 job、未写数据库。",
+		}, nil
+	}
 	if err != nil {
-		return rushestools.SpeechInspectResult{}, err
+		return rushestools.SpeechSearchResult{}, err
 	}
 	utterances, err := DecodeSpeechUtterances(transcript.Utterances)
 	if err != nil {
-		return rushestools.SpeechInspectResult{}, err
+		return rushestools.SpeechSearchResult{}, err
 	}
 	pauses, err := DecodeSpeechPauses(transcript.VADSegments)
 	if err != nil {
-		return rushestools.SpeechInspectResult{}, err
+		return rushestools.SpeechSearchResult{}, err
 	}
 	pauses = ClampSpeechPausesToWordBoundaries(asset.ID, pauses, utterances)
 
@@ -1496,9 +1538,10 @@ func (exec *Executor) toolInspectSpeech(
 	if includeWords && wordTotal == 0 {
 		usageNote += "当前持久化索引没有词级时间戳（例如来源仅为 SRT）；不能猜 word_id，可使用逐句证据或配置带词时间戳的 ASR 后重新转写。"
 	}
-	return rushestools.SpeechInspectResult{
+	return rushestools.SpeechSearchResult{
+		Status:       string(rushestools.StatusSucceeded),
 		TranscriptID: transcript.ID, AssetID: asset.ID, TimelineClipID: input.TimelineClipID,
-		TimelineFPS: timeline.DefaultFPS, ProviderID: transcript.ProviderID, CacheHit: cacheHit,
+		TimelineFPS: timeline.DefaultFPS, ProviderID: transcript.ProviderID,
 		Utterances: evidence, UtteranceTotal: len(utterances), WordTotal: wordTotal,
 		WordsTruncated: wordsTruncated, Pauses: pauseEvidence,
 		PauseTotal: pauseTotal, PausesTruncated: pausesTruncated,
@@ -1532,15 +1575,15 @@ func (exec *Executor) resolveSpeechAsset(
 			}
 		}
 		if selectedClip == nil || selectedClip.AssetID == "" {
-			return storage.Asset{}, nil, errors.New("speech.inspect 的 timeline_clip_id 不存在或不是素材片段")
+			return storage.Asset{}, nil, errors.New("speech.search 的 timeline_clip_id 不存在或不是素材片段")
 		}
 		if assetID != "" && assetID != selectedClip.AssetID {
-			return storage.Asset{}, nil, errors.New("speech.inspect 的 asset_id 与 timeline_clip_id 不一致")
+			return storage.Asset{}, nil, errors.New("speech.search 的 asset_id 与 timeline_clip_id 不一致")
 		}
 		assetID = selectedClip.AssetID
 	}
 	if assetID == "" {
-		return storage.Asset{}, nil, errors.New("speech.inspect 至少需要 asset_id 或 timeline_clip_id")
+		return storage.Asset{}, nil, errors.New("speech 工具至少需要 asset_id 或 timeline_clip_id")
 	}
 	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
@@ -1551,11 +1594,11 @@ func (exec *Executor) resolveSpeechAsset(
 			continue
 		}
 		if !asset.Usable || asset.Kind != "video" && asset.Kind != "audio" {
-			return storage.Asset{}, nil, errors.New("speech.inspect 只支持当前草稿中可用的音频或视频素材")
+			return storage.Asset{}, nil, errors.New("speech 工具只支持当前草稿中可用的音频或视频素材")
 		}
 		return asset, selectedClip, nil
 	}
-	return storage.Asset{}, nil, errors.New("speech.inspect 的素材不属于当前草稿")
+	return storage.Asset{}, nil, errors.New("speech 工具的素材不属于当前草稿")
 }
 
 func (exec *Executor) loadOrBuildSpeechTranscript(
@@ -1585,7 +1628,7 @@ func (exec *Executor) loadOrBuildSpeechTranscript(
 		return storage.Transcript{}, false, err
 	}
 	if !probe.HasAudio {
-		return storage.Transcript{}, false, errors.New("speech.inspect 的素材没有可转写音轨")
+		return storage.Transcript{}, false, errors.New("speech.transcribe 的素材没有可转写音轨")
 	}
 	durationFrames := max(1, int(math.Round(probe.DurationSec*timeline.DefaultFPS)))
 	pauseAnalysis, err := media.AnalyzeSpeechPauses(ctx, source, timeline.DefaultFPS, media.SpeechPauseOptions{
@@ -1632,7 +1675,7 @@ func (exec *Executor) loadOrBuildSpeechTranscript(
 		chunks := BuildASRChunks(durationFrames, pauses, MaxASRChunkFrames)
 		for index, chunk := range chunks {
 			exec.recordProgress(draftID, map[string]any{
-				"type": contracts.TurnStreamSubagentProgress, "tool": "speech.inspect",
+				"type": contracts.TurnStreamSubagentProgress, "tool": "speech.transcribe",
 				"asset_id": asset.ID, "note": fmt.Sprintf("ASR 转写 %d/%d", index+1, len(chunks)),
 				"completed": index, "total": len(chunks),
 			})
@@ -1648,7 +1691,7 @@ func (exec *Executor) loadOrBuildSpeechTranscript(
 			_ = os.Remove(path)
 			if errors.Is(recognizeErr, contracts.ErrSpeechNoWords) {
 				exec.recordProgress(draftID, map[string]any{
-					"type": contracts.TurnStreamSubagentProgress, "tool": "speech.inspect",
+					"type": contracts.TurnStreamSubagentProgress, "tool": "speech.transcribe",
 					"asset_id":  asset.ID,
 					"note":      fmt.Sprintf("ASR 转写 %d/%d：该分块无台词，已跳过", index+1, len(chunks)),
 					"completed": index + 1, "total": len(chunks),
@@ -1678,7 +1721,7 @@ func (exec *Executor) loadOrBuildSpeechTranscript(
 		}
 	}
 	if len(utterances) == 0 {
-		return storage.Transcript{}, false, errors.New("speech.inspect 没有取得可用台词")
+		return storage.Transcript{}, false, errors.New("speech.transcribe 没有取得可用台词")
 	}
 	pauses = ClampSpeechPausesToWordBoundaries(
 		asset.ID,

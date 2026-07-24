@@ -91,20 +91,16 @@ func (scaffold *e2eFallbackScaffold) cancelDuringUnderstanding(
 	if len(listed.Assets) == 0 {
 		return "", errors.New("E2E 素材理解取消脚手架缺少可用素材")
 	}
-	assetIDs := make([]string, 0, len(listed.Assets))
-	for _, asset := range listed.Assets {
-		assetIDs = append(assetIDs, asset.AssetID)
-	}
-	logicalInput := rushestools.UnderstandInput{
-		AssetIDs: assetIDs, Depth: "scan", MaxStepsPerAsset: 8,
+	logicalInput := rushestools.DetectShotsInput{
+		AssetID: listed.Assets[0].AssetID, Depth: "deep", MaxStepsPerAsset: 8,
 	}
 	reporter := scaffold.service.toolReporter(ctx, draftID)
-	reporter(ctx, "understand.materials", "started", logicalInput, nil, nil)
+	reporter(ctx, "media.detect_shots", "started", logicalInput, nil, nil)
 	var output any
 	defer func() {
-		reporter(ctx, "understand.materials", "finished", logicalInput, output, resultErr)
+		reporter(ctx, "media.detect_shots", "finished", logicalInput, output, resultErr)
 	}()
-	output, resultErr = scaffold.service.ExecuteTool(ctx, "understand.materials", logicalInput)
+	output, resultErr = scaffold.service.ExecuteTool(ctx, "media.detect_shots", logicalInput)
 	if resultErr != nil {
 		return "", resultErr
 	}

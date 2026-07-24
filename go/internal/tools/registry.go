@@ -201,13 +201,13 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 	}
 	registry := &Registry{database: database, executor: executor, specs: map[string]Spec{}}
 	builders := []func(*Registry) error{
-		registerAssetImport, registerAssetList, registerUnderstand, registerShotSearch, registerAudioBeatAnalysis,
-		registerSpeechPauseAnalysis, registerSpeechInspect, registerAskUser,
+		registerAssetImport, registerAssetList, registerDetectShots, registerShotSearch, registerAudioBeatAnalysis,
+		registerSpeechPauseAnalysis, registerSpeechTranscribe, registerSpeechSearch, registerAskUser,
 		registerDecisionAnswer, registerPlanUpdate, registerMemoryUpdate,
 		registerComposeInitial, registerApplyPatchBatch,
 		registerBeatRecut, registerTalkingHeadEdit,
-		registerTimelineValidate, registerTimelineInspect, registerRenderPreview,
-		registerRenderFinal, registerRenderStatus, registerInspectPreview,
+		registerTimelineCheck, registerTimelineInspect, registerRenderPreview,
+		registerRenderFinal, registerRenderStatus, registerPreviewCheck,
 		registerConfirmAction,
 	}
 	for _, builder := range builders {
@@ -516,6 +516,13 @@ func (registry *Registry) Effect(name string) (Effect, bool) {
 	return spec.Effect, true
 }
 
+// Spec 返回指定工具的完整分类元数据；执行路由据此组合 Family 与 Effect，
+// 不复制 detector 名单。返回值是副本，调用方无法修改 Registry 事实源。
+func (registry *Registry) Spec(name string) (Spec, bool) {
+	spec, exists := registry.specs[name]
+	return spec, exists
+}
+
 func strictUnmarshalToolArguments[I any](_ context.Context, arguments string) (any, error) {
 	var input I
 	decoder := json.NewDecoder(strings.NewReader(arguments))
@@ -638,16 +645,16 @@ func registerAssetList(registry *Registry) error {
 		metadata(FamilyRead, CostLow, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit))
 }
 
-func registerUnderstand(registry *Registry) error {
-	return addTool[UnderstandInput, UnderstandResult](registry, "understand.materials", "幂等理解所选素材并生成可检索的逐镜头时间证据；相同素材和参数默认直接复用持久化结果，只有用户明确要求重新分析时才设置 force_refresh=true；旧强制任务终态后再次重跑完全相同分析才更换 refresh_nonce；多素材、deep 或 force_refresh 可能返回 queued，后台完成后会自动续跑当前任务，不要轮询", nil, ExposureLLM, EffectReversible, false,
-		metadata(FamilyDetect, CostHigh, SurfaceDiscovery))
+func registerDetectShots(registry *Registry) error {
+	return addTool[DetectShotsInput, DetectShotsResult](registry, "media.detect_shots", "为一个视频素材建立或刷新可检索的逐镜头证据；每次只接收一个 asset_id，多素材必须并行调用；相同参数默认复用持久化结果，deep 或 force_refresh 可能排队并在完成后自动续跑", []string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
+		metadata(FamilyDetect, CostHigh, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit))
 }
 
 func registerShotSearch(registry *Registry) error {
 	return addTool[ShotSearchInput, ShotSearchResult](
 		registry,
-		"media.search_shots",
-		"像检索代码一样按创作意图搜索已理解视频中的镜头级源区间；返回稳定 shot_id、精确源帧、语义、匹配证据和剪辑提示。若更匹配的文件尚未理解，understanding_candidates 会返回文件名与 asset_id；先对候选调用 understand.materials，再用同一意图重搜，禁止把候选文件臆造为 shot_id",
+		"shot.search",
+		"只读搜索既有镜头索引；按创作意图返回稳定 shot_id、精确源帧、语义与匹配证据。未建立索引的素材只会列为 detection_candidates；先并行调用 media.detect_shots，再用同一意图重搜，禁止把候选素材臆造为 shot_id",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
 		metadata(FamilyRead, CostStandard, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit),
 	)
@@ -673,17 +680,23 @@ func registerSpeechPauseAnalysis(registry *Registry) error {
 	)
 }
 
-func registerSpeechInspect(registry *Registry) error {
-	// 偏离 issue 的 ReadOnly：首次调用经 reducer 落盘 transcript（speech_inspect.go 的
-	// loadOrBuildSpeechTranscript），命中缓存才是纯读。稳定指纹 ID 让顺序重放幂等（故仍属
-	// 重试安全，见 agent 侧 retrySafeFromEffect），但两个并发首调会重复 ASR 且 providerID
-	// 可能分叉出不同 transcript 行——对 G3 只读并发不安全，故按 G3a spike 归为副作用。
-	return addTool[SpeechInspectInput, SpeechInspectResult](
+func registerSpeechTranscribe(registry *Registry) error {
+	return addTool[SpeechTranscribeInput, SpeechTranscribeResult](
 		registry,
-		"speech.inspect",
-		"建立或复用带整数帧坐标的口播索引，并像 grep 一样按台词语义或源帧范围读取逐句 ASR、气口和相似台词证据。要检查句内卡壳、重复词或半句重说时设置 include_words=true，取得稳定 word_id 与词级帧。工具只提供可核验信息，不决定哪些内容应删除；完整转写持久化在本地，后续调用默认命中缓存",
+		"speech.transcribe",
+		"为一个音频或视频素材建立或刷新带词级整数帧坐标的 transcript 索引；每次只处理一个 asset_id，多素材必须并行调用；只生成证据，不搜索台词或编辑时间线",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
 		metadata(FamilyDetect, CostHigh, SurfaceTalkingHead),
+	)
+}
+
+func registerSpeechSearch(registry *Registry) error {
+	return addTool[SpeechSearchInput, SpeechSearchResult](
+		registry,
+		"speech.search",
+		"只读搜索已有 transcript；按台词语义、稳定 ID 或源帧范围返回逐句、词级、气口和相似台词证据。缺少索引时返回 index_missing，并提示调用 speech.transcribe；绝不触发 ASR、创建 job 或写入 transcript",
+		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
+		metadata(FamilyRead, CostStandard, SurfaceTalkingHead),
 	)
 }
 
@@ -747,7 +760,7 @@ func registerBeatRecut(registry *Registry) error {
 	return addTool[TimelineBeatRecutInput, ToolResult](
 		registry,
 		"timeline.recut_to_beats",
-		"从空时间线或已有时间线原子完成卡点混剪：传 bgm_asset_id 后按真实拍点重建主视频；优先传 media.search_shots 返回的有序 shot_ids，工具会解析精确源帧。cut_frames 可多于视频素材数，同一素材会使用不同且不重叠的源区间；use_all_video_assets=true 表示每个素材至少一次；cover_entire_bgm=true 覆盖整首音乐；SFX 始终独立分轨。禁止用 compose_initial 加几十个低层补丁替代",
+		"从空时间线或已有时间线原子完成卡点混剪：传 bgm_asset_id 后按真实拍点重建主视频；优先传 shot.search 返回的有序 shot_ids，工具会解析精确源帧。cut_frames 可多于视频素材数，同一素材会使用不同且不重叠的源区间；use_all_video_assets=true 表示每个素材至少一次；cover_entire_bgm=true 覆盖整首音乐；SFX 始终独立分轨。禁止用 compose_initial 加几十个低层补丁替代",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
 		metadata(FamilyEdit, CostHigh, SurfaceBeatEdit),
 	)
@@ -757,16 +770,14 @@ func registerTalkingHeadEdit(registry *Registry) error {
 	return addTool[TalkingHeadEditInput, ToolResult](
 		registry,
 		"timeline.edit_talking_head",
-		"按模型已经选定的 utterance_id、pause/repetition/fragment 决定、连续 word_id 范围和 b_roll shot_id 原子剪辑口播。模型结合两侧原文自主选择 remove/preserve；工具只校验稳定 ID 与合法范围、波纹删除整句/句内卡壳/气口，并把 B-roll 放到独立叠加轨。B-roll 的 utterance、anchor_text 或 word_id 必须以本次全部删除决定展开后的保留台词为准：anchor_text 要从 speech.inspect 原文逐字复制，不能包含同次将删除的卡壳、重复词或短片段。短镜头可用保留 utterance 内的唯一连续 anchor_text，或直接使用保留的 start/end_word_id。若删气口会把保留台词夹成不足 2 秒的孤立碎片，工具会保守撤回最短的相邻气口删除并在 auto_preserved_pause_ids 中报告；语义删除造成的孤片或落在口误证据上的保留岛会失败，并在 island_counter_proposals 里给出可直接采纳的合并删除区间。未处理的内容候选作为非阻塞证据随成功结果返回，工具不替模型判断内容好坏",
+		"按模型已经选定的 utterance_id、pause/repetition/fragment 决定、连续 word_id 范围和 b_roll shot_id 原子剪辑口播。模型结合两侧原文自主选择 remove/preserve；工具只校验稳定 ID 与合法范围、波纹删除整句/句内卡壳/气口，并把 B-roll 放到独立叠加轨。B-roll 的 utterance、anchor_text 或 word_id 必须以本次全部删除决定展开后的保留台词为准：anchor_text 要从 speech.search 原文逐字复制，不能包含同次将删除的卡壳、重复词或短片段。短镜头可用保留 utterance 内的唯一连续 anchor_text，或直接使用保留的 start/end_word_id。若删气口会把保留台词夹成不足 2 秒的孤立碎片，工具会保守撤回最短的相邻气口删除并在 auto_preserved_pause_ids 中报告；语义删除造成的孤片或落在口误证据上的保留岛会失败，并在 island_counter_proposals 里给出可直接采纳的合并删除区间。未处理的内容候选作为非阻塞证据随成功结果返回，工具不替模型判断内容好坏",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
 		metadata(FamilyEdit, CostHigh, SurfaceTalkingHead),
 	)
 }
 
-func registerTimelineValidate(registry *Registry) error {
-	// 归可逆而非只读：写 TimelineValidated/TimelineValidationFailed 校验事件（reducer.Apply）。
-	// 校验事件按 merge key 幂等、顺序重放安全，故仍属重试安全，由 retrySafeFromEffect 单独放行。
-	return addTool[TimelineValidateInput, ToolResult](registry, "timeline.validate", "验证当前时间线不变量", []string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
+func registerTimelineCheck(registry *Registry) error {
+	return addTool[TimelineCheckInput, ToolResult](registry, "timeline.check", "只读检查当前时间线的结构不变量、内容合同、节拍对齐与口播质量；不写 validation event、draft state 或 timeline version", []string{"timeline_exists"}, ExposureLLM, EffectReadOnly, false,
 		metadata(FamilyCheck, CostStandard, SurfaceRender, SurfaceTimelineEdit))
 }
 
@@ -776,12 +787,12 @@ func registerTimelineInspect(registry *Registry) error {
 }
 
 func registerRenderPreview(registry *Registry) error {
-	return addTool[RenderPreviewInput, ToolResult](registry, "render.preview", "排队渲染当前已验证时间线预览", []string{"timeline_validated"}, ExposureLLM, EffectReversible, false,
+	return addTool[RenderPreviewInput, ToolResult](registry, "render.preview", "校验当前时间线并原子排队渲染预览；失败不创建任务", []string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
 		metadata(FamilyEdit, CostHigh, SurfaceRender))
 }
 
 func registerRenderFinal(registry *Registry) error {
-	return addTool[RenderFinalInput, ToolResult](registry, "render.final_mp4", "排队导出最终 MP4", []string{"timeline_validated"}, ExposureLLM, EffectReversible, false,
+	return addTool[RenderFinalInput, ToolResult](registry, "render.final_mp4", "校验当前时间线并原子排队导出 MP4；失败不创建任务", []string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
 		metadata(FamilyEdit, CostHigh, SurfaceRender))
 }
 
@@ -790,8 +801,8 @@ func registerRenderStatus(registry *Registry) error {
 		metadata(FamilyRead, CostLow, SurfaceRender, SurfacePreviewCheck))
 }
 
-func registerInspectPreview(registry *Registry) error {
-	return addTool[RenderInspectInput, PreviewInspectionResult](registry, "render.inspect_preview", "检查预览的流、解码、黑帧、静帧、静音和响度；传 visual 可追加切点、B-roll 与字幕 contact sheet 视觉检查", []string{"any_preview_exists"}, ExposureLLM, EffectReadOnly, true,
+func registerPreviewCheck(registry *Registry) error {
+	return addTool[PreviewCheckInput, PreviewInspectionResult](registry, "preview.check", "对一个 preview 执行一个明确检查；check 只能是 decode、black、freeze、silence、loudness 或 visual 之一，多个独立检查由模型并行调用", []string{"any_preview_exists"}, ExposureLLM, EffectReadOnly, true,
 		metadata(FamilyCheck, CostHigh, SurfacePreviewCheck))
 }
 

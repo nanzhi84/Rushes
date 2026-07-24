@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -19,12 +21,13 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 	if _, err := rushestools.DraftID(ctx); err != nil {
 		return nil, err
 	}
-	// 只读工具取共享锁并发执行,副作用工具独占——分类事实源是 registry.Effect（#103 G3b）。
+	// 普通只读工具取共享锁，资源隔离 detector/索引读取分层锁，其余副作用工具独占。
+	// Effect/Family 分类事实源仍是 registry，索引 footprint 只负责细化执行互斥。
 	readOnly := false
 	if effect, ok := service.tools.Effect(name); ok {
 		readOnly = effect == rushestools.EffectReadOnly
 	}
-	release, blockingDecisionID := beginTurnToolCall(ctx, readOnly)
+	release, blockingDecisionID := service.beginToolCall(ctx, name, input, readOnly)
 	defer release()
 	if blockingDecisionID != "" {
 		return rushestools.ToolResult{
@@ -54,4 +57,22 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 		}
 	}
 	return service.executor.ExecuteTool(ctx, name, input)
+}
+
+func (service *Service) beginToolCall(
+	ctx context.Context, name string, input any, readOnly bool,
+) (func(), string) {
+	if encoded, err := json.Marshal(input); err == nil {
+		if footprint, _ := indexedResourceFootprint(name, string(encoded)); len(footprint) > 0 {
+			accesses := make([]agentexec.IndexedResourceAccess, 0, len(footprint))
+			for _, access := range footprint {
+				accesses = append(accesses, agentexec.IndexedResourceAccess{
+					Domain: access.domain, Resources: access.resources,
+					WriteResource: access.writeResource, AllResources: access.allResources,
+				})
+			}
+			return beginIndexedTurnToolCalls(ctx, accesses)
+		}
+	}
+	return beginTurnToolCall(ctx, readOnly)
 }

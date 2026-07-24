@@ -106,13 +106,13 @@ type AssetListResult struct {
 	UsageNote string          `json:"usage_note,omitempty"`
 }
 
-type UnderstandInput struct {
-	AssetIDs         []string `json:"asset_ids" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的一个或多个素材 ID；不要传文件名或本地路径"`
-	Depth            string   `json:"depth,omitempty" jsonschema_description:"scan 做低成本广度扫描，deep 做逐镜头深度理解；默认 scan，多素材或 deep 可能异步排队并在完成后自动续跑"`
-	Focus            string   `json:"focus,omitempty" jsonschema_description:"可选创作关注点，例如产品特写、人物动作或可用于高潮的镜头；会进入视觉分析提示与缓存键"`
-	MaxStepsPerAsset int      `json:"max_steps_per_asset,omitempty" jsonschema_description:"每个素材的最大分析步骤数；0 使用服务端默认值，数值越大成本和延迟越高"`
-	ForceRefresh     bool     `json:"force_refresh,omitempty" jsonschema_description:"仅当用户明确要求重新分析时设为 true；默认复用相同素材与参数的持久化结果"`
-	RefreshNonce     string   `json:"refresh_nonce,omitempty" jsonschema_description:"仅当用户在旧强制任务终态后明确要求再次重跑完全相同的分析时提供新的短标识；同一标识重复调用仍幂等复用同一 job"`
+type DetectShotsInput struct {
+	AssetID          string `json:"asset_id" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的单个 video 素材 ID；多素材必须由模型并行调用本工具"`
+	Depth            string `json:"depth,omitempty" jsonschema_description:"scan 做低成本镜头检测，deep 做逐镜头深度理解；默认 scan，deep 可能异步排队并在完成后自动续跑"`
+	Focus            string `json:"focus,omitempty" jsonschema_description:"可选创作关注点，例如产品特写、人物动作或可用于高潮的镜头；会进入视觉分析提示与缓存键"`
+	MaxStepsPerAsset int    `json:"max_steps_per_asset,omitempty" jsonschema_description:"每个素材的最大分析步骤数；0 使用服务端默认值，数值越大成本和延迟越高"`
+	ForceRefresh     bool   `json:"force_refresh,omitempty" jsonschema_description:"仅当用户明确要求重新分析时设为 true；默认复用相同素材与参数的持久化结果"`
+	RefreshNonce     string `json:"refresh_nonce,omitempty" jsonschema_description:"仅当用户在旧强制任务终态后明确要求再次重跑完全相同的分析时提供新的短标识；同一标识重复调用仍幂等复用同一 job"`
 }
 
 // MaterialEvidence 是模型可直接用于选择源素材区间的紧凑时间证据。
@@ -160,15 +160,15 @@ type MaterialUnderstandingSummary struct {
 	UsageNote         string             `json:"usage_note,omitempty"`
 }
 
-type UnderstandResult struct {
-	DraftID          string                         `json:"draft_id"`
-	JobID            string                         `json:"job_id"`
-	AssetIDs         []string                       `json:"asset_ids"`
-	Status           string                         `json:"status"`
-	Summaries        []MaterialUnderstandingSummary `json:"summaries,omitempty"`
-	CacheHitAssetIDs []string                       `json:"cache_hit_asset_ids,omitempty"`
-	AnalyzedAssetIDs []string                       `json:"analyzed_asset_ids,omitempty"`
-	UsageNote        string                         `json:"usage_note,omitempty"`
+type DetectShotsResult struct {
+	DraftID   string                        `json:"draft_id"`
+	JobID     string                        `json:"job_id,omitempty"`
+	AssetID   string                        `json:"asset_id"`
+	Status    string                        `json:"status"`
+	Summary   *MaterialUnderstandingSummary `json:"summary,omitempty"`
+	CacheHit  bool                          `json:"cache_hit"`
+	Analyzed  bool                          `json:"analyzed"`
+	UsageNote string                        `json:"usage_note,omitempty"`
 }
 
 type ShotSearchInput struct {
@@ -213,11 +213,11 @@ type ShotCandidate struct {
 	Score             float64  `json:"score"`
 }
 
-// ShotSearchUnderstandingCandidate exposes assets whose filename/path matches the
-// current visual intent but which do not have shot-level understanding yet. It is
+// ShotDetectionCandidate exposes assets whose filename/path matches the
+// current visual intent but which do not have a shot index yet. It is
 // deliberately not a shot: callers must understand the asset and search again
 // before they can obtain a valid shot_id or source range.
-type ShotSearchUnderstandingCandidate struct {
+type ShotDetectionCandidate struct {
 	AssetID           string   `json:"asset_id"`
 	Filename          string   `json:"filename"`
 	RelDir            string   `json:"rel_dir,omitempty"`
@@ -229,13 +229,13 @@ type ShotSearchUnderstandingCandidate struct {
 }
 
 type ShotSearchResult struct {
-	Query                        string                             `json:"query,omitempty"`
-	Shots                        []ShotCandidate                    `json:"shots"`
-	TotalMatches                 int                                `json:"total_matches"`
-	Truncated                    bool                               `json:"truncated"`
-	UnderstandingCoverageNote    string                             `json:"understanding_coverage_note,omitempty"`
-	MissingUnderstandingAssetIDs []string                           `json:"missing_understanding_asset_ids,omitempty"`
-	UnderstandingCandidates      []ShotSearchUnderstandingCandidate `json:"understanding_candidates,omitempty"`
+	Query                string                   `json:"query,omitempty"`
+	Shots                []ShotCandidate          `json:"shots"`
+	TotalMatches         int                      `json:"total_matches"`
+	Truncated            bool                     `json:"truncated"`
+	IndexCoverageNote    string                   `json:"index_coverage_note,omitempty"`
+	MissingIndexAssetIDs []string                 `json:"missing_index_asset_ids,omitempty"`
+	DetectionCandidates  []ShotDetectionCandidate `json:"detection_candidates,omitempty"`
 }
 
 type AudioBeatAnalysisInput struct {
@@ -301,7 +301,24 @@ type SpeechPauseAnalysisResult struct {
 	UsageNote      string                 `json:"usage_note"`
 }
 
-type SpeechInspectInput struct {
+type SpeechTranscribeInput struct {
+	AssetID      string `json:"asset_id" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的单个 video 或 audio 素材 ID；多素材必须由模型并行调用本工具"`
+	Language     string `json:"language,omitempty" jsonschema_description:"可选 ASR 语言，例如 zh、en；混合语言时省略"`
+	ForceRefresh bool   `json:"force_refresh,omitempty" jsonschema_description:"默认复用持久化转写；只有用户明确要求重新转写时设为 true"`
+}
+
+type SpeechTranscribeResult struct {
+	TranscriptID   string `json:"transcript_id"`
+	AssetID        string `json:"asset_id"`
+	TimelineFPS    int    `json:"timeline_fps"`
+	ProviderID     string `json:"provider_id"`
+	CacheHit       bool   `json:"cache_hit"`
+	UtteranceTotal int    `json:"utterance_total"`
+	WordTotal      int    `json:"word_total"`
+	PauseTotal     int    `json:"pause_total"`
+}
+
+type SpeechSearchInput struct {
 	AssetID          string `json:"asset_id,omitempty" jsonschema_description:"带声音的视频或音频素材 ID；与 timeline_clip_id 至少传一个"`
 	TimelineClipID   string `json:"timeline_clip_id,omitempty" jsonschema_description:"当前时间线 A-roll clip ID；传入后返回映射后的时间线帧"`
 	Query            string `json:"query,omitempty" jsonschema_description:"像 grep 一样检索台词语义；省略时返回时间顺序的口播索引"`
@@ -313,8 +330,6 @@ type SpeechInspectInput struct {
 	IncludePauses    *bool  `json:"include_pauses,omitempty" jsonschema_description:"是否返回带稳定 pause_id 的气口候选，默认 true"`
 	MaxPauses        int    `json:"max_pauses,omitempty" jsonschema_description:"最多返回按可删除时长降序排列的气口证据，默认 24，上限 100；用源帧窗口可继续局部检索"`
 	IncludeSimilar   *bool  `json:"include_similar,omitempty" jsonschema_description:"是否返回相似台词对的客观相似度证据，默认 true"`
-	Language         string `json:"language,omitempty" jsonschema_description:"可选 ASR 语言，例如 zh、en；混合语言时省略"`
-	ForceRefresh     bool   `json:"force_refresh,omitempty" jsonschema_description:"默认复用持久化转写；只有用户明确要求重新转写时设为 true"`
 }
 
 type SpeechWordEvidence struct {
@@ -426,13 +441,15 @@ type SpeechFragmentEvidence struct {
 	Evidence                  string `json:"evidence"`
 }
 
-type SpeechInspectResult struct {
+type SpeechSearchResult struct {
+	Status                  string                     `json:"status"`
+	ErrorCode               string                     `json:"error_code,omitempty"`
+	Recovery                string                     `json:"recovery,omitempty"`
 	TranscriptID            string                     `json:"transcript_id"`
 	AssetID                 string                     `json:"asset_id"`
 	TimelineClipID          string                     `json:"timeline_clip_id,omitempty"`
 	TimelineFPS             int                        `json:"timeline_fps"`
 	ProviderID              string                     `json:"provider_id"`
-	CacheHit                bool                       `json:"cache_hit"`
 	Repetitions             []SpeechRepetitionEvidence `json:"intra_utterance_repetitions,omitempty"`
 	RepetitionTotal         int                        `json:"repetition_total,omitempty"`
 	RepetitionsTruncated    bool                       `json:"repetitions_truncated,omitempty"`
@@ -480,7 +497,7 @@ type ContentPlanFrameRange struct {
 type ContentPlanContract struct {
 	TargetDurationFrames    int                     `json:"target_duration_frames,omitempty" jsonschema_description:"目标成片总帧数；大于 0 时编辑后自动核对"`
 	DurationToleranceFrames *int                    `json:"duration_tolerance_frames,omitempty" jsonschema_description:"目标时长允许误差帧数；省略时为 timeline_fps 的一半，显式传 0 表示必须精确命中"`
-	MustKeepUtteranceIDs    []string                `json:"must_keep_utterance_ids,omitempty" jsonschema_description:"speech.inspect 返回、成片必须完整保留的 utterance_id"`
+	MustKeepUtteranceIDs    []string                `json:"must_keep_utterance_ids,omitempty" jsonschema_description:"speech.search 返回、成片必须完整保留的 utterance_id"`
 	BrollCoverageRanges     []ContentPlanFrameRange `json:"broll_coverage_ranges,omitempty" jsonschema_description:"必须由 visual_overlay B-roll 完整覆盖的时间线帧区间"`
 	MinOnBeatRatio          *float64                `json:"min_on_beat_ratio,omitempty" jsonschema_description:"画面切点落在真实 beat_grid 的最低比例，范围 0 到 1"`
 	Rhythm                  string                  `json:"rhythm,omitempty" jsonschema_description:"创作节奏意图，例如舒缓、均衡、紧凑；作为计划语义保留，数值验收使用切点密度字段"`
@@ -523,33 +540,33 @@ type TimelinePatchBatchInput struct {
 }
 
 type TalkingHeadBrollAssignment struct {
-	ShotID           string `json:"shot_id" jsonschema:"required" jsonschema_description:"media.search_shots 返回的 b_roll shot_id"`
+	ShotID           string `json:"shot_id" jsonschema:"required" jsonschema_description:"shot.search 返回的 b_roll shot_id"`
 	StartUtteranceID string `json:"start_utterance_id,omitempty" jsonschema_description:"B-roll 覆盖语义的起始 utterance_id；与 start_word_id 二选一，且该句在本次所有 remove 决定展开后必须仍被保留"`
 	EndUtteranceID   string `json:"end_utterance_id,omitempty" jsonschema_description:"结束 utterance_id；省略时只覆盖起始句，且不能同时属于本次删除范围"`
-	AnchorText       string `json:"anchor_text,omitempty" jsonschema_description:"从 speech.inspect 返回的 utterance 原文逐字复制的唯一连续短语；其中每个词在本次 remove_word_ranges、repetition_decisions、short_fragment_decisions 展开后都必须保留，不能把将删除的卡壳或重说词放进锚点"`
+	AnchorText       string `json:"anchor_text,omitempty" jsonschema_description:"从 speech.search 返回的 utterance 原文逐字复制的唯一连续短语；其中每个词在本次 remove_word_ranges、repetition_decisions、short_fragment_decisions 展开后都必须保留，不能把将删除的卡壳或重说词放进锚点"`
 	StartWordID      string `json:"start_word_id,omitempty" jsonschema_description:"词级 B-roll 语义锚点起始 word_id；与 start_utterance_id 二选一，且该词不能被本次任何删除决定覆盖"`
 	EndWordID        string `json:"end_word_id,omitempty" jsonschema_description:"词级语义锚点结束 word_id；省略时只覆盖起始词，整段连续 word_id 都必须在本次编辑后保留"`
 }
 
 type TalkingHeadWordRange struct {
-	StartWordID string `json:"start_word_id" jsonschema:"required" jsonschema_description:"speech.inspect(include_words=true) 返回的起始 word_id"`
+	StartWordID string `json:"start_word_id" jsonschema:"required" jsonschema_description:"speech.search(include_words=true) 返回的起始 word_id"`
 	EndWordID   string `json:"end_word_id,omitempty" jsonschema_description:"连续删除范围的结束 word_id；省略时只删除起始词"`
 }
 
 type TalkingHeadFragmentDecision struct {
-	FragmentID string `json:"fragment_id" jsonschema:"required" jsonschema_description:"speech.inspect.short_speech_fragments 返回的 fragment_id"`
+	FragmentID string `json:"fragment_id" jsonschema:"required" jsonschema_description:"speech.search.short_speech_fragments 返回的 fragment_id"`
 	Action     string `json:"action" jsonschema:"required" jsonschema_description:"模型结合 text、previous_context、next_context、joined_context 后的明确决定：remove 或 preserve"`
 	Reason     string `json:"reason,omitempty" jsonschema_description:"保留 restart_prefix_before_repeated_take 时必填：至少 20 字，原样引用 fragment.text 与 restart_anchor_text，并解释拼接语义；其他决定可简短说明"`
 }
 
 type TalkingHeadRepetitionDecision struct {
-	RepetitionID string `json:"repetition_id" jsonschema:"required" jsonschema_description:"speech.inspect.intra_utterance_repetitions 返回的 repetition_id"`
+	RepetitionID string `json:"repetition_id" jsonschema:"required" jsonschema_description:"speech.search.intra_utterance_repetitions 返回的 repetition_id"`
 	Action       string `json:"action" jsonschema:"required" jsonschema_description:"模型结合 context_text 后的明确决定：remove_earlier、remove_later 或 preserve；工具不会替模型判断重复词是卡壳、数字拆词还是正常叠词"`
 	Reason       string `json:"reason,omitempty" jsonschema_description:"简述结合上下文选择删除前一段、后一段或保留的理由"`
 }
 
 type TalkingHeadPauseDecision struct {
-	PauseID string `json:"pause_id" jsonschema:"required" jsonschema_description:"speech.inspect.pauses 返回的稳定 pause_id"`
+	PauseID string `json:"pause_id" jsonschema:"required" jsonschema_description:"speech.search.pauses 返回的稳定 pause_id"`
 	Action  string `json:"action" jsonschema:"required" jsonschema_description:"模型结合 previous_context、next_context 与 joined_context 后的明确决定：remove 或 preserve；工具不会替模型判断是气口还是正常表达停顿"`
 	Reason  string `json:"reason,omitempty" jsonschema_description:"简述为何删除该气口，或为何它属于应保留的正常表达停顿"`
 }
@@ -558,10 +575,10 @@ type TalkingHeadEditInput struct {
 	ARollTimelineClipID    string                          `json:"a_roll_timeline_clip_id" jsonschema:"required" jsonschema_description:"timeline.inspect 返回的 A-roll 主视频 clip ID"`
 	RemoveUtteranceIDs     []string                        `json:"remove_utterance_ids,omitempty" jsonschema_description:"模型根据 ASR 语义自行判断后选择删除的 utterance_id，例如语义重复或口误"`
 	RemoveWordRanges       []TalkingHeadWordRange          `json:"remove_word_ranges,omitempty" jsonschema_description:"模型根据词级 ASR 证据选择的连续句内删除范围；用于卡壳、重复词或半句重说，不能猜 word_id"`
-	RemovePauseIDs         []string                        `json:"remove_pause_ids,omitempty" jsonschema_description:"模型根据 speech.inspect 证据自行选择删除的 pause_id"`
-	PauseDecisions         []TalkingHeadPauseDecision      `json:"pause_decisions,omitempty" jsonschema_description:"对 speech.inspect 返回的显著气口候选逐项给出 remove/preserve 决定；remove 会自动加入删除项，preserve 只记录模型判断"`
-	RepetitionDecisions    []TalkingHeadRepetitionDecision `json:"repetition_decisions,omitempty" jsonschema_description:"对 speech.inspect 返回的每个 intra_utterance_repetitions 候选一次性给出 remove_earlier/remove_later/preserve 决定；删除动作会自动解析候选自带的精确连续 word_id 范围"`
-	ShortFragmentDecisions []TalkingHeadFragmentDecision   `json:"short_fragment_decisions,omitempty" jsonschema_description:"对 speech.inspect 返回的每个 short_speech_fragments 候选一次性给出 remove/preserve 决定；remove 会自动解析为该候选的精确连续 word_id 范围，避免在失败后逐个补参数"`
+	RemovePauseIDs         []string                        `json:"remove_pause_ids,omitempty" jsonschema_description:"模型根据 speech.search 证据自行选择删除的 pause_id"`
+	PauseDecisions         []TalkingHeadPauseDecision      `json:"pause_decisions,omitempty" jsonschema_description:"对 speech.search 返回的显著气口候选逐项给出 remove/preserve 决定；remove 会自动加入删除项，preserve 只记录模型判断"`
+	RepetitionDecisions    []TalkingHeadRepetitionDecision `json:"repetition_decisions,omitempty" jsonschema_description:"对 speech.search 返回的每个 intra_utterance_repetitions 候选一次性给出 remove_earlier/remove_later/preserve 决定；删除动作会自动解析候选自带的精确连续 word_id 范围"`
+	ShortFragmentDecisions []TalkingHeadFragmentDecision   `json:"short_fragment_decisions,omitempty" jsonschema_description:"对 speech.search 返回的每个 short_speech_fragments 候选一次性给出 remove/preserve 决定；remove 会自动解析为该候选的精确连续 word_id 范围，避免在失败后逐个补参数"`
 	BrollAssignments       []TalkingHeadBrollAssignment    `json:"b_roll_assignments,omitempty" jsonschema_description:"模型自行选择的台词语义与 B-roll 镜头对应关系"`
 }
 
@@ -579,12 +596,12 @@ type TimelineBeatRecutInput struct {
 	CoverEntireBGM       bool               `json:"cover_entire_bgm,omitempty" jsonschema_description:"用户要求覆盖整首音乐时必须为 true；工具会以 BGM 的完整可用帧数重建主视频并铺满音乐"`
 	VideoAssetIDs        []string           `json:"video_asset_ids,omitempty" jsonschema_description:"可选的主视频素材顺序；省略时先保留当前主视频素材顺序，再自动补入草稿内其余可用视频"`
 	UseAllVideoAssets    bool               `json:"use_all_video_assets,omitempty" jsonschema_description:"用户要求每个/全部视频素材都用上时必须为 true；语义是每个素材至少一次，额外片段可从同一素材的其他不重叠镜头区间取得"`
-	ShotIDs              []string           `json:"shot_ids,omitempty" jsonschema_description:"media.search_shots 返回的有序镜头 ID；与 cut_frames 一一对应，工具会从持久化理解摘要解析精确源帧，禁止猜测"`
+	ShotIDs              []string           `json:"shot_ids,omitempty" jsonschema_description:"shot.search 返回的有序镜头 ID；与 cut_frames 一一对应，工具会从持久化理解摘要解析精确源帧，禁止猜测"`
 	CutFrames            []int              `json:"cut_frames,omitempty" jsonschema_description:"可选的累计结束帧；完整重剪会逐项校验其属于真实 beat_frames。可多于视频素材数，同一素材会使用不同且不重叠的源区间；传 shot_ids 时数量必须一致"`
 	SFX                  *BeatRecutSFXInput `json:"sfx,omitempty" jsonschema_description:"可选的音效点缀；传入时由模型显式选择 start_frame，工具只校验范围、时长、增益与素材合法性，并始终写入独立 sfx 轨"`
 }
 
-type TimelineValidateInput struct{}
+type TimelineCheckInput struct{}
 
 type TimelineInspectInput struct{}
 
@@ -598,12 +615,14 @@ type RenderFinalInput struct {
 
 type RenderStatusInput struct{}
 
-type RenderInspectInput struct {
-	PreviewID string   `json:"preview_id" jsonschema:"required" jsonschema_description:"render.preview 成功产物返回的 preview_id"`
-	Checks    []string `json:"checks,omitempty" jsonschema_description:"确定性检查项：decode、black、freeze、silence、loudness，省略时执行这五项；需要 contact sheet 视觉检查时额外传 visual"`
+type PreviewCheckInput struct {
+	PreviewID string `json:"preview_id" jsonschema:"required" jsonschema_description:"render.preview 成功产物返回的 preview_id"`
+	Check     string `json:"check" jsonschema:"required" jsonschema_description:"本次唯一检查项：decode、black、freeze、silence、loudness 或 visual"`
 }
 
 type PreviewInspectionResult struct {
+	PreviewID          string                   `json:"preview_id"`
+	Check              string                   `json:"check"`
 	Summary            string                   `json:"summary"`
 	Degraded           bool                     `json:"degraded"`
 	Issues             []map[string]interface{} `json:"issues"`

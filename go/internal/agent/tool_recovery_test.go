@@ -37,22 +37,22 @@ func testRetrySafe(t *testing.T) func(string) bool {
 	return retrySafeFromEffect(registry.Effect)
 }
 
-// TestRetrySafeFromEffectAllowlist 锁定 Effect 派生的重试白名单精确复刻此前硬编码的九工具集合：
-// 只读七件 + timeline.validate / speech.inspect 两个「可逆但稳定键幂等」的特例，其余一律不重试。
+// TestRetrySafeFromEffectAllowlist 锁定 Effect 派生的重试白名单：九个纯读工具允许自动重试，
+// 包括 timeline.check 与 speech.search；检测、编辑、控制和交互工具一律不重试。
 func TestRetrySafeFromEffectAllowlist(t *testing.T) {
 	t.Parallel()
 	retrySafe := testRetrySafe(t)
 	for _, name := range []string{
-		"asset.list_assets", "media.search_shots", "audio.analyze_beats",
-		"audio.analyze_speech_pauses", "speech.inspect", "timeline.inspect",
-		"timeline.validate", "render.status", "render.inspect_preview",
+		"asset.list_assets", "shot.search", "audio.analyze_beats",
+		"audio.analyze_speech_pauses", "speech.search", "timeline.inspect",
+		"timeline.check", "render.status", "preview.check",
 	} {
 		if !retrySafe(name) {
 			t.Fatalf("%s 应为重试安全", name)
 		}
 	}
 	for _, name := range []string{
-		"understand.materials", "plan.update", "memory.update",
+		"media.detect_shots", "speech.transcribe", "plan.update", "memory.update",
 		"timeline.compose_initial", "timeline.apply_patches", "timeline.recut_to_beats",
 		"timeline.edit_talking_head", "render.preview", "render.final_mp4",
 		"interaction.ask_user", "interaction.confirm_action", "decision.answer",
@@ -61,6 +61,33 @@ func TestRetrySafeFromEffectAllowlist(t *testing.T) {
 		if retrySafe(name) {
 			t.Fatalf("%s 不应为重试安全", name)
 		}
+	}
+}
+
+func TestToolRecoveryDoesNotRetrySpeechTranscribe(t *testing.T) {
+	for _, arguments := range []string{
+		`{"asset_id":"asset_a"}`,
+		`{"asset_id":"asset_a","force_refresh":true}`,
+	} {
+		t.Run(arguments, func(t *testing.T) {
+			calls := 0
+			middleware := newToolRecoveryMiddleware(testRetrySafe(t))
+			endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+				calls++
+				return nil, errors.New("temporary commit result unknown")
+			})
+			output, err := endpoint(t.Context(), &compose.ToolInput{
+				Name: "speech.transcribe", Arguments: arguments,
+			})
+			if err != nil || calls != 1 {
+				t.Fatalf("calls=%d output=%#v err=%v", calls, output, err)
+			}
+			payload := decodeRecoveryPayload(t, output.Result)
+			data := payload["data"].(map[string]any)
+			if data["retryable"] != false || data["execution_attempts"] != float64(1) {
+				t.Fatalf("payload=%#v", payload)
+			}
+		})
 	}
 }
 

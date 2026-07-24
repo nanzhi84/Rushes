@@ -19,15 +19,15 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
-func RankUnderstandingCandidates(
-	values []rushestools.ShotSearchUnderstandingCandidate,
+func RankDetectionCandidates(
+	values []rushestools.ShotDetectionCandidate,
 	query string,
 	tags []string,
 	roleFilter map[string]struct{},
 	limit int,
-) []rushestools.ShotSearchUnderstandingCandidate {
+) []rushestools.ShotDetectionCandidate {
 	tokens := SemanticTokens(strings.TrimSpace(query + " " + strings.Join(tags, " ")))
-	result := make([]rushestools.ShotSearchUnderstandingCandidate, 0, len(values))
+	result := make([]rushestools.ShotDetectionCandidate, 0, len(values))
 	for _, value := range values {
 		// 未理解素材的角色也可能尚未确定；只有目录/文件名已经明确给出
 		// 相反角色时才排除，避免 b_roll 检索把最相关的未知素材藏起来。
@@ -406,16 +406,16 @@ func (exec *Executor) toolSearchShots(
 	for _, candidate := range missing {
 		missingIDs = append(missingIDs, candidate.AssetID)
 	}
-	understandingCandidates := RankUnderstandingCandidates(
+	understandingCandidates := RankDetectionCandidates(
 		missing, input.Query, input.Tags, roleFilter, min(limit, 20),
 	)
 	result := rushestools.ShotSearchResult{
 		Query: input.Query, Shots: matches, TotalMatches: total, Truncated: total > len(matches),
-		MissingUnderstandingAssetIDs: missingIDs, UnderstandingCandidates: understandingCandidates,
+		MissingIndexAssetIDs: missingIDs, DetectionCandidates: understandingCandidates,
 	}
 	if len(missing) > 0 {
-		result.UnderstandingCoverageNote = fmt.Sprintf(
-			"当前草稿关联的可用视频素材中还有 %d 个尚未理解，未纳入本次检索；若目标画面可能在其中，先用 understand.materials 理解后重搜，或明确告知用户当前检索池并不完整。",
+		result.IndexCoverageNote = fmt.Sprintf(
+			"当前草稿关联的可用视频素材中还有 %d 个尚未理解，未纳入本次检索；若目标画面可能在其中，先用 media.detect_shots 理解后重搜，或明确告知用户当前检索池并不完整。",
 			len(missing),
 		)
 	}
@@ -426,7 +426,7 @@ func (exec *Executor) draftShotIndex(
 	ctx context.Context,
 	draftID string,
 	requestedAssetIDs []string,
-) ([]indexedShot, []rushestools.ShotSearchUnderstandingCandidate, error) {
+) ([]indexedShot, []rushestools.ShotDetectionCandidate, error) {
 	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return nil, nil, err
@@ -455,7 +455,7 @@ func (exec *Executor) draftShotIndex(
 	}
 
 	shots := []indexedShot{}
-	missing := []rushestools.ShotSearchUnderstandingCandidate{}
+	missing := []rushestools.ShotDetectionCandidate{}
 	seen := map[string]struct{}{}
 	for _, asset := range assets {
 		if asset.Kind != "video" || !asset.Usable {
@@ -473,7 +473,7 @@ func (exec *Executor) draftShotIndex(
 			relDir = *asset.RelDir
 		}
 		suggestedRole := understanding.SuggestVisualRole(asset.Filename, relDir, "")
-		missingCandidate := rushestools.ShotSearchUnderstandingCandidate{
+		missingCandidate := rushestools.ShotDetectionCandidate{
 			AssetID: asset.ID, Filename: asset.Filename, RelDir: relDir,
 			DurationFrames: availableFrames, SemanticRole: suggestedRole,
 		}

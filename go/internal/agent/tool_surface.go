@@ -246,12 +246,12 @@ func inferModelToolSurface(
 		return recent
 	}
 	if latestUserIsAutomaticContinuation(messages) {
-		if requestsPreviewCheck(text) && hasAllowedTool(specs, "render.inspect_preview") {
+		if requestsPreviewCheck(text) && hasAllowedTool(specs, "preview.check") {
 			return rushestools.SurfacePreviewCheck
 		}
 		if containsSurfaceKeyword(text,
 			"渲染", "导出", "最终成片", "mp4", "render.preview", "render.final",
-		) && hasAnyAllowedTool(specs, "timeline.validate", "render.preview", "render.final_mp4") {
+		) && hasAnyAllowedTool(specs, "timeline.check", "render.preview", "render.final_mp4") {
 			return rushestools.SurfaceRender
 		}
 	}
@@ -380,9 +380,10 @@ func surfaceWithAvailablePrerequisites(
 	switch lane {
 	case rushestools.SurfaceTalkingHead:
 		if !hasAnyAllowedTool(specs,
-			"speech.inspect",
+			"speech.transcribe",
+			"speech.search",
 			"audio.analyze_speech_pauses",
-			"media.search_shots",
+			"shot.search",
 			"timeline.compose_initial",
 			"timeline.edit_talking_head",
 		) {
@@ -391,7 +392,7 @@ func surfaceWithAvailablePrerequisites(
 	case rushestools.SurfaceBeatEdit:
 		if !hasAnyAllowedTool(specs,
 			"audio.analyze_beats",
-			"media.search_shots",
+			"shot.search",
 			"timeline.recut_to_beats",
 		) {
 			return rushestools.SurfaceDiscovery
@@ -401,14 +402,14 @@ func surfaceWithAvailablePrerequisites(
 			return rushestools.SurfaceDiscovery
 		}
 	case rushestools.SurfaceRender:
-		if !hasAllowedTool(specs, "timeline.validate") &&
+		if !hasAllowedTool(specs, "timeline.check") &&
 			!hasAllowedTool(specs, "render.preview") &&
 			!hasAllowedTool(specs, "render.final_mp4") {
 			return rushestools.SurfaceDiscovery
 		}
 	case rushestools.SurfacePreviewCheck:
-		if !hasAllowedTool(specs, "render.inspect_preview") {
-			if hasAllowedTool(specs, "timeline.validate") ||
+		if !hasAllowedTool(specs, "preview.check") {
+			if hasAllowedTool(specs, "timeline.check") ||
 				hasAllowedTool(specs, "render.preview") ||
 				hasAllowedTool(specs, "render.final_mp4") {
 				return rushestools.SurfaceRender
@@ -485,7 +486,9 @@ func recentSuccessfulWorkflowSurface(
 				return rushestools.SurfaceTalkingHead
 			}
 			return rushestools.SurfaceTimelineEdit
-		case "media.search_shots":
+		case "media.detect_shots", "speech.transcribe":
+			return remainingWorkflowSurface(userText)
+		case "shot.search":
 			if requestsTalkingHeadWorkflow(userText) {
 				return rushestools.SurfaceTalkingHead
 			}
@@ -503,7 +506,7 @@ func recentSuccessfulWorkflowSurface(
 			return rushestools.SurfaceRender
 		case "timeline.apply_patches":
 			return rushestools.SurfaceTimelineEdit
-		case "timeline.validate":
+		case "timeline.check":
 			return rushestools.SurfaceRender
 		case "render.preview":
 			if requestsPreviewCheck(userText) {
@@ -520,11 +523,13 @@ func isWorkflowTransitionTool(name string) bool {
 	case "plan.update",
 		"memory.update",
 		"timeline.compose_initial",
-		"media.search_shots",
+		"media.detect_shots",
+		"speech.transcribe",
+		"shot.search",
 		"timeline.edit_talking_head",
 		"timeline.recut_to_beats",
 		"timeline.apply_patches",
-		"timeline.validate",
+		"timeline.check",
 		"render.preview":
 		return true
 	default:
@@ -597,7 +602,7 @@ func requestsPreviewCheck(text string) bool {
 }
 
 func workflowToolCallSucceeded(message *schema.Message) bool {
-	if message.ToolName == "media.search_shots" {
+	if message.ToolName == "shot.search" {
 		var result struct {
 			Shots []json.RawMessage `json:"shots"`
 		}

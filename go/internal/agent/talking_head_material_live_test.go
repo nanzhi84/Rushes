@@ -184,24 +184,22 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 		report.Trace = append(report.Trace, entry)
 	})
 
-	var understood rushestools.UnderstandResult
+	var understood rushestools.DetectShotsResult
 	// 该工具级质量验收没有启动 worker；显式 8 步的单素材 scan 与原 deep 使用同一分析步数，
 	// 多素材/deep 的 queued→worker→bridge 链路由 internal/integration 独立验收。
-	invokeRegisteredTool(t, service, ctx, "understand.materials", rushestools.UnderstandInput{
-		AssetIDs: assetIDs[:1], Depth: "scan", Focus: "口播 A-roll；主体、表达主题和可剪辑语义",
+	invokeRegisteredTool(t, service, ctx, "media.detect_shots", rushestools.DetectShotsInput{
+		AssetID: assetIDs[0], Depth: "scan", Focus: "口播 A-roll；主体、表达主题和可剪辑语义",
 		MaxStepsPerAsset: 8,
 	}, &understood)
-	if understood.Status != "completed" || len(understood.Summaries) != 1 {
+	if understood.Status != "completed" || understood.Summary == nil {
 		t.Fatalf("understanding=%#v", understood)
 	}
 	arollFrames := 0
-	for _, summary := range understood.Summaries {
-		if summary.AssetID != assetIDs[0] || summary.SemanticRole != "a_roll" {
-			t.Fatalf("真实 A-roll summary=%#v", summary)
-		}
-		probe, _ := media.ProbeFile(t.Context(), selectedPaths[0])
-		arollFrames = int(math.Round(probe.DurationSec * timeline.DefaultFPS))
+	if understood.Summary.AssetID != assetIDs[0] || understood.Summary.SemanticRole != "a_roll" {
+		t.Fatalf("真实 A-roll summary=%#v", understood.Summary)
 	}
+	probe, _ := media.ProbeFile(t.Context(), selectedPaths[0])
+	arollFrames = int(math.Round(probe.DurationSec * timeline.DefaultFPS))
 	var composed rushestools.ToolResult
 	invokeRegisteredTool(t, service, ctx, "timeline.compose_initial", rushestools.ComposeInitialInput{
 		Clips: []rushestools.ComposeClip{{
@@ -211,8 +209,12 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 	if composed.Status != "succeeded" {
 		t.Fatalf("compose=%#v", composed)
 	}
-	var speech rushestools.SpeechInspectResult
-	invokeRegisteredTool(t, service, ctx, "speech.inspect", rushestools.SpeechInspectInput{
+	var transcribed rushestools.SpeechTranscribeResult
+	invokeRegisteredTool(t, service, ctx, "speech.transcribe", rushestools.SpeechTranscribeInput{
+		AssetID: assetIDs[0],
+	}, &transcribed)
+	var speech rushestools.SpeechSearchResult
+	invokeRegisteredTool(t, service, ctx, "speech.search", rushestools.SpeechSearchInput{
 		TimelineClipID: "clip_v1_001", MaxUtterances: 120,
 		IncludeWords: true, MaxWords: 2000,
 	}, &speech)
@@ -234,23 +236,23 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 	var fingerprintShot rushestools.ShotCandidate
 	for _, query := range queries {
 		var discovery rushestools.ShotSearchResult
-		invokeRegisteredTool(t, service, ctx, "media.search_shots", rushestools.ShotSearchInput{
+		invokeRegisteredTool(t, service, ctx, "shot.search", rushestools.ShotSearchInput{
 			Query: query.query, SemanticRoles: []string{"b_roll"}, MinDurationFrames: 45, Limit: 5,
 		}, &discovery)
-		if len(discovery.UnderstandingCandidates) == 0 ||
-			!strings.Contains(discovery.UnderstandingCandidates[0].Filename, query.want) {
+		if len(discovery.DetectionCandidates) == 0 ||
+			!strings.Contains(discovery.DetectionCandidates[0].Filename, query.want) {
 			t.Fatalf("query=%q discovery=%#v", query.query, discovery)
 		}
-		var onDemand rushestools.UnderstandResult
-		invokeRegisteredTool(t, service, ctx, "understand.materials", rushestools.UnderstandInput{
-			AssetIDs: []string{discovery.UnderstandingCandidates[0].AssetID},
-			Depth:    "scan", Focus: query.query, MaxStepsPerAsset: 8,
+		var onDemand rushestools.DetectShotsResult
+		invokeRegisteredTool(t, service, ctx, "media.detect_shots", rushestools.DetectShotsInput{
+			AssetID: discovery.DetectionCandidates[0].AssetID,
+			Depth:   "scan", Focus: query.query, MaxStepsPerAsset: 8,
 		}, &onDemand)
-		if onDemand.Status != "completed" || len(onDemand.Summaries) != 1 {
+		if onDemand.Status != "completed" || onDemand.Summary == nil {
 			t.Fatalf("query=%q on-demand understanding=%#v", query.query, onDemand)
 		}
 		var search rushestools.ShotSearchResult
-		invokeRegisteredTool(t, service, ctx, "media.search_shots", rushestools.ShotSearchInput{
+		invokeRegisteredTool(t, service, ctx, "shot.search", rushestools.ShotSearchInput{
 			Query: query.query, SemanticRoles: []string{"b_roll"}, MinDurationFrames: 45, Limit: 5,
 		}, &search)
 		if len(search.Shots) > 0 {

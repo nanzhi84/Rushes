@@ -77,6 +77,13 @@ func TestRenderOrientationParticipatesInIdempotencyWithoutNumericKnobs(t *testin
 	if err := rows.Err(); err != nil || count != 3 || !orientations["auto"] || !orientations["portrait"] || !orientations["landscape"] {
 		t.Fatalf("count=%d orientations=%#v err=%v", count, orientations, err)
 	}
+	var validationEvents int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM event_log
+		WHERE draft_id='draft_orientation' AND event_type='TimelineValidated'`,
+	).Scan(&validationEvents); err != nil || validationEvents != 4 {
+		t.Fatalf("每个新 render job 必须同批附带 strict validation: events=%d err=%v", validationEvents, err)
+	}
 	if _, err := exec.ExecuteTool(ctx, "render.preview", rushestools.RenderPreviewInput{Orientation: "square"}); err == nil {
 		t.Fatal("unknown orientation should fail")
 	}
