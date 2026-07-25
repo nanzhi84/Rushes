@@ -63,9 +63,12 @@ func TestDetectShotsSingleAssetAsyncRouting(t *testing.T) {
 			if job.Payload["depth"] != test.wantDepth || job.Payload["force_refresh"] != test.wantForce {
 				t.Fatalf("payload=%#v", job.Payload)
 			}
-			ids := stringsFromJSONSlice(t, job.Payload["asset_ids"])
-			if len(ids) != 1 || ids[0] != test.input.AssetID {
-				t.Fatalf("内部 job 不是单素材: %v", ids)
+			if !job.AssetID.Valid || job.AssetID.String != test.input.AssetID ||
+				job.Payload["asset_id"] != test.input.AssetID {
+				t.Fatalf("内部 job 不是单素材: %#v", job)
+			}
+			if fingerprint, _ := job.Payload["analysis_fingerprint"].(string); fingerprint == "" {
+				t.Fatalf("job 缺少单素材 fingerprint: %#v", job.Payload)
 			}
 			if test.name == "deep" && job.Payload["focus"] != "人物 动作" {
 				t.Fatalf("focus 未规范化: %#v", job.Payload)
@@ -425,23 +428,6 @@ func countUnderstandingLifecycleEvents(t *testing.T, database *storage.DB, asset
 		t.Fatal(err)
 	}
 	return started, completed
-}
-
-func stringsFromJSONSlice(t *testing.T, value any) []string {
-	t.Helper()
-	values, ok := value.([]any)
-	if !ok {
-		t.Fatalf("value=%#v 不是 JSON 数组", value)
-	}
-	result := make([]string, 0, len(values))
-	for _, item := range values {
-		text, ok := item.(string)
-		if !ok {
-			t.Fatalf("item=%#v 不是字符串", item)
-		}
-		result = append(result, text)
-	}
-	return result
 }
 
 func executeDetectShots(

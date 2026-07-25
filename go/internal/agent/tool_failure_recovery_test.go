@@ -7,6 +7,9 @@ import (
 	"testing"
 
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -70,11 +73,30 @@ func TestAgentRecoveryMiddlewareFailuresCarryRecovery(t *testing.T) {
 }
 
 // TestExecutorStructuredFailuresCarryRecovery 通过 Service.ExecuteTool 触发领域层代表性结构化
-// 失败（plan.update 参数缺失、apply_patches 字段错误与未知 kind），断言 Data.recovery 非空。
-// 覆盖 planUpdateFailure 兜底与 timeline op 恢复两条主线。
+// 失败（plan.update 参数缺失、原子更新字段错误与未知 kind），断言 Data.recovery 非空。
+// 覆盖 planUpdateFailure 兜底与原子 timeline op 恢复两条主线。
 func TestExecutorStructuredFailuresCarryRecovery(t *testing.T) {
 	t.Parallel()
-	service, _, ctx := timelineOpRecoveryFixture(t, "draft_recovery_coverage")
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_recovery_coverage"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+		AssetID: "fixture", AssetKind: "video",
+		SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedTimelineVersion(service,
+		t.Context(), draftID, document, "recovery_coverage_fixture", nil); err != nil {
+		t.Fatal(err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
 
 	cases := []struct {
 		name  string
@@ -82,16 +104,13 @@ func TestExecutorStructuredFailuresCarryRecovery(t *testing.T) {
 		input any
 	}{
 		{"plan_required", "plan.update", rushestools.PlanUpdateInput{}},
-		{"apply_patches_field_error", "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
-			"kind": "trim_clip_edge", "timeline_clip_id": "clip_v1_001", "target_frame": 10, "edge": "end",
-		}}}},
-		{"apply_patches_unknown_kind", "timeline.apply_patches", rushestools.TimelinePatchBatchInput{Ops: []rushestools.TimelineOp{{
+		{"update_field_error", "timeline.update", rushestools.TimelineUpdateInput{
+			"kind": "trim_clip_edge", "timeline_clip_id": "clip_v1_001",
+			"target_frame": 10, "edge": "end",
+		}},
+		{"update_unknown_kind", "timeline.update", rushestools.TimelineUpdateInput{
 			"kind": "remove_clip", "timeline_clip_id": "clip_v1_001",
-		}}}},
-		// 经 edit_talking_head / recut_to_beats 的 failed 闭包路径，验证闭包 recovery 兜底
-		// 已让这两条主线的结构化失败机械带 recovery（覆盖 talking_head.go:1752 同类闭包）。
-		{"talking_head_no_decisions", "timeline.edit_talking_head", rushestools.TalkingHeadEditInput{ARollTimelineClipID: "clip_v1_001"}},
-		{"recut_missing_inputs", "timeline.recut_to_beats", rushestools.TimelineBeatRecutInput{}},
+		}},
 	}
 	for _, test := range cases {
 		raw, err := service.ExecuteTool(ctx, test.tool, test.input)
@@ -103,5 +122,122 @@ func TestExecutorStructuredFailuresCarryRecovery(t *testing.T) {
 			t.Fatalf("%s 期望结构化失败，实际 status=%q data=%#v", test.name, result.Status, result.Data)
 		}
 		assertFailureDataHasRecovery(t, test.name, result.Data)
+	}
+}
+
+func TestRegistryRouterTimelineFieldFailuresPreserveFailedOperation(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_registry_failure_recovery"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+		AssetID: "asset_recovery", AssetKind: "video",
+		SourceStartFrame: 0, SourceEndFrame: 30,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seedTimelineVersion(service,
+		t.Context(), draftID, document, "registry_recovery_fixture", nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	router, err := newToolRouter(
+		t.Context(),
+		compose.ToolsNodeConfig{Tools: service.Tools().EinoTools(true, false)},
+		service.Tools().Spec,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx = agentexec.WithTurnInteractionState(
+		ctx, agentexec.NewTurnInteractionState(service.indexedResources),
+	)
+	results, err := router.Invoke(ctx, &schema.Message{
+		Role: schema.Assistant,
+		ToolCalls: []schema.ToolCall{
+			{
+				ID: "missing_field",
+				Function: schema.FunctionCall{
+					Name: "timeline.update",
+					Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_v1_001",` +
+						`"target_frame":10,"edge":"end"}`,
+				},
+			},
+			{
+				ID: "unknown_field",
+				Function: schema.FunctionCall{
+					Name:      "timeline.delete",
+					Arguments: `{"kind":"delete_clip","timeline_clip_id":"clip_v1_001","future":true}`,
+				},
+			},
+			{
+				ID: "cross_family",
+				Function: schema.FunctionCall{
+					Name:      "timeline.update",
+					Arguments: `{"kind":"delete_clip","timeline_clip_id":"clip_v1_001"}`,
+				},
+			},
+		},
+	})
+	if err != nil || len(results) != 3 {
+		t.Fatalf("results=%#v err=%v", results, err)
+	}
+	for index, resultMessage := range results {
+		var result rushestools.ToolResult
+		if err := json.Unmarshal([]byte(resultMessage.Content), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Status != string(rushestools.StatusFailed) {
+			t.Fatalf("result[%d]=%#v", index, result)
+		}
+		failedOp, ok := result.Data["failed_op"].(map[string]any)
+		if !ok || failedOp["kind"] == nil {
+			t.Fatalf("result[%d] 丢失 failed_op: %#v", index, result)
+		}
+		if index != 2 {
+			if result.Data["expected_schema"] == nil || result.Data["correct_example"] == nil {
+				t.Fatalf("result[%d] 缺少同家族恢复 schema: %#v", index, result)
+			}
+			continue
+		}
+		if result.Data["required_tool"] != "timeline.delete" ||
+			result.Data["op_catalog"] == nil ||
+			result.Data["expected_schema"] != nil ||
+			result.Data["correct_example"] != nil {
+			t.Fatalf("跨家族恢复指向错误: %#v", result)
+		}
+	}
+}
+
+func TestFailureDecorationIncludesRemainingToolRoundsOnlyOnFailure(t *testing.T) {
+	t.Parallel()
+	budget := newTurnBudgetState(5)
+	ctx := withTurnBudgetState(t.Context(), budget)
+	budget.beginModelCall()
+	budget.beginModelCall()
+	raw := decorateToolFailure(
+		ctx,
+		&compose.ToolInput{Name: "timeline.update", Arguments: `{}`},
+		`{"status":"failed","observation":"bad"}`,
+		1,
+	)
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatal(err)
+	}
+	data := payload["data"].(map[string]any)
+	if data["remaining_tool_rounds"] != float64(4) {
+		t.Fatalf("payload=%#v", payload)
+	}
+	success := rushestools.ToolResult{Status: "succeeded", Observation: "ok", Data: map[string]any{}}
+	if _, exists := success.Data["remaining_tool_rounds"]; exists {
+		t.Fatal("remaining_tool_rounds leaked into success payload")
 	}
 }

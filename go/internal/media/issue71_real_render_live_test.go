@@ -52,7 +52,7 @@ func TestIssue71RealTalkingHeadRenderAcceptance(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	document, err := timeline.ComposeInitial("issue71_real_render", 1, []timeline.Selection{{
+	document, err := composeMediaTimeline("issue71_real_render", 1, []mediaTimelineSelection{{
 		AssetID: "issue71_aroll", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 1200,
 		Role: "a_roll", HasAudio: true,
 	}})

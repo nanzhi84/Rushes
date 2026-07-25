@@ -38,7 +38,7 @@ func TestTimelineInspectReturnsWaveTwoEditingState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := timeline.ComposeInitial("draft_inspect_wave_two", 1, []timeline.Selection{{
+	document, err := agenttest.ComposeTimeline("draft_inspect_wave_two", 1, []agenttest.TimelineSelection{{
 		AssetID: "asset_video", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 90,
 	}})
 	if err != nil {
@@ -55,7 +55,7 @@ func TestTimelineInspectReturnsWaveTwoEditingState(t *testing.T) {
 			t.Fatalf("operation=%#v err=%v", operation, err)
 		}
 	}
-	if _, err := exec.PersistTimeline(t.Context(), "draft_inspect_wave_two", document, "inspect_wave_two_fixture"); err != nil {
+	if _, err := seedTimelineVersion(exec, t.Context(), "draft_inspect_wave_two", document, "inspect_wave_two_fixture", nil); err != nil {
 		t.Fatal(err)
 	}
 	result, err := exec.toolInspectTimeline(t.Context(), "draft_inspect_wave_two", rushestools.TimelineInspectInput{})
@@ -78,5 +78,106 @@ func TestTimelineInspectReturnsWaveTwoEditingState(t *testing.T) {
 	subtitle := byID["subtitles"]["clips"].([]map[string]any)[0]
 	if subtitle["text"] != "新字幕" || subtitle["subtitle_style"] != "bold_bottom" {
 		t.Fatalf("subtitle=%#v", subtitle)
+	}
+}
+
+func TestTimelineInspectAndCheckReadExactOwnedVersionWithoutWrites(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_exact_timeline_read"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range []struct {
+		version, endFrame int
+	}{{1, 30}, {2, 75}} {
+		document, composeErr := agenttest.ComposeTimeline(draftID, fixture.version, []agenttest.TimelineSelection{{
+			AssetID: "asset_exact", AssetKind: "video",
+			SourceStartFrame: 0, SourceEndFrame: fixture.endFrame,
+		}})
+		if composeErr != nil {
+			t.Fatal(composeErr)
+		}
+		if _, persistErr := seedTimelineVersion(exec,
+			t.Context(), draftID, document, "exact_read_fixture", nil,
+		); persistErr != nil {
+			t.Fatal(persistErr)
+		}
+	}
+	var beforeEvents, beforeVersions, beforeStateVersion int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT
+			(SELECT COUNT(*) FROM event_log),
+			(SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?),
+			(SELECT state_version FROM drafts WHERE draft_id=?)`,
+		draftID, draftID,
+	).Scan(&beforeEvents, &beforeVersions, &beforeStateVersion); err != nil {
+		t.Fatal(err)
+	}
+
+	inspect, err := exec.toolInspectTimeline(
+		t.Context(), draftID, rushestools.TimelineInspectInput{TimelineID: draftID + ":v1"},
+	)
+	if err != nil || inspect.Status != string(rushestools.StatusSucceeded) ||
+		inspect.Data["timeline_id"] != draftID+":v1" ||
+		inspect.Data["timeline_version"] != 1 ||
+		inspect.Data["duration_frames"] != 30 {
+		t.Fatalf("inspect=%#v err=%v", inspect, err)
+	}
+	check, err := exec.toolCheckTimeline(
+		t.Context(), draftID, rushestools.TimelineCheckInput{TimelineID: draftID + ":v1"},
+	)
+	if err != nil || check.Status != string(rushestools.StatusSucceeded) ||
+		check.Data["timeline_id"] != draftID+":v1" ||
+		check.Data["timeline_version"] != 1 {
+		t.Fatalf("check=%#v err=%v", check, err)
+	}
+	for _, result := range []rushestools.ToolResult{
+		func() rushestools.ToolResult {
+			value, callErr := exec.toolInspectTimeline(
+				t.Context(), draftID,
+				rushestools.TimelineInspectInput{TimelineID: "other_draft:v1"},
+			)
+			if callErr != nil {
+				t.Fatal(callErr)
+			}
+			return value
+		}(),
+		func() rushestools.ToolResult {
+			value, callErr := exec.toolCheckTimeline(
+				t.Context(), draftID,
+				rushestools.TimelineCheckInput{TimelineID: draftID + ":v999"},
+			)
+			if callErr != nil {
+				t.Fatal(callErr)
+			}
+			return value
+		}(),
+	} {
+		if result.Status != string(rushestools.StatusFailed) ||
+			result.Data["error_code"] != string(rushestools.ErrCodeStaleTarget) {
+			t.Fatalf("unowned/not-found result=%#v", result)
+		}
+	}
+
+	var afterEvents, afterVersions, afterStateVersion int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT
+			(SELECT COUNT(*) FROM event_log),
+			(SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?),
+			(SELECT state_version FROM drafts WHERE draft_id=?)`,
+		draftID, draftID,
+	).Scan(&afterEvents, &afterVersions, &afterStateVersion); err != nil {
+		t.Fatal(err)
+	}
+	if beforeEvents != afterEvents || beforeVersions != afterVersions ||
+		beforeStateVersion != afterStateVersion {
+		t.Fatalf(
+			"read tools wrote state: before=(%d,%d,%d) after=(%d,%d,%d)",
+			beforeEvents, beforeVersions, beforeStateVersion,
+			afterEvents, afterVersions, afterStateVersion,
+		)
 	}
 }

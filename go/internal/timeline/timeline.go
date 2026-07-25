@@ -70,15 +70,6 @@ type Clip struct {
 
 var SubtitleStyleNames = []string{"default", "large_center", "top_bar", "minimal", "bold_bottom"}
 
-type Selection struct {
-	AssetID          string
-	AssetKind        string
-	SourceStartFrame int
-	SourceEndFrame   int
-	Role             string
-	HasAudio         bool
-}
-
 type ValidationIssue struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -88,52 +79,6 @@ type ValidationReport struct {
 	Valid  bool              `json:"valid"`
 	Checks []string          `json:"checks"`
 	Issues []ValidationIssue `json:"issues"`
-}
-
-func ComposeInitial(draftID string, version int, selections []Selection) (Document, error) {
-	if draftID == "" || version < 1 || len(selections) == 0 {
-		return Document{}, errors.New("compose_initial 参数无效")
-	}
-	document := Empty(draftID, version)
-	primary := &document.Tracks[0]
-	originalAudio := &document.Tracks[2]
-	cursor := 0
-	for index, selection := range selections {
-		if selection.AssetID == "" || selection.SourceStartFrame < 0 || selection.SourceEndFrame <= selection.SourceStartFrame {
-			return Document{}, fmt.Errorf("clip %d 源范围无效", index)
-		}
-		if selection.AssetKind != "" && selection.AssetKind != "video" && selection.AssetKind != "image" {
-			return Document{}, fmt.Errorf(
-				"clip %d 素材类型 %s 不能放入主视觉轨，仅支持 video/image",
-				index,
-				selection.AssetKind,
-			)
-		}
-		duration := selection.SourceEndFrame - selection.SourceStartFrame
-		clipID := fmt.Sprintf("clip_v%d_%03d", version, index+1)
-		parentBlockID := fmt.Sprintf("block_%03d", index+1)
-		primary.Clips = append(primary.Clips, Clip{
-			TimelineClipID: clipID, TrackID: primary.TrackID, AssetID: selection.AssetID,
-			AssetKind: selection.AssetKind,
-			Role:      selection.Role, TimelineStartFrame: cursor, TimelineEndFrame: cursor + duration,
-			SourceStartFrame: selection.SourceStartFrame,
-			SourceEndFrame:   selection.SourceEndFrame,
-			PlaybackRate:     1, ParentBlockID: parentBlockID,
-			Linked: selection.HasAudio,
-		})
-		if selection.HasAudio {
-			originalAudio.Clips = append(originalAudio.Clips, Clip{
-				TimelineClipID: clipID + "_audio", TrackID: originalAudio.TrackID,
-				AssetID: selection.AssetID, AssetKind: selection.AssetKind,
-				Role: "original_audio", TimelineStartFrame: cursor, TimelineEndFrame: cursor + duration,
-				SourceStartFrame: selection.SourceStartFrame, SourceEndFrame: selection.SourceEndFrame,
-				PlaybackRate: 1, ParentBlockID: parentBlockID, Linked: true,
-			})
-		}
-		cursor += duration
-	}
-	document.DurationFrames = cursor
-	return document, nil
 }
 
 func Empty(draftID string, version int) Document {
@@ -350,10 +295,10 @@ func ApplyPatch(document Document, operation map[string]any) (Document, error) {
 		err = insertSubtitle(&copy, operation)
 	case "delete_range":
 		err = deleteRange(&copy, operation)
+	case "delete_source_range":
+		err = deleteSourceRange(&copy, operation)
 	case "insert_clip":
 		err = insertClip(&copy, operation)
-	case "sync_original_audio":
-		err = syncOriginalAudio(&copy, operation)
 	case "replace_clip":
 		err = replaceClip(&copy, operation)
 	case "set_playback_rate":
@@ -570,7 +515,7 @@ func splitClipValue(clip Clip, splitFrame int, leftGroupID, rightGroupID string)
 // reorder_clip 只改变主视觉片段顺序，并重新紧密排布该轨道。其他轨道保留
 // 时间坐标，因此不会制造主视觉空洞，也不会绕开后续 Validate/Reducer 门禁。
 func reorderClip(document *Document, operation map[string]any) error {
-	id := valueOr(stringValue(operation["timeline_clip_id"]), stringValue(operation["clip_id"]))
+	id := stringValue(operation["timeline_clip_id"])
 	if id == "" {
 		return errors.New("reorder_clip 缺少 timeline_clip_id")
 	}
@@ -731,6 +676,101 @@ func deleteRange(document *Document, operation map[string]any) error {
 	return nil
 }
 
+func deleteSourceRange(document *Document, operation map[string]any) error {
+	assetID := strings.TrimSpace(stringValue(operation["asset_id"]))
+	sourceStart, startErr := frameValue(operation, "source_start_frame")
+	sourceEnd, endErr := frameValue(operation, "source_end_frame")
+	if startErr != nil || endErr != nil {
+		return errors.Join(startErr, endErr)
+	}
+	if assetID == "" || sourceStart < 0 || sourceEnd <= sourceStart {
+		return errors.New("delete_source_range 素材或源范围无效")
+	}
+
+	type mappedSourceSegment struct {
+		sourceStart   int
+		sourceEnd     int
+		timelineStart int
+		timelineEnd   int
+	}
+	primary := trackByID(document, "visual_base")
+	if primary == nil {
+		return errors.New("delete_source_range 缺少主视觉轨")
+	}
+	segments := []mappedSourceSegment{}
+	for _, clip := range primary.Clips {
+		if clip.AssetID != assetID {
+			continue
+		}
+		start := max(sourceStart, clip.SourceStartFrame)
+		end := min(sourceEnd, clip.SourceEndFrame)
+		if end <= start {
+			continue
+		}
+		rate := effectiveRate(clip)
+		startOffset, exactStart := exactTimelineOffset(start-clip.SourceStartFrame, rate)
+		endOffset, exactEnd := exactTimelineOffset(end-clip.SourceStartFrame, rate)
+		if !exactStart || !exactEnd {
+			return errors.New(
+				"delete_source_range 的源边界无法按当前 playback_rate 精确映射到整数时间线帧",
+			)
+		}
+		timelineStart := clip.TimelineStartFrame + startOffset
+		timelineEnd := clip.TimelineStartFrame + endOffset
+		timelineStart = max(clip.TimelineStartFrame, timelineStart)
+		timelineEnd = min(clip.TimelineEndFrame, timelineEnd)
+		if timelineEnd <= timelineStart {
+			return errors.New("delete_source_range 映射后的时间线范围为空")
+		}
+		segments = append(segments, mappedSourceSegment{
+			sourceStart: start, sourceEnd: end,
+			timelineStart: timelineStart, timelineEnd: timelineEnd,
+		})
+	}
+	sort.SliceStable(segments, func(left, right int) bool {
+		return segments[left].timelineStart < segments[right].timelineStart
+	})
+	if len(segments) == 0 {
+		return errors.New("delete_source_range 在当前主视觉中没有匹配的 source range")
+	}
+
+	sourceCursor := sourceStart
+	timelineStart, timelineEnd := -1, -1
+	for _, segment := range segments {
+		if segment.sourceStart < sourceCursor {
+			return errors.New("delete_source_range 在当前主视觉中存在重复映射")
+		}
+		if segment.sourceStart > sourceCursor {
+			return errors.New("delete_source_range 在当前主视觉中的 source 映射不连续")
+		}
+		if timelineStart < 0 {
+			timelineStart = segment.timelineStart
+		} else if segment.timelineStart != timelineEnd {
+			return errors.New("delete_source_range 在当前主视觉中的 timeline 映射不连续")
+		}
+		sourceCursor = segment.sourceEnd
+		timelineEnd = segment.timelineEnd
+	}
+	if sourceCursor != sourceEnd {
+		return errors.New("delete_source_range 在当前主视觉中未完整覆盖请求的 source range")
+	}
+	return deleteRange(document, map[string]any{
+		"kind": "delete_range", "start_frame": timelineStart, "end_frame": timelineEnd,
+	})
+}
+
+func exactTimelineOffset(sourceOffset int, rate float64) (int, bool) {
+	if sourceOffset < 0 || rate <= 0 || math.IsNaN(rate) || math.IsInf(rate, 0) {
+		return 0, false
+	}
+	rounded := int(math.Round(float64(sourceOffset) / rate))
+	tolerance := 1e-9 * math.Max(1, math.Abs(float64(sourceOffset)))
+	if math.Abs(float64(rounded)*rate-float64(sourceOffset)) > tolerance {
+		return 0, false
+	}
+	return rounded, true
+}
+
 func splitClipAroundDeletedRange(clip Clip, start, end int) (Clip, Clip) {
 	rate := effectiveRate(clip)
 	left := clip
@@ -802,7 +842,7 @@ func insertClip(document *Document, operation map[string]any) error {
 	clip := Clip{
 		TimelineClipID: valueOr(stringValue(operation["timeline_clip_id"]), fmt.Sprintf("clip_v%d_%03d", document.Version+1, len(track.Clips)+1)),
 		TrackID:        track.TrackID, AssetID: assetID, AssetKind: stringValue(operation["asset_kind"]),
-		Role:               valueOr(stringValue(operation["role"]), "b_roll"),
+		Role:               valueOr(stringValue(operation["role"]), defaultClipRole(track.TrackID)),
 		TimelineStartFrame: startFrame, TimelineEndFrame: startFrame + duration,
 		SourceStartFrame: start, SourceEndFrame: end,
 		PlaybackRate: 1,
@@ -848,15 +888,13 @@ func insertClip(document *Document, operation map[string]any) error {
 	return nil
 }
 
-func syncOriginalAudio(document *Document, operation map[string]any) error {
-	audioAssetIDs, err := stringSetValue(operation["audio_asset_ids"])
-	if err != nil {
-		return err
+func defaultClipRole(trackID string) string {
+	switch trackID {
+	case "original_audio", "voiceover", "bgm", "sfx":
+		return trackID
+	default:
+		return "b_roll"
 	}
-	if len(audioAssetIDs) == 0 {
-		return errors.New("sync_original_audio 缺少带音频的视频素材")
-	}
-	return rebuildOriginalAudio(document, audioAssetIDs)
 }
 
 // DeriveOriginalAudio 返回不增加 timeline version 的原声联动派生结果。
@@ -1109,33 +1147,6 @@ func numberValue(value any) float64 {
 	default:
 		return 0
 	}
-}
-
-func stringSetValue(value any) (map[string]struct{}, error) {
-	result := map[string]struct{}{}
-	switch typed := value.(type) {
-	case []string:
-		for _, item := range typed {
-			if item = strings.TrimSpace(item); item != "" {
-				result[item] = struct{}{}
-			}
-		}
-	case []any:
-		for _, raw := range typed {
-			item, ok := raw.(string)
-			if !ok {
-				return nil, errors.New("audio_asset_ids 必须是字符串数组")
-			}
-			if item = strings.TrimSpace(item); item != "" {
-				result[item] = struct{}{}
-			}
-		}
-	case nil:
-		return result, nil
-	default:
-		return nil, errors.New("audio_asset_ids 必须是字符串数组")
-	}
-	return result, nil
 }
 
 func frameValue(operation map[string]any, key string) (int, error) {

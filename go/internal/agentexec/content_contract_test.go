@@ -61,7 +61,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		t.Fatalf("draft=%#v err=%v", draft, err)
 	}
 
-	failing, err := timeline.ComposeInitial("draft_contract", 1, []timeline.Selection{
+	failing, err := agenttest.ComposeTimeline("draft_contract", 1, []agenttest.TimelineSelection{
 		{AssetID: "asset_a", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 10, Role: "a_roll"},
 		{AssetID: "asset_b", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 80, Role: "a_roll"},
 	})
@@ -86,12 +86,12 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		len(byCheck["on_beat_ratio"].Frames) != 1 {
 		t.Fatalf("missing anchors report=%#v", report)
 	}
-	persisted, err := exec.PersistTimeline(t.Context(), "draft_contract", failing, "contract_fixture")
+	persisted, err := seedTimelineVersion(exec, t.Context(), "draft_contract", failing, "contract_fixture", nil)
 	if err != nil || !strings.Contains(persisted.Observation, "验收合同未通过项") || persisted.Data["contract_failures"] == nil {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
 	assertPersistedContractReport(t, database, "draft_contract", 1, false)
-	validated, err := exec.toolCheckTimeline(t.Context(), "draft_contract")
+	validated, err := exec.toolCheckTimeline(t.Context(), "draft_contract", rushestools.TimelineCheckInput{})
 	if err != nil || validated.Status != "succeeded" ||
 		!strings.Contains(validated.Observation, "验收合同未通过项") ||
 		len(validated.Data["contract_failures"].([]ContractVerificationItem)) != 5 ||
@@ -99,7 +99,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		t.Fatalf("validated failing contract=%#v err=%v", validated, err)
 	}
 
-	compliant, err := timeline.ComposeInitial("draft_contract", 2, []timeline.Selection{
+	compliant, err := agenttest.ComposeTimeline("draft_contract", 2, []agenttest.TimelineSelection{
 		{AssetID: "asset_a", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll"},
 		{AssetID: "asset_b", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 90, Role: "a_roll"},
 	})
@@ -119,12 +119,12 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 	if err != nil || !configured || !report.Pass || len(ContractFailureItems(report)) != 0 {
 		t.Fatalf("compliant report=%#v configured=%v err=%v", report, configured, err)
 	}
-	persisted, err = exec.PersistTimeline(t.Context(), "draft_contract", compliant, "contract_compliant_fixture")
+	persisted, err = seedTimelineVersion(exec, t.Context(), "draft_contract", compliant, "contract_compliant_fixture", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertPersistedContractReport(t, database, "draft_contract", 2, true)
-	validated, err = exec.toolCheckTimeline(t.Context(), "draft_contract")
+	validated, err = exec.toolCheckTimeline(t.Context(), "draft_contract", rushestools.TimelineCheckInput{})
 	if err != nil || validated.Status != "succeeded" ||
 		!strings.Contains(validated.Observation, "验收合同全部通过") ||
 		len(validated.Data["contract_failures"].([]ContractVerificationItem)) != 0 ||
@@ -172,7 +172,7 @@ func TestContentContractReportsMissingBeatGrid(t *testing.T) {
 	if item.Check != "on_beat_ratio" || item.Pass || item.ErrorCode != "missing_beat_grid" || item.Message != guidance {
 		t.Fatalf("item=%#v", item)
 	}
-	persisted, err := exec.PersistTimeline(t.Context(), "draft_missing_beat_grid", document, "missing_beat_grid_fixture")
+	persisted, err := seedTimelineVersion(exec, t.Context(), "draft_missing_beat_grid", document, "missing_beat_grid_fixture", nil)
 	if err != nil || !strings.Contains(persisted.Observation, guidance) {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}

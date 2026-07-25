@@ -16,6 +16,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agent"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -136,6 +137,7 @@ func TestCancelCurrentTurnCancelsAllWaitedJobsWithoutActiveAgentTurn(t *testing.
 	server, handler := testServer(t, t.TempDir(), 0)
 	createDraftThroughAPI(t, handler, "draft_cancel_jobs")
 	now := time.Now().UTC()
+	agenttest.InsertJobFixtureAsset(t, server.database, "asset_job_understand")
 	events := make([]contracts.Event, 0, 4)
 	for _, item := range []struct {
 		id, kind string
@@ -145,12 +147,16 @@ func TestCancelCurrentTurnCancelsAllWaitedJobsWithoutActiveAgentTurn(t *testing.
 		{"job_final", "render_final"},
 		{"job_ingest", "ingest"},
 	} {
+		payload := map[string]any{
+			"job_id": item.id, "kind": item.kind, "idempotency_key": item.id,
+			"requested_by_draft_id": "draft_cancel_jobs",
+			"next_run_at":           now.Format(time.RFC3339Nano),
+		}
+		if item.kind == "understand" {
+			payload["asset_id"] = "asset_job_understand"
+		}
 		events = append(events, contracts.Event{
-			Type: "JobEnqueued", DraftID: "draft_cancel_jobs", Payload: map[string]any{
-				"job_id": item.id, "kind": item.kind, "idempotency_key": item.id,
-				"requested_by_draft_id": "draft_cancel_jobs",
-				"next_run_at":           now.Format(time.RFC3339Nano),
-			},
+			Type: "JobEnqueued", DraftID: "draft_cancel_jobs", Payload: payload,
 		})
 	}
 	result, err := reducer.Apply(t.Context(), server.database, events, reducer.Options{
@@ -198,9 +204,11 @@ func TestTurnCancellationCleanupSurvivesRequestCancellation(t *testing.T) {
 	server, _ := testServer(t, t.TempDir(), 0)
 	createDraftThroughAPI(t, server.Handler(), "draft_cancel_disconnected")
 	now := time.Now().UTC()
+	agenttest.InsertJobFixtureAsset(t, server.database, "asset_disconnected")
 	result, err := reducer.Apply(t.Context(), server.database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: "draft_cancel_disconnected", Payload: map[string]any{
 			"job_id": "job_disconnected", "kind": "understand",
+			"asset_id":              "asset_disconnected",
 			"idempotency_key":       "job_disconnected",
 			"requested_by_draft_id": "draft_cancel_disconnected",
 			"next_run_at":           now.Format(time.RFC3339Nano),
@@ -236,9 +244,11 @@ func TestTurnCancellationBoundaryProtectsJobsCreatedAfterBarrier(t *testing.T) {
 	now := time.Now().UTC()
 	enqueue := func(jobID string, createdAt time.Time) {
 		t.Helper()
+		agenttest.InsertJobFixtureAsset(t, server.database, "asset_"+jobID)
 		result, err := reducer.Apply(t.Context(), server.database, []contracts.Event{{
 			Type: "JobEnqueued", DraftID: "draft_cancel_boundary", Payload: map[string]any{
 				"job_id": jobID, "kind": "understand", "idempotency_key": jobID,
+				"asset_id":              "asset_" + jobID,
 				"requested_by_draft_id": "draft_cancel_boundary",
 				"next_run_at":           createdAt.Format(time.RFC3339Nano),
 			},
@@ -349,9 +359,11 @@ func TestCancelCurrentTurnReturnsBoundedAndProtectsLaterJobs(t *testing.T) {
 		}
 	}
 	now := time.Now().UTC()
+	agenttest.InsertJobFixtureAsset(t, database, "asset_before_cancel")
 	result, err := reducer.Apply(t.Context(), database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: "draft_bounded_cancel", Payload: map[string]any{
 			"job_id": "job_before_cancel", "kind": "understand",
+			"asset_id":        "asset_before_cancel",
 			"idempotency_key": "job_before_cancel", "requested_by_draft_id": "draft_bounded_cancel",
 			"next_run_at": now.Format(time.RFC3339Nano),
 		},
@@ -390,9 +402,11 @@ func TestCancelCurrentTurnReturnsBoundedAndProtectsLaterJobs(t *testing.T) {
 	}
 	service.Queue().JoinDraft("draft_bounded_cancel")
 	later := now.Add(time.Second)
+	agenttest.InsertJobFixtureAsset(t, database, "asset_after_cancel")
 	result, err = reducer.Apply(t.Context(), database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: "draft_bounded_cancel", Payload: map[string]any{
 			"job_id": "job_after_cancel", "kind": "understand",
+			"asset_id":        "asset_after_cancel",
 			"idempotency_key": "job_after_cancel", "requested_by_draft_id": "draft_bounded_cancel",
 			"next_run_at": later.Format(time.RFC3339Nano),
 		},

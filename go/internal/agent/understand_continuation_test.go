@@ -88,7 +88,7 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 		message.Extra["job_id"] != queued.JobID {
 		t.Fatalf("evidence extra=%#v", message.Extra)
 	}
-	for _, expected := range []string{assetID, "缓存摘要 " + assetID, `"included":1`, `"truncated":false`} {
+	for _, expected := range []string{assetID, "缓存摘要 " + assetID, `"asset":{`} {
 		if !strings.Contains(message.Content, expected) {
 			t.Fatalf("evidence 缺少 %q: %s", expected, message.Content)
 		}
@@ -101,20 +101,30 @@ func TestUnderstandJobEvidenceSurvivesResidentCatalogTruncation(t *testing.T) {
 	}
 }
 
-func TestDecodeUnderstandJobPayloadKeepsLegacyMixedAssetIDs(t *testing.T) {
+func TestDecodeUnderstandJobPayloadRequiresSingleAssetShape(t *testing.T) {
 	t.Parallel()
 	payload, err := agentexec.DecodeUnderstandJobPayload(`{
-		"asset_ids":["asset-a",42,"asset-b",null],
+		"asset_id":"asset-a",
 		"focus":"人物","depth":"deep","max_steps_per_asset":9,
-		"analysis_fingerprints":{"asset-a":"fp-a","asset-b":17}
+		"force_refresh":false,"refresh_nonce":"",
+		"analysis_fingerprint":"fp-a"
 	}`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(payload.AssetIDs, ","); got != "asset-a,asset-b" ||
+	if payload.AssetID != "asset-a" ||
 		payload.Focus != "人物" || payload.Depth != "deep" || payload.MaxStepsPerAsset != 9 ||
-		payload.AnalysisFingerprints["asset-a"] != "fp-a" {
+		payload.AnalysisFingerprint != "fp-a" {
 		t.Fatalf("payload=%#v", payload)
+	}
+	for _, raw := range []string{
+		`{"asset_ids":["asset-a"],"analysis_fingerprint":"fp-a"}`,
+		`{"asset_id":"asset-a","analysis_fingerprints":{"asset-a":"fp-a"}}`,
+		`{"asset_id":"asset-a","analysis_fingerprint":"fp-a"}{"extra":true}`,
+	} {
+		if _, err := agentexec.DecodeUnderstandJobPayload(raw); err == nil {
+			t.Fatalf("旧批量或 trailing shape 应失败: %s", raw)
+		}
 	}
 }
 
@@ -186,7 +196,7 @@ func TestUnderstandJobEvidenceAndTerminalReuseSelectJobSpecificSummary(t *testin
 	terminal, err := reducer.Apply(t.Context(), database, []contracts.Event{{
 		Type: "JobSucceeded", DraftID: draftID, Payload: map[string]any{
 			"job_id": queued.JobID, "kind": "understand", "requested_by_draft_id": draftID,
-			"result": map[string]any{"status": "completed", "analyzed_asset_ids": []string{assetID}},
+			"result": map[string]any{"status": "completed", "asset_id": assetID, "analyzed": true},
 		},
 	}}, reducer.Options{Actor: contracts.ActorJob})
 	if err != nil || terminal.Status != reducer.StatusApplied {

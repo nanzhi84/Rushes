@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -84,6 +85,242 @@ func TestAtomicTimelineToolsCreateOneVersionPerCatalogOperation(t *testing.T) {
 		WHERE draft_id=? AND json_array_length(operations_json)=1`, draftID,
 	).Scan(&singleOperationBatches); err != nil || singleOperationBatches != 5 {
 		t.Fatalf("single_operation_batches=%d err=%v", singleOperationBatches, err)
+	}
+}
+
+func TestPersistTimelineStaleSnapshotReturnsStructuredConflict(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_atomic_stale_snapshot"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+		AssetID: "asset_stale", AssetKind: "video",
+		SourceStartFrame: 0, SourceEndFrame: 120,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, persistErr := seedTimelineVersion(exec,
+		t.Context(), draftID, initial, "stale_fixture", nil,
+	); persistErr != nil || result.Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("initial result=%#v err=%v", result, persistErr)
+	}
+	snapshot, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draftSnapshot, err := storage.GetDraft(t.Context(), database.Read(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manual, err := timeline.ApplyPatch(snapshot, map[string]any{
+		"kind": "insert_subtitle", "start_frame": 0, "end_frame": 30, "text": "manual",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, persistErr := seedTimelineVersion(exec,
+		t.Context(), draftID, manual, "manual_race", nil,
+	); persistErr != nil || result.Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("manual result=%#v err=%v", result, persistErr)
+	}
+	staleAttempt, err := timeline.ApplyPatch(snapshot, map[string]any{
+		"kind": "insert_subtitle", "start_frame": 30, "end_frame": 60, "text": "stale",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := exec.persistTimelineFromSnapshot(
+		t.Context(),
+		draftID,
+		staleAttempt,
+		"stale_race",
+		nil,
+		timelineMutationBase{
+			stateVersion:    draftSnapshot.StateVersion,
+			timelineVersion: snapshot.Version,
+			timelineID:      snapshot.TimelineID,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != string(rushestools.StatusFailed) ||
+		result.Data["error_code"] != string(rushestools.ErrCodeStaleTarget) ||
+		result.Data["current_timeline_unchanged"] != true ||
+		result.Data["previous_timeline_id"] != draftID+":v1" ||
+		result.Data["attempted_timeline_id"] != draftID+":v2" ||
+		result.Data["timeline_id"] != draftID+":v2" ||
+		result.Data["expected_state_version"] != draftSnapshot.StateVersion ||
+		result.Data["expected_timeline_version"] != snapshot.Version ||
+		result.Data["actual_state_version"] != draftSnapshot.StateVersion+1 {
+		t.Fatalf("conflict result=%#v", result)
+	}
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	var subtitles []timeline.Clip
+	for _, track := range latest.Tracks {
+		if track.TrackID == "subtitles" {
+			subtitles = track.Clips
+			break
+		}
+	}
+	if err != nil || latest.Version != 2 ||
+		len(subtitles) != 1 || subtitles[0].Text != "manual" {
+		t.Fatalf("latest=%#v err=%v", latest, err)
+	}
+	var timelineRows, staleBatches, createdEvents, validatedEvents int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT
+			(SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?),
+			(SELECT COUNT(*) FROM timeline_edit_batches
+				WHERE draft_id=? AND edit_batch_id LIKE 'stale_race:%'),
+			(SELECT COUNT(*) FROM event_log
+				WHERE draft_id=? AND event_type='TimelineVersionCreated'),
+			(SELECT COUNT(*) FROM event_log
+				WHERE draft_id=? AND event_type='TimelineValidated')`,
+		draftID, draftID, draftID, draftID,
+	).Scan(&timelineRows, &staleBatches, &createdEvents, &validatedEvents); err != nil {
+		t.Fatal(err)
+	}
+	if timelineRows != 2 || staleBatches != 0 ||
+		createdEvents != 2 || validatedEvents != 2 {
+		t.Fatalf(
+			"rows=%d stale_batches=%d created=%d validated=%d",
+			timelineRows, staleBatches, createdEvents, validatedEvents,
+		)
+	}
+}
+
+func TestPersistTimelineCompetingInitialVersionsHaveSingleWinner(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_atomic_initial_race"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, base, err := exec.timelineMutationSnapshot(t.Context(), draftID)
+	if err != nil || empty.Version != 0 || base.timelineVersion != 0 ||
+		base.timelineID != "" {
+		t.Fatalf("empty=%#v base=%#v err=%v", empty, base, err)
+	}
+	winner, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+		AssetID: "asset_winner", AssetKind: "video",
+		SourceStartFrame: 0, SourceEndFrame: 60,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result, persistErr := seedTimelineVersion(exec,
+		t.Context(), draftID, winner, "initial_winner", nil,
+	); persistErr != nil || result.Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("winner result=%#v err=%v", result, persistErr)
+	}
+	loser, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+		AssetID: "asset_loser", AssetKind: "video",
+		SourceStartFrame: 0, SourceEndFrame: 90,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := exec.persistTimelineFromSnapshot(
+		t.Context(), draftID, loser, "initial_loser", nil, base,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != string(rushestools.StatusFailed) ||
+		result.Data["error_code"] != string(rushestools.ErrCodeStaleTarget) ||
+		result.Data["expected_timeline_version"] != 0 ||
+		result.Data["timeline_id"] != draftID+":v1" {
+		t.Fatalf("loser result=%#v", result)
+	}
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 1 ||
+		latest.Tracks[0].Clips[0].AssetID != "asset_winner" {
+		t.Fatalf("latest=%#v err=%v", latest, err)
+	}
+	var versions, loserBatches int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT
+			(SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?),
+			(SELECT COUNT(*) FROM timeline_edit_batches
+				WHERE draft_id=? AND edit_batch_id LIKE 'initial_loser:%')`,
+		draftID, draftID,
+	).Scan(&versions, &loserBatches); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 1 || loserBatches != 0 {
+		t.Fatalf("versions=%d loser_batches=%d", versions, loserBatches)
+	}
+}
+
+func TestAtomicDeleteSourceRangeMisalignedRateDoesNotPersist(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_atomic_source_rate"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	insertAtomicTimelineAsset(t, database, draftID, "talk_rate", "video", 4, false)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "talk_rate",
+		"source_start_frame": 0, "source_end_frame": 20,
+	})
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executeAtomicTimelineTool(t, exec, ctx, "timeline.update", rushestools.TimelineUpdateInput{
+		"kind":             "set_playback_rate",
+		"timeline_clip_id": latest.Tracks[0].Clips[0].TimelineClipID,
+		"playback_rate":    2.0,
+	})
+	failedRaw, err := exec.ExecuteTool(ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+		"kind": "delete_source_range", "asset_id": "talk_rate",
+		"source_start_frame": 0, "source_end_frame": 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := failedRaw.(rushestools.ToolResult)
+	if failed.Status != string(rushestools.StatusFailed) ||
+		!strings.Contains(InterfaceString(failed.Data["reason"]), "精确映射") {
+		t.Fatalf("failed=%#v", failed)
+	}
+	var versionCount, editBatchCount int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT
+			(SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?),
+			(SELECT COUNT(*) FROM timeline_edit_batches WHERE draft_id=?)`,
+		draftID, draftID,
+	).Scan(&versionCount, &editBatchCount); err != nil {
+		t.Fatal(err)
+	}
+	latest, err = timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 2 || versionCount != 2 || editBatchCount != 2 {
+		t.Fatalf(
+			"失败写入了版本/编辑批次 latest=%#v versions=%d batches=%d err=%v",
+			latest, versionCount, editBatchCount, err,
+		)
+	}
+	aligned := executeAtomicTimelineTool(t, exec, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+		"kind": "delete_source_range", "asset_id": "talk_rate",
+		"source_start_frame": 0, "source_end_frame": 2,
+	})
+	assertAtomicTimelineResult(t, aligned, "delete_source_range")
+	latest, err = timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 3 || latest.DurationFrames != 9 ||
+		latest.Tracks[0].Clips[0].SourceStartFrame != 2 {
+		t.Fatalf("aligned latest=%#v err=%v", latest, err)
 	}
 }
 
@@ -245,6 +482,117 @@ func TestAtomicTimelineInsertRejectsDerivedOriginalAudioTrack(t *testing.T) {
 	}
 }
 
+func TestAtomicBGMInsertRejectsPartialBeatGridWithoutCreatingVersion(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_atomic_bgm_grid"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	insertAtomicTimelineAsset(t, database, draftID, "visual", "video", 4, false)
+	insertAtomicTimelineAsset(t, database, draftID, "music", "audio", 4, true)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "visual",
+		"source_start_frame": 0, "source_end_frame": 120,
+	})
+
+	raw, err := exec.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "track_id": "bgm", "asset_id": "music",
+		"source_start_frame": 0, "source_end_frame": 120,
+		"metadata": map[string]any{"beat_grid": map[string]any{
+			"bpm": 120, "beat_frames": []any{0, 15, 30},
+			"strong_beat_frames": []any{0}, "downbeat_frames": []any{0},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := raw.(rushestools.ToolResult)
+	missing, _ := failed.Data["missing_beat_grid_fields"].([]string)
+	if failed.Status != string(rushestools.StatusFailed) ||
+		len(missing) != 2 || missing[0] != "bar_phase" ||
+		missing[1] != "analysis_method" {
+		t.Fatalf("partial beat grid result=%#v", failed)
+	}
+	afterFailure, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || afterFailure.Version != 1 || len(afterFailure.Tracks[4].Clips) != 0 {
+		t.Fatalf("partial beat grid wrote timeline: %#v err=%v", afterFailure, err)
+	}
+
+	for _, testCase := range []struct {
+		name         string
+		beatFrames   any
+		strongFrames any
+		downbeats    any
+		invalidField string
+	}{
+		{
+			name: "wrong_type", beatFrames: "oops",
+			strongFrames: []any{0}, downbeats: []any{0}, invalidField: "beat_frames",
+		},
+		{
+			name: "null", beatFrames: nil,
+			strongFrames: []any{0}, downbeats: []any{0}, invalidField: "beat_frames",
+		},
+		{
+			name: "empty", beatFrames: []any{},
+			strongFrames: []any{0}, downbeats: []any{0}, invalidField: "beat_frames",
+		},
+		{
+			name: "fractional", beatFrames: []any{0, 15.5},
+			strongFrames: []any{0}, downbeats: []any{0}, invalidField: "beat_frames",
+		},
+		{
+			name: "negative_strong", beatFrames: []any{0, 15},
+			strongFrames: []any{-1}, downbeats: []any{0}, invalidField: "strong_beat_frames",
+		},
+		{
+			name: "invalid_downbeat_type", beatFrames: []any{0, 15},
+			strongFrames: []any{0}, downbeats: "0", invalidField: "downbeat_frames",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			raw, executeErr := exec.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
+				"kind": "insert_clip", "track_id": "bgm", "asset_id": "music",
+				"source_start_frame": 0, "source_end_frame": 120,
+				"metadata": map[string]any{"beat_grid": map[string]any{
+					"bpm": 120, "beat_frames": testCase.beatFrames,
+					"strong_beat_frames": testCase.strongFrames,
+					"downbeat_frames":    testCase.downbeats,
+					"bar_phase":          0, "analysis_method": "fixture",
+				}},
+			})
+			if executeErr != nil {
+				t.Fatal(executeErr)
+			}
+			failed := raw.(rushestools.ToolResult)
+			invalid, _ := failed.Data["missing_beat_grid_fields"].([]string)
+			if failed.Status != string(rushestools.StatusFailed) ||
+				!ContainsString(invalid, testCase.invalidField) {
+				t.Fatalf("invalid beat grid result=%#v", failed)
+			}
+			afterInvalid, latestErr := timeline.Latest(t.Context(), database, draftID)
+			if latestErr != nil || afterInvalid.Version != 1 ||
+				len(afterInvalid.Tracks[4].Clips) != 0 {
+				t.Fatalf("invalid beat grid wrote timeline: %#v err=%v", afterInvalid, latestErr)
+			}
+		})
+	}
+
+	succeeded := executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "track_id": "bgm", "asset_id": "music",
+		"source_start_frame": 0, "source_end_frame": 120,
+		"metadata": map[string]any{"beat_grid": map[string]any{
+			"bpm": 120, "beat_frames": []any{0, 15, 30},
+			"strong_beat_frames": []any{0}, "downbeat_frames": []any{0},
+			"bar_phase": 0, "analysis_method": "fixture",
+		}},
+	})
+	assertAtomicTimelineResult(t, succeeded, "insert_clip")
+}
+
 func TestAtomicTimelineEditDoesNotAnalyzeOrModifyUntouchedBGM(t *testing.T) {
 	fakeBin := t.TempDir()
 	for name, body := range map[string]string{
@@ -285,7 +633,7 @@ func TestAtomicTimelineEditDoesNotAnalyzeOrModifyUntouchedBGM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
 		AssetID: "talk", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 60,
 	}})
 	if err != nil {
@@ -296,9 +644,8 @@ func TestAtomicTimelineEditDoesNotAnalyzeOrModifyUntouchedBGM(t *testing.T) {
 		Role: "bgm", TimelineStartFrame: 0, TimelineEndFrame: 60,
 		SourceStartFrame: 0, SourceEndFrame: 60, PlaybackRate: 1,
 	}}
-	if persisted, persistErr := exec.PersistTimeline(
-		t.Context(), draftID, document, "fixture",
-	); persistErr != nil || persisted.Status != "succeeded" {
+	if persisted, persistErr := seedTimelineVersion(exec,
+		t.Context(), draftID, document, "fixture", nil); persistErr != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 

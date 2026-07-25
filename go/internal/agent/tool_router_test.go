@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
+	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -113,6 +116,43 @@ func TestToolRouterRunsReadOnlyMessagesInParallel(t *testing.T) {
 	}
 }
 
+func TestIndexedResourceWildcardMatchesReadToolDomains(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		want []indexedResourceAccess
+	}{
+		{
+			name: "speech.search",
+			want: []indexedResourceAccess{{domain: "speech", allResources: true}},
+		},
+		{
+			name: "shot.search",
+			want: []indexedResourceAccess{
+				{domain: "shots", allResources: true},
+				{domain: "speech", allResources: true},
+			},
+		},
+		{
+			name: "timeline.check",
+			want: []indexedResourceAccess{{domain: "speech", allResources: true}},
+		},
+		{
+			name: "preview.check",
+			want: []indexedResourceAccess{{domain: "speech", allResources: true}},
+		},
+		{name: "timeline.inspect", want: nil},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := indexedResourceWildcard(test.name); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("indexedResourceWildcard(%q)=%#v want=%#v", test.name, got, test.want)
+			}
+		})
+	}
+}
+
 func TestToolRouterSerializesMessagesWithWrites(t *testing.T) {
 	t.Parallel()
 	probe := &concurrencyProbe{}
@@ -131,6 +171,310 @@ func TestToolRouterSerializesMessagesWithWrites(t *testing.T) {
 	if probe.maxSeen.Load() != 1 {
 		t.Fatalf("含写消息不得并发: 并发峰值=%d", probe.maxSeen.Load())
 	}
+}
+
+func TestToolRouterEnforcesMessageStartStableClipTargets(t *testing.T) {
+	t.Parallel()
+	t.Run("generated_id_requires_next_observation", func(t *testing.T) {
+		database := agenttest.AgentTestDatabase(t)
+		const draftID = "draft_router_generated_dependency"
+		agenttest.CreateAgentDraft(t, database, draftID)
+		if _, err := database.Write().ExecContext(t.Context(), `
+			INSERT INTO assets(
+				asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
+				probe_json,ingest_status,understanding_status,usable
+			) VALUES(
+				'asset_router','reference','/tmp/router.mp4','video','local_path',
+				'router.mp4','router-hash',1,'{"duration_sec":4}',
+				'ready','ready',1
+			);
+			INSERT INTO draft_asset_links(draft_id,asset_id,rel_dir,linked_at)
+			VALUES(?, 'asset_router', 'Aroll', '2026-01-01T00:00:00Z')`,
+			draftID,
+		); err != nil {
+			t.Fatal(err)
+		}
+		service, err := NewService(t.Context(), database, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(service.Close)
+		router, err := newToolRouter(
+			t.Context(),
+			compose.ToolsNodeConfig{Tools: service.Tools().EinoTools(true, false)},
+			service.Tools().Spec,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := rushestools.WithDraftID(t.Context(), draftID)
+		ctx = agentexec.WithTurnInteractionState(
+			ctx, agentexec.NewTurnInteractionState(service.indexedResources),
+		)
+		results, err := router.Invoke(ctx, routerMessageWithArguments(
+			schema.FunctionCall{
+				Name: "timeline.insert",
+				Arguments: `{"kind":"insert_clip","asset_id":"asset_router",` +
+					`"source_start_frame":0,"source_end_frame":60}`,
+			},
+			schema.FunctionCall{
+				Name:      "timeline.update",
+				Arguments: `{"kind":"adjust_gain","timeline_clip_id":"clip_v1_001","gain_db":-6}`,
+			},
+		))
+		if err != nil || len(results) != 2 {
+			t.Fatalf("results=%#v err=%v", results, err)
+		}
+		var inserted, blocked rushestools.ToolResult
+		if err := json.Unmarshal([]byte(results[0].Content), &inserted); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(results[1].Content), &blocked); err != nil {
+			t.Fatal(err)
+		}
+		if inserted.Status != string(rushestools.StatusSucceeded) ||
+			blocked.Status != string(rushestools.StatusFailed) ||
+			blocked.Data["dependency_requires_observation"] != true ||
+			blocked.Data["error_code"] != string(rushestools.ErrCodeStaleTarget) {
+			t.Fatalf("inserted=%#v blocked=%#v", inserted, blocked)
+		}
+		latest, err := timeline.Latest(t.Context(), database, draftID)
+		if err != nil || latest.Version != 1 ||
+			latest.Tracks[0].Clips[0].GainDB != 0 {
+			t.Fatalf("latest=%#v err=%v", latest, err)
+		}
+	})
+
+	t.Run("new_timeline_coordinates_require_next_observation", func(t *testing.T) {
+		database := agenttest.AgentTestDatabase(t)
+		const draftID = "draft_router_coordinate_dependency"
+		agenttest.CreateAgentDraft(t, database, draftID)
+		if _, err := database.Write().ExecContext(t.Context(), `
+			INSERT INTO assets(
+				asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
+				probe_json,ingest_status,understanding_status,usable
+			) VALUES(
+				'asset_router','reference','/tmp/router.mp4','video','local_path',
+				'router.mp4','router-coordinate-hash',1,'{"duration_sec":4}',
+				'ready','ready',1
+			);
+			INSERT INTO draft_asset_links(draft_id,asset_id,rel_dir,linked_at)
+			VALUES(?, 'asset_router', 'Aroll', '2026-01-01T00:00:00Z')`,
+			draftID,
+		); err != nil {
+			t.Fatal(err)
+		}
+		service, err := NewService(t.Context(), database, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(service.Close)
+		document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+			AssetID: "asset_router", AssetKind: "video",
+			SourceStartFrame: 0, SourceEndFrame: 60,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := seedTimelineVersion(service,
+			t.Context(), draftID, document, "router_coordinate_fixture", nil,
+		); err != nil {
+			t.Fatal(err)
+		}
+		router, err := newToolRouter(
+			t.Context(),
+			compose.ToolsNodeConfig{Tools: service.Tools().EinoTools(true, false)},
+			service.Tools().Spec,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := rushestools.WithDraftID(t.Context(), draftID)
+		ctx = agentexec.WithTurnInteractionState(
+			ctx, agentexec.NewTurnInteractionState(service.indexedResources),
+		)
+		results, err := router.Invoke(ctx, routerMessageWithArguments(
+			schema.FunctionCall{
+				Name: "timeline.insert",
+				Arguments: `{"kind":"insert_clip","asset_id":"asset_router",` +
+					`"source_start_frame":60,"source_end_frame":90}`,
+			},
+			schema.FunctionCall{
+				Name: "timeline.insert",
+				Arguments: `{"kind":"insert_clip","asset_id":"asset_router",` +
+					`"source_start_frame":90,"source_end_frame":120}`,
+			},
+			schema.FunctionCall{
+				Name: "timeline.insert",
+				Arguments: `{"kind":"insert_clip","track_id":"visual_overlay",` +
+					`"asset_id":"asset_router","source_start_frame":0,"source_end_frame":30}`,
+			},
+			schema.FunctionCall{
+				Name:      "timeline.delete",
+				Arguments: `{"kind":"delete_range","start_frame":60,"end_frame":90}`,
+			},
+		))
+		if err != nil || len(results) != 4 {
+			t.Fatalf("results=%#v err=%v", results, err)
+		}
+		var firstInserted, secondInserted, blockedOverlay, blockedDelete rushestools.ToolResult
+		if err := json.Unmarshal([]byte(results[0].Content), &firstInserted); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(results[1].Content), &secondInserted); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(results[2].Content), &blockedOverlay); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(results[3].Content), &blockedDelete); err != nil {
+			t.Fatal(err)
+		}
+		if firstInserted.Status != string(rushestools.StatusSucceeded) ||
+			secondInserted.Status != string(rushestools.StatusSucceeded) ||
+			blockedOverlay.Status != string(rushestools.StatusFailed) ||
+			blockedOverlay.Data["coordinate_dependency"] != "timeline_frames_after_prior_edit" ||
+			blockedDelete.Status != string(rushestools.StatusFailed) ||
+			blockedDelete.Data["dependency_requires_observation"] != true ||
+			blockedDelete.Data["coordinate_dependency"] != "timeline_frames_after_prior_edit" {
+			t.Fatalf(
+				"first=%#v second=%#v overlay=%#v delete=%#v",
+				firstInserted, secondInserted, blockedOverlay, blockedDelete,
+			)
+		}
+		latest, err := timeline.Latest(t.Context(), database, draftID)
+		if err != nil || latest.Version != 3 || latest.DurationFrames != 120 ||
+			len(latest.Tracks[0].Clips) != 3 {
+			t.Fatalf("latest=%#v err=%v", latest, err)
+		}
+	})
+
+	t.Run("failed_edit_does_not_poison_message_start_coordinates", func(t *testing.T) {
+		database := agenttest.AgentTestDatabase(t)
+		const draftID = "draft_router_failed_coordinate_edit"
+		agenttest.CreateAgentDraft(t, database, draftID)
+		service, err := NewService(t.Context(), database, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(service.Close)
+		document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+			AssetID: "asset_router", AssetKind: "video",
+			SourceStartFrame: 0, SourceEndFrame: 60,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := seedTimelineVersion(service,
+			t.Context(), draftID, document, "router_failed_coordinate_fixture", nil,
+		); err != nil {
+			t.Fatal(err)
+		}
+		router, err := newToolRouter(
+			t.Context(),
+			compose.ToolsNodeConfig{Tools: service.Tools().EinoTools(true, false)},
+			service.Tools().Spec,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := rushestools.WithDraftID(t.Context(), draftID)
+		ctx = agentexec.WithTurnInteractionState(
+			ctx, agentexec.NewTurnInteractionState(service.indexedResources),
+		)
+		results, err := router.Invoke(ctx, routerMessageWithArguments(
+			schema.FunctionCall{
+				Name: "timeline.insert",
+				Arguments: `{"kind":"insert_clip","asset_id":"missing_asset",` +
+					`"source_start_frame":0,"source_end_frame":30}`,
+			},
+			schema.FunctionCall{
+				Name:      "timeline.delete",
+				Arguments: `{"kind":"delete_range","start_frame":30,"end_frame":60}`,
+			},
+		))
+		if err != nil || len(results) != 2 {
+			t.Fatalf("results=%#v err=%v", results, err)
+		}
+		var failedInsert, deleted rushestools.ToolResult
+		if err := json.Unmarshal([]byte(results[0].Content), &failedInsert); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(results[1].Content), &deleted); err != nil {
+			t.Fatal(err)
+		}
+		if failedInsert.Status != string(rushestools.StatusFailed) ||
+			failedInsert.Data["current_timeline_unchanged"] != true ||
+			deleted.Status != string(rushestools.StatusSucceeded) {
+			t.Fatalf("failedInsert=%#v deleted=%#v", failedInsert, deleted)
+		}
+		latest, err := timeline.Latest(t.Context(), database, draftID)
+		if err != nil || latest.Version != 2 || latest.DurationFrames != 30 ||
+			len(latest.Tracks[0].Clips) != 1 {
+			t.Fatalf("latest=%#v err=%v", latest, err)
+		}
+	})
+
+	t.Run("independent_existing_targets_remain_composable", func(t *testing.T) {
+		database := agenttest.AgentTestDatabase(t)
+		const draftID = "draft_router_existing_targets"
+		agenttest.CreateAgentDraft(t, database, draftID)
+		service, err := NewService(t.Context(), database, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(service.Close)
+		document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{
+			{AssetID: "asset_a", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30},
+			{AssetID: "asset_b", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := seedTimelineVersion(service,
+			t.Context(), draftID, document, "router_existing_fixture", nil,
+		); err != nil {
+			t.Fatal(err)
+		}
+		router, err := newToolRouter(
+			t.Context(),
+			compose.ToolsNodeConfig{Tools: service.Tools().EinoTools(true, false)},
+			service.Tools().Spec,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := rushestools.WithDraftID(t.Context(), draftID)
+		ctx = agentexec.WithTurnInteractionState(
+			ctx, agentexec.NewTurnInteractionState(service.indexedResources),
+		)
+		results, err := router.Invoke(ctx, routerMessageWithArguments(
+			schema.FunctionCall{
+				Name:      "timeline.update",
+				Arguments: `{"kind":"adjust_gain","timeline_clip_id":"clip_v1_001","gain_db":-3}`,
+			},
+			schema.FunctionCall{
+				Name:      "timeline.update",
+				Arguments: `{"kind":"adjust_gain","timeline_clip_id":"clip_v1_002","gain_db":-6}`,
+			},
+		))
+		if err != nil || len(results) != 2 {
+			t.Fatalf("results=%#v err=%v", results, err)
+		}
+		for index := range results {
+			var result rushestools.ToolResult
+			if err := json.Unmarshal([]byte(results[index].Content), &result); err != nil ||
+				result.Status != string(rushestools.StatusSucceeded) {
+				t.Fatalf("result[%d]=%#v err=%v", index, result, err)
+			}
+		}
+		latest, err := timeline.Latest(t.Context(), database, draftID)
+		if err != nil || latest.Version != 3 ||
+			latest.Tracks[0].Clips[0].GainDB != -3 ||
+			latest.Tracks[0].Clips[1].GainDB != -6 {
+			t.Fatalf("latest=%#v err=%v", latest, err)
+		}
+	})
 }
 
 func TestToolRouterRunsIndependentDetectorsInParallel(t *testing.T) {

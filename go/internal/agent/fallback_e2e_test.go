@@ -15,7 +15,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
 
-func TestUnderstandingAsyncScaffoldEnqueuesCancellableMultiAssetJob(t *testing.T) {
+func TestUnderstandingAsyncScaffoldEnqueuesCancellableSingleAssetJob(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")
 	}
@@ -25,17 +25,15 @@ func TestUnderstandingAsyncScaffoldEnqueuesCancellableMultiAssetJob(t *testing.T
 	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=30:duration=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", source); err != nil {
 		t.Fatal(err)
 	}
-	events := []contracts.Event{}
-	for index, assetID := range []string{"ready_asset", "slow_asset"} {
-		events = append(events,
-			contracts.Event{Type: "AssetImported", Payload: map[string]any{
-				"asset_id": assetID, "job_id": "job_asset_" + assetID,
-				"storage_mode": "reference", "reference_path": source, "kind": "video",
-				"source": "local_path", "filename": assetID + ".mp4", "hash": assetID,
-				"size": index + 1, "probe": map[string]any{"duration_sec": 1}, "ingest_status": "ready",
-			}},
-			contracts.Event{Type: "AssetLinked", DraftID: "draft_understand_cancel", Payload: map[string]any{"asset_id": assetID}},
-		)
+	const assetID = "ready_asset"
+	events := []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "job_asset_" + assetID,
+			"storage_mode": "reference", "reference_path": source, "kind": "video",
+			"source": "local_path", "filename": assetID + ".mp4", "hash": assetID,
+			"size": 1, "probe": map[string]any{"duration_sec": 1}, "ingest_status": "ready",
+		}},
+		{Type: "AssetLinked", DraftID: "draft_understand_cancel", Payload: map[string]any{"asset_id": assetID}},
 	}
 	result, err := reducer.Apply(t.Context(), database, events, reducer.Options{Actor: contracts.ActorUser})
 	if err != nil || result.Status != reducer.StatusApplied {
@@ -60,7 +58,7 @@ func TestUnderstandingAsyncScaffoldEnqueuesCancellableMultiAssetJob(t *testing.T
 		time.Sleep(10 * time.Millisecond)
 	}
 	if jobID == "" {
-		t.Fatal("未入队多素材 understand job")
+		t.Fatal("未入队单素材 understand job")
 	}
 	if _, err := reducer.Apply(t.Context(), database, []contracts.Event{{
 		Type: "JobCancelled", DraftID: "draft_understand_cancel", Payload: map[string]any{
@@ -74,11 +72,9 @@ func TestUnderstandingAsyncScaffoldEnqueuesCancellableMultiAssetJob(t *testing.T
 		t.Fatal("理解进行中取消 Agent 回合失败")
 	}
 	service.Queue().JoinDraft("draft_understand_cancel")
-	for _, assetID := range []string{"ready_asset", "slow_asset"} {
-		asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
-		if err != nil || asset.UnderstandingStatus != "none" {
-			t.Fatalf("asset=%s status=%s err=%v", assetID, asset.UnderstandingStatus, err)
-		}
+	asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
+	if err != nil || asset.UnderstandingStatus != "none" {
+		t.Fatalf("asset=%s status=%s err=%v", assetID, asset.UnderstandingStatus, err)
 	}
 }
 

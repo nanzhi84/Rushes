@@ -7,9 +7,7 @@ import (
 	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
-	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
-	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
 func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
@@ -128,13 +126,13 @@ func TestShotSearchFiltersSemanticsAndCurrentTimelineUsage(t *testing.T) {
 		t.Fatalf("limited search=%#v", all)
 	}
 
-	document, err := timeline.ComposeInitial("draft_shot_search", 1, []timeline.Selection{{
+	document, err := agenttest.ComposeTimeline("draft_shot_search", 1, []agenttest.TimelineSelection{{
 		AssetID: "video_search", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 60,
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if persisted, err := exec.PersistTimeline(t.Context(), "draft_shot_search", document, "shot_search_fixture"); err != nil || persisted.Status != "succeeded" {
+	if persisted, err := seedTimelineVersion(exec, t.Context(), "draft_shot_search", document, "shot_search_fixture", nil); err != nil || persisted.Status != "succeeded" {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
 	excludedOutput, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
@@ -216,28 +214,6 @@ func TestShotSearchJoinsTranscriptByOverlapAndMarksTermSource(t *testing.T) {
 	quality := qualityRaw.(rushestools.ShotSearchResult)
 	if len(quality.Shots) != 2 || quality.Shots[0].SourceStartFrame != 60 || quality.Shots[1].SourceStartFrame != 0 {
 		t.Fatalf("quality ranking=%#v", quality.Shots)
-	}
-}
-
-func TestShotQualityMetricsGentlyLowerSearchAndRecutPriority(t *testing.T) {
-	normalExposure, normalSharpness := 0.01, 500.0
-	badExposure, badSharpness := 0.95, 0.0
-	normal := rushestools.ShotCandidate{OverexposedRatio: &normalExposure, SharpnessScore: &normalSharpness}
-	bad := rushestools.ShotCandidate{OverexposedRatio: &badExposure, SharpnessScore: &badSharpness}
-	if ShotQualityPenalty(normal) != 0 || ShotQualityPenalty(bad) <= 0 || ShotQualityPenalty(bad) > 0.22 {
-		t.Fatalf("normal=%.4f bad=%.4f", ShotQualityPenalty(normal), ShotQualityPenalty(bad))
-	}
-	segments := []understanding.Segment{
-		{SourceStartFrame: 0, SourceEndFrame: 90, OverexposedRatio: &badExposure, SharpnessScore: &badSharpness},
-		{SourceStartFrame: 90, SourceEndFrame: 180, OverexposedRatio: &normalExposure, SharpnessScore: &normalSharpness},
-	}
-	ranges := BeatMixRangesFromUnderstanding(segments, 180)
-	if len(ranges) < 2 || ranges[0].StartFrame != 90 || ranges[0].QualityPenalty != 0 {
-		t.Fatalf("ranges=%#v", ranges)
-	}
-	start, ok := ChooseUnusedBeatMixSourceStart(180, 30, ranges, nil, 7, true)
-	if !ok || start != 90 {
-		t.Fatalf("start=%d ok=%v ranges=%#v", start, ok, ranges)
 	}
 }
 
@@ -395,5 +371,102 @@ func TestShotSearchReportsUnderstandingCoverageGap(t *testing.T) {
 	full := fullRaw.(rushestools.ShotSearchResult)
 	if len(full.MissingIndexAssetIDs) != 0 || full.IndexCoverageNote != "" {
 		t.Fatalf("全部理解后不应再有覆盖提示: %#v", full)
+	}
+}
+
+func TestShotSearchPaginatesStableResultsBeyondOneHundred(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_shot_pagination"
+	const assetID = "video_pagination"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO assets(
+			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
+			probe_json,ingest_status,understanding_status,usable
+		) VALUES(?, 'reference', '/tmp/pagination.mp4', 'video', 'local_path',
+			'pagination.mp4', ?, 1, '{"duration_sec":100}', 'ready', 'ready', 1)`,
+		assetID, assetID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO draft_asset_links(draft_id,asset_id,rel_dir,linked_at)
+		VALUES(?, ?, 'Broll', ?)`,
+		draftID, assetID, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	segments := make([]map[string]any, 0, 135)
+	for index := range 135 {
+		segments = append(segments, map[string]any{
+			"source_start_frame": index * 10,
+			"source_end_frame":   index*10 + 10,
+			"description":        "稳定分页镜头",
+			"quality":            "usable",
+		})
+	}
+	summary, err := json.Marshal(map[string]any{
+		"asset_id": assetID, "semantic_role": "b_roll", "segments": segments,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO material_summaries(
+			summary_id,asset_id,version,status,summary_json,fingerprint,prompt_version,created_at
+		) VALUES('summary_pagination',?,1,'ready',?,'pagination-fingerprint','v3',?)`,
+		assetID, string(summary), now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	firstRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := firstRaw.(rushestools.ShotSearchResult)
+	if len(first.Shots) != 100 || first.TotalMatches != 135 || !first.Truncated ||
+		first.NextAfterShotID == "" ||
+		first.NextAfterShotID != first.Shots[len(first.Shots)-1].ShotID {
+		t.Fatalf("first page=%#v", first)
+	}
+	secondRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
+		Limit: 100, AfterShotID: first.NextAfterShotID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := secondRaw.(rushestools.ShotSearchResult)
+	if len(second.Shots) != 35 || second.TotalMatches != 135 || second.Truncated ||
+		second.NextAfterShotID != "" {
+		t.Fatalf("second page=%#v", second)
+	}
+	seen := make(map[string]struct{}, 135)
+	for _, shot := range append(append([]rushestools.ShotCandidate{}, first.Shots...), second.Shots...) {
+		if _, duplicate := seen[shot.ShotID]; duplicate {
+			t.Fatalf("shot %s 跨页重复", shot.ShotID)
+		}
+		seen[shot.ShotID] = struct{}{}
+	}
+	repeatedRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{Limit: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated := repeatedRaw.(rushestools.ShotSearchResult)
+	for index := range first.Shots {
+		if first.Shots[index].ShotID != repeated.Shots[index].ShotID {
+			t.Fatalf("重复查询排序漂移 at %d", index)
+		}
+	}
+	if _, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
+		AfterShotID: "shot_not_in_result",
+	}); err == nil {
+		t.Fatal("未知 after_shot_id 应失败")
 	}
 }

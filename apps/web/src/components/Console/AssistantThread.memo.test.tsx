@@ -82,7 +82,7 @@ describe("AssistantThread 行 memo 隔离流式重渲染", () => {
             type: "text",
             text: JSON.stringify({
               step_id: "step1",
-              tool: "render.preview",
+              tool: "timeline.update",
               status: "succeeded",
               args_summary: "{\"v\":1}",
               observation: "{\"ok\":true}"

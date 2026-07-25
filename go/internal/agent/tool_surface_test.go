@@ -32,6 +32,20 @@ func seedSurfaceAsset(t *testing.T, service *Service, draftID string) {
 	}
 }
 
+func seedSurfaceTranscript(t *testing.T, service *Service) {
+	t.Helper()
+	if _, err := service.database.Write().ExecContext(t.Context(), `
+		INSERT INTO transcripts(
+			transcript_id,asset_id,provider_id,raw_preserved,utterances_json,vad_segments_json
+		) VALUES(
+			'transcript_surface','asset_surface','fixture',0,
+			'[{"utterance_id":"surface_u1","source_start_frame":0,"source_end_frame":30,"text":"测试口播"}]',
+			'[]'
+		)`); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func seedUnavailableSurfaceAsset(t *testing.T, service *Service, draftID string) {
 	t.Helper()
 	if _, err := service.database.Write().ExecContext(t.Context(), `
@@ -124,17 +138,23 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 	assertSurface(
 		"请先看看有哪些素材",
 		[]string{"asset.list_assets"},
-		[]string{"timeline.update", "timeline.compose_initial"},
+		[]string{"timeline.update"},
 	)
 
 	seedSurfaceAsset(t, service, draftID)
 	assertSurface(
 		"读取口播台词和气口证据",
 		[]string{
-			"speech.transcribe", "speech.search", "audio.analyze_speech_pauses",
+			"speech.transcribe", "audio.analyze_speech_pauses",
 			"media.detect_shots", "shot.search", "timeline.insert",
 		},
-		[]string{"timeline.edit_talking_head", "timeline.update"},
+		[]string{"speech.search", "timeline.update"},
+	)
+	seedSurfaceTranscript(t, service)
+	assertSurface(
+		"读取口播台词和气口证据",
+		[]string{"speech.transcribe", "speech.search", "audio.analyze_speech_pauses"},
+		[]string{"timeline.update"},
 	)
 	assertSurface(
 		"请组装初版时间线",
@@ -144,28 +164,9 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 
 	setSurfaceTimelineState(t, service, draftID, false)
 	assertSurface(
-		"只把当前时间线片段音量调低",
-		[]string{
-			"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
-			"timeline.inspect",
-		},
-		[]string{"timeline.edit_talking_head", "timeline.recut_to_beats"},
-	)
-	assertSurface(
 		"完成口播气口和重说清理",
 		[]string{"speech.search", "shot.search", "media.detect_shots", "timeline.inspect"},
-		[]string{
-			"timeline.edit_talking_head", "timeline.update",
-			"timeline.recut_to_beats", "timeline.compose_initial",
-		},
-	)
-	assertSurface(
-		"根据节拍和 BGM 做卡点",
-		[]string{
-			"audio.analyze_beats", "media.detect_shots", "shot.search",
-			"timeline.insert", "timeline.delete", "timeline.update",
-		},
-		[]string{"timeline.recut_to_beats", "timeline.edit_talking_head"},
+		[]string{"timeline.update"},
 	)
 	assertSurface(
 		"验证时间线后渲染预览",
@@ -181,8 +182,69 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 	)
 	assertSurface(
 		"记住我的长期偏好并更新计划",
-		[]string{"memory.set", "memory.remove", "plan.update", "interaction.confirm_action"},
-		[]string{"timeline.update", "speech.search"},
+		[]string{"memory.set", "plan.update"},
+		[]string{
+			"memory.remove", "interaction.confirm_action", "decision.answer",
+			"timeline.update", "speech.search",
+		},
+	)
+}
+
+func TestControlToolSurfaceNarrowsToCurrentAction(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_control_surface"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+
+	assertExact := func(messages []*schema.Message, want ...string) {
+		t.Helper()
+		specs, selectErr := selectModelToolSurface(ctx, service.tools, messages)
+		if selectErr != nil {
+			t.Fatal(selectErr)
+		}
+		names := surfaceNames(specs)
+		if !reflect.DeepEqual(names, want) {
+			t.Fatalf("surface=%v want=%v", names, want)
+		}
+	}
+
+	assertExact(
+		[]*schema.Message{schema.UserMessage("记住我偏好短视频并更新计划")},
+		"memory.set", "plan.update",
+	)
+	assertExact(
+		[]*schema.Message{schema.UserMessage("忘记我偏好短视频")},
+		"memory.remove",
+	)
+	assertExact(
+		[]*schema.Message{
+			schema.UserMessage("忘记我偏好短视频"),
+			schema.ToolMessage(
+				`{"status":"failed","data":{"error_code":"confirmation_required"}}`,
+				"call_memory_remove",
+				schema.WithToolName("memory.remove"),
+			),
+		},
+		"interaction.confirm_action",
+	)
+
+	snapshot := NewWorldStateSnapshot(map[string]any{
+		"draft": map[string]any{"pending_decision_id": "decision_surface"},
+	})
+	raw, err := snapshot.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	worldState := schema.SystemMessage("【WorldState 参考快照】\n" + string(raw))
+	worldState.Extra = map[string]any{"context_phase": "world_state_reference"}
+	assertExact(
+		[]*schema.Message{worldState, schema.UserMessage("我选择第一个选项并更新计划")},
+		"decision.answer",
 	)
 }
 
@@ -196,6 +258,7 @@ func TestEveryConfiguredModelSurfaceFitsBudgetAcrossDraftStates(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	seedSurfaceAsset(t, service, draftID)
+	seedSurfaceTranscript(t, service)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	surfaces := []rushestools.Surface{
 		rushestools.SurfaceDiscovery,
@@ -237,7 +300,37 @@ func TestEveryConfiguredModelSurfaceFitsBudgetAcrossDraftStates(t *testing.T) {
 	assertBudgets("timeline-validated-with-preview")
 }
 
-func TestLegacyCompositeAndAtomicTimelineToolsNeverShareOneModelSurface(t *testing.T) {
+func TestRemainingWorkflowSurfaceClassifiesEveryContinuationLane(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		text string
+		want rushestools.Surface
+	}{
+		{name: "pending_timeline_edit", text: "把第一段剪掉", want: rushestools.SurfaceTimelineEdit},
+		{name: "render", text: "导出最终成片", want: rushestools.SurfaceRender},
+		{name: "preview_check", text: "检查预览有没有黑帧", want: rushestools.SurfacePreviewCheck},
+		{name: "talking_head", text: "读取口播逐字稿", want: rushestools.SurfaceTalkingHead},
+		{name: "beat", text: "读取 bgm 的 bpm", want: rushestools.SurfaceBeatEdit},
+		{name: "asset_search", text: "为时间线找一个镜头", want: rushestools.SurfaceDiscovery},
+		{name: "initial_timeline", text: "组装初版时间线", want: rushestools.SurfaceDiscovery},
+		{name: "unclassified", text: "你好", want: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := remainingWorkflowSurface(test.text); got != test.want {
+				t.Fatalf("remainingWorkflowSurface(%q)=%d want=%d", test.text, got, test.want)
+			}
+		})
+	}
+	if got := noModelToolsError(rushestools.SurfaceRender).Error(); got !=
+		"当前状态没有可绑定的模型工具: surface=16" {
+		t.Fatalf("noModelToolsError=%q", got)
+	}
+}
+
+func TestAtomicTimelineToolsAreTheOnlyEditingSurface(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_no_mixed_edit_surface"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -247,6 +340,7 @@ func TestLegacyCompositeAndAtomicTimelineToolsNeverShareOneModelSurface(t *testi
 	}
 	t.Cleanup(service.Close)
 	seedSurfaceAsset(t, service, draftID)
+	seedSurfaceTranscript(t, service)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 
 	assertNotMixed := func(prompt string) []string {
@@ -260,44 +354,25 @@ func TestLegacyCompositeAndAtomicTimelineToolsNeverShareOneModelSurface(t *testi
 			t.Fatal(selectErr)
 		}
 		names := surfaceNames(specs)
-		hasAtomic := false
-		for _, name := range []string{
-			"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
-		} {
-			hasAtomic = hasAtomic || containsName(names, name)
-		}
-		hasComposite := false
-		for _, name := range []string{
-			"timeline.compose_initial", "timeline.edit_talking_head", "timeline.recut_to_beats",
-		} {
-			hasComposite = hasComposite || containsName(names, name)
-		}
-		if hasAtomic && hasComposite {
-			t.Fatalf("%q 同时暴露新旧编辑工具: %v", prompt, names)
-		}
 		return names
 	}
 
 	composeNames := assertNotMixed("请组装初版时间线")
-	if !containsName(composeNames, "timeline.insert") ||
-		containsName(composeNames, "timeline.compose_initial") {
+	if !containsName(composeNames, "timeline.insert") {
 		t.Fatalf("initial surface=%v", composeNames)
 	}
 	firstInsertNames := assertNotMixed("调用 timeline.insert 插入第一个 visual_base clip")
-	if !containsName(firstInsertNames, "timeline.insert") ||
-		containsName(firstInsertNames, "timeline.compose_initial") {
+	if !containsName(firstInsertNames, "timeline.insert") {
 		t.Fatalf("first insert surface=%v", firstInsertNames)
 	}
 	setSurfaceTimelineState(t, service, draftID, false)
 	talkingHeadNames := assertNotMixed("完成口播气口和重说清理")
-	if !containsName(talkingHeadNames, "speech.search") ||
-		containsName(talkingHeadNames, "timeline.edit_talking_head") {
+	if !containsName(talkingHeadNames, "speech.search") {
 		t.Fatalf("talking-head surface=%v", talkingHeadNames)
 	}
 	beatNames := assertNotMixed("根据节拍和 BGM 做卡点")
 	if !containsName(beatNames, "timeline.insert") ||
-		!containsName(beatNames, "timeline.update") ||
-		containsName(beatNames, "timeline.recut_to_beats") {
+		!containsName(beatNames, "timeline.update") {
 		t.Fatalf("beat surface=%v", beatNames)
 	}
 	atomicNames := assertNotMixed("只把当前时间线片段音量调低")
@@ -320,6 +395,7 @@ func TestTimelineEditSurfaceCanDiscoverAndInsertNewShot(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	seedSurfaceAsset(t, service, draftID)
+	seedSurfaceTranscript(t, service)
 	setSurfaceTimelineState(t, service, draftID, false)
 
 	specs, err := selectModelToolSurface(
@@ -377,6 +453,7 @@ func TestTimelineEditSurfaceDoesNotAdvanceAfterEmptyOrFailedShotSearch(t *testin
 	}
 	t.Cleanup(service.Close)
 	seedSurfaceAsset(t, service, draftID)
+	seedSurfaceTranscript(t, service)
 	setSurfaceTimelineState(t, service, draftID, false)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 
@@ -409,6 +486,7 @@ func TestSuccessfulShotSearchPreservesSpecializedWorkflowIntent(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	seedSurfaceAsset(t, service, draftID)
+	seedSurfaceTranscript(t, service)
 	setSurfaceTimelineState(t, service, draftID, false)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 
@@ -431,20 +509,16 @@ func TestSuccessfulShotSearchPreservesSpecializedWorkflowIntent(t *testing.T) {
 	}{
 		{
 			name: "talking_head", prompt: "清理口播并找一个 B-roll 镜头插入",
-			required: "speech.search",
-			forbidden: []string{
-				"timeline.edit_talking_head", "timeline.update", "timeline.recut_to_beats",
-			},
+			required:  "speech.search",
+			forbidden: []string{"timeline.update"},
 		},
 		{
 			name: "beat_edit", prompt: "按 BGM 卡点并找一个镜头插入",
-			required:  "timeline.insert",
-			forbidden: []string{"timeline.recut_to_beats", "timeline.edit_talking_head"},
+			required: "timeline.insert",
 		},
 		{
 			name: "generic_timeline_edit", prompt: "在时间线里找一个海边镜头插入",
-			required:  "timeline.update",
-			forbidden: []string{"timeline.edit_talking_head", "timeline.recut_to_beats"},
+			required: "timeline.update",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -482,6 +556,7 @@ func TestAutomaticContinuationPreservesTalkingHeadIntentAfterInitialInsert(t *te
 	}
 	t.Cleanup(service.Close)
 	seedSurfaceAsset(t, service, draftID)
+	seedSurfaceTranscript(t, service)
 	setSurfaceTimelineState(t, service, draftID, false)
 
 	messages := []*schema.Message{
@@ -505,9 +580,7 @@ func TestAutomaticContinuationPreservesTalkingHeadIntentAfterInitialInsert(t *te
 		t.Fatal(err)
 	}
 	names := surfaceNames(specs)
-	if !containsName(names, "speech.search") ||
-		containsName(names, "timeline.edit_talking_head") ||
-		containsName(names, "timeline.compose_initial") {
+	if !containsName(names, "speech.search") {
 		t.Fatalf("后台续跑后的口播 surface=%v", names)
 	}
 }
@@ -621,8 +694,7 @@ func TestUnclassifiedEditLanguageConservativelyKeepsTimelineTools(t *testing.T) 
 		}
 		names := surfaceNames(specs)
 		if !containsName(names, "timeline.update") ||
-			!containsName(names, "timeline.check") ||
-			containsName(names, "render.final_mp4") {
+			!containsName(names, "timeline.check") {
 			t.Errorf("%q surface=%v", prompt, names)
 		}
 	}
@@ -734,6 +806,7 @@ func TestExplicitIntentAdvancesAfterSuccessfulWorkflowWrite(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	seedSurfaceAsset(t, service, draftID)
+	seedSurfaceTranscript(t, service)
 	setSurfaceTimelineState(t, service, draftID, false)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 
@@ -747,22 +820,22 @@ func TestExplicitIntentAdvancesAfterSuccessfulWorkflowWrite(t *testing.T) {
 		{
 			name: "initial_insert", prompt: "请组装初版时间线",
 			toolName: "timeline.insert",
-			required: "timeline.update", forbidden: "timeline.compose_initial",
+			required: "timeline.update",
 		},
 		{
 			name: "talking_head_after_initial_insert", prompt: "完成口播气口和重说清理",
 			toolName: "timeline.insert",
-			required: "speech.search", forbidden: "timeline.edit_talking_head",
+			required: "speech.search",
 		},
 		{
 			name: "talking_head_evidence", prompt: "完成口播气口和重说清理",
 			toolName: "speech.search",
-			required: "timeline.delete", forbidden: "timeline.edit_talking_head",
+			required: "timeline.delete",
 		},
 		{
 			name: "beat", prompt: "根据节拍和 BGM 做卡点",
 			toolName: "timeline.insert",
-			required: "timeline.check", forbidden: "timeline.recut_to_beats",
+			required: "timeline.check",
 		},
 	}
 	for _, test := range tests {
@@ -786,7 +859,7 @@ func TestExplicitIntentAdvancesAfterSuccessfulWorkflowWrite(t *testing.T) {
 	}
 }
 
-func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
+func TestStagedEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_composite_edit_render_surface"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -796,6 +869,7 @@ func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	seedSurfaceAsset(t, service, draftID)
+	seedSurfaceTranscript(t, service)
 	setSurfaceTimelineState(t, service, draftID, false)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 
@@ -814,9 +888,7 @@ func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 				t.Fatal(selectErr)
 			}
 			names := surfaceNames(specs)
-			if !containsName(names, test.editTool) ||
-				containsName(names, "render.preview") ||
-				containsName(names, "render.final_mp4") {
+			if !containsName(names, test.editTool) {
 				t.Fatalf("初始 surface=%v", names)
 			}
 
@@ -843,9 +915,7 @@ func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if names := surfaceNames(specs); !containsName(names, "speech.search") ||
-		containsName(names, "timeline.edit_talking_head") ||
-		containsName(names, "render.final_mp4") {
+	if names := surfaceNames(specs); !containsName(names, "speech.search") {
 		t.Fatalf("口播证据阶段 surface=%v", names)
 	}
 	talkingMessages = append(talkingMessages, schema.ToolMessage(
@@ -859,9 +929,7 @@ func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 	}
 	if names := surfaceNames(specs); !containsName(names, "timeline.delete") ||
 		!containsName(names, "speech.search") ||
-		!containsName(names, "shot.search") ||
-		containsName(names, "timeline.edit_talking_head") ||
-		containsName(names, "render.final_mp4") {
+		!containsName(names, "shot.search") {
 		t.Fatalf("口播原子编辑阶段 surface=%v", names)
 	}
 	talkingMessages = append(talkingMessages, schema.ToolMessage(
@@ -875,13 +943,12 @@ func TestCompositeEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 	}
 	if names := surfaceNames(specs); !containsName(names, "timeline.inspect") ||
 		!containsName(names, "speech.search") ||
-		!containsName(names, "shot.search") ||
-		containsName(names, "timeline.edit_talking_head") {
+		!containsName(names, "shot.search") {
 		t.Fatalf("口播删剪后的重新观察 surface=%v", names)
 	}
 }
 
-func TestCompositeEditRenderAndPreviewCheckPreservesStageOrder(t *testing.T) {
+func TestStagedEditRenderAndPreviewCheckPreservesStageOrder(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_composite_edit_preview_check"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -891,6 +958,7 @@ func TestCompositeEditRenderAndPreviewCheckPreservesStageOrder(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	seedSurfaceAsset(t, service, draftID)
+	seedSurfaceTranscript(t, service)
 	setSurfaceTimelineState(t, service, draftID, false)
 	if _, err := service.database.Write().ExecContext(t.Context(), `
 		INSERT INTO objects(hash,rel_path,size,created_at)
@@ -1147,7 +1215,7 @@ func TestRenderAndInspectIgnoresPreviewFromOlderTimeline(t *testing.T) {
 	}
 }
 
-func TestExplicitCompositeEditThenRenderStartsWithEditOnValidatedTimeline(t *testing.T) {
+func TestExplicitStagedEditThenRenderStartsWithEditOnValidatedTimeline(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_explicit_composite_edit_render"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -1255,7 +1323,7 @@ func TestLatestWorkflowFailureDoesNotReuseOlderSuccess(t *testing.T) {
 	})
 }
 
-func TestCompositeSpecializedAndGenericEditsFinishBeforeRender(t *testing.T) {
+func TestMultipleAtomicEditsFinishBeforeRender(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_composite_specialized_generic_edit"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -1281,15 +1349,14 @@ func TestCompositeSpecializedAndGenericEditsFinishBeforeRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := surfaceNames(specs)
-	if !containsName(names, "timeline.update") ||
-		containsName(names, "timeline.edit_talking_head") {
+	if !containsName(names, "timeline.update") {
 		t.Fatalf("口播证据读取后 surface=%v", names)
 	}
 
 	specs, err = selectModelToolSurface(ctx, service.tools, append(messages,
 		schema.ToolMessage(
 			`{"status":"succeeded"}`,
-			"call_apply_patches",
+			"call_timeline_update",
 			schema.WithToolName("timeline.update"),
 		),
 	))
@@ -1306,7 +1373,7 @@ func TestCompositeSpecializedAndGenericEditsFinishBeforeRender(t *testing.T) {
 	specs, err = selectModelToolSurface(ctx, service.tools, append(messages,
 		schema.ToolMessage(
 			`{"status":"succeeded"}`,
-			"call_apply_patches",
+			"call_timeline_update",
 			schema.WithToolName("timeline.update"),
 		),
 		schema.ToolMessage(
@@ -1417,7 +1484,7 @@ func TestPlanUpdateIsAvailableAcrossWorkflowSurfaces(t *testing.T) {
 	}
 }
 
-func TestSuccessfulControlActionAdvancesCompositeRequest(t *testing.T) {
+func TestSuccessfulControlActionAdvancesStagedRequest(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_control_composite"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -1528,8 +1595,7 @@ func TestBroadRequestAdvancesSurfaceWhenDraftStateChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	afterNames := surfaceNames(after)
-	if !containsName(afterNames, "timeline.update") ||
-		containsName(afterNames, "timeline.compose_initial") {
+	if !containsName(afterNames, "timeline.update") {
 		t.Fatalf("状态推进后 surface=%v", afterNames)
 	}
 
@@ -1638,6 +1704,7 @@ func TestDynamicModelRebindsDifferentSurfaceOnEveryModelCall(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	seedSurfaceAsset(t, service, draftID)
+	seedSurfaceTranscript(t, service)
 	setSurfaceTimelineState(t, service, draftID, false)
 
 	ctx := withModelToolSurfaceSession(rushestools.WithDraftID(t.Context(), draftID))

@@ -16,7 +16,6 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
-	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -73,7 +72,6 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 			"asset.list_assets": {input: rushestools.AssetListInput{}},
 			"timeline.inspect":  {input: rushestools.TimelineInspectInput{}},
 			"shot.search":       {input: rushestools.ShotSearchInput{Query: "人物"}},
-			"render.status":     {input: rushestools.RenderStatusInput{}},
 			"job.read":          {input: rushestools.JobReadInput{JobID: "missing_job"}},
 			"preview.check": {
 				input:      rushestools.PreviewCheckInput{PreviewID: previewID, Check: "decode"},
@@ -267,13 +265,13 @@ func setupReadOnlyPreviewFixture(
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("video fixture status=%s err=%v", result.Status, err)
 	}
-	document, err := timeline.ComposeInitial(draftID, 1, []timeline.Selection{{
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
 		AssetID: assetID, AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := executor.PersistTimeline(t.Context(), draftID, document, "effect_readonly_fixture"); err != nil {
+	if _, err := seedTimelineVersion(executor, t.Context(), draftID, document, "effect_readonly_fixture", nil); err != nil {
 		t.Fatal(err)
 	}
 	object, err := media.NewObjectStore(database.Paths).PutFile(t.Context(), path)

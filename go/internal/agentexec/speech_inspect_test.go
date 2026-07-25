@@ -120,12 +120,20 @@ func TestSpeechTranscribeBuildsSidecarAndSearchStaysReadOnly(t *testing.T) {
 		t.Fatal("命中索引的 speech.search 写入了业务状态")
 	}
 	for _, required := range []string{
-		"按可安全删除时长从长到短", "previous_context", "timeline.inspect",
-		"timeline.delete", "一次删除一个连续范围",
+		"按可安全删除时长从长到短", "previous_context",
+		"timeline.delete(kind=delete_source_range", "asset_id 与 source range",
+		"跨前序 ripple 保持稳定", "映射缺失、断裂或歧义",
+		"只有操作本身以 timeline range 为目标时", "timeline.inspect", "delete_range",
 	} {
 		if !strings.Contains(first.UsageNote, required) {
 			t.Fatalf("usage note missing %q: %s", required, first.UsageNote)
 		}
+	}
+	if strings.Contains(
+		first.UsageNote,
+		"先用 timeline.inspect 把明确选定的 source range 映射到当前时间线",
+	) {
+		t.Fatalf("usage note retained stale source-to-timeline workflow: %s", first.UsageNote)
 	}
 	second, err := exec.toolSearchSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechSearchInput{
 		AssetID: "asset_speech_sidecar", Query: "第一句", MaxUtterances: 1,
@@ -135,6 +143,17 @@ func TestSpeechTranscribeBuildsSidecarAndSearchStaysReadOnly(t *testing.T) {
 	}
 	if len(second.Utterances) != 1 || !second.Truncated {
 		t.Fatalf("second=%#v", second)
+	}
+	noMatch, err := exec.toolSearchSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechSearchInput{
+		AssetID: "asset_speech_sidecar", Query: "完全不存在的台词",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noMatch.Utterances) != 0 ||
+		!strings.Contains(noMatch.UsageNote, "不得把所查 clip 的起点或相似文本当成该句锚点") ||
+		!strings.Contains(noMatch.UsageNote, "改用 asset_id 扩大到整段素材") {
+		t.Fatalf("no-match recovery=%#v", noMatch)
 	}
 	cachedTranscript, err := exec.toolTranscribeSpeech(
 		t.Context(),

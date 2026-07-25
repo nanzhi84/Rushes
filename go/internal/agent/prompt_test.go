@@ -38,7 +38,8 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 		fragments []string
 	}{
 		"core": {coreSystemPrompt, []string{
-			"唯一客观事实", "目标明确就直接执行", "整数帧", "不可原样重试",
+			"唯一客观事实", "目标明确就直接执行", "完整、合法且没有尾随字符的 JSON 对象", "整数帧", "不可原样重试",
+			"业务状态未变化", "只重试失败原语", "不重复读取未变状态",
 			"即时预览", "用户反馈可以推翻旧的节奏或镜头结论",
 			"draft.content_plan", "plan.update", "RFC 7396", "不是日志或转写",
 			"WorldState.user_memory", "memory.set", "memory.remove", "本回合为准", "一次性要求不要入库",
@@ -53,6 +54,8 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 		"talking_head": {agentexec.TalkingHeadPlaybook, []string{
 			"已有时间线", "尚无时间线", "建立初版", "timeline.inspect", "speech.search",
 			"明确选择删哪一侧或保留", "从后向前提交", "不得重跑已成功删除",
+			"精确 source range", "当前 A-roll clip ID", "直接采用返回的 timeline_start_frame",
+			"不得拿所查 clip 的起点",
 			"timeline.insert", "timeline.update", "timeline.check", "不向用户逐项审批",
 		}},
 	} {

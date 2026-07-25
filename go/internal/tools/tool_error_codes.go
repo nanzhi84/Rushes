@@ -8,17 +8,6 @@ package tools
 // 注册集合。常量值与迁移前的字面量逐字相同，本改动零行为变化。
 
 // ToolStatus 是工具结果信封 ToolResult.Status 的规范取值。
-//
-// 注意 render.status/render.preview/render.final_mp4 会把底层 job 状态原样透传成 Status
-// （agentexec/tool_exec_render.go 的 renderJobResult：pending/running 归一为 queued，
-// succeeded 保持，其余 job 状态如 failed 原样透传）。因此 ToolResult.Status 不是封闭枚举，
-// 这里的常量只登记 harness 自身直接产出的规范状态，render 透传路径刻意不迁移为常量。
-//
-// 口径说明：与 ToolErrorCode 不同，ToolStatus 是「集中定义、不做棘轮守卫」——不对源码做
-// status 字面量扫描。原因有二：Status 是众多非 ToolResult 结构体（job/asset/understand 等）
-// 的通用字段名，逐字面量扫描会大量误伤且需维护排除清单；render 透传路径本就动态、无法登记。
-// 故这里只提供集中定义与集合完整性校验（无重复/无空值），ToolResult.Status 迁移的完备性靠
-// golden/contract/race 全绿佐证，而非源码棘轮。
 type ToolStatus string
 
 const (
@@ -51,7 +40,6 @@ const (
 	ErrCodeTimelineOpFieldError    ToolErrorCode = "timeline_op_field_error"
 	ErrCodeTimelineAbsent          ToolErrorCode = "timeline_absent"
 	ErrCodeStaleTarget             ToolErrorCode = "stale_target"
-	ErrCodeComposeInitialInvalid   ToolErrorCode = "compose_initial_invalid"
 
 	// —— 内容合同校验（agentexec/content_contract.go）——
 	ErrCodeMissingBeatGrid ToolErrorCode = "missing_beat_grid"
@@ -109,7 +97,6 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodeTimelineOpFieldError,
 	ErrCodeTimelineAbsent,
 	ErrCodeStaleTarget,
-	ErrCodeComposeInitialInvalid,
 	ErrCodeMissingBeatGrid,
 	ErrCodePlanRequired,
 	ErrCodePlanNotJSON,

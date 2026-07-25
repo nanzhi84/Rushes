@@ -8,7 +8,7 @@ import (
 
 func newEditingDocument(t *testing.T, linked bool) Document {
 	t.Helper()
-	document, err := ComposeInitial("draft_editing_branches", 1, []Selection{
+	document, err := composeTimelineFixture("draft_editing_branches", 1, []timelineFixtureSelection{
 		{AssetID: "a", AssetKind: "video", SourceEndFrame: 30, Role: "a_roll", HasAudio: linked},
 		{AssetID: "b", AssetKind: "video", SourceEndFrame: 30, Role: "a_roll", HasAudio: linked},
 		{AssetID: "c", AssetKind: "video", SourceEndFrame: 30, Role: "a_roll", HasAudio: linked},
@@ -247,7 +247,7 @@ func TestMoveClipInsertOverwriteAndFailureBranches(t *testing.T) {
 			}
 		}
 
-		single, err := ComposeInitial("single", 1, []Selection{{AssetID: "a", AssetKind: "video", SourceEndFrame: 30}})
+		single, err := composeTimelineFixture("single", 1, []timelineFixtureSelection{{AssetID: "a", AssetKind: "video", SourceEndFrame: 30}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -408,7 +408,7 @@ func TestTrimDeleteSubtitleAndRippleBranches(t *testing.T) {
 		if err := deleteClip(&missing, map[string]any{"timeline_clip_id": "missing"}); err == nil {
 			t.Fatal("missing clip should fail deletion")
 		}
-		single, err := ComposeInitial("single_delete", 1, []Selection{{AssetID: "a", SourceEndFrame: 30}})
+		single, err := composeTimelineFixture("single_delete", 1, []timelineFixtureSelection{{AssetID: "a", SourceEndFrame: 30}})
 		if err != nil {
 			t.Fatal(err)
 		}

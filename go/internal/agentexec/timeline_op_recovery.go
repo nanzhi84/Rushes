@@ -4,49 +4,7 @@ import (
 	"errors"
 
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
-	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
-
-func timelineOpFieldFailure(
-	fieldErr *timeline.OpFieldError,
-	operation map[string]any,
-	failedIndex int,
-) rushestools.ToolResult {
-	data := map[string]any{
-		"error_code":                 string(rushestools.ErrCodeTimelineOpFieldError),
-		"op_kind":                    fieldErr.Kind,
-		"invalid_field":              fieldErr.Field,
-		"reason":                     fieldErr.Error(),
-		"current_timeline_unchanged": true,
-	}
-	if failedIndex > 0 {
-		data["failed_op_index"] = failedIndex
-		data["failed_op"] = operation
-	}
-	if fieldErr.Spec != nil {
-		data["expected_schema"] = rushestools.TimelineOpExpectedSchema(*fieldErr.Spec)
-		data["correct_example"] = timeline.CorrectOpExample(*fieldErr.Spec)
-		data["recovery"] = "只修正当前 op 的字段名与类型后重新调用；不要原样重发失败参数。"
-	} else {
-		data["op_catalog"] = timelineOpCatalogIndex()
-		data["recovery"] = "从 op_catalog 选择受支持的 kind，再按该操作的字段约定重新调用。"
-	}
-	return rushestools.ToolResult{
-		Status:      string(rushestools.StatusFailed),
-		Observation: "时间线补丁字段预校验失败：" + fieldErr.Error(),
-		Data:        data,
-	}
-}
-
-func timelineOpCatalogIndex() []map[string]string {
-	index := make([]map[string]string, 0, len(timeline.Catalog))
-	for _, spec := range timeline.Catalog {
-		index = append(index, map[string]string{
-			"kind": spec.Kind, "summary": spec.Summary,
-		})
-	}
-	return index
-}
 
 func TimelineOpFieldError(err error) (*timeline.OpFieldError, bool) {
 	var fieldErr *timeline.OpFieldError

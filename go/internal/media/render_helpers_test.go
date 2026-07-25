@@ -95,7 +95,7 @@ func TestAppendAudioMixUsesPrimaryAudioFallback(t *testing.T) {
 }
 
 func TestLinkedVideoFadesReachFinalVideoAndOriginalAudioFilters(t *testing.T) {
-	document, err := timeline.ComposeInitial("linked_fade_render", 1, []timeline.Selection{{
+	document, err := composeMediaTimeline("linked_fade_render", 1, []mediaTimelineSelection{{
 		AssetID: "talk", AssetKind: "video", SourceEndFrame: 60, HasAudio: true,
 	}})
 	if err != nil {

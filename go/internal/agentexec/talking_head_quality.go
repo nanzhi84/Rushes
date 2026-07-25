@@ -9,7 +9,6 @@ import (
 
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
-	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 const (
@@ -18,9 +17,8 @@ const (
 	MinTalkingHeadRetainedIslandFrames = 2 * timeline.DefaultFPS
 	// minTalkingHeadResidualBreathFrames 是口播质检列出残留气口的时长下限（0.3 秒）。
 	MinTalkingHeadResidualBreathFrames = timeline.DefaultFPS * 3 / 10
-	// MinTalkingHeadBrollQualityFrames 是口播质检提示过短 B-roll 的时长下限（1.5 秒），与放置
-	// 硬下限 MinTalkingHeadBrollDurationFrames 同为 1.5 秒：放置这关（edit_talking_head）先挡住，
-	// 本项只兜底 insert_clip 直插或历史时间线里遗留的过短 B-roll。
+	// MinTalkingHeadBrollQualityFrames 是口播质检提示过短 B-roll 的客观时长下限（1.5 秒）。
+	// 原子 insert 允许模型显式决定片段长度，本项负责让过短结果在 timeline.check 中可观察。
 	MinTalkingHeadBrollQualityFrames = timeline.DefaultFPS * 3 / 2
 )
 
@@ -139,7 +137,7 @@ func TalkingHeadRetainedIslands(
 			"duration_frames":      duration,
 			"duration_seconds":     FrameSeconds(duration, fps),
 			"text": TalkingHeadTranscriptText(
-				transcripts[run.assetID].Utterances, run.sourceStart, run.sourceEnd, nil, nil,
+				transcripts[run.assetID].Utterances, run.sourceStart, run.sourceEnd,
 			),
 		})
 	}
@@ -246,8 +244,8 @@ func FrameSeconds(frames, fps int) float64 {
 	return math.Round(float64(frames)/float64(fps)*100) / 100
 }
 
-// confirmedToolReplayKey 标记"用户在决策卡上确认后重放的工具调用"。只有此时
-// edit_talking_head 才会把执行结果与用户批准的删除方案的偏差输出为 plan_drift。
+// confirmedToolReplayKey 标记“用户在决策卡上确认后重放的工具调用”，供统一确认拦截器
+// 在重放一次已经批准的破坏性原子动作时识别确认凭证。
 type confirmedToolReplayKey struct{}
 
 func WithConfirmedToolReplay(ctx context.Context) context.Context {
@@ -261,43 +259,8 @@ func IsConfirmedToolReplay(ctx context.Context) bool {
 	return value
 }
 
-// talkingHeadPlanDrift 在"决策卡批准后的重放"里，把工具为避免制造孤岛而保守撤回
-// 的气口列成偏差清单：这些是用户已批准删除、却因防护被保留下来的碎片。
-func TalkingHeadPlanDrift(
-	ctx context.Context,
-	autoPreserved []SpeechPause,
-	utterances []SpeechUtterance,
-) map[string]any {
-	if !IsConfirmedToolReplay(ctx) || len(autoPreserved) == 0 {
-		return nil
-	}
-	items := make([]map[string]any, 0, len(autoPreserved))
-	for _, pause := range autoPreserved {
-		evidence := rushestools.SpeechPauseEvidence{
-			SourceStartFrame: pause.StartFrame, SourceEndFrame: pause.EndFrame,
-		}
-		PopulateSpeechPauseContext(&evidence, utterances)
-		items = append(items, map[string]any{
-			"pause_id":               pause.ID,
-			"delete_duration_frames": pause.DeleteEnd - pause.DeleteStart,
-			"previous_text":          evidence.PreviousText,
-			"next_text":              evidence.NextText,
-		})
-	}
-	return map[string]any{
-		"approved_plan":        true,
-		"retained_pause_count": len(items),
-		"retained_pauses":      items,
-		"summary": fmt.Sprintf(
-			"与你批准的删除方案相比，为避免制造不足 2 秒的保留孤岛，本次实际保留了 %d 处气口未删；请在回复中如实向用户说明这一偏差。",
-			len(items),
-		),
-	}
-}
-
-// speechQualityReport 是纯读函数：只读取当前时间线文档与已持久化的转写，量化含
-// a_roll 的口播成片里"还剩什么没剪干净"——残留气口、过短保留孤岛、未被 overlay
-// 遮盖的硬接缝、过短 B-roll。它只陈述证据、不做裁决，供模型自主收敛、供用户验收。
+// SpeechQualityReport 汇总当前时间线上的客观口播质量证据，供 timeline.check 与
+// render.start 的结构校验使用，不替模型做删除或镜头选择。
 func (exec *Executor) SpeechQualityReport(
 	ctx context.Context,
 	document timeline.Document,

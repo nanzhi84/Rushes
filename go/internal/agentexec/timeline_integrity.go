@@ -6,79 +6,17 @@ import (
 	"math"
 	"sort"
 
-	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
 
 var independentAudioTrackIDs = []string{"bgm", "sfx"}
 
-// prepareTimelineBatch keeps a full primary-track replacement executable as one
-// atomic request. Models naturally emit "delete old clips, then insert new
-// clips"; applying that order literally reaches an invalid empty primary track
-// halfway through. Moving the new primary inserts before the old deletions keeps
-// every intermediate document editable without changing the final ordering.
-func PrepareTimelineBatch(
+func preserveIndependentAudioForOperation(
 	current timeline.Document,
-	operations []map[string]any,
-) ([]map[string]any, map[string]timeline.Track) {
-	planned := reorderFullPrimaryReplacement(current, operations)
-	return planned, snapshotUntouchedIndependentAudio(current, planned)
-}
-
-func reorderFullPrimaryReplacement(
-	current timeline.Document,
-	operations []map[string]any,
-) []map[string]any {
-	primaryIDs := map[string]struct{}{}
-	for _, track := range current.Tracks {
-		if track.TrackID != "visual_base" {
-			continue
-		}
-		for _, clip := range track.Clips {
-			primaryIDs[clip.TimelineClipID] = struct{}{}
-		}
-	}
-	if len(primaryIDs) == 0 {
-		return operations
-	}
-	deleted := map[string]struct{}{}
-	visualInsertIndexes := map[int]struct{}{}
-	for index, operation := range operations {
-		switch StringValue(operation["kind"]) {
-		case "delete_clip":
-			clipID := ValueOr(StringValue(operation["timeline_clip_id"]), StringValue(operation["clip_id"]))
-			if _, isPrimary := primaryIDs[clipID]; isPrimary {
-				deleted[clipID] = struct{}{}
-			}
-		case "insert_clip":
-			if ValueOr(StringValue(operation["track_id"]), "visual_base") == "visual_base" {
-				visualInsertIndexes[index] = struct{}{}
-			}
-		}
-	}
-	if len(deleted) != len(primaryIDs) || len(visualInsertIndexes) == 0 {
-		return operations
-	}
-	reordered := make([]map[string]any, 0, len(operations))
-	for index, operation := range operations {
-		if _, isInsert := visualInsertIndexes[index]; isInsert {
-			reordered = append(reordered, operation)
-		}
-	}
-	for index, operation := range operations {
-		if _, isInsert := visualInsertIndexes[index]; !isInsert {
-			reordered = append(reordered, operation)
-		}
-	}
-	return reordered
-}
-
-func snapshotUntouchedIndependentAudio(
-	current timeline.Document,
-	operations []map[string]any,
+	operation map[string]any,
 ) map[string]timeline.Track {
-	touched := touchedTrackIDs(current, operations)
+	touched := touchedTrackIDsForOperation(current, operation)
 	preserved := map[string]timeline.Track{}
 	for _, track := range current.Tracks {
 		if !ContainsString(independentAudioTrackIDs, track.TrackID) {
@@ -92,7 +30,10 @@ func snapshotUntouchedIndependentAudio(
 	return preserved
 }
 
-func touchedTrackIDs(current timeline.Document, operations []map[string]any) map[string]struct{} {
+func touchedTrackIDsForOperation(
+	current timeline.Document,
+	operation map[string]any,
+) map[string]struct{} {
 	clipTracks := map[string]string{}
 	for _, track := range current.Tracks {
 		for _, clip := range track.Clips {
@@ -100,35 +41,30 @@ func touchedTrackIDs(current timeline.Document, operations []map[string]any) map
 		}
 	}
 	touched := map[string]struct{}{}
-	for _, operation := range operations {
-		kind := StringValue(operation["kind"])
-		if kind == "delete_range" {
-			for _, trackID := range independentAudioTrackIDs {
-				touched[trackID] = struct{}{}
-			}
-		}
-		trackID := StringValue(operation["track_id"])
-		if kind == "insert_clip" && trackID == "" {
-			trackID = "visual_base"
-		}
-		if trackID != "" {
+	kind := StringValue(operation["kind"])
+	if kind == "delete_range" || kind == "delete_source_range" {
+		for _, trackID := range independentAudioTrackIDs {
 			touched[trackID] = struct{}{}
 		}
-		if targetTrackID := StringValue(operation["target_track_id"]); targetTrackID != "" {
-			touched[targetTrackID] = struct{}{}
-		}
-		clipID := ValueOr(StringValue(operation["timeline_clip_id"]), StringValue(operation["clip_id"]))
-		if sourceTrackID := clipTracks[clipID]; sourceTrackID != "" {
-			touched[sourceTrackID] = struct{}{}
-		}
-		if kind == "insert_clip" && clipID != "" {
-			clipTracks[clipID] = trackID
-		}
+	}
+	trackID := StringValue(operation["track_id"])
+	if kind == "insert_clip" && trackID == "" {
+		trackID = "visual_base"
+	}
+	if trackID != "" {
+		touched[trackID] = struct{}{}
+	}
+	if targetTrackID := StringValue(operation["target_track_id"]); targetTrackID != "" {
+		touched[targetTrackID] = struct{}{}
+	}
+	clipID := StringValue(operation["timeline_clip_id"])
+	if sourceTrackID := clipTracks[clipID]; sourceTrackID != "" {
+		touched[sourceTrackID] = struct{}{}
 	}
 	return touched
 }
 
-func RestoreIndependentAudioTracks(
+func restoreIndependentAudioTracks(
 	document *timeline.Document,
 	preserved map[string]timeline.Track,
 ) error {
@@ -140,7 +76,7 @@ func RestoreIndependentAudioTracks(
 		for _, clip := range track.Clips {
 			if clip.TimelineEndFrame > document.DurationFrames {
 				return fmt.Errorf(
-					"主视频批量编辑会把时间线缩到 %d 帧，但未编辑的 %s 片段 %s 仍延伸到 %d 帧",
+					"主视频原子编辑会把时间线缩到 %d 帧，但未编辑的 %s 片段 %s 仍延伸到 %d 帧",
 					document.DurationFrames, track.TrackID, clip.TimelineClipID, clip.TimelineEndFrame,
 				)
 			}
@@ -154,15 +90,6 @@ func copyTimelineTrack(track timeline.Track) timeline.Track {
 	copy := track
 	copy.Clips = append([]timeline.Clip(nil), track.Clips...)
 	return copy
-}
-
-func HasBeatGrid(effects []map[string]any) bool {
-	for _, effect := range effects {
-		if StringValue(effect["kind"]) == "beat_grid" {
-			return true
-		}
-	}
-	return false
 }
 
 func BeatAlignmentData(document timeline.Document) map[string]any {
@@ -323,116 +250,43 @@ func ValueOr(value, fallback string) string {
 	return fallback
 }
 
-func (exec *Executor) enrichTimelineOperations(
+func (exec *Executor) enrichTimelineOperation(
 	ctx context.Context,
 	draftID string,
-	operations []map[string]any,
-) ([]map[string]any, error) {
+	original map[string]any,
+) (map[string]any, error) {
 	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
 	if err != nil {
 		return nil, err
 	}
 	assetByID := make(map[string]storage.Asset, len(assets))
-	audioAssetIDs := make([]string, 0, len(assets))
-	for _, asset := range assets {
-		assetByID[asset.ID] = asset
-		hasAudio, _ := asset.Probe["has_audio"].(bool)
-		if asset.Kind == "video" && hasAudio {
-			audioAssetIDs = append(audioAssetIDs, asset.ID)
-		}
-	}
-	sort.Strings(audioAssetIDs)
-
-	result := make([]map[string]any, 0, len(operations))
-	for _, original := range operations {
-		operation := make(map[string]any, len(original)+2)
-		for key, value := range original {
-			operation[key] = value
-		}
-		switch StringValue(operation["kind"]) {
-		case "insert_clip", "replace_clip":
-			asset, exists := assetByID[StringValue(operation["asset_id"])]
-			if !exists {
-				break
-			}
-			if StringValue(operation["asset_kind"]) == "" {
-				operation["asset_kind"] = asset.Kind
-			}
-			if StringValue(operation["kind"]) == "replace_clip" {
-				break
-			}
-			if ValueOr(StringValue(operation["track_id"]), "visual_base") != "visual_base" {
-				break
-			}
-			if _, explicit := operation["include_original_audio"]; !explicit {
-				hasAudio, _ := asset.Probe["has_audio"].(bool)
-				operation["include_original_audio"] = asset.Kind == "video" && hasAudio
-			}
-		case "sync_original_audio":
-			operation["audio_asset_ids"] = append([]string(nil), audioAssetIDs...)
-		}
-		result = append(result, operation)
-	}
-	return result, nil
-}
-
-func (exec *Executor) attachMissingBGMBeatGrids(
-	ctx context.Context,
-	draftID string,
-	document *timeline.Document,
-) (int, []string) {
-	assets, err := storage.ListDraftAssets(ctx, exec.database.Read(), draftID)
-	if err != nil {
-		return 0, []string{err.Error()}
-	}
-	assetByID := make(map[string]storage.Asset, len(assets))
 	for _, asset := range assets {
 		assetByID[asset.ID] = asset
 	}
-	gridByAsset := map[string]media.BeatGrid{}
-	waveformByAsset := map[string]*media.WaveformEnvelope{}
-	attached := 0
-	warnings := []string{}
-	for trackIndex := range document.Tracks {
-		if document.Tracks[trackIndex].TrackID != "bgm" {
-			continue
+
+	operation := make(map[string]any, len(original)+2)
+	for key, value := range original {
+		operation[key] = value
+	}
+	switch StringValue(operation["kind"]) {
+	case "insert_clip", "replace_clip":
+		asset, exists := assetByID[StringValue(operation["asset_id"])]
+		if !exists {
+			break
 		}
-		for clipIndex := range document.Tracks[trackIndex].Clips {
-			clip := &document.Tracks[trackIndex].Clips[clipIndex]
-			if clip.AssetID == "" || HasBeatGrid(clip.Effects) {
-				continue
-			}
-			grid, cached := gridByAsset[clip.AssetID]
-			waveform := waveformByAsset[clip.AssetID]
-			if !cached {
-				asset, exists := assetByID[clip.AssetID]
-				if !exists || asset.Kind != "audio" || !asset.Usable {
-					warnings = append(warnings, fmt.Sprintf("BGM %s 不是可分析的音频素材", clip.AssetID))
-					continue
-				}
-				source, _, resolveErr := media.ResolveAssetSource(ctx, exec.database, asset.ID)
-				if resolveErr != nil {
-					warnings = append(warnings, fmt.Sprintf("BGM %s 节拍源不可用: %v", clip.AssetID, resolveErr))
-					continue
-				}
-				grid, err = media.AnalyzeBeatGrid(ctx, source, document.FPS, 4096)
-				if err != nil {
-					warnings = append(warnings, fmt.Sprintf("BGM %s 节拍分析失败: %v", clip.AssetID, err))
-					continue
-				}
-				gridByAsset[clip.AssetID] = grid
-				durationSec, _ := NumericValue(asset.Probe["duration_sec"])
-				waveform = optionalWaveformEnvelope(
-					ctx,
-					source,
-					document.FPS,
-					int(math.Round(durationSec*float64(document.FPS))),
-				)
-				waveformByAsset[clip.AssetID] = waveform
-			}
-			clip.Effects = append(clip.Effects, beatGridEffect(grid, waveform))
-			attached++
+		if StringValue(operation["asset_kind"]) == "" {
+			operation["asset_kind"] = asset.Kind
+		}
+		if StringValue(operation["kind"]) == "replace_clip" {
+			break
+		}
+		if ValueOr(StringValue(operation["track_id"]), "visual_base") != "visual_base" {
+			break
+		}
+		if _, explicit := operation["include_original_audio"]; !explicit {
+			hasAudio, _ := asset.Probe["has_audio"].(bool)
+			operation["include_original_audio"] = asset.Kind == "video" && hasAudio
 		}
 	}
-	return attached, warnings
+	return operation, nil
 }

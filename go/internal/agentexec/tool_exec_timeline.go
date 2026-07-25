@@ -2,6 +2,7 @@ package agentexec
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,168 +18,6 @@ import (
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-func (exec *Executor) toolComposeInitial(
-	ctx context.Context,
-	draftID string,
-	input rushestools.ComposeInitialInput,
-) (rushestools.ToolResult, error) {
-	version, err := timeline.NextVersion(ctx, exec.database, draftID)
-	if err != nil {
-		return rushestools.ToolResult{}, err
-	}
-	selections := make([]timeline.Selection, 0, len(input.Clips))
-	for index, clip := range input.Clips {
-		asset, assetErr := storage.GetAsset(ctx, exec.database.Read(), clip.AssetID)
-		if assetErr != nil {
-			return composeInitialFailure(index, clip, storage.Asset{}, assetErr.Error()), nil
-		}
-		durationSec, _ := NumericValue(asset.Probe["duration_sec"])
-		durationFrames := int(math.Round(durationSec * timeline.DefaultFPS))
-		if asset.Kind != "video" && asset.Kind != "image" {
-			return composeInitialFailure(index, clip, asset, "主视觉轨只支持 video/image 素材"), nil
-		}
-		if clip.SourceStartFrame < 0 || clip.SourceEndFrame <= clip.SourceStartFrame ||
-			durationFrames > 0 && clip.SourceEndFrame > durationFrames {
-			return composeInitialFailure(index, clip, asset, "源帧范围无效或超出素材时长"), nil
-		}
-		hasAudio, _ := asset.Probe["has_audio"].(bool)
-		selections = append(selections, timeline.Selection{
-			AssetID: clip.AssetID, AssetKind: asset.Kind, HasAudio: hasAudio,
-			SourceStartFrame: clip.SourceStartFrame, SourceEndFrame: clip.SourceEndFrame,
-			Role: clip.Role,
-		})
-	}
-	document, err := timeline.ComposeInitial(draftID, version, selections)
-	if err != nil {
-		return rushestools.ToolResult{
-			Status: string(rushestools.StatusFailed), Observation: "初版时间线参数校验失败，当前时间线未更新",
-			Data: map[string]any{
-				"error_code": string(rushestools.ErrCodeComposeInitialInvalid), "reason": err.Error(),
-				"current_timeline_unchanged": true,
-				"recovery":                   "根据 failed_clip 与 asset_facts 修正源帧范围或素材类型后重试。",
-			},
-		}, nil
-	}
-	return exec.PersistTimeline(ctx, draftID, document, "compose_initial", []map[string]any{{
-		"kind": "compose_initial", "clip_count": len(input.Clips),
-	}})
-}
-
-func composeInitialFailure(
-	index int,
-	clip rushestools.ComposeClip,
-	asset storage.Asset,
-	reason string,
-) rushestools.ToolResult {
-	durationSec, _ := NumericValue(asset.Probe["duration_sec"])
-	assetID := asset.ID
-	if assetID == "" {
-		assetID = clip.AssetID
-	}
-	return rushestools.ToolResult{
-		Status:      string(rushestools.StatusFailed),
-		Observation: fmt.Sprintf("初版时间线第 %d 个片段参数无效，当前时间线未更新", index+1),
-		Data: map[string]any{
-			"error_code": string(rushestools.ErrCodeComposeInitialInvalid), "failed_clip_index": index + 1,
-			"failed_clip": map[string]any{
-				"asset_id": clip.AssetID, "source_start_frame": clip.SourceStartFrame,
-				"source_end_frame": clip.SourceEndFrame, "role": clip.Role,
-			},
-			"asset_facts": map[string]any{
-				"asset_id": assetID, "kind": asset.Kind,
-				"duration_frames": int(math.Round(durationSec * timeline.DefaultFPS)),
-			},
-			"reason": reason, "current_timeline_unchanged": true,
-			"recovery": "改用 video/image 素材，并把 source_start_frame/source_end_frame 限制在 duration_frames 内。",
-		},
-	}
-}
-
-func (exec *Executor) toolApplyPatches(
-	ctx context.Context,
-	draftID string,
-	input rushestools.TimelinePatchBatchInput,
-) (rushestools.ToolResult, error) {
-	if len(input.Ops) == 0 {
-		return rushestools.ToolResult{}, errors.New("timeline.apply_patches 至少需要一个 op")
-	}
-	if len(input.Ops) > 100 {
-		return rushestools.ToolResult{}, errors.New("timeline.apply_patches 单次最多 100 个 op")
-	}
-	current, err := timeline.Latest(ctx, exec.database, draftID)
-	if err != nil {
-		return rushestools.ToolResult{}, err
-	}
-	operations := make([]map[string]any, len(input.Ops))
-	for index := range input.Ops {
-		operations[index] = map[string]any(input.Ops[index])
-	}
-	enrichedOperations, err := exec.enrichTimelineOperations(ctx, draftID, operations)
-	if err != nil {
-		return rushestools.ToolResult{}, err
-	}
-	plannedOperations, preservedAudio := PrepareTimelineBatch(current, enrichedOperations)
-	document := current
-	for index, operation := range plannedOperations {
-		beforeOperation := document
-		document, err = timeline.ApplyPatch(document, operation)
-		if err != nil {
-			if failure, ok := TimelineOpFailureAt(err, operation, index+1, beforeOperation); ok {
-				return failure, nil
-			}
-			message := fmt.Sprintf("第 %d 个时间线补丁失败: %v", index+1, err)
-			return rushestools.ToolResult{
-				Status: string(rushestools.StatusFailed), Observation: message,
-				Data: map[string]any{
-					"failed_op_index":            index + 1,
-					"failed_op":                  operation,
-					"reason":                     err.Error(),
-					"current_timeline_unchanged": true,
-					"recovery": "读取 failed_op 和 reason 后修正这一批；完整卡点重剪必须改用 timeline.recut_to_beats。" +
-						"如需整批替换主视频，应把新 insert_clip 与旧 delete_clip 放在同一次调用中，工具会自动规划安全顺序并保护 BGM/SFX。",
-				},
-			}, nil
-		}
-	}
-	if restoreErr := RestoreIndependentAudioTracks(&document, preservedAudio); restoreErr != nil {
-		return rushestools.ToolResult{
-			Status:      string(rushestools.StatusFailed),
-			Observation: "批量主视频编辑会破坏未被本批直接编辑的 BGM/SFX，当前时间线未更新",
-			Data: map[string]any{
-				"reason":                     restoreErr.Error(),
-				"current_timeline_unchanged": true,
-				"recovery": "把完整的新主视频 insert_clip 与旧主视频 delete_clip 放在同一次 timeline.apply_patches 调用中，" +
-					"保证最终时长能容纳现有音轨；卡点混剪改用 timeline.recut_to_beats。",
-			},
-		}, nil
-	}
-	attachedBeatGrids, beatWarnings := exec.attachMissingBGMBeatGrids(ctx, draftID, &document)
-	if report := timeline.Validate(document); !report.Valid {
-		return rushestools.ToolResult{
-			Status:      string(rushestools.StatusFailed),
-			Observation: "批量补丁结果未通过时间线校验，当前时间线未更新",
-			Data: map[string]any{
-				"failed_op_index":            len(plannedOperations),
-				"reason":                     "validation_failed",
-				"current_timeline_unchanged": true,
-				"recovery":                   "根据 validation_report 修正整批参数后重试；卡点重剪不要降级为低层补丁。",
-				"validation_report": map[string]any{
-					"valid": report.Valid, "checks": report.Checks, "issues": report.Issues,
-				},
-			},
-		}, nil
-	}
-	next, err := timeline.NextVersion(ctx, exec.database, draftID)
-	if err != nil {
-		return rushestools.ToolResult{}, err
-	}
-	document.Version = next
-	document.TimelineID = fmt.Sprintf("%s:v%d", draftID, next)
-	result, err := exec.PersistTimeline(ctx, draftID, document, "apply_patches", plannedOperations)
-	appendBeatMetadataResult(&result, attachedBeatGrids, beatWarnings)
-	return result, err
-}
-
 func (exec *Executor) toolAtomicTimelineEdit(
 	ctx context.Context,
 	draftID string,
@@ -187,7 +26,7 @@ func (exec *Executor) toolAtomicTimelineEdit(
 ) (rushestools.ToolResult, error) {
 	operation, err := rushestools.TimelineAtomicOperation(toolName, input)
 	if err != nil {
-		if failure, ok := TimelineOpFailureAt(err, map[string]any(operation), 0, timeline.Document{}); ok {
+		if failure, ok := TimelineOpFailure(toolName, err, map[string]any(operation), timeline.Document{}); ok {
 			return failure, nil
 		}
 		return rushestools.ToolResult{
@@ -201,9 +40,9 @@ func (exec *Executor) toolAtomicTimelineEdit(
 		}, nil
 	}
 
-	current, err := timeline.Latest(ctx, exec.database, draftID)
+	current, mutationBase, err := exec.timelineMutationSnapshot(ctx, draftID)
 	previousTimelineID := ""
-	if errors.Is(err, storage.ErrNotFound) {
+	if err == nil && mutationBase.timelineVersion == 0 {
 		if toolName != "timeline.insert" ||
 			StringValue(operation["kind"]) != "insert_clip" ||
 			ValueOr(StringValue(operation["track_id"]), "visual_base") != "visual_base" {
@@ -217,27 +56,31 @@ func (exec *Executor) toolAtomicTimelineEdit(
 				},
 			}, nil
 		}
-		current = timeline.Empty(draftID, 0)
-		current.DurationFrames = 0
 	} else if err != nil {
 		return rushestools.ToolResult{}, err
 	} else {
 		previousTimelineID = current.TimelineID
 	}
+	targetClipID := StringValue(operation["timeline_clip_id"])
+	admission := atomicEditAdmissionFromContext(ctx)
+	if admission != nil {
+		if decision := admission.admit(draftID, current, operation); decision != atomicEditAdmitted {
+			return atomicEditAdmissionFailure(decision, targetClipID), nil
+		}
+	}
 
-	enriched, err := exec.enrichTimelineOperations(ctx, draftID, []map[string]any{operation})
+	appliedOperation, err := exec.enrichTimelineOperation(ctx, draftID, operation)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	appliedOperation := enriched[0]
 	if failure := exec.validateAtomicTimelineAsset(ctx, draftID, current, appliedOperation); failure != nil {
 		return *failure, nil
 	}
 
-	planned, preservedAudio := PrepareTimelineBatch(current, enriched)
-	document, err := timeline.ApplyPatch(current, planned[0])
+	preservedAudio := preserveIndependentAudioForOperation(current, appliedOperation)
+	document, err := timeline.ApplyPatch(current, appliedOperation)
 	if err != nil {
-		if failure, ok := TimelineOpFailureAt(err, appliedOperation, 0, current); ok {
+		if failure, ok := TimelineOpFailure(toolName, err, appliedOperation, current); ok {
 			if semanticKind, _ := failure.Data["semantic_error_kind"].(timeline.SemanticErrorKind); semanticKind == timeline.SemanticClipNotFound {
 				failure.Data["error_code"] = string(rushestools.ErrCodeStaleTarget)
 				failure.Data["recovery"] = "目标可能已被前一个原子编辑改写；先调用 timeline.inspect 读取最新稳定 ID，再继续剩余编辑。"
@@ -246,7 +89,7 @@ func (exec *Executor) toolAtomicTimelineEdit(
 		}
 		return atomicTimelineApplyFailure(appliedOperation, err), nil
 	}
-	if restoreErr := RestoreIndependentAudioTracks(&document, preservedAudio); restoreErr != nil {
+	if restoreErr := restoreIndependentAudioTracks(&document, preservedAudio); restoreErr != nil {
 		return atomicTimelineApplyFailure(appliedOperation, restoreErr), nil
 	}
 	if atomicReplaceTouchesPrimary(current, appliedOperation) {
@@ -275,12 +118,13 @@ func (exec *Executor) toolAtomicTimelineEdit(
 	}
 
 	changedTargets := atomicChangedTargets(current, document)
-	result, err := exec.PersistTimeline(
+	result, err := exec.persistTimelineFromSnapshot(
 		ctx,
 		draftID,
 		document,
 		strings.TrimPrefix(toolName, "timeline."),
-		[]map[string]any{appliedOperation},
+		appliedOperation,
+		mutationBase,
 	)
 	if err != nil {
 		return rushestools.ToolResult{}, err
@@ -288,11 +132,20 @@ func (exec *Executor) toolAtomicTimelineEdit(
 	if result.Data == nil {
 		result.Data = map[string]any{}
 	}
+	if result.Status == string(rushestools.StatusSucceeded) {
+		admission.recordSuccess(draftID, appliedOperation)
+	}
 	result.Data["previous_timeline_id"] = previousTimelineID
-	result.Data["timeline_id"] = document.TimelineID
-	result.Data["applied_operation"] = appliedOperation
-	result.Data["changed_targets"] = changedTargets
-	result.Data["validation_summary"] = result.Data["validation_report"]
+	if _, present := result.Data["timeline_id"]; !present {
+		result.Data["timeline_id"] = document.TimelineID
+	}
+	if result.Status == string(rushestools.StatusFailed) {
+		result.Data["failed_operation"] = appliedOperation
+	} else {
+		result.Data["applied_operation"] = appliedOperation
+		result.Data["changed_targets"] = changedTargets
+		result.Data["validation_summary"] = result.Data["validation_report"]
+	}
 	return result, nil
 }
 
@@ -355,10 +208,7 @@ func (exec *Executor) validateAtomicTimelineAsset(
 
 	trackID := ValueOr(StringValue(operation["track_id"]), "visual_base")
 	if kind == "replace_clip" {
-		clipID := ValueOr(
-			StringValue(operation["timeline_clip_id"]),
-			StringValue(operation["clip_id"]),
-		)
+		clipID := StringValue(operation["timeline_clip_id"])
 		trackID = atomicClipTrackID(current, clipID)
 		if target, exists := atomicTimelineClip(current, clipID); exists {
 			durationSec, _ := NumericValue(asset.Probe["duration_sec"])
@@ -431,14 +281,81 @@ func (exec *Executor) validateAtomicTimelineAsset(
 			return &result
 		}
 	}
+	if kind == "insert_clip" && trackID == "bgm" {
+		if missing := incompleteAtomicBeatGridFields(operation); len(missing) > 0 {
+			result := atomicTimelineApplyFailure(
+				operation,
+				fmt.Errorf("metadata.beat_grid 缺少或包含无效检测证据字段: %s", strings.Join(missing, ",")),
+			)
+			result.Data["missing_beat_grid_fields"] = missing
+			result.Data["recovery"] = "保留已成功原语，只重试本次 BGM 插入；把 audio.analyze_beats 本轮返回的 bpm、beat_frames、strong_beat_frames、downbeat_frames、bar_phase 与 analysis_method 原样写入 metadata.beat_grid。"
+			return &result
+		}
+	}
 	return nil
+}
+
+func incompleteAtomicBeatGridFields(operation map[string]any) []string {
+	metadata, hasMetadata := operation["metadata"]
+	if !hasMetadata {
+		return nil
+	}
+	metadataObject, ok := metadata.(map[string]any)
+	if !ok {
+		return []string{"metadata"}
+	}
+	rawGrid, hasGrid := metadataObject["beat_grid"]
+	if !hasGrid {
+		return nil
+	}
+	grid, ok := rawGrid.(map[string]any)
+	if !ok {
+		return []string{"beat_grid"}
+	}
+	missing := []string{}
+	if bpm, valid := NumericValue(grid["bpm"]); !valid || bpm <= 0 {
+		missing = append(missing, "bpm")
+	}
+	for _, name := range []string{
+		"beat_frames", "strong_beat_frames", "downbeat_frames",
+	} {
+		requireNonEmpty := name == "beat_frames"
+		if !validAtomicFrameArray(grid[name], requireNonEmpty) {
+			missing = append(missing, name)
+		}
+	}
+	if phase, valid := NumericValue(grid["bar_phase"]); !valid ||
+		phase < 0 || phase != math.Trunc(phase) {
+		missing = append(missing, "bar_phase")
+	}
+	if strings.TrimSpace(StringValue(grid["analysis_method"])) == "" {
+		missing = append(missing, "analysis_method")
+	}
+	return missing
+}
+
+func validAtomicFrameArray(value any, requireNonEmpty bool) bool {
+	frames := reflect.ValueOf(value)
+	if !frames.IsValid() ||
+		(frames.Kind() != reflect.Slice && frames.Kind() != reflect.Array) ||
+		requireNonEmpty && frames.Len() == 0 {
+		return false
+	}
+	for index := 0; index < frames.Len(); index++ {
+		frame, valid := NumericValue(frames.Index(index).Interface())
+		if !valid || math.IsNaN(frame) || math.IsInf(frame, 0) ||
+			frame < 0 || frame != math.Trunc(frame) {
+			return false
+		}
+	}
+	return true
 }
 
 func atomicReplaceTouchesPrimary(current timeline.Document, operation map[string]any) bool {
 	if StringValue(operation["kind"]) != "replace_clip" {
 		return false
 	}
-	clipID := ValueOr(StringValue(operation["timeline_clip_id"]), StringValue(operation["clip_id"]))
+	clipID := StringValue(operation["timeline_clip_id"])
 	return atomicClipTrackID(current, clipID) == "visual_base"
 }
 
@@ -550,33 +467,56 @@ func atomicChangedTargets(before, after timeline.Document) []map[string]any {
 	return targets
 }
 
-func appendBeatMetadataResult(
-	result *rushestools.ToolResult,
-	attached int,
-	warnings []string,
-) {
-	if result == nil || attached == 0 && len(warnings) == 0 {
-		return
-	}
-	if result.Data == nil {
-		result.Data = map[string]any{}
-	}
-	result.Data["beat_grid_attached_count"] = attached
-	if len(warnings) > 0 {
-		result.Data["beat_grid_warnings"] = warnings
-	}
+type timelineMutationBase struct {
+	stateVersion    int
+	timelineVersion int
+	timelineID      string
 }
 
-func (exec *Executor) PersistTimeline(
+func (exec *Executor) timelineMutationSnapshot(
+	ctx context.Context,
+	draftID string,
+) (timeline.Document, timelineMutationBase, error) {
+	var stateVersion int
+	var timelineVersion sql.NullInt64
+	err := exec.database.Read().QueryRowContext(ctx, `
+		SELECT state_version,timeline_current_version
+		FROM drafts WHERE draft_id=?`, draftID,
+	).Scan(&stateVersion, &timelineVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return timeline.Document{}, timelineMutationBase{}, storage.ErrNotFound
+	}
+	if err != nil {
+		return timeline.Document{}, timelineMutationBase{}, err
+	}
+	base := timelineMutationBase{stateVersion: stateVersion}
+	if !timelineVersion.Valid {
+		document := timeline.Empty(draftID, 0)
+		document.DurationFrames = 0
+		return document, base, nil
+	}
+	base.timelineVersion = int(timelineVersion.Int64)
+	document, err := timeline.Get(ctx, exec.database, draftID, base.timelineVersion)
+	if err != nil {
+		return timeline.Document{}, timelineMutationBase{}, err
+	}
+	base.timelineID = document.TimelineID
+	return document, base, nil
+}
+
+func (exec *Executor) persistTimelineFromSnapshot(
 	ctx context.Context,
 	draftID string,
 	document timeline.Document,
 	operation string,
-	editOperationBatches ...[]map[string]any,
+	editOperation map[string]any,
+	base timelineMutationBase,
 ) (rushestools.ToolResult, error) {
-	draft, err := storage.GetDraft(ctx, exec.database.Read(), draftID)
-	if err != nil {
-		return rushestools.ToolResult{}, err
+	if document.Version != base.timelineVersion+1 {
+		return rushestools.ToolResult{}, fmt.Errorf(
+			"timeline snapshot version mismatch: base=%d attempted=%d",
+			base.timelineVersion, document.Version,
+		)
 	}
 	documentMap, err := timeline.ToMap(document)
 	if err != nil {
@@ -599,26 +539,38 @@ func (exec *Executor) PersistTimeline(
 		origin = "agent"
 	}
 	editOperations := []map[string]any{}
-	if len(editOperationBatches) > 0 {
-		editOperations = editOperationBatches[0]
+	if editOperation != nil {
+		editOperations = append(editOperations, editOperation)
 	}
 	patchID := operation + ":" + RandomID("patch")
+	timelinePayload := map[string]any{
+		"timeline_id": document.TimelineID, "timeline_version": document.Version,
+		"patch_id": patchID, "document_json": documentMap,
+		"edit_origin": origin, "edit_operations": editOperations,
+	}
+	if base.timelineVersion > 0 {
+		timelinePayload["parent_version"] = base.timelineVersion
+	}
 	result, err := reducer.Apply(ctx, exec.database, []contracts.Event{
 		{
 			Type: "TimelineVersionCreated", DraftID: draftID,
-			Payload: map[string]any{
-				"timeline_id": document.TimelineID, "timeline_version": document.Version,
-				"patch_id": patchID, "document_json": documentMap,
-				"edit_origin": origin, "edit_operations": editOperations,
-			},
+			Payload: timelinePayload,
 		},
 		{
 			Type: validationType, DraftID: draftID,
 			Payload: map[string]any{"timeline_version": document.Version, "validation_report": reportMap},
 		},
-	}, reducer.Options{Actor: actor, BaseVersion: &draft.StateVersion})
-	if err != nil || result.Status != reducer.StatusApplied {
-		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("timeline reducer status: %s", result.Status))
+	}, reducer.Options{Actor: actor, BaseVersion: &base.stateVersion})
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	if result.Status == reducer.StatusVersionConflict {
+		return exec.timelineVersionConflictResult(
+			ctx, draftID, document.TimelineID, base, result,
+		), nil
+	}
+	if result.Status != reducer.StatusApplied {
+		return rushestools.ToolResult{}, fmt.Errorf("timeline reducer status: %s", result.Status)
 	}
 	status := "succeeded"
 	if !valid {
@@ -642,6 +594,38 @@ func (exec *Executor) PersistTimeline(
 	return toolResult, nil
 }
 
+func (exec *Executor) timelineVersionConflictResult(
+	ctx context.Context,
+	draftID string,
+	attemptedTimelineID string,
+	base timelineMutationBase,
+	result reducer.Result,
+) rushestools.ToolResult {
+	data := map[string]any{
+		"error_code":                 string(rushestools.ErrCodeStaleTarget),
+		"current_timeline_unchanged": true,
+		"expected_state_version":     base.stateVersion,
+		"expected_timeline_version":  base.timelineVersion,
+		"previous_timeline_id":       base.timelineID,
+		"attempted_timeline_id":      attemptedTimelineID,
+		"recovery":                   "调用 timeline.inspect 读取最新 timeline_id 与稳定 clip ID，再基于新快照重试这一项原子编辑。",
+	}
+	if result.Conflict != nil {
+		data["actual_state_version"] = result.Conflict.ActualStateVersion
+	}
+	if latest, err := timeline.Latest(ctx, exec.database, draftID); err == nil {
+		data["timeline_id"] = latest.TimelineID
+		data["timeline_version"] = latest.Version
+	}
+	return rushestools.ToolFailure(
+		rushestools.StatusFailed,
+		"时间线在本次原子编辑提交前已被其它请求更新；本次结果未写入。",
+		rushestools.ErrCodeStaleTarget,
+		"调用 timeline.inspect 读取最新 timeline_id 与稳定 clip ID，再基于新快照重试这一项原子编辑。",
+		data,
+	)
+}
+
 func (exec *Executor) timelineValidationReport(
 	ctx context.Context,
 	draftID string,
@@ -661,8 +645,15 @@ func (exec *Executor) timelineValidationReport(
 	return reportMap, report.Valid, nil
 }
 
-func (exec *Executor) toolCheckTimeline(ctx context.Context, draftID string) (rushestools.ToolResult, error) {
-	document, err := timeline.Latest(ctx, exec.database, draftID)
+func (exec *Executor) toolCheckTimeline(
+	ctx context.Context,
+	draftID string,
+	input rushestools.TimelineCheckInput,
+) (rushestools.ToolResult, error) {
+	document, err := exec.requestedTimeline(ctx, draftID, input.TimelineID)
+	if errors.Is(err, storage.ErrNotFound) && input.TimelineID != "" {
+		return requestedTimelineNotFound(input.TimelineID), nil
+	}
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -690,11 +681,11 @@ func (exec *Executor) toolCheckTimeline(ctx context.Context, draftID string) (ru
 		}
 	}
 	data := map[string]any{
+		"timeline_id":       document.TimelineID,
+		"timeline_version":  document.Version,
 		"validation_report": validationReport,
 		"beat_alignment":    beatAlignment,
 	}
-	// timeline.check 是只读诊断：口播质检读取失败（如 transcript 缺失/损坏）时跳过附加，
-	// 不让合法时间线因增强信息读取失败而报错（与 toolEditTalkingHead 的软跳过一致）。
 	if quality, qualityErr := exec.SpeechQualityReport(ctx, document); qualityErr == nil {
 		if present, _ := quality["a_roll_present"].(bool); present {
 			data["speech_quality"] = quality
@@ -722,10 +713,13 @@ func (exec *Executor) toolCheckTimeline(ctx context.Context, draftID string) (ru
 func (exec *Executor) toolInspectTimeline(
 	ctx context.Context,
 	draftID string,
-	_ rushestools.TimelineInspectInput,
+	input rushestools.TimelineInspectInput,
 ) (rushestools.ToolResult, error) {
-	document, err := timeline.Latest(ctx, exec.database, draftID)
+	document, err := exec.requestedTimeline(ctx, draftID, input.TimelineID)
 	if errors.Is(err, storage.ErrNotFound) {
+		if input.TimelineID != "" {
+			return requestedTimelineNotFound(input.TimelineID), nil
+		}
 		return rushestools.ToolResult{
 			Status:      string(rushestools.StatusSucceeded),
 			Observation: "当前草稿尚无时间线；请先选择素材并创建初版时间线。",
@@ -778,12 +772,38 @@ func (exec *Executor) toolInspectTimeline(
 	return rushestools.ToolResult{
 		Status: string(rushestools.StatusSucceeded), Observation: timeline.Inspect(document),
 		Data: map[string]any{
-			"timeline_exists": true,
-			"fps":             document.FPS, "duration_frames": document.DurationFrames, "tracks": tracks,
+			"timeline_exists":  true,
+			"timeline_id":      document.TimelineID,
+			"timeline_version": document.Version,
+			"fps":              document.FPS, "duration_frames": document.DurationFrames, "tracks": tracks,
 			"audio_layout":   AudioLayoutData(document),
 			"beat_alignment": BeatAlignmentData(document),
 		},
 	}, nil
+}
+
+func (exec *Executor) requestedTimeline(
+	ctx context.Context,
+	draftID string,
+	timelineID string,
+) (timeline.Document, error) {
+	if timelineID == "" {
+		return timeline.Latest(ctx, exec.database, draftID)
+	}
+	return timeline.GetByID(ctx, exec.database, draftID, timelineID)
+}
+
+func requestedTimelineNotFound(timelineID string) rushestools.ToolResult {
+	return rushestools.ToolFailure(
+		rushestools.StatusFailed,
+		"指定 timeline_id 不属于当前草稿或已不存在。",
+		rushestools.ErrCodeStaleTarget,
+		"省略 timeline_id 调用 timeline.inspect 读取当前稳定版本，再使用返回的 timeline_id 重试。",
+		map[string]any{
+			"requested_timeline_id":      timelineID,
+			"current_timeline_unchanged": true,
+		},
+	)
 }
 
 func AudioLayoutData(document timeline.Document) map[string]any {

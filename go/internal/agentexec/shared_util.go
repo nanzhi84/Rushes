@@ -94,15 +94,15 @@ func IsReservedContextKey(key string) bool {
 	}
 }
 
-func TimelineOpFailureAt(
+func TimelineOpFailure(
+	toolName string,
 	err error,
 	operation map[string]any,
-	failedIndex int,
 	document timeline.Document,
 ) (rushestools.ToolResult, bool) {
 	fieldErr, ok := TimelineOpFieldError(err)
 	if ok {
-		return timelineOpFieldFailure(fieldErr, operation, failedIndex), true
+		return rushestools.TimelineAtomicFieldFailure(toolName, fieldErr, operation), true
 	}
 	var semanticErr *timeline.SemanticError
 	if !errors.As(err, &semanticErr) {
@@ -116,11 +116,8 @@ func TimelineOpFailureAt(
 		"current_timeline_unchanged": true,
 		"recovery":                   "根据当前时间线事实修正 failed_op 后重新调用；不要猜测 clip ID 或帧范围。",
 	}
-	if failedIndex > 0 {
-		data["failed_op_index"] = failedIndex
-	}
 	if spec, exists := timeline.LookupOpSpec(InterfaceString(operation["kind"])); exists {
-		data["expected_schema"] = rushestools.TimelineOpExpectedSchema(*spec)
+		data["expected_schema"] = rushestools.TimelineOpExpectedSchema(toolName, *spec)
 		data["correct_example"] = timeline.CorrectOpExample(*spec)
 	}
 	switch semanticErr.Kind {

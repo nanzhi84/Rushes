@@ -93,7 +93,7 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 		t.Fatalf("transcript status=%s err=%v", transcriptResult.Status, err)
 	}
 
-	selections := make([]timeline.Selection, 0, 8)
+	selections := make([]agenttest.TimelineSelection, 0, 8)
 	for _, sourceRange := range [][2]int{
 		{0, 90},
 		{90, 240},
@@ -104,12 +104,12 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 		{1080, 1320},
 		{1320, 1560},
 	} {
-		selections = append(selections, timeline.Selection{
+		selections = append(selections, agenttest.TimelineSelection{
 			AssetID: aRollID, AssetKind: "video", HasAudio: true,
 			SourceStartFrame: sourceRange[0], SourceEndFrame: sourceRange[1], Role: "a_roll",
 		})
 	}
-	document, err := timeline.ComposeInitial(draftID, 1, selections)
+	document, err := agenttest.ComposeTimeline(draftID, 1, selections)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 	if !ok {
 		t.Fatalf("fixture 未把句内重说较早一遍建成稳定 clip: %#v", document.Tracks)
 	}
-	currentDocument, err := timeline.ComposeInitial(draftID, 2, selections)
+	currentDocument, err := agenttest.ComposeTimeline(draftID, 2, selections)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,14 +129,12 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	if persisted, persistErr := service.executor.PersistTimeline(
-		t.Context(), draftID, document, "issue_140_fixture",
-	); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
+	if persisted, persistErr := seedTimelineVersion(service,
+		t.Context(), draftID, document, "issue_140_fixture", nil); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
-	if persisted, persistErr := service.executor.PersistTimeline(
-		t.Context(), draftID, currentDocument, "issue_140_fixture_refresh",
-	); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
+	if persisted, persistErr := seedTimelineVersion(service,
+		t.Context(), draftID, currentDocument, "issue_140_fixture_refresh", nil); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
 		t.Fatalf("refreshed=%#v err=%v", persisted, persistErr)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
@@ -263,9 +261,49 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 		t.Fatalf("相似/句内重说选择未精确落实: %#v", timelineTrackClips(cleaned, "visual_base"))
 	}
 
-	anchorStart, anchorEnd, ok := sourceRangeOnCurrentTimeline(cleaned, aRollID, 1320, 1440)
-	if !ok || anchorEnd-anchorStart < 90 {
-		t.Fatalf("保留指纹台词映射=%d-%d ok=%v", anchorStart, anchorEnd, ok)
+	postDeleteInspect, err := service.ExecuteTool(
+		ctx, "timeline.inspect", rushestools.TimelineInspectInput{},
+	)
+	if err != nil ||
+		postDeleteInspect.(rushestools.ToolResult).Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("post-delete timeline.inspect=%#v err=%v", postDeleteInspect, err)
+	}
+	trace = append(trace, "timeline.inspect:anchor")
+	anchorClipID, ok := containingSourceRangeClipID(cleaned, aRollID, 1320, 1440)
+	if !ok {
+		t.Fatalf("保留指纹台词没有覆盖它的当前 A-roll clip: %#v", timelineTrackClips(cleaned, "visual_base"))
+	}
+	anchorSourceStart, anchorSourceEnd := 1320, 1440
+	anchorRaw, err := service.ExecuteTool(ctx, "speech.search", rushestools.SpeechSearchInput{
+		TimelineClipID:   anchorClipID,
+		Query:            "指纹解锁",
+		SourceStartFrame: &anchorSourceStart,
+		SourceEndFrame:   &anchorSourceEnd,
+		MaxUtterances:    5,
+		IncludeWords:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace = append(trace, "speech.search:anchor")
+	anchorEvidence := anchorRaw.(rushestools.SpeechSearchResult)
+	if anchorEvidence.Status != string(rushestools.StatusSucceeded) ||
+		len(anchorEvidence.Utterances) != 1 ||
+		anchorEvidence.Utterances[0].TimelineStartFrame == nil ||
+		anchorEvidence.Utterances[0].TimelineEndFrame == nil {
+		t.Fatalf("保留指纹台词精确映射=%#v", anchorEvidence)
+	}
+	anchorStart := *anchorEvidence.Utterances[0].TimelineStartFrame
+	anchorEnd := *anchorEvidence.Utterances[0].TimelineEndFrame
+	expectedAnchorStart, expectedAnchorEnd, mapped := sourceRangeOnCurrentTimeline(
+		cleaned, aRollID, anchorSourceStart, anchorSourceEnd,
+	)
+	if !mapped || anchorStart != expectedAnchorStart || anchorEnd != expectedAnchorEnd ||
+		anchorEnd-anchorStart < 90 {
+		t.Fatalf(
+			"保留指纹台词映射=%d-%d expected=%d-%d mapped=%v",
+			anchorStart, anchorEnd, expectedAnchorStart, expectedAnchorEnd, mapped,
+		)
 	}
 	insertRaw, err := service.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
 		"kind": "insert_clip", "track_id": "visual_overlay",
@@ -335,20 +373,19 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 	).Scan(&singleOpBatches); err != nil || singleOpBatches != 5 {
 		t.Fatalf("single-op batches=%d err=%v", singleOpBatches, err)
 	}
-	for _, name := range trace {
-		if name == "timeline.edit_talking_head" {
-			t.Fatalf("trace 仍调用旧口播工具: %v", trace)
-		}
-	}
 	if successfulAtomicEdits != 5 || failedAtomicAttempts != 1 {
 		t.Fatalf(
 			"原子重试统计不符: success=%d failed=%d trace=%v",
 			successfulAtomicEdits, failedAtomicAttempts, trace,
 		)
 	}
+	schemaMetrics, err := modelToolSchemaSize(t.Context(), service.tools)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Logf(
-		"#140 atomic trace: reads=3 successful_edits=%d failed_attempts=%d retry_scope=failed_primitive schema_runes=19254 trace=%v",
-		successfulAtomicEdits, failedAtomicAttempts, trace,
+		"#140 atomic trace: reads=5 successful_edits=%d failed_attempts=%d retry_scope=failed_primitive schema_runes=%d trace=%v",
+		successfulAtomicEdits, failedAtomicAttempts, schemaMetrics.TotalRunes, trace,
 	)
 }
 
@@ -473,6 +510,22 @@ func exactSourceRangeClipID(
 		if clip.AssetID == assetID &&
 			clip.SourceStartFrame == sourceStart &&
 			clip.SourceEndFrame == sourceEnd {
+			return clip.TimelineClipID, true
+		}
+	}
+	return "", false
+}
+
+func containingSourceRangeClipID(
+	document timeline.Document,
+	assetID string,
+	sourceStart int,
+	sourceEnd int,
+) (string, bool) {
+	for _, clip := range timelineTrackClips(document, "visual_base") {
+		if clip.AssetID == assetID &&
+			clip.SourceStartFrame <= sourceStart &&
+			clip.SourceEndFrame >= sourceEnd {
 			return clip.TimelineClipID, true
 		}
 	}

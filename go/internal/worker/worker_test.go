@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -84,6 +85,23 @@ func TestClaimPriorityHeartbeatRetryAndStaleRecovery(t *testing.T) {
 	claimRunner := &Runner{database: database}
 	if err := claimRunner.emitTerminal(t.Context(), *job, "JobSucceeded", map[string]any{"stale": true}, nil); !errors.Is(err, reducer.ErrJobClaimLost) {
 		t.Fatalf("stale terminal err=%v", err)
+	}
+	if _, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "MaterialUnderstandingFailed", Payload: map[string]any{
+			"asset_id": "asset_stale_failure", "job_id": job.ID,
+			"attempt": job.Attempts, "cancelled": false,
+			"failure": map[string]any{"message": "late analyzer failure"},
+		},
+	}}, claimedJobOptions(*job, reducer.Options{})); !errors.Is(err, reducer.ErrJobClaimLost) {
+		t.Fatalf("stale understanding failure err=%v", err)
+	}
+	var staleFailureEvents int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM event_log
+		WHERE event_type='MaterialUnderstandingFailed'
+		AND json_extract(payload_json,'$.payload.job_id')=?`, job.ID,
+	).Scan(&staleFailureEvents); err != nil || staleFailureEvents != 0 {
+		t.Fatalf("stale failure events=%d err=%v", staleFailureEvents, err)
 	}
 	stored, err = GetJob(t.Context(), database, job.ID)
 	if err != nil || stored.Status != "running" || !sameClaim(stored, *replacement) {
@@ -439,9 +457,11 @@ func TestProgressReporterThrottlesAndForwardsOptionalDetail(t *testing.T) {
 	database := testDatabase(t)
 	now := time.Date(2026, 7, 15, 13, 0, 0, 0, time.UTC)
 	createDraft(t, database, "draft_progress_throttle", now)
+	agenttest.InsertJobFixtureAsset(t, database, "asset_progress")
 	apply(t, database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: "draft_progress_throttle", Payload: map[string]any{
 			"job_id": "job_progress", "kind": "understand", "idempotency_key": "progress",
+			"asset_id":    "asset_progress",
 			"next_run_at": now.Format(time.RFC3339Nano),
 		},
 	}}, contracts.ActorJob, now)
@@ -501,9 +521,11 @@ func TestProgressReporterKeepsSameProgressWithNewDetail(t *testing.T) {
 	database := testDatabase(t)
 	now := time.Date(2026, 7, 15, 13, 0, 0, 0, time.UTC)
 	createDraft(t, database, "draft_progress_detail", now)
+	agenttest.InsertJobFixtureAsset(t, database, "asset_progress_detail")
 	apply(t, database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: "draft_progress_detail", Payload: map[string]any{
 			"job_id": "job_progress_detail", "kind": "understand", "idempotency_key": "detail",
+			"asset_id":    "asset_progress_detail",
 			"next_run_at": now.Format(time.RFC3339Nano),
 		},
 	}}, contracts.ActorJob, now)
@@ -794,7 +816,7 @@ func TestRenderWorkerCreatesPreviewWithRenderSnapshot(t *testing.T) {
 		}},
 		{Type: "AssetLinked", DraftID: "draft_render", Payload: map[string]any{"asset_id": "asset_render"}},
 	}, contracts.ActorUser, now)
-	document, err := timeline.ComposeInitial("draft_render", 1, []timeline.Selection{{
+	document, err := agenttest.ComposeTimeline("draft_render", 1, []agenttest.TimelineSelection{{
 		AssetID: "asset_render", SourceStartFrame: 0, SourceEndFrame: 30, Role: "a_roll",
 	}})
 	if err != nil {
@@ -892,7 +914,7 @@ func TestRenderWorkerCreatesPreviewWithRenderSnapshot(t *testing.T) {
 	}
 }
 
-func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
+func TestUnderstandHandlerCompletesSingleAssetAndRejectsBatchShape(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")
 	}
@@ -904,16 +926,15 @@ func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	createDraft(t, database, "draft_understand_worker", now)
-	for _, assetID := range []string{"asset_u1", "asset_u2"} {
-		apply(t, database, []contracts.Event{{
-			Type: "AssetImported", Payload: map[string]any{
-				"asset_id": assetID, "job_id": "import_" + assetID, "storage_mode": "reference",
-				"reference_path": source, "kind": "video", "source": "local_path",
-				"filename": assetID + ".mp4", "hash": assetID, "size": 1,
-				"probe": map[string]any{"duration_sec": 1}, "ingest_status": "ready",
-			},
-		}}, contracts.ActorUser, now)
-	}
+	const assetID = "asset_u1"
+	apply(t, database, []contracts.Event{{
+		Type: "AssetImported", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "import_" + assetID, "storage_mode": "reference",
+			"reference_path": source, "kind": "video", "source": "local_path",
+			"filename": assetID + ".mp4", "hash": assetID, "size": 1,
+			"probe": map[string]any{"duration_sec": 1}, "ingest_status": "ready",
+		},
+	}}, contracts.ActorUser, now)
 	registry := NewRegistry()
 	if err := RegisterUnderstand(registry, database, nil); err != nil {
 		t.Fatal(err)
@@ -924,56 +945,48 @@ func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
 	}
 	progress := []float64{}
 	progressUpdates := []ProgressUpdate{}
-	result, err := handler(t.Context(), Job{
-		ID: "understand_job", Payload: map[string]any{
-			"asset_ids": []any{"asset_u1", 42, "asset_u2"}, "focus": "人物",
-		},
-	}, func(_ context.Context, _ Job, update ProgressUpdate) error {
+	job := Job{
+		ID: "understand_job", AssetID: understandStringPointer(assetID),
+		Payload: map[string]any{"asset_id": assetID, "focus": "人物"},
+	}
+	result, err := handler(t.Context(), job, func(_ context.Context, _ Job, update ProgressUpdate) error {
 		progress = append(progress, update.Progress)
 		progressUpdates = append(progressUpdates, update)
 		return nil
 	})
-	if err != nil || result["status"] != "completed" || len(progress) < 2 || progress[len(progress)-1] != 1 {
+	if err != nil || result["status"] != "completed" || result["asset_id"] != assetID ||
+		result["analyzed"] != true || len(progress) == 0 || progress[len(progress)-1] != 1 {
 		t.Fatalf("result=%#v progress=%v err=%v", result, progress, err)
 	}
-	if !containsProgressDetail(progressUpdates, "asset_u1", "view_frames", "asset_u1.mp4") {
+	if !containsProgressDetail(progressUpdates, assetID, "view_frames", assetID+".mp4") {
 		t.Fatalf("missing asset progress detail: %#v", progressUpdates)
 	}
-	retryProgress := []float64{}
-	result, err = handler(t.Context(), Job{
-		ID: "understand_job", Payload: map[string]any{
-			"asset_ids": []any{"asset_u1", "asset_u2"}, "focus": "人物",
-		},
-	}, func(_ context.Context, _ Job, update ProgressUpdate) error {
-		retryProgress = append(retryProgress, update.Progress)
+	replayProgress := []float64{}
+	result, err = handler(t.Context(), job, func(_ context.Context, _ Job, update ProgressUpdate) error {
+		replayProgress = append(replayProgress, update.Progress)
 		return nil
 	})
-	if err != nil || result["status"] != "completed" || len(retryProgress) != 2 || retryProgress[1] != 1 {
-		t.Fatalf("retry result=%#v progress=%v err=%v", result, retryProgress, err)
+	if err != nil || result["analyzed"] != true ||
+		!reflect.DeepEqual(replayProgress, []float64{1}) {
+		t.Fatalf("replay result=%#v progress=%v err=%v", result, replayProgress, err)
 	}
 	cacheResult, err := handler(t.Context(), Job{
-		ID: "understand_cache_hit", Payload: map[string]any{
-			"asset_ids": []string{"asset_u1"}, "focus": "人物",
-		},
+		ID: "understand_cache_hit", AssetID: understandStringPointer(assetID),
+		Payload: map[string]any{"asset_id": assetID, "focus": "人物"},
 	}, func(context.Context, Job, ProgressUpdate) error { return nil })
-	if err != nil || !reflect.DeepEqual(cacheResult["cache_hit_asset_ids"], []string{"asset_u1"}) ||
-		len(cacheResult["analyzed_asset_ids"].([]string)) != 0 {
+	if err != nil || cacheResult["cache_hit"] != true || cacheResult["analyzed"] != false {
 		t.Fatalf("cache result=%#v err=%v", cacheResult, err)
 	}
-	for _, assetID := range []string{"asset_u1", "asset_u2"} {
-		asset, _ := storage.GetAsset(t.Context(), database.Read(), assetID)
-		if asset.UnderstandingStatus != "ready" {
-			t.Fatalf("%s status=%s", assetID, asset.UnderstandingStatus)
-		}
-		var summaries int
-		if err := database.Read().QueryRowContext(t.Context(),
-			"SELECT COUNT(*) FROM material_summaries WHERE asset_id=?", assetID,
-		).Scan(&summaries); err != nil || summaries != 1 {
-			t.Fatalf("%s summaries=%d err=%v", assetID, summaries, err)
-		}
+	asset, _ := storage.GetAsset(t.Context(), database.Read(), assetID)
+	if asset.UnderstandingStatus != "ready" {
+		t.Fatalf("%s status=%s", assetID, asset.UnderstandingStatus)
 	}
-	assetID := "asset_u1"
-	if _, err := handler(t.Context(), Job{ID: "by_asset", AssetID: &assetID}, func(context.Context, Job, ProgressUpdate) error { return nil }); err != nil {
+	if _, err := handler(t.Context(), Job{
+		ID: "forced", AssetID: understandStringPointer(assetID),
+		Payload: map[string]any{
+			"asset_id": assetID, "focus": "人物", "force_refresh": true,
+		},
+	}, func(context.Context, Job, ProgressUpdate) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := database.Read().QueryContext(t.Context(), `
@@ -994,18 +1007,13 @@ func TestUnderstandHandlerCompletesSummariesAndInputShapes(t *testing.T) {
 		t.Fatalf("summary versions=%v", versions)
 	}
 	if _, err := handler(t.Context(), Job{ID: "missing", Payload: map[string]any{}}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
-		t.Fatal("missing assets should fail")
+		t.Fatal("missing asset should fail")
 	}
-	if got := stringSlice([]string{"a", "b"}); len(got) != 2 {
-		t.Fatalf("string slice=%v", got)
-	}
-	if got := stringSlice(1); got != nil {
-		t.Fatalf("invalid string slice=%v", got)
-	}
-	for input, expected := range map[any]int{int(3): 3, int64(4): 4, float64(5.9): 5, "6": 0} {
-		if got := understandInt(input); got != expected {
-			t.Fatalf("understandInt(%#v)=%d want=%d", input, got, expected)
-		}
+	if _, err := handler(t.Context(), Job{
+		ID: "batch", AssetID: understandStringPointer(assetID),
+		Payload: map[string]any{"asset_id": assetID, "asset_ids": []string{assetID}},
+	}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
+		t.Fatal("batch payload should fail")
 	}
 }
 
@@ -1017,17 +1025,15 @@ func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	assetIDs := []string{"asset-retry-1", "asset-retry-2"}
-	for _, assetID := range assetIDs {
-		apply(t, database, []contracts.Event{{
-			Type: "AssetImported", Payload: map[string]any{
-				"asset_id": assetID, "job_id": "import-" + assetID,
-				"storage_mode": "reference", "reference_path": fontSource,
-				"kind": "font", "source": "local_path", "filename": assetID + ".otf",
-				"hash": assetID, "size": 1, "ingest_status": "ready", "usable": true,
-			},
-		}}, contracts.ActorUser, now)
-	}
+	const assetID = "asset-retry"
+	apply(t, database, []contracts.Event{{
+		Type: "AssetImported", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "import-" + assetID,
+			"storage_mode": "reference", "reference_path": fontSource,
+			"kind": "font", "source": "local_path", "filename": assetID + ".otf",
+			"hash": assetID, "size": 1, "ingest_status": "ready", "usable": true,
+		},
+	}}, contracts.ActorUser, now)
 	registry := NewRegistry()
 	if err := RegisterUnderstand(registry, database, nil); err != nil {
 		t.Fatal(err)
@@ -1036,9 +1042,12 @@ func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job := Job{ID: "understand-retry", Payload: map[string]any{
-		"asset_ids": assetIDs, "focus": "字体可用性", "depth": "scan",
-	}}
+	job := Job{
+		ID: "understand-retry", AssetID: understandStringPointer(assetID),
+		Payload: map[string]any{
+			"asset_id": assetID, "focus": "字体可用性", "depth": "scan",
+		},
+	}
 	reportErr := errors.New("进度写入失败")
 	firstProgress := []float64{}
 	firstResult, err := handler(t.Context(), job, func(_ context.Context, _ Job, update ProgressUpdate) error {
@@ -1046,22 +1055,20 @@ func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
 		return reportErr
 	})
 	if !errors.Is(err, reportErr) || firstResult != nil || len(firstProgress) != 1 ||
-		firstProgress[0] <= 0 || firstProgress[0] >= 0.5 {
+		firstProgress[0] <= 0 || firstProgress[0] >= 1 {
 		t.Fatalf("first result=%#v progress=%v err=%v", firstResult, firstProgress, err)
 	}
-	for _, assetID := range assetIDs {
-		var count int
-		if err := database.Read().QueryRowContext(t.Context(),
-			"SELECT COUNT(*) FROM material_summaries WHERE asset_id=?", assetID,
-		).Scan(&count); err != nil {
-			t.Fatal(err)
-		}
-		want := 0
-		if count != want {
-			t.Fatalf("第一次 reporter 失败后 %s summaries=%d want=%d", assetID, count, want)
-		}
+	var count int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM material_summaries WHERE asset_id=?", assetID,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("第一次 reporter 失败后 %s summaries=%d want=0", assetID, count)
 	}
 
+	job.Attempts = 1
 	retryProgress := []float64{}
 	retryResult, err := handler(t.Context(), job, func(_ context.Context, _ Job, update ProgressUpdate) error {
 		retryProgress = append(retryProgress, update.Progress)
@@ -1069,9 +1076,8 @@ func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
 	})
 	if err != nil || retryResult["status"] != "completed" ||
 		len(retryProgress) < 2 || retryProgress[len(retryProgress)-1] != 1 ||
-		!reflect.DeepEqual(retryResult["asset_ids"], assetIDs) ||
-		!reflect.DeepEqual(retryResult["analyzed_asset_ids"], assetIDs) ||
-		!reflect.DeepEqual(retryResult["cache_hit_asset_ids"], []string{}) {
+		retryResult["asset_id"] != assetID || retryResult["analyzed"] != true ||
+		retryResult["cache_hit"] != false {
 		t.Fatalf("retry result=%#v progress=%v err=%v", retryResult, retryProgress, err)
 	}
 
@@ -1081,14 +1087,14 @@ func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
 		replayProgress = append(replayProgress, update.Progress)
 		return nil
 	})
-	if err != nil || !reflect.DeepEqual(replayProgress, []float64{0.5, 1.0}) ||
-		!reflect.DeepEqual(replayResult["analyzed_asset_ids"], assetIDs) {
+	if err != nil || !reflect.DeepEqual(replayProgress, []float64{1}) ||
+		replayResult["analyzed"] != true {
 		t.Fatalf("replay result=%#v progress=%v err=%v", replayResult, replayProgress, err)
 	}
 	var summaries int
 	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT COUNT(*) FROM material_summaries WHERE asset_id IN (?, ?)`, assetIDs[0], assetIDs[1],
-	).Scan(&summaries); err != nil || summaries != 2 {
+		SELECT COUNT(*) FROM material_summaries WHERE asset_id=?`, assetID,
+	).Scan(&summaries); err != nil || summaries != 1 {
 		t.Fatalf("summaries=%d err=%v", summaries, err)
 	}
 	for _, item := range []struct {
@@ -1096,7 +1102,7 @@ func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
 		want      int
 	}{
 		{eventType: "MaterialUnderstandingStarted", want: 2},
-		{eventType: "MaterialUnderstandingCompleted", want: 2},
+		{eventType: "MaterialUnderstandingCompleted", want: 1},
 		{eventType: "MaterialUnderstandingFailed", want: 1},
 	} {
 		var count int
@@ -1132,7 +1138,8 @@ func TestUnderstandRunnerRetriesKeepAssetRunningUntilFinalFailure(t *testing.T) 
 		{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{"asset_id": assetID}},
 		{Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
 			"job_id": jobID, "kind": "understand", "requested_by_draft_id": draftID,
-			"idempotency_key": jobID, "job_payload": map[string]any{"asset_ids": []string{assetID}},
+			"asset_id": assetID, "idempotency_key": jobID,
+			"job_payload": map[string]any{"asset_id": assetID},
 			"max_retries": 2, "next_run_at": clock.Format(time.RFC3339Nano),
 		}},
 	}, contracts.ActorAgent, clock)
@@ -1198,6 +1205,115 @@ func TestUnderstandRunnerRetriesKeepAssetRunningUntilFinalFailure(t *testing.T) 
 		if !reflect.DeepEqual(attempts, []int{0, 1, 2}) {
 			t.Fatalf("%s attempts=%v want=[0 1 2]", eventType, attempts)
 		}
+	}
+}
+
+func TestPersistedLegacyUnderstandBatchReachesTerminalFailureAfterUpgrade(t *testing.T) {
+	t.Parallel()
+	database := testDatabase(t)
+	clock := time.Date(2026, 7, 24, 18, 0, 0, 0, time.UTC)
+	const (
+		draftID = "draft-legacy-understand"
+		jobID   = "job-legacy-understand"
+	)
+	assetIDs := []string{"asset-legacy-a", "asset-legacy-b"}
+	createDraft(t, database, draftID, clock)
+	events := make([]contracts.Event, 0, len(assetIDs)*2)
+	for _, assetID := range assetIDs {
+		events = append(events,
+			contracts.Event{Type: "AssetImported", Payload: map[string]any{
+				"asset_id": assetID, "job_id": "import-" + assetID,
+				"kind": "video", "filename": assetID + ".mp4",
+				"ingest_status": "ready", "understanding_status": "running",
+				"usable": true,
+			}},
+			contracts.Event{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{
+				"asset_id": assetID,
+			}},
+		)
+	}
+	apply(t, database, events, contracts.ActorAgent, clock)
+
+	legacyPayload := map[string]any{
+		"asset_ids": assetIDs, "focus": "人物", "depth": "deep",
+		"analysis_fingerprints": map[string]string{
+			assetIDs[0]: "fingerprint-a", assetIDs[1]: "fingerprint-b",
+		},
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO jobs(
+			job_id, kind, status, draft_id, requested_by_draft_id, asset_id,
+			idempotency_key, payload_json, attempts, max_retries, next_run_at,
+			priority, created_at
+		) VALUES(?, 'understand', 'pending', ?, ?, NULL, ?, ?, 0, 2, ?, 30, ?)`,
+		jobID, draftID, draftID, jobID, mustJSON(legacyPayload),
+		clock.Format(time.RFC3339Nano), clock.Format(time.RFC3339Nano),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		UPDATE drafts SET running_jobs_json=? WHERE draft_id=?`,
+		mustJSON([]map[string]any{{
+			"job_id": jobID, "kind": "understand", "status": "pending",
+		}}), draftID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := NewRegistry()
+	if err := RegisterUnderstand(registry, database, nil); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewRunner(RunnerConfig{
+		Database: database, Registry: registry, WorkerID: "legacy-upgrade-worker",
+		Now: func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := range 3 {
+		worked, runErr := runner.RunOnce(t.Context())
+		if runErr != nil || !worked {
+			t.Fatalf("attempt=%d worked=%v err=%v", attempt, worked, runErr)
+		}
+		stored, err := GetJob(t.Context(), database, jobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if attempt < 2 {
+			if stored.Status != "pending" || stored.Attempts != attempt+1 {
+				t.Fatalf("attempt=%d job=%#v", attempt, stored)
+			}
+			clock = clock.Add(time.Duration(attempt+2) * time.Second)
+			continue
+		}
+		if stored.Status != "failed" || stored.Attempts != 2 {
+			t.Fatalf("terminal job=%#v", stored)
+		}
+	}
+
+	for _, assetID := range assetIDs {
+		asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if asset.UnderstandingStatus != "failed" ||
+			!strings.Contains(string(mustJSON(asset.Failure)), "unknown field") {
+			t.Fatalf("%s status=%s failure=%#v", assetID, asset.UnderstandingStatus, asset.Failure)
+		}
+	}
+	var runningJobsJSON string
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT running_jobs_json FROM drafts WHERE draft_id=?", draftID,
+	).Scan(&runningJobsJSON); err != nil || runningJobsJSON != "[]" {
+		t.Fatalf("running_jobs=%s err=%v", runningJobsJSON, err)
+	}
+	var failedEvents int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM event_log WHERE event_type='JobFailed'
+		AND json_extract(payload_json,'$.payload.job_id')=?`, jobID,
+	).Scan(&failedEvents); err != nil || failedEvents != 1 {
+		t.Fatalf("JobFailed events=%d err=%v", failedEvents, err)
 	}
 }
 
@@ -1417,7 +1533,9 @@ func TestCancelledJobClaimFencesAllWorkerResults(t *testing.T) {
 		}},
 		{Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
 			"job_id": jobID, "kind": "understand", "requested_by_draft_id": draftID,
-			"idempotency_key": jobID, "next_run_at": now.Format(time.RFC3339Nano),
+			"asset_id": assetID, "idempotency_key": jobID,
+			"job_payload": map[string]any{"asset_id": assetID},
+			"next_run_at": now.Format(time.RFC3339Nano),
 		}},
 	}, contracts.ActorUser, now)
 	job, err := Claim(t.Context(), database, "claim-fence-worker", now)
@@ -1441,6 +1559,10 @@ func TestCancelledJobClaimFencesAllWorkerResults(t *testing.T) {
 		{{Type: "MaterialUnderstandingCompleted", Payload: map[string]any{
 			"asset_id": assetID, "job_id": jobID, "attempt": 0,
 			"summary_id": "summary_claim_fence",
+		}}},
+		{{Type: "MaterialUnderstandingFailed", Payload: map[string]any{
+			"asset_id": assetID, "job_id": jobID, "attempt": 0,
+			"cancelled": true, "failure": map[string]any{"message": "late"},
 		}}},
 		{{Type: "PreviewRendered", DraftID: draftID, Payload: map[string]any{
 			"artifact_id": "preview_claim_fence", "timeline_version": 1,
@@ -1472,7 +1594,7 @@ func TestCancelledJobClaimFencesAllWorkerResults(t *testing.T) {
 	assertEmpty("SELECT COUNT(*) FROM previews WHERE preview_id='preview_claim_fence'")
 	assertEmpty("SELECT COUNT(*) FROM exports WHERE export_id='export_claim_fence'")
 	assertEmpty(`SELECT COUNT(*) FROM event_log WHERE event_type IN
-		('MaterialUnderstandingCompleted','PreviewRendered','ExportCompleted')
+		('MaterialUnderstandingCompleted','MaterialUnderstandingFailed','PreviewRendered','ExportCompleted')
 		AND (json_extract(payload_json,'$.payload.job_id')=?
 			OR json_extract(payload_json,'$.payload.artifact_id') IN
 				('preview_claim_fence','export_claim_fence'))`, jobID)
@@ -1677,9 +1799,11 @@ func TestWorkerHandlerFailureSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := understand(t.Context(), Job{ID: "understand_missing", Payload: map[string]any{
-		"asset_ids": []string{"asset_missing_source"},
-	}}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
+	missingSourceAssetID := "asset_missing_source"
+	if _, err := understand(t.Context(), Job{
+		ID: "understand_missing", AssetID: &missingSourceAssetID,
+		Payload: map[string]any{"asset_id": missingSourceAssetID},
+	}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
 		t.Fatal("缺失源文件应触发理解失败")
 	}
 	var failed int
@@ -1687,9 +1811,11 @@ func TestWorkerHandlerFailureSemantics(t *testing.T) {
 		t.Fatalf("failed events=%d err=%v", failed, err)
 	}
 	reportErr := errors.New("report failed")
-	if _, err := understand(t.Context(), Job{ID: "understand_report", Payload: map[string]any{
-		"asset_ids": []string{"asset_font"},
-	}}, func(context.Context, Job, ProgressUpdate) error { return reportErr }); !errors.Is(err, reportErr) {
+	fontAssetID := "asset_font"
+	if _, err := understand(t.Context(), Job{
+		ID: "understand_report", AssetID: &fontAssetID,
+		Payload: map[string]any{"asset_id": fontAssetID},
+	}, func(context.Context, Job, ProgressUpdate) error { return reportErr }); !errors.Is(err, reportErr) {
 		t.Fatalf("understand report err=%v", err)
 	}
 	duplicate := NewRegistry()

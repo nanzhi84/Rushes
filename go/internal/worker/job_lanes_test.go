@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
@@ -58,11 +59,17 @@ func TestClaimMatchingSeparatesRenderAndGeneralJobs(t *testing.T) {
 		{id: "job_render", kind: "render_preview", priority: 1},
 		{id: "job_understand", kind: "understand", priority: 2},
 	} {
+		payload := map[string]any{
+			"job_id": fixture.id, "kind": fixture.kind, "idempotency_key": fixture.id,
+			"priority": fixture.priority, "next_run_at": now.Format(time.RFC3339Nano),
+		}
+		if fixture.kind == "understand" {
+			assetID := "asset_" + fixture.id
+			agenttest.InsertJobFixtureAsset(t, database, assetID)
+			payload["asset_id"] = assetID
+		}
 		apply(t, database, []contracts.Event{{
-			Type: "JobEnqueued", DraftID: "draft_claim_lanes", Payload: map[string]any{
-				"job_id": fixture.id, "kind": fixture.kind, "idempotency_key": fixture.id,
-				"priority": fixture.priority, "next_run_at": now.Format(time.RFC3339Nano),
-			},
+			Type: "JobEnqueued", DraftID: "draft_claim_lanes", Payload: payload,
 		}}, contracts.ActorJob, now)
 	}
 	renderKinds := contracts.JobKindsByExecutionClass(contracts.JobExecutionRender)
@@ -87,9 +94,11 @@ func TestClaimMatchingReturnsTheJobClaimedByThisCall(t *testing.T) {
 	now := time.Date(2026, 7, 16, 15, 30, 0, 0, time.UTC)
 	createDraft(t, database, "draft_claim_fence", now)
 	for _, jobID := range []string{"job_a", "job_b"} {
+		agenttest.InsertJobFixtureAsset(t, database, "asset_"+jobID)
 		apply(t, database, []contracts.Event{{
 			Type: "JobEnqueued", DraftID: "draft_claim_fence", Payload: map[string]any{
 				"job_id": jobID, "kind": "understand", "idempotency_key": jobID,
+				"asset_id": "asset_" + jobID,
 				"priority": 1, "next_run_at": now.Format(time.RFC3339Nano),
 			},
 		}}, contracts.ActorJob, now)
@@ -118,11 +127,17 @@ func TestRunnerKeepsGeneralLaneMovingWhileRenderLaneIsBlocked(t *testing.T) {
 		{id: "render_b", kind: "render_final", priority: 1},
 		{id: "understand_a", kind: "understand", priority: 2},
 	} {
+		payload := map[string]any{
+			"job_id": fixture.id, "kind": fixture.kind, "idempotency_key": fixture.id,
+			"priority": fixture.priority, "next_run_at": now.Format(time.RFC3339Nano),
+		}
+		if fixture.kind == "understand" {
+			assetID := "asset_" + fixture.id
+			agenttest.InsertJobFixtureAsset(t, database, assetID)
+			payload["asset_id"] = assetID
+		}
 		apply(t, database, []contracts.Event{{
-			Type: "JobEnqueued", DraftID: "draft_lane_fairness", Payload: map[string]any{
-				"job_id": fixture.id, "kind": fixture.kind, "idempotency_key": fixture.id,
-				"priority": fixture.priority, "next_run_at": now.Format(time.RFC3339Nano),
-			},
+			Type: "JobEnqueued", DraftID: "draft_lane_fairness", Payload: payload,
 		}}, contracts.ActorJob, now)
 	}
 	registry := NewRegistry()

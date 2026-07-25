@@ -105,7 +105,7 @@ func TestTimeoutRetryChatModelRetriesFiveTimesAndCompactsToolResults(t *testing.
 		t.Fatal(err)
 	}
 	toolMessage := &schema.Message{
-		Role: schema.Tool, Content: string(toolPayload), ToolCallID: "call_recut", ToolName: "timeline.recut_to_beats",
+		Role: schema.Tool, Content: string(toolPayload), ToolCallID: "call_atomic_update", ToolName: "timeline.update",
 	}
 	input := []*schema.Message{schema.UserMessage("继续剪辑"), toolMessage}
 	originalContent := toolMessage.Content
@@ -133,7 +133,7 @@ func TestTimeoutRetryChatModelRetriesFiveTimesAndCompactsToolResults(t *testing.
 	}
 	for callIndex, messages := range stub.inputs[1:] {
 		compacted := messages[1]
-		if compacted.ToolCallID != "call_recut" || compacted.ToolName != "timeline.recut_to_beats" {
+		if compacted.ToolCallID != "call_atomic_update" || compacted.ToolName != "timeline.update" {
 			t.Fatalf("工具关联字段丢失: %#v", compacted)
 		}
 		if utf8.RuneCountInString(compacted.Content) > modelRetryPerToolBudgets[callIndex] {

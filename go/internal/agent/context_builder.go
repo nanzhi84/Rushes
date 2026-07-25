@@ -617,20 +617,6 @@ func compactWaveformContext(value any) map[string]any {
 	}
 }
 
-func compressTimelineEditBatches(
-	batches []storage.TimelineEditBatch,
-	limit int,
-) []map[string]any {
-	entries := compressTimelineEditEntries(batches, limit)
-	result := make([]map[string]any, 0, len(entries))
-	for _, entry := range entries {
-		clean := cloneContextMap(entry)
-		delete(clean, "_history_key")
-		result = append(result, clean)
-	}
-	return result
-}
-
 func compressTimelineEditHistoryMap(
 	batches []storage.TimelineEditBatch,
 	limit int,
@@ -676,13 +662,6 @@ func compressTimelineEditEntries(
 			operation := summarizeTimelineEditOperation(rawOperation)
 			kind, _ := operation["kind"].(string)
 			target := operationTarget(operation)
-			// 这两类操作会原子替换整条时间线。此前的逐片段操作已经被最新
-			// WorldState 吸收，继续保留只会让模型误读为仍待执行的指令。
-			if kind == "recut_to_beats" || kind == "compose_initial" {
-				entries = entries[:0]
-				coalesced = map[string]int{}
-				inserted = map[string]int{}
-			}
 			if kind == "delete_clip" && target != "" {
 				if index, ok := inserted[target]; ok && index >= 0 && index < len(entries) {
 					entries = append(entries[:index], entries[index+1:]...)
@@ -724,39 +703,11 @@ func timelineEditHistoryKey(sequence int64, operationIndex int) string {
 
 func summarizeTimelineEditOperation(raw map[string]any) map[string]any {
 	operation := sanitizeContextMap(raw)
-	kind := agentexec.InterfaceString(operation["kind"])
-	if kind != "recut_to_beats" {
-		compacted, _ := compactEditHistoryValue(operation, 0).(map[string]any)
-		if compacted == nil {
-			return map[string]any{"kind": kind}
-		}
-		return compacted
+	compacted, _ := compactEditHistoryValue(operation, 0).(map[string]any)
+	if compacted == nil {
+		return map[string]any{"kind": agentexec.InterfaceString(operation["kind"])}
 	}
-
-	result := map[string]any{"kind": kind}
-	copyContextFields(result, operation,
-		"bgm_asset_id", "target_duration_frames", "sfx_asset_id", "sfx_start_frame",
-	)
-	cutFrames := agentexec.EffectFrameValues(operation["cut_frames"])
-	if len(cutFrames) > 0 {
-		result["clip_count"] = len(cutFrames)
-		result["first_cut_frame"] = cutFrames[0]
-		result["last_cut_frame"] = cutFrames[len(cutFrames)-1]
-	}
-	result["video_asset_count"] = distinctContextStringCount(operation["video_asset_ids"])
-	result["source_range_count"] = contextCollectionCount(operation["source_range_usage"])
-	shotCount := contextCollectionCount(operation["shot_ids"])
-	result["shot_count"] = shotCount
-	result["uses_explicit_shots"] = shotCount > 0
-	return result
-}
-
-func copyContextFields(target, source map[string]any, keys ...string) {
-	for _, key := range keys {
-		if value, exists := source[key]; exists && !emptyContextValue(value) {
-			target[key] = compactEditHistoryValue(value, 1)
-		}
-	}
+	return compacted
 }
 
 func compactEditHistoryValue(value any, depth int) any {
@@ -856,29 +807,6 @@ func minimalEditHistoryEntry(entry map[string]any) map[string]any {
 	return result
 }
 
-func contextCollectionCount(value any) int {
-	reflected := reflect.ValueOf(value)
-	if !reflected.IsValid() || (reflected.Kind() != reflect.Slice && reflected.Kind() != reflect.Array) {
-		return 0
-	}
-	return reflected.Len()
-}
-
-func distinctContextStringCount(value any) int {
-	reflected := reflect.ValueOf(value)
-	if !reflected.IsValid() || (reflected.Kind() != reflect.Slice && reflected.Kind() != reflect.Array) {
-		return 0
-	}
-	seen := map[string]struct{}{}
-	for index := 0; index < reflected.Len(); index++ {
-		item := reflected.Index(index).Interface()
-		if text, ok := item.(string); ok && text != "" {
-			seen[text] = struct{}{}
-		}
-	}
-	return len(seen)
-}
-
 func minInt(left, right int) int {
 	if left < right {
 		return left
@@ -905,8 +833,6 @@ func rebuildEditIndexes(entries []map[string]any) (map[string]int, map[string]in
 
 func coalesceOperationKey(kind string, operation map[string]any, target string) string {
 	switch kind {
-	case "recut_to_beats", "compose_initial":
-		return kind
 	case "move_clip", "adjust_gain", "set_clip_fades", "set_clip_linked", "edit_subtitle_text", "set_playback_rate":
 		return kind + ":" + target
 	case "trim_clip", "trim_clip_edge":
@@ -919,7 +845,7 @@ func coalesceOperationKey(kind string, operation map[string]any, target string) 
 }
 
 func operationTarget(operation map[string]any) string {
-	for _, key := range []string{"timeline_clip_id", "clip_id", "track_id"} {
+	for _, key := range []string{"timeline_clip_id", "track_id"} {
 		if value, ok := operation[key].(string); ok && value != "" {
 			return value
 		}

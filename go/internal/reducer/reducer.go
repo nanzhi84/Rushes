@@ -959,9 +959,17 @@ func reconcileUnderstandingAsset(
 		SELECT EXISTS(
 			SELECT 1 FROM jobs j
 			WHERE j.kind='understand' AND j.status IN ('pending','running')
-			AND (j.asset_id=? OR EXISTS(
-				SELECT 1 FROM json_each(j.payload_json, '$.asset_ids') item WHERE item.value=?
-			))
+			AND (
+				j.asset_id=?
+				OR (
+					j.asset_id IS NULL
+					AND json_type(j.payload_json, '$.asset_ids')='array'
+					AND EXISTS(
+						SELECT 1 FROM json_each(j.payload_json, '$.asset_ids') legacy
+						WHERE TRIM(CAST(legacy.value AS TEXT))=?
+					)
+				)
+			)
 		)`, assetID, assetID).Scan(&active)
 	if err != nil {
 		return err
@@ -981,9 +989,17 @@ func reconcileUnderstandingAsset(
 	err = tx.QueryRowContext(ctx, `
 		SELECT j.error_json FROM jobs j
 		WHERE j.kind='understand' AND j.status='failed'
-		AND (j.asset_id=? OR EXISTS(
-			SELECT 1 FROM json_each(j.payload_json, '$.asset_ids') item WHERE item.value=?
-		))
+		AND (
+			j.asset_id=?
+			OR (
+				j.asset_id IS NULL
+				AND json_type(j.payload_json, '$.asset_ids')='array'
+				AND EXISTS(
+					SELECT 1 FROM json_each(j.payload_json, '$.asset_ids') legacy
+					WHERE TRIM(CAST(legacy.value AS TEXT))=?
+				)
+			)
+		)
 		ORDER BY j.finished_at DESC, j.created_at DESC, j.rowid DESC LIMIT 1`,
 		assetID, assetID,
 	).Scan(&failedError)
@@ -1381,7 +1397,7 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 			}
 		}
 	}
-	if err := reconcileUnderstandJobAssets(ctx, state.tx, jobID); err != nil {
+	if err := reconcileUnderstandJobAsset(ctx, state.tx, jobID, event); err != nil {
 		return err
 	}
 	draftID := stringFrom(event.Payload["requested_by_draft_id"], event.DraftID)
@@ -1391,55 +1407,72 @@ func applyJob(ctx context.Context, state *applyState, event contracts.Event) err
 	return updateRunningJobs(ctx, state, draftID, jobID, status, event)
 }
 
-func reconcileUnderstandJobAssets(ctx context.Context, tx *sql.Tx, jobID string) error {
+func reconcileUnderstandJobAsset(
+	ctx context.Context,
+	tx *sql.Tx,
+	jobID string,
+	event contracts.Event,
+) error {
 	var kind, payloadJSON string
-	var outerAssetID sql.NullString
+	var assetID sql.NullString
 	if err := tx.QueryRowContext(ctx,
 		"SELECT kind, payload_json, asset_id FROM jobs WHERE job_id=?", jobID,
-	).Scan(&kind, &payloadJSON, &outerAssetID); err != nil {
+	).Scan(&kind, &payloadJSON, &assetID); err != nil {
 		return err
 	}
 	if kind != "understand" {
 		return nil
 	}
-	var payload map[string]any
-	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+	if assetID.Valid && strings.TrimSpace(assetID.String) != "" {
+		return reconcileUnderstandingAsset(
+			ctx, tx, strings.TrimSpace(assetID.String), nil, false, false,
+		)
+	}
+	if event.Type == "JobEnqueued" {
+		return fmt.Errorf("understand job %s 缺少 asset_id", jobID)
+	}
+
+	// 旧版本可能已持久化 asset_id=NULL、payload.asset_ids=[...] 的批量
+	// understand job。新代码不再允许创建这种 job，但升级后必须让已有 job
+	// 能写入终态，否则严格单素材 decoder 的失败会在 reducer 中回滚，job
+	// 永久停在 running。这里只为已存在的旧行恢复关联素材状态，不接受新的
+	// 批量 JobEnqueued，也不把旧 payload 暴露回当前 detector 契约。
+	var legacy struct {
+		AssetIDs []string `json:"asset_ids"`
+	}
+	if err := json.Unmarshal([]byte(payloadJSON), &legacy); err != nil {
 		return fmt.Errorf("understand job %s payload 无效: %w", jobID, err)
 	}
-	assetIDs := reducerStringSlice(payload["asset_ids"])
-	if len(assetIDs) == 0 && outerAssetID.Valid {
-		assetIDs = []string{outerAssetID.String}
+	seen := make(map[string]struct{}, len(legacy.AssetIDs))
+	assetIDs := make([]string, 0, len(legacy.AssetIDs))
+	for _, rawAssetID := range legacy.AssetIDs {
+		legacyAssetID := strings.TrimSpace(rawAssetID)
+		if legacyAssetID == "" {
+			continue
+		}
+		if _, duplicate := seen[legacyAssetID]; duplicate {
+			continue
+		}
+		seen[legacyAssetID] = struct{}{}
+		assetIDs = append(assetIDs, legacyAssetID)
 	}
-	seen := map[string]struct{}{}
-	for _, assetID := range assetIDs {
-		assetID = strings.TrimSpace(assetID)
-		if assetID == "" {
-			continue
-		}
-		if _, duplicate := seen[assetID]; duplicate {
-			continue
-		}
-		seen[assetID] = struct{}{}
-		if err := reconcileUnderstandingAsset(ctx, tx, assetID, nil, false, false); err != nil {
+	if len(assetIDs) == 0 {
+		return fmt.Errorf("understand job %s 缺少 asset_id", jobID)
+	}
+	for _, legacyAssetID := range assetIDs {
+		useFailure := event.Type == "JobFailed"
+		if err := reconcileUnderstandingAsset(
+			ctx,
+			tx,
+			legacyAssetID,
+			event.Payload["error"],
+			event.Type == "JobCancelled",
+			useFailure,
+		); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func reducerStringSlice(value any) []string {
-	result := []string{}
-	switch typed := value.(type) {
-	case []string:
-		return append(result, typed...)
-	case []any:
-		for _, item := range typed {
-			if text, ok := item.(string); ok {
-				result = append(result, text)
-			}
-		}
-	}
-	return result
 }
 
 func updateRunningJobs(

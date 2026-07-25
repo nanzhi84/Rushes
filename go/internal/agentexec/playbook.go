@@ -18,8 +18,8 @@ const TimelineEditingPlaybook = `【时间线编辑】
 
 const TalkingHeadPlaybook = `【口播工作流】
 已有时间线时先并行读取 timeline.inspect、speech.search 与已有 shot.search 证据；尚无时间线时先选主讲素材建立初版。需要精确剪词时让 speech.search 返回 word_id 和源帧。相似台词、句内重说、气口和残句都只是证据：你必须结合上下文明确选择删哪一侧或保留，不向用户逐项审批可逆首剪。
-把选定的 source frame 区间映射到 timeline.inspect 返回的当前主视觉片段；每次只用 timeline.delete 删除一个连续时间线范围。来自同一快照的多个独立范围按时间线从后向前提交，避免前一次波纹删除移动后续坐标；若区间跨片段、依赖新 ID 或前一步改变了映射，先重新读取时间线再继续，不得猜目标。失败只修正失败的那一个原子操作，不得重跑已成功删除。
-台词清理完成后重新读取最新时间线，再按保留台词意图取得可验证 B-roll 镜头。镜头索引缺失时先并行 detect，检索池不完整时如实说明，不得编造 shot 或台词锚点。用 shot.search 的 asset_id/source range 调用 timeline.insert，只插入一段 visual_overlay；每段至少 1.5 秒，并用 timeline.update 为该段设置约 7 帧淡入淡出。不得在删除前预放 B-roll，也不得让工具自动选择镜头、改写 preserve/remove 决定或顺便执行第二种创作编辑。
+口播证据给出明确 asset_id 与 source frame 区间时，优先用 timeline.delete 的 delete_source_range，让服务端只把这个已选定的源区间确定性映射到最新时间线；映射缺失、不连续或不唯一时必须失败，不得猜替代目标。只有目标本来就是时间线范围时才用 delete_range。每次只删除一个连续范围；一次快照选出多个 timeline range 时按时间线从后向前提交，多个 source range 则分别提交，前一次波纹删除不会令后续 source 坐标失效。若依赖新 ID 或时间线目标，先重新读取时间线再继续。失败只修正失败的那一个原子操作，不得重跑已成功删除。
+台词清理完成后重新读取最新时间线，再按保留台词意图取得可验证 B-roll 镜头。为某句放置 B-roll 时，必须先用 speech.search 命中该句的 asset_id 与精确 source range；删除完成后用 timeline.inspect 找到覆盖该 source range 的当前 A-roll clip ID，再以这个 clip ID 和原句 query/source window 重调 speech.search，直接采用返回的 timeline_start_frame，禁止自行按 clip 起点估算。检索未命中时扩大到整段素材重查，不得拿所查 clip 的起点、同义句或另一段台词代替。镜头索引缺失时先并行 detect，检索池不完整时如实说明，不得编造 shot 或台词锚点。用 shot.search 的 asset_id/source range 调用 timeline.insert，只插入一段 visual_overlay；每段至少 1.5 秒，并用 timeline.update 为该段设置约 7 帧淡入淡出。不得在删除前预放 B-roll，也不得让工具自动选择镜头、改写 preserve/remove 决定或顺便执行第二种创作编辑。
 最后调用 timeline.check，依据 speech_quality 中的残留气口、过短保留孤岛、未遮盖硬接缝与过短 B-roll 逐项收敛。未遮盖硬接缝优先用与当前保留台词相符的 B-roll 覆盖；没有合适画面时才作为有意跳切保留并说明。结构合法不代表语义清理完成。`
 
 // TaskPlaybookSegments 是纯函数：只读取当前 WorldState 快照的固定 section 路径，

@@ -67,12 +67,10 @@ func TestCatalogSpecsAndCorrectExamples(t *testing.T) {
 				if _, exists := knownTypes[field.Type]; !exists {
 					t.Fatalf("字段 %s 使用未知类型 %q", field.Name, field.Type)
 				}
-				for _, name := range append([]string{field.Name}, field.Aliases...) {
-					if _, duplicate := fieldNames[name]; duplicate {
-						t.Fatalf("字段名或别名 %q 重复", name)
-					}
-					fieldNames[name] = struct{}{}
+				if _, duplicate := fieldNames[field.Name]; duplicate {
+					t.Fatalf("字段名 %q 重复", field.Name)
 				}
+				fieldNames[field.Name] = struct{}{}
 			}
 			for _, name := range spec.RequireAny {
 				if _, exists := fieldNames[name]; !exists {
@@ -111,7 +109,7 @@ func TestCatalogSpecsAndCorrectExamples(t *testing.T) {
 	}
 }
 
-func TestValidateOpFieldsAliasesAndCompatibility(t *testing.T) {
+func TestValidateOpFieldsCanonicalShapes(t *testing.T) {
 	t.Parallel()
 
 	valid := []struct {
@@ -122,12 +120,6 @@ func TestValidateOpFieldsAliasesAndCompatibility(t *testing.T) {
 			name: "canonical clip id",
 			op: map[string]any{
 				"kind": "trim_clip_edge", "timeline_clip_id": "clip_1", "timeline_frame": 10, "edge": "end",
-			},
-		},
-		{
-			name: "clip_id alias",
-			op: map[string]any{
-				"kind": "trim_clip_edge", "clip_id": "clip_1", "timeline_frame": 10, "edge": "end",
 			},
 		},
 		{
@@ -151,35 +143,19 @@ func TestValidateOpFieldsAliasesAndCompatibility(t *testing.T) {
 		{
 			name: "number variants",
 			op: map[string]any{
-				"kind": "set_playback_rate", "clip_id": "clip_1", "playback_rate": int64(2),
+				"kind": "set_playback_rate", "timeline_clip_id": "clip_1", "playback_rate": int64(2),
 			},
 		},
 		{
 			name: "float32 number",
 			op: map[string]any{
-				"kind": "adjust_gain", "clip_id": "clip_1", "gain_db": float32(-3.5),
-			},
-		},
-		{
-			name: "injected fields may be absent",
-			op:   map[string]any{"kind": "sync_original_audio"},
-		},
-		{
-			name: "json string array",
-			op: map[string]any{
-				"kind": "sync_original_audio", "audio_asset_ids": []any{"asset_1", "asset_2"},
+				"kind": "adjust_gain", "timeline_clip_id": "clip_1", "gain_db": float32(-3.5),
 			},
 		},
 		{
 			name: "subtitle style only",
 			op: map[string]any{
 				"kind": "edit_subtitle_text", "timeline_clip_id": "subtitle_1", "style": "large_center",
-			},
-		},
-		{
-			name: "unknown compatibility field is tolerated",
-			op: map[string]any{
-				"kind": "delete_clip", "clip_id": "clip_1", "future_metadata": map[string]any{"v": 1},
 			},
 		},
 	}
@@ -222,14 +198,16 @@ func TestValidateOpFieldsReturnsTypedErrors(t *testing.T) {
 			wantKind: "delete_range", wantField: "start_frame", wantSpec: true, wantReason: "整数帧",
 		},
 		{
-			name:     "alias wrong type",
-			op:       map[string]any{"kind": "delete_clip", "clip_id": 1},
-			wantKind: "delete_clip", wantField: "clip_id", wantSpec: true, wantReason: "字符串",
+			name: "unknown field",
+			op: map[string]any{
+				"kind": "delete_clip", "timeline_clip_id": "clip_1", "future_metadata": map[string]any{"v": 1},
+			},
+			wantKind: "delete_clip", wantField: "future_metadata", wantSpec: true, wantReason: "不是该操作支持",
 		},
 		{
 			name: "optional field wrong type",
 			op: map[string]any{
-				"kind": "move_clip", "clip_id": "clip_1", "target_frame": 10, "mode": true,
+				"kind": "move_clip", "timeline_clip_id": "clip_1", "target_frame": 10, "mode": true,
 			},
 			wantKind: "move_clip", wantField: "mode", wantSpec: true, wantReason: "字符串",
 		},
@@ -245,7 +223,7 @@ func TestValidateOpFieldsReturnsTypedErrors(t *testing.T) {
 		},
 		{
 			name:     "boolean wrong type",
-			op:       map[string]any{"kind": "set_clip_linked", "clip_id": "clip_1", "linked": "true"},
+			op:       map[string]any{"kind": "set_clip_linked", "timeline_clip_id": "clip_1", "linked": "true"},
 			wantKind: "set_clip_linked", wantField: "linked", wantSpec: true, wantReason: "布尔值",
 		},
 		{
@@ -255,11 +233,6 @@ func TestValidateOpFieldsReturnsTypedErrors(t *testing.T) {
 				"metadata": []any{"not", "an", "object"},
 			},
 			wantKind: "insert_clip", wantField: "metadata", wantSpec: true, wantReason: "对象",
-		},
-		{
-			name:     "string array wrong member type",
-			op:       map[string]any{"kind": "sync_original_audio", "audio_asset_ids": []any{"asset_1", 2}},
-			wantKind: "sync_original_audio", wantField: "audio_asset_ids", wantSpec: true, wantReason: "字符串数组",
 		},
 		{
 			name:     "fractional frame",
@@ -273,12 +246,12 @@ func TestValidateOpFieldsReturnsTypedErrors(t *testing.T) {
 		},
 		{
 			name:     "non finite number",
-			op:       map[string]any{"kind": "adjust_gain", "clip_id": "clip_1", "gain_db": math.NaN()},
+			op:       map[string]any{"kind": "adjust_gain", "timeline_clip_id": "clip_1", "gain_db": math.NaN()},
 			wantKind: "adjust_gain", wantField: "gain_db", wantSpec: true, wantReason: "有限数值",
 		},
 		{
 			name:     "number wrong type",
-			op:       map[string]any{"kind": "adjust_gain", "clip_id": "clip_1", "gain_db": "-3"},
+			op:       map[string]any{"kind": "adjust_gain", "timeline_clip_id": "clip_1", "gain_db": "-3"},
 			wantKind: "adjust_gain", wantField: "gain_db", wantSpec: true, wantReason: "有限数值",
 		},
 	}

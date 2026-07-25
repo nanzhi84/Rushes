@@ -107,6 +107,7 @@ test("在途回合运行时编辑重发会先取消该回合再回退重发", as
 
   await sendMessage(page, "E2E_FULL_MAINLINE 首轮");
   await waitForTimelineVersion(request, draftId, 1);
+  await waitForPreview(request, draftId);
 
   // 发一条会一直阻塞直到取消的消息,制造在途回合。
   await page.getByLabel("消息输入").fill("E2E_BLOCK_UNTIL_CANCEL 卡住");

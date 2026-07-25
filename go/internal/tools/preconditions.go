@@ -10,10 +10,10 @@ import (
 )
 
 var PreconditionRegistry = map[string]struct{}{
-	"usable_asset_exists": {},
-	"timeline_absent":     {},
-	"timeline_exists":     {},
-	"any_preview_exists":  {},
+	"usable_asset_exists":     {},
+	"transcript_index_exists": {},
+	"timeline_exists":         {},
+	"any_preview_exists":      {},
 }
 
 func EvaluatePrecondition(
@@ -33,12 +33,18 @@ func EvaluatePrecondition(
 				SELECT 1 FROM assets a JOIN draft_asset_links l ON l.asset_id=a.asset_id
 				WHERE l.draft_id=? AND a.usable=1
 			)`, draftID).Scan(&value)
+	case "transcript_index_exists":
+		err = database.Read().QueryRowContext(ctx, `
+			SELECT EXISTS(
+				SELECT 1
+				FROM transcripts t
+				JOIN draft_asset_links l ON l.asset_id=t.asset_id
+				JOIN assets a ON a.asset_id=t.asset_id
+				WHERE l.draft_id=? AND a.usable=1
+			)`, draftID).Scan(&value)
 	case "timeline_exists":
 		err = database.Read().QueryRowContext(ctx,
 			"SELECT timeline_current_version IS NOT NULL FROM drafts WHERE draft_id=?", draftID).Scan(&value)
-	case "timeline_absent":
-		err = database.Read().QueryRowContext(ctx,
-			"SELECT timeline_current_version IS NULL FROM drafts WHERE draft_id=?", draftID).Scan(&value)
 	case "any_preview_exists":
 		err = database.Read().QueryRowContext(ctx,
 			"SELECT EXISTS(SELECT 1 FROM previews WHERE draft_id=?)", draftID).Scan(&value)

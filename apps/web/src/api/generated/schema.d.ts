@@ -2996,6 +2996,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimelinePatchFailureResponse"];
+                };
+            };
             /** @description Unsupported Media Type */
             415: {
                 headers: {
