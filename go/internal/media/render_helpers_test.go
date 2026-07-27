@@ -158,10 +158,16 @@ func TestBuildDuckingFilterGraphGroupsVoiceKeyAndKeepsFinalMix(t *testing.T) {
 func TestMixAudioFilterTrimsPreservedOverhangToCompositionDuration(t *testing.T) {
 	document := timeline.Empty("preserved_audio_render", 1)
 	document.DurationFrames = 30
+	overhang := timeline.Clip{
+		TimelineClipID: "bgm_overhang", TrackID: "bgm", AssetID: "music", AssetKind: "audio",
+		TimelineEndFrame: 60, SourceEndFrame: 60, PlaybackRate: 1,
+	}
+	clipFilter := audioFilter(0, overhang, 0, document, "bgm", audioSeam{})
 	filter := mixAudioFilter([]string{"bgm", "sfx"}, "mixed", document)
-	if !strings.Contains(filter, "amix=inputs=2:duration=longest") ||
+	if !strings.Contains(clipFilter, "atrim=duration=2.000000") ||
+		!strings.Contains(filter, "amix=inputs=2:duration=longest") ||
 		!strings.Contains(filter, "apad=whole_dur=1.000000,atrim=duration=1.000000[mixed]") {
-		t.Fatalf("overhanging independent audio must be trimmed to the final video: %s", filter)
+		t.Fatalf("overhanging independent audio must be kept at clip stage then trimmed in final mix: clip=%s mix=%s", clipFilter, filter)
 	}
 }
 

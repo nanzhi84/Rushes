@@ -624,51 +624,40 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 	}
 }
 
-func TestValidateAllowsOverhangOnlyForIndependentAudio(t *testing.T) {
+func TestValidateRejectsOverhangOnEveryTrack(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		trackID string
-		valid   bool
-	}{
-		{trackID: "bgm", valid: true},
-		{trackID: "sfx", valid: true},
-		{trackID: "voiceover", valid: false},
-		{trackID: "original_audio", valid: false},
-		{trackID: "visual_overlay", valid: false},
-		{trackID: "subtitles", valid: false},
+	tests := []string{
+		"bgm", "sfx", "voiceover", "original_audio", "visual_overlay", "subtitles",
 	}
-	for _, test := range tests {
-		t.Run(test.trackID, func(t *testing.T) {
+	for _, trackID := range tests {
+		t.Run(trackID, func(t *testing.T) {
 			document, err := composeTimelineFixture(
-				"draft_overhang_"+test.trackID,
+				"draft_overhang_"+trackID,
 				1,
 				[]timelineFixtureSelection{{AssetID: "visual", AssetKind: "video", SourceEndFrame: 60}},
 			)
 			if err != nil {
 				t.Fatal(err)
 			}
-			track := trackByID(&document, test.trackID)
+			track := trackByID(&document, trackID)
 			clip := Clip{
-				TimelineClipID: "overhang_" + test.trackID,
-				TrackID:        test.trackID, TimelineEndFrame: 90,
+				TimelineClipID: "overhang_" + trackID,
+				TrackID:        trackID, TimelineEndFrame: 90,
 			}
-			if test.trackID == "subtitles" {
+			if trackID == "subtitles" {
 				clip.Text = "字幕"
 			} else {
-				clip.AssetID = "asset_" + test.trackID
+				clip.AssetID = "asset_" + trackID
 				clip.AssetKind = "audio"
 				clip.SourceEndFrame = 90
 				clip.PlaybackRate = 1
-				if test.trackID == "visual_overlay" {
+				if trackID == "visual_overlay" {
 					clip.AssetKind = "video"
 				}
 			}
 			track.Clips = []Clip{clip}
 			report := Validate(document)
-			if report.Valid != test.valid {
-				t.Fatalf("valid=%v want=%v issues=%#v", report.Valid, test.valid, report.Issues)
-			}
-			if !test.valid && !hasValidationIssue(report, "invalid_clip_range") {
+			if report.Valid || !hasValidationIssue(report, "invalid_clip_range") {
 				t.Fatalf("missing invalid_clip_range: %#v", report.Issues)
 			}
 		})

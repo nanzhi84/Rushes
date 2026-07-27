@@ -153,7 +153,7 @@ func Validate(document Document) ValidationReport {
 				add("clip_track_mismatch", clip.TimelineClipID)
 			}
 			if clip.TimelineStartFrame < 0 || clip.TimelineEndFrame <= clip.TimelineStartFrame ||
-				(clip.TimelineEndFrame > document.DurationFrames && !allowsIndependentAudioOverhang(track.TrackID)) {
+				clip.TimelineEndFrame > document.DurationFrames {
 				add("invalid_clip_range", clip.TimelineClipID)
 			}
 			if clip.AssetID != "" && clip.SourceEndFrame <= clip.SourceStartFrame {
@@ -262,13 +262,6 @@ func Validate(document Document) ValidationReport {
 		}
 	}
 	return report
-}
-
-func allowsIndependentAudioOverhang(trackID string) bool {
-	// Untouched beds and effects keep their source tail when primary video shrinks.
-	// insertClip still prevents a newly requested free-track clip from exceeding
-	// the current composition duration.
-	return trackID == "bgm" || trackID == "sfx"
 }
 
 func ApplyPatch(document Document, operation map[string]any) (Document, error) {

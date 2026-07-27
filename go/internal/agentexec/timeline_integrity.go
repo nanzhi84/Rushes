@@ -2,7 +2,11 @@ package agentexec
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
 	"math"
+	"reflect"
 	"sort"
 
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -74,6 +78,126 @@ func restoreIndependentAudioTracks(
 		}
 		document.Tracks[trackIndex] = copyTimelineTrack(track)
 	}
+}
+
+func unlockPreservedIndependentAudio(
+	document timeline.Document,
+	preserved map[string]timeline.Track,
+) timeline.Document {
+	copy := document
+	copy.Tracks = append([]timeline.Track(nil), document.Tracks...)
+	for trackIndex := range copy.Tracks {
+		if _, exists := preserved[copy.Tracks[trackIndex].TrackID]; exists {
+			copy.Tracks[trackIndex].Locked = false
+		}
+	}
+	return copy
+}
+
+func validateWithPreservedIndependentAudio(
+	document timeline.Document,
+	preserved map[string]timeline.Track,
+) timeline.ValidationReport {
+	report := timeline.Validate(document)
+	if report.Valid || len(preserved) == 0 {
+		return report
+	}
+	preservedClipIDs := map[string]struct{}{}
+	for _, track := range document.Tracks {
+		snapshot, exists := preserved[track.TrackID]
+		if !exists || !ContainsString(independentAudioTrackIDs, track.TrackID) ||
+			!reflect.DeepEqual(track, snapshot) {
+			continue
+		}
+		for _, clip := range track.Clips {
+			if clip.TrackID == track.TrackID &&
+				clip.TimelineStartFrame >= 0 &&
+				clip.TimelineEndFrame > clip.TimelineStartFrame &&
+				clip.TimelineEndFrame > document.DurationFrames {
+				preservedClipIDs[clip.TimelineClipID] = struct{}{}
+			}
+		}
+	}
+	issues := report.Issues[:0]
+	for _, issue := range report.Issues {
+		if issue.Code == "invalid_clip_range" {
+			if _, allowed := preservedClipIDs[issue.Message]; allowed {
+				continue
+			}
+		}
+		issues = append(issues, issue)
+	}
+	report.Issues = issues
+	report.Valid = len(issues) == 0
+	return report
+}
+
+func (exec *Executor) validateStoredTimeline(
+	ctx context.Context,
+	draftID string,
+	document timeline.Document,
+) (timeline.ValidationReport, error) {
+	preserved, err := exec.preservedIndependentAudioFromStoredParent(ctx, draftID, document)
+	if err != nil {
+		return timeline.ValidationReport{}, err
+	}
+	return validateWithPreservedIndependentAudio(document, preserved), nil
+}
+
+func (exec *Executor) preservedIndependentAudioFromStoredParent(
+	ctx context.Context,
+	draftID string,
+	document timeline.Document,
+) (map[string]timeline.Track, error) {
+	var parentVersion sql.NullInt64
+	var rawReport sql.NullString
+	err := exec.database.Read().QueryRowContext(ctx, `
+		SELECT parent_version,validation_report_json
+		FROM timeline_versions WHERE draft_id=? AND version=?`,
+		draftID, document.Version,
+	).Scan(&parentVersion, &rawReport)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !parentVersion.Valid || !rawReport.Valid {
+		return nil, nil
+	}
+	var storedReport struct {
+		Valid bool `json:"valid"`
+	}
+	if err := json.Unmarshal([]byte(rawReport.String), &storedReport); err != nil {
+		return nil, err
+	}
+	// A parent snapshot is proof only for a version that was accepted with the
+	// contextual preservation rule when it was created. A directly persisted
+	// invalid overhang must not become valid merely because its tracks match.
+	if !storedReport.Valid {
+		return nil, nil
+	}
+	parent, err := timeline.Get(ctx, exec.database, draftID, int(parentVersion.Int64))
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	currentTracks := make(map[string]timeline.Track, len(document.Tracks))
+	for _, track := range document.Tracks {
+		currentTracks[track.TrackID] = track
+	}
+	preserved := map[string]timeline.Track{}
+	for _, track := range parent.Tracks {
+		if !ContainsString(independentAudioTrackIDs, track.TrackID) {
+			continue
+		}
+		if current, exists := currentTracks[track.TrackID]; exists && reflect.DeepEqual(current, track) {
+			preserved[track.TrackID] = copyTimelineTrack(track)
+		}
+	}
+	return preserved, nil
 }
 
 func copyTimelineTrack(track timeline.Track) timeline.Track {

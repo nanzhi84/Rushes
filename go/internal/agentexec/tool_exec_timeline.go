@@ -78,7 +78,8 @@ func (exec *Executor) toolAtomicTimelineEdit(
 	}
 
 	preservedAudio := preserveIndependentAudioForOperation(current, appliedOperation)
-	document, err := timeline.ApplyPatch(current, appliedOperation)
+	patchInput := unlockPreservedIndependentAudio(current, preservedAudio)
+	document, err := timeline.ApplyPatch(patchInput, appliedOperation)
 	if err != nil {
 		if failure, ok := TimelineOpFailure(toolName, err, appliedOperation, current); ok {
 			if semanticKind, _ := failure.Data["semantic_error_kind"].(timeline.SemanticErrorKind); semanticKind == timeline.SemanticClipNotFound {
@@ -100,7 +101,7 @@ func (exec *Executor) toolAtomicTimelineEdit(
 			return atomicTimelineApplyFailure(appliedOperation, err), nil
 		}
 	}
-	if report := timeline.Validate(document); !report.Valid {
+	if report := validateWithPreservedIndependentAudio(document, preservedAudio); !report.Valid {
 		return rushestools.ToolResult{
 			Status:      string(rushestools.StatusFailed),
 			Observation: "原子编辑结果未通过结构校验，当前时间线未更新",
@@ -117,13 +118,14 @@ func (exec *Executor) toolAtomicTimelineEdit(
 
 	changedTargets := atomicChangedTargets(current, document)
 	coordinateEffect := atomicTimelineCoordinateEffect(current, document)
-	result, err := exec.persistTimelineFromSnapshot(
+	result, err := exec.persistTimelineFromSnapshotWithPreservedAudio(
 		ctx,
 		draftID,
 		document,
 		strings.TrimPrefix(toolName, "timeline."),
 		appliedOperation,
 		mutationBase,
+		preservedAudio,
 	)
 	if err != nil {
 		return rushestools.ToolResult{}, err
@@ -557,6 +559,20 @@ func (exec *Executor) persistTimelineFromSnapshot(
 	editOperation map[string]any,
 	base timelineMutationBase,
 ) (rushestools.ToolResult, error) {
+	return exec.persistTimelineFromSnapshotWithPreservedAudio(
+		ctx, draftID, document, operation, editOperation, base, nil,
+	)
+}
+
+func (exec *Executor) persistTimelineFromSnapshotWithPreservedAudio(
+	ctx context.Context,
+	draftID string,
+	document timeline.Document,
+	operation string,
+	editOperation map[string]any,
+	base timelineMutationBase,
+	preservedAudio map[string]timeline.Track,
+) (rushestools.ToolResult, error) {
 	if document.Version != base.timelineVersion+1 {
 		return rushestools.ToolResult{}, fmt.Errorf(
 			"timeline snapshot version mismatch: base=%d attempted=%d",
@@ -567,7 +583,9 @@ func (exec *Executor) persistTimelineFromSnapshot(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	reportMap, valid, err := exec.timelineValidationReport(ctx, draftID, document)
+	reportMap, valid, err := exec.timelineValidationReportWithPreservedAudio(
+		ctx, draftID, document, preservedAudio,
+	)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
@@ -676,7 +694,29 @@ func (exec *Executor) timelineValidationReport(
 	draftID string,
 	document timeline.Document,
 ) (map[string]any, bool, error) {
-	report := timeline.Validate(document)
+	report, err := exec.validateStoredTimeline(ctx, draftID, document)
+	if err != nil {
+		return nil, false, err
+	}
+	return exec.timelineValidationReportFromStructural(ctx, draftID, document, report)
+}
+
+func (exec *Executor) timelineValidationReportWithPreservedAudio(
+	ctx context.Context,
+	draftID string,
+	document timeline.Document,
+	preservedAudio map[string]timeline.Track,
+) (map[string]any, bool, error) {
+	report := validateWithPreservedIndependentAudio(document, preservedAudio)
+	return exec.timelineValidationReportFromStructural(ctx, draftID, document, report)
+}
+
+func (exec *Executor) timelineValidationReportFromStructural(
+	ctx context.Context,
+	draftID string,
+	document timeline.Document,
+	report timeline.ValidationReport,
+) (map[string]any, bool, error) {
 	reportMap := map[string]any{
 		"valid": report.Valid, "checks": report.Checks, "issues": report.Issues,
 	}
@@ -702,7 +742,10 @@ func (exec *Executor) toolCheckTimeline(
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	report := timeline.Validate(document)
+	report, validationErr := exec.validateStoredTimeline(ctx, draftID, document)
+	if validationErr != nil {
+		return rushestools.ToolResult{}, validationErr
+	}
 	beatAlignment := BeatAlignmentData(document)
 	contractReport, hasContract, contractErr := exec.VerifyContentContract(ctx, draftID, document)
 	if contractErr != nil {
