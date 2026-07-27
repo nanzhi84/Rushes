@@ -148,6 +148,12 @@ RUSHES_LIVE_TOOL_EVAL=1 RUSHES_TOOL_EVAL_RUNS=5 \
 RUSHES_TALKING_HEAD_EVAL=1 \
   ../scripts/run_go_test_exact.sh ./internal/agent TestTalkingHeadRealMaterialAcceptance \
   -timeout=30m
+RUSHES_REAL_DRAFT_TOOL_EVAL=1 \
+RUSHES_REAL_DRAFT_WORKSPACE="$(pwd)/../.e2e-workspace" \
+RUSHES_REAL_DRAFT_ID=draft_30b145179f7c9ee31af443b8 \
+RUSHES_REAL_DRAFT_TOOL_REPORT="$(pwd)/../.artifacts/real-draft-tool-stability.json" \
+  ../scripts/run_go_test_exact.sh ./internal/agent TestRealDraftToolCallingStability \
+  -timeout=45m
 RUSHES_REQUIRE_LIVE_MODELS=1 \
 RUSHES_ASR_LIVE_SOURCE=/absolute/path/to/aroll-without-sidecar.mp4 \
   ../scripts/run_go_test_exact.sh ./internal/agent \
@@ -155,4 +161,4 @@ RUSHES_ASR_LIVE_SOURCE=/absolute/path/to/aroll-without-sidecar.mp4 \
   -tags=integration -timeout=30m
 ```
 
-三项验收的硬门槛均为 95%；第二项会通过工具注册表调用真实练习素材，检查 A/B-roll 角色、逐句索引、气口删除、B-roll 语义检索、时间线不变量与上下文全文隔离；第三项必须使用没有同名 SRT 的真实口播，覆盖 DashScope 分块转写、空分块容错、SQLite 持久化与重复工具调用成功率。
+模型工具验收的硬门槛为 99%；真实草稿门禁会用 SQLite `VACUUM INTO` 取得源工作区的一致只读快照，再为每次调用创建隔离副本，源库绝不由 Rushes 写连接打开。它固定覆盖真实镜头检索、BGM 拍点分析、波纹删除后的新版本、视觉裁边时独立音频保持，以及终态检查如实返回内容合同失败；至少 5 类 workflow、100 次单次模型选择，错工具、非法参数、执行失败或后置条件失败都计为失败且不隐藏重试。口播练习素材验收会检查 A/B-roll 角色、逐句索引、气口删除、B-roll 语义检索、时间线不变量与上下文全文隔离；真实 ASR 验收必须使用没有同名 SRT 的口播，覆盖 DashScope 分块转写、空分块容错、SQLite 持久化与重复工具调用成功率。

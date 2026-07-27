@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -1209,6 +1210,25 @@ func TestStagedEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 		!containsName(names, "speech.search") ||
 		!containsName(names, "shot.search") {
 		t.Fatalf("口播删剪后的重新观察 surface=%v", names)
+	}
+}
+
+func TestRequestsShotSearchRecognizesNaturalRetrievalWording(t *testing.T) {
+	t.Parallel()
+	for _, prompt := range []string{
+		"请检索镜头，找海边日落",
+		"做一次镜头检索，不要剪辑",
+		"只检索当前草稿里适合火焰段落的 B-roll",
+		"从已理解素材中检索适合收尾的片段",
+	} {
+		if !requestsShotSearch(strings.ToLower(prompt)) {
+			t.Errorf("未识别镜头检索表达: %q", prompt)
+		}
+	}
+	for _, prompt := range []string{"检索口播台词", "查看时间线", "分析 BGM 拍点"} {
+		if requestsShotSearch(strings.ToLower(prompt)) {
+			t.Errorf("误识别为镜头检索: %q", prompt)
+		}
 	}
 }
 

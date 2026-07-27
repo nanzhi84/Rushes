@@ -353,7 +353,10 @@ func (exec *Executor) toolSearchShots(
 	matches := make([]rushestools.ShotCandidate, 0, len(shots))
 	for _, shot := range shots {
 		candidate := shot.candidate
-		if len(roleFilter) > 0 {
+		// 旧版或只做过视觉理解的摘要可能只有 visual/空角色。角色未知不等于角色
+		// 相反；把它们从 b_roll 检索中硬排除会让已有真实素材稳定返回空结果。
+		// 只有摘要明确标成另一种角色时才应用排除，模型仍可依据镜头证据作选择。
+		if len(roleFilter) > 0 && candidate.SemanticRole != "" {
 			if _, matchesRole := roleFilter[candidate.SemanticRole]; !matchesRole {
 				continue
 			}

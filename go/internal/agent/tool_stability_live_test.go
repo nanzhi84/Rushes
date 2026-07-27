@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	liveToolStabilityTarget = 0.95
+	liveToolStabilityTarget = 0.99
 	liveWorkflowMinimumRuns = 5
 	liveWorkflowTimelineFPS = 30
 )
@@ -1558,7 +1558,7 @@ func validateLiveWorkflowToolOutput(toolName, output string) error {
 		}
 		for _, shot := range result.Shots {
 			if shot.ShotID == "" || shot.AssetID == "" || shot.DurationFrames <= 0 ||
-				shot.SemanticRole != "b_roll" {
+				(shot.SemanticRole != "" && shot.SemanticRole != "b_roll") {
 				return fmt.Errorf("执行 %s 返回非 B-roll 或不完整镜头: %#v", toolName, shot)
 			}
 		}

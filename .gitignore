@@ -13,6 +13,7 @@ workspace/
 .e2e-workspace/
 .playwright-workspace/
 .playwright-mcp/
+.artifacts/
 
 # JavaScript dependencies and build/test output
 node_modules/
