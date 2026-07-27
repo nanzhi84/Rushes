@@ -157,7 +157,8 @@ func (retry *timeoutRetryChatModel) Stream(
 		// 工具调用轮必须完整缓冲——供应商常先发空增量、思考增量或未闭合 tool_call 再超时，
 		// 把这些前导当副作用会让超时绕过重试，正是长 ASR 结果后任务静止的原因；完整缓冲后
 		// 中途失败的响应尚未离开此边界，可以安全丢弃、压缩输入并重试。终态文本轮则一旦出现
-		// 可见正文即直通，让首 token 直达用户；已直通的内容不可撤回，故越过该点不再重试（按
+		// 可见正文即交给下游终态消费者；已交付的 provider 流无法在此层重放，
+		// 故越过该点不再重试（按
 		// 现有 turn_error 处理）。分类规则与 stream_checker.go 的 FullStreamToolCallChecker
 		// 同源（classifyModelChunk），保证 Stream 直通与 checker 路由逐块一致。
 		copies := stream.Copy(2)
@@ -187,7 +188,7 @@ func (retry *timeoutRetryChatModel) Stream(
 			}
 			return schema.StreamReaderFromArray(buffered), nil
 		}
-		// 终态文本轮直通：downstream 副本仍从流首开始（含已 peek 的前导与首个正文，后续为
+		// 终态文本轮交给 downstream：副本仍从流首开始（含已 peek 的前导与首个正文，后续为
 		// live 流），用量随末片抵达、由消费端 streamAgent 统计，故此处不缓冲、不记账、不再重试。
 		observeModelCall(ctx, time.Since(callStart).Milliseconds())
 		return downstream, nil
@@ -226,8 +227,8 @@ func messageTokenUsage(message *schema.Message) *schema.TokenUsage {
 	return message.ResponseMeta.Usage
 }
 
-// recordTokenUsage 把一次模型响应的 token 用量计入回合预算。终态回复直通流式（#95 H5）下，
-// 缓冲的工具调用轮由 Stream 内的 recordModelResponseUsage 记账，直通的终态文本轮则由消费端
+// recordTokenUsage 把一次模型响应的 token 用量计入回合预算。工具调用轮由 Stream 内的
+// recordModelResponseUsage 记账，终态文本轮则由完整读取并缓冲它的消费端
 // streamAgent 在读到末片后调用本函数记账，二者各对本轮记一次、互不重复。
 func recordTokenUsage(ctx context.Context, usage *schema.TokenUsage) {
 	if usage == nil {

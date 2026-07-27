@@ -43,10 +43,9 @@ func finalReplyHasReflectionLeak(content string) bool {
 // 且不再夹带过程性语句才采用并返回 restated=true;否则原样放行、记日志。未命中或无模型时零
 // 额外开销。
 //
-// 时序契约(与 H5 直通流式):重述发生在流式回合完成之后,只改「事后」的规范回复,不拦流式。
-// 因此 turn-stream 上会先流出**原文**的 text_delta(实时可能闪现夹带反思的原句),回合收尾时
-// message_completed 携带的是**重述版**整体替换,持久化消息也是重述版;这份「实时闪现、事后
-// 干净」是有意为之——不为 P2 的观感牺牲 H5 的 TTFT(首字延迟),而泄漏窗口在直通下极短。
+// 时序契约：模型终态正文先由 streamAgent 完整缓冲；runTurn 在真值门禁与本重述完成后，
+// 才统一发出 text_delta。因此流式、message_completed 与持久化消息使用同一份干净正文，
+// 未验收的成功文案或过程性反思都不能先闪现再被事后替换。
 func (service *Service) qualityCheckedFinalReply(
 	ctx context.Context, draftID, messageID, content string,
 ) (string, bool) {

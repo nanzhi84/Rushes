@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -35,6 +36,21 @@ func testRetrySafe(t *testing.T) func(string) bool {
 		t.Fatal(err)
 	}
 	return retrySafeFromEffect(registry.Effect)
+}
+
+func successfulTimelineCheckResult(timelineID, observation string) string {
+	return `{"status":"succeeded","observation":"` + observation + `","data":{"timeline_id":"` + timelineID +
+		`","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[]}}}`
+}
+
+func successfulTimelineCheckData(timelineID string) map[string]any {
+	return map[string]any{
+		"timeline_id": timelineID,
+		"validation_report": map[string]any{
+			"valid": true, "structural_valid": true, "content_contract_valid": true,
+			"checks": []any{"schema"}, "issues": []any{},
+		},
+	}
 }
 
 func TestRetrySafeFromEffectAllowlist(t *testing.T) {
@@ -112,19 +128,24 @@ func TestToolRecoveryRetriesSafeErrorsAndReturnsThemToModel(t *testing.T) {
 }
 
 func TestToolRecoveryObservesOversizeResultWithoutTruncating(t *testing.T) {
-	largeResult := strings.Repeat("中", toolResultSoftLimitBytes)
+	largeResult := `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[]}},"observation":"` +
+		strings.Repeat("中", toolResultSoftLimitBytes) + `"}`
 	oversizeBefore := metricToolResultOversize.Value()
 	countBefore, _, _, _ := metricToolResultBytes.Snapshot()
 	middleware := newToolRecoveryMiddleware(testRetrySafe(t))
 	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 		return &compose.ToolOutput{Result: largeResult}, nil
 	})
-	output, err := endpoint(t.Context(), &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`})
+	output, err := endpoint(
+		rushestools.WithDraftID(t.Context(), "draft"),
+		&compose.ToolInput{Name: "timeline.check", Arguments: `{}`},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if output == nil || output.Result != largeResult {
-		t.Fatalf("超限结果被改写: got_bytes=%d want_bytes=%d", len(output.Result), len(largeResult))
+	if output == nil || !strings.Contains(output.Result, strings.Repeat("中", toolResultSoftLimitBytes)) ||
+		!validToolRequestFingerprint("timeline.check", `{}`, output.Result) {
+		t.Fatalf("超限结果正文丢失或缺少请求 proof: got_bytes=%d want_at_least=%d", len(output.Result), len(largeResult))
 	}
 	if metricToolResultOversize.Value() != oversizeBefore+1 {
 		t.Fatalf("oversize=%d want=%d", metricToolResultOversize.Value(), oversizeBefore+1)
@@ -177,6 +198,458 @@ func TestToolRecoveryFormattingHelpersCoverMalformedValues(t *testing.T) {
 	cancel()
 	if !errors.Is(waitForToolRetry(cancelled, 1), context.Canceled) {
 		t.Fatal("cancelled retry should return context.Canceled")
+	}
+}
+
+func TestToolRecoveryUnknownOrMalformedStatusDoesNotResolveFailure(t *testing.T) {
+	for name, result := range map[string]string{
+		"unknown_status": `{"status":"mystery","observation":"not verified"}`,
+		"malformed":      `not-json`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := newToolRecoveryState()
+			ctx := withToolRecoveryState(t.Context(), state)
+			endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+				func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+					if strings.Contains(input.Arguments, `"kind":"trim_clip"`) {
+						return &compose.ToolOutput{Result: marshalToolFailure("kind invalid", nil)}, nil
+					}
+					return &compose.ToolOutput{Result: result}, nil
+				},
+			)
+			if _, err := endpoint(ctx, &compose.ToolInput{
+				Name: "timeline.update", Arguments: `{"kind":"trim_clip","timeline_clip_id":"clip_1"}`,
+			}); err != nil || !state.unresolved() {
+				t.Fatalf("initial failure err=%v unresolved=%v", err, state.unresolved())
+			}
+			output, err := endpoint(ctx, &compose.ToolInput{
+				Name: "timeline.update", Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_1"}`,
+			})
+			if err != nil || !state.unresolved() || !isStructuredToolFailure(output.Result) {
+				t.Fatalf("output=%#v err=%v unresolved=%v", output, err, state.unresolved())
+			}
+		})
+	}
+}
+
+func TestConfirmedToolRecoverySuccessRequiresToolSpecificStatus(t *testing.T) {
+	tests := []struct {
+		name, tool, arguments, result string
+		want                          bool
+	}{
+		{"check success with version proof", "timeline.check", `{}`, successfulTimelineCheckResult("draft:v2", "valid"), true},
+		{"check success without contract accepts empty failures", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[]},"contract_failures":[]}}`, true},
+		{"check success missing version proof", "timeline.check", `{}`, `{"status":"succeeded"}`, false},
+		{"check success malformed version proof", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft"}}`, false},
+		{"check success contradictory report", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":false,"structural_valid":true,"content_contract_valid":true,"checks":[],"issues":[]}}}`, false},
+		{"check success rejects null checks", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":null,"issues":[]}}}`, false},
+		{"check success rejects structural issues", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[{"code":"invalid_document","message":"invalid"}]}}}`, false},
+		{"check success rejects blank check", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":[" "],"issues":[]}}}`, false},
+		{"check success rejects unexpected top-level contract", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":[],"issues":[]},"content_contract":{"pass":false,"items":[{"pass":false}]},"contract_failures":[{"pass":false}]}}`, false},
+		{"check success accepts consistent empty contract", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[],"content_contract":{"pass":true,"items":[]}},"content_contract":{"pass":true,"items":[]},"contract_failures":[]}}`, true},
+		{"check success accepts consistent passing contract", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[],"content_contract":{"pass":true,"items":[{"check":"target_duration","pass":true,"message":"duration matches"}]}},"content_contract":{"pass":true,"items":[{"check":"target_duration","pass":true,"message":"duration matches"}]},"contract_failures":[]}}`, true},
+		{"check success rejects passing contract item with error code", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[],"content_contract":{"pass":true,"items":[{"check":"on_beat_ratio","pass":true,"error_code":"missing_beat_grid","message":"ok"}]}},"content_contract":{"pass":true,"items":[{"check":"on_beat_ratio","pass":true,"error_code":"missing_beat_grid","message":"ok"}]},"contract_failures":[]}}`, false},
+		{"check success rejects nil contract items", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[],"content_contract":{"pass":true}},"content_contract":{"pass":true},"contract_failures":[]}}`, false},
+		{"check success rejects incomplete contract item", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[],"content_contract":{"pass":true,"items":[{"pass":true}]}},"content_contract":{"pass":true,"items":[{"pass":true}]},"contract_failures":[]}}`, false},
+		{"check success rejects duplicate contract checks", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[],"content_contract":{"pass":true,"items":[{"check":"duration","pass":true,"message":"one"},{"check":"duration","pass":true,"message":"two"}]}},"content_contract":{"pass":true,"items":[{"check":"duration","pass":true,"message":"one"},{"check":"duration","pass":true,"message":"two"}]},"contract_failures":[]}}`, false},
+		{"check success rejects null-normalized contract field", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[],"content_contract":{"pass":true,"items":[{"check":"duration","pass":true,"error_code":null,"message":"ok"}]}},"content_contract":{"pass":true,"items":[{"check":"duration","pass":true,"message":"ok"}]},"contract_failures":[]}}`, false},
+		{"check success contract requires failure list", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":[],"issues":[],"content_contract":{"pass":true,"items":[{"pass":true}]}},"content_contract":{"pass":true,"items":[{"pass":true}]}}}`, false},
+		{"check success rejects inconsistent contract copies", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":[],"issues":[],"content_contract":{"pass":true,"items":[{"pass":true}]}},"content_contract":{"pass":false,"items":[{"pass":false}]},"contract_failures":[]}}`, false},
+		{"check success missing report", "timeline.check", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2"}}`, false},
+		{"timeline mutation with version proof", "timeline.update", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft:v2"}}`, true},
+		{"timeline mutation missing version proof", "timeline.update", `{}`, `{"status":"succeeded"}`, false},
+		{"timeline mutation malformed version proof", "timeline.update", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft"}}`, false},
+		{"memory set exact keys", "memory.set", `{"entries":[{"key":"kept"}]}`, `{"status":"succeeded","data":{"written_keys":["kept"]}}`, true},
+		{"memory remove idempotent subset", "memory.remove", `{"keys":["existing","missing"]}`, `{"status":"succeeded","data":{"removed_keys":["existing"]}}`, true},
+		{"memory remove empty idempotent subset", "memory.remove", `{"keys":["missing"]}`, `{"status":"succeeded","data":{"removed_keys":[]}}`, true},
+		{"memory remove real output shape", "memory.remove", `{"keys":["existing","missing"]}`, `{"status":"succeeded","data":{"removed_keys":["existing"],"written_keys":[],"evicted_keys":[],"total":0}}`, true},
+		{"memory remove rejects writes", "memory.remove", `{"keys":["missing"]}`, `{"status":"succeeded","data":{"removed_keys":[],"written_keys":["other"],"evicted_keys":[]}}`, false},
+		{"memory remove rejects evictions", "memory.remove", `{"keys":["missing"]}`, `{"status":"succeeded","data":{"removed_keys":[],"written_keys":[],"evicted_keys":["important"]}}`, false},
+		{"memory remove rejects null side-effect proof", "memory.remove", `{"keys":["missing"]}`, `{"status":"succeeded","data":{"removed_keys":[],"written_keys":null,"evicted_keys":[]}}`, false},
+		{"memory remove outside requested keys", "memory.remove", `{"keys":["existing"]}`, `{"status":"succeeded","data":{"removed_keys":["other"]}}`, false},
+		{"memory remove duplicate proof keys", "memory.remove", `{"keys":["existing"]}`, `{"status":"succeeded","data":{"removed_keys":["existing","existing"]}}`, false},
+		{"typed result cannot use generic success", "shot.search", `{}`, `{"status":"succeeded"}`, false},
+		{"render queued", "render.start", `{"kind":"preview","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","timeline_id":"draft:v2","timeline_version":2,"render_kind":"preview","orientation":"auto"}}`, true},
+		{"render queued wrong request draft", "render.start", `{"kind":"preview","timeline_id":"draft_A:v2"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","timeline_id":"draft_B:v2","timeline_version":2,"render_kind":"preview","orientation":"auto"}}`, false},
+		{"render queued wrong request version", "render.start", `{"kind":"preview","timeline_id":"draft:v3"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","timeline_id":"draft:v2","timeline_version":2,"render_kind":"preview","orientation":"auto"}}`, false},
+		{"render queued wrong request kind", "render.start", `{"kind":"final","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","timeline_id":"draft:v2","timeline_version":2,"render_kind":"preview","orientation":"auto"}}`, false},
+		{"render queued wrong orientation", "render.start", `{"kind":"preview","timeline_id":"draft:v2","orientation":"portrait"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","timeline_id":"draft:v2","timeline_version":2,"render_kind":"preview","orientation":"landscape"}}`, false},
+		{"render queued missing job id", "render.start", `{"kind":"preview","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_status":"pending","timeline_version":2,"render_kind":"preview"}}`, false},
+		{"render queued empty job id", "render.start", `{"kind":"preview","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_id":" ","job_status":"pending","timeline_version":2,"render_kind":"preview"}}`, false},
+		{"render queued invalid job status", "render.start", `{"kind":"preview","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"succeeded","timeline_version":2,"render_kind":"preview"}}`, false},
+		{"render queued missing timeline version", "render.start", `{"kind":"preview","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","render_kind":"preview"}}`, false},
+		{"render succeeded", "render.start", `{"kind":"final","timeline_id":"draft:v2","orientation":"portrait"}`, `{"status":"succeeded","data":{"job_id":"job_1","job_status":"succeeded","timeline_id":"draft:v2","timeline_version":2,"render_kind":"final","orientation":"portrait"}}`, true},
+		{"render succeeded inconsistent job status", "render.start", `{"kind":"final","timeline_id":"draft:v2"}`, `{"status":"succeeded","data":{"job_id":"job_1","job_status":"running","timeline_version":2,"render_kind":"final"}}`, false},
+		{"other queued", "timeline.check", `{}`, `{"status":"queued"}`, false},
+		{"interaction waiting", "interaction.ask_user", `{}`, `{"status":"waiting","data":{"decision_id":"decision_1","turn_should_end":true}}`, true},
+		{"interaction waiting missing decision", "interaction.ask_user", `{}`, `{"status":"waiting","data":{"turn_should_end":true}}`, false},
+		{"other waiting", "timeline.check", `{}`, `{"status":"waiting"}`, false},
+		{"understanding queued", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","job_id":"job_1","asset_id":"asset","status":"queued"}`, true},
+		{"understanding queued missing job", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","asset_id":"asset","status":"queued"}`, false},
+		{"understanding queued wrong asset", "media.detect_shots", `{"asset_id":"asset_A"}`, `{"draft_id":"draft","job_id":"job_1","asset_id":"asset_B","status":"queued"}`, false},
+		{"understanding completed", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","asset_id":"asset","status":"completed","summary":{"asset_id":"asset","timeline_fps":30}}`, true},
+		{"understanding completed wrong summary", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","asset_id":"asset","status":"completed","summary":{"asset_id":"other","timeline_fps":30}}`, false},
+		{"understanding generic success", "media.detect_shots", `{}`, `{"status":"succeeded"}`, false},
+		{"typed read result missing pagination proof", "shot.search", `{}`, `{"shots":[],"total_matches":0}`, false},
+		{"shot search rejects missing shots", "shot.search", `{}`, `{"total_matches":0,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
+		{"real empty typed read result", "shot.search", `{}`, `{"shots":null,"total_matches":0,"page_start":0,"remaining_matches":0,"truncated":false}`, true},
+		{"shot search rejects non-array shots", "shot.search", `{}`, `{"shots":{},"total_matches":0,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
+		{"shot search rejects null pagination scalars", "shot.search", `{}`, `{"shots":null,"total_matches":null,"page_start":null,"remaining_matches":null,"truncated":null}`, false},
+		{"terminal page after matches", "shot.search", `{"after_shot_id":"shot_1"}`, `{"shots":null,"total_matches":1,"page_start":1,"remaining_matches":0,"page_after_shot_id":"shot_1","truncated":false}`, true},
+		{"typed read count exceeds total", "shot.search", `{}`, `{"shots":[{}],"total_matches":0,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
+		{"shot search query match", "shot.search", `{"query":"cat","asset_ids":["asset_A"]}`, `{"query":"cat","shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`, true},
+		{"shot search wrong query", "shot.search", `{"query":"cat"}`, `{"query":"dog","shots":[],"total_matches":0,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
+		{"shot search invalid entity", "shot.search", `{"query":"cat"}`, `{"query":"cat","shots":[{}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
+		{"shot search outside asset filter", "shot.search", `{"asset_ids":["asset_A"]}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_B","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
+		{"shot search truncated page", "shot.search", `{"limit":1}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":2,"page_start":0,"remaining_matches":1,"truncated":true,"next_after_shot_id":"shot_1"}`, true},
+		{"shot search truncated continuation page", "shot.search", `{"after_shot_id":"shot_1","limit":1}`, `{"shots":[{"shot_id":"shot_2","asset_id":"asset_A","source_start_frame":30,"source_end_frame":60,"duration_frames":30}],"total_matches":3,"page_start":1,"remaining_matches":1,"page_after_shot_id":"shot_1","truncated":true,"next_after_shot_id":"shot_2"}`, true},
+		{"shot search missing truncated cursor", "shot.search", `{"limit":1}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":2,"page_start":0,"remaining_matches":1,"truncated":true}`, false},
+		{"shot search contradictory terminal page", "shot.search", `{"limit":1}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":2,"page_start":0,"remaining_matches":1,"truncated":false,"next_after_shot_id":"wrong"}`, false},
+		{"shot search repeats after cursor", "shot.search", `{"after_shot_id":"shot_1"}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":2,"page_start":1,"remaining_matches":0,"page_after_shot_id":"shot_1","truncated":false}`, false},
+		{"shot search continuation missing position proof", "shot.search", `{"after_shot_id":"shot_50","limit":20}`, `{"shots":[{"shot_id":"shot_2","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":100,"page_start":0,"remaining_matches":99,"truncated":true}`, false},
+		{"shot search duplicate page ids", "shot.search", `{"after_shot_id":"shot_0"}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30},{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":3,"page_start":1,"remaining_matches":0,"page_after_shot_id":"shot_0","truncated":false}`, false},
+		{"typed read wrong field type", "shot.search", `{}`, `{"shots":"已完成","total_matches":"全部"}`, false},
+		{"incomplete typed result", "shot.search", `{}`, `{"shots":[],"page_start":0,"remaining_matches":0,"truncated":false}`, false},
+		{"asset list paginated", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":2,"next_after":"asset_1"}`, true},
+		{"asset list count exceeds total", "asset.list_assets", `{}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":0}`, false},
+		{"asset list missing asset identity", "asset.list_assets", `{}`, `{"draft_id":"draft","assets":[{}],"total":1}`, false},
+		{"asset list wrong kind", "asset.list_assets", `{"kind":"video"}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1","kind":"audio"}],"total":1}`, false},
+		{"asset list wrong usable state", "asset.list_assets", `{"only_usable":true}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1","usable":false}],"total":1}`, false},
+		{"asset list before cursor", "asset.list_assets", `{"after":"asset_10"}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_09"}],"total":1}`, false},
+		{"asset list exceeds limit", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"},{"asset_id":"asset_2"}],"total":2}`, false},
+		{"asset list missing pagination cursor", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":2}`, false},
+		{"asset list wrong pagination cursor", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":2,"next_after":"asset_2"}`, false},
+		{"asset list unexpected terminal cursor", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":1,"next_after":"asset_1"}`, false},
+		{"beats match asset", "audio.analyze_beats", `{"asset_id":"asset_A"}`, `{"asset_id":"asset_A","timeline_fps":30,"beat_frames":[]}`, true},
+		{"beats wrong asset", "audio.analyze_beats", `{"asset_id":"asset_A"}`, `{"asset_id":"asset_B","timeline_fps":30,"beat_frames":[]}`, false},
+		{"pauses match clip", "audio.analyze_speech_pauses", `{"timeline_clip_id":"clip_A"}`, `{"asset_id":"asset_A","timeline_clip_id":"clip_A","timeline_fps":30,"pauses":[]}`, true},
+		{"pauses wrong clip", "audio.analyze_speech_pauses", `{"timeline_clip_id":"clip_A"}`, `{"asset_id":"asset_A","timeline_clip_id":"clip_B","timeline_fps":30,"pauses":[]}`, false},
+		{"transcribe match asset", "speech.transcribe", `{"asset_id":"asset_A"}`, `{"transcript_id":"transcript_A","asset_id":"asset_A","timeline_fps":30}`, true},
+		{"transcribe wrong asset", "speech.transcribe", `{"asset_id":"asset_A"}`, `{"transcript_id":"transcript_B","asset_id":"asset_B","timeline_fps":30}`, false},
+		{"preview check matches request", "preview.check", `{"preview_id":"preview_A","check":"decode"}`, `{"preview_id":"preview_A","check":"decode","issues":[]}`, true},
+		{"preview check wrong target", "preview.check", `{"preview_id":"preview_A","check":"decode"}`, `{"preview_id":"preview_B","check":"decode","issues":[]}`, false},
+		{"preview check wrong check", "preview.check", `{"preview_id":"preview_A","check":"decode"}`, `{"preview_id":"preview_A","check":"visual","issues":[]}`, false},
+		{"speech search success", "speech.search", `{"asset_id":"asset"}`, `{"status":"succeeded","transcript_id":"transcript","asset_id":"asset","timeline_fps":30,"provider_id":"test","utterances":[],"utterance_total":0,"truncated":false,"usage_note":"ok"}`, true},
+		{"speech search wrong asset", "speech.search", `{"asset_id":"asset_A"}`, `{"status":"succeeded","transcript_id":"transcript","asset_id":"asset_B","timeline_fps":30,"provider_id":"test","utterances":[],"utterance_total":0,"truncated":false,"usage_note":"ok"}`, false},
+		{"speech search clip match", "speech.search", `{"timeline_clip_id":"clip_A"}`, `{"status":"succeeded","transcript_id":"transcript","asset_id":"asset","timeline_clip_id":"clip_A","timeline_fps":30,"provider_id":"test","utterances":[],"utterance_total":0,"truncated":false,"usage_note":"ok"}`, true},
+		{"speech search missing core field", "speech.search", `{"asset_id":"asset"}`, `{"status":"succeeded","transcript_id":"transcript","asset_id":"asset","timeline_fps":30}`, false},
+		{"unknown", "timeline.check", `{}`, `{"status":"mystery"}`, false},
+		{"malformed", "timeline.check", `{}`, `not-json`, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.result = attachToolRequestFingerprint(test.tool, test.arguments, test.result)
+			draftID := ""
+			if test.tool == "media.detect_shots" || test.tool == "timeline.check" ||
+				isTerminalTimelineMutation(test.tool) {
+				draftID = "draft"
+			}
+			if got := isConfirmedToolRecoverySuccess(test.tool, test.arguments, test.result, draftID); got != test.want {
+				t.Fatalf("got=%v want=%v", got, test.want)
+			}
+		})
+	}
+	shots := make([]rushestools.ShotCandidate, 100)
+	for index := range shots {
+		shots[index] = rushestools.ShotCandidate{
+			ShotID:  "shot_" + strconv.Itoa(index+1),
+			AssetID: "asset_A", SourceStartFrame: index * 30,
+			SourceEndFrame: index*30 + 30, DurationFrames: 30,
+		}
+	}
+	largePage, err := json.Marshal(rushestools.ShotSearchResult{
+		Shots: shots, TotalMatches: 101, RemainingMatches: 1,
+		Truncated: true, NextAfterShotID: "shot_100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	largePageProof := attachToolRequestFingerprint("shot.search", `{"limit":200}`, string(largePage))
+	if !isConfirmedToolRecoverySuccess("shot.search", `{"limit":200}`, largePageProof, "") {
+		t.Fatal("executor clamps limit=200 to a valid 100-shot truncated page")
+	}
+	if isConfirmedToolRecoverySuccess(
+		"asset.list_assets", `{}`, `{"draft_id":"draft_B","assets":[],"total":0}`, "draft_A",
+	) {
+		t.Fatal("asset.list_assets result from another active draft was accepted")
+	}
+	if isConfirmedToolRecoverySuccess(
+		"media.detect_shots", `{"asset_id":"asset"}`,
+		`{"draft_id":"draft_B","job_id":"job_1","asset_id":"asset","status":"queued"}`, "draft_A",
+	) {
+		t.Fatal("media.detect_shots result from another active draft was accepted")
+	}
+	if !isConfirmedToolRecoverySuccess(
+		"timeline.inspect", `{}`,
+		attachToolRequestFingerprint("timeline.inspect", `{}`, `{"status":"succeeded","data":{"timeline_id":"draft_A:v1"}}`),
+		"draft_A",
+	) {
+		t.Fatal("timeline.inspect result for the active draft was rejected")
+	}
+	if !isConfirmedToolRecoverySuccess(
+		"timeline.inspect", `{}`,
+		attachToolRequestFingerprint("timeline.inspect", `{}`, `{"status":"succeeded","data":{"timeline_exists":false}}`),
+		"draft_A",
+	) {
+		t.Fatal("timeline.inspect empty result for the active draft was rejected")
+	}
+	if isConfirmedToolRecoverySuccess(
+		"timeline.inspect", `{}`,
+		attachToolRequestFingerprint("timeline.inspect", `{}`, `{"status":"succeeded","observation":"别的草稿已读取","data":{"timeline_id":"draft_B:v1"}}`),
+		"draft_A",
+	) {
+		t.Fatal("timeline.inspect result from another active draft was accepted")
+	}
+	if isConfirmedToolRecoverySuccess(
+		"timeline.check", `{}`,
+		attachToolRequestFingerprint("timeline.check", `{}`, successfulTimelineCheckResult("draft_B:v1", "别的草稿已通过")),
+		"draft_A",
+	) {
+		t.Fatal("timeline.check result from another active draft was accepted")
+	}
+}
+
+func TestToolRecoveryRejectsWrongDraftInspectWithoutLeakingSuccessObservation(t *testing.T) {
+	type reportedEvent struct {
+		phase  string
+		output any
+	}
+	events := []reportedEvent{}
+	state := newToolRecoveryState()
+	ctx := rushestools.WithReporter(
+		rushestools.WithDraftID(withToolRecoveryState(t.Context(), state), "draft_A"),
+		func(_ context.Context, _ string, phase string, _, output any, _ error) {
+			events = append(events, reportedEvent{phase: phase, output: output})
+		},
+	)
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(ctx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+			if reporter, ok := rushestools.ReporterFromContext(ctx); ok {
+				reporter(ctx, "timeline.inspect", "finished", map[string]any{}, rushestools.ToolResult{
+					Status: "succeeded", Observation: "别的草稿已读取",
+					Data: map[string]any{"timeline_id": "draft_B:v1"},
+				}, nil)
+			}
+			return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"别的草稿已读取","data":{"timeline_id":"draft_B:v1"}}`}, nil
+		},
+	)
+	output, err := endpoint(ctx, &compose.ToolInput{Name: "timeline.inspect", Arguments: `{}`})
+	if err != nil || output == nil || !isStructuredToolFailure(output.Result) ||
+		strings.Contains(output.Result, "别的草稿已读取") || !state.unresolved() {
+		t.Fatalf("wrong-draft output leaked success: output=%#v err=%v", output, err)
+	}
+	if len(events) != 2 || events[1].phase != "finished" {
+		t.Fatalf("events=%#v", events)
+	}
+	reported, ok := events[1].output.(rushestools.ToolResult)
+	if !ok || reported.Status != string(rushestools.StatusFailed) ||
+		strings.Contains(reported.Observation, "别的草稿已读取") {
+		t.Fatalf("reporter leaked success: %#v", events[1].output)
+	}
+}
+
+func TestToolRecoveryRejectsWrongDraftCheckWithoutLeakingSuccessObservation(t *testing.T) {
+	type reportedEvent struct {
+		phase  string
+		output any
+	}
+	events := []reportedEvent{}
+	state := newToolRecoveryState()
+	ctx := rushestools.WithReporter(
+		rushestools.WithDraftID(withToolRecoveryState(t.Context(), state), "draft_A"),
+		func(_ context.Context, _ string, phase string, _, output any, _ error) {
+			events = append(events, reportedEvent{phase: phase, output: output})
+		},
+	)
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(ctx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+			if reporter, ok := rushestools.ReporterFromContext(ctx); ok {
+				reporter(ctx, "timeline.check", "finished", map[string]any{}, rushestools.ToolResult{
+					Status: "succeeded", Observation: "别的草稿已通过",
+					Data: successfulTimelineCheckData("draft_B:v1"),
+				}, nil)
+			}
+			return &compose.ToolOutput{Result: successfulTimelineCheckResult("draft_B:v1", "别的草稿已通过")}, nil
+		},
+	)
+	output, err := endpoint(ctx, &compose.ToolInput{Name: "timeline.check", Arguments: `{}`})
+	if err != nil || output == nil || !isStructuredToolFailure(output.Result) ||
+		strings.Contains(output.Result, "别的草稿已通过") || !state.unresolved() {
+		t.Fatalf("wrong-draft output leaked success: output=%#v err=%v", output, err)
+	}
+	if len(events) != 2 || events[1].phase != "finished" {
+		t.Fatalf("events=%#v", events)
+	}
+	reported, ok := events[1].output.(rushestools.ToolResult)
+	if !ok || reported.Status != string(rushestools.StatusFailed) ||
+		strings.Contains(reported.Observation, "别的草稿已通过") {
+		t.Fatalf("reporter leaked success: %#v", events[1].output)
+	}
+}
+
+func TestToolRecoveryRejectsWrongDraftMutationWithoutLeakingSuccessObservation(t *testing.T) {
+	type reportedEvent struct {
+		phase  string
+		output any
+	}
+	events := []reportedEvent{}
+	state := newToolRecoveryState()
+	ctx := rushestools.WithReporter(
+		rushestools.WithDraftID(withToolRecoveryState(t.Context(), state), "draft_A"),
+		func(_ context.Context, _ string, phase string, _, output any, _ error) {
+			events = append(events, reportedEvent{phase: phase, output: output})
+		},
+	)
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(ctx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+			if reporter, ok := rushestools.ReporterFromContext(ctx); ok {
+				reporter(ctx, "timeline.update", "finished", map[string]any{}, rushestools.ToolResult{
+					Status: "succeeded", Observation: "别的草稿已编辑",
+					Data: map[string]any{"timeline_id": "draft_B:v2"},
+				}, nil)
+			}
+			return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"别的草稿已编辑","data":{"timeline_id":"draft_B:v2"}}`}, nil
+		},
+	)
+	output, err := endpoint(ctx, &compose.ToolInput{
+		Name: "timeline.update", Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_1"}`,
+	})
+	if err != nil || output == nil || !isStructuredToolFailure(output.Result) ||
+		strings.Contains(output.Result, "别的草稿已编辑") || !state.unresolved() {
+		t.Fatalf("wrong-draft output leaked success: output=%#v err=%v", output, err)
+	}
+	if len(events) != 2 || events[1].phase != "finished" {
+		t.Fatalf("events=%#v", events)
+	}
+	reported, ok := events[1].output.(rushestools.ToolResult)
+	if !ok || reported.Status != string(rushestools.StatusFailed) ||
+		strings.Contains(reported.Observation, "别的草稿已编辑") {
+		t.Fatalf("reporter leaked success: %#v", events[1].output)
+	}
+}
+
+func TestToolRecoveryProofBindsFullSemanticRequestAndTarget(t *testing.T) {
+	tests := []struct {
+		name, tool, request, proofRequest, result string
+	}{
+		{
+			"detect shots analysis configuration", "media.detect_shots",
+			`{"asset_id":"asset_A","depth":"deep","force_refresh":true}`,
+			`{"asset_id":"asset_A","depth":"scan","force_refresh":false}`,
+			`{"draft_id":"draft","job_id":"job_1","asset_id":"asset_A","status":"queued"}`,
+		},
+		{
+			"speech semantic query", "speech.search",
+			`{"asset_id":"asset_A","query":"保留这句","include_words":true}`,
+			`{"asset_id":"asset_A","query":"删除那句","include_words":false}`,
+			`{"status":"succeeded","transcript_id":"transcript","asset_id":"asset_A","timeline_fps":30,"provider_id":"test","utterances":[],"utterance_total":0,"truncated":false,"usage_note":"ok"}`,
+		},
+		{
+			"decision card content", "interaction.ask_user",
+			`{"question":"当前问题","decision_type":"critical"}`,
+			`{"question":"另一个问题","decision_type":"critical"}`,
+			`{"status":"waiting","data":{"decision_id":"decision_other","turn_should_end":true}}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw := attachToolRequestFingerprint(test.tool, test.proofRequest, test.result)
+			if isConfirmedToolRecoverySuccess(test.tool, test.request, raw, "draft") {
+				t.Fatal("另一请求的 proof 不得确认当前请求")
+			}
+		})
+	}
+
+	wrongRole := attachToolRequestFingerprint(
+		"shot.search", `{"semantic_roles":["a_roll"],"min_duration_frames":60}`,
+		`{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"semantic_role":"b_roll"}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`,
+	)
+	if isConfirmedToolRecoverySuccess(
+		"shot.search", `{"semantic_roles":["a_roll"],"min_duration_frames":60}`, wrongRole, "",
+	) {
+		t.Fatal("违反角色或时长筛选的 shot 不得通过")
+	}
+	normalizedRole := attachToolRequestFingerprint(
+		"shot.search", `{"semantic_roles":[" B_ROLL "]}`,
+		`{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"semantic_role":"b_roll"}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`,
+	)
+	if !isConfirmedToolRecoverySuccess(
+		"shot.search", `{"semantic_roles":[" B_ROLL "]}`, normalizedRole, "",
+	) {
+		t.Fatal("executor 规范化后合法的 semantic_role 不应被 proof 拒绝")
+	}
+
+	semanticTagMatch := attachToolRequestFingerprint(
+		"shot.search", `{"tags":["city skyline"]}`,
+		`{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"description":"city skyline at night"}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`,
+	)
+	if !isConfirmedToolRecoverySuccess(
+		"shot.search", `{"tags":["city skyline"]}`, semanticTagMatch, "",
+	) {
+		t.Fatal("executor 可接受的 description 语义标签命中不应被 proof 拒绝")
+	}
+	wrongSemanticTag := attachToolRequestFingerprint(
+		"shot.search", `{"tags":["city skyline"]}`,
+		`{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"description":"forest trail"}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`,
+	)
+	if isConfirmedToolRecoverySuccess(
+		"shot.search", `{"tags":["city skyline"]}`, wrongSemanticTag, "",
+	) {
+		t.Fatal("executor 会过滤的错误语义标签结果不得通过 proof")
+	}
+
+	if isConfirmedToolRecoverySuccess(
+		"timeline.check", `{"timeline_id":"draft:v1"}`,
+		attachToolRequestFingerprint(
+			"timeline.check", `{"timeline_id":"draft:v1"}`,
+			successfulTimelineCheckResult("draft:v2", "wrong version"),
+		), "draft",
+	) {
+		t.Fatal("timeline.check 不得接受错误请求版本")
+	}
+	if isConfirmedToolRecoverySuccess(
+		"job.read", `{"job_id":"job_A"}`,
+		attachToolRequestFingerprint("job.read", `{"job_id":"job_A"}`, `{"status":"succeeded","data":{"job_id":"job_B"}}`), "",
+	) {
+		t.Fatal("job.read 不得接受错误 job")
+	}
+}
+
+func TestToolRecoveryReporterUsesNormalizedFailureResult(t *testing.T) {
+	type reportedEvent struct {
+		phase  string
+		output any
+		err    error
+	}
+	events := []reportedEvent{}
+	ctx := rushestools.WithReporter(t.Context(), func(
+		_ context.Context, _ string, phase string, _, output any, err error,
+	) {
+		events = append(events, reportedEvent{phase: phase, output: output, err: err})
+	})
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			reporter, ok := rushestools.ReporterFromContext(ctx)
+			if !ok {
+				t.Fatal("missing reporter")
+			}
+			original := rushestools.ToolResult{Status: "mystery", Observation: "已完成"}
+			reporter(ctx, input.Name, "finished", map[string]any{}, original, nil)
+			return &compose.ToolOutput{Result: `{"status":"mystery","observation":"已完成"}`}, nil
+		},
+	)
+	output, err := endpoint(ctx, &compose.ToolInput{Name: "timeline.check", Arguments: `{}`})
+	if err != nil || output == nil || !isStructuredToolFailure(output.Result) {
+		t.Fatalf("output=%#v err=%v", output, err)
+	}
+	if len(events) != 2 || events[0].phase != "started" || events[1].phase != "finished" ||
+		events[1].err != nil || !structuredToolOutputFailed(events[1].output) {
+		t.Fatalf("events=%#v", events)
+	}
+	encoded, marshalErr := json.Marshal(events[1].output)
+	if marshalErr != nil || strings.Contains(string(encoded), "mystery") ||
+		strings.Contains(string(encoded), "已完成") {
+		t.Fatalf("unverified result leaked to reporter: %s err=%v", encoded, marshalErr)
 	}
 }
 
@@ -406,13 +879,13 @@ func TestToolRecoveryCapsDistinctModelRepairFailures(t *testing.T) {
 
 func TestToolRecoveryLetsModelCorrectArguments(t *testing.T) {
 	state := newToolRecoveryState()
-	ctx := withToolRecoveryState(t.Context(), state)
+	ctx := rushestools.WithDraftID(withToolRecoveryState(t.Context(), state), "draft")
 	calls := 0
 	middleware := newToolRecoveryMiddleware(testRetrySafe(t))
 	endpoint := middleware.Invokable(func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 		calls++
 		if input.Arguments == `{"value":"good"}` {
-			return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"fixed"}`}, nil
+			return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"fixed","data":{"timeline_id":"draft:v2"}}`}, nil
 		}
 		return &compose.ToolOutput{Result: marshalToolFailure("change value", nil)}, nil
 	})
@@ -425,7 +898,7 @@ func TestToolRecoveryLetsModelCorrectArguments(t *testing.T) {
 	}
 }
 
-func TestToolRecoverySuccessOnAnotherToolStartsFreshFailureChain(t *testing.T) {
+func TestToolRecoverySuccessOnUnrelatedToolKeepsFailureUnresolved(t *testing.T) {
 	state := newToolRecoveryState()
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
@@ -433,20 +906,343 @@ func TestToolRecoverySuccessOnAnotherToolStartsFreshFailureChain(t *testing.T) {
 		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 			calls++
 			if input.Name == "asset.list_assets" {
-				return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"fresh state"}`}, nil
+				return &compose.ToolOutput{Result: `{"draft_id":"draft","assets":[],"total":0,"usage_note":"fresh state"}`}, nil
 			}
 			return &compose.ToolOutput{Result: marshalToolFailure("not ready", nil)}, nil
 		},
 	)
-	failedInput := &compose.ToolInput{Name: "timeline.inspect", Arguments: `{}`}
+	failedInput := &compose.ToolInput{Name: "timeline.update", Arguments: `{"timeline_clip_id":"stale"}`}
 	if _, err := endpoint(ctx, failedInput); err != nil || !state.unresolved() {
 		t.Fatalf("initial failure err=%v unresolved=%v", err, state.unresolved())
 	}
-	if _, err := endpoint(ctx, &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`}); err != nil || state.unresolved() {
-		t.Fatalf("recovery step err=%v unresolved=%v", err, state.unresolved())
+	if _, err := endpoint(ctx, &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`}); err != nil || !state.unresolved() {
+		t.Fatalf("unrelated success err=%v unresolved=%v", err, state.unresolved())
 	}
-	if _, err := endpoint(ctx, failedInput); err != nil || calls != 3 || !state.unresolved() {
-		t.Fatalf("fresh failure err=%v calls=%d unresolved=%v", err, calls, state.unresolved())
+	if _, err := endpoint(ctx, failedInput); err != nil || calls != 2 || !state.unresolved() {
+		t.Fatalf("duplicate failure should remain blocked err=%v calls=%d unresolved=%v", err, calls, state.unresolved())
+	}
+}
+
+func TestToolRecoverySuccessOnDifferentTargetOfSameToolKeepsFailureUnresolved(t *testing.T) {
+	state := newToolRecoveryState()
+	ctx := withToolRecoveryState(t.Context(), state)
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			if strings.Contains(input.Arguments, `"timeline_id":"draft:v2"`) {
+				return &compose.ToolOutput{Result: marshalToolFailure("v2 contract failed", nil)}, nil
+			}
+			return &compose.ToolOutput{Result: successfulTimelineCheckResult("draft:v1", "old version valid")}, nil
+		},
+	)
+	if _, err := endpoint(ctx, &compose.ToolInput{
+		Name: "timeline.check", Arguments: `{"timeline_id":"draft:v2"}`,
+	}); err != nil || !state.unresolved() {
+		t.Fatalf("current check failure err=%v unresolved=%v", err, state.unresolved())
+	}
+	if _, err := endpoint(ctx, &compose.ToolInput{
+		Name: "timeline.check", Arguments: `{"timeline_id":"draft:v1"}`,
+	}); err != nil || !state.unresolved() {
+		t.Fatalf("old-version success must not resolve current failure err=%v unresolved=%v", err, state.unresolved())
+	}
+}
+
+func TestToolRecoveryLatestCheckCanRetrySameEmptyArgumentsAndResolveOlderVersion(t *testing.T) {
+	state := newToolRecoveryState()
+	ctx := rushestools.WithDraftID(withToolRecoveryState(t.Context(), state), "draft")
+	calls := 0
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+			calls++
+			if calls == 1 {
+				return &compose.ToolOutput{Result: `{
+					"status":"validation_failed","observation":"v2 contract failed",
+					"data":{"timeline_id":"draft:v2"}
+				}`}, nil
+			}
+			return &compose.ToolOutput{Result: successfulTimelineCheckResult("draft:v3", "v3 valid")}, nil
+		},
+	)
+	input := &compose.ToolInput{Name: "timeline.check", Arguments: `{}`}
+	if _, err := endpoint(ctx, input); err != nil || !state.unresolved() {
+		t.Fatalf("first empty check err=%v unresolved=%v", err, state.unresolved())
+	}
+	if _, err := endpoint(ctx, input); err != nil || calls != 2 || state.unresolved() {
+		t.Fatalf(
+			"same dynamic arguments must check and resolve newer version: calls=%d err=%v unresolved=%v",
+			calls, err, state.unresolved(),
+		)
+	}
+}
+
+func TestToolRecoveryExplicitCheckCanRetryAfterContractRepairOnSameVersion(t *testing.T) {
+	state := newToolRecoveryState()
+	ctx := withToolRecoveryState(t.Context(), state)
+	checkCalls := 0
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			if input.Name == "plan.update" {
+				return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"contract fixed"}`}, nil
+			}
+			checkCalls++
+			if checkCalls == 1 {
+				return &compose.ToolOutput{Result: `{
+					"status":"validation_failed","observation":"contract failed",
+					"data":{"timeline_id":"draft:v2"}
+				}`}, nil
+			}
+			return &compose.ToolOutput{Result: successfulTimelineCheckResult("draft:v2", "contract valid")}, nil
+		},
+	)
+	check := &compose.ToolInput{
+		Name: "timeline.check", Arguments: `{"timeline_id":"draft:v2"}`,
+	}
+	if _, err := endpoint(ctx, check); err != nil || !state.unresolved() {
+		t.Fatalf("initial explicit check err=%v unresolved=%v", err, state.unresolved())
+	}
+	if _, err := endpoint(ctx, &compose.ToolInput{
+		Name: "plan.update", Arguments: `{"plan":{"content_contract":{}}}`,
+	}); err != nil || !state.unresolved() {
+		t.Fatalf("contract repair must not itself erase check failure: err=%v unresolved=%v", err, state.unresolved())
+	}
+	if _, err := endpoint(ctx, check); err != nil || checkCalls != 2 || state.unresolved() {
+		t.Fatalf(
+			"explicit same-version check must rerun after contract repair: calls=%d err=%v unresolved=%v",
+			checkCalls, err, state.unresolved(),
+		)
+	}
+}
+
+func TestToolRecoveryCheckResolvesCommittedMutationContractFailure(t *testing.T) {
+	state := newToolRecoveryState()
+	ctx := withToolRecoveryState(t.Context(), state)
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			switch input.Name {
+			case "timeline.update":
+				return &compose.ToolOutput{Result: `{
+					"status":"validation_failed","observation":"v2 contract failed",
+					"data":{"timeline_id":"draft:v2","contract_failures":[{"check":"target_duration"}]}
+				}`}, nil
+			case "plan.update":
+				return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"contract fixed"}`}, nil
+			case "timeline.check":
+				return &compose.ToolOutput{Result: successfulTimelineCheckResult("draft:v2", "v2 contract valid")}, nil
+			default:
+				t.Fatalf("unexpected tool %q", input.Name)
+				return nil, nil
+			}
+		},
+	)
+	if _, err := endpoint(ctx, &compose.ToolInput{
+		Name: "timeline.update", Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_1"}`,
+	}); err != nil || !state.unresolved() {
+		t.Fatalf("committed mutation failure err=%v unresolved=%v", err, state.unresolved())
+	}
+	if _, err := endpoint(ctx, &compose.ToolInput{
+		Name: "plan.update", Arguments: `{"plan":{"content_contract":{}}}`,
+	}); err != nil || !state.unresolved() {
+		t.Fatalf("contract repair must retain mutation failure err=%v unresolved=%v", err, state.unresolved())
+	}
+	if _, err := endpoint(ctx, &compose.ToolInput{
+		Name: "timeline.check", Arguments: `{"timeline_id":"draft:v2"}`,
+	}); err != nil || state.unresolved() {
+		t.Fatalf("same-version check must resolve committed mutation failure err=%v unresolved=%v summary=%q",
+			err, state.unresolved(), state.summary())
+	}
+}
+
+func TestToolRecoveryCheckDoesNotResolveUncommittedMutationFailure(t *testing.T) {
+	state := newToolRecoveryState()
+	state.recordFailure(toolFailureSnapshot{
+		Tool: "timeline.update", Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_1"}`,
+		Observation: "execution failed",
+	})
+	state.recordSuccess(
+		"timeline.check", `{"timeline_id":"draft:v2"}`,
+		`{"status":"succeeded","data":{"timeline_id":"draft:v2"}}`,
+	)
+	if !state.unresolved() {
+		t.Fatal("timeline.check must not resolve an uncommitted mutation failure")
+	}
+}
+
+func TestTimelineUpdateRecoveryTargetUsesExistingClipInsteadOfReplacementAsset(t *testing.T) {
+	original := toolRecoveryTargetKey(
+		"timeline.update",
+		`{"kind":"replace_clip","timeline_clip_id":"clip_1","asset_id":"bad_asset"}`,
+		"",
+	)
+	corrected := toolRecoveryTargetKey(
+		"timeline.update",
+		`{"kind":"replace_clip","timeline_clip_id":"clip_1","asset_id":"good_asset"}`,
+		"",
+	)
+	differentClip := toolRecoveryTargetKey(
+		"timeline.update",
+		`{"kind":"replace_clip","timeline_clip_id":"clip_2","asset_id":"good_asset"}`,
+		"",
+	)
+	if original != corrected || original == differentClip {
+		t.Fatalf(
+			"targets original=%q corrected=%q different=%q",
+			original, corrected, differentClip,
+		)
+	}
+}
+
+func TestShotSearchRecoveryTargetIncludesQueryAndCanonicalFilters(t *testing.T) {
+	first := toolRecoveryTargetKey(
+		"shot.search",
+		`{"query":" Cat  Scene ","asset_ids":["asset_B","asset_A"],"limit":10}`,
+		"",
+	)
+	equivalent := toolRecoveryTargetKey(
+		"shot.search",
+		`{"query":"cat scene","asset_ids":["asset_A","asset_B"],"limit":20}`,
+		"",
+	)
+	differentQuery := toolRecoveryTargetKey(
+		"shot.search",
+		`{"query":"dog scene","asset_ids":["asset_A","asset_B"]}`,
+		"",
+	)
+	if first != equivalent || first == differentQuery {
+		t.Fatalf("targets first=%q equivalent=%q different=%q", first, equivalent, differentQuery)
+	}
+}
+
+func TestRenderStartRecoveryTargetIncludesNormalizedOrientation(t *testing.T) {
+	portrait := toolRecoveryTargetKey(
+		"render.start", `{"kind":"final","timeline_id":"draft:v1","orientation":"portrait"}`, "",
+	)
+	landscape := toolRecoveryTargetKey(
+		"render.start", `{"kind":"final","timeline_id":"draft:v1","orientation":"landscape"}`, "",
+	)
+	autoImplicit := toolRecoveryTargetKey(
+		"render.start", `{"kind":"final","timeline_id":"draft:v1"}`, "",
+	)
+	autoExplicit := toolRecoveryTargetKey(
+		"render.start", `{"kind":"final","timeline_id":"draft:v1","orientation":"auto"}`, "",
+	)
+	if portrait == landscape || autoImplicit != autoExplicit {
+		t.Fatalf(
+			"targets portrait=%q landscape=%q autoImplicit=%q autoExplicit=%q",
+			portrait, landscape, autoImplicit, autoExplicit,
+		)
+	}
+
+	state := newToolRecoveryState()
+	state.recordFailure(toolFailureSnapshot{
+		Tool:      "render.start",
+		Arguments: `{"kind":"final","timeline_id":"draft:v1","orientation":"portrait"}`,
+	})
+	state.recordSuccess(
+		"render.start",
+		`{"kind":"final","timeline_id":"draft:v1","orientation":"landscape"}`,
+		`{"status":"queued","data":{"timeline_id":"draft:v1","render_kind":"final","orientation":"landscape"}}`,
+	)
+	if !state.unresolved() {
+		t.Fatal("landscape success must not resolve portrait render failure")
+	}
+	state.recordSuccess(
+		"render.start",
+		`{"kind":"final","timeline_id":"draft:v1","orientation":"portrait"}`,
+		`{"status":"queued","data":{"timeline_id":"draft:v1","render_kind":"final","orientation":"portrait"}}`,
+	)
+	if state.unresolved() {
+		t.Fatal("portrait success must resolve the matching portrait render failure")
+	}
+}
+
+func TestToolRecoveryCorrectedKindOnSameStableTargetResolvesFailure(t *testing.T) {
+	state := newToolRecoveryState()
+	ctx := rushestools.WithDraftID(withToolRecoveryState(t.Context(), state), "draft")
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			if strings.Contains(input.Arguments, `"kind":"trim_clip"`) {
+				return &compose.ToolOutput{Result: marshalToolFailure("kind 与字段不匹配", nil)}, nil
+			}
+			return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"已修正","data":{"timeline_id":"draft:v2"}}`}, nil
+		},
+	)
+	if _, err := endpoint(ctx, &compose.ToolInput{
+		Name: "timeline.update", Arguments: `{"kind":"trim_clip","timeline_clip_id":"clip_1","edge":"end","timeline_frame":45}`,
+	}); err != nil || !state.unresolved() {
+		t.Fatalf("initial failure err=%v unresolved=%v", err, state.unresolved())
+	}
+	if _, err := endpoint(ctx, &compose.ToolInput{
+		Name: "timeline.update", Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_1","edge":"end","timeline_frame":45}`,
+	}); err != nil || state.unresolved() {
+		t.Fatalf("corrected kind on same clip must resolve failure err=%v unresolved=%v", err, state.unresolved())
+	}
+}
+
+func TestToolRecoverySuccessOnDifferentRangeKeepsFailureUnresolved(t *testing.T) {
+	state := newToolRecoveryState()
+	ctx := rushestools.WithDraftID(withToolRecoveryState(t.Context(), state), "draft")
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			if strings.Contains(input.Arguments, `"start_frame":0`) {
+				return &compose.ToolOutput{Result: marshalToolFailure("range invalid", nil)}, nil
+			}
+			return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"deleted other range","data":{"timeline_id":"draft:v2"}}`}, nil
+		},
+	)
+	if _, err := endpoint(ctx, &compose.ToolInput{
+		Name: "timeline.delete", Arguments: `{"kind":"delete_range","start_frame":0,"end_frame":10}`,
+	}); err != nil || !state.unresolved() {
+		t.Fatalf("initial range failure err=%v unresolved=%v", err, state.unresolved())
+	}
+	if _, err := endpoint(ctx, &compose.ToolInput{
+		Name: "timeline.delete", Arguments: `{"kind":"delete_range","start_frame":20,"end_frame":30}`,
+	}); err != nil || !state.unresolved() {
+		t.Fatalf("different range success must not resolve failure err=%v unresolved=%v", err, state.unresolved())
+	}
+}
+
+func TestToolRecoveryImportSuccessOnlyResolvesSameNormalizedPath(t *testing.T) {
+	state := newToolRecoveryState()
+	state.recordFailure(toolFailureSnapshot{
+		Tool: "asset.import_local_file", Arguments: `{"path":"/media/failed.mp4","storage_mode":"reference"}`,
+	})
+	state.recordSuccess(
+		"asset.import_local_file", `{"path":"/media/other.mp4","storage_mode":"copy"}`,
+		`{"status":"succeeded"}`,
+	)
+	if !state.unresolved() {
+		t.Fatal("导入另一个路径成功不得核销原路径失败")
+	}
+	state.recordSuccess(
+		"asset.import_local_file", `{"path":"/media/tmp/../failed.mp4","storage_mode":"copy","kind":"video"}`,
+		`{"status":"succeeded"}`,
+	)
+	if state.unresolved() {
+		t.Fatal("同一规范化路径修正其他参数后应核销原失败")
+	}
+}
+
+func TestToolRecoveryMemorySetSuccessOnlyResolvesSameSortedKeys(t *testing.T) {
+	state := newToolRecoveryState()
+	state.recordFailure(toolFailureSnapshot{
+		Tool: "memory.set", Arguments: `{"entries":[` +
+			`{"key":"pacing","kind":"invalid","statement":"快","evidence_quote":"偏快"},` +
+			`{"key":"subtitle_style","kind":"preference","statement":"简洁","evidence_quote":"字幕简洁"}]}`,
+	})
+	state.recordSuccess(
+		"memory.set", `{"entries":[{"key":"music_style","kind":"preference","statement":"轻快","evidence_quote":"音乐轻快"}]}`,
+		`{"status":"succeeded"}`,
+	)
+	if !state.unresolved() {
+		t.Fatal("写入另一组记忆键成功不得核销原失败")
+	}
+	state.recordSuccess(
+		"memory.set", `{"entries":[`+
+			`{"key":"subtitle_style","kind":"preference","statement":"字幕简洁","evidence_quote":"字幕简洁"},`+
+			`{"key":"pacing","kind":"preference","statement":"节奏偏快","evidence_quote":"偏快"}]}`,
+		`{"status":"succeeded"}`,
+	)
+	if state.unresolved() {
+		t.Fatal("同一组排序后记忆键修正内容参数后应核销原失败")
 	}
 }
 
@@ -499,20 +1295,19 @@ func decodeRecoveryPayload(t *testing.T, raw string) map[string]any {
 
 func TestToolRecoveryCumulativeRepairBudgetSurvivesAlternatingSuccess(t *testing.T) {
 	state := newToolRecoveryState()
-	ctx := withToolRecoveryState(t.Context(), state)
+	ctx := rushestools.WithDraftID(withToolRecoveryState(t.Context(), state), "draft")
 	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
 		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
-			if input.Name == "asset.list_assets" {
-				return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"fresh state"}`}, nil
+			if input.Arguments == `{"state":"ready"}` {
+				return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"fresh state","data":{"timeline_exists":false}}`}, nil
 			}
 			return &compose.ToolOutput{Result: marshalToolFailure("still not ready", nil)}, nil
 		},
 	)
 	failing := &compose.ToolInput{Name: "timeline.inspect", Arguments: `{}`}
-	recovering := &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`}
+	recovering := &compose.ToolInput{Name: "timeline.inspect", Arguments: `{"state":"ready"}`}
 
-	// 交替 fail→success：每次成功清空连击链（repairFailures 回 0），旧行为下 exhaustion 永不
-	// 触发。前 maxCumulativeRepairAttempts-1 次失败都不应穷尽，且连击成功后确实被清空。
+	// 同一失败工具的成功重试会清空连击链；累计预算仍跨成功保留。
 	for i := 1; i < maxCumulativeRepairAttempts; i++ {
 		if _, err := endpoint(ctx, failing); err != nil {
 			t.Fatal(err)

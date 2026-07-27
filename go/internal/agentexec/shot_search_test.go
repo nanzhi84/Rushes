@@ -426,12 +426,13 @@ func TestShotSearchPaginatesStableResultsBeyondOneHundred(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
-	firstRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{Limit: 100})
+	firstRaw, err := exec.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{Limit: 200})
 	if err != nil {
 		t.Fatal(err)
 	}
 	first := firstRaw.(rushestools.ShotSearchResult)
-	if len(first.Shots) != 100 || first.TotalMatches != 135 || !first.Truncated ||
+	if len(first.Shots) != 100 || first.TotalMatches != 135 || first.PageStart != 0 ||
+		first.RemainingMatches != 35 || first.PageAfterShotID != "" || !first.Truncated ||
 		first.NextAfterShotID == "" ||
 		first.NextAfterShotID != first.Shots[len(first.Shots)-1].ShotID {
 		t.Fatalf("first page=%#v", first)
@@ -443,7 +444,8 @@ func TestShotSearchPaginatesStableResultsBeyondOneHundred(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := secondRaw.(rushestools.ShotSearchResult)
-	if len(second.Shots) != 35 || second.TotalMatches != 135 || second.Truncated ||
+	if len(second.Shots) != 35 || second.TotalMatches != 135 || second.PageStart != 100 ||
+		second.RemainingMatches != 0 || second.PageAfterShotID != first.NextAfterShotID || second.Truncated ||
 		second.NextAfterShotID != "" {
 		t.Fatalf("second page=%#v", second)
 	}

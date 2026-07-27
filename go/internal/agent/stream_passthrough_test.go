@@ -9,10 +9,11 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
+	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
 
-// delayedFinalReplyModel 的终态文本轮按 delay 逐块推送，用于验证直通流式：首 token 早于整轮
-// 生成完毕，deltas 随生成过程分散到达而非在缓冲后一次性涌出。
+// delayedFinalReplyModel 的终态文本轮按 delay 逐块推送，用于验证终态门禁先缓冲完整正文，
+// 再统一输出通过真值检查的内容。
 type delayedFinalReplyModel struct {
 	chunks []string
 	delay  time.Duration
@@ -55,11 +56,9 @@ func (stub *delayedFinalReplyModel) Stream(
 	return reader, nil
 }
 
-func TestFinalReplyStreamsThroughIncrementally(t *testing.T) {
+func TestFinalReplyStreamsOnlyAfterTerminalBufferCompletes(t *testing.T) {
 	t.Parallel()
-	// H5/H7 交点：本用例用普通回复（不触发 H7 反思重述），故 text_delta 序列与 message_completed
-	// 全文严格一致；若 H7 重述命中，message_completed 会被整体替换为重述版、与已流出的 delta 不同，
-	// 那是 H7 的既定语义例外，不在本 golden 约束内。
+	// 普通回复不触发反思重述；text_delta 与 message_completed 必须严格一致。
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_passthrough")
 	chunkDelay := 250 * time.Millisecond
@@ -115,23 +114,23 @@ collect:
 	joined := strings.Join(deltaTexts, "")
 	want := strings.Join(chunks, "")
 	if !sawCompleted || completedContent != want || joined != want {
-		t.Fatalf("直通 delta 序列与 message_completed 不一致：deltas=%q completed=%q want=%q", joined, completedContent, want)
+		t.Fatalf("门禁后 delta 序列与 message_completed 不一致：deltas=%q completed=%q want=%q", joined, completedContent, want)
 	}
-	// 直通证明：deltas 随生成过程分散到达（首末间隔接近 3×delay）。若是缓冲后一次性涌出，间隔≈0。
+	// 终态正文必须先完整缓冲；放行后的 delta 会紧邻发出，不能在模型生成过程中提前泄漏。
 	spread := lastDeltaAt.Sub(firstDeltaAt)
-	if spread < 300*time.Millisecond {
-		t.Fatalf("delta 首末间隔=%s 过小，疑似缓冲而非直通（期望≈%s）", spread, 3*chunkDelay)
+	if spread >= 100*time.Millisecond {
+		t.Fatalf("门禁放行后的 delta 不应继续按模型生成延迟分散：%s", spread)
 	}
-	// TTFT 验收：首 token 远早于整轮生成完毕（<1s 本地基准）。
+	// 首 delta 只能在最后一个模型 chunk 到达后出现（3×delay）。
 	ttft := firstDeltaAt.Sub(start)
-	if ttft >= time.Second {
-		t.Fatalf("终态回复首 token 延迟=%s ≥ 1s，未达直通基准", ttft)
+	if ttft < 3*chunkDelay-100*time.Millisecond {
+		t.Fatalf("终态正文在完整缓冲前泄漏：first_delta=%s want>=%s", ttft, 3*chunkDelay-100*time.Millisecond)
 	}
-	t.Logf("直通基准：TTFT=%s，delta 首末间隔=%s（%d 段 %s 间隔）", ttft, spread, len(chunks), chunkDelay)
+	t.Logf("终态缓冲：first_delta=%s，放行后 delta spread=%s", ttft, spread)
 }
 
-// lateToolCallReplyModel 在终态文本轮里先吐可见正文、再吐一个 tool_call 分片，用于验证决策 2 的
-// 观测保护：直通后晚到的 tool_call 被检测（计数 +1），且回合仍以正文正常收尾、不执行该工具。
+// lateToolCallReplyModel 在终态文本轮里先吐成功正文、再吐一个 timeline.update 分片，
+// 用于验证未执行的晚到工具调用会使整条缓冲回复失败。
 type lateToolCallReplyModel struct{}
 
 func (lateToolCallReplyModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
@@ -150,13 +149,13 @@ func (lateToolCallReplyModel) Stream(
 	reader, writer := schema.Pipe[*schema.Message](3)
 	writer.Send(schema.AssistantMessage("先给你个结论", nil), nil)
 	writer.Send(schema.AssistantMessage("", []schema.ToolCall{{
-		ID: "late_call", Function: schema.FunctionCall{Name: "timeline.check", Arguments: "{}"},
+		ID: "late_call", Function: schema.FunctionCall{Name: "timeline.update", Arguments: "{}"},
 	}}), nil)
 	writer.Close()
 	return reader, nil
 }
 
-func TestPassThroughLateToolCallIsDetectedButTurnFinishes(t *testing.T) {
+func TestBufferedFinalReplyWithLateToolCallFailsWithoutLeakingSuccess(t *testing.T) {
 	// 不并行：passthroughLateToolCallCount 是包级计数器，串行才能对增量做精确断言。
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_late_toolcall")
@@ -175,13 +174,23 @@ func TestPassThroughLateToolCallIsDetectedButTurnFinishes(t *testing.T) {
 	service.Queue().JoinDraft("draft_late_toolcall")
 
 	var completedContent string
+	var completedKind string
+	var leakedSuccess bool
+	var toolStarted bool
 	var outcome any
 	deadline := time.After(5 * time.Second)
 	for outcome == nil {
 		select {
 		case event := <-stream:
+			if event["type"] == TurnStreamTextDelta && strings.Contains(event["delta"].(string), "先给你个结论") {
+				leakedSuccess = true
+			}
+			if event["type"] == TurnStreamToolStepStarted && event["tool"] == "timeline.update" {
+				toolStarted = true
+			}
 			if event["type"] == TurnStreamMessageCompleted {
 				completedContent, _ = event["content"].(string)
+				completedKind, _ = event["kind"].(string)
 			}
 			if event["type"] == TurnStreamTurnEnded {
 				outcome = event["outcome"]
@@ -191,10 +200,22 @@ func TestPassThroughLateToolCallIsDetectedButTurnFinishes(t *testing.T) {
 		}
 	}
 
-	if outcome != "finished" || completedContent != "先给你个结论" {
-		t.Fatalf("直通后晚到 tool_call 不应打断回合：outcome=%v content=%q", outcome, completedContent)
+	if outcome != "failed" || completedKind != "turn_failure" ||
+		!strings.Contains(completedContent, "该调用未被执行") {
+		t.Fatalf("晚到 tool_call 必须确定性失败：outcome=%v kind=%q content=%q", outcome, completedKind, completedContent)
+	}
+	if leakedSuccess || toolStarted || strings.Contains(completedContent, "先给你个结论") {
+		t.Fatalf("不得泄漏成功正文或伪装执行工具：leaked=%t tool_started=%t content=%q", leakedSuccess, toolStarted, completedContent)
 	}
 	if after := passthroughLateToolCallCount.Load(); after != before+1 {
 		t.Fatalf("晚到 tool_call 应被检测计数一次：before=%d after=%d", before, after)
+	}
+	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_late_toolcall", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := messages[len(messages)-1]
+	if final.Role != "system" || final.Kind != "turn_failure" || final.Content != completedContent {
+		t.Fatalf("只能持久化确定性终态失败：%#v", final)
 	}
 }

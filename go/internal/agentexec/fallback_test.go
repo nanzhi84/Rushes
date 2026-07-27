@@ -71,6 +71,8 @@ func TestFallbackMainlineUsesLatestExistingTimelineAndRejectsRenderDrift(t *test
 				return rushestools.DetectShotsResult{Status: "completed"}, nil
 			case "timeline.insert":
 				return executor.ExecuteTool(callCtx, name, input)
+			case "timeline.check":
+				return executor.ExecuteTool(callCtx, name, input)
 			case "render.start":
 				renderTimelineID = input.(rushestools.RenderStartInput).TimelineID
 				return rushestools.ToolResult{

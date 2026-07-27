@@ -91,11 +91,28 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
 	assertPersistedContractReport(t, database, "draft_contract", 1, false)
+	draft, err = storage.GetDraft(t.Context(), database.Read(), "draft_contract")
+	if err != nil || draft.TimelineValidated {
+		t.Fatalf("contract-invalid timeline must not be validated: draft=%#v err=%v", draft, err)
+	}
+	rendered, err := exec.toolStartRender(t.Context(), "draft_contract", rushestools.RenderStartInput{
+		Kind: "preview", TimelineID: failing.TimelineID,
+	})
+	if err != nil || rendered.Status != string(rushestools.StatusValidationFailed) {
+		t.Fatalf("contract-invalid timeline render=%#v err=%v", rendered, err)
+	}
+	var jobCount int
+	if err := database.Read().QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM jobs WHERE requested_by_draft_id=?`, "draft_contract",
+	).Scan(&jobCount); err != nil || jobCount != 0 {
+		t.Fatalf("contract-invalid timeline enqueued jobs=%d err=%v", jobCount, err)
+	}
 	validated, err := exec.toolCheckTimeline(t.Context(), "draft_contract", rushestools.TimelineCheckInput{})
-	if err != nil || validated.Status != "succeeded" ||
+	if err != nil || validated.Status != "validation_failed" ||
 		!strings.Contains(validated.Observation, "验收合同未通过项") ||
 		len(validated.Data["contract_failures"].([]ContractVerificationItem)) != 5 ||
-		validated.Data["content_contract"].(ContractVerificationReport).Pass {
+		validated.Data["content_contract"].(ContractVerificationReport).Pass ||
+		validated.Data["validation_report"].(map[string]any)["valid"] != false {
 		t.Fatalf("validated failing contract=%#v err=%v", validated, err)
 	}
 

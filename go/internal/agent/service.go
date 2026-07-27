@@ -204,6 +204,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	ctx, injectedMemory := withInjectedMemoryCollector(ctx)
 	recoveryState := newToolRecoveryState()
 	ctx = withToolRecoveryState(ctx, recoveryState)
+	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
 	ctx = agentexec.WithTurnInteractionState(
 		ctx,
 		agentexec.NewTurnInteractionState(service.indexedResources),
@@ -213,6 +214,18 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	})
 	turnBudget := newTurnBudgetState(maxToolRoundsPerTurn)
 	ctx = withTurnBudgetState(ctx, turnBudget)
+	finishCancelled := func(turnErr error) error {
+		service.recordTurnEnded(
+			item.DraftID, turnID, startedAt, "cancelled", "user_cancelled", turnBudget, false,
+		)
+		if turnErr != nil {
+			return turnErr
+		}
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
+		return context.Canceled
+	}
 	ctx = service.withModelRetryReporting(ctx, item.DraftID)
 	ctx = rushestools.WithReporter(ctx, service.toolReporter(ctx, item.DraftID))
 	content, err := service.turnContent(ctx, item, messageID)
@@ -221,13 +234,26 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	// 只落 cancelled 终态，绝不合成 turn_failure；ctx.Err() 兜住后一种，与
 	// model_retry.go 的既有护栏写法一致。
 	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-		service.recordTurnEnded(item.DraftID, turnID, startedAt, "cancelled", "user_cancelled", turnBudget, false)
-		return err
+		return finishCancelled(err)
+	}
+	if recoveryState.recoveryExhausted() {
+		err = &terminalReplyGuardError{kind: "recovery_exhausted", details: recoveryState.summary()}
+		content = ""
+	} else if guardErr := service.terminalReplyGuard(ctx, item.DraftID); guardErr != nil {
+		// 即便 provider 在成功写入或工具失败之后又返回普通错误，也必须优先暴露
+		// harness 已记录的真实终态，不能让错误路径绕过同版本检查或未解决失败门禁。
+		err = guardErr
+		content = ""
 	}
 	// H7:终态回复质检——夹带自我怀疑/中途推翻等过程性语句时,要求模型重述一次(最多 1 次)。
 	reflectionRestated := false
 	if err == nil && content != "" {
 		content, reflectionRestated = service.qualityCheckedFinalReply(ctx, item.DraftID, messageID, content)
+	}
+	if ctx.Err() != nil {
+		// 取消可能落在初次检查之后的 terminal guard / reflection 窗口。此时尚未提交
+		// durable terminal，必须仍以 cancelled 收口，不能进入 turn_failure 或 turn_error。
+		return finishCancelled(ctx.Err())
 	}
 	outcome := "finished"
 	var reason any
@@ -239,51 +265,49 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 				err = errors.New("模型没有生成最终回复")
 			}
 		}
-		content = service.terminalFailureReply(ctx, item.DraftID, messageID, err)
+		content = terminalFailureReply(ctx, err)
 		outcome = "failed"
 		reason = agentexec.TruncateText(err.Error(), 800)
-	} else if recoveryState.recoveryExhausted() {
-		// 模型在恢复预算耗尽后亲笔生成了失败说明：这条走下面的 assistant/reply
-		// 保留为可见回复并注入下一轮上下文，但回合终态必须真实标记为 failed，
-		// 不能把“已停止修复”记成完成。
-		outcome = "failed"
-		reason = agentexec.TruncateText(recoveryState.summary(), 800)
 	}
 	if content != "" {
 		messageRole := "assistant"
 		messageKind := "reply"
 		switch {
 		case err != nil:
-			// 只有 harness 合成的终态失败文案（terminalFailureReply，恒非空）落
-			// 持久系统失败消息，用户不在页面时也能事后从 DB 读回。模型在恢复预算
-			// 耗尽后亲笔生成的失败说明走下面的 assistant/reply，仍注入下一轮上下文；
-			// 用户主动取消走上面的 context.Canceled/ctx.Err 分支，不会到这里。
+			// harness 合成的终态失败文案（terminalFailureReply，恒非空）落持久系统
+			// 失败消息，用户不在页面时也能事后读回；用户主动取消走上面的分支。
 			messageRole, messageKind = "system", "turn_failure"
 		case item.Kind == QueueJobObservation && service.react == nil:
 			messageKind = "observation"
 		}
-		resultRows := reducer.ResultRows{Message: &reducer.MessageRow{
-			ID: messageID, DraftID: item.DraftID, Role: messageRole, Kind: messageKind, Content: content,
-		}}
-		if delivery := observationDeliveryFromContext(ctx, item); delivery != nil {
-			resultRows.AgentJobObservationDelivery = delivery
+		expectedTimelineID := ""
+		if err == nil {
+			expectedTimelineID = terminalExpectedTimelineID(
+				terminalTimelineTruthFromContext(ctx).snapshot(),
+			)
 		}
-		var result reducer.Result
-		_, applyErr := agentexec.CommitDurableTerminal(ctx, func() (bool, error) {
-			var err error
-			result, err = reducer.Apply(ctx, service.database, nil, reducer.Options{
-				Actor:      contracts.ActorAgent,
-				ResultRows: resultRows,
-			})
-			return err == nil && result.Status == reducer.StatusApplied, err
-		})
+		applyErr := service.commitFinalReply(
+			ctx, item, messageID, messageRole, messageKind, content, expectedTimelineID,
+		)
+		var latestChanged *terminalReplyGuardError
+		if errors.As(applyErr, &latestChanged) && latestChanged.kind == "timeline_latest_changed" {
+			err = latestChanged
+			content = terminalFailureReply(ctx, err)
+			outcome = "failed"
+			reason = agentexec.TruncateText(err.Error(), 800)
+			messageRole, messageKind = "system", "turn_failure"
+			applyErr = service.commitFinalReply(
+				ctx, item, messageID, messageRole, messageKind, content, "",
+			)
+		}
 		if applyErr != nil {
+			if errors.Is(applyErr, context.Canceled) || ctx.Err() != nil {
+				return finishCancelled(applyErr)
+			}
 			service.hub.Record(item.DraftID, StreamEvent{"type": TurnStreamTurnError, "message": applyErr.Error()})
 			return applyErr
 		}
-		if result.Status != reducer.StatusApplied {
-			return fmt.Errorf("assistant message reducer status: %s", result.Status)
-		}
+		service.emitAssistantReply(item.DraftID, messageID, content)
 		service.hub.Record(item.DraftID, StreamEvent{
 			"type": TurnStreamMessageCompleted, "message_id": messageID,
 			"kind": messageKind, "content": content,
@@ -299,6 +323,9 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 			return err == nil && result.Status == reducer.StatusApplied, err
 		})
 		if applyErr != nil {
+			if errors.Is(applyErr, context.Canceled) || ctx.Err() != nil {
+				return finishCancelled(applyErr)
+			}
 			return applyErr
 		}
 		if result.Status != reducer.StatusApplied {
@@ -309,6 +336,39 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		service.touchInjectedMemories(ctx, item.DraftID, injectedMemory.snapshot())
 	}
 	service.recordTurnEnded(item.DraftID, turnID, startedAt, outcome, reason, turnBudget, reflectionRestated)
+	return nil
+}
+
+func (service *Service) commitFinalReply(
+	ctx context.Context,
+	item QueueItem,
+	messageID, role, kind, content, expectedTimelineID string,
+) error {
+	resultRows := reducer.ResultRows{Message: &reducer.MessageRow{
+		ID: messageID, DraftID: item.DraftID, Role: role, Kind: kind, Content: content,
+	}}
+	if delivery := observationDeliveryFromContext(ctx, item); delivery != nil {
+		resultRows.AgentJobObservationDelivery = delivery
+	}
+	var result reducer.Result
+	_, applyErr := agentexec.CommitDurableTerminal(ctx, func() (bool, error) {
+		var err error
+		options := reducer.Options{Actor: contracts.ActorAgent, ResultRows: resultRows}
+		if expectedTimelineID != "" {
+			options.Validate = terminalTimelineLatestValidation(item.DraftID, expectedTimelineID)
+		}
+		result, err = reducer.Apply(ctx, service.database, nil, options)
+		return err == nil && result.Status == reducer.StatusApplied, err
+	})
+	if applyErr != nil {
+		return applyErr
+	}
+	if result.Status == reducer.StatusValidationFailed && expectedTimelineID != "" {
+		return service.timelineLatestChangedError(ctx, item.DraftID, expectedTimelineID)
+	}
+	if result.Status != reducer.StatusApplied {
+		return fmt.Errorf("assistant message reducer status: %s", result.Status)
+	}
 	return nil
 }
 
@@ -467,10 +527,10 @@ func (service *Service) streamAgent(
 		if message == nil {
 			continue
 		}
-		// 直通承诺后若仍出现 tool_call 分片，说明模型违反了「工具轮不在 tool_call 前吐正文」的
-		// 假设（见 stream_checker.go classifyModelChunk）：该轮已被判终态并直通，此 tool_call 不会
-		// 被执行。后果有界（用户看到未执行工具的正文，可继续下一轮），但必须可观测——告警 + 计数，
-		// 让假设在真实模型上可证伪、坏了能经 H3 聚合发现（#95 H5，决策 2 观测保护）。
+		// 模型正文之后若又出现 tool_call 分片，说明供应商流违反了「工具轮不在
+		// tool_call 前吐正文」的假设（见 stream_checker.go classifyModelChunk）。此调用不会被
+		// 执行，但回复仍在本地缓冲区，终态门禁通过前不会暴露给用户；同时保留告警与计数，
+		// 让该假设在真实模型上可证伪、坏了能经 H3 聚合发现（#95 H5，决策 2 观测保护）。
 		if len(message.ToolCalls) > 0 {
 			// 按 tool-call 去重计数：流式里同一个 call 会分多片抵达，只应计一次（H-B P2）；
 			// ID 缺失时退回 index/函数名做去重键。
@@ -487,8 +547,8 @@ func (service *Service) streamAgent(
 					"tool_name", call.Function.Name, "tool_call_id", call.ID)
 			}
 		}
-		// 终态回复直通流式（#95 H5）下，Stream 不再缓冲统计这一轮的用量；末片携带的 Usage
-		// 随流抵达，取最新一份（供应商通常在末片给全量），回合读尽后记一次账。
+		// 末片携带的 Usage 随流抵达，取最新一份（供应商通常在末片给全量），
+		// 回合读尽后记一次账。正文只写入本地缓冲区，由 runTurn 通过终态门禁后统一发送。
 		if usage := messageTokenUsage(message); usage != nil {
 			roundUsage = usage
 		}
@@ -496,12 +556,11 @@ func (service *Service) streamAgent(
 			continue
 		}
 		output.WriteString(message.Content)
-		service.hub.Record(draftID, StreamEvent{
-			"type": TurnStreamTextDelta, "message_id": messageID,
-			"kind": "assistant", "delta": message.Content,
-		})
 	}
 	recordTokenUsage(ctx, roundUsage)
+	if len(seenLateToolCalls) > 0 {
+		return "", &terminalReplyGuardError{kind: "terminal_late_tool_call"}
+	}
 	return output.String(), nil
 }
 
@@ -690,17 +749,6 @@ func (service *Service) fallbackTurn(
 		}
 	}
 	reply := "未配置模型密钥：已记录你的需求，并保持本地编辑链路可用。"
-	for _, delta := range runeChunks(reply, 6) {
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		default:
-		}
-		service.hub.Record(draftID, StreamEvent{
-			"type": TurnStreamTextDelta, "message_id": messageID,
-			"kind": "assistant", "delta": delta,
-		})
-	}
 	return reply, nil
 }
 
@@ -833,6 +881,13 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 			status, observation = "failed", err.Error()
 		} else if structuredToolOutputFailed(output) {
 			status = "failed"
+		}
+		truthContext := reportCtx
+		if truthContext == nil {
+			truthContext = ctx
+		}
+		if truthState := terminalTimelineTruthFromContext(truthContext); truthState != nil {
+			truthState.recordToolResult(name, status, output)
 		}
 		service.hub.Record(draftID, StreamEvent{
 			"type": TurnStreamToolStepFinished, "step_id": stepID, "tool": name,
@@ -977,14 +1032,82 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 		return "", err
 	}
 	ctx = agentexec.WithConfirmedToolReplay(ctx)
-	output, err := service.executeReported(ctx, item.DraftID, name, input)
+	result, err := service.executeConfirmedReported(
+		ctx, item.DraftID, name, input, arguments,
+	)
 	if err != nil {
 		return "", err
 	}
-	if result, ok := output.(rushestools.ToolResult); ok && result.Observation != "" {
+	if isTerminalTimelineMutation(name) {
+		timelineID := agentexec.InterfaceString(result.Data["timeline_id"])
+		if timelineID == "" {
+			return "", &terminalReplyGuardError{kind: "timeline_check_missing"}
+		}
+		_, checkErr := service.executeConfirmedReported(
+			ctx,
+			item.DraftID,
+			"timeline.check",
+			rushestools.TimelineCheckInput{TimelineID: timelineID},
+			map[string]any{"timeline_id": timelineID},
+		)
+		if checkErr != nil {
+			return "", &terminalReplyGuardError{
+				kind: "timeline_check_missing", mutationTimelineID: timelineID,
+			}
+		}
+	}
+	if result.Observation != "" {
 		return result.Observation, nil
 	}
 	return "已按你的确认继续执行。", nil
+}
+
+func (service *Service) executeConfirmedReported(
+	ctx context.Context,
+	draftID, name string,
+	input any,
+	arguments map[string]any,
+) (rushestools.ToolResult, error) {
+	reporter := service.toolReporter(ctx, draftID)
+	reporter(ctx, name, "started", input, nil, nil)
+	output, err := service.ExecuteTool(ctx, name, input)
+	if err != nil {
+		reporter(ctx, name, "finished", input, nil, err)
+		return rushestools.ToolResult{}, err
+	}
+	result, proofErr := requireConfirmedToolSuccess(name, arguments, output, draftID)
+	if proofErr != nil {
+		reporter(ctx, name, "finished", input, nil, proofErr)
+		return rushestools.ToolResult{}, proofErr
+	}
+	reporter(ctx, name, "finished", input, result, nil)
+	return result, nil
+}
+
+func requireConfirmedToolSuccess(
+	name string,
+	arguments map[string]any,
+	output any,
+	draftID string,
+) (rushestools.ToolResult, error) {
+	result, ok := terminalTruthToolResult(output)
+	if !ok {
+		return rushestools.ToolResult{}, &terminalReplyGuardError{
+			kind: "tool_failure_unresolved", details: "确认重放的 " + name + " 未返回有效 ToolResult",
+		}
+	}
+	// 该路径直接同步调用 Service.ExecuteTool，返回值与当前 typed input 同栈绑定；
+	// 不经过模型工具中间件，因此把这次直接执行作为完整请求 proof。
+	if !confirmedToolResultSuccessWithExecutionProof(name, arguments, result, draftID, true) {
+		details := result.Observation
+		if details == "" {
+			details = "status=" + result.Status
+		}
+		return rushestools.ToolResult{}, &terminalReplyGuardError{
+			kind: "tool_failure_unresolved", details: "确认重放的 " + name + " 失败：" + details,
+		}
+	}
+	return result, nil
 }
 
 var _ rushestools.Executor = (*Service)(nil)

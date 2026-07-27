@@ -64,8 +64,10 @@ func TestRenderStartTargetsOneTimelineAndJobReadStaysPure(t *testing.T) {
 	jobID, _ := first.Data["job_id"].(string)
 	if first.Status != "queued" || jobID == "" ||
 		second.Data["job_id"] != jobID ||
+		first.Data["timeline_id"] != draftID+":v1" ||
 		first.Data["timeline_version"] != 1 ||
-		first.Data["render_kind"] != "preview" {
+		first.Data["render_kind"] != "preview" ||
+		first.Data["orientation"] != "portrait" {
 		t.Fatalf("first=%#v second=%#v", first, second)
 	}
 	var jobsBeforeStale int
