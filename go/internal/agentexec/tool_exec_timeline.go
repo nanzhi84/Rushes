@@ -118,6 +118,7 @@ func (exec *Executor) toolAtomicTimelineEdit(
 	}
 
 	changedTargets := atomicChangedTargets(current, document)
+	coordinateEffect := atomicTimelineCoordinateEffect(current, document)
 	result, err := exec.persistTimelineFromSnapshot(
 		ctx,
 		draftID,
@@ -144,6 +145,7 @@ func (exec *Executor) toolAtomicTimelineEdit(
 	} else {
 		result.Data["applied_operation"] = appliedOperation
 		result.Data["changed_targets"] = changedTargets
+		result.Data["coordinate_effect"] = coordinateEffect
 		result.Data["validation_summary"] = result.Data["validation_report"]
 	}
 	return result, nil
@@ -467,6 +469,51 @@ func atomicChangedTargets(before, after timeline.Document) []map[string]any {
 	return targets
 }
 
+func atomicTimelineCoordinateEffect(before, after timeline.Document) map[string]any {
+	observationRequired := existingTimelineCoordinatesChanged(before, after)
+	rippleDelta := 0
+	if observationRequired {
+		rippleDelta = after.DurationFrames - before.DurationFrames
+	}
+	return map[string]any{
+		"scope":                  "existing_timeline_clips",
+		"duration_frames_before": before.DurationFrames,
+		"duration_frames_after":  after.DurationFrames,
+		"ripple_delta_frames":    rippleDelta,
+		"observation_required":   observationRequired,
+	}
+}
+
+func existingTimelineCoordinatesChanged(before, after timeline.Document) bool {
+	type placement struct {
+		trackID string
+		start   int
+		end     int
+	}
+	afterPlacements := map[string]placement{}
+	for _, track := range after.Tracks {
+		for _, clip := range track.Clips {
+			afterPlacements[clip.TimelineClipID] = placement{
+				trackID: track.TrackID,
+				start:   clip.TimelineStartFrame,
+				end:     clip.TimelineEndFrame,
+			}
+		}
+	}
+	for _, track := range before.Tracks {
+		for _, previous := range track.Clips {
+			current, exists := afterPlacements[previous.TimelineClipID]
+			if !exists ||
+				current.trackID != track.TrackID ||
+				current.start != previous.TimelineStartFrame ||
+				current.end != previous.TimelineEndFrame {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type timelineMutationBase struct {
 	stateVersion    int
 	timelineVersion int
@@ -715,24 +762,32 @@ func (exec *Executor) toolInspectTimeline(
 	draftID string,
 	input rushestools.TimelineInspectInput,
 ) (rushestools.ToolResult, error) {
-	document, err := exec.requestedTimeline(ctx, draftID, input.TimelineID)
+	document, timelineExists, isCurrent, err := exec.timelineInspectionSnapshot(
+		ctx, draftID, input.TimelineID,
+	)
 	if errors.Is(err, storage.ErrNotFound) {
 		if input.TimelineID != "" {
 			return requestedTimelineNotFound(input.TimelineID), nil
 		}
+		timelineExists = false
+		isCurrent = true
+		err = nil
+	}
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	if !timelineExists {
 		return rushestools.ToolResult{
 			Status:      string(rushestools.StatusSucceeded),
 			Observation: "当前草稿尚无时间线；请先选择素材并创建初版时间线。",
 			Data: map[string]any{
 				"timeline_exists": false,
+				"is_current":      true,
 				"fps":             timeline.DefaultFPS,
 				"duration_frames": 0,
 				"tracks":          []map[string]any{},
 			},
 		}, nil
-	}
-	if err != nil {
-		return rushestools.ToolResult{}, err
 	}
 	tracks := make([]map[string]any, 0, len(document.Tracks))
 	for _, track := range document.Tracks {
@@ -774,12 +829,77 @@ func (exec *Executor) toolInspectTimeline(
 		Data: map[string]any{
 			"timeline_exists":  true,
 			"timeline_id":      document.TimelineID,
+			"is_current":       isCurrent,
 			"timeline_version": document.Version,
 			"fps":              document.FPS, "duration_frames": document.DurationFrames, "tracks": tracks,
 			"audio_layout":   AudioLayoutData(document),
 			"beat_alignment": BeatAlignmentData(document),
 		},
 	}, nil
+}
+
+func (exec *Executor) timelineInspectionSnapshot(
+	ctx context.Context,
+	draftID string,
+	timelineID string,
+) (timeline.Document, bool, bool, error) {
+	var currentVersion sql.NullInt64
+	var requestedVersion sql.NullInt64
+	var raw sql.NullString
+	query := `
+		SELECT d.timeline_current_version,t.version,t.document_json
+		FROM drafts d
+		LEFT JOIN timeline_versions t
+			ON t.draft_id=d.draft_id AND t.version=d.timeline_current_version
+		WHERE d.draft_id=?`
+	args := []any{draftID}
+	if timelineID != "" {
+		query = `
+			SELECT d.timeline_current_version,t.version,t.document_json
+			FROM drafts d
+			LEFT JOIN timeline_versions t
+				ON t.draft_id=d.draft_id AND t.timeline_id=?
+			WHERE d.draft_id=?`
+		args = []any{timelineID, draftID}
+	}
+	err := exec.database.Read().QueryRowContext(ctx, query, args...).Scan(
+		&currentVersion, &requestedVersion, &raw,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return timeline.Document{}, false, false, storage.ErrNotFound
+	}
+	if err != nil {
+		return timeline.Document{}, false, false, err
+	}
+	if !requestedVersion.Valid || !raw.Valid {
+		if timelineID == "" && !currentVersion.Valid {
+			return timeline.Document{}, false, true, nil
+		}
+		return timeline.Document{}, false, false, storage.ErrNotFound
+	}
+	document, err := decodeTimelineInspectionDocument(raw.String)
+	if err != nil {
+		return timeline.Document{}, false, false, err
+	}
+	isCurrent := currentVersion.Valid && currentVersion.Int64 == requestedVersion.Int64
+	return document, true, isCurrent, nil
+}
+
+func decodeTimelineInspectionDocument(raw string) (timeline.Document, error) {
+	var document timeline.Document
+	if err := json.Unmarshal([]byte(raw), &document); err != nil {
+		return timeline.Document{}, err
+	}
+	existing := make(map[string]struct{}, len(document.Tracks))
+	for _, track := range document.Tracks {
+		existing[track.TrackID] = struct{}{}
+	}
+	for _, required := range timeline.Empty(document.DraftID, document.Version).Tracks {
+		if _, found := existing[required.TrackID]; !found {
+			document.Tracks = append(document.Tracks, required)
+		}
+	}
+	return document, nil
 }
 
 func (exec *Executor) requestedTimeline(
