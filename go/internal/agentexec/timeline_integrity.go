@@ -10,6 +10,8 @@ import (
 	"math"
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -217,7 +219,10 @@ func independentAudioClipOverhangDoesNotIncrease(
 		}
 		origin, exists := previousByID[clip.TimelineClipID]
 		if !exists {
-			origin, exists = uniqueConservativeSourceAncestor(clip, previous.Clips, previousDuration)
+			origin, exists = deterministicDerivedClipAncestor(clip, previousByID)
+		}
+		if !exists {
+			origin, exists = uniqueSourceAncestor(clip, previous.Clips)
 		}
 		if !exists || resultOverhang > clipOverhangFrames(origin, previousDuration) {
 			return false
@@ -226,27 +231,55 @@ func independentAudioClipOverhangDoesNotIncrease(
 	return true
 }
 
-func uniqueConservativeSourceAncestor(
+func deterministicDerivedClipAncestor(
 	clip timeline.Clip,
-	previous []timeline.Clip,
-	durationFrames int,
+	previous map[string]timeline.Clip,
 ) (timeline.Clip, bool) {
 	var ancestor timeline.Clip
 	found := false
-	for _, candidate := range previous {
-		if candidate.AssetID == "" || candidate.AssetID != clip.AssetID ||
-			candidate.AssetKind != clip.AssetKind || candidate.PlaybackRate != clip.PlaybackRate ||
-			clip.SourceStartFrame < candidate.SourceStartFrame ||
-			clip.SourceEndFrame > candidate.SourceEndFrame {
-			continue
-		}
-		if !found || clipOverhangFrames(candidate, durationFrames) <
-			clipOverhangFrames(ancestor, durationFrames) {
+	for clipID, candidate := range previous {
+		for _, marker := range []string{"_after_", "_split_"} {
+			suffix, matches := strings.CutPrefix(clip.TimelineClipID, clipID+marker)
+			if !matches || suffix == "" {
+				continue
+			}
+			if _, err := strconv.Atoi(suffix); err != nil || !isSourceDescendant(clip, candidate) {
+				continue
+			}
+			if found {
+				return timeline.Clip{}, false
+			}
 			ancestor = candidate
 			found = true
 		}
 	}
 	return ancestor, found
+}
+
+func uniqueSourceAncestor(
+	clip timeline.Clip,
+	previous []timeline.Clip,
+) (timeline.Clip, bool) {
+	var ancestor timeline.Clip
+	found := false
+	for _, candidate := range previous {
+		if !isSourceDescendant(clip, candidate) {
+			continue
+		}
+		if found {
+			return timeline.Clip{}, false
+		}
+		ancestor = candidate
+		found = true
+	}
+	return ancestor, found
+}
+
+func isSourceDescendant(clip, candidate timeline.Clip) bool {
+	return candidate.AssetID != "" && candidate.AssetID == clip.AssetID &&
+		candidate.AssetKind == clip.AssetKind && candidate.PlaybackRate == clip.PlaybackRate &&
+		clip.SourceStartFrame >= candidate.SourceStartFrame &&
+		clip.SourceEndFrame <= candidate.SourceEndFrame
 }
 
 func clipOverhangFrames(clip timeline.Clip, durationFrames int) int {

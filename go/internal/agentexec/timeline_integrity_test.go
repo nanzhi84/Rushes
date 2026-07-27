@@ -409,6 +409,73 @@ func TestTrustedOverhangDoesNotAuthorizeAnotherClipToExtend(t *testing.T) {
 	}
 }
 
+func TestTrustedOverhangRangeSplitUsesDeterministicClipLineage(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_repeated_source_audio_split"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{
+		{AssetID: "visual", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30},
+		{AssetID: "visual", AssetKind: "video", SourceStartFrame: 30, SourceEndFrame: 60},
+		{AssetID: "visual", AssetKind: "video", SourceStartFrame: 60, SourceEndFrame: 90},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Tracks[4].Clips = []timeline.Clip{
+		{
+			TimelineClipID: "bgm_tail", TrackID: "bgm", AssetID: "music", AssetKind: "audio",
+			TimelineStartFrame: 30, TimelineEndFrame: 90,
+			SourceStartFrame: 0, SourceEndFrame: 60, PlaybackRate: 1,
+		},
+		{
+			TimelineClipID: "bgm_repeat", TrackID: "bgm", AssetID: "music", AssetKind: "audio",
+			TimelineStartFrame: 0, TimelineEndFrame: 60,
+			SourceStartFrame: 0, SourceEndFrame: 60, PlaybackRate: 1,
+		},
+	}
+	if persisted, persistErr := seedTimelineVersion(
+		exec, t.Context(), draftID, document, "fixture", nil,
+	); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	executeAtomicTimelineTool(t, exec, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+		"kind": "delete_clip", "timeline_clip_id": "clip_v1_003",
+	})
+
+	deleted := executeAtomicTimelineTool(t, exec, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+		"kind": "delete_range", "start_frame": 40, "end_frame": 50,
+	})
+	if deleted.Data["timeline_id"] != draftID+":v3" {
+		t.Fatalf("repeated-source split result=%#v", deleted)
+	}
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 3 || latest.DurationFrames != 50 {
+		t.Fatalf("latest=%#v err=%v", latest, err)
+	}
+	var tail timeline.Clip
+	for _, clip := range latest.Tracks[4].Clips {
+		if clip.TimelineClipID == "bgm_tail_after_50" {
+			tail = clip
+			break
+		}
+	}
+	if tail.TimelineClipID == "" || tail.TimelineStartFrame != 40 || tail.TimelineEndFrame != 80 ||
+		tail.SourceStartFrame != 20 || tail.SourceEndFrame != 60 {
+		t.Fatalf("deterministic tail lineage=%#v clips=%#v", tail, latest.Tracks[4].Clips)
+	}
+	checkedRaw, err := exec.ExecuteTool(ctx, "timeline.check", rushestools.TimelineCheckInput{
+		TimelineID: latest.TimelineID,
+	})
+	if err != nil || checkedRaw.(rushestools.ToolResult).Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("repeated-source split check=%#v err=%v", checkedRaw, err)
+	}
+}
+
 func TestDirectPersistenceDoesNotValidateIndependentAudioOverhang(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_direct_overhang"
