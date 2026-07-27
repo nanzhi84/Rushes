@@ -355,6 +355,60 @@ func TestAtomicExplicitAudioExtensionDoesNotPersist(t *testing.T) {
 	}
 }
 
+func TestTrustedOverhangDoesNotAuthorizeAnotherClipToExtend(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_per_clip_audio_overhang"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	insertAtomicTimelineAsset(t, database, draftID, "music_b", "audio", 2, false)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{
+		{AssetID: "visual", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30},
+		{AssetID: "visual", AssetKind: "video", SourceStartFrame: 30, SourceEndFrame: 60},
+		{AssetID: "visual", AssetKind: "video", SourceStartFrame: 60, SourceEndFrame: 90},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Tracks[4].Clips = []timeline.Clip{
+		{
+			TimelineClipID: "bgm_existing_tail", TrackID: "bgm",
+			AssetID: "music_a", AssetKind: "audio",
+			TimelineEndFrame: 90, SourceEndFrame: 90, PlaybackRate: 1,
+		},
+		{
+			TimelineClipID: "bgm_in_bounds", TrackID: "bgm",
+			AssetID: "music_b", AssetKind: "audio",
+			TimelineEndFrame: 60, SourceEndFrame: 60, PlaybackRate: 1,
+		},
+	}
+	if persisted, persistErr := seedTimelineVersion(
+		exec, t.Context(), draftID, document, "fixture", nil,
+	); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	executeAtomicTimelineTool(t, exec, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+		"kind": "delete_clip", "timeline_clip_id": "clip_v1_003",
+	})
+
+	raw, err := exec.ExecuteTool(ctx, "timeline.update", rushestools.TimelineUpdateInput{
+		"kind": "set_playback_rate", "timeline_clip_id": "bgm_in_bounds", "playback_rate": 0.75,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := raw.(rushestools.ToolResult); result.Status != string(rushestools.StatusFailed) {
+		t.Fatalf("one clip's trusted tail must not authorize another clip to extend: %#v", result)
+	}
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 2 || latest.Tracks[4].Clips[1].TimelineEndFrame != 60 {
+		t.Fatalf("per-clip extension wrote a version: %#v err=%v", latest, err)
+	}
+}
+
 func TestDirectPersistenceDoesNotValidateIndependentAudioOverhang(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_direct_overhang"

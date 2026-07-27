@@ -191,12 +191,66 @@ func deriveIndependentAudioValidationProof(
 			continue
 		}
 		if _, trusted := trustedCurrent[track.TrackID]; trusted &&
-			trackOverhangFrames(track, result.DurationFrames) <=
-				trackOverhangFrames(previous, current.DurationFrames) {
+			independentAudioClipOverhangDoesNotIncrease(
+				previous, track, current.DurationFrames, result.DurationFrames,
+			) {
 			allowed[track.TrackID] = copyTimelineTrack(track)
 		}
 	}
 	return allowed
+}
+
+func independentAudioClipOverhangDoesNotIncrease(
+	previous timeline.Track,
+	result timeline.Track,
+	previousDuration int,
+	resultDuration int,
+) bool {
+	previousByID := make(map[string]timeline.Clip, len(previous.Clips))
+	for _, clip := range previous.Clips {
+		previousByID[clip.TimelineClipID] = clip
+	}
+	for _, clip := range result.Clips {
+		resultOverhang := clipOverhangFrames(clip, resultDuration)
+		if resultOverhang == 0 {
+			continue
+		}
+		origin, exists := previousByID[clip.TimelineClipID]
+		if !exists {
+			origin, exists = uniqueConservativeSourceAncestor(clip, previous.Clips, previousDuration)
+		}
+		if !exists || resultOverhang > clipOverhangFrames(origin, previousDuration) {
+			return false
+		}
+	}
+	return true
+}
+
+func uniqueConservativeSourceAncestor(
+	clip timeline.Clip,
+	previous []timeline.Clip,
+	durationFrames int,
+) (timeline.Clip, bool) {
+	var ancestor timeline.Clip
+	found := false
+	for _, candidate := range previous {
+		if candidate.AssetID == "" || candidate.AssetID != clip.AssetID ||
+			candidate.AssetKind != clip.AssetKind || candidate.PlaybackRate != clip.PlaybackRate ||
+			clip.SourceStartFrame < candidate.SourceStartFrame ||
+			clip.SourceEndFrame > candidate.SourceEndFrame {
+			continue
+		}
+		if !found || clipOverhangFrames(candidate, durationFrames) <
+			clipOverhangFrames(ancestor, durationFrames) {
+			ancestor = candidate
+			found = true
+		}
+	}
+	return ancestor, found
+}
+
+func clipOverhangFrames(clip timeline.Clip, durationFrames int) int {
+	return max(0, clip.TimelineEndFrame-durationFrames)
 }
 
 func (exec *Executor) validateStoredTimeline(
