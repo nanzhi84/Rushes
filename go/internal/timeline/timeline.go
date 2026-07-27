@@ -70,6 +70,8 @@ type Clip struct {
 
 var SubtitleStyleNames = []string{"default", "large_center", "top_bar", "minimal", "bold_bottom"}
 
+const preservedAudioLineageMetadataKey = "_rushes_preserved_audio_lineage"
+
 type ValidationIssue struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -152,7 +154,8 @@ func Validate(document Document) ValidationReport {
 			if clip.TrackID != track.TrackID {
 				add("clip_track_mismatch", clip.TimelineClipID)
 			}
-			if clip.TimelineStartFrame < 0 || clip.TimelineEndFrame <= clip.TimelineStartFrame || clip.TimelineEndFrame > document.DurationFrames {
+			if clip.TimelineStartFrame < 0 || clip.TimelineEndFrame <= clip.TimelineStartFrame ||
+				clip.TimelineEndFrame > document.DurationFrames {
 				add("invalid_clip_range", clip.TimelineClipID)
 			}
 			if clip.AssetID != "" && clip.SourceEndFrame <= clip.SourceStartFrame {
@@ -402,20 +405,28 @@ func trimClip(document *Document, operation map[string]any) error {
 	newDuration := max(1, int(math.Round(float64(end-start)/effectiveRate(selected))))
 	hasPrimary := false
 	for _, member := range members {
-		track := &document.Tracks[member.trackIndex]
+		track := document.Tracks[member.trackIndex]
 		if track.Locked {
 			return trackLockedError(track.TrackID)
 		}
+		hasPrimary = hasPrimary || track.TrackID == "visual_base"
+	}
+	if hasPrimary && newDuration != oldDuration {
+		if err := ensureShiftAfterUnlocked(document, selected.TimelineStartFrame+oldDuration); err != nil {
+			return err
+		}
+	}
+	for _, member := range members {
+		track := &document.Tracks[member.trackIndex]
 		clip := &track.Clips[member.clipIndex]
 		clip.SourceStartFrame = start
 		clip.SourceEndFrame = end
 		clip.TimelineEndFrame = clip.TimelineStartFrame + newDuration
 		syncClipPlacementMetadata(clip)
-		hasPrimary = hasPrimary || track.TrackID == "visual_base"
 	}
 	// 主视觉决定成片时长，裁剪时需要 ripple 后续片段及其他轨道。
 	// BGM/SFX/字幕等自由轨只改变自身区间。
-	if hasPrimary {
+	if hasPrimary && newDuration != oldDuration {
 		shiftAfter(document, selected.TimelineStartFrame+oldDuration, newDuration-oldDuration)
 	}
 	return nil
@@ -852,6 +863,9 @@ func insertClip(document *Document, operation map[string]any) error {
 		if !ok {
 			return errors.New("insert_clip metadata 必须是对象")
 		}
+		if _, reserved := metadata[preservedAudioLineageMetadataKey]; reserved {
+			return fmt.Errorf("insert_clip metadata 字段 %q 为内部保留字段", preservedAudioLineageMetadataKey)
+		}
 		clip.Metadata = metadata
 	}
 	if includeOriginalAudio {
@@ -1012,17 +1026,25 @@ func setPlaybackRate(document *Document, operation map[string]any) error {
 	newDuration := max(1, int(math.Round(float64(selected.SourceEndFrame-selected.SourceStartFrame)/rate)))
 	hasPrimary := false
 	for _, member := range members {
-		track := &document.Tracks[member.trackIndex]
+		track := document.Tracks[member.trackIndex]
 		if track.Locked {
 			return trackLockedError(track.TrackID)
 		}
+		hasPrimary = hasPrimary || track.TrackID == "visual_base"
+	}
+	if hasPrimary && newDuration != oldDuration {
+		if err := ensureShiftAfterUnlocked(document, selected.TimelineStartFrame+oldDuration); err != nil {
+			return err
+		}
+	}
+	for _, member := range members {
+		track := &document.Tracks[member.trackIndex]
 		clip := &track.Clips[member.clipIndex]
 		clip.PlaybackRate = rate
 		clip.TimelineEndFrame = clip.TimelineStartFrame + newDuration
 		syncClipPlacementMetadata(clip)
-		hasPrimary = hasPrimary || track.TrackID == "visual_base"
 	}
-	if hasPrimary {
+	if hasPrimary && newDuration != oldDuration {
 		shiftAfter(document, selected.TimelineStartFrame+oldDuration, newDuration-oldDuration)
 	}
 	return nil
@@ -1108,6 +1130,23 @@ func shiftAfter(document *Document, boundary, delta int) {
 		}
 	}
 	document.DurationFrames += delta
+}
+
+func ensureShiftAfterUnlocked(document *Document, boundary int) error {
+	for _, track := range document.Tracks {
+		if !track.Locked {
+			continue
+		}
+		for _, clip := range track.Clips {
+			if clip.TimelineStartFrame >= boundary {
+				return &SemanticError{
+					Kind: SemanticTrackLocked, TrackID: track.TrackID,
+					Message: fmt.Sprintf("轨道 %s 已锁定，不能执行波纹编辑", track.TrackID),
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func trackByID(document *Document, trackID string) *Track {

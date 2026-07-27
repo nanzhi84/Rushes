@@ -45,10 +45,12 @@ func applyTimelineRestored(ctx context.Context, state *applyState, event contrac
 			return errors.New("TimelineVersionRestored 缺少新 timeline_version")
 		}
 		var raw string
+		var validationReport sql.NullString
 		if err := state.tx.QueryRowContext(ctx, `
-			SELECT document_json FROM timeline_versions WHERE draft_id=? AND version=?`,
+			SELECT document_json,validation_report_json
+			FROM timeline_versions WHERE draft_id=? AND version=?`,
 			event.DraftID, checkpoint.timelineVersion.Int64,
-		).Scan(&raw); err != nil {
+		).Scan(&raw, &validationReport); err != nil {
 			return err
 		}
 		if err := json.Unmarshal([]byte(raw), &document); err != nil {
@@ -62,9 +64,10 @@ func applyTimelineRestored(ctx context.Context, state *applyState, event contrac
 			INSERT INTO timeline_versions(
 				timeline_id,draft_id,version,parent_version,created_by_patch_id,
 				document_json,validation_report_json,created_at
-			) VALUES(?,?,?,?,?,?,NULL,?)`,
+			) VALUES(?,?,?,?,?,?,?,?)`,
 			timelineID, event.DraftID, newVersion,
-			checkpoint.timelineVersion.Int64, "rewind:"+checkpointID, mustJSON(document), state.createdAt,
+			checkpoint.timelineVersion.Int64, "rewind:"+checkpointID, mustJSON(document),
+			validationReport, state.createdAt,
 		); err != nil {
 			return err
 		}

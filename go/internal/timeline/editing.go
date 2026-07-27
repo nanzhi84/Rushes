@@ -157,11 +157,27 @@ func setClipLinked(document *Document, operation map[string]any) error {
 	}
 	selected := &document.Tracks[location.trackIndex].Clips[location.clipIndex]
 	if !linked {
+		if !selected.Linked {
+			selected.ParentBlockID = ""
+			return nil
+		}
 		groupID := selected.ParentBlockID
+		members := linkedGroup(document, groupID)
+		if groupID != "" && len(members) == 2 {
+			for _, member := range members {
+				if member == location {
+					continue
+				}
+				track := document.Tracks[member.trackIndex]
+				if track.Locked {
+					return trackLockedError(track.TrackID)
+				}
+			}
+		}
 		selected.Linked = false
 		selected.ParentBlockID = ""
 		if groupID != "" {
-			members := linkedGroup(document, groupID)
+			members = linkedGroup(document, groupID)
 			if len(members) == 1 {
 				member := members[0]
 				document.Tracks[member.trackIndex].Clips[member.clipIndex].Linked = false

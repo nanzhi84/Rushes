@@ -393,6 +393,85 @@ func TestTrimAndPlaybackRateOnFreeTrackDoNotChangeCompositionDuration(t *testing
 	}
 }
 
+func TestTrimAndPlaybackRateAllowLockedLinkedAudioCrossingRippleBoundary(t *testing.T) {
+	t.Parallel()
+	base, err := composeTimelineFixture("draft_locked_crossing_audio", 1, []timelineFixtureSelection{
+		{AssetID: "a", AssetKind: "video", SourceEndFrame: 30},
+		{AssetID: "b", AssetKind: "video", SourceEndFrame: 30},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, trackID := range []string{"bgm", "sfx"} {
+		track := trackByID(&base, trackID)
+		track.Locked = true
+		track.Clips = []Clip{{
+			TimelineClipID: trackID + "_linked", TrackID: trackID,
+			AssetID: "independent_audio", AssetKind: "audio", Role: trackID,
+			TimelineStartFrame: 15, TimelineEndFrame: 45,
+			SourceEndFrame: 30, PlaybackRate: 1,
+			ParentBlockID: "independent_audio_group", Linked: true,
+		}}
+	}
+
+	tests := []struct {
+		name         string
+		operation    map[string]any
+		wantDuration int
+	}{
+		{
+			name: "trim",
+			operation: map[string]any{
+				"kind": "trim_clip", "timeline_clip_id": "clip_v1_001",
+				"source_start_frame": 0, "source_end_frame": 20,
+			},
+			wantDuration: 50,
+		},
+		{
+			name: "rate",
+			operation: map[string]any{
+				"kind": "set_playback_rate", "timeline_clip_id": "clip_v1_001", "playback_rate": 2.0,
+			},
+			wantDuration: 45,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, patchErr := ApplyPatch(base, test.operation)
+			if patchErr != nil {
+				t.Fatal(patchErr)
+			}
+			if result.DurationFrames != test.wantDuration || !Validate(result).Valid {
+				t.Fatalf("duration=%d report=%#v", result.DurationFrames, Validate(result))
+			}
+			for _, trackID := range []string{"bgm", "sfx"} {
+				clip := trackByID(&result, trackID).Clips[0]
+				if clip.TimelineStartFrame != 15 || clip.TimelineEndFrame != 45 {
+					t.Fatalf("%s clip moved outside shiftAfter footprint: %#v", trackID, clip)
+				}
+			}
+		})
+	}
+}
+
+func TestInsertClipRejectsInternalPreservedAudioLineageMetadata(t *testing.T) {
+	t.Parallel()
+	document, err := composeTimelineFixture("draft_reserved_metadata", 1, []timelineFixtureSelection{{
+		AssetID: "a", AssetKind: "video", SourceEndFrame: 60,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ApplyPatch(document, map[string]any{
+		"kind": "insert_clip", "track_id": "bgm", "asset_id": "music", "asset_kind": "audio",
+		"source_start_frame": 0, "source_end_frame": 30,
+		"metadata": map[string]any{preservedAudioLineageMetadataKey: "user-value"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "内部保留字段") {
+		t.Fatalf("reserved metadata err=%v", err)
+	}
+}
+
 func TestLinkedAudioAndProfessionalEditingOperations(t *testing.T) {
 	t.Parallel()
 	base, err := composeTimelineFixture("draft_pro_edit", 1, []timelineFixtureSelection{
@@ -575,6 +654,7 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 		{"kind": "delete_range", "start_frame": -1, "end_frame": 30},
 		{"kind": "insert_clip", "asset_id": "", "source_start_frame": 0, "source_end_frame": 30},
 		{"kind": "insert_clip", "asset_id": "a", "source_start_frame": 0, "source_end_frame": 30, "track_id": "missing"},
+		{"kind": "insert_clip", "asset_id": "music", "asset_kind": "audio", "source_start_frame": 0, "source_end_frame": 90, "track_id": "bgm"},
 		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_frame": 0.5, "source_end_frame": 30},
 		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_frame": "0", "source_end_frame": 30},
 		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_s": 0, "source_end_s": 1},
@@ -620,6 +700,46 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 		if _, err := ApplyPatch(base, operation); err == nil {
 			t.Fatalf("operation should fail: %#v", operation)
 		}
+	}
+}
+
+func TestValidateRejectsOverhangOnEveryTrack(t *testing.T) {
+	t.Parallel()
+	tests := []string{
+		"bgm", "sfx", "voiceover", "original_audio", "visual_overlay", "subtitles",
+	}
+	for _, trackID := range tests {
+		t.Run(trackID, func(t *testing.T) {
+			document, err := composeTimelineFixture(
+				"draft_overhang_"+trackID,
+				1,
+				[]timelineFixtureSelection{{AssetID: "visual", AssetKind: "video", SourceEndFrame: 60}},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			track := trackByID(&document, trackID)
+			clip := Clip{
+				TimelineClipID: "overhang_" + trackID,
+				TrackID:        trackID, TimelineEndFrame: 90,
+			}
+			if trackID == "subtitles" {
+				clip.Text = "字幕"
+			} else {
+				clip.AssetID = "asset_" + trackID
+				clip.AssetKind = "audio"
+				clip.SourceEndFrame = 90
+				clip.PlaybackRate = 1
+				if trackID == "visual_overlay" {
+					clip.AssetKind = "video"
+				}
+			}
+			track.Clips = []Clip{clip}
+			report := Validate(document)
+			if report.Valid || !hasValidationIssue(report, "invalid_clip_range") {
+				t.Fatalf("missing invalid_clip_range: %#v", report.Issues)
+			}
+		})
 	}
 }
 
