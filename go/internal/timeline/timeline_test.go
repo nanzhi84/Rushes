@@ -575,6 +575,7 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 		{"kind": "delete_range", "start_frame": -1, "end_frame": 30},
 		{"kind": "insert_clip", "asset_id": "", "source_start_frame": 0, "source_end_frame": 30},
 		{"kind": "insert_clip", "asset_id": "a", "source_start_frame": 0, "source_end_frame": 30, "track_id": "missing"},
+		{"kind": "insert_clip", "asset_id": "music", "asset_kind": "audio", "source_start_frame": 0, "source_end_frame": 90, "track_id": "bgm"},
 		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_frame": 0.5, "source_end_frame": 30},
 		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_frame": "0", "source_end_frame": 30},
 		{"kind": "trim_clip", "timeline_clip_id": "clip_v1_001", "source_start_s": 0, "source_end_s": 1},
@@ -620,6 +621,57 @@ func TestValidationAndPatchFailureBranches(t *testing.T) {
 		if _, err := ApplyPatch(base, operation); err == nil {
 			t.Fatalf("operation should fail: %#v", operation)
 		}
+	}
+}
+
+func TestValidateAllowsOverhangOnlyForIndependentAudio(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		trackID string
+		valid   bool
+	}{
+		{trackID: "bgm", valid: true},
+		{trackID: "sfx", valid: true},
+		{trackID: "voiceover", valid: false},
+		{trackID: "original_audio", valid: false},
+		{trackID: "visual_overlay", valid: false},
+		{trackID: "subtitles", valid: false},
+	}
+	for _, test := range tests {
+		t.Run(test.trackID, func(t *testing.T) {
+			document, err := composeTimelineFixture(
+				"draft_overhang_"+test.trackID,
+				1,
+				[]timelineFixtureSelection{{AssetID: "visual", AssetKind: "video", SourceEndFrame: 60}},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			track := trackByID(&document, test.trackID)
+			clip := Clip{
+				TimelineClipID: "overhang_" + test.trackID,
+				TrackID:        test.trackID, TimelineEndFrame: 90,
+			}
+			if test.trackID == "subtitles" {
+				clip.Text = "字幕"
+			} else {
+				clip.AssetID = "asset_" + test.trackID
+				clip.AssetKind = "audio"
+				clip.SourceEndFrame = 90
+				clip.PlaybackRate = 1
+				if test.trackID == "visual_overlay" {
+					clip.AssetKind = "video"
+				}
+			}
+			track.Clips = []Clip{clip}
+			report := Validate(document)
+			if report.Valid != test.valid {
+				t.Fatalf("valid=%v want=%v issues=%#v", report.Valid, test.valid, report.Issues)
+			}
+			if !test.valid && !hasValidationIssue(report, "invalid_clip_range") {
+				t.Fatalf("missing invalid_clip_range: %#v", report.Issues)
+			}
+		})
 	}
 }
 

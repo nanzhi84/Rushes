@@ -12,7 +12,7 @@ import (
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-func TestIndependentAudioGuardRejectsPartialPrimaryDeletion(t *testing.T) {
+func TestIndependentAudioPreservationAllowsPrimaryShrinkWithoutTruncatingBGM(t *testing.T) {
 	document, err := agenttest.ComposeTimeline("draft_partial_delete", 1, []agenttest.TimelineSelection{
 		{AssetID: "old_a", AssetKind: "video", SourceEndFrame: 30},
 		{AssetID: "old_b", AssetKind: "video", SourceEndFrame: 30},
@@ -32,8 +32,77 @@ func TestIndependentAudioGuardRejectsPartialPrimaryDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := restoreIndependentAudioTracks(&result, preserved); err == nil {
-		t.Fatalf("partial replacement must not silently truncate BGM: %#v", result)
+	restoreIndependentAudioTracks(&result, preserved)
+	if report := timeline.Validate(result); !report.Valid {
+		t.Fatalf("preserved overhang must remain structurally valid: %#v", report)
+	}
+	if result.DurationFrames != 30 || len(result.Tracks[4].Clips) != 1 ||
+		result.Tracks[4].Clips[0].TimelineEndFrame != 60 ||
+		result.Tracks[4].Clips[0].SourceEndFrame != 60 {
+		t.Fatalf("partial replacement truncated untouched BGM: %#v", result)
+	}
+}
+
+func TestAtomicPrimaryDeletionPreservesIndependentAudioAcrossLaterRegrowth(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_preserve_audio_overhang"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	insertAtomicTimelineAsset(t, database, draftID, "old_a", "video", 1, false)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{
+		{AssetID: "old_a", AssetKind: "video", SourceEndFrame: 30},
+		{AssetID: "old_b", AssetKind: "video", SourceEndFrame: 30},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Tracks[4].Clips = []timeline.Clip{{
+		TimelineClipID: "bgm_full", TrackID: "bgm", AssetID: "music", AssetKind: "audio",
+		TimelineEndFrame: 60, SourceEndFrame: 60, PlaybackRate: 1,
+	}}
+	document.Tracks[6].Clips = []timeline.Clip{{
+		TimelineClipID: "sfx_tail", TrackID: "sfx", AssetID: "effect", AssetKind: "audio",
+		TimelineStartFrame: 45, TimelineEndFrame: 60,
+		SourceStartFrame: 0, SourceEndFrame: 15, PlaybackRate: 1,
+	}}
+	if persisted, persistErr := seedTimelineVersion(
+		exec, t.Context(), draftID, document, "fixture", nil,
+	); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
+	}
+
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	deleted := executeAtomicTimelineTool(t, exec, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+		"kind": "delete_clip", "timeline_clip_id": "clip_v1_001",
+	})
+	for _, target := range deleted.Data["changed_targets"].([]map[string]any) {
+		if ContainsString(independentAudioTrackIDs, StringValue(target["track_id"])) {
+			t.Fatalf("untouched independent audio must not be reported as changed: %#v", deleted.Data)
+		}
+	}
+	shrunk, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || shrunk.DurationFrames != 30 || !timeline.Validate(shrunk).Valid ||
+		shrunk.Tracks[4].Clips[0].TimelineEndFrame != 60 ||
+		shrunk.Tracks[4].Clips[0].SourceEndFrame != 60 ||
+		shrunk.Tracks[6].Clips[0].TimelineStartFrame != 45 ||
+		shrunk.Tracks[6].Clips[0].TimelineEndFrame != 60 {
+		t.Fatalf("shrunk=%#v report=%#v err=%v", shrunk, timeline.Validate(shrunk), err)
+	}
+
+	executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "old_a",
+		"source_start_frame": 0, "source_end_frame": 30,
+	})
+	regrown, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || regrown.DurationFrames != 60 || !timeline.Validate(regrown).Valid ||
+		regrown.Tracks[4].Clips[0].TimelineEndFrame != 60 ||
+		regrown.Tracks[4].Clips[0].SourceEndFrame != 60 ||
+		regrown.Tracks[6].Clips[0].TimelineStartFrame != 45 ||
+		regrown.Tracks[6].Clips[0].TimelineEndFrame != 60 {
+		t.Fatalf("regrown=%#v report=%#v err=%v", regrown, timeline.Validate(regrown), err)
 	}
 }
 
@@ -95,6 +164,12 @@ func TestTimelineIntegrityHelpersNormalizeEvidenceAndTouchedTracks(t *testing.T)
 	})
 	if _, exists := insertTouched["sfx"]; !exists {
 		t.Errorf("insert touched tracks=%v missing sfx", insertTouched)
+	}
+	for _, kind := range []string{"delete_range", "delete_source_range"} {
+		preserved := preserveIndependentAudioForOperation(document, map[string]any{"kind": kind})
+		if len(preserved) != 0 {
+			t.Errorf("%s must explicitly edit independent audio, preserved=%v", kind, preserved)
+		}
 	}
 }
 

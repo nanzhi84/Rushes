@@ -89,9 +89,7 @@ func (exec *Executor) toolAtomicTimelineEdit(
 		}
 		return atomicTimelineApplyFailure(appliedOperation, err), nil
 	}
-	if restoreErr := restoreIndependentAudioTracks(&document, preservedAudio); restoreErr != nil {
-		return atomicTimelineApplyFailure(appliedOperation, restoreErr), nil
-	}
+	restoreIndependentAudioTracks(&document, preservedAudio)
 	if atomicReplaceTouchesPrimary(current, appliedOperation) {
 		audioAssetIDs, listErr := exec.draftAudioVideoAssetIDs(ctx, draftID)
 		if listErr != nil {

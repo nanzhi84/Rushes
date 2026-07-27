@@ -2,7 +2,6 @@ package agentexec
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"sort"
 
@@ -67,23 +66,14 @@ func touchedTrackIDsForOperation(
 func restoreIndependentAudioTracks(
 	document *timeline.Document,
 	preserved map[string]timeline.Track,
-) error {
+) {
 	for trackIndex := range document.Tracks {
 		track, exists := preserved[document.Tracks[trackIndex].TrackID]
 		if !exists {
 			continue
 		}
-		for _, clip := range track.Clips {
-			if clip.TimelineEndFrame > document.DurationFrames {
-				return fmt.Errorf(
-					"主视频原子编辑会把时间线缩到 %d 帧，但未编辑的 %s 片段 %s 仍延伸到 %d 帧",
-					document.DurationFrames, track.TrackID, clip.TimelineClipID, clip.TimelineEndFrame,
-				)
-			}
-		}
 		document.Tracks[trackIndex] = copyTimelineTrack(track)
 	}
-	return nil
 }
 
 func copyTimelineTrack(track timeline.Track) timeline.Track {

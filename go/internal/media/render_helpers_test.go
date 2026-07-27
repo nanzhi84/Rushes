@@ -155,6 +155,16 @@ func TestBuildDuckingFilterGraphGroupsVoiceKeyAndKeepsFinalMix(t *testing.T) {
 	}
 }
 
+func TestMixAudioFilterTrimsPreservedOverhangToCompositionDuration(t *testing.T) {
+	document := timeline.Empty("preserved_audio_render", 1)
+	document.DurationFrames = 30
+	filter := mixAudioFilter([]string{"bgm", "sfx"}, "mixed", document)
+	if !strings.Contains(filter, "amix=inputs=2:duration=longest") ||
+		!strings.Contains(filter, "apad=whole_dur=1.000000,atrim=duration=1.000000[mixed]") {
+		t.Fatalf("overhanging independent audio must be trimmed to the final video: %s", filter)
+	}
+}
+
 func TestLinkOrCopyFileFallsBackWhenLinksAreUnavailable(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "source.ttf")
 	destination := filepath.Join(t.TempDir(), "staged.ttf")
