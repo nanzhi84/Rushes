@@ -248,6 +248,255 @@ func TestControlToolSurfaceNarrowsToCurrentAction(t *testing.T) {
 	)
 }
 
+func TestRippleEditForcesTimelineInspectBeforeMoreModelTools(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_ripple_observation_surface"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	seedSurfaceAsset(t, service, draftID)
+	setSurfaceTimelineState(t, service, draftID, false)
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	user := schema.UserMessage("根据节拍继续修改现有时间线")
+	ripple := schema.ToolMessage(
+		`{"status":"succeeded","data":{"timeline_id":"draft_ripple_observation_surface:v2",`+
+			`"coordinate_effect":{`+
+			`"duration_frames_before":1440,"duration_frames_after":1308,`+
+			`"ripple_delta_frames":-132,"observation_required":true}}}`,
+		"call_ripple",
+		schema.WithToolName("timeline.update"),
+	)
+
+	messages := []*schema.Message{user, ripple}
+	if !timelineObservationRequiredSinceLatestUser(messages, false) {
+		t.Fatal("成功波纹编辑后未要求重新观察")
+	}
+	specs, err := selectModelToolSurface(ctx, service.tools, messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := surfaceNames(specs); !reflect.DeepEqual(names, []string{"timeline.inspect"}) {
+		t.Fatalf("ripple surface=%v want=[timeline.inspect]", names)
+	}
+
+	failedInspect := schema.ToolMessage(
+		`{"status":"failed"}`, "call_failed_inspect",
+		schema.WithToolName("timeline.inspect"),
+	)
+	if !timelineObservationRequiredSinceLatestUser(append(messages, failedInspect), false) {
+		t.Fatal("失败的 inspect 不得清除重新观察要求")
+	}
+	automaticContinuation := schema.UserMessage(
+		"这是原任务的自动续跑，不是新的用户请求。请继续。",
+	)
+	if !timelineObservationRequiredSinceLatestUser(append(messages, automaticContinuation), false) {
+		t.Fatal("自动续跑不得清除重新观察要求")
+	}
+
+	staleInspect := schema.ToolMessage(
+		`{"status":"succeeded","data":{"timeline_id":"draft_ripple_observation_surface:v1",`+
+			`"is_current":false}}`, "call_stale_inspect",
+		schema.WithToolName("timeline.inspect"),
+	)
+	if !timelineObservationRequiredSinceLatestUser(append(messages, staleInspect), false) {
+		t.Fatal("成功读取旧 timeline_id 不得清除最新版本观察要求")
+	}
+	invalidatedVersionNowStale := schema.ToolMessage(
+		`{"status":"succeeded","data":{"timeline_exists":true,`+
+			`"timeline_id":"draft_ripple_observation_surface:v2","is_current":false}}`,
+		"call_invalidated_version_now_stale",
+		schema.WithToolName("timeline.inspect"),
+	)
+	if !timelineObservationRequiredSinceLatestUser(
+		append(messages, invalidatedVersionNowStale), false,
+	) {
+		t.Fatal("失效版本后来变旧时不得因 timeline_id 相等而清除观察要求")
+	}
+	newerCurrentInspect := schema.ToolMessage(
+		`{"status":"succeeded","data":{"timeline_exists":true,`+
+			`"timeline_id":"draft_ripple_observation_surface:v3","is_current":true}}`,
+		"call_newer_current_inspect",
+		schema.WithToolName("timeline.inspect"),
+	)
+	if timelineObservationRequiredSinceLatestUser(append(messages, newerCurrentInspect), false) {
+		t.Fatal("成功读取更新的当前版本后仍要求重复观察")
+	}
+	timelineGoneInspect := schema.ToolMessage(
+		`{"status":"succeeded","data":{"timeline_exists":false,"is_current":true}}`,
+		"call_timeline_gone_inspect",
+		schema.WithToolName("timeline.inspect"),
+	)
+	if timelineObservationRequiredSinceLatestUser(append(messages, timelineGoneInspect), false) {
+		t.Fatal("成功确认当前时间线不存在后仍要求重复观察")
+	}
+
+	successfulInspect := schema.ToolMessage(
+		`{"status":"succeeded","data":{"timeline_exists":true,`+
+			`"timeline_id":"draft_ripple_observation_surface:v2",`+
+			`"is_current":true}}`, "call_inspect",
+		schema.WithToolName("timeline.inspect"),
+	)
+	afterInspect := append(messages, successfulInspect)
+	if timelineObservationRequiredSinceLatestUser(afterInspect, false) {
+		t.Fatal("成功 inspect 后仍要求重复观察")
+	}
+	specs, err = selectModelToolSurface(ctx, service.tools, afterInspect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := surfaceNames(specs); !containsName(names, "timeline.update") {
+		t.Fatalf("inspect 后未恢复编辑工具面: %v", names)
+	}
+
+	nonRipple := schema.ToolMessage(
+		`{"status":"succeeded","data":{"coordinate_effect":{`+
+			`"duration_frames_before":60,"duration_frames_after":120,`+
+			`"ripple_delta_frames":0,"observation_required":false}}}`,
+		"call_append",
+		schema.WithToolName("timeline.insert"),
+	)
+	if timelineObservationRequiredSinceLatestUser([]*schema.Message{user, nonRipple}, false) {
+		t.Fatal("顺序追加主视觉不应强制重复 inspect")
+	}
+	if timelineObservationRequiredSinceLatestUser(append(messages, schema.UserMessage("只调整字幕")), false) {
+		t.Fatal("新的真实用户消息必须开始新的观察边界")
+	}
+}
+
+func TestEditingJobContinuationWithoutToolTraceRequiresCurrentTimelineInspect(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_rebuilt_continuation_observation"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	seedSurfaceAsset(t, service, draftID)
+	setSurfaceTimelineState(t, service, draftID, false)
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	messages := []*schema.Message{
+		schema.UserMessage("清理口播并继续调整现有时间线"),
+		schema.AssistantMessage("【历史最终回复】后台分析完成后继续。", nil),
+		schema.UserMessage(
+			"你等待的后台任务已到终态。\n任务：understand\n状态：成功\n" +
+				"这是原任务的自动续跑，不是新的用户请求。请继续。",
+		),
+	}
+	specs, err := selectModelToolSurface(ctx, service.tools, messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := surfaceNames(specs); !reflect.DeepEqual(names, []string{"timeline.inspect"}) {
+		t.Fatalf("重建后的自动续跑 surface=%v want=[timeline.inspect]", names)
+	}
+
+	staleInspect := schema.ToolMessage(
+		`{"status":"succeeded","data":{"timeline_id":"draft_rebuilt_continuation_observation:v1",`+
+			`"is_current":false}}`, "call_stale_continuation_inspect",
+		schema.WithToolName("timeline.inspect"),
+	)
+	if specs, err = selectModelToolSurface(ctx, service.tools, append(messages, staleInspect)); err != nil {
+		t.Fatal(err)
+	} else if names := surfaceNames(specs); !reflect.DeepEqual(names, []string{"timeline.inspect"}) {
+		t.Fatalf("旧版本 inspect 后 surface=%v want=[timeline.inspect]", names)
+	}
+
+	currentInspect := schema.ToolMessage(
+		`{"status":"succeeded","data":{"timeline_id":"draft_rebuilt_continuation_observation:v2",`+
+			`"is_current":true}}`, "call_current_continuation_inspect",
+		schema.WithToolName("timeline.inspect"),
+	)
+	specs, err = selectModelToolSurface(ctx, service.tools, append(messages, currentInspect))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := surfaceNames(specs); reflect.DeepEqual(names, []string{"timeline.inspect"}) {
+		t.Fatalf("当前版本 inspect 后仍未解除门禁: %v", names)
+	}
+}
+
+func TestDiscoveryJobContinuationInspectsExistingTimelineBeforeInsert(t *testing.T) {
+	t.Parallel()
+	continuationMessages := func() []*schema.Message {
+		return []*schema.Message{
+			schema.UserMessage("找一个合适镜头插入现有时间线"),
+			schema.AssistantMessage("【历史最终回复】镜头理解完成后继续。", nil),
+			schema.UserMessage(
+				"你等待的后台任务已到终态。\n任务：understand\n状态：成功\n" +
+					"这是原任务的自动续跑，不是新的用户请求。请继续。",
+			),
+		}
+	}
+
+	t.Run("existing timeline", func(t *testing.T) {
+		database := agenttest.AgentTestDatabase(t)
+		const draftID = "draft_discovery_continuation_existing_timeline"
+		agenttest.CreateAgentDraft(t, database, draftID)
+		service, err := NewService(t.Context(), database, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(service.Close)
+		seedSurfaceAsset(t, service, draftID)
+		setSurfaceTimelineState(t, service, draftID, false)
+		ctx := rushestools.WithDraftID(t.Context(), draftID)
+		messages := continuationMessages()
+
+		specs, err := selectModelToolSurface(ctx, service.tools, messages)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if names := surfaceNames(specs); !reflect.DeepEqual(names, []string{"timeline.inspect"}) {
+			t.Fatalf("existing discovery continuation surface=%v", names)
+		}
+
+		messages = append(messages, schema.ToolMessage(
+			`{"status":"succeeded","data":{"timeline_exists":true,`+
+				`"timeline_id":"draft_discovery_continuation_existing_timeline:v1",`+
+				`"is_current":true}}`,
+			"call_current_discovery_inspect",
+			schema.WithToolName("timeline.inspect"),
+		))
+		specs, err = selectModelToolSurface(ctx, service.tools, messages)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := surfaceNames(specs)
+		if !containsName(names, "shot.search") || !containsName(names, "timeline.insert") {
+			t.Fatalf("inspect 后未恢复 discovery edit surface=%v", names)
+		}
+	})
+
+	t.Run("empty timeline", func(t *testing.T) {
+		database := agenttest.AgentTestDatabase(t)
+		const draftID = "draft_discovery_continuation_empty_timeline"
+		agenttest.CreateAgentDraft(t, database, draftID)
+		service, err := NewService(t.Context(), database, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(service.Close)
+		seedSurfaceAsset(t, service, draftID)
+		specs, err := selectModelToolSurface(
+			rushestools.WithDraftID(t.Context(), draftID), service.tools, continuationMessages(),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := surfaceNames(specs)
+		if reflect.DeepEqual(names, []string{"timeline.inspect"}) ||
+			!containsName(names, "timeline.insert") {
+			t.Fatalf("empty discovery continuation surface=%v", names)
+		}
+	})
+}
+
 func TestEveryConfiguredModelSurfaceFitsBudgetAcrossDraftStates(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_all_surface_budgets"
@@ -580,8 +829,23 @@ func TestAutomaticContinuationPreservesTalkingHeadIntentAfterInitialInsert(t *te
 		t.Fatal(err)
 	}
 	names := surfaceNames(specs)
-	if !containsName(names, "speech.search") {
-		t.Fatalf("后台续跑后的口播 surface=%v", names)
+	if !reflect.DeepEqual(names, []string{"timeline.inspect"}) {
+		t.Fatalf("后台续跑必须先重新观察当前时间线: %v", names)
+	}
+	messages = append(messages, schema.ToolMessage(
+		`{"status":"succeeded","data":{"timeline_id":"draft_talking_head_continuation_surface:v1",`+
+			`"is_current":true}}`,
+		"call_inspect_after_continuation",
+		schema.WithToolName("timeline.inspect"),
+	))
+	specs, err = selectModelToolSurface(
+		rushestools.WithDraftID(t.Context(), draftID), service.tools, messages,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names = surfaceNames(specs); !containsName(names, "speech.search") {
+		t.Fatalf("重新观察后未恢复口播意图 surface=%v", names)
 	}
 }
 

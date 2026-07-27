@@ -182,6 +182,18 @@ func selectModelToolSurface(
 	if lane == rushestools.SurfaceTimelineEdit && requestsTimelineInspect(latestUserSurfaceText(messages)) {
 		selected = filterSpecsByName(selected, "timeline.inspect")
 	}
+	requireCurrentObservationOnContinuation :=
+		hasAnyAllowedTool(allowed, "timeline.delete", "timeline.update", "timeline.split") &&
+			hasAnyAllowedTool(selected,
+				"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
+			)
+	if timelineObservationRequiredSinceLatestUser(
+		messages,
+		requireCurrentObservationOnContinuation,
+	) {
+		lane = rushestools.SurfaceTimelineEdit
+		selected = filterSpecsByName(allowed, "timeline.inspect")
+	}
 	if len(selected) == 0 && lane != rushestools.SurfaceDiscovery {
 		lane = rushestools.SurfaceDiscovery
 		selected = filterSurface(allowed, lane)
@@ -200,6 +212,73 @@ func selectModelToolSurface(
 		)
 	}
 	return selected, nil
+}
+
+func timelineObservationRequiredSinceLatestUser(
+	messages []*schema.Message,
+	requireCurrentOnJobContinuation bool,
+) bool {
+	pending := false
+	for _, message := range messages {
+		if message == nil {
+			continue
+		}
+		if message.Role == schema.User {
+			if isAutomaticContinuationSurfaceMessage(message.Content) {
+				if requireCurrentOnJobContinuation &&
+					strings.Contains(message.Content, "任务：") &&
+					strings.Contains(message.Content, "状态：") {
+					pending = true
+				}
+				continue
+			}
+			pending = false
+			continue
+		}
+		if message.Role != schema.Tool {
+			continue
+		}
+		if message.ToolName == "timeline.inspect" && workflowToolCallSucceeded(message) {
+			if successfulCurrentTimelineInspection(message) {
+				pending = false
+			}
+			continue
+		}
+		if successfulTimelineToolRequiresObservation(message) {
+			pending = true
+		}
+	}
+	return pending
+}
+
+func successfulTimelineToolRequiresObservation(message *schema.Message) bool {
+	if message == nil || message.Role != schema.Tool ||
+		!strings.HasPrefix(message.ToolName, "timeline.") {
+		return false
+	}
+	var result struct {
+		Status string `json:"status"`
+		Data   struct {
+			CoordinateEffect struct {
+				ObservationRequired bool `json:"observation_required"`
+			} `json:"coordinate_effect"`
+		} `json:"data"`
+	}
+	return json.Unmarshal([]byte(message.Content), &result) == nil &&
+		result.Status == string(rushestools.StatusSucceeded) &&
+		result.Data.CoordinateEffect.ObservationRequired
+}
+
+func successfulCurrentTimelineInspection(message *schema.Message) bool {
+	var result struct {
+		Data struct {
+			IsCurrent bool `json:"is_current"`
+		} `json:"data"`
+	}
+	if json.Unmarshal([]byte(message.Content), &result) != nil {
+		return false
+	}
+	return result.Data.IsCurrent
 }
 
 func filterSpecsByName(specs []rushestools.Spec, names ...string) []rushestools.Spec {

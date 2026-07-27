@@ -88,6 +88,206 @@ func TestAtomicTimelineToolsCreateOneVersionPerCatalogOperation(t *testing.T) {
 	}
 }
 
+func TestAtomicTimelineEditReportsRippleCoordinateEffect(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_atomic_coordinate_effect"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	insertAtomicTimelineAsset(t, database, draftID, "talk", "video", 4, false)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+
+	first := executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "talk",
+		"source_start_frame": 0, "source_end_frame": 60,
+	})
+	assertCoordinateEffect(t, first, 0, 60, 0, false)
+	second := executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "talk",
+		"source_start_frame": 60, "source_end_frame": 120,
+	})
+	assertCoordinateEffect(t, second, 60, 120, 0, false)
+
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstClipID := latest.Tracks[0].Clips[0].TimelineClipID
+	trimmed := executeAtomicTimelineTool(t, exec, ctx, "timeline.update", rushestools.TimelineUpdateInput{
+		"kind": "trim_clip", "timeline_clip_id": firstClipID,
+		"source_start_frame": 0, "source_end_frame": 30,
+	})
+	assertCoordinateEffect(t, trimmed, 120, 90, -30, true)
+
+	latest, err = timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.DurationFrames != 90 ||
+		latest.Tracks[0].Clips[0].TimelineEndFrame != 30 ||
+		latest.Tracks[0].Clips[1].TimelineStartFrame != 30 ||
+		latest.Tracks[0].Clips[1].TimelineEndFrame != 90 {
+		t.Fatalf("latest=%#v err=%v", latest, err)
+	}
+	staleInspection, err := exec.toolInspectTimeline(t.Context(), draftID, rushestools.TimelineInspectInput{
+		TimelineID: first.Data["timeline_id"].(string),
+	})
+	if err != nil || staleInspection.Data["is_current"] != false {
+		t.Fatalf("stale inspection=%#v err=%v", staleInspection, err)
+	}
+	currentInspection, err := exec.toolInspectTimeline(
+		t.Context(), draftID, rushestools.TimelineInspectInput{},
+	)
+	if err != nil || currentInspection.Data["timeline_id"] != latest.TimelineID ||
+		currentInspection.Data["is_current"] != true {
+		t.Fatalf("current inspection=%#v err=%v", currentInspection, err)
+	}
+}
+
+func TestTimelineInspectMarksAbsentCurrentState(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_absent_timeline_current_observation"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inspection, err := exec.toolInspectTimeline(
+		t.Context(), draftID, rushestools.TimelineInspectInput{},
+	)
+	if err != nil || inspection.Status != string(rushestools.StatusSucceeded) ||
+		inspection.Data["timeline_exists"] != false || inspection.Data["is_current"] != true {
+		t.Fatalf("absent timeline inspection=%#v err=%v", inspection, err)
+	}
+}
+
+func TestTimelineInspectSnapshotStaysCoherentAcrossConcurrentCurrentTransitions(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_concurrent_timeline_inspection"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []int{1, 2} {
+		document, composeErr := agenttest.ComposeTimeline(
+			draftID, version, []agenttest.TimelineSelection{{
+				AssetID: "asset", AssetKind: "video",
+				SourceStartFrame: 0, SourceEndFrame: version * 30,
+			}},
+		)
+		if composeErr != nil {
+			t.Fatal(composeErr)
+		}
+		if _, persistErr := seedTimelineVersion(
+			exec, t.Context(), draftID, document, "concurrent_inspection_fixture", nil,
+		); persistErr != nil {
+			t.Fatal(persistErr)
+		}
+	}
+
+	transitions := []struct {
+		name            string
+		from, to        any
+		allowedTimeline map[string]bool
+		allowAbsent     bool
+	}{
+		{
+			name: "commit_new_version", from: 1, to: 2,
+			allowedTimeline: map[string]bool{draftID + ":v1": true, draftID + ":v2": true},
+		},
+		{
+			name: "rewind", from: 2, to: 1,
+			allowedTimeline: map[string]bool{draftID + ":v1": true, draftID + ":v2": true},
+		},
+		{
+			name: "absent_to_v1", from: nil, to: 1,
+			allowedTimeline: map[string]bool{draftID + ":v1": true}, allowAbsent: true,
+		},
+	}
+	for _, transition := range transitions {
+		t.Run(transition.name, func(t *testing.T) {
+			if _, err := database.Write().ExecContext(t.Context(),
+				"UPDATE drafts SET timeline_current_version=? WHERE draft_id=?",
+				transition.from, draftID,
+			); err != nil {
+				t.Fatal(err)
+			}
+			start := make(chan struct{})
+			writeDone := make(chan error, 1)
+			inspectDone := make(chan struct {
+				result rushestools.ToolResult
+				err    error
+			}, 1)
+			go func() {
+				<-start
+				_, updateErr := database.Write().ExecContext(t.Context(),
+					"UPDATE drafts SET timeline_current_version=? WHERE draft_id=?",
+					transition.to, draftID,
+				)
+				writeDone <- updateErr
+			}()
+			go func() {
+				<-start
+				result, inspectErr := exec.toolInspectTimeline(
+					t.Context(), draftID, rushestools.TimelineInspectInput{},
+				)
+				inspectDone <- struct {
+					result rushestools.ToolResult
+					err    error
+				}{result: result, err: inspectErr}
+			}()
+			close(start)
+			if err := <-writeDone; err != nil {
+				t.Fatal(err)
+			}
+			inspection := <-inspectDone
+			if inspection.err != nil || inspection.result.Data["is_current"] != true {
+				t.Fatalf("inspection=%#v err=%v", inspection.result, inspection.err)
+			}
+			if inspection.result.Data["timeline_exists"] == false {
+				if !transition.allowAbsent {
+					t.Fatalf("unexpected absent inspection=%#v", inspection.result)
+				}
+				return
+			}
+			gotID, _ := inspection.result.Data["timeline_id"].(string)
+			if !transition.allowedTimeline[gotID] {
+				t.Fatalf("timeline_id=%q inspection=%#v", gotID, inspection.result)
+			}
+		})
+	}
+}
+
+func TestAtomicCoordinateEffectCoversExistingNonPrimaryClips(t *testing.T) {
+	t.Parallel()
+	before := timeline.Document{
+		DurationFrames: 120,
+		Tracks: []timeline.Track{{
+			TrackID: "visual_overlay",
+			Clips: []timeline.Clip{{
+				TimelineClipID:     "overlay_1",
+				TimelineStartFrame: 10,
+				TimelineEndFrame:   40,
+			}},
+		}},
+	}
+	after := before
+	after.Tracks = append([]timeline.Track(nil), before.Tracks...)
+	after.Tracks[0].Clips = append([]timeline.Clip(nil), before.Tracks[0].Clips...)
+	after.Tracks[0].Clips[0].TimelineStartFrame = 20
+	after.Tracks[0].Clips[0].TimelineEndFrame = 50
+
+	effect := atomicTimelineCoordinateEffect(before, after)
+	if effect["scope"] != "existing_timeline_clips" ||
+		effect["observation_required"] != true ||
+		effect["ripple_delta_frames"] != 0 {
+		t.Fatalf("non-primary coordinate_effect=%#v", effect)
+	}
+}
+
 func TestPersistTimelineStaleSnapshotReturnsStructuredConflict(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
@@ -720,7 +920,28 @@ func assertAtomicTimelineResult(t *testing.T, result rushestools.ToolResult, kin
 		t.Fatalf("applied_operation=%#v want kind=%s", result.Data["applied_operation"], kind)
 	}
 	if result.Data["timeline_id"] == "" || result.Data["changed_targets"] == nil ||
+		result.Data["coordinate_effect"] == nil ||
 		result.Data["validation_summary"] == nil {
 		t.Fatalf("atomic result missing required fields: %#v", result.Data)
+	}
+}
+
+func assertCoordinateEffect(
+	t *testing.T,
+	result rushestools.ToolResult,
+	before, after, rippleDelta int,
+	observationRequired bool,
+) {
+	t.Helper()
+	effect, ok := result.Data["coordinate_effect"].(map[string]any)
+	if !ok || effect["scope"] != "existing_timeline_clips" ||
+		effect["duration_frames_before"] != before ||
+		effect["duration_frames_after"] != after ||
+		effect["ripple_delta_frames"] != rippleDelta ||
+		effect["observation_required"] != observationRequired {
+		t.Fatalf(
+			"coordinate_effect=%#v want before=%d after=%d ripple=%d observation=%v",
+			effect, before, after, rippleDelta, observationRequired,
+		)
 	}
 }
