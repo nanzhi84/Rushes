@@ -2,7 +2,9 @@ package agentexec
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
@@ -14,6 +16,35 @@ import (
 )
 
 var independentAudioTrackIDs = []string{"bgm", "sfx"}
+
+const independentAudioPreservationProofType = "bounded_independent_audio_v1"
+
+type independentAudioPreservationProof struct {
+	Type           string `json:"type"`
+	TrackID        string `json:"track_id"`
+	TimingSHA256   string `json:"timing_sha256"`
+	OverhangFrames int    `json:"overhang_frames"`
+}
+
+type independentAudioTrackTiming struct {
+	TrackID string                       `json:"track_id"`
+	Clips   []independentAudioClipTiming `json:"clips"`
+}
+
+type independentAudioClipTiming struct {
+	TimelineClipID     string  `json:"timeline_clip_id"`
+	TrackID            string  `json:"track_id"`
+	AssetID            string  `json:"asset_id"`
+	AssetKind          string  `json:"asset_kind"`
+	Role               string  `json:"role"`
+	TimelineStartFrame int     `json:"timeline_start_frame"`
+	TimelineEndFrame   int     `json:"timeline_end_frame"`
+	SourceStartFrame   int     `json:"source_start_frame"`
+	SourceEndFrame     int     `json:"source_end_frame"`
+	PlaybackRate       float64 `json:"playback_rate"`
+	ParentBlockID      string  `json:"parent_block_id"`
+	Linked             bool    `json:"linked"`
+}
 
 func preserveIndependentAudioForOperation(
 	current timeline.Document,
@@ -132,72 +163,213 @@ func validateWithPreservedIndependentAudio(
 	return report
 }
 
+func deriveIndependentAudioValidationProof(
+	current timeline.Document,
+	result timeline.Document,
+	trustedCurrent map[string]timeline.Track,
+	currentValid bool,
+) map[string]timeline.Track {
+	allowed := map[string]timeline.Track{}
+	if !currentValid {
+		return allowed
+	}
+	currentTracks := make(map[string]timeline.Track, len(current.Tracks))
+	for _, track := range current.Tracks {
+		currentTracks[track.TrackID] = track
+	}
+	for _, track := range result.Tracks {
+		if !ContainsString(independentAudioTrackIDs, track.TrackID) ||
+			trackOverhangFrames(track, result.DurationFrames) == 0 {
+			continue
+		}
+		previous, exists := currentTracks[track.TrackID]
+		if !exists {
+			continue
+		}
+		if reflect.DeepEqual(independentAudioTiming(previous), independentAudioTiming(track)) {
+			allowed[track.TrackID] = copyTimelineTrack(track)
+			continue
+		}
+		if _, trusted := trustedCurrent[track.TrackID]; trusted &&
+			trackOverhangFrames(track, result.DurationFrames) <=
+				trackOverhangFrames(previous, current.DurationFrames) {
+			allowed[track.TrackID] = copyTimelineTrack(track)
+		}
+	}
+	return allowed
+}
+
 func (exec *Executor) validateStoredTimeline(
 	ctx context.Context,
 	draftID string,
 	document timeline.Document,
 ) (timeline.ValidationReport, error) {
-	preserved, err := exec.preservedIndependentAudioFromStoredParent(ctx, draftID, document)
+	preserved, err := exec.preservedIndependentAudioFromStoredProof(ctx, draftID, document)
 	if err != nil {
 		return timeline.ValidationReport{}, err
 	}
 	return validateWithPreservedIndependentAudio(document, preserved), nil
 }
 
-func (exec *Executor) preservedIndependentAudioFromStoredParent(
+func (exec *Executor) preservedIndependentAudioFromStoredProof(
 	ctx context.Context,
 	draftID string,
 	document timeline.Document,
 ) (map[string]timeline.Track, error) {
-	var parentVersion sql.NullInt64
-	var rawReport sql.NullString
-	err := exec.database.Read().QueryRowContext(ctx, `
-		SELECT parent_version,validation_report_json
-		FROM timeline_versions WHERE draft_id=? AND version=?`,
-		draftID, document.Version,
-	).Scan(&parentVersion, &rawReport)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+	version := document.Version
+	logicalSnapshot := document
+	visited := map[int]struct{}{}
+	for depth := 0; depth < 64; depth++ {
+		if _, duplicate := visited[version]; duplicate {
+			return nil, errors.New("timeline preservation proof parent chain contains a cycle")
+		}
+		visited[version] = struct{}{}
+		var parentVersion sql.NullInt64
+		var rawReport sql.NullString
+		err := exec.database.Read().QueryRowContext(ctx, `
+			SELECT parent_version,validation_report_json
+			FROM timeline_versions WHERE draft_id=? AND version=?`,
+			draftID, version,
+		).Scan(&parentVersion, &rawReport)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if rawReport.Valid {
+			proofs, authoritative, proofErr := verifiedIndependentAudioProofs(document, rawReport.String)
+			if proofErr != nil {
+				return nil, proofErr
+			}
+			if authoritative {
+				return proofs, nil
+			}
+		}
+		if !parentVersion.Valid {
+			return nil, nil
+		}
+		parent, parentErr := timeline.Get(ctx, exec.database, draftID, int(parentVersion.Int64))
+		if errors.Is(parentErr, storage.ErrNotFound) {
+			return nil, nil
+		}
+		if parentErr != nil {
+			return nil, parentErr
+		}
+		if !sameLogicalTimelineSnapshot(logicalSnapshot, parent) {
+			return nil, nil
+		}
+		logicalSnapshot = parent
+		version = int(parentVersion.Int64)
 	}
-	if err != nil {
-		return nil, err
-	}
-	if !parentVersion.Valid || !rawReport.Valid {
-		return nil, nil
-	}
-	var storedReport struct {
-		Valid bool `json:"valid"`
-	}
-	if err := json.Unmarshal([]byte(rawReport.String), &storedReport); err != nil {
-		return nil, err
-	}
-	// A parent snapshot is proof only for a version that was accepted with the
-	// contextual preservation rule when it was created. A directly persisted
-	// invalid overhang must not become valid merely because its tracks match.
-	if !storedReport.Valid {
-		return nil, nil
-	}
-	parent, err := timeline.Get(ctx, exec.database, draftID, int(parentVersion.Int64))
-	if errors.Is(err, storage.ErrNotFound) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	currentTracks := make(map[string]timeline.Track, len(document.Tracks))
-	for _, track := range document.Tracks {
-		currentTracks[track.TrackID] = track
-	}
-	preserved := map[string]timeline.Track{}
-	for _, track := range parent.Tracks {
-		if !ContainsString(independentAudioTrackIDs, track.TrackID) {
+	return nil, errors.New("timeline preservation proof parent chain exceeds 64 versions")
+}
+
+func addIndependentAudioPreservationProofs(
+	report map[string]any,
+	document timeline.Document,
+	preserved map[string]timeline.Track,
+) error {
+	proofs := []independentAudioPreservationProof{}
+	for _, trackID := range independentAudioTrackIDs {
+		track, exists := preserved[trackID]
+		if !exists || !trackHasOverhang(track, document.DurationFrames) {
 			continue
 		}
-		if current, exists := currentTracks[track.TrackID]; exists && reflect.DeepEqual(current, track) {
-			preserved[track.TrackID] = copyTimelineTrack(track)
+		hash, err := timelineTrackTimingSHA256(track)
+		if err != nil {
+			return err
+		}
+		proofs = append(proofs, independentAudioPreservationProof{
+			Type: independentAudioPreservationProofType, TrackID: trackID,
+			TimingSHA256: hash, OverhangFrames: trackOverhangFrames(track, document.DurationFrames),
+		})
+	}
+	if len(proofs) > 0 {
+		report["preservation_proofs"] = proofs
+	}
+	return nil
+}
+
+func verifiedIndependentAudioProofs(
+	document timeline.Document,
+	rawReport string,
+) (map[string]timeline.Track, bool, error) {
+	var stored struct {
+		Proofs json.RawMessage `json:"preservation_proofs"`
+	}
+	if err := json.Unmarshal([]byte(rawReport), &stored); err != nil {
+		return nil, false, err
+	}
+	if len(stored.Proofs) == 0 {
+		return nil, false, nil
+	}
+	var proofs []independentAudioPreservationProof
+	if err := json.Unmarshal(stored.Proofs, &proofs); err != nil {
+		return nil, true, err
+	}
+	tracks := make(map[string]timeline.Track, len(document.Tracks))
+	for _, track := range document.Tracks {
+		tracks[track.TrackID] = track
+	}
+	preserved := map[string]timeline.Track{}
+	for _, proof := range proofs {
+		track, exists := tracks[proof.TrackID]
+		if proof.Type != independentAudioPreservationProofType ||
+			!ContainsString(independentAudioTrackIDs, proof.TrackID) || !exists {
+			continue
+		}
+		hash, err := timelineTrackTimingSHA256(track)
+		if err != nil {
+			return nil, true, err
+		}
+		if hash == proof.TimingSHA256 && proof.OverhangFrames > 0 &&
+			trackOverhangFrames(track, document.DurationFrames) == proof.OverhangFrames {
+			preserved[proof.TrackID] = copyTimelineTrack(track)
 		}
 	}
-	return preserved, nil
+	return preserved, true, nil
+}
+
+func timelineTrackTimingSHA256(track timeline.Track) (string, error) {
+	raw, err := json.Marshal(independentAudioTiming(track))
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256(raw)
+	return hex.EncodeToString(hash[:]), nil
+}
+
+func independentAudioTiming(track timeline.Track) independentAudioTrackTiming {
+	timing := independentAudioTrackTiming{TrackID: track.TrackID}
+	for _, clip := range track.Clips {
+		timing.Clips = append(timing.Clips, independentAudioClipTiming{
+			TimelineClipID: clip.TimelineClipID, TrackID: clip.TrackID,
+			AssetID: clip.AssetID, AssetKind: clip.AssetKind, Role: clip.Role,
+			TimelineStartFrame: clip.TimelineStartFrame, TimelineEndFrame: clip.TimelineEndFrame,
+			SourceStartFrame: clip.SourceStartFrame, SourceEndFrame: clip.SourceEndFrame,
+			PlaybackRate: clip.PlaybackRate, ParentBlockID: clip.ParentBlockID, Linked: clip.Linked,
+		})
+	}
+	return timing
+}
+
+func trackHasOverhang(track timeline.Track, durationFrames int) bool {
+	return trackOverhangFrames(track, durationFrames) > 0
+}
+
+func trackOverhangFrames(track timeline.Track, durationFrames int) int {
+	overhang := 0
+	for _, clip := range track.Clips {
+		overhang = max(overhang, clip.TimelineEndFrame-durationFrames)
+	}
+	return overhang
+}
+
+func sameLogicalTimelineSnapshot(left, right timeline.Document) bool {
+	left.TimelineID, left.DraftID, left.Version = "", "", 0
+	right.TimelineID, right.DraftID, right.Version = "", "", 0
+	return reflect.DeepEqual(left, right)
 }
 
 func copyTimelineTrack(track timeline.Track) timeline.Track {

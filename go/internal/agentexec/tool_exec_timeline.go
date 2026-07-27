@@ -77,6 +77,11 @@ func (exec *Executor) toolAtomicTimelineEdit(
 		return *failure, nil
 	}
 
+	trustedCurrentAudio, proofErr := exec.preservedIndependentAudioFromStoredProof(ctx, draftID, current)
+	if proofErr != nil {
+		return rushestools.ToolResult{}, proofErr
+	}
+	currentValid := validateWithPreservedIndependentAudio(current, trustedCurrentAudio).Valid
 	preservedAudio := preserveIndependentAudioForOperation(current, appliedOperation)
 	patchInput := unlockPreservedIndependentAudio(current, preservedAudio)
 	document, err := timeline.ApplyPatch(patchInput, appliedOperation)
@@ -101,7 +106,10 @@ func (exec *Executor) toolAtomicTimelineEdit(
 			return atomicTimelineApplyFailure(appliedOperation, err), nil
 		}
 	}
-	if report := validateWithPreservedIndependentAudio(document, preservedAudio); !report.Valid {
+	audioValidationProof := deriveIndependentAudioValidationProof(
+		current, document, trustedCurrentAudio, currentValid,
+	)
+	if report := validateWithPreservedIndependentAudio(document, audioValidationProof); !report.Valid {
 		return rushestools.ToolResult{
 			Status:      string(rushestools.StatusFailed),
 			Observation: "原子编辑结果未通过结构校验，当前时间线未更新",
@@ -125,7 +133,7 @@ func (exec *Executor) toolAtomicTimelineEdit(
 		strings.TrimPrefix(toolName, "timeline."),
 		appliedOperation,
 		mutationBase,
-		preservedAudio,
+		audioValidationProof,
 	)
 	if err != nil {
 		return rushestools.ToolResult{}, err
@@ -694,11 +702,11 @@ func (exec *Executor) timelineValidationReport(
 	draftID string,
 	document timeline.Document,
 ) (map[string]any, bool, error) {
-	report, err := exec.validateStoredTimeline(ctx, draftID, document)
+	preservedAudio, err := exec.preservedIndependentAudioFromStoredProof(ctx, draftID, document)
 	if err != nil {
 		return nil, false, err
 	}
-	return exec.timelineValidationReportFromStructural(ctx, draftID, document, report)
+	return exec.timelineValidationReportWithPreservedAudio(ctx, draftID, document, preservedAudio)
 }
 
 func (exec *Executor) timelineValidationReportWithPreservedAudio(
@@ -708,7 +716,14 @@ func (exec *Executor) timelineValidationReportWithPreservedAudio(
 	preservedAudio map[string]timeline.Track,
 ) (map[string]any, bool, error) {
 	report := validateWithPreservedIndependentAudio(document, preservedAudio)
-	return exec.timelineValidationReportFromStructural(ctx, draftID, document, report)
+	reportMap, valid, err := exec.timelineValidationReportFromStructural(ctx, draftID, document, report)
+	if err != nil || !valid {
+		return reportMap, valid, err
+	}
+	if err := addIndependentAudioPreservationProofs(reportMap, document, preservedAudio); err != nil {
+		return nil, false, err
+	}
+	return reportMap, true, nil
 }
 
 func (exec *Executor) timelineValidationReportFromStructural(

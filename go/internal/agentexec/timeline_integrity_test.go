@@ -1,6 +1,7 @@
 package agentexec
 
 import (
+	"encoding/json"
 	"math"
 	"reflect"
 	"testing"
@@ -124,6 +125,108 @@ func TestAtomicPrimaryDeletionPreservesIndependentAudioAcrossLaterRegrowth(t *te
 	if render := renderRaw.(rushestools.ToolResult); render.Status != "queued" || render.Data["timeline_version"] != 2 {
 		t.Fatalf("stored preserved overhang must remain renderable: %#v", render)
 	}
+	var storedReport string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT validation_report_json FROM timeline_versions WHERE draft_id=? AND version=2`,
+		draftID,
+	).Scan(&storedReport); err != nil {
+		t.Fatal(err)
+	}
+	var persistedProof struct {
+		Proofs []independentAudioPreservationProof `json:"preservation_proofs"`
+	}
+	if err := json.Unmarshal([]byte(storedReport), &persistedProof); err != nil || len(persistedProof.Proofs) != 2 {
+		t.Fatalf("portable preservation proof=%#v err=%v report=%s", persistedProof, err, storedReport)
+	}
+
+	const copiedDraftID = "draft_preserve_audio_overhang_copy"
+	copyResult, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "DraftCopied", DraftID: copiedDraftID,
+		Payload: map[string]any{"source_draft_id": draftID, "name": "proof copy"},
+	}}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || copyResult.Status != reducer.StatusApplied {
+		t.Fatalf("copy result=%#v err=%v", copyResult, err)
+	}
+	copied, err := timeline.Latest(t.Context(), database, copiedDraftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStoredOverhangCheckAndRender(t, exec, copiedDraftID, copied, 2)
+
+	const checkpointID = "checkpoint:preserved-audio"
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO rewind_checkpoints(
+			checkpoint_id,draft_id,trigger_kind,timeline_version,summary,created_at
+		) VALUES(?,?,'timeline_write',2,'preserved audio','now')`,
+		checkpointID, copiedDraftID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var copiedStateVersion int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT state_version FROM drafts WHERE draft_id=?", copiedDraftID,
+	).Scan(&copiedStateVersion); err != nil {
+		t.Fatal(err)
+	}
+	restoreResult, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "TimelineVersionRestored", DraftID: copiedDraftID,
+		Payload: map[string]any{
+			"checkpoint_id": checkpointID, "mode": "timeline", "timeline_version": 3,
+			"restore_checkpoint_id": "checkpoint:preserved-audio:restored",
+		},
+	}}, reducer.Options{Actor: contracts.ActorUser, BaseVersion: &copiedStateVersion})
+	if err != nil || restoreResult.Status != reducer.StatusApplied {
+		t.Fatalf("restore result=%#v err=%v", restoreResult, err)
+	}
+	restored, err := timeline.Latest(t.Context(), database, copiedDraftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStoredOverhangCheckAndRender(t, exec, copiedDraftID, restored, 3)
+
+	const restoredCheckpointID = "checkpoint:preserved-audio:restored-twice"
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO rewind_checkpoints(
+			checkpoint_id,draft_id,trigger_kind,timeline_version,summary,created_at
+		) VALUES(?,?,'timeline_write',3,'preserved audio twice','now')`,
+		restoredCheckpointID, copiedDraftID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT state_version FROM drafts WHERE draft_id=?", copiedDraftID,
+	).Scan(&copiedStateVersion); err != nil {
+		t.Fatal(err)
+	}
+	restoreAgain, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "TimelineVersionRestored", DraftID: copiedDraftID,
+		Payload: map[string]any{
+			"checkpoint_id": restoredCheckpointID, "mode": "timeline", "timeline_version": 4,
+			"restore_checkpoint_id": "checkpoint:preserved-audio:restored-again",
+		},
+	}}, reducer.Options{Actor: contracts.ActorUser, BaseVersion: &copiedStateVersion})
+	if err != nil || restoreAgain.Status != reducer.StatusApplied {
+		t.Fatalf("second restore result=%#v err=%v", restoreAgain, err)
+	}
+	restoredAgain, err := timeline.Latest(t.Context(), database, copiedDraftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStoredOverhangCheckAndRender(t, exec, copiedDraftID, restoredAgain, 4)
+
+	const restoredCopyID = "draft_preserve_audio_overhang_restored_copy"
+	restoredCopy, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "DraftCopied", DraftID: restoredCopyID,
+		Payload: map[string]any{"source_draft_id": copiedDraftID, "name": "restored proof copy"},
+	}}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || restoredCopy.Status != reducer.StatusApplied {
+		t.Fatalf("restored copy result=%#v err=%v", restoredCopy, err)
+	}
+	restoredCopyTimeline, err := timeline.Latest(t.Context(), database, restoredCopyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStoredOverhangCheckAndRender(t, exec, restoredCopyID, restoredCopyTimeline, 4)
 
 	regrow := executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
 		"kind": "insert_clip", "asset_id": "old_a",
@@ -151,6 +254,38 @@ func TestAtomicPrimaryDeletionPreservesIndependentAudioAcrossLaterRegrowth(t *te
 	if failed.Status != string(rushestools.StatusFailed) ||
 		failed.Data["semantic_error_kind"] != timeline.SemanticTrackLocked {
 		t.Fatalf("explicit edit of locked BGM must remain blocked: %#v", failed)
+	}
+}
+
+func assertStoredOverhangCheckAndRender(
+	t *testing.T,
+	exec *Executor,
+	draftID string,
+	document timeline.Document,
+	version int,
+) {
+	t.Helper()
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	checkedRaw, err := exec.ExecuteTool(ctx, "timeline.check", rushestools.TimelineCheckInput{
+		TimelineID: document.TimelineID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := checkedRaw.(rushestools.ToolResult)
+	validation, _ := checked.Data["validation_report"].(map[string]any)
+	if checked.Status != string(rushestools.StatusSucceeded) || validation["valid"] != true {
+		t.Fatalf("portable stored proof must remain checkable: %#v", checked)
+	}
+	renderRaw, err := exec.ExecuteTool(ctx, "render.start", rushestools.RenderStartInput{
+		Kind: "preview", TimelineID: document.TimelineID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	render := renderRaw.(rushestools.ToolResult)
+	if render.Status != "queued" || render.Data["timeline_version"] != version {
+		t.Fatalf("portable stored proof must remain renderable: %#v", render)
 	}
 }
 
@@ -255,6 +390,102 @@ func TestDirectPersistenceDoesNotValidateIndependentAudioOverhang(t *testing.T) 
 	}
 	if checked := raw.(rushestools.ToolResult); checked.Status != "validation_failed" {
 		t.Fatalf("directly persisted overhang must remain invalid: %#v", checked)
+	}
+	raw, err = exec.ExecuteTool(
+		rushestools.WithDraftID(t.Context(), draftID),
+		"timeline.update",
+		rushestools.TimelineUpdateInput{
+			"kind": "set_track_state", "track_id": "visual_base", "muted": true,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited := raw.(rushestools.ToolResult); edited.Status != string(rushestools.StatusFailed) {
+		t.Fatalf("unrelated edit must not launder invalid overhang: %#v", edited)
+	}
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 1 {
+		t.Fatalf("invalid overhang laundering wrote a version: %#v err=%v", latest, err)
+	}
+}
+
+func TestTrustedAudioOverhangAllowsSafeEditsAndNonIncreasingRipple(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_trusted_audio_overhang_edits"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	insertAtomicTimelineAsset(t, database, draftID, "music", "audio", 3, false)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 0, SourceEndFrame: 30},
+		{AssetID: "talk", AssetKind: "video", SourceStartFrame: 30, SourceEndFrame: 60},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Tracks[4].Clips = []timeline.Clip{{
+		TimelineClipID: "bgm_safe", TrackID: "bgm", AssetID: "music", AssetKind: "audio",
+		TimelineEndFrame: 60, SourceEndFrame: 60, PlaybackRate: 1,
+	}}
+	if persisted, persistErr := seedTimelineVersion(
+		exec, t.Context(), draftID, document, "fixture", nil,
+	); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	executeAtomicTimelineTool(t, exec, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+		"kind": "delete_clip", "timeline_clip_id": "clip_v1_001",
+	})
+
+	for _, operation := range []rushestools.TimelineUpdateInput{
+		{"kind": "adjust_gain", "timeline_clip_id": "bgm_safe", "gain_db": -6},
+		{"kind": "set_clip_fades", "timeline_clip_id": "bgm_safe", "fade_in_frames": 3, "fade_out_frames": 3},
+		{"kind": "set_track_state", "track_id": "bgm", "muted": true},
+		{"kind": "set_track_ducking", "track_id": "bgm", "enabled": true, "duck_db": -9,
+			"trigger_tracks": []string{"voiceover"}},
+	} {
+		executeAtomicTimelineTool(t, exec, ctx, "timeline.update", operation)
+	}
+	executeAtomicTimelineTool(t, exec, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+		"kind": "delete_source_range", "asset_id": "talk",
+		"source_start_frame": 30, "source_end_frame": 40,
+	})
+	executeAtomicTimelineTool(t, exec, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+		"kind": "delete_range", "start_frame": 0, "end_frame": 5,
+	})
+
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 8 || latest.DurationFrames != 15 ||
+		len(latest.Tracks[4].Clips) != 1 ||
+		latest.Tracks[4].Clips[0].TimelineEndFrame != 45 ||
+		latest.Tracks[4].Clips[0].GainDB != -6 ||
+		latest.Tracks[4].Clips[0].FadeInFrames != 3 ||
+		latest.Tracks[4].Clips[0].FadeOutFrames != 3 ||
+		!latest.Tracks[4].Muted || latest.Tracks[4].Ducking == nil {
+		t.Fatalf("latest=%#v err=%v", latest, err)
+	}
+	checkedRaw, err := exec.ExecuteTool(ctx, "timeline.check", rushestools.TimelineCheckInput{
+		TimelineID: latest.TimelineID,
+	})
+	if err != nil || checkedRaw.(rushestools.ToolResult).Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("safe overhang sequence check=%#v err=%v", checkedRaw, err)
+	}
+
+	raw, err := exec.ExecuteTool(ctx, "timeline.update", rushestools.TimelineUpdateInput{
+		"kind": "set_playback_rate", "timeline_clip_id": "bgm_safe", "playback_rate": 0.5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if extended := raw.(rushestools.ToolResult); extended.Status != string(rushestools.StatusFailed) {
+		t.Fatalf("timing edit that increases trusted overhang must fail: %#v", extended)
+	}
+	afterFailure, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || afterFailure.Version != 8 {
+		t.Fatalf("increasing overhang wrote a version: %#v err=%v", afterFailure, err)
 	}
 }
 
