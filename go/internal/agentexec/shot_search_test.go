@@ -217,6 +217,46 @@ func TestShotSearchJoinsTranscriptByOverlapAndMarksTermSource(t *testing.T) {
 	}
 }
 
+func TestShotSearchKeepsLegacyUnknownRoleAsCandidate(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_legacy_visual_role"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO assets(
+			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
+			probe_json,ingest_status,understanding_status,usable
+		) VALUES('legacy_visual','reference','/tmp/legacy.mp4','video','local_path',
+			'海边火舞.mov','legacy',1,'{"duration_sec":4}','ready','ready',1);
+		INSERT INTO draft_asset_links(draft_id,asset_id,rel_dir,linked_at)
+		VALUES(?, 'legacy_visual', '视频', ?);
+		INSERT INTO material_summaries(
+			summary_id,asset_id,version,status,summary_json,fingerprint,prompt_version,created_at
+		) VALUES('summary_legacy_visual','legacy_visual',1,'ready',
+			'{"semantic_role":"visual","segments":[{"source_start_frame":0,"source_end_frame":120,"description":"海边舞者挥舞火焰道具","quality":"usable"}]}',
+			'legacy-fp','legacy-v1',?)`, draftID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := exec.ExecuteTool(
+		rushestools.WithDraftID(t.Context(), draftID),
+		"shot.search",
+		rushestools.ShotSearchInput{Query: "海边火舞", SemanticRoles: []string{"b_roll"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := raw.(rushestools.ShotSearchResult)
+	if len(result.Shots) != 1 || result.Shots[0].AssetID != "legacy_visual" ||
+		result.Shots[0].SemanticRole != "" {
+		t.Fatalf("legacy role search=%#v", result)
+	}
+}
+
 func TestShotSearchRanksSegmentEvidenceAboveSharedFilename(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)

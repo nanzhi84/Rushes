@@ -655,8 +655,13 @@ func (exec *Executor) persistTimelineFromSnapshotWithPreservedAudio(
 	if result.Status != reducer.StatusApplied {
 		return rushestools.ToolResult{}, fmt.Errorf("timeline reducer status: %s", result.Status)
 	}
+	// 原子编辑已经在同一事务内提交。内容合同描述整条成片距离目标的差距，不能把
+	// 一次结构合法、已落库的原子写入伪装成工具执行失败，否则 ReAct 会重试并重复
+	// 修改时间线。draft 的 TimelineValidated 仍由上面的整体 valid 决定，最终
+	// timeline.check / render.start 也仍会因合同未通过而拒绝成功。
+	structuralValid, _ := reportMap["structural_valid"].(bool)
 	status := "succeeded"
-	if !valid {
+	if !structuralValid {
 		status = "validation_failed"
 	}
 	toolResult := rushestools.ToolResult{

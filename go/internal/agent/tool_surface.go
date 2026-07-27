@@ -527,7 +527,7 @@ func inferModelToolSurface(
 		return rushestools.SurfaceTimelineEdit
 	case containsSurfaceKeyword(text,
 		"有哪些素材", "查看素材", "列出素材", "素材列表", "理解素材",
-		"搜索镜头", "查找镜头", "找镜头", "asset.", "shot"):
+		"asset.", "shot") || requestsShotSearch(text):
 		return rushestools.SurfaceDiscovery
 	default:
 		// 空时间线时只有 timeline.insert 可用；宽泛请求仍先在 Discovery
@@ -911,13 +911,19 @@ func requestsAssetSearchForTimelineEdit(text string) bool {
 	hasTimelineEdit := containsSurfaceKeyword(text,
 		"时间线", "剪辑", "插入", "替换", "添加", "补一个", "clip", "patch",
 	)
-	explicitSearch := containsSurfaceKeyword(text,
-		"搜索镜头", "查找镜头", "找镜头", "找一个", "asset.", "shot",
-	)
+	explicitSearch := requestsShotSearch(text) || containsSurfaceKeyword(text, "找一个", "asset.", "shot")
 	semanticInsert := containsSurfaceKeyword(text,
 		"插入", "替换", "添加", "补一个",
 	) && containsSurfaceKeyword(text, "镜头", "素材")
 	return hasTimelineEdit && (explicitSearch || semanticInsert)
+}
+
+func requestsShotSearch(text string) bool {
+	if containsSurfaceKeyword(text, "搜索镜头", "查找镜头", "检索镜头", "镜头检索", "找镜头") {
+		return true
+	}
+	return strings.Contains(text, "检索") &&
+		containsSurfaceKeyword(text, "镜头", "素材", "b-roll", "broll")
 }
 
 func containsSurfaceKeyword(text string, keywords ...string) bool {
