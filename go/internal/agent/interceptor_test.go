@@ -65,7 +65,7 @@ func TestInterceptorRejectionMiddlewareSkipsRecoveryBudget(t *testing.T) {
 			}
 		},
 	)
-	output, err := endpoint(ctx, &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`})
+	output, err := endpoint(ctx, &compose.ToolInput{Name: "memory.remove", Arguments: `{"keys":["pacing"]}`})
 	if err != nil || calls != 1 {
 		t.Fatalf("策略拒绝不应重试: calls=%d err=%v", calls, err)
 	}
@@ -74,9 +74,12 @@ func TestInterceptorRejectionMiddlewareSkipsRecoveryBudget(t *testing.T) {
 	if payload["status"] != "failed" || data["error_code"] != "confirmation_required" {
 		t.Fatalf("拒绝未回灌结构化提示: %#v", payload)
 	}
-	// 关键：不消耗恢复预算——既不记失败链，harness_recovery 也不该出现（未走 decorateToolFailure）。
-	if state.unresolved() || data["harness_recovery"] != nil {
-		t.Fatalf("策略拒绝不得计入恢复账: unresolved=%v data=%#v", state.unresolved(), data)
+	// 策略拒绝不消耗修复预算，但必须留在终态门禁中，防止模型直接声称成功。
+	if !state.unresolved() || state.cumulativeRepairFailures != 0 || data["harness_recovery"] != nil {
+		t.Fatalf("策略拒绝应阻止成功终态且不消耗预算: unresolved=%v state=%#v data=%#v", state.unresolved(), state, data)
+	}
+	if guardErr := (&Service{}).terminalReplyGuard(ctx, "unused"); guardErr == nil {
+		t.Fatal("策略拒绝后直接收尾必须被终态门禁拒绝")
 	}
 }
 
@@ -93,7 +96,7 @@ func TestInterceptorRejectionNotRetriedOnTransientText(t *testing.T) {
 			calls++
 			return nil, &rushestools.InterceptorRejection{
 				Observation: "confirmation required (request timed out)",
-				Data:        map[string]any{"error_code": "confirmation_required"},
+				Data:        map[string]any{"error_code": "tool_not_in_surface"},
 			}
 		},
 	)
@@ -101,8 +104,38 @@ func TestInterceptorRejectionNotRetriedOnTransientText(t *testing.T) {
 	if err != nil || calls != 1 {
 		t.Fatalf("含 transient 词的策略拒绝也不得重试: calls=%d err=%v", calls, err)
 	}
-	if decodeRecoveryPayload(t, output.Result)["status"] != "failed" || state.unresolved() {
-		t.Fatal("拒绝应回灌结构化提示且不记恢复账")
+	if decodeRecoveryPayload(t, output.Result)["status"] != "failed" || state.unresolved() ||
+		state.cumulativeRepairFailures != 0 {
+		t.Fatal("非确认类拒绝应回灌结构化提示、不触发重试且不污染确认门禁")
+	}
+}
+
+func TestMatchingConfirmationDecisionResolvesInterceptorRejection(t *testing.T) {
+	t.Parallel()
+	state := newToolRecoveryState()
+	ctx := withToolRecoveryState(t.Context(), state)
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			if input.Name == "memory.remove" {
+				return nil, &rushestools.InterceptorRejection{
+					Observation: "必须先确认",
+					Data:        map[string]any{"error_code": "confirmation_required", "tool": "memory.remove"},
+				}
+			}
+			return &compose.ToolOutput{Result: `{"status":"waiting","observation":"已创建确认卡","data":{"decision_id":"decision_1","turn_should_end":true}}`}, nil
+		},
+	)
+	removeArguments := `{"keys":["pacing"]}`
+	if _, err := endpoint(ctx, &compose.ToolInput{Name: "memory.remove", Arguments: removeArguments}); err != nil || !state.unresolved() {
+		t.Fatalf("rejection err=%v unresolved=%v", err, state.unresolved())
+	}
+	mismatchedArguments := `{"question":"确认删除？","tool_name":"memory.remove","arguments":{"keys":["subtitle"]}}`
+	if _, err := endpoint(ctx, &compose.ToolInput{Name: "interaction.confirm_action", Arguments: mismatchedArguments}); err != nil || !state.unresolved() {
+		t.Fatalf("mismatched confirmation err=%v unresolved=%v", err, state.unresolved())
+	}
+	confirmArguments := `{"question":"确认删除？","tool_name":"memory.remove","arguments":{"keys":["pacing"]}}`
+	if _, err := endpoint(ctx, &compose.ToolInput{Name: "interaction.confirm_action", Arguments: confirmArguments}); err != nil || state.unresolved() {
+		t.Fatalf("matching confirmation err=%v unresolved=%v summary=%q", err, state.unresolved(), state.summary())
 	}
 }
 

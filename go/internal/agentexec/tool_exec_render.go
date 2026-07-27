@@ -104,7 +104,9 @@ func (exec *Executor) toolEnqueueRender(
 					)
 				}
 			}
-			return renderJobResult(kind, existing.ID, existing.Status, timelineVersion), nil
+			return renderJobResult(
+				kind, existing.ID, existing.Status, document.TimelineID, timelineVersion, orientation,
+			), nil
 		}
 		retryOfJobID = existing.ID
 		idempotencyKey = fmt.Sprintf("%s:retry:%s", baseIdempotencyKey, existing.ID)
@@ -143,11 +145,13 @@ func (exec *Executor) toolEnqueueRender(
 		if existing, found, lookupErr := exec.FindRenderJob(ctx, kind, idempotencyKey, false); lookupErr != nil {
 			return rushestools.ToolResult{}, errors.Join(err, lookupErr)
 		} else if found {
-			return renderJobResult(kind, existing.ID, existing.Status, timelineVersion), nil
+			return renderJobResult(
+				kind, existing.ID, existing.Status, document.TimelineID, timelineVersion, orientation,
+			), nil
 		}
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("reducer status: %s", result.Status))
 	}
-	return renderJobResult(kind, jobID, "pending", timelineVersion), nil
+	return renderJobResult(kind, jobID, "pending", document.TimelineID, timelineVersion, orientation), nil
 }
 
 func (exec *Executor) toolStartRender(
@@ -230,7 +234,11 @@ func (exec *Executor) FindRenderJob(
 	return job, true, nil
 }
 
-func renderJobResult(kind, jobID, jobStatus string, timelineVersion int) rushestools.ToolResult {
+func renderJobResult(
+	kind, jobID, jobStatus, timelineID string,
+	timelineVersion int,
+	orientation string,
+) rushestools.ToolResult {
 	status := jobStatus
 	observation := kind + " 任务已存在"
 	switch jobStatus {
@@ -245,7 +253,8 @@ func renderJobResult(kind, jobID, jobStatus string, timelineVersion int) rushest
 		Status: status, Observation: observation,
 		Data: map[string]any{
 			"job_id": jobID, "job_status": jobStatus,
-			"render_kind": renderKind, "timeline_version": timelineVersion,
+			"render_kind": renderKind, "timeline_id": timelineID,
+			"timeline_version": timelineVersion, "orientation": orientation,
 		},
 	}
 }

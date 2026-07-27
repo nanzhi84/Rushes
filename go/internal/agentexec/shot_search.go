@@ -441,6 +441,7 @@ func (exec *Executor) toolSearchShots(
 	)
 	result := rushestools.ShotSearchResult{
 		Query: input.Query, Shots: page, TotalMatches: total, Truncated: end < total,
+		PageStart: start, RemainingMatches: total - end, PageAfterShotID: input.AfterShotID,
 		NextAfterShotID:      nextAfterShotID,
 		MissingIndexAssetIDs: missingIDs, DetectionCandidates: understandingCandidates,
 	}

@@ -64,8 +64,9 @@ func (blockingFallbackScaffold) TryHandle(
 }
 
 type terminatingFailureLoopModel struct {
-	mu    sync.Mutex
-	calls int
+	mu          sync.Mutex
+	calls       int
+	terminalErr bool
 }
 
 type failingReadToolServiceModel struct {
@@ -154,6 +155,39 @@ type cancelDuringModelExecModel struct {
 	once    sync.Once
 }
 
+// cancelDuringReflectionModel 先返回一段会触发 H7 重述的终态正文，再把重述调用阻塞到取消，
+// 用于稳定命中 runTurn 初次取消检查之后、最终 durable commit 之前的竞态窗口。
+type cancelDuringReflectionModel struct {
+	entered sync.Once
+	ready   chan struct{}
+}
+
+func (modelValue *cancelDuringReflectionModel) WithTools(
+	[]*schema.ToolInfo,
+) (model.ToolCallingChatModel, error) {
+	return modelValue, nil
+}
+
+func (modelValue *cancelDuringReflectionModel) Generate(
+	ctx context.Context,
+	_ []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	modelValue.entered.Do(func() { close(modelValue.ready) })
+	<-ctx.Done()
+	return nil, errors.New("provider disconnected during reflection")
+}
+
+func (modelValue *cancelDuringReflectionModel) Stream(
+	context.Context,
+	[]*schema.Message,
+	...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	return schema.StreamReaderFromArray([]*schema.Message{
+		schema.AssistantMessage("但等等，让我再确认已经全部完成。", nil),
+	}), nil
+}
+
 func (modelValue *cancelDuringModelExecModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return modelValue, nil
 }
@@ -200,7 +234,10 @@ func (modelValue *terminatingFailureLoopModel) Generate(
 			},
 		}}), nil
 	}
-	return schema.AssistantMessage("本轮工具修复未完成，请告诉我下一步怎么处理。", nil), nil
+	if modelValue.terminalErr {
+		return nil, errors.New("provider stream failed after recovery exhaustion")
+	}
+	return schema.AssistantMessage("已经全部完成。", nil), nil
 }
 
 func (modelValue *terminatingFailureLoopModel) Stream(
@@ -330,12 +367,12 @@ func (modelValue *selfRepairServiceModel) Generate(
 	switch modelValue.calls {
 	case 1:
 		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID: "bad_call", Function: schema.FunctionCall{Name: "timeline.nonexistent", Arguments: `{}`},
+			ID: "bad_call", Function: schema.FunctionCall{Name: "asset.list_assets", Arguments: `{`},
 		}}), nil
 	case 2:
 		if len(messages) == 0 || messages[len(messages)-1].Role != schema.Tool ||
-			!strings.Contains(messages[len(messages)-1].Content, "unknown_tool") {
-			return nil, errors.New("未知工具错误没有回灌模型")
+			!strings.Contains(messages[len(messages)-1].Content, `"status":"failed"`) {
+			return nil, errors.New("工具参数错误没有回灌模型")
 		}
 		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID: "fixed_call", Function: schema.FunctionCall{Name: "asset.list_assets", Arguments: `{}`},
@@ -411,7 +448,7 @@ func (modelValue *failingReadToolServiceModel) Generate(
 		!strings.Contains(messages[len(messages)-1].Content, `"retryable":false`) {
 		return nil, errors.New("确定性参数失败没有立即回灌模型")
 	}
-	return schema.AssistantMessage("工具失败，但本轮已正常回复。", nil), nil
+	return schema.AssistantMessage("已经全部完成。", nil), nil
 }
 
 func (modelValue *failingReadToolServiceModel) Stream(
@@ -638,7 +675,7 @@ func TestServiceReturnsToolFailureToModelForSelfRepair(t *testing.T) {
 	}
 }
 
-func TestServiceReturnsDeterministicToolFailureInOneVisibleTrace(t *testing.T) {
+func TestServiceRejectsSuccessClaimAfterUnresolvedToolFailure(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_retry_trace")
@@ -674,8 +711,10 @@ func TestServiceReturnsDeterministicToolFailureInOneVisibleTrace(t *testing.T) {
 			toolRows++
 		}
 	}
-	if toolRows != 1 || len(messages) != 3 || messages[len(messages)-1].Content != "工具失败，但本轮已正常回复。" {
-		t.Fatalf("确定性失败应立即返回且只展示一个工具终态：tool_rows=%d messages=%#v", toolRows, messages)
+	final := messages[len(messages)-1]
+	if toolRows != 1 || len(messages) != 3 || final.Role != "system" || final.Kind != "turn_failure" ||
+		!strings.Contains(final.Content, "工具调用仍处于失败状态") || strings.Contains(final.Content, "已经全部完成") {
+		t.Fatalf("未解决工具失败必须拒绝伪成功：tool_rows=%d messages=%#v", toolRows, messages)
 	}
 }
 
@@ -1210,6 +1249,58 @@ func TestModelExecutionCancelledPersistsNoFailureMessage(t *testing.T) {
 			}
 		case <-time.After(3 * time.Second):
 			t.Fatal("未收到取消终态")
+		}
+	}
+}
+
+func TestCancellationDuringReflectionStillEndsCancelledWithoutTerminalEvents(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_cancel_during_reflection"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	agenttest.InsertAgentMessage(t, database, draftID, "user_cancel_reflection", "在回复质检时取消")
+	chatModel := &cancelDuringReflectionModel{ready: make(chan struct{})}
+	service, err := NewService(t.Context(), database, chatModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	_, stream, unsubscribe := service.Hub().Subscribe(draftID)
+	defer unsubscribe()
+	service.Queue().EnqueueUserMessage(draftID, "user_cancel_reflection", "在回复质检时取消")
+	select {
+	case <-chatModel.ready:
+	case <-time.After(3 * time.Second):
+		t.Fatal("未进入反思重述窗口")
+	}
+	if !service.Queue().RequestStop(draftID) {
+		t.Fatal("取消请求未传播")
+	}
+	service.Queue().JoinDraft(draftID)
+
+	for {
+		select {
+		case event := <-stream:
+			switch event["type"] {
+			case TurnStreamTurnError:
+				t.Fatalf("反思窗口取消不应发 turn_error：%#v", event)
+			case TurnStreamTextDelta, TurnStreamMessageCompleted:
+				t.Fatalf("反思窗口取消不应泄漏终态正文：%#v", event)
+			case TurnStreamTurnEnded:
+				if event["outcome"] != "cancelled" {
+					t.Fatalf("取消终态错误：%#v", event)
+				}
+				messages, listErr := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
+				if listErr != nil {
+					t.Fatal(listErr)
+				}
+				if len(messages) != 1 || messages[0].Role != "user" {
+					t.Fatalf("取消后不得持久化回复或失败：%#v", messages)
+				}
+				return
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("反思窗口取消没有 cancelled 终态")
 		}
 	}
 }
@@ -2247,7 +2338,8 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 			"answer":            map[string]any{"option_id": "confirm"},
 		},
 	})
-	if err != nil || replayed == "" {
+	var replayGuardErr *terminalReplyGuardError
+	if replayed != "" || !errors.As(err, &replayGuardErr) || replayGuardErr.kind != "tool_failure_unresolved" {
 		t.Fatalf("replayed=%q err=%v", replayed, err)
 	}
 	if cancelled, err := service.replayPendingTool(ctx, QueueItem{DraftID: "draft_full", Payload: map[string]any{
@@ -2843,13 +2935,12 @@ func TestExhaustedRecoveryReplyIsVisibleAndMarkedFailed(t *testing.T) {
 			switch event["type"] {
 			case "message_completed":
 				completed, _ = event["content"].(string)
-				// 模型在恢复预算耗尽后亲笔生成的失败说明是它自己的回复，走
-				// assistant/reply 通道，不套 harness 的 turn_failure（P2#2）。
-				if event["kind"] != "reply" {
-					t.Fatalf("模型亲笔失败说明应走 kind=reply：%#v", event)
+				if event["kind"] != "turn_failure" {
+					t.Fatalf("恢复耗尽必须由 harness 输出确定性失败：%#v", event)
 				}
 			case "turn_ended":
-				if event["outcome"] != "failed" || completed != "本轮工具修复未完成，请告诉我下一步怎么处理。" {
+				if event["outcome"] != "failed" || !strings.Contains(completed, "工具自修复次数已经用尽") ||
+					strings.Contains(completed, "已经全部完成") {
 					t.Fatalf("completed=%q event=%#v", completed, event)
 				}
 				messages, listErr := storage.ListMessages(t.Context(), database.Read(), "draft_bounded_recovery", 20)
@@ -2865,17 +2956,47 @@ func TestExhaustedRecoveryReplyIsVisibleAndMarkedFailed(t *testing.T) {
 				if toolRows != 1 {
 					t.Fatalf("重复失败不应污染 UI：tool_rows=%d messages=%#v", toolRows, messages)
 				}
-				// 只有 harness 合成的终态文案才落 system/turn_failure；模型亲笔的失败说明
-				// 必须保留为 assistant/reply，才能注入下一轮上下文而不是被当成系统失败（P2#2）。
 				reply := messages[len(messages)-1]
-				if reply.Role != "assistant" || reply.Kind != "reply" || reply.Content != completed {
-					t.Fatalf("恢复耗尽的模型亲笔回复应落 assistant/reply：%#v", reply)
+				if reply.Role != "system" || reply.Kind != "turn_failure" || reply.Content != completed {
+					t.Fatalf("恢复耗尽的确定性失败应落 system/turn_failure：%#v", reply)
 				}
 				return
 			}
 		case <-time.After(3 * time.Second):
 			t.Fatal("恢复预算耗尽后没有可见终态")
 		}
+	}
+}
+
+func TestExhaustedRecoveryOverridesProviderErrorWithoutModelFallback(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_bounded_recovery_provider_error"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	agenttest.InsertAgentMessage(t, database, draftID, "user_bounded_recovery_error", "不要循环")
+	modelValue := &terminatingFailureLoopModel{terminalErr: true}
+	service, err := NewService(t.Context(), database, modelValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	service.Queue().EnqueueUserMessage(draftID, "user_bounded_recovery_error", "不要循环")
+	service.Queue().JoinDraft(draftID)
+
+	messages, err := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := messages[len(messages)-1]
+	if final.Kind != "turn_failure" || !strings.Contains(final.Content, "工具自修复次数已经用尽") ||
+		strings.Contains(final.Content, "provider stream failed") {
+		t.Fatalf("恢复耗尽应覆盖 provider 错误并使用固定正文：%#v", final)
+	}
+	modelValue.mu.Lock()
+	calls := modelValue.calls
+	modelValue.mu.Unlock()
+	if calls != maxModelRepairAttempts+2 {
+		t.Fatalf("恢复耗尽后不得为失败收尾再次调用模型：calls=%d", calls)
 	}
 }
 
@@ -2990,6 +3111,11 @@ func TestServiceClosedDatabaseFailureBoundaries(t *testing.T) {
 		Payload: map[string]any{"content": "ordinary"},
 	}); err == nil {
 		t.Fatal("assistant message 持久化到关闭数据库应失败")
+	}
+	for _, event := range service.hub.Snapshot("draft_closed") {
+		if event["type"] == TurnStreamTextDelta || event["type"] == TurnStreamMessageCompleted {
+			t.Fatalf("持久化失败前不得泄漏最终正文事件：%#v", event)
+		}
 	}
 	if cursor := service.bridgeIteration(t.Context(), 9); cursor != 9 {
 		t.Fatalf("closed bridge cursor=%d", cursor)

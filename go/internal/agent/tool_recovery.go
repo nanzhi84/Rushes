@@ -2,19 +2,23 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -37,11 +41,20 @@ type toolFailureSnapshot struct {
 	Arguments         string
 	Observation       string
 	ExecutionAttempts int
+	TargetKey         string
+	// CommittedTimelineID is set only when a timeline mutation durably wrote a
+	// version but returned validation_failed. A later timeline.check can prove
+	// that exact or a newer version valid after the independent contract changes.
+	CommittedTimelineID string
 }
 
 type toolRecoveryState struct {
 	mu                       sync.Mutex
 	failedCalls              map[string]toolFailureSnapshot
+	pendingFailures          map[string]toolFailureSnapshot
+	pendingOrder             []string
+	pendingRejections        map[string]toolFailureSnapshot
+	rejectionOrder           []string
 	hadFailure               bool
 	rootTool                 string
 	repairFailures           int
@@ -59,7 +72,11 @@ type recoveryDecision struct {
 }
 
 func newToolRecoveryState() *toolRecoveryState {
-	return &toolRecoveryState{failedCalls: map[string]toolFailureSnapshot{}}
+	return &toolRecoveryState{
+		failedCalls:       map[string]toolFailureSnapshot{},
+		pendingFailures:   map[string]toolFailureSnapshot{},
+		pendingRejections: map[string]toolFailureSnapshot{},
+	}
 }
 
 func withToolRecoveryState(ctx context.Context, state *toolRecoveryState) context.Context {
@@ -79,6 +96,12 @@ func (state *toolRecoveryState) beforeCall(name, arguments string) recoveryDecis
 	}
 	fingerprint := toolCallFingerprint(name, arguments)
 	if previous, exists := state.failedCalls[fingerprint]; exists {
+		// timeline.check 同时依赖 timeline 与独立更新的 content contract。
+		// 即便显式 timeline_id 不变，plan.update 后同一调用也可能恢复；允许重检，
+		// 实际失败仍由 recordFailure 累计并受 turn 级预算约束。
+		if name == "timeline.check" {
+			return recoveryDecision{}
+		}
 		state.repairFailures++
 		state.cumulativeRepairFailures++
 		state.evaluateExhaustion()
@@ -103,23 +126,94 @@ func (state *toolRecoveryState) recordFailure(snapshot toolFailureSnapshot) reco
 	}
 	state.evaluateExhaustion()
 	state.failedCalls[toolCallFingerprint(snapshot.Tool, snapshot.Arguments)] = snapshot
+	target := snapshot.TargetKey
+	if target == "" {
+		target = toolRecoveryTargetKey(snapshot.Tool, snapshot.Arguments, "")
+	}
+	if _, exists := state.pendingFailures[target]; !exists {
+		state.pendingOrder = append(state.pendingOrder, target)
+	}
+	state.pendingFailures[target] = snapshot
 	state.latest = snapshot
 	return recoveryDecision{
 		exhausted: state.exhausted, repairAttempt: state.repairFailures, latest: snapshot,
 	}
 }
 
-func (state *toolRecoveryState) recordSuccess(_ string) {
+func (state *toolRecoveryState) recordRejection(snapshot toolFailureSnapshot) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if !state.hadFailure {
+	fingerprint := toolCallFingerprint(snapshot.Tool, snapshot.Arguments)
+	if _, exists := state.pendingRejections[fingerprint]; !exists {
+		state.rejectionOrder = append(state.rejectionOrder, fingerprint)
+	}
+	state.pendingRejections[fingerprint] = snapshot
+	state.latest = snapshot
+}
+
+func (state *toolRecoveryState) recordSuccess(tool, arguments, rawResult string) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.resolveRejectionLocked(toolCallFingerprint(tool, arguments))
+	target := toolRecoveryTargetKey(tool, arguments, rawResult)
+	resolvedTargets := map[string]struct{}{}
+	if _, resolvesFailure := state.pendingFailures[target]; resolvesFailure {
+		resolvedTargets[target] = struct{}{}
+	}
+	if tool == "timeline.check" {
+		if successTimelineID := timelineIDFromRecoveryTargetKey(target); successTimelineID != "" {
+			for pendingTarget, pending := range state.pendingFailures {
+				failedTimelineID := timelineIDFromRecoveryTargetKey(pendingTarget)
+				if timelineIDAtLeast(successTimelineID, failedTimelineID) ||
+					timelineIDAtLeast(successTimelineID, pending.CommittedTimelineID) {
+					resolvedTargets[pendingTarget] = struct{}{}
+				}
+			}
+		}
+	}
+	if len(resolvedTargets) == 0 {
+		// 参数在 schema 解码前失败时可能没有任何可识别目标。允许同一工具后续一次
+		// 有效成功核销这个「未知目标」失败，但绝不让另一个已识别目标的成功越权核销。
+		if _, resolvesUnknownTarget := state.pendingFailures[tool]; !resolvesUnknownTarget {
+			return
+		}
+		resolvedTargets[tool] = struct{}{}
+	}
+	for resolvedTarget := range resolvedTargets {
+		pending := state.pendingFailures[resolvedTarget]
+		if pending.Tool != tool && (tool != "timeline.check" || pending.CommittedTimelineID == "") {
+			delete(resolvedTargets, resolvedTarget)
+		}
+	}
+	if len(resolvedTargets) == 0 {
 		return
 	}
-	// 任一成功工具调用都表示模型已经读取了新状态、换了方案或完成了
-	// 恢复步骤。修复预算按连续失败链计算，不能让回合早期一个已绕过的
-	// 空状态错误（例如尚无时间线时 inspect）污染后续完全不同的编辑工具。
-	state.failedCalls = map[string]toolFailureSnapshot{}
-	state.hadFailure = false
+	for resolvedTarget := range resolvedTargets {
+		delete(state.pendingFailures, resolvedTarget)
+	}
+	for fingerprint, snapshot := range state.failedCalls {
+		targetKey := snapshot.TargetKey
+		if targetKey == "" {
+			targetKey = toolRecoveryTargetKey(snapshot.Tool, snapshot.Arguments, "")
+		}
+		if _, resolved := resolvedTargets[targetKey]; resolved {
+			delete(state.failedCalls, fingerprint)
+		}
+	}
+	keptOrder := state.pendingOrder[:0]
+	for _, pendingTarget := range state.pendingOrder {
+		if _, resolved := resolvedTargets[pendingTarget]; !resolved {
+			keptOrder = append(keptOrder, pendingTarget)
+		}
+	}
+	state.pendingOrder = keptOrder
+	state.hadFailure = len(state.pendingFailures) != 0
+	if state.hadFailure {
+		state.rootTool = state.pendingOrder[0]
+		state.latest = state.pendingFailures[state.pendingOrder[len(state.pendingOrder)-1]]
+		state.evaluateExhaustion()
+		return
+	}
 	state.rootTool = ""
 	state.repairFailures = 0
 	// 累计修复计数是 turn 级、不因单次成功重置（#95 H4）：交替 fail→success 不能无限
@@ -127,6 +221,46 @@ func (state *toolRecoveryState) recordSuccess(_ string) {
 	// 「连击已清零、累计仍超」的穷尽记成 cumulative 分因，即 H-B P2「预算重叠」信号）。
 	state.evaluateExhaustion()
 	state.latest = toolFailureSnapshot{}
+}
+
+func (state *toolRecoveryState) resolveConfirmation(arguments, rawResult string) {
+	var confirmation rushestools.ConfirmActionInput
+	var result rushestools.ToolResult
+	if json.Unmarshal([]byte(arguments), &confirmation) != nil ||
+		json.Unmarshal([]byte(rawResult), &result) != nil ||
+		(result.Status != string(rushestools.StatusWaiting) &&
+			result.Status != string(rushestools.StatusSucceeded)) ||
+		agentexec.InterfaceString(result.Data["decision_id"]) == "" {
+		return
+	}
+	encodedArguments, err := json.Marshal(confirmation.Arguments)
+	if err != nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.resolveRejectionLocked(toolCallFingerprint(confirmation.ToolName, string(encodedArguments)))
+}
+
+func (state *toolRecoveryState) resolveRejectionLocked(fingerprint string) {
+	if _, exists := state.pendingRejections[fingerprint]; !exists {
+		return
+	}
+	delete(state.pendingRejections, fingerprint)
+	for index, pendingFingerprint := range state.rejectionOrder {
+		if pendingFingerprint == fingerprint {
+			state.rejectionOrder = append(state.rejectionOrder[:index], state.rejectionOrder[index+1:]...)
+			break
+		}
+	}
+	switch {
+	case len(state.pendingFailures) != 0:
+		state.latest = state.pendingFailures[state.pendingOrder[len(state.pendingOrder)-1]]
+	case len(state.pendingRejections) != 0:
+		state.latest = state.pendingRejections[state.rejectionOrder[len(state.rejectionOrder)-1]]
+	default:
+		state.latest = toolFailureSnapshot{}
+	}
 }
 
 // evaluateExhaustion 在持锁下把穷尽从 false 翻成 true（累计计数只增不减，不会反向），并按
@@ -152,7 +286,7 @@ func (state *toolRecoveryState) evaluateExhaustion() {
 func (state *toolRecoveryState) unresolved() bool {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return state.hadFailure
+	return state.hadFailure || len(state.pendingRejections) != 0
 }
 
 func (state *toolRecoveryState) recoveryExhausted() bool {
@@ -164,8 +298,17 @@ func (state *toolRecoveryState) recoveryExhausted() bool {
 func (state *toolRecoveryState) summary() string {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if !state.hadFailure {
+	if !state.hadFailure && len(state.pendingRejections) == 0 {
 		return ""
+	}
+	if !state.hadFailure {
+		latest := state.pendingRejections[state.rejectionOrder[len(state.rejectionOrder)-1]]
+		return fmt.Sprintf(
+			"工具：%s；参数：%s；策略拒绝：%s",
+			latest.Tool,
+			agentexec.TruncateText(canonicalToolArguments(latest.Arguments), 320),
+			agentexec.TruncateText(latest.Observation, 600),
+		)
 	}
 	return fmt.Sprintf(
 		"工具：%s；参数：%s；最后错误：%s；模型修复失败次数：%d/%d（本回合累计 %d/%d）",
@@ -181,6 +324,186 @@ func (state *toolRecoveryState) summary() string {
 
 func toolCallFingerprint(name, arguments string) string {
 	return name + "\x00" + canonicalToolArguments(arguments)
+}
+
+func timelineIDFromRecoveryTargetKey(target string) string {
+	const prefix = "timeline.check\x00"
+	if !strings.HasPrefix(target, prefix) {
+		return ""
+	}
+	var identity map[string]any
+	if json.Unmarshal([]byte(strings.TrimPrefix(target, prefix)), &identity) != nil {
+		return ""
+	}
+	return agentexec.InterfaceString(identity["timeline_id"])
+}
+
+func timelineIDAtLeast(successID, failedID string) bool {
+	successDraft, successVersion, successOK := splitTimelineID(successID)
+	failedDraft, failedVersion, failedOK := splitTimelineID(failedID)
+	return successOK && failedOK && successDraft == failedDraft && successVersion >= failedVersion
+}
+
+func splitTimelineID(timelineID string) (string, int, bool) {
+	separator := strings.LastIndex(timelineID, ":v")
+	if separator <= 0 {
+		return "", 0, false
+	}
+	version, err := strconv.Atoi(timelineID[separator+2:])
+	if err != nil || version < 0 {
+		return "", 0, false
+	}
+	return timelineID[:separator], version, true
+}
+
+func committedMutationValidationTimelineID(name, raw string) string {
+	if !isTerminalTimelineMutation(name) {
+		return ""
+	}
+	var result rushestools.ToolResult
+	if json.Unmarshal([]byte(raw), &result) != nil ||
+		result.Status != string(rushestools.StatusValidationFailed) {
+		return ""
+	}
+	timelineID := agentexec.InterfaceString(result.Data["timeline_id"])
+	if !isValidTimelineVersionID(timelineID) {
+		return ""
+	}
+	return timelineID
+}
+
+// toolRecoveryTargetKey 从参数中只提取稳定目标，让同一目标的修正参数成功能核销失败，
+// 但同名工具操作另一个素材、clip 或 timeline 不能掩盖原失败。完全无法解码或没有
+// 稳定目标的调用退回工具名，供 schema 参数修正与无参工具恢复。
+func toolRecoveryTargetKey(name, arguments, rawResult string) string {
+	// timeline.check 的空参数表示「当前版本」，真实 timeline_id 只在结果里。
+	// 优先用结果 ID 归一化，使同版本的显式/省略参数能相互恢复，旧版本成功则不能核销新版本失败。
+	if name == "timeline.check" && rawResult != "" {
+		var result rushestools.ToolResult
+		if json.Unmarshal([]byte(rawResult), &result) == nil {
+			if timelineID := agentexec.InterfaceString(result.Data["timeline_id"]); timelineID != "" {
+				encoded, _ := json.Marshal(map[string]any{"timeline_id": timelineID})
+				return name + "\x00" + string(encoded)
+			}
+		}
+	}
+	var values map[string]any
+	if json.Unmarshal([]byte(arguments), &values) != nil {
+		return name
+	}
+	identity := map[string]any{}
+	switch name {
+	case "asset.import_local_file":
+		if path, _ := values["path"].(string); path != "" {
+			identity["path"] = filepath.Clean(path)
+		}
+	case "render.start":
+		for _, key := range []string{"timeline_id", "kind"} {
+			if value, exists := values[key]; exists {
+				identity[key] = value
+			}
+		}
+		orientation := strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(values["orientation"])))
+		if orientation == "" {
+			orientation = "auto"
+		}
+		identity["orientation"] = orientation
+	case "shot.search":
+		if query, _ := values["query"].(string); strings.TrimSpace(query) != "" {
+			identity["query"] = strings.ToLower(strings.Join(strings.Fields(query), " "))
+		}
+		for _, key := range []string{
+			"asset_ids", "semantic_roles", "tags", "min_duration_frames", "max_duration_frames",
+			"exclude_used", "after_shot_id",
+		} {
+			if value, exists := values[key]; exists {
+				identity[key] = canonicalRecoveryIdentityValue(value)
+			}
+		}
+	case "memory.set":
+		keys := map[string]struct{}{}
+		if entries, ok := values["entries"].([]any); ok {
+			for _, rawEntry := range entries {
+				entry, _ := rawEntry.(map[string]any)
+				if key, _ := entry["key"].(string); key != "" {
+					keys[key] = struct{}{}
+				}
+			}
+		}
+		if len(keys) != 0 {
+			sortedKeys := make([]string, 0, len(keys))
+			for key := range keys {
+				sortedKeys = append(sortedKeys, key)
+			}
+			sort.Strings(sortedKeys)
+			identity["keys"] = sortedKeys
+		}
+	}
+	if len(identity) != 0 {
+		encoded, err := json.Marshal(identity)
+		if err != nil {
+			return name
+		}
+		return name + "\x00" + string(encoded)
+	}
+	if name == "timeline.update" || name == "timeline.delete" || name == "timeline.split" {
+		for _, key := range []string{"timeline_clip_id", "track_id", "clip_id"} {
+			if value, exists := values[key]; exists {
+				encoded, err := json.Marshal(map[string]any{key: value})
+				if err == nil {
+					return name + "\x00" + string(encoded)
+				}
+			}
+		}
+	}
+	for _, key := range []string{
+		"check", "timeline_id", "timeline_clip_id", "track_id", "clip_id",
+		"asset_id", "asset_ids", "job_id", "preview_id", "decision_id", "keys",
+	} {
+		if value, exists := values[key]; exists {
+			identity[key] = value
+		}
+	}
+	// 已有时间线对象 ID 时，kind 和帧坐标都是可纠正的操作参数，不属于目标身份；
+	// 否则操作种类及完整范围共同定义目标，避免另一个范围的成功掩盖当前失败。
+	_, hasTimelineClipID := values["timeline_clip_id"]
+	_, hasTrackID := values["track_id"]
+	_, hasClipID := values["clip_id"]
+	if !hasTimelineClipID && !hasTrackID && !hasClipID {
+		for _, key := range []string{
+			"kind", "start_frame", "end_frame", "source_start_frame", "source_end_frame",
+			"timeline_start_frame", "timeline_end_frame",
+		} {
+			if value, exists := values[key]; exists {
+				identity[key] = value
+			}
+		}
+	}
+	if len(identity) == 0 {
+		return name
+	}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return name
+	}
+	return name + "\x00" + string(encoded)
+}
+
+func canonicalRecoveryIdentityValue(value any) any {
+	items, ok := value.([]any)
+	if !ok {
+		return value
+	}
+	stringsOnly := make([]string, 0, len(items))
+	for _, item := range items {
+		text, textOK := item.(string)
+		if !textOK {
+			return value
+		}
+		stringsOnly = append(stringsOnly, strings.TrimSpace(text))
+	}
+	sort.Strings(stringsOnly)
+	return stringsOnly
 }
 
 func canonicalToolArguments(arguments string) string {
@@ -279,6 +602,13 @@ func newToolRecoveryMiddleware(retrySafe func(string) bool) compose.ToolMiddlewa
 					// 失败——不记恢复账、不触发重试、不消耗修复预算（#103 G2）。
 					var rejection *rushestools.InterceptorRejection
 					if errors.As(err, &rejection) {
+						if state != nil && agentexec.InterfaceString(rejection.Data["error_code"]) ==
+							string(rushestools.ErrCodeConfirmationRequired) {
+							state.recordRejection(toolFailureSnapshot{
+								Tool: input.Name, Arguments: input.Arguments,
+								Observation: rejection.Observation,
+							})
+						}
 						if !reportFinished {
 							reportFinished = true
 							reportOutput, reportErr = rejectionToolResult(rejection), nil
@@ -305,10 +635,32 @@ func newToolRecoveryMiddleware(retrySafe func(string) bool) compose.ToolMiddlewa
 					raw := executionErrorOutput(input.Name, missingResultErr, attempts, false)
 					return &compose.ToolOutput{Result: decorateToolFailure(ctx, input, raw, attempts)}, nil
 				}
+				if !isStructuredToolFailure(output.Result) {
+					output.Result = attachToolRequestFingerprint(input.Name, input.Arguments, output.Result)
+				}
+				draftID, _ := rushestools.DraftID(ctx)
 				if isStructuredToolFailure(output.Result) {
 					output.Result = decorateToolFailure(ctx, input, output.Result, attempts)
+					reportFinished, reportOutput, reportErr = true, toolResultForReport(output.Result), nil
+				} else if !isConfirmedToolRecoverySuccessWithExecutionProof(
+					input.Name, input.Arguments, output.Result, draftID,
+					validToolRequestFingerprint(input.Name, input.Arguments, output.Result),
+				) {
+					raw := marshalToolFailure(
+						"工具返回了无法核验的结果状态，不能据此确认执行成功。",
+						map[string]any{
+							"error_code":       string(rushestools.ErrCodeToolExecutionError),
+							"recovery":         "检查工具返回格式与状态；只有该工具约定的成功、排队或等待状态才能确认恢复。",
+							"raw_result_bytes": len([]byte(output.Result)),
+						},
+					)
+					output.Result = decorateToolFailure(ctx, input, raw, attempts)
+					reportFinished, reportOutput, reportErr = true, toolResultForReport(output.Result), nil
 				} else if state != nil {
-					state.recordSuccess(input.Name)
+					if input.Name == "interaction.confirm_action" {
+						state.resolveConfirmation(input.Arguments, output.Result)
+					}
+					state.recordSuccess(input.Name, input.Arguments, output.Result)
 				}
 				observeToolResultSize(input.Name, output.Result)
 				return output, nil
@@ -371,6 +723,8 @@ func decorateToolFailure(
 		decision = state.recordFailure(toolFailureSnapshot{
 			Tool: input.Name, Arguments: input.Arguments,
 			Observation: observation, ExecutionAttempts: executionAttempts,
+			TargetKey:           toolRecoveryTargetKey(input.Name, input.Arguments, raw),
+			CommittedTimelineID: committedMutationValidationTimelineID(input.Name, raw),
 		})
 	}
 	data["harness_recovery"] = recoveryMetadata(decision, executionAttempts)
@@ -453,6 +807,772 @@ func isStructuredToolFailure(raw string) bool {
 		return false
 	}
 	return payload.Status == string(rushestools.StatusFailed) || payload.Status == string(rushestools.StatusValidationFailed)
+}
+
+func toolResultForReport(raw string) any {
+	var result rushestools.ToolResult
+	if json.Unmarshal([]byte(raw), &result) == nil {
+		return result
+	}
+	return raw
+}
+
+const toolRequestFingerprintField = "request_fingerprint"
+
+func toolRequestFingerprint(name, arguments string) string {
+	var value any
+	if json.Unmarshal([]byte(arguments), &value) != nil {
+		return ""
+	}
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	digest := sha256.Sum256(append(append([]byte(name), 0), canonical...))
+	return fmt.Sprintf("sha256:%x", digest[:])
+}
+
+func attachToolRequestFingerprint(name, arguments, raw string) string {
+	fingerprint := toolRequestFingerprint(name, arguments)
+	if fingerprint == "" {
+		return raw
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(raw), &payload) != nil || payload == nil {
+		return raw
+	}
+	payload[toolRequestFingerprintField] = fingerprint
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+func validToolRequestFingerprint(name, arguments, raw string) bool {
+	expected := toolRequestFingerprint(name, arguments)
+	if expected == "" {
+		return false
+	}
+	var payload map[string]any
+	return json.Unmarshal([]byte(raw), &payload) == nil &&
+		agentexec.InterfaceString(payload[toolRequestFingerprintField]) == expected
+}
+
+func confirmedToolResultSuccessWithExecutionProof(
+	name string,
+	arguments any,
+	result rushestools.ToolResult,
+	draftID string,
+	fullRequestBound bool,
+) bool {
+	switch result.Status {
+	case string(rushestools.StatusSucceeded):
+		switch {
+		case isTerminalTimelineMutation(name):
+			return fullRequestBound && timelineVersionBelongsToDraft(
+				agentexec.InterfaceString(result.Data["timeline_id"]), draftID,
+			)
+		case name == "timeline.check":
+			return validRequestedTimelineProof(arguments, result, true, draftID) &&
+				validSuccessfulTimelineCheck(result)
+		case name == "timeline.inspect":
+			return validRequestedTimelineProof(arguments, result, false, draftID)
+		case name == "render.start":
+			return validRenderDispatchProof(arguments, result, "succeeded")
+		case name == "job.read":
+			return matchesRequestedString(arguments, "job_id", agentexec.InterfaceString(result.Data["job_id"]))
+		case name == "memory.set":
+			return matchesRequestedMemoryKeys(arguments, result, "entries", "written_keys")
+		case name == "memory.remove":
+			return matchesRemovedMemoryKeys(arguments, result)
+		case name == "interaction.ask_user":
+			return fullRequestBound && validDecisionProof(result, false)
+		case name == "interaction.confirm_action":
+			return false
+		case name == "decision.answer", name == "plan.update", name == "asset.import_local_file":
+			return fullRequestBound
+		default:
+			return false
+		}
+	case string(rushestools.StatusQueued):
+		return name == "render.start" && validRenderDispatchProof(arguments, result, "queued")
+	case string(rushestools.StatusWaiting):
+		return (name == "interaction.ask_user" || name == "interaction.confirm_action") &&
+			fullRequestBound && validDecisionProof(result, true)
+	default:
+		return false
+	}
+}
+
+func timelineVersionBelongsToDraft(timelineID, draftID string) bool {
+	timelineDraftID, _, valid := splitTimelineID(strings.TrimSpace(timelineID))
+	return valid && strings.TrimSpace(draftID) != "" && timelineDraftID == strings.TrimSpace(draftID)
+}
+
+func validSuccessfulTimelineCheck(result rushestools.ToolResult) bool {
+	encoded, err := json.Marshal(result.Data["validation_report"])
+	if err != nil {
+		return false
+	}
+	var rawReport map[string]json.RawMessage
+	if json.Unmarshal(encoded, &rawReport) != nil {
+		return false
+	}
+	var report struct {
+		Valid                *bool                                 `json:"valid"`
+		StructuralValid      *bool                                 `json:"structural_valid"`
+		ContentContractValid *bool                                 `json:"content_contract_valid"`
+		Checks               []string                              `json:"checks"`
+		Issues               []timeline.ValidationIssue            `json:"issues"`
+		ContentContract      *agentexec.ContractVerificationReport `json:"content_contract"`
+	}
+	if json.Unmarshal(encoded, &report) != nil ||
+		report.Valid == nil || !*report.Valid ||
+		report.StructuralValid == nil || !*report.StructuralValid ||
+		report.ContentContractValid == nil || !*report.ContentContractValid ||
+		report.Checks == nil || len(report.Checks) == 0 || report.Issues == nil ||
+		len(report.Issues) != 0 {
+		return false
+	}
+	seenChecks := make(map[string]struct{}, len(report.Checks))
+	for _, check := range report.Checks {
+		check = strings.TrimSpace(check)
+		if check == "" {
+			return false
+		}
+		if _, duplicate := seenChecks[check]; duplicate {
+			return false
+		}
+		seenChecks[check] = struct{}{}
+	}
+	if report.ContentContract == nil {
+		if _, hasNestedContract := rawReport["content_contract"]; hasNestedContract {
+			return false
+		}
+		if _, hasTopLevel := result.Data["content_contract"]; hasTopLevel {
+			return false
+		}
+		return validEmptyContractFailures(result.Data, false)
+	}
+	if !report.ContentContract.Pass {
+		return false
+	}
+	if !validRawPassingContract(rawReport["content_contract"], result.Data["content_contract"]) {
+		return false
+	}
+	if report.ContentContract.Items == nil {
+		return false
+	}
+	seenContractChecks := make(map[string]struct{}, len(report.ContentContract.Items))
+	for _, item := range report.ContentContract.Items {
+		check := strings.TrimSpace(item.Check)
+		if !item.Pass || check == "" || strings.TrimSpace(item.ErrorCode) != "" ||
+			strings.TrimSpace(item.Message) == "" {
+			return false
+		}
+		if _, duplicate := seenContractChecks[check]; duplicate {
+			return false
+		}
+		seenContractChecks[check] = struct{}{}
+	}
+	return validEmptyContractFailures(result.Data, true)
+}
+
+func validRawPassingContract(nested json.RawMessage, topLevel any) bool {
+	if len(nested) == 0 || strings.TrimSpace(string(nested)) == "null" {
+		return false
+	}
+	var nestedValue any
+	if json.Unmarshal(nested, &nestedValue) != nil {
+		return false
+	}
+	encodedTopLevel, err := json.Marshal(topLevel)
+	if err != nil {
+		return false
+	}
+	var topLevelValue any
+	if json.Unmarshal(encodedTopLevel, &topLevelValue) != nil || !reflect.DeepEqual(nestedValue, topLevelValue) {
+		return false
+	}
+	var rawContract struct {
+		Items []map[string]json.RawMessage `json:"items"`
+	}
+	if json.Unmarshal(nested, &rawContract) != nil || rawContract.Items == nil {
+		return false
+	}
+	for _, item := range rawContract.Items {
+		if rawErrorCode, exists := item["error_code"]; exists && !validJSONString(rawErrorCode) {
+			return false
+		}
+	}
+	return true
+}
+
+func validJSONString(raw json.RawMessage) bool {
+	if strings.TrimSpace(string(raw)) == "null" {
+		return false
+	}
+	var value string
+	return json.Unmarshal(raw, &value) == nil
+}
+
+func validEmptyContractFailures(data map[string]any, required bool) bool {
+	rawFailures, exists := data["contract_failures"]
+	if !exists {
+		return !required
+	}
+	encodedFailures, err := json.Marshal(rawFailures)
+	if err != nil {
+		return false
+	}
+	var failures []agentexec.ContractVerificationItem
+	if json.Unmarshal(encodedFailures, &failures) != nil || failures == nil {
+		return false
+	}
+	return len(failures) == 0
+}
+
+func validRequestedTimelineProof(
+	arguments any,
+	result rushestools.ToolResult,
+	requireTimeline bool,
+	draftID string,
+) bool {
+	requested := strings.TrimSpace(agentexec.InterfaceString(toolArgumentsObject(arguments)["timeline_id"]))
+	returned := strings.TrimSpace(agentexec.InterfaceString(result.Data["timeline_id"]))
+	if requested != "" {
+		return returned == requested && isValidTimelineVersionID(returned)
+	}
+	if returned != "" {
+		returnedDraftID, _, valid := splitTimelineID(returned)
+		return valid && draftID != "" && returnedDraftID == draftID
+	}
+	return !requireTimeline && draftID != "" && result.Data["timeline_exists"] == false
+}
+
+func matchesRequestedMemoryKeys(arguments any, result rushestools.ToolResult, requestField, resultField string) bool {
+	requested := requestedMemoryKeys(arguments, requestField)
+	returned, valid := recoveryStringSet(result.Data[resultField])
+	return len(requested) > 0 && valid && reflect.DeepEqual(requested, returned)
+}
+
+func matchesRemovedMemoryKeys(arguments any, result rushestools.ToolResult) bool {
+	requested := requestedMemoryKeys(arguments, "keys")
+	removed, valid := recoveryStringSet(result.Data["removed_keys"])
+	if len(requested) == 0 || !valid ||
+		!optionalEmptyRecoveryStringSet(result.Data, "written_keys") ||
+		!optionalEmptyRecoveryStringSet(result.Data, "evicted_keys") {
+		return false
+	}
+	for key := range removed {
+		if _, requestedKey := requested[key]; !requestedKey {
+			return false
+		}
+	}
+	return true
+}
+
+func optionalEmptyRecoveryStringSet(data map[string]any, field string) bool {
+	value, exists := data[field]
+	if !exists {
+		return true
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return false
+	}
+	var values []string
+	return json.Unmarshal(encoded, &values) == nil && values != nil && len(values) == 0
+}
+
+func requestedMemoryKeys(arguments any, field string) map[string]struct{} {
+	raw := toolArgumentsObject(arguments)[field]
+	values, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	keys := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if object, objectOK := value.(map[string]any); objectOK {
+			value = object["key"]
+		}
+		key := strings.TrimSpace(agentexec.InterfaceString(value))
+		if key == "" {
+			return nil
+		}
+		keys[key] = struct{}{}
+	}
+	return keys
+}
+
+func recoveryStringSet(value any) (map[string]struct{}, bool) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil, false
+	}
+	var values []string
+	if json.Unmarshal(encoded, &values) != nil {
+		return nil, false
+	}
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil, false
+		}
+		if _, duplicate := result[value]; duplicate {
+			return nil, false
+		}
+		result[value] = struct{}{}
+	}
+	return result, true
+}
+
+func validRenderDispatchProof(arguments any, result rushestools.ToolResult, status string) bool {
+	if strings.TrimSpace(agentexec.InterfaceString(result.Data["job_id"])) == "" ||
+		positiveInteger(result.Data["timeline_version"]) <= 0 {
+		return false
+	}
+	argumentMap := toolArgumentsObject(arguments)
+	timelineID := strings.TrimSpace(agentexec.InterfaceString(argumentMap["timeline_id"]))
+	_, requestedVersion, validTimelineID := splitTimelineID(timelineID)
+	requestedKind := strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(argumentMap["kind"])))
+	requestedOrientation := strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(argumentMap["orientation"])))
+	if requestedOrientation == "" {
+		requestedOrientation = "auto"
+	}
+	if !validTimelineID || int64(requestedVersion) != positiveInteger(result.Data["timeline_version"]) ||
+		strings.TrimSpace(agentexec.InterfaceString(result.Data["timeline_id"])) != timelineID ||
+		(requestedKind != "preview" && requestedKind != "final") ||
+		strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(result.Data["render_kind"]))) != requestedKind ||
+		(requestedOrientation != "auto" && requestedOrientation != "portrait" && requestedOrientation != "landscape") ||
+		strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(result.Data["orientation"]))) != requestedOrientation {
+		return false
+	}
+	jobStatus := agentexec.InterfaceString(result.Data["job_status"])
+	if status == "queued" {
+		return jobStatus == "pending" || jobStatus == "running"
+	}
+	return status == "succeeded" && jobStatus == "succeeded"
+}
+
+func validDecisionProof(result rushestools.ToolResult, shouldEnd bool) bool {
+	if strings.TrimSpace(agentexec.InterfaceString(result.Data["decision_id"])) == "" {
+		return false
+	}
+	turnShouldEnd, ok := result.Data["turn_should_end"].(bool)
+	return ok && turnShouldEnd == shouldEnd
+}
+
+func toolArgumentsObject(arguments any) map[string]any {
+	switch typed := arguments.(type) {
+	case map[string]any:
+		return typed
+	case string:
+		var values map[string]any
+		if json.Unmarshal([]byte(typed), &values) == nil {
+			return values
+		}
+		return nil
+	default:
+		encoded, err := json.Marshal(arguments)
+		if err != nil {
+			return nil
+		}
+		var values map[string]any
+		if json.Unmarshal(encoded, &values) != nil {
+			return nil
+		}
+		return values
+	}
+}
+
+func positiveInteger(value any) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int32:
+		return int64(typed)
+	case int64:
+		return typed
+	case float64:
+		if typed > 0 && typed == float64(int64(typed)) {
+			return int64(typed)
+		}
+	}
+	return 0
+}
+
+func isConfirmedToolRecoverySuccess(name string, arguments any, raw, draftID string) bool {
+	argumentJSON, _ := json.Marshal(arguments)
+	if text, ok := arguments.(string); ok {
+		argumentJSON = []byte(text)
+	}
+	return isConfirmedToolRecoverySuccessWithExecutionProof(
+		name, arguments, raw, draftID,
+		validToolRequestFingerprint(name, string(argumentJSON), raw),
+	)
+}
+
+func isConfirmedToolRecoverySuccessWithExecutionProof(
+	name string,
+	arguments any,
+	raw, draftID string,
+	fullRequestBound bool,
+) bool {
+	var payload map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &payload) != nil || payload == nil {
+		return false
+	}
+	if isTypedToolRecoveryResult(name) {
+		if _, hasStatus := payload["status"]; hasStatus {
+			return false
+		}
+		return validTypedToolRecoveryResult(name, arguments, raw, payload, draftID, fullRequestBound)
+	}
+	var status string
+	if encodedStatus, exists := payload["status"]; exists {
+		if json.Unmarshal(encodedStatus, &status) != nil {
+			return false
+		}
+		if name == "media.detect_shots" {
+			return fullRequestBound && validDetectShotsProof(arguments, raw, status, draftID)
+		}
+		if name == "speech.search" {
+			return fullRequestBound && validSpeechSearchProof(arguments, raw, payload, status)
+		}
+		var result rushestools.ToolResult
+		return json.Unmarshal([]byte(raw), &result) == nil &&
+			confirmedToolResultSuccessWithExecutionProof(name, arguments, result, draftID, fullRequestBound)
+	}
+	return false
+}
+
+func isTypedToolRecoveryResult(name string) bool {
+	switch name {
+	case "asset.list_assets", "shot.search", "audio.analyze_beats",
+		"audio.analyze_speech_pauses", "speech.transcribe", "preview.check":
+		return true
+	default:
+		return false
+	}
+}
+
+func validDetectShotsProof(arguments any, raw, status, draftID string) bool {
+	var result rushestools.DetectShotsResult
+	if json.Unmarshal([]byte(raw), &result) != nil || result.Status != status ||
+		strings.TrimSpace(draftID) == "" || strings.TrimSpace(result.DraftID) != strings.TrimSpace(draftID) ||
+		!matchesRequestedString(arguments, "asset_id", result.AssetID) {
+		return false
+	}
+	switch status {
+	case string(rushestools.StatusQueued):
+		return strings.TrimSpace(result.JobID) != ""
+	case "completed":
+		return result.Summary != nil &&
+			strings.TrimSpace(result.Summary.AssetID) == strings.TrimSpace(result.AssetID) &&
+			result.Summary.TimelineFPS > 0
+	default:
+		return false
+	}
+}
+
+func validSpeechSearchProof(
+	arguments any,
+	raw string,
+	payload map[string]json.RawMessage,
+	status string,
+) bool {
+	for _, field := range []string{
+		"status", "transcript_id", "asset_id", "timeline_fps", "provider_id",
+		"utterances", "utterance_total", "truncated", "usage_note",
+	} {
+		if _, exists := payload[field]; !exists {
+			return false
+		}
+	}
+	var result rushestools.SpeechSearchResult
+	if status != string(rushestools.StatusSucceeded) ||
+		json.Unmarshal([]byte(raw), &result) != nil ||
+		result.Status != string(rushestools.StatusSucceeded) ||
+		strings.TrimSpace(result.TranscriptID) == "" || result.TimelineFPS <= 0 ||
+		result.UtteranceTotal < 0 || len(result.Utterances) > result.UtteranceTotal {
+		return false
+	}
+	argumentMap := toolArgumentsObject(arguments)
+	requestedAssetID := strings.TrimSpace(agentexec.InterfaceString(argumentMap["asset_id"]))
+	requestedClipID := strings.TrimSpace(agentexec.InterfaceString(argumentMap["timeline_clip_id"]))
+	return (requestedAssetID != "" || requestedClipID != "") &&
+		(requestedAssetID == "" || strings.TrimSpace(result.AssetID) == requestedAssetID) &&
+		(requestedClipID == "" || strings.TrimSpace(result.TimelineClipID) == requestedClipID)
+}
+
+func validTypedToolRecoveryResult(
+	name string,
+	arguments any,
+	raw string,
+	payload map[string]json.RawMessage,
+	draftID string,
+	fullRequestBound bool,
+) bool {
+	requiredFields := map[string][]string{
+		"asset.list_assets":           {"draft_id", "assets", "total"},
+		"shot.search":                 {"shots", "total_matches", "page_start", "remaining_matches", "truncated"},
+		"audio.analyze_beats":         {"asset_id", "timeline_fps", "beat_frames"},
+		"audio.analyze_speech_pauses": {"timeline_fps", "pauses"},
+		"speech.transcribe":           {"transcript_id", "asset_id", "timeline_fps"},
+		"preview.check":               {"preview_id", "check", "issues"},
+	}
+	for _, field := range requiredFields[name] {
+		if _, exists := payload[field]; !exists {
+			return false
+		}
+	}
+	switch name {
+	case "asset.list_assets":
+		var result rushestools.AssetListResult
+		if json.Unmarshal([]byte(raw), &result) != nil || strings.TrimSpace(result.DraftID) == "" ||
+			result.Assets == nil || result.Total < 0 || len(result.Assets) > result.Total {
+			return false
+		}
+		if draftID != "" && strings.TrimSpace(result.DraftID) != draftID {
+			return false
+		}
+		argumentMap := toolArgumentsObject(arguments)
+		requestedKind := agentexec.InterfaceString(argumentMap["kind"])
+		after := agentexec.InterfaceString(argumentMap["after"])
+		requestedLimit := int(positiveInteger(argumentMap["limit"]))
+		if requestedLimit == 0 || requestedLimit > 200 {
+			requestedLimit = 200
+		}
+		onlyUsable, hasOnlyUsable := argumentMap["only_usable"]
+		requestedUsable, usableIsBool := onlyUsable.(bool)
+		if hasOnlyUsable && !usableIsBool {
+			return false
+		}
+		for _, asset := range result.Assets {
+			if strings.TrimSpace(asset.AssetID) == "" {
+				return false
+			}
+			if requestedKind != "" && asset.Kind != requestedKind ||
+				hasOnlyUsable && asset.Usable != requestedUsable ||
+				after != "" && asset.AssetID <= after {
+				return false
+			}
+		}
+		if len(result.Assets) > requestedLimit {
+			return false
+		}
+		if result.NextAfter != "" {
+			return len(result.Assets) == requestedLimit && result.Total > len(result.Assets) &&
+				result.NextAfter == result.Assets[len(result.Assets)-1].AssetID
+		}
+		return result.Total == len(result.Assets)
+	case "shot.search":
+		if !fullRequestBound {
+			return false
+		}
+		rawShots, hasShots := payload["shots"]
+		var encodedShots []json.RawMessage
+		if !hasShots || json.Unmarshal(rawShots, &encodedShots) != nil {
+			return false
+		}
+		for _, field := range []string{"total_matches", "page_start", "remaining_matches"} {
+			if !validJSONInteger(payload[field]) {
+				return false
+			}
+		}
+		if !validJSONBoolean(payload["truncated"]) {
+			return false
+		}
+		var result rushestools.ShotSearchResult
+		if json.Unmarshal([]byte(raw), &result) != nil || result.TotalMatches < 0 ||
+			len(result.Shots) > result.TotalMatches ||
+			strings.TrimSpace(result.Query) != strings.TrimSpace(
+				agentexec.InterfaceString(toolArgumentsObject(arguments)["query"]),
+			) {
+			return false
+		}
+		requestedAssets := requestedStringSet(arguments, "asset_ids")
+		requestedRoles := requestedLowercaseStringSet(arguments, "semantic_roles")
+		requestedTags := requestedStringSet(arguments, "tags")
+		argumentMap := toolArgumentsObject(arguments)
+		minDuration := int(positiveInteger(argumentMap["min_duration_frames"]))
+		maxDuration := int(positiveInteger(argumentMap["max_duration_frames"]))
+		limit := int(positiveInteger(argumentMap["limit"]))
+		if limit == 0 {
+			limit = 20
+		}
+		if limit > 100 {
+			limit = 100
+		}
+		if len(result.Shots) > limit {
+			return false
+		}
+		afterShotID := strings.TrimSpace(agentexec.InterfaceString(argumentMap["after_shot_id"]))
+		if result.PageStart < 0 || result.RemainingMatches < 0 ||
+			result.PageStart+len(result.Shots)+result.RemainingMatches != result.TotalMatches ||
+			(afterShotID == "" && (result.PageStart != 0 || result.PageAfterShotID != "")) ||
+			(afterShotID != "" && (result.PageStart <= 0 || result.PageAfterShotID != afterShotID)) ||
+			result.Truncated != (result.RemainingMatches > 0) {
+			return false
+		}
+		seenShotIDs := make(map[string]struct{}, len(result.Shots))
+		for _, shot := range result.Shots {
+			shotID := strings.TrimSpace(shot.ShotID)
+			if shotID == "" || strings.TrimSpace(shot.AssetID) == "" || shotID == afterShotID ||
+				shot.SourceEndFrame <= shot.SourceStartFrame ||
+				shot.DurationFrames != shot.SourceEndFrame-shot.SourceStartFrame {
+				return false
+			}
+			if _, duplicate := seenShotIDs[shotID]; duplicate {
+				return false
+			}
+			seenShotIDs[shotID] = struct{}{}
+			if len(requestedAssets) != 0 {
+				if _, requested := requestedAssets[shot.AssetID]; !requested {
+					return false
+				}
+			}
+			if len(requestedRoles) != 0 {
+				if _, requested := requestedRoles[strings.TrimSpace(shot.SemanticRole)]; !requested {
+					return false
+				}
+			}
+			if minDuration > 0 && shot.DurationFrames < minDuration ||
+				maxDuration > 0 && shot.DurationFrames > maxDuration {
+				return false
+			}
+			if len(requestedTags) != 0 && !shotMatchesAnyRequestedTag(shot, requestedTags) {
+				return false
+			}
+		}
+		if result.Truncated {
+			return len(result.Shots) == limit && len(result.Shots) > 0 &&
+				result.NextAfterShotID == result.Shots[len(result.Shots)-1].ShotID &&
+				result.TotalMatches > len(result.Shots)
+		}
+		if result.NextAfterShotID != "" {
+			return false
+		}
+		return result.PageStart+len(result.Shots) == result.TotalMatches
+	case "audio.analyze_beats":
+		if !fullRequestBound {
+			return false
+		}
+		var result rushestools.AudioBeatAnalysisResult
+		return json.Unmarshal([]byte(raw), &result) == nil &&
+			matchesRequestedString(arguments, "asset_id", result.AssetID) &&
+			result.TimelineFPS > 0 && result.BeatFrames != nil
+	case "audio.analyze_speech_pauses":
+		if !fullRequestBound {
+			return false
+		}
+		var result rushestools.SpeechPauseAnalysisResult
+		if json.Unmarshal([]byte(raw), &result) != nil || strings.TrimSpace(result.AssetID) == "" ||
+			result.TimelineFPS <= 0 || result.Pauses == nil {
+			return false
+		}
+		argumentMap := toolArgumentsObject(arguments)
+		requestedAssetID := strings.TrimSpace(agentexec.InterfaceString(argumentMap["asset_id"]))
+		requestedClipID := strings.TrimSpace(agentexec.InterfaceString(argumentMap["timeline_clip_id"]))
+		return (requestedAssetID != "" || requestedClipID != "") &&
+			(requestedAssetID == "" || strings.TrimSpace(result.AssetID) == requestedAssetID) &&
+			(requestedClipID == "" || strings.TrimSpace(result.TimelineClipID) == requestedClipID)
+	case "speech.transcribe":
+		if !fullRequestBound {
+			return false
+		}
+		var result rushestools.SpeechTranscribeResult
+		return json.Unmarshal([]byte(raw), &result) == nil &&
+			strings.TrimSpace(result.TranscriptID) != "" &&
+			matchesRequestedString(arguments, "asset_id", result.AssetID) &&
+			result.TimelineFPS > 0
+	case "preview.check":
+		var result rushestools.PreviewInspectionResult
+		return json.Unmarshal([]byte(raw), &result) == nil &&
+			matchesRequestedString(arguments, "preview_id", result.PreviewID) &&
+			matchesRequestedPreviewCheck(arguments, result.Check) && result.Issues != nil
+	default:
+		return false
+	}
+}
+
+func validJSONInteger(raw json.RawMessage) bool {
+	if strings.TrimSpace(string(raw)) == "null" {
+		return false
+	}
+	var value int
+	return json.Unmarshal(raw, &value) == nil
+}
+
+func validJSONBoolean(raw json.RawMessage) bool {
+	if strings.TrimSpace(string(raw)) == "null" {
+		return false
+	}
+	var value bool
+	return json.Unmarshal(raw, &value) == nil
+}
+
+func shotMatchesAnyRequestedTag(shot rushestools.ShotCandidate, requested map[string]struct{}) bool {
+	requestedValues := make([]string, 0, len(requested))
+	for value := range requested {
+		requestedValues = append(requestedValues, value)
+	}
+	tokens := agentexec.SemanticTokens(strings.Join(requestedValues, " "))
+	return len(tokens) != 0 &&
+		agentexec.WeightedSemanticMatchScore(tokens, agentexec.ShotSemanticText(shot)) > 0
+}
+
+func matchesRequestedString(arguments any, field, resultValue string) bool {
+	requested := strings.TrimSpace(agentexec.InterfaceString(toolArgumentsObject(arguments)[field]))
+	return requested != "" && strings.TrimSpace(resultValue) == requested
+}
+
+func requestedStringSet(arguments any, field string) map[string]struct{} {
+	values, ok := toolArgumentsObject(arguments)[field].([]any)
+	if !ok {
+		return nil
+	}
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		text, textOK := value.(string)
+		if !textOK || strings.TrimSpace(text) == "" {
+			return nil
+		}
+		result[strings.TrimSpace(text)] = struct{}{}
+	}
+	return result
+}
+
+func requestedLowercaseStringSet(arguments any, field string) map[string]struct{} {
+	values := requestedStringSet(arguments, field)
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]struct{}, len(values))
+	for value := range values {
+		result[strings.ToLower(value)] = struct{}{}
+	}
+	return result
+}
+
+func matchesRequestedPreviewCheck(arguments any, resultCheck string) bool {
+	requested := strings.TrimSpace(agentexec.InterfaceString(
+		toolArgumentsObject(arguments)["check"],
+	))
+	resultCheck = strings.TrimSpace(resultCheck)
+	return validPreviewCheck(requested) && resultCheck == requested
+}
+
+func validPreviewCheck(check string) bool {
+	switch strings.TrimSpace(check) {
+	case "decode", "black", "freeze", "silence", "loudness", "visual":
+		return true
+	default:
+		return false
+	}
 }
 
 // retrySafeFromEffect 从工具注册表的 Effect 分级派生「瞬时失败可重试」白名单（#103 G1）。
@@ -539,24 +1659,56 @@ func (service *Service) emitAssistantReply(draftID, messageID, content string) s
 	return content
 }
 
-func (service *Service) terminalFailureReply(
-	ctx context.Context,
-	draftID, messageID string,
-	turnErr error,
-) string {
+func terminalFailureReply(ctx context.Context, turnErr error) string {
+	var guardErr *terminalReplyGuardError
+	if errors.As(turnErr, &guardErr) {
+		switch guardErr.kind {
+		case "recovery_exhausted":
+			return "本轮没有完成：工具自修复次数已经用尽，系统已停止继续调用。最后问题：" +
+				agentexec.TruncateText(guardErr.details, 800) +
+				"。当前时间线保留在最新已成功写入的版本；你可以继续让我从这里诊断或修复。"
+		case "tool_failure_unresolved":
+			return "本轮没有完成：工具调用仍处于失败状态，系统已拒绝未验收的成功声明。最后问题：" +
+				agentexec.TruncateText(guardErr.details, 800) +
+				"。当前时间线保留在最新已成功写入的版本；你可以继续让我从这里诊断或修复。"
+		case "timeline_check_missing":
+			return fmt.Sprintf(
+				"本轮没有完成终态验收：编辑已写入 %s，但尚未对这个最新版本执行成功的 timeline.check，因此我不能声称剪辑已经完成。你可以继续让我验证并修复未通过项。",
+				guardErr.mutationTimelineID,
+			)
+		case "timeline_mutation_unverified":
+			return "本轮没有完成终态验收：时间线编辑返回了成功状态，但没有携带有效的 timeline_id，系统无法确认实际写入版本，因此已拒绝成功声明。你可以继续让我读取最新时间线并重新检查。"
+		case "timeline_check_unverified":
+			return "本轮没有完成终态验收：timeline.check 返回了成功状态，但没有携带有效的 timeline_id，系统无法确认实际检查版本，因此已拒绝成功声明。你可以继续让我读取最新时间线并重新检查。"
+		case "timeline_check_stale":
+			return fmt.Sprintf(
+				"本轮没有完成终态验收：最新编辑是 %s，但最后成功检查的是 %s，检查结果已经过期，因此我不能声称剪辑已经完成。你可以继续让我检查最新版本。",
+				guardErr.mutationTimelineID,
+				guardErr.checkTimelineID,
+			)
+		case "timeline_latest_changed":
+			return fmt.Sprintf(
+				"本轮没有完成终态验收：检查后时间线又发生了变化，已编辑版本是 %s，当前最新版本是 %s，因此我不能声称剪辑已经完成。你可以继续让我读取并检查最新版本。",
+				guardErr.mutationTimelineID,
+				guardErr.latestTimelineID,
+			)
+		case "terminal_late_tool_call":
+			return "本轮没有完成：模型在最终回复中又请求了工具调用，但该调用未被执行。系统已丢弃未验收的成功正文；你可以继续让我重新执行并检查最新时间线。"
+		}
+	}
 	var timeoutErr *modelResponseTimeoutError
 	if errors.As(turnErr, &timeoutErr) {
-		return service.emitAssistantReply(draftID, messageID, fmt.Sprintf(
+		return fmt.Sprintf(
 			"本轮没有完成：模型响应超时，已自动重试 %d 次仍未恢复。系统已停止重试。你可以继续给出下一步指令，我会从当前最新时间线接着执行。",
 			timeoutErr.Retries,
-		))
+		)
 	}
 	var contextLengthErr *modelContextLengthError
 	if errors.As(turnErr, &contextLengthErr) {
-		return service.emitAssistantReply(draftID, messageID, fmt.Sprintf(
+		return fmt.Sprintf(
 			"本轮没有完成：对话上下文超出了模型长度上限，已自动压缩并重试 %d 次仍无法容纳。系统已停止重试。你可以精简指令或另开新话题后再试，我会从当前最新时间线接着执行。",
 			contextLengthErr.Retries,
-		))
+		)
 	}
 
 	state := toolRecoveryFromContext(ctx)
@@ -571,24 +1723,6 @@ func (service *Service) terminalFailureReply(
 		details = "本轮执行没有生成可交付结果"
 	}
 
-	content := ""
-	if service.chatModel != nil {
-		messages, err := service.modelMessages(ctx, draftID)
-		if err == nil {
-			messages = append(messages,
-				schema.SystemMessage("你正在为一次失败的剪辑执行做最终收尾。禁止调用任何工具。必须用简体中文明确告诉用户：本轮没有完成、最后失败在哪、系统已停止无意义重试、用户可以继续给出下一步指令。不要声称已经完成。"),
-				schema.UserMessage("请根据以下真实终态生成简短回复：\n"+details),
-			)
-			response, generateErr := service.chatModel.Generate(
-				ctx, messages, model.WithToolChoice(schema.ToolChoiceForbidden),
-			)
-			if generateErr == nil && response != nil && strings.TrimSpace(response.Content) != "" {
-				content = strings.TrimSpace(response.Content)
-			}
-		}
-	}
-	if content == "" {
-		content = "本轮没有完成，系统已经停止重复失败的工具调用。最后问题：" + details + "。你可以继续告诉我下一步怎么处理，我会从当前最新时间线接着执行。"
-	}
-	return service.emitAssistantReply(draftID, messageID, content)
+	return "本轮没有完成，系统已经停止重复失败的工具调用。最后问题：" + details +
+		"。你可以继续告诉我下一步怎么处理，我会从当前最新时间线接着执行。"
 }

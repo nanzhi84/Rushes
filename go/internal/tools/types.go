@@ -233,6 +233,9 @@ type ShotSearchResult struct {
 	Query                string                   `json:"query,omitempty"`
 	Shots                []ShotCandidate          `json:"shots"`
 	TotalMatches         int                      `json:"total_matches"`
+	PageStart            int                      `json:"page_start"`
+	RemainingMatches     int                      `json:"remaining_matches"`
+	PageAfterShotID      string                   `json:"page_after_shot_id,omitempty"`
 	Truncated            bool                     `json:"truncated"`
 	NextAfterShotID      string                   `json:"next_after_shot_id,omitempty"`
 	IndexCoverageNote    string                   `json:"index_coverage_note,omitempty"`

@@ -157,9 +157,9 @@ func (stub *reflectionLeakTurnModel) Stream(
 	return schema.StreamReaderFromArray([]*schema.Message{stub.reply(messages)}), nil
 }
 
-// 锁死 H7 的「实时闪现、事后干净」时序契约:回合流出原文的 text_delta,收尾时 message_completed
-// 整体替换为重述版、持久化消息也是重述版,turn_ended 带 reflection_restated=true。
-func TestReflectionLeakTurnFlashesOriginalThenPersistsRestated(t *testing.T) {
+// 终态正文先缓冲并完成真值/反思门禁，因此 text_delta、message_completed 与持久化正文
+// 都只能出现重述后的干净版本。
+func TestReflectionLeakTurnStreamsOnlyRestatedReply(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_reflect")
@@ -200,8 +200,8 @@ func TestReflectionLeakTurnFlashesOriginalThenPersistsRestated(t *testing.T) {
 		}
 	}
 done:
-	if !strings.Contains(deltas.String(), "但等等") {
-		t.Fatalf("text_delta 应流出原文(含反思): %q", deltas.String())
+	if deltas.String() != completedContent || strings.Contains(deltas.String(), "但等等") {
+		t.Fatalf("text_delta 只能流出重述版: deltas=%q completed=%q", deltas.String(), completedContent)
 	}
 	if completedContent == "" || strings.Contains(completedContent, "但等等") {
 		t.Fatalf("message_completed 应为重述版(无反思): %q", completedContent)

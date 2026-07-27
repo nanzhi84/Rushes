@@ -73,7 +73,18 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 	if err != nil {
 		return "", err
 	}
-	output, err := runReported(ctx, "render.start", rushestools.RenderStartInput{
+	output, err := runReported(ctx, "timeline.check", rushestools.TimelineCheckInput{
+		TimelineID: document.TimelineID,
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := requireFallbackToolStatus(
+		"timeline.check", output, string(rushestools.StatusSucceeded),
+	); err != nil {
+		return "", err
+	}
+	output, err = runReported(ctx, "render.start", rushestools.RenderStartInput{
 		Kind: "preview", TimelineID: document.TimelineID,
 	})
 	if err != nil {

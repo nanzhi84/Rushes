@@ -350,43 +350,14 @@ func TestTimeoutRetryChatModelHonorsCallerCancellation(t *testing.T) {
 	}
 }
 
-type countingFailureReplyModel struct{ calls int }
-
-func (stub *countingFailureReplyModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	return stub, nil
-}
-
-func (stub *countingFailureReplyModel) Generate(
-	context.Context, []*schema.Message, ...model.Option,
-) (*schema.Message, error) {
-	stub.calls++
-	return schema.AssistantMessage("模型猜测文案", nil), nil
-}
-
-func (stub *countingFailureReplyModel) Stream(
-	context.Context, []*schema.Message, ...model.Option,
-) (*schema.StreamReader[*schema.Message], error) {
-	return nil, errors.New("unused")
-}
-
 func TestTerminalFailureReplyClassifiesTimeoutWithoutAnotherModelCall(t *testing.T) {
 	t.Parallel()
-	stub := &countingFailureReplyModel{}
-	service := &Service{hub: NewTurnStreamHub(0), chatModel: stub}
-	content := service.terminalFailureReply(t.Context(), "draft_timeout", "msg_timeout", &modelResponseTimeoutError{
+	content := terminalFailureReply(t.Context(), &modelResponseTimeoutError{
 		Retries: maxModelTimeoutRetries, LastErr: context.DeadlineExceeded,
 	})
-	if stub.calls != 0 {
-		t.Fatalf("超时失败文案不应再次调用模型: %d", stub.calls)
-	}
 	if !strings.Contains(content, "模型响应超时") || !strings.Contains(content, "自动重试 5 次") ||
 		!strings.Contains(content, "当前最新时间线") {
 		t.Fatalf("timeout content=%q", content)
-	}
-	for _, event := range service.hub.Snapshot("draft_timeout") {
-		if event["type"] != "text_delta" {
-			t.Fatalf("unexpected event=%#v", event)
-		}
 	}
 }
 
@@ -825,23 +796,13 @@ func TestModelRetryReporterPublishesContextLengthReason(t *testing.T) {
 
 func TestTerminalFailureReplyClassifiesContextLengthWithoutAnotherModelCall(t *testing.T) {
 	t.Parallel()
-	stub := &countingFailureReplyModel{}
-	service := &Service{hub: NewTurnStreamHub(0), chatModel: stub}
-	content := service.terminalFailureReply(t.Context(), "draft_context", "msg_context", &modelContextLengthError{
+	content := terminalFailureReply(t.Context(), &modelContextLengthError{
 		Retries: maxModelTimeoutRetries, LastErr: errors.New("context_length_exceeded"),
 	})
-	if stub.calls != 0 {
-		t.Fatalf("上下文超限终态不应再次调用模型: %d", stub.calls)
-	}
 	if !strings.Contains(content, "上下文超出了模型长度上限") ||
 		!strings.Contains(content, "压缩并重试 5 次") ||
 		!strings.Contains(content, "当前最新时间线") {
 		t.Fatalf("context content=%q", content)
-	}
-	for _, event := range service.hub.Snapshot("draft_context") {
-		if event["type"] != "text_delta" {
-			t.Fatalf("unexpected event=%#v", event)
-		}
 	}
 }
 

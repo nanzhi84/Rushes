@@ -729,13 +729,15 @@ func (exec *Executor) timelineValidationReportWithPreservedAudio(
 ) (map[string]any, bool, error) {
 	report := validateWithPreservedIndependentAudio(document, preservedAudio)
 	reportMap, valid, err := exec.timelineValidationReportFromStructural(ctx, draftID, document, report)
-	if err != nil || !valid {
+	if err != nil {
 		return reportMap, valid, err
 	}
-	if err := addIndependentAudioPreservationProofs(reportMap, document, preservedAudio); err != nil {
-		return nil, false, err
+	if report.Valid {
+		if err := addIndependentAudioPreservationProofs(reportMap, document, preservedAudio); err != nil {
+			return nil, false, err
+		}
 	}
-	return reportMap, true, nil
+	return reportMap, valid, nil
 }
 
 func (exec *Executor) timelineValidationReportFromStructural(
@@ -744,17 +746,21 @@ func (exec *Executor) timelineValidationReportFromStructural(
 	document timeline.Document,
 	report timeline.ValidationReport,
 ) (map[string]any, bool, error) {
-	reportMap := map[string]any{
-		"valid": report.Valid, "checks": report.Checks, "issues": report.Issues,
-	}
 	contractReport, hasContract, err := exec.VerifyContentContract(ctx, draftID, document)
 	if err != nil {
 		return nil, false, err
 	}
+	contractValid := !hasContract || contractReport.Pass
+	valid := report.Valid && contractValid
+	reportMap := map[string]any{
+		"valid": valid, "structural_valid": report.Valid,
+		"content_contract_valid": contractValid,
+		"checks":                 report.Checks, "issues": report.Issues,
+	}
 	if hasContract {
 		reportMap["content_contract"] = contractReport
 	}
-	return reportMap, report.Valid, nil
+	return reportMap, valid, nil
 }
 
 func (exec *Executor) toolCheckTimeline(
@@ -774,16 +780,13 @@ func (exec *Executor) toolCheckTimeline(
 		return rushestools.ToolResult{}, validationErr
 	}
 	beatAlignment := BeatAlignmentData(document)
-	contractReport, hasContract, contractErr := exec.VerifyContentContract(ctx, draftID, document)
+	validationReport, valid, contractErr := exec.timelineValidationReportFromStructural(
+		ctx, draftID, document, report,
+	)
 	if contractErr != nil {
 		return rushestools.ToolResult{}, contractErr
 	}
-	validationReport := map[string]any{
-		"valid": report.Valid, "checks": report.Checks, "issues": report.Issues,
-	}
-	if hasContract {
-		validationReport["content_contract"] = contractReport
-	}
+	contractReport, hasContract := validationReport["content_contract"].(ContractVerificationReport)
 	observation := timeline.Inspect(document)
 	if report.Valid {
 		if present, _ := beatAlignment["beat_grid_present"].(bool); !present {
@@ -819,7 +822,7 @@ func (exec *Executor) toolCheckTimeline(
 		}
 	}
 	return rushestools.ToolResult{
-		Status:      map[bool]string{true: "succeeded", false: "validation_failed"}[report.Valid],
+		Status:      map[bool]string{true: "succeeded", false: "validation_failed"}[valid],
 		Observation: observation,
 		Data:        data,
 	}, nil
