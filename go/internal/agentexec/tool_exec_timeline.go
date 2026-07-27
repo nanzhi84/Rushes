@@ -83,7 +83,13 @@ func (exec *Executor) toolAtomicTimelineEdit(
 	}
 	currentValid := validateWithPreservedIndependentAudio(current, trustedCurrentAudio).Valid
 	preservedAudio := preserveIndependentAudioForOperation(current, appliedOperation)
-	patchInput := unlockPreservedIndependentAudio(current, preservedAudio)
+	lineageContext, err := newPreservedAudioLineageContext()
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	patchInput := unlockPreservedIndependentAudio(
+		current, preservedAudio, appliedOperation, lineageContext,
+	)
 	document, err := timeline.ApplyPatch(patchInput, appliedOperation)
 	if err != nil {
 		if failure, ok := TimelineOpFailure(toolName, err, appliedOperation, current); ok {
@@ -95,7 +101,11 @@ func (exec *Executor) toolAtomicTimelineEdit(
 		}
 		return atomicTimelineApplyFailure(appliedOperation, err), nil
 	}
-	restoreIndependentAudioTracks(&document, preservedAudio)
+	if err := restoreIndependentAudioTracks(
+		&document, current, preservedAudio, lineageContext,
+	); err != nil {
+		return atomicTimelineApplyFailure(appliedOperation, err), nil
+	}
 	if atomicReplaceTouchesPrimary(current, appliedOperation) {
 		audioAssetIDs, listErr := exec.draftAudioVideoAssetIDs(ctx, draftID)
 		if listErr != nil {
@@ -107,8 +117,10 @@ func (exec *Executor) toolAtomicTimelineEdit(
 		}
 	}
 	audioValidationProof := deriveIndependentAudioValidationProof(
-		current, document, trustedCurrentAudio, currentValid,
+		current, document, trustedCurrentAudio, preservedAudio, currentValid, lineageContext,
 	)
+	stripPreservedAudioLineage(&document, current, lineageContext)
+	stripPreservedAudioLineageFromTracks(audioValidationProof, current, lineageContext)
 	if report := validateWithPreservedIndependentAudio(document, audioValidationProof); !report.Valid {
 		return rushestools.ToolResult{
 			Status:      string(rushestools.StatusFailed),

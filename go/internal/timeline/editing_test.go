@@ -130,6 +130,65 @@ func TestTrackStateAndClipLinkingBranches(t *testing.T) {
 	}
 }
 
+func TestSetClipLinkedDoesNotMutateLockedRemainingGroupMember(t *testing.T) {
+	document := newEditingDocument(t, false)
+	document.Tracks[3].Clips = []Clip{{
+		TimelineClipID: "voice_linked", TrackID: "voiceover", AssetID: "audio", AssetKind: "audio",
+		TimelineStartFrame: 0, TimelineEndFrame: 20, SourceEndFrame: 20,
+		Linked: true, ParentBlockID: "free_group",
+	}}
+	document.Tracks[4].Clips = []Clip{{
+		TimelineClipID: "bgm_linked", TrackID: "bgm", AssetID: "audio", AssetKind: "audio",
+		TimelineStartFrame: 0, TimelineEndFrame: 20, SourceEndFrame: 20,
+		Linked: true, ParentBlockID: "free_group",
+	}}
+	document.Tracks[4].Locked = true
+
+	err := setClipLinked(&document, map[string]any{
+		"timeline_clip_id": "voice_linked", "linked": false,
+	})
+	semantic, ok := err.(*SemanticError)
+	if !ok || semantic.Kind != SemanticTrackLocked || semantic.TrackID != "bgm" {
+		t.Fatalf("locked remaining linked member err=%#v", err)
+	}
+	if !document.Tracks[3].Clips[0].Linked || !document.Tracks[4].Clips[0].Linked ||
+		document.Tracks[3].Clips[0].ParentBlockID != "free_group" ||
+		document.Tracks[4].Clips[0].ParentBlockID != "free_group" {
+		t.Fatalf("failed unlink mutated the group: voice=%#v bgm=%#v",
+			document.Tracks[3].Clips[0], document.Tracks[4].Clips[0])
+	}
+}
+
+func TestSetClipLinkedClearsOnlySelectedStaleParent(t *testing.T) {
+	document := newEditingDocument(t, false)
+	document.Tracks[3].Clips = []Clip{{
+		TimelineClipID: "voice_stale", TrackID: "voiceover", AssetID: "audio", AssetKind: "audio",
+		TimelineStartFrame: 0, TimelineEndFrame: 20, SourceEndFrame: 20,
+		ParentBlockID: "free_group",
+	}}
+	document.Tracks[4].Clips = []Clip{{
+		TimelineClipID: "bgm_linked", TrackID: "bgm", AssetID: "audio", AssetKind: "audio",
+		TimelineStartFrame: 0, TimelineEndFrame: 20, SourceEndFrame: 20,
+		Linked: true, ParentBlockID: "free_group",
+	}}
+	document.Tracks[4].Locked = true
+	if report := Validate(document); !report.Valid {
+		t.Fatalf("fixture invalid: %#v", report)
+	}
+
+	if err := setClipLinked(&document, map[string]any{
+		"timeline_clip_id": "voice_stale", "linked": false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if document.Tracks[3].Clips[0].Linked || document.Tracks[3].Clips[0].ParentBlockID != "" ||
+		!document.Tracks[4].Clips[0].Linked ||
+		document.Tracks[4].Clips[0].ParentBlockID != "free_group" {
+		t.Fatalf("stale-parent cleanup mutated the locked group: voice=%#v bgm=%#v",
+			document.Tracks[3].Clips[0], document.Tracks[4].Clips[0])
+	}
+}
+
 func TestMoveClipInsertOverwriteAndFailureBranches(t *testing.T) {
 	t.Run("unlinked primary reorders on its own track", func(t *testing.T) {
 		document := newEditingDocument(t, false)

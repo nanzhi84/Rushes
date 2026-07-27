@@ -2,11 +2,13 @@ package agentexec
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"sort"
@@ -19,13 +21,34 @@ import (
 
 var independentAudioTrackIDs = []string{"bgm", "sfx"}
 
-const independentAudioPreservationProofType = "bounded_independent_audio_v1"
+const (
+	independentAudioPreservationProofType = "bounded_independent_audio_v1"
+	preservedAudioLineageMetadataKey      = "_rushes_preserved_audio_lineage"
+)
 
 type independentAudioPreservationProof struct {
 	Type           string `json:"type"`
 	TrackID        string `json:"track_id"`
 	TimingSHA256   string `json:"timing_sha256"`
 	OverhangFrames int    `json:"overhang_frames"`
+}
+
+type preservedAudioLineageContext struct {
+	prefix string
+}
+
+func newPreservedAudioLineageContext() (preservedAudioLineageContext, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return preservedAudioLineageContext{}, fmt.Errorf("生成音频 lineage token: %w", err)
+	}
+	return preservedAudioLineageContext{
+		prefix: "rushes-internal-audio-lineage:" + hex.EncodeToString(nonce[:]),
+	}, nil
+}
+
+func (context preservedAudioLineageContext) markerValue(timelineClipID string) string {
+	return context.prefix + ":" + timelineClipID
 }
 
 type independentAudioTrackTiming struct {
@@ -53,17 +76,89 @@ func preserveIndependentAudioForOperation(
 	operation map[string]any,
 ) map[string]timeline.Track {
 	touched := touchedTrackIDsForOperation(current, operation)
+	touchedClips := touchedTimelineClipIDsForOperation(current, operation)
 	preserved := map[string]timeline.Track{}
 	for _, track := range current.Tracks {
 		if !ContainsString(independentAudioTrackIDs, track.TrackID) {
 			continue
 		}
-		if _, changed := touched[track.TrackID]; changed {
+		_, trackChanged := touched[track.TrackID]
+		if trackChanged && len(touchedClips) == 0 {
 			continue
 		}
-		preserved[track.TrackID] = copyTimelineTrack(track)
+		snapshot := copyTimelineTrack(track)
+		snapshot.Clips = snapshot.Clips[:0]
+		for _, clip := range track.Clips {
+			if clip.Linked {
+				continue
+			}
+			if _, changed := touchedClips[clip.TimelineClipID]; trackChanged && changed {
+				continue
+			}
+			snapshot.Clips = append(snapshot.Clips, clip)
+		}
+		if len(snapshot.Clips) > 0 {
+			preserved[track.TrackID] = snapshot
+		}
 	}
 	return preserved
+}
+
+func touchedTimelineClipIDsForOperation(
+	current timeline.Document,
+	operation map[string]any,
+) map[string]struct{} {
+	touched := map[string]struct{}{}
+	kind := StringValue(operation["kind"])
+	if kind == "delete_range" || kind == "delete_source_range" {
+		for _, track := range current.Tracks {
+			for _, clip := range track.Clips {
+				touched[clip.TimelineClipID] = struct{}{}
+			}
+		}
+		return touched
+	}
+	targetID := StringValue(operation["timeline_clip_id"])
+	if targetID == "" {
+		return touched
+	}
+	linkedGroupID := ""
+	sourceTrackID := ""
+	for _, track := range current.Tracks {
+		for _, clip := range track.Clips {
+			if clip.TimelineClipID == targetID {
+				touched[targetID] = struct{}{}
+				sourceTrackID = track.TrackID
+				if clip.Linked {
+					linkedGroupID = clip.ParentBlockID
+				}
+			}
+		}
+	}
+	if linkedGroupID != "" {
+		for _, track := range current.Tracks {
+			for _, clip := range track.Clips {
+				if clip.Linked && clip.ParentBlockID == linkedGroupID {
+					touched[clip.TimelineClipID] = struct{}{}
+				}
+			}
+		}
+	}
+	if kind == "move_clip" {
+		targetTrackID := StringValue(operation["target_track_id"])
+		if targetTrackID == "" {
+			targetTrackID = sourceTrackID
+		}
+		for _, track := range current.Tracks {
+			if track.TrackID != targetTrackID {
+				continue
+			}
+			for _, clip := range track.Clips {
+				touched[clip.TimelineClipID] = struct{}{}
+			}
+		}
+	}
+	return touched
 }
 
 func touchedTrackIDsForOperation(
@@ -71,9 +166,19 @@ func touchedTrackIDsForOperation(
 	operation map[string]any,
 ) map[string]struct{} {
 	clipTracks := map[string]string{}
+	clipLinkedGroups := map[string]string{}
+	linkedGroupTracks := map[string]map[string]struct{}{}
 	for _, track := range current.Tracks {
 		for _, clip := range track.Clips {
 			clipTracks[clip.TimelineClipID] = track.TrackID
+			if !clip.Linked || clip.ParentBlockID == "" {
+				continue
+			}
+			clipLinkedGroups[clip.TimelineClipID] = clip.ParentBlockID
+			if linkedGroupTracks[clip.ParentBlockID] == nil {
+				linkedGroupTracks[clip.ParentBlockID] = map[string]struct{}{}
+			}
+			linkedGroupTracks[clip.ParentBlockID][track.TrackID] = struct{}{}
 		}
 	}
 	touched := map[string]struct{}{}
@@ -97,34 +202,273 @@ func touchedTrackIDsForOperation(
 	if sourceTrackID := clipTracks[clipID]; sourceTrackID != "" {
 		touched[sourceTrackID] = struct{}{}
 	}
+	if linkedGroupID := clipLinkedGroups[clipID]; linkedGroupID != "" {
+		for linkedTrackID := range linkedGroupTracks[linkedGroupID] {
+			touched[linkedTrackID] = struct{}{}
+		}
+	}
 	return touched
 }
 
 func restoreIndependentAudioTracks(
 	document *timeline.Document,
+	current timeline.Document,
 	preserved map[string]timeline.Track,
-) {
+	lineageContext preservedAudioLineageContext,
+) error {
+	protectedIDs := make(map[string]struct{})
+	for _, track := range preserved {
+		for _, clip := range track.Clips {
+			protectedIDs[clip.TimelineClipID] = struct{}{}
+		}
+	}
+	protectedCounts := make(map[string]int, len(protectedIDs))
+	for _, track := range document.Tracks {
+		for _, clip := range track.Clips {
+			if _, protected := protectedIDs[clip.TimelineClipID]; protected {
+				lineageID, marked := preservedAudioLineageID(clip, lineageContext)
+				if !marked || lineageID != clip.TimelineClipID {
+					return fmt.Errorf("受保护音频片段 ID 冲突: duplicate timeline_clip_id %q", clip.TimelineClipID)
+				}
+				protectedCounts[clip.TimelineClipID]++
+			}
+		}
+	}
+	for clipID, count := range protectedCounts {
+		if count > 1 {
+			return fmt.Errorf("受保护音频片段 ID 冲突: duplicate timeline_clip_id %q", clipID)
+		}
+	}
+
+	currentTracks := make(map[string]timeline.Track, len(current.Tracks))
+	for _, track := range current.Tracks {
+		currentTracks[track.TrackID] = track
+	}
 	for trackIndex := range document.Tracks {
-		track, exists := preserved[document.Tracks[trackIndex].TrackID]
+		snapshot, exists := preserved[document.Tracks[trackIndex].TrackID]
 		if !exists {
 			continue
 		}
-		document.Tracks[trackIndex] = copyTimelineTrack(track)
+		currentTrack, found := currentTracks[document.Tracks[trackIndex].TrackID]
+		if found && reflect.DeepEqual(currentTrack.Clips, snapshot.Clips) {
+			document.Tracks[trackIndex] = copyTimelineTrack(snapshot)
+			continue
+		}
+		preservedByID := make(map[string]timeline.Clip, len(snapshot.Clips))
+		for _, clip := range snapshot.Clips {
+			preservedByID[clip.TimelineClipID] = clip
+		}
+		restored := copyTimelineTrack(document.Tracks[trackIndex])
+		kept := make([]timeline.Clip, 0, len(restored.Clips)+len(snapshot.Clips))
+		for _, clip := range restored.Clips {
+			if lineageID, marked := preservedAudioLineageID(clip, lineageContext); marked {
+				if _, protected := preservedByID[lineageID]; protected {
+					continue
+				}
+			}
+			kept = append(kept, clip)
+		}
+		restored.Clips = append(kept, snapshot.Clips...)
+		sort.SliceStable(restored.Clips, func(left, right int) bool {
+			if restored.Clips[left].TimelineStartFrame == restored.Clips[right].TimelineStartFrame {
+				return restored.Clips[left].TimelineClipID < restored.Clips[right].TimelineClipID
+			}
+			return restored.Clips[left].TimelineStartFrame < restored.Clips[right].TimelineStartFrame
+		})
+		restored.Muted = snapshot.Muted
+		restored.Solo = snapshot.Solo
+		restored.Locked = snapshot.Locked
+		restored.GainDB = snapshot.GainDB
+		restored.Ducking = snapshot.Ducking
+		document.Tracks[trackIndex] = restored
 	}
+	return nil
+}
+
+func preservedAudioLineageID(
+	clip timeline.Clip,
+	lineageContext preservedAudioLineageContext,
+) (string, bool) {
+	if clip.Metadata == nil {
+		return "", false
+	}
+	marker, ok := clip.Metadata[preservedAudioLineageMetadataKey].(string)
+	if !ok || lineageContext.prefix == "" {
+		return "", false
+	}
+	lineageID, matches := strings.CutPrefix(marker, lineageContext.prefix+":")
+	return lineageID, matches && lineageID != ""
 }
 
 func unlockPreservedIndependentAudio(
 	document timeline.Document,
 	preserved map[string]timeline.Track,
+	operation map[string]any,
+	lineageContext preservedAudioLineageContext,
 ) timeline.Document {
 	copy := document
 	copy.Tracks = append([]timeline.Track(nil), document.Tracks...)
 	for trackIndex := range copy.Tracks {
+		copy.Tracks[trackIndex] = copyTimelineTrack(copy.Tracks[trackIndex])
+		if !ContainsString(independentAudioTrackIDs, copy.Tracks[trackIndex].TrackID) {
+			continue
+		}
+		for clipIndex := range copy.Tracks[trackIndex].Clips {
+			clip := &copy.Tracks[trackIndex].Clips[clipIndex]
+			metadata := make(map[string]any, len(clip.Metadata)+1)
+			for key, value := range clip.Metadata {
+				metadata[key] = value
+			}
+			metadata[preservedAudioLineageMetadataKey] = lineageContext.markerValue(clip.TimelineClipID)
+			if len(metadata) == 0 {
+				clip.Metadata = nil
+			} else {
+				clip.Metadata = metadata
+			}
+		}
 		if _, exists := preserved[copy.Tracks[trackIndex].TrackID]; exists {
 			copy.Tracks[trackIndex].Locked = false
 		}
 	}
+	probe, err := timeline.ApplyPatch(copy, operation)
+	if err != nil {
+		return document
+	}
+	for trackIndex := range copy.Tracks {
+		track := document.Tracks[trackIndex]
+		snapshot, exists := preserved[track.TrackID]
+		if !exists || !track.Locked ||
+			!onlyPreservedClipsChanged(track, probe.Tracks[trackIndex], snapshot, lineageContext) {
+			copy.Tracks[trackIndex].Locked = track.Locked
+		}
+	}
 	return copy
+}
+
+func onlyPreservedClipsChanged(
+	current, result, preserved timeline.Track,
+	lineageContext preservedAudioLineageContext,
+) bool {
+	preservedByID := make(map[string]timeline.Clip, len(preserved.Clips))
+	for _, clip := range preserved.Clips {
+		preservedByID[clip.TimelineClipID] = clip
+	}
+	currentUnprotected := make(map[string]timeline.Clip, len(current.Clips))
+	for _, clip := range current.Clips {
+		if _, protected := preservedByID[clip.TimelineClipID]; !protected {
+			currentUnprotected[clip.TimelineClipID] = clip
+		}
+	}
+	originalByID := make(map[string]timeline.Clip, len(current.Clips))
+	for _, clip := range current.Clips {
+		originalByID[clip.TimelineClipID] = clip
+	}
+	resultUnprotected := make(map[string]timeline.Clip, len(result.Clips))
+	for _, clip := range result.Clips {
+		if lineageID, marked := preservedAudioLineageID(clip, lineageContext); marked {
+			if _, protected := preservedByID[lineageID]; protected {
+				continue
+			}
+		}
+		resultUnprotected[clip.TimelineClipID] = withoutPreservedAudioLineage(
+			clip, originalByID, lineageContext,
+		)
+	}
+	return reflect.DeepEqual(currentUnprotected, resultUnprotected)
+}
+
+func withoutPreservedAudioLineage(
+	clip timeline.Clip,
+	originalByID map[string]timeline.Clip,
+	lineageContext preservedAudioLineageContext,
+) timeline.Clip {
+	lineageID, marked := preservedAudioLineageID(clip, lineageContext)
+	if !marked {
+		return clip
+	}
+	original, exists := originalByID[lineageID]
+	if !exists {
+		return clip
+	}
+	metadata := make(map[string]any, len(clip.Metadata))
+	for key, value := range clip.Metadata {
+		if key != preservedAudioLineageMetadataKey {
+			metadata[key] = value
+		}
+	}
+	if original.Metadata != nil {
+		if value, hadOriginal := original.Metadata[preservedAudioLineageMetadataKey]; hadOriginal {
+			metadata[preservedAudioLineageMetadataKey] = value
+		}
+	}
+	if len(metadata) == 0 {
+		clip.Metadata = nil
+	} else {
+		clip.Metadata = metadata
+	}
+	return clip
+}
+
+func stripPreservedAudioLineage(
+	document *timeline.Document,
+	current timeline.Document,
+	lineageContext preservedAudioLineageContext,
+) {
+	originalByID := originalIndependentAudioClipsByID(current)
+	for trackIndex := range document.Tracks {
+		for clipIndex := range document.Tracks[trackIndex].Clips {
+			clip := document.Tracks[trackIndex].Clips[clipIndex]
+			if !shouldStripPreservedAudioLineage(clip, lineageContext) {
+				continue
+			}
+			document.Tracks[trackIndex].Clips[clipIndex] = withoutPreservedAudioLineage(
+				clip,
+				originalByID,
+				lineageContext,
+			)
+		}
+	}
+}
+
+func stripPreservedAudioLineageFromTracks(
+	tracks map[string]timeline.Track,
+	current timeline.Document,
+	lineageContext preservedAudioLineageContext,
+) {
+	originalByID := originalIndependentAudioClipsByID(current)
+	for trackID, track := range tracks {
+		track = copyTimelineTrack(track)
+		for clipIndex := range track.Clips {
+			if !shouldStripPreservedAudioLineage(track.Clips[clipIndex], lineageContext) {
+				continue
+			}
+			track.Clips[clipIndex] = withoutPreservedAudioLineage(
+				track.Clips[clipIndex], originalByID, lineageContext,
+			)
+		}
+		tracks[trackID] = track
+	}
+}
+
+func originalIndependentAudioClipsByID(document timeline.Document) map[string]timeline.Clip {
+	originalByID := map[string]timeline.Clip{}
+	for _, track := range document.Tracks {
+		if !ContainsString(independentAudioTrackIDs, track.TrackID) {
+			continue
+		}
+		for _, clip := range track.Clips {
+			originalByID[clip.TimelineClipID] = clip
+		}
+	}
+	return originalByID
+}
+
+func shouldStripPreservedAudioLineage(
+	clip timeline.Clip,
+	lineageContext preservedAudioLineageContext,
+) bool {
+	_, marked := preservedAudioLineageID(clip, lineageContext)
+	return marked
 }
 
 func validateWithPreservedIndependentAudio(
@@ -169,7 +513,9 @@ func deriveIndependentAudioValidationProof(
 	current timeline.Document,
 	result timeline.Document,
 	trustedCurrent map[string]timeline.Track,
+	preserved map[string]timeline.Track,
 	currentValid bool,
+	lineageContext preservedAudioLineageContext,
 ) map[string]timeline.Track {
 	allowed := map[string]timeline.Track{}
 	if !currentValid {
@@ -188,47 +534,85 @@ func deriveIndependentAudioValidationProof(
 		if !exists {
 			continue
 		}
-		if reflect.DeepEqual(independentAudioTiming(previous), independentAudioTiming(track)) {
-			allowed[track.TrackID] = copyTimelineTrack(track)
-			continue
-		}
-		if _, trusted := trustedCurrent[track.TrackID]; trusted &&
-			independentAudioClipOverhangDoesNotIncrease(
-				previous, track, current.DurationFrames, result.DurationFrames,
-			) {
+		snapshot, protected := preserved[track.TrackID]
+		_, trusted := trustedCurrent[track.TrackID]
+		if independentAudioOverhangIsAuthorizedPerClip(
+			previous,
+			track,
+			current.DurationFrames,
+			result.DurationFrames,
+			trusted,
+			snapshot,
+			protected,
+			lineageContext,
+		) {
 			allowed[track.TrackID] = copyTimelineTrack(track)
 		}
 	}
 	return allowed
 }
 
-func independentAudioClipOverhangDoesNotIncrease(
+func independentAudioOverhangIsAuthorizedPerClip(
 	previous timeline.Track,
 	result timeline.Track,
 	previousDuration int,
 	resultDuration int,
+	trustedPrevious bool,
+	preserved timeline.Track,
+	hasPreserved bool,
+	lineageContext preservedAudioLineageContext,
 ) bool {
+	preservedByID := make(map[string]timeline.Clip, len(preserved.Clips))
+	for _, clip := range preserved.Clips {
+		preservedByID[clip.TimelineClipID] = clip
+	}
 	previousByID := make(map[string]timeline.Clip, len(previous.Clips))
 	for _, clip := range previous.Clips {
 		previousByID[clip.TimelineClipID] = clip
 	}
+	found := false
 	for _, clip := range result.Clips {
-		resultOverhang := clipOverhangFrames(clip, resultDuration)
-		if resultOverhang == 0 {
+		if clipOverhangFrames(clip, resultDuration) == 0 {
 			continue
 		}
-		origin, exists := previousByID[clip.TimelineClipID]
-		if !exists {
-			origin, exists = deterministicDerivedClipAncestor(clip, previousByID)
+		if origin, exists := preservedByID[clip.TimelineClipID]; hasPreserved && exists && reflect.DeepEqual(origin, clip) {
+			found = true
+			continue
 		}
-		if !exists {
-			origin, exists = uniqueSourceAncestor(clip, previous.Clips)
-		}
-		if !exists || resultOverhang > clipOverhangFrames(origin, previousDuration) {
+		if !trustedPrevious {
 			return false
 		}
+		origin, exists := independentAudioClipAncestor(
+			clip, previousByID, previous.Clips, lineageContext,
+		)
+		if !exists || clipOverhangFrames(clip, resultDuration) > clipOverhangFrames(origin, previousDuration) {
+			return false
+		}
+		found = true
 	}
-	return true
+	return found
+}
+
+func independentAudioClipAncestor(
+	clip timeline.Clip,
+	previousByID map[string]timeline.Clip,
+	previous []timeline.Clip,
+	lineageContext preservedAudioLineageContext,
+) (timeline.Clip, bool) {
+	if origin, exists := previousByID[clip.TimelineClipID]; exists {
+		return origin, true
+	}
+	if lineageID, marked := preservedAudioLineageID(clip, lineageContext); marked {
+		origin, exists := previousByID[lineageID]
+		if exists && isSourceDescendant(clip, origin) {
+			return origin, true
+		}
+		return timeline.Clip{}, false
+	}
+	if origin, exists := deterministicDerivedClipAncestor(clip, previousByID); exists {
+		return origin, true
+	}
+	return uniqueSourceAncestor(clip, previous)
 }
 
 func deterministicDerivedClipAncestor(
@@ -276,8 +660,9 @@ func uniqueSourceAncestor(
 }
 
 func isSourceDescendant(clip, candidate timeline.Clip) bool {
-	return candidate.AssetID != "" && candidate.AssetID == clip.AssetID &&
-		candidate.AssetKind == clip.AssetKind && candidate.PlaybackRate == clip.PlaybackRate &&
+	return candidate.TrackID == clip.TrackID && candidate.AssetID == clip.AssetID &&
+		candidate.AssetKind == clip.AssetKind && candidate.Role == clip.Role &&
+		candidate.PlaybackRate == clip.PlaybackRate &&
 		clip.SourceStartFrame >= candidate.SourceStartFrame &&
 		clip.SourceEndFrame <= candidate.SourceEndFrame
 }
