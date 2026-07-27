@@ -32,6 +32,10 @@ func TestAtomicTimelineSchemasPartitionCatalogWithoutBatchOrInjectedFields(t *te
 		if fixture.schema.Type != "object" || len(fixture.schema.OneOf) != len(fixture.kinds) {
 			t.Fatalf("%s schema=%#v", fixture.name, fixture.schema)
 		}
+		rootKind, exists := fixture.schema.Properties.Get("kind")
+		if !exists || strings.TrimSpace(rootKind.Description) == "" {
+			t.Fatalf("%s root kind 缺少模型可见语义", fixture.name)
+		}
 		for index, kind := range fixture.kinds {
 			branch := fixture.schema.OneOf[index]
 			kindSchema, exists := branch.Properties.Get("kind")
@@ -43,7 +47,25 @@ func TestAtomicTimelineSchemasPartitionCatalogWithoutBatchOrInjectedFields(t *te
 			}
 			seen[kind] = fixture.name
 			spec, _ := timeline.LookupOpSpec(kind)
+			if kindSchema.Description != spec.Summary {
+				t.Errorf(
+					"%s.%s summary=%q want=%q",
+					fixture.name, kind, kindSchema.Description, spec.Summary,
+				)
+			}
 			allowedNames := modelFacingTimelineOpFieldNames(*spec)
+			for _, field := range spec.Fields {
+				if field.Injected || field.Generated {
+					continue
+				}
+				property, exposed := fixture.schema.Properties.Get(field.Name)
+				if !exposed || !strings.Contains(property.Description, field.Desc) {
+					t.Errorf(
+						"%s.%s field %s description=%q missing=%q",
+						fixture.name, kind, field.Name, property.Description, field.Desc,
+					)
+				}
+			}
 			if branch.MaxProperties == nil ||
 				*branch.MaxProperties != uint64(len(allowedNames)) {
 				t.Errorf(
@@ -224,6 +246,56 @@ func TestAtomicForwardAndRecoverySchemasStayInCatalogParity(t *testing.T) {
 		if got, want := mapKeys(forwardProperties), setKeys(expectedRootProperties); !reflect.DeepEqual(got, want) {
 			t.Errorf("%s root properties=%v want Catalog union=%v", toolName, got, want)
 		}
+	}
+}
+
+func TestTimelineAtomicFieldDescriptionGroupsKindsWithoutLosingOwnership(t *testing.T) {
+	t.Parallel()
+	testCases := []struct {
+		name   string
+		inputs []timelineAtomicFieldSemantic
+		want   string
+	}{
+		{
+			name: "相同语义保持紧凑",
+			inputs: []timelineAtomicFieldSemantic{
+				{kinds: []string{"kind_a"}, description: "同一语义"},
+				{kinds: []string{"kind_b"}, description: "同一语义"},
+			},
+			want: "同一语义",
+		},
+		{
+			name: "不同语义标注 kind",
+			inputs: []timelineAtomicFieldSemantic{
+				{kinds: []string{"kind_a"}, description: "语义甲"},
+				{kinds: []string{"kind_b"}, description: "语义乙"},
+			},
+			want: "按 kind 解释：kind_a：语义甲；kind_b：语义乙",
+		},
+		{
+			name: "重复语义后出现分歧仍保留全部 kind",
+			inputs: []timelineAtomicFieldSemantic{
+				{kinds: []string{"kind_a"}, description: "语义甲"},
+				{kinds: []string{"kind_b"}, description: "语义甲"},
+				{kinds: []string{"kind_c"}, description: "语义乙"},
+			},
+			want: "按 kind 解释：kind_a/kind_b：语义甲；kind_c：语义乙",
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			var semantics []timelineAtomicFieldSemantic
+			var got string
+			for _, input := range testCase.inputs {
+				semantics, got = mergeTimelineAtomicFieldSemantic(
+					semantics, input.kinds[0], input.description,
+				)
+			}
+			if got != testCase.want {
+				t.Fatalf("description=%q want=%q", got, testCase.want)
+			}
+		})
 	}
 }
 

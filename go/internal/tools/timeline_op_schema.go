@@ -63,7 +63,11 @@ func (TimelineSplitInput) JSONSchema() *jsonschema.Schema {
 func timelineAtomicOpSchema(kinds []string) *jsonschema.Schema {
 	branches := make([]*jsonschema.Schema, 0, len(kinds))
 	properties := jsonschema.NewProperties()
-	properties.Set("kind", &jsonschema.Schema{Type: "string"})
+	fieldSemantics := map[string][]timelineAtomicFieldSemantic{}
+	properties.Set("kind", &jsonschema.Schema{
+		Type:        "string",
+		Description: "要执行的单个原子操作类型；必须选择 oneOf 中一个 kind，并只提交该分支允许的字段",
+	})
 	for _, kind := range kinds {
 		spec, exists := timeline.LookupOpSpec(kind)
 		if !exists {
@@ -73,10 +77,18 @@ func timelineAtomicOpSchema(kinds []string) *jsonschema.Schema {
 			if field.Injected || field.Generated {
 				continue
 			}
-			if _, exists := properties.Get(field.Name); exists {
+			semantics, description := mergeTimelineAtomicFieldSemantic(
+				fieldSemantics[field.Name], kind, field.Desc,
+			)
+			fieldSemantics[field.Name] = semantics
+			if existing, exists := properties.Get(field.Name); exists {
+				existing.Description = description
 				continue
 			}
-			fieldSchema := &jsonschema.Schema{Type: timelineOpJSONType(field.Type)}
+			fieldSchema := &jsonschema.Schema{
+				Type:        timelineOpJSONType(field.Type),
+				Description: description,
+			}
 			if field.Type == timeline.OpFieldStringArray {
 				fieldSchema.Items = &jsonschema.Schema{Type: "string"}
 			}
@@ -91,12 +103,55 @@ func timelineAtomicOpSchema(kinds []string) *jsonschema.Schema {
 	}
 }
 
+type timelineAtomicFieldSemantic struct {
+	kinds       []string
+	description string
+}
+
+func mergeTimelineAtomicFieldSemantic(
+	current []timelineAtomicFieldSemantic,
+	kind, description string,
+) ([]timelineAtomicFieldSemantic, string) {
+	for index, semantic := range current {
+		if semantic.description == description {
+			for _, existingKind := range semantic.kinds {
+				if existingKind == kind {
+					return current, timelineAtomicFieldDescription(current)
+				}
+			}
+			current[index].kinds = append(current[index].kinds, kind)
+			return current, timelineAtomicFieldDescription(current)
+		}
+	}
+	current = append(current, timelineAtomicFieldSemantic{
+		kinds: []string{kind}, description: description,
+	})
+	return current, timelineAtomicFieldDescription(current)
+}
+
+func timelineAtomicFieldDescription(semantics []timelineAtomicFieldSemantic) string {
+	if len(semantics) == 0 {
+		return ""
+	}
+	if len(semantics) == 1 {
+		return semantics[0].description
+	}
+	parts := make([]string, 0, len(semantics))
+	for _, semantic := range semantics {
+		parts = append(parts, strings.Join(semantic.kinds, "/")+"："+semantic.description)
+	}
+	return "按 kind 解释：" + strings.Join(parts, "；")
+}
+
 // timelineAtomicOpBranchSchema 用 required + maxProperties 锁住无可选字段的
 // kind；存在可选字段时再用 propertyNames pattern 声明精确白名单。字段类型仍在根层
 // 只声明一次，避免 12 个 update 分支重复后突破模型 schema 预算。
 func timelineAtomicOpBranchSchema(spec timeline.OpSpec) *jsonschema.Schema {
 	properties := jsonschema.NewProperties()
-	properties.Set("kind", &jsonschema.Schema{Const: spec.Kind})
+	properties.Set("kind", &jsonschema.Schema{
+		Const:       spec.Kind,
+		Description: spec.Summary,
+	})
 	branch := &jsonschema.Schema{
 		Properties: properties,
 		Required:   []string{"kind"},
