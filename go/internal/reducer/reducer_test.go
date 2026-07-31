@@ -36,6 +36,12 @@ func createDraft(t *testing.T, database *storage.DB, draftID string) Result {
 	return result
 }
 
+func manualTimelineWriteOptions(options Options) Options {
+	options.Actor = contracts.ActorUser
+	options.TimelineWriteAdmission = &TimelineWriteAdmission{Origin: "manual"}
+	return options
+}
+
 func TestDraftCreatedAndMergeDedup(t *testing.T) {
 	t.Parallel()
 	database := openTestDB(t)
@@ -108,7 +114,7 @@ func TestTimelineEditHistoryKeepsOnlyTwentySemanticBatches(t *testing.T) {
 					"fps": 30, "duration_frames": 1, "tracks": []any{},
 				},
 			},
-		}}, Options{Actor: contracts.ActorUser, BaseVersion: &baseVersion})
+		}}, manualTimelineWriteOptions(Options{BaseVersion: &baseVersion}))
 		if err != nil || result.Status != StatusApplied {
 			t.Fatalf("batch %d result=%#v err=%v", index, result, err)
 		}
@@ -148,7 +154,7 @@ func TestStrictPreflightCASAndConflictRollback(t *testing.T) {
 		Type: "TimelineVersionCreated", DraftID: "draft-1", BaseVersion: &base,
 		Payload: map[string]any{"timeline_version": 1},
 	}
-	result, err := Apply(t.Context(), database, []contracts.Event{event}, Options{Actor: contracts.ActorAgent})
+	result, err := Apply(t.Context(), database, []contracts.Event{event}, manualTimelineWriteOptions(Options{}))
 	if err != nil || result.Status != StatusApplied || result.DraftStateVersions["draft-1"] != 1 {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
@@ -176,15 +182,14 @@ func TestValidationFailureRollsBackEventsAndSideRows(t *testing.T) {
 	result, err := Apply(t.Context(), database, []contracts.Event{{
 		Type: "TimelineVersionCreated", DraftID: "draft-1", BaseVersion: &base,
 		Payload: map[string]any{"timeline_version": 1},
-	}}, Options{
-		Actor: contracts.ActorAgent,
+	}}, manualTimelineWriteOptions(Options{
 		ResultRows: ResultRows{Message: &MessageRow{
 			ID: "message-1", DraftID: "draft-1", Role: "assistant", Kind: "reply", Content: "不会提交",
 		}},
 		Validate: func(context.Context, *sql.Tx, []string) error {
 			return errors.New("时间线不变量失败")
 		},
-	})
+	}))
 	if err != nil || result.Status != StatusValidationFailed {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
@@ -580,7 +585,7 @@ func TestUnderstandJobStateReconciliationAcrossConcurrentJobs(t *testing.T) {
 		Summary: map[string]any{"overall": "并发中的成功摘要"},
 	}}})
 	terminal("JobSucceeded", "job-understand-success", map[string]any{
-		"result": map[string]any{"status": "completed"},
+		"result": map[string]any{"status": "succeeded"},
 	})
 	assertAsset("ready", "")
 
@@ -813,7 +818,7 @@ func TestDraftLifecycleCopyAssetUnlinkAndJobCancellation(t *testing.T) {
 				"timeline_id": "draft-source:v1", "draft_id": "draft-source", "version": 1,
 			},
 		},
-	}}, Options{Actor: contracts.ActorAgent})
+	}}, manualTimelineWriteOptions(Options{}))
 	if err != nil || result.Status != StatusApplied {
 		t.Fatalf("timeline result=%#v err=%v", result, err)
 	}
@@ -965,7 +970,7 @@ func TestDraftCopyRejectsInvalidSourcesAndRollsBack(t *testing.T) {
 	result, err := Apply(t.Context(), database, []contracts.Event{{
 		Type: "TimelineVersionCreated", DraftID: "draft-copy-source", BaseVersion: &base,
 		Payload: map[string]any{"timeline_version": 1},
-	}}, Options{Actor: contracts.ActorAgent})
+	}}, manualTimelineWriteOptions(Options{}))
 	if err != nil || result.Status != StatusApplied {
 		t.Fatalf("timeline result=%#v err=%v", result, err)
 	}
@@ -1090,7 +1095,14 @@ func TestReducerMaterializesCompleteCoreEventLifecycle(t *testing.T) {
 			t.Fatal(err)
 		}
 		event.BaseVersion = &draft.StateVersion
-		applyEvents(contracts.ActorAgent, event)
+		options := Options{Actor: contracts.ActorAgent, CreatedAt: now}
+		if event.Type == "TimelineVersionCreated" || event.Type == "TimelineVersionRestored" {
+			options = manualTimelineWriteOptions(options)
+		}
+		result, err := Apply(t.Context(), database, []contracts.Event{event}, options)
+		if err != nil || result.Status != StatusApplied {
+			t.Fatalf("event=%s result=%#v err=%v", event.Type, result, err)
+		}
 	}
 
 	applyEvents(contracts.ActorUser,

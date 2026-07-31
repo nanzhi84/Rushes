@@ -108,7 +108,7 @@ type AssetListResult struct {
 
 type DetectShotsInput struct {
 	AssetID          string `json:"asset_id" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的单个 video 素材 ID；多素材必须由模型并行调用本工具"`
-	Depth            string `json:"depth,omitempty" jsonschema_description:"scan 做低成本镜头检测，deep 做逐镜头深度理解；默认 scan，deep 可能异步排队并在完成后自动续跑"`
+	Depth            string `json:"depth,omitempty" jsonschema_description:"scan 做低成本镜头检测，deep 做逐镜头深度理解；默认 scan；调用会在当前 turn 内等待终态"`
 	Focus            string `json:"focus,omitempty" jsonschema_description:"可选创作关注点，例如产品特写、人物动作或可用于高潮的镜头；会进入视觉分析提示与缓存键"`
 	MaxStepsPerAsset int    `json:"max_steps_per_asset,omitempty" jsonschema_description:"每个素材的最大分析步骤数；0 使用服务端默认值，数值越大成本和延迟越高"`
 	ForceRefresh     bool   `json:"force_refresh,omitempty" jsonschema_description:"仅当用户明确要求重新分析时设为 true；默认复用相同素材与参数的持久化结果"`
@@ -165,6 +165,7 @@ type DetectShotsResult struct {
 	JobID     string                        `json:"job_id,omitempty"`
 	AssetID   string                        `json:"asset_id"`
 	Status    string                        `json:"status"`
+	Data      map[string]any                `json:"data,omitempty"`
 	Summary   *MaterialUnderstandingSummary `json:"summary,omitempty"`
 	CacheHit  bool                          `json:"cache_hit"`
 	Analyzed  bool                          `json:"analyzed"`
@@ -540,18 +541,13 @@ type TimelineInspectInput struct {
 	TimelineID string `json:"timeline_id,omitempty" jsonschema_description:"可选；读取该草稿下这个稳定 timeline_id 指向的精确版本。省略时读取当前版本"`
 }
 
-type RenderStartInput struct {
-	Kind        string `json:"kind" jsonschema:"required" jsonschema_description:"本次唯一渲染产物：preview 或 final"`
+type PreviewGenerateInput struct {
 	TimelineID  string `json:"timeline_id" jsonschema:"required" jsonschema_description:"timeline.inspect 返回的当前稳定 timeline_id；它精确指向一个版本，若已变化则返回 stale_target，不猜测新目标"`
-	Orientation string `json:"orientation,omitempty" jsonschema_description:"成片画幅方向：auto、portrait 或 landscape；默认 auto"`
-}
-
-type JobReadInput struct {
-	JobID string `json:"job_id" jsonschema:"required" jsonschema_description:"检测或 render.start 返回的单个 job_id"`
+	Orientation string `json:"orientation,omitempty" jsonschema_description:"预览画幅方向：auto、portrait 或 landscape；默认 auto"`
 }
 
 type PreviewCheckInput struct {
-	PreviewID string `json:"preview_id" jsonschema:"required" jsonschema_description:"render.start(kind=preview) 完成后 job.read 返回的 artifact_id"`
+	PreviewID string `json:"preview_id" jsonschema:"required" jsonschema_description:"preview.generate 成功返回的 preview_id"`
 	Check     string `json:"check" jsonschema:"required" jsonschema_description:"本次唯一检查项：decode、black、freeze、silence、loudness 或 visual"`
 }
 

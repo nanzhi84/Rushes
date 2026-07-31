@@ -12,7 +12,6 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
-	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 type timelineOpReactRepairModel struct {
@@ -159,7 +158,7 @@ func TestReactAgentRepairsTimelineOpFromJITFieldFailure(t *testing.T) {
 	recoveryState := newToolRecoveryState()
 	ctx := withToolRecoveryState(t.Context(), recoveryState)
 	ctx = withTurnBudgetState(ctx, newTurnBudgetState(maxToolRoundsPerTurn))
-	ctx = rushestools.WithDraftID(ctx, draftID)
+	ctx = withTestTurnLeaseSession(t, service, ctx, draftID)
 	response, err := service.react.Generate(ctx, []*schema.Message{
 		schema.UserMessage("把主视频片段结尾裁到第 45 帧。"),
 	})

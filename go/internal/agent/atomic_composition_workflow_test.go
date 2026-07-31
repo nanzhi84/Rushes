@@ -26,7 +26,7 @@ func TestInitialCompositionFixtureUsesSearchAndAtomicInserts(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
 	trace := []string{}
 
 	listedRaw, err := service.ExecuteTool(ctx, "asset.list_assets", rushestools.AssetListInput{})
@@ -111,7 +111,7 @@ func TestBeatCompositionFixtureUsesDetectorSearchAndAtomicEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
 	trace := []string{}
 
 	beatsRaw, err := service.ExecuteTool(ctx, "audio.analyze_beats", rushestools.AudioBeatAnalysisInput{

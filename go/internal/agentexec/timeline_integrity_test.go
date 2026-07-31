@@ -139,13 +139,13 @@ func TestAtomicPrimaryDeletionPreservesIndependentAudioAcrossLaterRegrowth(t *te
 	if checked.Status != string(rushestools.StatusSucceeded) || checkedValidation["valid"] != true {
 		t.Fatalf("stored preserved overhang must remain checkable: %#v", checked)
 	}
-	renderRaw, err := exec.ExecuteTool(ctx, "render.start", rushestools.RenderStartInput{
-		Kind: "preview", TimelineID: shrunk.TimelineID,
-	})
+	render, err := exec.enqueuePreviewRender(
+		t.Context(), draftID, "", shrunk.TimelineID,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if render := renderRaw.(rushestools.ToolResult); render.Status != "queued" || render.Data["timeline_version"] != 2 {
+	if render.Status != "queued" || render.Data["timeline_version"] != 2 {
 		t.Fatalf("stored preserved overhang must remain renderable: %#v", render)
 	}
 	var storedReport string
@@ -300,13 +300,12 @@ func assertStoredOverhangCheckAndRender(
 	if checked.Status != string(rushestools.StatusSucceeded) || validation["valid"] != true {
 		t.Fatalf("portable stored proof must remain checkable: %#v", checked)
 	}
-	renderRaw, err := exec.ExecuteTool(ctx, "render.start", rushestools.RenderStartInput{
-		Kind: "preview", TimelineID: document.TimelineID,
-	})
+	render, err := exec.enqueuePreviewRender(
+		t.Context(), draftID, "", document.TimelineID,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	render := renderRaw.(rushestools.ToolResult)
 	if render.Status != "queued" || render.Data["timeline_version"] != version {
 		t.Fatalf("portable stored proof must remain renderable: %#v", render)
 	}
@@ -828,7 +827,7 @@ func TestTrustedOverhangCustomSplitUsesTemporaryClipLineage(t *testing.T) {
 		t.Fatalf("custom split proof=%#v report=%#v", proof, report)
 	}
 	split, err := exec.persistTimelineFromSnapshotWithPreservedAudio(
-		t.Context(), draftID, result, "timeline.split", operation, base, proof,
+		manualTimelineMutationContext(t.Context()), draftID, result, "timeline.split", operation, base, proof,
 	)
 	if err != nil || split.Status != string(rushestools.StatusSucceeded) {
 		t.Fatalf("custom split persistence=%#v err=%v", split, err)
@@ -1772,7 +1771,7 @@ func TestAtomicEditDerivesOriginalAudioFromAssetProbe(t *testing.T) {
 		t.Fatalf("persisted=%#v err=%v", persisted, persistErr)
 	}
 
-	ctx := rushestools.WithDraftID(t.Context(), "draft_derive_original_audio")
+	ctx := manualTimelineMutationContext(rushestools.WithDraftID(t.Context(), "draft_derive_original_audio"))
 	raw, err := exec.ExecuteTool(ctx, "timeline.update", rushestools.TimelineUpdateInput{
 		"kind": "replace_clip", "timeline_clip_id": "clip_v1_001",
 		"asset_id": "talk", "role": "a_roll",

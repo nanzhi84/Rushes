@@ -27,8 +27,10 @@ type DraftMutationResponse = {
 };
 
 type TimelineResponse = {
+  edit_lease: { active: boolean };
   timeline_version: number;
   timeline: {
+    timeline_id: string;
     fps: number;
     duration_frames: number;
     tracks: Array<{
@@ -52,7 +54,7 @@ const FIXTURE_PATH = path.join(FIXTURE_DIR, FIXTURE_NAME);
 const API_URL = `http://127.0.0.1:${process.env.RUSHES_E2E_API_PORT ?? "18001"}`;
 const TOKEN = "e2e-token";
 
-test("Go 主线：导入、理解、时间线、预览、确认与最终导出", async ({
+test("Go 主线：导入、理解、时间线、预览与用户最终导出", async ({
   page,
   request
 }) => {
@@ -93,6 +95,17 @@ test("Go 主线：导入、理解、时间线、预览、确认与最终导出",
     Boolean(draft.preview_current_id)
   );
   expect(renderedInitial.preview_current_id).toBeTruthy();
+
+  // 预览 artifact 落库早于 Agent turn 的最终清理；手工编辑必须等同 turn
+  // 已释放独占 lease，不能把服务端正确的 409 当成可重试竞态绕过去。
+  await expect
+    .poll(
+      async () =>
+        (await apiGet<TimelineResponse>(request, `/api/drafts/${draftAId}/timeline`))
+          .edit_lease.active,
+      { timeout: 15_000 }
+    )
+    .toBe(false);
 
   // 回归“素材中段取片”：Diffusion Core 的 delay 必须扣掉 source_start_frame。
   // 旧实现同时把 source start 算入 delay/range，在时间线 0 帧会没有活跃 clip，画布稳定黑屏。
@@ -148,11 +161,16 @@ test("Go 主线：导入、理解、时间线、预览、确认与最终导出",
     .poll(async () => Number(await previewProgress.inputValue()), { timeout: 5_000 })
     .toBeGreaterThan(previewStart + 0.1);
   await page.getByRole("button", { name: "暂停", exact: true }).click();
-  await page.getByLabel("消息输入").fill("导出成片");
-  await page.getByRole("button", { name: "发送" }).click();
-  const currentDecision = page.getByRole("region", { name: /个问题待回答/ });
-  await expect(currentDecision.getByRole("button", { name: "确认", exact: true })).toBeVisible();
-  await currentDecision.getByRole("button", { name: "确认", exact: true }).click();
+
+  // 最终导出不再是 Agent tool/确认卡：用户在专用控件中固定当前 vN 与画幅并显式触发。
+  await page.getByLabel("导出画幅").selectOption("portrait");
+  await page
+    .getByRole("button", { name: `导出 v${trimmedTimeline.timeline_version}` })
+    .click();
+  await expect(
+    page.getByRole("link", { name: `下载 v${trimmedTimeline.timeline_version}` })
+  ).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByRole("region", { name: /个问题待回答/ })).toHaveCount(0);
   const afterExport = await waitForDraft(request, draftAId, (draft) =>
     Boolean(draft.export_current_id)
   );
@@ -195,7 +213,9 @@ async function apiGet<T>(request: APIRequestContext, pathName: string): Promise<
   const response = await request.get(`${API_URL}${pathName}`, {
     headers: { Authorization: `Bearer ${TOKEN}` }
   });
-  expect(response.ok()).toBe(true);
+  if (!response.ok()) {
+    throw new Error(`GET ${pathName} returned ${response.status()}: ${await response.text()}`);
+  }
   return (await response.json()) as T;
 }
 
@@ -208,7 +228,9 @@ async function apiPost<T>(
     headers: { Authorization: `Bearer ${TOKEN}` },
     data: body
   });
-  expect(response.ok()).toBe(true);
+  if (!response.ok()) {
+    throw new Error(`POST ${pathName} returned ${response.status()}: ${await response.text()}`);
+  }
   return (await response.json()) as T;
 }
 

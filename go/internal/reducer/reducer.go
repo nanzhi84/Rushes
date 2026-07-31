@@ -59,6 +59,7 @@ type Result struct {
 	Conflict           *VersionConflict
 	SkippedEvents      int
 	UserMemory         *UserMemoryOutcome
+	AgentEditLease     *AgentEditLeaseOutcome
 	// RewindAffectedMemories 是「编辑并重发」回退波及的长期记忆快照(证据落在回退区间内
 	// 且创建于区间内);随回退在同一事务内算出,供 API 原样带回响应。非回退结果为 nil。
 	RewindAffectedMemories []storage.RewindAffectedMemory
@@ -178,28 +179,6 @@ func ContentPlanHash(plan map[string]any) (string, error) {
 	return fmt.Sprintf("%x", sha256.Sum256(encoded)), nil
 }
 
-// AgentJobBridgeCursorRow and AgentJobObservationRow are persistent bridge
-// bookkeeping. Keeping them in ResultRows makes cursor advancement and the
-// job-level idempotency guard one reducer transaction.
-type AgentJobBridgeCursorRow struct {
-	ConsumerID  string
-	LastEventID int64
-}
-
-type AgentJobObservationRow struct {
-	JobID      string
-	EventID    int64
-	DraftID    string
-	Event      map[string]any
-	ClaimToken string
-	CreatedAt  string
-}
-
-type AgentJobObservationDeliveryRow struct {
-	JobID      string
-	ClaimToken string
-}
-
 type AgentJobObservationSuppressionRow struct {
 	JobID string
 }
@@ -210,9 +189,6 @@ type ResultRows struct {
 	Transcripts                     []TranscriptRow
 	AgentContextCheckpoint          *AgentContextCheckpointRow
 	DraftPlanUpdate                 *DraftPlanUpdateRow
-	AgentJobBridgeCursor            *AgentJobBridgeCursorRow
-	AgentJobObservations            []AgentJobObservationRow
-	AgentJobObservationDelivery     *AgentJobObservationDeliveryRow
 	AgentJobObservationSuppressions []AgentJobObservationSuppressionRow
 	UserMemoryUpserts               []UserMemoryRow
 	UserMemoryRemoveKeys            []string
@@ -224,7 +200,12 @@ type ResultRows struct {
 	UserMemoryTouchKeys []string
 	// UserMemoryStatementEdit 是用户在设置面板对某条记忆 statement 的手动修订：仅限
 	// Actor=User,不带模型证据,直接更新 statement 并标注 manually_revised_at。
-	UserMemoryStatementEdit *UserMemoryStatementEditRow
+	UserMemoryStatementEdit    *UserMemoryStatementEditRow
+	AgentEditLeaseMutation     *AgentEditLeaseMutation
+	AgentToolReceipt           *AgentToolReceiptRow
+	AgentTurnRunStart          *AgentTurnRunStartRow
+	AgentTurnRunFinish         *AgentTurnRunFinishRow
+	InterruptRunningAgentTurns bool
 }
 
 type ValidationHook func(context.Context, *sql.Tx, []string) error
@@ -239,13 +220,24 @@ type JobClaim struct {
 }
 
 type Options struct {
-	BaseVersion   *int
-	Actor         contracts.Actor
-	CreatedAt     time.Time
-	ResultRows    ResultRows
-	Validate      ValidationHook
-	JobClaim      *JobClaim
-	RewindRestore *RewindRestore
+	BaseVersion            *int
+	Actor                  contracts.Actor
+	CreatedAt              time.Time
+	ResultRows             ResultRows
+	Validate               ValidationHook
+	JobClaim               *JobClaim
+	RewindRestore          *RewindRestore
+	TimelineWriteAdmission *TimelineWriteAdmission
+}
+
+// TimelineWriteAdmission binds an Agent timeline write to the exact persisted
+// lease. Manual callers set Origin=manual and intentionally omit turn/token.
+// Now is injectable for deterministic lease-boundary tests.
+type TimelineWriteAdmission struct {
+	Origin     string
+	TurnID     string
+	LeaseToken string
+	Now        time.Time
 }
 
 // RewindRestore persists the retry key and the response-producing metadata in
@@ -328,6 +320,11 @@ func Apply(
 		originalVersions: map[string]int{},
 		touched:          map[string]struct{}{},
 	}
+	if err := validateTimelineWriteAdmission(
+		ctx, tx, normalized, options.Actor, options.TimelineWriteAdmission,
+	); err != nil {
+		return Result{}, err
+	}
 	if restore := options.RewindRestore; restore != nil {
 		result, insertErr := tx.ExecContext(ctx, `
 			INSERT INTO rewind_restore_requests(
@@ -394,6 +391,9 @@ func Apply(
 		options.ResultRows.UserMemoryConditionalRemove != nil) && options.Actor != contracts.ActorUser {
 		return Result{}, fmt.Errorf("%w: 记忆治理写入仅限用户", ErrUserMemoryInput)
 	}
+	if options.ResultRows.AgentEditLeaseMutation != nil && options.Actor != contracts.ActorAgent {
+		return Result{}, errors.New("agent edit lease 写入仅限 Agent harness")
+	}
 	if options.ResultRows.UserMemoryConditionalRemove != nil &&
 		(len(options.ResultRows.UserMemoryUpserts) > 0 ||
 			len(options.ResultRows.UserMemoryRemoveKeys) > 0 || options.ResultRows.UserMemoryClearAll ||
@@ -402,13 +402,16 @@ func Apply(
 		return Result{}, fmt.Errorf("%w: 条件删除不能与其它记忆写入并用", ErrUserMemoryInput)
 	}
 	var userMemory *UserMemoryOutcome
+	var agentEditLease *AgentEditLeaseOutcome
 	if len(options.ResultRows.UserMemoryUpserts) > 0 ||
 		len(options.ResultRows.UserMemoryRemoveKeys) > 0 || options.ResultRows.UserMemoryClearAll ||
 		options.ResultRows.UserMemoryStatementEdit != nil ||
 		options.ResultRows.UserMemoryConditionalRemove != nil {
 		userMemory = &UserMemoryOutcome{}
 	}
-	if err := persistResultRows(ctx, tx, options.ResultRows, state.createdAt, userMemory); err != nil {
+	if err := persistResultRows(
+		ctx, tx, options.ResultRows, state.createdAt, userMemory, &agentEditLease,
+	); err != nil {
 		if errors.Is(err, errDraftPlanConflict) {
 			return Result{Status: StatusVersionConflict}, nil
 		}
@@ -473,6 +476,7 @@ func Apply(
 	return Result{
 		Status: StatusApplied, AppliedEvents: applied, DraftStateVersions: versions,
 		SkippedEvents: state.skipped, UserMemory: userMemory,
+		AgentEditLease:         agentEditLease,
 		RewindAffectedMemories: state.rewindAffectedMemories,
 	}, nil
 }
@@ -516,6 +520,9 @@ func preflightStrict(
 			return nil, err
 		}
 		if event.BaseVersion == nil || *event.BaseVersion != actual {
+			if event.Type == "TimelineVersionCreated" || event.Type == "TimelineVersionRestored" {
+				RecordCurrentTimelineVersionMismatch()
+			}
 			return &VersionConflict{
 				DraftID: event.DraftID, ExpectedBaseVersion: event.BaseVersion,
 				ActualStateVersion: actual, EventType: event.Type,
@@ -1183,11 +1190,18 @@ func applyTimelineCreated(ctx context.Context, state *applyState, event contract
 			return errors.New("TimelineVersionCreated 编辑日志缺少 patch_id")
 		}
 		origin := stringFrom(event.Payload["edit_origin"], "agent")
+		beforeVersion := 0
+		if currentVersion.Valid {
+			beforeVersion = int(currentVersion.Int64)
+		}
+		affectedRefs := timelineEditAffectedRefs(operations)
 		if _, err := state.tx.ExecContext(ctx, `
 			INSERT INTO timeline_edit_batches(
-				edit_batch_id,draft_id,actor,origin,operations_json,created_at
-			) VALUES(?, ?, ?, ?, ?, ?)`,
-			batchID, event.DraftID, event.Actor, origin, mustJSON(operations), state.createdAt,
+				edit_batch_id,draft_id,actor,origin,operations_json,
+				before_version,after_version,affected_refs_json,created_at
+			) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			batchID, event.DraftID, event.Actor, origin, mustJSON(operations),
+			beforeVersion, version, mustJSON(affectedRefs), state.createdAt,
 		); err != nil {
 			return err
 		}
@@ -1209,6 +1223,41 @@ func applyTimelineCreated(ctx context.Context, state *applyState, event contract
 		"UPDATE drafts SET timeline_current_version=?, timeline_validated=0 WHERE draft_id=?",
 		version, event.DraftID)
 	return err
+}
+
+func timelineEditAffectedRefs(operations []any) []string {
+	set := map[string]struct{}{}
+	var collect func(any)
+	collect = func(value any) {
+		switch typed := value.(type) {
+		case map[string]any:
+			for key, item := range typed {
+				switch key {
+				case "timeline_clip_id", "track_id", "asset_id", "parent_block_id":
+					if ref, ok := item.(string); ok && strings.TrimSpace(ref) != "" {
+						set[key+":"+ref] = struct{}{}
+					}
+				default:
+					collect(item)
+				}
+			}
+		case []any:
+			for _, item := range typed {
+				collect(item)
+			}
+		case []map[string]any:
+			for _, item := range typed {
+				collect(item)
+			}
+		}
+	}
+	collect(operations)
+	result := make([]string, 0, len(set))
+	for ref := range set {
+		result = append(result, ref)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func applyTimelineValidation(ctx context.Context, state *applyState, event contracts.Event) error {
@@ -1515,7 +1564,29 @@ func persistResultRows(
 	rows ResultRows,
 	defaultCreatedAt string,
 	userMemoryOutcome *UserMemoryOutcome,
+	agentEditLeaseOutcome **AgentEditLeaseOutcome,
 ) error {
+	if rows.AgentEditLeaseMutation != nil {
+		outcome, err := persistAgentEditLeaseMutation(ctx, tx, *rows.AgentEditLeaseMutation)
+		if err != nil {
+			return err
+		}
+		*agentEditLeaseOutcome = &outcome
+	}
+	if rows.InterruptRunningAgentTurns {
+		if err := interruptRunningAgentTurns(ctx, tx, defaultCreatedAt); err != nil {
+			return err
+		}
+	}
+	if err := persistAgentTurnRunStart(ctx, tx, rows.AgentTurnRunStart, defaultCreatedAt); err != nil {
+		return err
+	}
+	if err := persistAgentTurnRunFinish(ctx, tx, rows.AgentTurnRunFinish, defaultCreatedAt); err != nil {
+		return err
+	}
+	if err := persistAgentToolReceipt(ctx, tx, rows.AgentToolReceipt, defaultCreatedAt); err != nil {
+		return err
+	}
 	if rows.Message != nil {
 		createdAt := rows.Message.CreatedAt
 		if createdAt == "" {
@@ -1676,25 +1747,6 @@ func persistResultRows(
 			return fmt.Errorf("草稿创作计划更新未找到草稿 %s", plan.DraftID)
 		}
 	}
-	for _, observation := range rows.AgentJobObservations {
-		if observation.JobID == "" || observation.EventID < 1 ||
-			observation.DraftID == "" || observation.Event == nil || observation.ClaimToken == "" {
-			return errors.New("agent job observation 字段不完整")
-		}
-		createdAt := observation.CreatedAt
-		if createdAt == "" {
-			createdAt = defaultCreatedAt
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO agent_job_observations(
-				job_id,event_id,draft_id,event_json,claim_token,created_at
-			) VALUES(?,?,?,?,?,?) ON CONFLICT(job_id) DO NOTHING`,
-			observation.JobID, observation.EventID, observation.DraftID,
-			mustJSON(observation.Event), observation.ClaimToken, createdAt,
-		); err != nil {
-			return err
-		}
-	}
 	for _, suppression := range rows.AgentJobObservationSuppressions {
 		if suppression.JobID == "" {
 			return errors.New("agent job observation suppression 缺少 job_id")
@@ -1703,40 +1755,6 @@ func persistResultRows(
 			INSERT INTO agent_job_observation_suppressions(job_id,created_at)
 			VALUES(?,?) ON CONFLICT(job_id) DO NOTHING`,
 			suppression.JobID, defaultCreatedAt,
-		); err != nil {
-			return err
-		}
-	}
-	if delivery := rows.AgentJobObservationDelivery; delivery != nil {
-		if delivery.JobID == "" || delivery.ClaimToken == "" {
-			return errors.New("agent job observation delivery 字段不完整")
-		}
-		result, err := tx.ExecContext(ctx, `
-			UPDATE agent_job_observations SET delivered_at=?
-			WHERE job_id=? AND claim_token=? AND delivered_at IS NULL`,
-			defaultCreatedAt, delivery.JobID, delivery.ClaimToken)
-		if err != nil {
-			return err
-		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if affected != 1 {
-			return errors.New("agent job observation 已交付或 claim token 不匹配")
-		}
-	}
-	if cursor := rows.AgentJobBridgeCursor; cursor != nil {
-		if cursor.ConsumerID == "" || cursor.LastEventID < 0 {
-			return errors.New("agent job bridge cursor 字段不完整")
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO agent_job_bridge_state(consumer_id,last_event_id,updated_at)
-			VALUES(?,?,?)
-			ON CONFLICT(consumer_id) DO UPDATE SET
-				last_event_id=MAX(agent_job_bridge_state.last_event_id,excluded.last_event_id),
-				updated_at=excluded.updated_at`,
-			cursor.ConsumerID, cursor.LastEventID, defaultCreatedAt,
 		); err != nil {
 			return err
 		}
@@ -2246,12 +2264,13 @@ func emptyTimeline(draftID string, version int) map[string]any {
 func emptyResultRows(rows ResultRows) bool {
 	return rows.Message == nil && len(rows.MaterialSummaries) == 0 &&
 		len(rows.Transcripts) == 0 && rows.AgentContextCheckpoint == nil &&
-		rows.DraftPlanUpdate == nil && rows.AgentJobBridgeCursor == nil &&
-		len(rows.AgentJobObservations) == 0 && rows.AgentJobObservationDelivery == nil &&
-		len(rows.AgentJobObservationSuppressions) == 0 &&
+		rows.DraftPlanUpdate == nil && len(rows.AgentJobObservationSuppressions) == 0 &&
 		len(rows.UserMemoryUpserts) == 0 && len(rows.UserMemoryRemoveKeys) == 0 &&
 		!rows.UserMemoryClearAll && len(rows.UserMemoryTouchKeys) == 0 &&
-		rows.UserMemoryStatementEdit == nil && rows.UserMemoryConditionalRemove == nil
+		rows.UserMemoryStatementEdit == nil && rows.UserMemoryConditionalRemove == nil &&
+		rows.AgentEditLeaseMutation == nil && rows.AgentToolReceipt == nil &&
+		rows.AgentTurnRunStart == nil && rows.AgentTurnRunFinish == nil &&
+		!rows.InterruptRunningAgentTurns
 }
 
 func sortedKeys(values map[string]struct{}) []string {

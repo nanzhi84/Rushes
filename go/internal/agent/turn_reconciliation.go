@@ -14,14 +14,13 @@ import (
 )
 
 type persistedTurnCandidate struct {
-	draftID        string
-	itemID         string
-	kind           QueueItemKind
-	content        string
-	decision       storage.Decision
-	jobObservation bridgeObservation
-	created        time.Time
-	recoverable    bool
+	draftID     string
+	itemID      string
+	kind        QueueItemKind
+	content     string
+	decision    storage.Decision
+	created     time.Time
+	recoverable bool
 }
 
 type persistedTurnFact struct {
@@ -34,7 +33,7 @@ type persistedTurnFact struct {
 
 // ReconcilePersistedTurns 补驱“reducer 已提交、内存 TurnQueue 未接住”的 user 消息和
 // decision answer。持久 messages/decisions 是唯一事实源，不另建 turn-intent 表；队列的
-// idle 守卫让重复调用幂等。调用方应在单实例启动、job bridge 与 HTTP 监听启动前执行。
+// idle 守卫让重复调用幂等。后台 job 终态不再构造 synthetic turn。
 func (service *Service) ReconcilePersistedTurns(ctx context.Context) error {
 	if service == nil || service.database == nil || service.queue == nil {
 		return errors.New("启动对账缺少 agent service 依赖")
@@ -68,9 +67,6 @@ func (service *Service) enqueuePersistedTurn(
 			)
 		}
 		return service.queue.EnqueueUserMessage(candidate.draftID, candidate.itemID, candidate.content)
-	}
-	if candidate.kind == QueueJobObservation {
-		return service.enqueueJobObservation(ctx, candidate.jobObservation, onlyIfIdle)
 	}
 	if candidate.kind != QueueUIObservation {
 		return false
@@ -204,51 +200,26 @@ func (service *Service) persistedTurnCandidates(ctx context.Context) ([]persiste
 		return nil, err
 	}
 
+	// 旧 observation 表只读兼容：已交付 synthetic turn 的 assistant reply 不能被
+	// 错配成后来真实 user turn 的终态。未交付行不再生成 candidate，也不会唤醒模型。
 	deliveredJobTerminals := map[string]int{}
 	deliveryRows, err := service.database.Read().QueryContext(ctx, `
-		SELECT event_id,job_id,draft_id,event_json,claim_token,created_at,delivered_at
-		FROM agent_job_observations`)
+		SELECT draft_id,delivered_at FROM agent_job_observations
+		WHERE delivered_at IS NOT NULL`)
 	if err != nil {
 		return nil, err
 	}
 	for deliveryRows.Next() {
-		var eventID int64
-		var jobID, draftID, eventJSON, claimToken, created string
+		var draftID string
 		var deliveredAt sql.NullString
-		if err := deliveryRows.Scan(
-			&eventID, &jobID, &draftID, &eventJSON, &claimToken, &created, &deliveredAt,
-		); err != nil {
+		if err := deliveryRows.Scan(&draftID, &deliveredAt); err != nil {
 			_ = deliveryRows.Close()
 			return nil, err
 		}
-		createdAt, err := time.Parse(time.RFC3339Nano, created)
-		if err != nil {
-			_ = deliveryRows.Close()
-			return nil, fmt.Errorf("解析 job observation 创建时间: %w", err)
-		}
-		jobCandidate := persistedTurnCandidate{
-			draftID: draftID, itemID: jobID, kind: QueueJobObservation,
-			created: createdAt, recoverable: !deliveredAt.Valid,
-		}
-		jobCandidate.jobObservation = bridgeObservation{
-			eventID: eventID, draftID: draftID, jobID: jobID, claimToken: claimToken,
-		}
-		_ = json.Unmarshal([]byte(eventJSON), &jobCandidate.jobObservation.event)
-		facts[draftID] = append(facts[draftID], persistedTurnFact{
-			created: createdAt, candidate: &jobCandidate,
-		})
 		if !deliveredAt.Valid {
 			continue
 		}
 		deliveredJobTerminals[draftID+"\x00"+deliveredAt.String]++
-		deliveredTime, err := time.Parse(time.RFC3339Nano, deliveredAt.String)
-		if err != nil {
-			_ = deliveryRows.Close()
-			return nil, fmt.Errorf("解析 job observation 交付时间: %w", err)
-		}
-		facts[draftID] = append(facts[draftID], persistedTurnFact{
-			created: deliveredTime, terminalCount: 1, terminalIncludesCoalesced: true,
-		})
 	}
 	if err := deliveryRows.Err(); err != nil {
 		_ = deliveryRows.Close()
@@ -388,9 +359,28 @@ func (service *Service) persistedTurnCandidates(ctx context.Context) ([]persiste
 			}
 		}
 		for _, candidate := range unmatched {
-			if candidate.recoverable {
-				candidates = append(candidates, candidate)
+			if !candidate.recoverable {
+				continue
 			}
+			sourceItemID := candidate.itemID
+			if candidate.kind == QueueUIObservation &&
+				candidate.decision.ReplayedToolCallID != nil &&
+				*candidate.decision.ReplayedToolCallID != "" {
+				sourceItemID = *candidate.decision.ReplayedToolCallID
+			}
+			_, runErr := storage.GetAgentTurnRunBySource(
+				ctx, service.database.Read(), candidate.draftID, sourceItemID, string(candidate.kind),
+			)
+			if runErr == nil {
+				// A started turn is never blindly replayed after restart. Running rows
+				// were already marked interrupted during service construction; terminal
+				// rows are equally authoritative.
+				continue
+			}
+			if !errors.Is(runErr, storage.ErrNotFound) {
+				return nil, runErr
+			}
+			candidates = append(candidates, candidate)
 		}
 	}
 	return candidates, nil

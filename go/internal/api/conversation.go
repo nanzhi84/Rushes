@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
@@ -201,172 +200,28 @@ func (server *Server) CancelCurrentTurnApiDraftsDraftIdTurnCancelPost(
 			return
 		}
 	}
-	cleanupCtx, cancelCleanup := turnCancellationContext(request.Context())
-	defer cancelCleanup()
-	jobBoundary, err := server.turnCancellationJobBoundary(cleanupCtx)
-	if err != nil {
-		barrier.Abandon()
-		server.internalError(writer, err)
-		return
-	}
-	if err := server.suppressTurnJobObservations(cleanupCtx, draftID, jobBoundary); err != nil {
-		barrier.Abandon()
-		server.internalError(writer, err)
-		return
-	}
-	cancelledJobs, err := server.cancelTurnJobs(cleanupCtx, draftID, jobBoundary)
-	if err != nil {
-		barrier.Abandon()
-		server.internalError(writer, err)
-		return
-	}
+	// 全局停止只取消当前 waiter、后续模型调用和编辑；understand / preview 等
+	// durable job 是可复用工作，继续由 worker 收敛并保存结果。这里不得再按
+	// draft 扫描、抑制或取消 job，否则会把“停止 AI”误写成“丢弃后台产物”。
 	waitCtx, cancelWait := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	finished := barrier.Wait(waitCtx)
 	cancelWait()
 	if finished {
-		trailingJobs, trailingErr := server.cancelTurnJobs(cleanupCtx, draftID, jobBoundary)
 		barrier.Release()
-		if trailingErr != nil {
-			server.internalError(writer, trailingErr)
-			return
-		}
-		cancelledJobs += trailingJobs
 	} else {
-		trailingJobs, trailingErr := server.cancelTurnJobs(cleanupCtx, draftID, jobBoundary)
 		barrier.Abandon()
-		if trailingErr != nil {
-			server.internalError(writer, trailingErr)
-			return
-		}
-		cancelledJobs += trailingJobs
 	}
-	requested := stopped || cancelledJobs > 0
 	status := "idle"
-	if requested {
+	if stopped {
 		status = "requested"
 	}
 	writeJSON(writer, http.StatusOK, TurnCancelResponse{
-		DraftId: draftID, Requested: requested, Status: TurnCancelResponseStatus(status),
+		DraftId: draftID, Requested: stopped, Status: TurnCancelResponseStatus(status),
 	})
 }
 
 func turnCancellationContext(requestCtx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(requestCtx), 5*time.Second)
-}
-
-func (server *Server) turnCancellationJobBoundary(ctx context.Context) (int64, error) {
-	var boundary int64
-	err := server.database.Read().QueryRowContext(ctx, "SELECT COALESCE(MAX(rowid),0) FROM jobs").Scan(&boundary)
-	return boundary, err
-}
-
-func (server *Server) suppressTurnJobObservations(
-	ctx context.Context,
-	draftID string,
-	boundary int64,
-) error {
-	rows, err := server.database.Read().QueryContext(ctx, `
-		SELECT job_id,kind FROM jobs
-		WHERE rowid<=? AND COALESCE(requested_by_draft_id,draft_id)=?
-		ORDER BY rowid`, boundary, draftID)
-	if err != nil {
-		return err
-	}
-	suppressions := make([]reducer.AgentJobObservationSuppressionRow, 0)
-	for rows.Next() {
-		var jobID, kind string
-		if err := rows.Scan(&jobID, &kind); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		if agent.IsAgentWaitedJobKind(kind) {
-			suppressions = append(suppressions, reducer.AgentJobObservationSuppressionRow{JobID: jobID})
-		}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if len(suppressions) == 0 {
-		return nil
-	}
-	result, err := reducer.Apply(ctx, server.database, nil, reducer.Options{
-		Actor:      contracts.ActorUser,
-		ResultRows: reducer.ResultRows{AgentJobObservationSuppressions: suppressions},
-	})
-	if err != nil {
-		return err
-	}
-	if result.Status != reducer.StatusApplied {
-		return fmt.Errorf("抑制 turn job observation reducer status: %s", result.Status)
-	}
-	return nil
-}
-
-func (server *Server) cancelTurnJobs(ctx context.Context, draftID string, boundary int64) (int, error) {
-	rows, err := server.database.Read().QueryContext(ctx, `
-		SELECT job_id,kind,draft_id,requested_by_draft_id,asset_id
-		FROM jobs
-		WHERE rowid<=?
-		  AND COALESCE(requested_by_draft_id,draft_id)=?
-		  AND status IN ('pending','running')
-		ORDER BY rowid`, boundary, draftID)
-	if err != nil {
-		return 0, err
-	}
-	type cancellableJob struct {
-		id, kind                      string
-		draftID, requestedBy, assetID sql.NullString
-	}
-	jobs := make([]cancellableJob, 0)
-	for rows.Next() {
-		var job cancellableJob
-		if err := rows.Scan(&job.id, &job.kind, &job.draftID, &job.requestedBy, &job.assetID); err != nil {
-			_ = rows.Close()
-			return 0, err
-		}
-		if agent.IsAgentWaitedJobKind(job.kind) {
-			jobs = append(jobs, job)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return 0, err
-	}
-	_ = rows.Close()
-	cancelled := 0
-	for _, job := range jobs {
-		eventDraftID := ""
-		if job.draftID.Valid {
-			eventDraftID = job.draftID.String
-		}
-		payload := map[string]any{
-			"job_id": job.id, "kind": job.kind, "reason": "turn_cancelled",
-		}
-		if job.requestedBy.Valid {
-			payload["requested_by_draft_id"] = job.requestedBy.String
-		}
-		if job.assetID.Valid {
-			payload["asset_id"] = job.assetID.String
-		}
-		result, applyErr := reducer.Apply(ctx, server.database, []contracts.Event{{
-			Type: "JobCancelled", DraftID: eventDraftID, Payload: payload,
-		}}, reducer.Options{Actor: contracts.ActorUser})
-		if errors.Is(applyErr, reducer.ErrJobNotCancellable) {
-			continue
-		}
-		if applyErr != nil {
-			return cancelled, applyErr
-		}
-		if result.Status != reducer.StatusApplied {
-			return cancelled, fmt.Errorf("取消 turn job reducer status: %s", result.Status)
-		}
-		cancelled++
-	}
-	return cancelled, nil
 }
 
 func (server *Server) DraftTurnStreamApiDraftsDraftIdTurnStreamGet(

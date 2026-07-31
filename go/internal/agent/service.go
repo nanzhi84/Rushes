@@ -56,11 +56,6 @@ type Service struct {
 	fallbackScaffold fallbackScaffold
 	ctx              context.Context
 	cancel           context.CancelFunc
-	bridgeStartOnce  sync.Once
-	bridgeWG         sync.WaitGroup
-	bridgeMu         sync.Mutex
-	bridgeInflight   map[string]struct{}
-	bridgeDispatchMu sync.Mutex
 }
 
 func NewService(
@@ -77,18 +72,18 @@ func NewServiceWithModels(
 	chatModel model.ToolCallingChatModel,
 	visionModel model.ToolCallingChatModel,
 ) (*Service, error) {
-	return newServiceWithModels(parent, database, chatModel, visionModel, true)
+	return newServiceWithModels(parent, database, chatModel, visionModel)
 }
 
-// NewServiceWithModelsForStartup 暂不启动持久 job observation bridge，保证进程入口
-// 先补驱遗留 user/decision 回合；ReconcilePersistedTurns 成功后再显式启动 bridge。
+// NewServiceWithModelsForStartup 与普通构造共享同一行为；后台 job 不再创建 synthetic
+// Agent turn，启动对账只补驱真实 user/decision 回合。
 func NewServiceWithModelsForStartup(
 	parent context.Context,
 	database *storage.DB,
 	chatModel model.ToolCallingChatModel,
 	visionModel model.ToolCallingChatModel,
 ) (*Service, error) {
-	return newServiceWithModels(parent, database, chatModel, visionModel, false)
+	return newServiceWithModels(parent, database, chatModel, visionModel)
 }
 
 func newServiceWithModels(
@@ -96,23 +91,30 @@ func newServiceWithModels(
 	database *storage.DB,
 	chatModel model.ToolCallingChatModel,
 	visionModel model.ToolCallingChatModel,
-	startBridge bool,
 ) (*Service, error) {
 	if database == nil {
 		return nil, errors.New("agent service 缺少数据库")
 	}
 	ctx, cancel := context.WithCancel(parent)
+	if err := expireStaleAgentEditLeases(ctx, database); err != nil {
+		cancel()
+		return nil, fmt.Errorf("清理过期 Agent edit lease: %w", err)
+	}
 	chatModel = newTimeoutRetryChatModel(chatModel)
 	service := &Service{
 		database: database, hub: NewTurnStreamHub(0), ctx: ctx, cancel: cancel,
 		chatModel: chatModel, analyzer: understanding.NewAnalyzer(visionModel),
 		contextManager:   NewContextManager(database),
 		indexedResources: agentexec.NewIndexedResourceCoordinator(),
-		bridgeInflight:   map[string]struct{}{},
+	}
+	if err := service.interruptStaleAgentTurnRuns(ctx); err != nil {
+		cancel()
+		return nil, fmt.Errorf("标记重启中断的 Agent turn: %w", err)
 	}
 	service.executor = agentexec.New(database, service.analyzer, nil, func(draftID string, event map[string]any) {
 		service.hub.Record(draftID, event)
 	})
+	service.executor.SetSameTurnWaitObserver(recordSameTurnToolWait)
 	service.fallbackScaffold = newFallbackScaffold(service)
 	registry, err := rushestools.NewRegistry(database, service)
 	if err != nil {
@@ -138,7 +140,9 @@ func newServiceWithModels(
 				// 阻止模型绕过未披露能力。
 				Tools:               registry.EinoTools(true, false),
 				UnknownToolsHandler: unknownToolRecoveryHandler,
-				ToolCallMiddlewares: []compose.ToolMiddleware{newToolRecoveryMiddleware(retrySafeFromEffect(registry.Effect))},
+				ToolCallMiddlewares: []compose.ToolMiddleware{newToolRecoveryMiddleware(
+					retrySafeFromEffect(registry.Effect), registry.ModelReceiptPolicy,
+				)},
 			},
 			registry.Spec,
 			// 多主题口播可能需要 30 轮以上的模型/工具往返，因此将真实预算保留到 40 轮；
@@ -153,18 +157,7 @@ func newServiceWithModels(
 		}
 	}
 	service.queue = NewTurnQueue(ctx, service.runTurn)
-	if startBridge {
-		service.StartJobObservationBridge()
-	}
 	return service, nil
-}
-
-// StartJobObservationBridge 只启动一次持久 job bridge；重复调用安全无副作用。
-func (service *Service) StartJobObservationBridge() {
-	if service == nil {
-		return
-	}
-	service.bridgeStartOnce.Do(func() { service.startJobObservationBridge(service.ctx) })
 }
 
 func (service *Service) Queue() *TurnQueue { return service.queue }
@@ -180,7 +173,6 @@ func (service *Service) SetSpeechRecognizer(recognizer contracts.SpeechRecognize
 
 func (service *Service) Close() {
 	service.cancel()
-	service.bridgeWG.Wait()
 	service.queue.Close()
 }
 
@@ -193,9 +185,37 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	startedAt := time.Now()
 	slog.Info("turn_started", "turn_id", turnID, "draft_id", item.DraftID, "kind", string(item.Kind))
 	ctx = rushestools.WithDraftID(ctx, item.DraftID)
-	if delivery := observationDelivery(item); delivery != nil {
-		ctx = agentexec.WithJobObservationDelivery(ctx, delivery.JobID, delivery.ClaimToken)
+	ctx = rushestools.WithTurnIdentity(ctx, turnID, item.ItemID)
+	ctx, cancelForLease := context.WithCancelCause(ctx)
+	defer cancelForLease(nil)
+	leaseSession := newTimelineEditLeaseSession(
+		service.database, item.DraftID, turnID, cancelForLease,
+	)
+	ctx = withTimelineEditLeaseSession(ctx, leaseSession)
+	ctx = rushestools.WithTimelineWriteAdmission(
+		ctx, turnID, leaseSession.token, leaseSession.markLost,
+	)
+	turnBudget := newTurnBudgetState(maxToolRoundsPerTurn)
+	if err := service.startAgentTurnRun(ctx, turnID, item); err != nil {
+		leaseSession.close()
+		// turn_started 已经对客户端可见；用户可能正好在持久化 run marker
+		// 前点击停止。即使取消让 reducer 立即返回，也必须配对一个 cancelled
+		// turn_ended，不能让 UI 永久停在运行中。
+		if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+			service.recordTurnEnded(
+				item.DraftID, turnID, startedAt, "cancelled", "user_cancelled",
+				turnBudget, false,
+			)
+		}
+		return err
 	}
+	turnRunStatus := "failed"
+	defer func() {
+		leaseSession.close()
+		if finishErr := service.finishAgentTurnRun(ctx, turnID, turnRunStatus); finishErr != nil {
+			slog.Error("持久化 Agent turn 终态失败", "turn_id", turnID, "error", finishErr)
+		}
+	}()
 	if item.Kind == QueueUserMessage {
 		ctx = withContextMessageBoundary(ctx, item.ItemID)
 	}
@@ -212,9 +232,9 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	ctx = agentexec.WithDurableTerminalCommit(ctx, func(commit func() (bool, error)) (bool, error) {
 		return service.queue.CommitCurrentDurableTerminal(item, commit)
 	})
-	turnBudget := newTurnBudgetState(maxToolRoundsPerTurn)
 	ctx = withTurnBudgetState(ctx, turnBudget)
 	finishCancelled := func(turnErr error) error {
+		turnRunStatus = "cancelled"
 		service.recordTurnEnded(
 			item.DraftID, turnID, startedAt, "cancelled", "user_cancelled", turnBudget, false,
 		)
@@ -229,6 +249,18 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	ctx = service.withModelRetryReporting(ctx, item.DraftID)
 	ctx = rushestools.WithReporter(ctx, service.toolReporter(ctx, item.DraftID))
 	content, err := service.turnContent(ctx, item, messageID)
+	leaseCause := context.Cause(ctx)
+	if errors.Is(err, storage.ErrAgentEditLeaseLost) ||
+		errors.Is(leaseCause, storage.ErrAgentEditLeaseLost) {
+		turnRunStatus = "lease_lost"
+		if leaseCause == nil {
+			leaseCause = storage.ErrAgentEditLeaseLost
+		}
+		service.recordTurnEnded(
+			item.DraftID, turnID, startedAt, "failed", "agent_edit_lease_lost", turnBudget, false,
+		)
+		return leaseCause
+	}
 	// 用户主动取消有两种形态：错误链里包着 context.Canceled，或 provider 在连接
 	// 中断时抛出的普通传输错误（不包裹 Canceled）但 turn 上下文已被取消。两者都
 	// 只落 cancelled 终态，绝不合成 turn_failure；ctx.Err() 兜住后一种，与
@@ -251,6 +283,13 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		content, reflectionRestated = service.qualityCheckedFinalReply(ctx, item.DraftID, messageID, content)
 	}
 	if ctx.Err() != nil {
+		if errors.Is(context.Cause(ctx), storage.ErrAgentEditLeaseLost) {
+			turnRunStatus = "lease_lost"
+			service.recordTurnEnded(
+				item.DraftID, turnID, startedAt, "failed", "agent_edit_lease_lost", turnBudget, false,
+			)
+			return context.Cause(ctx)
+		}
 		// 取消可能落在初次检查之后的 terminal guard / reflection 窗口。此时尚未提交
 		// durable terminal，必须仍以 cancelled 收口，不能进入 turn_failure 或 turn_error。
 		return finishCancelled(ctx.Err())
@@ -277,8 +316,6 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 			// harness 合成的终态失败文案（terminalFailureReply，恒非空）落持久系统
 			// 失败消息，用户不在页面时也能事后读回；用户主动取消走上面的分支。
 			messageRole, messageKind = "system", "turn_failure"
-		case item.Kind == QueueJobObservation && service.react == nil:
-			messageKind = "observation"
 		}
 		expectedTimelineID := ""
 		if err == nil {
@@ -312,30 +349,12 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 			"type": TurnStreamMessageCompleted, "message_id": messageID,
 			"kind": messageKind, "content": content,
 		})
-	} else if delivery := observationDeliveryFromContext(ctx, item); delivery != nil {
-		var result reducer.Result
-		_, applyErr := agentexec.CommitDurableTerminal(ctx, func() (bool, error) {
-			var err error
-			result, err = reducer.Apply(ctx, service.database, nil, reducer.Options{
-				Actor:      contracts.ActorAgent,
-				ResultRows: reducer.ResultRows{AgentJobObservationDelivery: delivery},
-			})
-			return err == nil && result.Status == reducer.StatusApplied, err
-		})
-		if applyErr != nil {
-			if errors.Is(applyErr, context.Canceled) || ctx.Err() != nil {
-				return finishCancelled(applyErr)
-			}
-			return applyErr
-		}
-		if result.Status != reducer.StatusApplied {
-			return fmt.Errorf("job observation delivery reducer status: %s", result.Status)
-		}
 	}
 	if outcome == "finished" {
 		service.touchInjectedMemories(ctx, item.DraftID, injectedMemory.snapshot())
 	}
 	service.recordTurnEnded(item.DraftID, turnID, startedAt, outcome, reason, turnBudget, reflectionRestated)
+	turnRunStatus = outcome
 	return nil
 }
 
@@ -347,9 +366,6 @@ func (service *Service) commitFinalReply(
 	resultRows := reducer.ResultRows{Message: &reducer.MessageRow{
 		ID: messageID, DraftID: item.DraftID, Role: role, Kind: kind, Content: content,
 	}}
-	if delivery := observationDeliveryFromContext(ctx, item); delivery != nil {
-		resultRows.AgentJobObservationDelivery = delivery
-	}
 	var result reducer.Result
 	_, applyErr := agentexec.CommitDurableTerminal(ctx, func() (bool, error) {
 		var err error
@@ -370,24 +386,6 @@ func (service *Service) commitFinalReply(
 		return fmt.Errorf("assistant message reducer status: %s", result.Status)
 	}
 	return nil
-}
-
-func observationDelivery(item QueueItem) *reducer.AgentJobObservationDeliveryRow {
-	if item.Kind != QueueJobObservation {
-		return nil
-	}
-	claimToken, _ := item.Payload["claim_token"].(string)
-	if claimToken == "" {
-		return nil
-	}
-	return &reducer.AgentJobObservationDeliveryRow{JobID: item.ItemID, ClaimToken: claimToken}
-}
-
-func observationDeliveryFromContext(ctx context.Context, item QueueItem) *reducer.AgentJobObservationDeliveryRow {
-	if delivery, tracked := agentexec.JobObservationDelivery(ctx); tracked {
-		return delivery
-	}
-	return observationDelivery(item)
 }
 
 // lateToolCallDedupKey 为「终态直通后晚到的 tool_call」生成去重键：优先用 call ID，缺失时
@@ -461,28 +459,11 @@ func (service *Service) withModelRetryReporting(ctx context.Context, draftID str
 	})
 }
 
-// The only intentionally silent turn is a duplicated successful preview job
-// notification whose artifact was already inspected. User turns, decision
-// continuations and failed background jobs must always finish with visible text.
 func (service *Service) maySilentlyFinishTurn(ctx context.Context, item QueueItem) bool {
-	if item.Kind != QueueJobObservation {
-		return false
-	}
-	event, _ := item.Payload["event"].(map[string]any)
-	if agentexec.InterfaceString(event["event"]) != "JobSucceeded" {
-		return false
-	}
-	payload, _ := event["payload"].(map[string]any)
-	if agentexec.InterfaceString(payload["kind"]) != "render_preview" {
-		return false
-	}
-	return service.executor.PreviewAlreadyInspected(ctx, item.DraftID, payload["result"])
+	return false
 }
 
 func (service *Service) turnContent(ctx context.Context, item QueueItem, messageID string) (string, error) {
-	if item.Kind == QueueJobObservation {
-		return service.continueAfterJobObservation(ctx, item, messageID)
-	}
 	if item.Kind == QueueUIObservation {
 		if observationType, _ := item.Payload["observation_type"].(string); observationType == "decision_answered" {
 			pending, _ := item.Payload["pending_tool_call"].(map[string]any)
@@ -596,84 +577,6 @@ func (service *Service) continueAfterDecision(
 	return service.streamAgent(ctx, item.DraftID, messageID, messages)
 }
 
-func (service *Service) continueAfterJobObservation(
-	ctx context.Context,
-	item QueueItem,
-	messageID string,
-) (string, error) {
-	event, _ := item.Payload["event"].(map[string]any)
-	eventType := agentexec.InterfaceString(event["event"])
-	payload, _ := event["payload"].(map[string]any)
-	jobID := agentexec.InterfaceString(item.Payload["job_id"])
-	if value := agentexec.InterfaceString(payload["job_id"]); value != "" {
-		jobID = value
-	}
-	kind := agentexec.InterfaceString(payload["kind"])
-	if kind == "" {
-		kind = "后台"
-	}
-	succeeded := eventType == "JobSucceeded"
-	cancelled := eventType == "JobCancelled"
-	terminalDetails := payload["result"]
-	if cancelled {
-		terminalDetails = map[string]any{"reason": payload["reason"]}
-	} else if !succeeded {
-		terminalDetails = payload["error"]
-		if terminalDetails == nil {
-			terminalDetails = payload["failure"]
-		}
-	}
-	details := compactJSON(terminalDetails)
-	if service.react == nil {
-		if succeeded {
-			return fmt.Sprintf("%s 任务 %s 已完成。", kind, jobID), nil
-		}
-		if cancelled {
-			return fmt.Sprintf("后台任务已被取消：%s（job_id：%s）。", kind, jobID), nil
-		}
-		return fmt.Sprintf("%s 任务 %s 失败：%s", kind, jobID, details), nil
-	}
-	if succeeded && kind == "render_preview" {
-		if service.executor.PreviewAlreadyInspected(ctx, item.DraftID, terminalDetails) {
-			return "", nil
-		}
-	}
-	status := "成功"
-	nextAction := contracts.DefaultJobContinuationHint
-	if spec, exists := contracts.LookupJobKind(kind); exists && spec.ContinuationHint != "" {
-		nextAction = spec.ContinuationHint
-	}
-	if !succeeded {
-		status = "失败"
-		nextAction = "先读取失败信息并诊断；能用现有工具修复时立即修复并重试，不要把失败说成完成。"
-	}
-	if cancelled {
-		status = "已取消"
-		nextAction = "明确说明后台任务已被取消；保留现有成果，不要自动重试，也不要把取消说成失败。"
-	}
-	prompt := fmt.Sprintf(
-		"你等待的后台任务已到终态。\n任务：%s\njob_id：%s\n状态：%s\n终态详情：%s\n这是原任务的自动续跑，不是新的用户请求。%s 不要重复询问已经回答的问题，也不要仅回复泛化的“后台已完成”。",
-		kind,
-		jobID,
-		status,
-		details,
-		nextAction,
-	)
-	messages, err := service.modelMessages(ctx, item.DraftID)
-	if err != nil {
-		return "", err
-	}
-	if succeeded && kind == "understand" {
-		evidence, evidenceErr := service.executor.UnderstandJobEvidenceMessage(ctx, item.DraftID, jobID)
-		if evidenceErr != nil {
-			return "", evidenceErr
-		}
-		messages = append(messages, evidence)
-	}
-	messages = append(messages, schema.UserMessage(prompt))
-	return service.streamAgent(ctx, item.DraftID, messageID, messages)
-}
-
 func decisionContinuationPrompt(decision storage.Decision, answer map[string]any) string {
 	optionID := agentexec.InterfaceString(answer["option_id"])
 	freeText := agentexec.InterfaceString(answer["free_text"])
@@ -714,27 +617,19 @@ func (service *Service) fallbackTurn(
 		}
 	}
 	if strings.Contains(content, "混剪") {
-		return service.fallbackMainline(ctx, draftID)
+		reply, err := service.fallbackMainline(ctx, draftID)
+		if err != nil || !requestsUserFinalExport(content) {
+			return reply, err
+		}
+		return reply + " " + userFinalExportGuidance, nil
 	}
-	if strings.Contains(content, "导出") {
-		document, err := timeline.Latest(ctx, service.database, draftID)
-		if errors.Is(err, storage.ErrNotFound) {
+	if requestsUserFinalExport(content) {
+		if _, err := timeline.Latest(ctx, service.database, draftID); errors.Is(err, storage.ErrNotFound) {
 			return "当前草稿还没有可导出的时间线。", nil
-		}
-		if err != nil {
+		} else if err != nil {
 			return "", err
 		}
-		_, err = service.executeReported(ctx, draftID, "interaction.confirm_action", rushestools.ConfirmActionInput{
-			Question: "确认导出当前已验证时间线的最终 MP4？",
-			ToolName: "render.start",
-			Arguments: map[string]any{
-				"kind": "final", "timeline_id": document.TimelineID,
-			},
-		})
-		if err != nil {
-			return "", err
-		}
-		return "请在决策卡中确认是否导出最终 MP4。", nil
+		return "编辑结果已准备好。" + userFinalExportGuidance, nil
 	}
 	if strings.Contains(content, "ASK_USER") {
 		_, err := service.ExecuteTool(ctx, "interaction.ask_user", rushestools.AskUserInput{
@@ -751,6 +646,8 @@ func (service *Service) fallbackTurn(
 	reply := "未配置模型密钥：已记录你的需求，并保持本地编辑链路可用。"
 	return reply, nil
 }
+
+const userFinalExportGuidance = "最终视频只能由你明确触发：请在编辑器右侧的“导出”区域选择规格并点击“导出视频”，完成后可直接下载。"
 
 func (service *Service) modelMessages(ctx context.Context, draftID string) ([]*schema.Message, error) {
 	boundary := contextMessageBoundary(ctx)
@@ -792,7 +689,7 @@ func (service *Service) contextSummary(ctx context.Context, draftID, source stri
 	if service.chatModel == nil {
 		return summary
 	}
-	response, err := service.chatModel.Generate(ctx, []*schema.Message{
+	response, err := generateWithCurrentTimelineView(ctx, service.chatModel, []*schema.Message{
 		schema.SystemMessage(contextCompactionPrompt),
 		schema.UserMessage(source),
 	}, model.WithToolChoice(schema.ToolChoiceForbidden))

@@ -150,6 +150,11 @@ func TestToolVocabularyAccessors(t *testing.T) {
 	if !ToolErrorCodeRegistered(string(ErrCodeUnknownTool)) {
 		t.Error("已声明的 error_code 应被识别为已注册")
 	}
+	for _, code := range []ToolErrorCode{ErrCodeToolValidationFailed, ErrCodeToolCancelled} {
+		if !ToolErrorCodeRegistered(string(code)) {
+			t.Errorf("终态错误码 %q 应被识别为已注册", code)
+		}
+	}
 	if ToolErrorCodeRegistered("definitely_not_registered") {
 		t.Error("未声明的 error_code 不应被识别为已注册")
 	}

@@ -135,6 +135,10 @@ func (server *Server) ResendMessageApiDraftsDraftIdMessagesMessageIdResendPost(
 		writeConflict(writer, "resend_job_state_changed")
 		return
 	}
+	if errors.Is(err, storage.ErrTimelineLockedByAgent) {
+		writeConflict(writer, "timeline_locked_by_agent")
+		return
+	}
 	var reducerResultError *rewindReducerResultError
 	if errors.As(err, &reducerResultError) {
 		writeReducerResult(writer, reducerResultError.result)

@@ -4,13 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
-	"time"
 
-	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
-	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
@@ -58,32 +54,19 @@ func renderHandler(database *storage.DB, final bool) Handler {
 		if err != nil {
 			return nil, err
 		}
-		artifactID := fmt.Sprintf("preview_%d", time.Now().UnixNano())
-		eventType := "PreviewRendered"
-		if final {
-			artifactID = fmt.Sprintf("export_%d", time.Now().UnixNano())
-			eventType = "ExportCompleted"
-		}
+		artifactID := renderArtifactID(job)
 		payload := map[string]any{
 			"artifact_id": artifactID, "timeline_version": document.Version,
 			"object_hash": rendered.Object.Hash, "object_size": rendered.Object.Size,
 			"quality":      map[string]any{"profile": profile.Name, "orientation": orientation},
 			"render_width": rendered.Width, "render_height": rendered.Height,
 			"render_fps": rendered.FPS, "expected_duration_sec": rendered.DurationSec,
-		}
-		result, err := reducer.Apply(ctx, database, []contracts.Event{{
-			Type: eventType, DraftID: draftID, Payload: payload,
-		}}, claimedJobOptions(job, reducer.Options{}))
-		if err != nil || result.Status != reducer.StatusApplied {
-			return nil, errors.Join(err, fmt.Errorf("render reducer status: %s", result.Status))
+			"profile": profile.Name, "orientation": orientation,
 		}
 		if err := report(ctx, job, Progress(0.98)); err != nil {
 			return nil, err
 		}
-		return map[string]any{
-			"artifact_id": artifactID, "timeline_version": document.Version,
-			"object_hash": rendered.Object.Hash, "profile": profile.Name, "orientation": orientation,
-		}, nil
+		return payload, nil
 	}
 }
 

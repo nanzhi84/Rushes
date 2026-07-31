@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/telemetry"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -18,6 +19,14 @@ var (
 	metricTurnFinished  = telemetry.NewCounter("agent_turn_finished_total")
 	metricTurnFailed    = telemetry.NewCounter("agent_turn_failed_total")
 	metricTurnCancelled = telemetry.NewCounter("agent_turn_cancelled_total")
+
+	// Edit lease lifecycle is deliberately low-cardinality: no draft, turn or
+	// token labels are exported. These four counters expose ownership health
+	// without leaking identifiers.
+	metricEditLeaseAcquire = telemetry.NewCounter("agent_edit_lease_acquire")
+	metricEditLeaseRenew   = telemetry.NewCounter("agent_edit_lease_renew")
+	metricEditLeaseRelease = telemetry.NewCounter("agent_edit_lease_release")
+	metricEditLeaseLost    = telemetry.NewCounter("agent_edit_lease_lost")
 
 	// 模型调用延迟（毫秒）、重试数与重试原因分类（H1a 上下文超限 vs 超时）。
 	metricModelCallMS = telemetry.NewHistogram(
@@ -74,6 +83,23 @@ var (
 		"agent_tool_result_bytes", []int64{1024, 4096, 16384, 65536, 131072, 524288},
 	)
 	metricToolResultOversize = telemetry.NewCounter("tool_result_oversize_total")
+	// 模型工具必须在同一 turn 内只返回终态；queued/running 表示合同回退，运行时
+	// fail-closed 并计数，避免模型靠轮询或 synthetic continuation 收敛。
+	metricLLMNonTerminalToolResult = telemetry.NewCounter("agent_llm_non_terminal_tool_result_total")
+	// 这个边界指标应长期保持 0，只在防御性拒绝旧 final-render 调用时增长。
+	metricLLMFinalExportAttempt = telemetry.NewCounter("agent_llm_final_export_attempt_total")
+
+	metricSameTurnToolWaitSeconds = telemetry.NewHistogram(
+		"agent_same_turn_tool_wait_seconds", []int64{1, 5, 15, 30, 60, 180, 600},
+	)
+	metricSameTurnPreviewSucceeded    = telemetry.NewCounter("agent_same_turn_tool_wait_preview_succeeded_total")
+	metricSameTurnPreviewFailed       = telemetry.NewCounter("agent_same_turn_tool_wait_preview_failed_total")
+	metricSameTurnPreviewCancelled    = telemetry.NewCounter("agent_same_turn_tool_wait_preview_cancelled_total")
+	metricSameTurnPreviewTimeout      = telemetry.NewCounter("agent_same_turn_tool_wait_preview_timeout_total")
+	metricSameTurnUnderstandSucceeded = telemetry.NewCounter("agent_same_turn_tool_wait_understand_succeeded_total")
+	metricSameTurnUnderstandFailed    = telemetry.NewCounter("agent_same_turn_tool_wait_understand_failed_total")
+	metricSameTurnUnderstandCancelled = telemetry.NewCounter("agent_same_turn_tool_wait_understand_cancelled_total")
+	metricSameTurnUnderstandTimeout   = telemetry.NewCounter("agent_same_turn_tool_wait_understand_timeout_total")
 
 	// 模型工具目录与实际绑定面的规模基线（#141 PR1）。目录是 Registry 的全量 LLM
 	// Catalog；bound 是实际传给某次 ReAct 图的工具面。当前二者仍相同，后续动态披露
@@ -100,6 +126,8 @@ func observeModelCall(ctx context.Context, latencyMS int64) {
 var contextTokenBounds = []int64{500, 2000, 8000, 32000, 128000}
 
 func init() {
+	// 保留“应永远为 0”的可观测基线；无生产代码可以递增它。
+	telemetry.NewCounter("agent_synthetic_job_continuation_total")
 	// 缓存 prompt token 命中率 = 累计 cached / 累计 prompt。
 	telemetry.PublishRatio("agent_cached_prompt_hit_ratio", func() float64 {
 		prompt := metricPromptTokensTotal.Value()
@@ -115,6 +143,28 @@ func init() {
 		}
 		return float64(metricUserMemoryOmitted.Value()) / float64(total)
 	})
+}
+
+func recordSameTurnToolWait(kind, status string, duration time.Duration) {
+	metricSameTurnToolWaitSeconds.Observe(int64(duration / time.Second))
+	switch kind + "\x00" + status {
+	case "preview\x00succeeded":
+		metricSameTurnPreviewSucceeded.Inc()
+	case "preview\x00failed":
+		metricSameTurnPreviewFailed.Inc()
+	case "preview\x00cancelled", "preview\x00turn_cancelled":
+		metricSameTurnPreviewCancelled.Inc()
+	case "preview\x00timeout":
+		metricSameTurnPreviewTimeout.Inc()
+	case "understand\x00succeeded":
+		metricSameTurnUnderstandSucceeded.Inc()
+	case "understand\x00failed":
+		metricSameTurnUnderstandFailed.Inc()
+	case "understand\x00cancelled", "understand\x00turn_cancelled":
+		metricSameTurnUnderstandCancelled.Inc()
+	case "understand\x00timeout":
+		metricSameTurnUnderstandTimeout.Inc()
+	}
 }
 
 func recordUserMemoryInjection(total, included, sectionRunes int) {

@@ -68,10 +68,6 @@ func (exec *Executor) toolAskUser(
 		pendingPayload = pending
 		pendingStatus = "pending"
 	}
-	resultRows := reducer.ResultRows{}
-	if blocking {
-		resultRows.AgentJobObservationDelivery = PendingJobObservationDelivery(ctx)
-	}
 	var result reducer.Result
 	applyDecision := func() (bool, error) {
 		var applyErr error
@@ -84,9 +80,7 @@ func (exec *Executor) toolAskUser(
 				"pending_tool_call_status": pendingStatus,
 				"created_by_tool_call_id":  nullableToolCallID(ctx),
 			},
-		}}, reducer.Options{
-			Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion, ResultRows: resultRows,
-		})
+		}}, reducer.Options{Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion})
 		return applyErr == nil && result.Status == reducer.StatusApplied, applyErr
 	}
 	if blocking {
@@ -96,9 +90,6 @@ func (exec *Executor) toolAskUser(
 	}
 	if err != nil || result.Status != reducer.StatusApplied {
 		return rushestools.ToolResult{}, errors.Join(err, fmt.Errorf("reducer status: %s", result.Status))
-	}
-	if resultRows.AgentJobObservationDelivery != nil {
-		MarkJobObservationDelivered(ctx)
 	}
 	MarkDecisionCreatedThisTurn(ctx, decisionID, blocking)
 	if !blocking {

@@ -41,7 +41,6 @@ func (exec *Executor) toolAtomicTimelineEdit(
 	}
 
 	current, mutationBase, err := exec.timelineMutationSnapshot(ctx, draftID)
-	previousTimelineID := ""
 	if err == nil && mutationBase.timelineVersion == 0 {
 		if toolName != "timeline.insert" ||
 			StringValue(operation["kind"]) != "insert_clip" ||
@@ -58,8 +57,6 @@ func (exec *Executor) toolAtomicTimelineEdit(
 		}
 	} else if err != nil {
 		return rushestools.ToolResult{}, err
-	} else {
-		previousTimelineID = current.TimelineID
 	}
 	targetClipID := StringValue(operation["timeline_clip_id"])
 	admission := atomicEditAdmissionFromContext(ctx)
@@ -138,7 +135,7 @@ func (exec *Executor) toolAtomicTimelineEdit(
 
 	changedTargets := atomicChangedTargets(current, document)
 	coordinateEffect := atomicTimelineCoordinateEffect(current, document)
-	result, err := exec.persistTimelineFromSnapshotWithPreservedAudio(
+	result, err := exec.persistTimelineFromSnapshotWithPreservedAudioAndResultData(
 		ctx,
 		draftID,
 		document,
@@ -146,28 +143,22 @@ func (exec *Executor) toolAtomicTimelineEdit(
 		appliedOperation,
 		mutationBase,
 		audioValidationProof,
+		map[string]any{
+			"applied_operation": appliedOperation,
+			"changed_targets":   changedTargets,
+			"coordinate_effect": coordinateEffect,
+		},
 	)
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	if result.Data == nil {
-		result.Data = map[string]any{}
-	}
-	if result.Status == string(rushestools.StatusSucceeded) {
+	if result.Status == string(rushestools.StatusSucceeded) && admission != nil {
 		admission.recordSuccess(draftID, appliedOperation)
 	}
-	result.Data["previous_timeline_id"] = previousTimelineID
-	if _, present := result.Data["timeline_id"]; !present {
-		result.Data["timeline_id"] = document.TimelineID
-	}
-	if result.Status == string(rushestools.StatusFailed) {
-		result.Data["failed_operation"] = appliedOperation
-	} else {
-		result.Data["applied_operation"] = appliedOperation
-		result.Data["changed_targets"] = changedTargets
-		result.Data["coordinate_effect"] = coordinateEffect
-		result.Data["validation_summary"] = result.Data["validation_report"]
-	}
+	// persistTimelineFromSnapshotWithPreservedAudioAndResultData already built
+	// and durably receipted the exact terminal payload returned here. Never add
+	// model-visible fields after the reducer commit, or a crash replay could
+	// observe weaker coordinate facts than the original call.
 	return result, nil
 }
 
@@ -593,6 +584,21 @@ func (exec *Executor) persistTimelineFromSnapshotWithPreservedAudio(
 	base timelineMutationBase,
 	preservedAudio map[string]timeline.Track,
 ) (rushestools.ToolResult, error) {
+	return exec.persistTimelineFromSnapshotWithPreservedAudioAndResultData(
+		ctx, draftID, document, operation, editOperation, base, preservedAudio, nil,
+	)
+}
+
+func (exec *Executor) persistTimelineFromSnapshotWithPreservedAudioAndResultData(
+	ctx context.Context,
+	draftID string,
+	document timeline.Document,
+	operation string,
+	editOperation map[string]any,
+	base timelineMutationBase,
+	preservedAudio map[string]timeline.Track,
+	resultData map[string]any,
+) (rushestools.ToolResult, error) {
 	if document.Version != base.timelineVersion+1 {
 		return rushestools.ToolResult{}, fmt.Errorf(
 			"timeline snapshot version mismatch: base=%d attempted=%d",
@@ -634,6 +640,52 @@ func (exec *Executor) persistTimelineFromSnapshotWithPreservedAudio(
 	if base.timelineVersion > 0 {
 		timelinePayload["parent_version"] = base.timelineVersion
 	}
+	// Build the exact terminal proof before opening the reducer transaction so
+	// a successful mutation can persist the same result atomically. A process
+	// crash after commit can then reuse this receipt without creating vN+2.
+	structuralValid, _ := reportMap["structural_valid"].(bool)
+	status := string(rushestools.StatusSucceeded)
+	if !structuralValid {
+		status = string(rushestools.StatusValidationFailed)
+	}
+	toolResult := rushestools.ToolResult{
+		Status: status, Observation: timeline.Inspect(document),
+		Data: map[string]any{
+			"timeline_id":          document.TimelineID,
+			"timeline_version":     document.Version,
+			"before_version":       base.timelineVersion,
+			"after_version":        document.Version,
+			"previous_timeline_id": base.timelineID,
+			"validation_report":    reportMap,
+			"beat_alignment":       BeatAlignmentData(document),
+		},
+	}
+	if resultData != nil {
+		for key, value := range resultData {
+			toolResult.Data[key] = value
+		}
+		toolResult.Data["validation_summary"] = reportMap
+	}
+	if contractReport, hasContract := reportMap["content_contract"].(ContractVerificationReport); hasContract {
+		failures := ContractFailureItems(contractReport)
+		if len(failures) > 0 {
+			encoded, _ := json.Marshal(failures)
+			toolResult.Observation += " 验收合同未通过项：" + string(encoded)
+			toolResult.Data["contract_failures"] = failures
+		}
+	}
+	receipt, err := timelineMutationReceipt(ctx, draftID, base, document, toolResult)
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	var writeAdmission *reducer.TimelineWriteAdmission
+	if origin == "manual" {
+		writeAdmission = &reducer.TimelineWriteAdmission{Origin: "manual"}
+	} else if admission, ok := rushestools.TimelineWriteAdmissionFromContext(ctx); ok {
+		writeAdmission = &reducer.TimelineWriteAdmission{
+			Origin: "agent", TurnID: admission.TurnID, LeaseToken: admission.LeaseToken,
+		}
+	}
 	result, err := reducer.Apply(ctx, exec.database, []contracts.Event{
 		{
 			Type: "TimelineVersionCreated", DraftID: draftID,
@@ -643,8 +695,14 @@ func (exec *Executor) persistTimelineFromSnapshotWithPreservedAudio(
 			Type: validationType, DraftID: draftID,
 			Payload: map[string]any{"timeline_version": document.Version, "validation_report": reportMap},
 		},
-	}, reducer.Options{Actor: actor, BaseVersion: &base.stateVersion})
+	}, reducer.Options{
+		Actor: actor, BaseVersion: &base.stateVersion, TimelineWriteAdmission: writeAdmission,
+		ResultRows: reducer.ResultRows{AgentToolReceipt: receipt},
+	})
 	if err != nil {
+		if errors.Is(err, storage.ErrAgentEditLeaseLost) {
+			rushestools.NotifyTimelineWriteLeaseLost(ctx, err)
+		}
 		return rushestools.ToolResult{}, err
 	}
 	if result.Status == reducer.StatusVersionConflict {
@@ -658,27 +716,7 @@ func (exec *Executor) persistTimelineFromSnapshotWithPreservedAudio(
 	// 原子编辑已经在同一事务内提交。内容合同描述整条成片距离目标的差距，不能把
 	// 一次结构合法、已落库的原子写入伪装成工具执行失败，否则 ReAct 会重试并重复
 	// 修改时间线。draft 的 TimelineValidated 仍由上面的整体 valid 决定，最终
-	// timeline.check / render.start 也仍会因合同未通过而拒绝成功。
-	structuralValid, _ := reportMap["structural_valid"].(bool)
-	status := "succeeded"
-	if !structuralValid {
-		status = "validation_failed"
-	}
-	toolResult := rushestools.ToolResult{
-		Status: status, Observation: timeline.Inspect(document),
-		Data: map[string]any{
-			"validation_report": reportMap,
-			"beat_alignment":    BeatAlignmentData(document),
-		},
-	}
-	if contractReport, hasContract := reportMap["content_contract"].(ContractVerificationReport); hasContract {
-		failures := ContractFailureItems(contractReport)
-		if len(failures) > 0 {
-			encoded, _ := json.Marshal(failures)
-			toolResult.Observation += " 验收合同未通过项：" + string(encoded)
-			toolResult.Data["contract_failures"] = failures
-		}
-	}
+	// timeline.check / preview.generate 也仍会因合同未通过而拒绝成功。
 	return toolResult, nil
 }
 

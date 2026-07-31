@@ -37,4 +37,14 @@ describe("timeline patch error details", () => {
 
     expect(timelinePatchPartialFailure(error)).toBeNull();
   });
+
+  it("人工写入撞上 Agent 编辑租约时显示可行动的中文提示", () => {
+    const error = new ApiError(409, "API 请求失败：409", {
+      detail: { reason: "timeline_locked_by_agent" }
+    });
+
+    expect(timelinePatchErrorMessage(error)).toBe(
+      "Agent 正在编辑，请等待本轮结束后再修改时间线。"
+    );
+  });
 });

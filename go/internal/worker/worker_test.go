@@ -298,7 +298,11 @@ func TestRunnerRetriesRenderThenEmitsSingleSuccess(t *testing.T) {
 		if calls == 1 {
 			return nil, context.DeadlineExceeded
 		}
-		return map[string]any{"ok": true}, nil
+		return map[string]any{
+			"artifact_id": "preview_job_retry", "timeline_version": 1,
+			"object_hash": strings.Repeat("a", 64), "object_size": 1,
+			"quality": map[string]any{"profile": "preview"},
+		}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -665,6 +669,196 @@ func TestRunnerRecoversAfterTransientTerminalEventWriteFailure(t *testing.T) {
 	}
 }
 
+func TestRenderArtifactAndJobSuccessCommitAtomicallyAcrossRecovery(t *testing.T) {
+	for _, test := range []struct {
+		kind          string
+		artifactEvent string
+		artifactTable string
+		artifactIDCol string
+	}{
+		{kind: "render_preview", artifactEvent: "PreviewRendered", artifactTable: "previews", artifactIDCol: "preview_id"},
+		{kind: "render_final", artifactEvent: "ExportCompleted", artifactTable: "exports", artifactIDCol: "export_id"},
+	} {
+		t.Run(test.kind, func(t *testing.T) {
+			database := testDatabase(t)
+			now := time.Date(2026, 7, 31, 18, 0, 0, 0, time.UTC)
+			draftID := "draft_atomic_" + test.kind
+			jobID := "job_atomic_" + test.kind
+			objectHash := strings.Repeat("a", 63) + map[string]string{
+				"render_preview": "1", "render_final": "2",
+			}[test.kind]
+			createDraft(t, database, draftID, now)
+			apply(t, database, []contracts.Event{{
+				Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
+					"job_id": jobID, "kind": test.kind,
+					"requested_by_draft_id": draftID, "idempotency_key": jobID,
+					"max_retries": 1, "next_run_at": now.Format(time.RFC3339Nano),
+				},
+			}}, contracts.ActorJob, now)
+
+			registry := NewRegistry()
+			calls := 0
+			artifactIDs := []string{}
+			var terminalPayload map[string]any
+			if err := registry.Register(test.kind, func(
+				_ context.Context,
+				job Job,
+				_ ProgressReporter,
+			) (map[string]any, error) {
+				calls++
+				terminalPayload = map[string]any{
+					"artifact_id": renderArtifactID(job), "timeline_version": 1,
+					"object_hash": objectHash, "object_size": 42,
+					"quality": map[string]any{"profile": test.kind},
+					"profile": test.kind, "orientation": "auto",
+				}
+				artifactIDs = append(artifactIDs, terminalPayload["artifact_id"].(string))
+				return terminalPayload, nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			clock := now
+			runner, err := NewRunner(RunnerConfig{
+				Database: database, Registry: registry, WorkerID: "atomic-worker",
+				HeartbeatInterval: 10 * time.Second, HeartbeatTimeout: time.Minute,
+				Now: func() time.Time { return clock },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.Write().ExecContext(t.Context(), `
+				CREATE TRIGGER fail_atomic_render_terminal
+				BEFORE INSERT ON event_log WHEN NEW.event_type='JobSucceeded'
+				BEGIN SELECT RAISE(ABORT,'transient render terminal failure'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if worked, runErr := runner.RunOnce(t.Context()); runErr == nil || !worked ||
+				!strings.Contains(runErr.Error(), "transient render terminal failure") {
+				t.Fatalf("first worked=%v err=%v", worked, runErr)
+			}
+			assertRenderTerminalCounts(
+				t, database, test.artifactTable, test.artifactIDCol,
+				artifactIDs[0], objectHash, test.artifactEvent, jobID, 0,
+			)
+			stored, err := GetJob(t.Context(), database, jobID)
+			if err != nil || stored.Status != "running" {
+				t.Fatalf("failed atomic commit job=%#v err=%v", stored, err)
+			}
+
+			if _, err := database.Write().ExecContext(t.Context(), "DROP TRIGGER fail_atomic_render_terminal"); err != nil {
+				t.Fatal(err)
+			}
+			recoveryAt := now.Add(2 * time.Minute)
+			if recovered, err := RecoverStale(t.Context(), database, recoveryAt, time.Minute); err != nil || recovered != 1 {
+				t.Fatalf("recovered=%d err=%v", recovered, err)
+			}
+			clock = recoveryAt.Add(2 * time.Second)
+			if worked, err := runner.RunOnce(t.Context()); err != nil || !worked {
+				t.Fatalf("replayed worked=%v err=%v", worked, err)
+			}
+			if calls != 2 || len(artifactIDs) != 2 || artifactIDs[0] != artifactIDs[1] {
+				t.Fatalf("render calls=%d artifact_ids=%v", calls, artifactIDs)
+			}
+			assertRenderTerminalCounts(
+				t, database, test.artifactTable, test.artifactIDCol,
+				artifactIDs[0], objectHash, test.artifactEvent, jobID, 1,
+			)
+			stored, err = GetJob(t.Context(), database, jobID)
+			if err != nil || stored.Status != "succeeded" || stored.Attempts != 1 {
+				t.Fatalf("recovered atomic commit job=%#v err=%v", stored, err)
+			}
+			if err := runner.emitTerminal(
+				t.Context(), stored, "JobSucceeded", terminalPayload, nil,
+			); !errors.Is(err, reducer.ErrJobClaimLost) {
+				t.Fatalf("same job terminal replay err=%v", err)
+			}
+			assertRenderTerminalCounts(
+				t, database, test.artifactTable, test.artifactIDCol,
+				artifactIDs[0], objectHash, test.artifactEvent, jobID, 1,
+			)
+		})
+	}
+}
+
+func TestRenderTerminalClaimLossRollsBackArtifactAndSuccess(t *testing.T) {
+	database := testDatabase(t)
+	now := time.Date(2026, 7, 31, 19, 0, 0, 0, time.UTC)
+	const (
+		draftID = "draft_render_terminal_claim_loss"
+		jobID   = "job_render_terminal_claim_loss"
+	)
+	createDraft(t, database, draftID, now)
+	apply(t, database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: draftID, Payload: map[string]any{
+			"job_id": jobID, "kind": "render_final", "requested_by_draft_id": draftID,
+			"idempotency_key": jobID, "max_retries": 1,
+			"next_run_at": now.Format(time.RFC3339Nano),
+		},
+	}}, contracts.ActorJob, now)
+	stale, err := Claim(t.Context(), database, "stale-render-worker", now)
+	if err != nil || stale == nil {
+		t.Fatalf("stale claim=%#v err=%v", stale, err)
+	}
+	if scheduled, err := ScheduleRetry(t.Context(), database, *stale, now, nil); err != nil || !scheduled {
+		t.Fatalf("schedule replacement=%v err=%v", scheduled, err)
+	}
+	replacement, err := Claim(t.Context(), database, "replacement-render-worker", now.Add(2*time.Second))
+	if err != nil || replacement == nil {
+		t.Fatalf("replacement claim=%#v err=%v", replacement, err)
+	}
+	objectHash := strings.Repeat("b", 64)
+	payload := map[string]any{
+		"artifact_id": renderArtifactID(*stale), "timeline_version": 1,
+		"object_hash": objectHash, "object_size": 42,
+		"quality": map[string]any{"profile": "final"},
+		"profile": "final", "orientation": "auto",
+	}
+	runner := &Runner{database: database, now: func() time.Time { return now }}
+	if err := runner.emitTerminal(
+		t.Context(), *stale, "JobSucceeded", payload, nil,
+	); !errors.Is(err, reducer.ErrJobClaimLost) {
+		t.Fatalf("stale terminal err=%v", err)
+	}
+	assertRenderTerminalCounts(
+		t, database, "exports", "export_id", payload["artifact_id"].(string),
+		objectHash, "ExportCompleted", jobID, 0,
+	)
+	stored, err := GetJob(t.Context(), database, jobID)
+	if err != nil || stored.Status != "running" || !sameClaim(stored, *replacement) {
+		t.Fatalf("replacement overwritten job=%#v err=%v", stored, err)
+	}
+}
+
+func assertRenderTerminalCounts(
+	t *testing.T,
+	database *storage.DB,
+	artifactTable, artifactIDColumn, artifactID, objectHash, artifactEvent, jobID string,
+	want int,
+) {
+	t.Helper()
+	queries := []struct {
+		query string
+		args  []any
+	}{
+		{query: fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s=?", artifactTable, artifactIDColumn), args: []any{artifactID}},
+		{query: "SELECT COUNT(*) FROM objects WHERE hash=?", args: []any{objectHash}},
+		{query: "SELECT COUNT(*) FROM event_log WHERE event_type=? AND json_extract(payload_json,'$.payload.artifact_id')=?", args: []any{artifactEvent, artifactID}},
+		{query: "SELECT COUNT(*) FROM event_log WHERE event_type='JobSucceeded' AND json_extract(payload_json,'$.payload.job_id')=?", args: []any{jobID}},
+	}
+	for _, check := range queries {
+		var count int
+		if err := database.Read().QueryRowContext(t.Context(), check.query, check.args...).Scan(&count); err != nil || count != want {
+			t.Fatalf("count=%d want=%d err=%v query=%s", count, want, err, check.query)
+		}
+	}
+	var observations int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM agent_job_observations WHERE job_id=?`, jobID,
+	).Scan(&observations); err != nil || observations != 0 {
+		t.Fatalf("agent job observations=%d err=%v", observations, err)
+	}
+}
+
 func TestIngestHandlerProducesProbeThumbnailProxyAndProgress(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg 未安装")
@@ -824,10 +1018,10 @@ func TestRenderWorkerCreatesPreviewWithRenderSnapshot(t *testing.T) {
 	}
 	documentMap, _ := timeline.ToMap(document)
 	base := 0
-	apply(t, database, []contracts.Event{{
+	applyManualTimeline(t, database, []contracts.Event{{
 		Type: "TimelineVersionCreated", DraftID: "draft_render", BaseVersion: &base,
 		Payload: map[string]any{"timeline_version": 1, "document_json": documentMap},
-	}}, contracts.ActorAgent, now)
+	}}, now)
 	base = 1
 	apply(t, database, []contracts.Event{{
 		Type: "TimelineValidated", DraftID: "draft_render", BaseVersion: &base,
@@ -849,10 +1043,10 @@ func TestRenderWorkerCreatesPreviewWithRenderSnapshot(t *testing.T) {
 	if err := database.Read().QueryRowContext(t.Context(), "SELECT state_version FROM drafts WHERE draft_id='draft_render'").Scan(&base); err != nil {
 		t.Fatal(err)
 	}
-	apply(t, database, []contracts.Event{{
+	applyManualTimeline(t, database, []contracts.Event{{
 		Type: "TimelineVersionCreated", DraftID: "draft_render", BaseVersion: &base,
 		Payload: map[string]any{"timeline_version": 2, "document_json": documentMap},
-	}}, contracts.ActorAgent, now)
+	}}, now)
 	registry := NewRegistry()
 	if err := RegisterRender(registry, database); err != nil {
 		t.Fatal(err)
@@ -954,7 +1148,7 @@ func TestUnderstandHandlerCompletesSingleAssetAndRejectsBatchShape(t *testing.T)
 		progressUpdates = append(progressUpdates, update)
 		return nil
 	})
-	if err != nil || result["status"] != "completed" || result["asset_id"] != assetID ||
+	if err != nil || result["status"] != "succeeded" || result["asset_id"] != assetID ||
 		result["analyzed"] != true || len(progress) == 0 || progress[len(progress)-1] != 1 {
 		t.Fatalf("result=%#v progress=%v err=%v", result, progress, err)
 	}
@@ -1074,7 +1268,7 @@ func TestUnderstandRetryAfterProgressFailureIsExactlyOnce(t *testing.T) {
 		retryProgress = append(retryProgress, update.Progress)
 		return nil
 	})
-	if err != nil || retryResult["status"] != "completed" ||
+	if err != nil || retryResult["status"] != "succeeded" ||
 		len(retryProgress) < 2 || retryProgress[len(retryProgress)-1] != 1 ||
 		retryResult["asset_id"] != assetID || retryResult["analyzed"] != true ||
 		retryResult["cache_hit"] != false {
@@ -1863,9 +2057,9 @@ func TestWorkerHandlerFailureSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := 0
-	apply(t, database, []contracts.Event{{Type: "TimelineVersionCreated", DraftID: draftID, BaseVersion: &base, Payload: map[string]any{
+	applyManualTimeline(t, database, []contracts.Event{{Type: "TimelineVersionCreated", DraftID: draftID, BaseVersion: &base, Payload: map[string]any{
 		"timeline_version": 1, "document_json": documentMap,
-	}}}, contracts.ActorAgent, now)
+	}}}, now)
 	if _, err := renderHandler(database, false)(t.Context(), Job{DraftID: &draftID, Payload: map[string]any{"timeline_version": 1}}, func(context.Context, Job, ProgressUpdate) error { return reportErr }); !errors.Is(err, reportErr) {
 		t.Fatalf("render report err=%v", err)
 	}
@@ -2031,5 +2225,21 @@ func apply(
 	result, err := reducer.Apply(t.Context(), database, events, reducer.Options{Actor: actor, CreatedAt: now})
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("apply status=%s err=%v result=%#v", result.Status, err, result)
+	}
+}
+
+func applyManualTimeline(
+	t *testing.T,
+	database *storage.DB,
+	events []contracts.Event,
+	now time.Time,
+) {
+	t.Helper()
+	result, err := reducer.Apply(t.Context(), database, events, reducer.Options{
+		Actor: contracts.ActorUser, CreatedAt: now,
+		TimelineWriteAdmission: &reducer.TimelineWriteAdmission{Origin: "manual", Now: now},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("manual timeline apply status=%s err=%v result=%#v", result.Status, err, result)
 	}
 }

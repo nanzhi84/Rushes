@@ -281,6 +281,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/drafts/{draft_id}/exports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List User Exports */
+        get: operations["list_user_exports_api_drafts__draft_id__exports_get"];
+        put?: never;
+        /** Create User Export */
+        post: operations["create_user_export_api_drafts__draft_id__exports_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/drafts/{draft_id}/exports/{job_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry User Export */
+        post: operations["retry_user_export_api_drafts__draft_id__exports__job_id__retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/drafts/{draft_id}/previews/{preview_id}/viewed": {
         parameters: {
             query?: never;
@@ -911,6 +946,7 @@ export interface components {
         DraftTimelineResponse: {
             /** Draft Id */
             draft_id: string;
+            edit_lease: components["schemas"]["EditLeaseStatus"];
             /** Preview Id */
             preview_id: string | null;
             /** Summary */
@@ -921,6 +957,15 @@ export interface components {
             };
             /** Timeline Version */
             timeline_version: number;
+        };
+        /** EditLeaseStatus */
+        EditLeaseStatus: {
+            /** Active */
+            active: boolean;
+            /** Expires At */
+            expires_at: string | null;
+            /** Turn Id */
+            turn_id: string | null;
         };
         /** TimelinePatchRequest */
         TimelinePatchRequest: {
@@ -1317,6 +1362,71 @@ export interface components {
              * @enum {string}
              */
             status: "requested" | "idle";
+        };
+        /** UserExportCreateRequest */
+        UserExportCreateRequest: {
+            /**
+             * Orientation
+             * @default auto
+             * @enum {string}
+             */
+            orientation: "auto" | "portrait" | "landscape";
+            /** Timeline Id */
+            timeline_id: string;
+        };
+        /** UserExportFailure */
+        UserExportFailure: {
+            /** Error Code */
+            error_code: string;
+            /** Message */
+            message: string;
+            /** Retryable */
+            retryable: boolean;
+        };
+        /** UserExportRecord */
+        UserExportRecord: {
+            /** Attempts */
+            attempts: number;
+            /** Created At */
+            created_at: string;
+            error?: components["schemas"]["UserExportFailure"];
+            /** Export Id */
+            export_id: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Job Id */
+            job_id: string;
+            /** Max Retries */
+            max_retries: number;
+            /**
+             * Orientation
+             * @enum {string}
+             */
+            orientation: "auto" | "portrait" | "landscape";
+            /** Profile */
+            profile: string | null;
+            /** Progress */
+            progress: number;
+            /** Retry Of Job Id */
+            retry_of_job_id: string | null;
+            /** Retryable */
+            retryable: boolean;
+            /** Started At */
+            started_at: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "running" | "succeeded" | "failed" | "cancelled";
+            /** Timeline Id */
+            timeline_id: string;
+            /** Timeline Version */
+            timeline_version: number;
+        };
+        /** UserExportsResponse */
+        UserExportsResponse: {
+            /** Exports */
+            exports: components["schemas"]["UserExportRecord"][];
         };
         /** ValidationError */
         ValidationError: {
@@ -2797,6 +2907,230 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_user_exports_api_drafts__draft_id__exports_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                draft_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserExportsResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_user_export_api_drafts__draft_id__exports_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                draft_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserExportCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserExportRecord"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Timeline Changed or Agent Editing */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Timeline Validation Failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    retry_user_export_api_drafts__draft_id__exports__job_id__retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                draft_id: string;
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserExportRecord"];
+                };
+            };
+            /** @description Unauthorized */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Not Retryable */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Unsupported Media Type */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SecurityRefusalResponse"];
+                };
+            };
+            /** @description Timeline Validation Failed */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

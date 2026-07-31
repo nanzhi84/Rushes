@@ -39,6 +39,7 @@ type MockTimelineProps = {
   onSeek?: (sec: number) => void;
   editMode?: string;
   dropMode?: "insert" | "overwrite";
+  editing?: boolean;
   onClipClick?: (clipId: string) => void;
   onDeselect?: () => void;
   onZoomChange?: (pxPerSec: number) => void;
@@ -960,7 +961,7 @@ describe("DraftEditorView", () => {
     expect(screen.getByText(/00:00/)).toBeTruthy();
   });
 
-  it("JobProgress SSE 显示素材明细并可取消当前 job", async () => {
+  it("Agent 不再消费后台 job 观察事件，进度与取消不会进入对话区", async () => {
     const fetchMock = mockFetch({ decision: null });
     renderEditor(fetchMock);
 
@@ -968,38 +969,13 @@ describe("DraftEditorView", () => {
       draftEventsSource().emit("JobProgress", jobProgressPayload(0.42));
     });
 
-    const progress = await screen.findByRole("progressbar", { name: "理解素材 进度" });
-    expect(progress.getAttribute("aria-valuenow")).toBe("42");
-    expect(screen.getByText("理解素材：采访.mp4 正在调用 VLM")).toBeTruthy();
-
-    act(() => {
-      draftEventsSource().emit("JobProgress", jobProgressPayload(0.8));
+    await waitFor(() => {
+      expect(screen.queryByRole("progressbar", { name: "理解素材 进度" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "取消理解素材" })).toBeNull();
     });
-    await waitFor(() => expect(progress.getAttribute("aria-valuenow")).toBe("80"));
-
-    fireEvent.click(screen.getByRole("button", { name: "取消理解素材" }));
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        "/api/jobs/job_1/cancel",
-        expect.objectContaining({ method: "POST" })
-      )
-    );
-    await screen.findByText("已取消");
-    expect(screen.queryByRole("button", { name: "取消理解素材" })).toBeNull();
-  });
-
-  it.each([
-    ["conflict", "任务状态已变化，无法取消；已刷新当前状态。"],
-    ["network", "取消任务失败：网络不可用"]
-  ] as const)("job 取消失败会显示错误：%s", async (cancelFailure, message) => {
-    const fetchMock = mockFetch({ decision: null, cancelFailure });
-    renderEditor(fetchMock);
-    act(() => {
-      draftEventsSource().emit("JobProgress", jobProgressPayload(0.42));
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "取消理解素材" }));
-    expect((await screen.findByRole("alert")).textContent).toContain(message);
-    expect(screen.getByRole("button", { name: "取消理解素材" })).toBeTruthy();
+    expect(
+      vi.mocked(fetchMock).mock.calls.some(([input]) => String(input) === "/api/jobs/job_1/cancel")
+    ).toBe(false);
   });
 
   it("未知 kind 渲染 JSON 兜底", () => {
@@ -1109,15 +1085,10 @@ describe("DraftEditorView", () => {
     expect(after).toEqual([]);
   });
 
-  it("events 到渲染条目的纯函数会按 job_id 合并进度并保留未知事件", () => {
+  it("events 到渲染条目的纯函数会忽略后台 job 观察并保留未知事件", () => {
     const first = reduceStructuredInteractionItems([], jobProgressPayload(0.2));
     const second = reduceStructuredInteractionItems(first, jobProgressPayload(0.75));
-    expect(second).toHaveLength(1);
-    expect(second[0]).toMatchObject({
-      kind: "progress",
-      job_id: "job_1",
-      progress: 75
-    });
+    expect(second).toEqual([]);
 
     const unknown = itemFromEvent({
       event_id: 99,
@@ -1150,27 +1121,19 @@ describe("DraftEditorView", () => {
     expect(items).toHaveLength(0);
   });
 
-  it("白名单 job（understand）产进度行且文案按 kind 给中文名", () => {
+  it("understand job 也由同次工具调用收敛，不在对话区产进度行", () => {
     const items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "understand"));
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ kind: "progress", job_id: "job_1", job_kind: "理解素材" });
+    expect(items).toEqual([]);
   });
 
-  it("同一 job 的 queued→running→succeeded 合并进一行并流转到完成态", () => {
-    // 三种事件的 job 标识都取顶层 event.job_id（这里都是 job_1），必须合并进同一行。
+  it("后台 job 的 queued→running→succeeded 全程不进入 Agent 对话区", () => {
     let items = reduceStructuredInteractionItems([], jobEventPayload("JobEnqueued", "understand"));
-    expect(items).toMatchObject([{ kind: "progress", job_id: "job_1", status: "queued" }]);
-
     items = reduceStructuredInteractionItems(items, jobProgressPayload(0.5));
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ job_id: "job_1", status: "running", progress: 50 });
-
     items = reduceStructuredInteractionItems(items, jobEventPayload("JobSucceeded", "understand"));
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ job_id: "job_1", status: "succeeded" });
+    expect(items).toEqual([]);
   });
 
-  it("同类并发渲染 job 独立显示并取消各自的 job_id", () => {
+  it("并发 preview job 不再进入对话区，最终导出状态由专用控件承载", () => {
     let items = reduceStructuredInteractionItems(
       [],
       jobEventPayload("JobEnqueued", "render_preview", "job_preview_1")
@@ -1179,29 +1142,7 @@ describe("DraftEditorView", () => {
       items,
       jobEventPayload("JobEnqueued", "render_preview", "job_preview_2")
     );
-
-    expect(items).toMatchObject([
-      { kind: "progress", job_id: "job_preview_1", job_kind: "渲染预览", status: "queued" },
-      { kind: "progress", job_id: "job_preview_2", job_kind: "渲染预览", status: "queued" }
-    ]);
-
-    const onCancelJob = vi.fn();
-    render(
-      <>
-        {items.map((item) => (
-          <StructuredInteractionRenderer
-            key={item.id}
-            item={item}
-            onAnswerDecision={vi.fn()}
-            onCancelJob={onCancelJob}
-          />
-        ))}
-      </>
-    );
-    const cancelButtons = screen.getAllByRole("button", { name: "取消渲染预览" });
-    fireEvent.click(cancelButtons[0]);
-    fireEvent.click(cancelButtons[1]);
-    expect(onCancelJob.mock.calls).toEqual([["job_preview_1"], ["job_preview_2"]]);
+    expect(items).toEqual([]);
   });
 
   it("进度行终态 succeeded 显示已完成而非停在处理中", () => {
@@ -1237,6 +1178,18 @@ describe("DraftEditorView", () => {
       const latestPreviewProps = consoleComponentMocks.previewProps.at(-1);
       expect(latestPreviewProps?.seekSec).toBe(2.5);
     });
+  });
+
+  it("服务端 Agent 编辑租约会禁用人工编辑与最终导出", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true, editLease: true });
+    renderEditor(fetchMock);
+
+    await screen.findByTestId("mock-timeline-seek");
+    expect(consoleComponentMocks.timelineProps.at(-1)?.editing).toBe(true);
+    expect(screen.getByText("Agent 正在编辑")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "导出 v1" }) as HTMLButtonElement).disabled).toBe(
+      true
+    );
   });
 
   it("时间线工具切换到刀片模式，并把分割操作提交到 patch API", async () => {
@@ -1464,7 +1417,8 @@ function mockFetch({
   costs,
   cancelFailure,
   rewoundMessageCount = 0,
-  onResend
+  onResend,
+  editLease = false
 }: {
   decision: Decision | null;
   timeline?: boolean;
@@ -1475,6 +1429,7 @@ function mockFetch({
   cancelFailure?: "conflict" | "network";
   rewoundMessageCount?: number;
   onResend?: (url: string, body: unknown) => void;
+  editLease?: boolean;
 }): FetchMock {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -1499,7 +1454,10 @@ function mockFetch({
       });
     }
     if (url.startsWith("/api/drafts/draft_1/timeline")) {
-      return jsonResponse(timelineResponseFixture());
+      return jsonResponse(timelineResponseFixture(editLease));
+    }
+    if (url === "/api/drafts/draft_1/exports") {
+      return jsonResponse({ exports: [] });
     }
     if (url.endsWith("/decisions/current")) {
       return jsonResponse({ decision });
@@ -1597,13 +1555,21 @@ function manualPatchOperations(fetchMock: FetchMock): Record<string, unknown>[] 
     });
 }
 
-function timelineResponseFixture() {
+function timelineResponseFixture(editLease = false) {
   return {
     draft_id: "draft_1",
     timeline_version: 1,
     summary: "首版粗剪",
     preview_id: "prev_1",
+    edit_lease: {
+      active: editLease,
+      turn_id: editLease ? "turn_agent" : null,
+      expires_at: editLease ? "2026-07-31T00:01:00Z" : null
+    },
     timeline: {
+      timeline_id: "draft_1:v1",
+      draft_id: "draft_1",
+      version: 1,
       fps: 30,
       duration_frames: 90,
       tracks: [

@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 19
+const schemaVersion = 21
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -472,3 +472,76 @@ const schemaV18 = `ALTER TABLE assets ADD COLUMN peaks_object_hash TEXT REFERENC
 // resend re-renders the exact same "retract these memories" card. Historical rows
 // stay NULL and read back as an empty list.
 const schemaV19 = `ALTER TABLE rewind_restore_requests ADD COLUMN affected_memories_json TEXT`
+
+// schemaV20 gives one Agent turn exclusive ownership of timeline mutations while
+// it edits or validates a preview. Lease timestamps are fixed-width UTC strings,
+// so ordinary SQLite lexical comparison preserves chronological order.
+const schemaV20 = `
+CREATE TABLE IF NOT EXISTS agent_edit_leases (
+    draft_id TEXT PRIMARY KEY REFERENCES drafts(draft_id) ON DELETE CASCADE,
+    turn_id TEXT NOT NULL,
+    lease_token TEXT NOT NULL UNIQUE,
+    acquired_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_agent_edit_leases_expiry
+ON agent_edit_leases(expires_at);
+`
+
+// schemaV21 persists only the crash-safety boundary required for Agent turns:
+// a turn lifecycle marker and one terminal receipt per timeline tool call. It
+// deliberately does not persist model tokens or a resumable workflow frame.
+// Historical synthetic observations are terminally suppressed during upgrade.
+const schemaV21 = `
+CREATE TABLE IF NOT EXISTS agent_turn_runs (
+    turn_id TEXT PRIMARY KEY,
+    draft_id TEXT NOT NULL REFERENCES drafts(draft_id) ON DELETE CASCADE,
+    source_item_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+        'running','finished','waiting_user','cancelled','failed','timeout','lease_lost','interrupted'
+    )),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    UNIQUE(draft_id, source_item_id, kind)
+);
+
+CREATE INDEX IF NOT EXISTS ix_agent_turn_runs_status
+ON agent_turn_runs(status, started_at);
+
+CREATE TABLE IF NOT EXISTS agent_tool_receipts (
+    invocation_key TEXT PRIMARY KEY,
+    draft_id TEXT NOT NULL REFERENCES drafts(draft_id) ON DELETE CASCADE,
+    source_message_id TEXT NOT NULL,
+    turn_id TEXT NOT NULL REFERENCES agent_turn_runs(turn_id) ON DELETE CASCADE,
+    tool_call_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    argument_fingerprint TEXT NOT NULL,
+    before_timeline_id TEXT,
+    before_version INTEGER NOT NULL CHECK(before_version >= 0),
+    after_timeline_id TEXT NOT NULL,
+    after_version INTEGER NOT NULL CHECK(after_version >= 1),
+    terminal_status TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(turn_id, tool_call_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_agent_tool_receipts_source
+ON agent_tool_receipts(draft_id, source_message_id, created_at);
+
+INSERT OR IGNORE INTO agent_job_observation_suppressions(job_id,created_at)
+SELECT job_id,COALESCE(delivered_at,created_at)
+FROM agent_job_observations WHERE delivered_at IS NULL;
+
+UPDATE agent_job_observations
+SET delivered_at=COALESCE(delivered_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+WHERE delivered_at IS NULL;
+
+UPDATE agent_job_bridge_state
+SET last_event_id=(SELECT COALESCE(MAX(event_id),0) FROM event_log),
+    updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE consumer_id='agent';
+`

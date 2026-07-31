@@ -5,11 +5,7 @@
     "render_preview",
     "understand"
   ],
-  "agent_waited": [
-    "render_final",
-    "render_preview",
-    "understand"
-  ],
+  "agent_waited": [],
   "execution_classes": {
     "general": [
       "ingest",
@@ -20,9 +16,5 @@
       "render_preview"
     ]
   },
-  "progress_labels": {
-    "render_final": "渲染成片",
-    "render_preview": "渲染预览",
-    "understand": "理解素材"
-  }
+  "progress_labels": {}
 }

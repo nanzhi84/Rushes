@@ -14,9 +14,9 @@ const (
 	StatusSucceeded        ToolStatus = "succeeded"
 	StatusFailed           ToolStatus = "failed"
 	StatusValidationFailed ToolStatus = "validation_failed"
-	StatusWaiting          ToolStatus = "waiting"
-	// StatusQueued 只经 render 透传路径产生（pending/running 归一），列此备查，不强制迁移。
-	StatusQueued ToolStatus = "queued"
+	StatusCancelled        ToolStatus = "cancelled"
+	StatusTimeout          ToolStatus = "timeout"
+	StatusWaiting          ToolStatus = "waiting_user"
 )
 
 // ToolErrorCode 是工具失败分类的中央枚举与唯一事实源。
@@ -27,8 +27,11 @@ const (
 	ErrCodeUnknownTool             ToolErrorCode = "unknown_tool"
 	ErrCodeFailureSerialization    ToolErrorCode = "failure_serialization_error"
 	ErrCodeToolExecutionError      ToolErrorCode = "tool_execution_error"
+	ErrCodeToolValidationFailed    ToolErrorCode = "tool_validation_failed"
+	ErrCodeToolCancelled           ToolErrorCode = "tool_cancelled"
 	ErrCodeDuplicateFailedToolCall ToolErrorCode = "duplicate_failed_tool_call"
 	ErrCodeToolRecoveryExhausted   ToolErrorCode = "tool_recovery_exhausted"
+	ErrCodeToolTimeout             ToolErrorCode = "tool_timeout"
 	// ErrCodeToolNotInSurface 由 #141 动态工具面拦截器产出。
 	ErrCodeToolNotInSurface ToolErrorCode = "tool_not_in_surface"
 	// ErrCodeConfirmationRequired 由 #128 的破坏性强制确认拦截器产出。
@@ -88,8 +91,11 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodeUnknownTool,
 	ErrCodeFailureSerialization,
 	ErrCodeToolExecutionError,
+	ErrCodeToolValidationFailed,
+	ErrCodeToolCancelled,
 	ErrCodeDuplicateFailedToolCall,
 	ErrCodeToolRecoveryExhausted,
+	ErrCodeToolTimeout,
 	ErrCodeToolNotInSurface,
 	ErrCodeConfirmationRequired,
 	ErrCodeInvalidConfirmationTarget,
@@ -135,7 +141,7 @@ var registeredToolErrorCodes = func() map[ToolErrorCode]struct{} {
 }()
 
 var allToolStatuses = []ToolStatus{
-	StatusSucceeded, StatusFailed, StatusValidationFailed, StatusWaiting, StatusQueued,
+	StatusSucceeded, StatusFailed, StatusValidationFailed, StatusCancelled, StatusTimeout, StatusWaiting,
 }
 
 var registeredToolStatuses = func() map[ToolStatus]struct{} {

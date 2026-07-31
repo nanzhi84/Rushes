@@ -829,13 +829,19 @@ func TestLiveWorkflowGateCountsOneModelAttemptAndRequiresSucceededToolResult(t *
 }
 
 type scriptedWorkflowModel struct {
-	calls []schema.ToolCall
-	next  int
+	calls          []schema.ToolCall
+	next           int
+	boundTools     []string
+	beforeGenerate func([]string) error
 }
 
 func (stub *scriptedWorkflowModel) WithTools(
-	[]*schema.ToolInfo,
+	infos []*schema.ToolInfo,
 ) (model.ToolCallingChatModel, error) {
+	stub.boundTools = make([]string, 0, len(infos))
+	for _, info := range infos {
+		stub.boundTools = append(stub.boundTools, info.Name)
+	}
 	return stub, nil
 }
 
@@ -844,6 +850,11 @@ func (stub *scriptedWorkflowModel) Generate(
 	[]*schema.Message,
 	...model.Option,
 ) (*schema.Message, error) {
+	if stub.beforeGenerate != nil {
+		if err := stub.beforeGenerate(append([]string(nil), stub.boundTools...)); err != nil {
+			return nil, err
+		}
+	}
 	if stub.next >= len(stub.calls) {
 		return nil, errors.New("scripted workflow 已耗尽")
 	}
@@ -920,8 +931,9 @@ func TestLiveWorkflowFixturesExecuteThroughRegistryAndMeetFinalPostconditions(t 
 		}
 		scriptedCalls := scriptedLiveWorkflowCalls(t, fixture, name)
 		stub := &scriptedWorkflowModel{calls: scriptedCalls}
+		runContext := withTestTurnLeaseSession(t, service, t.Context(), fixture.DraftID)
 		report := runLiveWorkflowSuite(
-			t.Context(),
+			runContext,
 			service,
 			stub,
 			fixture,
@@ -931,6 +943,115 @@ func TestLiveWorkflowFixturesExecuteThroughRegistryAndMeetFinalPostconditions(t 
 		if !report.Succeeded || !report.FinalStateValid || stub.next != len(scriptedCalls) {
 			t.Fatalf("%s report=%#v calls=%d/%d", name, report, stub.next, len(scriptedCalls))
 		}
+	}
+}
+
+func TestLiveWorkflowRunnerUsesProductionLeaseAndReceiptBoundary(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	prepareLiveWorkflowBeatEnvironment(t)
+	fixture, err := prepareLiveWorkflowFixture(t, service, "initial_composition", 206)
+	if err != nil {
+		t.Fatal(err)
+	}
+	suite, ok := liveWorkflowSuiteByName(liveWorkflowSuites(), "initial_composition")
+	if !ok {
+		t.Fatal("missing initial workflow")
+	}
+	calls := scriptedLiveWorkflowCalls(t, fixture, suite.Name)
+	expectedReceipts := map[string]string{}
+	for _, call := range calls {
+		if isTerminalTimelineMutation(call.Function.Name) {
+			expectedReceipts[call.ID] = call.Function.Name
+		}
+	}
+	if len(expectedReceipts) == 0 {
+		t.Fatal("scripted workflow 缺少 mutation receipt 目标")
+	}
+
+	var turnID, sourceMessageID string
+	sawMutationSurface := false
+	if passed := t.Run("attempt", func(t *testing.T) {
+		runContext := withTestTurnLeaseSession(t, service, t.Context(), fixture.DraftID)
+		leaseSession := timelineEditLeaseSessionFromContext(runContext)
+		turnID, sourceMessageID = rushestools.TurnIdentity(runContext)
+		stub := &scriptedWorkflowModel{calls: calls}
+		stub.beforeGenerate = func(boundTools []string) error {
+			requiresLease := false
+			for _, name := range boundTools {
+				if toolRequiresTimelineEditLease(name) {
+					requiresLease = true
+					break
+				}
+			}
+			if !requiresLease {
+				return nil
+			}
+			sawMutationSurface = true
+			var leaseTurnID string
+			if err := database.Read().QueryRowContext(t.Context(), `
+				SELECT turn_id FROM agent_edit_leases WHERE draft_id=?`, fixture.DraftID,
+			).Scan(&leaseTurnID); err != nil {
+				return fmt.Errorf("provider 看见 mutation surface 前没有 live lease: %w", err)
+			}
+			if leaseTurnID != turnID {
+				return fmt.Errorf("provider lease turn=%s want=%s", leaseTurnID, turnID)
+			}
+			return nil
+		}
+		report := runLiveWorkflowSuite(runContext, service, stub, fixture, suite, 206)
+		if !report.Succeeded || !report.FinalStateValid || stub.next != len(calls) {
+			t.Fatalf("report=%#v calls=%d/%d", report, stub.next, len(calls))
+		}
+		// 与 production runTurn defer 顺序一致，在 turn context 取消前同步释放。
+		leaseSession.close()
+	}); !passed {
+		return
+	}
+	if !sawMutationSurface {
+		t.Fatal("provider 未观察到 mutation surface")
+	}
+
+	var liveLeases int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM agent_edit_leases WHERE draft_id=?", fixture.DraftID,
+	).Scan(&liveLeases); err != nil || liveLeases != 0 {
+		t.Fatalf("cleanup leases=%d err=%v", liveLeases, err)
+	}
+	rows, err := database.Read().QueryContext(t.Context(), `
+		SELECT turn_id,source_message_id,tool_call_id,tool_name,argument_fingerprint
+		FROM agent_tool_receipts WHERE draft_id=? ORDER BY tool_call_id`, fixture.DraftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	seen := map[string]bool{}
+	for rows.Next() {
+		var receiptTurnID, receiptSourceID, callID, toolName, fingerprint string
+		if err := rows.Scan(
+			&receiptTurnID, &receiptSourceID, &callID, &toolName, &fingerprint,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if receiptTurnID != turnID || receiptSourceID != sourceMessageID ||
+			expectedReceipts[callID] != toolName ||
+			!strings.HasPrefix(fingerprint, "sha256:") {
+			t.Fatalf(
+				"receipt turn=%q source=%q call=%q tool=%q fingerprint=%q",
+				receiptTurnID, receiptSourceID, callID, toolName, fingerprint,
+			)
+		}
+		seen[callID] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != len(expectedReceipts) {
+		t.Fatalf("receipts=%v want=%v", seen, expectedReceipts)
 	}
 }
 
@@ -953,7 +1074,8 @@ func TestLiveWorkflowRunnerScoresFinalStateWithoutHiddenStepOrder(t *testing.T) 
 	calls[0], calls[1] = calls[1], calls[0]
 	calls[1].Function.Arguments = `{"only_usable":true}`
 	stub := &scriptedWorkflowModel{calls: calls}
-	report := runLiveWorkflowSuite(t.Context(), service, stub, fixture, suite, 202)
+	runContext := withTestTurnLeaseSession(t, service, t.Context(), fixture.DraftID)
+	report := runLiveWorkflowSuite(runContext, service, stub, fixture, suite, 202)
 	if !report.Succeeded || !report.FinalStateValid || stub.next != len(calls) {
 		t.Fatalf("alternative order report=%#v calls=%d/%d", report, stub.next, len(calls))
 	}
@@ -978,21 +1100,26 @@ func TestLiveWorkflowRunnerRetriesOnlyFailedPrimitive(t *testing.T) {
 	if !ok {
 		t.Fatal("missing initial workflow")
 	}
-	calls := append([]schema.ToolCall{{
+	scripted := scriptedLiveWorkflowCalls(t, fixture, suite.Name)
+	failed := schema.ToolCall{
 		ID: "failed_primitive",
 		Function: schema.FunctionCall{
 			Name: "timeline.insert",
 			Arguments: `{"kind":"insert_clip","asset_id":"missing_asset",` +
 				`"source_start_frame":0,"source_end_frame":60}`,
 		},
-	}}, scriptedLiveWorkflowCalls(t, fixture, suite.Name)...)
+	}
+	calls := append([]schema.ToolCall{}, scripted[:2]...)
+	calls = append(calls, failed)
+	calls = append(calls, scripted[2:]...)
 	stub := &scriptedWorkflowModel{calls: calls}
-	report := runLiveWorkflowSuite(t.Context(), service, stub, fixture, suite, 203)
+	runContext := withTestTurnLeaseSession(t, service, t.Context(), fixture.DraftID)
+	report := runLiveWorkflowSuite(runContext, service, stub, fixture, suite, 203)
 	if !report.Succeeded || !report.FinalStateValid || stub.next != len(calls) {
 		t.Fatalf("retry report=%#v calls=%d/%d", report, stub.next, len(calls))
 	}
-	if len(report.Steps) != len(calls) || report.Steps[0].Succeeded ||
-		report.Steps[0].Error != "" {
+	if len(report.Steps) != len(calls) || report.Steps[2].Succeeded ||
+		report.Steps[2].Error != "" {
 		t.Fatalf("failed primitive trace=%#v", report.Steps)
 	}
 }
@@ -1018,7 +1145,8 @@ func TestLiveWorkflowRunnerAcceptsParallelReadTurn(t *testing.T) {
 		turns = append(turns, []schema.ToolCall{call})
 	}
 	stub := &scriptedWorkflowTurnModel{turns: turns}
-	report := runLiveWorkflowSuite(t.Context(), service, stub, fixture, suite, 204)
+	runContext := withTestTurnLeaseSession(t, service, t.Context(), fixture.DraftID)
+	report := runLiveWorkflowSuite(runContext, service, stub, fixture, suite, 204)
 	if !report.Succeeded || !report.FinalStateValid || stub.next != len(turns) {
 		t.Fatalf("parallel read report=%#v turns=%d/%d", report, stub.next, len(turns))
 	}
@@ -1028,7 +1156,7 @@ func TestLiveWorkflowRunnerAcceptsParallelReadTurn(t *testing.T) {
 	}
 }
 
-func TestLiveWorkflowRunnerRejectsValidFinalStateWithoutRequiredEvidence(t *testing.T) {
+func TestLiveWorkflowRunnerRejectsMutationBeforeRequiredEvidence(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
@@ -1045,25 +1173,18 @@ func TestLiveWorkflowRunnerRejectsValidFinalStateWithoutRequiredEvidence(t *test
 	}
 	scripted := scriptedLiveWorkflowCalls(t, fixture, suite.Name)
 	calls := append([]schema.ToolCall{}, scripted[2:]...)
-	for len(calls) < suite.MaxSteps {
-		calls = append(calls, schema.ToolCall{
-			ID: fmt.Sprintf("missing_evidence_check_%d", len(calls)+1),
-			Function: schema.FunctionCall{
-				Name: "timeline.check", Arguments: `{}`,
-			},
-		})
-	}
 	stub := &scriptedWorkflowModel{calls: calls}
-	report := runLiveWorkflowSuite(t.Context(), service, stub, fixture, suite, 205)
-	if report.Succeeded || !report.FinalStateValid ||
+	runContext := withTestTurnLeaseSession(t, service, t.Context(), fixture.DraftID)
+	report := runLiveWorkflowSuite(runContext, service, stub, fixture, suite, 205)
+	if report.Succeeded || report.FinalStateValid ||
 		!reflect.DeepEqual(
 			report.MissingEvidence,
 			[]string{"asset.list_assets", "shot.search"},
 		) {
 		t.Fatalf("missing evidence gate report=%#v", report)
 	}
-	if !strings.Contains(report.Error, "缺少必需检测/检索证据") {
-		t.Fatalf("missing evidence error=%q", report.Error)
+	if !strings.Contains(report.Error, "已绑定工具面缺少模型选择的 spec: timeline.insert") {
+		t.Fatalf("pre-evidence mutation error=%q", report.Error)
 	}
 }
 
@@ -1213,7 +1334,8 @@ func runLiveWorkflowSuites(
 				})
 				continue
 			}
-			reports = append(reports, runLiveWorkflowSuite(t.Context(), service, chat, fixture, suite, run))
+			runContext := withTestTurnLeaseSession(t, service, t.Context(), fixture.DraftID)
+			reports = append(reports, runLiveWorkflowSuite(runContext, service, chat, fixture, suite, run))
 		}
 	}
 	return reports
@@ -1238,6 +1360,8 @@ func runLiveWorkflowSuite(
 		Steps:              make([]liveWorkflowStepReport, 0, suite.MaxSteps),
 	}
 	ctx := rushestools.WithDraftID(parent, fixture.DraftID)
+	ctx = withModelToolSurfaceSession(ctx)
+	ctx = withToolRecoveryState(ctx, newToolRecoveryState())
 	ctx = agentexec.WithTurnInteractionState(
 		ctx,
 		agentexec.NewTurnInteractionState(service.indexedResources),
@@ -1248,6 +1372,9 @@ func runLiveWorkflowSuite(
 	callOrdinal := 0
 	observedEvidence := map[string]bool{}
 	talkingHeadEvidence := newLiveTalkingHeadEvidenceChain(fixture)
+	receiptMiddleware := newToolRecoveryMiddleware(
+		func(string) bool { return false }, service.tools.ModelReceiptPolicy,
+	)
 	for stepIndex := 0; stepIndex < suite.MaxSteps; stepIndex++ {
 		stepReport := liveWorkflowStepReport{
 			Step: fmt.Sprintf("step_%02d", stepIndex+1),
@@ -1267,6 +1394,22 @@ func runLiveWorkflowSuite(
 			report.Steps = append(report.Steps, stepReport)
 			report.Error = stepReport.Error
 			return report
+		}
+		modelToolSurfaceSessionFromContext(ctx).set(stepReport.BoundTools)
+		if specsRequireTimelineEditLease(selected) {
+			leaseSession := timelineEditLeaseSessionFromContext(ctx)
+			if leaseSession == nil {
+				stepReport.Error = "动态编辑工具面缺少 edit lease session"
+				report.Steps = append(report.Steps, stepReport)
+				report.Error = stepReport.Error
+				return report
+			}
+			if err := leaseSession.ensure(ctx); err != nil {
+				stepReport.Error = "取得 Agent edit lease 失败: " + err.Error()
+				report.Steps = append(report.Steps, stepReport)
+				report.Error = stepReport.Error
+				return report
+			}
 		}
 		bound, err := bindLiveWorkflowTools(ctx, chat, selected)
 		if err != nil {
@@ -1291,9 +1434,10 @@ func runLiveWorkflowSuite(
 			stepReport.Calls = append(stepReport.Calls, liveWorkflowCallReport{
 				Actual: call.Function.Name, Arguments: call.Function.Arguments,
 			})
-			if strings.TrimSpace(call.ID) == "" {
-				call.ID = fmt.Sprintf(
-					"live_%s_%d_%d_%d", suite.Name, run, stepIndex+1, callIndex+1,
+			if err == nil && strings.TrimSpace(call.ID) == "" {
+				err = fmt.Errorf(
+					"模型工具调用[%d] %s 缺少 provider tool_call_id",
+					callIndex, call.Function.Name,
 				)
 			}
 			if containsToolName(retiredLLMToolNames, call.Function.Name) {
@@ -1320,7 +1464,9 @@ func runLiveWorkflowSuite(
 		}
 		var toolMessages []*schema.Message
 		if err == nil {
-			toolMessages, err = invokeLiveWorkflowTools(ctx, service, selected, calls)
+			toolMessages, err = invokeLiveWorkflowTools(
+				ctx, service, selected, calls, receiptMiddleware,
+			)
 		}
 		if err != nil {
 			stepReport.Error = err.Error()
@@ -1506,10 +1652,14 @@ func invokeLiveWorkflowTools(
 	service *Service,
 	specs []rushestools.Spec,
 	calls []schema.ToolCall,
+	middlewares ...compose.ToolMiddleware,
 ) ([]*schema.Message, error) {
 	router, err := newToolRouter(
 		ctx,
-		compose.ToolsNodeConfig{Tools: implementationsForSpecs(specs)},
+		compose.ToolsNodeConfig{
+			Tools:               implementationsForSpecs(specs),
+			ToolCallMiddlewares: middlewares,
+		},
 		service.tools.Spec,
 	)
 	if err != nil {
@@ -2644,9 +2794,7 @@ func liveSchemaCases() []liveToolEvalCase {
 		{Name: "talking_head_broll_fade", Prompt: "请只给刚插入的 B-roll 片段 clip_v4_001 设置 7 帧淡入和 7 帧淡出。", Expected: []string{"timeline.update"}},
 		{Name: "timeline_check", Prompt: "请校验当前时间线不变量和节拍对齐数据。", Expected: []string{"timeline.check"}},
 		{Name: "inspect", Prompt: "请读取当前时间线的完整轨道、clip ID 和帧范围。", Expected: []string{"timeline.inspect"}},
-		{Name: "preview", Prompt: "时间线已验证，当前 timeline_id=draft_eval:v7。请只启动一个可分享的 preview 渲染 job。", Expected: []string{"render.start"}},
-		{Name: "final", Prompt: "时间线已验证，当前 timeline_id=draft_eval:v7。请只启动一个 final 渲染 job。", Expected: []string{"render.start"}},
-		{Name: "status", Prompt: "请严格只读 job_render_123 的任务状态。", Expected: []string{"job.read"}},
+		{Name: "preview", Prompt: "时间线已验证，当前 timeline_id=draft_eval:v7。请只生成一个可分享的 preview 并等待终态。", Expected: []string{"preview.generate"}},
 		{Name: "preview_check", Prompt: "请只检查预览 preview_123 是否存在黑帧。", Expected: []string{"preview.check"}},
 		{Name: "confirm", Prompt: "请为危险的时间线清空操作创建确认：工具 timeline.delete，参数 kind=remove_track_clips、track_id=sfx。", Expected: []string{"interaction.confirm_action"}},
 	}
@@ -2674,10 +2822,8 @@ func liveRoutingCases() []liveToolEvalCase {
 		{Name: "route_atomic_update_after_field_failure", Prompt: contextPrefix + "\n上一工具结果：{\"status\":\"failed\",\"observation\":\"时间线补丁字段预校验失败：时间线补丁 trim_clip_edge 的字段 timeline_frame 缺少必填字段\",\"data\":{\"op_kind\":\"trim_clip_edge\",\"invalid_field\":\"timeline_frame\",\"expected_schema\":{\"required\":[\"kind\",\"timeline_clip_id\",\"timeline_frame\",\"edge\"]},\"correct_example\":{\"kind\":\"trim_clip_edge\",\"timeline_clip_id\":\"clip_v1_001\",\"timeline_frame\":75,\"edge\":\"end\"},\"recovery\":\"只修正当前 op 的字段名与类型后重新调用；不要原样重发失败参数。\"}}。字段错误已明确；按原子顺序先把 clip_v1_001 的结尾裁到 75 帧。请选择下一步工具。", Expected: []string{"timeline.update"}},
 		{Name: "route_talking_head_delete", Prompt: contextPrefix + "\n逐句证据与最新时间线已读取；较早一遍重说当前映射为时间线 360 到 480 帧，我明确选择删除它。现在只提交这个连续范围。", Expected: []string{"timeline.delete"}},
 		{Name: "route_check", Prompt: contextPrefix + "\n用户：校验时间线和卡点对齐。", Expected: []string{"timeline.check"}},
-		{Name: "route_preview", Prompt: contextPrefix + "\n用户：基于当前 timeline_id 生成一个可分享的预览。", Expected: []string{"render.start"}},
+		{Name: "route_preview", Prompt: contextPrefix + "\n用户：基于当前 timeline_id 生成一个可分享的预览。", Expected: []string{"preview.generate"}},
 		{Name: "route_preview_check", Prompt: contextPrefix + "\n用户：质检 preview_123 是否有黑帧、静音和解码问题。", Expected: []string{"preview.check"}},
-		{Name: "route_export", Prompt: contextPrefix + "\n用户：基于当前 timeline_id 导出最终 MP4，不要只生成预览。", Expected: []string{"render.start"}},
-		{Name: "route_status", Prompt: contextPrefix + "\n用户：只读取 job_render_123 的状态。", Expected: []string{"job.read"}},
 	}
 	snapshot := liveFullTaskSnapshot()
 	for index := range cases {

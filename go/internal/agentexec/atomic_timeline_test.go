@@ -335,7 +335,7 @@ func TestPersistTimelineStaleSnapshotReturnsStructuredConflict(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := exec.persistTimelineFromSnapshot(
-		t.Context(),
+		manualTimelineMutationContext(t.Context()),
 		draftID,
 		staleAttempt,
 		"stale_race",
@@ -429,7 +429,7 @@ func TestPersistTimelineCompetingInitialVersionsHaveSingleWinner(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := exec.persistTimelineFromSnapshot(
-		t.Context(), draftID, loser, "initial_loser", nil, base,
+		manualTimelineMutationContext(t.Context()), draftID, loser, "initial_loser", nil, base,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -902,7 +902,7 @@ func executeAtomicTimelineTool(
 	input any,
 ) rushestools.ToolResult {
 	t.Helper()
-	raw, err := exec.ExecuteTool(ctx, name, input)
+	raw, err := exec.ExecuteTool(manualTimelineMutationContext(ctx), name, input)
 	if err != nil {
 		t.Fatalf("%s err=%v", name, err)
 	}

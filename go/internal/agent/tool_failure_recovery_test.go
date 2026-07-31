@@ -96,7 +96,7 @@ func TestExecutorStructuredFailuresCarryRecovery(t *testing.T) {
 		t.Context(), draftID, document, "recovery_coverage_fixture", nil); err != nil {
 		t.Fatal(err)
 	}
-	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
 
 	cases := []struct {
 		name  string
@@ -155,7 +155,7 @@ func TestRegistryRouterTimelineFieldFailuresPreserveFailedOperation(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
 	ctx = agentexec.WithTurnInteractionState(
 		ctx, agentexec.NewTurnInteractionState(service.indexedResources),
 	)

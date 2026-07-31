@@ -128,8 +128,6 @@ func run() error {
 	if err := agentService.ReconcilePersistedTurns(context.Background()); err != nil {
 		return fmt.Errorf("启动对账未完成回合: %w", err)
 	}
-	agentService.StartJobObservationBridge()
-
 	server, err := api.NewServer(api.Config{
 		Database: database, Token: token, Port: port,
 		FSRoots: filepath.SplitList(os.Getenv("RUSHES_FS_ROOTS")),

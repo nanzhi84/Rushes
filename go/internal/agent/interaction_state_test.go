@@ -51,7 +51,7 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	waiting := raw.(rushestools.ToolResult)
-	if waiting.Status != "waiting" || waiting.Data["turn_should_end"] != true ||
+	if waiting.Status != "waiting_user" || waiting.Data["turn_should_end"] != true ||
 		waiting.Data["decision_type"] != "critical" {
 		t.Fatalf("waiting=%#v", waiting)
 	}
@@ -78,7 +78,7 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	blocked := blockedRaw.(rushestools.ToolResult)
-	if blocked.Status != "waiting" || blocked.Data["blocked_tool"] != "plan.update" ||
+	if blocked.Status != "waiting_user" || blocked.Data["blocked_tool"] != "plan.update" ||
 		blocked.Data["turn_should_end"] != true {
 		t.Fatalf("blocked=%#v", blocked)
 	}
@@ -95,7 +95,7 @@ func TestAskUserPersistsToolCallAndRejectsSameTurnSelfAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 	answer := answerRaw.(rushestools.ToolResult)
-	if answer.Status != "waiting" || answer.Data["turn_should_end"] != true ||
+	if answer.Status != "waiting_user" || answer.Data["turn_should_end"] != true ||
 		answer.Data["blocked_tool"] != "decision.answer" {
 		t.Fatalf("answer=%#v", answer)
 	}

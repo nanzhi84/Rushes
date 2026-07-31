@@ -884,7 +884,7 @@ func createRewindTestTimeline(
 			"timeline_version": version, "patch_id": fmt.Sprintf("patch-%d", version),
 			"document_json": document,
 		},
-	}}, Options{Actor: contracts.ActorAgent, BaseVersion: &base})
+	}}, manualTimelineWriteOptions(Options{BaseVersion: &base}))
 	if err != nil || result.Status != StatusApplied {
 		t.Fatalf("timeline v%d result=%#v err=%v", version, result, err)
 	}

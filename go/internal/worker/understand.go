@@ -76,7 +76,7 @@ func RegisterUnderstand(
 			}
 			return map[string]any{
 				"asset_id": assetID, "cache_hit": false,
-				"analyzed": true, "status": "completed",
+				"analyzed": true, "status": "succeeded",
 			}, nil
 		}
 		options := understanding.NormalizeAnalyzeOptions(asset, understanding.AnalyzeOptions{
@@ -92,7 +92,7 @@ func RegisterUnderstand(
 				}
 				return map[string]any{
 					"asset_id": assetID, "cache_hit": true,
-					"analyzed": false, "status": "completed",
+					"analyzed": false, "status": "succeeded",
 				}, nil
 			} else if !errors.Is(cacheErr, storage.ErrNotFound) {
 				return nil, cacheErr
@@ -159,7 +159,7 @@ func RegisterUnderstand(
 		}
 		return map[string]any{
 			"asset_id": assetID, "cache_hit": false,
-			"analyzed": true, "status": "completed",
+			"analyzed": true, "status": "succeeded",
 		}, nil
 	})
 }

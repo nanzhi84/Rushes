@@ -294,7 +294,8 @@ func TestConfirmedTimelineMutationAutomaticallyChecksCommittedVersion(t *testing
 		t.Fatal(err)
 	}
 	truthState := newTerminalTimelineTruthState()
-	ctx := withTerminalTimelineTruthState(rushestools.WithDraftID(t.Context(), draftID), truthState)
+	ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
+	ctx = withTerminalTimelineTruthState(ctx, truthState)
 	content, err := service.replayPendingTool(ctx, QueueItem{DraftID: draftID, Payload: map[string]any{
 		"pending_tool_call": map[string]any{
 			"tool_name": "timeline.update",
@@ -372,36 +373,14 @@ func TestConfirmedToolRejectsStructuredAndMalformedFailures(t *testing.T) {
 	}
 }
 
-func TestConfirmedRenderAcceptsQueuedAsSuccessfulDispatch(t *testing.T) {
-	renderArguments := map[string]any{"kind": "final", "timeline_id": "draft:v2", "orientation": "portrait"}
-	result, err := requireConfirmedToolSuccess("render.start", renderArguments, rushestools.ToolResult{
-		Status: string(rushestools.StatusQueued), Observation: "render_final 任务已排队",
-		Data: map[string]any{
-			"job_id": "job_queued", "job_status": "pending", "timeline_version": 2,
-			"render_kind": "final", "timeline_id": "draft:v2", "orientation": "portrait",
-		},
-	}, "draft")
-	if err != nil || result.Status != string(rushestools.StatusQueued) {
-		t.Fatalf("queued render result=%#v err=%v", result, err)
-	}
-	if _, err := requireConfirmedToolSuccess("timeline.update", nil, rushestools.ToolResult{
-		Status: string(rushestools.StatusQueued),
-	}, "draft"); err == nil {
-		t.Fatal("queued 只能作为 render.start 的正常终态")
-	}
-	for name, data := range map[string]map[string]any{
-		"missing_job_id":       {"job_status": "pending", "timeline_version": 2, "render_kind": "final"},
-		"empty_job_id":         {"job_id": " ", "job_status": "pending", "timeline_version": 2, "render_kind": "final"},
-		"invalid_job_status":   {"job_id": "job_queued", "job_status": "succeeded", "timeline_version": 2, "render_kind": "final"},
-		"missing_timeline_ver": {"job_id": "job_queued", "job_status": "pending", "render_kind": "final"},
-		"wrong_timeline_ver":   {"job_id": "job_queued", "job_status": "pending", "timeline_version": 1, "render_kind": "final"},
-		"wrong_render_kind":    {"job_id": "job_queued", "job_status": "pending", "timeline_version": 2, "render_kind": "preview"},
-	} {
+func TestConfirmedToolRejectsQueuedAndRetiredRender(t *testing.T) {
+	for _, name := range []string{"timeline.update", "preview.generate", "render.start"} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := requireConfirmedToolSuccess("render.start", renderArguments, rushestools.ToolResult{
-				Status: string(rushestools.StatusQueued), Data: data,
+			if _, err := requireConfirmedToolSuccess(name, nil, rushestools.ToolResult{
+				Status: "queued",
+				Data:   map[string]any{"job_id": "job_queued", "job_status": "pending"},
 			}, "draft"); err == nil {
-				t.Fatal("incomplete render dispatch proof was accepted")
+				t.Fatal("queued 不得作为模型工具成功终态")
 			}
 		})
 	}

@@ -123,38 +123,59 @@ func (effect Effect) Valid() bool {
 }
 
 type Spec struct {
-	Name           string
-	Description    string
-	Requires       []string
-	Exposure       Exposure
-	Family         Family
-	Cost           Cost
-	PrimarySurface Surface
-	Surfaces       Surface
-	Effect         Effect
-	Optional       bool
-	InputType      reflect.Type
-	Implementation tool.BaseTool
+	Name                string
+	Description         string
+	Requires            []string
+	Exposure            Exposure
+	Family              Family
+	Cost                Cost
+	PrimarySurface      Surface
+	Surfaces            Surface
+	Effect              Effect
+	CompletionSemantics CompletionSemantics
+	TypedSuccessAdapter bool
+	Optional            bool
+	InputType           reflect.Type
+	Implementation      tool.BaseTool
 }
 
 // Parallelizable 从 Effect 单一事实源派生；不额外维护会漂移的并发布尔字段。
 func (spec Spec) Parallelizable() bool { return spec.Effect == EffectReadOnly }
 
 type specMetadata struct {
-	family   Family
-	cost     Cost
-	primary  Surface
-	surfaces Surface
+	family     Family
+	cost       Cost
+	primary    Surface
+	surfaces   Surface
+	completion CompletionSemantics
 }
 
-func metadata(family Family, cost Cost, surfaces ...Surface) specMetadata {
+func modelMetadata(
+	family Family,
+	cost Cost,
+	completion CompletionSemantics,
+	surfaces ...Surface,
+) specMetadata {
 	var primary Surface
 	if len(surfaces) > 0 {
 		primary = surfaces[0]
 	}
 	return specMetadata{
 		family: family, cost: cost, primary: primary, surfaces: Surfaces(surfaces...),
+		completion: completion,
 	}
+}
+
+func terminalMetadata(family Family, cost Cost, surfaces ...Surface) specMetadata {
+	return modelMetadata(family, cost, CompletionTerminalOnly, surfaces...)
+}
+
+func waitingUserMetadata(family Family, cost Cost, surfaces ...Surface) specMetadata {
+	return modelMetadata(family, cost, CompletionTerminalOrWaitingUser, surfaces...)
+}
+
+func harnessMetadata(family Family, cost Cost) specMetadata {
+	return specMetadata{family: family, cost: cost}
 }
 
 type Registry struct {
@@ -204,7 +225,7 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 		registerSpeechPauseAnalysis, registerSpeechTranscribe, registerSpeechSearch, registerAskUser,
 		registerDecisionAnswer, registerPlanUpdate, registerMemorySet, registerMemoryRemove,
 		registerTimelineInsert, registerTimelineDelete, registerTimelineUpdate, registerTimelineSplit,
-		registerTimelineCheck, registerTimelineInspect, registerRenderStart, registerJobRead, registerPreviewCheck,
+		registerTimelineCheck, registerTimelineInspect, registerPreviewGenerate, registerPreviewCheck,
 		registerConfirmAction,
 	}
 	for _, builder := range builders {
@@ -438,10 +459,21 @@ func addTool[I, O any](
 	if exposure == ExposureLLM && !classification.surfaces.Includes(classification.primary) {
 		return fmt.Errorf("模型工具 %s 的 PrimarySurface 不属于 Surfaces", name)
 	}
+	if exposure == ExposureLLM && !classification.completion.Valid() {
+		return fmt.Errorf("模型工具 %s 缺少合法 CompletionSemantics: %q", name, classification.completion)
+	}
+	if exposure != ExposureLLM && classification.completion != "" {
+		return fmt.Errorf("非模型工具 %s 不得声明 CompletionSemantics: %q", name, classification.completion)
+	}
+	if classification.completion == CompletionTerminalOrWaitingUser &&
+		name != "interaction.ask_user" && name != "interaction.confirm_action" {
+		return fmt.Errorf("模型工具 %s 不允许返回 waiting_user", name)
+	}
 	if err := validateFamilyEffect(name, classification.family, effect); err != nil {
 		return err
 	}
 	inputType := reflect.TypeFor[I]()
+	outputType := reflect.TypeFor[O]()
 	if exposure == ExposureLLM {
 		if key := prohibitedField(inputType); key != "" {
 			return fmt.Errorf("工具 %s 的字段被 PolicyGate 禁止: %s", name, key)
@@ -490,8 +522,10 @@ func addTool[I, O any](
 		Name: name, Description: description, Requires: append([]string(nil), requires...),
 		Exposure: exposure, Family: classification.family, Cost: classification.cost,
 		PrimarySurface: classification.primary, Surfaces: classification.surfaces,
-		Effect: effect, Optional: optional,
-		InputType: inputType, Implementation: implementation,
+		Effect: effect, CompletionSemantics: classification.completion,
+		TypedSuccessAdapter: exposure == ExposureLLM && !jsonTypeHasField(outputType, "status"),
+		Optional:            optional,
+		InputType:           inputType, Implementation: implementation,
 	}
 	return nil
 }
@@ -522,6 +556,19 @@ func (registry *Registry) Effect(name string) (Effect, bool) {
 		return "", false
 	}
 	return spec.Effect, true
+}
+
+// ModelReceiptPolicy 返回 Registry 持有的模型完成合同；harness-only 工具
+// 刻意不提供模型回执策略。
+func (registry *Registry) ModelReceiptPolicy(name string) (ModelReceiptPolicy, bool) {
+	spec, exists := registry.specs[name]
+	if !exists || spec.Exposure != ExposureLLM || !spec.CompletionSemantics.Valid() {
+		return ModelReceiptPolicy{}, false
+	}
+	return ModelReceiptPolicy{
+		Completion:          spec.CompletionSemantics,
+		TypedSuccessAdapter: spec.TypedSuccessAdapter,
+	}, true
 }
 
 // Spec 返回指定工具的完整分类元数据；执行路由据此组合 Family 与 Effect，
@@ -575,10 +622,64 @@ func convertResult[O any](raw any) (O, error) {
 	if err != nil {
 		return result, err
 	}
-	if err := json.Unmarshal(data, &result); err != nil {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return result, errors.New("工具结果不得为 null")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&result); err != nil {
+		return result, err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = errors.New("包含多个 JSON 值")
+		}
 		return result, err
 	}
 	return result, nil
+}
+
+func jsonTypeHasField(output reflect.Type, target string) bool {
+	return jsonTypeHasFieldRecursive(output, target, map[reflect.Type]struct{}{})
+}
+
+func jsonTypeHasFieldRecursive(
+	output reflect.Type,
+	target string,
+	active map[reflect.Type]struct{},
+) bool {
+	for output != nil && output.Kind() == reflect.Pointer {
+		output = output.Elem()
+	}
+	if output == nil || output.Kind() != reflect.Struct {
+		return false
+	}
+	if _, recursive := active[output]; recursive {
+		return false
+	}
+	active[output] = struct{}{}
+	defer delete(active, output)
+	for index := range output.NumField() {
+		field := output.Field(index)
+		if field.PkgPath != "" && !field.Anonymous {
+			continue
+		}
+		tag := field.Tag.Get("json")
+		name := strings.Split(tag, ",")[0]
+		if name == "-" {
+			continue
+		}
+		if name == "" && !field.Anonymous {
+			name = field.Name
+		}
+		if name == target {
+			return true
+		}
+		if field.Anonymous && name == "" && jsonTypeHasFieldRecursive(field.Type, target, active) {
+			return true
+		}
+	}
+	return false
 }
 
 var prohibitedParts = []string{"timecode", "ffmpeg", "filter_complex", "codec", "bitrate", "crf", "preset", "pix_fmt"}
@@ -645,17 +746,17 @@ func prohibitedFieldAtDepth(input reflect.Type, depth int, active map[reflect.Ty
 func registerAssetImport(registry *Registry) error {
 	// 仅 harness 调用；写入素材行并触发导入，可通过移除素材回滚，故归可逆。
 	return addTool[AssetImportInput, ToolResult](registry, "asset.import_local_file", "导入用户已确认的本地素材", nil, ExposureHarness, EffectReversible, false,
-		metadata(FamilyEdit, CostStandard))
+		harnessMetadata(FamilyEdit, CostStandard))
 }
 
 func registerAssetList(registry *Registry) error {
 	return addTool[AssetListInput, AssetListResult](registry, "asset.list_assets", "列出当前草稿可用素材", nil, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyRead, CostLow, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit))
+		terminalMetadata(FamilyRead, CostLow, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit))
 }
 
 func registerDetectShots(registry *Registry) error {
-	return addTool[DetectShotsInput, DetectShotsResult](registry, "media.detect_shots", "为一个视频素材建立或刷新可检索的逐镜头证据；每次只接收一个 asset_id，多素材必须并行调用；相同参数默认复用持久化结果，deep 或 force_refresh 可能排队并在完成后自动续跑", []string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
-		metadata(FamilyDetect, CostHigh, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit))
+	return addTool[DetectShotsInput, DetectShotsResult](registry, "media.detect_shots", "为一个视频素材建立或刷新可检索的逐镜头证据；每次只接收一个 asset_id，多素材必须并行调用；相同参数默认复用持久化结果，force_refresh 强制刷新；调用会在当前 turn 内等待并返回终态摘要，不需要轮询或让用户继续", []string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
+		terminalMetadata(FamilyDetect, CostHigh, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit))
 }
 
 func registerShotSearch(registry *Registry) error {
@@ -664,7 +765,7 @@ func registerShotSearch(registry *Registry) error {
 		"shot.search",
 		"只读搜索既有镜头索引；按创作意图返回稳定 shot_id、精确源帧、语义与匹配证据。未建立索引的素材只会列为 detection_candidates；先并行调用 media.detect_shots，再用同一意图重搜，禁止把候选素材臆造为 shot_id",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyRead, CostStandard, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit),
+		terminalMetadata(FamilyRead, CostStandard, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit),
 	)
 }
 
@@ -674,7 +775,7 @@ func registerAudioBeatAnalysis(registry *Registry) error {
 		"audio.analyze_beats",
 		"读取音频的 BPM、普通拍点、强瞬态、推断小节第一拍和按时间顺序压缩的 RMS 波形。拍点坐标使用整数帧；波形使用固定 0-100 编码并返回采样间隔，不标注高潮、低潮或剪辑好坏",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyDetect, CostStandard, SurfaceBeatEdit),
+		terminalMetadata(FamilyDetect, CostStandard, SurfaceBeatEdit),
 	)
 }
 
@@ -684,7 +785,7 @@ func registerSpeechPauseAnalysis(registry *Registry) error {
 		"audio.analyze_speech_pauses",
 		"分析音频或视频内音轨的停顿/气口，返回源素材整数帧；传 timeline_clip_id 时同时映射为当前时间线帧，可用于剪口播。结果是 RMS 静音候选，不会把语义停顿或口头禅误报成已确认删除项",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyDetect, CostStandard, SurfaceTalkingHead),
+		terminalMetadata(FamilyDetect, CostStandard, SurfaceTalkingHead),
 	)
 }
 
@@ -694,7 +795,7 @@ func registerSpeechTranscribe(registry *Registry) error {
 		"speech.transcribe",
 		"为一个音频或视频素材建立或刷新带词级整数帧坐标的 transcript 索引；每次只处理一个 asset_id，多素材必须并行调用；只生成证据，不搜索台词或编辑时间线",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
-		metadata(FamilyDetect, CostHigh, SurfaceTalkingHead),
+		terminalMetadata(FamilyDetect, CostHigh, SurfaceTalkingHead),
 	)
 }
 
@@ -704,18 +805,18 @@ func registerSpeechSearch(registry *Registry) error {
 		"speech.search",
 		"只读搜索已有 transcript；按台词语义、稳定 ID 或源帧范围返回逐句、词级、气口和相似台词证据。缺少索引时返回 index_missing，并提示调用 speech.transcribe；绝不触发 ASR、创建 job 或写入 transcript",
 		[]string{"usable_asset_exists", "transcript_index_exists"}, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyRead, CostStandard, SurfaceTalkingHead),
+		terminalMetadata(FamilyRead, CostStandard, SurfaceTalkingHead),
 	)
 }
 
 func registerAskUser(registry *Registry) error {
 	return addTool[AskUserInput, ToolResult](registry, "interaction.ask_user", "仅在缺少会实质改变成片目标、且无法从素材或上下文安全推断的关键决策时，通过简短结构化决策卡向用户提问；已有可用素材时，成片类型、时长、风格和节奏等可逆首剪细节必须结合 user_memory 与安全默认值自主决定，不得用此工具追问", nil, ExposureLLM, EffectReversible, false,
-		metadata(FamilyControl, CostLow, SurfaceControl, SurfaceDiscovery))
+		waitingUserMetadata(FamilyControl, CostLow, SurfaceControl, SurfaceDiscovery))
 }
 
 func registerDecisionAnswer(registry *Registry) error {
 	return addTool[DecisionAnswerInput, ToolResult](registry, "decision.answer", "提交结构化决策答案", nil, ExposureLLM, EffectReversible, false,
-		metadata(FamilyControl, CostLow, SurfaceControl))
+		terminalMetadata(FamilyControl, CostLow, SurfaceControl))
 }
 
 func registerPlanUpdate(registry *Registry) error {
@@ -724,7 +825,7 @@ func registerPlanUpdate(registry *Registry) error {
 		"plan.update",
 		"以 RFC 7396 语义增量合并 plan；reset=true 时先清空旧计划再应用该对象，用于在跨回合继续工作前保存已确定的计划结构；素材可用但请求宽泛时，用此工具记录基于长期画像作出的首剪默认决定并继续执行，不要转去追问可回滚细节",
 		nil, ExposureLLM, EffectReversible, false,
-		metadata(FamilyControl, CostStandard,
+		terminalMetadata(FamilyControl, CostStandard,
 			SurfaceControl,
 			SurfaceDiscovery,
 			SurfaceTalkingHead,
@@ -741,7 +842,7 @@ func registerMemorySet(registry *Registry) error {
 		"memory.set",
 		"仅当当前用户明确表达跨项目稳定的偏好、习惯或纠正时写入用户画像；一次性草稿要求和模型自己的创作判断不得写入",
 		nil, ExposureLLM, EffectReversible, false,
-		metadata(FamilyControl, CostStandard, SurfaceControl),
+		terminalMetadata(FamilyControl, CostStandard, SurfaceControl),
 	)
 }
 
@@ -751,7 +852,7 @@ func registerMemoryRemove(registry *Registry) error {
 		"memory.remove",
 		"仅当当前用户明确要求忘记已有长期记忆时删除指定键；此操作必须先获得破坏性确认",
 		nil, ExposureLLM, EffectDestructive, false,
-		metadata(FamilyControl, CostStandard, SurfaceControl),
+		terminalMetadata(FamilyControl, CostStandard, SurfaceControl),
 	)
 }
 
@@ -761,8 +862,8 @@ func registerTimelineInsert(registry *Registry) error {
 		"timeline.insert",
 		"插入一个素材 clip 或一条字幕；空时间线先插入一个 visual_base clip 即创建 v1，后续片段逐次追加。原声联动由服务端派生，只维护确定性音画不变量。插入 BGM 时把对应检测结果的完整拍点证据原样放入 metadata.beat_grid，供 timeline.check 校验切点",
 		nil, ExposureLLM, EffectReversible, false,
-		metadata(FamilyEdit, CostStandard,
-			SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit, SurfaceTimelineEdit),
+		terminalMetadata(FamilyEdit, CostStandard,
+			SurfaceTalkingHead, SurfaceBeatEdit, SurfaceTimelineEdit),
 	)
 }
 
@@ -772,7 +873,7 @@ func registerTimelineDelete(registry *Registry) error {
 		"timeline.delete",
 		"只删除一个 clip、一个连续帧范围、一个素材的连续源帧范围或一个非主视觉轨内容集合；多个目标必须分成多次调用",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
-		metadata(FamilyEdit, CostStandard, SurfaceBeatEdit, SurfaceTimelineEdit),
+		terminalMetadata(FamilyEdit, CostStandard, SurfaceBeatEdit, SurfaceTimelineEdit),
 	)
 }
 
@@ -782,7 +883,7 @@ func registerTimelineUpdate(registry *Registry) error {
 		"timeline.update",
 		"只更新一个 clip、track 或 subtitle 目标；kind 选择裁剪、移动、重排、替换、速率、音量、淡入淡出、联动、轨道状态或字幕内容",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
-		metadata(FamilyEdit, CostStandard, SurfaceBeatEdit, SurfaceTimelineEdit),
+		terminalMetadata(FamilyEdit, CostStandard, SurfaceBeatEdit, SurfaceTimelineEdit),
 	)
 }
 
@@ -792,48 +893,38 @@ func registerTimelineSplit(registry *Registry) error {
 		"timeline.split",
 		"只在一个 timeline_clip_id 的一个时间线整数帧位置切分片段",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
-		metadata(FamilyEdit, CostStandard, SurfaceTimelineEdit),
+		terminalMetadata(FamilyEdit, CostStandard, SurfaceTimelineEdit),
 	)
 }
 
 func registerTimelineCheck(registry *Registry) error {
 	return addTool[TimelineCheckInput, ToolResult](registry, "timeline.check", "只读检查当前时间线或指定稳定 timeline_id 的结构不变量、内容合同、节拍对齐与口播质量；不写 validation event、draft state 或 timeline version", []string{"timeline_exists"}, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyCheck, CostStandard, SurfaceRender, SurfaceTimelineEdit, SurfaceBeatEdit))
+		terminalMetadata(FamilyCheck, CostStandard, SurfaceRender, SurfaceTimelineEdit, SurfaceBeatEdit))
 }
 
 func registerTimelineInspect(registry *Registry) error {
 	return addTool[TimelineInspectInput, ToolResult](registry, "timeline.inspect", "读取当前时间线或指定稳定 timeline_id 的完整 track/clip ID、素材、角色和帧范围；尚无时间线时返回 timeline_exists=false，而不是失败", nil, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyRead, CostLow, SurfaceTimelineEdit, SurfaceTalkingHead, SurfaceBeatEdit, SurfaceRender, SurfacePreviewCheck))
+		terminalMetadata(FamilyRead, CostLow, SurfaceTimelineEdit, SurfaceTalkingHead, SurfaceBeatEdit, SurfaceRender, SurfacePreviewCheck))
 }
 
-func registerRenderStart(registry *Registry) error {
-	return addTool[RenderStartInput, ToolResult](
+func registerPreviewGenerate(registry *Registry) error {
+	return addTool[PreviewGenerateInput, ToolResult](
 		registry,
-		"render.start",
-		"只为一个明确 timeline_id 创建或复用一个 preview/final 渲染 job；timeline_id 精确指向一个版本，同步重验目标，失败不排队，也不会自动质检或修改时间线",
+		"preview.generate",
+		"提交指定 timeline_id 的离线预览任务；该调用同步收敛渲染结果，成功 data 含 preview_id，失败按 recovery 处理；模型不轮询后台 job",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
-		metadata(FamilyEdit, CostHigh, SurfaceRender),
-	)
-}
-
-func registerJobRead(registry *Registry) error {
-	return addTool[JobReadInput, ToolResult](
-		registry,
-		"job.read",
-		"严格只读一个当前草稿所属 job 的状态、进度与有界结果；不启动、重试或取消任务",
-		nil, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyRead, CostLow, SurfaceRender, SurfacePreviewCheck),
+		terminalMetadata(FamilyEdit, CostHigh, SurfaceRender),
 	)
 }
 
 func registerPreviewCheck(registry *Registry) error {
 	return addTool[PreviewCheckInput, PreviewInspectionResult](registry, "preview.check", "对一个 preview 执行一个明确检查；check 只能是 decode、black、freeze、silence、loudness 或 visual 之一，多个独立检查由模型并行调用", []string{"any_preview_exists"}, ExposureLLM, EffectReadOnly, true,
-		metadata(FamilyCheck, CostHigh, SurfacePreviewCheck))
+		terminalMetadata(FamilyCheck, CostHigh, SurfacePreviewCheck))
 }
 
 func registerConfirmAction(registry *Registry) error {
 	// 创建确认决策是一次可逆写入（决策行）；G2 的强制确认拦截器读 EffectDestructive，
 	// confirm_action 本身不是被拦截对象，故按其写行为归可逆。
 	return addTool[ConfirmActionInput, ToolResult](registry, "interaction.confirm_action", "为破坏性动作创建确认决策", nil, ExposureLLM, EffectReversible, true,
-		metadata(FamilyControl, CostLow, SurfaceControl))
+		waitingUserMetadata(FamilyControl, CostLow, SurfaceControl))
 }

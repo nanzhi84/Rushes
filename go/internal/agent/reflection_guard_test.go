@@ -76,7 +76,7 @@ func TestFinalReplyReflectionLeakDetection(t *testing.T) {
 
 func TestQualityCheckedFinalReplyRestatesOnlyOnLeak(t *testing.T) {
 	t.Parallel()
-	newService := func(stub model.ToolCallingChatModel) *Service {
+	newService := func(stub model.ToolCallingChatModel) (*Service, context.Context) {
 		database, err := storage.Open(t.Context(), t.TempDir())
 		if err != nil {
 			t.Fatal(err)
@@ -87,13 +87,13 @@ func TestQualityCheckedFinalReplyRestatesOnlyOnLeak(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(service.Close)
-		return service
+		agenttest.CreateAgentDraft(t, database, "d")
+		return service, withTestTurnLeaseSession(t, service, t.Context(), "d")
 	}
-	ctx := t.Context()
 
 	// 正常回复:零模型调用(零额外延迟),原样返回。
 	clean := &restateStubModel{reply: "无关"}
-	service := newService(clean)
+	service, ctx := newService(clean)
 	if out, restated := service.qualityCheckedFinalReply(ctx, "d", "m", "已删掉开头三秒。"); out != "已删掉开头三秒。" || restated {
 		t.Fatalf("clean out=%q restated=%v", out, restated)
 	}
@@ -103,7 +103,7 @@ func TestQualityCheckedFinalReplyRestatesOnlyOnLeak(t *testing.T) {
 
 	// 泄漏 + 干净重述:采用重述,restated=true,恰好 1 次调用。
 	fixed := &restateStubModel{reply: "已把开头三秒删掉,并对齐字幕。"}
-	service = newService(fixed)
+	service, ctx = newService(fixed)
 	out, restated := service.qualityCheckedFinalReply(ctx, "d", "m", "删了开头。但等等,字幕没对齐?")
 	if out != "已把开头三秒删掉,并对齐字幕。" || !restated {
 		t.Fatalf("leak out=%q restated=%v", out, restated)
@@ -114,7 +114,7 @@ func TestQualityCheckedFinalReplyRestatesOnlyOnLeak(t *testing.T) {
 
 	// 泄漏 + 重述仍泄漏:原样放行(不采用)。
 	stillLeak := &restateStubModel{reply: "让我再确认一下。"}
-	service = newService(stillLeak)
+	service, ctx = newService(stillLeak)
 	original := "删了开头。但等等。"
 	if out, restated := service.qualityCheckedFinalReply(ctx, "d", "m", original); out != original || restated {
 		t.Fatalf("still-leak out=%q restated=%v", out, restated)
@@ -122,7 +122,7 @@ func TestQualityCheckedFinalReplyRestatesOnlyOnLeak(t *testing.T) {
 
 	// 泄漏 + 模型出错:原样放行。
 	failing := &restateStubModel{err: errors.New("boom")}
-	service = newService(failing)
+	service, ctx = newService(failing)
 	if out, restated := service.qualityCheckedFinalReply(ctx, "d", "m", original); out != original || restated {
 		t.Fatalf("error out=%q restated=%v", out, restated)
 	}

@@ -166,3 +166,45 @@ func TestTurnEmitsStructuredLogAndMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestSameTurnWaitMetricsClassifyEveryTerminalOutcome(t *testing.T) {
+	previewSucceeded := metricSameTurnPreviewSucceeded.Value()
+	previewFailed := metricSameTurnPreviewFailed.Value()
+	previewCancelled := metricSameTurnPreviewCancelled.Value()
+	previewTimeout := metricSameTurnPreviewTimeout.Value()
+	understandSucceeded := metricSameTurnUnderstandSucceeded.Value()
+	understandFailed := metricSameTurnUnderstandFailed.Value()
+	understandCancelled := metricSameTurnUnderstandCancelled.Value()
+	understandTimeout := metricSameTurnUnderstandTimeout.Value()
+	waitCount, _, _, _ := metricSameTurnToolWaitSeconds.Snapshot()
+
+	for _, outcome := range []struct{ kind, status string }{
+		{kind: "preview", status: "succeeded"},
+		{kind: "preview", status: "failed"},
+		{kind: "preview", status: "cancelled"},
+		{kind: "preview", status: "turn_cancelled"},
+		{kind: "preview", status: "timeout"},
+		{kind: "understand", status: "succeeded"},
+		{kind: "understand", status: "failed"},
+		{kind: "understand", status: "cancelled"},
+		{kind: "understand", status: "turn_cancelled"},
+		{kind: "understand", status: "timeout"},
+		{kind: "unknown", status: "failed"},
+	} {
+		recordSameTurnToolWait(outcome.kind, outcome.status, 1500*time.Millisecond)
+	}
+
+	if metricSameTurnPreviewSucceeded.Value() < previewSucceeded+1 ||
+		metricSameTurnPreviewFailed.Value() < previewFailed+1 ||
+		metricSameTurnPreviewCancelled.Value() < previewCancelled+2 ||
+		metricSameTurnPreviewTimeout.Value() < previewTimeout+1 ||
+		metricSameTurnUnderstandSucceeded.Value() < understandSucceeded+1 ||
+		metricSameTurnUnderstandFailed.Value() < understandFailed+1 ||
+		metricSameTurnUnderstandCancelled.Value() < understandCancelled+2 ||
+		metricSameTurnUnderstandTimeout.Value() < understandTimeout+1 {
+		t.Fatal("same-turn wait terminal counters did not classify every outcome")
+	}
+	if count, _, _, _ := metricSameTurnToolWaitSeconds.Snapshot(); count < waitCount+11 {
+		t.Fatalf("same-turn wait histogram count=%d want_at_least=%d", count, waitCount+11)
+	}
+}

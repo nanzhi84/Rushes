@@ -35,9 +35,9 @@ func (server *Server) CancelJobApiJobsJobIdCancelPost(
 			return
 		}
 	}
-	if status == string(Cancelled) {
+	if status == string(JobCancelResponseStatusCancelled) {
 		writeJSON(writer, http.StatusOK, JobCancelResponse{
-			EventIds: []int{}, JobId: jobID, Status: Cancelled,
+			EventIds: []int{}, JobId: jobID, Status: JobCancelResponseStatusCancelled,
 		})
 		return
 	}
@@ -80,6 +80,6 @@ func (server *Server) CancelJobApiJobsJobIdCancelPost(
 		return
 	}
 	writeJSON(writer, http.StatusOK, JobCancelResponse{
-		EventIds: reducerEventIDs(result), JobId: jobID, Status: Cancelled,
+		EventIds: reducerEventIDs(result), JobId: jobID, Status: JobCancelResponseStatusCancelled,
 	})
 }

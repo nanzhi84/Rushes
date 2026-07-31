@@ -376,7 +376,8 @@ func TestServiceCompactionReplacesHistoryAndPreservesPendingUser(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 
-	messages, err := service.modelMessages(t.Context(), draftID)
+	turnCtx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
+	messages, err := service.modelMessages(turnCtx, draftID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -436,7 +437,8 @@ func TestCJKHistoryTriggersCompactionAndPreservesAssistantBoundary(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	messages, err := service.modelMessages(t.Context(), draftID)
+	turnCtx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
+	messages, err := service.modelMessages(turnCtx, draftID)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -173,6 +173,7 @@ func TestConcurrentReactAgentRoutesAndPreservesOrder(t *testing.T) {
 			events[name+":"+phase]++
 			eventsMu.Unlock()
 		})
+	ctx = withTestTurnLeaseSession(t, service, ctx, "draft_g3b_wire")
 
 	response, err := service.react.Generate(ctx, []*schema.Message{
 		schema.UserMessage("列素材、看时间线并记录计划。"),

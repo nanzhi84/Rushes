@@ -86,6 +86,9 @@ export type TimelineTrackJson = {
 };
 
 export type TimelineJson = {
+  timeline_id?: string;
+  draft_id?: string;
+  version?: number;
   fps: number;
   duration_frames: number;
   tracks: TimelineTrackJson[];
@@ -98,6 +101,7 @@ export type DraftTimelineResponse = {
   timeline: TimelineJson;
   summary: string;
   preview_id: string | null;
+  edit_lease: Schemas["EditLeaseStatus"];
 };
 
 // ---- 草稿 / 消息 / 成本：引 generated ----
@@ -112,6 +116,9 @@ export type MessagesResponse = Schemas["MessagesResponse"];
 export type MessageQueuedResponse = Schemas["MessageQueuedResponse"];
 export type TurnCancelResponse = Schemas["TurnCancelResponse"];
 export type JobCancelResponse = Schemas["JobCancelResponse"];
+export type UserExportCreateRequest = Schemas["UserExportCreateRequest"];
+export type UserExportRecord = Schemas["UserExportRecord"];
+export type UserExportsResponse = Schemas["UserExportsResponse"];
 export type ConversationClearResponse = Schemas["ConversationClearResponse"];
 export type MessageResendRequest = Schemas["MessageResendRequest"];
 export type MessageResendResponse = Schemas["MessageResendResponse"];
@@ -283,6 +290,27 @@ export const api = {
     });
   },
 
+  listUserExports(draftId: string): Promise<UserExportsResponse> {
+    return apiFetch<UserExportsResponse>(`${draftPath(draftId)}/exports`);
+  },
+
+  createUserExport(
+    draftId: string,
+    payload: UserExportCreateRequest
+  ): Promise<UserExportRecord> {
+    return apiFetch<UserExportRecord>(`${draftPath(draftId)}/exports`, {
+      method: "POST",
+      body: payload
+    });
+  },
+
+  retryUserExport(draftId: string, jobId: string): Promise<UserExportRecord> {
+    return apiFetch<UserExportRecord>(
+      `${draftPath(draftId)}/exports/${encodeURIComponent(jobId)}/retry`,
+      { method: "POST", headers: JSON_MUTATION_HEADERS }
+    );
+  },
+
   clearDraftConversation,
 
   getDraftMessages,
@@ -404,6 +432,10 @@ export const api = {
 
   mediaPreviewUrl(previewId: string): string {
     return withQueryToken(`/api/media/preview/${encodeURIComponent(previewId)}`);
+  },
+
+  mediaExportUrl(exportId: string): string {
+    return withQueryToken(`/api/media/export/${encodeURIComponent(exportId)}`);
   }
 };
 

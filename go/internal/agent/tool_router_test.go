@@ -207,7 +207,7 @@ func TestToolRouterEnforcesMessageStartStableClipTargets(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ctx := rushestools.WithDraftID(t.Context(), draftID)
+		ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
 		ctx = agentexec.WithTurnInteractionState(
 			ctx, agentexec.NewTurnInteractionState(service.indexedResources),
 		)
@@ -289,7 +289,7 @@ func TestToolRouterEnforcesMessageStartStableClipTargets(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ctx := rushestools.WithDraftID(t.Context(), draftID)
+		ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
 		ctx = agentexec.WithTurnInteractionState(
 			ctx, agentexec.NewTurnInteractionState(service.indexedResources),
 		)
@@ -378,7 +378,7 @@ func TestToolRouterEnforcesMessageStartStableClipTargets(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ctx := rushestools.WithDraftID(t.Context(), draftID)
+		ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
 		ctx = agentexec.WithTurnInteractionState(
 			ctx, agentexec.NewTurnInteractionState(service.indexedResources),
 		)
@@ -444,7 +444,7 @@ func TestToolRouterEnforcesMessageStartStableClipTargets(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ctx := rushestools.WithDraftID(t.Context(), draftID)
+		ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
 		ctx = agentexec.WithTurnInteractionState(
 			ctx, agentexec.NewTurnInteractionState(service.indexedResources),
 		)
