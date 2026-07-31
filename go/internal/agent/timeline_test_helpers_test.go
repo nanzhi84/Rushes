@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"testing"
+	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
@@ -13,6 +15,35 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
+
+func withTestTurnLeaseSession(
+	t *testing.T,
+	service *Service,
+	ctx context.Context,
+	draftID string,
+) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithCancelCause(ctx)
+	turnID := "turn-test-" + agentexec.RandomID("lease")
+	messageID := "message-test-" + turnID
+	session := newTimelineEditLeaseSession(service.database, draftID, turnID, cancel)
+	t.Cleanup(func() {
+		session.close()
+		cancel(nil)
+	})
+	ctx = rushestools.WithDraftID(ctx, draftID)
+	ctx = rushestools.WithTurnIdentity(ctx, turnID, messageID)
+	if err := service.startAgentTurnRun(ctx, turnID, QueueItem{
+		DraftID: draftID, ItemID: messageID, Kind: QueueUserMessage,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = service.finishAgentTurnRun(context.Background(), turnID, "cancelled")
+	})
+	ctx = withTimelineEditLeaseSession(ctx, session)
+	return rushestools.WithTimelineWriteAdmission(ctx, turnID, session.token, session.markLost)
+}
 
 func fmtJSON(value any) string {
 	encoded, _ := json.Marshal(value)
@@ -60,6 +91,52 @@ func seedTimelineVersion(
 	if origin == "" {
 		origin = "agent"
 	}
+	var writeAdmission *reducer.TimelineWriteAdmission
+	if origin == "manual" {
+		writeAdmission = &reducer.TimelineWriteAdmission{Origin: "manual"}
+	} else {
+		turnID := "turn-test-seed-" + agentexec.RandomID("lease")
+		leaseToken := agentexec.RandomID("lease")
+		if session := timelineEditLeaseSessionFromContext(ctx); session != nil {
+			if session.draftID != draftID {
+				return rushestools.ToolResult{}, fmt.Errorf(
+					"timeline fixture lease draft mismatch: session=%s seed=%s",
+					session.draftID, draftID,
+				)
+			}
+			if err := session.ensure(ctx); err != nil {
+				return rushestools.ToolResult{}, err
+			}
+			turnID = session.turnID
+			leaseToken = session.token
+		} else {
+			result, acquireErr := applyAgentEditLeaseMutation(ctx, service.database,
+				reducer.AgentEditLeaseMutation{
+					Operation: reducer.AgentEditLeaseAcquire,
+					DraftID:   draftID, TurnID: turnID, LeaseToken: leaseToken,
+					Now: time.Now().UTC(), TTL: agentEditLeaseTTL,
+				},
+			)
+			if acquireErr != nil {
+				return rushestools.ToolResult{}, acquireErr
+			}
+			if result.AgentEditLease == nil || result.AgentEditLease.Lease == nil {
+				return rushestools.ToolResult{}, errors.New("timeline fixture lease acquire 未返回持久化租约")
+			}
+			defer func() {
+				_, _ = applyAgentEditLeaseMutation(context.WithoutCancel(ctx), service.database,
+					reducer.AgentEditLeaseMutation{
+						Operation: reducer.AgentEditLeaseRelease,
+						DraftID:   draftID, TurnID: turnID, LeaseToken: leaseToken,
+						Now: time.Now().UTC(),
+					},
+				)
+			}()
+		}
+		writeAdmission = &reducer.TimelineWriteAdmission{
+			Origin: "agent", TurnID: turnID, LeaseToken: leaseToken,
+		}
+	}
 	editOperations := []map[string]any{}
 	if editOperation != nil {
 		editOperations = append(editOperations, editOperation)
@@ -85,7 +162,10 @@ func seedTimelineVersion(
 				"validation_report": reportMap,
 			},
 		},
-	}, reducer.Options{Actor: actor, BaseVersion: &draft.StateVersion})
+	}, reducer.Options{
+		Actor: actor, BaseVersion: &draft.StateVersion,
+		TimelineWriteAdmission: writeAdmission,
+	})
 	if err != nil || result.Status != reducer.StatusApplied {
 		return rushestools.ToolResult{}, errors.Join(
 			err, fmt.Errorf("timeline fixture reducer status: %s", result.Status),

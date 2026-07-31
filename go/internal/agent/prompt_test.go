@@ -171,12 +171,14 @@ func TestTaskPlaybookMessageUsesCurrentSnapshotBetweenReferenceAndPatch(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 3 ||
+	if len(messages) != 2 ||
 		messages[0].Extra["context_phase"] != "world_state_reference" ||
 		messages[1].Extra["context_phase"] != "task_playbook" ||
-		messages[2].Extra["context_phase"] != "world_state_update" ||
 		!strings.Contains(messages[1].Content, agentexec.TimelineEditingPlaybook) {
 		t.Fatalf("messages=%#v", messages)
+	}
+	if strings.Contains(messages[0].Content, `"timeline"`) {
+		t.Fatalf("cacheable WorldState leaked timeline authority: %s", messages[0].Content)
 	}
 
 	withoutPlaybook, err := renderContextMessages(
@@ -185,9 +187,8 @@ func TestTaskPlaybookMessageUsesCurrentSnapshotBetweenReferenceAndPatch(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(withoutPlaybook) != 2 ||
-		withoutPlaybook[0].Extra["context_phase"] != "world_state_reference" ||
-		withoutPlaybook[1].Extra["context_phase"] != "world_state_update" {
+	if len(withoutPlaybook) != 1 ||
+		withoutPlaybook[0].Extra["context_phase"] != "world_state_reference" {
 		t.Fatalf("base condition leaked into current playbook: %#v", withoutPlaybook)
 	}
 	if taskPlaybookMessage(NewWorldStateSnapshot(map[string]any{})) != nil {

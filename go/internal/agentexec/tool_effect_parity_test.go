@@ -72,7 +72,6 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 			"asset.list_assets": {input: rushestools.AssetListInput{}},
 			"timeline.inspect":  {input: rushestools.TimelineInspectInput{}},
 			"shot.search":       {input: rushestools.ShotSearchInput{Query: "人物"}},
-			"job.read":          {input: rushestools.JobReadInput{JobID: "missing_job"}},
 			"preview.check": {
 				input:      rushestools.PreviewCheckInput{PreviewID: previewID, Check: "decode"},
 				skipReason: dependencySkipReason(ffmpegErr, "ffmpeg"),

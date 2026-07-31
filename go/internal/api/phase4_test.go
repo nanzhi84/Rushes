@@ -29,7 +29,9 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("assets status=%s err=%v", result.Status, err)
 	}
-	ctx := tools.WithDraftID(t.Context(), "draft_timeline_api")
+	ctx := tools.WithTimelineMutationOrigin(
+		tools.WithDraftID(t.Context(), "draft_timeline_api"), "manual",
+	)
 	if _, err := server.agent.ExecuteTool(ctx, "timeline.insert", tools.TimelineInsertInput{
 		"kind": "insert_clip", "asset_id": "asset_timeline_api", "role": "a_roll",
 		"source_start_frame": 0, "source_end_frame": 60,
@@ -111,7 +113,7 @@ func TestTimelineEndpointPreviewLookupAndViewedMutation(t *testing.T) {
 	).Scan(&manualBatches, &actor, &origin, &operationCount); err != nil {
 		t.Fatal(err)
 	}
-	if manualBatches != 2 || actor != string(contracts.ActorUser) || origin != "manual" || operationCount != 2 {
+	if manualBatches != 3 || actor != string(contracts.ActorUser) || origin != "manual" || operationCount != 3 {
 		t.Fatalf("manual batches=%d actor=%s origin=%s ops=%d", manualBatches, actor, origin, operationCount)
 	}
 	removedRestore := httptest.NewRecorder()
@@ -145,7 +147,7 @@ func TestTimelineBatchFailureReportsDurablePrefixAndLatestSnapshot(t *testing.T)
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("assets status=%s err=%v", result.Status, err)
 	}
-	ctx := tools.WithDraftID(t.Context(), draftID)
+	ctx := tools.WithTimelineMutationOrigin(tools.WithDraftID(t.Context(), draftID), "manual")
 	if _, err := server.agent.ExecuteTool(ctx, "timeline.insert", tools.TimelineInsertInput{
 		"kind": "insert_clip", "asset_id": "asset_timeline_partial", "role": "a_roll",
 		"source_start_frame": 0, "source_end_frame": 60,
@@ -186,7 +188,98 @@ func TestTimelineBatchFailureReportsDurablePrefixAndLatestSnapshot(t *testing.T)
 	if err := server.database.Read().QueryRowContext(t.Context(), `
 		SELECT COUNT(*) FROM timeline_edit_batches
 		WHERE draft_id=? AND origin='manual'`, draftID,
-	).Scan(&manualBatches); err != nil || manualBatches != 1 {
+	).Scan(&manualBatches); err != nil || manualBatches != 2 {
 		t.Fatalf("manual batches=%d err=%v", manualBatches, err)
+	}
+}
+
+func TestTimelinePatchFastRejectsLiveAgentLeaseAndSucceedsAfterRelease(t *testing.T) {
+	t.Parallel()
+	server, handler := testServer(t, t.TempDir(), 0)
+	const draftID = "draft_timeline_lease_fast_path"
+	createDraftThroughAPI(t, handler, draftID)
+	result, err := reducer.Apply(t.Context(), server.database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset_timeline_lease", "job_id": "job_timeline_lease",
+			"storage_mode": "reference", "reference_path": "/tmp/lease.mp4",
+			"kind": "video", "source": "local_path", "filename": "lease.mp4",
+			"hash": "lease", "size": 1, "ingest_status": "ready",
+		}},
+		{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{"asset_id": "asset_timeline_lease"}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("assets result=%#v err=%v", result, err)
+	}
+	ctx := tools.WithTimelineMutationOrigin(tools.WithDraftID(t.Context(), draftID), "manual")
+	if _, err := server.agent.ExecuteTool(ctx, "timeline.insert", tools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "asset_timeline_lease", "role": "a_roll",
+		"source_start_frame": 0, "source_end_frame": 60,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var manualBatchesBefore int
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM timeline_edit_batches WHERE draft_id=? AND origin='manual'`, draftID,
+	).Scan(&manualBatchesBefore); err != nil || manualBatchesBefore != 1 {
+		t.Fatalf("manual seed batches=%d err=%v", manualBatchesBefore, err)
+	}
+	now := time.Now().UTC()
+	acquire := reducer.AgentEditLeaseMutation{
+		Operation: reducer.AgentEditLeaseAcquire, DraftID: draftID,
+		TurnID: "turn-api-lease", LeaseToken: "token-api-lease", Now: now, TTL: time.Minute,
+	}
+	result, err = reducer.Apply(t.Context(), server.database, nil, reducer.Options{
+		Actor:      contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{AgentEditLeaseMutation: &acquire},
+	})
+	if err != nil || result.AgentEditLease == nil {
+		t.Fatalf("lease result=%#v err=%v", result, err)
+	}
+
+	locked := httptest.NewRecorder()
+	handler.ServeHTTP(locked, apiRequest(t, http.MethodPost,
+		"/api/drafts/"+draftID+"/timeline/patch", map[string]any{"op": map[string]any{
+			"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -6,
+		}}))
+	if locked.Code != http.StatusConflict ||
+		!strings.Contains(locked.Body.String(), `"reason":"timeline_locked_by_agent"`) ||
+		!strings.Contains(locked.Body.String(), `"edit_lease":{"active":true`) ||
+		!strings.Contains(locked.Body.String(), `"timeline_version":1`) {
+		t.Fatalf("locked status=%d body=%s", locked.Code, locked.Body.String())
+	}
+	var currentVersion, manualBatches int
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT timeline_current_version FROM drafts WHERE draft_id=?`, draftID,
+	).Scan(&currentVersion); err != nil || currentVersion != 1 {
+		t.Fatalf("locked write changed version=%d err=%v", currentVersion, err)
+	}
+	if err := server.database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM timeline_edit_batches WHERE draft_id=? AND origin='manual'`, draftID,
+	).Scan(&manualBatches); err != nil || manualBatches != manualBatchesBefore {
+		t.Fatalf(
+			"locked write changed history: before=%d after=%d err=%v",
+			manualBatchesBefore, manualBatches, err,
+		)
+	}
+
+	release := reducer.AgentEditLeaseMutation{
+		Operation: reducer.AgentEditLeaseRelease, DraftID: draftID,
+		TurnID: "turn-api-lease", LeaseToken: "token-api-lease", Now: now.Add(time.Second),
+	}
+	if _, err := reducer.Apply(t.Context(), server.database, nil, reducer.Options{
+		Actor:      contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{AgentEditLeaseMutation: &release},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	unlocked := httptest.NewRecorder()
+	handler.ServeHTTP(unlocked, apiRequest(t, http.MethodPost,
+		"/api/drafts/"+draftID+"/timeline/patch", map[string]any{"op": map[string]any{
+			"kind": "adjust_gain", "timeline_clip_id": "clip_v1_001", "gain_db": -6,
+		}}))
+	if unlocked.Code != http.StatusOK ||
+		!strings.Contains(unlocked.Body.String(), `"timeline_version":2`) ||
+		!strings.Contains(unlocked.Body.String(), `"edit_lease":{"active":false`) {
+		t.Fatalf("unlocked status=%d body=%s", unlocked.Code, unlocked.Body.String())
 	}
 }

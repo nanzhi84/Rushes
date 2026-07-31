@@ -18,9 +18,11 @@ type modelContractGolden struct {
 }
 
 type modelContractTool struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Parameters  any    `json:"parameters"`
+	Name                string                          `json:"name"`
+	Description         string                          `json:"description"`
+	CompletionSemantics rushestools.CompletionSemantics `json:"completion_semantics"`
+	TypedSuccessAdapter bool                            `json:"typed_success_adapter"`
+	Parameters          any                             `json:"parameters"`
 }
 
 type modelContractPrompts struct {
@@ -58,7 +60,10 @@ func TestModelContractGolden(t *testing.T) {
 			t.Fatalf("%s schema: %v", spec.Name, err)
 		}
 		contract.Tools = append(contract.Tools, modelContractTool{
-			Name: spec.Name, Description: spec.Description, Parameters: parameters,
+			Name: spec.Name, Description: spec.Description,
+			CompletionSemantics: spec.CompletionSemantics,
+			TypedSuccessAdapter: spec.TypedSuccessAdapter,
+			Parameters:          parameters,
 		})
 	}
 	actual, err := json.MarshalIndent(contract, "", "  ")

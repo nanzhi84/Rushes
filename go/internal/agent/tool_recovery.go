@@ -397,8 +397,8 @@ func toolRecoveryTargetKey(name, arguments, rawResult string) string {
 		if path, _ := values["path"].(string); path != "" {
 			identity["path"] = filepath.Clean(path)
 		}
-	case "render.start":
-		for _, key := range []string{"timeline_id", "kind"} {
+	case "preview.generate":
+		for _, key := range []string{"timeline_id"} {
 			if value, exists := values[key]; exists {
 				identity[key] = value
 			}
@@ -516,7 +516,16 @@ func canonicalToolArguments(arguments string) string {
 	return strings.TrimSpace(arguments)
 }
 
-func newToolRecoveryMiddleware(retrySafe func(string) bool) compose.ToolMiddleware {
+type modelReceiptPolicyLookup func(string) (rushestools.ModelReceiptPolicy, bool)
+
+func newToolRecoveryMiddleware(
+	retrySafe func(string) bool,
+	policyLookups ...modelReceiptPolicyLookup,
+) compose.ToolMiddleware {
+	policyLookup := fallbackModelReceiptPolicy
+	if len(policyLookups) > 0 && policyLookups[0] != nil {
+		policyLookup = policyLookups[0]
+	}
 	return compose.ToolMiddleware{
 		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
@@ -527,6 +536,7 @@ func newToolRecoveryMiddleware(retrySafe func(string) bool) compose.ToolMiddlewa
 					}
 				}
 				ctx = rushestools.WithToolCallID(ctx, input.CallID)
+				missingMutationReceiptIdentity := modelMutationReceiptIdentityMissing(ctx, input)
 
 				// registry reporter 位于工具实现内部；若直接重放 next，每次内部重试都会
 				// 在消息流和数据库里生成一条失败工具记录。保留第一次 started 以持续
@@ -573,6 +583,19 @@ func newToolRecoveryMiddleware(retrySafe func(string) bool) compose.ToolMiddlewa
 					if reporter, ok := rushestools.ReporterFromContext(ctx); ok {
 						reporter(ctx, input.Name, "started", toolArgumentsForReport(input.Arguments), nil, nil)
 					}
+				}
+				if missingMutationReceiptIdentity {
+					raw := marshalToolFailure(
+						"模型时间线写入缺少完整调用身份，已在执行前拒绝。",
+						map[string]any{
+							"error_code": string(rushestools.ErrCodeToolExecutionError),
+							"recovery":   "重新发起一次带非空 tool_call_id 的时间线工具调用。",
+						},
+					)
+					result := decorateToolFailure(ctx, input, raw, 0)
+					reportFinished, reportOutput, reportErr = true, toolResultForReport(result), nil
+					observeToolResultSize(input.Name, result)
+					return &compose.ToolOutput{Result: result}, nil
 				}
 
 				attempts := 0
@@ -635,6 +658,31 @@ func newToolRecoveryMiddleware(retrySafe func(string) bool) compose.ToolMiddlewa
 					raw := executionErrorOutput(input.Name, missingResultErr, attempts, false)
 					return &compose.ToolOutput{Result: decorateToolFailure(ctx, input, raw, attempts)}, nil
 				}
+				policy, policyExists := policyLookup(input.Name)
+				normalizedResult, status, validReceipt := normalizeModelToolReceipt(output.Result, policy)
+				validReceipt = validReceipt && policyExists
+				if !validReceipt {
+					if status == "queued" || status == "running" {
+						metricLLMNonTerminalToolResult.Inc()
+					}
+					slog.Warn(
+						"模型工具返回非合同状态，已 fail-closed",
+						"tool", input.Name, "status", status,
+					)
+					raw := marshalToolFailure(
+						"模型工具必须在同一 turn 内返回标准终态或 waiting_user。",
+						map[string]any{
+							"error_code":      string(rushestools.ErrCodeToolExecutionError),
+							"returned_status": status,
+							"recovery":        "修正工具返回合同；只允许 succeeded、failed、validation_failed、cancelled、timeout 或 waiting_user。",
+						},
+					)
+					output.Result = decorateToolFailure(ctx, input, raw, attempts)
+					reportFinished, reportOutput, reportErr = true, toolResultForReport(output.Result), nil
+					observeToolResultSize(input.Name, output.Result)
+					return output, nil
+				}
+				output.Result = normalizedResult
 				if !isStructuredToolFailure(output.Result) {
 					output.Result = attachToolRequestFingerprint(input.Name, input.Arguments, output.Result)
 				}
@@ -650,7 +698,7 @@ func newToolRecoveryMiddleware(retrySafe func(string) bool) compose.ToolMiddlewa
 						"工具返回了无法核验的结果状态，不能据此确认执行成功。",
 						map[string]any{
 							"error_code":       string(rushestools.ErrCodeToolExecutionError),
-							"recovery":         "检查工具返回格式与状态；只有该工具约定的成功、排队或等待状态才能确认恢复。",
+							"recovery":         "检查工具返回格式与状态；只有该工具约定的终态或 waiting_user 才能确认恢复。",
 							"raw_result_bytes": len([]byte(output.Result)),
 						},
 					)
@@ -667,6 +715,74 @@ func newToolRecoveryMiddleware(retrySafe func(string) bool) compose.ToolMiddlewa
 			}
 		},
 	}
+}
+
+// Model-origin timeline mutations must be attributable before the executor can
+// create a version. Direct harness/unit calls do not carry a turn identity and
+// therefore remain outside this middleware boundary; production ReAct calls
+// always carry both identities from runTurn and must also carry a provider call
+// ID so the reducer can commit the durable receipt with the mutation.
+func modelMutationReceiptIdentityMissing(ctx context.Context, input *compose.ToolInput) bool {
+	if input == nil || !isTerminalTimelineMutation(input.Name) {
+		return false
+	}
+	turnID, sourceMessageID := rushestools.TurnIdentity(ctx)
+	if strings.TrimSpace(turnID) == "" && strings.TrimSpace(sourceMessageID) == "" {
+		return false
+	}
+	return strings.TrimSpace(turnID) == "" ||
+		strings.TrimSpace(sourceMessageID) == "" ||
+		strings.TrimSpace(input.CallID) == ""
+}
+
+func normalizeModelToolReceipt(
+	raw string,
+	policy rushestools.ModelReceiptPolicy,
+) (normalized, status string, valid bool) {
+	if !policy.Valid() {
+		return raw, "missing_contract", false
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(raw), &payload) != nil || payload == nil {
+		return raw, "invalid_json", false
+	}
+	rawStatus, exists := payload["status"]
+	if !exists {
+		if !policy.TypedSuccessAdapter {
+			return raw, "missing", false
+		}
+		status = string(rushestools.StatusSucceeded)
+	} else {
+		var ok bool
+		status, ok = rawStatus.(string)
+		if !ok {
+			return raw, "invalid_type", false
+		}
+		status = strings.ToLower(strings.TrimSpace(status))
+	}
+	if !policy.Allows(rushestools.ToolStatus(status)) {
+		return raw, status, false
+	}
+	payload["status"] = status
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return raw, "serialization_failed", false
+	}
+	return string(encoded), status, true
+}
+
+// fallbackModelReceiptPolicy keeps isolated middleware/unit tests honest when
+// no Registry is available. Production injects Registry.ModelReceiptPolicy;
+// this fallback mirrors only the stable adapter boundary, not a second tool
+// catalog: typed result names are already the proof validator's exhaustive set.
+func fallbackModelReceiptPolicy(name string) (rushestools.ModelReceiptPolicy, bool) {
+	completion := rushestools.CompletionTerminalOnly
+	if name == "interaction.ask_user" || name == "interaction.confirm_action" {
+		completion = rushestools.CompletionTerminalOrWaitingUser
+	}
+	return rushestools.ModelReceiptPolicy{
+		Completion: completion, TypedSuccessAdapter: isTypedToolRecoveryResult(name),
+	}, name != ""
 }
 
 func observeToolResultSize(name, result string) {
@@ -711,11 +827,32 @@ func decorateToolFailure(
 	if json.Unmarshal([]byte(raw), &payload) != nil {
 		payload = map[string]any{"status": string(rushestools.StatusFailed), "observation": agentexec.TruncateText(raw, 1000)}
 	}
-	payload["status"] = string(rushestools.StatusFailed)
+	status := agentexec.InterfaceString(payload["status"])
+	switch status {
+	case string(rushestools.StatusFailed),
+		string(rushestools.StatusValidationFailed),
+		string(rushestools.StatusCancelled),
+		string(rushestools.StatusTimeout):
+	default:
+		status = string(rushestools.StatusFailed)
+	}
+	payload["status"] = status
 	observation, _ := payload["observation"].(string)
 	data, _ := payload["data"].(map[string]any)
 	if data == nil {
 		data = map[string]any{}
+	}
+	if strings.TrimSpace(agentexec.InterfaceString(data["error_code"])) == "" {
+		switch status {
+		case string(rushestools.StatusValidationFailed):
+			data["error_code"] = string(rushestools.ErrCodeToolValidationFailed)
+		case string(rushestools.StatusCancelled):
+			data["error_code"] = string(rushestools.ErrCodeToolCancelled)
+		case string(rushestools.StatusTimeout):
+			data["error_code"] = string(rushestools.ErrCodeToolTimeout)
+		default:
+			data["error_code"] = string(rushestools.ErrCodeToolExecutionError)
+		}
 	}
 	state := toolRecoveryFromContext(ctx)
 	decision := recoveryDecision{}
@@ -806,7 +943,10 @@ func isStructuredToolFailure(raw string) bool {
 	if json.Unmarshal([]byte(raw), &payload) != nil {
 		return false
 	}
-	return payload.Status == string(rushestools.StatusFailed) || payload.Status == string(rushestools.StatusValidationFailed)
+	return payload.Status == string(rushestools.StatusFailed) ||
+		payload.Status == string(rushestools.StatusValidationFailed) ||
+		payload.Status == string(rushestools.StatusCancelled) ||
+		payload.Status == string(rushestools.StatusTimeout)
 }
 
 func toolResultForReport(raw string) any {
@@ -878,10 +1018,8 @@ func confirmedToolResultSuccessWithExecutionProof(
 				validSuccessfulTimelineCheck(result)
 		case name == "timeline.inspect":
 			return validRequestedTimelineProof(arguments, result, false, draftID)
-		case name == "render.start":
-			return validRenderDispatchProof(arguments, result, "succeeded")
-		case name == "job.read":
-			return matchesRequestedString(arguments, "job_id", agentexec.InterfaceString(result.Data["job_id"]))
+		case name == "preview.generate":
+			return validPreviewGenerateProof(arguments, result)
 		case name == "memory.set":
 			return matchesRequestedMemoryKeys(arguments, result, "entries", "written_keys")
 		case name == "memory.remove":
@@ -895,8 +1033,6 @@ func confirmedToolResultSuccessWithExecutionProof(
 		default:
 			return false
 		}
-	case string(rushestools.StatusQueued):
-		return name == "render.start" && validRenderDispatchProof(arguments, result, "queued")
 	case string(rushestools.StatusWaiting):
 		return (name == "interaction.ask_user" || name == "interaction.confirm_action") &&
 			fullRequestBound && validDecisionProof(result, true)
@@ -1129,32 +1265,25 @@ func recoveryStringSet(value any) (map[string]struct{}, bool) {
 	return result, true
 }
 
-func validRenderDispatchProof(arguments any, result rushestools.ToolResult, status string) bool {
-	if strings.TrimSpace(agentexec.InterfaceString(result.Data["job_id"])) == "" ||
+func validPreviewGenerateProof(arguments any, result rushestools.ToolResult) bool {
+	if strings.TrimSpace(agentexec.InterfaceString(result.Data["preview_id"])) == "" ||
+		strings.TrimSpace(agentexec.InterfaceString(result.Data["job_id"])) == "" ||
+		agentexec.InterfaceString(result.Data["job_status"]) != "succeeded" ||
 		positiveInteger(result.Data["timeline_version"]) <= 0 {
 		return false
 	}
 	argumentMap := toolArgumentsObject(arguments)
 	timelineID := strings.TrimSpace(agentexec.InterfaceString(argumentMap["timeline_id"]))
 	_, requestedVersion, validTimelineID := splitTimelineID(timelineID)
-	requestedKind := strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(argumentMap["kind"])))
 	requestedOrientation := strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(argumentMap["orientation"])))
 	if requestedOrientation == "" {
 		requestedOrientation = "auto"
 	}
-	if !validTimelineID || int64(requestedVersion) != positiveInteger(result.Data["timeline_version"]) ||
-		strings.TrimSpace(agentexec.InterfaceString(result.Data["timeline_id"])) != timelineID ||
-		(requestedKind != "preview" && requestedKind != "final") ||
-		strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(result.Data["render_kind"]))) != requestedKind ||
-		(requestedOrientation != "auto" && requestedOrientation != "portrait" && requestedOrientation != "landscape") ||
-		strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(result.Data["orientation"]))) != requestedOrientation {
-		return false
-	}
-	jobStatus := agentexec.InterfaceString(result.Data["job_status"])
-	if status == "queued" {
-		return jobStatus == "pending" || jobStatus == "running"
-	}
-	return status == "succeeded" && jobStatus == "succeeded"
+	return validTimelineID &&
+		int64(requestedVersion) == positiveInteger(result.Data["timeline_version"]) &&
+		strings.TrimSpace(agentexec.InterfaceString(result.Data["timeline_id"])) == timelineID &&
+		(requestedOrientation == "auto" || requestedOrientation == "portrait" || requestedOrientation == "landscape") &&
+		strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(result.Data["orientation"]))) == requestedOrientation
 }
 
 func validDecisionProof(result rushestools.ToolResult, shouldEnd bool) bool {
@@ -1221,12 +1350,20 @@ func isConfirmedToolRecoverySuccessWithExecutionProof(
 	raw, draftID string,
 	fullRequestBound bool,
 ) bool {
+	policy, _ := fallbackModelReceiptPolicy(name)
+	normalized, _, validReceipt := normalizeModelToolReceipt(raw, policy)
+	if !validReceipt {
+		return false
+	}
+	raw = normalized
 	var payload map[string]json.RawMessage
 	if json.Unmarshal([]byte(raw), &payload) != nil || payload == nil {
 		return false
 	}
 	if isTypedToolRecoveryResult(name) {
-		if _, hasStatus := payload["status"]; hasStatus {
+		var status string
+		if json.Unmarshal(payload["status"], &status) != nil ||
+			status != string(rushestools.StatusSucceeded) {
 			return false
 		}
 		return validTypedToolRecoveryResult(name, arguments, raw, payload, draftID, fullRequestBound)
@@ -1267,9 +1404,7 @@ func validDetectShotsProof(arguments any, raw, status, draftID string) bool {
 		return false
 	}
 	switch status {
-	case string(rushestools.StatusQueued):
-		return strings.TrimSpace(result.JobID) != ""
-	case "completed":
+	case string(rushestools.StatusSucceeded):
 		return result.Summary != nil &&
 			strings.TrimSpace(result.Summary.AssetID) == strings.TrimSpace(result.AssetID) &&
 			result.Summary.TimelineFPS > 0
@@ -1436,8 +1571,13 @@ func validTypedToolRecoveryResult(
 				}
 			}
 			if len(requestedRoles) != 0 {
-				if _, requested := requestedRoles[strings.TrimSpace(shot.SemanticRole)]; !requested {
-					return false
+				// 与 agentexec.toolSearchShots 的筛选语义保持一致：旧版或仅做过
+				// 视觉理解的素材可能没有可判定的 a_roll/b_roll。未知角色不是
+				// 相反角色；只有结果明确声明了另一种角色时，proof 才拒绝。
+				if explicitRole := explicitShotSemanticRole(shot.SemanticRole); explicitRole != "" {
+					if _, requested := requestedRoles[explicitRole]; !requested {
+						return false
+					}
 				}
 			}
 			if minDuration > 0 && shot.DurationFrames < minDuration ||
@@ -1556,6 +1696,17 @@ func requestedLowercaseStringSet(arguments any, field string) map[string]struct{
 		result[strings.ToLower(value)] = struct{}{}
 	}
 	return result
+}
+
+func explicitShotSemanticRole(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "a_roll", "a-roll", "aroll":
+		return "a_roll"
+	case "b_roll", "b-roll", "broll":
+		return "b_roll"
+	default:
+		return ""
+	}
 }
 
 func matchesRequestedPreviewCheck(arguments any, resultCheck string) bool {

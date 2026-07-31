@@ -27,14 +27,12 @@ const (
 )
 
 type understandBridgeChatModel struct {
-	mu                     sync.Mutex
-	toolBound              bool
-	toolCalls              int
-	sawQueuedResult        bool
-	continuationCalls      int
-	continuationWorldState string
-	continuationEvidence   string
-	terminalPrompt         string
+	mu                sync.Mutex
+	toolBound         bool
+	toolCalls         int
+	modelCalls        int
+	sawTerminalResult bool
+	toolResult        string
 }
 
 func (modelValue *understandBridgeChatModel) WithTools(
@@ -58,42 +56,16 @@ func (modelValue *understandBridgeChatModel) Generate(
 ) (*schema.Message, error) {
 	modelValue.mu.Lock()
 	defer modelValue.mu.Unlock()
+	modelValue.modelCalls++
 
-	lastUser := lastMessageContent(messages, schema.User)
-	if strings.Contains(lastUser, "你等待的后台任务已到终态") {
-		modelValue.continuationCalls++
-		modelValue.terminalPrompt = lastUser
-		for _, message := range messages {
-			if message.Role == schema.System && strings.Contains(message.Content, "material_catalog") &&
-				strings.Contains(message.Content, firstVisionMarker) {
-				modelValue.continuationWorldState = message.Content
-			}
-			if message.Role == schema.System &&
-				message.Extra["context_phase"] == "job_understanding_evidence" &&
-				strings.Contains(message.Content, firstVisionMarker) {
-				modelValue.continuationEvidence = message.Content
-			}
+	if toolResult := lastMessageContent(messages, schema.Tool); toolResult != "" {
+		if !strings.Contains(toolResult, `"status":"succeeded"`) ||
+			!strings.Contains(toolResult, firstVisionMarker) {
+			return nil, errors.New("单素材检测没有在当前 ReAct turn 返回终态持久化摘要")
 		}
-		if modelValue.continuationWorldState == "" {
-			return nil, errors.New("后台续跑没有从最新 WorldState 读到素材理解摘要")
-		}
-		if modelValue.continuationEvidence == "" {
-			return nil, errors.New("后台续跑没有收到按 job asset_id 定向注入的持久化素材证据")
-		}
-		return schema.AssistantMessage(
-			"已依据真实素材理解继续处理："+firstVisionMarker+"。",
-			nil,
-		), nil
-	}
-
-	if len(messages) > 0 && messages[len(messages)-1].Role == schema.Tool {
-		toolResult := messages[len(messages)-1].Content
-		if !strings.Contains(toolResult, `"status":"queued"`) ||
-			!strings.Contains(toolResult, "任务终态会自动续跑") {
-			return nil, errors.New("单素材检测没有向 ReAct 返回 queued 与自动续跑说明")
-		}
-		modelValue.sawQueuedResult = true
-		return schema.AssistantMessage("素材理解已排队，等待后台完成后自动继续。", nil), nil
+		modelValue.sawTerminalResult = true
+		modelValue.toolResult = toolResult
+		return schema.AssistantMessage("已依据真实素材理解继续处理："+firstVisionMarker+"。", nil), nil
 	}
 
 	if !modelValue.toolBound {
@@ -126,16 +98,13 @@ func (modelValue *understandBridgeChatModel) Stream(
 
 func (modelValue *understandBridgeChatModel) snapshot() (
 	toolCalls int,
-	sawQueued bool,
-	continuationCalls int,
-	worldState string,
-	evidence string,
-	terminalPrompt string,
+	modelCalls int,
+	sawTerminal bool,
+	toolResult string,
 ) {
 	modelValue.mu.Lock()
 	defer modelValue.mu.Unlock()
-	return modelValue.toolCalls, modelValue.sawQueuedResult, modelValue.continuationCalls,
-		modelValue.continuationWorldState, modelValue.continuationEvidence, modelValue.terminalPrompt
+	return modelValue.toolCalls, modelValue.modelCalls, modelValue.sawTerminalResult, modelValue.toolResult
 }
 
 type markerVisionModel struct {
@@ -199,7 +168,7 @@ func (modelValue *markerVisionModel) callCount() int {
 	return modelValue.calls
 }
 
-func TestAsyncUnderstandWorkerBridgeUsesPersistedWorldState(t *testing.T) {
+func TestAsyncUnderstandWorkerCompletesInSameTurn(t *testing.T) {
 	database, err := storage.Open(t.Context(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -216,40 +185,6 @@ func TestAsyncUnderstandWorkerBridgeUsesPersistedWorldState(t *testing.T) {
 	userContent := "请深度检测第一份视频素材，并根据真实视觉结论继续当前任务。"
 	assertMarkersAbsent(t, "用户请求", userContent)
 	persistMessage(t, database, "draft_understand_bridge", "user_understand_bridge", "user", "user", userContent)
-
-	chatModel := &understandBridgeChatModel{}
-	service, err := agent.NewService(t.Context(), database, chatModel)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(service.Close)
-	if !service.Queue().EnqueueUserMessage(
-		"draft_understand_bridge", "user_understand_bridge", userContent,
-	) {
-		t.Fatal("初始用户回合未入队")
-	}
-	service.Queue().JoinDraft("draft_understand_bridge")
-
-	var jobID, status, payloadJSON string
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT job_id,status,payload_json FROM jobs
-		WHERE kind='understand' AND requested_by_draft_id='draft_understand_bridge'`,
-	).Scan(&jobID, &status, &payloadJSON); err != nil {
-		t.Fatal(err)
-	}
-	if status != "pending" || jobID == "" {
-		t.Fatalf("单素材检测未立即入队: job_id=%q status=%q", jobID, status)
-	}
-	for _, fragment := range []string{"asset_visual_one", `"depth":"deep"`} {
-		if !strings.Contains(payloadJSON, fragment) {
-			t.Fatalf("understand job payload 缺少 %q: %s", fragment, payloadJSON)
-		}
-	}
-	assertMarkersAbsent(t, "jobs.payload_json", payloadJSON)
-	toolCalls, sawQueued, continuationCalls, _, _, _ := chatModel.snapshot()
-	if toolCalls != 1 || !sawQueued || continuationCalls != 0 {
-		t.Fatalf("初始 ReAct 状态异常: tool_calls=%d queued=%v continuation=%d", toolCalls, sawQueued, continuationCalls)
-	}
 
 	visionModel := &markerVisionModel{}
 	registry := worker.NewRegistry()
@@ -268,68 +203,106 @@ func TestAsyncUnderstandWorkerBridgeUsesPersistedWorldState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worked, err := runner.RunOnce(t.Context())
-	if err != nil || !worked {
-		t.Fatalf("understand worker RunOnce: worked=%v err=%v", worked, err)
+	workerCtx, cancelWorker := context.WithCancel(t.Context())
+	t.Cleanup(cancelWorker)
+	workerDone := make(chan error, 1)
+	go func() {
+		for {
+			worked, runErr := runner.RunOnce(workerCtx)
+			if runErr != nil {
+				workerDone <- runErr
+				return
+			}
+			if worked {
+				workerDone <- nil
+				return
+			}
+			select {
+			case <-workerCtx.Done():
+				workerDone <- workerCtx.Err()
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}()
+
+	chatModel := &understandBridgeChatModel{}
+	service, err := agent.NewService(t.Context(), database, chatModel)
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(service.Close)
+	if !service.Queue().EnqueueUserMessage(
+		"draft_understand_bridge", "user_understand_bridge", userContent,
+	) {
+		t.Fatal("初始用户回合未入队")
+	}
+	service.Queue().JoinDraft("draft_understand_bridge")
+	select {
+	case runErr := <-workerDone:
+		if runErr != nil {
+			t.Fatalf("understand worker: %v", runErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("understand worker 未完成")
+	}
+
+	var jobID, status, payloadJSON, resultJSON string
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT job_id,status,payload_json,result_json FROM jobs
+		WHERE kind='understand' AND requested_by_draft_id='draft_understand_bridge'`,
+	).Scan(&jobID, &status, &payloadJSON, &resultJSON); err != nil {
+		t.Fatal(err)
+	}
+	if status != "succeeded" || jobID == "" || !strings.Contains(resultJSON, `"status":"succeeded"`) {
+		t.Fatalf("understand job 未成功: job_id=%q status=%q result=%s", jobID, status, resultJSON)
+	}
+	for _, fragment := range []string{"asset_visual_one", `"depth":"deep"`} {
+		if !strings.Contains(payloadJSON, fragment) {
+			t.Fatalf("understand job payload 缺少 %q: %s", fragment, payloadJSON)
+		}
+	}
+	assertMarkersAbsent(t, "jobs.payload_json", payloadJSON)
+	assertMarkersAbsent(t, "jobs.result_json", resultJSON)
 	if visionModel.callCount() != 1 {
 		t.Fatalf("VLM calls=%d want=1", visionModel.callCount())
 	}
 	assertStoredMarkerSummary(t, database, "asset_visual_one", firstVisionMarker, secondVisionMarker)
 
-	var resultJSON string
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT status,result_json FROM jobs WHERE job_id=?`, jobID,
-	).Scan(&status, &resultJSON); err != nil {
-		t.Fatal(err)
+	toolCalls, modelCalls, sawTerminal, toolResult := chatModel.snapshot()
+	if toolCalls != 1 || modelCalls != 2 || !sawTerminal {
+		t.Fatalf("same-turn ReAct 异常: tool_calls=%d model_calls=%d terminal=%v", toolCalls, modelCalls, sawTerminal)
 	}
-	if status != "succeeded" || !strings.Contains(resultJSON, `"status":"completed"`) {
-		t.Fatalf("worker 未写入成功终态: status=%q result=%s", status, resultJSON)
+	if strings.Contains(toolResult, `"status":"queued"`) ||
+		strings.Contains(toolResult, "自动续跑") ||
+		!strings.Contains(toolResult, firstVisionMarker) {
+		t.Fatalf("工具回灌不是同 turn 终态摘要: %s", toolResult)
 	}
-	assertMarkersAbsent(t, "jobs.result_json", resultJSON)
-
-	finalReply := waitForMarkerReply(t, database, "draft_understand_bridge", 5*time.Second)
-	service.Queue().JoinDraft("draft_understand_bridge")
-	time.Sleep(600 * time.Millisecond)
-	service.Queue().JoinDraft("draft_understand_bridge")
-
-	toolCalls, sawQueued, continuationCalls, worldState, evidence, terminalPrompt := chatModel.snapshot()
-	if toolCalls != 1 || !sawQueued || continuationCalls != 1 {
-		t.Fatalf("桥续跑次数异常: tool_calls=%d queued=%v continuation=%d", toolCalls, sawQueued, continuationCalls)
+	finalReply := waitForMarkerReply(t, database, "draft_understand_bridge", 2*time.Second)
+	if !strings.Contains(finalReply, firstVisionMarker) {
+		t.Fatalf("最终回复未引用持久化摘要: %q", finalReply)
 	}
-	for _, marker := range []string{firstVisionMarker} {
-		if !strings.Contains(worldState, marker) {
-			t.Fatalf("最新 WorldState 缺少 %q", marker)
-		}
-		if !strings.Contains(evidence, marker) {
-			t.Fatalf("定向 understand bridge 证据缺少 %q", marker)
-		}
-		if !strings.Contains(finalReply, marker) {
-			t.Fatalf("最终回复未引用 %q: %q", marker, finalReply)
-		}
+	var observations int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM agent_job_observations",
+	).Scan(&observations); err != nil || observations != 0 {
+		t.Fatalf("same-turn 不得创建 synthetic observation: count=%d err=%v", observations, err)
 	}
-	assertMarkersAbsent(t, "后台终态 prompt", terminalPrompt)
-	for _, fragment := range []string{
-		"本次后台素材理解结果", "定向证据", "assets.material_catalog", "可能截断",
-		"shot.search", "不要重复调用 media.detect_shots",
-	} {
-		if !strings.Contains(terminalPrompt, fragment) {
-			t.Fatalf("understand 自动续跑指令缺少 %q: %s", fragment, terminalPrompt)
-		}
-	}
-
 	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_understand_bridge", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	persistedMarkerReplies := 0
+	markerReplies := 0
 	for _, message := range messages {
+		if message.Role == "user" && strings.Contains(message.Content, "你等待的后台任务已到终态") {
+			t.Fatalf("出现 synthetic user prompt: %#v", message)
+		}
 		if message.Role == "assistant" && strings.Contains(message.Content, firstVisionMarker) {
-			persistedMarkerReplies++
+			markerReplies++
 		}
 	}
-	if persistedMarkerReplies != 1 {
-		t.Fatalf("最终 marker 回复持久化次数=%d want=1; messages=%#v", persistedMarkerReplies, messages)
+	if markerReplies != 1 {
+		t.Fatalf("最终 marker 回复持久化次数=%d want=1; messages=%#v", markerReplies, messages)
 	}
 }
 

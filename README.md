@@ -131,7 +131,7 @@ CI 在 Ubuntu 与 macOS 上执行 Go `-race`，并运行契约对拍、90% 覆�
 
 初版组装与卡点混剪也使用同一组原子编辑。空时间线先通过 `asset.list_assets` / `shot.search` 取得素材事实，再逐段 `timeline.insert`；卡点流程可并行读取 `audio.analyze_beats` 与镜头检索结果，由模型明确选择切点、镜头顺序和 source range。BGM 作为单独一次 insert 写入 `bgm` 轨，并携带检测所得的完整 `metadata.beat_grid`；可选 SFX 再单独插入和调节增益。领域流程不再拥有绕过这些原子操作的高层写入入口。
 
-预览与最终导出统一为 `render.start(kind=preview|final, timeline_id=...)`：稳定 `timeline_id` 精确锁定目标版本，版本漂移只返回 `stale_target`，不会猜测新目标或排队旧版本。任务创建后用严格只读的 `job.read(job_id)` 轮询；preview 成功后，decode/black/freeze/silence/loudness/visual 各自通过一次 `preview.check` 调用，可在同一轮并行执行。旧 render 入口不再绑定给模型。
+Agent 只通过 `preview.generate(timeline_id=...)` 生成预览，并在同一次工具调用内等待终态；成功后，decode/black/freeze/silence/loudness/visual 各自通过一次 `preview.check` 调用，可并行执行。最终成片不属于模型工具面：用户在编辑器中显式选择画幅并触发导出，REST API 将当前 `timeline_id` 与版本固定到持久任务；进度、失败重试和 MP4 下载均由用户界面读取，显式重试继续使用原任务锁定的版本，不经过 Tool Registry、模型回合或 `job.read`。
 
 ### 口播工具验收
 

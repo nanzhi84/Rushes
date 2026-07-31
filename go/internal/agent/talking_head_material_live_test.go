@@ -188,12 +188,13 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 
 	var understood rushestools.DetectShotsResult
 	// 该工具级质量验收没有启动 worker；显式 8 步的单素材 scan 与原 deep 使用同一分析步数，
-	// 多素材/deep 的 queued→worker→bridge 链路由 internal/integration 独立验收。
+	// 多素材/deep 的持久 job、同 turn 等待终态与迟到结果不唤醒模型，
+	// 由 internal/integration 独立验收。
 	invokeRegisteredTool(t, service, ctx, "media.detect_shots", rushestools.DetectShotsInput{
 		AssetID: assetIDs[0], Depth: "scan", Focus: "口播 A-roll；主体、表达主题和可剪辑语义",
 		MaxStepsPerAsset: 8,
 	}, &understood)
-	if understood.Status != "completed" || understood.Summary == nil {
+	if understood.Status != "succeeded" || understood.Summary == nil {
 		t.Fatalf("understanding=%#v", understood)
 	}
 	arollFrames := 0
@@ -250,7 +251,7 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 			AssetID: discovery.DetectionCandidates[0].AssetID,
 			Depth:   "scan", Focus: query.query, MaxStepsPerAsset: 8,
 		}, &onDemand)
-		if onDemand.Status != "completed" || onDemand.Summary == nil {
+		if onDemand.Status != "succeeded" || onDemand.Summary == nil {
 			t.Fatalf("query=%q on-demand understanding=%#v", query.query, onDemand)
 		}
 		var search rushestools.ShotSearchResult

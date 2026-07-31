@@ -142,10 +142,16 @@ func (failingExecutor) ExecuteTool(context.Context, string, any) (any, error) {
 	return map[string]any{"status": "failed"}, errors.New("executor failed")
 }
 
+type untypedErrorExecutor struct{}
+
+func (untypedErrorExecutor) ExecuteTool(context.Context, string, any) (any, error) {
+	return map[string]any{"error": "adapter boom"}, nil
+}
+
 func TestDetectShotsResultJSONUsesSingleAssetShape(t *testing.T) {
 	t.Parallel()
 	encoded, err := json.Marshal(DetectShotsResult{
-		DraftID: "draft", JobID: "job", AssetID: "asset", Status: "completed",
+		DraftID: "draft", JobID: "job", AssetID: "asset", Status: "succeeded",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -158,7 +164,7 @@ func TestDetectShotsResultJSONUsesSingleAssetShape(t *testing.T) {
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Status != "completed" || decoded.AssetID != "asset" {
+	if decoded.Status != "succeeded" || decoded.AssetID != "asset" {
 		t.Fatalf("单素材 JSON 无法解码: %#v", decoded)
 	}
 }
@@ -274,6 +280,112 @@ func TestEveryToolHasValidEffect(t *testing.T) {
 	}
 }
 
+func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	typedAdapters := map[string]bool{
+		"asset.list_assets":           true,
+		"media.detect_shots":          false,
+		"shot.search":                 true,
+		"audio.analyze_beats":         true,
+		"audio.analyze_speech_pauses": true,
+		"speech.transcribe":           true,
+		"speech.search":               false,
+		"interaction.ask_user":        false,
+		"decision.answer":             false,
+		"plan.update":                 false,
+		"memory.set":                  false,
+		"memory.remove":               false,
+		"timeline.insert":             false,
+		"timeline.delete":             false,
+		"timeline.update":             false,
+		"timeline.split":              false,
+		"timeline.check":              false,
+		"timeline.inspect":            false,
+		"preview.generate":            false,
+		"preview.check":               true,
+		"interaction.confirm_action":  false,
+	}
+	waitingUser := map[string]bool{
+		"interaction.ask_user":       true,
+		"interaction.confirm_action": true,
+	}
+
+	for _, spec := range registry.Specs(true) {
+		policy, exists := registry.ModelReceiptPolicy(spec.Name)
+		if spec.Exposure == ExposureHarness {
+			if spec.CompletionSemantics != "" || spec.TypedSuccessAdapter || exists {
+				t.Fatalf("harness 工具 %s 泄漏模型回执合同: spec=%#v policy=%#v exists=%v", spec.Name, spec, policy, exists)
+			}
+			continue
+		}
+		wantAdapter, classified := typedAdapters[spec.Name]
+		if !classified {
+			t.Fatalf("模型工具 %s 未进入 typed adapter 分类表", spec.Name)
+		}
+		wantCompletion := CompletionTerminalOnly
+		if waitingUser[spec.Name] {
+			wantCompletion = CompletionTerminalOrWaitingUser
+		}
+		if !exists || policy.Completion != wantCompletion ||
+			policy.TypedSuccessAdapter != wantAdapter ||
+			spec.CompletionSemantics != wantCompletion || spec.TypedSuccessAdapter != wantAdapter {
+			t.Fatalf("模型工具 %s 回执合同错误: spec=%#v policy=%#v exists=%v", spec.Name, spec, policy, exists)
+		}
+		for _, status := range []ToolStatus{
+			StatusSucceeded, StatusFailed, StatusValidationFailed, StatusCancelled, StatusTimeout,
+		} {
+			if !policy.Allows(status) {
+				t.Fatalf("模型工具 %s 不允许标准终态 %q", spec.Name, status)
+			}
+		}
+		for _, status := range []ToolStatus{"queued", "running", "completed", "mystery", ""} {
+			if policy.Allows(status) {
+				t.Fatalf("模型工具 %s 错误允许非合同状态 %q", spec.Name, status)
+			}
+		}
+		if policy.Allows(StatusWaiting) != waitingUser[spec.Name] {
+			t.Fatalf("模型工具 %s waiting_user 语义错误", spec.Name)
+		}
+	}
+	if len(typedAdapters) != len(registry.Specs(true))-1 {
+		t.Fatalf("typed adapter 分类数=%d，与模型工具数=%d 不一致", len(typedAdapters), len(registry.Specs(true))-1)
+	}
+	if _, exists := registry.ModelReceiptPolicy("asset.import_local_file"); exists {
+		t.Fatal("harness 工具不得有模型回执策略")
+	}
+	if _, exists := registry.ModelReceiptPolicy("does.not.exist"); exists {
+		t.Fatal("未注册工具不得有模型回执策略")
+	}
+}
+
+func TestTypedToolRejectsUnknownExecutorErrorEnvelope(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, untypedErrorExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tool := registry.specs["asset.list_assets"].Implementation.(einotool.InvokableTool)
+	_, err = tool.InvokableRun(WithDraftID(t.Context(), "draft"), `{}`)
+	if err == nil || !strings.Contains(err.Error(), "unknown field \"error\"") {
+		t.Fatalf("typed adapter 应拒绝未知错误 envelope，err=%v", err)
+	}
+}
+
 // TestToolEffectClassificationTable 把 #103 G1 的全量分类表锁成可执行断言：任何工具的
 // Effect 被误改或新增工具未标注都会在此失败。speech.transcribe 负责持久化索引，
 // speech.search 与 timeline.check 必须严格只读；memory.set 可逆，memory.remove 归破坏性。
@@ -295,8 +407,8 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		"audio.analyze_beats":         EffectReadOnly,
 		"audio.analyze_speech_pauses": EffectReadOnly,
 		"timeline.inspect":            EffectReadOnly,
-		"job.read":                    EffectReadOnly,
 		"preview.check":               EffectReadOnly,
+		"preview.generate":            EffectReversible,
 		"media.detect_shots":          EffectReversible,
 		"speech.transcribe":           EffectReversible,
 		"speech.search":               EffectReadOnly,
@@ -309,7 +421,6 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		"timeline.update":             EffectReversible,
 		"timeline.split":              EffectReversible,
 		"timeline.check":              EffectReadOnly,
-		"render.start":                EffectReversible,
 		"memory.set":                  EffectReversible,
 		"memory.remove":               EffectDestructive,
 	}
@@ -359,8 +470,7 @@ func TestToolPrimitiveClassificationMatchesEffectAndSurface(t *testing.T) {
 		"timeline.split":              FamilyEdit,
 		"timeline.check":              FamilyCheck,
 		"timeline.inspect":            FamilyRead,
-		"render.start":                FamilyEdit,
-		"job.read":                    FamilyRead,
+		"preview.generate":            FamilyEdit,
 		"preview.check":               FamilyCheck,
 		"interaction.confirm_action":  FamilyControl,
 	}
@@ -726,11 +836,8 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		"timeline.split": {
 			"一个 timeline_clip_id", "一个时间线整数帧",
 		},
-		"render.start": {
-			"timeline_id", "一个 preview/final", "失败不排队", "不会自动质检",
-		},
-		"job.read": {
-			"一个当前草稿所属 job", "严格只读", "不启动", "或取消",
+		"preview.generate": {
+			"timeline_id", "同步收敛", "preview_id", "模型不轮询后台 job",
 		},
 		"timeline.inspect": {
 			"完整 track/clip ID", "timeline_exists=false",
@@ -995,11 +1102,14 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	allowed, _ = registry.Allowed(ctx, true)
 	for _, name := range []string{
 		"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
-		"timeline.check", "timeline.inspect", "render.start", "job.read",
+		"timeline.check", "timeline.inspect", "preview.generate",
 	} {
 		if !containsSpec(allowed, name) {
 			t.Fatalf("已有但未标记 validated 的时间线也应放行 %s，由渲染入口同步校验", name)
 		}
+	}
+	if containsSpec(allowed, "render.start") || containsSpec(allowed, "job.read") {
+		t.Fatal("Agent Tool Registry 不得披露 render.start 或 job.read")
 	}
 	if containsSpec(allowed, "preview.check") {
 		t.Fatal("没有 preview 时不应放行 inspect_preview")
@@ -1078,7 +1188,7 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 	}
 
 	registry := &Registry{database: database, executor: failingExecutor{}, specs: map[string]Spec{}}
-	readMetadata := metadata(FamilyRead, CostLow, SurfaceDiscovery)
+	readMetadata := terminalMetadata(FamilyRead, CostLow, SurfaceDiscovery)
 	if err := addTool[cleanInput, ToolResult](registry, "clean", "clean", nil, ExposureLLM, EffectReadOnly, false, readMetadata); err != nil {
 		t.Fatal(err)
 	}
@@ -1099,28 +1209,44 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 		t.Fatal("invalid Effect should fail registration")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "no_family", "missing family", nil, ExposureLLM, EffectReadOnly, false,
-		metadata("", CostLow, SurfaceDiscovery)); err == nil {
+		terminalMetadata("", CostLow, SurfaceDiscovery)); err == nil {
 		t.Fatal("missing Family should fail registration")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "no_cost", "missing cost", nil, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyRead, "", SurfaceDiscovery)); err == nil {
+		terminalMetadata(FamilyRead, "", SurfaceDiscovery)); err == nil {
 		t.Fatal("missing Cost should fail registration")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "no_surface", "missing surface", nil, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyRead, CostLow)); err == nil {
+		terminalMetadata(FamilyRead, CostLow)); err == nil {
 		t.Fatal("missing LLM Surface should fail registration")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "unknown_surface", "unknown surface", nil, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyRead, CostLow, Surface(1<<20))); err == nil {
+		terminalMetadata(FamilyRead, CostLow, Surface(1<<20))); err == nil {
 		t.Fatal("unknown LLM Surface should fail registration")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "compound_primary", "compound primary", nil, ExposureLLM, EffectReadOnly, false,
-		metadata(FamilyRead, CostLow, Surfaces(SurfaceDiscovery, SurfaceTalkingHead))); err == nil {
+		terminalMetadata(FamilyRead, CostLow, Surfaces(SurfaceDiscovery, SurfaceTalkingHead))); err == nil {
 		t.Fatal("compound PrimarySurface should fail registration")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "bad_family_effect", "bad classification", nil, ExposureLLM, EffectReversible, false,
-		metadata(FamilyRead, CostLow, SurfaceDiscovery)); err == nil {
+		terminalMetadata(FamilyRead, CostLow, SurfaceDiscovery)); err == nil {
 		t.Fatal("inconsistent Family and Effect should fail registration")
+	}
+	if err := addTool[cleanInput, ToolResult](registry, "no_completion", "missing completion", nil, ExposureLLM, EffectReadOnly, false,
+		modelMetadata(FamilyRead, CostLow, "", SurfaceDiscovery)); err == nil {
+		t.Fatal("LLM 工具缺少 CompletionSemantics 应注册失败")
+	}
+	if err := addTool[cleanInput, ToolResult](registry, "bad_completion", "bad completion", nil, ExposureLLM, EffectReadOnly, false,
+		modelMetadata(FamilyRead, CostLow, CompletionSemantics("queued_allowed"), SurfaceDiscovery)); err == nil {
+		t.Fatal("LLM 工具声明非法 CompletionSemantics 应注册失败")
+	}
+	if err := addTool[cleanInput, ToolResult](registry, "read.waiting", "unexpected waiting", nil, ExposureLLM, EffectReadOnly, false,
+		waitingUserMetadata(FamilyRead, CostLow, SurfaceDiscovery)); err == nil {
+		t.Fatal("非交互模型工具不得允许 waiting_user")
+	}
+	if err := addTool[cleanInput, ToolResult](registry, "harness_with_completion", "unexpected model policy", nil, ExposureHarness, EffectReadOnly, false,
+		terminalMetadata(FamilyRead, CostLow)); err == nil {
+		t.Fatal("harness 工具不得声明 CompletionSemantics")
 	}
 	if _, exists := registry.specs["no_effect"]; exists {
 		t.Fatal("未标注 Effect 的工具不得进入注册表")
@@ -1147,6 +1273,15 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 	converted, err := convertResult[ToolResult](map[string]any{"status": "ok"})
 	if err != nil || converted.Status != "ok" {
 		t.Fatalf("converted=%#v err=%v", converted, err)
+	}
+	if _, err := convertResult[AssetListResult](map[string]any{"error": "adapter boom"}); err == nil {
+		t.Fatal("typed result 不得忽略未知 error 字段并解成零值成功")
+	}
+	if _, err := convertResult[ToolResult](map[string]any{"status": "succeeded", "unexpected": true}); err == nil {
+		t.Fatal("ToolResult 不得忽略未知字段")
+	}
+	if _, err := convertResult[AssetListResult](nil); err == nil {
+		t.Fatal("工具结果不得把 null 解成零值成功")
 	}
 	if _, err := convertResult[ToolResult](make(chan int)); err == nil {
 		t.Fatal("unmarshalable result should fail")

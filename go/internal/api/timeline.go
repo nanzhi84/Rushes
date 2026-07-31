@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -45,6 +46,19 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 		writeNotFound(writer, "draft_not_found")
 		return
 	} else if err != nil {
+		server.internalError(writer, err)
+		return
+	}
+	if _, err := storage.GetLiveAgentEditLease(
+		request.Context(), server.database.Read(), draftID, time.Now().UTC(),
+	); err == nil {
+		reducer.RecordManualTimelineWriteRejectedWhileAgent()
+		server.writeTimelinePatchFailure(
+			writer, request.Context(), draftID, http.StatusConflict,
+			"timeline_locked_by_agent", 0, 0,
+		)
+		return
+	} else if !errors.Is(err, storage.ErrNotFound) {
 		server.internalError(writer, err)
 		return
 	}
@@ -100,6 +114,14 @@ func (server *Server) ApplyTimelinePatchApiDraftsDraftIdTimelinePatchPost(
 	for index, current := range invocations {
 		raw, executeErr := server.agent.ExecuteTool(ctx, current.name, current.input)
 		if executeErr != nil {
+			if errors.Is(executeErr, storage.ErrTimelineLockedByAgent) ||
+				errors.Is(executeErr, storage.ErrAgentEditLeaseLost) {
+				server.writeTimelinePatchFailure(
+					writer, request.Context(), draftID, http.StatusConflict,
+					"timeline_locked_by_agent", index, index,
+				)
+				return
+			}
 			server.writeTimelinePatchFailure(
 				writer, request.Context(), draftID, http.StatusBadRequest,
 				"timeline_patch_invalid: "+executeErr.Error(), index, index,
@@ -202,9 +224,22 @@ func (server *Server) draftTimelineResponse(
 	if err != nil {
 		return DraftTimelineResponse{}, err
 	}
+	leaseStatus := EditLeaseStatus{Active: false}
+	lease, leaseErr := storage.GetLiveAgentEditLease(
+		ctx, server.database.Read(), draftID, time.Now().UTC(),
+	)
+	if leaseErr == nil {
+		turnID := lease.TurnID
+		expiresAt := lease.ExpiresAt.Format(time.RFC3339Nano)
+		leaseStatus = EditLeaseStatus{
+			Active: true, TurnId: &turnID, ExpiresAt: &expiresAt,
+		}
+	} else if !errors.Is(leaseErr, storage.ErrNotFound) {
+		return DraftTimelineResponse{}, leaseErr
+	}
 	return DraftTimelineResponse{
 		DraftId: draftID, TimelineVersion: document.Version, Timeline: documentMap,
-		Summary: timeline.Inspect(document), PreviewId: previewID,
+		Summary: timeline.Inspect(document), PreviewId: previewID, EditLease: leaseStatus,
 	}, nil
 }
 

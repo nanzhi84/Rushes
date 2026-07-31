@@ -25,6 +25,7 @@ func TestJobKindRegistryMatchesSharedGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	actual := jobKindGolden{
+		AgentWaited: []string{},
 		ExecutionClasses: map[string][]string{
 			string(JobExecutionGeneral): JobKindsByExecutionClass(JobExecutionGeneral),
 			string(JobExecutionRender):  JobKindsByExecutionClass(JobExecutionRender),
@@ -36,9 +37,6 @@ func TestJobKindRegistryMatchesSharedGolden(t *testing.T) {
 		if spec.AgentWaited {
 			actual.AgentWaited = append(actual.AgentWaited, spec.Kind)
 			actual.ProgressLabels[spec.Kind] = spec.ProgressLabel
-			if spec.ContinuationHint == "" {
-				t.Errorf("agent-waited job %s 缺少 continuation hint", spec.Kind)
-			}
 		}
 		if spec.ExecutionClass != JobExecutionGeneral && spec.ExecutionClass != JobExecutionRender {
 			t.Errorf("job %s execution class=%q", spec.Kind, spec.ExecutionClass)

@@ -3,6 +3,7 @@ package agentexec
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -14,6 +15,11 @@ import (
 // 引擎装配时注入 hub.Record 适配器；事件负载保持 map[string]any 原状。
 type ProgressFunc func(draftID string, event map[string]any)
 
+// SameTurnWaitObserver is injected by the Agent orchestration layer so the
+// domain executor can report low-cardinality terminal wait outcomes without
+// depending on the telemetry package.
+type SameTurnWaitObserver func(kind, status string, duration time.Duration)
+
 // Executor 承载视频领域的工具执行算法，与编排引擎解耦。依赖经构造注入，
 // 回合级回调（draft/reporter/交互态）仍走 context key。引擎侧 Service 保留
 // 一个装饰器负责引擎语义（决策屏障、本地导入硬拒绝、确认卡校验），再委托到此。
@@ -22,6 +28,9 @@ type Executor struct {
 	analyzer         *understanding.Analyzer
 	speechRecognizer contracts.SpeechRecognizer
 	progress         ProgressFunc
+	sameTurnWait     SameTurnWaitObserver
+	jobPollInterval  time.Duration
+	jobWaitTimeout   time.Duration
 }
 
 // New 构造领域执行器。progress 可为 nil（非流式场景，如直接 REST 与测试）。
@@ -36,6 +45,8 @@ func New(
 		analyzer:         analyzer,
 		speechRecognizer: speechRecognizer,
 		progress:         progress,
+		jobPollInterval:  100 * time.Millisecond,
+		jobWaitTimeout:   10 * time.Minute,
 	}
 }
 
@@ -94,10 +105,8 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 		return exec.toolCheckTimeline(ctx, draftID, input.(rushestools.TimelineCheckInput))
 	case "timeline.inspect":
 		return exec.toolInspectTimeline(ctx, draftID, input.(rushestools.TimelineInspectInput))
-	case "render.start":
-		return exec.toolStartRender(ctx, draftID, input.(rushestools.RenderStartInput))
-	case "job.read":
-		return exec.toolReadJob(ctx, draftID, input.(rushestools.JobReadInput))
+	case "preview.generate":
+		return exec.toolGeneratePreview(ctx, draftID, input.(rushestools.PreviewGenerateInput))
 	case "preview.check":
 		return exec.toolCheckPreview(ctx, draftID, input.(rushestools.PreviewCheckInput))
 	default:
@@ -108,4 +117,10 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 // SetSpeechRecognizer 在装配后期注入语音识别器（与 Service.SetSpeechRecognizer 同步）。
 func (exec *Executor) SetSpeechRecognizer(recognizer contracts.SpeechRecognizer) {
 	exec.speechRecognizer = recognizer
+}
+
+// SetSameTurnWaitObserver wires the orchestration-owned metrics observer before
+// the executor begins serving tool calls.
+func (exec *Executor) SetSameTurnWaitObserver(observer SameTurnWaitObserver) {
+	exec.sameTurnWait = observer
 }

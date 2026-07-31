@@ -53,7 +53,7 @@ func (service *Service) qualityCheckedFinalReply(
 	if marker == "" || service.chatModel == nil {
 		return content, false
 	}
-	response, err := service.chatModel.Generate(ctx, []*schema.Message{
+	response, err := generateWithCurrentTimelineView(ctx, service.chatModel, []*schema.Message{
 		schema.SystemMessage(reflectionRestatePrompt),
 		schema.UserMessage(content),
 	}, model.WithToolChoice(schema.ToolChoiceForbidden))

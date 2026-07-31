@@ -12,6 +12,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
+	"github.com/nanzhi84/Rushes/go/internal/telemetry"
 )
 
 type RunnerConfig struct {
@@ -76,6 +77,12 @@ func NewRunner(config RunnerConfig) (*Runner, error) {
 
 func (runner *Runner) Run(ctx context.Context) error {
 	if _, err := RecoverStale(ctx, runner.database, runner.now(), runner.heartbeatTimeout); err != nil {
+		// Run 把调用方 context 结束视为正常停机；即使取消恰好发生在
+		// 启动恢复查询期间，也应与进入 worker loop 后的退出语义一致。
+		if ctx.Err() != nil &&
+			(errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx))) {
+			return nil
+		}
 		return fmt.Errorf("恢复超时 job: %w", err)
 	}
 	var group sync.WaitGroup
@@ -327,7 +334,17 @@ func (runner *Runner) emitTerminal(
 	result map[string]any,
 	failure map[string]any,
 ) error {
-	applyResult, err := reducer.Apply(ctx, runner.database, []contracts.Event{{
+	events := make([]contracts.Event, 0, 2)
+	if eventType == "JobSucceeded" {
+		artifactEvent, err := renderArtifactTerminalEvent(job, result)
+		if err != nil {
+			return err
+		}
+		if artifactEvent != nil {
+			events = append(events, *artifactEvent)
+		}
+	}
+	events = append(events, contracts.Event{
 		Type: eventType, DraftID: value(job.DraftID),
 		Payload: map[string]any{
 			"job_id": job.ID, "kind": job.Kind, "asset_id": value(job.AssetID),
@@ -335,15 +352,59 @@ func (runner *Runner) emitTerminal(
 			"worker_id":             value(job.WorkerID), "started_at": value(job.StartedAt),
 			"progress": 1.0, "result": result, "error": failure,
 		},
-	}}, reducer.Options{Actor: contracts.ActorJob})
+	})
+	applyResult, err := reducer.Apply(
+		ctx,
+		runner.database,
+		events,
+		claimedJobOptions(job, reducer.Options{}),
+	)
 	if err != nil {
 		return err
 	}
 	if applyResult.Status != reducer.StatusApplied {
 		return fmt.Errorf("job 终态写入失败: %s", applyResult.Status)
 	}
+	if job.Kind == "render_final" && job.Payload["request_origin"] == "user" {
+		telemetry.RecordUserExportTerminal(eventType == "JobSucceeded")
+	}
 	recordJobTerminalMetrics(eventType, job, runner.now())
 	return nil
+}
+
+func renderArtifactTerminalEvent(job Job, result map[string]any) (*contracts.Event, error) {
+	var eventType string
+	switch job.Kind {
+	case "render_preview":
+		eventType = "PreviewRendered"
+	case "render_final":
+		eventType = "ExportCompleted"
+	default:
+		return nil, nil
+	}
+	if result == nil {
+		return nil, fmt.Errorf("%s 成功结果缺少 render artifact payload", job.Kind)
+	}
+	expectedArtifactID := renderArtifactID(job)
+	if artifactID, _ := result["artifact_id"].(string); artifactID != expectedArtifactID {
+		return nil, fmt.Errorf(
+			"%s artifact_id=%q 与 job 确定性标识 %q 不一致",
+			job.Kind,
+			artifactID,
+			expectedArtifactID,
+		)
+	}
+	return &contracts.Event{
+		Type: eventType, DraftID: value(job.DraftID), Payload: result,
+	}, nil
+}
+
+func renderArtifactID(job Job) string {
+	prefix := "preview"
+	if job.Kind == "render_final" {
+		prefix = "export"
+	}
+	return prefix + "_" + job.ID
 }
 
 func failureJSON(err error) map[string]any {

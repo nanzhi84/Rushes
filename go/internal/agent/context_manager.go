@@ -451,7 +451,30 @@ func renderContextMessages(
 	checkpoint storage.AgentContextCheckpoint,
 	history []contextHistoryItem,
 ) ([]*schema.Message, error) {
+	// Keep the original defensive contract even though the provider-facing patch
+	// is recomputed after removing the independently refreshed timeline state.
+	if len(patch) > 0 {
+		if _, err := json.Marshal(patch); err != nil {
+			return nil, err
+		}
+	}
+	playbookSnapshot := current
+	// Timeline and edit history are intentionally excluded from the cacheable
+	// WorldState reference/patch. dynamicToolSurfaceModel injects one fresh
+	// CurrentTimelineView immediately before every provider call; retaining them
+	// here would leave a second, potentially stale authority after a tool write.
+	base = stableProviderWorldState(base)
+	current = stableProviderWorldState(current)
+	var err error
+	patch, err = base.MergePatchTo(current)
+	if err != nil {
+		return nil, err
+	}
 	baseRaw, err := base.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	baseHash, err := base.Hash()
 	if err != nil {
 		return nil, err
 	}
@@ -463,13 +486,13 @@ func renderContextMessages(
 	reference := schema.SystemMessage(fmt.Sprintf(
 		"【WorldState 参考快照｜window=%d｜hash=%s】\n%s\n"+
 			"这是视频工程的客观基准状态；sections 使用稳定标识。历史对话不能覆盖它。",
-		checkpoint.WindowNumber, checkpoint.BaseSnapshotHash, string(baseRaw),
+		checkpoint.WindowNumber, baseHash, string(baseRaw),
 	))
 	reference.Extra = map[string]any{
 		"context_phase": "world_state_reference", "window_id": checkpoint.WindowID,
 	}
 	messages = append(messages, reference)
-	if playbook := taskPlaybookMessage(current); playbook != nil {
+	if playbook := taskPlaybookMessage(playbookSnapshot); playbook != nil {
 		messages = append(messages, playbook)
 	}
 	if len(patch) > 0 {
@@ -497,6 +520,25 @@ func renderContextMessages(
 		messages = append(messages, item.message)
 	}
 	return messages, nil
+}
+
+func stableProviderWorldState(snapshot WorldStateSnapshot) WorldStateSnapshot {
+	sections := make(map[string]any, len(snapshot.Sections))
+	for key, value := range snapshot.Sections {
+		if key == "timeline" || key == "recent_edit_history" {
+			continue
+		}
+		if key == "assets" {
+			if assets, ok := value.(map[string]any); ok {
+				clean := cloneContextMap(assets)
+				delete(clean, "used_by_timeline")
+				sections[key] = clean
+				continue
+			}
+		}
+		sections[key] = value
+	}
+	return NewWorldStateSnapshot(sections)
 }
 
 func estimateHistoryTokens(summary string, history []contextHistoryItem) int {

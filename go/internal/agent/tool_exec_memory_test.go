@@ -42,10 +42,6 @@ func TestQueueMemoryEvidenceUsesOnlyUserOwnedInputs(t *testing.T) {
 				"observation_type": "preview_viewed",
 			}},
 		},
-		{
-			name: "job observation",
-			item: QueueItem{Kind: QueueJobObservation, ItemID: "job"},
-		},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

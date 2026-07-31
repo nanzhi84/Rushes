@@ -31,9 +31,9 @@ import { AssetMediaPreview } from "../components/Materials/AssetMediaPreview";
 import { AssetsPanel } from "../components/Materials/AssetsPanel";
 import {
   ConsolePanel,
-  type ConsoleConnectionState,
-  type ConsolePanelHandle
+  type ConsoleConnectionState
 } from "../components/Console/ConsolePanel";
+import { ExportControl } from "../components/Export/ExportControl";
 import {
   timelinePatchErrorMessage,
   timelinePatchPartialFailure
@@ -88,7 +88,6 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   // 但每个 text_delta 不会流经这里，故不会重渲染右侧工作区。
   const [consoleConnection, setConsoleConnection] = useState<ConsoleConnectionState>("connecting");
   const [consoleBusy, setConsoleBusy] = useState(false);
-  const consoleRef = useRef<ConsolePanelHandle | null>(null);
   const timelineBodyRef = useRef<HTMLDivElement | null>(null);
   const timelineViewerRef = useRef<TimelineViewerHandle | null>(null);
   const playheadSecRef = useRef<number | null>(null);
@@ -127,10 +126,14 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const timelineQuery = useQuery({
     queryKey: queryKeys.timeline(draftId),
     queryFn: () => api.fetchDraftTimeline(draftId),
-    enabled: timelineVersion !== null
+    enabled: timelineVersion !== null,
+    refetchInterval: (query) =>
+      consoleBusy || query.state.data?.edit_lease?.active === true ? 1_000 : false
   });
 
   const timelinePayload = timelineQuery.data ?? null;
+  const editLeaseActive = timelinePayload?.edit_lease?.active === true;
+  const persistedTimelineId = timelinePayload?.timeline.timeline_id ?? null;
   const editorTimeline = editorSnapshot?.timeline ?? timelinePayload?.timeline ?? null;
   // 时间线渲染让位于紧急交互：缩放/流式高频提交时，React 可中断这棵较重的子树，
   // 用上一份时间线继续绘制，避免阻塞输入。仅用于喂 TimelineViewer，handler 仍用 editorTimeline。
@@ -200,12 +203,12 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   }, [draftId, queryClient]);
 
   useEffect(() => {
-    if (editorSnapshot?.saveState !== "dirty") {
+    if (editorSnapshot?.saveState !== "dirty" || editLeaseActive) {
       return;
     }
     const timer = window.setTimeout(() => void flushEditorSession(), 500);
     return () => window.clearTimeout(timer);
-  }, [editorSnapshot?.pendingCount, editorSnapshot?.saveState, flushEditorSession]);
+  }, [editLeaseActive, editorSnapshot?.pendingCount, editorSnapshot?.saveState, flushEditorSession]);
 
   // ConsolePanel 用稳定回调把低频的连接态 / 回合忙碌态回传给工作区（顶栏与导出按钮）。
   const handleConsoleConnectionChange = useCallback((state: ConsoleConnectionState) => {
@@ -305,6 +308,10 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   const handleTimelineDeselect = useCallback(() => setSelectedClipId(null), []);
   const applyTimelinePatch = useCallback(
     (op: TimelineOperation) => {
+      if (editLeaseActive) {
+        setTimelineEditError("Agent 正在编辑，时间线暂时只读。");
+        return;
+      }
       try {
         editorSessionRef.current?.apply(op);
         setTimelineEditError(null);
@@ -312,7 +319,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         setTimelineEditError(timelinePatchErrorMessage(error));
       }
     },
-    []
+    [editLeaseActive]
   );
   const handleSplitClip = useCallback(
     (clipId: string, splitFrame: number) => {
@@ -508,7 +515,19 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         : null,
     [editorTimeline, selectedClipId]
   );
-  const timelineEditingDisabled = editorTimeline === null;
+  const timelineEditingDisabled = editorTimeline === null || editLeaseActive;
+  const exportDisabled =
+    editLeaseActive ||
+    timelineVersion === null ||
+    persistedTimelineId === null ||
+    editorSnapshot?.saveState !== "saved";
+  const exportDisabledReason = editLeaseActive
+    ? "Agent 正在编辑"
+    : editorSnapshot?.saveState !== "saved"
+      ? "请等待时间线保存完成"
+      : timelineVersion === null || persistedTimelineId === null
+          ? "当前没有可导出的时间线"
+          : undefined;
 
   return (
     <div className="flex h-[100dvh] min-h-0 flex-col bg-ink text-fg">
@@ -544,14 +563,18 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
             >
               {formatCost(totalCost)}
             </span>
-            <button
-              className="rounded-sm bg-accent px-3 py-1.5 text-xs font-semibold text-white hover:bg-accent-strong disabled:opacity-40"
-              type="button"
-              disabled={consoleBusy || timelineVersion === null}
-              onClick={() => consoleRef.current?.submit("请把当前时间线导出为最终 MP4。")}
-            >
-              导出
-            </button>
+            {editLeaseActive ? (
+              <span className="whitespace-nowrap text-2xs text-accent" role="status">
+                Agent 正在编辑
+              </span>
+            ) : null}
+            <ExportControl
+              draftId={draftId}
+              timelineId={persistedTimelineId}
+              timelineVersion={timelineVersion}
+              disabled={exportDisabled}
+              disabledReason={exportDisabledReason}
+            />
           </div>
         }
       />
@@ -559,7 +582,6 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
       {/* ChatCut 式工作台：左侧 AI 贯穿全高；右侧素材/预览在上，时间线固定在下。 */}
       <div className="flex min-h-0 flex-1">
         <ConsolePanel
-          ref={consoleRef}
           draftId={draftId}
           chatPanelWidth={chatPanelWidth}
           highlightedMessageId={highlightedMessageId}
@@ -807,7 +829,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
                   editMode={editMode}
                   dropMode={dropMode}
                   snapEnabled={snapEnabled}
-                  editing={false}
+                  editing={timelineEditingDisabled}
                   onSplitClip={handleSplitClip}
                   onMoveClip={handleMoveClip}
                   onTrimClip={handleTrimClip}

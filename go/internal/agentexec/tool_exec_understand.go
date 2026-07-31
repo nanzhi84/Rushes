@@ -205,7 +205,7 @@ func (exec *Executor) runUnderstandInline(
 			return rushestools.DetectShotsResult{}, err
 		}
 		return rushestools.DetectShotsResult{
-			DraftID: draftID, AssetID: request.Asset.ID, Status: "completed",
+			DraftID: draftID, AssetID: request.Asset.ID, Status: string(rushestools.StatusSucceeded),
 			Summary: &summary, CacheHit: true,
 		}, nil
 	}
@@ -276,7 +276,7 @@ func (exec *Executor) runUnderstandInline(
 	})
 	return rushestools.DetectShotsResult{
 		DraftID: draftID, JobID: runID, AssetID: request.Asset.ID,
-		Status: "completed", Summary: &bestSummary, Analyzed: true,
+		Status: string(rushestools.StatusSucceeded), Summary: &bestSummary, Analyzed: true,
 	}, nil
 }
 
@@ -329,21 +329,24 @@ func (exec *Executor) enqueueUnderstand(
 			err, fmt.Errorf("understand enqueue reducer status: %s", result.Status),
 		)
 	}
-	return queuedUnderstandResult(draftID, jobID, request), nil
+	return exec.waitForUnderstandJob(ctx, draftID, jobID, request)
 }
 
 type understandJobRef struct {
-	ID     string
-	Status string
+	ID        string
+	Status    string
+	ErrorJSON sql.NullString
 }
 
 func (exec *Executor) findUnderstandJob(
 	ctx context.Context,
 	idempotencyKey string,
 ) (understandJobRef, bool, error) {
-	query := "SELECT job_id, status FROM jobs WHERE kind='understand' AND idempotency_key=? LIMIT 1"
+	query := "SELECT job_id, status, error_json FROM jobs WHERE kind='understand' AND idempotency_key=? LIMIT 1"
 	var job understandJobRef
-	err := exec.database.Read().QueryRowContext(ctx, query, idempotencyKey).Scan(&job.ID, &job.Status)
+	err := exec.database.Read().QueryRowContext(ctx, query, idempotencyKey).Scan(
+		&job.ID, &job.Status, &job.ErrorJSON,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return understandJobRef{}, false, nil
 	}
@@ -361,7 +364,7 @@ func (exec *Executor) existingUnderstandResult(
 ) (rushestools.DetectShotsResult, error) {
 	switch job.Status {
 	case "pending", "running":
-		return queuedUnderstandResult(draftID, job.ID, request), nil
+		return exec.waitForUnderstandJob(ctx, draftID, job.ID, request)
 	case "succeeded":
 		raw, err := exec.materialSummaryForUnderstandJob(
 			ctx, job.ID, request.Asset.ID, request.Fingerprint,
@@ -379,20 +382,163 @@ func (exec *Executor) existingUnderstandResult(
 		}
 		compact := CompactUnderstandingSummary(request.Asset, summary, 12)
 		return rushestools.DetectShotsResult{
-			DraftID: draftID, JobID: job.ID, AssetID: request.Asset.ID, Status: "completed",
-			Summary: &compact, CacheHit: request.CacheHit,
+			DraftID: draftID, JobID: job.ID, AssetID: request.Asset.ID,
+			Status:  string(rushestools.StatusSucceeded),
+			Summary: &compact, CacheHit: request.CacheHit, Analyzed: true,
 			UsageNote: "同参数素材理解任务已完成，结果来自持久化摘要；无需重复调用。",
 		}, nil
 	case "failed", "cancelled":
+		data := map[string]any{"job_status": job.Status}
+		if job.ErrorJSON.Valid {
+			var failure map[string]any
+			if json.Unmarshal([]byte(job.ErrorJSON.String), &failure) == nil {
+				data["error"] = boundedJobFailure(failure)
+			}
+		}
+		status := rushestools.StatusFailed
+		if job.Status == "cancelled" {
+			status = rushestools.StatusCancelled
+		}
 		return rushestools.DetectShotsResult{
-			DraftID: draftID, JobID: job.ID, AssetID: request.Asset.ID, Status: job.Status,
-			CacheHit:  request.CacheHit,
-			UsageNote: "同参数素材理解任务已到终态；请先读取失败信息，确需新任务时须调整素材或理解参数。",
+			DraftID: draftID, JobID: job.ID, AssetID: request.Asset.ID, Status: string(status),
+			Data: data, CacheHit: request.CacheHit,
+			UsageNote: "同参数素材理解任务已到终态；有界失败信息已随 data.error 返回（若 worker 提供），确需新任务时须调整素材或理解参数。",
 		}, nil
 	default:
 		return rushestools.DetectShotsResult{}, fmt.Errorf(
 			"understand job %s 状态无效: %s", job.ID, job.Status,
 		)
+	}
+}
+
+func (exec *Executor) materialSummaryForUnderstandJob(
+	ctx context.Context,
+	jobID string,
+	assetID string,
+	fingerprint string,
+) (map[string]any, error) {
+	summaryID := fmt.Sprintf("summary_%s_%s", assetID, jobID)
+	summary, err := storage.MaterialSummaryByID(ctx, exec.database.Read(), summaryID)
+	if err == nil {
+		return summary, nil
+	}
+	if !errors.Is(err, storage.ErrNotFound) {
+		return nil, err
+	}
+	if strings.TrimSpace(fingerprint) == "" {
+		return nil, storage.ErrNotFound
+	}
+	return storage.MaterialSummaryByFingerprint(ctx, exec.database.Read(), assetID, fingerprint)
+}
+
+func (exec *Executor) waitForUnderstandJob(
+	ctx context.Context,
+	draftID, jobID string,
+	request preparedDetectShotsRequest,
+) (rushestools.DetectShotsResult, error) {
+	waitStarted := time.Now()
+	terminalStatus := "failed"
+	defer func() { exec.observeSameTurnToolWait("understand", terminalStatus, waitStarted) }()
+	interval := exec.jobPollInterval
+	if interval <= 0 {
+		interval = 100 * time.Millisecond
+	}
+	waitTimeout := exec.jobWaitTimeout
+	if waitTimeout <= 0 {
+		waitTimeout = 10 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	timer := time.NewTimer(waitTimeout)
+	defer timer.Stop()
+	// waitForUnderstandJob 只会在新任务或已知 pending/running 任务上进入。
+	// 即使 deadline 恰好发生在第一次状态读取中，也应返回结构化 timeout，
+	// 而不是把底层仍可继续的 job 误报成普通 context error。
+	lastStatus := "pending"
+	for {
+		job, err := exec.understandJobState(ctx, draftID, jobID, request.Asset.ID)
+		if err != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+				errors.Is(context.Cause(ctx), context.DeadlineExceeded) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				terminalStatus = "timeout"
+				return understandWaitTimeoutResult(draftID, jobID, request, lastStatus), nil
+			}
+			if ctx.Err() != nil {
+				terminalStatus = "turn_cancelled"
+				return rushestools.DetectShotsResult{}, ctx.Err()
+			}
+			return rushestools.DetectShotsResult{}, err
+		}
+		lastStatus = job.Status
+		switch job.Status {
+		case "succeeded", "failed", "cancelled":
+			terminalStatus = job.Status
+			return exec.existingUnderstandResult(ctx, draftID, job, request)
+		case "pending", "running":
+		default:
+			return rushestools.DetectShotsResult{}, fmt.Errorf(
+				"understand job %s 状态无效: %s", jobID, job.Status,
+			)
+		}
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				terminalStatus = "timeout"
+				return understandWaitTimeoutResult(draftID, jobID, request, lastStatus), nil
+			}
+			terminalStatus = "turn_cancelled"
+			return rushestools.DetectShotsResult{}, ctx.Err()
+		case <-timer.C:
+			terminalStatus = "timeout"
+			return understandWaitTimeoutResult(draftID, jobID, request, lastStatus), nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func (exec *Executor) understandJobStatus(
+	ctx context.Context,
+	draftID, jobID, assetID string,
+) (string, error) {
+	job, err := exec.understandJobState(ctx, draftID, jobID, assetID)
+	return job.Status, err
+}
+
+func (exec *Executor) understandJobState(
+	ctx context.Context,
+	draftID, jobID, assetID string,
+) (understandJobRef, error) {
+	job := understandJobRef{ID: jobID}
+	err := exec.database.Read().QueryRowContext(ctx, `
+		SELECT status,error_json FROM jobs
+		WHERE job_id=? AND kind='understand' AND asset_id=?
+		AND (draft_id=? OR requested_by_draft_id=?)`,
+		jobID, assetID, draftID, draftID,
+	).Scan(&job.Status, &job.ErrorJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return understandJobRef{}, errors.New("understand job 不存在或不属于当前草稿")
+	}
+	return job, err
+}
+
+func understandWaitTimeoutResult(
+	draftID, jobID string,
+	request preparedDetectShotsRequest,
+	underlyingStatus string,
+) rushestools.DetectShotsResult {
+	return rushestools.DetectShotsResult{
+		DraftID: draftID, JobID: jobID, AssetID: request.Asset.ID,
+		Status: string(rushestools.StatusTimeout), CacheHit: request.CacheHit,
+		Data: map[string]any{
+			"error_code":               string(rushestools.ErrCodeToolTimeout),
+			"job_status":               underlyingStatus,
+			"underlying_job_continues": underlyingStatus == "pending" || underlyingStatus == "running",
+		},
+		UsageNote: fmt.Sprintf(
+			"等待素材理解终态超时（底层 job_status=%s）；job 保持运行，迟到完成不会自动续跑模型。",
+			underlyingStatus,
+		),
 	}
 }
 
@@ -421,18 +567,6 @@ func understandIdempotencyKey(
 	}
 	digest := sha256.Sum256(raw)
 	return "understand:" + draftID + ":" + hex.EncodeToString(digest[:]), nil
-}
-
-func queuedUnderstandResult(
-	draftID string,
-	jobID string,
-	request preparedDetectShotsRequest,
-) rushestools.DetectShotsResult {
-	return rushestools.DetectShotsResult{
-		DraftID: draftID, JobID: jobID, AssetID: request.Asset.ID, Status: "queued",
-		CacheHit:  request.CacheHit,
-		UsageNote: "素材理解已在后台排队；任务终态会自动续跑当前请求，请勿轮询或重复调用。",
-	}
 }
 
 func CompactUnderstandingSummary(

@@ -14,7 +14,7 @@ const BeatEditingPlaybook = `【卡点工作流】
 const TimelineEditingPlaybook = `【时间线编辑】
 选择或修改片段前先读取现有轨道与稳定片段标识。首次建立初版时根据用户目标和素材证据自主决定片段顺序、源区间、目标时长与取舍：第一次 timeline.insert visual_base 自动创建 v1，后续片段逐次追加；不得改用一次接收整张 EDL 的组装工具，也不要求用户审批可逆首剪。
 所有编辑只使用 timeline.insert、timeline.delete、timeline.update、timeline.split；一次调用只提交一个 kind 和一个目标或连续范围。多个独立目标按稳定顺序分别调用，每次成功产生一个可 Rewind 版本；若后一步依赖新 ID 或前一步令旧目标失效，先读取最新时间线，不得猜测。禁止提交 ops[] 或把多个目标塞进同一调用。
-全部编辑完成后执行 timeline.check。要渲染时读取当前 timeline_id，只用一次 render.start 创建 preview 或 final job，再用 job.read 读取该 job；目标变化时重新检查，不得让渲染工具猜新目标。这个稳定标识唯一锁定当时版本，模型不要自行解析或改写。preview 完成后可在同一轮并行调用多个 preview.check，分别覆盖解码、黑帧、静帧、静音、响度或视觉语义；模型汇总证据并自行决定是否继续原子编辑，检查工具不得自动修复。`
+全部编辑完成后执行 timeline.check。要预览时读取当前 timeline_id，只调用一次 preview.generate；它会在本次调用内等待到终态并直接返回 preview_id，无需轮询或让用户发送“继续”，也不得从模型侧触发 final 导出。目标变化时重新检查，不得让渲染工具猜新目标。这个稳定标识唯一锁定当时版本，模型不要自行解析或改写。preview 完成后可在同一轮并行调用多个 preview.check，分别覆盖解码、黑帧、静帧、静音、响度或视觉语义；模型汇总证据并自行决定是否继续原子编辑，检查工具不得自动修复。`
 
 const TalkingHeadPlaybook = `【口播工作流】
 已有时间线时先并行读取 timeline.inspect、speech.search 与已有 shot.search 证据；尚无时间线时先选主讲素材建立初版。需要精确剪词时让 speech.search 返回 word_id 和源帧。相似台词、句内重说、气口和残句都只是证据：你必须结合上下文明确选择删哪一侧或保留，不向用户逐项审批可逆首剪。

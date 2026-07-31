@@ -177,8 +177,8 @@ func TestResendRewindsBranchEnqueuesTurnAndIsIdempotent(t *testing.T) {
 	assertMessageShadowed(t, server.database, "api-user-2", true)
 	assertMessageShadowed(t, server.database, "api-user-3", true)
 	assertMessageContent(t, server.database, response.MessageId, "第二版改写")
-	// 失效边界后的 pending 决策/可取消 job 被取消。
-	assertRowStatus(t, server.database, "SELECT status FROM jobs WHERE job_id='resend-pending-job'", "cancelled")
+	// 失效边界后的 pending 决策被取消；同 turn 长任务不归模型所有，继续运行供后续复用。
+	assertRowStatus(t, server.database, "SELECT status FROM jobs WHERE job_id='resend-pending-job'", "pending")
 	assertRowStatus(t, server.database, "SELECT status FROM decisions WHERE decision_id='resend-pending-decision'", "cancelled")
 
 	// 幂等重放：同 key 同内容返回相同结果，不产生第二次回退或重复消息。
@@ -204,6 +204,8 @@ func TestResendRewindsBranchEnqueuesTurnAndIsIdempotent(t *testing.T) {
 	}
 
 	// 直接调用 applyResend 复用同 key → ErrRewindRestoreDuplicate。
+	blocking.unblock()
+	server.agent.Queue().JoinDraft(draftID)
 	checkpoint, err := storage.GetRewindCheckpoint(t.Context(), server.database.Read(), draftID, "rewind:message:api-user-2")
 	if err != nil {
 		t.Fatal(err)
@@ -240,6 +242,109 @@ func TestResendEarlyMessageRewindsConversationOnly(t *testing.T) {
 	visible, _ := storage.ListMessages(t.Context(), server.database.Read(), draftID, 50)
 	if strings.Join(messageIDs(visible), ",") != response.MessageId {
 		t.Fatalf("visible=%v new=%s", messageIDs(visible), response.MessageId)
+	}
+}
+
+func TestResendRejectsLiveAgentLeaseWithoutSideEffectsThenSucceedsAfterRelease(t *testing.T) {
+	server, handler, _ := resendTestServer(t)
+	const draftID = "draft-resend-agent-lease"
+	createDraftThroughAPI(t, handler, draftID)
+	createAPIResendTimeline(t, server.database, draftID, 1, "lease-clip-1", 30)
+	insertAPIResendMessage(t, server.database, draftID, "lease-anchor", "保留 v1 检查点")
+	createAPIResendTimeline(t, server.database, draftID, 2, "lease-clip-2", 60)
+
+	now := time.Now().UTC()
+	acquire := reducer.AgentEditLeaseMutation{
+		Operation: reducer.AgentEditLeaseAcquire, DraftID: draftID,
+		TurnID: "turn-resend-orphan", LeaseToken: "token-resend-orphan",
+		Now: now, TTL: time.Minute,
+	}
+	result, err := reducer.Apply(t.Context(), server.database, nil, reducer.Options{
+		Actor:      contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{AgentEditLeaseMutation: &acquire},
+	})
+	if err != nil || result.Status != reducer.StatusApplied || result.AgentEditLease == nil {
+		t.Fatalf("acquire result=%#v err=%v", result, err)
+	}
+
+	type persistedCounts struct {
+		timelineVersions int
+		messages         int
+		jobs             int
+		restores         int
+		events           int
+	}
+	readCounts := func() persistedCounts {
+		t.Helper()
+		var counts persistedCounts
+		queries := []struct {
+			target *int
+			query  string
+		}{
+			{&counts.timelineVersions, "SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?"},
+			{&counts.messages, "SELECT COUNT(*) FROM messages WHERE draft_id=?"},
+			{&counts.jobs, "SELECT COUNT(*) FROM jobs WHERE COALESCE(requested_by_draft_id,draft_id)=?"},
+			{&counts.restores, "SELECT COUNT(*) FROM rewind_restore_requests WHERE draft_id=?"},
+			{&counts.events, "SELECT COUNT(*) FROM event_log WHERE draft_id=?"},
+		}
+		for _, query := range queries {
+			if err := server.database.Read().QueryRowContext(
+				t.Context(), query.query, draftID,
+			).Scan(query.target); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return counts
+	}
+	before := readCounts()
+	draftBefore, err := storage.GetDraft(t.Context(), server.database.Read(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{
+		"content": "从 v1 重新修改", "idempotency_key": "resend-agent-lease",
+	}
+	locked := httptest.NewRecorder()
+	handler.ServeHTTP(locked, apiRequest(
+		t, http.MethodPost, resendPath(draftID, "lease-anchor"), body,
+	))
+	if locked.Code != http.StatusConflict ||
+		!strings.Contains(locked.Body.String(), `"reason":"timeline_locked_by_agent"`) {
+		t.Fatalf("locked status=%d body=%s", locked.Code, locked.Body.String())
+	}
+	if after := readCounts(); after != before {
+		t.Fatalf("lease rejection persisted side effects: before=%#v after=%#v", before, after)
+	}
+	draftAfter, err := storage.GetDraft(t.Context(), server.database.Read(), draftID)
+	if err != nil || draftAfter.StateVersion != draftBefore.StateVersion ||
+		draftAfter.TimelineCurrentVersion == nil || *draftAfter.TimelineCurrentVersion != 2 {
+		t.Fatalf("lease rejection changed draft: before=%#v after=%#v err=%v", draftBefore, draftAfter, err)
+	}
+	assertMessageShadowed(t, server.database, "lease-anchor", false)
+
+	release := reducer.AgentEditLeaseMutation{
+		Operation: reducer.AgentEditLeaseRelease, DraftID: draftID,
+		TurnID: "turn-resend-orphan", LeaseToken: "token-resend-orphan",
+		Now: now.Add(time.Second),
+	}
+	result, err = reducer.Apply(t.Context(), server.database, nil, reducer.Options{
+		Actor:      contracts.ActorAgent,
+		ResultRows: reducer.ResultRows{AgentEditLeaseMutation: &release},
+	})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("release result=%#v err=%v", result, err)
+	}
+	retried := httptest.NewRecorder()
+	handler.ServeHTTP(retried, apiRequest(
+		t, http.MethodPost, resendPath(draftID, "lease-anchor"), body,
+	))
+	if retried.Code != http.StatusAccepted {
+		t.Fatalf("released resend status=%d body=%s", retried.Code, retried.Body.String())
+	}
+	var response MessageResendResponse
+	if err := json.Unmarshal(retried.Body.Bytes(), &response); err != nil ||
+		response.RestoredTimelineVersion == nil || *response.RestoredTimelineVersion != 3 {
+		t.Fatalf("released resend response=%#v err=%v", response, err)
 	}
 }
 
@@ -438,7 +543,7 @@ func TestResendReturnsStableErrorsForUnavailableRuntimeState(t *testing.T) {
 		}
 	})
 
-	t.Run("job state changes during atomic resend", func(t *testing.T) {
+	t.Run("job state changes do not gate atomic resend", func(t *testing.T) {
 		server, handler, _ := resendTestServer(t)
 		draftID := "draft-resend-job-race"
 		createDraftThroughAPI(t, handler, draftID)
@@ -462,10 +567,10 @@ func TestResendReturnsStableErrorsForUnavailableRuntimeState(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, apiRequest(t, http.MethodPost, resendPath(draftID, "race-anchor"),
 			map[string]any{"content": "x", "idempotency_key": "job-race"}))
-		if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "resend_job_state_changed") {
+		if recorder.Code != http.StatusAccepted {
 			t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 		}
-		assertRowStatus(t, server.database, "SELECT status FROM jobs WHERE job_id='resend-racing-job'", "pending")
+		assertRowStatus(t, server.database, "SELECT status FROM jobs WHERE job_id='resend-racing-job'", "succeeded")
 	})
 
 	t.Run("draft version changes during atomic resend", func(t *testing.T) {
@@ -617,7 +722,10 @@ func createAPIResendTimeline(
 				}},
 			},
 		},
-	}}, reducer.Options{Actor: contracts.ActorAgent, BaseVersion: &base})
+	}}, reducer.Options{
+		Actor: contracts.ActorUser, BaseVersion: &base,
+		TimelineWriteAdmission: &reducer.TimelineWriteAdmission{Origin: "manual"},
+	})
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("timeline result=%#v err=%v", result, err)
 	}

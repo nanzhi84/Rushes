@@ -3,15 +3,18 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
@@ -23,6 +26,356 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
+
+type dynamicPreviewQAReactModel struct {
+	mu              sync.Mutex
+	draftID         string
+	timelineID      string
+	previewID       string
+	bound           []string
+	surfaces        [][]string
+	versions        []int
+	leaseSeen       bool
+	calls           int
+	inspectAfterFix bool
+}
+
+func (stub *dynamicPreviewQAReactModel) WithTools(
+	infos []*schema.ToolInfo,
+) (model.ToolCallingChatModel, error) {
+	names := make([]string, 0, len(infos))
+	for _, info := range infos {
+		names = append(names, info.Name)
+	}
+	stub.mu.Lock()
+	stub.bound = names
+	stub.mu.Unlock()
+	return stub, nil
+}
+
+func (stub *dynamicPreviewQAReactModel) Generate(
+	_ context.Context,
+	messages []*schema.Message,
+	_ ...model.Option,
+) (*schema.Message, error) {
+	view, err := dynamicPreviewQACurrentView(messages)
+	if err != nil {
+		return nil, err
+	}
+	version, ok := agentexec.NumericValue(view["version"])
+	if !ok {
+		return nil, fmt.Errorf("CurrentTimelineView 缺少 version: %#v", view)
+	}
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	stub.calls++
+	bound := append([]string(nil), stub.bound...)
+	stub.surfaces = append(stub.surfaces, bound)
+	stub.versions = append(stub.versions, int(version))
+	stub.leaseSeen = stub.leaseSeen || strings.TrimSpace(
+		agentexec.InterfaceString(view["edit_lease_turn_id"]),
+	) != ""
+
+	switch stub.calls {
+	case 1:
+		if !containsName(bound, "preview.generate") ||
+			containsName(bound, "preview.check") || containsName(bound, "timeline.update") {
+			return nil, fmt.Errorf("preview 生成阶段工具面=%v", bound)
+		}
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "dynamic_preview_generate",
+			Function: schema.FunctionCall{
+				Name: "preview.generate", Arguments: fmt.Sprintf(
+					`{"timeline_id":%q,"orientation":"auto"}`, stub.timelineID,
+				),
+			},
+		}}), nil
+	case 2:
+		if !containsName(bound, "preview.check") ||
+			containsName(bound, "preview.generate") || containsName(bound, "timeline.update") {
+			return nil, fmt.Errorf("preview QA 阶段工具面=%v", bound)
+		}
+		if !hasSuccessfulDynamicPreviewToolResult(messages, "preview.generate", 1) {
+			return nil, errors.New("preview.generate 终态结果未回灌同一 ReAct transcript")
+		}
+		checks := []string{"black", "freeze", "silence"}
+		calls := make([]schema.ToolCall, 0, len(checks))
+		for _, check := range checks {
+			calls = append(calls, schema.ToolCall{
+				ID: "dynamic_preview_check_" + check,
+				Function: schema.FunctionCall{
+					Name: "preview.check", Arguments: fmt.Sprintf(
+						`{"preview_id":%q,"check":%q}`, stub.previewID, check,
+					),
+				},
+			})
+		}
+		return schema.AssistantMessage("", calls), nil
+	case 3:
+		if !containsName(bound, "timeline.update") ||
+			containsName(bound, "preview.check") || containsName(bound, "preview.generate") {
+			return nil, fmt.Errorf("preview QA 后未回到原子编辑面: %v", bound)
+		}
+		if !hasSuccessfulDynamicPreviewToolResult(messages, "preview.check", 3) {
+			return nil, errors.New("preview.check 终态证据未全部回灌同一 ReAct transcript")
+		}
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "dynamic_preview_fix",
+			Function: schema.FunctionCall{
+				Name: "timeline.update",
+				Arguments: `{"kind":"trim_clip","timeline_clip_id":"clip_v1_001",` +
+					`"source_start_frame":15,"source_end_frame":60}`,
+			},
+		}}), nil
+	case 4:
+		if int(version) != 2 || !dynamicPreviewQAClipStartsAt(view, "clip_v1_001", 15) {
+			return nil, fmt.Errorf("mutation 后 provider 未看到 v2 真实片段状态: %#v", view)
+		}
+		if !hasSuccessfulDynamicPreviewToolResult(messages, "timeline.update", 1) {
+			return nil, errors.New("timeline.update 终态结果未回灌")
+		}
+		if containsName(bound, "timeline.inspect") && !containsName(bound, "timeline.check") {
+			stub.inspectAfterFix = true
+			return schema.AssistantMessage("", []schema.ToolCall{{
+				ID: "dynamic_preview_fix_inspect",
+				Function: schema.FunctionCall{
+					Name:      "timeline.inspect",
+					Arguments: fmt.Sprintf(`{"timeline_id":%q}`, stub.draftID+":v2"),
+				},
+			}}), nil
+		}
+		if !containsName(bound, "timeline.check") {
+			return nil, fmt.Errorf("修正后既不能 inspect 也不能 check: %v", bound)
+		}
+		return dynamicPreviewQACheckCall(stub.draftID), nil
+	case 5:
+		if stub.inspectAfterFix {
+			if !hasSuccessfulDynamicPreviewToolResult(messages, "timeline.inspect", 1) ||
+				!containsName(bound, "timeline.check") {
+				return nil, fmt.Errorf("修正后观察屏障未回到检查面: %v", bound)
+			}
+			return dynamicPreviewQACheckCall(stub.draftID), nil
+		}
+		if !hasSuccessfulDynamicPreviewToolResult(messages, "timeline.check", 1) {
+			return nil, errors.New("timeline.check 终态结果未回灌")
+		}
+		return schema.AssistantMessage("动态 preview QA 已在同一 turn 修正并验证。", nil), nil
+	case 6:
+		if !stub.inspectAfterFix ||
+			!hasSuccessfulDynamicPreviewToolResult(messages, "timeline.check", 1) {
+			return nil, errors.New("修正后的 timeline.check 终态结果未回灌")
+		}
+		return schema.AssistantMessage("动态 preview QA 已在同一 turn 修正并验证。", nil), nil
+	default:
+		return nil, fmt.Errorf("动态 preview QA 收到额外 provider call: %d", stub.calls)
+	}
+}
+
+func (stub *dynamicPreviewQAReactModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := stub.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
+
+func (stub *dynamicPreviewQAReactModel) snapshot() (
+	int, [][]string, []int, bool,
+) {
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	surfaces := make([][]string, len(stub.surfaces))
+	for index := range stub.surfaces {
+		surfaces[index] = append([]string(nil), stub.surfaces[index]...)
+	}
+	return stub.calls, surfaces, append([]int(nil), stub.versions...), stub.leaseSeen
+}
+
+func dynamicPreviewQACurrentView(messages []*schema.Message) (map[string]any, error) {
+	var current *schema.Message
+	for _, message := range messages {
+		if message == nil {
+			continue
+		}
+		if phase, _ := message.Extra["context_phase"].(string); phase == currentTimelineViewContextPhase {
+			if current != nil {
+				return nil, errors.New("provider 同时收到多份 CurrentTimelineView")
+			}
+			current = message
+		}
+	}
+	if current == nil {
+		return nil, errors.New("provider 缺少 CurrentTimelineView")
+	}
+	start := strings.IndexByte(current.Content, '{')
+	end := strings.LastIndex(current.Content, "\n这是当前时间线")
+	if start < 0 || end <= start {
+		return nil, fmt.Errorf("CurrentTimelineView 格式无效: %s", current.Content)
+	}
+	var view map[string]any
+	if err := json.Unmarshal([]byte(current.Content[start:end]), &view); err != nil {
+		return nil, err
+	}
+	return view, nil
+}
+
+func hasSuccessfulDynamicPreviewToolResult(
+	messages []*schema.Message,
+	name string,
+	want int,
+) bool {
+	count := 0
+	for _, message := range messages {
+		if message == nil || message.Role != schema.Tool || message.ToolName != name {
+			continue
+		}
+		var result struct {
+			Status string `json:"status"`
+		}
+		if json.Unmarshal([]byte(message.Content), &result) == nil &&
+			result.Status == string(rushestools.StatusSucceeded) {
+			count++
+		}
+	}
+	return count >= want
+}
+
+func dynamicPreviewQAClipStartsAt(view map[string]any, clipID string, sourceStart int) bool {
+	clips, _ := view["clips"].([]any)
+	for _, raw := range clips {
+		clip, _ := raw.(map[string]any)
+		start, ok := agentexec.NumericValue(clip["source_start_frame"])
+		if clip["timeline_clip_id"] == clipID && ok && int(start) == sourceStart {
+			return true
+		}
+	}
+	return false
+}
+
+func dynamicPreviewQACheckCall(draftID string) *schema.Message {
+	return schema.AssistantMessage("", []schema.ToolCall{{
+		ID: "dynamic_preview_revalidate",
+		Function: schema.FunctionCall{
+			Name: "timeline.check", Arguments: fmt.Sprintf(`{"timeline_id":%q}`, draftID+":v2"),
+		},
+	}})
+}
+
+func TestDynamicPreviewQAReActReturnsToMutationAndRefreshesTimeline(t *testing.T) {
+	installPreviewQAMediaFixture(t)
+
+	database := agenttest.AgentTestDatabase(t)
+	const (
+		draftID   = "draft_dynamic_preview_qa"
+		assetID   = "asset_dynamic_preview_qa"
+		previewID = "preview_dynamic_qa"
+		jobID     = "job_dynamic_preview_qa"
+	)
+	agenttest.CreateAgentDraft(t, database, draftID)
+	provider := &dynamicPreviewQAReactModel{
+		draftID: draftID, timelineID: draftID + ":v1", previewID: previewID,
+	}
+	service, err := NewService(t.Context(), database, provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	source := filepath.Join(database.Paths.Temporary, "dynamic-preview-qa-source.mp4")
+	if err := os.WriteFile(source, []byte("deterministic dynamic preview fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seedPreviewQAAsset(t, database, draftID, assetID, source)
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+		AssetID: assetID, AssetKind: "video", HasAudio: true,
+		SourceStartFrame: 0, SourceEndFrame: 60, Role: "a_roll",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted, persistErr := seedTimelineVersion(
+		service, t.Context(), draftID, document, "dynamic_preview_qa_fixture", nil,
+	); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("persist timeline=%#v err=%v", persisted, persistErr)
+	}
+	seedPreviewQAArtifact(t, database, draftID, previewID, source)
+
+	now := time.Now().UTC()
+	enqueued, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobEnqueued", DraftID: draftID,
+		Payload: map[string]any{
+			"job_id": jobID, "kind": "render_preview", "requested_by_draft_id": draftID,
+			"idempotency_key": "render_preview:" + draftID + ":1:auto",
+			"job_payload":     map[string]any{"timeline_version": 1, "orientation": "auto"},
+			"next_run_at":     now.Format(time.RFC3339Nano), "max_retries": 2,
+		},
+	}}, reducer.Options{Actor: contracts.ActorAgent})
+	if err != nil || enqueued.Status != reducer.StatusApplied {
+		t.Fatalf("enqueue preview status=%s err=%v", enqueued.Status, err)
+	}
+	completed, err := reducer.Apply(t.Context(), database, []contracts.Event{{
+		Type: "JobSucceeded", DraftID: draftID,
+		Payload: map[string]any{
+			"job_id": jobID, "kind": "render_preview", "requested_by_draft_id": draftID,
+			"result": map[string]any{
+				"artifact_id": previewID, "timeline_version": 1, "orientation": "auto",
+			},
+		},
+	}}, reducer.Options{Actor: contracts.ActorJob})
+	if err != nil || completed.Status != reducer.StatusApplied {
+		t.Fatalf("complete preview status=%s err=%v", completed.Status, err)
+	}
+
+	recoveryState := newToolRecoveryState()
+	ctx := withToolRecoveryState(t.Context(), recoveryState)
+	ctx = withTurnBudgetState(ctx, newTurnBudgetState(maxToolRoundsPerTurn))
+	ctx = withTestTurnLeaseSession(t, service, ctx, draftID)
+	ctx = withModelToolSurfaceSession(ctx)
+	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
+	ctx = agentexec.WithTurnInteractionState(
+		ctx, agentexec.NewTurnInteractionState(service.indexedResources),
+	)
+	ctx = rushestools.WithReporter(ctx, service.toolReporter(ctx, draftID))
+	response, err := service.react.Generate(ctx, []*schema.Message{
+		schema.UserMessage("生成预览并检查黑帧；发现问题就处理。"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response == nil || response.Content != "动态 preview QA 已在同一 turn 修正并验证。" {
+		t.Fatalf("response=%#v", response)
+	}
+
+	calls, surfaces, versions, leaseSeen := provider.snapshot()
+	if calls < 5 || calls > 6 || len(surfaces) != calls || len(versions) != calls {
+		t.Fatalf("calls=%d surfaces=%v versions=%v", calls, surfaces, versions)
+	}
+	if !containsName(surfaces[0], "preview.generate") ||
+		!containsName(surfaces[1], "preview.check") ||
+		!containsName(surfaces[2], "timeline.update") ||
+		containsName(surfaces[2], "preview.check") || !leaseSeen {
+		t.Fatalf("动态阶段披露或 lease 不符合预期: surfaces=%v lease=%v", surfaces, leaseSeen)
+	}
+	if versions[0] != 1 || versions[1] != 1 || versions[2] != 1 || versions[3] != 2 {
+		t.Fatalf("CurrentTimelineView 未在 mutation 后刷新: versions=%v", versions)
+	}
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 2 {
+		t.Fatalf("latest=%#v err=%v", latest, err)
+	}
+	clips := timelineTrackClips(latest, "visual_base")
+	if len(clips) != 1 || clips[0].SourceStartFrame != 15 || clips[0].SourceEndFrame != 60 {
+		t.Fatalf("QA 修正未精确提交: %#v", clips)
+	}
+	if recoveryState.unresolved() || recoveryState.recoveryExhausted() {
+		t.Fatalf("preview QA 后仍有未解决 recovery: %s", recoveryState.summary())
+	}
+}
 
 // TestPreviewQAWorkflowRunsChecksInParallelThenAppliesOneAtomicFix 固化 #141 的
 // preview QA playbook：同一 assistant message 并行取得多个只读证据，模型只根据
@@ -76,7 +429,7 @@ func TestPreviewQAWorkflowRunsChecksInParallelThenAppliesOneAtomicFix(t *testing
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	ctx = rushestools.WithDraftID(ctx, draftID)
+	ctx = withTestTurnLeaseSession(t, service, ctx, draftID)
 	ctx = agentexec.WithTurnInteractionState(
 		ctx,
 		agentexec.NewTurnInteractionState(service.indexedResources),

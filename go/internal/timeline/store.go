@@ -15,8 +15,20 @@ func Get(
 	draftID string,
 	version int,
 ) (Document, error) {
+	return GetFromQuery(ctx, database.Read(), draftID, version)
+}
+
+// GetFromQuery reads one exact timeline through the caller's query handle.
+// A caller that needs a coherent multi-table snapshot can pass a read-only
+// *sql.Tx instead of accidentally mixing several SQLite snapshots.
+func GetFromQuery(
+	ctx context.Context,
+	query storage.Querier,
+	draftID string,
+	version int,
+) (Document, error) {
 	var raw string
-	err := database.Read().QueryRowContext(ctx, `
+	err := query.QueryRowContext(ctx, `
 		SELECT document_json FROM timeline_versions WHERE draft_id=? AND version=?`,
 		draftID, version).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -95,8 +107,18 @@ func LatestPreviewID(
 	draftID string,
 	version int,
 ) (*string, error) {
+	return LatestPreviewIDFromQuery(ctx, database.Read(), draftID, version)
+}
+
+// LatestPreviewIDFromQuery is the snapshot-aware form of LatestPreviewID.
+func LatestPreviewIDFromQuery(
+	ctx context.Context,
+	query storage.Querier,
+	draftID string,
+	version int,
+) (*string, error) {
 	var previewID string
-	err := database.Read().QueryRowContext(ctx, `
+	err := query.QueryRowContext(ctx, `
 		SELECT preview_id FROM previews WHERE draft_id=? AND timeline_version=?
 		ORDER BY created_at DESC,preview_id DESC LIMIT 1`, draftID, version).Scan(&previewID)
 	if errors.Is(err, sql.ErrNoRows) {

@@ -49,6 +49,9 @@ export function timelinePatchErrorMessage(error: unknown): string {
     if (detail && typeof detail === "object") {
       const reason = Reflect.get(detail, "reason");
       if (typeof reason === "string" && reason.trim()) {
+        if (reason === "timeline_locked_by_agent") {
+          return "Agent 正在编辑，请等待本轮结束后再修改时间线。";
+        }
         return reason;
       }
     }

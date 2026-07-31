@@ -47,8 +47,8 @@ func TestOpenMigratesSchemaAndCreatesWorkspace(t *testing.T) {
 		WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 22 {
-		t.Fatalf("业务表数=%d want=22", count)
+	if count != 25 {
+		t.Fatalf("业务表数=%d want=25", count)
 	}
 	batches, err := ListTimelineEditBatches(t.Context(), database.Read(), "missing", 20)
 	if err != nil || len(batches) != 0 {
@@ -570,6 +570,63 @@ func TestOpenMigratesV14RewindCheckpointsToMessageBoundary(t *testing.T) {
 	restoreMembers := readCheckpointMembers(t, migrated, "rewind:restore:r1")
 	if strings.Join(restoreMembers, ",") != "msg-before" {
 		t.Fatalf("restore checkpoint members=%v", restoreMembers)
+	}
+}
+
+func TestOpenMigratesV20ExecutionReceiptsAndSuppressesLegacyObservations(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	database, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		DROP TABLE agent_tool_receipts;
+		DROP TABLE agent_turn_runs;
+		INSERT INTO drafts(draft_id,name,created_at,updated_at)
+		VALUES('draft_v20','迁移保留',?,?);
+		INSERT INTO agent_job_observations(
+			event_id,job_id,draft_id,event_json,claim_token,created_at,delivered_at
+		) VALUES(1,'job_legacy','draft_v20','{}','claim_legacy',?,NULL);
+		PRAGMA user_version = 20`, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = migrated.Close() })
+	var version, tables, delivered, suppressed int
+	if err := migrated.Read().QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrated.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM sqlite_master
+		WHERE type='table' AND name IN ('agent_turn_runs','agent_tool_receipts')`,
+	).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrated.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM agent_job_observations
+		WHERE job_id='job_legacy' AND delivered_at IS NOT NULL`,
+	).Scan(&delivered); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrated.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM agent_job_observation_suppressions WHERE job_id='job_legacy'`,
+	).Scan(&suppressed); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion || tables != 2 || delivered != 1 || suppressed != 1 {
+		t.Fatalf(
+			"version=%d tables=%d delivered=%d suppressed=%d",
+			version, tables, delivered, suppressed,
+		)
 	}
 }
 

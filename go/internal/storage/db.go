@@ -476,6 +476,50 @@ func (database *DB) Migrate(ctx context.Context) error {
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		version = 19
+	}
+	if version < 20 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := addColumnIfMissing(ctx, tx, "timeline_edit_batches", "before_version"); err != nil {
+			return fmt.Errorf("应用 schema v20 before_version: %w", err)
+		}
+		if err := addColumnIfMissing(ctx, tx, "timeline_edit_batches", "after_version"); err != nil {
+			return fmt.Errorf("应用 schema v20 after_version: %w", err)
+		}
+		if err := addColumnIfMissing(ctx, tx, "timeline_edit_batches", "affected_refs_json"); err != nil {
+			return fmt.Errorf("应用 schema v20 affected_refs_json: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, schemaV20); err != nil {
+			return fmt.Errorf("应用 schema v20: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 20"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 20
+	}
+	if version < 21 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV21); err != nil {
+			return fmt.Errorf("应用 schema v21: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 21"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 21
 	}
 	return nil
 }
@@ -504,6 +548,9 @@ func addColumnIfMissing(
 		"user_memories.manually_revised_at":              schemaV17,
 		"assets.peaks_object_hash":                       schemaV18,
 		"rewind_restore_requests.affected_memories_json": schemaV19,
+		"timeline_edit_batches.before_version":           "ALTER TABLE timeline_edit_batches ADD COLUMN before_version INTEGER",
+		"timeline_edit_batches.after_version":            "ALTER TABLE timeline_edit_batches ADD COLUMN after_version INTEGER",
+		"timeline_edit_batches.affected_refs_json":       "ALTER TABLE timeline_edit_batches ADD COLUMN affected_refs_json TEXT NOT NULL DEFAULT '[]'",
 	}
 	statement, ok := allowed[table+"."+column]
 	if !ok {

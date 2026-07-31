@@ -76,9 +76,8 @@ func TestTurnQueueHelpersCloseAndRejectedItems(t *testing.T) {
 		t.Fatal("空 draft_id 不应入队")
 	}
 	if !queue.EnqueueUserMessage("draft", "message", "hello") ||
-		!queue.EnqueueJobObservation("draft", "job", map[string]any{"status": "done"}) ||
 		!queue.EnqueueUIObservation("draft", "ui", "preview_viewed", map[string]any{"preview_id": "p1"}) {
-		t.Fatal("三类 observation 应入队")
+		t.Fatal("user 与真实 UI observation 应入队")
 	}
 	queue.JoinDraft("draft")
 	queue.JoinDraft("missing")
@@ -87,8 +86,7 @@ func TestTurnQueueHelpersCloseAndRejectedItems(t *testing.T) {
 	for item := range items {
 		seen[item.Kind] = item
 	}
-	if len(seen) != 3 || seen[QueueUserMessage].Payload["content"] != "hello" ||
-		seen[QueueJobObservation].Payload["job_id"] != "job" ||
+	if len(seen) != 2 || seen[QueueUserMessage].Payload["content"] != "hello" ||
 		seen[QueueUIObservation].Payload["observation_type"] != "preview_viewed" {
 		t.Fatalf("items=%#v", seen)
 	}

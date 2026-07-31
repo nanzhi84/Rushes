@@ -38,7 +38,7 @@ func TestAtomicEditReportsCommittedWhenOnlyContentContractIsStillOpen(t *testing
 	}
 
 	raw, err := exec.ExecuteTool(
-		rushestools.WithDraftID(t.Context(), draftID),
+		manualTimelineMutationContext(rushestools.WithDraftID(t.Context(), draftID)),
 		"timeline.update",
 		rushestools.TimelineUpdateInput{
 			"kind": "set_track_state", "track_id": "bgm", "muted": true,

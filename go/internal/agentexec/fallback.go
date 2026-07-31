@@ -44,7 +44,7 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 			}
 			if err := requireFallbackToolStatus(
 				"media.detect_shots", output,
-				"completed", string(rushestools.StatusQueued),
+				string(rushestools.StatusSucceeded),
 			); err != nil {
 				return "", err
 			}
@@ -84,19 +84,18 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 	); err != nil {
 		return "", err
 	}
-	output, err = runReported(ctx, "render.start", rushestools.RenderStartInput{
-		Kind: "preview", TimelineID: document.TimelineID,
+	output, err = runReported(ctx, "preview.generate", rushestools.PreviewGenerateInput{
+		TimelineID: document.TimelineID,
 	})
 	if err != nil {
 		return "", err
 	}
 	if err := requireFallbackToolStatus(
-		"render.start", output,
-		string(rushestools.StatusQueued), string(rushestools.StatusSucceeded),
+		"preview.generate", output, string(rushestools.StatusSucceeded),
 	); err != nil {
 		return "", err
 	}
-	return "已完成素材理解与初版时间线，并开始渲染预览。", nil
+	return "已完成素材理解、初版时间线与预览渲染。", nil
 }
 
 func requireFallbackToolStatus(

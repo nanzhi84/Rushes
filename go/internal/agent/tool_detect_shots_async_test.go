@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
@@ -49,11 +50,13 @@ func TestDetectShotsSingleAssetAsyncRouting(t *testing.T) {
 			t.Parallel()
 			draftID := "draft_detect_" + test.name
 			database, service := setupUnderstandRoutingService(t, draftID, test.input.AssetID)
-			result, err := executeDetectShots(service, t.Context(), draftID, test.input)
+			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			defer cancel()
+			result, err := executeDetectShots(service, ctx, draftID, test.input)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.Status != "queued" || result.JobID == "" || result.AssetID != test.input.AssetID {
+			if result.Status != string(rushestools.StatusTimeout) || result.JobID == "" || result.AssetID != test.input.AssetID {
 				t.Fatalf("result=%#v", result)
 			}
 			job := readUnderstandRoutingJob(t, database, result.JobID)
@@ -89,7 +92,7 @@ func TestDetectShotsSingleScanInlineAndCancelable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Status != "completed" || result.Summary == nil || !result.Analyzed || result.CacheHit {
+		if result.Status != "succeeded" || result.Summary == nil || !result.Analyzed || result.CacheHit {
 			t.Fatalf("result=%#v", result)
 		}
 		if got := countUnderstandRoutingJobs(t, database, draftID); got != 0 {
@@ -132,7 +135,7 @@ func TestDetectShotsCacheAndIdempotentEnqueue(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Status != "completed" || result.Summary == nil || !result.CacheHit || result.Analyzed {
+		if result.Status != "succeeded" || result.Summary == nil || !result.CacheHit || result.Analyzed {
 			t.Fatalf("result=%#v", result)
 		}
 		if got := countUnderstandRoutingJobs(t, database, draftID); got != 0 {
@@ -156,7 +159,12 @@ func TestDetectShotsCacheAndIdempotentEnqueue(t *testing.T) {
 			go func() {
 				defer wait.Done()
 				<-start
-				result, err := executeDetectShots(service, t.Context(), draftID, input)
+				// race+cover instrumentation runs all internal packages concurrently;
+				// leave enough time for the eight SQLite contenders to converge on one
+				// durable job before the same-turn waiter reaches its terminal timeout.
+				ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+				defer cancel()
+				result, err := executeDetectShots(service, ctx, draftID, input)
 				if err != nil {
 					errs <- err
 					return
@@ -173,7 +181,7 @@ func TestDetectShotsCacheAndIdempotentEnqueue(t *testing.T) {
 		}
 		var jobID string
 		for result := range results {
-			if result.Status != "queued" || result.JobID == "" {
+			if result.Status != string(rushestools.StatusTimeout) || result.JobID == "" {
 				t.Errorf("result=%#v", result)
 			}
 			if jobID == "" {

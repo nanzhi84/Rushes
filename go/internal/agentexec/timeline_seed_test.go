@@ -11,6 +11,10 @@ import (
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
+func manualTimelineMutationContext(ctx context.Context) context.Context {
+	return rushestools.WithTimelineMutationOrigin(ctx, "manual")
+}
+
 func seedTimelineVersion(
 	exec *Executor,
 	ctx context.Context,
@@ -19,6 +23,7 @@ func seedTimelineVersion(
 	operation string,
 	editOperation map[string]any,
 ) (rushestools.ToolResult, error) {
+	ctx = manualTimelineMutationContext(ctx)
 	var stateVersion int
 	if err := exec.database.Read().QueryRowContext(
 		ctx, "SELECT state_version FROM drafts WHERE draft_id=?", draftID,

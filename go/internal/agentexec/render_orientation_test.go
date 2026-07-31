@@ -26,16 +26,15 @@ func TestRenderOrientationParticipatesInIdempotencyWithoutNumericKnobs(t *testin
 	if _, err := seedTimelineVersion(exec, t.Context(), draftID, document, "orientation_fixture", nil); err != nil {
 		t.Fatal(err)
 	}
-	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	start := func(orientation string) rushestools.ToolResult {
 		t.Helper()
-		raw, executeErr := exec.ExecuteTool(ctx, "render.start", rushestools.RenderStartInput{
-			Kind: "preview", TimelineID: document.TimelineID, Orientation: orientation,
-		})
+		result, executeErr := exec.enqueuePreviewRender(
+			t.Context(), draftID, orientation, document.TimelineID,
+		)
 		if executeErr != nil {
 			t.Fatal(executeErr)
 		}
-		return raw.(rushestools.ToolResult)
+		return result
 	}
 
 	auto := start("")
@@ -92,9 +91,9 @@ func TestRenderOrientationParticipatesInIdempotencyWithoutNumericKnobs(t *testin
 		t.Fatalf("每个新 render job 必须同批附带 strict validation: events=%d err=%v",
 			validationEvents, err)
 	}
-	if _, err := exec.ExecuteTool(ctx, "render.start", rushestools.RenderStartInput{
-		Kind: "preview", TimelineID: document.TimelineID, Orientation: "square",
-	}); err == nil {
+	if _, err := exec.enqueuePreviewRender(
+		t.Context(), draftID, "square", document.TimelineID,
+	); err == nil {
 		t.Fatal("unknown orientation should fail")
 	}
 }

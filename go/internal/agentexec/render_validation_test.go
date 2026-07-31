@@ -36,15 +36,12 @@ func TestRenderRejectsInvalidCurrentTimelineWithoutCreatingJob(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	raw, err := exec.ExecuteTool(
-		rushestools.WithDraftID(t.Context(), draftID),
-		"render.start",
-		rushestools.RenderStartInput{Kind: "preview", TimelineID: draftID + ":v1"},
+	result, err := exec.enqueuePreviewRender(
+		t.Context(), draftID, "", draftID+":v1",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := raw.(rushestools.ToolResult)
 	if result.Status != string(rushestools.StatusValidationFailed) ||
 		result.Data["reason"] != "validation_failed" ||
 		result.Data["current_timeline_unchanged"] != true ||

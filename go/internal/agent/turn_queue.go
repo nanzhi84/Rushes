@@ -15,9 +15,8 @@ const cancelAndJoinDraftTimeout = 500 * time.Millisecond
 type QueueItemKind string
 
 const (
-	QueueUserMessage    QueueItemKind = "user_message"
-	QueueJobObservation QueueItemKind = "job_observation"
-	QueueUIObservation  QueueItemKind = "ui_observation"
+	QueueUserMessage   QueueItemKind = "user_message"
+	QueueUIObservation QueueItemKind = "ui_observation"
 )
 
 type QueueItem struct {
@@ -271,13 +270,6 @@ func (queue *TurnQueue) PendingCount(draftID string) int {
 	worker.mu.Lock()
 	defer worker.mu.Unlock()
 	return worker.pendingCount
-}
-
-func (queue *TurnQueue) EnqueueJobObservation(draftID, jobID string, event map[string]any) bool {
-	return queue.Enqueue(QueueItem{
-		DraftID: draftID, Kind: QueueJobObservation, ItemID: jobID,
-		Payload: map[string]any{"job_id": jobID, "event": event},
-	})
 }
 
 func (queue *TurnQueue) EnqueueUIObservation(draftID, itemID, observationType string, payload map[string]any) bool {

@@ -260,7 +260,7 @@ func IsConfirmedToolReplay(ctx context.Context) bool {
 }
 
 // SpeechQualityReport 汇总当前时间线上的客观口播质量证据，供 timeline.check 与
-// render.start 的结构校验使用，不替模型做删除或镜头选择。
+// preview.generate 的结构校验使用，不替模型做删除或镜头选择。
 func (exec *Executor) SpeechQualityReport(
 	ctx context.Context,
 	document timeline.Document,

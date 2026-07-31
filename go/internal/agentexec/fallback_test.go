@@ -28,12 +28,12 @@ func TestFallbackMainlineStopsOnStructuredAtomicFailure(t *testing.T) {
 		func(_ context.Context, name string, _ any) (any, error) {
 			switch name {
 			case "media.detect_shots":
-				return rushestools.DetectShotsResult{Status: "completed"}, nil
+				return rushestools.DetectShotsResult{Status: "succeeded"}, nil
 			case "timeline.insert":
 				return rushestools.ToolResult{
 					Status: string(rushestools.StatusValidationFailed), Observation: "素材目标已失效",
 				}, nil
-			case "render.start":
+			case "preview.generate":
 				renderCalled = true
 			}
 			return nil, nil
@@ -53,7 +53,7 @@ func TestFallbackMainlineUsesLatestExistingTimelineAndRejectsRenderDrift(t *test
 	agenttest.CreateAgentDraft(t, database, draftID)
 	seedFallbackAsset(t, database, draftID, "asset_fallback_latest")
 	executor := New(database, understanding.NewAnalyzer(nil), nil, nil)
-	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx := manualTimelineMutationContext(rushestools.WithDraftID(t.Context(), draftID))
 	if _, err := executor.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
 		"kind": "insert_clip", "asset_id": "asset_fallback_latest", "role": "b_roll",
 		"source_start_frame": 0, "source_end_frame": 15,
@@ -68,13 +68,13 @@ func TestFallbackMainlineUsesLatestExistingTimelineAndRejectsRenderDrift(t *test
 		func(callCtx context.Context, name string, input any) (any, error) {
 			switch name {
 			case "media.detect_shots":
-				return rushestools.DetectShotsResult{Status: "completed"}, nil
+				return rushestools.DetectShotsResult{Status: "succeeded"}, nil
 			case "timeline.insert":
 				return executor.ExecuteTool(callCtx, name, input)
 			case "timeline.check":
 				return executor.ExecuteTool(callCtx, name, input)
-			case "render.start":
-				renderTimelineID = input.(rushestools.RenderStartInput).TimelineID
+			case "preview.generate":
+				renderTimelineID = input.(rushestools.PreviewGenerateInput).TimelineID
 				return rushestools.ToolResult{
 					Status: string(rushestools.StatusFailed), Observation: "timeline_id 已过期",
 				}, nil
@@ -84,7 +84,7 @@ func TestFallbackMainlineUsesLatestExistingTimelineAndRejectsRenderDrift(t *test
 			}
 		},
 	)
-	if err == nil || !strings.Contains(err.Error(), "render.start 未完成") || reply != "" {
+	if err == nil || !strings.Contains(err.Error(), "preview.generate 未完成") || reply != "" {
 		t.Fatalf("reply=%q err=%v", reply, err)
 	}
 	document, latestErr := timeline.Latest(t.Context(), database, draftID)

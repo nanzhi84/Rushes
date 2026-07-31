@@ -20,6 +20,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/providers"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -155,6 +156,10 @@ func TestRealDraftToolCallingStability(t *testing.T) {
 				Workflow: workflow.Name, Run: run, Tool: workflow.ExpectedTool,
 				Error: agentexec.TruncateText(attemptErr.Error(), 1200),
 			})
+			t.Logf(
+				"REAL_DRAFT_TOOL_FAILURE model=%s workflow=%s run=%d error=%s",
+				modelName, workflow.Name, run, agentexec.TruncateText(attemptErr.Error(), 1200),
+			)
 		}
 		metric.Rate = ratio(metric.Succeeded, metric.Total)
 		report.Workflows[workflow.Name] = metric
@@ -183,7 +188,7 @@ func runRealDraftToolAttempt(
 	workflow realDraftWorkflow,
 	chat model.ToolCallingChatModel,
 	vision model.ToolCallingChatModel,
-) (int, error) {
+) (toolCalls int, returnErr error) {
 	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		return 0, err
 	}
@@ -202,10 +207,38 @@ func runRealDraftToolAttempt(
 	defer service.Close()
 	defer func() { _ = database.Close() }()
 
-	ctx := rushestools.WithDraftID(parent, facts.DraftID)
+	ctx, cancelTurn := context.WithCancelCause(parent)
+	turnID := agentexec.RandomID("turn_real_draft")
+	sourceMessageID := agentexec.RandomID("message_real_draft")
+	ctx = rushestools.WithDraftID(ctx, facts.DraftID)
+	ctx = rushestools.WithTurnIdentity(ctx, turnID, sourceMessageID)
+	leaseSession := newTimelineEditLeaseSession(
+		service.database, facts.DraftID, turnID, cancelTurn,
+	)
+	ctx = withTimelineEditLeaseSession(ctx, leaseSession)
+	ctx = rushestools.WithTimelineWriteAdmission(
+		ctx, turnID, leaseSession.token, leaseSession.markLost,
+	)
+	ctx = withModelToolSurfaceSession(ctx)
+	ctx = withToolRecoveryState(ctx, newToolRecoveryState())
 	ctx = agentexec.WithTurnInteractionState(
 		ctx, agentexec.NewTurnInteractionState(service.indexedResources),
 	)
+	if err := service.startAgentTurnRun(ctx, turnID, QueueItem{
+		DraftID: facts.DraftID, ItemID: sourceMessageID, Kind: QueueUserMessage,
+	}); err != nil {
+		cancelTurn(err)
+		return 0, fmt.Errorf("创建真实 Agent turn: %w", err)
+	}
+	turnRunStatus := "failed"
+	defer func() {
+		leaseSession.close()
+		if err := service.finishAgentTurnRun(ctx, turnID, turnRunStatus); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("结束真实 Agent turn: %w", err))
+		}
+		cancelTurn(nil)
+	}()
+
 	before, err := timeline.Latest(ctx, database, facts.DraftID)
 	if err != nil {
 		return 0, fmt.Errorf("读取调用前时间线: %w", err)
@@ -221,6 +254,14 @@ func runRealDraftToolAttempt(
 			"动态工具面未绑定期望工具 %s，实际=%s",
 			workflow.ExpectedTool, strings.Join(liveWorkflowSpecNames(selected), ","),
 		)
+	}
+	modelToolSurfaceSessionFromContext(ctx).set(liveWorkflowSpecNames(selected))
+	// 与正式 dynamicToolSurfaceModel 一致：mutation/preview 能力在 provider
+	// 看见之前取得 lease，纯搜索/分析则不提前锁住时间线。
+	if specsRequireTimelineEditLease(selected) {
+		if err := leaseSession.ensure(ctx); err != nil {
+			return 0, fmt.Errorf("取得真实 Agent edit lease: %w", err)
+		}
 	}
 	bound, err := bindLiveWorkflowTools(ctx, chat, selected)
 	if err != nil {
@@ -259,10 +300,18 @@ func runRealDraftToolAttempt(
 			}
 		}
 		if strings.TrimSpace(call.ID) == "" {
-			call.ID = fmt.Sprintf("real_%s_%d", workflow.Name, index+1)
+			return callCount, fmt.Errorf(
+				"模型工具调用[%d] %s 缺少 provider tool_call_id",
+				index, call.Function.Name,
+			)
 		}
 	}
-	messages, err := invokeLiveWorkflowTools(ctx, service, selected, calls)
+	// 真实 gate 必须经过与生产 ReAct 相同的 identity/receipt 中间件；关闭
+	// 工具内部重试，保持“一次模型选择、一次工具执行”的稳定性计分口径。
+	messages, err := invokeLiveWorkflowTools(
+		ctx, service, selected, calls,
+		newToolRecoveryMiddleware(func(string) bool { return false }, service.tools.ModelReceiptPolicy),
+	)
 	if err != nil {
 		return callCount, fmt.Errorf("实际执行工具: %w", err)
 	}
@@ -275,14 +324,33 @@ func runRealDraftToolAttempt(
 		}
 	}
 	if workflow.Validate != nil {
-		return callCount, workflow.Validate(ctx, service, facts, before, outputs)
-	}
-	for index, output := range outputs {
-		if !liveWorkflowToolOutputSucceeded(calls[index].Function.Name, output) {
-			return callCount, fmt.Errorf("工具返回未成功: %s", agentexec.TruncateText(output, 600))
+		returnErr = workflow.Validate(ctx, service, facts, before, outputs)
+		if returnErr != nil {
+			arguments := make([]string, 0, len(calls))
+			for _, call := range calls {
+				arguments = append(arguments, call.Function.Arguments)
+			}
+			returnErr = fmt.Errorf(
+				"%w; arguments=%s outputs=%s",
+				returnErr,
+				agentexec.TruncateText(strings.Join(arguments, " | "), 600),
+				agentexec.TruncateText(strings.Join(outputs, " | "), 600),
+			)
+		}
+	} else {
+		for index, output := range outputs {
+			if !liveWorkflowToolOutputSucceeded(calls[index].Function.Name, output) {
+				returnErr = fmt.Errorf(
+					"工具返回未成功: %s", agentexec.TruncateText(output, 600),
+				)
+				break
+			}
 		}
 	}
-	return callCount, nil
+	if returnErr == nil {
+		turnRunStatus = "finished"
+	}
+	return callCount, returnErr
 }
 
 func realDraftWorkflows() []realDraftWorkflow {
@@ -819,5 +887,146 @@ func TestRealDraftGateDefinitionsAndScoring(t *testing.T) {
 	failing.Workflows[workflows[0].Name] = liveToolEvalMetric{Succeeded: 19, Total: 20, Rate: 0.95}
 	if err := validateRealDraftToolReport(failing); err == nil {
 		t.Fatal("单 workflow 低于 99% 不得通过")
+	}
+}
+
+func TestRealDraftAttemptRunsMutationWithAgentLeaseAndDurableReceipt(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	const draftID = "draft_real_gate_harness"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	if err := seedLiveWorkflowVideo(
+		t.Context(), service, draftID, "asset_real_gate_harness",
+		"真实门禁夹具", "真实 门禁", 60, false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+		AssetID: "asset_real_gate_harness", AssetKind: "video",
+		SourceStartFrame: 0, SourceEndFrame: 60, Role: "b_roll",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manualContext := rushestools.WithTimelineMutationOrigin(t.Context(), "manual")
+	if result, persistErr := seedTimelineVersion(
+		service, manualContext, draftID, document, "real_gate_fixture", nil,
+	); persistErr != nil || result.Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("seed timeline result=%#v err=%v", result, persistErr)
+	}
+
+	goldenDB := filepath.Join(t.TempDir(), "rushes.db")
+	if err := snapshotSQLiteReadOnly(t.Context(), database.Paths.DB, goldenDB); err != nil {
+		t.Fatal(err)
+	}
+	workflow := realDraftWorkflows()[2]
+	facts := realDraftFacts{
+		DraftID: draftID, TimelineID: document.TimelineID,
+		DeleteStartFrame: 1, DeleteEndFrame: 2,
+		LinkedAssetIDs: map[string]bool{"asset_real_gate_harness": true},
+	}
+	stub := &scriptedWorkflowModel{calls: []schema.ToolCall{{
+		ID: "call_real_gate_delete",
+		Function: schema.FunctionCall{
+			Name:      "timeline.delete",
+			Arguments: `{"kind":"delete_range","start_frame":1,"end_frame":2}`,
+		},
+	}}}
+	attemptWorkspace := filepath.Join(t.TempDir(), "attempt")
+	toolCalls, err := runRealDraftToolAttempt(
+		t.Context(), attemptWorkspace, goldenDB,
+		facts,
+		workflow, stub, stub,
+	)
+	if err != nil || toolCalls != 1 || stub.next != 1 {
+		t.Fatalf("attempt calls=%d model=%d err=%v", toolCalls, stub.next, err)
+	}
+
+	resultDB, err := openSQLiteReadOnly(filepath.Join(attemptWorkspace, "rushes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resultDB.Close() }()
+	var versions, receipts, liveLeases, finishedTurns int
+	if err := resultDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?", draftID,
+	).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if err := resultDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM agent_tool_receipts WHERE draft_id=?", draftID,
+	).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if err := resultDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM agent_edit_leases WHERE draft_id=?", draftID,
+	).Scan(&liveLeases); err != nil {
+		t.Fatal(err)
+	}
+	if err := resultDB.QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM agent_turn_runs WHERE draft_id=? AND status='finished'`, draftID,
+	).Scan(&finishedTurns); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 2 || receipts != 1 || liveLeases != 0 || finishedTurns != 1 {
+		t.Fatalf(
+			"versions=%d receipts=%d leases=%d finished_turns=%d",
+			versions, receipts, liveLeases, finishedTurns,
+		)
+	}
+
+	missingIDStub := &scriptedWorkflowModel{calls: []schema.ToolCall{{
+		Function: schema.FunctionCall{
+			Name:      "timeline.delete",
+			Arguments: `{"kind":"delete_range","start_frame":1,"end_frame":2}`,
+		},
+	}}}
+	missingIDWorkspace := filepath.Join(t.TempDir(), "attempt-missing-id")
+	toolCalls, err = runRealDraftToolAttempt(
+		t.Context(), missingIDWorkspace, goldenDB, facts,
+		workflow, missingIDStub, missingIDStub,
+	)
+	if err == nil || toolCalls != 1 || missingIDStub.next != 1 ||
+		!strings.Contains(err.Error(), "缺少 provider tool_call_id") {
+		t.Fatalf(
+			"missing-id attempt calls=%d model=%d err=%v",
+			toolCalls, missingIDStub.next, err,
+		)
+	}
+	missingIDDB, err := openSQLiteReadOnly(filepath.Join(missingIDWorkspace, "rushes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = missingIDDB.Close() }()
+	var unchangedVersions, missingReceipts, leakedLeases, failedTurns int
+	if err := missingIDDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM timeline_versions WHERE draft_id=?", draftID,
+	).Scan(&unchangedVersions); err != nil {
+		t.Fatal(err)
+	}
+	if err := missingIDDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM agent_tool_receipts WHERE draft_id=?", draftID,
+	).Scan(&missingReceipts); err != nil {
+		t.Fatal(err)
+	}
+	if err := missingIDDB.QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM agent_edit_leases WHERE draft_id=?", draftID,
+	).Scan(&leakedLeases); err != nil {
+		t.Fatal(err)
+	}
+	if err := missingIDDB.QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM agent_turn_runs WHERE draft_id=? AND status='failed'`, draftID,
+	).Scan(&failedTurns); err != nil {
+		t.Fatal(err)
+	}
+	if unchangedVersions != 1 || missingReceipts != 0 || leakedLeases != 0 || failedTurns != 1 {
+		t.Fatalf(
+			"missing-id versions=%d receipts=%d leases=%d failed_turns=%d",
+			unchangedVersions, missingReceipts, leakedLeases, failedTurns,
+		)
 	}
 }

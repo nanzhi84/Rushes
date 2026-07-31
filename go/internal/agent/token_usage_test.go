@@ -136,11 +136,20 @@ func (stub *contextSummaryModel) Stream(
 
 func TestContextSummaryFailureIsObservableAndBounded(t *testing.T) {
 	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_compaction_failure")
+	agenttest.CreateAgentDraft(t, database, "draft_compaction_success")
 	service := &Service{
+		database:  database,
 		chatModel: &contextSummaryModel{err: errors.New("provider unavailable")},
 		hub:       NewTurnStreamHub(0),
 	}
-	summary := service.contextSummary(t.Context(), "draft_compaction_failure", strings.Repeat("历史", 5000))
+	failureCtx := withTestTurnLeaseSession(
+		t, service, t.Context(), "draft_compaction_failure",
+	)
+	summary := service.contextSummary(
+		failureCtx, "draft_compaction_failure", strings.Repeat("历史", 5000),
+	)
 	prefixRunes := utf8.RuneCountInString(deterministicContextSummary(""))
 	if !strings.Contains(summary, "自动语义压缩不可用") ||
 		utf8.RuneCountInString(summary) > prefixRunes+contextCompactionFallbackRuneLimit+1 {
@@ -153,7 +162,10 @@ func TestContextSummaryFailureIsObservableAndBounded(t *testing.T) {
 	}
 
 	service.chatModel = &contextSummaryModel{content: strings.Repeat("摘要", 5000)}
-	bounded := service.contextSummary(t.Context(), "draft_compaction_success", "source")
+	successCtx := withTestTurnLeaseSession(
+		t, service, t.Context(), "draft_compaction_success",
+	)
+	bounded := service.contextSummary(successCtx, "draft_compaction_success", "source")
 	if utf8.RuneCountInString(bounded) > contextCompactionSummaryRuneLimit+1 {
 		t.Fatalf("model summary not bounded: %d", utf8.RuneCountInString(bounded))
 	}
@@ -255,7 +267,7 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 }
 
 const (
-	modelToolSchemaTotalBaselineRunes = 19763
+	modelToolSchemaTotalBaselineRunes = 19432
 	maxAtomicTimelineToolSchemaRunes  = 4400
 )
 
@@ -266,13 +278,12 @@ var modelToolSchemaBaselineRunes = map[string]int{
 	"decision.answer":             566,
 	"interaction.ask_user":        1079,
 	"interaction.confirm_action":  387,
-	"job.read":                    246,
-	"media.detect_shots":          813,
+	"media.detect_shots":          829,
 	"memory.remove":               418,
 	"memory.set":                  929,
 	"plan.update":                 1573,
-	"preview.check":               442,
-	"render.start":                522,
+	"preview.check":               420,
+	"preview.generate":            443,
 	"shot.search":                 964,
 	"speech.search":               1199,
 	"speech.transcribe":           486,
@@ -455,7 +466,7 @@ func TestModelToolSurfaceMetricsFollowSuccessfulGraphBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	messages := []*schema.Message{schema.UserMessage("列出素材")}
-	successCtx := rushestools.WithDraftID(t.Context(), "draft_surface_success")
+	successCtx := withTestTurnLeaseSession(t, service, t.Context(), "draft_surface_success")
 	specs, err := selectModelToolSurface(successCtx, service.tools, messages)
 	if err != nil {
 		t.Fatal(err)

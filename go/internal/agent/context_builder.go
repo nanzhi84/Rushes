@@ -620,30 +620,8 @@ func compactWaveformContext(value any) map[string]any {
 func compressTimelineEditHistoryMap(
 	batches []storage.TimelineEditBatch,
 	limit int,
-) map[string]any {
-	entries := compressTimelineEditEntries(batches, limit)
-	result := make(map[string]any, len(entries))
-	keys := make([]string, 0, len(entries))
-	for index, entry := range entries {
-		key, _ := entry["_history_key"].(string)
-		if key == "" {
-			key = timelineEditHistoryKey(int64(index+1), 0)
-		}
-		clean := cloneContextMap(entry)
-		delete(clean, "_history_key")
-		result[key] = clean
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for len(keys) > 0 {
-		encoded, err := json.Marshal(result)
-		if err == nil && utf8.RuneCount(encoded) <= contextRecentEditRuneBudget {
-			break
-		}
-		delete(result, keys[0])
-		keys = keys[1:]
-	}
-	return result
+) []map[string]any {
+	return compressTimelineEditEntries(batches, limit)
 }
 
 func compressTimelineEditEntries(
@@ -651,8 +629,6 @@ func compressTimelineEditEntries(
 	limit int,
 ) []map[string]any {
 	entries := make([]map[string]any, 0)
-	coalesced := map[string]int{}
-	inserted := map[string]int{}
 	for batchIndex, batch := range batches {
 		sequence := batch.Sequence
 		if sequence <= 0 {
@@ -660,33 +636,16 @@ func compressTimelineEditEntries(
 		}
 		for operationIndex, rawOperation := range batch.Operations {
 			operation := summarizeTimelineEditOperation(rawOperation)
-			kind, _ := operation["kind"].(string)
-			target := operationTarget(operation)
-			if kind == "delete_clip" && target != "" {
-				if index, ok := inserted[target]; ok && index >= 0 && index < len(entries) {
-					entries = append(entries[:index], entries[index+1:]...)
-					coalesced, inserted = rebuildEditIndexes(entries)
-					continue
-				}
-			}
 			entry := map[string]any{
-				"_history_key": timelineEditHistoryKey(sequence, operationIndex),
-				"actor":        batch.Actor,
-				"origin":       batch.Origin,
-				"op":           operation,
-			}
-			key := coalesceOperationKey(kind, operation, target)
-			if key != "" {
-				if index, ok := coalesced[key]; ok {
-					entries = append(entries[:index], entries[index+1:]...)
-					entries = append(entries, entry)
-					coalesced, inserted = rebuildEditIndexes(entries)
-					continue
-				}
-				coalesced[key] = len(entries)
-			}
-			if kind == "insert_clip" && target != "" {
-				inserted[target] = len(entries)
+				"sequence":        sequence,
+				"operation_index": operationIndex,
+				"actor":           batch.Actor,
+				"origin":          batch.Origin,
+				"operation":       operation,
+				"before_version":  batch.BeforeVersion,
+				"after_version":   batch.AfterVersion,
+				"affected_refs":   append([]string(nil), batch.AffectedRefs...),
+				"created_at":      batch.CreatedAt,
 			}
 			entries = append(entries, entry)
 		}
@@ -793,17 +752,16 @@ func boundRecentEditHistory(entries []map[string]any, budget int) []map[string]a
 
 func minimalEditHistoryEntry(entry map[string]any) map[string]any {
 	result := map[string]any{
+		"sequence": entry["sequence"], "operation_index": entry["operation_index"],
 		"actor": entry["actor"], "origin": entry["origin"],
+		"before_version": entry["before_version"], "after_version": entry["after_version"],
 	}
-	if key, ok := entry["_history_key"].(string); ok {
-		result["_history_key"] = key
-	}
-	operation, _ := entry["op"].(map[string]any)
+	operation, _ := entry["operation"].(map[string]any)
 	minimalOperation := map[string]any{"kind": operation["kind"]}
 	if target := operationTarget(operation); target != "" {
 		minimalOperation["target"] = agentexec.TruncateRunes(target, 120)
 	}
-	result["op"] = minimalOperation
+	result["operation"] = minimalOperation
 	return result
 }
 

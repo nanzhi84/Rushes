@@ -183,3 +183,24 @@ func TestHandlerExcludesCmdlineExposesMetrics(t *testing.T) {
 		t.Fatalf("Handler 输出非法 JSON: %s", body)
 	}
 }
+
+func TestUserExportMetricsRecordAcceptedAndBothTerminalOutcomes(t *testing.T) {
+	requestedBefore := metricUserExportRequested.Value()
+	succeededBefore := metricUserExportSucceeded.Value()
+	failedBefore := metricUserExportFailed.Value()
+
+	RecordUserExportRequested()
+	RecordUserExportTerminal(true)
+	RecordUserExportTerminal(false)
+
+	if metricUserExportRequested.Value() != requestedBefore+1 ||
+		metricUserExportSucceeded.Value() != succeededBefore+1 ||
+		metricUserExportFailed.Value() != failedBefore+1 {
+		t.Fatalf(
+			"user export metrics requested=%d succeeded=%d failed=%d",
+			metricUserExportRequested.Value(),
+			metricUserExportSucceeded.Value(),
+			metricUserExportFailed.Value(),
+		)
+	}
+}

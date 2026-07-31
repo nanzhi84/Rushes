@@ -5,10 +5,10 @@
 1. API 将本地文件登记为 `AssetImported + AssetLinked + JobEnqueued(ingest)`。
 2. worker 原子 claim job，生成 probe、thumbnail、proxy，再经 Reducer 写 `AssetProbed / ProxyGenerated / JobProgress / JobSucceeded`。
 3. 用户消息以 202 入 TurnQueue。Eino ReAct 读取草稿消息，调用理解、时间线、决策或渲染工具；过程通过 turn-stream 实时推送。
-4. 渲染工具只入队。worker 完成后写终态事件，job observation bridge 再唤醒同一草稿的 Agent 回合。
+4. `media.detect_shots` 的 deep/force-refresh 与 `preview.generate` 可复用 durable job，但工具调用会在当前 turn 内等待 worker 终态；同批工具全部终态后才允许下一次模型调用。turn 取消只停止 waiter，底层可复用 job 继续运行，迟到完成不会合成消息或唤醒 Agent。
 5. 前端领域 SSE 只做 query invalidation；媒体由带 query token 的 Range/HEAD 端点直接播放。
 
-模型工具目录按当前草稿状态和任务阶段动态披露；长期记忆写入使用可逆的 `memory.set`，用户明确要求忘记时使用破坏性的 `memory.remove` 并先走确认。
+模型工具目录按当前草稿状态和任务阶段动态披露；Agent 只用 `preview.generate` 生成预览并直接取得 `preview_id`，看不到 `render.start`、`job.read` 或 final 导出工具。最终导出必须由用户从产品界面触发。长期记忆写入使用可逆的 `memory.set`，用户明确要求忘记时使用破坏性的 `memory.remove` 并先走确认。
 
 素材理解以 `asset hash + 分析参数 + prompt version` 作为持久化 fingerprint；`media.detect_shots` 每次只为一个可用视频建立或刷新镜头证据，相同输入直接复用 SQLite 结果。Agent 每回合常驻读取精简 `material_catalog`，逐镜头语义与精确源帧由只读的 `shot.search` 按创作意图检索，再以稳定 `shot_id` 交给时间线工具执行。
 
@@ -31,7 +31,7 @@
 - 业务表禁止绕过 `reducer.Apply`；工具结果侧行也必须通过 `ResultRows` 同事务提交。
 - strict 事件必须携带正确 base version；merge 事件必须拥有完整 merge key。
 - 一批事件的 preflight、apply、状态校验、CAS、event_log append 是一个 immediate transaction。
-- draft 内 turn FIFO；跨 draft 并行。取消只传播 context，不删除已经完成的合法结果。
+- draft 内 turn FIFO；跨 draft 并行。取消只传播 context，不删除已经完成的合法结果，也不强制取消可复用的 understand/preview job。
 - job terminal event 只能由 worker 写；API/Agent 只负责 `JobEnqueued`。
 
 ## 流式契约

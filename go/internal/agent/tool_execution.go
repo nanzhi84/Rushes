@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -21,6 +22,43 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 	if _, err := rushestools.DraftID(ctx); err != nil {
 		return nil, err
 	}
+	// 旧客户端或异常 provider 即使绕过 Registry，也不能重新打开 Agent 的最终
+	// 导出或 job 轮询能力。用户导出只走独立 HTTP/UI 服务。
+	if name == "render.start" {
+		var retiredInput struct {
+			Kind string `json:"kind"`
+		}
+		encoded, _ := json.Marshal(input)
+		if json.Unmarshal(encoded, &retiredInput) == nil && retiredInput.Kind == "final" {
+			metricLLMFinalExportAttempt.Inc()
+		}
+		return nil, errors.New("render.start 不属于 Agent 能力；预览使用 preview.generate，最终导出由用户在 UI 触发")
+	}
+	if name == "job.read" {
+		return nil, errors.New("job.read 不属于 Agent 能力；长工具由 harness 在当前 turn 等待终态")
+	}
+	if toolRequiresTimelineEditLease(name) {
+		// REST timeline patches are explicitly marked manual and are fenced in the
+		// reducer transaction. Every Agent mutation/preview must instead belong to
+		// a live turn lease session; direct callers cannot bypass the harness.
+		if rushestools.TimelineMutationOrigin(ctx) != "manual" {
+			session := timelineEditLeaseSessionFromContext(ctx)
+			if session == nil {
+				return nil, storage.ErrAgentEditLeaseLost
+			}
+			if err := session.ensure(ctx); err != nil {
+				return nil, err
+			}
+		}
+	}
+	preparedContext, receiptResult, reused, err := service.prepareTimelineMutationReceipt(ctx, name, input)
+	if err != nil {
+		return nil, err
+	}
+	if reused {
+		return receiptResult, nil
+	}
+	ctx = preparedContext
 	// 普通只读工具取共享锁，资源隔离 detector/索引读取分层锁，其余副作用工具独占。
 	// Effect/Family 分类事实源仍是 registry，索引 footprint 只负责细化执行互斥。
 	readOnly := false

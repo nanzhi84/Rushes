@@ -127,6 +127,240 @@ func TestToolRecoveryRetriesSafeErrorsAndReturnsThemToModel(t *testing.T) {
 	}
 }
 
+func TestToolRecoveryFailsClosedOnNonTerminalModelToolResult(t *testing.T) {
+	for _, test := range []struct {
+		status       string
+		metricChange int64
+	}{
+		{status: "queued", metricChange: 1},
+		{status: "running", metricChange: 1},
+		{status: "completed"},
+		{status: "mystery"},
+	} {
+		t.Run(test.status, func(t *testing.T) {
+			before := metricLLMNonTerminalToolResult.Value()
+			endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+				func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+					return &compose.ToolOutput{Result: `{"status":"` + test.status + `","data":{"job_id":"job_1"}}`}, nil
+				},
+			)
+			output, err := endpoint(
+				rushestools.WithDraftID(t.Context(), "draft"),
+				&compose.ToolInput{Name: "preview.generate", Arguments: `{"timeline_id":"draft:v1"}`},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := decodeRecoveryPayload(t, output.Result)
+			data := payload["data"].(map[string]any)
+			if payload["status"] != string(rushestools.StatusFailed) ||
+				data["error_code"] != string(rushestools.ErrCodeToolExecutionError) ||
+				data["returned_status"] != test.status {
+				t.Fatalf("payload=%#v", payload)
+			}
+			if metricLLMNonTerminalToolResult.Value() != before+test.metricChange {
+				t.Fatalf("non-terminal metric=%d want=%d", metricLLMNonTerminalToolResult.Value(), before+test.metricChange)
+			}
+		})
+	}
+}
+
+func TestToolRecoveryAddsSucceededReceiptToTypedReadResult(t *testing.T) {
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+			return &compose.ToolOutput{Result: `{"draft_id":"draft","assets":[],"total":0}`}, nil
+		},
+	)
+	output, err := endpoint(
+		rushestools.WithDraftID(t.Context(), "draft"),
+		&compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := decodeRecoveryPayload(t, output.Result)
+	if payload["status"] != string(rushestools.StatusSucceeded) ||
+		payload[toolRequestFingerprintField] == "" {
+		t.Fatalf("typed model receipt=%#v", payload)
+	}
+}
+
+func TestToolRecoveryShotSearchRoleProofMatchesExecutorSemantics(t *testing.T) {
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := rushestools.NewRegistry(database, effectProbeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const arguments = `{"semantic_roles":["b_roll"]}`
+	for _, test := range []struct {
+		name         string
+		semanticRole string
+		wantSuccess  bool
+	}{
+		{name: "empty role is unknown", semanticRole: "", wantSuccess: true},
+		{name: "legacy visual role is unknown", semanticRole: "visual", wantSuccess: true},
+		{name: "matching explicit role", semanticRole: "b_roll", wantSuccess: true},
+		{name: "opposite explicit role", semanticRole: "a_roll", wantSuccess: false},
+		{name: "opposite explicit alias", semanticRole: "a-roll", wantSuccess: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw, err := json.Marshal(rushestools.ShotSearchResult{
+				Shots: []rushestools.ShotCandidate{{
+					ShotID: "shot_1", AssetID: "asset_A",
+					SourceStartFrame: 0, SourceEndFrame: 30, DurationFrames: 30,
+					SemanticRole: test.semanticRole,
+				}},
+				TotalMatches: 1,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			endpoint := newToolRecoveryMiddleware(
+				retrySafeFromEffect(registry.Effect), registry.ModelReceiptPolicy,
+			).Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+				calls++
+				return &compose.ToolOutput{Result: string(raw)}, nil
+			})
+			output, err := endpoint(
+				rushestools.WithDraftID(t.Context(), "draft"),
+				&compose.ToolInput{Name: "shot.search", Arguments: arguments},
+			)
+			if err != nil || output == nil || calls != 1 {
+				t.Fatalf("calls=%d output=%#v err=%v", calls, output, err)
+			}
+			payload := decodeRecoveryPayload(t, output.Result)
+			gotSuccess := payload["status"] == string(rushestools.StatusSucceeded)
+			if gotSuccess != test.wantSuccess {
+				t.Fatalf("role=%q payload=%#v want_success=%v", test.semanticRole, payload, test.wantSuccess)
+			}
+			if test.wantSuccess && !validToolRequestFingerprint("shot.search", arguments, output.Result) {
+				t.Fatalf("role=%q succeeded receipt 缺少完整请求 proof: %s", test.semanticRole, output.Result)
+			}
+			if !test.wantSuccess && !isStructuredToolFailure(output.Result) {
+				t.Fatalf("role=%q 相反角色未 fail-closed: %s", test.semanticRole, output.Result)
+			}
+		})
+	}
+}
+
+func TestToolRecoveryMissingStatusFailsClosedForExplicitReceipts(t *testing.T) {
+	for _, name := range []string{"plan.update", "decision.answer"} {
+		t.Run(name, func(t *testing.T) {
+			endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+				func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+					return &compose.ToolOutput{Result: `{"error":"adapter boom"}`}, nil
+				},
+			)
+			output, err := endpoint(
+				rushestools.WithDraftID(t.Context(), "draft"),
+				&compose.ToolInput{Name: name, Arguments: `{}`},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := decodeRecoveryPayload(t, output.Result)
+			data := payload["data"].(map[string]any)
+			if payload["status"] != string(rushestools.StatusFailed) ||
+				data["error_code"] != string(rushestools.ErrCodeToolExecutionError) ||
+				data["returned_status"] != "missing" {
+				t.Fatalf("missing-status adapter failure was accepted: %#v", payload)
+			}
+		})
+	}
+}
+
+func TestToolRecoverySuppliesStableCodeForEveryFailureStatus(t *testing.T) {
+	tests := []struct {
+		status string
+		code   rushestools.ToolErrorCode
+	}{
+		{status: "failed", code: rushestools.ErrCodeToolExecutionError},
+		{status: "validation_failed", code: rushestools.ErrCodeToolValidationFailed},
+		{status: "cancelled", code: rushestools.ErrCodeToolCancelled},
+		{status: "timeout", code: rushestools.ErrCodeToolTimeout},
+	}
+	for _, test := range tests {
+		t.Run(test.status, func(t *testing.T) {
+			endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+				func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+					return &compose.ToolOutput{Result: `{"status":"` + test.status + `"}`}, nil
+				},
+			)
+			output, err := endpoint(t.Context(), &compose.ToolInput{
+				Name: "timeline.update", Arguments: `{"kind":"adjust_gain"}`,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			payload := decodeRecoveryPayload(t, output.Result)
+			data := payload["data"].(map[string]any)
+			if payload["status"] != test.status || data["error_code"] != string(test.code) {
+				t.Fatalf("payload=%#v", payload)
+			}
+		})
+	}
+}
+
+func TestToolRecoveryRejectsModelMutationWithoutDurableReceiptIdentity(t *testing.T) {
+	tests := []struct {
+		name, turnID, sourceMessageID, callID string
+	}{
+		{name: "missing call id", turnID: "turn-receipt", sourceMessageID: "message-receipt"},
+		{name: "missing source message", turnID: "turn-receipt", callID: "call-receipt"},
+		{name: "missing turn", sourceMessageID: "message-receipt", callID: "call-receipt"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+				func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+					calls++
+					return &compose.ToolOutput{Result: `{"status":"succeeded","data":{"timeline_id":"draft:v2"}}`}, nil
+				},
+			)
+			ctx := rushestools.WithDraftID(t.Context(), "draft")
+			ctx = rushestools.WithTurnIdentity(ctx, test.turnID, test.sourceMessageID)
+			output, err := endpoint(ctx, &compose.ToolInput{
+				Name: "timeline.update", CallID: test.callID,
+				Arguments: `{"kind":"adjust_gain","timeline_clip_id":"clip-1","gain_db":-6}`,
+			})
+			if err != nil || output == nil || calls != 0 {
+				t.Fatalf("calls=%d output=%#v err=%v", calls, output, err)
+			}
+			payload := decodeRecoveryPayload(t, output.Result)
+			data := payload["data"].(map[string]any)
+			if payload["status"] != string(rushestools.StatusFailed) ||
+				data["error_code"] != string(rushestools.ErrCodeToolExecutionError) ||
+				!strings.Contains(payload["observation"].(string), "调用身份") {
+				t.Fatalf("payload=%#v", payload)
+			}
+		})
+	}
+
+	// Isolated harness calls have no model turn identity and remain governed by
+	// the direct executor/admission tests instead of this model-only fence.
+	if modelMutationReceiptIdentityMissing(t.Context(), &compose.ToolInput{
+		Name: "timeline.update",
+	}) {
+		t.Fatal("non-model harness call was classified as a model receipt violation")
+	}
+	if modelMutationReceiptIdentityMissing(
+		rushestools.WithTurnIdentity(t.Context(), "turn", "message"),
+		&compose.ToolInput{Name: "timeline.inspect"},
+	) {
+		t.Fatal("read-only tool was classified as a mutation receipt violation")
+	}
+	if modelMutationReceiptIdentityMissing(t.Context(), nil) {
+		t.Fatal("nil input was classified as a mutation receipt violation")
+	}
+}
+
 func TestToolRecoveryObservesOversizeResultWithoutTruncating(t *testing.T) {
 	largeResult := `{"status":"succeeded","data":{"timeline_id":"draft:v2","validation_report":{"valid":true,"structural_valid":true,"content_contract_valid":true,"checks":["schema"],"issues":[]}},"observation":"` +
 		strings.Repeat("中", toolResultSoftLimitBytes) + `"}`
@@ -269,26 +503,20 @@ func TestConfirmedToolRecoverySuccessRequiresToolSpecificStatus(t *testing.T) {
 		{"memory remove outside requested keys", "memory.remove", `{"keys":["existing"]}`, `{"status":"succeeded","data":{"removed_keys":["other"]}}`, false},
 		{"memory remove duplicate proof keys", "memory.remove", `{"keys":["existing"]}`, `{"status":"succeeded","data":{"removed_keys":["existing","existing"]}}`, false},
 		{"typed result cannot use generic success", "shot.search", `{}`, `{"status":"succeeded"}`, false},
-		{"render queued", "render.start", `{"kind":"preview","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","timeline_id":"draft:v2","timeline_version":2,"render_kind":"preview","orientation":"auto"}}`, true},
-		{"render queued wrong request draft", "render.start", `{"kind":"preview","timeline_id":"draft_A:v2"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","timeline_id":"draft_B:v2","timeline_version":2,"render_kind":"preview","orientation":"auto"}}`, false},
-		{"render queued wrong request version", "render.start", `{"kind":"preview","timeline_id":"draft:v3"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","timeline_id":"draft:v2","timeline_version":2,"render_kind":"preview","orientation":"auto"}}`, false},
-		{"render queued wrong request kind", "render.start", `{"kind":"final","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","timeline_id":"draft:v2","timeline_version":2,"render_kind":"preview","orientation":"auto"}}`, false},
-		{"render queued wrong orientation", "render.start", `{"kind":"preview","timeline_id":"draft:v2","orientation":"portrait"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","timeline_id":"draft:v2","timeline_version":2,"render_kind":"preview","orientation":"landscape"}}`, false},
-		{"render queued missing job id", "render.start", `{"kind":"preview","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_status":"pending","timeline_version":2,"render_kind":"preview"}}`, false},
-		{"render queued empty job id", "render.start", `{"kind":"preview","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_id":" ","job_status":"pending","timeline_version":2,"render_kind":"preview"}}`, false},
-		{"render queued invalid job status", "render.start", `{"kind":"preview","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"succeeded","timeline_version":2,"render_kind":"preview"}}`, false},
-		{"render queued missing timeline version", "render.start", `{"kind":"preview","timeline_id":"draft:v2"}`, `{"status":"queued","data":{"job_id":"job_1","job_status":"pending","render_kind":"preview"}}`, false},
-		{"render succeeded", "render.start", `{"kind":"final","timeline_id":"draft:v2","orientation":"portrait"}`, `{"status":"succeeded","data":{"job_id":"job_1","job_status":"succeeded","timeline_id":"draft:v2","timeline_version":2,"render_kind":"final","orientation":"portrait"}}`, true},
-		{"render succeeded inconsistent job status", "render.start", `{"kind":"final","timeline_id":"draft:v2"}`, `{"status":"succeeded","data":{"job_id":"job_1","job_status":"running","timeline_version":2,"render_kind":"final"}}`, false},
+		{"preview succeeded", "preview.generate", `{"timeline_id":"draft:v2","orientation":"portrait"}`, `{"status":"succeeded","data":{"preview_id":"preview_1","job_id":"job_1","job_status":"succeeded","timeline_id":"draft:v2","timeline_version":2,"orientation":"portrait"}}`, true},
+		{"preview wrong request draft", "preview.generate", `{"timeline_id":"draft_A:v2"}`, `{"status":"succeeded","data":{"preview_id":"preview_1","job_id":"job_1","job_status":"succeeded","timeline_id":"draft_B:v2","timeline_version":2,"orientation":"auto"}}`, false},
+		{"preview missing preview id", "preview.generate", `{"timeline_id":"draft:v2"}`, `{"status":"succeeded","data":{"job_id":"job_1","job_status":"succeeded","timeline_id":"draft:v2","timeline_version":2,"orientation":"auto"}}`, false},
+		{"preview inconsistent job status", "preview.generate", `{"timeline_id":"draft:v2"}`, `{"status":"succeeded","data":{"preview_id":"preview_1","job_id":"job_1","job_status":"running","timeline_id":"draft:v2","timeline_version":2,"orientation":"auto"}}`, false},
+		{"preview wrong orientation", "preview.generate", `{"timeline_id":"draft:v2","orientation":"portrait"}`, `{"status":"succeeded","data":{"preview_id":"preview_1","job_id":"job_1","job_status":"succeeded","timeline_id":"draft:v2","timeline_version":2,"orientation":"landscape"}}`, false},
 		{"other queued", "timeline.check", `{}`, `{"status":"queued"}`, false},
-		{"interaction waiting", "interaction.ask_user", `{}`, `{"status":"waiting","data":{"decision_id":"decision_1","turn_should_end":true}}`, true},
-		{"interaction waiting missing decision", "interaction.ask_user", `{}`, `{"status":"waiting","data":{"turn_should_end":true}}`, false},
-		{"other waiting", "timeline.check", `{}`, `{"status":"waiting"}`, false},
-		{"understanding queued", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","job_id":"job_1","asset_id":"asset","status":"queued"}`, true},
+		{"interaction waiting", "interaction.ask_user", `{}`, `{"status":"waiting_user","data":{"decision_id":"decision_1","turn_should_end":true}}`, true},
+		{"interaction waiting missing decision", "interaction.ask_user", `{}`, `{"status":"waiting_user","data":{"turn_should_end":true}}`, false},
+		{"other waiting", "timeline.check", `{}`, `{"status":"waiting_user"}`, false},
+		{"understanding queued", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","job_id":"job_1","asset_id":"asset","status":"queued"}`, false},
 		{"understanding queued missing job", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","asset_id":"asset","status":"queued"}`, false},
 		{"understanding queued wrong asset", "media.detect_shots", `{"asset_id":"asset_A"}`, `{"draft_id":"draft","job_id":"job_1","asset_id":"asset_B","status":"queued"}`, false},
-		{"understanding completed", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","asset_id":"asset","status":"completed","summary":{"asset_id":"asset","timeline_fps":30}}`, true},
-		{"understanding completed wrong summary", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","asset_id":"asset","status":"completed","summary":{"asset_id":"other","timeline_fps":30}}`, false},
+		{"understanding succeeded", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","asset_id":"asset","status":"succeeded","summary":{"asset_id":"asset","timeline_fps":30}}`, true},
+		{"understanding succeeded wrong summary", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","asset_id":"asset","status":"succeeded","summary":{"asset_id":"other","timeline_fps":30}}`, false},
 		{"understanding generic success", "media.detect_shots", `{}`, `{"status":"succeeded"}`, false},
 		{"typed read result missing pagination proof", "shot.search", `{}`, `{"shots":[],"total_matches":0}`, false},
 		{"shot search rejects missing shots", "shot.search", `{}`, `{"total_matches":0,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
@@ -548,7 +776,7 @@ func TestToolRecoveryProofBindsFullSemanticRequestAndTarget(t *testing.T) {
 			"decision card content", "interaction.ask_user",
 			`{"question":"当前问题","decision_type":"critical"}`,
 			`{"question":"另一个问题","decision_type":"critical"}`,
-			`{"status":"waiting","data":{"decision_id":"decision_other","turn_should_end":true}}`,
+			`{"status":"waiting_user","data":{"decision_id":"decision_other","turn_should_end":true}}`,
 		},
 	}
 	for _, test := range tests {
@@ -608,10 +836,13 @@ func TestToolRecoveryProofBindsFullSemanticRequestAndTarget(t *testing.T) {
 		t.Fatal("timeline.check 不得接受错误请求版本")
 	}
 	if isConfirmedToolRecoverySuccess(
-		"job.read", `{"job_id":"job_A"}`,
-		attachToolRequestFingerprint("job.read", `{"job_id":"job_A"}`, `{"status":"succeeded","data":{"job_id":"job_B"}}`), "",
+		"preview.generate", `{"timeline_id":"draft:v2"}`,
+		attachToolRequestFingerprint(
+			"preview.generate", `{"timeline_id":"draft:v2"}`,
+			`{"status":"succeeded","data":{"preview_id":"preview_1","job_id":"job_1","job_status":"succeeded","timeline_id":"other:v2","timeline_version":2,"orientation":"auto"}}`,
+		), "draft",
 	) {
-		t.Fatal("job.read 不得接受错误 job")
+		t.Fatal("preview.generate 不得接受错误 timeline")
 	}
 }
 
@@ -647,8 +878,10 @@ func TestToolRecoveryReporterUsesNormalizedFailureResult(t *testing.T) {
 		t.Fatalf("events=%#v", events)
 	}
 	encoded, marshalErr := json.Marshal(events[1].output)
-	if marshalErr != nil || strings.Contains(string(encoded), "mystery") ||
-		strings.Contains(string(encoded), "已完成") {
+	var reported rushestools.ToolResult
+	decodeErr := json.Unmarshal(encoded, &reported)
+	if marshalErr != nil || decodeErr != nil || reported.Status != "failed" ||
+		reported.Data["returned_status"] != "mystery" || strings.Contains(string(encoded), "已完成") {
 		t.Fatalf("unverified result leaked to reporter: %s err=%v", encoded, marshalErr)
 	}
 }
@@ -735,7 +968,7 @@ func TestToolRecoveryPreservesStructuredBusinessFailureForModel(t *testing.T) {
 	}
 	payload := decodeRecoveryPayload(t, output.Result)
 	data := payload["data"].(map[string]any)
-	if payload["status"] != "failed" || payload["observation"] != "片段相互重叠" ||
+	if payload["status"] != "validation_failed" || payload["observation"] != "片段相互重叠" ||
 		data["error_code"] != "timeline_invalid" || data["failed_op"] == nil ||
 		data["recovery"] != "修正当前操作" || data["harness_recovery"] == nil {
 		t.Fatalf("structured business failure was not preserved: payload=%#v", payload)
@@ -1111,18 +1344,18 @@ func TestShotSearchRecoveryTargetIncludesQueryAndCanonicalFilters(t *testing.T) 
 	}
 }
 
-func TestRenderStartRecoveryTargetIncludesNormalizedOrientation(t *testing.T) {
+func TestPreviewGenerateRecoveryTargetIncludesNormalizedOrientation(t *testing.T) {
 	portrait := toolRecoveryTargetKey(
-		"render.start", `{"kind":"final","timeline_id":"draft:v1","orientation":"portrait"}`, "",
+		"preview.generate", `{"timeline_id":"draft:v1","orientation":"portrait"}`, "",
 	)
 	landscape := toolRecoveryTargetKey(
-		"render.start", `{"kind":"final","timeline_id":"draft:v1","orientation":"landscape"}`, "",
+		"preview.generate", `{"timeline_id":"draft:v1","orientation":"landscape"}`, "",
 	)
 	autoImplicit := toolRecoveryTargetKey(
-		"render.start", `{"kind":"final","timeline_id":"draft:v1"}`, "",
+		"preview.generate", `{"timeline_id":"draft:v1"}`, "",
 	)
 	autoExplicit := toolRecoveryTargetKey(
-		"render.start", `{"kind":"final","timeline_id":"draft:v1","orientation":"auto"}`, "",
+		"preview.generate", `{"timeline_id":"draft:v1","orientation":"auto"}`, "",
 	)
 	if portrait == landscape || autoImplicit != autoExplicit {
 		t.Fatalf(
@@ -1133,21 +1366,21 @@ func TestRenderStartRecoveryTargetIncludesNormalizedOrientation(t *testing.T) {
 
 	state := newToolRecoveryState()
 	state.recordFailure(toolFailureSnapshot{
-		Tool:      "render.start",
-		Arguments: `{"kind":"final","timeline_id":"draft:v1","orientation":"portrait"}`,
+		Tool:      "preview.generate",
+		Arguments: `{"timeline_id":"draft:v1","orientation":"portrait"}`,
 	})
 	state.recordSuccess(
-		"render.start",
-		`{"kind":"final","timeline_id":"draft:v1","orientation":"landscape"}`,
-		`{"status":"queued","data":{"timeline_id":"draft:v1","render_kind":"final","orientation":"landscape"}}`,
+		"preview.generate",
+		`{"timeline_id":"draft:v1","orientation":"landscape"}`,
+		`{"status":"succeeded","data":{"timeline_id":"draft:v1","orientation":"landscape"}}`,
 	)
 	if !state.unresolved() {
 		t.Fatal("landscape success must not resolve portrait render failure")
 	}
 	state.recordSuccess(
-		"render.start",
-		`{"kind":"final","timeline_id":"draft:v1","orientation":"portrait"}`,
-		`{"status":"queued","data":{"timeline_id":"draft:v1","render_kind":"final","orientation":"portrait"}}`,
+		"preview.generate",
+		`{"timeline_id":"draft:v1","orientation":"portrait"}`,
+		`{"status":"succeeded","data":{"timeline_id":"draft:v1","orientation":"portrait"}}`,
 	)
 	if state.unresolved() {
 		t.Fatal("portrait success must resolve the matching portrait render failure")

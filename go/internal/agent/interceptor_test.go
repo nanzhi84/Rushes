@@ -122,7 +122,7 @@ func TestMatchingConfirmationDecisionResolvesInterceptorRejection(t *testing.T) 
 					Data:        map[string]any{"error_code": "confirmation_required", "tool": "memory.remove"},
 				}
 			}
-			return &compose.ToolOutput{Result: `{"status":"waiting","observation":"已创建确认卡","data":{"decision_id":"decision_1","turn_should_end":true}}`}, nil
+			return &compose.ToolOutput{Result: `{"status":"waiting_user","observation":"已创建确认卡","data":{"decision_id":"decision_1","turn_should_end":true}}`}, nil
 		},
 	)
 	removeArguments := `{"keys":["pacing"]}`

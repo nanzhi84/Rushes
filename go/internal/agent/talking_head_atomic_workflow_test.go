@@ -137,7 +137,7 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 		t.Context(), draftID, currentDocument, "issue_140_fixture_refresh", nil); persistErr != nil || persisted.Status != string(rushestools.StatusSucceeded) {
 		t.Fatalf("refreshed=%#v err=%v", persisted, persistErr)
 	}
-	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
 	trace := []string{}
 
 	inspectRaw, err := service.ExecuteTool(ctx, "timeline.inspect", rushestools.TimelineInspectInput{})

@@ -8,12 +8,10 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
-	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 type reconciliationBlockingModel struct {
@@ -480,171 +478,6 @@ func TestPersistedTurnCandidatesIgnoreDeliveredJobReplyWhenPairingUser(t *testin
 	}
 }
 
-func TestPersistedTurnCandidatesRestoreUndeliveredJobBeforeLaterUser(t *testing.T) {
-	database := agenttest.AgentTestDatabase(t)
-	const draftID = "draft_reconcile_undelivered_job_fifo"
-	agenttest.CreateAgentDraft(t, database, draftID)
-	base := time.Date(2026, 7, 19, 15, 30, 0, 0, time.UTC)
-	if _, err := database.Write().ExecContext(t.Context(), `
-		INSERT INTO agent_job_observations(
-			job_id,event_id,draft_id,event_json,claim_token,created_at
-		) VALUES('job_reconcile_undelivered',88003,?,?,'claim_reconcile_undelivered',?)`,
-		draftID,
-		`{"event":"JobSucceeded","payload":{"job_id":"job_reconcile_undelivered","kind":"render_preview"}}`,
-		base.Format(time.RFC3339Nano),
-	); err != nil {
-		t.Fatal(err)
-	}
-	user := reducer.MessageRow{
-		ID: "user_after_undelivered_job", DraftID: draftID,
-		Role: "user", Kind: "user", Content: "必须排在未投递 job 后恢复",
-	}
-	if result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
-		Actor: contracts.ActorUser, CreatedAt: base.Add(time.Second),
-		ResultRows: reducer.ResultRows{Message: &user},
-	}); err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("seed later user result=%#v err=%v", result, err)
-	}
-
-	service, err := NewServiceWithModelsForStartup(t.Context(), database, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer service.Close()
-	candidates, err := service.persistedTurnCandidates(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates) != 2 || candidates[0].kind != QueueJobObservation ||
-		candidates[0].itemID != "job_reconcile_undelivered" || candidates[1].itemID != user.ID {
-		t.Fatalf("未投递 job 与 user 必须按持久时间恢复为 J→U: %#v", candidates)
-	}
-}
-
-func TestPersistedTurnCandidatesJobDecisionDoesNotConsumeConcurrentUser(t *testing.T) {
-	database := agenttest.AgentTestDatabase(t)
-	const draftID = "draft_reconcile_job_decision"
-	agenttest.CreateAgentDraft(t, database, draftID)
-	base := time.Date(2026, 7, 19, 16, 0, 0, 0, time.UTC)
-	deliveredAt := base.Add(3 * time.Second).Format(time.RFC3339Nano)
-	if _, err := database.Write().ExecContext(t.Context(), `
-		INSERT INTO agent_job_observations(
-			job_id,event_id,draft_id,event_json,claim_token,created_at,delivered_at
-		) VALUES('job_reconcile_decision',88002,?,'{}','claim_reconcile_decision',?,?)`,
-		draftID, base.Format(time.RFC3339Nano), deliveredAt,
-	); err != nil {
-		t.Fatal(err)
-	}
-	queuedUser := reducer.MessageRow{
-		ID: "user_during_job_decision", DraftID: draftID,
-		Role: "user", Kind: "user", Content: "不能被 job 的决策完成事实吞掉",
-	}
-	if result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
-		Actor: contracts.ActorUser, CreatedAt: base.Add(time.Second),
-		ResultRows: reducer.ResultRows{Message: &queuedUser},
-	}); err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("seed concurrent user result=%#v err=%v", result, err)
-	}
-	decisionResult := seedPendingDecisionAt(
-		t, database, draftID, "decision_from_job", base.Add(2*time.Second),
-	)
-	jobReply := reducer.MessageRow{
-		ID: "job_decision_waiting_reply", DraftID: draftID, Role: "assistant", Kind: "reply",
-		Content: "后台任务需要你的确认。",
-	}
-	if result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
-		Actor: contracts.ActorAgent, CreatedAt: base.Add(3 * time.Second),
-		ResultRows: reducer.ResultRows{Message: &jobReply},
-	}); err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("seed job decision reply result=%#v err=%v", result, err)
-	}
-	answeredVersion := decisionResult.DraftStateVersions[draftID]
-	answerResult, err := reducer.Apply(t.Context(), database, []contracts.Event{{
-		Type: "DecisionAnswered", DraftID: draftID,
-		Payload: map[string]any{
-			"decision_id": "decision_from_job",
-			"answer":      map[string]any{"option_id": "yes", "answered_via": "button"},
-		},
-	}}, reducer.Options{
-		Actor: contracts.ActorUser, BaseVersion: &answeredVersion, CreatedAt: base.Add(4 * time.Second),
-	})
-	if err != nil || answerResult.Status != reducer.StatusApplied {
-		t.Fatalf("answer job decision result=%#v err=%v", answerResult, err)
-	}
-	continuationReply := reducer.MessageRow{
-		ID: "job_decision_continuation_reply", DraftID: draftID,
-		Role: "assistant", Kind: "reply", Content: "后台决策续跑已完成。",
-	}
-	if result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
-		Actor: contracts.ActorAgent, CreatedAt: base.Add(5 * time.Second),
-		ResultRows: reducer.ResultRows{Message: &continuationReply},
-	}); err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("seed job decision continuation result=%#v err=%v", result, err)
-	}
-
-	service, err := NewService(t.Context(), database, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer service.Close()
-	candidates, err := service.persistedTurnCandidates(t.Context())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(candidates) != 1 || candidates[0].itemID != queuedUser.ID {
-		t.Fatalf("job decision 完成后应只剩并发 user 待补驱: %#v", candidates)
-	}
-}
-
-func TestJobObservationBlockingDecisionMarksDeliveryAtomically(t *testing.T) {
-	database := agenttest.AgentTestDatabase(t)
-	const (
-		draftID    = "draft_job_decision_atomic_delivery"
-		jobID      = "job_decision_atomic_delivery"
-		claimToken = "claim_decision_atomic_delivery"
-	)
-	agenttest.CreateAgentDraft(t, database, draftID)
-	if _, err := database.Write().ExecContext(t.Context(), `
-		INSERT INTO agent_job_observations(
-			job_id,event_id,draft_id,event_json,claim_token,created_at
-		) VALUES(?,88004,?,'{}',?,?)`,
-		jobID, draftID, claimToken, time.Now().UTC().Format(time.RFC3339Nano),
-	); err != nil {
-		t.Fatal(err)
-	}
-	service, err := NewServiceWithModelsForStartup(t.Context(), database, nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer service.Close()
-	ctx := rushestools.WithDraftID(t.Context(), draftID)
-	ctx = agentexec.WithJobObservationDelivery(ctx, jobID, claimToken)
-	result, err := service.ExecuteTool(ctx, "interaction.ask_user", rushestools.AskUserInput{
-		Question: "后台任务存在关键分歧，是否继续？", DecisionType: "critical",
-		Options: []rushestools.DecisionOptionInput{{OptionID: "yes", Label: "继续"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	toolResult := result.(rushestools.ToolResult)
-	if toolResult.Status != string(rushestools.StatusWaiting) {
-		t.Fatalf("ask_user status=%s", toolResult.Status)
-	}
-	var delivered int
-	if err := database.Read().QueryRowContext(t.Context(), `
-		SELECT delivered_at IS NOT NULL FROM agent_job_observations WHERE job_id=?`, jobID,
-	).Scan(&delivered); err != nil || delivered != 1 {
-		t.Fatalf("blocking DecisionCreated 必须原子交付 job: delivered=%d err=%v", delivered, err)
-	}
-	if pending := agentexec.PendingJobObservationDelivery(ctx); pending != nil {
-		t.Fatalf("上下文仍暴露已交付 job: %#v", pending)
-	}
-	observations, err := service.pendingJobObservations(t.Context())
-	if err != nil || len(observations) != 0 {
-		t.Fatalf("bridge 不得重放已随 DecisionCreated 交付的 job: %#v err=%v", observations, err)
-	}
-}
-
 func TestReconcilePersistedUserTurnAfterCommitBeforeEnqueueCrash(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_reconcile_user"
@@ -826,62 +659,6 @@ func TestReconcilePersistedTurnIgnoresCancellationMarkerAndRewoundDecision(t *te
 	for _, draftID := range []string{cancelledDraft, rewoundDraft} {
 		if pending := service.Queue().PendingCount(draftID); pending != 0 {
 			t.Fatalf("draft %s 被误驱: pending=%d", draftID, pending)
-		}
-	}
-}
-
-func TestStartupReconciliationRestoresFIFOBeforeBridgeWithoutDuplicate(t *testing.T) {
-	database := agenttest.AgentTestDatabase(t)
-	const draftID = "draft_reconcile_before_bridge"
-	agenttest.CreateAgentDraft(t, database, draftID)
-	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
-		Actor: contracts.ActorUser,
-		ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
-			ID: "user_before_bridge", DraftID: draftID, Role: "user", Kind: "user", Content: "先恢复我的请求",
-		}},
-	})
-	if err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("seed user result=%#v err=%v", result, err)
-	}
-	if _, err := database.Write().ExecContext(t.Context(), `
-		INSERT INTO agent_job_observations(job_id,event_id,draft_id,event_json,claim_token,created_at)
-		VALUES('job_before_bridge',9001,?, ?, 'claim_before_bridge',?)`, draftID,
-		`{"event":"JobSucceeded","payload":{"job_id":"job_before_bridge","kind":"render_preview"}}`,
-		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-		t.Fatal(err)
-	}
-
-	blocking := newReconciliationBlockingModel()
-	service, err := NewServiceWithModelsForStartup(t.Context(), database, blocking, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { blocking.unblock(); service.Close() }()
-	if err := service.ReconcilePersistedTurns(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	<-blocking.started
-	if pending := service.Queue().PendingCount(draftID); pending != 2 {
-		t.Fatalf("bridge 启动前应按持久 FIFO 恢复 user+job: pending=%d want=2", pending)
-	}
-	service.dispatchPendingJobObservations(t.Context())
-	if pending := service.Queue().PendingCount(draftID); pending != 2 {
-		t.Fatalf("O1 已登记 inflight 的 job 不得被 bridge 重复投递: pending=%d", pending)
-	}
-	service.StartJobObservationBridge()
-	service.StartJobObservationBridge()
-	deadline := time.NewTimer(500 * time.Millisecond)
-	defer deadline.Stop()
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-deadline.C:
-			return
-		case <-ticker.C:
-			if pending := service.Queue().PendingCount(draftID); pending != 2 {
-				t.Fatalf("bridge 启动后重复投递已恢复 job: pending=%d", pending)
-			}
 		}
 	}
 }

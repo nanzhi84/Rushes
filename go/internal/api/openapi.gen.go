@@ -210,13 +210,13 @@ func (e FsPickRequestMode) Valid() bool {
 
 // Defines values for JobCancelResponseStatus.
 const (
-	Cancelled JobCancelResponseStatus = "cancelled"
+	JobCancelResponseStatusCancelled JobCancelResponseStatus = "cancelled"
 )
 
 // Valid indicates whether the value is a known member of the JobCancelResponseStatus enum.
 func (e JobCancelResponseStatus) Valid() bool {
 	switch e {
-	case Cancelled:
+	case JobCancelResponseStatusCancelled:
 		return true
 	default:
 		return false
@@ -364,6 +364,75 @@ func (e TurnCancelResponseStatus) Valid() bool {
 	case Idle:
 		return true
 	case Requested:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UserExportCreateRequestOrientation.
+const (
+	UserExportCreateRequestOrientationAuto      UserExportCreateRequestOrientation = "auto"
+	UserExportCreateRequestOrientationLandscape UserExportCreateRequestOrientation = "landscape"
+	UserExportCreateRequestOrientationPortrait  UserExportCreateRequestOrientation = "portrait"
+)
+
+// Valid indicates whether the value is a known member of the UserExportCreateRequestOrientation enum.
+func (e UserExportCreateRequestOrientation) Valid() bool {
+	switch e {
+	case UserExportCreateRequestOrientationAuto:
+		return true
+	case UserExportCreateRequestOrientationLandscape:
+		return true
+	case UserExportCreateRequestOrientationPortrait:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UserExportRecordOrientation.
+const (
+	UserExportRecordOrientationAuto      UserExportRecordOrientation = "auto"
+	UserExportRecordOrientationLandscape UserExportRecordOrientation = "landscape"
+	UserExportRecordOrientationPortrait  UserExportRecordOrientation = "portrait"
+)
+
+// Valid indicates whether the value is a known member of the UserExportRecordOrientation enum.
+func (e UserExportRecordOrientation) Valid() bool {
+	switch e {
+	case UserExportRecordOrientationAuto:
+		return true
+	case UserExportRecordOrientationLandscape:
+		return true
+	case UserExportRecordOrientationPortrait:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for UserExportRecordStatus.
+const (
+	UserExportRecordStatusCancelled UserExportRecordStatus = "cancelled"
+	UserExportRecordStatusFailed    UserExportRecordStatus = "failed"
+	UserExportRecordStatusPending   UserExportRecordStatus = "pending"
+	UserExportRecordStatusRunning   UserExportRecordStatus = "running"
+	UserExportRecordStatusSucceeded UserExportRecordStatus = "succeeded"
+)
+
+// Valid indicates whether the value is a known member of the UserExportRecordStatus enum.
+func (e UserExportRecordStatus) Valid() bool {
+	switch e {
+	case UserExportRecordStatusCancelled:
+		return true
+	case UserExportRecordStatusFailed:
+		return true
+	case UserExportRecordStatusPending:
+		return true
+	case UserExportRecordStatusRunning:
+		return true
+	case UserExportRecordStatusSucceeded:
 		return true
 	default:
 		return false
@@ -572,6 +641,7 @@ type DraftResponse struct {
 // DraftTimelineResponse defines model for DraftTimelineResponse.
 type DraftTimelineResponse struct {
 	DraftId         string                 `json:"draft_id"`
+	EditLease       EditLeaseStatus        `json:"edit_lease"`
 	PreviewId       *string                `json:"preview_id"`
 	Summary         string                 `json:"summary"`
 	Timeline        map[string]interface{} `json:"timeline"`
@@ -581,6 +651,13 @@ type DraftTimelineResponse struct {
 // DraftUpdateRequest defines model for DraftUpdateRequest.
 type DraftUpdateRequest struct {
 	Name string `json:"name"`
+}
+
+// EditLeaseStatus defines model for EditLeaseStatus.
+type EditLeaseStatus struct {
+	Active    bool    `json:"active"`
+	ExpiresAt *string `json:"expires_at"`
+	TurnId    *string `json:"turn_id"`
 }
 
 // ErrorDetail defines model for ErrorDetail.
@@ -868,6 +945,53 @@ type TurnCancelResponse struct {
 // TurnCancelResponseStatus defines model for TurnCancelResponse.Status.
 type TurnCancelResponseStatus string
 
+// UserExportCreateRequest defines model for UserExportCreateRequest.
+type UserExportCreateRequest struct {
+	Orientation *UserExportCreateRequestOrientation `json:"orientation,omitempty"`
+	TimelineId  string                              `json:"timeline_id"`
+}
+
+// UserExportCreateRequestOrientation defines model for UserExportCreateRequest.Orientation.
+type UserExportCreateRequestOrientation string
+
+// UserExportFailure defines model for UserExportFailure.
+type UserExportFailure struct {
+	ErrorCode string `json:"error_code"`
+	Message   string `json:"message"`
+	Retryable bool   `json:"retryable"`
+}
+
+// UserExportRecord defines model for UserExportRecord.
+type UserExportRecord struct {
+	Attempts        int                         `json:"attempts"`
+	CreatedAt       string                      `json:"created_at"`
+	Error           *UserExportFailure          `json:"error,omitempty"`
+	ExportId        *string                     `json:"export_id"`
+	FinishedAt      *string                     `json:"finished_at"`
+	JobId           string                      `json:"job_id"`
+	MaxRetries      int                         `json:"max_retries"`
+	Orientation     UserExportRecordOrientation `json:"orientation"`
+	Profile         *string                     `json:"profile"`
+	Progress        float32                     `json:"progress"`
+	RetryOfJobId    *string                     `json:"retry_of_job_id"`
+	Retryable       bool                        `json:"retryable"`
+	StartedAt       *string                     `json:"started_at"`
+	Status          UserExportRecordStatus      `json:"status"`
+	TimelineId      string                      `json:"timeline_id"`
+	TimelineVersion int                         `json:"timeline_version"`
+}
+
+// UserExportRecordOrientation defines model for UserExportRecord.Orientation.
+type UserExportRecordOrientation string
+
+// UserExportRecordStatus defines model for UserExportRecord.Status.
+type UserExportRecordStatus string
+
+// UserExportsResponse defines model for UserExportsResponse.
+type UserExportsResponse struct {
+	Exports []UserExportRecord `json:"exports"`
+}
+
 // ValidationError defines model for ValidationError.
 type ValidationError struct {
 	Ctx   *map[string]interface{}    `json:"ctx,omitempty"`
@@ -937,6 +1061,9 @@ type RenameDraftApiDraftsDraftIdPatchJSONRequestBody = DraftUpdateRequest
 
 // CopyDraftApiDraftsDraftIdCopyPostJSONRequestBody defines body for CopyDraftApiDraftsDraftIdCopyPost for application/json ContentType.
 type CopyDraftApiDraftsDraftIdCopyPostJSONRequestBody = DraftCopyRequest
+
+// CreateUserExportApiDraftsDraftIdExportsPostJSONRequestBody defines body for CreateUserExportApiDraftsDraftIdExportsPost for application/json ContentType.
+type CreateUserExportApiDraftsDraftIdExportsPostJSONRequestBody = UserExportCreateRequest
 
 // ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPostJSONRequestBody defines body for ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPost for application/json ContentType.
 type ImportLocalMaterialApiDraftsDraftIdMaterialsImportLocalPostJSONRequestBody = MaterialImportLocalRequest
@@ -1189,6 +1316,15 @@ type ServerInterface interface {
 	// Draft Events
 	// (GET /api/drafts/{draft_id}/events)
 	DraftEventsApiDraftsDraftIdEventsGet(w http.ResponseWriter, r *http.Request, draftId string, params DraftEventsApiDraftsDraftIdEventsGetParams)
+	// List User Exports
+	// (GET /api/drafts/{draft_id}/exports)
+	ListUserExportsApiDraftsDraftIdExportsGet(w http.ResponseWriter, r *http.Request, draftId string)
+	// Create User Export
+	// (POST /api/drafts/{draft_id}/exports)
+	CreateUserExportApiDraftsDraftIdExportsPost(w http.ResponseWriter, r *http.Request, draftId string)
+	// Retry User Export
+	// (POST /api/drafts/{draft_id}/exports/{job_id}/retry)
+	RetryUserExportApiDraftsDraftIdExportsJobIdRetryPost(w http.ResponseWriter, r *http.Request, draftId string, jobId string)
 	// List Materials
 	// (GET /api/drafts/{draft_id}/materials)
 	ListMaterialsApiDraftsDraftIdMaterialsGet(w http.ResponseWriter, r *http.Request, draftId string)
@@ -1372,6 +1508,24 @@ func (_ Unimplemented) PendingDraftDecisionsApiDraftsDraftIdDecisionsPendingGet(
 // Draft Events
 // (GET /api/drafts/{draft_id}/events)
 func (_ Unimplemented) DraftEventsApiDraftsDraftIdEventsGet(w http.ResponseWriter, r *http.Request, draftId string, params DraftEventsApiDraftsDraftIdEventsGetParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// List User Exports
+// (GET /api/drafts/{draft_id}/exports)
+func (_ Unimplemented) ListUserExportsApiDraftsDraftIdExportsGet(w http.ResponseWriter, r *http.Request, draftId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Create User Export
+// (POST /api/drafts/{draft_id}/exports)
+func (_ Unimplemented) CreateUserExportApiDraftsDraftIdExportsPost(w http.ResponseWriter, r *http.Request, draftId string) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// Retry User Export
+// (POST /api/drafts/{draft_id}/exports/{job_id}/retry)
+func (_ Unimplemented) RetryUserExportApiDraftsDraftIdExportsJobIdRetryPost(w http.ResponseWriter, r *http.Request, draftId string, jobId string) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -1897,6 +2051,93 @@ func (siw *ServerInterfaceWrapper) DraftEventsApiDraftsDraftIdEventsGet(w http.R
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.DraftEventsApiDraftsDraftIdEventsGet(w, r, draftId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListUserExportsApiDraftsDraftIdExportsGet operation middleware
+func (siw *ServerInterfaceWrapper) ListUserExportsApiDraftsDraftIdExportsGet(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "draft_id" -------------
+	var draftId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "draft_id", chi.URLParam(r, "draft_id"), &draftId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "draft_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListUserExportsApiDraftsDraftIdExportsGet(w, r, draftId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateUserExportApiDraftsDraftIdExportsPost operation middleware
+func (siw *ServerInterfaceWrapper) CreateUserExportApiDraftsDraftIdExportsPost(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "draft_id" -------------
+	var draftId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "draft_id", chi.URLParam(r, "draft_id"), &draftId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "draft_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateUserExportApiDraftsDraftIdExportsPost(w, r, draftId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RetryUserExportApiDraftsDraftIdExportsJobIdRetryPost operation middleware
+func (siw *ServerInterfaceWrapper) RetryUserExportApiDraftsDraftIdExportsJobIdRetryPost(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "draft_id" -------------
+	var draftId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "draft_id", chi.URLParam(r, "draft_id"), &draftId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "draft_id", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "job_id" -------------
+	var jobId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "job_id", chi.URLParam(r, "job_id"), &jobId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: ""})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "job_id", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RetryUserExportApiDraftsDraftIdExportsJobIdRetryPost(w, r, draftId, jobId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -2956,6 +3197,15 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/drafts/{draft_id}/events", wrapper.DraftEventsApiDraftsDraftIdEventsGet)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/api/drafts/{draft_id}/exports", wrapper.ListUserExportsApiDraftsDraftIdExportsGet)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/drafts/{draft_id}/exports", wrapper.CreateUserExportApiDraftsDraftIdExportsPost)
+	})
+	r.Group(func(r chi.Router) {
+		r.Post(options.BaseURL+"/api/drafts/{draft_id}/exports/{job_id}/retry", wrapper.RetryUserExportApiDraftsDraftIdExportsJobIdRetryPost)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/api/drafts/{draft_id}/materials", wrapper.ListMaterialsApiDraftsDraftIdMaterialsGet)

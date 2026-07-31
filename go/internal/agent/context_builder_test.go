@@ -15,7 +15,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
-func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *testing.T) {
+func TestCurrentTimelineViewExposesLatestTimelineAndOrderedSemanticEdits(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_context_latest")
@@ -74,31 +74,35 @@ func TestContextBuilderOnlyExposesLatestTimelineAndCompressedSemanticEdits(t *te
 		t.Fatalf("second=%#v err=%v", second, err)
 	}
 
-	contextText, err := NewContextBuilder(database).Build(t.Context(), "draft_context_latest")
+	view, err := buildCurrentTimelineView(t.Context(), database, "draft_context_latest")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{
-		`"timeline_revision"`, `"timeline_version"`, `"timeline_id"`, `"draft_id"`, `"version"`,
-	} {
-		if strings.Contains(contextText, forbidden) {
-			t.Fatalf("模型上下文仍包含废弃字段 %s: %s", forbidden, contextText)
-		}
+	raw, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(contextText, `"gain_db":-9`) || strings.Contains(contextText, `"gain_db":-3`) {
-		t.Fatalf("模型未只看到最新时间线: %s", contextText)
+	contextText := string(raw)
+	if view["draft_id"] != "draft_context_latest" ||
+		view["timeline_id"] != "draft_context_latest:v2" || view["version"] != 2 {
+		t.Fatalf("CurrentTimelineView identity=%#v", view)
+	}
+	clips := view["clips"].([]map[string]any)
+	if len(clips) != 2 || clips[0]["gain_db"] != float64(-9) {
+		t.Fatalf("模型未看到最新时间线 clip: %#v", clips)
 	}
 	if !strings.Contains(contextText, `"samples":[5,70,10]`) ||
 		!strings.Contains(contextText, `"sample_interval_frames":10`) ||
 		!strings.Contains(contextText, `"sample_frames":[0,10,20]`) {
 		t.Fatalf("压缩波形未进入模型的最新时间线上下文: %s", contextText)
 	}
-	if strings.Count(contextText, `"kind":"adjust_gain"`) != 1 {
-		t.Fatalf("重复操作未压缩: %s", contextText)
+	if strings.Count(contextText, `"kind":"adjust_gain"`) != 2 {
+		t.Fatalf("有序编辑历史丢失了同目标操作: %s", contextText)
 	}
-	if !strings.Contains(contextText, `"actor":"user"`) ||
+	if !strings.Contains(contextText, `"actor":"agent"`) ||
+		!strings.Contains(contextText, `"actor":"user"`) ||
 		!strings.Contains(contextText, `"origin":"manual"`) {
-		t.Fatalf("人工编辑来源丢失: %s", contextText)
+		t.Fatalf("编辑来源或顺序丢失: %s", contextText)
 	}
 }
 
@@ -333,7 +337,7 @@ func TestMaterialCatalogPrioritizesUsedAndTranscriptAssetsWithStableOutput(t *te
 	}
 }
 
-func TestRecentEditHistoryMapProducesIncrementalMergePatches(t *testing.T) {
+func TestRecentEditHistoryIsStableOrderedArray(t *testing.T) {
 	t.Parallel()
 	batches := []storage.TimelineEditBatch{
 		{Sequence: 10, Actor: "agent", Origin: "tool", Operations: []map[string]any{{"kind": "adjust_gain", "timeline_clip_id": "clip_a", "gain_db": -3}}},
@@ -347,25 +351,25 @@ func TestRecentEditHistoryMapProducesIncrementalMergePatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	historyPatch := patch["sections"].(map[string]any)["recent_edit_history"].(map[string]any)
-	if len(historyPatch) != 1 || historyPatch["b00000000000000000011-o00000000000000000000"] == nil {
-		t.Fatalf("incremental history patch=%#v", historyPatch)
+	historyPatch := patch["sections"].(map[string]any)["recent_edit_history"].([]any)
+	if len(historyPatch) != 2 {
+		t.Fatalf("ordered history replacement=%#v", historyPatch)
+	}
+	first := historyPatch[0].(map[string]any)
+	second := historyPatch[1].(map[string]any)
+	if first["sequence"] != float64(10) || second["sequence"] != float64(11) ||
+		first["actor"] != "agent" || second["actor"] != "user" {
+		t.Fatalf("ordered history lost provenance: %#v", historyPatch)
 	}
 
-	evicted := NewWorldStateSnapshot(map[string]any{"recent_edit_history": map[string]any{}})
+	evicted := NewWorldStateSnapshot(map[string]any{"recent_edit_history": []any{}})
 	deletePatch, err := current.MergePatchTo(evicted)
 	if err != nil {
 		t.Fatal(err)
 	}
-	deleted := deletePatch["sections"].(map[string]any)["recent_edit_history"].(map[string]any)
-	for key := range currentHistory {
-		if value, exists := deleted[key]; !exists || value != nil {
-			t.Fatalf("eviction missing null for %s: %#v", key, deleted)
-		}
-	}
-	rebuilt := applyMergePatch(current.Sections["recent_edit_history"], deleted)
-	if !reflect.DeepEqual(rebuilt, map[string]any{}) {
-		t.Fatalf("rebuilt=%#v", rebuilt)
+	deleted := deletePatch["sections"].(map[string]any)["recent_edit_history"].([]any)
+	if len(deleted) != 0 {
+		t.Fatalf("history eviction patch=%#v", deleted)
 	}
 }
 
@@ -386,12 +390,12 @@ func TestRecentEditHistoryKeepsNewestOperationsAcrossThousandBoundary(t *testing
 	if len(history) == 0 || len(history) >= contextRecentEditLimit {
 		t.Fatalf("fixture must trigger rune eviction: retained=%d", len(history))
 	}
-	latestKey := timelineEditHistoryKey(42, 1009)
-	if history[latestKey] == nil {
+	latest := history[len(history)-1]
+	if latest["operation_index"] != 1009 {
 		t.Fatalf("latest operation was evicted across 999 boundary: entries=%d", len(history))
 	}
-	for index := 990; index < 990+contextRecentEditLimit-len(history); index++ {
-		if history[timelineEditHistoryKey(42, index)] != nil {
+	for _, entry := range history {
+		if index, _ := entry["operation_index"].(int); index < 990 {
 			t.Fatalf("older operation %d survived before newer entries", index)
 		}
 	}
@@ -640,7 +644,7 @@ func TestCompactWaveformContextRejectsMalformedCoordinatesAndBoundsStoredPoints(
 	}
 }
 
-func TestCompressTimelineEditHistoryCancelsTransientInsertDelete(t *testing.T) {
+func TestCompressTimelineEditHistoryRetainsTransientInsertDeleteInOrder(t *testing.T) {
 	t.Parallel()
 	batches := []struct {
 		actor, origin string
@@ -654,8 +658,8 @@ func TestCompressTimelineEditHistoryCancelsTransientInsertDelete(t *testing.T) {
 		}}},
 	}
 	converted := makeTimelineEditBatches(batches)
-	if compressed := compressTimelineEditHistoryMap(converted, 20); len(compressed) != 0 {
-		t.Fatalf("短暂插入后删除不应进入模型历史: %#v", compressed)
+	if compressed := compressTimelineEditHistoryMap(converted, 20); len(compressed) != 2 {
+		t.Fatalf("有序审计历史必须保留插入与删除: %#v", compressed)
 	}
 }
 
@@ -687,7 +691,7 @@ func TestRecentEditHistoryBudgetFallsBackToMinimalLatestEntry(t *testing.T) {
 	t.Parallel()
 	entry := map[string]any{
 		"actor": "user", "origin": "manual",
-		"op": map[string]any{
+		"operation": map[string]any{
 			"kind": "custom_oversized", "timeline_clip_id": strings.Repeat("clip", 1000),
 			"payload": strings.Repeat("内容", 10000),
 		},
@@ -696,7 +700,7 @@ func TestRecentEditHistoryBudgetFallsBackToMinimalLatestEntry(t *testing.T) {
 	if len(bounded) != 1 {
 		t.Fatalf("bounded=%#v", bounded)
 	}
-	operation := bounded[0]["op"].(map[string]any)
+	operation := bounded[0]["operation"].(map[string]any)
 	if operation["kind"] != "custom_oversized" || len([]rune(operation["target"].(string))) > 121 {
 		t.Fatalf("minimal=%#v", operation)
 	}
@@ -704,7 +708,7 @@ func TestRecentEditHistoryBudgetFallsBackToMinimalLatestEntry(t *testing.T) {
 		boundRecentEditHistory(nil, contextRecentEditRuneBudget) != nil {
 		t.Fatal("空历史或零预算必须返回 nil")
 	}
-	unencodable := map[string]any{"op": map[string]any{"kind": make(chan int)}}
+	unencodable := map[string]any{"operation": map[string]any{"kind": make(chan int)}}
 	if boundRecentEditHistory([]map[string]any{unencodable}, 20) != nil {
 		t.Fatal("不可编码且无法最小化的历史必须舍弃")
 	}
@@ -777,10 +781,10 @@ func TestContextCompressionHelpersBoundAndSanitizeHistory(t *testing.T) {
 		t.Fatal("collection helper defensive branches mismatch")
 	}
 	minimal := minimalEditHistoryEntry(map[string]any{
-		"_history_key": "b1-o1", "actor": "agent", "origin": "tool",
-		"op": map[string]any{"kind": "delete_clip", "timeline_clip_id": "clip_1"},
+		"sequence": int64(1), "operation_index": 1, "actor": "agent", "origin": "tool",
+		"operation": map[string]any{"kind": "delete_clip", "timeline_clip_id": "clip_1"},
 	})
-	if minimal["_history_key"] != "b1-o1" {
+	if minimal["sequence"] != int64(1) || minimal["operation_index"] != 1 {
 		t.Fatalf("minimal=%#v", minimal)
 	}
 }

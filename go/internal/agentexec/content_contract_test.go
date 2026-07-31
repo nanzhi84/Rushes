@@ -95,9 +95,9 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 	if err != nil || draft.TimelineValidated {
 		t.Fatalf("contract-invalid timeline must not be validated: draft=%#v err=%v", draft, err)
 	}
-	rendered, err := exec.toolStartRender(t.Context(), "draft_contract", rushestools.RenderStartInput{
-		Kind: "preview", TimelineID: failing.TimelineID,
-	})
+	rendered, err := exec.enqueuePreviewRender(
+		t.Context(), "draft_contract", "", failing.TimelineID,
+	)
 	if err != nil || rendered.Status != string(rushestools.StatusValidationFailed) {
 		t.Fatalf("contract-invalid timeline render=%#v err=%v", rendered, err)
 	}
