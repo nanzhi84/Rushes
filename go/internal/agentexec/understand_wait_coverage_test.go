@@ -2,6 +2,7 @@ package agentexec
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -32,6 +33,14 @@ func TestUnderstandWaitReturnsTerminalTimeoutCancellationAndErrors(t *testing.T)
 				exec.jobWaitTimeout = 0
 				jobID := "job_understand_terminal_" + test.status
 				insertUnderstandJobState(t, database, request.Asset.ID, request.Asset.ID, jobID, test.status)
+				if test.status == "failed" || test.status == "cancelled" {
+					setUnderstandJobFailure(t, database, jobID, map[string]any{
+						"error_code": "understand_" + test.status,
+						"message":    "/private/tmp/secret.mov decoder failed",
+						"retryable":  test.status == "failed",
+						"internal":   "must not escape",
+					})
+				}
 				result, err := exec.waitForUnderstandJob(
 					t.Context(), request.Asset.ID, jobID, request,
 				)
@@ -41,8 +50,18 @@ func TestUnderstandWaitReturnsTerminalTimeoutCancellationAndErrors(t *testing.T)
 					}
 					return
 				}
-				if err != nil || result.Status != test.wantStatus || result.JobID != jobID {
+				if err != nil || result.Status != test.wantStatus || result.JobID != jobID ||
+					result.Data["job_status"] != test.status {
 					t.Fatalf("result=%#v err=%v", result, err)
+				}
+				if test.status == "failed" || test.status == "cancelled" {
+					failure, _ := result.Data["error"].(map[string]any)
+					if failure["error_code"] != "understand_"+test.status ||
+						failure["retryable"] != (test.status == "failed") ||
+						strings.Contains(InterfaceString(failure["message"]), "/private/") ||
+						failure["internal"] != nil || strings.Contains(result.UsageNote, "读取失败信息") {
+						t.Fatalf("failure=%#v usage_note=%q", failure, result.UsageNote)
+					}
 				}
 			})
 		}
@@ -180,11 +199,16 @@ func TestEnqueueUnderstandHandlesDuplicateAndCommitFailure(t *testing.T) {
 		insertUnderstandJobStateWithKey(
 			t, database, request.Asset.ID, request.Asset.ID, "job_understand_duplicate", "failed", key,
 		)
+		setUnderstandJobFailure(t, database, "job_understand_duplicate", map[string]any{
+			"error_code": "provider_failed", "message": "provider unavailable", "retryable": true,
+		})
 		result, err := exec.enqueueUnderstand(
 			t.Context(), request.Asset.ID,
 			rushestools.DetectShotsInput{AssetID: request.Asset.ID, Depth: "deep"}, request, key,
 		)
-		if err != nil || result.Status != "failed" || result.JobID != "job_understand_duplicate" {
+		failure, _ := result.Data["error"].(map[string]any)
+		if err != nil || result.Status != "failed" || result.JobID != "job_understand_duplicate" ||
+			failure["error_code"] != "provider_failed" {
 			t.Fatalf("result=%#v err=%v", result, err)
 		}
 	})
@@ -390,5 +414,23 @@ func insertUnderstandJobStateWithKey(
 		); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func setUnderstandJobFailure(
+	t *testing.T,
+	database *storage.DB,
+	jobID string,
+	failure map[string]any,
+) {
+	t.Helper()
+	raw, err := json.Marshal(failure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(),
+		"UPDATE jobs SET error_json=json(?) WHERE job_id=?", string(raw), jobID,
+	); err != nil {
+		t.Fatal(err)
 	}
 }

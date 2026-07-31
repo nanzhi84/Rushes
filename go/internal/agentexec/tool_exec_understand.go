@@ -333,17 +333,20 @@ func (exec *Executor) enqueueUnderstand(
 }
 
 type understandJobRef struct {
-	ID     string
-	Status string
+	ID        string
+	Status    string
+	ErrorJSON sql.NullString
 }
 
 func (exec *Executor) findUnderstandJob(
 	ctx context.Context,
 	idempotencyKey string,
 ) (understandJobRef, bool, error) {
-	query := "SELECT job_id, status FROM jobs WHERE kind='understand' AND idempotency_key=? LIMIT 1"
+	query := "SELECT job_id, status, error_json FROM jobs WHERE kind='understand' AND idempotency_key=? LIMIT 1"
 	var job understandJobRef
-	err := exec.database.Read().QueryRowContext(ctx, query, idempotencyKey).Scan(&job.ID, &job.Status)
+	err := exec.database.Read().QueryRowContext(ctx, query, idempotencyKey).Scan(
+		&job.ID, &job.Status, &job.ErrorJSON,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return understandJobRef{}, false, nil
 	}
@@ -385,10 +388,21 @@ func (exec *Executor) existingUnderstandResult(
 			UsageNote: "同参数素材理解任务已完成，结果来自持久化摘要；无需重复调用。",
 		}, nil
 	case "failed", "cancelled":
+		data := map[string]any{"job_status": job.Status}
+		if job.ErrorJSON.Valid {
+			var failure map[string]any
+			if json.Unmarshal([]byte(job.ErrorJSON.String), &failure) == nil {
+				data["error"] = boundedJobFailure(failure)
+			}
+		}
+		status := rushestools.StatusFailed
+		if job.Status == "cancelled" {
+			status = rushestools.StatusCancelled
+		}
 		return rushestools.DetectShotsResult{
-			DraftID: draftID, JobID: job.ID, AssetID: request.Asset.ID, Status: job.Status,
-			CacheHit:  request.CacheHit,
-			UsageNote: "同参数素材理解任务已到终态；请先读取失败信息，确需新任务时须调整素材或理解参数。",
+			DraftID: draftID, JobID: job.ID, AssetID: request.Asset.ID, Status: string(status),
+			Data: data, CacheHit: request.CacheHit,
+			UsageNote: "同参数素材理解任务已到终态；有界失败信息已随 data.error 返回（若 worker 提供），确需新任务时须调整素材或理解参数。",
 		}, nil
 	default:
 		return rushestools.DetectShotsResult{}, fmt.Errorf(
@@ -442,7 +456,7 @@ func (exec *Executor) waitForUnderstandJob(
 	// 而不是把底层仍可继续的 job 误报成普通 context error。
 	lastStatus := "pending"
 	for {
-		status, err := exec.understandJobStatus(ctx, draftID, jobID, request.Asset.ID)
+		job, err := exec.understandJobState(ctx, draftID, jobID, request.Asset.ID)
 		if err != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) ||
 				errors.Is(context.Cause(ctx), context.DeadlineExceeded) ||
@@ -456,17 +470,15 @@ func (exec *Executor) waitForUnderstandJob(
 			}
 			return rushestools.DetectShotsResult{}, err
 		}
-		lastStatus = status
-		switch status {
+		lastStatus = job.Status
+		switch job.Status {
 		case "succeeded", "failed", "cancelled":
-			terminalStatus = status
-			return exec.existingUnderstandResult(
-				ctx, draftID, understandJobRef{ID: jobID, Status: status}, request,
-			)
+			terminalStatus = job.Status
+			return exec.existingUnderstandResult(ctx, draftID, job, request)
 		case "pending", "running":
 		default:
 			return rushestools.DetectShotsResult{}, fmt.Errorf(
-				"understand job %s 状态无效: %s", jobID, status,
+				"understand job %s 状态无效: %s", jobID, job.Status,
 			)
 		}
 		select {
@@ -489,17 +501,25 @@ func (exec *Executor) understandJobStatus(
 	ctx context.Context,
 	draftID, jobID, assetID string,
 ) (string, error) {
-	var status string
+	job, err := exec.understandJobState(ctx, draftID, jobID, assetID)
+	return job.Status, err
+}
+
+func (exec *Executor) understandJobState(
+	ctx context.Context,
+	draftID, jobID, assetID string,
+) (understandJobRef, error) {
+	job := understandJobRef{ID: jobID}
 	err := exec.database.Read().QueryRowContext(ctx, `
-		SELECT status FROM jobs
+		SELECT status,error_json FROM jobs
 		WHERE job_id=? AND kind='understand' AND asset_id=?
 		AND (draft_id=? OR requested_by_draft_id=?)`,
 		jobID, assetID, draftID, draftID,
-	).Scan(&status)
+	).Scan(&job.Status, &job.ErrorJSON)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", errors.New("understand job 不存在或不属于当前草稿")
+		return understandJobRef{}, errors.New("understand job 不存在或不属于当前草稿")
 	}
-	return status, err
+	return job, err
 }
 
 func understandWaitTimeoutResult(
