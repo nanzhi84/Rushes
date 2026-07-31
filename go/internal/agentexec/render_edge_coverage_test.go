@@ -50,7 +50,7 @@ func TestPreviewWaitReturnsEveryPersistedTerminalShape(t *testing.T) {
 			insertPreviewJobState(t, database, document.DraftID, jobID, test.status, test.resultJSON, test.errorJSON)
 
 			result, err := exec.waitForPreviewJob(
-				t.Context(), document.DraftID, jobID, document.TimelineID, document.Version, "auto",
+				t.Context(), document.DraftID, jobID, document.TimelineID, document.Version, "auto", test.status,
 			)
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
@@ -75,7 +75,7 @@ func TestPreviewWaitReturnsEveryPersistedTerminalShape(t *testing.T) {
 func TestPreviewWaitSurfacesMissingJobAndDeadline(t *testing.T) {
 	database, exec, _, document := previewRenderFixture(t, "draft_preview_wait_edges")
 	if _, err := exec.waitForPreviewJob(
-		t.Context(), document.DraftID, "missing_job", document.TimelineID, 1, "auto",
+		t.Context(), document.DraftID, "missing_job", document.TimelineID, 1, "auto", "pending",
 	); err == nil || !strings.Contains(err.Error(), "不存在") {
 		t.Fatalf("missing job err=%v", err)
 	}
@@ -86,14 +86,38 @@ func TestPreviewWaitSurfacesMissingJobAndDeadline(t *testing.T) {
 	insertPreviewJobState(t, database, document.DraftID, "job_preview_deadline", "pending", nil, nil)
 	exec.jobPollInterval = time.Second
 	exec.jobWaitTimeout = time.Second
-	ctx, cancel := context.WithTimeout(t.Context(), time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(context.DeadlineExceeded)
 	result, err := exec.waitForPreviewJob(
-		ctx, document.DraftID, "job_preview_deadline", document.TimelineID, 1, "portrait",
+		ctx, document.DraftID, "job_preview_deadline", document.TimelineID, 1, "portrait", "pending",
 	)
 	if err != nil || result.Status != string(rushestools.StatusTimeout) ||
+		result.Data["job_status"] != "pending" ||
 		result.Data["underlying_job_continues"] != true {
 		t.Fatalf("deadline result=%#v err=%v", result, err)
+	}
+
+	insertPreviewJobState(t, database, document.DraftID, "job_preview_succeeded_deadline", "succeeded", map[string]any{
+		"artifact_id": "preview_succeeded", "timeline_version": 1,
+	}, nil)
+	succeededCtx, cancelSucceeded := context.WithCancelCause(t.Context())
+	cancelSucceeded(context.DeadlineExceeded)
+	result, err = exec.waitForPreviewJob(
+		succeededCtx, document.DraftID, "job_preview_succeeded_deadline",
+		document.TimelineID, 1, "portrait", "succeeded",
+	)
+	if err != nil || result.Status != string(rushestools.StatusTimeout) ||
+		result.Data["job_status"] != "succeeded" || result.Data["underlying_job_continues"] != false ||
+		strings.Contains(result.Observation, "保持运行") || !strings.Contains(result.Observation, "最后已知") {
+		t.Fatalf("succeeded deadline result=%#v err=%v", result, err)
+	}
+
+	cancelledCtx, cancelTurn := context.WithCancel(t.Context())
+	cancelTurn()
+	if _, err := exec.waitForPreviewJob(
+		cancelledCtx, document.DraftID, "job_preview_deadline", document.TimelineID, 1, "portrait", "pending",
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("turn cancellation err=%v", err)
 	}
 
 	for _, value := range []any{nil, 0, -1, 1.5, math.Inf(1), float64(math.MaxInt) * 2} {
@@ -329,11 +353,23 @@ func insertPreviewJobState(
 	resultJSON, errorJSON any,
 ) {
 	t.Helper()
+	insertPreviewJobStateWithKey(
+		t, database, draftID, jobID, jobID, status, resultJSON, errorJSON,
+	)
+}
+
+func insertPreviewJobStateWithKey(
+	t *testing.T,
+	database *storage.DB,
+	draftID, jobID, idempotencyKey, status string,
+	resultJSON, errorJSON any,
+) {
+	t.Helper()
 	result, err := reducer.Apply(t.Context(), database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: draftID,
 		Payload: map[string]any{
 			"job_id": jobID, "kind": "render_preview", "requested_by_draft_id": draftID,
-			"idempotency_key": jobID, "job_payload": map[string]any{"timeline_version": 1},
+			"idempotency_key": idempotencyKey, "job_payload": map[string]any{"timeline_version": 1},
 			"next_run_at": time.Now().UTC().Format(time.RFC3339Nano),
 		},
 	}}, reducer.Options{Actor: contracts.ActorAgent})

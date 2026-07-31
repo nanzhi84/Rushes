@@ -187,8 +187,14 @@ func (exec *Executor) toolGeneratePreview(
 		return rushestools.ToolResult{}, errors.New("preview.generate 入队结果缺少 timeline_version")
 	}
 	orientation := strings.TrimSpace(InterfaceString(queued.Data["orientation"]))
+	initialJobStatus := strings.TrimSpace(InterfaceString(queued.Data["job_status"]))
+	switch initialJobStatus {
+	case "pending", "running", "succeeded", "failed", "cancelled":
+	default:
+		return rushestools.ToolResult{}, errors.New("preview.generate 入队结果缺少有效 job_status")
+	}
 	return exec.waitForPreviewJob(
-		ctx, draftID, jobID, input.TimelineID, timelineVersion, orientation,
+		ctx, draftID, jobID, input.TimelineID, timelineVersion, orientation, initialJobStatus,
 	)
 }
 
@@ -202,7 +208,7 @@ func (exec *Executor) waitForPreviewJob(
 	ctx context.Context,
 	draftID, jobID, timelineID string,
 	timelineVersion int,
-	orientation string,
+	orientation, initialJobStatus string,
 ) (rushestools.ToolResult, error) {
 	waitStarted := time.Now()
 	terminalStatus := "failed"
@@ -219,10 +225,24 @@ func (exec *Executor) waitForPreviewJob(
 	}
 	timer := time.NewTimer(waitTimeout)
 	defer timer.Stop()
-	var lastStatus string
+	// 首次状态读取若与 deadline 同时发生，使用入队/复用步骤刚读取到的状态
+	// 返回结构化 timeout；父 turn 超时只停止 waiter，不会取消底层 job。
+	lastStatus := initialJobStatus
 	for {
 		state, err := exec.previewJobState(ctx, draftID, jobID)
 		if err != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) ||
+				errors.Is(context.Cause(ctx), context.DeadlineExceeded) ||
+				errors.Is(err, context.DeadlineExceeded) {
+				terminalStatus = "timeout"
+				return previewWaitTimeoutResult(
+					jobID, lastStatus, timelineID, timelineVersion, orientation,
+				), nil
+			}
+			if ctx.Err() != nil {
+				terminalStatus = "turn_cancelled"
+				return rushestools.ToolResult{}, ctx.Err()
+			}
 			return rushestools.ToolResult{}, err
 		}
 		lastStatus = state.status
@@ -308,7 +328,7 @@ func previewWaitTimeoutResult(
 ) rushestools.ToolResult {
 	return rushestools.ToolResult{
 		Status:      string(rushestools.StatusTimeout),
-		Observation: "等待预览渲染终态超时；底层 job 保持运行，迟到完成不会自动续跑模型",
+		Observation: "等待预览渲染结果超时；以下为最后已知 job 状态，waiter 超时不会改变底层 job，也不会自动续跑模型",
 		Data: map[string]any{
 			"error_code": string(rushestools.ErrCodeToolTimeout),
 			"job_id":     jobID, "job_status": underlyingStatus,

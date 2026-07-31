@@ -1,6 +1,7 @@
 package agentexec
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -143,6 +144,35 @@ func TestPreviewEnqueueTargetsOneTimelineAndRetriesFailedJobs(t *testing.T) {
 		retryJobID,
 	).Scan(&retryOf); err != nil || retryOf != failedJobID {
 		t.Fatalf("retry_of_job_id=%q err=%v", retryOf, err)
+	}
+}
+
+func TestPreviewGenerateReturnsCancelledRetryConflict(t *testing.T) {
+	database, exec, ctx, document := previewRenderFixture(t, "draft_preview_cancelled_retry_conflict")
+	baseKey := fmt.Sprintf(
+		"render_preview:%s:%d:auto", document.DraftID, document.Version,
+	)
+	const failedJobID = "job_preview_retry_base_failed"
+	const cancelledJobID = "job_preview_retry_conflict_cancelled"
+	// 先插入会造成唯一键冲突的 retry，再插入 base job，保证 includeRetries
+	// 按最新 rowid 选中 base failed；入队冲突回退随后读到 cancelled retry。
+	insertPreviewJobStateWithKey(
+		t, database, document.DraftID, cancelledJobID,
+		baseKey+":retry:"+failedJobID, "cancelled", nil,
+		map[string]any{"error_code": "render_cancelled", "message": "cancelled", "retryable": false},
+	)
+	insertPreviewJobStateWithKey(
+		t, database, document.DraftID, failedJobID, baseKey, "failed", nil, nil,
+	)
+
+	result, err := exec.toolGeneratePreview(ctx, document.DraftID, rushestools.PreviewGenerateInput{
+		TimelineID: document.TimelineID, Orientation: "auto",
+	})
+	failure, _ := result.Data["error"].(map[string]any)
+	if err != nil || result.Status != string(rushestools.StatusCancelled) ||
+		result.Data["job_id"] != cancelledJobID || result.Data["job_status"] != "cancelled" ||
+		failure["error_code"] != "render_cancelled" {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 
