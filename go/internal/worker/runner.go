@@ -77,6 +77,12 @@ func NewRunner(config RunnerConfig) (*Runner, error) {
 
 func (runner *Runner) Run(ctx context.Context) error {
 	if _, err := RecoverStale(ctx, runner.database, runner.now(), runner.heartbeatTimeout); err != nil {
+		// Run 把调用方 context 结束视为正常停机；即使取消恰好发生在
+		// 启动恢复查询期间，也应与进入 worker loop 后的退出语义一致。
+		if ctx.Err() != nil &&
+			(errors.Is(err, ctx.Err()) || errors.Is(err, context.Cause(ctx))) {
+			return nil
+		}
 		return fmt.Errorf("恢复超时 job: %w", err)
 	}
 	var group sync.WaitGroup

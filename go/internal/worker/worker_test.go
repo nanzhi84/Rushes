@@ -1568,10 +1568,15 @@ func TestRunnerLoopRegistryAndTerminalFailureBranches(t *testing.T) {
 	if worked, err := runner.RunOnce(t.Context()); err != nil || !worked {
 		t.Fatalf("noop worked=%v err=%v", worked, err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
-	defer cancel()
-	if err := runner.Run(ctx); err != nil {
-		t.Fatal(err)
+	cancelledCtx, cancelImmediately := context.WithCancel(t.Context())
+	cancelImmediately()
+	if err := runner.Run(cancelledCtx); err != nil {
+		t.Fatalf("startup cancellation err=%v", err)
+	}
+	expiredCtx, cancelExpired := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	if err := runner.Run(expiredCtx); err != nil {
+		t.Fatalf("startup deadline err=%v", err)
 	}
 	if job, err := Claim(t.Context(), database, "worker", time.Now()); err != nil || job != nil {
 		t.Fatalf("empty claim=%#v err=%v", job, err)
