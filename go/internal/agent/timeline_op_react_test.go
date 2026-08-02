@@ -83,11 +83,10 @@ func (modelValue *timelineOpReactRepairModel) Generate(
 			return nil, fmt.Errorf("correct_example 无法指导修复: %#v", data["correct_example"])
 		}
 		modelValue.sawCorrectExample = true
-		harness, harnessOK := data["harness_recovery"].(map[string]any)
-		if !harnessOK || harness["automatic_retries"] != float64(0) ||
-			harness["remaining_model_repairs"] != float64(maxModelRepairAttempts) ||
-			harness["exhausted"] != false {
-			return nil, fmt.Errorf("harness_recovery 未保留: %#v", data["harness_recovery"])
+		if payload["error_code"] == nil || payload["message"] == nil ||
+			payload["invalid_fields"] == nil || payload["current_state"] == nil ||
+			payload["recovery"] == nil {
+			return nil, fmt.Errorf("独立失败信封不完整: %#v", payload)
 		}
 		modelValue.sawHarnessRecovery = true
 		return schema.AssistantMessage("", []schema.ToolCall{{
@@ -175,7 +174,7 @@ func TestReactAgentRepairsTimelineOpFromJITFieldFailure(t *testing.T) {
 			calls, sawSchema, sawExample, sawHarness, sawSuccess,
 		)
 	}
-	if recoveryState.unresolved() || recoveryState.recoveryExhausted() || recoveryState.summary() != "" {
+	if recoveryState.unresolved() || recoveryState.summary() != "" {
 		t.Fatalf("成功修复后 recovery state 未清空: %s", recoveryState.summary())
 	}
 

@@ -38,8 +38,8 @@ func TestCoreSystemPromptStaysSmallAndContainsNoIncidentExamples(t *testing.T) {
 		fragments []string
 	}{
 		"core": {coreSystemPrompt, []string{
-			"唯一客观事实", "目标明确就直接执行", "完整、合法且没有尾随字符的 JSON 对象", "整数帧", "不可原样重试",
-			"业务状态未变化", "只重试失败原语", "不重复读取未变状态",
+			"唯一客观事实", "目标明确就直接执行", "完整、合法且没有尾随字符的 JSON 对象", "整数帧",
+			"每次工具失败只属于本次调用", "invalid_fields", "之前成功的原语不受影响", "无关工具也可继续执行",
 			"即时预览", "用户反馈可以推翻旧的节奏或镜头结论",
 			"draft.content_plan", "plan.update", "RFC 7396", "不是日志或转写",
 			"WorldState.user_memory", "memory.set", "memory.remove", "本回合为准", "一次性要求不要入库",

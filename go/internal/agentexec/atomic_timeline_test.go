@@ -88,6 +88,60 @@ func TestAtomicTimelineToolsCreateOneVersionPerCatalogOperation(t *testing.T) {
 	}
 }
 
+func TestAtomicTimelineDeleteFullRangePersistsEmptyVersionAfterPreciseFailure(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_atomic_delete_all"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	insertAtomicTimelineAsset(t, database, draftID, "talk", "video", 48, false)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	insert := executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
+		"kind": "insert_clip", "asset_id": "talk",
+		"source_start_frame": 0, "source_end_frame": 1440,
+	})
+	if insert.Data["timeline_id"] != draftID+":v1" {
+		t.Fatalf("insert=%#v", insert)
+	}
+
+	rawInvalid, err := exec.ExecuteTool(
+		manualTimelineMutationContext(ctx), "timeline.delete", rushestools.TimelineDeleteInput{
+			"kind": "delete_range", "start_frame": 0, "end_frame": 1441,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := rawInvalid.(rushestools.ToolResult)
+	fields, _ := invalid.Data["invalid_fields"].([]map[string]any)
+	current, _ := invalid.Data["current_state"].(map[string]any)
+	if invalid.Status != string(rushestools.StatusValidationFailed) ||
+		invalid.Data["error_code"] != string(rushestools.ErrCodeTimelineRangeOutOfBounds) ||
+		len(fields) != 1 || fields[0]["field"] != "end_frame" || fields[0]["actual"] != 1441 ||
+		current["timeline_id"] != draftID+":v1" || current["duration_frames"] != 1440 {
+		t.Fatalf("invalid=%#v", invalid)
+	}
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 1 {
+		t.Fatalf("invalid delete changed timeline: latest=%#v err=%v", latest, err)
+	}
+
+	deleted := executeAtomicTimelineTool(t, exec, ctx, "timeline.delete", rushestools.TimelineDeleteInput{
+		"kind": "delete_range", "start_frame": 0, "end_frame": 1440,
+	})
+	if deleted.Data["previous_timeline_id"] != draftID+":v1" ||
+		deleted.Data["timeline_id"] != draftID+":v2" {
+		t.Fatalf("deleted=%#v", deleted)
+	}
+	latest, err = timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 2 || latest.DurationFrames != 0 || !timeline.Validate(latest).Valid {
+		t.Fatalf("latest=%#v validation=%#v err=%v", latest, timeline.Validate(latest), err)
+	}
+}
+
 func TestAtomicTimelineEditReportsRippleCoordinateEffect(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)

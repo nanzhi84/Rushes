@@ -45,10 +45,8 @@ type terminalReplyGuardError struct {
 
 func (guardErr *terminalReplyGuardError) Error() string {
 	switch guardErr.kind {
-	case "recovery_exhausted":
-		return "工具自修复次数已用尽：" + guardErr.details
-	case "tool_failure_unresolved":
-		return "工具失败尚未解决：" + guardErr.details
+	case "tool_policy_unresolved":
+		return "工具策略确认尚未解决：" + guardErr.details
 	case "timeline_check_missing":
 		return fmt.Sprintf("最新编辑 %s 尚未通过同版本 timeline.check", guardErr.mutationTimelineID)
 	case "timeline_check_stale":
@@ -166,7 +164,7 @@ func terminalTruthToolResult(output any) (rushestools.ToolResult, bool) {
 func (service *Service) terminalReplyGuard(ctx context.Context, draftID string) error {
 	if recovery := toolRecoveryFromContext(ctx); recovery != nil && recovery.unresolved() {
 		return &terminalReplyGuardError{
-			kind: "tool_failure_unresolved", details: recovery.summary(),
+			kind: "tool_policy_unresolved", details: recovery.summary(),
 		}
 	}
 	snapshot := terminalTimelineTruthFromContext(ctx).snapshot()

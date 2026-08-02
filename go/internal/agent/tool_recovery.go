@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,11 +23,6 @@ import (
 const (
 	// 首次执行之外最多自动重试 5 次；只用于只读工具的瞬时故障。
 	maxToolExecutionRetries = 5
-	// 工具把结构化失败回灌模型后，最多允许 5 次“修改方案再试”。
-	maxModelRepairAttempts = 5
-	// 交替 fail→success 会不断清空连击预算（recordSuccess），单靠 maxModelRepairAttempts
-	// 无法收敛（#95 H4）。turn 级累计计数不因成功重置，累计到此阈值同样触发穷尽。
-	maxCumulativeRepairAttempts = 10
 	// 64 KiB 仅是早期观测阈值，不改变结果语义；speech.search 等合法大结果仍完整回灌。
 	toolResultSoftLimitBytes = 64 << 10
 )
@@ -37,44 +30,20 @@ const (
 type toolRecoveryContextKey struct{}
 
 type toolFailureSnapshot struct {
-	Tool              string
-	Arguments         string
-	Observation       string
-	ExecutionAttempts int
-	TargetKey         string
-	// CommittedTimelineID is set only when a timeline mutation durably wrote a
-	// version but returned validation_failed. A later timeline.check can prove
-	// that exact or a newer version valid after the independent contract changes.
-	CommittedTimelineID string
+	Tool        string
+	Arguments   string
+	Observation string
 }
 
 type toolRecoveryState struct {
-	mu                       sync.Mutex
-	failedCalls              map[string]toolFailureSnapshot
-	pendingFailures          map[string]toolFailureSnapshot
-	pendingOrder             []string
-	pendingRejections        map[string]toolFailureSnapshot
-	rejectionOrder           []string
-	hadFailure               bool
-	rootTool                 string
-	repairFailures           int
-	cumulativeRepairFailures int
-	exhausted                bool
-	latest                   toolFailureSnapshot
-}
-
-type recoveryDecision struct {
-	blocked       bool
-	duplicate     bool
-	exhausted     bool
-	repairAttempt int
-	latest        toolFailureSnapshot
+	mu                sync.Mutex
+	pendingRejections map[string]toolFailureSnapshot
+	rejectionOrder    []string
+	latest            toolFailureSnapshot
 }
 
 func newToolRecoveryState() *toolRecoveryState {
 	return &toolRecoveryState{
-		failedCalls:       map[string]toolFailureSnapshot{},
-		pendingFailures:   map[string]toolFailureSnapshot{},
 		pendingRejections: map[string]toolFailureSnapshot{},
 	}
 }
@@ -86,58 +55,6 @@ func withToolRecoveryState(ctx context.Context, state *toolRecoveryState) contex
 func toolRecoveryFromContext(ctx context.Context) *toolRecoveryState {
 	state, _ := ctx.Value(toolRecoveryContextKey{}).(*toolRecoveryState)
 	return state
-}
-
-func (state *toolRecoveryState) beforeCall(name, arguments string) recoveryDecision {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.exhausted {
-		return recoveryDecision{blocked: true, exhausted: true, repairAttempt: state.repairFailures, latest: state.latest}
-	}
-	fingerprint := toolCallFingerprint(name, arguments)
-	if previous, exists := state.failedCalls[fingerprint]; exists {
-		// timeline.check 同时依赖 timeline 与独立更新的 content contract。
-		// 即便显式 timeline_id 不变，plan.update 后同一调用也可能恢复；允许重检，
-		// 实际失败仍由 recordFailure 累计并受 turn 级预算约束。
-		if name == "timeline.check" {
-			return recoveryDecision{}
-		}
-		state.repairFailures++
-		state.cumulativeRepairFailures++
-		state.evaluateExhaustion()
-		state.latest = previous
-		return recoveryDecision{
-			blocked: true, duplicate: true, exhausted: state.exhausted,
-			repairAttempt: state.repairFailures, latest: previous,
-		}
-	}
-	return recoveryDecision{}
-}
-
-func (state *toolRecoveryState) recordFailure(snapshot toolFailureSnapshot) recoveryDecision {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	state.cumulativeRepairFailures++
-	if !state.hadFailure {
-		state.hadFailure = true
-		state.rootTool = snapshot.Tool
-	} else {
-		state.repairFailures++
-	}
-	state.evaluateExhaustion()
-	state.failedCalls[toolCallFingerprint(snapshot.Tool, snapshot.Arguments)] = snapshot
-	target := snapshot.TargetKey
-	if target == "" {
-		target = toolRecoveryTargetKey(snapshot.Tool, snapshot.Arguments, "")
-	}
-	if _, exists := state.pendingFailures[target]; !exists {
-		state.pendingOrder = append(state.pendingOrder, target)
-	}
-	state.pendingFailures[target] = snapshot
-	state.latest = snapshot
-	return recoveryDecision{
-		exhausted: state.exhausted, repairAttempt: state.repairFailures, latest: snapshot,
-	}
 }
 
 func (state *toolRecoveryState) recordRejection(snapshot toolFailureSnapshot) {
@@ -155,72 +72,6 @@ func (state *toolRecoveryState) recordSuccess(tool, arguments, rawResult string)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.resolveRejectionLocked(toolCallFingerprint(tool, arguments))
-	target := toolRecoveryTargetKey(tool, arguments, rawResult)
-	resolvedTargets := map[string]struct{}{}
-	if _, resolvesFailure := state.pendingFailures[target]; resolvesFailure {
-		resolvedTargets[target] = struct{}{}
-	}
-	if tool == "timeline.check" {
-		if successTimelineID := timelineIDFromRecoveryTargetKey(target); successTimelineID != "" {
-			for pendingTarget, pending := range state.pendingFailures {
-				failedTimelineID := timelineIDFromRecoveryTargetKey(pendingTarget)
-				if timelineIDAtLeast(successTimelineID, failedTimelineID) ||
-					timelineIDAtLeast(successTimelineID, pending.CommittedTimelineID) {
-					resolvedTargets[pendingTarget] = struct{}{}
-				}
-			}
-		}
-	}
-	if len(resolvedTargets) == 0 {
-		// 参数在 schema 解码前失败时可能没有任何可识别目标。允许同一工具后续一次
-		// 有效成功核销这个「未知目标」失败，但绝不让另一个已识别目标的成功越权核销。
-		if _, resolvesUnknownTarget := state.pendingFailures[tool]; !resolvesUnknownTarget {
-			return
-		}
-		resolvedTargets[tool] = struct{}{}
-	}
-	for resolvedTarget := range resolvedTargets {
-		pending := state.pendingFailures[resolvedTarget]
-		if pending.Tool != tool && (tool != "timeline.check" || pending.CommittedTimelineID == "") {
-			delete(resolvedTargets, resolvedTarget)
-		}
-	}
-	if len(resolvedTargets) == 0 {
-		return
-	}
-	for resolvedTarget := range resolvedTargets {
-		delete(state.pendingFailures, resolvedTarget)
-	}
-	for fingerprint, snapshot := range state.failedCalls {
-		targetKey := snapshot.TargetKey
-		if targetKey == "" {
-			targetKey = toolRecoveryTargetKey(snapshot.Tool, snapshot.Arguments, "")
-		}
-		if _, resolved := resolvedTargets[targetKey]; resolved {
-			delete(state.failedCalls, fingerprint)
-		}
-	}
-	keptOrder := state.pendingOrder[:0]
-	for _, pendingTarget := range state.pendingOrder {
-		if _, resolved := resolvedTargets[pendingTarget]; !resolved {
-			keptOrder = append(keptOrder, pendingTarget)
-		}
-	}
-	state.pendingOrder = keptOrder
-	state.hadFailure = len(state.pendingFailures) != 0
-	if state.hadFailure {
-		state.rootTool = state.pendingOrder[0]
-		state.latest = state.pendingFailures[state.pendingOrder[len(state.pendingOrder)-1]]
-		state.evaluateExhaustion()
-		return
-	}
-	state.rootTool = ""
-	state.repairFailures = 0
-	// 累计修复计数是 turn 级、不因单次成功重置（#95 H4）：交替 fail→success 不能无限
-	// 刷新预算。连击照常清零，但累计到阈值仍维持穷尽（evaluateExhaustion 会把这类
-	// 「连击已清零、累计仍超」的穷尽记成 cumulative 分因，即 H-B P2「预算重叠」信号）。
-	state.evaluateExhaustion()
-	state.latest = toolFailureSnapshot{}
 }
 
 func (state *toolRecoveryState) resolveConfirmation(arguments, rawResult string) {
@@ -253,95 +104,36 @@ func (state *toolRecoveryState) resolveRejectionLocked(fingerprint string) {
 			break
 		}
 	}
-	switch {
-	case len(state.pendingFailures) != 0:
-		state.latest = state.pendingFailures[state.pendingOrder[len(state.pendingOrder)-1]]
-	case len(state.pendingRejections) != 0:
+	if len(state.pendingRejections) != 0 {
 		state.latest = state.pendingRejections[state.rejectionOrder[len(state.rejectionOrder)-1]]
-	default:
-		state.latest = toolFailureSnapshot{}
-	}
-}
-
-// evaluateExhaustion 在持锁下把穷尽从 false 翻成 true（累计计数只增不减，不会反向），并按
-// 分因记度量一次：streak = 连击超限；cumulative = 连击未超但 turn 级累计超限（交替
-// fail→success 被累计计数挡住，H4 / H-B P2「预算重叠」）。
-func (state *toolRecoveryState) evaluateExhaustion() {
-	if state.exhausted {
-		return
-	}
-	streak := state.repairFailures >= maxModelRepairAttempts
-	cumulative := state.cumulativeRepairFailures >= maxCumulativeRepairAttempts
-	if !streak && !cumulative {
-		return
-	}
-	state.exhausted = true
-	if cumulative && !streak {
-		metricRecoveryCumulativeExhausted.Inc()
 	} else {
-		metricRecoveryStreakExhausted.Inc()
+		state.latest = toolFailureSnapshot{}
 	}
 }
 
 func (state *toolRecoveryState) unresolved() bool {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	return state.hadFailure || len(state.pendingRejections) != 0
-}
-
-func (state *toolRecoveryState) recoveryExhausted() bool {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	return state.exhausted
+	return len(state.pendingRejections) != 0
 }
 
 func (state *toolRecoveryState) summary() string {
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if !state.hadFailure && len(state.pendingRejections) == 0 {
+	if len(state.pendingRejections) == 0 {
 		return ""
 	}
-	if !state.hadFailure {
-		latest := state.pendingRejections[state.rejectionOrder[len(state.rejectionOrder)-1]]
-		return fmt.Sprintf(
-			"工具：%s；参数：%s；策略拒绝：%s",
-			latest.Tool,
-			agentexec.TruncateText(canonicalToolArguments(latest.Arguments), 320),
-			agentexec.TruncateText(latest.Observation, 600),
-		)
-	}
+	latest := state.pendingRejections[state.rejectionOrder[len(state.rejectionOrder)-1]]
 	return fmt.Sprintf(
-		"工具：%s；参数：%s；最后错误：%s；模型修复失败次数：%d/%d（本回合累计 %d/%d）",
-		state.latest.Tool,
-		agentexec.TruncateText(canonicalToolArguments(state.latest.Arguments), 320),
-		agentexec.TruncateText(state.latest.Observation, 600),
-		state.repairFailures,
-		maxModelRepairAttempts,
-		state.cumulativeRepairFailures,
-		maxCumulativeRepairAttempts,
+		"工具：%s；参数：%s；策略拒绝：%s",
+		latest.Tool,
+		agentexec.TruncateText(canonicalToolArguments(latest.Arguments), 320),
+		agentexec.TruncateText(latest.Observation, 600),
 	)
 }
 
 func toolCallFingerprint(name, arguments string) string {
 	return name + "\x00" + canonicalToolArguments(arguments)
-}
-
-func timelineIDFromRecoveryTargetKey(target string) string {
-	const prefix = "timeline.check\x00"
-	if !strings.HasPrefix(target, prefix) {
-		return ""
-	}
-	var identity map[string]any
-	if json.Unmarshal([]byte(strings.TrimPrefix(target, prefix)), &identity) != nil {
-		return ""
-	}
-	return agentexec.InterfaceString(identity["timeline_id"])
-}
-
-func timelineIDAtLeast(successID, failedID string) bool {
-	successDraft, successVersion, successOK := splitTimelineID(successID)
-	failedDraft, failedVersion, failedOK := splitTimelineID(failedID)
-	return successOK && failedOK && successDraft == failedDraft && successVersion >= failedVersion
 }
 
 func splitTimelineID(timelineID string) (string, int, bool) {
@@ -354,156 +146,6 @@ func splitTimelineID(timelineID string) (string, int, bool) {
 		return "", 0, false
 	}
 	return timelineID[:separator], version, true
-}
-
-func committedMutationValidationTimelineID(name, raw string) string {
-	if !isTerminalTimelineMutation(name) {
-		return ""
-	}
-	var result rushestools.ToolResult
-	if json.Unmarshal([]byte(raw), &result) != nil ||
-		result.Status != string(rushestools.StatusValidationFailed) {
-		return ""
-	}
-	timelineID := agentexec.InterfaceString(result.Data["timeline_id"])
-	if !isValidTimelineVersionID(timelineID) {
-		return ""
-	}
-	return timelineID
-}
-
-// toolRecoveryTargetKey 从参数中只提取稳定目标，让同一目标的修正参数成功能核销失败，
-// 但同名工具操作另一个素材、clip 或 timeline 不能掩盖原失败。完全无法解码或没有
-// 稳定目标的调用退回工具名，供 schema 参数修正与无参工具恢复。
-func toolRecoveryTargetKey(name, arguments, rawResult string) string {
-	// timeline.check 的空参数表示「当前版本」，真实 timeline_id 只在结果里。
-	// 优先用结果 ID 归一化，使同版本的显式/省略参数能相互恢复，旧版本成功则不能核销新版本失败。
-	if name == "timeline.check" && rawResult != "" {
-		var result rushestools.ToolResult
-		if json.Unmarshal([]byte(rawResult), &result) == nil {
-			if timelineID := agentexec.InterfaceString(result.Data["timeline_id"]); timelineID != "" {
-				encoded, _ := json.Marshal(map[string]any{"timeline_id": timelineID})
-				return name + "\x00" + string(encoded)
-			}
-		}
-	}
-	var values map[string]any
-	if json.Unmarshal([]byte(arguments), &values) != nil {
-		return name
-	}
-	identity := map[string]any{}
-	switch name {
-	case "asset.import_local_file":
-		if path, _ := values["path"].(string); path != "" {
-			identity["path"] = filepath.Clean(path)
-		}
-	case "preview.generate":
-		for _, key := range []string{"timeline_id"} {
-			if value, exists := values[key]; exists {
-				identity[key] = value
-			}
-		}
-		orientation := strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(values["orientation"])))
-		if orientation == "" {
-			orientation = "auto"
-		}
-		identity["orientation"] = orientation
-	case "shot.search":
-		if query, _ := values["query"].(string); strings.TrimSpace(query) != "" {
-			identity["query"] = strings.ToLower(strings.Join(strings.Fields(query), " "))
-		}
-		for _, key := range []string{
-			"asset_ids", "semantic_roles", "tags", "min_duration_frames", "max_duration_frames",
-			"exclude_used", "after_shot_id",
-		} {
-			if value, exists := values[key]; exists {
-				identity[key] = canonicalRecoveryIdentityValue(value)
-			}
-		}
-	case "memory.set":
-		keys := map[string]struct{}{}
-		if entries, ok := values["entries"].([]any); ok {
-			for _, rawEntry := range entries {
-				entry, _ := rawEntry.(map[string]any)
-				if key, _ := entry["key"].(string); key != "" {
-					keys[key] = struct{}{}
-				}
-			}
-		}
-		if len(keys) != 0 {
-			sortedKeys := make([]string, 0, len(keys))
-			for key := range keys {
-				sortedKeys = append(sortedKeys, key)
-			}
-			sort.Strings(sortedKeys)
-			identity["keys"] = sortedKeys
-		}
-	}
-	if len(identity) != 0 {
-		encoded, err := json.Marshal(identity)
-		if err != nil {
-			return name
-		}
-		return name + "\x00" + string(encoded)
-	}
-	if name == "timeline.update" || name == "timeline.delete" || name == "timeline.split" {
-		for _, key := range []string{"timeline_clip_id", "track_id", "clip_id"} {
-			if value, exists := values[key]; exists {
-				encoded, err := json.Marshal(map[string]any{key: value})
-				if err == nil {
-					return name + "\x00" + string(encoded)
-				}
-			}
-		}
-	}
-	for _, key := range []string{
-		"check", "timeline_id", "timeline_clip_id", "track_id", "clip_id",
-		"asset_id", "asset_ids", "job_id", "preview_id", "decision_id", "keys",
-	} {
-		if value, exists := values[key]; exists {
-			identity[key] = value
-		}
-	}
-	// 已有时间线对象 ID 时，kind 和帧坐标都是可纠正的操作参数，不属于目标身份；
-	// 否则操作种类及完整范围共同定义目标，避免另一个范围的成功掩盖当前失败。
-	_, hasTimelineClipID := values["timeline_clip_id"]
-	_, hasTrackID := values["track_id"]
-	_, hasClipID := values["clip_id"]
-	if !hasTimelineClipID && !hasTrackID && !hasClipID {
-		for _, key := range []string{
-			"kind", "start_frame", "end_frame", "source_start_frame", "source_end_frame",
-			"timeline_start_frame", "timeline_end_frame",
-		} {
-			if value, exists := values[key]; exists {
-				identity[key] = value
-			}
-		}
-	}
-	if len(identity) == 0 {
-		return name
-	}
-	encoded, err := json.Marshal(identity)
-	if err != nil {
-		return name
-	}
-	return name + "\x00" + string(encoded)
-}
-
-func canonicalRecoveryIdentityValue(value any) any {
-	items, ok := value.([]any)
-	if !ok {
-		return value
-	}
-	stringsOnly := make([]string, 0, len(items))
-	for _, item := range items {
-		text, textOK := item.(string)
-		if !textOK {
-			return value
-		}
-		stringsOnly = append(stringsOnly, strings.TrimSpace(text))
-	}
-	sort.Strings(stringsOnly)
-	return stringsOnly
 }
 
 func canonicalToolArguments(arguments string) string {
@@ -530,11 +172,6 @@ func newToolRecoveryMiddleware(
 		Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
 			return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 				state := toolRecoveryFromContext(ctx)
-				if state != nil {
-					if decision := state.beforeCall(input.Name, input.Arguments); decision.blocked {
-						return &compose.ToolOutput{Result: blockedToolCallOutput(input, decision)}, nil
-					}
-				}
 				ctx = rushestools.WithToolCallID(ctx, input.CallID)
 				missingMutationReceiptIdentity := modelMutationReceiptIdentityMissing(ctx, input)
 
@@ -800,11 +437,6 @@ func observeToolResultSize(name, result string) {
 
 func unknownToolRecoveryHandler(ctx context.Context, name, arguments string) (string, error) {
 	input := &compose.ToolInput{Name: name, Arguments: arguments}
-	if state := toolRecoveryFromContext(ctx); state != nil {
-		if decision := state.beforeCall(name, arguments); decision.blocked {
-			return blockedToolCallOutput(input, decision), nil
-		}
-	}
 	raw := marshalToolFailure(
 		"模型调用了不存在的工具："+name,
 		map[string]any{
@@ -854,21 +486,35 @@ func decorateToolFailure(
 			data["error_code"] = string(rushestools.ErrCodeToolExecutionError)
 		}
 	}
-	state := toolRecoveryFromContext(ctx)
-	decision := recoveryDecision{}
-	if state != nil {
-		decision = state.recordFailure(toolFailureSnapshot{
-			Tool: input.Name, Arguments: input.Arguments,
-			Observation: observation, ExecutionAttempts: executionAttempts,
-			TargetKey:           toolRecoveryTargetKey(input.Name, input.Arguments, raw),
-			CommittedTimelineID: committedMutationValidationTimelineID(input.Name, raw),
-		})
+	if strings.TrimSpace(agentexec.InterfaceString(data["message"])) == "" {
+		data["message"] = observation
 	}
-	data["harness_recovery"] = recoveryMetadata(decision, executionAttempts)
+	if strings.TrimSpace(agentexec.InterfaceString(data["recovery"])) == "" {
+		data["recovery"] = rushestools.DefaultToolFailureRecovery
+	}
+	if _, exists := data["invalid_fields"]; !exists {
+		data["invalid_fields"] = []map[string]any{}
+	}
+	if _, exists := data["current_state"]; !exists {
+		data["current_state"] = map[string]any{}
+	}
+	if executionAttempts > 0 {
+		if _, exists := data["execution_attempts"]; !exists {
+			data["execution_attempts"] = executionAttempts
+		}
+		data["automatic_retries"] = max(0, executionAttempts-1)
+	}
 	if budget := turnBudgetFromContext(ctx); budget != nil {
 		data["remaining_tool_rounds"] = budget.remainingToolRounds()
 	}
 	payload["data"] = data
+	// Keep the legacy data object for durable UI traces while exposing the
+	// canonical failure envelope at top level to the model.
+	payload["error_code"] = data["error_code"]
+	payload["message"] = data["message"]
+	payload["invalid_fields"] = data["invalid_fields"]
+	payload["current_state"] = data["current_state"]
+	payload["recovery"] = data["recovery"]
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return marshalToolFailure("工具失败，且失败详情无法序列化", map[string]any{
@@ -877,43 +523,6 @@ func decorateToolFailure(
 		})
 	}
 	return string(encoded)
-}
-
-func blockedToolCallOutput(input *compose.ToolInput, decision recoveryDecision) string {
-	observation := "检测到与之前完全相同的失败工具调用，已跳过重复执行。必须修改参数、先读取最新状态，或改用其他工具。"
-	errorCode := rushestools.ErrCodeDuplicateFailedToolCall
-	recovery := "必须修改参数、先读取最新状态，或改用其他工具后再重试，不要原样重复同一调用。"
-	if decision.exhausted {
-		observation = "工具自修复次数已经用尽。停止继续调用工具，立即向用户说明未完成的步骤、最后错误，并等待下一步指令。"
-		errorCode = rushestools.ErrCodeToolRecoveryExhausted
-		recovery = "停止继续调用工具，立即向用户说明未完成的步骤与最后错误，并等待下一步指令。"
-	}
-	return marshalToolFailure(observation, map[string]any{
-		"error_code":       string(errorCode),
-		"recovery":         recovery,
-		"tool":             input.Name,
-		"last_failure":     agentexec.TruncateText(decision.latest.Observation, 600),
-		"harness_recovery": recoveryMetadata(decision, decision.latest.ExecutionAttempts),
-	})
-}
-
-func recoveryMetadata(decision recoveryDecision, executionAttempts int) map[string]any {
-	remaining := max(0, maxModelRepairAttempts-decision.repairAttempt)
-	action := "读取 observation 和 data，修改参数后再调用；不得原样重复同一工具调用"
-	if decision.exhausted {
-		remaining = 0
-		action = "停止工具调用，向用户明确说明失败原因并等待下一步指令"
-	}
-	return map[string]any{
-		"execution_attempts":      executionAttempts,
-		"automatic_retries":       max(0, executionAttempts-1),
-		"model_repair_attempt":    decision.repairAttempt,
-		"max_model_repairs":       maxModelRepairAttempts,
-		"remaining_model_repairs": remaining,
-		"duplicate_call_blocked":  decision.duplicate,
-		"exhausted":               decision.exhausted,
-		"next_action":             action,
-	}
 }
 
 func executionErrorOutput(name string, err error, attempts int, retryable bool) string {
@@ -1814,12 +1423,8 @@ func terminalFailureReply(ctx context.Context, turnErr error) string {
 	var guardErr *terminalReplyGuardError
 	if errors.As(turnErr, &guardErr) {
 		switch guardErr.kind {
-		case "recovery_exhausted":
-			return "本轮没有完成：工具自修复次数已经用尽，系统已停止继续调用。最后问题：" +
-				agentexec.TruncateText(guardErr.details, 800) +
-				"。当前时间线保留在最新已成功写入的版本；你可以继续让我从这里诊断或修复。"
-		case "tool_failure_unresolved":
-			return "本轮没有完成：工具调用仍处于失败状态，系统已拒绝未验收的成功声明。最后问题：" +
+		case "tool_policy_unresolved":
+			return "本轮没有完成：工具策略确认尚未解决，系统已拒绝越过确认直接收尾。最后问题：" +
 				agentexec.TruncateText(guardErr.details, 800) +
 				"。当前时间线保留在最新已成功写入的版本；你可以继续让我从这里诊断或修复。"
 		case "timeline_check_missing":
@@ -1874,6 +1479,6 @@ func terminalFailureReply(ctx context.Context, turnErr error) string {
 		details = "本轮执行没有生成可交付结果"
 	}
 
-	return "本轮没有完成，系统已经停止重复失败的工具调用。最后问题：" + details +
+	return "本轮没有完成，系统已按本回合安全上限或终态错误结束执行。最后问题：" + details +
 		"。你可以继续告诉我下一步怎么处理，我会从当前最新时间线接着执行。"
 }

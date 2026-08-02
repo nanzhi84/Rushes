@@ -17,6 +17,11 @@ import (
 
 type effectProbeExecutor struct{}
 
+const (
+	independentFailureRetryCount = 5
+	alternatingFailureProbeCount = 10
+)
+
 func (effectProbeExecutor) ExecuteTool(context.Context, string, any) (any, error) {
 	return nil, nil
 }
@@ -121,9 +126,10 @@ func TestToolRecoveryRetriesSafeErrorsAndReturnsThemToModel(t *testing.T) {
 	if data["error_code"] != "tool_execution_error" || data["execution_attempts"] != float64(6) {
 		t.Fatalf("payload=%#v", payload)
 	}
-	harness := data["harness_recovery"].(map[string]any)
-	if harness["automatic_retries"] != float64(5) || !state.unresolved() {
-		t.Fatalf("harness=%#v state=%#v", harness, state)
+	if data["automatic_retries"] != float64(5) || state.unresolved() ||
+		payload["error_code"] != "tool_execution_error" || payload["message"] == "" ||
+		payload["recovery"] == "" || payload["invalid_fields"] == nil || payload["current_state"] == nil {
+		t.Fatalf("独立失败信封不完整: payload=%#v state=%#v", payload, state)
 	}
 }
 
@@ -453,13 +459,13 @@ func TestToolRecoveryUnknownOrMalformedStatusDoesNotResolveFailure(t *testing.T)
 			)
 			if _, err := endpoint(ctx, &compose.ToolInput{
 				Name: "timeline.update", Arguments: `{"kind":"trim_clip","timeline_clip_id":"clip_1"}`,
-			}); err != nil || !state.unresolved() {
+			}); err != nil || state.unresolved() {
 				t.Fatalf("initial failure err=%v unresolved=%v", err, state.unresolved())
 			}
 			output, err := endpoint(ctx, &compose.ToolInput{
 				Name: "timeline.update", Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_1"}`,
 			})
-			if err != nil || !state.unresolved() || !isStructuredToolFailure(output.Result) {
+			if err != nil || state.unresolved() || !isStructuredToolFailure(output.Result) {
 				t.Fatalf("output=%#v err=%v unresolved=%v", output, err, state.unresolved())
 			}
 		})
@@ -663,7 +669,7 @@ func TestToolRecoveryRejectsWrongDraftInspectWithoutLeakingSuccessObservation(t 
 	)
 	output, err := endpoint(ctx, &compose.ToolInput{Name: "timeline.inspect", Arguments: `{}`})
 	if err != nil || output == nil || !isStructuredToolFailure(output.Result) ||
-		strings.Contains(output.Result, "别的草稿已读取") || !state.unresolved() {
+		strings.Contains(output.Result, "别的草稿已读取") || state.unresolved() {
 		t.Fatalf("wrong-draft output leaked success: output=%#v err=%v", output, err)
 	}
 	if len(events) != 2 || events[1].phase != "finished" {
@@ -702,7 +708,7 @@ func TestToolRecoveryRejectsWrongDraftCheckWithoutLeakingSuccessObservation(t *t
 	)
 	output, err := endpoint(ctx, &compose.ToolInput{Name: "timeline.check", Arguments: `{}`})
 	if err != nil || output == nil || !isStructuredToolFailure(output.Result) ||
-		strings.Contains(output.Result, "别的草稿已通过") || !state.unresolved() {
+		strings.Contains(output.Result, "别的草稿已通过") || state.unresolved() {
 		t.Fatalf("wrong-draft output leaked success: output=%#v err=%v", output, err)
 	}
 	if len(events) != 2 || events[1].phase != "finished" {
@@ -743,7 +749,7 @@ func TestToolRecoveryRejectsWrongDraftMutationWithoutLeakingSuccessObservation(t
 		Name: "timeline.update", Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_1"}`,
 	})
 	if err != nil || output == nil || !isStructuredToolFailure(output.Result) ||
-		strings.Contains(output.Result, "别的草稿已编辑") || !state.unresolved() {
+		strings.Contains(output.Result, "别的草稿已编辑") || state.unresolved() {
 		t.Fatalf("wrong-draft output leaked success: output=%#v err=%v", output, err)
 	}
 	if len(events) != 2 || events[1].phase != "finished" {
@@ -935,7 +941,7 @@ func TestToolRecoveryDoesNotRetryDeterministicSchemaErrors(t *testing.T) {
 	payload := decodeRecoveryPayload(t, output.Result)
 	data := payload["data"].(map[string]any)
 	if data["retryable"] != false || data["execution_attempts"] != float64(1) ||
-		data["harness_recovery"].(map[string]any)["automatic_retries"] != float64(0) {
+		data["automatic_retries"] != float64(0) {
 		t.Fatalf("payload=%#v", payload)
 	}
 	if len(events) != 2 || events[0].phase != "started" || events[1].phase != "finished" ||
@@ -970,7 +976,9 @@ func TestToolRecoveryPreservesStructuredBusinessFailureForModel(t *testing.T) {
 	data := payload["data"].(map[string]any)
 	if payload["status"] != "validation_failed" || payload["observation"] != "片段相互重叠" ||
 		data["error_code"] != "timeline_invalid" || data["failed_op"] == nil ||
-		data["recovery"] != "修正当前操作" || data["harness_recovery"] == nil {
+		data["recovery"] != "修正当前操作" || payload["error_code"] != "timeline_invalid" ||
+		payload["message"] != "片段相互重叠" || payload["current_state"] == nil ||
+		payload["invalid_fields"] == nil {
 		t.Fatalf("structured business failure was not preserved: payload=%#v", payload)
 	}
 }
@@ -1006,7 +1014,7 @@ func TestToolRecoveryCollapsesInternalRetryReporterEvents(t *testing.T) {
 	}
 }
 
-func TestToolRecoveryBlocksDuplicateFailuresAndExhaustsRepairBudget(t *testing.T) {
+func TestToolFailuresAreIndependentAndNeverExhaustPerCallAdmission(t *testing.T) {
 	state := newToolRecoveryState()
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
@@ -1019,31 +1027,21 @@ func TestToolRecoveryBlocksDuplicateFailuresAndExhaustsRepairBudget(t *testing.T
 	})
 	input := &compose.ToolInput{Name: "timeline.update", Arguments: `{"bgm_asset_id":"bad"}`}
 	first, err := endpoint(ctx, input)
-	if err != nil || calls != 1 || !state.unresolved() {
+	if err != nil || calls != 1 || state.unresolved() {
 		t.Fatalf("first=%#v calls=%d err=%v", first, calls, err)
 	}
 
-	var last *compose.ToolOutput
-	for range maxModelRepairAttempts {
-		last, err = endpoint(ctx, input)
-		if err != nil {
+	for range independentFailureRetryCount {
+		if _, err = endpoint(ctx, input); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if calls != 1 {
-		t.Fatalf("重复失败调用被实际执行：calls=%d", calls)
+	if calls != independentFailureRetryCount+1 {
+		t.Fatalf("每次失败都应进入 executor: calls=%d", calls)
 	}
-	payload := decodeRecoveryPayload(t, last.Result)
-	data := payload["data"].(map[string]any)
-	if data["error_code"] != "tool_recovery_exhausted" {
-		t.Fatalf("payload=%#v", payload)
-	}
-	blocked, blockErr := endpoint(ctx, &compose.ToolInput{
-		Name: "timeline.inspect", Arguments: `{}`,
-	})
-	if blockErr != nil || calls != 1 ||
-		decodeRecoveryPayload(t, blocked.Result)["observation"] == "" {
-		t.Fatalf("blocked=%#v calls=%d err=%v", blocked, calls, blockErr)
+	other, err := endpoint(ctx, &compose.ToolInput{Name: "timeline.inspect", Arguments: `{}`})
+	if err != nil || calls != independentFailureRetryCount+2 {
+		t.Fatalf("无关工具应继续执行: output=%#v calls=%d err=%v", other, calls, err)
 	}
 }
 
@@ -1057,24 +1055,18 @@ func TestToolRecoveryCanonicalizesDuplicateJSONArguments(t *testing.T) {
 			return &compose.ToolOutput{Result: marshalToolFailure("invalid range", nil)}, nil
 		},
 	)
-	if _, err := endpoint(ctx, &compose.ToolInput{
-		Name: "timeline.update", Arguments: `{"b":2,"a":1}`,
-	}); err != nil {
-		t.Fatal(err)
+	for _, arguments := range []string{`{"b":2,"a":1}`, `{ "a": 1, "b": 2 }`} {
+		output, callErr := endpoint(ctx, &compose.ToolInput{Name: "timeline.update", Arguments: arguments})
+		if callErr != nil || decodeRecoveryPayload(t, output.Result)["status"] != "failed" {
+			t.Fatalf("output=%#v err=%v", output, callErr)
+		}
 	}
-	blocked, err := endpoint(ctx, &compose.ToolInput{
-		Name: "timeline.update", Arguments: `{ "a": 1, "b": 2 }`,
-	})
-	if err != nil || calls != 1 {
-		t.Fatalf("canonical duplicate executed: calls=%d blocked=%#v err=%v", calls, blocked, err)
-	}
-	data := decodeRecoveryPayload(t, blocked.Result)["data"].(map[string]any)
-	if data["error_code"] != "duplicate_failed_tool_call" {
-		t.Fatalf("data=%#v", data)
+	if calls != 2 || state.unresolved() {
+		t.Fatalf("规范化后相同参数仍必须独立执行: calls=%d state=%#v", calls, state)
 	}
 }
 
-func TestToolRecoveryCapsDistinctModelRepairFailures(t *testing.T) {
+func TestDistinctFailuresRemainBoundedOnlyByTurnBudget(t *testing.T) {
 	state := newToolRecoveryState()
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
@@ -1084,29 +1076,16 @@ func TestToolRecoveryCapsDistinctModelRepairFailures(t *testing.T) {
 			return &compose.ToolOutput{Result: marshalToolFailure("still invalid", nil)}, nil
 		},
 	)
-	var last *compose.ToolOutput
-	for attempt := 0; attempt <= maxModelRepairAttempts; attempt++ {
-		var err error
-		last, err = endpoint(ctx, &compose.ToolInput{
+	for attempt := 0; attempt <= independentFailureRetryCount; attempt++ {
+		_, err := endpoint(ctx, &compose.ToolInput{
 			Name: "timeline.update", Arguments: `{"attempt":` + string(rune('0'+attempt)) + `}`,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	if calls != maxModelRepairAttempts+1 || !state.recoveryExhausted() {
-		t.Fatalf("calls=%d exhausted=%v", calls, state.recoveryExhausted())
-	}
-	harness := decodeRecoveryPayload(t, last.Result)["data"].(map[string]any)["harness_recovery"].(map[string]any)
-	if harness["exhausted"] != true || harness["remaining_model_repairs"] != float64(0) {
-		t.Fatalf("harness=%#v", harness)
-	}
-	blocked, err := endpoint(ctx, &compose.ToolInput{
-		Name: "timeline.inspect", Arguments: `{}`,
-	})
-	if err != nil || calls != maxModelRepairAttempts+1 ||
-		decodeRecoveryPayload(t, blocked.Result)["data"].(map[string]any)["error_code"] != "tool_recovery_exhausted" {
-		t.Fatalf("blocked=%#v calls=%d err=%v", blocked, calls, err)
+	if calls != independentFailureRetryCount+1 || state.unresolved() {
+		t.Fatalf("calls=%d unresolved=%v", calls, state.unresolved())
 	}
 }
 
@@ -1145,14 +1124,14 @@ func TestToolRecoverySuccessOnUnrelatedToolKeepsFailureUnresolved(t *testing.T) 
 		},
 	)
 	failedInput := &compose.ToolInput{Name: "timeline.update", Arguments: `{"timeline_clip_id":"stale"}`}
-	if _, err := endpoint(ctx, failedInput); err != nil || !state.unresolved() {
+	if _, err := endpoint(ctx, failedInput); err != nil || state.unresolved() {
 		t.Fatalf("initial failure err=%v unresolved=%v", err, state.unresolved())
 	}
-	if _, err := endpoint(ctx, &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`}); err != nil || !state.unresolved() {
+	if _, err := endpoint(ctx, &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`}); err != nil || state.unresolved() {
 		t.Fatalf("unrelated success err=%v unresolved=%v", err, state.unresolved())
 	}
-	if _, err := endpoint(ctx, failedInput); err != nil || calls != 2 || !state.unresolved() {
-		t.Fatalf("duplicate failure should remain blocked err=%v calls=%d unresolved=%v", err, calls, state.unresolved())
+	if _, err := endpoint(ctx, failedInput); err != nil || calls != 3 || state.unresolved() {
+		t.Fatalf("repeated failure should execute independently err=%v calls=%d unresolved=%v", err, calls, state.unresolved())
 	}
 }
 
@@ -1169,12 +1148,12 @@ func TestToolRecoverySuccessOnDifferentTargetOfSameToolKeepsFailureUnresolved(t 
 	)
 	if _, err := endpoint(ctx, &compose.ToolInput{
 		Name: "timeline.check", Arguments: `{"timeline_id":"draft:v2"}`,
-	}); err != nil || !state.unresolved() {
+	}); err != nil || state.unresolved() {
 		t.Fatalf("current check failure err=%v unresolved=%v", err, state.unresolved())
 	}
 	if _, err := endpoint(ctx, &compose.ToolInput{
 		Name: "timeline.check", Arguments: `{"timeline_id":"draft:v1"}`,
-	}); err != nil || !state.unresolved() {
+	}); err != nil || state.unresolved() {
 		t.Fatalf("old-version success must not resolve current failure err=%v unresolved=%v", err, state.unresolved())
 	}
 }
@@ -1196,7 +1175,7 @@ func TestToolRecoveryLatestCheckCanRetrySameEmptyArgumentsAndResolveOlderVersion
 		},
 	)
 	input := &compose.ToolInput{Name: "timeline.check", Arguments: `{}`}
-	if _, err := endpoint(ctx, input); err != nil || !state.unresolved() {
+	if _, err := endpoint(ctx, input); err != nil || state.unresolved() {
 		t.Fatalf("first empty check err=%v unresolved=%v", err, state.unresolved())
 	}
 	if _, err := endpoint(ctx, input); err != nil || calls != 2 || state.unresolved() {
@@ -1229,12 +1208,12 @@ func TestToolRecoveryExplicitCheckCanRetryAfterContractRepairOnSameVersion(t *te
 	check := &compose.ToolInput{
 		Name: "timeline.check", Arguments: `{"timeline_id":"draft:v2"}`,
 	}
-	if _, err := endpoint(ctx, check); err != nil || !state.unresolved() {
+	if _, err := endpoint(ctx, check); err != nil || state.unresolved() {
 		t.Fatalf("initial explicit check err=%v unresolved=%v", err, state.unresolved())
 	}
 	if _, err := endpoint(ctx, &compose.ToolInput{
 		Name: "plan.update", Arguments: `{"plan":{"content_contract":{}}}`,
-	}); err != nil || !state.unresolved() {
+	}); err != nil || state.unresolved() {
 		t.Fatalf("contract repair must not itself erase check failure: err=%v unresolved=%v", err, state.unresolved())
 	}
 	if _, err := endpoint(ctx, check); err != nil || checkCalls != 2 || state.unresolved() {
@@ -1268,12 +1247,12 @@ func TestToolRecoveryCheckResolvesCommittedMutationContractFailure(t *testing.T)
 	)
 	if _, err := endpoint(ctx, &compose.ToolInput{
 		Name: "timeline.update", Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_1"}`,
-	}); err != nil || !state.unresolved() {
+	}); err != nil || state.unresolved() {
 		t.Fatalf("committed mutation failure err=%v unresolved=%v", err, state.unresolved())
 	}
 	if _, err := endpoint(ctx, &compose.ToolInput{
 		Name: "plan.update", Arguments: `{"plan":{"content_contract":{}}}`,
-	}); err != nil || !state.unresolved() {
+	}); err != nil || state.unresolved() {
 		t.Fatalf("contract repair must retain mutation failure err=%v unresolved=%v", err, state.unresolved())
 	}
 	if _, err := endpoint(ctx, &compose.ToolInput{
@@ -1286,104 +1265,12 @@ func TestToolRecoveryCheckResolvesCommittedMutationContractFailure(t *testing.T)
 
 func TestToolRecoveryCheckDoesNotResolveUncommittedMutationFailure(t *testing.T) {
 	state := newToolRecoveryState()
-	state.recordFailure(toolFailureSnapshot{
-		Tool: "timeline.update", Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_1"}`,
-		Observation: "execution failed",
-	})
 	state.recordSuccess(
 		"timeline.check", `{"timeline_id":"draft:v2"}`,
 		`{"status":"succeeded","data":{"timeline_id":"draft:v2"}}`,
 	)
-	if !state.unresolved() {
-		t.Fatal("timeline.check must not resolve an uncommitted mutation failure")
-	}
-}
-
-func TestTimelineUpdateRecoveryTargetUsesExistingClipInsteadOfReplacementAsset(t *testing.T) {
-	original := toolRecoveryTargetKey(
-		"timeline.update",
-		`{"kind":"replace_clip","timeline_clip_id":"clip_1","asset_id":"bad_asset"}`,
-		"",
-	)
-	corrected := toolRecoveryTargetKey(
-		"timeline.update",
-		`{"kind":"replace_clip","timeline_clip_id":"clip_1","asset_id":"good_asset"}`,
-		"",
-	)
-	differentClip := toolRecoveryTargetKey(
-		"timeline.update",
-		`{"kind":"replace_clip","timeline_clip_id":"clip_2","asset_id":"good_asset"}`,
-		"",
-	)
-	if original != corrected || original == differentClip {
-		t.Fatalf(
-			"targets original=%q corrected=%q different=%q",
-			original, corrected, differentClip,
-		)
-	}
-}
-
-func TestShotSearchRecoveryTargetIncludesQueryAndCanonicalFilters(t *testing.T) {
-	first := toolRecoveryTargetKey(
-		"shot.search",
-		`{"query":" Cat  Scene ","asset_ids":["asset_B","asset_A"],"limit":10}`,
-		"",
-	)
-	equivalent := toolRecoveryTargetKey(
-		"shot.search",
-		`{"query":"cat scene","asset_ids":["asset_A","asset_B"],"limit":20}`,
-		"",
-	)
-	differentQuery := toolRecoveryTargetKey(
-		"shot.search",
-		`{"query":"dog scene","asset_ids":["asset_A","asset_B"]}`,
-		"",
-	)
-	if first != equivalent || first == differentQuery {
-		t.Fatalf("targets first=%q equivalent=%q different=%q", first, equivalent, differentQuery)
-	}
-}
-
-func TestPreviewGenerateRecoveryTargetIncludesNormalizedOrientation(t *testing.T) {
-	portrait := toolRecoveryTargetKey(
-		"preview.generate", `{"timeline_id":"draft:v1","orientation":"portrait"}`, "",
-	)
-	landscape := toolRecoveryTargetKey(
-		"preview.generate", `{"timeline_id":"draft:v1","orientation":"landscape"}`, "",
-	)
-	autoImplicit := toolRecoveryTargetKey(
-		"preview.generate", `{"timeline_id":"draft:v1"}`, "",
-	)
-	autoExplicit := toolRecoveryTargetKey(
-		"preview.generate", `{"timeline_id":"draft:v1","orientation":"auto"}`, "",
-	)
-	if portrait == landscape || autoImplicit != autoExplicit {
-		t.Fatalf(
-			"targets portrait=%q landscape=%q autoImplicit=%q autoExplicit=%q",
-			portrait, landscape, autoImplicit, autoExplicit,
-		)
-	}
-
-	state := newToolRecoveryState()
-	state.recordFailure(toolFailureSnapshot{
-		Tool:      "preview.generate",
-		Arguments: `{"timeline_id":"draft:v1","orientation":"portrait"}`,
-	})
-	state.recordSuccess(
-		"preview.generate",
-		`{"timeline_id":"draft:v1","orientation":"landscape"}`,
-		`{"status":"succeeded","data":{"timeline_id":"draft:v1","orientation":"landscape"}}`,
-	)
-	if !state.unresolved() {
-		t.Fatal("landscape success must not resolve portrait render failure")
-	}
-	state.recordSuccess(
-		"preview.generate",
-		`{"timeline_id":"draft:v1","orientation":"portrait"}`,
-		`{"status":"succeeded","data":{"timeline_id":"draft:v1","orientation":"portrait"}}`,
-	)
 	if state.unresolved() {
-		t.Fatal("portrait success must resolve the matching portrait render failure")
+		t.Fatal("单次 mutation failure 不得形成跨调用未解决状态")
 	}
 }
 
@@ -1400,7 +1287,7 @@ func TestToolRecoveryCorrectedKindOnSameStableTargetResolvesFailure(t *testing.T
 	)
 	if _, err := endpoint(ctx, &compose.ToolInput{
 		Name: "timeline.update", Arguments: `{"kind":"trim_clip","timeline_clip_id":"clip_1","edge":"end","timeline_frame":45}`,
-	}); err != nil || !state.unresolved() {
+	}); err != nil || state.unresolved() {
 		t.Fatalf("initial failure err=%v unresolved=%v", err, state.unresolved())
 	}
 	if _, err := endpoint(ctx, &compose.ToolInput{
@@ -1423,27 +1310,24 @@ func TestToolRecoverySuccessOnDifferentRangeKeepsFailureUnresolved(t *testing.T)
 	)
 	if _, err := endpoint(ctx, &compose.ToolInput{
 		Name: "timeline.delete", Arguments: `{"kind":"delete_range","start_frame":0,"end_frame":10}`,
-	}); err != nil || !state.unresolved() {
+	}); err != nil || state.unresolved() {
 		t.Fatalf("initial range failure err=%v unresolved=%v", err, state.unresolved())
 	}
 	if _, err := endpoint(ctx, &compose.ToolInput{
 		Name: "timeline.delete", Arguments: `{"kind":"delete_range","start_frame":20,"end_frame":30}`,
-	}); err != nil || !state.unresolved() {
-		t.Fatalf("different range success must not resolve failure err=%v unresolved=%v", err, state.unresolved())
+	}); err != nil || state.unresolved() {
+		t.Fatalf("different range success must remain independent err=%v unresolved=%v", err, state.unresolved())
 	}
 }
 
 func TestToolRecoveryImportSuccessOnlyResolvesSameNormalizedPath(t *testing.T) {
 	state := newToolRecoveryState()
-	state.recordFailure(toolFailureSnapshot{
-		Tool: "asset.import_local_file", Arguments: `{"path":"/media/failed.mp4","storage_mode":"reference"}`,
-	})
 	state.recordSuccess(
 		"asset.import_local_file", `{"path":"/media/other.mp4","storage_mode":"copy"}`,
 		`{"status":"succeeded"}`,
 	)
-	if !state.unresolved() {
-		t.Fatal("导入另一个路径成功不得核销原路径失败")
+	if state.unresolved() {
+		t.Fatal("单次导入失败不得形成跨调用未解决状态")
 	}
 	state.recordSuccess(
 		"asset.import_local_file", `{"path":"/media/tmp/../failed.mp4","storage_mode":"copy","kind":"video"}`,
@@ -1456,17 +1340,12 @@ func TestToolRecoveryImportSuccessOnlyResolvesSameNormalizedPath(t *testing.T) {
 
 func TestToolRecoveryMemorySetSuccessOnlyResolvesSameSortedKeys(t *testing.T) {
 	state := newToolRecoveryState()
-	state.recordFailure(toolFailureSnapshot{
-		Tool: "memory.set", Arguments: `{"entries":[` +
-			`{"key":"pacing","kind":"invalid","statement":"快","evidence_quote":"偏快"},` +
-			`{"key":"subtitle_style","kind":"preference","statement":"简洁","evidence_quote":"字幕简洁"}]}`,
-	})
 	state.recordSuccess(
 		"memory.set", `{"entries":[{"key":"music_style","kind":"preference","statement":"轻快","evidence_quote":"音乐轻快"}]}`,
 		`{"status":"succeeded"}`,
 	)
-	if !state.unresolved() {
-		t.Fatal("写入另一组记忆键成功不得核销原失败")
+	if state.unresolved() {
+		t.Fatal("单次记忆写入失败不得形成跨调用未解决状态")
 	}
 	state.recordSuccess(
 		"memory.set", `{"entries":[`+
@@ -1489,7 +1368,7 @@ func TestUnknownToolBecomesRepairableToolResult(t *testing.T) {
 	output, err := unknownToolRecoveryHandler(
 		ctx, "timeline.magic", `{}`,
 	)
-	if err != nil || !state.unresolved() {
+	if err != nil || state.unresolved() {
 		t.Fatalf("output=%s err=%v", output, err)
 	}
 	payload := decodeRecoveryPayload(t, output)
@@ -1500,10 +1379,10 @@ func TestUnknownToolBecomesRepairableToolResult(t *testing.T) {
 	if len(events) != 2 || events[0] != "started" || events[1] != "finished" {
 		t.Fatalf("unknown tool trace=%v", events)
 	}
-	blocked, err := unknownToolRecoveryHandler(ctx, "timeline.magic", `{}`)
-	if err != nil || decodeRecoveryPayload(t, blocked)["data"].(map[string]any)["error_code"] != "duplicate_failed_tool_call" ||
-		len(events) != 2 {
-		t.Fatalf("duplicate unknown tool should be hidden from UI: output=%s events=%v err=%v", blocked, events, err)
+	repeated, err := unknownToolRecoveryHandler(ctx, "timeline.magic", `{}`)
+	if err != nil || decodeRecoveryPayload(t, repeated)["data"].(map[string]any)["error_code"] != "unknown_tool" ||
+		len(events) != 4 {
+		t.Fatalf("repeated unknown tool should execute and trace independently: output=%s events=%v err=%v", repeated, events, err)
 	}
 }
 
@@ -1526,11 +1405,13 @@ func decodeRecoveryPayload(t *testing.T, raw string) map[string]any {
 	return payload
 }
 
-func TestToolRecoveryCumulativeRepairBudgetSurvivesAlternatingSuccess(t *testing.T) {
+func TestAlternatingFailureAndSuccessNeverCreatesCrossCallAdmission(t *testing.T) {
 	state := newToolRecoveryState()
 	ctx := rushestools.WithDraftID(withToolRecoveryState(t.Context(), state), "draft")
+	calls := 0
 	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
 		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			calls++
 			if input.Arguments == `{"state":"ready"}` {
 				return &compose.ToolOutput{Result: `{"status":"succeeded","observation":"fresh state","data":{"timeline_exists":false}}`}, nil
 			}
@@ -1540,40 +1421,15 @@ func TestToolRecoveryCumulativeRepairBudgetSurvivesAlternatingSuccess(t *testing
 	failing := &compose.ToolInput{Name: "timeline.inspect", Arguments: `{}`}
 	recovering := &compose.ToolInput{Name: "timeline.inspect", Arguments: `{"state":"ready"}`}
 
-	// 同一失败工具的成功重试会清空连击链；累计预算仍跨成功保留。
-	for i := 1; i < maxCumulativeRepairAttempts; i++ {
+	for i := 0; i < alternatingFailureProbeCount; i++ {
 		if _, err := endpoint(ctx, failing); err != nil {
 			t.Fatal(err)
-		}
-		if state.recoveryExhausted() {
-			t.Fatalf("第 %d 次失败即穷尽，累计阈值应为 %d", i, maxCumulativeRepairAttempts)
 		}
 		if _, err := endpoint(ctx, recovering); err != nil {
 			t.Fatal(err)
 		}
-		if state.unresolved() {
-			t.Fatalf("交替成功后连击链未清空（i=%d）", i)
-		}
 	}
-
-	// 第 maxCumulativeRepairAttempts 次失败：连击仍是「首次」（上一步成功已清零），但 turn 级
-	// 累计计数到达阈值，仍触发穷尽——这正是交替模式此前无法收敛的缺口。
-	last, err := endpoint(ctx, failing)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !state.recoveryExhausted() {
-		t.Fatalf("累计 %d 次失败应触发穷尽", maxCumulativeRepairAttempts)
-	}
-	harness := decodeRecoveryPayload(t, last.Result)["data"].(map[string]any)["harness_recovery"].(map[string]any)
-	if harness["exhausted"] != true || harness["remaining_model_repairs"] != float64(0) {
-		t.Fatalf("穷尽未反映到 harness_recovery：%#v", harness)
-	}
-
-	// 穷尽后任何后续工具调用（哪怕本会成功的只读工具）都被拦截。
-	blocked, err := endpoint(ctx, recovering)
-	if err != nil ||
-		decodeRecoveryPayload(t, blocked.Result)["data"].(map[string]any)["error_code"] != "tool_recovery_exhausted" {
-		t.Fatalf("穷尽后未拦截后续调用：blocked=%s err=%v", blocked.Result, err)
+	if calls != alternatingFailureProbeCount*2 || state.unresolved() {
+		t.Fatalf("calls=%d unresolved=%v", calls, state.unresolved())
 	}
 }

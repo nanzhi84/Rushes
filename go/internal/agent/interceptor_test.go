@@ -75,7 +75,7 @@ func TestInterceptorRejectionMiddlewareSkipsRecoveryBudget(t *testing.T) {
 		t.Fatalf("拒绝未回灌结构化提示: %#v", payload)
 	}
 	// 策略拒绝不消耗修复预算，但必须留在终态门禁中，防止模型直接声称成功。
-	if !state.unresolved() || state.cumulativeRepairFailures != 0 || data["harness_recovery"] != nil {
+	if !state.unresolved() || data["harness_recovery"] != nil {
 		t.Fatalf("策略拒绝应阻止成功终态且不消耗预算: unresolved=%v state=%#v data=%#v", state.unresolved(), state, data)
 	}
 	if guardErr := (&Service{}).terminalReplyGuard(ctx, "unused"); guardErr == nil {
@@ -104,8 +104,7 @@ func TestInterceptorRejectionNotRetriedOnTransientText(t *testing.T) {
 	if err != nil || calls != 1 {
 		t.Fatalf("含 transient 词的策略拒绝也不得重试: calls=%d err=%v", calls, err)
 	}
-	if decodeRecoveryPayload(t, output.Result)["status"] != "failed" || state.unresolved() ||
-		state.cumulativeRepairFailures != 0 {
+	if decodeRecoveryPayload(t, output.Result)["status"] != "failed" || state.unresolved() {
 		t.Fatal("非确认类拒绝应回灌结构化提示、不触发重试且不污染确认门禁")
 	}
 }

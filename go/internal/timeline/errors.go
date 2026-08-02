@@ -5,9 +5,10 @@ import "fmt"
 type SemanticErrorKind string
 
 const (
-	SemanticClipNotFound SemanticErrorKind = "clip_not_found"
-	SemanticFrameRange   SemanticErrorKind = "frame_out_of_range"
-	SemanticTrackLocked  SemanticErrorKind = "track_locked"
+	SemanticClipNotFound  SemanticErrorKind = "clip_not_found"
+	SemanticFrameRange    SemanticErrorKind = "frame_out_of_range"
+	SemanticTimelineRange SemanticErrorKind = "timeline_range_out_of_bounds"
+	SemanticTrackLocked   SemanticErrorKind = "track_locked"
 )
 
 // SemanticError carries the current-document facts needed for one-round model repair.
@@ -22,6 +23,9 @@ type SemanticError struct {
 	SourceStartFrame   int
 	SourceEndFrame     int
 	Message            string
+	ProvidedStartFrame int
+	ProvidedEndFrame   int
+	DurationFrames     int
 }
 
 func trackLockedError(trackID string) error {
@@ -53,6 +57,11 @@ func (err *SemanticError) Error() string {
 		return fmt.Sprintf(
 			"帧 %d 必须位于片段 %s 的时间线范围 (%d,%d) 内",
 			err.ProvidedFrame, err.ClipID, err.TimelineStartFrame, err.TimelineEndFrame,
+		)
+	case SemanticTimelineRange:
+		return fmt.Sprintf(
+			"时间线范围 [%d,%d) 必须满足 0 <= start_frame < end_frame <= %d",
+			err.ProvidedStartFrame, err.ProvidedEndFrame, err.DurationFrames,
 		)
 	default:
 		return "时间线语义约束失败"

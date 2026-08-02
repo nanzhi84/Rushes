@@ -55,8 +55,8 @@ func TestSharedToolFailureAlwaysCarriesRecovery(t *testing.T) {
 	}
 }
 
-// TestAgentRecoveryMiddlewareFailuresCarryRecovery 覆盖 agent 侧恢复中间件产出的结构化失败
-// （未注册工具、执行错误、重复/耗尽拦截），断言都带非空 recovery。
+// TestAgentRecoveryMiddlewareFailuresCarryRecovery 覆盖 agent 中间件产出的结构化失败，
+// 断言独立失败都带非空 recovery。
 func TestAgentRecoveryMiddlewareFailuresCarryRecovery(t *testing.T) {
 	t.Parallel()
 	unknown, err := unknownToolRecoveryHandler(t.Context(), "fake.tool", `{}`)
@@ -66,10 +66,6 @@ func TestAgentRecoveryMiddlewareFailuresCarryRecovery(t *testing.T) {
 	assertFailureJSONHasRecovery(t, "unknown_tool", unknown)
 	assertFailureJSONHasRecovery(t, "execution_error",
 		executionErrorOutput("timeline.check", errors.New("boom"), 1, false))
-	assertFailureJSONHasRecovery(t, "blocked_duplicate",
-		blockedToolCallOutput(&compose.ToolInput{Name: "timeline.check"}, recoveryDecision{duplicate: true}))
-	assertFailureJSONHasRecovery(t, "blocked_exhausted",
-		blockedToolCallOutput(&compose.ToolInput{Name: "timeline.check"}, recoveryDecision{exhausted: true}))
 }
 
 // TestExecutorStructuredFailuresCarryRecovery 通过 Service.ExecuteTool 触发领域层代表性结构化
