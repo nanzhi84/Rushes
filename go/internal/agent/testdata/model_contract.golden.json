@@ -159,45 +159,6 @@
       }
     },
     {
-      "name": "media.detect_shots",
-      "description": "为一个视频素材建立或刷新可检索的逐镜头证据；每次只接收一个 asset_id，多素材必须并行调用；相同参数默认复用持久化结果，force_refresh 强制刷新；调用会在当前 turn 内等待并返回终态摘要，不需要轮询或让用户继续",
-      "completion_semantics": "terminal_only",
-      "typed_success_adapter": false,
-      "parameters": {
-        "properties": {
-          "asset_id": {
-            "description": "asset.list_assets 返回的单个 video 素材 ID；多素材必须由模型并行调用本工具",
-            "type": "string"
-          },
-          "depth": {
-            "description": "scan 做低成本镜头检测，deep 做逐镜头深度理解；默认 scan；调用会在当前 turn 内等待终态",
-            "type": "string"
-          },
-          "focus": {
-            "description": "可选创作关注点，例如产品特写、人物动作或可用于高潮的镜头；会进入视觉分析提示与缓存键",
-            "type": "string"
-          },
-          "max_steps_per_asset": {
-            "description": "每个素材的最大分析步骤数；0 使用服务端默认值，数值越大成本和延迟越高",
-            "type": "integer"
-          },
-          "force_refresh": {
-            "description": "仅当用户明确要求重新分析时设为 true；默认复用相同素材与参数的持久化结果",
-            "type": "boolean"
-          },
-          "refresh_nonce": {
-            "description": "仅当用户在旧强制任务终态后明确要求再次重跑完全相同的分析时提供新的短标识；同一标识重复调用仍幂等复用同一 job",
-            "type": "string"
-          }
-        },
-        "additionalProperties": false,
-        "required": [
-          "asset_id"
-        ],
-        "type": "object"
-      }
-    },
-    {
       "name": "memory.remove",
       "description": "仅当当前用户明确要求忘记已有长期记忆时删除指定键；此操作必须先获得破坏性确认",
       "completion_semantics": "terminal_only",
@@ -419,7 +380,7 @@
     },
     {
       "name": "shot.search",
-      "description": "只读搜索既有镜头索引；按创作意图返回稳定 shot_id、精确源帧、语义与匹配证据。未建立索引的素材只会列为 detection_candidates；先并行调用 media.detect_shots，再用同一意图重搜，禁止把候选素材臆造为 shot_id",
+      "description": "只读搜索既有镜头索引；按创作意图返回稳定 shot_id、精确源帧、语义与匹配证据。未建立索引的素材只会列为 detection_candidates；告知用户后台索引尚未完成并稍后重搜，禁止把候选素材臆造为 shot_id",
       "completion_semantics": "terminal_only",
       "typed_success_adapter": true,
       "parameters": {

@@ -107,6 +107,44 @@ type AssetAnalysisRow struct {
 	CreatedAt             string
 }
 
+type ShotIndexShotRow struct {
+	ID                   string
+	AssetContentHash     string
+	SourceStartFrame     int
+	SourceEndFrame       int
+	BoundaryVersion      int
+	BoundaryKind         string
+	BoundaryConfidence   *float64
+	LineageParentShotID  *string
+	RepresentativeFrames []map[string]any
+	Description          string
+	Tags                 []string
+	Subjects             []string
+	Actions              []string
+	Setting              []string
+	ShotScale            string
+	Composition          string
+	Lighting             []string
+	Mood                 []string
+	EditHints            []string
+	Quality              map[string]any
+	SearchText           string
+	SearchTokens         []string
+	DeepCoverage         []string
+}
+
+type ShotIndexSnapshotRow struct {
+	ID                  string
+	AssetContentHash    string
+	Generation          int
+	AnalyzerVersion     string
+	OutputSchemaVersion int
+	SourceAssetID       string
+	Summary             map[string]any
+	Shots               []ShotIndexShotRow
+	CreatedAt           string
+}
+
 // AgentContextCheckpointRow persists the model's replacement-history window.
 // It is deliberately a reducer result row rather than a domain event: changing
 // prompt bookkeeping must not pretend that the user's video state changed.
@@ -199,6 +237,7 @@ type ResultRows struct {
 	MaterialSummaries               []MaterialSummaryRow
 	Transcripts                     []TranscriptRow
 	AssetAnalyses                   []AssetAnalysisRow
+	ShotIndexSnapshots              []ShotIndexSnapshotRow
 	AgentContextCheckpoint          *AgentContextCheckpointRow
 	DraftPlanUpdate                 *DraftPlanUpdateRow
 	AgentJobObservationSuppressions []AgentJobObservationSuppressionRow
@@ -1709,6 +1748,81 @@ func persistResultRows(
 			return err
 		}
 	}
+	for _, snapshot := range rows.ShotIndexSnapshots {
+		createdAt := snapshot.CreatedAt
+		if createdAt == "" {
+			createdAt = defaultCreatedAt
+		}
+		if snapshot.ID == "" || snapshot.AssetContentHash == "" ||
+			snapshot.AnalyzerVersion == "" || snapshot.OutputSchemaVersion < 1 ||
+			snapshot.SourceAssetID == "" || snapshot.Summary == nil || len(snapshot.Shots) == 0 {
+			return errors.New("shot index snapshot 字段不完整")
+		}
+		generation := snapshot.Generation
+		if generation < 1 {
+			if err := tx.QueryRowContext(ctx, `
+				SELECT COALESCE(MAX(generation),0)+1 FROM shot_index_snapshots
+				WHERE asset_content_hash=?`, snapshot.AssetContentHash).Scan(&generation); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE shot_index_snapshots SET status='superseded'
+			WHERE asset_content_hash=? AND status='ready'`, snapshot.AssetContentHash); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO shot_index_snapshots(
+				index_snapshot_id,asset_content_hash,generation,analyzer_version,
+				output_schema_version,source_asset_id,status,summary_json,created_at,published_at
+			) VALUES(?,?,?,?,?,?,'ready',?,?,?)`,
+			snapshot.ID, snapshot.AssetContentHash, generation, snapshot.AnalyzerVersion,
+			snapshot.OutputSchemaVersion, snapshot.SourceAssetID, mustJSON(snapshot.Summary),
+			createdAt, createdAt,
+		); err != nil {
+			return err
+		}
+		for _, shot := range snapshot.Shots {
+			if shot.ID == "" || shot.AssetContentHash != snapshot.AssetContentHash ||
+				shot.SourceStartFrame < 0 || shot.SourceEndFrame <= shot.SourceStartFrame ||
+				shot.BoundaryVersion < 1 || shot.BoundaryKind == "" ||
+				len(shot.RepresentativeFrames) == 0 || shot.Description == "" ||
+				shot.Quality == nil || shot.SearchText == "" || len(shot.SearchTokens) == 0 {
+				return fmt.Errorf("shot index %s 的 shot %s 字段不完整", snapshot.ID, shot.ID)
+			}
+			for _, frame := range shot.RepresentativeFrames {
+				hash := stringFrom(frame["object_hash"], "")
+				if hash == "" {
+					return fmt.Errorf("shot %s 的代表帧缺少 object_hash", shot.ID)
+				}
+				if err := ensureObject(ctx, &applyState{tx: tx, createdAt: createdAt}, hash,
+					int64From(frame["object_size"], 0)); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO shots(
+					index_snapshot_id,shot_id,asset_content_hash,source_start_frame,
+					source_end_frame,boundary_version,boundary_kind,boundary_confidence,
+					lineage_parent_shot_id,representative_frames_json,description,tags_json,
+					subjects_json,actions_json,setting_json,shot_scale,composition,
+					lighting_json,mood_json,edit_hints_json,quality_json,search_text,
+					search_tokens_json,deep_coverage_json,created_at
+				) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				snapshot.ID, shot.ID, shot.AssetContentHash, shot.SourceStartFrame,
+				shot.SourceEndFrame, shot.BoundaryVersion, shot.BoundaryKind,
+				shot.BoundaryConfidence, shot.LineageParentShotID,
+				mustJSON(shot.RepresentativeFrames), shot.Description, mustJSON(shot.Tags),
+				mustJSON(shot.Subjects), mustJSON(shot.Actions), mustJSON(shot.Setting),
+				shot.ShotScale, shot.Composition, mustJSON(shot.Lighting),
+				mustJSON(shot.Mood), mustJSON(shot.EditHints), mustJSON(shot.Quality),
+				shot.SearchText, mustJSON(shot.SearchTokens), mustJSON(shot.DeepCoverage),
+				createdAt,
+			); err != nil {
+				return err
+			}
+		}
+	}
 	if checkpoint := rows.AgentContextCheckpoint; checkpoint != nil {
 		if checkpoint.DraftID == "" || checkpoint.WindowID == "" ||
 			checkpoint.WindowNumber < 1 || checkpoint.HistoryVersion < 1 ||
@@ -2300,6 +2414,7 @@ func emptyTimeline(draftID string, version int) map[string]any {
 func emptyResultRows(rows ResultRows) bool {
 	return rows.Message == nil && len(rows.MaterialSummaries) == 0 &&
 		len(rows.Transcripts) == 0 && len(rows.AssetAnalyses) == 0 &&
+		len(rows.ShotIndexSnapshots) == 0 &&
 		rows.AgentContextCheckpoint == nil &&
 		rows.DraftPlanUpdate == nil && len(rows.AgentJobObservationSuppressions) == 0 &&
 		len(rows.UserMemoryUpserts) == 0 && len(rows.UserMemoryRemoveKeys) == 0 &&

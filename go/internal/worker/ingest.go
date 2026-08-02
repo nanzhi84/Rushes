@@ -104,6 +104,14 @@ func RegisterIngest(registry *Registry, database *storage.DB) error {
 				}
 			}
 		}
+		if kind == "video" {
+			if err := ensureBaseShotIndexForAsset(
+				ctx, database, assetID, value(job.RequestedByDraftID),
+				claimedJobOptions(job, reducer.Options{CreatedAt: time.Now().UTC()}),
+			); err != nil {
+				return nil, err
+			}
+		}
 		if err := report(ctx, job, Progress(0.99)); err != nil {
 			return nil, err
 		}

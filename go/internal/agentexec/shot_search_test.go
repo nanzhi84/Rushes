@@ -398,7 +398,7 @@ func TestShotSearchReportsUnderstandingCoverageGap(t *testing.T) {
 	gap := gapRaw.(rushestools.ShotSearchResult)
 	if len(gap.MissingIndexAssetIDs) != 1 ||
 		!strings.Contains(gap.IndexCoverageNote, "1 个") ||
-		!strings.Contains(gap.IndexCoverageNote, "media.detect_shots") {
+		!strings.Contains(gap.IndexCoverageNote, "后台基础镜头索引") {
 		t.Fatalf("存在未理解素材时应报告覆盖缺口: %#v", gap)
 	}
 

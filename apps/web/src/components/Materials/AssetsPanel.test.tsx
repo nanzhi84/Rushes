@@ -217,20 +217,16 @@ describe("AssetsPanel 单击试看 / 右键摘要", () => {
 });
 
 describe("MaterialSummaryPanel 理解语义澄清", () => {
-  it("未理解时提示镜头检测是对话里按需调用的工具（media.detect_shots）", () => {
+  it("未理解时提示基础镜头索引会由导入流程自动排队", () => {
     renderSummary(makeAsset({ understanding_status: "none" }));
 
-    expect(
-      screen.getByText(
-        /尚未理解。剪辑对话中，代理会按需调用镜头检测工具（media\.detect_shots）生成摘要/
-      )
-    ).toBeTruthy();
+    expect(screen.getByText(/基础镜头索引会在导入完成后自动排队/)).toBeTruthy();
   });
 
-  it("理解中时提示无需手动等待", () => {
+  it("理解中时提示后台索引不阻塞剪辑", () => {
     renderSummary(makeAsset({ understanding_status: "running" }));
 
-    expect(screen.getByText(/正在理解该素材/)).toBeTruthy();
+    expect(screen.getByText(/正在后台建立基础镜头索引；不阻塞继续剪辑/)).toBeTruthy();
   });
 });
 

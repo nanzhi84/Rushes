@@ -13,13 +13,42 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
+	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
+
+type baseIndexVisionModel struct{}
+
+func (baseIndexVisionModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return baseIndexVisionModel{}, nil
+}
+
+func (baseIndexVisionModel) Generate(
+	context.Context,
+	[]*schema.Message,
+	...model.Option,
+) (*schema.Message, error) {
+	return schema.AssistantMessage(`{"overall":"黄色测试画面","semantic_role":"b_roll","segments":[{"id":"s000","description":"黄色纯色测试画面，全景居中构图","tags":["黄色","测试画面"],"quality":"usable","subjects":["测试画面"],"actions":[],"setting":["纯色背景"],"shot_scale":"全景","composition":"居中构图","lighting":["均匀"],"mood":["中性"],"edit_hints":["测试"]}]}`, nil), nil
+}
+
+func (value baseIndexVisionModel) Stream(
+	ctx context.Context,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.StreamReader[*schema.Message], error) {
+	message, err := value.Generate(ctx, messages, options...)
+	if err != nil {
+		return nil, err
+	}
+	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
+}
 
 func TestClaimPriorityHeartbeatRetryAndStaleRecovery(t *testing.T) {
 	t.Parallel()
@@ -923,6 +952,19 @@ func TestIngestHandlerProducesProbeThumbnailProxyAndProgress(t *testing.T) {
 	if progress < 3 || terminal != 1 {
 		t.Fatalf("progress=%d terminal=%d", progress, terminal)
 	}
+	var baseJobs, snapshots int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM jobs WHERE kind='understand' AND status='pending' AND asset_id='asset_video'`,
+	).Scan(&baseJobs); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM shot_index_snapshots`).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if baseJobs != 1 || snapshots != 0 || asset.UnderstandingStatus != "running" {
+		t.Fatalf("ingest 必须先 ready 再异步索引: base_jobs=%d snapshots=%d understanding=%s",
+			baseJobs, snapshots, asset.UnderstandingStatus)
+	}
 }
 
 func TestIngestHandlerProducesWaveformPeaksForAudioAsset(t *testing.T) {
@@ -1130,7 +1172,9 @@ func TestUnderstandHandlerCompletesSingleAssetAndRejectsBatchShape(t *testing.T)
 		},
 	}}, contracts.ActorUser, now)
 	registry := NewRegistry()
-	if err := RegisterUnderstand(registry, database, nil); err != nil {
+	if err := RegisterUnderstand(
+		registry, database, understanding.NewAnalyzer(baseIndexVisionModel{}),
+	); err != nil {
 		t.Fatal(err)
 	}
 	handler, err := registry.Require("understand")
@@ -1160,7 +1204,7 @@ func TestUnderstandHandlerCompletesSingleAssetAndRejectsBatchShape(t *testing.T)
 		replayProgress = append(replayProgress, update.Progress)
 		return nil
 	})
-	if err != nil || result["analyzed"] != true ||
+	if err != nil || result["analyzed"] != false || result["cache_hit"] != true ||
 		!reflect.DeepEqual(replayProgress, []float64{1}) {
 		t.Fatalf("replay result=%#v progress=%v err=%v", result, replayProgress, err)
 	}
@@ -1200,6 +1244,26 @@ func TestUnderstandHandlerCompletesSingleAssetAndRejectsBatchShape(t *testing.T)
 	if len(versions) != 2 || versions[0] != 1 || versions[1] != 2 {
 		t.Fatalf("summary versions=%v", versions)
 	}
+	var readySnapshots, supersededSnapshots, distinctShotIDs, maxBoundaryVersion int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM shot_index_snapshots
+		WHERE asset_content_hash=? AND status='ready'`, assetID).Scan(&readySnapshots); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM shot_index_snapshots
+		WHERE asset_content_hash=? AND status='superseded'`, assetID).Scan(&supersededSnapshots); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(DISTINCT shot_id),MAX(boundary_version) FROM shots
+		WHERE asset_content_hash=?`, assetID).Scan(&distinctShotIDs, &maxBoundaryVersion); err != nil {
+		t.Fatal(err)
+	}
+	if readySnapshots != 1 || supersededSnapshots != 1 || distinctShotIDs != 1 || maxBoundaryVersion != 1 {
+		t.Fatalf("ready=%d superseded=%d distinct_shots=%d boundary_version=%d",
+			readySnapshots, supersededSnapshots, distinctShotIDs, maxBoundaryVersion)
+	}
 	if _, err := handler(t.Context(), Job{ID: "missing", Payload: map[string]any{}}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
 		t.Fatal("missing asset should fail")
 	}
@@ -1208,6 +1272,129 @@ func TestUnderstandHandlerCompletesSingleAssetAndRejectsBatchShape(t *testing.T)
 		Payload: map[string]any{"asset_id": assetID, "asset_ids": []string{assetID}},
 	}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
 		t.Fatal("batch payload should fail")
+	}
+}
+
+func TestBaseShotIndexSingleflightReusesContentAcrossAssetHandles(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg 未安装")
+	}
+	database := testDatabase(t)
+	source := filepath.Join(database.Paths.Temporary, "same-content.mp4")
+	if _, err := media.RunCommand(t.Context(), "ffmpeg", "-y", "-f", "lavfi", "-i",
+		"color=c=yellow:s=160x120:d=1", "-c:v", "libx264", "-pix_fmt", "yuv420p", source); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, draftID := range []string{"draft_content_a", "draft_content_b"} {
+		createDraft(t, database, draftID, now)
+	}
+	for index, assetID := range []string{"asset_content_a", "asset_content_b"} {
+		draftID := []string{"draft_content_a", "draft_content_b"}[index]
+		apply(t, database, []contracts.Event{
+			{Type: "AssetImported", Payload: map[string]any{
+				"asset_id": assetID, "job_id": "import_" + assetID,
+				"storage_mode": "reference", "reference_path": source,
+				"kind": "video", "source": "local_path", "filename": assetID + ".mp4",
+				"hash": "same-content-hash", "size": 1,
+				"probe": map[string]any{"duration_sec": 1}, "ingest_status": "ready", "usable": true,
+			}},
+			{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{"asset_id": assetID}},
+		}, contracts.ActorUser, now)
+	}
+	if err := EnqueueBaseShotIndexBackfill(t.Context(), database); err != nil {
+		t.Fatal(err)
+	}
+	var pending int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM jobs WHERE kind='understand'`).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("understand jobs=%d want=1 err=%v", pending, err)
+	}
+	registry := NewRegistry()
+	if err := RegisterUnderstand(
+		registry, database, understanding.NewAnalyzer(baseIndexVisionModel{}),
+	); err != nil {
+		t.Fatal(err)
+	}
+	runner, err := NewRunner(RunnerConfig{Database: database, Registry: registry, WorkerID: "content-reuse"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if worked, runErr := runner.RunOnce(t.Context()); runErr != nil || !worked {
+		t.Fatalf("worked=%v err=%v", worked, runErr)
+	}
+	var snapshots, shots, summaries int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM shot_index_snapshots WHERE asset_content_hash='same-content-hash' AND status='ready'`,
+	).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM shots WHERE asset_content_hash='same-content-hash'`,
+	).Scan(&shots); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM material_summaries
+		WHERE asset_id IN ('asset_content_a','asset_content_b') AND status='ready'`,
+	).Scan(&summaries); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 1 || shots != 1 || summaries != 2 {
+		t.Fatalf("snapshots=%d shots=%d summaries=%d", snapshots, shots, summaries)
+	}
+	for _, assetID := range []string{"asset_content_a", "asset_content_b"} {
+		asset, getErr := storage.GetAsset(t.Context(), database.Read(), assetID)
+		if getErr != nil || asset.UnderstandingStatus != "ready" {
+			t.Fatalf("asset=%s status=%s err=%v", assetID, asset.UnderstandingStatus, getErr)
+		}
+	}
+
+	// A later import of the same bytes reuses the published content snapshot.
+	// It receives its own material summary/status without another VLM job.
+	createDraft(t, database, "draft_content_c", now)
+	apply(t, database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "asset_content_c", "job_id": "import_asset_content_c",
+			"storage_mode": "reference", "reference_path": source,
+			"kind": "video", "source": "local_path", "filename": "asset_content_c.mp4",
+			"hash": "same-content-hash", "size": 1,
+			"probe": map[string]any{"duration_sec": 1}, "ingest_status": "ready", "usable": true,
+		}},
+		{Type: "AssetLinked", DraftID: "draft_content_c", Payload: map[string]any{"asset_id": "asset_content_c"}},
+	}, contracts.ActorUser, now)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO material_summaries(
+			summary_id,asset_id,version,status,summary_json,created_at
+		) VALUES('legacy_content_c','asset_content_c',1,'ready',
+			'{"asset_id":"asset_content_c","overall":"legacy"}',?)`,
+		now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		UPDATE assets SET understanding_status='ready' WHERE asset_id='asset_content_c'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := EnqueueBaseShotIndexBackfill(t.Context(), database); err != nil {
+		t.Fatal(err)
+	}
+	var jobsAfterReuse, summariesAfterReuse int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM jobs WHERE kind='understand'",
+	).Scan(&jobsAfterReuse); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM material_summaries
+		WHERE asset_id IN ('asset_content_a','asset_content_b','asset_content_c') AND status='ready'`,
+	).Scan(&summariesAfterReuse); err != nil {
+		t.Fatal(err)
+	}
+	reusedAsset, err := storage.GetAsset(t.Context(), database.Read(), "asset_content_c")
+	if err != nil || jobsAfterReuse != 1 || summariesAfterReuse != 4 ||
+		reusedAsset.UnderstandingStatus != "ready" {
+		t.Fatalf("reuse jobs=%d summaries=%d asset=%#v err=%v",
+			jobsAfterReuse, summariesAfterReuse, reusedAsset, err)
 	}
 }
 

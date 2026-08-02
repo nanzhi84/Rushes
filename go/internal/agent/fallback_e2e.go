@@ -6,18 +6,16 @@ import (
 	"context"
 	"errors"
 	"strings"
-	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 const (
-	e2eBlockUntilCancelMarker    = "E2E_BLOCK_UNTIL_CANCEL"
-	e2eCancelUnderstandingMarker = "E2E_CANCEL_UNDERSTANDING"
-	e2eFullMainlineMarker        = "E2E_FULL_MAINLINE"
-	e2eMemoryWriteMarker         = "E2E_MEMORY_WRITE"
-	e2eMemoryStatusMarker        = "E2E_MEMORY_STATUS"
+	e2eBlockUntilCancelMarker = "E2E_BLOCK_UNTIL_CANCEL"
+	e2eFullMainlineMarker     = "E2E_FULL_MAINLINE"
+	e2eMemoryWriteMarker      = "E2E_MEMORY_WRITE"
+	e2eMemoryStatusMarker     = "E2E_MEMORY_STATUS"
 )
 
 type e2eFallbackScaffold struct {
@@ -37,9 +35,6 @@ func (scaffold *e2eFallbackScaffold) TryHandle(
 	case strings.Contains(content, e2eBlockUntilCancelMarker):
 		<-ctx.Done()
 		return "", true, ctx.Err()
-	case strings.Contains(content, e2eCancelUnderstandingMarker):
-		reply, err := scaffold.cancelDuringUnderstanding(ctx, draftID)
-		return reply, true, err
 	case strings.Contains(content, e2eFullMainlineMarker):
 		reply, err := scaffold.service.fallbackMainline(ctx, draftID)
 		return reply, true, err
@@ -74,43 +69,4 @@ func (scaffold *e2eFallbackScaffold) TryHandle(
 	default:
 		return "", false, nil
 	}
-}
-
-func (scaffold *e2eFallbackScaffold) cancelDuringUnderstanding(
-	ctx context.Context,
-	draftID string,
-) (reply string, resultErr error) {
-	listed, err := scaffold.service.executor.ToolListAssets(
-		ctx,
-		draftID,
-		rushestools.AssetListInput{OnlyUsable: agentexec.BoolPointer(true)},
-	)
-	if err != nil {
-		return "", err
-	}
-	if len(listed.Assets) == 0 {
-		return "", errors.New("E2E 素材理解取消脚手架缺少可用素材")
-	}
-	logicalInput := rushestools.DetectShotsInput{
-		AssetID: listed.Assets[0].AssetID, Depth: "deep", MaxStepsPerAsset: 8,
-	}
-	reporter := scaffold.service.toolReporter(ctx, draftID)
-	reporter(ctx, "media.detect_shots", "started", logicalInput, nil, nil)
-	var output any
-	defer func() {
-		reporter(ctx, "media.detect_shots", "finished", logicalInput, output, resultErr)
-	}()
-	output, resultErr = scaffold.service.ExecuteTool(ctx, "media.detect_shots", logicalInput)
-	if resultErr != nil {
-		return "", resultErr
-	}
-	// Keep the synthetic Agent turn alive while the real async job runs so E2E
-	// can exercise both the per-job cancel action and whole-turn cancellation.
-	select {
-	case <-ctx.Done():
-		resultErr = ctx.Err()
-		return "", resultErr
-	case <-time.After(30 * time.Second):
-	}
-	return "素材理解已完成。", nil
 }

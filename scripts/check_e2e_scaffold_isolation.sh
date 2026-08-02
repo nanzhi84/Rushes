@@ -15,7 +15,6 @@ LC_ALL=C strings "$TMP/rushes-api-e2e" > "$TMP/e2e.strings"
 
 markers=(
   E2E_BLOCK_UNTIL_CANCEL
-  E2E_CANCEL_UNDERSTANDING
   E2E_FULL_MAINLINE
 )
 for marker in "${markers[@]}"; do

@@ -147,9 +147,9 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 	seedSurfaceAsset(t, service, draftID)
 	assertSurface(
 		"读取口播台词和气口证据",
-		[]string{"speech.search", "media.detect_shots", "shot.search"},
+		[]string{"speech.search", "shot.search"},
 		[]string{
-			"speech.transcribe", "audio.analyze_speech_pauses",
+			"media.detect_shots", "speech.transcribe", "audio.analyze_speech_pauses",
 			"timeline.insert", "timeline.delete", "timeline.update",
 			"timeline.split", "preview.generate",
 		},
@@ -192,8 +192,8 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 	setSurfaceTimelineState(t, service, draftID, false)
 	assertSurface(
 		"完成口播气口和重说清理",
-		[]string{"speech.search", "shot.search", "media.detect_shots"},
-		[]string{"timeline.update"},
+		[]string{"speech.search", "shot.search"},
+		[]string{"media.detect_shots", "timeline.update"},
 	)
 	assertSurface(
 		"验证时间线后渲染预览",
@@ -473,7 +473,6 @@ func TestTimelineEditSurfaceCanDiscoverAndInsertNewShot(t *testing.T) {
 	names := surfaceNames(specs)
 	for _, name := range []string{
 		"asset.list_assets",
-		"media.detect_shots",
 		"shot.search",
 	} {
 		if !containsName(names, name) {

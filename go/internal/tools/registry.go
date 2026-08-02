@@ -755,15 +755,15 @@ func registerAssetList(registry *Registry) error {
 }
 
 func registerDetectShots(registry *Registry) error {
-	return addTool[DetectShotsInput, DetectShotsResult](registry, "media.detect_shots", "为一个视频素材建立或刷新可检索的逐镜头证据；每次只接收一个 asset_id，多素材必须并行调用；相同参数默认复用持久化结果，force_refresh 强制刷新；调用会在当前 turn 内等待并返回终态摘要，不需要轮询或让用户继续", []string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyDetect, CostHigh, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit))
+	return addTool[DetectShotsInput, DetectShotsResult](registry, "media.detect_shots", "Harness 为视频素材建立或刷新可检索的持久基础镜头索引；普通导入完成后自动排队，同内容哈希跨草稿复用", []string{"usable_asset_exists"}, ExposureHarness, EffectReversible, false,
+		harnessMetadata(FamilyDetect, CostHigh))
 }
 
 func registerShotSearch(registry *Registry) error {
 	return addTool[ShotSearchInput, ShotSearchResult](
 		registry,
 		"shot.search",
-		"只读搜索既有镜头索引；按创作意图返回稳定 shot_id、精确源帧、语义与匹配证据。未建立索引的素材只会列为 detection_candidates；先并行调用 media.detect_shots，再用同一意图重搜，禁止把候选素材臆造为 shot_id",
+		"只读搜索既有镜头索引；按创作意图返回稳定 shot_id、精确源帧、语义与匹配证据。未建立索引的素材只会列为 detection_candidates；告知用户后台索引尚未完成并稍后重搜，禁止把候选素材臆造为 shot_id",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
 		terminalMetadata(FamilyRead, CostStandard, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit),
 	)

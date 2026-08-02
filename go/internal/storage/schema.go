@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 22
+const schemaVersion = 23
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -572,4 +572,68 @@ CREATE TABLE IF NOT EXISTS asset_analyses (
 
 CREATE INDEX IF NOT EXISTS ix_asset_analyses_content_type
 ON asset_analyses(asset_content_hash, analysis_type, created_at DESC);
+`
+
+// schemaV23 publishes content-addressed base-shot indexes atomically. A ready
+// snapshot is immutable: rebuilding the same bytes creates a new generation
+// and marks the previous ready generation superseded in the same reducer
+// transaction. Shot identity is independent from one asset handle and from
+// mutable source boundaries, so another draft can reuse the index while still
+// addressing a shot as asset_id + shot_id.
+const schemaV23 = `
+CREATE TABLE IF NOT EXISTS shot_index_snapshots (
+    index_snapshot_id TEXT PRIMARY KEY,
+    asset_content_hash TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK(generation >= 1),
+    analyzer_version TEXT NOT NULL,
+    output_schema_version INTEGER NOT NULL CHECK(output_schema_version >= 1),
+    source_asset_id TEXT REFERENCES assets(asset_id) ON DELETE SET NULL,
+    status TEXT NOT NULL CHECK(status IN ('ready','superseded','failed')),
+    summary_json TEXT NOT NULL,
+    failure_json TEXT,
+    created_at TEXT NOT NULL,
+    published_at TEXT,
+    UNIQUE(asset_content_hash, generation)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_shot_index_ready_content
+ON shot_index_snapshots(asset_content_hash) WHERE status='ready';
+
+CREATE INDEX IF NOT EXISTS ix_shot_index_content_generation
+ON shot_index_snapshots(asset_content_hash, generation DESC);
+
+CREATE TABLE IF NOT EXISTS shots (
+    index_snapshot_id TEXT NOT NULL REFERENCES shot_index_snapshots(index_snapshot_id) ON DELETE CASCADE,
+    shot_id TEXT NOT NULL,
+    asset_content_hash TEXT NOT NULL,
+    source_start_frame INTEGER NOT NULL CHECK(source_start_frame >= 0),
+    source_end_frame INTEGER NOT NULL CHECK(source_end_frame > source_start_frame),
+    boundary_version INTEGER NOT NULL CHECK(boundary_version >= 1),
+    boundary_kind TEXT NOT NULL,
+    boundary_confidence REAL,
+    lineage_parent_shot_id TEXT,
+    representative_frames_json TEXT NOT NULL,
+    description TEXT NOT NULL,
+    tags_json TEXT NOT NULL,
+    subjects_json TEXT NOT NULL,
+    actions_json TEXT NOT NULL,
+    setting_json TEXT NOT NULL,
+    shot_scale TEXT NOT NULL,
+    composition TEXT NOT NULL,
+    lighting_json TEXT NOT NULL,
+    mood_json TEXT NOT NULL,
+    edit_hints_json TEXT NOT NULL,
+    quality_json TEXT NOT NULL,
+    search_text TEXT NOT NULL,
+    search_tokens_json TEXT NOT NULL,
+    deep_coverage_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(index_snapshot_id, shot_id)
+);
+
+CREATE INDEX IF NOT EXISTS ix_shots_content_identity
+ON shots(asset_content_hash, shot_id);
+
+CREATE INDEX IF NOT EXISTS ix_shots_snapshot_range
+ON shots(index_snapshot_id, source_start_frame, source_end_frame, shot_id);
 `

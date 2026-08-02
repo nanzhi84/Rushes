@@ -106,15 +106,15 @@ export function MaterialSummaryPanel({
   );
 }
 
-/** 未就绪时的提示：镜头检测是对话里按需调用的工具（media.detect_shots），不在导入流程里。 */
+/** 基础镜头索引由 ingest 后台排队，素材卡只展示持久化状态。 */
 function understandingHint(status: string): string {
   if (status === "running") {
-    return "正在理解该素材，稍候摘要就会出现，结果会缓存——无需手动等待。";
+    return "正在后台建立基础镜头索引；不阻塞继续剪辑，完成后摘要会自动出现。";
   }
   if (status === "failed") {
-    return "上次理解失败。可在剪辑对话中让代理重试镜头检测工具（media.detect_shots）。";
+    return "后台基础镜头索引失败；请检查 worker 配置后重试。";
   }
-  return "尚未理解。剪辑对话中，代理会按需调用镜头检测工具（media.detect_shots）生成摘要，结果会缓存——无需手动等待。";
+  return "基础镜头索引会在导入完成后自动排队；当前仍在等待后台 worker。";
 }
 
 function formatTags(segment: MaterialSummarySegment): string {

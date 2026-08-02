@@ -19,7 +19,6 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
-	"github.com/nanzhi84/Rushes/go/internal/understanding"
 )
 
 func TestDetectShotsSingleAssetAsyncRouting(t *testing.T) {
@@ -35,7 +34,7 @@ func TestDetectShotsSingleAssetAsyncRouting(t *testing.T) {
 			input: rushestools.DetectShotsInput{
 				AssetID: "asset_deep", Focus: "  人物   动作  ", Depth: "deep", MaxStepsPerAsset: 11,
 			},
-			wantDepth: "deep",
+			wantDepth: "scan",
 		},
 		{
 			name: "force_refresh",
@@ -73,34 +72,32 @@ func TestDetectShotsSingleAssetAsyncRouting(t *testing.T) {
 			if fingerprint, _ := job.Payload["analysis_fingerprint"].(string); fingerprint == "" {
 				t.Fatalf("job 缺少单素材 fingerprint: %#v", job.Payload)
 			}
-			if test.name == "deep" && job.Payload["focus"] != "人物 动作" {
-				t.Fatalf("focus 未规范化: %#v", job.Payload)
+			if job.Payload["focus"] != "" {
+				t.Fatalf("基础标注不得被一次查询 focus 污染: %#v", job.Payload)
 			}
 		})
 	}
 }
 
-func TestDetectShotsSingleScanInlineAndCancelable(t *testing.T) {
+func TestDetectShotsSingleScanEnqueuesAndIsCancelable(t *testing.T) {
 	t.Parallel()
-	t.Run("inline", func(t *testing.T) {
+	t.Run("enqueued", func(t *testing.T) {
 		t.Parallel()
-		const draftID = "draft_detect_inline"
-		database, service := setupUnderstandRoutingService(t, draftID, "asset_inline")
-		result, err := executeDetectShots(service, t.Context(), draftID, rushestools.DetectShotsInput{
-			AssetID: "asset_inline", Depth: "scan", Focus: "主体",
+		const draftID = "draft_detect_enqueued"
+		database, service := setupUnderstandRoutingService(t, draftID, "asset_enqueued")
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		defer cancel()
+		result, err := executeDetectShots(service, ctx, draftID, rushestools.DetectShotsInput{
+			AssetID: "asset_enqueued", Depth: "scan", Focus: "主体",
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if result.Status != "succeeded" || result.Summary == nil || !result.Analyzed || result.CacheHit {
+		if result.Status != string(rushestools.StatusTimeout) || result.JobID == "" {
 			t.Fatalf("result=%#v", result)
 		}
-		if got := countUnderstandRoutingJobs(t, database, draftID); got != 0 {
-			t.Fatalf("single scan jobs=%d want=0", got)
-		}
-		started, completed := countUnderstandingLifecycleEvents(t, database, "asset_inline")
-		if started != 1 || completed != 1 {
-			t.Fatalf("started=%d completed=%d", started, completed)
+		if got := countUnderstandRoutingJobs(t, database, draftID); got != 1 {
+			t.Fatalf("single scan jobs=%d want=1", got)
 		}
 	})
 
@@ -122,27 +119,8 @@ func TestDetectShotsSingleScanInlineAndCancelable(t *testing.T) {
 	})
 }
 
-func TestDetectShotsCacheAndIdempotentEnqueue(t *testing.T) {
+func TestDetectShotsIdempotentEnqueue(t *testing.T) {
 	t.Parallel()
-	t.Run("cache", func(t *testing.T) {
-		t.Parallel()
-		const draftID = "draft_detect_cache"
-		const assetID = "asset_cache"
-		database, service := setupUnderstandRoutingService(t, draftID, assetID)
-		input := rushestools.DetectShotsInput{AssetID: assetID, Focus: "动作", Depth: "scan"}
-		cacheUnderstandRoutingSummary(t, database, assetID, input)
-		result, err := executeDetectShots(service, t.Context(), draftID, input)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if result.Status != "succeeded" || result.Summary == nil || !result.CacheHit || result.Analyzed {
-			t.Fatalf("result=%#v", result)
-		}
-		if got := countUnderstandRoutingJobs(t, database, draftID); got != 0 {
-			t.Fatalf("cache jobs=%d want=0", got)
-		}
-	})
-
 	t.Run("concurrent", func(t *testing.T) {
 		t.Parallel()
 		const draftID = "draft_detect_concurrent"
@@ -194,6 +172,43 @@ func TestDetectShotsCacheAndIdempotentEnqueue(t *testing.T) {
 			t.Fatalf("concurrent jobs=%d want=1", got)
 		}
 	})
+}
+
+func TestDetectShotsSharesPendingContentJobAcrossDrafts(t *testing.T) {
+	t.Parallel()
+	database, service := setupUnderstandRoutingService(t, "draft_shared_a", "asset_shared_a")
+	agenttest.CreateAgentDraft(t, database, "draft_shared_b")
+	addUnderstandRoutingAsset(t, database, "draft_shared_b", "asset_shared_b")
+	if _, err := database.Write().ExecContext(t.Context(), `
+		UPDATE assets SET hash='shared-content-hash'
+		WHERE asset_id IN ('asset_shared_a','asset_shared_b')`); err != nil {
+		t.Fatal(err)
+	}
+
+	var sharedJobID string
+	for _, fixture := range []struct {
+		draftID string
+		assetID string
+	}{{"draft_shared_a", "asset_shared_a"}, {"draft_shared_b", "asset_shared_b"}} {
+		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+		result, err := executeDetectShots(service, ctx, fixture.draftID, rushestools.DetectShotsInput{
+			AssetID: fixture.assetID,
+		})
+		cancel()
+		if err != nil || result.Status != string(rushestools.StatusTimeout) || result.JobID == "" {
+			t.Fatalf("draft=%s result=%#v err=%v", fixture.draftID, result, err)
+		}
+		if sharedJobID == "" {
+			sharedJobID = result.JobID
+		} else if result.JobID != sharedJobID {
+			t.Fatalf("job=%s want shared job=%s", result.JobID, sharedJobID)
+		}
+	}
+	var jobs int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM jobs WHERE kind='understand'`).Scan(&jobs); err != nil || jobs != 1 {
+		t.Fatalf("jobs=%d want=1 err=%v", jobs, err)
+	}
 }
 
 func TestDetectShotsRejectsForeignAssetBeforeSideEffect(t *testing.T) {
@@ -336,46 +351,6 @@ func understandSideEffectCounts(t *testing.T, database *storage.DB) [3]int {
 	return counts
 }
 
-func cacheUnderstandRoutingSummary(
-	t *testing.T,
-	database *storage.DB,
-	assetID string,
-	input rushestools.DetectShotsInput,
-) {
-	t.Helper()
-	asset, err := storage.GetAsset(t.Context(), database.Read(), assetID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	options := understanding.NormalizeAnalyzeOptions(asset, understanding.AnalyzeOptions{
-		Focus: input.Focus, Depth: input.Depth, MaxStepsPerAsset: input.MaxStepsPerAsset,
-	})
-	fingerprint := understanding.AnalysisFingerprint(asset, options)
-	focus := options.Focus
-	model := "fixture"
-	promptVersion := understanding.PromptVersion
-	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
-		Actor: contracts.ActorAgent,
-		ResultRows: reducer.ResultRows{MaterialSummaries: []reducer.MaterialSummaryRow{{
-			ID: "summary_cached_" + assetID, AssetID: assetID, Status: "ready",
-			Focus: &focus, Model: &model, Fingerprint: &fingerprint, PromptVersion: &promptVersion,
-			Summary: map[string]any{
-				"asset_id": assetID, "version": 2, "focus": focus,
-				"semantic_role": "visual", "overall": "缓存摘要 " + assetID,
-				"segments": []map[string]any{{
-					"start_s": 0, "end_s": 1, "source_start_frame": 0, "source_end_frame": 30,
-					"description": "缓存证据 " + assetID, "tags": []string{"font"}, "quality": "usable",
-				}},
-				"generated_at": "2026-07-15T00:00:00Z", "model": model,
-				"analysis_method": "fixture", "analysis_depth": options.Depth, "analysis_steps": 1,
-			},
-		}}},
-	})
-	if err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("cache asset=%s result=%#v err=%v", assetID, result, err)
-	}
-}
-
 func readUnderstandRoutingJob(t *testing.T, database *storage.DB, jobID string) understandRoutingJob {
 	t.Helper()
 	var job understandRoutingJob
@@ -402,40 +377,6 @@ func countUnderstandRoutingJobs(t *testing.T, database *storage.DB, draftID stri
 		t.Fatal(err)
 	}
 	return count
-}
-
-func countUnderstandingLifecycleEvents(t *testing.T, database *storage.DB, assetID string) (int, int) {
-	t.Helper()
-	rows, err := database.Read().QueryContext(t.Context(), `
-		SELECT event_type, payload_json FROM event_log
-		WHERE event_type IN ('MaterialUnderstandingStarted','MaterialUnderstandingCompleted')`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = rows.Close() }()
-	started, completed := 0, 0
-	for rows.Next() {
-		var eventType, raw string
-		if err := rows.Scan(&eventType, &raw); err != nil {
-			t.Fatal(err)
-		}
-		var event contracts.Event
-		if err := json.Unmarshal([]byte(raw), &event); err != nil {
-			t.Fatal(err)
-		}
-		if event.Payload["asset_id"] != assetID {
-			continue
-		}
-		if eventType == "MaterialUnderstandingStarted" {
-			started++
-		} else {
-			completed++
-		}
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	return started, completed
 }
 
 func executeDetectShots(
