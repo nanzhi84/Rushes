@@ -252,6 +252,17 @@ func TestAutomaticPreviewQARenderFailureLeavesTimelineUnchanged(t *testing.T) {
 func TestAutomaticPreviewQATriggerAndClaimBoundaries(t *testing.T) {
 	base := withTerminalTimelineTruthState(t.Context(), newTerminalTimelineTruthState())
 	completed := schema.AssistantMessage("已完成，可交付。", nil)
+	if !automaticPreviewNeedsVisual([]*schema.Message{
+		schema.UserMessage("请检查画面构图。"),
+	}) {
+		t.Fatal("用户任务明确需要画面检查时必须执行 visual advisory")
+	}
+	if automaticPreviewNeedsVisual([]*schema.Message{
+		schema.UserMessage("只检查解码、黑帧、静帧、静音和响度。"),
+		schema.AssistantMessage("画面视觉检查已完成。", nil),
+	}) {
+		t.Fatal("模型候选措辞不得把五项核心检查升级成 visual advisory")
+	}
 	if got := automaticPreviewQATrigger(base, []*schema.Message{
 		schema.UserMessage("请生成预览。"),
 	}, completed); got != "explicit_preview_or_qa_request" {

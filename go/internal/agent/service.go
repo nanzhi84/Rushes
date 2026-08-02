@@ -636,7 +636,7 @@ func (service *Service) fallbackTurn(
 	if requestsPreviewBoundaryOnly(withoutNegatedSurfaceActions(strings.ToLower(content))) {
 		report := service.executeFallbackPreviewQA(
 			ctx, draftID, "explicit_preview_or_qa_request",
-			automaticPreviewNeedsVisual([]*schema.Message{schema.UserMessage(content)}, nil),
+			automaticPreviewNeedsVisual([]*schema.Message{schema.UserMessage(content)}),
 		)
 		return report.Summary, nil
 	}

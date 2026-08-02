@@ -195,7 +195,7 @@ func (service *Service) runAutomaticPreviewQA(
 	}
 	report := service.executeAutomaticPreviewQA(
 		ctx, draftID, automaticPreviewQATrigger(ctx, messages, candidate),
-		automaticPreviewNeedsVisual(messages, candidate),
+		automaticPreviewNeedsVisual(messages),
 	)
 	encoded, err := json.Marshal(report)
 	if err != nil {
@@ -211,14 +211,11 @@ func (service *Service) runAutomaticPreviewQA(
 	return message, nil
 }
 
-func automaticPreviewNeedsVisual(
-	messages []*schema.Message,
-	candidate *schema.Message,
-) bool {
+func automaticPreviewNeedsVisual(messages []*schema.Message) bool {
+	// visual 是高成本、按任务需要执行的 advisory。终态候选只是模型准备提交的
+	// 文本，不能反向扩大用户任务范围；否则模型随口提到“画面”就会把明确的
+	// 五项信号检查升级成视觉模型调用。
 	text := latestUserSurfaceText(messages)
-	if candidate != nil {
-		text += "\n" + strings.ToLower(candidate.Content)
-	}
 	return containsSurfaceKeyword(text,
 		"视觉", "画面", "字幕", "文字", "水印", "裁切", "裁边", "构图", "调色",
 		"颜色", "转场", "遮挡", "黑边", "主体", "b-roll", "broll", "visual",
