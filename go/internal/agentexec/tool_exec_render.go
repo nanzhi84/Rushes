@@ -52,7 +52,7 @@ func (exec *Executor) enqueuePreviewRender(
 				"current_timeline_id":        document.TimelineID,
 				"current_timeline_version":   timelineVersion,
 				"current_timeline_unchanged": true,
-				"recovery":                   "调用 timeline.inspect 读取当前 timeline_id；确认仍符合目标后，只重试当前预览生成。",
+				"recovery":                   "读取下一次 provider 调用前刷新的 CurrentTimelineView；确认仍符合目标后，只重试当前预览生成。",
 			},
 		}, nil
 	}
@@ -164,10 +164,10 @@ func (exec *Executor) toolGeneratePreview(
 	if input.TimelineID == "" {
 		return rushestools.ToolResult{
 			Status:      string(rushestools.StatusFailed),
-			Observation: "preview.generate 需要 timeline.inspect 返回的 timeline_id",
+			Observation: "preview.generate 需要 CurrentTimelineView 中的 timeline_id",
 			Data: map[string]any{
 				"current_timeline_unchanged": true,
-				"recovery":                   "先调用 timeline.inspect，再原样传入当前 timeline_id。",
+				"recovery":                   "从 Harness 注入的 CurrentTimelineView 原样传入当前 timeline_id。",
 			},
 		}, nil
 	}

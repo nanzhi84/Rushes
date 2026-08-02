@@ -1533,8 +1533,8 @@ func (exec *Executor) toolSearchSpeech(
 		"不属于现成 repetition/fragment 证据的句内卡壳或半句重说，才需要 include_words=true 取得连续 word_id 与 source frame；short_speech_fragments 中 earlier_take_before_repeated_phrase_restart 会暴露共同短语、分叉尾部与停顿组成的完整较早说法，避免只删尾部留下半句。" +
 		"执行删除时优先把明确选定的 asset_id 与 source range 原样交给 timeline.delete(kind=delete_source_range, asset_id, source_start_frame, source_end_frame)；" +
 		"source 坐标跨前序 ripple 保持稳定，服务端只在当前 visual_base 存在唯一连续映射时执行，映射缺失、断裂或歧义会失败且不会猜测替代目标。" +
-		"只有操作本身以 timeline range 为目标时，才先用 timeline.inspect 读取当前映射并调用 delete_range；依赖易变 timeline clip ID 或坐标的其它后续编辑，在前一步改变映射后必须重新读取。" +
-		"波纹删除后为保留台词放置 B-roll 时，先从 timeline.inspect 取得覆盖目标 source range 的最新 A-roll timeline_clip_id，再用该 ID 重查原句；直接采用返回的 timeline_start_frame，不得拿 clip 起点或自行估算偏移。"
+		"只有操作本身以 timeline range 为目标时，才从 CurrentTimelineView 读取当前映射并调用 delete_range；依赖易变 timeline clip ID 或坐标的其它后续编辑，在前一步改变映射后必须读取 Harness 刷新的视图。" +
+		"波纹删除后为保留台词放置 B-roll 时，从 CurrentTimelineView 取得覆盖目标 source range 的最新 A-roll timeline_clip_id，再用该 ID 重查原句；直接采用返回的 timeline_start_frame，不得拿 clip 起点或自行估算偏移。"
 	if includeWords && wordTotal == 0 {
 		usageNote += "当前持久化索引没有词级时间戳（例如来源仅为 SRT）；不能猜 word_id，可使用逐句证据或配置带词时间戳的 ASR 后重新转写。"
 	}

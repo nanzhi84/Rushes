@@ -28,16 +28,15 @@ import (
 )
 
 type dynamicPreviewQAReactModel struct {
-	mu              sync.Mutex
-	draftID         string
-	timelineID      string
-	previewID       string
-	bound           []string
-	surfaces        [][]string
-	versions        []int
-	leaseSeen       bool
-	calls           int
-	inspectAfterFix bool
+	mu         sync.Mutex
+	draftID    string
+	timelineID string
+	previewID  string
+	bound      []string
+	surfaces   [][]string
+	versions   []int
+	leaseSeen  bool
+	calls      int
 }
 
 func (stub *dynamicPreviewQAReactModel) WithTools(
@@ -135,36 +134,11 @@ func (stub *dynamicPreviewQAReactModel) Generate(
 		if !hasSuccessfulDynamicPreviewToolResult(messages, "timeline.update", 1) {
 			return nil, errors.New("timeline.update 终态结果未回灌")
 		}
-		if containsName(bound, "timeline.inspect") && !containsName(bound, "timeline.check") {
-			stub.inspectAfterFix = true
-			return schema.AssistantMessage("", []schema.ToolCall{{
-				ID: "dynamic_preview_fix_inspect",
-				Function: schema.FunctionCall{
-					Name:      "timeline.inspect",
-					Arguments: fmt.Sprintf(`{"timeline_id":%q}`, stub.draftID+":v2"),
-				},
-			}}), nil
+		if containsName(bound, "timeline.inspect") || containsName(bound, "timeline.check") {
+			return nil, fmt.Errorf("Harness 内部工具泄漏给 provider: %v", bound)
 		}
-		if !containsName(bound, "timeline.check") {
-			return nil, fmt.Errorf("修正后既不能 inspect 也不能 check: %v", bound)
-		}
-		return dynamicPreviewQACheckCall(stub.draftID), nil
-	case 5:
-		if stub.inspectAfterFix {
-			if !hasSuccessfulDynamicPreviewToolResult(messages, "timeline.inspect", 1) ||
-				!containsName(bound, "timeline.check") {
-				return nil, fmt.Errorf("修正后观察屏障未回到检查面: %v", bound)
-			}
-			return dynamicPreviewQACheckCall(stub.draftID), nil
-		}
-		if !hasSuccessfulDynamicPreviewToolResult(messages, "timeline.check", 1) {
-			return nil, errors.New("timeline.check 终态结果未回灌")
-		}
-		return schema.AssistantMessage("动态 preview QA 已在同一 turn 修正并验证。", nil), nil
-	case 6:
-		if !stub.inspectAfterFix ||
-			!hasSuccessfulDynamicPreviewToolResult(messages, "timeline.check", 1) {
-			return nil, errors.New("修正后的 timeline.check 终态结果未回灌")
+		if !hasAutomaticTimelineCheckEvidence(messages, stub.draftID+":v2") {
+			return nil, errors.New("mutation 回执缺少精确版本的 Harness 自动检查证据")
 		}
 		return schema.AssistantMessage("动态 preview QA 已在同一 turn 修正并验证。", nil), nil
 	default:
@@ -257,13 +231,25 @@ func dynamicPreviewQAClipStartsAt(view map[string]any, clipID string, sourceStar
 	return false
 }
 
-func dynamicPreviewQACheckCall(draftID string) *schema.Message {
-	return schema.AssistantMessage("", []schema.ToolCall{{
-		ID: "dynamic_preview_revalidate",
-		Function: schema.FunctionCall{
-			Name: "timeline.check", Arguments: fmt.Sprintf(`{"timeline_id":%q}`, draftID+":v2"),
-		},
-	}})
+func hasAutomaticTimelineCheckEvidence(messages []*schema.Message, timelineID string) bool {
+	for _, message := range messages {
+		if message == nil || message.Role != schema.Tool || message.ToolName != "timeline.update" {
+			continue
+		}
+		var result struct {
+			Data map[string]json.RawMessage `json:"data"`
+		}
+		if json.Unmarshal([]byte(message.Content), &result) != nil {
+			continue
+		}
+		var check rushestools.ToolResult
+		if json.Unmarshal(result.Data[automaticTimelineCheckDataKey], &check) == nil &&
+			check.Status == string(rushestools.StatusSucceeded) &&
+			agentexec.InterfaceString(check.Data["timeline_id"]) == timelineID {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDynamicPreviewQAReActReturnsToMutationAndRefreshesTimeline(t *testing.T) {
@@ -352,7 +338,7 @@ func TestDynamicPreviewQAReActReturnsToMutationAndRefreshesTimeline(t *testing.T
 	}
 
 	calls, surfaces, versions, leaseSeen := provider.snapshot()
-	if calls < 5 || calls > 6 || len(surfaces) != calls || len(versions) != calls {
+	if calls != 4 || len(surfaces) != calls || len(versions) != calls {
 		t.Fatalf("calls=%d surfaces=%v versions=%v", calls, surfaces, versions)
 	}
 	if !containsName(surfaces[0], "preview.generate") ||
@@ -374,6 +360,36 @@ func TestDynamicPreviewQAReActReturnsToMutationAndRefreshesTimeline(t *testing.T
 	}
 	if recoveryState.unresolved() {
 		t.Fatalf("preview QA 后仍有未解决 recovery: %s", recoveryState.summary())
+	}
+	events, _, unsubscribe := service.Hub().Subscribe(draftID)
+	unsubscribe()
+	assertAutomaticTimelineCheckStream(t, events, draftID+":v2")
+}
+
+func assertAutomaticTimelineCheckStream(t *testing.T, events []StreamEvent, timelineID string) {
+	t.Helper()
+	var stepID string
+	progressSeen := false
+	finishedSeen := false
+	for _, event := range events {
+		if event["tool"] != "timeline.check" || event["harness_owned"] != true {
+			continue
+		}
+		switch event["type"] {
+		case TurnStreamToolStepStarted:
+			stepID, _ = event["step_id"].(string)
+			if !strings.Contains(agentexec.InterfaceString(event["args_summary"]), timelineID) {
+				t.Fatalf("Harness started 缺少精确版本: %#v", event)
+			}
+		case TurnStreamToolStepProgress:
+			progressSeen = event["step_id"] == stepID && event["progress"] == 0.5
+		case TurnStreamToolStepFinished:
+			finishedSeen = event["step_id"] == stepID && event["progress"] == 1 &&
+				event["duration_ms"] != nil
+		}
+	}
+	if stepID == "" || !progressSeen || !finishedSeen {
+		t.Fatalf("自动检查流不完整: step=%q progress=%v finished=%v", stepID, progressSeen, finishedSeen)
 	}
 }
 
@@ -565,21 +581,10 @@ func TestPreviewQAWorkflowRunsChecksInParallelThenAppliesOneAtomicFix(t *testing
 		t.Fatalf("timeline.check spec=%#v exists=%v", checkSpec, exists)
 	}
 	beforeValidation := previewQABusinessSnapshot(t, database, draftID)
-	validationMessages, err := router.Invoke(ctx, &schema.Message{
-		Role: schema.Assistant,
-		ToolCalls: []schema.ToolCall{{
-			ID: "preview_qa_revalidate",
-			Function: schema.FunctionCall{
-				Name: "timeline.check", Arguments: `{}`,
-			},
-		}},
-	})
-	if err != nil || len(validationMessages) != 1 {
-		t.Fatalf("timeline revalidation=%#v err=%v", validationMessages, err)
-	}
-	var validation rushestools.ToolResult
-	if err := json.Unmarshal([]byte(validationMessages[0].Content), &validation); err != nil {
-		t.Fatal(err)
+	validationRaw, err := service.ExecuteTool(ctx, "timeline.check", rushestools.TimelineCheckInput{})
+	validation, ok := terminalTruthToolResult(validationRaw)
+	if err != nil || !ok {
+		t.Fatalf("timeline revalidation=%#v err=%v", validationRaw, err)
 	}
 	afterValidation := previewQABusinessSnapshot(t, database, draftID)
 	if validation.Status != string(rushestools.StatusSucceeded) ||

@@ -213,8 +213,8 @@ type currentTimelineClipEntry struct {
 // For long timelines it retains a bounded, recent-edit-relevant clip window and
 // turns every track into compact topology: the track remains present, reports
 // its complete clip counts, and embeds only clips that also appear in the root
-// clips array. The omitted metadata is sufficient to decide when the model must
-// call timeline.inspect for the full document.
+// clips array. The model may mutate only IDs present in this authoritative view;
+// the Harness refreshes the view after every mutation.
 func buildCurrentTimelineContext(
 	document timeline.Document,
 	batches []storage.TimelineEditBatch,
@@ -311,7 +311,7 @@ func buildCurrentTimelineContext(
 			"anchor_clip_refs":         anchorRefs,
 		},
 		"omitted_ranges": omittedRanges,
-		"inspect_hint":   "当前视图省略了窗口外片段；需要完整轨道、片段 ID、效果或元数据时调用 timeline.inspect 读取当前 timeline_id。",
+		"mutation_hint":  "当前视图省略了窗口外片段；只可编辑 clips 中明确出现的 ID。每次写入后 Harness 会刷新这一视图。",
 	}
 	return tracks, clips, compaction
 }

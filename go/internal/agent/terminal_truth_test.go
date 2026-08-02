@@ -12,6 +12,7 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -19,10 +20,9 @@ import (
 )
 
 type terminalTruthScriptModel struct {
-	mu                 sync.Mutex
-	round              int
-	mode               string
-	mutationTimelineID string
+	mu    sync.Mutex
+	round int
+	mode  string
 }
 
 func (script *terminalTruthScriptModel) WithTools(
@@ -57,48 +57,16 @@ func (script *terminalTruthScriptModel) Generate(
 		if result.Status != string(rushestools.StatusSucceeded) {
 			return nil, fmt.Errorf("mutation result=%#v", result)
 		}
-		if script.mode == "missing" {
-			return schema.AssistantMessage("已经全部完成。", nil), nil
+		timelineID := agentexec.InterfaceString(result.Data["timeline_id"])
+		encoded, _ := json.Marshal(result.Data[automaticTimelineCheckDataKey])
+		var check rushestools.ToolResult
+		if json.Unmarshal(encoded, &check) != nil ||
+			check.Status != string(rushestools.StatusSucceeded) ||
+			agentexec.InterfaceString(check.Data["timeline_id"]) != timelineID {
+			return nil, fmt.Errorf("automatic check result=%s mutation=%#v", encoded, result)
 		}
 		if script.mode == "provider_error" {
 			return nil, errors.New("provider failed after timeline mutation")
-		}
-		script.mutationTimelineID = result.Data["timeline_id"].(string)
-		arguments, _ := json.Marshal(rushestools.TimelineInspectInput{
-			TimelineID: script.mutationTimelineID,
-		})
-		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID: "inspect",
-			Function: schema.FunctionCall{
-				Name: "timeline.inspect", Arguments: string(arguments),
-			},
-		}}), nil
-	case 3:
-		result, err := latestTerminalTruthToolResult(messages)
-		if err != nil {
-			return nil, err
-		}
-		if result.Status != string(rushestools.StatusSucceeded) {
-			return nil, fmt.Errorf("inspect result=%#v", result)
-		}
-		timelineID := script.mutationTimelineID
-		if script.mode == "stale" {
-			timelineID = strings.TrimSuffix(timelineID, ":v2") + ":v1"
-		}
-		arguments, _ := json.Marshal(rushestools.TimelineCheckInput{TimelineID: timelineID})
-		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID: "check",
-			Function: schema.FunctionCall{
-				Name: "timeline.check", Arguments: string(arguments),
-			},
-		}}), nil
-	case 4:
-		result, err := latestTerminalTruthToolResult(messages)
-		if err != nil {
-			return nil, err
-		}
-		if result.Status != string(rushestools.StatusSucceeded) {
-			return nil, fmt.Errorf("check result=%#v", result)
 		}
 		return schema.AssistantMessage("已经全部完成。", nil), nil
 	default:
@@ -132,17 +100,15 @@ func latestTerminalTruthToolResult(messages []*schema.Message) (rushestools.Tool
 	return rushestools.ToolResult{}, fmt.Errorf("missing tool result")
 }
 
-func TestTerminalTimelineTruthRequiresLatestSuccessfulCheckBeforeReply(t *testing.T) {
+func TestTerminalTimelineTruthUsesAutomaticExactVersionCheckBeforeReply(t *testing.T) {
 	for _, test := range []struct {
 		mode        string
 		wantOutcome string
 		wantContent string
 		wantKind    string
 	}{
-		{mode: "missing", wantOutcome: "failed", wantContent: "尚未对这个最新版本执行成功", wantKind: "turn_failure"},
-		{mode: "provider_error", wantOutcome: "failed", wantContent: "尚未对这个最新版本执行成功", wantKind: "turn_failure"},
-		{mode: "stale", wantOutcome: "failed", wantContent: "最后成功检查的是", wantKind: "turn_failure"},
 		{mode: "passing", wantOutcome: "finished", wantContent: "已经全部完成。", wantKind: "reply"},
+		{mode: "provider_error", wantOutcome: "failed", wantContent: "provider failed after timeline mutation", wantKind: "turn_failure"},
 	} {
 		t.Run(test.mode, func(t *testing.T) {
 			draftID := "draft_terminal_truth_" + test.mode
@@ -200,7 +166,7 @@ func TestTerminalTimelineTruthRequiresLatestSuccessfulCheckBeforeReply(t *testin
 					outcome, kind, deltas.String(), completed,
 				)
 			}
-			if test.mode != "passing" && strings.Contains(completed, "已经全部完成") {
+			if test.mode == "provider_error" && strings.Contains(completed, "已经全部完成") {
 				t.Fatalf("unverified success text leaked: %q", completed)
 			}
 			latest, err := timeline.Latest(t.Context(), database, draftID)

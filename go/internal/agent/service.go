@@ -140,9 +140,12 @@ func newServiceWithModels(
 				// 阻止模型绕过未披露能力。
 				Tools:               registry.EinoTools(true, false),
 				UnknownToolsHandler: unknownToolRecoveryHandler,
-				ToolCallMiddlewares: []compose.ToolMiddleware{newToolRecoveryMiddleware(
-					retrySafeFromEffect(registry.Effect), registry.ModelReceiptPolicy,
-				)},
+				ToolCallMiddlewares: []compose.ToolMiddleware{
+					newToolRecoveryMiddleware(
+						retrySafeFromEffect(registry.Effect), registry.ModelReceiptPolicy,
+					),
+					newAutomaticTimelineTruthMiddleware(service),
+				},
 			},
 			registry.Spec,
 			// 多主题口播可能需要 30 轮以上的模型/工具往返，因此将真实预算保留到 40 轮；
@@ -267,6 +270,10 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	// model_retry.go 的既有护栏写法一致。
 	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 		return finishCancelled(err)
+	}
+	if truthErr := service.ensureTerminalTimelineTruth(ctx, item.DraftID); truthErr != nil {
+		err = truthErr
+		content = ""
 	}
 	if guardErr := service.terminalReplyGuard(ctx, item.DraftID); guardErr != nil {
 		// 即便 provider 在成功写入或工具调用之后又返回普通错误，也必须优先暴露
@@ -838,6 +845,7 @@ func previewCheckFromToolReport(name string, input any) string {
 func (service *Service) persistToolTrace(
 	ctx context.Context,
 	draftID, stepID, name, status, argsSummary, observation, previewID, previewCheck string,
+	metadata ...map[string]any,
 ) error {
 	record := map[string]any{
 		"step_id": stepID, "tool": name, "status": status,
@@ -848,6 +856,11 @@ func (service *Service) persistToolTrace(
 	}
 	if previewCheck != "" {
 		record["preview_check"] = previewCheck
+	}
+	if len(metadata) > 0 {
+		for key, value := range metadata[0] {
+			record[key] = value
+		}
 	}
 	content, err := json.Marshal(record)
 	if err != nil {
@@ -937,17 +950,17 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 		if timelineID == "" {
 			return "", &terminalReplyGuardError{kind: "timeline_check_missing"}
 		}
-		_, checkErr := service.executeConfirmedReported(
-			ctx,
-			item.DraftID,
-			"timeline.check",
-			rushestools.TimelineCheckInput{TimelineID: timelineID},
-			map[string]any{"timeline_id": timelineID},
-		)
+		truth := terminalTimelineTruthFromContext(ctx)
+		truth.recordMutationTimelineID(timelineID)
+		check, checkErr := service.executeAutomaticTimelineCheck(ctx, item.DraftID, timelineID)
 		if checkErr != nil {
 			return "", &terminalReplyGuardError{
 				kind: "timeline_check_missing", mutationTimelineID: timelineID,
 			}
+		}
+		truth.recordTimelineCheckResult(agentexec.InterfaceString(check.Data["timeline_id"]), check.Status)
+		if check.Status == string(rushestools.StatusValidationFailed) {
+			return result.Observation + "\n自动检查仍有未通过项：" + check.Observation, nil
 		}
 	}
 	if result.Observation != "" {

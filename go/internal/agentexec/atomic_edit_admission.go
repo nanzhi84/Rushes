@@ -126,7 +126,7 @@ func atomicEditAdmissionFailure(
 	targetClipID string,
 ) rushestools.ToolResult {
 	observation := "本条 assistant 消息开始时不存在该 timeline_clip_id，不能依赖同消息内新生成或猜测的 ID。"
-	recovery := "等待当前工具消息全部返回；下一轮先调用 timeline.inspect 观察最新稳定 ID，再提交依赖该 ID 的原子编辑。"
+	recovery := "等待当前工具消息全部返回；下一次 provider 调用读取 Harness 刷新的 CurrentTimelineView，再提交依赖最新稳定 ID 的原子编辑。"
 	data := map[string]any{
 		"dependency_requires_observation": true,
 		"current_timeline_unchanged":      true,
@@ -136,7 +136,7 @@ func atomicEditAdmissionFailure(
 	}
 	if decision == atomicEditUnobservedTimelineCoordinate {
 		observation = "前一个原子编辑已改变时间线坐标，本条 assistant 消息不能继续使用尚未重新观察的时间线帧。"
-		recovery = "等待当前工具消息全部返回；下一轮先调用 timeline.inspect 读取最新帧范围，再提交依赖时间线坐标的原子编辑。稳定 timeline_clip_id 或 asset_id + source range 不受此限制。"
+		recovery = "等待当前工具消息全部返回；下一次 provider 调用读取 Harness 刷新的 CurrentTimelineView，再提交依赖最新帧范围的原子编辑。稳定 timeline_clip_id 或 asset_id + source range 不受此限制。"
 		data["coordinate_dependency"] = "timeline_frames_after_prior_edit"
 	}
 	return rushestools.ToolFailure(

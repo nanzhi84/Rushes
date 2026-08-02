@@ -231,6 +231,46 @@ describe("reduceTurnStream · subagent_progress", () => {
     expect(state.subagentProgress).toEqual([]);
   });
 
+  it("Harness 工具步骤保留进度、耗时与归属", () => {
+    const state = apply([
+      { type: "turn_started", turn_id: "turn_1" },
+      {
+        type: "tool_step_started",
+        step_id: "h1",
+        tool: "timeline.check",
+        progress: 0,
+        harness_owned: true
+      },
+      {
+        type: "tool_step_progress",
+        step_id: "h1",
+        tool: "timeline.check",
+        progress: 0.5,
+        note: "正在校验精确时间线版本",
+        harness_owned: true
+      },
+      {
+        type: "tool_step_finished",
+        step_id: "h1",
+        tool: "timeline.check",
+        status: "succeeded",
+        progress: 1,
+        duration_ms: 12,
+        harness_owned: true
+      }
+    ]);
+    expect(state.items).toEqual([
+      expect.objectContaining({
+        type: "tool",
+        step_id: "h1",
+        status: "succeeded",
+        progress: 1,
+        durationMs: 12,
+        harnessOwned: true
+      })
+    ]);
+  });
+
   it("turn_started 重置上一回合的残留进度", () => {
     const state = apply([
       { type: "turn_started", turn_id: "turn_1" },

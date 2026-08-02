@@ -123,17 +123,14 @@ func TestSpeechTranscribeBuildsSidecarAndSearchStaysReadOnly(t *testing.T) {
 		"按可安全删除时长从长到短", "previous_context",
 		"timeline.delete(kind=delete_source_range", "asset_id 与 source range",
 		"跨前序 ripple 保持稳定", "映射缺失、断裂或歧义",
-		"只有操作本身以 timeline range 为目标时", "timeline.inspect", "delete_range",
+		"只有操作本身以 timeline range 为目标时", "CurrentTimelineView", "Harness 刷新的视图", "delete_range",
 	} {
 		if !strings.Contains(first.UsageNote, required) {
 			t.Fatalf("usage note missing %q: %s", required, first.UsageNote)
 		}
 	}
-	if strings.Contains(
-		first.UsageNote,
-		"先用 timeline.inspect 把明确选定的 source range 映射到当前时间线",
-	) {
-		t.Fatalf("usage note retained stale source-to-timeline workflow: %s", first.UsageNote)
+	if strings.Contains(first.UsageNote, "timeline.inspect") {
+		t.Fatalf("usage note retained model-authored timeline.inspect workflow: %s", first.UsageNote)
 	}
 	second, err := exec.toolSearchSpeech(t.Context(), "draft_speech_sidecar", rushestools.SpeechSearchInput{
 		AssetID: "asset_speech_sidecar", Query: "第一句", MaxUtterances: 1,

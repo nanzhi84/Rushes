@@ -267,7 +267,9 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 }
 
 const (
-	modelToolSchemaTotalBaselineRunes = 19432
+	// Issue #157 PR2 reviewed baseline: moving timeline.inspect/check to the
+	// Harness reduced the LLM catalog from 21 tools / 19,432 runes to 19 / 18,828.
+	modelToolSchemaTotalBaselineRunes = 18828
 	maxAtomicTimelineToolSchemaRunes  = 4400
 )
 
@@ -287,10 +289,8 @@ var modelToolSchemaBaselineRunes = map[string]int{
 	"shot.search":                 964,
 	"speech.search":               1199,
 	"speech.transcribe":           486,
-	"timeline.check":              308,
 	"timeline.delete":             1299,
-	"timeline.insert":             1679,
-	"timeline.inspect":            300,
+	"timeline.insert":             1677,
 	"timeline.split":              495,
 	"timeline.update":             4332,
 }

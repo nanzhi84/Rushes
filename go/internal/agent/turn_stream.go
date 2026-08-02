@@ -23,6 +23,7 @@ const (
 	TurnStreamTextDelta               = "text_delta"
 	TurnStreamMessageCompleted        = "message_completed"
 	TurnStreamToolStepStarted         = "tool_step_started"
+	TurnStreamToolStepProgress        = "tool_step_progress"
 	TurnStreamToolStepFinished        = "tool_step_finished"
 	TurnStreamModelRetry              = "model_retry"
 	TurnStreamContextCompactionFailed = "context_compaction_failed"
@@ -37,6 +38,7 @@ var knownTurnStreamTypes = []string{
 	TurnStreamTextDelta,
 	TurnStreamMessageCompleted,
 	TurnStreamToolStepStarted,
+	TurnStreamToolStepProgress,
 	TurnStreamToolStepFinished,
 	TurnStreamModelRetry,
 	contracts.TurnStreamSubagentProgress,

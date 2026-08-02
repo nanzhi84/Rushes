@@ -23,6 +23,7 @@ type terminalTimelineTruthState struct {
 	mutationProofInvalid bool
 	checkSequence        uint64
 	checkTimelineID      string
+	checkStatus          string
 	checkProofInvalid    bool
 }
 
@@ -32,6 +33,7 @@ type terminalTimelineTruthSnapshot struct {
 	mutationProofInvalid bool
 	checkSequence        uint64
 	checkTimelineID      string
+	checkStatus          string
 	checkProofInvalid    bool
 }
 
@@ -89,34 +91,64 @@ func terminalTimelineTruthFromContext(ctx context.Context) *terminalTimelineTrut
 }
 
 func (state *terminalTimelineTruthState) recordToolResult(name, status string, output any) {
-	if state == nil || status != "succeeded" {
+	if state == nil || (status != "succeeded" && name != "timeline.check") {
 		return
 	}
 	result, ok := terminalTruthToolResult(output)
-	if !ok || result.Status != string(rushestools.StatusSucceeded) {
+	if !ok {
 		return
 	}
 	timelineID := agentexec.InterfaceString(result.Data["timeline_id"])
-	state.mu.Lock()
-	defer state.mu.Unlock()
 	switch {
 	case isTerminalTimelineMutation(name):
-		if !isValidTimelineVersionID(timelineID) {
-			state.mutationProofInvalid = true
-			return
+		if result.Status == string(rushestools.StatusSucceeded) {
+			state.recordMutationTimelineID(timelineID)
 		}
-		state.mutationSequence++
-		state.mutationTimelineID = timelineID
-		state.mutationProofInvalid = false
 	case name == "timeline.check":
-		if !isValidTimelineVersionID(timelineID) {
-			state.checkProofInvalid = true
-			return
-		}
-		state.checkSequence = state.mutationSequence
-		state.checkTimelineID = timelineID
-		state.checkProofInvalid = false
+		state.recordTimelineCheckResult(timelineID, result.Status)
 	}
+}
+
+// recordMutationTimelineID is deliberately idempotent. The automatic truth middleware
+// records the durable version before running timeline.check, while the registry reporter
+// records the same mutation again when its deferred finished event is flushed.
+func (state *terminalTimelineTruthState) recordMutationTimelineID(timelineID string) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if !isValidTimelineVersionID(timelineID) {
+		state.mutationProofInvalid = true
+		return
+	}
+	if state.mutationTimelineID != timelineID {
+		state.mutationSequence++
+	}
+	state.mutationTimelineID = timelineID
+	state.mutationProofInvalid = false
+}
+
+// A validation_failed timeline.check is still authoritative evidence that the exact
+// version was checked. It must reach the model without rolling back the committed edit.
+func (state *terminalTimelineTruthState) recordTimelineCheckResult(timelineID, status string) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if status != string(rushestools.StatusSucceeded) &&
+		status != string(rushestools.StatusValidationFailed) {
+		return
+	}
+	if !isValidTimelineVersionID(timelineID) {
+		state.checkProofInvalid = true
+		return
+	}
+	state.checkSequence = state.mutationSequence
+	state.checkTimelineID = timelineID
+	state.checkStatus = status
+	state.checkProofInvalid = false
 }
 
 func isValidTimelineVersionID(timelineID string) bool {
@@ -145,6 +177,7 @@ func (state *terminalTimelineTruthState) snapshot() terminalTimelineTruthSnapsho
 		mutationProofInvalid: state.mutationProofInvalid,
 		checkSequence:        state.checkSequence,
 		checkTimelineID:      state.checkTimelineID,
+		checkStatus:          state.checkStatus,
 		checkProofInvalid:    state.checkProofInvalid,
 	}
 }

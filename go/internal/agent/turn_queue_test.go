@@ -647,7 +647,7 @@ func TestTurnStreamHubSnapshotAllTypesAndSlowSubscriber(t *testing.T) {
 	hub := NewTurnStreamHub(2)
 	allTypes := []string{
 		"turn_started", "text_delta", "message_completed", "tool_step_started",
-		"tool_step_finished", "subagent_progress", "model_retry", "turn_ended", "turn_error",
+		"tool_step_progress", "tool_step_finished", "subagent_progress", "model_retry", "turn_ended", "turn_error",
 	}
 	for _, typeName := range allTypes[:3] {
 		hub.Record("draft", StreamEvent{"type": typeName})
@@ -683,7 +683,9 @@ func TestTurnStreamHubSnapshotAllTypesAndSlowSubscriber(t *testing.T) {
 		!strings.Contains(string(retryFrame), `"max_retries":5`) {
 		t.Fatalf("retry frame=%q err=%v", retryFrame, err)
 	}
-	for _, typeName := range allTypes[3:6] {
+	for _, typeName := range []string{
+		TurnStreamToolStepStarted, TurnStreamToolStepFinished, "subagent_progress",
+	} {
 		hub.Record("draft", StreamEvent{"type": typeName})
 	}
 	select {
