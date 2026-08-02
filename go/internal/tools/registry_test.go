@@ -293,25 +293,22 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 	}
 
 	typedAdapters := map[string]bool{
-		"asset.list_assets":           true,
-		"media.detect_shots":          false,
-		"shot.search":                 true,
-		"audio.analyze_beats":         true,
-		"audio.analyze_speech_pauses": true,
-		"speech.transcribe":           true,
-		"speech.search":               false,
-		"interaction.ask_user":        false,
-		"decision.answer":             false,
-		"plan.update":                 false,
-		"memory.set":                  false,
-		"memory.remove":               false,
-		"timeline.insert":             false,
-		"timeline.delete":             false,
-		"timeline.update":             false,
-		"timeline.split":              false,
-		"preview.generate":            false,
-		"preview.check":               true,
-		"interaction.confirm_action":  false,
+		"asset.list_assets":          true,
+		"media.detect_shots":         false,
+		"shot.search":                true,
+		"speech.search":              false,
+		"interaction.ask_user":       false,
+		"decision.answer":            false,
+		"plan.update":                false,
+		"memory.set":                 false,
+		"memory.remove":              false,
+		"timeline.insert":            false,
+		"timeline.delete":            false,
+		"timeline.update":            false,
+		"timeline.split":             false,
+		"preview.generate":           false,
+		"preview.check":              true,
+		"interaction.confirm_action": false,
 	}
 	waitingUser := map[string]bool{
 		"interaction.ask_user":       true,
@@ -423,8 +420,8 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		"asset.import_local_file":     EffectReversible, // harness-only
 		"asset.list_assets":           EffectReadOnly,
 		"shot.search":                 EffectReadOnly,
-		"audio.analyze_beats":         EffectReadOnly,
-		"audio.analyze_speech_pauses": EffectReadOnly,
+		"audio.analyze_beats":         EffectReversible,
+		"audio.analyze_speech_pauses": EffectReversible,
 		"timeline.inspect":            EffectReadOnly,
 		"preview.check":               EffectReadOnly,
 		"preview.generate":            EffectReversible,
@@ -1092,14 +1089,15 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	if !containsSpec(allowed, "timeline.insert") {
 		t.Fatal("空时间线应允许模型用首个原子 insert 建立 v1")
 	}
-	if !containsSpec(allowed, "audio.analyze_beats") {
-		t.Fatal("可用素材存在后节拍分析未放行")
+	for _, internal := range []string{
+		"audio.analyze_beats", "audio.analyze_speech_pauses", "speech.transcribe",
+	} {
+		if containsSpec(allowed, internal) {
+			t.Fatalf("Harness 内部分析工具不得进入模型允许集: %s", internal)
+		}
 	}
-	if !containsSpec(allowed, "audio.analyze_speech_pauses") {
-		t.Fatal("可用素材存在后气口分析未放行")
-	}
-	if containsSpec(allowed, "speech.search") {
-		t.Fatal("没有任何 transcript 索引时不应披露 speech.search")
+	if !containsSpec(allowed, "speech.search") {
+		t.Fatal("speech.search 应在 Harness 自动确保 transcript 前即可披露")
 	}
 	if _, err := database.Write().ExecContext(t.Context(), `
 		INSERT INTO transcripts(

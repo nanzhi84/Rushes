@@ -280,12 +280,19 @@ func TestResultRowsCommitWithReducer(t *testing.T) {
 				ID: "t1", AssetID: "asset-1", ProviderID: "degraded", RawPreserved: true,
 				Utterances: []map[string]any{}, VADSegments: []map[string]any{},
 			}},
+			AssetAnalyses: []AssetAnalysisRow{{
+				ID: "analysis-1", AssetContentHash: "hash-1", AnalysisType: "beat_grid",
+				AnalyzerVersion: "fixture-v1", NormalizedOptionsJSON: `{}`,
+				OutputSchemaVersion: 1, Result: map[string]any{"bpm": 120},
+			}},
 		},
 	})
 	if err != nil || result.Status != StatusApplied {
 		t.Fatalf("result=%#v err=%v", result, err)
 	}
-	for _, table := range []string{"assets", "messages", "material_summaries", "transcripts"} {
+	for _, table := range []string{
+		"assets", "messages", "material_summaries", "transcripts", "asset_analyses",
+	} {
 		var count int
 		if err := database.Read().QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil || count != 1 {
 			t.Fatalf("%s count=%d err=%v", table, count, err)

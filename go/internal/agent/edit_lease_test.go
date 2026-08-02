@@ -402,17 +402,14 @@ func TestDiscoveryProviderCallsNeverAcquireTimelineEditLease(t *testing.T) {
 
 func TestReadOnlyBeatAndTranscriptAnalysisNeverAcquireTimelineEditLease(t *testing.T) {
 	for index, test := range []struct {
-		prompt   string
-		toolName string
-		exact    bool
+		prompt          string
+		expectedVisible string
 	}{
-		{prompt: "分析 BGM 拍点", toolName: "audio.analyze_beats"},
+		{prompt: "分析 BGM 拍点"},
 		{
-			prompt:   "分析当前卡点混剪的 BGM 素材 asset_surface，返回完整可用拍点证据；只做分析，不编辑时间线。",
-			toolName: "audio.analyze_beats",
-			exact:    true,
+			prompt: "分析当前卡点混剪的 BGM 素材 asset_surface，返回完整可用拍点证据；只做分析，不编辑时间线。",
 		},
-		{prompt: "读取口播逐字稿", toolName: "speech.transcribe"},
+		{prompt: "读取口播逐字稿", expectedVisible: "speech.search"},
 	} {
 		t.Run(test.prompt, func(t *testing.T) {
 			database := agenttest.AgentTestDatabase(t)
@@ -443,30 +440,32 @@ func TestReadOnlyBeatAndTranscriptAnalysisNeverAcquireTimelineEditLease(t *testi
 			if _, err := surface.Generate(turnCtx, []*schema.Message{user}); err != nil {
 				t.Fatal(err)
 			}
-			if !containsName(spy.bound[0], test.toolName) {
-				t.Fatalf("只读分析缺少 %s: %v", test.toolName, spy.bound[0])
+			firstBound := []string{}
+			if len(spy.bound) > 0 {
+				firstBound = spy.bound[0]
 			}
-			if test.exact && (len(spy.bound[0]) != 1 || spy.bound[0][0] != test.toolName) {
-				t.Fatalf("真实只读分析工具面=%v want=[%s]", spy.bound[0], test.toolName)
+			for _, internal := range []string{
+				"audio.analyze_beats", "audio.analyze_speech_pauses", "speech.transcribe",
+			} {
+				if containsName(firstBound, internal) {
+					t.Fatalf("Harness 内部工具泄露到模型面: %s in %v", internal, firstBound)
+				}
 			}
-			if containsTimelineMutationTool(spy.bound[0]) {
-				t.Fatalf("只读分析泄露 mutation: %v", spy.bound[0])
+			if test.expectedVisible != "" && !containsName(firstBound, test.expectedVisible) {
+				t.Fatalf("只读口播检索缺少 %s: %v", test.expectedVisible, firstBound)
 			}
-			if _, err := surface.Generate(turnCtx, []*schema.Message{
-				user,
-				schema.ToolMessage(
-					`{"status":"succeeded"}`,
-					"call-read-analysis",
-					schema.WithToolName(test.toolName),
-				),
-			}); err != nil {
+			if containsTimelineMutationTool(firstBound) {
+				t.Fatalf("只读分析泄露 mutation: %v", firstBound)
+			}
+			if _, err := surface.Generate(turnCtx, []*schema.Message{user}); err != nil {
 				t.Fatal(err)
 			}
-			if spy.calls != 2 || containsTimelineMutationTool(spy.bound[1]) {
-				t.Fatalf("分析终态后的工具面=%v calls=%d", spy.bound[1], spy.calls)
+			lastBound := firstBound
+			if len(spy.bound) > 1 {
+				lastBound = spy.bound[1]
 			}
-			if test.exact && (len(spy.bound[1]) != 1 || spy.bound[1][0] != test.toolName) {
-				t.Fatalf("真实只读分析终态工具面=%v want=[%s]", spy.bound[1], test.toolName)
+			if spy.calls != 2 || containsTimelineMutationTool(lastBound) {
+				t.Fatalf("分析终态后的工具面=%v calls=%d", lastBound, spy.calls)
 			}
 			if session.activeTurnID() != "" {
 				t.Fatalf("纯分析调用提前取得 edit lease: %q", session.activeTurnID())
@@ -508,7 +507,7 @@ func TestMixedBeatAnalysisAndTimelineEditBindsMutationUnderLease(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if spy.calls != 1 || !containsName(spy.bound[0], "audio.analyze_beats") ||
+	if spy.calls != 1 || containsName(spy.bound[0], "audio.analyze_beats") ||
 		!containsName(spy.bound[0], "timeline.insert") {
 		t.Fatalf("混合分析编辑工具面=%v calls=%d", spy.bound[0], spy.calls)
 	}
@@ -550,7 +549,7 @@ func TestBeatAnalysisThenCardEditBindsMutationUnderLease(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if spy.calls != 1 || !containsName(spy.bound[0], "audio.analyze_beats") ||
+	if spy.calls != 1 || containsName(spy.bound[0], "audio.analyze_beats") ||
 		!containsName(spy.bound[0], "timeline.insert") {
 		t.Fatalf("分析后编辑工具面=%v calls=%d", spy.bound[0], spy.calls)
 	}

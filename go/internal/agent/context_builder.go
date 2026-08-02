@@ -52,8 +52,9 @@ func (builder *ContextBuilder) Build(ctx context.Context, draftID string) (strin
 	return "【当前草稿最新 WorldState】\n" + string(raw) +
 		"\nsections 是当前客观状态的唯一事实源；历史回复和 recent_edit_history 不能覆盖它。" +
 		"user_memory 是跨草稿的用户长期偏好；与当前用户指令冲突时以本回合指令为准，并用 memory.set 更新记忆。" +
-		"assets.material_catalog 是常驻精简素材目录；详细镜头语义必须按创作意图调用 shot.search 检索；完整口播转写不常驻，speech_searchable=true 时按需调用 speech.search，缺少索引时先调用 speech.transcribe。" +
-		"timeline 中 beat_grid.waveform 仅常驻最多 24 点摘要：point_count 是完整压缩波形点数，sample_interval_frames 是原始 RMS 窗口宽度，sample_frames 是按 timeline_fps 标尺表示的摘要点素材内帧坐标并与 samples 一一对应，loudness_min/mean/max 汇总完整波形的 0–100 原始响度；完整波形必须按创作意图调用 audio.analyze_beats 获取，摘要不包含高潮标签。" +
+		"assets.material_catalog 是常驻精简素材目录；详细镜头语义必须按创作意图调用 shot.search 检索；完整口播转写不常驻，按需调用 speech.search，Harness 会先确保目标 transcript 就绪。" +
+		"assets.audio_roles 中已选 BGM 的 beat_analysis 是 Harness 持久化的完整拍点证据；若尚未出现，选定或插入 BGM 时 Harness 会自动分析并在下一次 provider 调用前注入。模型不得自行复制或构造 beat grid。" +
+		"timeline 中 beat_grid.waveform 仅常驻最多 24 点摘要：point_count 是完整压缩波形点数，sample_interval_frames 是原始 RMS 窗口宽度，sample_frames 是按 timeline_fps 标尺表示的摘要点素材内帧坐标并与 samples 一一对应，loudness_min/mean/max 汇总完整波形的 0–100 原始响度；摘要不包含高潮标签。" +
 		"人工编辑已经保存，不要要求用户重做；需要继续剪辑时直接基于当前轨道和片段。", nil
 }
 
@@ -100,6 +101,18 @@ func (builder *ContextBuilder) buildSnapshotMap(
 	readyUnderstanding := 0
 	assetByID := make(map[string]storage.Asset, len(assets))
 	audioRoles := make([]map[string]any, 0)
+	contentHashes := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		if asset.Hash != "" {
+			contentHashes = append(contentHashes, asset.Hash)
+		}
+	}
+	beatAnalyses, err := storage.LatestAssetAnalysesForContentHashes(
+		ctx, builder.database.Read(), contentHashes, agentexec.BeatAnalysisType,
+	)
+	if err != nil {
+		return nil, err
+	}
 	for _, asset := range assets {
 		kindCounts[asset.Kind]++
 		assetByID[asset.ID] = asset
@@ -108,10 +121,14 @@ func (builder *ContextBuilder) buildSnapshotMap(
 		}
 		if asset.Kind == "audio" {
 			duration, _ := agentexec.NumericValue(asset.Probe["duration_sec"])
-			audioRoles = append(audioRoles, map[string]any{
+			role := map[string]any{
 				"asset_id":       asset.ID,
 				"suggested_role": understanding.ClassifyAudioRole(asset.Filename, duration),
-			})
+			}
+			if analysis, exists := beatAnalyses[asset.Hash]; exists {
+				role["beat_analysis"] = beatAnalysisWorldState(analysis)
+			}
+			audioRoles = append(audioRoles, role)
 		}
 	}
 
@@ -199,6 +216,25 @@ func (builder *ContextBuilder) buildSnapshotMap(
 
 	// 最后一层递归清洗避免旧日志或外部输入把已废弃的版本字段重新带回模型。
 	return sanitizeContextMap(snapshot), nil
+}
+
+func beatAnalysisWorldState(analysis storage.AssetAnalysis) map[string]any {
+	result := map[string]any{
+		"analysis_id":           analysis.ID,
+		"analyzer_version":      analysis.AnalyzerVersion,
+		"output_schema_version": analysis.OutputSchemaVersion,
+	}
+	for _, key := range []string{
+		"bpm", "timeline_fps", "duration_frames", "beat_frames",
+		"strong_beat_frames", "downbeat_frames", "every_two_beat_frames",
+		"every_four_beat_frames", "bar_phase", "analysis_method", "truncated",
+		"phase_note",
+	} {
+		if value, exists := analysis.Result[key]; exists {
+			result[key] = value
+		}
+	}
+	return result
 }
 
 // userMemoryContext 把工作区级用户记忆按 last_confirmed_at DESC 顺序装进预算。

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -79,7 +80,7 @@ func TestInitialCompositionFixtureUsesSearchAndAtomicInserts(t *testing.T) {
 	}
 }
 
-func TestBeatCompositionFixtureUsesDetectorSearchAndAtomicEdits(t *testing.T) {
+func TestBeatCompositionFixtureUsesHarnessAnalysisSearchAndAtomicEdits(t *testing.T) {
 	fakeBin := t.TempDir()
 	for name, body := range map[string]string{
 		"aubiotrack": "#!/bin/sh\nprintf '0.000000\\n1.000000\\n2.000000\\n3.000000\\n4.000000\\n'\n",
@@ -114,14 +115,11 @@ func TestBeatCompositionFixtureUsesDetectorSearchAndAtomicEdits(t *testing.T) {
 	ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
 	trace := []string{}
 
-	beatsRaw, err := service.ExecuteTool(ctx, "audio.analyze_beats", rushestools.AudioBeatAnalysisInput{
-		AssetID: "beat_bgm", MaxBeats: 64, WaveformPoints: 16,
-	})
+	beats, err := service.executor.EnsureBeatAnalysis(t.Context(), draftID, "beat_bgm")
 	if err != nil {
 		t.Fatal(err)
 	}
-	trace = append(trace, "audio.analyze_beats")
-	beats := beatsRaw.(rushestools.AudioBeatAnalysisResult)
+	trace = append(trace, "Harness:audio.analyze_beats")
 	if beats.DurationFrames != 120 || !slices.Contains(beats.BeatFrames, 60) ||
 		len(beats.Waveform.Samples) == 0 {
 		t.Fatalf("beats=%#v", beats)
@@ -149,17 +147,9 @@ func TestBeatCompositionFixtureUsesDetectorSearchAndAtomicEdits(t *testing.T) {
 		}
 		trace = append(trace, "timeline.insert")
 	}
-	beatGrid := map[string]any{
-		"bpm": beats.BPM, "beat_frames": beats.BeatFrames,
-		"strong_beat_frames": beats.StrongBeatFrames,
-		"downbeat_frames":    beats.DownbeatFrames,
-		"bar_phase":          beats.BarPhase,
-		"analysis_method":    beats.AnalysisMethod,
-	}
 	bgmRaw, err := service.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
 		"kind": "insert_clip", "track_id": "bgm", "asset_id": "beat_bgm", "role": "bgm",
 		"timeline_start_frame": 0, "source_start_frame": 0, "source_end_frame": 120,
-		"metadata": map[string]any{"beat_grid": beatGrid},
 	})
 	if err != nil || bgmRaw.(rushestools.ToolResult).Status != string(rushestools.StatusSucceeded) {
 		t.Fatalf("bgm insert=%#v err=%v", bgmRaw, err)
@@ -203,6 +193,10 @@ func TestBeatCompositionFixtureUsesDetectorSearchAndAtomicEdits(t *testing.T) {
 		len(timelineTrackClips(final, "sfx")) != 1 ||
 		timelineTrackClips(final, "sfx")[0].GainDB != -12 {
 		t.Fatalf("final=%#v err=%v", final, err)
+	}
+	bgmMetadata := timelineTrackClips(final, "bgm")[0].Metadata
+	if agentexec.StringValue(bgmMetadata["beat_analysis_id"]) != beats.AnalysisID {
+		t.Fatalf("BGM 缺少 Harness 权威拍点投影: %#v", bgmMetadata)
 	}
 	var singleOperationBatches int
 	if err := database.Read().QueryRowContext(t.Context(), `

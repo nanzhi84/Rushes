@@ -17,6 +17,7 @@ import (
 
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
+	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
 var independentAudioTrackIDs = []string{"bgm", "sfx"}
@@ -1035,10 +1036,37 @@ func (exec *Executor) enrichTimelineOperation(
 		if StringValue(operation["asset_kind"]) == "" {
 			operation["asset_kind"] = asset.Kind
 		}
-		if StringValue(operation["kind"]) == "replace_clip" {
+		kind := StringValue(operation["kind"])
+		trackID := ValueOr(StringValue(operation["track_id"]), "visual_base")
+		if kind == "replace_clip" {
+			current, timelineErr := timeline.Latest(ctx, exec.database, draftID)
+			if timelineErr != nil {
+				return nil, timelineErr
+			}
+			trackID = atomicClipTrackID(current, StringValue(operation["timeline_clip_id"]))
+		}
+		if trackID == "bgm" {
+			analysis, analysisErr := exec.EnsureBeatAnalysis(ctx, draftID, asset.ID)
+			if analysisErr != nil {
+				return nil, fmt.Errorf("harness 为 BGM 建立拍点证据: %w", analysisErr)
+			}
+			metadata := map[string]any{}
+			if provided, ok := operation["metadata"].(map[string]any); ok {
+				for key, value := range provided {
+					if key != "beat_grid" && key != "beat_analysis_id" {
+						metadata[key] = value
+					}
+				}
+			}
+			metadata["beat_analysis_id"] = analysis.AnalysisID
+			metadata["beat_grid"] = beatAnalysisTimelineEvidence(analysis)
+			operation["metadata"] = metadata
 			break
 		}
-		if ValueOr(StringValue(operation["track_id"]), "visual_base") != "visual_base" {
+		if kind == "replace_clip" {
+			break
+		}
+		if trackID != "visual_base" {
 			break
 		}
 		if _, explicit := operation["include_original_audio"]; !explicit {
@@ -1047,4 +1075,31 @@ func (exec *Executor) enrichTimelineOperation(
 		}
 	}
 	return operation, nil
+}
+
+func beatAnalysisTimelineEvidence(analysis rushestools.AudioBeatAnalysisResult) map[string]any {
+	return map[string]any{
+		"analysis_id":            analysis.AnalysisID,
+		"bpm":                    analysis.BPM,
+		"timeline_fps":           analysis.TimelineFPS,
+		"duration_frames":        analysis.DurationFrames,
+		"beat_frames":            append([]int(nil), analysis.BeatFrames...),
+		"strong_beat_frames":     append([]int(nil), analysis.StrongBeatFrames...),
+		"downbeat_frames":        append([]int(nil), analysis.DownbeatFrames...),
+		"every_two_beat_frames":  append([]int(nil), analysis.EveryTwoBeatFrames...),
+		"every_four_beat_frames": append([]int(nil), analysis.EveryFourBeatFrames...),
+		"bar_phase":              analysis.BarPhase,
+		"analysis_method":        analysis.AnalysisMethod,
+		"truncated":              analysis.Truncated,
+		"phase_note":             analysis.PhaseNote,
+		"waveform_usage_note":    analysis.WaveformUsageNote,
+		"waveform": map[string]any{
+			"sample_interval_frames": analysis.Waveform.SampleIntervalFrames,
+			"sample_frames":          append([]int(nil), analysis.Waveform.SampleFrames...),
+			"samples":                append([]int(nil), analysis.Waveform.Samples...),
+			"encoding":               analysis.Waveform.Encoding,
+			"floor_db":               analysis.Waveform.FloorDB,
+			"ceiling_db":             analysis.Waveform.CeilingDB,
+		},
+	}
 }

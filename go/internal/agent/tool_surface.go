@@ -199,7 +199,8 @@ func selectModelToolSurface(
 	if requestsReadOnlyMediaAnalysis(positiveUserText) {
 		selected = filterSpecsWithoutTimelineEditLease(selected)
 		if requestsOnlyBeatAnalysis(positiveUserText) {
-			selected = filterSpecsByName(allowed, "audio.analyze_beats")
+			selected = nil
+			allowEmpty = true
 		}
 	}
 	// CurrentTimelineView 与 Harness 自动检查已经覆盖只读校验请求。模型只需基于
@@ -577,9 +578,7 @@ func surfaceWithAvailablePrerequisites(
 	switch lane {
 	case rushestools.SurfaceTalkingHead:
 		if !hasAnyAllowedTool(specs,
-			"speech.transcribe",
 			"speech.search",
-			"audio.analyze_speech_pauses",
 			"shot.search",
 			"timeline.insert",
 		) {
@@ -587,7 +586,6 @@ func surfaceWithAvailablePrerequisites(
 		}
 	case rushestools.SurfaceBeatEdit:
 		if !hasAnyAllowedTool(specs,
-			"audio.analyze_beats",
 			"shot.search",
 			"timeline.insert",
 			"timeline.delete",
@@ -820,7 +818,7 @@ func recentSuccessfulWorkflowSurface(
 			return remainingWorkflowSurface(userText)
 		case "asset.list_assets":
 			return remainingWorkflowSurface(userText)
-		case "media.detect_shots", "speech.transcribe":
+		case "media.detect_shots":
 			return remainingWorkflowSurface(userText)
 		case "speech.search":
 			if requestsTalkingHeadWorkflow(userText) {
@@ -893,7 +891,6 @@ func isWorkflowTransitionTool(name string) bool {
 		"memory.remove",
 		"asset.list_assets",
 		"media.detect_shots",
-		"speech.transcribe",
 		"speech.search",
 		"shot.search",
 		"timeline.insert",

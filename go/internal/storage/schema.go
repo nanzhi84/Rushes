@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 21
+const schemaVersion = 22
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (
@@ -544,4 +544,32 @@ UPDATE agent_job_bridge_state
 SET last_event_id=(SELECT COALESCE(MAX(event_id),0) FROM event_log),
     updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE consumer_id='agent';
+`
+
+// schemaV22 persists content-addressed, task-specific media analyses. Analyses
+// intentionally reference the immutable content hash rather than one asset row:
+// importing the same bytes into another draft can reuse the evidence without
+// running the analyzer again. The compound identity is also unique so callers
+// cannot publish two competing results for the same analyzer contract.
+const schemaV22 = `
+CREATE TABLE IF NOT EXISTS asset_analyses (
+    analysis_id TEXT PRIMARY KEY,
+    asset_content_hash TEXT NOT NULL,
+    analysis_type TEXT NOT NULL,
+    analyzer_version TEXT NOT NULL,
+    normalized_options_json TEXT NOT NULL,
+    output_schema_version INTEGER NOT NULL CHECK(output_schema_version >= 1),
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(
+        asset_content_hash,
+        analysis_type,
+        analyzer_version,
+        normalized_options_json,
+        output_schema_version
+    )
+);
+
+CREATE INDEX IF NOT EXISTS ix_asset_analyses_content_type
+ON asset_analyses(asset_content_hash, analysis_type, created_at DESC);
 `

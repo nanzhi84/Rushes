@@ -212,10 +212,6 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 	if insertedARoll.Status != "succeeded" {
 		t.Fatalf("insert A-roll=%#v", insertedARoll)
 	}
-	var transcribed rushestools.SpeechTranscribeResult
-	invokeRegisteredTool(t, service, ctx, "speech.transcribe", rushestools.SpeechTranscribeInput{
-		AssetID: assetIDs[0],
-	}, &transcribed)
 	var speech rushestools.SpeechSearchResult
 	invokeRegisteredTool(t, service, ctx, "speech.search", rushestools.SpeechSearchInput{
 		TimelineClipID: "clip_v1_001", MaxUtterances: 120,

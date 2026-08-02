@@ -301,7 +301,7 @@ func (exec *Executor) validateAtomicTimelineAsset(
 				fmt.Errorf("metadata.beat_grid 缺少或包含无效检测证据字段: %s", strings.Join(missing, ",")),
 			)
 			result.Data["missing_beat_grid_fields"] = missing
-			result.Data["recovery"] = "保留已成功原语，只重试本次 BGM 插入；把 audio.analyze_beats 本轮返回的 bpm、beat_frames、strong_beat_frames、downbeat_frames、bar_phase 与 analysis_method 原样写入 metadata.beat_grid。"
+			result.Data["recovery"] = "Harness 持久拍点证据不完整；保留已成功原语，修复对应 analysis 后可直接重试本次 BGM 插入。"
 			return &result
 		}
 	}

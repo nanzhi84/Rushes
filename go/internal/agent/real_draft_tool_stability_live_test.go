@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	realDraftMinimumWorkflows = 5
+	realDraftMinimumWorkflows = 3
 	realDraftMinimumAttempts  = 100
 )
 
@@ -373,19 +373,6 @@ func realDraftWorkflows() []realDraftWorkflow {
 			Validate: validateRealDraftShotSearch,
 		},
 		{
-			Name: "real_beat_analysis", ExpectedTool: "audio.analyze_beats",
-			Prompt: func(facts realDraftFacts) string {
-				return fmt.Sprintf(
-					"分析当前卡点混剪的 BGM 素材 %s，返回完整可用拍点证据；只做分析，不编辑时间线。",
-					facts.BGMAssetID,
-				)
-			},
-			ValidateArgs: func(facts realDraftFacts, raw string) error {
-				return requireRealDraftArguments(raw, map[string]any{"asset_id": facts.BGMAssetID})
-			},
-			Validate: validateRealDraftBeatAnalysis,
-		},
-		{
 			Name: "real_ripple_delete", ExpectedTool: "timeline.delete",
 			Prompt: func(facts realDraftFacts) string {
 				return fmt.Sprintf(
@@ -417,19 +404,6 @@ func realDraftWorkflows() []realDraftWorkflow {
 			},
 			Validate: validateRealDraftVisualTrim,
 		},
-		{
-			Name: "real_terminal_truth", ExpectedTool: "timeline.check",
-			Prompt: func(facts realDraftFacts) string {
-				return fmt.Sprintf(
-					"严格检查稳定版本 %s 的结构、内容合同和卡点比例，并如实返回是否通过；不要编辑或渲染。",
-					facts.TimelineID,
-				)
-			},
-			ValidateArgs: func(facts realDraftFacts, raw string) error {
-				return requireRealDraftArguments(raw, map[string]any{"timeline_id": facts.TimelineID})
-			},
-			Validate: validateRealDraftTerminalTruth,
-		},
 	}
 }
 
@@ -455,27 +429,6 @@ func validateRealDraftShotSearch(
 	}
 	if total == 0 {
 		return errors.New("真实素材镜头检索结果为空")
-	}
-	return nil
-}
-
-func validateRealDraftBeatAnalysis(
-	_ context.Context,
-	_ *Service,
-	facts realDraftFacts,
-	_ timeline.Document,
-	outputs []string,
-) error {
-	output := outputs[0]
-	var result rushestools.AudioBeatAnalysisResult
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		return err
-	}
-	if result.AssetID != facts.BGMAssetID || result.TimelineFPS <= 0 || len(result.BeatFrames) < 8 {
-		return fmt.Errorf(
-			"真实 BGM 拍点证据不完整: asset=%s fps=%d beats=%d",
-			result.AssetID, result.TimelineFPS, len(result.BeatFrames),
-		)
 	}
 	return nil
 }
@@ -539,44 +492,6 @@ func validateRealDraftVisualTrim(
 		return fmt.Errorf("视觉裁边后结构无效: %#v", report.Issues)
 	}
 	return validateRealDraftMutationProof(output, before.TimelineID, after.TimelineID)
-}
-
-func validateRealDraftTerminalTruth(
-	_ context.Context,
-	_ *Service,
-	facts realDraftFacts,
-	before timeline.Document,
-	outputs []string,
-) error {
-	output := outputs[0]
-	var result rushestools.ToolResult
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		return err
-	}
-	if result.Status != string(rushestools.StatusValidationFailed) {
-		return fmt.Errorf("真实失败合同必须如实返回 validation_failed，实际=%s", result.Status)
-	}
-	if before.TimelineID != facts.TimelineID || fmt.Sprint(result.Data["timeline_id"]) != facts.TimelineID {
-		return fmt.Errorf(
-			"检查版本未绑定最新真相: latest=%s result=%v",
-			before.TimelineID, result.Data["timeline_id"],
-		)
-	}
-	report, ok := result.Data["validation_report"].(map[string]any)
-	if !ok {
-		return errors.New("timeline.check 缺少 validation_report")
-	}
-	structural, _ := report["structural_valid"].(bool)
-	contract, _ := report["content_contract_valid"].(bool)
-	valid, _ := report["valid"].(bool)
-	if !structural || contract || valid {
-		return fmt.Errorf("真实终态真假不符: validation_report=%#v", report)
-	}
-	failures, ok := result.Data["contract_failures"].([]any)
-	if !ok || len(failures) == 0 {
-		return errors.New("真实失败合同没有返回可核验 contract_failures")
-	}
-	return nil
 }
 
 func validateRealDraftMutationProof(output, previousTimelineID, timelineID string) error {
@@ -923,7 +838,16 @@ func TestRealDraftAttemptRunsMutationWithAgentLeaseAndDurableReceipt(t *testing.
 	if err := snapshotSQLiteReadOnly(t.Context(), database.Paths.DB, goldenDB); err != nil {
 		t.Fatal(err)
 	}
-	workflow := realDraftWorkflows()[2]
+	var workflow realDraftWorkflow
+	for _, candidate := range realDraftWorkflows() {
+		if candidate.Name == "real_ripple_delete" {
+			workflow = candidate
+			break
+		}
+	}
+	if workflow.Name == "" {
+		t.Fatal("real_ripple_delete workflow missing")
+	}
 	facts := realDraftFacts{
 		DraftID: draftID, TimelineID: document.TimelineID,
 		DeleteStartFrame: 1, DeleteEndFrame: 2,

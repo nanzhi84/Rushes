@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/media"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -73,13 +74,10 @@ func TestBeatMixRealMaterialAcceptance(t *testing.T) {
 	}
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), "draft_beat_mix_real")
-	beatOutput, err := service.ExecuteTool(ctx, "audio.analyze_beats", rushestools.AudioBeatAnalysisInput{
-		AssetID: "beat_bgm", MaxBeats: 512, WaveformPoints: 96,
-	})
+	beats, err := service.executor.EnsureBeatAnalysis(t.Context(), "draft_beat_mix_real", "beat_bgm")
 	if err != nil {
 		t.Fatal(err)
 	}
-	beats := beatOutput.(rushestools.AudioBeatAnalysisResult)
 	if beats.BPM <= 0 || beats.DurationFrames < 1400 || len(beats.BeatFrames) < 20 || len(beats.Waveform.Samples) == 0 {
 		t.Fatalf("beats=%#v", beats)
 	}
@@ -88,7 +86,7 @@ func TestBeatMixRealMaterialAcceptance(t *testing.T) {
 	if !ok {
 		t.Fatalf("三个真实视频不足以按真实拍点覆盖 BGM: target=%d durations=%v", beats.DurationFrames, videoDurations)
 	}
-	trace := []string{"audio.analyze_beats"}
+	trace := []string{"Harness:audio.analyze_beats"}
 	start := 0
 	for index, end := range cuts {
 		raw, executeErr := service.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
@@ -104,13 +102,6 @@ func TestBeatMixRealMaterialAcceptance(t *testing.T) {
 	bgmRaw, err := service.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
 		"kind": "insert_clip", "track_id": "bgm", "asset_id": "beat_bgm", "role": "bgm",
 		"timeline_start_frame": 0, "source_start_frame": 0, "source_end_frame": beats.DurationFrames,
-		"metadata": map[string]any{"beat_grid": map[string]any{
-			"bpm": beats.BPM, "beat_frames": beats.BeatFrames,
-			"strong_beat_frames": beats.StrongBeatFrames,
-			"downbeat_frames":    beats.DownbeatFrames,
-			"bar_phase":          beats.BarPhase,
-			"analysis_method":    beats.AnalysisMethod,
-		}},
 	})
 	if err != nil || bgmRaw.(rushestools.ToolResult).Status != string(rushestools.StatusSucceeded) {
 		t.Fatalf("bgm insert=%#v err=%v", bgmRaw, err)
@@ -131,6 +122,10 @@ func TestBeatMixRealMaterialAcceptance(t *testing.T) {
 	}
 	if !timeline.Validate(document).Valid || document.DurationFrames != beats.DurationFrames || len(document.Tracks[0].Clips) != 3 {
 		t.Fatalf("timeline=%#v", document)
+	}
+	bgm := timelineTrackClips(document, "bgm")
+	if len(bgm) != 1 || agentexec.StringValue(bgm[0].Metadata["beat_analysis_id"]) != beats.AnalysisID {
+		t.Fatalf("BGM 缺少 Harness 权威拍点投影: %#v", bgm)
 	}
 	beatSet := map[int]struct{}{}
 	for _, frame := range beats.BeatFrames {

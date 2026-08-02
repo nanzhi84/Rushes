@@ -19,7 +19,8 @@ import (
 //   - 领域执行在后：其余一律委托给 agentexec.Executor.ExecuteTool，由领域包完成
 //     真正的工具执行，engine 不再感知具体工具清单。
 func (service *Service) ExecuteTool(ctx context.Context, name string, input any) (any, error) {
-	if _, err := rushestools.DraftID(ctx); err != nil {
+	draftID, err := rushestools.DraftID(ctx)
+	if err != nil {
 		return nil, err
 	}
 	// 旧客户端或异常 provider 即使绕过 Registry，也不能重新打开 Agent 的最终
@@ -50,6 +51,9 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 				return nil, err
 			}
 		}
+	}
+	if err := service.prepareOnDemandAudioAnalysis(ctx, draftID, name, input); err != nil {
+		return nil, err
 	}
 	preparedContext, receiptResult, reused, err := service.prepareTimelineMutationReceipt(ctx, name, input)
 	if err != nil {

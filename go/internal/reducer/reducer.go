@@ -96,6 +96,17 @@ type TranscriptRow struct {
 	VADSegments  []map[string]any
 }
 
+type AssetAnalysisRow struct {
+	ID                    string
+	AssetContentHash      string
+	AnalysisType          string
+	AnalyzerVersion       string
+	NormalizedOptionsJSON string
+	OutputSchemaVersion   int
+	Result                map[string]any
+	CreatedAt             string
+}
+
 // AgentContextCheckpointRow persists the model's replacement-history window.
 // It is deliberately a reducer result row rather than a domain event: changing
 // prompt bookkeeping must not pretend that the user's video state changed.
@@ -187,6 +198,7 @@ type ResultRows struct {
 	Message                         *MessageRow
 	MaterialSummaries               []MaterialSummaryRow
 	Transcripts                     []TranscriptRow
+	AssetAnalyses                   []AssetAnalysisRow
 	AgentContextCheckpoint          *AgentContextCheckpointRow
 	DraftPlanUpdate                 *DraftPlanUpdateRow
 	AgentJobObservationSuppressions []AgentJobObservationSuppressionRow
@@ -1673,6 +1685,30 @@ func persistResultRows(
 			return err
 		}
 	}
+	for _, analysis := range rows.AssetAnalyses {
+		createdAt := analysis.CreatedAt
+		if createdAt == "" {
+			createdAt = defaultCreatedAt
+		}
+		if analysis.ID == "" || analysis.AssetContentHash == "" ||
+			analysis.AnalysisType == "" || analysis.AnalyzerVersion == "" ||
+			analysis.NormalizedOptionsJSON == "" || analysis.OutputSchemaVersion < 1 ||
+			analysis.Result == nil {
+			return errors.New("asset analysis 字段不完整")
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO asset_analyses(
+				analysis_id, asset_content_hash, analysis_type, analyzer_version,
+				normalized_options_json, output_schema_version, result_json, created_at
+			) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(analysis_id) DO NOTHING`,
+			analysis.ID, analysis.AssetContentHash, analysis.AnalysisType,
+			analysis.AnalyzerVersion, analysis.NormalizedOptionsJSON,
+			analysis.OutputSchemaVersion, mustJSON(analysis.Result), createdAt,
+		); err != nil {
+			return err
+		}
+	}
 	if checkpoint := rows.AgentContextCheckpoint; checkpoint != nil {
 		if checkpoint.DraftID == "" || checkpoint.WindowID == "" ||
 			checkpoint.WindowNumber < 1 || checkpoint.HistoryVersion < 1 ||
@@ -2263,7 +2299,8 @@ func emptyTimeline(draftID string, version int) map[string]any {
 
 func emptyResultRows(rows ResultRows) bool {
 	return rows.Message == nil && len(rows.MaterialSummaries) == 0 &&
-		len(rows.Transcripts) == 0 && rows.AgentContextCheckpoint == nil &&
+		len(rows.Transcripts) == 0 && len(rows.AssetAnalyses) == 0 &&
+		rows.AgentContextCheckpoint == nil &&
 		rows.DraftPlanUpdate == nil && len(rows.AgentJobObservationSuppressions) == 0 &&
 		len(rows.UserMemoryUpserts) == 0 && len(rows.UserMemoryRemoveKeys) == 0 &&
 		!rows.UserMemoryClearAll && len(rows.UserMemoryTouchKeys) == 0 &&

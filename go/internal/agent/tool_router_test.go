@@ -603,36 +603,33 @@ func TestServiceRegistryAllowsIndependentDetectorsInParallel(t *testing.T) {
 	t.Cleanup(service.Close)
 	recognizer := &blockingSpeechRecognizer{ready: make(chan struct{})}
 	service.SetSpeechRecognizer(recognizer)
-	router, err := newToolRouter(
-		t.Context(),
-		compose.ToolsNodeConfig{Tools: service.Tools().EinoTools(true, false)},
-		service.Tools().Spec,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	ctx = rushestools.WithDraftID(ctx, draftID)
-	ctx = agentexec.WithTurnInteractionState(ctx, agentexec.NewTurnInteractionState())
-	results, err := router.Invoke(ctx, routerMessageWithArguments(
-		schema.FunctionCall{Name: "speech.transcribe", Arguments: `{"asset_id":"asset_a"}`},
-		schema.FunctionCall{Name: "speech.transcribe", Arguments: `{"asset_id":"asset_b"}`},
-	))
-	if err != nil || len(results) != 2 {
-		t.Fatalf("results=%#v err=%v", results, err)
+	errors := make(chan error, 2)
+	for _, assetID := range []string{"asset_a", "asset_b"} {
+		assetID := assetID
+		go func() {
+			_, ensureErr := service.executor.EnsureTranscript(ctx, draftID, assetID, "")
+			errors <- ensureErr
+		}()
+	}
+	for range 2 {
+		if ensureErr := <-errors; ensureErr != nil {
+			t.Fatal(ensureErr)
+		}
 	}
 	if recognizer.maxSeen.Load() != 2 {
 		t.Fatalf("Service 执行屏障仍串行化独立 detector: 并发峰值=%d", recognizer.maxSeen.Load())
 	}
 }
 
-func TestServiceSerializesSameAssetDetectorAcrossTurnsAndDrafts(t *testing.T) {
+func TestServiceSingleflightsTranscriptByContentHashAcrossDrafts(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const (
 		firstDraft  = "draft_shared_detector_a"
 		secondDraft = "draft_shared_detector_b"
-		assetID     = "asset_shared_detector"
+		firstAsset  = "asset_shared_detector_a"
+		secondAsset = "asset_shared_detector_b"
 	)
 	agenttest.CreateAgentDraft(t, database, firstDraft)
 	agenttest.CreateAgentDraft(t, database, secondDraft)
@@ -644,10 +641,11 @@ func TestServiceSerializesSameAssetDetectorAcrossTurnsAndDrafts(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	agenttest.InsertSpeechFixtureAsset(t, database, firstDraft, assetID, audioPath)
+	agenttest.InsertSpeechFixtureAsset(t, database, firstDraft, firstAsset, audioPath)
+	agenttest.InsertSpeechFixtureAsset(t, database, secondDraft, secondAsset, audioPath)
 	if _, err := database.Write().ExecContext(t.Context(), `
-		INSERT INTO draft_asset_links(draft_id,asset_id,rel_dir,linked_at)
-		VALUES(?, ?, 'Aroll', ?)`, secondDraft, assetID, time.Now().UTC().Format(time.RFC3339Nano),
+		UPDATE assets SET hash='shared_transcript_content_hash'
+		WHERE asset_id IN (?, ?)`, firstAsset, secondAsset,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -662,24 +660,20 @@ func TestServiceSerializesSameAssetDetectorAcrossTurnsAndDrafts(t *testing.T) {
 	start := make(chan struct{})
 	results := make(chan rushestools.SpeechTranscribeResult, 2)
 	errors := make(chan error, 2)
-	for _, draftID := range []string{firstDraft, secondDraft} {
+	for _, pair := range []struct{ draftID, assetID string }{
+		{firstDraft, firstAsset}, {secondDraft, secondAsset},
+	} {
+		pair := pair
 		go func() {
 			<-start
-			ctx := rushestools.WithDraftID(t.Context(), draftID)
-			ctx = agentexec.WithTurnInteractionState(
-				ctx,
-				agentexec.NewTurnInteractionState(service.indexedResources),
-			)
-			raw, executeErr := service.ExecuteTool(
-				ctx,
-				"speech.transcribe",
-				rushestools.SpeechTranscribeInput{AssetID: assetID, Language: "zh"},
+			result, executeErr := service.executor.EnsureTranscript(
+				t.Context(), pair.draftID, pair.assetID, "",
 			)
 			if executeErr != nil {
 				errors <- executeErr
 				return
 			}
-			results <- raw.(rushestools.SpeechTranscribeResult)
+			results <- result
 		}()
 	}
 	close(start)
@@ -702,16 +696,47 @@ func TestServiceSerializesSameAssetDetectorAcrossTurnsAndDrafts(t *testing.T) {
 	}
 	var transcripts int
 	if err := database.Read().QueryRowContext(t.Context(),
-		"SELECT COUNT(*) FROM transcripts WHERE asset_id=?", assetID,
+		"SELECT COUNT(*) FROM transcripts WHERE asset_id IN (?, ?)", firstAsset, secondAsset,
 	).Scan(&transcripts); err != nil {
 		t.Fatal(err)
 	}
+	var analyses int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM asset_analyses WHERE analysis_type=?", agentexec.TranscriptAnalysisType,
+	).Scan(&analyses); err != nil {
+		t.Fatal(err)
+	}
 	if recognizer.calls.Load() != 1 || recognizer.maxSeen.Load() != 1 ||
-		cacheHits != 1 || transcripts != 1 {
+		cacheHits != 1 || transcripts != 2 || analyses != 1 {
 		t.Fatalf(
-			"calls=%d max=%d cache_hits=%d transcripts=%d results=%#v",
-			recognizer.calls.Load(), recognizer.maxSeen.Load(), cacheHits, transcripts, collected,
+			"calls=%d max=%d cache_hits=%d transcripts=%d analyses=%d results=%#v",
+			recognizer.calls.Load(), recognizer.maxSeen.Load(), cacheHits, transcripts, analyses, collected,
 		)
+	}
+	pauseResults := make([]rushestools.SpeechPauseAnalysisResult, 0, 2)
+	for _, pair := range []struct{ draftID, assetID string }{
+		{firstDraft, firstAsset}, {secondDraft, secondAsset},
+	} {
+		raw, executeErr := service.ExecuteTool(
+			rushestools.WithDraftID(t.Context(), pair.draftID),
+			"audio.analyze_speech_pauses",
+			rushestools.SpeechPauseAnalysisInput{AssetID: pair.assetID},
+		)
+		if executeErr != nil {
+			t.Fatal(executeErr)
+		}
+		pauseResults = append(pauseResults, raw.(rushestools.SpeechPauseAnalysisResult))
+	}
+	if pauseResults[0].AnalysisID == "" ||
+		pauseResults[0].AnalysisID != pauseResults[1].AnalysisID ||
+		pauseResults[0].CacheHit || !pauseResults[1].CacheHit {
+		t.Fatalf("transcript VAD was not reused by content hash: %#v", pauseResults)
+	}
+	var pauseAnalyses int
+	if err := database.Read().QueryRowContext(t.Context(),
+		"SELECT COUNT(*) FROM asset_analyses WHERE analysis_type=?", agentexec.SpeechPauseAnalysisType,
+	).Scan(&pauseAnalyses); err != nil || pauseAnalyses != 2 {
+		t.Fatalf("pause analyses=%d err=%v", pauseAnalyses, err)
 	}
 }
 

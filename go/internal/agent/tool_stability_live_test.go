@@ -528,7 +528,7 @@ func TestLiveWorkflowDefinitionsAndScoring(t *testing.T) {
 	}
 	wantEvidence := map[string][]string{
 		"initial_composition": {"asset.list_assets", "shot.search"},
-		"beat_mix":            {"audio.analyze_beats", "shot.search"},
+		"beat_mix":            {"shot.search"},
 		"talking_head":        {"speech.search", "shot.search"},
 	}
 	if len(suites) != len(wantMaxSteps) {
@@ -2125,16 +2125,16 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 		{
 			Name: "beat_mix",
 			Goal: "请完成一条 4 秒、120 帧的卡点混剪：唯一的城市推进完整镜头在前，唯一的山峰揭示完整镜头在后，两个镜头等长且不裁短；" +
-				"唯一的 BGM 覆盖全程，并原样携带本轮客观节拍检测返回的完整节拍网格。完成后主动检查结构和拍点对齐。" +
-				"编辑前必须实际执行本轮节拍检测并检索可用镜头证据，不得只凭 WorldState 中的摘要直接写入。" +
+				"唯一的 BGM 覆盖全程；Harness 必须按需分析并自动投影完整节拍证据，模型不得搬运 beat grid。完成后主动检查结构和拍点对齐。" +
+				"编辑前必须实际检索可用镜头证据，并使用 WorldState 中 Harness 注入的完整 beat_analysis。" +
 				"请自行读取所需事实、选择调用顺序并连续推进；独立只读可以在同一消息并行，每个写调用只做一个可观察动作。",
 			MaxSteps: 10,
 			AllowedTools: []string{
 				"plan.update",
-				"asset.list_assets", "audio.analyze_beats", "media.detect_shots", "shot.search",
+				"asset.list_assets", "media.detect_shots", "shot.search",
 				"timeline.insert",
 			},
-			RequiredEvidence: []string{"audio.analyze_beats", "shot.search"},
+			RequiredEvidence: []string{"shot.search"},
 		},
 		{
 			Name: "talking_head",
@@ -2150,8 +2150,7 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 			MaxSteps: 20,
 			AllowedTools: []string{
 				"plan.update",
-				"asset.list_assets", "audio.analyze_speech_pauses",
-				"media.detect_shots", "speech.search", "speech.transcribe",
+				"asset.list_assets", "media.detect_shots", "speech.search",
 				"shot.search", "timeline.delete", "timeline.insert", "timeline.update",
 			},
 			RequiredEvidence: []string{"speech.search", "shot.search"},
@@ -2184,9 +2183,6 @@ func scriptedLiveWorkflowSteps(
 		}
 	case "beat_mix":
 		return []scriptedWorkflowStep{
-			{Name: "analyze_beats", ExpectedTool: "audio.analyze_beats", ExpectedArguments: map[string]any{
-				"asset_id": fixture.AudioID, "max_beats": 64, "waveform_points": 16,
-			}},
 			{Name: "search_shots", ExpectedTool: "shot.search", ExpectedArguments: map[string]any{
 				"query": "城市 山峰", "semantic_roles": []any{"b_roll"},
 				"min_duration_frames": 60, "limit": 8,
@@ -2202,12 +2198,6 @@ func scriptedLiveWorkflowSteps(
 			{Name: "insert_bgm", ExpectedTool: "timeline.insert", ExpectedArguments: map[string]any{
 				"kind": "insert_clip", "track_id": "bgm", "asset_id": fixture.AudioID,
 				"source_start_frame": 0, "source_end_frame": 120,
-				"metadata": map[string]any{"beat_grid": map[string]any{
-					"bpm": 120, "beat_frames": []any{0, 15, 30, 45, 60, 75, 90, 105},
-					"strong_beat_frames": []any{0, 60},
-					"downbeat_frames":    []any{0, 60},
-					"bar_phase":          0, "analysis_method": "aubio-tempo+specflux-onset",
-				}},
 			}},
 		}
 	case "talking_head":
@@ -2740,9 +2730,6 @@ func liveSchemaCases() []liveToolEvalCase {
 		{Name: "asset_list", Prompt: "请调用工具列出当前草稿最多 50 个可用素材。", Expected: []string{"asset.list_assets"}},
 		{Name: "understand", Prompt: "请深度检测 asset_video_1 的镜头，重点关注人物动作，最多 8 段证据。", Expected: []string{"media.detect_shots"}},
 		{Name: "shot_search", Prompt: "请只检索适合覆盖‘指纹解锁位于键盘右上角’这句口播的 B-roll 镜头，最多返回 8 个。", Expected: []string{"shot.search"}},
-		{Name: "beats", Prompt: "请分析 BGM 素材 asset_bgm_1 的节拍，最多返回 512 个拍点。", Expected: []string{"audio.analyze_beats"}},
-		{Name: "speech_pauses", Prompt: "请分析时间线片段 clip_v1_001 的口播气口，阈值 -35dB，最多 100 个候选。", Expected: []string{"audio.analyze_speech_pauses"}},
-		{Name: "speech_transcribe", Prompt: "请为素材 asset_video_1 建立中文词级口播索引，不要检索或剪辑。", Expected: []string{"speech.transcribe"}},
 		{Name: "speech_search", Prompt: "请读取 clip_v1_001 的持久化逐句口播索引，检索‘指纹解锁’，同时返回气口和相似台词证据。", Expected: []string{"speech.search"}},
 		{Name: "ask_user", Prompt: "用户要求的核心叙事目标存在两种实质冲突，素材和上下文都无法推断，且没有安全默认值。请用 decision_type=critical 发出一张允许自由输入的阻塞性二选一决策卡，只问这个核心分歧。", Expected: []string{"interaction.ask_user"}},
 		{Name: "decision_answer", Prompt: "请提交决策 decision_style_1 的答案 option_id=fast，补充说明为强节奏。", Expected: []string{"decision.answer"}},
@@ -2774,8 +2761,6 @@ func liveRoutingCases() []liveToolEvalCase {
 		{Name: "route_list", Prompt: contextPrefix + "\n用户：列出当前草稿的所有素材。", Expected: []string{"asset.list_assets"}},
 		{Name: "route_understand", Prompt: contextPrefix + "\n用户：素材 ID 已确认，请立即深度理解 asset_video_1 的动作和可剪区间。", Expected: []string{"media.detect_shots"}},
 		{Name: "route_shot_search", Prompt: contextPrefix + "\nspeech.search 已返回 utt_fingerprint_1，文本是‘指纹解锁位于键盘右上角’。用户：不用再读取台词，只调用镜头检索找合适的 B-roll，暂时不剪。", Expected: []string{"shot.search"}},
-		{Name: "route_beats", Prompt: contextPrefix + "\n用户：分析 asset_bgm_1 的节拍和重拍。", Expected: []string{"audio.analyze_beats"}},
-		{Name: "route_pauses", Prompt: contextPrefix + "\n用户：不需要逐句 ASR，只对 clip_v1_001 做轻量 RMS 能量静音扫描，暂时不删。", Expected: []string{"audio.analyze_speech_pauses"}},
 		{Name: "route_speech_search", Prompt: contextPrefix + "\n用户：读取 clip_v1_001 的逐句 ASR，检索重复说到‘指纹解锁’的地方并给出客观相似证据，暂时不删。", Expected: []string{"speech.search"}},
 		{Name: "route_plan_update", Prompt: contextPrefix + "\n用户：先不要继续剪，把已确定的创作方向记到持久计划本里：整体克制、高潮段加快节奏，供下回合继续。", Expected: []string{"plan.update"}},
 		{Name: "route_inspect", Prompt: contextPrefix + "\n用户：查看当前时间线的真实 clip 明细。", Expected: []string{"timeline.inspect"}},

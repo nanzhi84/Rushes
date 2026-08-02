@@ -53,7 +53,6 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 		agenttest.CreateAgentDraft(t, database, draftID)
 		ctx := rushestools.WithDraftID(t.Context(), draftID)
 		_, ffmpegErr := osexec.LookPath("ffmpeg")
-		_, aubioErr := osexec.LookPath("aubiotrack")
 
 		audioAssetID := ""
 		if ffmpegErr == nil {
@@ -81,16 +80,6 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 				skipReason: dependencySkipReason(ffmpegErr, "ffmpeg"),
 			},
 			"timeline.check": {input: rushestools.TimelineCheckInput{}},
-			"audio.analyze_beats": {
-				input: rushestools.AudioBeatAnalysisInput{AssetID: audioAssetID, MaxBeats: 32, WaveformPoints: 32},
-				skipReason: firstNonEmptySkip(
-					dependencySkipReason(ffmpegErr, "ffmpeg"), dependencySkipReason(aubioErr, "aubio"),
-				),
-			},
-			"audio.analyze_speech_pauses": {
-				input:      rushestools.SpeechPauseAnalysisInput{AssetID: audioAssetID, IncludeBoundaries: true},
-				skipReason: dependencySkipReason(ffmpegErr, "ffmpeg"),
-			},
 		}
 
 		registered := make([]string, 0, len(cases))
@@ -191,15 +180,6 @@ func dependencySkipReason(err error, dependency string) string {
 		return ""
 	}
 	return dependency + " 未安装；CI 默认镜像会安装并执行本用例"
-}
-
-func firstNonEmptySkip(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func setupReadOnlyAudioFixture(t *testing.T, database *storage.DB, draftID string) string {

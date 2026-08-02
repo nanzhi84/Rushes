@@ -451,7 +451,7 @@ func (modelValue *failingReadToolServiceModel) Generate(
 	if modelValue.calls == 1 {
 		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID: "missing_audio", Function: schema.FunctionCall{
-				Name: "audio.analyze_beats", Arguments: `{"asset_id":"asset_missing"}`,
+				Name: "speech.search", Arguments: `{"asset_id":"asset_missing"}`,
 			},
 		}}), nil
 	}
@@ -460,7 +460,7 @@ func (modelValue *failingReadToolServiceModel) Generate(
 		!strings.Contains(messages[len(messages)-1].Content, `"retryable":false`) {
 		return nil, errors.New("确定性参数失败没有立即回灌模型")
 	}
-	return schema.AssistantMessage("拍点分析失败；本轮未修改时间线，你可以更换素材后重试。", nil), nil
+	return schema.AssistantMessage("口播分析失败；本轮未修改时间线，你可以更换素材后重试。", nil), nil
 }
 
 func (modelValue *failingReadToolServiceModel) Stream(
@@ -703,13 +703,13 @@ func TestServiceAllowsHonestTerminalReplyAfterIndependentToolFailure(t *testing.
 	if assetErr != nil || assetResult.Status != reducer.StatusApplied {
 		t.Fatalf("asset status=%s err=%v", assetResult.Status, assetErr)
 	}
-	agenttest.InsertAgentMessage(t, database, "draft_retry_trace", "user_retry_trace", "分析不存在的音频")
+	agenttest.InsertAgentMessage(t, database, "draft_retry_trace", "user_retry_trace", "读取不存在素材的口播逐字稿")
 	service, err := NewService(t.Context(), database, &failingReadToolServiceModel{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	if !service.Queue().EnqueueUserMessage("draft_retry_trace", "user_retry_trace", "分析不存在的音频") {
+	if !service.Queue().EnqueueUserMessage("draft_retry_trace", "user_retry_trace", "读取不存在素材的口播逐字稿") {
 		t.Fatal("enqueue 失败")
 	}
 	service.Queue().JoinDraft("draft_retry_trace")
@@ -724,8 +724,8 @@ func TestServiceAllowsHonestTerminalReplyAfterIndependentToolFailure(t *testing.
 		}
 	}
 	final := messages[len(messages)-1]
-	if toolRows != 1 || len(messages) != 3 || final.Role != "assistant" || final.Kind != "reply" ||
-		final.Content != "拍点分析失败；本轮未修改时间线，你可以更换素材后重试。" {
+	if toolRows != 2 || len(messages) != 4 || final.Role != "assistant" || final.Kind != "reply" ||
+		final.Content != "口播分析失败；本轮未修改时间线，你可以更换素材后重试。" {
 		t.Fatalf("历史失败不应阻止诚实终态：tool_rows=%d messages=%#v", toolRows, messages)
 	}
 }

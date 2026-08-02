@@ -3,6 +3,7 @@ package agentexec
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -736,12 +737,18 @@ func TestAtomicTimelineInsertRejectsDerivedOriginalAudioTrack(t *testing.T) {
 	}
 }
 
-func TestAtomicBGMInsertRejectsPartialBeatGridWithoutCreatingVersion(t *testing.T) {
+func TestAtomicBGMInsertProjectsPersistentBeatAnalysisAndIgnoresModelGrid(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg 未安装")
+	}
+	if _, err := exec.LookPath("aubiotrack"); err != nil {
+		t.Skip("aubio 未安装")
+	}
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_atomic_bgm_grid"
 	agenttest.CreateAgentDraft(t, database, draftID)
 	insertAtomicTimelineAsset(t, database, draftID, "visual", "video", 4, false)
-	insertAtomicTimelineAsset(t, database, draftID, "music", "audio", 4, true)
+	musicID := setupReadOnlyAudioFixture(t, database, draftID)
 	exec, err := newTestExecutor(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -752,99 +759,86 @@ func TestAtomicBGMInsertRejectsPartialBeatGridWithoutCreatingVersion(t *testing.
 		"source_start_frame": 0, "source_end_frame": 120,
 	})
 
-	raw, err := exec.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
-		"kind": "insert_clip", "track_id": "bgm", "asset_id": "music",
-		"source_start_frame": 0, "source_end_frame": 120,
-		"metadata": map[string]any{"beat_grid": map[string]any{
-			"bpm": 120, "beat_frames": []any{0, 15, 30},
-			"strong_beat_frames": []any{0}, "downbeat_frames": []any{0},
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	failed := raw.(rushestools.ToolResult)
-	missing, _ := failed.Data["missing_beat_grid_fields"].([]string)
-	if failed.Status != string(rushestools.StatusFailed) ||
-		len(missing) != 2 || missing[0] != "bar_phase" ||
-		missing[1] != "analysis_method" {
-		t.Fatalf("partial beat grid result=%#v", failed)
-	}
-	afterFailure, err := timeline.Latest(t.Context(), database, draftID)
-	if err != nil || afterFailure.Version != 1 || len(afterFailure.Tracks[4].Clips) != 0 {
-		t.Fatalf("partial beat grid wrote timeline: %#v err=%v", afterFailure, err)
-	}
-
-	for _, testCase := range []struct {
-		name         string
-		beatFrames   any
-		strongFrames any
-		downbeats    any
-		invalidField string
-	}{
-		{
-			name: "wrong_type", beatFrames: "oops",
-			strongFrames: []any{0}, downbeats: []any{0}, invalidField: "beat_frames",
-		},
-		{
-			name: "null", beatFrames: nil,
-			strongFrames: []any{0}, downbeats: []any{0}, invalidField: "beat_frames",
-		},
-		{
-			name: "empty", beatFrames: []any{},
-			strongFrames: []any{0}, downbeats: []any{0}, invalidField: "beat_frames",
-		},
-		{
-			name: "fractional", beatFrames: []any{0, 15.5},
-			strongFrames: []any{0}, downbeats: []any{0}, invalidField: "beat_frames",
-		},
-		{
-			name: "negative_strong", beatFrames: []any{0, 15},
-			strongFrames: []any{-1}, downbeats: []any{0}, invalidField: "strong_beat_frames",
-		},
-		{
-			name: "invalid_downbeat_type", beatFrames: []any{0, 15},
-			strongFrames: []any{0}, downbeats: "0", invalidField: "downbeat_frames",
-		},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			raw, executeErr := exec.ExecuteTool(ctx, "timeline.insert", rushestools.TimelineInsertInput{
-				"kind": "insert_clip", "track_id": "bgm", "asset_id": "music",
-				"source_start_frame": 0, "source_end_frame": 120,
-				"metadata": map[string]any{"beat_grid": map[string]any{
-					"bpm": 120, "beat_frames": testCase.beatFrames,
-					"strong_beat_frames": testCase.strongFrames,
-					"downbeat_frames":    testCase.downbeats,
-					"bar_phase":          0, "analysis_method": "fixture",
-				}},
-			})
-			if executeErr != nil {
-				t.Fatal(executeErr)
-			}
-			failed := raw.(rushestools.ToolResult)
-			invalid, _ := failed.Data["missing_beat_grid_fields"].([]string)
-			if failed.Status != string(rushestools.StatusFailed) ||
-				!ContainsString(invalid, testCase.invalidField) {
-				t.Fatalf("invalid beat grid result=%#v", failed)
-			}
-			afterInvalid, latestErr := timeline.Latest(t.Context(), database, draftID)
-			if latestErr != nil || afterInvalid.Version != 1 ||
-				len(afterInvalid.Tracks[4].Clips) != 0 {
-				t.Fatalf("invalid beat grid wrote timeline: %#v err=%v", afterInvalid, latestErr)
-			}
-		})
-	}
-
 	succeeded := executeAtomicTimelineTool(t, exec, ctx, "timeline.insert", rushestools.TimelineInsertInput{
-		"kind": "insert_clip", "track_id": "bgm", "asset_id": "music",
+		"kind": "insert_clip", "track_id": "bgm", "asset_id": musicID,
 		"source_start_frame": 0, "source_end_frame": 120,
-		"metadata": map[string]any{"beat_grid": map[string]any{
-			"bpm": 120, "beat_frames": []any{0, 15, 30},
-			"strong_beat_frames": []any{0}, "downbeat_frames": []any{0},
-			"bar_phase": 0, "analysis_method": "fixture",
+		"metadata": map[string]any{"creative_note": "保留", "beat_grid": map[string]any{
+			"bpm": 999, "beat_frames": []any{7},
 		}},
 	})
 	assertAtomicTimelineResult(t, succeeded, "insert_clip")
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || latest.Version != 2 || len(latest.Tracks[4].Clips) != 1 {
+		t.Fatalf("BGM 自动证据写入失败: latest=%#v err=%v", latest, err)
+	}
+	clip := latest.Tracks[4].Clips[0]
+	analysisID := StringValue(clip.Metadata["beat_analysis_id"])
+	grid, _ := clip.Metadata["beat_grid"].(map[string]any)
+	beatFrames := EffectFrameValues(grid["beat_frames"])
+	if analysisID == "" || StringValue(grid["analysis_id"]) != analysisID ||
+		len(beatFrames) < 2 || beatFrames[0] == 7 || grid["bpm"] == 999 ||
+		StringValue(clip.Metadata["creative_note"]) != "保留" {
+		t.Fatalf("BGM 未由 Harness 投影权威分析: metadata=%#v", clip.Metadata)
+	}
+	if missing := incompleteAtomicBeatGridFields(map[string]any{
+		"metadata": map[string]any{"beat_grid": map[string]any{
+			"bpm": grid["bpm"], "beat_frames": grid["beat_frames"],
+			"strong_beat_frames": grid["strong_beat_frames"],
+			"downbeat_frames":    grid["downbeat_frames"],
+			"bar_phase":          grid["bar_phase"], "analysis_method": grid["analysis_method"],
+		}},
+	}); len(missing) != 0 {
+		t.Fatalf("Harness grid 缺字段: %v", missing)
+	}
+	var analyses int
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM asset_analyses WHERE analysis_type='beat_grid'`,
+	).Scan(&analyses); err != nil || analyses != 1 {
+		t.Fatalf("beat analysis count=%d err=%v", analyses, err)
+	}
+	music, err := storage.GetAsset(t.Context(), database.Read(), musicID)
+	if err != nil || music.ReferencePath == nil {
+		t.Fatalf("music=%#v err=%v", music, err)
+	}
+	replacementResult, err := reducer.Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": "music_replacement", "job_id": "job_music_replacement",
+			"storage_mode": "reference", "reference_path": *music.ReferencePath,
+			"kind": "audio", "source": "local_path", "filename": "replacement.wav",
+			"hash": "replacement_audio_hash", "size": music.Size,
+			"ingest_status": "ready", "usable": true, "probe": music.Probe,
+		}},
+		{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{
+			"asset_id": "music_replacement",
+		}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || replacementResult.Status != reducer.StatusApplied {
+		t.Fatalf("replacement asset status=%s err=%v", replacementResult.Status, err)
+	}
+	replaced := executeAtomicTimelineTool(t, exec, ctx, "timeline.update", rushestools.TimelineUpdateInput{
+		"kind": "replace_clip", "timeline_clip_id": clip.TimelineClipID,
+		"asset_id": "music_replacement", "role": "bgm",
+	})
+	assertAtomicTimelineResult(t, replaced, "replace_clip")
+	replacedTimeline, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil || len(replacedTimeline.Tracks) <= 4 {
+		t.Fatalf("replaced timeline=%#v err=%v", replacedTimeline, err)
+	}
+	replacedBGM := replacedTimeline.Tracks[4].Clips
+	if len(replacedBGM) != 1 || replacedBGM[0].AssetID != "music_replacement" {
+		t.Fatalf("replaced BGM=%#v err=%v", replacedBGM, err)
+	}
+	replacementAnalysisID := StringValue(replacedBGM[0].Metadata["beat_analysis_id"])
+	replacementGrid, _ := replacedBGM[0].Metadata["beat_grid"].(map[string]any)
+	if replacementAnalysisID == "" || replacementAnalysisID == analysisID ||
+		StringValue(replacementGrid["analysis_id"]) != replacementAnalysisID {
+		t.Fatalf("BGM replacement retained stale analysis: %#v", replacedBGM[0].Metadata)
+	}
+	if err := database.Read().QueryRowContext(t.Context(), `
+		SELECT COUNT(*) FROM asset_analyses WHERE analysis_type='beat_grid'`,
+	).Scan(&analyses); err != nil || analyses != 2 {
+		t.Fatalf("replacement beat analysis count=%d err=%v", analyses, err)
+	}
 }
 
 func TestAtomicTimelineEditDoesNotAnalyzeOrModifyUntouchedBGM(t *testing.T) {

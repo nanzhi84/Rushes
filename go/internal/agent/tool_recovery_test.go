@@ -62,8 +62,7 @@ func TestRetrySafeFromEffectAllowlist(t *testing.T) {
 	t.Parallel()
 	retrySafe := testRetrySafe(t)
 	for _, name := range []string{
-		"asset.list_assets", "shot.search", "audio.analyze_beats",
-		"audio.analyze_speech_pauses", "speech.search", "timeline.inspect",
+		"asset.list_assets", "shot.search", "speech.search", "timeline.inspect",
 		"timeline.check", "preview.check",
 	} {
 		if !retrySafe(name) {
@@ -71,7 +70,8 @@ func TestRetrySafeFromEffectAllowlist(t *testing.T) {
 		}
 	}
 	for _, name := range []string{
-		"media.detect_shots", "speech.transcribe", "plan.update", "memory.set", "memory.remove",
+		"media.detect_shots", "speech.transcribe", "audio.analyze_beats",
+		"audio.analyze_speech_pauses", "plan.update", "memory.set", "memory.remove",
 		"interaction.ask_user", "interaction.confirm_action", "decision.answer",
 		"asset.import_local_file", "unknown.tool",
 	} {

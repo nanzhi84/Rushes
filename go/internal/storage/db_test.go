@@ -47,8 +47,8 @@ func TestOpenMigratesSchemaAndCreatesWorkspace(t *testing.T) {
 		WHERE type='table' AND name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 25 {
-		t.Fatalf("业务表数=%d want=25", count)
+	if count != 26 {
+		t.Fatalf("业务表数=%d want=26", count)
 	}
 	batches, err := ListTimelineEditBatches(t.Context(), database.Read(), "missing", 20)
 	if err != nil || len(batches) != 0 {

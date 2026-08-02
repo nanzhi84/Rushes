@@ -24,13 +24,14 @@ type SameTurnWaitObserver func(kind, status string, duration time.Duration)
 // 回合级回调（draft/reporter/交互态）仍走 context key。引擎侧 Service 保留
 // 一个装饰器负责引擎语义（决策屏障、本地导入硬拒绝、确认卡校验），再委托到此。
 type Executor struct {
-	database         *storage.DB
-	analyzer         *understanding.Analyzer
-	speechRecognizer contracts.SpeechRecognizer
-	progress         ProgressFunc
-	sameTurnWait     SameTurnWaitObserver
-	jobPollInterval  time.Duration
-	jobWaitTimeout   time.Duration
+	database          *storage.DB
+	analyzer          *understanding.Analyzer
+	speechRecognizer  contracts.SpeechRecognizer
+	progress          ProgressFunc
+	sameTurnWait      SameTurnWaitObserver
+	jobPollInterval   time.Duration
+	jobWaitTimeout    time.Duration
+	analysisResources *IndexedResourceCoordinator
 }
 
 // New 构造领域执行器。progress 可为 nil（非流式场景，如直接 REST 与测试）。
@@ -41,12 +42,13 @@ func New(
 	progress ProgressFunc,
 ) *Executor {
 	return &Executor{
-		database:         database,
-		analyzer:         analyzer,
-		speechRecognizer: speechRecognizer,
-		progress:         progress,
-		jobPollInterval:  100 * time.Millisecond,
-		jobWaitTimeout:   10 * time.Minute,
+		database:          database,
+		analyzer:          analyzer,
+		speechRecognizer:  speechRecognizer,
+		progress:          progress,
+		jobPollInterval:   100 * time.Millisecond,
+		jobWaitTimeout:    10 * time.Minute,
+		analysisResources: NewIndexedResourceCoordinator(),
 	}
 }
 
@@ -123,4 +125,13 @@ func (exec *Executor) SetSpeechRecognizer(recognizer contracts.SpeechRecognizer)
 // the executor begins serving tool calls.
 func (exec *Executor) SetSameTurnWaitObserver(observer SameTurnWaitObserver) {
 	exec.sameTurnWait = observer
+}
+
+// SetAnalysisResourceCoordinator makes content-addressed analysis singleflight
+// span every turn served by one Service. Direct executor users retain a private
+// coordinator created by New.
+func (exec *Executor) SetAnalysisResourceCoordinator(coordinator *IndexedResourceCoordinator) {
+	if coordinator != nil {
+		exec.analysisResources = coordinator
+	}
 }
