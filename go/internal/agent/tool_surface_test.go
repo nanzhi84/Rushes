@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -192,19 +193,19 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 	setSurfaceTimelineState(t, service, draftID, false)
 	assertSurface(
 		"完成口播气口和重说清理",
-		[]string{"speech.search", "shot.search", "media.detect_shots", "timeline.inspect"},
+		[]string{"speech.search", "shot.search", "media.detect_shots"},
 		[]string{"timeline.update"},
 	)
 	assertSurface(
 		"验证时间线后渲染预览",
-		[]string{"timeline.check", "timeline.inspect", "preview.generate"},
+		[]string{"preview.generate"},
 		[]string{"timeline.update"},
 	)
 
 	setSurfaceTimelineState(t, service, draftID, true)
 	assertSurface(
 		"渲染预览并导出最终 MP4",
-		[]string{"preview.generate", "timeline.check"},
+		[]string{"preview.generate"},
 		[]string{"timeline.update"},
 	)
 	assertSurface(
@@ -275,7 +276,7 @@ func TestControlToolSurfaceNarrowsToCurrentAction(t *testing.T) {
 	)
 }
 
-func TestRippleEditForcesTimelineInspectBeforeMoreModelTools(t *testing.T) {
+func TestRippleEditContinuesWithCurrentTimelineViewWithoutInspectOrCheck(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_ripple_observation_surface"
@@ -298,99 +299,16 @@ func TestRippleEditForcesTimelineInspectBeforeMoreModelTools(t *testing.T) {
 		schema.WithToolName("timeline.update"),
 	)
 
-	messages := []*schema.Message{user, ripple}
-	if !timelineObservationRequiredSinceLatestUser(messages) {
-		t.Fatal("成功波纹编辑后未要求重新观察")
-	}
-	specs, err := selectModelToolSurface(ctx, service.tools, messages)
+	specs, err := selectModelToolSurface(ctx, service.tools, []*schema.Message{user, ripple})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if names := surfaceNames(specs); !reflect.DeepEqual(names, []string{"timeline.inspect"}) {
-		t.Fatalf("ripple surface=%v want=[timeline.inspect]", names)
+	names := surfaceNames(specs)
+	if containsName(names, "timeline.inspect") || containsName(names, "timeline.check") {
+		t.Fatalf("Harness 内部工具泄漏到波纹编辑工具面: %v", names)
 	}
-
-	failedInspect := schema.ToolMessage(
-		`{"status":"failed"}`, "call_failed_inspect",
-		schema.WithToolName("timeline.inspect"),
-	)
-	if !timelineObservationRequiredSinceLatestUser(append(messages, failedInspect)) {
-		t.Fatal("失败的 inspect 不得清除重新观察要求")
-	}
-	decisionContinuation := schema.UserMessage(
-		"用户刚刚回答了你此前提出的选择题。这是同一条任务的继续，不是新的请求。",
-	)
-	if !timelineObservationRequiredSinceLatestUser(append(messages, decisionContinuation)) {
-		t.Fatal("真实用户回答的同任务继续不得丢失重新观察要求")
-	}
-
-	staleInspect := schema.ToolMessage(
-		`{"status":"succeeded","data":{"timeline_id":"draft_ripple_observation_surface:v1",`+
-			`"is_current":false}}`, "call_stale_inspect",
-		schema.WithToolName("timeline.inspect"),
-	)
-	if !timelineObservationRequiredSinceLatestUser(append(messages, staleInspect)) {
-		t.Fatal("成功读取旧 timeline_id 不得清除最新版本观察要求")
-	}
-	invalidatedVersionNowStale := schema.ToolMessage(
-		`{"status":"succeeded","data":{"timeline_exists":true,`+
-			`"timeline_id":"draft_ripple_observation_surface:v2","is_current":false}}`,
-		"call_invalidated_version_now_stale",
-		schema.WithToolName("timeline.inspect"),
-	)
-	if !timelineObservationRequiredSinceLatestUser(
-		append(messages, invalidatedVersionNowStale),
-	) {
-		t.Fatal("失效版本后来变旧时不得因 timeline_id 相等而清除观察要求")
-	}
-	newerCurrentInspect := schema.ToolMessage(
-		`{"status":"succeeded","data":{"timeline_exists":true,`+
-			`"timeline_id":"draft_ripple_observation_surface:v3","is_current":true}}`,
-		"call_newer_current_inspect",
-		schema.WithToolName("timeline.inspect"),
-	)
-	if timelineObservationRequiredSinceLatestUser(append(messages, newerCurrentInspect)) {
-		t.Fatal("成功读取更新的当前版本后仍要求重复观察")
-	}
-	timelineGoneInspect := schema.ToolMessage(
-		`{"status":"succeeded","data":{"timeline_exists":false,"is_current":true}}`,
-		"call_timeline_gone_inspect",
-		schema.WithToolName("timeline.inspect"),
-	)
-	if timelineObservationRequiredSinceLatestUser(append(messages, timelineGoneInspect)) {
-		t.Fatal("成功确认当前时间线不存在后仍要求重复观察")
-	}
-
-	successfulInspect := schema.ToolMessage(
-		`{"status":"succeeded","data":{"timeline_exists":true,`+
-			`"timeline_id":"draft_ripple_observation_surface:v2",`+
-			`"is_current":true}}`, "call_inspect",
-		schema.WithToolName("timeline.inspect"),
-	)
-	afterInspect := append(messages, successfulInspect)
-	if timelineObservationRequiredSinceLatestUser(afterInspect) {
-		t.Fatal("成功 inspect 后仍要求重复观察")
-	}
-	specs, err = selectModelToolSurface(ctx, service.tools, afterInspect)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if names := surfaceNames(specs); !containsName(names, "timeline.update") {
-		t.Fatalf("inspect 后未恢复编辑工具面: %v", names)
-	}
-
-	nonRipple := schema.ToolMessage(
-		`{"status":"succeeded","data":{"coordinate_effect":{`+
-			`"duration_frames_before":60,"duration_frames_after":120,`+
-			`"ripple_delta_frames":0,"observation_required":false}}}`,
-		"call_append",
-		schema.WithToolName("timeline.insert"),
-	)
-	if timelineObservationRequiredSinceLatestUser([]*schema.Message{user, nonRipple}) {
-		t.Fatal("顺序追加主视觉不应强制重复 inspect")
-	}
-	if timelineObservationRequiredSinceLatestUser(append(messages, schema.UserMessage("只调整字幕"))) {
-		t.Fatal("新的真实用户消息必须开始新的观察边界")
+	if !containsName(names, "timeline.update") {
+		t.Fatalf("波纹编辑后未保留原子编辑能力: %v", names)
 	}
 }
 
@@ -583,8 +501,7 @@ func TestTimelineEditSurfaceCanDiscoverAndInsertNewShot(t *testing.T) {
 		t.Fatal(err)
 	}
 	names = surfaceNames(specs)
-	if !containsName(names, "timeline.inspect") ||
-		!containsName(names, "timeline.update") ||
+	if !containsName(names, "timeline.update") ||
 		containsName(names, "shot.search") {
 		t.Fatalf("检索完成后 surface=%v", names)
 	}
@@ -742,14 +659,14 @@ func TestUnclassifiedEditLanguageConservativelyKeepsTimelineTools(t *testing.T) 
 			t.Fatal(selectErr)
 		}
 		names := surfaceNames(specs)
-		if !containsName(names, "timeline.update") ||
-			!containsName(names, "timeline.check") {
+		if !containsName(names, "timeline.update") || containsName(names, "timeline.check") ||
+			containsName(names, "timeline.inspect") {
 			t.Errorf("%q surface=%v", prompt, names)
 		}
 	}
 }
 
-func TestDynamicModelToolSurfacePreservesReadOnlyTimelineInspect(t *testing.T) {
+func TestDynamicModelToolSurfaceAnswersTimelineReadFromCurrentView(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_read_only_surface"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -767,8 +684,8 @@ func TestDynamicModelToolSurfacePreservesReadOnlyTimelineInspect(t *testing.T) {
 		if selectErr != nil {
 			t.Fatal(selectErr)
 		}
-		if names := surfaceNames(specs); !reflect.DeepEqual(names, []string{"timeline.inspect"}) {
-			t.Errorf("%q surface=%v want=[timeline.inspect]", prompt, names)
+		if names := surfaceNames(specs); len(names) != 0 {
+			t.Errorf("%q surface=%v want no model tools", prompt, names)
 		}
 	}
 }
@@ -817,7 +734,7 @@ func TestDynamicModelToolSurfaceFallsBackToPrerequisiteStage(t *testing.T) {
 		if selectErr != nil {
 			t.Fatalf("%q select surface: %v", prompt, selectErr)
 		}
-		if names := surfaceNames(exportSpecs); !reflect.DeepEqual(names, []string{"timeline.inspect"}) {
+		if names := surfaceNames(exportSpecs); len(names) != 0 {
 			t.Fatalf("%q 是用户最终导出，不得暴露编辑或预览能力: %v", prompt, names)
 		}
 	}
@@ -903,7 +820,7 @@ func TestExplicitIntentAdvancesAfterSuccessfulWorkflowWrite(t *testing.T) {
 		{
 			name: "beat", prompt: "根据节拍和 BGM 做卡点",
 			toolName: "timeline.insert",
-			required: "timeline.check",
+			required: "timeline.update",
 		},
 	}
 	for _, test := range tests {
@@ -961,18 +878,15 @@ func TestStagedEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 			}
 
 			specs, selectErr = selectModelToolSurface(ctx, service.tools, append(messages,
-				schema.ToolMessage(
-					`{"status":"succeeded"}`,
-					"call_edit_success",
-					schema.WithToolName(test.editTool),
-				),
+				successfulMutationWithAutomaticCheck(test.editTool, "call_edit_success", draftID+":v2"),
 			))
 			if selectErr != nil {
 				t.Fatal(selectErr)
 			}
 			names = surfaceNames(specs)
-			if !containsName(names, "timeline.check") ||
-				containsName(names, "preview.generate") {
+			if containsName(names, "timeline.check") ||
+				(test.editTool == "timeline.insert" && !containsName(names, "preview.generate")) ||
+				(test.editTool == "timeline.update" && !containsName(names, "timeline.update")) {
 				t.Fatalf("编辑完成后 surface=%v", names)
 			}
 		})
@@ -1009,7 +923,7 @@ func TestStagedEditThenRenderRequestStartsWithEditSurface(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if names := surfaceNames(specs); !containsName(names, "timeline.inspect") ||
+	if names := surfaceNames(specs); !containsName(names, "timeline.update") ||
 		!containsName(names, "speech.search") ||
 		!containsName(names, "shot.search") {
 		t.Fatalf("口播删剪后的重新观察 surface=%v", names)
@@ -1110,7 +1024,7 @@ func TestWorkflowTransitionIgnoresUnrelatedFailureButLatestSameToolWins(t *testi
 			t.Fatal(selectErr)
 		}
 		names := surfaceNames(specs)
-		if !containsName(names, "timeline.check") ||
+		if containsName(names, "timeline.check") ||
 			!containsName(names, "timeline.update") {
 			t.Fatalf("unrelated failure messages=%v surface=%v", messages, names)
 		}
@@ -1134,7 +1048,7 @@ func TestWorkflowTransitionIgnoresUnrelatedFailureButLatestSameToolWins(t *testi
 	}
 }
 
-func TestGenericEditSurfaceRemainsAvailableUntilExplicitValidation(t *testing.T) {
+func TestGenericEditSurfaceKeepsEditingAndPreviewAfterAutomaticValidation(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_multistep_generic_edit"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -1148,11 +1062,7 @@ func TestGenericEditSurfaceRemainsAvailableUntilExplicitValidation(t *testing.T)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	messages := []*schema.Message{
 		schema.UserMessage("插入素材，读取生成的 clip ID，再调低该片段音量并渲染预览"),
-		schema.ToolMessage(
-			`{"status":"succeeded"}`,
-			"call_insert",
-			schema.WithToolName("timeline.update"),
-		),
+		successfulMutationWithAutomaticCheck("timeline.update", "call_insert", draftID+":v2"),
 	}
 
 	specs, err := selectModelToolSurface(ctx, service.tools, messages)
@@ -1161,27 +1071,10 @@ func TestGenericEditSurfaceRemainsAvailableUntilExplicitValidation(t *testing.T)
 	}
 	names := surfaceNames(specs)
 	if !containsName(names, "timeline.update") ||
-		!containsName(names, "timeline.inspect") ||
-		!containsName(names, "timeline.check") ||
-		containsName(names, "preview.generate") {
+		containsName(names, "timeline.inspect") ||
+		containsName(names, "timeline.check") ||
+		!containsName(names, "preview.generate") {
 		t.Fatalf("首次 patch 后 surface=%v", names)
-	}
-
-	setSurfaceTimelineState(t, service, draftID, true)
-	specs, err = selectModelToolSurface(ctx, service.tools, append(messages,
-		schema.ToolMessage(
-			`{"status":"succeeded"}`,
-			"call_validate",
-			schema.WithToolName("timeline.check"),
-		),
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	names = surfaceNames(specs)
-	if !containsName(names, "preview.generate") ||
-		containsName(names, "timeline.update") {
-		t.Fatalf("显式验证后 surface=%v", names)
 	}
 }
 
@@ -1436,41 +1329,17 @@ func TestMultipleAtomicEditsFinishBeforeRender(t *testing.T) {
 	}
 
 	specs, err = selectModelToolSurface(ctx, service.tools, append(messages,
-		schema.ToolMessage(
-			`{"status":"succeeded"}`,
-			"call_timeline_update",
-			schema.WithToolName("timeline.update"),
-		),
+		successfulMutationWithAutomaticCheck("timeline.update", "call_timeline_update", draftID+":v2"),
 	))
 	if err != nil {
 		t.Fatal(err)
 	}
 	names = surfaceNames(specs)
-	if !containsName(names, "timeline.check") ||
+	if containsName(names, "timeline.check") ||
 		!containsName(names, "timeline.update") {
 		t.Fatalf("全部编辑完成后 surface=%v", names)
 	}
 
-	setSurfaceTimelineState(t, service, draftID, true)
-	specs, err = selectModelToolSurface(ctx, service.tools, append(messages,
-		schema.ToolMessage(
-			`{"status":"succeeded"}`,
-			"call_timeline_update",
-			schema.WithToolName("timeline.update"),
-		),
-		schema.ToolMessage(
-			`{"status":"succeeded"}`,
-			"call_validate",
-			schema.WithToolName("timeline.check"),
-		),
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	names = surfaceNames(specs)
-	if !containsName(names, "preview.generate") || containsName(names, "timeline.update") {
-		t.Fatalf("验证完成后 surface=%v", names)
-	}
 }
 
 func TestPlanUpdateIsAvailableAcrossWorkflowSurfaces(t *testing.T) {
@@ -1700,38 +1569,18 @@ func TestBroadRequestAdvancesSurfaceWhenDraftStateChanges(t *testing.T) {
 
 	setSurfaceTimelineState(t, service, draftID, false)
 	afterEditMessages := append(messages,
-		schema.ToolMessage(
-			`{"status":"succeeded","observation":"时间线补丁已应用"}`,
-			"call_apply",
-			schema.WithToolName("timeline.update"),
-		),
+		successfulMutationWithAutomaticCheck("timeline.update", "call_apply", draftID+":v2"),
 	)
 	afterEdit, err := selectModelToolSurface(ctx, service.tools, afterEditMessages)
 	if err != nil {
 		t.Fatal(err)
 	}
 	afterEditNames := surfaceNames(afterEdit)
-	if !containsName(afterEditNames, "timeline.check") ||
+	if containsName(afterEditNames, "timeline.check") ||
 		!containsName(afterEditNames, "timeline.update") {
 		t.Fatalf("编辑完成后 surface=%v", afterEditNames)
 	}
 
-	setSurfaceTimelineState(t, service, draftID, true)
-	afterValidation, err := selectModelToolSurface(ctx, service.tools, append(afterEditMessages,
-		schema.ToolMessage(
-			`{"status":"succeeded"}`,
-			"call_validate",
-			schema.WithToolName("timeline.check"),
-		),
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	afterValidationNames := surfaceNames(afterValidation)
-	if !containsName(afterValidationNames, "preview.generate") ||
-		containsName(afterValidationNames, "timeline.update") {
-		t.Fatalf("验证完成后 surface=%v", afterValidationNames)
-	}
 }
 
 func containsName(names []string, target string) bool {
@@ -1741,6 +1590,17 @@ func containsName(names []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func successfulMutationWithAutomaticCheck(toolName, callID, timelineID string) *schema.Message {
+	return schema.ToolMessage(
+		fmt.Sprintf(
+			`{"status":"succeeded","data":{"timeline_id":%q,%q:{"status":"succeeded","data":{"timeline_id":%q}}}}`,
+			timelineID, automaticTimelineCheckDataKey, timelineID,
+		),
+		callID,
+		schema.WithToolName(toolName),
+	)
 }
 
 type surfaceHistoryModel struct {
@@ -1842,7 +1702,7 @@ func (stub *surfaceHistoryModel) snapshots() [][]string {
 	return result
 }
 
-func TestPureTimelineCheckBindsOnlyCheckWithoutEditLease(t *testing.T) {
+func TestPureTimelineCheckUsesCurrentViewWithoutToolsOrEditLease(t *testing.T) {
 	for _, prompt := range []string{
 		"请校验当前时间线不变量和节拍对齐数据。",
 		"请调用 timeline.check 检查当前时间线。",
@@ -1879,8 +1739,7 @@ func TestPureTimelineCheckBindsOnlyCheckWithoutEditLease(t *testing.T) {
 			if _, err := surface.Generate(ctx, []*schema.Message{schema.UserMessage(prompt)}); err != nil {
 				t.Fatal(err)
 			}
-			if spy.calls != 1 || len(spy.bound) != 1 ||
-				!reflect.DeepEqual(spy.bound[0], []string{"timeline.check"}) {
+			if spy.calls != 1 || len(spy.bound) != 0 {
 				t.Fatalf("provider calls=%d bound=%v", spy.calls, spy.bound)
 			}
 			if session := timelineEditLeaseSessionFromContext(ctx); session.activeTurnID() != "" {
@@ -1931,7 +1790,7 @@ func TestTimelineCheckWithPositivePreviewKeepsPreviewAndLease(t *testing.T) {
 				t.Fatal(err)
 			}
 			if spy.calls != 1 || len(spy.bound) != 1 ||
-				!containsName(spy.bound[0], "timeline.check") ||
+				containsName(spy.bound[0], "timeline.check") ||
 				!containsName(spy.bound[0], "preview.generate") {
 				t.Fatalf("正向预览复合请求 provider calls=%d bound=%v", spy.calls, spy.bound)
 			}
@@ -1942,7 +1801,7 @@ func TestTimelineCheckWithPositivePreviewKeepsPreviewAndLease(t *testing.T) {
 	}
 }
 
-func TestEditThenTimelineCheckKeepsSameTurnLease(t *testing.T) {
+func TestEditThenAutomaticTimelineCheckKeepsSameTurnLease(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft-edit-then-check-same-lease"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -1972,7 +1831,7 @@ func TestEditThenTimelineCheckKeepsSameTurnLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !containsName(spy.bound[0], "timeline.update") ||
-		!containsName(spy.bound[0], "timeline.check") {
+		containsName(spy.bound[0], "timeline.check") {
 		t.Fatalf("组合编辑首轮工具面=%v", spy.bound[0])
 	}
 	var firstTurnID, firstToken string
@@ -1984,15 +1843,14 @@ func TestEditThenTimelineCheckKeepsSameTurnLease(t *testing.T) {
 
 	if _, err := surface.Generate(ctx, []*schema.Message{
 		user,
-		schema.ToolMessage(
-			`{"status":"succeeded","data":{"timeline_id":"draft-edit-then-check-same-lease:v2"}}`,
-			"call-timeline-update",
-			schema.WithToolName("timeline.update"),
+		successfulMutationWithAutomaticCheck(
+			"timeline.update", "call-timeline-update", "draft-edit-then-check-same-lease:v2",
 		),
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if spy.calls != 2 || !containsName(spy.bound[1], "timeline.check") {
+	if spy.calls != 2 || containsName(spy.bound[1], "timeline.check") ||
+		!containsName(spy.bound[1], "timeline.update") {
 		t.Fatalf("编辑后校验工具面=%v calls=%d", spy.bound[1], spy.calls)
 	}
 	var secondTurnID, secondToken string
@@ -2046,12 +1904,7 @@ func TestDynamicModelRebindsDifferentSurfaceOnEveryModelCall(t *testing.T) {
 		t.Fatalf("talking-head surface=%v", history[0])
 	}
 	if !reflect.DeepEqual(history[1], []string{
-		"timeline.check",
-		"timeline.delete",
-		"timeline.insert",
-		"timeline.inspect",
-		"timeline.split",
-		"timeline.update",
+		"timeline.delete", "timeline.insert", "timeline.split", "timeline.update",
 	}) {
 		t.Fatalf("timeline-edit surface=%v", history[1])
 	}
@@ -2086,7 +1939,7 @@ func TestProviderFinalExportRequestOnlyGuidesUserToUI(t *testing.T) {
 		t.Fatal(err)
 	}
 	boundTools, calls := stub.snapshot()
-	if calls != 1 || !reflect.DeepEqual(boundTools, []string{"timeline.inspect"}) {
+	if calls != 1 || len(boundTools) != 0 {
 		t.Fatalf("provider calls=%d bound_tools=%v", calls, boundTools)
 	}
 	if !strings.Contains(response.Content, "点击导出") ||

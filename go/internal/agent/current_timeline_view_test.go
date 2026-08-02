@@ -250,8 +250,8 @@ func TestLongCurrentTimelineViewUsesDeterministicRelevantWindow(t *testing.T) {
 		omitted[0]["clip_count"].(int)+omitted[1]["clip_count"].(int) != 72-len(clips) {
 		t.Fatalf("omitted ranges=%#v", omitted)
 	}
-	if hint, _ := compaction["inspect_hint"].(string); !strings.Contains(hint, "timeline.inspect") {
-		t.Fatalf("inspect hint=%q", hint)
+	if hint, _ := compaction["mutation_hint"].(string); !strings.Contains(hint, "Harness") {
+		t.Fatalf("mutation hint=%q", hint)
 	}
 
 	flattened := flattenCurrentTimelineClips(tracks)

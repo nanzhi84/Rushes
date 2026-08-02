@@ -309,8 +309,6 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 		"timeline.delete":             false,
 		"timeline.update":             false,
 		"timeline.split":              false,
-		"timeline.check":              false,
-		"timeline.inspect":            false,
 		"preview.generate":            false,
 		"preview.check":               true,
 		"interaction.confirm_action":  false,
@@ -357,11 +355,32 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 			t.Fatalf("模型工具 %s waiting_user 语义错误", spec.Name)
 		}
 	}
-	if len(typedAdapters) != len(registry.Specs(true))-1 {
-		t.Fatalf("typed adapter 分类数=%d，与模型工具数=%d 不一致", len(typedAdapters), len(registry.Specs(true))-1)
+	modelToolCount := 0
+	for _, spec := range registry.Specs(true) {
+		if spec.Exposure == ExposureLLM {
+			modelToolCount++
+		}
+	}
+	if len(typedAdapters) != modelToolCount {
+		t.Fatalf("typed adapter 分类数=%d，与模型工具数=%d 不一致", len(typedAdapters), modelToolCount)
 	}
 	if _, exists := registry.ModelReceiptPolicy("asset.import_local_file"); exists {
 		t.Fatal("harness 工具不得有模型回执策略")
+	}
+	for _, name := range []string{"timeline.inspect", "timeline.check"} {
+		spec, exists := registry.Spec(name)
+		if !exists || spec.Exposure != ExposureHarness {
+			t.Fatalf("%s exposure=%q exists=%v", name, spec.Exposure, exists)
+		}
+		for _, modelTool := range registry.EinoTools(true, false) {
+			info, infoErr := modelTool.Info(t.Context())
+			if infoErr != nil {
+				t.Fatal(infoErr)
+			}
+			if info.Name == name {
+				t.Fatalf("Harness-only %s leaked into LLM registry surface", name)
+			}
+		}
 	}
 	if _, exists := registry.ModelReceiptPolicy("does.not.exist"); exists {
 		t.Fatal("未注册工具不得有模型回执策略")
@@ -663,8 +682,8 @@ func TestRegistryConfirmationValidationRejectsUnsafeTargets(t *testing.T) {
 	}
 
 	ctx := WithDraftID(t.Context(), "draft_confirmation_validation")
-	if err := registry.ValidateConfirmation(ctx, "timeline.inspect", map[string]any{}); err != nil {
-		t.Fatalf("timeline.inspect should be confirmable: %v", err)
+	if err := registry.ValidateConfirmation(ctx, "timeline.inspect", map[string]any{}); err == nil {
+		t.Fatal("Harness-only timeline.inspect must not be model-confirmable")
 	}
 	for _, fixture := range []struct {
 		name string
@@ -838,9 +857,6 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		},
 		"preview.generate": {
 			"timeline_id", "同步收敛", "preview_id", "模型不轮询后台 job",
-		},
-		"timeline.inspect": {
-			"完整 track/clip ID", "timeline_exists=false",
 		},
 	}
 	for toolName, fragments := range want {
@@ -1102,7 +1118,7 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	allowed, _ = registry.Allowed(ctx, true)
 	for _, name := range []string{
 		"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
-		"timeline.check", "timeline.inspect", "preview.generate",
+		"preview.generate",
 	} {
 		if !containsSpec(allowed, name) {
 			t.Fatalf("已有但未标记 validated 的时间线也应放行 %s，由渲染入口同步校验", name)

@@ -149,10 +149,9 @@ func TestTimelineReceiptReplayPreservesCompleteTerminalResult(t *testing.T) {
 			t.Fatalf("receipt replay missing %s: %#v", key, reused.Data)
 		}
 	}
-	if !successfulTimelineToolRequiresObservation(&schema.Message{
-		Role: schema.Tool, ToolName: "timeline.update", Content: string(reusedJSON),
-	}) {
-		t.Fatalf("reused coordinate effect did not retain observation gate: %s", reusedJSON)
+	coordinateEffect, _ := reused.Data["coordinate_effect"].(map[string]any)
+	if coordinateEffect["observation_required"] != true {
+		t.Fatalf("receipt replay did not retain coordinate effect: %s", reusedJSON)
 	}
 	var versions int
 	if err := database.Read().QueryRowContext(t.Context(), `

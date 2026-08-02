@@ -46,7 +46,7 @@ data: {"event_id":...,"event":{...}}
 
 支持 `Last-Event-ID` header 和 `last_event_id` query。workspace 与 draft 各自使用明确路由谓词。
 
-turn-stream 固定 `event: turn_stream`，data.type 为：`turn_started`、`text_delta`、`message_completed`、`tool_step_started`、`tool_step_finished`、`subagent_progress`、`turn_ended`、`turn_error`。`message_completed` 带全文，用于修复中间 delta 丢失。
+turn-stream 固定 `event: turn_stream`，data.type 为：`turn_started`、`text_delta`、`message_completed`、`tool_step_started`、`tool_step_progress`、`tool_step_finished`、`subagent_progress`、`turn_ended`、`turn_error`。`message_completed` 带全文，用于修复中间 delta 丢失。
 
 ## 依赖方向
 

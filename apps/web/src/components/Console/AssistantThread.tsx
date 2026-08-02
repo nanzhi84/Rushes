@@ -904,6 +904,15 @@ function ToolStepRowImpl({
     <span className="flex min-w-0 flex-1 items-start gap-1.5">
       <StatusDot status={step.status} />
       <span className="min-w-0 flex-1 break-words text-xs text-fg-muted">{label}</span>
+      {step.harnessOwned ? (
+        <span className="shrink-0 rounded bg-accent/10 px-1 text-2xs text-accent">Harness</span>
+      ) : null}
+      {step.status === "running" && typeof step.progress === "number" ? (
+        <span className="shrink-0 text-2xs text-fg-faint">{Math.round(step.progress * 100)}%</span>
+      ) : null}
+      {step.status !== "running" && typeof step.durationMs === "number" ? (
+        <span className="shrink-0 text-2xs text-fg-faint">{step.durationMs}ms</span>
+      ) : null}
       <span className={`shrink-0 text-2xs ${toolStatusToneClass(step.status)}`}>
         {toolStatusLabel(step.status)}
       </span>
@@ -948,6 +957,9 @@ function ToolStepRowImpl({
             <SubagentProgressRow key={entry.asset_id} entry={entry} />
           ))}
         </ul>
+      ) : null}
+      {step.status === "running" && step.progressNote ? (
+        <p className="pl-5 text-2xs text-fg-faint">{step.progressNote}</p>
       ) : null}
     </div>
   );
@@ -1141,7 +1153,11 @@ function parsePersistedTool(message: ConsoleAssistantMessage): StreamToolItem | 
       tool: raw.tool,
       status: raw.status,
       argsSummary: typeof raw.args_summary === "string" && raw.args_summary ? raw.args_summary : null,
-      observation: typeof raw.observation === "string" && raw.observation ? raw.observation : null
+      observation: typeof raw.observation === "string" && raw.observation ? raw.observation : null,
+      progress: typeof raw.progress === "number" ? raw.progress : null,
+      progressNote: null,
+      durationMs: typeof raw.duration_ms === "number" ? raw.duration_ms : null,
+      harnessOwned: raw.harness_owned === true
     };
   } catch {
     return null;

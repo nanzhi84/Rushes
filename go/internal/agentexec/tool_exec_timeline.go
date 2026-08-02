@@ -92,7 +92,7 @@ func (exec *Executor) toolAtomicTimelineEdit(
 		if failure, ok := TimelineOpFailure(toolName, err, appliedOperation, current); ok {
 			if semanticKind, _ := failure.Data["semantic_error_kind"].(timeline.SemanticErrorKind); semanticKind == timeline.SemanticClipNotFound {
 				failure.Data["error_code"] = string(rushestools.ErrCodeStaleTarget)
-				failure.Data["recovery"] = "目标可能已被前一个原子编辑改写；先调用 timeline.inspect 读取最新稳定 ID，再继续剩余编辑。"
+				failure.Data["recovery"] = "目标可能已被前一个原子编辑改写；读取下一次 provider 调用前刷新的 CurrentTimelineView，再继续剩余编辑。"
 			}
 			return failure, nil
 		}
@@ -734,7 +734,7 @@ func (exec *Executor) timelineVersionConflictResult(
 		"expected_timeline_version":  base.timelineVersion,
 		"previous_timeline_id":       base.timelineID,
 		"attempted_timeline_id":      attemptedTimelineID,
-		"recovery":                   "调用 timeline.inspect 读取最新 timeline_id 与稳定 clip ID，再基于新快照重试这一项原子编辑。",
+		"recovery":                   "读取下一次 provider 调用前刷新的 CurrentTimelineView，再基于其中的最新 timeline_id 与稳定 clip ID 重试这一项原子编辑。",
 	}
 	if result.Conflict != nil {
 		data["actual_state_version"] = result.Conflict.ActualStateVersion
@@ -747,7 +747,7 @@ func (exec *Executor) timelineVersionConflictResult(
 		rushestools.StatusFailed,
 		"时间线在本次原子编辑提交前已被其它请求更新；本次结果未写入。",
 		rushestools.ErrCodeStaleTarget,
-		"调用 timeline.inspect 读取最新 timeline_id 与稳定 clip ID，再基于新快照重试这一项原子编辑。",
+		"读取下一次 provider 调用前刷新的 CurrentTimelineView，再基于其中的最新 timeline_id 与稳定 clip ID 重试这一项原子编辑。",
 		data,
 	)
 }
@@ -1032,7 +1032,7 @@ func requestedTimelineNotFound(timelineID string) rushestools.ToolResult {
 		rushestools.StatusFailed,
 		"指定 timeline_id 不属于当前草稿或已不存在。",
 		rushestools.ErrCodeStaleTarget,
-		"省略 timeline_id 调用 timeline.inspect 读取当前稳定版本，再使用返回的 timeline_id 重试。",
+		"从 Harness 注入的 CurrentTimelineView 读取当前稳定 timeline_id 后重试。",
 		map[string]any{
 			"requested_timeline_id":      timelineID,
 			"current_timeline_unchanged": true,

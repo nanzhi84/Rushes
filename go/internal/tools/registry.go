@@ -860,7 +860,7 @@ func registerTimelineInsert(registry *Registry) error {
 	return addTool[TimelineInsertInput, ToolResult](
 		registry,
 		"timeline.insert",
-		"插入一个素材 clip 或一条字幕；空时间线先插入一个 visual_base clip 即创建 v1，后续片段逐次追加。原声联动由服务端派生，只维护确定性音画不变量。插入 BGM 时把对应检测结果的完整拍点证据原样放入 metadata.beat_grid，供 timeline.check 校验切点",
+		"插入一个素材 clip 或一条字幕；空时间线先插入一个 visual_base clip 即创建 v1，后续片段逐次追加。原声联动由服务端派生，只维护确定性音画不变量。插入 BGM 时把对应检测结果的完整拍点证据原样放入 metadata.beat_grid；Harness 会自动校验精确写入版本",
 		nil, ExposureLLM, EffectReversible, false,
 		terminalMetadata(FamilyEdit, CostStandard,
 			SurfaceTalkingHead, SurfaceBeatEdit, SurfaceTimelineEdit),
@@ -898,13 +898,13 @@ func registerTimelineSplit(registry *Registry) error {
 }
 
 func registerTimelineCheck(registry *Registry) error {
-	return addTool[TimelineCheckInput, ToolResult](registry, "timeline.check", "只读检查当前时间线或指定稳定 timeline_id 的结构不变量、内容合同、节拍对齐与口播质量；不写 validation event、draft state 或 timeline version", []string{"timeline_exists"}, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata(FamilyCheck, CostStandard, SurfaceRender, SurfaceTimelineEdit, SurfaceBeatEdit))
+	return addTool[TimelineCheckInput, ToolResult](registry, "timeline.check", "Harness 只读检查指定稳定 timeline_id 的结构不变量、内容合同、节拍对齐与口播质量；不写 validation event、draft state 或 timeline version", []string{"timeline_exists"}, ExposureHarness, EffectReadOnly, false,
+		harnessMetadata(FamilyCheck, CostStandard))
 }
 
 func registerTimelineInspect(registry *Registry) error {
-	return addTool[TimelineInspectInput, ToolResult](registry, "timeline.inspect", "读取当前时间线或指定稳定 timeline_id 的完整 track/clip ID、素材、角色和帧范围；尚无时间线时返回 timeline_exists=false，而不是失败", nil, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata(FamilyRead, CostLow, SurfaceTimelineEdit, SurfaceTalkingHead, SurfaceBeatEdit, SurfaceRender, SurfacePreviewCheck))
+	return addTool[TimelineInspectInput, ToolResult](registry, "timeline.inspect", "Harness 读取当前时间线或指定稳定 timeline_id 的完整 track/clip ID、素材、角色和帧范围；尚无时间线时返回 timeline_exists=false，而不是失败", nil, ExposureHarness, EffectReadOnly, false,
+		harnessMetadata(FamilyRead, CostLow))
 }
 
 func registerPreviewGenerate(registry *Registry) error {

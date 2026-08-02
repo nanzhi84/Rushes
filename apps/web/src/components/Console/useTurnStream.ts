@@ -19,6 +19,10 @@ export type StreamToolItem = {
   status: string;
   argsSummary: string | null;
   observation: string | null;
+  progress?: number | null;
+  progressNote?: string | null;
+  durationMs?: number | null;
+  harnessOwned?: boolean;
 };
 
 // 长期记忆写入成功的可见卡片：列出已记住/已更新/已移除的记忆键并直链设置面板。
@@ -83,6 +87,7 @@ export const KNOWN_TURN_STREAM_TYPES = [
   "text_delta",
   "message_completed",
   "tool_step_started",
+  "tool_step_progress",
   "tool_step_finished",
   "model_retry",
   "subagent_progress",
@@ -104,8 +109,9 @@ export type TurnStreamEvent =
       kind: "narration" | "reply" | "observation" | "turn_failure";
       content: string;
     }
-  | { type: "tool_step_started"; step_id: string; tool: string; args_summary?: string }
-  | { type: "tool_step_finished"; step_id: string; tool: string; status: string; observation?: string }
+  | { type: "tool_step_started"; step_id: string; tool: string; args_summary?: string; progress?: number; harness_owned?: boolean }
+  | { type: "tool_step_progress"; step_id: string; tool: string; progress?: number; note?: string; harness_owned?: boolean }
+  | { type: "tool_step_finished"; step_id: string; tool: string; status: string; observation?: string; progress?: number; duration_ms?: number; harness_owned?: boolean }
   | {
       type: "model_retry";
       attempt?: number;
@@ -221,7 +227,32 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
           tool: event.tool,
           status: "running",
           argsSummary: typeof event.args_summary === "string" && event.args_summary ? event.args_summary : null,
-          observation: null
+          observation: null,
+          progress: normalizeProgress(event.progress),
+          progressNote: null,
+          durationMs: null,
+          harnessOwned: event.harness_owned === true
+        })
+      };
+    }
+    case "tool_step_progress": {
+      if (typeof event.step_id !== "string" || typeof event.tool !== "string") {
+        return state;
+      }
+      return {
+        ...state,
+        turnActive: true,
+        items: upsertToolStep(state.items, {
+          type: "tool",
+          step_id: event.step_id,
+          tool: event.tool,
+          status: "running",
+          argsSummary: null,
+          observation: null,
+          progress: normalizeProgress(event.progress),
+          progressNote: typeof event.note === "string" && event.note ? event.note : null,
+          durationMs: null,
+          harnessOwned: event.harness_owned === true
         })
       };
     }
@@ -237,7 +268,11 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
           tool: event.tool,
           status: typeof event.status === "string" ? event.status : "succeeded",
           argsSummary: null,
-          observation: typeof event.observation === "string" && event.observation ? event.observation : null
+          observation: typeof event.observation === "string" && event.observation ? event.observation : null,
+          progress: normalizeProgress(event.progress),
+          progressNote: null,
+          durationMs: typeof event.duration_ms === "number" && event.duration_ms >= 0 ? event.duration_ms : null,
+          harnessOwned: event.harness_owned === true
         }),
         // 工具收尾即清空其子代理进度，避免残留串到下一个进行中工具行上。
         subagentProgress: []
@@ -443,10 +478,18 @@ function upsertToolStep(items: TurnStreamItem[], next: StreamToolItem): TurnStre
           ...item,
           status: next.status,
           argsSummary: next.argsSummary ?? item.argsSummary,
-          observation: next.observation ?? item.observation
+          observation: next.observation ?? item.observation,
+          progress: next.progress ?? item.progress,
+          progressNote: next.progressNote ?? item.progressNote,
+          durationMs: next.durationMs ?? item.durationMs,
+          harnessOwned: next.harnessOwned || item.harnessOwned
         }
       : item
   );
+}
+
+function normalizeProgress(value: unknown): number | null {
+  return typeof value === "number" && value >= 0 && value <= 1 ? value : null;
 }
 
 function upsertProgress(

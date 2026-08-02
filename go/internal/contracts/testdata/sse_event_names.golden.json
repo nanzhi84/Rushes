@@ -84,6 +84,7 @@
     "text_delta",
     "message_completed",
     "tool_step_started",
+	"tool_step_progress",
     "tool_step_finished",
     "model_retry",
     "subagent_progress",

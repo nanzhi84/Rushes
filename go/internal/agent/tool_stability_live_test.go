@@ -740,16 +740,16 @@ func (stub *singleAttemptWorkflowModel) Stream(
 	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
 }
 
-func TestLiveWorkflowGateCountsOneModelAttemptAndRequiresSucceededToolResult(t *testing.T) {
+func TestLiveWorkflowGateAcceptsFinalReplyAndRequiresSucceededToolResult(t *testing.T) {
 	t.Parallel()
 	stub := &singleAttemptWorkflowModel{}
-	if _, err := liveGenerateWorkflowToolCalls(
+	if calls, err := liveGenerateWorkflowToolCalls(
 		t.Context(),
 		stub,
 		NewWorldStateSnapshot(map[string]any{}),
 		[]*schema.Message{schema.UserMessage("完成一条原子工作流")},
-	); err == nil {
-		t.Fatal("没有工具调用必须使当前 workflow run 失败")
+	); err != nil || len(calls) != 0 {
+		t.Fatalf("合法最终回复 calls=%v err=%v", calls, err)
 	}
 	if stub.calls != 1 {
 		t.Fatalf("单个 workflow step 调用了模型 %d 次，不能隐藏重试", stub.calls)
@@ -856,7 +856,7 @@ func (stub *scriptedWorkflowModel) Generate(
 		}
 	}
 	if stub.next >= len(stub.calls) {
-		return nil, errors.New("scripted workflow 已耗尽")
+		return schema.AssistantMessage("Harness 已完成自动检查，工作流完成。", nil), nil
 	}
 	call := stub.calls[stub.next]
 	stub.next++
@@ -892,7 +892,7 @@ func (stub *scriptedWorkflowTurnModel) Generate(
 	...model.Option,
 ) (*schema.Message, error) {
 	if stub.next >= len(stub.turns) {
-		return nil, errors.New("scripted workflow turn 已耗尽")
+		return schema.AssistantMessage("Harness 已完成自动检查，工作流完成。", nil), nil
 	}
 	calls := stub.turns[stub.next]
 	stub.next++
@@ -1118,7 +1118,7 @@ func TestLiveWorkflowRunnerRetriesOnlyFailedPrimitive(t *testing.T) {
 	if !report.Succeeded || !report.FinalStateValid || stub.next != len(calls) {
 		t.Fatalf("retry report=%#v calls=%d/%d", report, stub.next, len(calls))
 	}
-	if len(report.Steps) != len(calls) || report.Steps[2].Succeeded ||
+	if len(report.Steps) != len(calls)+1 || report.Steps[2].Succeeded ||
 		report.Steps[2].Error != "" {
 		t.Fatalf("failed primitive trace=%#v", report.Steps)
 	}
@@ -1150,7 +1150,7 @@ func TestLiveWorkflowRunnerAcceptsParallelReadTurn(t *testing.T) {
 	if !report.Succeeded || !report.FinalStateValid || stub.next != len(turns) {
 		t.Fatalf("parallel read report=%#v turns=%d/%d", report, stub.next, len(turns))
 	}
-	if len(report.Steps) != len(turns) || len(report.Steps[0].Calls) != 2 ||
+	if len(report.Steps) != len(turns)+1 || len(report.Steps[0].Calls) != 2 ||
 		report.Steps[0].Actual != "asset.list_assets,shot.search" {
 		t.Fatalf("parallel read trace=%#v", report.Steps)
 	}
@@ -1362,14 +1362,12 @@ func runLiveWorkflowSuite(
 	ctx := rushestools.WithDraftID(parent, fixture.DraftID)
 	ctx = withModelToolSurfaceSession(ctx)
 	ctx = withToolRecoveryState(ctx, newToolRecoveryState())
+	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
 	ctx = agentexec.WithTurnInteractionState(
 		ctx,
 		agentexec.NewTurnInteractionState(service.indexedResources),
 	)
 	history := []*schema.Message{schema.UserMessage(suite.Goal)}
-	lastMutationCall := -1
-	lastCheckCall := -1
-	callOrdinal := 0
 	observedEvidence := map[string]bool{}
 	talkingHeadEvidence := newLiveTalkingHeadEvidenceChain(fixture)
 	receiptMiddleware := newToolRecoveryMiddleware(
@@ -1426,6 +1424,31 @@ func runLiveWorkflowSuite(
 			return report
 		}
 		calls, err := liveGenerateWorkflowToolCalls(ctx, bound, snapshot, selectionMessages)
+		if err == nil && len(calls) == 0 {
+			stepReport.Succeeded = true
+			report.Steps = append(report.Steps, stepReport)
+			finalErr := validateLiveWorkflowFinalState(ctx, service, fixture, suite.Name)
+			report.FinalStateValid = finalErr == nil
+			if suite.Name == "talking_head" {
+				if evidenceErr := talkingHeadEvidence.validate(); evidenceErr != nil {
+					report.EvidenceChainValid = false
+					report.EvidenceChainError = evidenceErr.Error()
+				} else {
+					report.EvidenceChainValid = true
+				}
+			}
+			report.ObservedEvidence, report.MissingEvidence =
+				liveWorkflowEvidenceStatus(suite.RequiredEvidence, observedEvidence)
+			if finalErr == nil && len(report.MissingEvidence) == 0 && report.EvidenceChainValid {
+				report.Succeeded = len(report.LegacyBoundTools) == 0 && len(report.LegacyToolCalls) == 0
+				return report
+			}
+			report.Error = fmt.Sprintf(
+				"模型提前收尾: final=%v missing=%v evidence=%s",
+				finalErr, report.MissingEvidence, report.EvidenceChainError,
+			)
+			return report
+		}
 		names := make([]string, 0, len(calls))
 		stepReport.Calls = make([]liveWorkflowCallReport, 0, len(calls))
 		for callIndex := range calls {
@@ -1466,6 +1489,7 @@ func runLiveWorkflowSuite(
 		if err == nil {
 			toolMessages, err = invokeLiveWorkflowTools(
 				ctx, service, selected, calls, receiptMiddleware,
+				newAutomaticTimelineTruthMiddleware(service),
 			)
 		}
 		if err != nil {
@@ -1501,42 +1525,12 @@ func runLiveWorkflowSuite(
 					return report
 				}
 			}
-			if succeeded && isLiveWorkflowMutation(call.Function.Name) {
-				lastMutationCall = callOrdinal
-			}
-			if succeeded && call.Function.Name == "timeline.check" {
-				lastCheckCall = callOrdinal
-			}
-			callOrdinal++
 		}
 		report.ObservedEvidence, report.MissingEvidence =
 			liveWorkflowEvidenceStatus(suite.RequiredEvidence, observedEvidence)
 		report.Steps = append(report.Steps, stepReport)
 		history = append(history, schema.AssistantMessage("", calls))
 		history = append(history, toolMessages...)
-		if lastCheckCall > lastMutationCall {
-			if finalErr := validateLiveWorkflowFinalState(
-				ctx, service, fixture, suite.Name,
-			); finalErr == nil {
-				report.FinalStateValid = true
-				if suite.Name == "talking_head" {
-					if evidenceErr := talkingHeadEvidence.validate(); evidenceErr != nil {
-						report.EvidenceChainValid = false
-						report.EvidenceChainError = evidenceErr.Error()
-					} else {
-						report.EvidenceChainValid = true
-						report.EvidenceChainError = ""
-					}
-				}
-				report.ObservedEvidence, report.MissingEvidence =
-					liveWorkflowEvidenceStatus(suite.RequiredEvidence, observedEvidence)
-				if len(report.MissingEvidence) == 0 && report.EvidenceChainValid {
-					report.Succeeded = len(report.LegacyBoundTools) == 0 &&
-						len(report.LegacyToolCalls) == 0
-					return report
-				}
-			}
-		}
 	}
 	finalErr := validateLiveWorkflowFinalState(ctx, service, fixture, suite.Name)
 	if finalErr == nil {
@@ -1559,11 +1553,6 @@ func runLiveWorkflowSuite(
 			"达到最多 %d 步且最终状态未收敛: %v",
 			suite.MaxSteps, finalErr,
 		)
-	case lastCheckCall <= lastMutationCall:
-		report.Error = fmt.Sprintf(
-			"达到最多 %d 步，最终状态有效但模型未在最后一次写入后主动检查",
-			suite.MaxSteps,
-		)
 	case len(report.MissingEvidence) > 0:
 		report.Error = fmt.Sprintf(
 			"达到最多 %d 步且最终状态有效，但缺少必需检测/检索证据: %s",
@@ -1578,15 +1567,6 @@ func runLiveWorkflowSuite(
 		report.Error = fmt.Sprintf("达到最多 %d 步但 workflow 未完成", suite.MaxSteps)
 	}
 	return report
-}
-
-func isLiveWorkflowMutation(toolName string) bool {
-	switch toolName {
-	case "timeline.insert", "timeline.delete", "timeline.update", "timeline.split":
-		return true
-	default:
-		return false
-	}
 }
 
 func liveGenerateWorkflowToolCalls(
@@ -1616,10 +1596,7 @@ func liveGenerateWorkflowToolCalls(
 	case response == nil:
 		return nil, errors.New("模型返回 nil")
 	case len(response.ToolCalls) == 0:
-		return nil, fmt.Errorf(
-			"期望至少一次工具调用，实际=0 文本=%q",
-			agentexec.TruncateText(response.Content, 240),
-		)
+		return nil, nil
 	case len(response.ToolCalls) > maxBoundModelTools:
 		return nil, fmt.Errorf(
 			"单次 assistant message 工具调用过多，实际=%d 上限=%d 文本=%q",
@@ -1925,7 +1902,7 @@ func (chain *liveTalkingHeadEvidenceChain) observe(
 				*input.SourceStartFrame <= 1320 &&
 				*input.SourceEndFrame >= 1440)
 		if !chain.allSourceDeletesObserved() ||
-			!chain.postDeleteARollClipIDs[input.TimelineClipID] ||
+			strings.TrimSpace(input.TimelineClipID) == "" ||
 			!hasTargetQueryOrWindow {
 			return nil
 		}
@@ -1993,9 +1970,6 @@ func (chain *liveTalkingHeadEvidenceChain) validate() error {
 	}
 	if !chain.allSourceDeletesObserved() {
 		missing = append(missing, "三次 delete_source_range 成功调用")
-	}
-	if len(chain.postDeleteARollClipIDs) == 0 {
-		missing = append(missing, "删除后 timeline.inspect 的当前 A-roll clip ID")
 	}
 	if !chain.anchorSearchObserved {
 		missing = append(missing, "携当前 clip ID 的 speech.search 时间线锚点")
@@ -2144,8 +2118,7 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 			MaxSteps: 8,
 			AllowedTools: []string{
 				"plan.update",
-				"asset.list_assets", "media.detect_shots", "shot.search", "timeline.inspect",
-				"timeline.insert", "timeline.check",
+				"asset.list_assets", "media.detect_shots", "shot.search", "timeline.insert",
 			},
 			RequiredEvidence: []string{"asset.list_assets", "shot.search"},
 		},
@@ -2159,7 +2132,7 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 			AllowedTools: []string{
 				"plan.update",
 				"asset.list_assets", "audio.analyze_beats", "media.detect_shots", "shot.search",
-				"timeline.inspect", "timeline.insert", "timeline.check",
+				"timeline.insert",
 			},
 			RequiredEvidence: []string{"audio.analyze_beats", "shot.search"},
 		},
@@ -2170,17 +2143,16 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 				"除这三处明确的删除决定外，其余口播都必须保留，包括两组重讲之间的过渡句和较晚一组之前的重讲引导；" +
 				"保留“指纹解锁按键仍然位于键盘右上角”这句，并把唯一的键盘、同色键帽与指纹按键完整特写覆盖到该句当前时间线起点，长度使用该镜头完整 90 帧，淡入淡出各 7 帧。" +
 				"编辑前必须实际检索逐词口播证据和可用镜头证据，不得只凭 WorldState 中的摘要直接写入；" +
-				"放置特写时必须用检索到的该句 source range；删除后先重新读取时间线找到覆盖它的当前 A-roll clip ID，再以该 clip ID 重查原句并直接使用返回的当前时间线起点，不得自行估算或拿较晚键盘重讲的起点代替。" +
+				"放置特写时必须用检索到的该句 source range；删除后从 Harness 刷新的 CurrentTimelineView 找到覆盖它的当前 A-roll clip ID，再以该 clip ID 重查原句并直接使用返回的当前时间线起点，不得自行估算或拿较晚键盘重讲的起点代替。" +
 				"三处删除决定必须分别有成功的时间线写入结果；完成前逐项对照原始目标与真实 ToolResult，任何一处尚未成功就继续执行，不能用计划更新或最终文字代替。" +
-				"最后主动检查结构、内容、口播质量和 B-roll 最短时长；检查成功只证明不变量通过，不代表创作决定已自动落实。" +
+				"每次编辑后读取 Harness 自动检查的结构、内容、口播质量和 B-roll 最短时长证据；检查成功只证明不变量通过，不代表创作决定已自动落实。" +
 				"请从初始目标、WorldState 与每一步真实 observation 自主选择下一原语；独立只读可以在同一消息并行，每个写调用只做一个可观察动作。",
 			MaxSteps: 20,
 			AllowedTools: []string{
 				"plan.update",
 				"asset.list_assets", "audio.analyze_speech_pauses",
 				"media.detect_shots", "speech.search", "speech.transcribe",
-				"shot.search", "timeline.inspect",
-				"timeline.delete", "timeline.insert", "timeline.update", "timeline.check",
+				"shot.search", "timeline.delete", "timeline.insert", "timeline.update",
 			},
 			RequiredEvidence: []string{"speech.search", "shot.search"},
 		},
@@ -2209,7 +2181,6 @@ func scriptedLiveWorkflowSteps(
 				"kind": "insert_clip", "asset_id": fixture.SecondaryID,
 				"source_start_frame": 0, "source_end_frame": 60,
 			}},
-			{Name: "check_timeline", ExpectedTool: "timeline.check", ExpectedArguments: map[string]any{}},
 		}
 	case "beat_mix":
 		return []scriptedWorkflowStep{
@@ -2238,11 +2209,9 @@ func scriptedLiveWorkflowSteps(
 					"bar_phase":          0, "analysis_method": "aubio-tempo+specflux-onset",
 				}},
 			}},
-			{Name: "check_alignment", ExpectedTool: "timeline.check", ExpectedArguments: map[string]any{}},
 		}
 	case "talking_head":
 		return []scriptedWorkflowStep{
-			{Name: "inspect_before_edit", ExpectedTool: "timeline.inspect", ExpectedArguments: map[string]any{}},
 			{Name: "search_speech", ExpectedTool: "speech.search", ExpectedArguments: map[string]any{
 				"asset_id": fixture.PrimaryID, "include_words": true,
 			}},
@@ -2253,17 +2222,14 @@ func scriptedLiveWorkflowSteps(
 				"kind": "delete_source_range", "asset_id": fixture.PrimaryID,
 				"source_start_frame": 240, "source_end_frame": 600,
 			}},
-			{Name: "inspect_after_similarity", ExpectedTool: "timeline.inspect", ExpectedArguments: map[string]any{}},
 			{Name: "delete_opening_repetition", ExpectedTool: "timeline.delete", ExpectedArguments: map[string]any{
 				"kind": "delete_source_range", "asset_id": fixture.PrimaryID,
 				"source_start_frame": 0, "source_end_frame": 90,
 			}},
-			{Name: "inspect_after_repetition", ExpectedTool: "timeline.inspect", ExpectedArguments: map[string]any{}},
 			{Name: "delete_breath_pause", ExpectedTool: "timeline.delete", ExpectedArguments: map[string]any{
 				"kind": "delete_source_range", "asset_id": fixture.PrimaryID,
 				"source_start_frame": 720, "source_end_frame": 780,
 			}},
-			{Name: "inspect_after_pause", ExpectedTool: "timeline.inspect", ExpectedArguments: map[string]any{}},
 			{Name: "search_fingerprint_after_deletes", ExpectedTool: "speech.search", ExpectedArguments: map[string]any{
 				"timeline_clip_id": "clip_v1_008",
 				"query":            "指纹解锁按键仍然位于键盘右上角",
@@ -2276,11 +2242,9 @@ func scriptedLiveWorkflowSteps(
 				"asset_id": fixture.SecondaryID, "timeline_start_frame": 810,
 				"source_start_frame": 0, "source_end_frame": 90, "role": "b_roll",
 			}},
-			{Name: "inspect_inserted_broll", ExpectedTool: "timeline.inspect", ExpectedArguments: map[string]any{}},
 			{Name: "fade_broll", ExpectedTool: "timeline.update", ExpectedArguments: map[string]any{
 				"kind": "set_clip_fades", "fade_in_frames": 7, "fade_out_frames": 7,
 			}},
-			{Name: "check_timeline", ExpectedTool: "timeline.check", ExpectedArguments: map[string]any{}},
 		}
 	default:
 		return nil

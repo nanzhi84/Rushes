@@ -1429,13 +1429,13 @@ func terminalFailureReply(ctx context.Context, turnErr error) string {
 				"。当前时间线保留在最新已成功写入的版本；你可以继续让我从这里诊断或修复。"
 		case "timeline_check_missing":
 			return fmt.Sprintf(
-				"本轮没有完成终态验收：编辑已写入 %s，但尚未对这个最新版本执行成功的 timeline.check，因此我不能声称剪辑已经完成。你可以继续让我验证并修复未通过项。",
+				"本轮没有完成终态验收：编辑已写入 %s，但 Harness 未能取得这个精确版本的自动检查证据，因此我不能声称剪辑已经完成。你可以继续让我验证并修复未通过项。",
 				guardErr.mutationTimelineID,
 			)
 		case "timeline_mutation_unverified":
 			return "本轮没有完成终态验收：时间线编辑返回了成功状态，但没有携带有效的 timeline_id，系统无法确认实际写入版本，因此已拒绝成功声明。你可以继续让我读取最新时间线并重新检查。"
 		case "timeline_check_unverified":
-			return "本轮没有完成终态验收：timeline.check 返回了成功状态，但没有携带有效的 timeline_id，系统无法确认实际检查版本，因此已拒绝成功声明。你可以继续让我读取最新时间线并重新检查。"
+			return "本轮没有完成终态验收：Harness 自动检查没有携带有效的 timeline_id，系统无法确认实际检查版本，因此已拒绝成功声明。你可以继续让我读取最新时间线并重新检查。"
 		case "timeline_check_stale":
 			return fmt.Sprintf(
 				"本轮没有完成终态验收：最新编辑是 %s，但最后成功检查的是 %s，检查结果已经过期，因此我不能声称剪辑已经完成。你可以继续让我检查最新版本。",

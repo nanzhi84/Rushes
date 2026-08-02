@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
+	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -140,9 +141,12 @@ func (surface *dynamicToolSurfaceModel) bind(
 		}
 		infos = append(infos, info)
 	}
-	bound, err := surface.inner.WithTools(infos)
-	if err != nil {
-		return nil, nil, err
+	bound := surface.inner
+	if len(infos) > 0 {
+		bound, err = surface.inner.WithTools(infos)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	recordBoundModelToolSurface(ctx, implementations)
 	names := make([]string, 0, len(specs))
@@ -181,6 +185,7 @@ func selectModelToolSurface(
 	lane := inferModelToolSurface(allowed, messages)
 	lane = surfaceWithAvailablePrerequisites(allowed, lane, positiveUserText)
 	selected := filterSurface(allowed, lane)
+	allowEmpty := false
 	if lane == rushestools.SurfaceDiscovery {
 		// Discovery 只负责收集素材/镜头证据和必要的控制信息。即使 Registry
 		// 元数据以后误把 timeline mutation 标进来，也不能因此在 provider
@@ -197,23 +202,21 @@ func selectModelToolSurface(
 			selected = filterSpecsByName(allowed, "audio.analyze_beats")
 		}
 	}
-	// 纯时间线校验与素材分析一样是只读请求。timeline.check 的 PrimarySurface
-	// 属于 Render，而 Render/TimelineEdit 都可能同时带出 preview 或 mutation；若把
-	// 这些能力交给 provider，bind 会在任何工具真正执行前提前取得独占 edit lease。
-	// 只有本轮尚未发生编辑/预览推进时才收窄，组合编辑任务仍保持同一 lease 连续推进。
+	// CurrentTimelineView 与 Harness 自动检查已经覆盖只读校验请求。模型只需基于
+	// 注入事实回答，不获得 timeline.check，也不因纯读取提前取得 edit lease。
 	if requestsReadOnlyTimelineCheck(userText) &&
 		!successfulTimelineMutationSinceLatestUser(messages) &&
 		!successfulToolCallSinceLatestUser(messages, "preview.generate") {
-		lane = rushestools.SurfaceRender
-		selected = filterSpecsByName(allowed, "timeline.check")
+		selected = nil
+		allowEmpty = true
 	}
 	// “导出/下载最终视频”是用户 UI 能力，不是预览请求。纯导出意图只给模型
 	// 一个只读时间线事实入口，用于说明当前版本与引导按钮；不能借 SurfaceRender
 	// 暴露 preview.generate，更不能因此提前取得 edit lease。组合剪辑请求仍先走对应
 	// 编辑面，完成后由模型按系统边界引导用户点击导出。
 	if requestsUserFinalExportOnly(positiveUserText) {
-		lane = rushestools.SurfaceRender
-		selected = filterSpecsByName(allowed, "timeline.inspect")
+		selected = nil
+		allowEmpty = true
 	}
 	if lane == rushestools.SurfaceControl {
 		selected = selectControlToolSurface(allowed, messages)
@@ -228,18 +231,23 @@ func selectModelToolSurface(
 			"speech.search",
 		)...)
 	}
-	if lane == rushestools.SurfaceTimelineEdit && requestsTimelineInspect(positiveUserText) {
-		selected = filterSpecsByName(selected, "timeline.inspect")
+	if isEditingSurface(lane) && requestsRenderWorkflow(positiveUserText) &&
+		successfulTimelineMutationSinceLatestUser(messages) &&
+		successfulToolCallSinceLatestUser(messages, "timeline.check") {
+		selected = append(selected, filterSpecsByName(allowed, "preview.generate")...)
 	}
-	if timelineObservationRequiredSinceLatestUser(messages) {
-		lane = rushestools.SurfaceTimelineEdit
-		selected = filterSpecsByName(allowed, "timeline.inspect")
+	if requestsTimelineInspect(positiveUserText) {
+		selected = nil
+		allowEmpty = true
 	}
-	if len(selected) == 0 && lane != rushestools.SurfaceDiscovery {
+	if len(selected) == 0 && !allowEmpty && lane != rushestools.SurfaceDiscovery {
 		lane = rushestools.SurfaceDiscovery
 		selected = filterSurface(allowed, lane)
 	}
 	if len(selected) == 0 {
+		if allowEmpty {
+			return nil, nil
+		}
 		return nil, noModelToolsError(lane)
 	}
 	metrics, err := modelToolSchemaSizeFromTools(ctx, implementationsForSpecs(selected))
@@ -253,67 +261,6 @@ func selectModelToolSurface(
 		)
 	}
 	return selected, nil
-}
-
-func timelineObservationRequiredSinceLatestUser(
-	messages []*schema.Message,
-) bool {
-	pending := false
-	for _, message := range messages {
-		if message == nil {
-			continue
-		}
-		if message.Role == schema.User {
-			if isDecisionContinuationSurfaceMessage(message.Content) {
-				continue
-			}
-			pending = false
-			continue
-		}
-		if message.Role != schema.Tool {
-			continue
-		}
-		if message.ToolName == "timeline.inspect" && workflowToolCallSucceeded(message) {
-			if successfulCurrentTimelineInspection(message) {
-				pending = false
-			}
-			continue
-		}
-		if successfulTimelineToolRequiresObservation(message) {
-			pending = true
-		}
-	}
-	return pending
-}
-
-func successfulTimelineToolRequiresObservation(message *schema.Message) bool {
-	if message == nil || message.Role != schema.Tool ||
-		!strings.HasPrefix(message.ToolName, "timeline.") {
-		return false
-	}
-	var result struct {
-		Status string `json:"status"`
-		Data   struct {
-			CoordinateEffect struct {
-				ObservationRequired bool `json:"observation_required"`
-			} `json:"coordinate_effect"`
-		} `json:"data"`
-	}
-	return json.Unmarshal([]byte(message.Content), &result) == nil &&
-		result.Status == string(rushestools.StatusSucceeded) &&
-		result.Data.CoordinateEffect.ObservationRequired
-}
-
-func successfulCurrentTimelineInspection(message *schema.Message) bool {
-	var result struct {
-		Data struct {
-			IsCurrent bool `json:"is_current"`
-		} `json:"data"`
-	}
-	if json.Unmarshal([]byte(message.Content), &result) != nil {
-		return false
-	}
-	return result.Data.IsCurrent
 }
 
 func filterSpecsByName(specs []rushestools.Spec, names ...string) []rushestools.Spec {
@@ -614,6 +561,10 @@ func successfulToolCallSinceLatestUser(messages []*schema.Message, toolName stri
 		if message.Role == schema.Tool && message.ToolName == toolName {
 			return workflowToolCallSucceeded(message)
 		}
+		if toolName == "timeline.check" && message.Role == schema.Tool &&
+			isTerminalTimelineMutation(message.ToolName) && automaticTimelineCheckSucceeded(message) {
+			return true
+		}
 	}
 	return false
 }
@@ -631,7 +582,6 @@ func surfaceWithAvailablePrerequisites(
 			"audio.analyze_speech_pauses",
 			"shot.search",
 			"timeline.insert",
-			"timeline.inspect",
 		) {
 			return rushestools.SurfaceDiscovery
 		}
@@ -671,14 +621,12 @@ func surfaceWithAvailablePrerequisites(
 			return rushestools.SurfaceDiscovery
 		}
 	case rushestools.SurfaceRender:
-		if !hasAllowedTool(specs, "timeline.check") &&
-			!hasAllowedTool(specs, "preview.generate") {
+		if !hasAllowedTool(specs, "preview.generate") {
 			return rushestools.SurfaceDiscovery
 		}
 	case rushestools.SurfacePreviewCheck:
 		if !hasAllowedTool(specs, "preview.check") {
-			if hasAllowedTool(specs, "timeline.check") ||
-				hasAllowedTool(specs, "preview.generate") {
+			if hasAllowedTool(specs, "preview.generate") {
 				return rushestools.SurfaceRender
 			}
 			return rushestools.SurfaceDiscovery
@@ -896,8 +844,6 @@ func recentSuccessfulWorkflowSurface(
 				return rushestools.SurfaceBeatEdit
 			}
 			return rushestools.SurfaceTimelineEdit
-		case "timeline.check":
-			return rushestools.SurfaceRender
 		case "preview.generate":
 			if requestsPreviewCheck(userText) {
 				return rushestools.SurfacePreviewCheck
@@ -911,6 +857,22 @@ func recentSuccessfulWorkflowSurface(
 		}
 	}
 	return 0
+}
+
+func automaticTimelineCheckSucceeded(message *schema.Message) bool {
+	if message == nil || message.Role != schema.Tool || !isTerminalTimelineMutation(message.ToolName) {
+		return false
+	}
+	var result struct {
+		Data map[string]json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal([]byte(message.Content), &result) != nil {
+		return false
+	}
+	var check rushestools.ToolResult
+	return json.Unmarshal(result.Data[automaticTimelineCheckDataKey], &check) == nil &&
+		check.Status == string(rushestools.StatusSucceeded) &&
+		isValidTimelineVersionID(agentexec.InterfaceString(check.Data["timeline_id"]))
 }
 
 func successfulTimelineMutationSinceLatestUser(messages []*schema.Message) bool {
@@ -938,7 +900,6 @@ func isWorkflowTransitionTool(name string) bool {
 		"timeline.delete",
 		"timeline.update",
 		"timeline.split",
-		"timeline.check",
 		"preview.generate",
 		"preview.check":
 		return true

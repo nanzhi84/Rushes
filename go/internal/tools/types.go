@@ -326,7 +326,7 @@ type SpeechTranscribeResult struct {
 
 type SpeechSearchInput struct {
 	AssetID          string `json:"asset_id,omitempty" jsonschema_description:"带声音的视频或音频素材 ID；与 timeline_clip_id 至少传一个"`
-	TimelineClipID   string `json:"timeline_clip_id,omitempty" jsonschema_description:"timeline.inspect 返回、覆盖目标 source range 的当前 A-roll clip ID；传入后确定性返回映射后的时间线帧，供波纹删除后锚定 B-roll"`
+	TimelineClipID   string `json:"timeline_clip_id,omitempty" jsonschema_description:"CurrentTimelineView 返回、覆盖目标 source range 的当前 A-roll clip ID；传入后确定性返回映射后的时间线帧，供波纹删除后锚定 B-roll"`
 	Query            string `json:"query,omitempty" jsonschema_description:"像 grep 一样检索台词语义；省略时返回时间顺序的口播索引"`
 	SourceStartFrame *int   `json:"source_start_frame,omitempty" jsonschema_description:"可选源素材检索起点帧"`
 	SourceEndFrame   *int   `json:"source_end_frame,omitempty" jsonschema_description:"可选源素材检索终点帧"`
@@ -542,7 +542,7 @@ type TimelineInspectInput struct {
 }
 
 type PreviewGenerateInput struct {
-	TimelineID  string `json:"timeline_id" jsonschema:"required" jsonschema_description:"timeline.inspect 返回的当前稳定 timeline_id；它精确指向一个版本，若已变化则返回 stale_target，不猜测新目标"`
+	TimelineID  string `json:"timeline_id" jsonschema:"required" jsonschema_description:"CurrentTimelineView 返回的当前稳定 timeline_id；它精确指向一个版本，若已变化则返回 stale_target，不猜测新目标"`
 	Orientation string `json:"orientation,omitempty" jsonschema_description:"预览画幅方向：auto、portrait 或 landscape；默认 auto"`
 }
 
