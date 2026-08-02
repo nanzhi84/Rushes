@@ -182,6 +182,17 @@ func selectModelToolSurface(
 	}
 	userText := latestUserSurfaceText(messages)
 	positiveUserText := withoutNegatedSurfaceActions(userText)
+	if requestsMaterialCatalogOnly(positiveUserText) {
+		// material_catalog is already injected in WorldState. Listing it again via
+		// a provider tool would duplicate deterministic context and waste a round.
+		return nil, nil
+	}
+	if requestsPreviewBoundaryOnly(positiveUserText) {
+		// Preview generation and QA are Harness graph steps. A preview-only request
+		// deliberately binds no model tool; the terminal candidate triggers the
+		// automatic exact-version PreviewQA loop in the same turn.
+		return nil, nil
+	}
 	lane := inferModelToolSurface(allowed, messages)
 	lane = surfaceWithAvailablePrerequisites(allowed, lane, positiveUserText)
 	selected := filterSurface(allowed, lane)
@@ -206,15 +217,12 @@ func selectModelToolSurface(
 	// CurrentTimelineView 与 Harness 自动检查已经覆盖只读校验请求。模型只需基于
 	// 注入事实回答，不获得 timeline.check，也不因纯读取提前取得 edit lease。
 	if requestsReadOnlyTimelineCheck(userText) &&
-		!successfulTimelineMutationSinceLatestUser(messages) &&
-		!successfulToolCallSinceLatestUser(messages, "preview.generate") {
+		!successfulTimelineMutationSinceLatestUser(messages) {
 		selected = nil
 		allowEmpty = true
 	}
 	// “导出/下载最终视频”是用户 UI 能力，不是预览请求。纯导出意图只给模型
-	// 一个只读时间线事实入口，用于说明当前版本与引导按钮；不能借 SurfaceRender
-	// 暴露 preview.generate，更不能因此提前取得 edit lease。组合剪辑请求仍先走对应
-	// 编辑面，完成后由模型按系统边界引导用户点击导出。
+	// CurrentTimelineView，用于说明当前版本与引导按钮；不能因此提前取得 edit lease。
 	if requestsUserFinalExportOnly(positiveUserText) {
 		selected = nil
 		allowEmpty = true
@@ -227,15 +235,9 @@ func selectModelToolSurface(
 		// 这些证据工具与原子编辑共享当前轮工具面，但不会把旧复合编辑带回来。
 		selected = append(selected, filterSpecsByName(
 			allowed,
-			"media.detect_shots",
 			"shot.search",
 			"speech.search",
 		)...)
-	}
-	if isEditingSurface(lane) && requestsRenderWorkflow(positiveUserText) &&
-		successfulTimelineMutationSinceLatestUser(messages) &&
-		successfulToolCallSinceLatestUser(messages, "timeline.check") {
-		selected = append(selected, filterSpecsByName(allowed, "preview.generate")...)
 	}
 	if requestsTimelineInspect(positiveUserText) {
 		selected = nil
@@ -455,31 +457,13 @@ func inferModelToolSurface(
 		return recent
 	}
 	lastIndex := -1
-	lastEditIndex := -1
 	var explicit rushestools.Surface
-	var explicitEdit rushestools.Surface
 	for _, spec := range specs {
 		index := strings.LastIndex(text, strings.ToLower(spec.Name))
 		if index > lastIndex {
 			lastIndex = index
 			explicit = spec.PrimarySurface
 		}
-		if index > lastEditIndex &&
-			spec.Family == rushestools.FamilyEdit &&
-			isEditingSurface(spec.PrimarySurface) {
-			lastEditIndex = index
-			explicitEdit = spec.PrimarySurface
-		}
-	}
-	if (explicit == rushestools.SurfaceRender ||
-		explicit == rushestools.SurfacePreviewCheck) &&
-		explicitEdit != 0 {
-		return explicitEdit
-	}
-	// “渲染新预览并质检”必须先精确渲染当前 timeline_id。草稿中可能仍有旧
-	// preview；只有本轮 preview.generate 返回成功产物后，后续轮次才推进 PreviewCheck。
-	if explicit == rushestools.SurfacePreviewCheck && requestsRenderWorkflow(text) {
-		return rushestools.SurfaceRender
 	}
 	if explicit != 0 {
 		return explicit
@@ -491,10 +475,6 @@ func inferModelToolSurface(
 		return rushestools.SurfaceControl
 	case pendingEditingSurface(text) != 0:
 		return pendingEditingSurface(text)
-	case requestsRenderWorkflow(text):
-		return rushestools.SurfaceRender
-	case requestsPreviewCheck(text):
-		return rushestools.SurfacePreviewCheck
 	case requestsTalkingHeadWorkflow(text):
 		return rushestools.SurfaceTalkingHead
 	case containsSurfaceKeyword(text, "卡点", "拍点", "节拍", "音频", "bpm", "bgm", "beat"):
@@ -519,12 +499,6 @@ func inferModelToolSurface(
 		}
 		return rushestools.SurfaceDiscovery
 	}
-}
-
-func isEditingSurface(surface rushestools.Surface) bool {
-	return surface == rushestools.SurfaceTalkingHead ||
-		surface == rushestools.SurfaceBeatEdit ||
-		surface == rushestools.SurfaceTimelineEdit
 }
 
 func needsPlanUpdateSurface(messages []*schema.Message) bool {
@@ -616,17 +590,6 @@ func surfaceWithAvailablePrerequisites(
 			"timeline.update",
 			"timeline.split",
 		) && !requestsTimelineInspect(text) {
-			return rushestools.SurfaceDiscovery
-		}
-	case rushestools.SurfaceRender:
-		if !hasAllowedTool(specs, "preview.generate") {
-			return rushestools.SurfaceDiscovery
-		}
-	case rushestools.SurfacePreviewCheck:
-		if !hasAllowedTool(specs, "preview.check") {
-			if hasAllowedTool(specs, "preview.generate") {
-				return rushestools.SurfaceRender
-			}
 			return rushestools.SurfaceDiscovery
 		}
 	}
@@ -780,10 +743,9 @@ func recentSuccessfulWorkflowSurface(
 ) rushestools.Surface {
 	if requestsInitialTimelineComposition(userText) &&
 		!successfulTimelineMutationSinceLatestUser(messages) {
-		// 首剪先完成两类只读证据，再进入会取得 edit lease 的原子写阶段。
-		// 两个读取允许并行或任意顺序，不能因其中一个先完成就把另一个移出工具面。
-		if successfulToolCallSinceLatestUser(messages, "asset.list_assets") &&
-			successfulToolCallSinceLatestUser(messages, "shot.search") {
+		// material_catalog 已由 WorldState 自动注入；首剪只需完成真实镜头检索，
+		// 然后进入会取得 edit lease 的原子写阶段。
+		if successfulToolCallSinceLatestUser(messages, "shot.search") {
 			return rushestools.SurfaceTimelineEdit
 		}
 		return rushestools.SurfaceDiscovery
@@ -815,10 +777,6 @@ func recentSuccessfulWorkflowSurface(
 		}
 		switch message.ToolName {
 		case "plan.update", "memory.set", "memory.remove":
-			return remainingWorkflowSurface(userText)
-		case "asset.list_assets":
-			return remainingWorkflowSurface(userText)
-		case "media.detect_shots":
 			return remainingWorkflowSurface(userText)
 		case "speech.search":
 			if requestsTalkingHeadWorkflow(userText) {
@@ -854,16 +812,6 @@ func recentSuccessfulWorkflowSurface(
 			if requestsBeatEditWorkflow(userText) {
 				return rushestools.SurfaceBeatEdit
 			}
-			return rushestools.SurfaceTimelineEdit
-		case "preview.generate":
-			if requestsPreviewCheck(userText) {
-				return rushestools.SurfacePreviewCheck
-			}
-			return rushestools.SurfaceRender
-		case "preview.check":
-			// preview.check 是只读证据收集，但其终态结果可能要求模型继续修正
-			// 时间线。检查完成后回到原子编辑面，避免更早的 preview.generate
-			// 一直把后续 provider 调用锁在只能继续质检的工具面。
 			return rushestools.SurfaceTimelineEdit
 		}
 	}
@@ -902,17 +850,13 @@ func isWorkflowTransitionTool(name string) bool {
 	case "plan.update",
 		"memory.set",
 		"memory.remove",
-		"asset.list_assets",
-		"media.detect_shots",
 		"speech.search",
 		"shot.search",
 		"shot.deep_search",
 		"timeline.insert",
 		"timeline.delete",
 		"timeline.update",
-		"timeline.split",
-		"preview.generate",
-		"preview.check":
+		"timeline.split":
 		return true
 	default:
 		return false
@@ -925,10 +869,6 @@ func remainingWorkflowSurface(text string) rushestools.Surface {
 		return rushestools.SurfaceTimelineEdit
 	case pendingEditingSurface(text) != 0:
 		return pendingEditingSurface(text)
-	case requestsRenderWorkflow(text):
-		return rushestools.SurfaceRender
-	case requestsPreviewCheck(text):
-		return rushestools.SurfacePreviewCheck
 	case requestsTalkingHeadWorkflow(text):
 		return rushestools.SurfaceTalkingHead
 	case containsSurfaceKeyword(text, "卡点", "拍点", "节拍", "音频", "bpm", "bgm", "beat"):
@@ -945,6 +885,18 @@ func requestsInitialTimelineComposition(text string) bool {
 		"组装初版时间线", "建立时间线", "创建时间线", "初版时间线", "首剪",
 		"做一个完整短片", "做个完整短片", "做一个短片", "做个短片",
 	)
+}
+
+func requestsMaterialCatalogOnly(text string) bool {
+	if !containsSurfaceKeyword(text,
+		"有哪些素材", "查看素材", "列出素材", "素材列表", "清点素材",
+	) {
+		return false
+	}
+	return !requestsShotSearch(text) &&
+		!requestsTimelineMutation(text) &&
+		!requestsInitialTimelineComposition(text) &&
+		!requestsAssetSearchForTimelineEdit(text)
 }
 
 func pendingEditingSurface(text string) rushestools.Surface {
@@ -972,7 +924,7 @@ func pendingEditingSurface(text string) rushestools.Surface {
 func requestsTimelineMutation(text string) bool {
 	if containsSurfaceKeyword(text,
 		"剪辑", "剪掉", "裁剪", "裁到", "分割", "移动片段", "淡入", "淡出",
-		"编辑", "修改", "调整", "clip", "patch",
+		"编辑", "修改", "调整", "修复", "clip", "patch",
 	) {
 		return true
 	}
@@ -1007,6 +959,18 @@ func requestsExplicitPreviewWorkflow(text string) bool {
 	return containsSurfaceKeyword(text, "预览", "离线画质", "preview.generate")
 }
 
+func requestsPreviewBoundaryOnly(text string) bool {
+	if !requestsExplicitPreviewWorkflow(text) && !requestsPreviewCheck(text) {
+		return false
+	}
+	return pendingEditingSurface(text) == 0 &&
+		!requestsTimelineMutation(text) &&
+		!requestsTalkingHeadWorkflow(text) &&
+		!requestsBeatEditWorkflow(text) &&
+		!requestsAssetSearchForTimelineEdit(text) &&
+		!requestsUserFinalExportOnly(text)
+}
+
 func requestsUserFinalExport(text string) bool {
 	return containsSurfaceKeyword(text,
 		"导出", "下载", "最终成片", "最终视频", "渲染成片", "mp4",
@@ -1027,11 +991,6 @@ func requestsUserFinalExportOnly(text string) bool {
 }
 
 func workflowToolCallSucceeded(message *schema.Message) bool {
-	if message.ToolName == "asset.list_assets" {
-		var result rushestools.AssetListResult
-		return json.Unmarshal([]byte(message.Content), &result) == nil &&
-			result.DraftID != "" && len(result.Assets) > 0
-	}
 	if message.ToolName == "shot.search" {
 		var result struct {
 			Shots []json.RawMessage `json:"shots"`

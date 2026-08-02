@@ -382,10 +382,10 @@ func TestDiscoveryProviderCallsNeverAcquireTimelineEditLease(t *testing.T) {
 			); err != nil {
 				t.Fatal(err)
 			}
-			if spy.calls != 1 || len(spy.bound) != 1 {
+			if spy.calls != 1 || (prompt != "查看素材" && len(spy.bound) != 1) {
 				t.Fatalf("provider calls=%d bound=%v", spy.calls, spy.bound)
 			}
-			if containsName(spy.bound[0], "timeline.insert") {
+			if len(spy.bound) > 0 && containsName(spy.bound[0], "timeline.insert") {
 				t.Fatalf("Discovery 泄露 timeline mutation: %v", spy.bound[0])
 			}
 			if session.activeTurnID() != "" {
@@ -624,7 +624,7 @@ func TestTimelineEditLeaseSessionDefensiveStateTransitions(t *testing.T) {
 
 func TestTimelineEditLeaseHelpersAndCancelledStorageMutation(t *testing.T) {
 	if toolRequiresTimelineEditLease("timeline.inspect") ||
-		!toolRequiresTimelineEditLease("preview.generate") ||
+		toolRequiresTimelineEditLease("preview.generate") ||
 		specsRequireTimelineEditLease([]rushestools.Spec{{Name: "timeline.inspect"}}) ||
 		!specsRequireTimelineEditLease([]rushestools.Spec{
 			{Name: "timeline.inspect"}, {Name: "timeline.split"},

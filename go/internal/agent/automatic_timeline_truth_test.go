@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -15,6 +17,58 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
+
+func TestCommittedTimelineMutationResultBoundaries(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		committed bool
+	}{
+		{name: "malformed", raw: "{"},
+		{name: "invalid timeline id", raw: `{"status":"succeeded","data":{"timeline_id":"draft"}}`},
+		{name: "succeeded", raw: `{"status":"succeeded","data":{"timeline_id":"draft:v2"}}`, committed: true},
+		{name: "validation unchanged", raw: `{"status":"validation_failed","data":{"timeline_id":"draft:v2","current_timeline_unchanged":true}}`},
+		{name: "validation advanced", raw: `{"status":"validation_failed","data":{"timeline_id":"draft:v2","before_version":1,"after_version":2}}`, committed: true},
+		{name: "validation not advanced", raw: `{"status":"validation_failed","data":{"timeline_id":"draft:v2","before_version":2,"after_version":2}}`},
+		{name: "failed", raw: `{"status":"failed","data":{"timeline_id":"draft:v2"}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, _, committed := committedTimelineMutationResult(test.raw)
+			if committed != test.committed {
+				t.Fatalf("committed=%v want=%v raw=%s", committed, test.committed, test.raw)
+			}
+		})
+	}
+}
+
+func TestAttachAutomaticTimelineCheckEvidenceOnHarnessFailure(t *testing.T) {
+	encoded := attachAutomaticTimelineCheckEvidence(
+		rushestools.ToolResult{Status: string(rushestools.StatusSucceeded)},
+		rushestools.ToolResult{},
+		errors.New("timeline check unavailable"),
+	)
+	var mutation rushestools.ToolResult
+	if err := json.Unmarshal([]byte(encoded), &mutation); err != nil {
+		t.Fatal(err)
+	}
+	if mutation.Observation == "" || mutation.Data == nil {
+		t.Fatalf("mutation=%#v", mutation)
+	}
+	checkBytes, err := json.Marshal(mutation.Data[automaticTimelineCheckDataKey])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var check rushestools.ToolResult
+	if err := json.Unmarshal(checkBytes, &check); err != nil {
+		t.Fatal(err)
+	}
+	if check.Status != string(rushestools.StatusFailed) ||
+		check.Data["error_code"] != string(rushestools.ErrCodeToolExecutionError) ||
+		!strings.Contains(check.Observation, "timeline check unavailable") {
+		t.Fatalf("check=%#v", check)
+	}
+}
 
 type automaticValidationFailureModel struct {
 	mu      sync.Mutex

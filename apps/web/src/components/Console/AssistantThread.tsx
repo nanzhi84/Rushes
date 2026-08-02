@@ -1248,6 +1248,8 @@ const TOOL_STEP_LABELS: Record<string, string> = {
   "render.final_mp4": "导出成片",
   "render.status": "查询渲染进度",
   "preview.check": "检查预览",
+  "preview.generate": "生成工作预览",
+  "preview.qa_report": "汇总预览质检",
   "interaction.ask_user": "向你提问",
   "interaction.confirm_action": "请求确认"
 };

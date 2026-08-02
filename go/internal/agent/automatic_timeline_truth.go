@@ -43,7 +43,7 @@ func newAutomaticTimelineTruthMiddleware(service *Service) compose.ToolMiddlewar
 				}
 				if checkErr == nil {
 					truth.recordTimelineCheckResult(
-						agentexec.InterfaceString(check.Data["timeline_id"]), check.Status,
+						agentexec.InterfaceString(check.Data["timeline_id"]), check.Status, check,
 					)
 				}
 				output.Result = attachAutomaticTimelineCheckEvidence(mutation, check, checkErr)
@@ -179,7 +179,9 @@ func (service *Service) ensureTerminalTimelineTruth(ctx context.Context, draftID
 	if err != nil {
 		return err
 	}
-	state.recordTimelineCheckResult(agentexec.InterfaceString(result.Data["timeline_id"]), result.Status)
+	state.recordTimelineCheckResult(
+		agentexec.InterfaceString(result.Data["timeline_id"]), result.Status, result,
+	)
 	refreshed := state.snapshot()
 	if refreshed.checkSequence != refreshed.mutationSequence ||
 		refreshed.checkTimelineID != refreshed.mutationTimelineID {

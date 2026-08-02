@@ -297,7 +297,6 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 	}
 
 	typedAdapters := map[string]bool{
-		"asset.list_assets":          true,
 		"shot.search":                false,
 		"shot.deep_search":           false,
 		"speech.search":              false,
@@ -310,8 +309,6 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 		"timeline.delete":            false,
 		"timeline.update":            false,
 		"timeline.split":             false,
-		"preview.generate":           false,
-		"preview.check":              true,
 		"interaction.confirm_action": false,
 	}
 	waitingUser := map[string]bool{
@@ -368,7 +365,10 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 	if _, exists := registry.ModelReceiptPolicy("asset.import_local_file"); exists {
 		t.Fatal("harness 工具不得有模型回执策略")
 	}
-	for _, name := range []string{"media.detect_shots", "timeline.inspect", "timeline.check"} {
+	for _, name := range []string{
+		"asset.list_assets", "media.detect_shots", "timeline.inspect", "timeline.check",
+		"preview.generate", "preview.check",
+	} {
 		spec, exists := registry.Spec(name)
 		if !exists || spec.Exposure != ExposureHarness {
 			t.Fatalf("%s exposure=%q exists=%v", name, spec.Exposure, exists)
@@ -869,9 +869,6 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		}
 	}
 	want := map[string][]string{
-		"asset.list_assets": {
-			"当前草稿", "可用素材",
-		},
 		"shot.search": {
 			"冻结目标视频素材", "search_ready", "index_snapshot_id", "无 embedding", "绝不返回部分索引",
 		},
@@ -892,9 +889,6 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		},
 		"timeline.split": {
 			"一个 timeline_clip_id", "一个时间线整数帧",
-		},
-		"preview.generate": {
-			"timeline_id", "同步收敛", "preview_id", "模型不轮询后台 job",
 		},
 	}
 	for toolName, fragments := range want {
@@ -1157,17 +1151,18 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 	allowed, _ = registry.Allowed(ctx, true)
 	for _, name := range []string{
 		"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
-		"preview.generate",
 	} {
 		if !containsSpec(allowed, name) {
-			t.Fatalf("已有但未标记 validated 的时间线也应放行 %s，由渲染入口同步校验", name)
+			t.Fatalf("已有但未标记 validated 的时间线也应放行 %s", name)
 		}
 	}
 	if containsSpec(allowed, "render.start") || containsSpec(allowed, "job.read") {
 		t.Fatal("Agent Tool Registry 不得披露 render.start 或 job.read")
 	}
-	if containsSpec(allowed, "preview.check") {
-		t.Fatal("没有 preview 时不应放行 inspect_preview")
+	for _, internal := range []string{"asset.list_assets", "preview.generate", "preview.check"} {
+		if containsSpec(allowed, internal) {
+			t.Fatalf("Harness-only 工具不得进入模型允许集: %s", internal)
+		}
 	}
 	now = time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := database.Write().ExecContext(t.Context(), `
@@ -1177,8 +1172,10 @@ func TestPreconditionRegistryPrunesAndUnlocksTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	allowed, _ = registry.Allowed(ctx, true)
-	if !containsSpec(allowed, "preview.check") {
-		t.Fatal("preview 存在后 inspect_preview 未放行")
+	for _, internal := range []string{"asset.list_assets", "preview.generate", "preview.check"} {
+		if containsSpec(allowed, internal) {
+			t.Fatalf("状态变化后 Harness-only 工具仍不得进入模型允许集: %s", internal)
+		}
 	}
 	if passed, err := EvaluatePrecondition(ctx, database, "draft_gate", "unknown"); err == nil || passed {
 		t.Fatalf("unknown predicate passed=%v err=%v", passed, err)

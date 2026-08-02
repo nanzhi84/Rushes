@@ -117,7 +117,7 @@ func TestToolRecoveryRetriesSafeErrorsAndReturnsThemToModel(t *testing.T) {
 		calls++
 		return nil, errors.New("temporary read failure")
 	})
-	output, err := endpoint(ctx, &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`})
+	output, err := endpoint(ctx, &compose.ToolInput{Name: "shot.search", Arguments: `{}`})
 	if err != nil || calls != maxToolExecutionRetries+1 {
 		t.Fatalf("calls=%d output=%#v err=%v", calls, output, err)
 	}
@@ -152,7 +152,7 @@ func TestToolRecoveryFailsClosedOnNonTerminalModelToolResult(t *testing.T) {
 			)
 			output, err := endpoint(
 				rushestools.WithDraftID(t.Context(), "draft"),
-				&compose.ToolInput{Name: "preview.generate", Arguments: `{"timeline_id":"draft:v1"}`},
+				&compose.ToolInput{Name: "plan.update", Arguments: `{"plan":{"phase":"queued"}}`},
 			)
 			if err != nil {
 				t.Fatal(err)
@@ -168,26 +168,6 @@ func TestToolRecoveryFailsClosedOnNonTerminalModelToolResult(t *testing.T) {
 				t.Fatalf("non-terminal metric=%d want=%d", metricLLMNonTerminalToolResult.Value(), before+test.metricChange)
 			}
 		})
-	}
-}
-
-func TestToolRecoveryAddsSucceededReceiptToTypedReadResult(t *testing.T) {
-	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
-		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
-			return &compose.ToolOutput{Result: `{"draft_id":"draft","assets":[],"total":0}`}, nil
-		},
-	)
-	output, err := endpoint(
-		rushestools.WithDraftID(t.Context(), "draft"),
-		&compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	payload := decodeRecoveryPayload(t, output.Result)
-	if payload["status"] != string(rushestools.StatusSucceeded) ||
-		payload[toolRequestFingerprintField] == "" {
-		t.Fatalf("typed model receipt=%#v", payload)
 	}
 }
 
@@ -532,11 +512,6 @@ func TestConfirmedToolRecoverySuccessRequiresToolSpecificStatus(t *testing.T) {
 		{"memory remove outside requested keys", "memory.remove", `{"keys":["existing"]}`, `{"status":"succeeded","data":{"removed_keys":["other"]}}`, false},
 		{"memory remove duplicate proof keys", "memory.remove", `{"keys":["existing"]}`, `{"status":"succeeded","data":{"removed_keys":["existing","existing"]}}`, false},
 		{"typed result cannot use generic success", "shot.search", `{}`, `{"status":"succeeded"}`, false},
-		{"preview succeeded", "preview.generate", `{"timeline_id":"draft:v2","orientation":"portrait"}`, `{"status":"succeeded","data":{"preview_id":"preview_1","job_id":"job_1","job_status":"succeeded","timeline_id":"draft:v2","timeline_version":2,"orientation":"portrait"}}`, true},
-		{"preview wrong request draft", "preview.generate", `{"timeline_id":"draft_A:v2"}`, `{"status":"succeeded","data":{"preview_id":"preview_1","job_id":"job_1","job_status":"succeeded","timeline_id":"draft_B:v2","timeline_version":2,"orientation":"auto"}}`, false},
-		{"preview missing preview id", "preview.generate", `{"timeline_id":"draft:v2"}`, `{"status":"succeeded","data":{"job_id":"job_1","job_status":"succeeded","timeline_id":"draft:v2","timeline_version":2,"orientation":"auto"}}`, false},
-		{"preview inconsistent job status", "preview.generate", `{"timeline_id":"draft:v2"}`, `{"status":"succeeded","data":{"preview_id":"preview_1","job_id":"job_1","job_status":"running","timeline_id":"draft:v2","timeline_version":2,"orientation":"auto"}}`, false},
-		{"preview wrong orientation", "preview.generate", `{"timeline_id":"draft:v2","orientation":"portrait"}`, `{"status":"succeeded","data":{"preview_id":"preview_1","job_id":"job_1","job_status":"succeeded","timeline_id":"draft:v2","timeline_version":2,"orientation":"landscape"}}`, false},
 		{"other queued", "timeline.check", `{}`, `{"status":"queued"}`, false},
 		{"interaction waiting", "interaction.ask_user", `{}`, `{"status":"waiting_user","data":{"decision_id":"decision_1","turn_should_end":true}}`, true},
 		{"interaction waiting missing decision", "interaction.ask_user", `{}`, `{"status":"waiting_user","data":{"turn_should_end":true}}`, false},
@@ -576,25 +551,12 @@ func TestConfirmedToolRecoverySuccessRequiresToolSpecificStatus(t *testing.T) {
 		{"deep search rejects criterion drift", "shot.deep_search", `{"query":"spin","index_snapshot_id":"snap","candidate_shots":[{"asset_id":"asset_A","shot_id":"shot_1"}],"requirements":["person spins"]}`, `{"status":"succeeded","query":"spin","index_snapshot_id":"snap","analyzer_version":"deep-v1","candidates":[{"index_snapshot_id":"snap","asset_id":"asset_A","shot_id":"shot_1","source_start_frame":0,"source_end_frame":30,"boundary_version":1,"verification":"match","score":0.9,"requirements":[{"criterion":"different","status":"observed","observation":"visible spin","frame_ids":["f1"]}],"exclusions":[],"preferences":[],"observations":["person rotates"],"frame_evidence":[{"frame_id":"f1","source_frame":10,"timestamp_ms":333,"position":"ordered_1_of_3","object_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","object_size":10,"newly_added":true}],"deep_coverage":["temporal_action"]}],"total_candidates":1,"returned_candidates":1,"new_frame_count":1,"reused_frame_count":0,"cache_hit":false}`, false},
 		{"typed read wrong field type", "shot.search", `{}`, `{"shots":"已完成","total_matches":"全部"}`, false},
 		{"incomplete typed result", "shot.search", `{}`, `{"status":"succeeded","shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
-		{"asset list paginated", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":2,"next_after":"asset_1"}`, true},
-		{"asset list count exceeds total", "asset.list_assets", `{}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":0}`, false},
-		{"asset list missing asset identity", "asset.list_assets", `{}`, `{"draft_id":"draft","assets":[{}],"total":1}`, false},
-		{"asset list wrong kind", "asset.list_assets", `{"kind":"video"}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1","kind":"audio"}],"total":1}`, false},
-		{"asset list wrong usable state", "asset.list_assets", `{"only_usable":true}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1","usable":false}],"total":1}`, false},
-		{"asset list before cursor", "asset.list_assets", `{"after":"asset_10"}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_09"}],"total":1}`, false},
-		{"asset list exceeds limit", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"},{"asset_id":"asset_2"}],"total":2}`, false},
-		{"asset list missing pagination cursor", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":2}`, false},
-		{"asset list wrong pagination cursor", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":2,"next_after":"asset_2"}`, false},
-		{"asset list unexpected terminal cursor", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":1,"next_after":"asset_1"}`, false},
 		{"beats match asset", "audio.analyze_beats", `{"asset_id":"asset_A"}`, `{"asset_id":"asset_A","timeline_fps":30,"beat_frames":[]}`, true},
 		{"beats wrong asset", "audio.analyze_beats", `{"asset_id":"asset_A"}`, `{"asset_id":"asset_B","timeline_fps":30,"beat_frames":[]}`, false},
 		{"pauses match clip", "audio.analyze_speech_pauses", `{"timeline_clip_id":"clip_A"}`, `{"asset_id":"asset_A","timeline_clip_id":"clip_A","timeline_fps":30,"pauses":[]}`, true},
 		{"pauses wrong clip", "audio.analyze_speech_pauses", `{"timeline_clip_id":"clip_A"}`, `{"asset_id":"asset_A","timeline_clip_id":"clip_B","timeline_fps":30,"pauses":[]}`, false},
 		{"transcribe match asset", "speech.transcribe", `{"asset_id":"asset_A"}`, `{"transcript_id":"transcript_A","asset_id":"asset_A","timeline_fps":30}`, true},
 		{"transcribe wrong asset", "speech.transcribe", `{"asset_id":"asset_A"}`, `{"transcript_id":"transcript_B","asset_id":"asset_B","timeline_fps":30}`, false},
-		{"preview check matches request", "preview.check", `{"preview_id":"preview_A","check":"decode"}`, `{"preview_id":"preview_A","check":"decode","issues":[]}`, true},
-		{"preview check wrong target", "preview.check", `{"preview_id":"preview_A","check":"decode"}`, `{"preview_id":"preview_B","check":"decode","issues":[]}`, false},
-		{"preview check wrong check", "preview.check", `{"preview_id":"preview_A","check":"decode"}`, `{"preview_id":"preview_A","check":"visual","issues":[]}`, false},
 		{"speech search success", "speech.search", `{"asset_id":"asset"}`, `{"status":"succeeded","transcript_id":"transcript","asset_id":"asset","timeline_fps":30,"provider_id":"test","utterances":[],"utterance_total":0,"truncated":false,"usage_note":"ok"}`, true},
 		{"speech search wrong asset", "speech.search", `{"asset_id":"asset_A"}`, `{"status":"succeeded","transcript_id":"transcript","asset_id":"asset_B","timeline_fps":30,"provider_id":"test","utterances":[],"utterance_total":0,"truncated":false,"usage_note":"ok"}`, false},
 		{"speech search clip match", "speech.search", `{"timeline_clip_id":"clip_A"}`, `{"status":"succeeded","transcript_id":"transcript","asset_id":"asset","timeline_clip_id":"clip_A","timeline_fps":30,"provider_id":"test","utterances":[],"utterance_total":0,"truncated":false,"usage_note":"ok"}`, true},
@@ -634,11 +596,6 @@ func TestConfirmedToolRecoverySuccessRequiresToolSpecificStatus(t *testing.T) {
 	largeTopKProof := attachToolRequestFingerprint("shot.search", `{"top_k":30}`, string(largeTopK))
 	if !isConfirmedToolRecoverySuccess("shot.search", `{"top_k":30}`, largeTopKProof, "") {
 		t.Fatal("top_k=30 的冻结快照结果应通过回执校验")
-	}
-	if isConfirmedToolRecoverySuccess(
-		"asset.list_assets", `{}`, `{"draft_id":"draft_B","assets":[],"total":0}`, "draft_A",
-	) {
-		t.Fatal("asset.list_assets result from another active draft was accepted")
 	}
 	if isConfirmedToolRecoverySuccess(
 		"media.detect_shots", `{"asset_id":"asset"}`,
@@ -941,15 +898,6 @@ func TestToolRecoveryProofBindsFullSemanticRequestAndTarget(t *testing.T) {
 	) {
 		t.Fatal("timeline.check 不得接受错误请求版本")
 	}
-	if isConfirmedToolRecoverySuccess(
-		"preview.generate", `{"timeline_id":"draft:v2"}`,
-		attachToolRequestFingerprint(
-			"preview.generate", `{"timeline_id":"draft:v2"}`,
-			`{"status":"succeeded","data":{"preview_id":"preview_1","job_id":"job_1","job_status":"succeeded","timeline_id":"other:v2","timeline_version":2,"orientation":"auto"}}`,
-		), "draft",
-	) {
-		t.Fatal("preview.generate 不得接受错误 timeline")
-	}
 }
 
 func TestToolRecoveryReporterUsesNormalizedFailureResult(t *testing.T) {
@@ -1033,7 +981,7 @@ func TestToolRecoveryDoesNotRetryDeterministicSchemaErrors(t *testing.T) {
 		},
 	)
 	output, err := endpoint(ctx, &compose.ToolInput{
-		Name: "asset.list_assets", Arguments: `{"only_usable":"yes"}`,
+		Name: "shot.search", Arguments: `{"top_k":"many"}`,
 	})
 	if err != nil || calls != 1 {
 		t.Fatalf("deterministic schema error was retried: calls=%d output=%#v err=%v", calls, output, err)
@@ -1129,13 +1077,13 @@ func TestToolRecoveryCollapsesInternalRetryReporterEvents(t *testing.T) {
 		if !ok {
 			t.Fatal("missing reporter")
 		}
-		reporter(ctx, "asset.list_assets", "started", map[string]any{}, nil, nil)
+		reporter(ctx, "shot.search", "started", map[string]any{}, nil, nil)
 		calls++
 		err := errors.New("temporary read failure")
-		reporter(ctx, "asset.list_assets", "finished", map[string]any{}, nil, err)
+		reporter(ctx, "shot.search", "finished", map[string]any{}, nil, err)
 		return nil, err
 	})
-	output, err := endpoint(ctx, &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`})
+	output, err := endpoint(ctx, &compose.ToolInput{Name: "shot.search", Arguments: `{}`})
 	if err != nil || output == nil || calls != maxToolExecutionRetries+1 {
 		t.Fatalf("calls=%d output=%#v err=%v", calls, output, err)
 	}
@@ -1247,8 +1195,8 @@ func TestToolRecoverySuccessOnUnrelatedToolKeepsFailureUnresolved(t *testing.T) 
 	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
 		func(_ context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
 			calls++
-			if input.Name == "asset.list_assets" {
-				return &compose.ToolOutput{Result: `{"draft_id":"draft","assets":[],"total":0,"usage_note":"fresh state"}`}, nil
+			if input.Name == "plan.update" {
+				return &compose.ToolOutput{Result: `{"status":"succeeded","data":{}}`}, nil
 			}
 			return &compose.ToolOutput{Result: marshalToolFailure("not ready", nil)}, nil
 		},
@@ -1257,7 +1205,7 @@ func TestToolRecoverySuccessOnUnrelatedToolKeepsFailureUnresolved(t *testing.T) 
 	if _, err := endpoint(ctx, failedInput); err != nil || state.unresolved() {
 		t.Fatalf("initial failure err=%v unresolved=%v", err, state.unresolved())
 	}
-	if _, err := endpoint(ctx, &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`}); err != nil || state.unresolved() {
+	if _, err := endpoint(ctx, &compose.ToolInput{Name: "plan.update", Arguments: `{"plan":{"phase":"other"}}`}); err != nil || state.unresolved() {
 		t.Fatalf("unrelated success err=%v unresolved=%v", err, state.unresolved())
 	}
 	if _, err := endpoint(ctx, failedInput); err != nil || calls != 3 || state.unresolved() {
@@ -1521,7 +1469,7 @@ func TestToolRecoveryPropagatesCancellation(t *testing.T) {
 	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
 		return nil, context.Canceled
 	})
-	if _, err := endpoint(t.Context(), &compose.ToolInput{Name: "asset.list_assets", Arguments: `{}`}); !errors.Is(err, context.Canceled) {
+	if _, err := endpoint(t.Context(), &compose.ToolInput{Name: "shot.search", Arguments: `{}`}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v", err)
 	}
 }

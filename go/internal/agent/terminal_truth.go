@@ -25,6 +25,7 @@ type terminalTimelineTruthState struct {
 	checkTimelineID      string
 	checkStatus          string
 	checkProofInvalid    bool
+	checkResult          rushestools.ToolResult
 }
 
 type terminalTimelineTruthSnapshot struct {
@@ -35,6 +36,7 @@ type terminalTimelineTruthSnapshot struct {
 	checkTimelineID      string
 	checkStatus          string
 	checkProofInvalid    bool
+	checkResult          rushestools.ToolResult
 }
 
 type terminalReplyGuardError struct {
@@ -105,7 +107,7 @@ func (state *terminalTimelineTruthState) recordToolResult(name, status string, o
 			state.recordMutationTimelineID(timelineID)
 		}
 	case name == "timeline.check":
-		state.recordTimelineCheckResult(timelineID, result.Status)
+		state.recordTimelineCheckResult(timelineID, result.Status, result)
 	}
 }
 
@@ -131,7 +133,10 @@ func (state *terminalTimelineTruthState) recordMutationTimelineID(timelineID str
 
 // A validation_failed timeline.check is still authoritative evidence that the exact
 // version was checked. It must reach the model without rolling back the committed edit.
-func (state *terminalTimelineTruthState) recordTimelineCheckResult(timelineID, status string) {
+func (state *terminalTimelineTruthState) recordTimelineCheckResult(
+	timelineID, status string,
+	results ...rushestools.ToolResult,
+) {
 	if state == nil {
 		return
 	}
@@ -149,6 +154,11 @@ func (state *terminalTimelineTruthState) recordTimelineCheckResult(timelineID, s
 	state.checkTimelineID = timelineID
 	state.checkStatus = status
 	state.checkProofInvalid = false
+	if len(results) > 0 {
+		state.checkResult = results[0]
+	} else {
+		state.checkResult = rushestools.ToolResult{}
+	}
 }
 
 func isValidTimelineVersionID(timelineID string) bool {
@@ -179,6 +189,7 @@ func (state *terminalTimelineTruthState) snapshot() terminalTimelineTruthSnapsho
 		checkTimelineID:      state.checkTimelineID,
 		checkStatus:          state.checkStatus,
 		checkProofInvalid:    state.checkProofInvalid,
+		checkResult:          state.checkResult,
 	}
 }
 

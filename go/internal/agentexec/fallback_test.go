@@ -47,7 +47,7 @@ func TestFallbackMainlineStopsOnStructuredAtomicFailure(t *testing.T) {
 	}
 }
 
-func TestFallbackMainlineUsesLatestExistingTimelineAndRejectsRenderDrift(t *testing.T) {
+func TestFallbackMainlineOnlyEditsLatestTimelineAndLeavesPreviewToHarness(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_fallback_latest"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -61,7 +61,7 @@ func TestFallbackMainlineUsesLatestExistingTimelineAndRejectsRenderDrift(t *test
 		t.Fatal(err)
 	}
 
-	var renderTimelineID string
+	previewCalled := false
 	reply, err := executor.FallbackMainline(
 		ctx,
 		draftID,
@@ -71,31 +71,24 @@ func TestFallbackMainlineUsesLatestExistingTimelineAndRejectsRenderDrift(t *test
 				return rushestools.DetectShotsResult{Status: "succeeded"}, nil
 			case "timeline.insert":
 				return executor.ExecuteTool(callCtx, name, input)
-			case "timeline.check":
-				return executor.ExecuteTool(callCtx, name, input)
-			case "preview.generate":
-				renderTimelineID = input.(rushestools.PreviewGenerateInput).TimelineID
-				return rushestools.ToolResult{
-					Status: string(rushestools.StatusFailed), Observation: "timeline_id 已过期",
-				}, nil
+			case "timeline.check", "preview.generate", "preview.check":
+				previewCalled = true
+				return nil, nil
 			default:
 				t.Fatalf("unexpected tool %s", name)
 				return nil, nil
 			}
 		},
 	)
-	if err == nil || !strings.Contains(err.Error(), "preview.generate 未完成") || reply != "" {
+	if err != nil || !strings.Contains(reply, "已完成初版时间线") {
 		t.Fatalf("reply=%q err=%v", reply, err)
 	}
 	document, latestErr := timeline.Latest(t.Context(), database, draftID)
 	if latestErr != nil {
 		t.Fatal(latestErr)
 	}
-	if document.Version != 2 || renderTimelineID != document.TimelineID {
-		t.Fatalf(
-			"version=%d render timeline=%q latest=%q",
-			document.Version, renderTimelineID, document.TimelineID,
-		)
+	if document.Version != 2 || previewCalled {
+		t.Fatalf("version=%d preview_called=%v latest=%q", document.Version, previewCalled, document.TimelineID)
 	}
 }
 

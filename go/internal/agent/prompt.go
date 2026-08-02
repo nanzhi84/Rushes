@@ -18,11 +18,11 @@ draft.content_plan 是你的持久创作计划本，用 plan.update 维护（默
 WorldState.user_memory 是跨草稿的用户长期偏好、习惯与纠正；与本回合用户指令冲突时以本回合为准。用户明确表达跨项目稳定偏好、习惯或纠正时用 memory.set 固化；一次性要求不要入库，用户明确要求忘记时用 memory.remove 删除指定键。user_memory 已提供当前任务相关偏好时，把它作为安全默认值融入计划和执行；不得仅因用户没有再次声明同一偏好或其他可逆创作细节而调用 interaction.ask_user。
 
 通用规则：
-1. 只通过已注册能力完成理解、编辑、验证、预览和质检；不得编造文件、素材、时间线、任务或产物。最终导出和下载不属于你的工具能力，只能由用户在编辑器 UI 中明确点击触发。
+1. 只通过已注册能力完成理解与原子编辑；确定性时间线检查、工作预览和 Preview QA 由 Harness 自动执行并把报告回灌当前 turn。不得编造文件、素材、时间线、任务或产物，也不得调用或臆造 preview.generate、preview.check。最终导出和下载不属于你的工具能力，只能由用户在编辑器 UI 中明确点击触发。
 2. 目标明确就直接执行。镜头取舍、气口与重复处理、B-roll、节奏、字幕、转场、调色和 BGM 等可逆创作细节由你结合证据自主决定，先交付结果，再接受用户增量反馈或 Rewind；不得把首剪方案、EDL 或参数清单交给用户逐项审批。用户只给出宽泛剪辑请求但已有可用素材时，结合素材证据、user_memory 和安全默认值先做可回滚首剪；未指定成片类型、时长或风格本身不构成阻塞。只有缺少会让成片目标产生实质冲突、且无法从素材、上下文或安全默认值推断的关键信息时，才可用 decision_type=critical 的 interaction.ask_user，问题必须只聚焦一个核心分歧。破坏性或外部影响动作改用 interaction.confirm_action。
 3. 每次工具调用的 arguments 必须是一个完整、合法且没有尾随字符的 JSON 对象。精确时间坐标统一使用整数帧；编辑操作必须是带 kind 的扁平对象，禁止自行换算或传递秒字段。
 4. 每次工具失败只属于本次调用。先读 error_code、message、invalid_fields、current_state 和 recovery，再修正参数或补取证据并直接重试；之前成功的原语不受影响，无关工具也可继续执行。不要删除用户要求来绕过错误。
-5. 浏览器编辑代理负责即时预览，普通移动、裁剪和分割不触发离线渲染。只有用户明确需要可分享预览或离线画质检查时才生成预览并质检。用户要求最终导出或下载时，不得调用预览代替、不得创建或轮询 final job；完成必要编辑与校验后，只引导用户在编辑器 UI 的导出区域选择规格并点击“导出视频”。
+5. 浏览器编辑代理负责即时预览，普通移动、裁剪和分割本身不触发离线渲染。用户明确要求预览/质检、你准备声明编辑达到可交付状态，或当前 playbook 要求像素/声音验收时，Harness 会对最新同版本 timeline.check 通过的精确版本自动生成一次工作预览，并行执行 decode、black、freeze、silence、loudness，任务需要时再给 visual advisory；请只消费回灌的 PreviewQAReport。用户要求最终导出或下载时，不得把工作预览冒充 final、不得创建或轮询 final job；完成必要编辑与校验后，只引导用户在编辑器 UI 的导出区域选择规格并点击“导出视频”。
 6. 用户反馈可以推翻旧的节奏或镜头结论。应从当前状态和本轮证据继续，不复用已过期判断；除非用户明确要求，不从头重做，也不删除已有素材、时间线或已完成理解。
 7. 最终回复只呈现结论与已完成的事实。禁止把「但等等」「让我再确认」「不对，重新想」这类自我怀疑、中途推翻或二次确认的过程性语句写进正式回复；验证性思考在内部完成，不外泄给用户。`
 
@@ -35,5 +35,11 @@ func taskPlaybookMessage(snapshot WorldStateSnapshot) *schema.Message {
 		"【按当前 WorldState 启用的任务工作流】\n" + strings.Join(segments, "\n\n"),
 	)
 	message.Extra = map[string]any{"context_phase": "task_playbook"}
+	for _, segment := range segments {
+		if segment == agentexec.TimelineEditingPlaybook {
+			message.Extra["preview_qa_required"] = true
+			break
+		}
+	}
 	return message
 }

@@ -12,9 +12,9 @@ import (
 // fallback 主线用它保持与引擎侧完全一致的上报行为(领域只管编排序列,上报仍归引擎)。
 type RunReportedFunc func(ctx context.Context, name string, input any) (any, error)
 
-// FallbackMainline 是无模型密钥兜底下的确定性「混剪主线」:列可用视觉素材 →
-// 原子插入初版时间线 → 起预览。基础镜头索引由 ingest 后的低优先级 worker
-// 独立建立；兜底编辑不能重复排分析任务或等待 VLM。
+// FallbackMainline 是无模型密钥兜底下的确定性「混剪编辑主线」:Harness 读取
+// 可用视觉素材并逐个原子插入初版时间线。它不自行检查或生成预览；调用方在
+// 明确交付边界统一进入自动 Preview QA，避免保留第二套预览编排路径。
 func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runReported RunReportedFunc) (string, error) {
 	listed, err := exec.ToolListAssets(ctx, draftID, rushestools.AssetListInput{OnlyUsable: BoolPointer(true)})
 	if err != nil {
@@ -48,33 +48,7 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 			return "", err
 		}
 	}
-	document, err := timeline.Latest(ctx, exec.database, draftID)
-	if err != nil {
-		return "", err
-	}
-	output, err := runReported(ctx, "timeline.check", rushestools.TimelineCheckInput{
-		TimelineID: document.TimelineID,
-	})
-	if err != nil {
-		return "", err
-	}
-	if err := requireFallbackToolStatus(
-		"timeline.check", output, string(rushestools.StatusSucceeded),
-	); err != nil {
-		return "", err
-	}
-	output, err = runReported(ctx, "preview.generate", rushestools.PreviewGenerateInput{
-		TimelineID: document.TimelineID,
-	})
-	if err != nil {
-		return "", err
-	}
-	if err := requireFallbackToolStatus(
-		"preview.generate", output, string(rushestools.StatusSucceeded),
-	); err != nil {
-		return "", err
-	}
-	return "已完成初版时间线与预览渲染；基础镜头索引由后台独立建立。", nil
+	return "已完成初版时间线；基础镜头索引由后台独立建立。", nil
 }
 
 func requireFallbackToolStatus(

@@ -72,8 +72,6 @@ const (
 	SurfaceTalkingHead
 	SurfaceBeatEdit
 	SurfaceTimelineEdit
-	SurfaceRender
-	SurfacePreviewCheck
 	SurfaceControl
 )
 
@@ -81,8 +79,6 @@ const allSurfaces = SurfaceDiscovery |
 	SurfaceTalkingHead |
 	SurfaceBeatEdit |
 	SurfaceTimelineEdit |
-	SurfaceRender |
-	SurfacePreviewCheck |
 	SurfaceControl
 
 func Surfaces(values ...Surface) Surface {
@@ -750,8 +746,8 @@ func registerAssetImport(registry *Registry) error {
 }
 
 func registerAssetList(registry *Registry) error {
-	return addTool[AssetListInput, AssetListResult](registry, "asset.list_assets", "列出当前草稿可用素材", nil, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata(FamilyRead, CostLow, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit))
+	return addTool[AssetListInput, AssetListResult](registry, "asset.list_assets", "Harness 读取当前草稿完整素材清单；模型使用 WorldState 自动注入的有界 material_catalog", nil, ExposureHarness, EffectReadOnly, false,
+		harnessMetadata(FamilyRead, CostLow))
 }
 
 func registerDetectShots(registry *Registry) error {
@@ -841,8 +837,6 @@ func registerPlanUpdate(registry *Registry) error {
 			SurfaceDiscovery,
 			SurfaceTalkingHead,
 			SurfaceBeatEdit,
-			SurfaceRender,
-			SurfacePreviewCheck,
 		),
 	)
 }
@@ -922,15 +916,15 @@ func registerPreviewGenerate(registry *Registry) error {
 	return addTool[PreviewGenerateInput, ToolResult](
 		registry,
 		"preview.generate",
-		"提交指定 timeline_id 的离线预览任务；该调用同步收敛渲染结果，成功 data 含 preview_id，失败按 recovery 处理；模型不轮询后台 job",
-		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyEdit, CostHigh, SurfaceRender),
+		"Harness 在明确 Preview QA 边界提交指定 timeline_id 的离线预览任务，并在同一 turn 等到终态",
+		[]string{"timeline_exists"}, ExposureHarness, EffectReversible, false,
+		harnessMetadata(FamilyEdit, CostHigh),
 	)
 }
 
 func registerPreviewCheck(registry *Registry) error {
-	return addTool[PreviewCheckInput, PreviewInspectionResult](registry, "preview.check", "对一个 preview 执行一个明确检查；check 只能是 decode、black、freeze、silence、loudness 或 visual 之一，多个独立检查由模型并行调用", []string{"any_preview_exists"}, ExposureLLM, EffectReadOnly, true,
-		terminalMetadata(FamilyCheck, CostHigh, SurfacePreviewCheck))
+	return addTool[PreviewCheckInput, PreviewInspectionResult](registry, "preview.check", "Harness 对 preview 执行 decode、black、freeze、silence、loudness 或按需 visual 检查，并汇总 PreviewQAReport", []string{"any_preview_exists"}, ExposureHarness, EffectReadOnly, false,
+		harnessMetadata(FamilyCheck, CostHigh))
 }
 
 func registerConfirmAction(registry *Registry) error {

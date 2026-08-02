@@ -527,7 +527,7 @@ func TestLiveWorkflowDefinitionsAndScoring(t *testing.T) {
 		"talking_head":        20,
 	}
 	wantEvidence := map[string][]string{
-		"initial_composition": {"asset.list_assets", "shot.search"},
+		"initial_composition": {"shot.search"},
 		"beat_mix":            {"shot.search"},
 		"talking_head":        {"speech.search", "shot.search"},
 	}
@@ -765,10 +765,6 @@ func TestLiveWorkflowGateAcceptsFinalReplyAndRequiresSucceededToolResult(t *test
 		tool   string
 		output string
 	}{
-		"assets": {
-			tool:   "asset.list_assets",
-			output: `{"draft_id":"draft_1","assets":[{"asset_id":"asset_1"}],"total":1}`,
-		},
 		"shots": {
 			tool: "shot.search",
 			output: `{"shots":[{"shot_id":"shot_1","asset_id":"asset_1",` +
@@ -1055,36 +1051,6 @@ func TestLiveWorkflowRunnerUsesProductionLeaseAndReceiptBoundary(t *testing.T) {
 	}
 }
 
-func TestLiveWorkflowRunnerScoresFinalStateWithoutHiddenStepOrder(t *testing.T) {
-	database := agenttest.AgentTestDatabase(t)
-	service, err := NewService(t.Context(), database, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(service.Close)
-	fixture, err := prepareLiveWorkflowFixture(t, service, "initial_composition", 202)
-	if err != nil {
-		t.Fatal(err)
-	}
-	suite, ok := liveWorkflowSuiteByName(liveWorkflowSuites(), "initial_composition")
-	if !ok {
-		t.Fatal("missing initial workflow")
-	}
-	calls := scriptedLiveWorkflowCalls(t, fixture, suite.Name)
-	calls[0], calls[1] = calls[1], calls[0]
-	calls[1].Function.Arguments = `{"only_usable":true}`
-	stub := &scriptedWorkflowModel{calls: calls}
-	runContext := withTestTurnLeaseSession(t, service, t.Context(), fixture.DraftID)
-	report := runLiveWorkflowSuite(runContext, service, stub, fixture, suite, 202)
-	if !report.Succeeded || !report.FinalStateValid || stub.next != len(calls) {
-		t.Fatalf("alternative order report=%#v calls=%d/%d", report, stub.next, len(calls))
-	}
-	if report.Steps[0].Actual != "shot.search" ||
-		report.Steps[1].Actual != "asset.list_assets" {
-		t.Fatalf("runner unexpectedly rewrote model order: %#v", report.Steps)
-	}
-}
-
 func TestLiveWorkflowRunnerRetriesOnlyFailedPrimitive(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
@@ -1131,13 +1097,13 @@ func TestLiveWorkflowRunnerAcceptsParallelReadTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	fixture, err := prepareLiveWorkflowFixture(t, service, "initial_composition", 204)
+	fixture, err := prepareLiveWorkflowFixture(t, service, "talking_head", 204)
 	if err != nil {
 		t.Fatal(err)
 	}
-	suite, ok := liveWorkflowSuiteByName(liveWorkflowSuites(), "initial_composition")
+	suite, ok := liveWorkflowSuiteByName(liveWorkflowSuites(), "talking_head")
 	if !ok {
-		t.Fatal("missing initial workflow")
+		t.Fatal("missing talking-head workflow")
 	}
 	calls := scriptedLiveWorkflowCalls(t, fixture, suite.Name)
 	turns := [][]schema.ToolCall{{calls[0], calls[1]}}
@@ -1151,7 +1117,7 @@ func TestLiveWorkflowRunnerAcceptsParallelReadTurn(t *testing.T) {
 		t.Fatalf("parallel read report=%#v turns=%d/%d", report, stub.next, len(turns))
 	}
 	if len(report.Steps) != len(turns)+1 || len(report.Steps[0].Calls) != 2 ||
-		report.Steps[0].Actual != "asset.list_assets,shot.search" {
+		report.Steps[0].Actual != "speech.search,shot.search" {
 		t.Fatalf("parallel read trace=%#v", report.Steps)
 	}
 }
@@ -1172,14 +1138,14 @@ func TestLiveWorkflowRunnerRejectsMutationBeforeRequiredEvidence(t *testing.T) {
 		t.Fatal("missing initial workflow")
 	}
 	scripted := scriptedLiveWorkflowCalls(t, fixture, suite.Name)
-	calls := append([]schema.ToolCall{}, scripted[2:]...)
+	calls := append([]schema.ToolCall{}, scripted[1:]...)
 	stub := &scriptedWorkflowModel{calls: calls}
 	runContext := withTestTurnLeaseSession(t, service, t.Context(), fixture.DraftID)
 	report := runLiveWorkflowSuite(runContext, service, stub, fixture, suite, 205)
 	if report.Succeeded || report.FinalStateValid ||
 		!reflect.DeepEqual(
 			report.MissingEvidence,
-			[]string{"asset.list_assets", "shot.search"},
+			[]string{"shot.search"},
 		) {
 		t.Fatalf("missing evidence gate report=%#v", report)
 	}
@@ -1666,18 +1632,6 @@ func invokeLiveWorkflowTools(
 
 func validateLiveWorkflowToolOutput(toolName, output string) error {
 	switch toolName {
-	case "asset.list_assets":
-		var result rushestools.AssetListResult
-		if err := json.Unmarshal([]byte(output), &result); err != nil {
-			return fmt.Errorf("执行 %s 返回非法 AssetListResult: %w", toolName, err)
-		}
-		if result.DraftID == "" || len(result.Assets) == 0 {
-			return fmt.Errorf(
-				"执行 %s 未返回可核验素材: draft_id=%q assets=%d",
-				toolName, result.DraftID, len(result.Assets),
-			)
-		}
-		return nil
 	case "shot.search":
 		var result rushestools.ShotSearchResult
 		if err := json.Unmarshal([]byte(output), &result); err != nil {
@@ -1736,7 +1690,7 @@ func validateLiveWorkflowToolOutput(toolName, output string) error {
 
 func liveWorkflowToolOutputSucceeded(toolName, output string) bool {
 	switch toolName {
-	case "asset.list_assets", "shot.search", "audio.analyze_beats":
+	case "shot.search", "audio.analyze_beats":
 		return true
 	case "speech.search":
 		var result rushestools.SpeechSearchResult
@@ -1751,9 +1705,6 @@ func liveWorkflowToolOutputSucceeded(toolName, output string) bool {
 
 func liveWorkflowToolOutputProvidesEvidence(toolName, output string) bool {
 	switch toolName {
-	case "asset.list_assets":
-		var result rushestools.AssetListResult
-		return json.Unmarshal([]byte(output), &result) == nil && len(result.Assets) > 0
 	case "shot.search":
 		var result rushestools.ShotSearchResult
 		return json.Unmarshal([]byte(output), &result) == nil && len(result.Shots) > 0
@@ -2113,14 +2064,14 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 		{
 			Name: "initial_composition",
 			Goal: "请把当前草稿中唯一的城市夜景完整镜头与唯一的山峰云海完整镜头，按城市在前、山峰在后，组成一条总长 120 帧的初版时间线。" +
-				"编辑前必须实际列出素材并检索可用镜头证据，不得只凭 WorldState 中的摘要直接写入；不裁短镜头，完成后主动检查结构。" +
+				"素材清单已由 Harness 注入 material_catalog；编辑前必须实际检索可用镜头证据，不裁短镜头，完成后直接声明交付边界。" +
 				"请自行读取所需事实并通过可组合原语连续推进；独立只读可以在同一消息并行，每个写调用只做一个可观察动作。",
 			MaxSteps: 8,
 			AllowedTools: []string{
 				"plan.update",
-				"asset.list_assets", "shot.search", "timeline.insert",
+				"shot.search", "timeline.insert",
 			},
-			RequiredEvidence: []string{"asset.list_assets", "shot.search"},
+			RequiredEvidence: []string{"shot.search"},
 		},
 		{
 			Name: "beat_mix",
@@ -2131,7 +2082,7 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 			MaxSteps: 10,
 			AllowedTools: []string{
 				"plan.update",
-				"asset.list_assets", "shot.search",
+				"shot.search",
 				"timeline.insert",
 			},
 			RequiredEvidence: []string{"shot.search"},
@@ -2150,7 +2101,7 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 			MaxSteps: 20,
 			AllowedTools: []string{
 				"plan.update",
-				"asset.list_assets", "speech.search",
+				"speech.search",
 				"shot.search", "timeline.delete", "timeline.insert", "timeline.update",
 			},
 			RequiredEvidence: []string{"speech.search", "shot.search"},
@@ -2167,7 +2118,6 @@ func scriptedLiveWorkflowSteps(
 	switch suite {
 	case "initial_composition":
 		return []scriptedWorkflowStep{
-			{Name: "list_assets", ExpectedTool: "asset.list_assets", ExpectedArguments: map[string]any{}},
 			{Name: "search_shots", ExpectedTool: "shot.search", ExpectedArguments: map[string]any{
 				"query": "城市 山峰", "semantic_roles": []any{"b_roll"},
 				"min_duration_frames": 45, "top_k": 8,
@@ -2757,8 +2707,6 @@ func TestRetiredLLMToolSetCoversIssue141Surface(t *testing.T) {
 
 func liveSchemaCases() []liveToolEvalCase {
 	cases := []liveToolEvalCase{
-		{Name: "asset_list", Prompt: "请调用工具列出当前草稿最多 50 个可用素材。", Expected: []string{"asset.list_assets"}},
-		{Name: "understand", Prompt: "请深度检测 asset_video_1 的镜头，重点关注人物动作，最多 8 段证据。", Expected: []string{"media.detect_shots"}},
 		{Name: "shot_search", Prompt: "请只检索适合覆盖‘指纹解锁位于键盘右上角’这句口播的 B-roll 镜头，最多返回 8 个。", Expected: []string{"shot.search"}},
 		{Name: "speech_search", Prompt: "请读取 clip_v1_001 的持久化逐句口播索引，检索‘指纹解锁’，同时返回气口和相似台词证据。", Expected: []string{"speech.search"}},
 		{Name: "ask_user", Prompt: "用户要求的核心叙事目标存在两种实质冲突，素材和上下文都无法推断，且没有安全默认值。请用 decision_type=critical 发出一张允许自由输入的阻塞性二选一决策卡，只问这个核心分歧。", Expected: []string{"interaction.ask_user"}},
@@ -2773,10 +2721,6 @@ func liveSchemaCases() []liveToolEvalCase {
 		{Name: "talking_head_delete", Prompt: "口播证据和当前时间线已经读取；我明确选择删除较早一遍重说，它当前映射为时间线 360 到 480 帧。请只删除这个连续范围。", Expected: []string{"timeline.delete"}},
 		{Name: "talking_head_broll_insert", Prompt: "口播已清理并重新读取；请把 B-roll 素材 asset_video_1 的源 30 到 120 帧作为 visual_overlay 插入当前时间线第 600 帧，只做这一次插入。", Expected: []string{"timeline.insert"}},
 		{Name: "talking_head_broll_fade", Prompt: "请只给刚插入的 B-roll 片段 clip_v4_001 设置 7 帧淡入和 7 帧淡出。", Expected: []string{"timeline.update"}},
-		{Name: "timeline_check", Prompt: "请校验当前时间线不变量和节拍对齐数据。", Expected: []string{"timeline.check"}},
-		{Name: "inspect", Prompt: "请读取当前时间线的完整轨道、clip ID 和帧范围。", Expected: []string{"timeline.inspect"}},
-		{Name: "preview", Prompt: "时间线已验证，当前 timeline_id=draft_eval:v7。请只生成一个可分享的 preview 并等待终态。", Expected: []string{"preview.generate"}},
-		{Name: "preview_check", Prompt: "请只检查预览 preview_123 是否存在黑帧。", Expected: []string{"preview.check"}},
 		{Name: "confirm", Prompt: "请为危险的时间线清空操作创建确认：工具 timeline.delete，参数 kind=remove_track_clips、track_id=sfx。", Expected: []string{"interaction.confirm_action"}},
 	}
 	for index := range cases {
@@ -2788,21 +2732,15 @@ func liveSchemaCases() []liveToolEvalCase {
 func liveRoutingCases() []liveToolEvalCase {
 	const contextPrefix = `已读取当前客观状态：timeline_fps=30；当前 timeline_id=draft_eval:v7；A-roll asset_aroll_1 已有持久化逐句索引，主视频 clip 为 clip_v1_001；B-roll asset_video_1、asset_video_2 已完成逐镜头理解；BGM asset_bgm_1；SFX asset_sfx_1；当前时间线存在且已验证，预览为 preview_123，渲染任务为 job_render_123。`
 	cases := []liveToolEvalCase{
-		{Name: "route_list", Prompt: contextPrefix + "\n用户：列出当前草稿的所有素材。", Expected: []string{"asset.list_assets"}},
-		{Name: "route_understand", Prompt: contextPrefix + "\n用户：素材 ID 已确认，请立即深度理解 asset_video_1 的动作和可剪区间。", Expected: []string{"media.detect_shots"}},
 		{Name: "route_shot_search", Prompt: contextPrefix + "\nspeech.search 已返回 utt_fingerprint_1，文本是‘指纹解锁位于键盘右上角’。用户：不用再读取台词，只调用镜头检索找合适的 B-roll，暂时不剪。", Expected: []string{"shot.search"}},
 		{Name: "route_speech_search", Prompt: contextPrefix + "\n用户：读取 clip_v1_001 的逐句 ASR，检索重复说到‘指纹解锁’的地方并给出客观相似证据，暂时不删。", Expected: []string{"speech.search"}},
 		{Name: "route_plan_update", Prompt: contextPrefix + "\n用户：先不要继续剪，把已确定的创作方向记到持久计划本里：整体克制、高潮段加快节奏，供下回合继续。", Expected: []string{"plan.update"}},
-		{Name: "route_inspect", Prompt: contextPrefix + "\n用户：查看当前时间线的真实 clip 明细。", Expected: []string{"timeline.inspect"}},
 		{Name: "route_atomic_gain_update", Prompt: contextPrefix + "\n用户：已取得真实 ID，只把 clip_v1_001 音量调到 -6dB。", Expected: []string{"timeline.update"}},
 		{Name: "route_atomic_fade_update", Prompt: contextPrefix + "\n用户：已取得真实 ID；clip_v1_001 当前淡入、淡出均为 0 帧。保持淡入为 0，现在只把淡出设为 8 帧。", Expected: []string{"timeline.update"}},
 		{Name: "route_beat_insert", Prompt: contextPrefix + "\n节拍和镜头选择已完成；下一段明确使用 asset_video_2 的源 180 到 300 帧，作为 b_roll 追加到 visual_base，片尾正好落在选定拍点。现在只提交这一段插入。", Expected: []string{"timeline.insert"}},
 		{Name: "route_beat_insert_after_recoverable_failure", Prompt: contextPrefix + "\n上一原子插入因所选 shot 只有 80 帧而失败，当前时间线未变化。shot.search 已返回替代镜头 shot_video_2b：asset_video_2 源 180 到 300 帧，正好 120 帧；创作选择不变。现在只重试这一个失败的插入，不重做其他已成功片段。", Expected: []string{"timeline.insert"}},
 		{Name: "route_atomic_update_after_field_failure", Prompt: contextPrefix + "\n上一工具结果：{\"status\":\"failed\",\"observation\":\"时间线补丁字段预校验失败：时间线补丁 trim_clip_edge 的字段 timeline_frame 缺少必填字段\",\"data\":{\"op_kind\":\"trim_clip_edge\",\"invalid_field\":\"timeline_frame\",\"expected_schema\":{\"required\":[\"kind\",\"timeline_clip_id\",\"timeline_frame\",\"edge\"]},\"correct_example\":{\"kind\":\"trim_clip_edge\",\"timeline_clip_id\":\"clip_v1_001\",\"timeline_frame\":75,\"edge\":\"end\"},\"recovery\":\"只修正当前 op 的字段名与类型后重新调用；不要原样重发失败参数。\"}}。字段错误已明确；按原子顺序先把 clip_v1_001 的结尾裁到 75 帧。请选择下一步工具。", Expected: []string{"timeline.update"}},
 		{Name: "route_talking_head_delete", Prompt: contextPrefix + "\n逐句证据与最新时间线已读取；较早一遍重说当前映射为时间线 360 到 480 帧，我明确选择删除它。现在只提交这个连续范围。", Expected: []string{"timeline.delete"}},
-		{Name: "route_check", Prompt: contextPrefix + "\n用户：校验时间线和卡点对齐。", Expected: []string{"timeline.check"}},
-		{Name: "route_preview", Prompt: contextPrefix + "\n用户：基于当前 timeline_id 生成一个可分享的预览。", Expected: []string{"preview.generate"}},
-		{Name: "route_preview_check", Prompt: contextPrefix + "\n用户：质检 preview_123 是否有黑帧、静音和解码问题。", Expected: []string{"preview.check"}},
 	}
 	snapshot := liveFullTaskSnapshot()
 	for index := range cases {

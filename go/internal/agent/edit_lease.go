@@ -219,7 +219,7 @@ func expireStaleAgentEditLeases(ctx context.Context, database *storage.DB) error
 
 func toolRequiresTimelineEditLease(name string) bool {
 	switch name {
-	case "timeline.insert", "timeline.delete", "timeline.update", "timeline.split", "preview.generate":
+	case "timeline.insert", "timeline.delete", "timeline.update", "timeline.split":
 		return true
 	default:
 		return false
