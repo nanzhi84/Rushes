@@ -229,6 +229,72 @@ type ShotSearchResult struct {
 	Truncated          bool            `json:"truncated"`
 }
 
+type ShotRefInput struct {
+	AssetID string `json:"asset_id" jsonschema:"required" jsonschema_description:"shot.search 返回的精确素材 ID"`
+	ShotID  string `json:"shot_id" jsonschema:"required" jsonschema_description:"shot.search 返回的持久 shot_id；不要传源帧范围"`
+}
+
+type ShotDeepSearchInput struct {
+	Query           string         `json:"query" jsonschema:"required" jsonschema_description:"需要新增帧核验的具体画面问题或创作意图"`
+	IndexSnapshotID string         `json:"index_snapshot_id" jsonschema:"required" jsonschema_description:"同一次 shot.search 返回的冻结 index_snapshot_id"`
+	CandidateShots  []ShotRefInput `json:"candidate_shots" jsonschema:"required" jsonschema_description:"只接受 1 到 8 个精确 ShotRef；每项同时包含 asset_id 和 shot_id，不传源帧范围"`
+	Requirements    []string       `json:"requirements,omitempty" jsonschema_description:"必须被新增帧证据支持的条件；被反驳时确定性 reject"`
+	Exclusions      []string       `json:"exclusions,omitempty" jsonschema_description:"观察到任一排除条件时确定性 reject"`
+	Preferences     []string       `json:"preferences,omitempty" jsonschema_description:"只影响候选排序，不做硬过滤"`
+	ReturnTopK      int            `json:"return_top_k,omitempty" jsonschema_description:"返回候选数，默认全部；范围 1 到 candidate_shots 数量"`
+}
+
+type ShotDeepFrameEvidence struct {
+	FrameID     string `json:"frame_id"`
+	SourceFrame int    `json:"source_frame"`
+	TimestampMS int64  `json:"timestamp_ms"`
+	Position    string `json:"position"`
+	ObjectHash  string `json:"object_hash"`
+	ObjectSize  int64  `json:"object_size"`
+	NewlyAdded  bool   `json:"newly_added"`
+}
+
+type ShotDeepCriterionEvidence struct {
+	Criterion   string   `json:"criterion"`
+	Status      string   `json:"status" jsonschema_description:"observed、refuted 或 uncertain"`
+	Observation string   `json:"observation"`
+	FrameIDs    []string `json:"frame_ids"`
+}
+
+type ShotDeepCandidate struct {
+	IndexSnapshotID  string                      `json:"index_snapshot_id"`
+	AssetID          string                      `json:"asset_id"`
+	ShotID           string                      `json:"shot_id"`
+	SourceStartFrame int                         `json:"source_start_frame"`
+	SourceEndFrame   int                         `json:"source_end_frame"`
+	BoundaryVersion  int                         `json:"boundary_version"`
+	Verification     string                      `json:"verification" jsonschema_description:"match、reject、partial 或 uncertain"`
+	Score            float64                     `json:"score"`
+	Requirements     []ShotDeepCriterionEvidence `json:"requirements"`
+	Exclusions       []ShotDeepCriterionEvidence `json:"exclusions"`
+	Preferences      []ShotDeepCriterionEvidence `json:"preferences"`
+	Observations     []string                    `json:"observations"`
+	FrameEvidence    []ShotDeepFrameEvidence     `json:"frame_evidence"`
+	DeepCoverage     []string                    `json:"deep_coverage"`
+}
+
+type ShotDeepSearchResult struct {
+	Status                string              `json:"status"`
+	ErrorCode             string              `json:"error_code,omitempty"`
+	Message               string              `json:"message,omitempty"`
+	Recovery              string              `json:"recovery,omitempty"`
+	Query                 string              `json:"query,omitempty"`
+	IndexSnapshotID       string              `json:"index_snapshot_id,omitempty"`
+	AnalyzerVersion       string              `json:"analyzer_version,omitempty"`
+	InvalidCandidateShots []ShotRefInput      `json:"invalid_candidate_shots,omitempty"`
+	Candidates            []ShotDeepCandidate `json:"candidates"`
+	TotalCandidates       int                 `json:"total_candidates"`
+	ReturnedCandidates    int                 `json:"returned_candidates"`
+	NewFrameCount         int                 `json:"new_frame_count"`
+	ReusedFrameCount      int                 `json:"reused_frame_count"`
+	CacheHit              bool                `json:"cache_hit"`
+}
+
 type AudioBeatAnalysisInput struct {
 	AssetID        string `json:"asset_id" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的 audio 素材 ID；带原声的视频不作为 BGM 节拍源"`
 	MaxBeats       int    `json:"max_beats,omitempty" jsonschema_description:"最多返回的节拍点，默认 512，上限 2000"`

@@ -87,6 +87,34 @@ func LatestAssetAnalysesForContentHashes(
 	return result, rows.Err()
 }
 
+// ListAssetAnalysesByContentType returns every immutable analyzer result for a
+// content hash and analysis type. Progressive shot understanding uses this to
+// union independently cached facet analyses without treating one latest row as
+// a replacement for facts learned earlier.
+func ListAssetAnalysesByContentType(
+	ctx context.Context,
+	query Querier,
+	contentHash, analysisType string,
+) ([]AssetAnalysis, error) {
+	rows, err := query.QueryContext(ctx, `
+		SELECT `+assetAnalysisColumns+` FROM asset_analyses
+		WHERE asset_content_hash=? AND analysis_type=?
+		ORDER BY created_at,analysis_id`, contentHash, analysisType)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	result := []AssetAnalysis{}
+	for rows.Next() {
+		analysis, err := scanAssetAnalysis(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, analysis)
+	}
+	return result, rows.Err()
+}
+
 func scanAssetAnalysis(row rowScanner) (AssetAnalysis, error) {
 	var analysis AssetAnalysis
 	var raw string

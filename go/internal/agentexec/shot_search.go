@@ -2,9 +2,7 @@ package agentexec
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -411,23 +409,13 @@ func frozenShotAssetIDs(values []frozenShotAsset) []string {
 	return result
 }
 
-func shotSearchSnapshotID(draftID string, values []frozenShotAsset) string {
-	parts := []string{draftID, shotSearchSynonymVersion}
-	for _, value := range values {
-		parts = append(parts, strings.Join([]string{
-			value.asset.ID, value.asset.Hash, value.snapshot.ID, fmt.Sprint(value.snapshot.Generation),
-		}, ":"))
-	}
-	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return "shot_search_" + hex.EncodeToString(sum[:16])
-}
-
 func (exec *Executor) loadFrozenShotIndex(
 	ctx context.Context,
 	frozen []frozenShotAsset,
 	searchSnapshotID string,
 ) ([]indexedShot, error) {
 	shotsBySnapshot := map[string][]storage.IndexedShot{}
+	deepFactsByContent := map[string]map[string]storedDeepShotFacts{}
 	result := []indexedShot{}
 	for _, item := range frozen {
 		rows, exists := shotsBySnapshot[item.snapshot.ID]
@@ -439,6 +427,15 @@ func (exec *Executor) loadFrozenShotIndex(
 			}
 			shotsBySnapshot[item.snapshot.ID] = rows
 		}
+		factsByShot, factsLoaded := deepFactsByContent[item.asset.Hash]
+		if !factsLoaded {
+			var err error
+			factsByShot, err = exec.loadStoredDeepFactsForContent(ctx, item.asset.Hash)
+			if err != nil {
+				return nil, err
+			}
+			deepFactsByContent[item.asset.Hash] = factsByShot
+		}
 		role := understanding.SuggestVisualRole(
 			item.asset.Filename, stringValue(item.asset.RelDir), InterfaceString(item.snapshot.Summary["semantic_role"]),
 		)
@@ -447,6 +444,23 @@ func (exec *Executor) loadFrozenShotIndex(
 				row.AssetContentHash != item.asset.Hash {
 				return nil, fmt.Errorf("冻结索引 %s 含非法镜头 %s", item.snapshot.ID, row.ShotID)
 			}
+			deepFacts, exists := factsByShot[deepFactsKey(
+				row.ShotID, row.SourceStartFrame, row.SourceEndFrame, row.BoundaryVersion,
+			)]
+			if !exists {
+				deepFacts = storedDeepShotFacts{
+					ShotID: row.ShotID, SourceStartFrame: row.SourceStartFrame,
+					SourceEndFrame: row.SourceEndFrame, BoundaryVersion: row.BoundaryVersion,
+				}
+			}
+			description := strings.TrimSpace(row.Description)
+			if objectiveFacts := deepObservationSearchText(deepFacts.Observations); objectiveFacts != "" {
+				if description != "" {
+					description += "；深度观察：" + objectiveFacts
+				} else {
+					description = "深度观察：" + objectiveFacts
+				}
+			}
 			qualityLabel := strings.TrimSpace(InterfaceString(row.Quality["label"]))
 			result = append(result, indexedShot{
 				candidate: rushestools.ShotCandidate{
@@ -454,13 +468,15 @@ func (exec *Executor) loadFrozenShotIndex(
 					Filename: item.asset.Filename, SourceStartFrame: row.SourceStartFrame,
 					SourceEndFrame: row.SourceEndFrame, DurationFrames: row.SourceEndFrame - row.SourceStartFrame,
 					BoundaryVersion: row.BoundaryVersion, SemanticRole: role,
-					Description: row.Description, Tags: append([]string(nil), row.Tags...),
+					Description: description, Tags: append([]string(nil), row.Tags...),
 					Quality: qualityLabel, Subjects: append([]string(nil), row.Subjects...),
 					Actions: append([]string(nil), row.Actions...), Setting: append([]string(nil), row.Setting...),
 					ShotScale: row.ShotScale, Composition: row.Composition,
 					Lighting: append([]string(nil), row.Lighting...), Mood: append([]string(nil), row.Mood...),
-					EditHints:    append([]string(nil), row.EditHints...),
-					DeepCoverage: append([]string(nil), row.DeepCoverage...),
+					EditHints: append([]string(nil), row.EditHints...),
+					DeepCoverage: compactSortedStrings(append(
+						append([]string(nil), row.DeepCoverage...), deepFacts.Facets...,
+					)),
 				},
 				rangeInfo: sourceRange{startFrame: row.SourceStartFrame, endFrame: row.SourceEndFrame},
 				quality:   row.Quality, boundaryConfidence: row.BoundaryConfidence,

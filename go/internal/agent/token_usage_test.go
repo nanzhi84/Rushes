@@ -267,10 +267,10 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 }
 
 const (
-	// Issue #157 PR5 reviewed baseline: shot.search replaced partial pagination
-	// with top_k plus a frozen search-ready snapshot contract. The catalog stays
-	// at 15 tools while the schema contracts from 16,127 to 16,100 runes.
-	modelToolSchemaTotalBaselineRunes = 16100
+	// Issue #157 PR6 reviewed baseline: the model-visible high-cost
+	// shot.deep_search contract adds exact ShotRef inputs and frame-bound truth
+	// evidence without expanding the atomic timeline schemas.
+	modelToolSchemaTotalBaselineRunes = 17307
 	maxAtomicTimelineToolSchemaRunes  = 4400
 )
 
@@ -285,6 +285,7 @@ var modelToolSchemaBaselineRunes = map[string]int{
 	"preview.check":              420,
 	"preview.generate":           446,
 	"shot.search":                921,
+	"shot.deep_search":           1207,
 	"speech.search":              1138,
 	"timeline.delete":            1299,
 	"timeline.insert":            1662,

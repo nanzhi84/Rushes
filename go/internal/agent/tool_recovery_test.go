@@ -571,6 +571,9 @@ func TestConfirmedToolRecoverySuccessRequiresToolSpecificStatus(t *testing.T) {
 		{"shot search rejects frozen asset identity drift", "shot.search", `{"asset_ids":["asset_A","asset_B"]}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A","asset_C"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
 		{"shot search rejects candidate outside frozen set", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_B","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`, false},
 		{"shot search rejects duration outside request", "shot.search", `{"max_duration_frames":10}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`, false},
+		{"deep search exact proof", "shot.deep_search", `{"query":"spin","index_snapshot_id":"snap","candidate_shots":[{"asset_id":"asset_A","shot_id":"shot_1"}],"requirements":["person spins"]}`, `{"status":"succeeded","query":"spin","index_snapshot_id":"snap","analyzer_version":"deep-v1","candidates":[{"index_snapshot_id":"snap","asset_id":"asset_A","shot_id":"shot_1","source_start_frame":0,"source_end_frame":30,"boundary_version":1,"verification":"match","score":0.9,"requirements":[{"criterion":"person spins","status":"observed","observation":"visible spin","frame_ids":["f1"]}],"exclusions":[],"preferences":[],"observations":["person rotates"],"frame_evidence":[{"frame_id":"f1","source_frame":10,"timestamp_ms":333,"position":"ordered_1_of_3","object_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","object_size":10,"newly_added":true}],"deep_coverage":["temporal_action"]}],"total_candidates":1,"returned_candidates":1,"new_frame_count":1,"reused_frame_count":0,"cache_hit":false}`, true},
+		{"deep search rejects wrong snapshot", "shot.deep_search", `{"query":"spin","index_snapshot_id":"snap","candidate_shots":[{"asset_id":"asset_A","shot_id":"shot_1"}],"requirements":["person spins"]}`, `{"status":"succeeded","query":"spin","index_snapshot_id":"snap","analyzer_version":"deep-v1","candidates":[{"index_snapshot_id":"other","asset_id":"asset_A","shot_id":"shot_1","source_start_frame":0,"source_end_frame":30,"boundary_version":1,"verification":"match","score":0.9,"requirements":[{"criterion":"person spins","status":"observed","observation":"visible spin","frame_ids":["f1"]}],"exclusions":[],"preferences":[],"observations":["person rotates"],"frame_evidence":[{"frame_id":"f1","source_frame":10,"timestamp_ms":333,"position":"ordered_1_of_3","object_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","object_size":10,"newly_added":true}],"deep_coverage":["temporal_action"]}],"total_candidates":1,"returned_candidates":1,"new_frame_count":1,"reused_frame_count":0,"cache_hit":false}`, false},
+		{"deep search rejects criterion drift", "shot.deep_search", `{"query":"spin","index_snapshot_id":"snap","candidate_shots":[{"asset_id":"asset_A","shot_id":"shot_1"}],"requirements":["person spins"]}`, `{"status":"succeeded","query":"spin","index_snapshot_id":"snap","analyzer_version":"deep-v1","candidates":[{"index_snapshot_id":"snap","asset_id":"asset_A","shot_id":"shot_1","source_start_frame":0,"source_end_frame":30,"boundary_version":1,"verification":"match","score":0.9,"requirements":[{"criterion":"different","status":"observed","observation":"visible spin","frame_ids":["f1"]}],"exclusions":[],"preferences":[],"observations":["person rotates"],"frame_evidence":[{"frame_id":"f1","source_frame":10,"timestamp_ms":333,"position":"ordered_1_of_3","object_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","object_size":10,"newly_added":true}],"deep_coverage":["temporal_action"]}],"total_candidates":1,"returned_candidates":1,"new_frame_count":1,"reused_frame_count":0,"cache_hit":false}`, false},
 		{"typed read wrong field type", "shot.search", `{}`, `{"shots":"已完成","total_matches":"全部"}`, false},
 		{"incomplete typed result", "shot.search", `{}`, `{"status":"succeeded","shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
 		{"asset list paginated", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":2,"next_after":"asset_1"}`, true},
@@ -670,6 +673,73 @@ func TestConfirmedToolRecoverySuccessRequiresToolSpecificStatus(t *testing.T) {
 		"draft_A",
 	) {
 		t.Fatal("timeline.check result from another active draft was accepted")
+	}
+}
+
+func TestShotDeepSearchRecoveryProofHandlesTruncationAndPersistedFrameCache(t *testing.T) {
+	frame := rushestools.ShotDeepFrameEvidence{
+		FrameID: "f1", SourceFrame: 10, TimestampMS: 333, Position: "ordered_1_of_3",
+		ObjectHash: strings.Repeat("a", 64), ObjectSize: 10, NewlyAdded: true,
+	}
+	candidate := rushestools.ShotDeepCandidate{
+		IndexSnapshotID: "snapshot", AssetID: "asset_a", ShotID: "shot_a",
+		SourceStartFrame: 0, SourceEndFrame: 30, BoundaryVersion: 1,
+		Verification: "match", Score: 0.9,
+		Requirements: []rushestools.ShotDeepCriterionEvidence{},
+		Exclusions:   []rushestools.ShotDeepCriterionEvidence{},
+		Preferences:  []rushestools.ShotDeepCriterionEvidence{},
+		Observations: []string{"人物可见"}, FrameEvidence: []rushestools.ShotDeepFrameEvidence{frame},
+		DeepCoverage: []string{"appearance"},
+	}
+	confirm := func(input rushestools.ShotDeepSearchInput, result rushestools.ShotDeepSearchResult) bool {
+		t.Helper()
+		arguments, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		proof := attachToolRequestFingerprint("shot.deep_search", string(arguments), string(output))
+		return isConfirmedToolRecoverySuccess("shot.deep_search", string(arguments), proof, "")
+	}
+	truncatedInput := rushestools.ShotDeepSearchInput{
+		Query: "人物", IndexSnapshotID: "snapshot", ReturnTopK: 1,
+		CandidateShots: []rushestools.ShotRefInput{
+			{AssetID: "asset_a", ShotID: "shot_a"}, {AssetID: "asset_b", ShotID: "shot_b"},
+		},
+	}
+	truncated := rushestools.ShotDeepSearchResult{
+		Status: "succeeded", Query: "人物", IndexSnapshotID: "snapshot", AnalyzerVersion: "deep-v1",
+		Candidates: []rushestools.ShotDeepCandidate{candidate}, TotalCandidates: 2, ReturnedCandidates: 1,
+		NewFrameCount: 2, ReusedFrameCount: 0,
+	}
+	if !confirm(truncatedInput, truncated) {
+		t.Fatal("top-k 截断后的全工作量计数应通过 proof")
+	}
+	cachedInput := truncatedInput
+	cachedInput.CandidateShots = cachedInput.CandidateShots[:1]
+	cachedInput.ReturnTopK = 0
+	cached := truncated
+	cached.TotalCandidates = 1
+	cached.NewFrameCount = 0
+	cached.ReusedFrameCount = 1
+	cached.CacheHit = true
+	cached.Candidates[0].FrameEvidence[0].NewlyAdded = false
+	if !confirm(cachedInput, cached) {
+		t.Fatal("持久化帧 cache hit proof 被拒绝")
+	}
+	wrongVerification := cached
+	wrongVerification.Candidates = append([]rushestools.ShotDeepCandidate(nil), cached.Candidates...)
+	wrongVerification.Candidates[0].Verification = "partial"
+	if confirm(cachedInput, wrongVerification) {
+		t.Fatal("与逐项证据矛盾的 verification 不应通过 proof")
+	}
+	duplicateInput := cachedInput
+	duplicateInput.CandidateShots = append(duplicateInput.CandidateShots, duplicateInput.CandidateShots[0])
+	if confirm(duplicateInput, cached) {
+		t.Fatal("重复请求 ShotRef 不应形成有效 proof")
 	}
 }
 
@@ -1010,6 +1080,36 @@ func TestToolRecoveryPreservesStructuredBusinessFailureForModel(t *testing.T) {
 		payload["message"] != "片段相互重叠" || payload["current_state"] == nil ||
 		payload["invalid_fields"] == nil {
 		t.Fatalf("structured business failure was not preserved: payload=%#v", payload)
+	}
+}
+
+func TestToolRecoveryPreservesTopLevelTypedFailureForModel(t *testing.T) {
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+			return &compose.ToolOutput{Result: `{
+				"status":"failed",
+				"error_code":"shot_deep_analysis_failed",
+				"message":"新增帧视觉复核失败。",
+				"recovery":"使用相同快照和 ShotRef 直接重试。",
+				"invalid_candidate_shots":[{"asset_id":"asset_a","shot_id":"shot_a"}],
+				"candidates":[],"total_candidates":0,"returned_candidates":0,
+				"new_frame_count":0,"reused_frame_count":0,"cache_hit":false
+			}`}, nil
+		},
+	)
+	output, err := endpoint(t.Context(), &compose.ToolInput{
+		Name: "shot.deep_search", Arguments: `{"query":"动作","index_snapshot_id":"snapshot","candidate_shots":[{"asset_id":"asset_a","shot_id":"shot_a"}]}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := decodeRecoveryPayload(t, output.Result)
+	data := payload["data"].(map[string]any)
+	if payload["error_code"] != "shot_deep_analysis_failed" ||
+		payload["message"] != "新增帧视觉复核失败。" ||
+		payload["recovery"] != "使用相同快照和 ShotRef 直接重试。" ||
+		data["error_code"] != payload["error_code"] || data["message"] != payload["message"] {
+		t.Fatalf("typed failure was not preserved: payload=%#v", payload)
 	}
 }
 

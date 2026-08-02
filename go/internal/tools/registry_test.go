@@ -24,6 +24,10 @@ func (fakeExecutor) ExecuteTool(ctx context.Context, name string, _ any) (any, e
 		return DetectShotsResult{DraftID: draftID, JobID: "job", AssetID: "asset", Status: "queued"}, nil
 	case "shot.search":
 		return ShotSearchResult{Shots: []ShotCandidate{}, TotalMatches: 0}, nil
+	case "shot.deep_search":
+		return ShotDeepSearchResult{
+			Status: "succeeded", Candidates: []ShotDeepCandidate{},
+		}, nil
 	case "audio.analyze_beats":
 		return AudioBeatAnalysisResult{AssetID: "audio", BPM: 120, BeatFrames: []int{0, 15}}, nil
 	case "audio.analyze_speech_pauses":
@@ -295,6 +299,7 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 	typedAdapters := map[string]bool{
 		"asset.list_assets":          true,
 		"shot.search":                false,
+		"shot.deep_search":           false,
 		"speech.search":              false,
 		"interaction.ask_user":       false,
 		"decision.answer":            false,
@@ -419,6 +424,7 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		"asset.import_local_file":     EffectReversible, // harness-only
 		"asset.list_assets":           EffectReadOnly,
 		"shot.search":                 EffectReadOnly,
+		"shot.deep_search":            EffectReversible,
 		"audio.analyze_beats":         EffectReversible,
 		"audio.analyze_speech_pauses": EffectReversible,
 		"timeline.inspect":            EffectReadOnly,
@@ -470,6 +476,7 @@ func TestToolPrimitiveClassificationMatchesEffectAndSurface(t *testing.T) {
 		"asset.list_assets":           FamilyRead,
 		"media.detect_shots":          FamilyDetect,
 		"shot.search":                 FamilyRead,
+		"shot.deep_search":            FamilyDetect,
 		"audio.analyze_beats":         FamilyDetect,
 		"audio.analyze_speech_pauses": FamilyDetect,
 		"speech.transcribe":           FamilyDetect,
@@ -703,6 +710,41 @@ func TestRegistryConfirmationValidationRejectsUnsafeTargets(t *testing.T) {
 	}
 }
 
+func TestShotDeepSearchSchemaOnlyAcceptsExactShotRefs(t *testing.T) {
+	t.Parallel()
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := map[string]any{
+		"query": "旋转动作", "index_snapshot_id": "snapshot",
+		"candidate_shots": []any{map[string]any{"asset_id": "asset", "shot_id": "shot"}},
+	}
+	decoded, err := registry.DecodeInput("shot.deep_search", valid)
+	if err != nil {
+		t.Fatalf("精确 ShotRef 被拒绝: %v", err)
+	}
+	input := decoded.(ShotDeepSearchInput)
+	if len(input.CandidateShots) != 1 || input.CandidateShots[0].ShotID != "shot" {
+		t.Fatalf("decoded=%#v", decoded)
+	}
+	invalid := map[string]any{
+		"query": "旋转动作", "index_snapshot_id": "snapshot",
+		"candidate_shots": []any{map[string]any{
+			"asset_id": "asset", "shot_id": "shot", "source_start_frame": 0, "source_end_frame": 30,
+		}},
+	}
+	if _, err := registry.DecodeInput("shot.deep_search", invalid); err == nil ||
+		!strings.Contains(err.Error(), "source_") {
+		t.Fatalf("模型不应向 deep_search 传源范围: %v", err)
+	}
+}
+
 func minimalDecodeArguments(input reflect.Type) map[string]any {
 	for input.Kind() == reflect.Pointer {
 		input = input.Elem()
@@ -832,6 +874,9 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		},
 		"shot.search": {
 			"冻结目标视频素材", "search_ready", "index_snapshot_id", "无 embedding", "绝不返回部分索引",
+		},
+		"shot.deep_search": {
+			"精确 ShotRef", "冻结快照", "新增有序帧", "通用事实", "requirements", "exclusions", "preferences", "不能传", "源帧范围",
 		},
 		"plan.update": {
 			"RFC 7396", "reset=true", "跨回合",

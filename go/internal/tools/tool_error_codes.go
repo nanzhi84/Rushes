@@ -73,11 +73,16 @@ const (
 
 	// —— 素材理解（agentexec/tool_exec_understand.go）——
 	ErrCodeUnderstandingFailed ToolErrorCode = "understanding_failed"
-	// —— 纯检索（agentexec/speech_inspect.go、shot_search.go）——
+	// —— 素材检索与渐进式深搜（agentexec/speech_inspect.go、shot_search.go、shot_deep_search.go）——
 	ErrCodeIndexMissing           ToolErrorCode = "index_missing"
 	ErrCodeShotIndexNotReady      ToolErrorCode = "shot_index_not_ready"
 	ErrCodeShotIndexFailed        ToolErrorCode = "shot_index_failed"
 	ErrCodeShotIndexSnapshotStale ToolErrorCode = "shot_index_snapshot_stale"
+	ErrCodeShotRefNotFound        ToolErrorCode = "shot_ref_not_found"
+	ErrCodeShotRefAssetMismatch   ToolErrorCode = "shot_ref_asset_mismatch"
+	ErrCodeShotDeepInputInvalid   ToolErrorCode = "shot_deep_input_invalid"
+	ErrCodeShotDeepVisionMissing  ToolErrorCode = "shot_deep_vision_unavailable"
+	ErrCodeShotDeepAnalysisFailed ToolErrorCode = "shot_deep_analysis_failed"
 
 	// —— 预览质检（media/render.go 因 depguard 保留字面量）——
 	ErrCodePreviewDecodeFailed ToolErrorCode = "preview_decode_failed"
@@ -131,6 +136,11 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodeShotIndexNotReady,
 	ErrCodeShotIndexFailed,
 	ErrCodeShotIndexSnapshotStale,
+	ErrCodeShotRefNotFound,
+	ErrCodeShotRefAssetMismatch,
+	ErrCodeShotDeepInputInvalid,
+	ErrCodeShotDeepVisionMissing,
+	ErrCodeShotDeepAnalysisFailed,
 	ErrCodePreviewDecodeFailed,
 	ErrCodeStaleRecoveryExhausted,
 	ErrCodeJobHandlerFailed,
