@@ -268,12 +268,9 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 		return finishCancelled(err)
 	}
-	if recoveryState.recoveryExhausted() {
-		err = &terminalReplyGuardError{kind: "recovery_exhausted", details: recoveryState.summary()}
-		content = ""
-	} else if guardErr := service.terminalReplyGuard(ctx, item.DraftID); guardErr != nil {
-		// 即便 provider 在成功写入或工具失败之后又返回普通错误，也必须优先暴露
-		// harness 已记录的真实终态，不能让错误路径绕过同版本检查或未解决失败门禁。
+	if guardErr := service.terminalReplyGuard(ctx, item.DraftID); guardErr != nil {
+		// 即便 provider 在成功写入或工具调用之后又返回普通错误，也必须优先暴露
+		// harness 已记录的真实终态，不能让错误路径绕过同版本检查或待确认策略门禁。
 		err = guardErr
 		content = ""
 	}
@@ -990,7 +987,7 @@ func requireConfirmedToolSuccess(
 	result, ok := terminalTruthToolResult(output)
 	if !ok {
 		return rushestools.ToolResult{}, &terminalReplyGuardError{
-			kind: "tool_failure_unresolved", details: "确认重放的 " + name + " 未返回有效 ToolResult",
+			kind: "tool_policy_unresolved", details: "确认重放的 " + name + " 未返回有效 ToolResult",
 		}
 	}
 	// 该路径直接同步调用 Service.ExecuteTool，返回值与当前 typed input 同栈绑定；
@@ -1001,7 +998,7 @@ func requireConfirmedToolSuccess(
 			details = "status=" + result.Status
 		}
 		return rushestools.ToolResult{}, &terminalReplyGuardError{
-			kind: "tool_failure_unresolved", details: "确认重放的 " + name + " 失败：" + details,
+			kind: "tool_policy_unresolved", details: "确认重放的 " + name + " 失败：" + details,
 		}
 	}
 	return result, nil

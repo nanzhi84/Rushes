@@ -17,11 +17,17 @@ func TestTurnQueueFIFOParallelDraftsAndCancel(t *testing.T) {
 	order := []string{}
 	started := make(chan string, 4)
 	releaseA := make(chan struct{})
+	releaseA2 := make(chan struct{})
 	queue := NewTurnQueue(t.Context(), func(ctx context.Context, item QueueItem) error {
 		started <- item.DraftID + ":" + item.ItemID
 		if item.DraftID == "a" && item.ItemID == "1" {
 			select {
 			case <-releaseA:
+			case <-ctx.Done():
+			}
+		} else if item.DraftID == "a" && item.ItemID == "2" {
+			select {
+			case <-releaseA2:
 			case <-ctx.Done():
 			}
 		}
@@ -47,9 +53,18 @@ func TestTurnQueueFIFOParallelDraftsAndCancel(t *testing.T) {
 	if !queue.RequestStop("a") {
 		t.Fatal("活跃 turn 应可取消")
 	}
+	select {
+	case third := <-started:
+		if third != "a:2" {
+			t.Fatalf("取消当前 turn 后应按 FIFO 启动排队项: %s", third)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("取消当前 turn 后排队项未启动")
+	}
 	if !queue.IsBusy("a") {
 		t.Fatal("尚有排队 turn 时应报告 busy")
 	}
+	close(releaseA2)
 	queue.JoinDraft("a")
 	queue.JoinDraft("b")
 	mu.Lock()

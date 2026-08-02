@@ -64,8 +64,6 @@ var (
 	// 工具修复预算穷尽分因（H4）：streak = 连续失败链超限；cumulative = 连击预算被成功清零、
 	// 但 turn 级累计预算仍超限——正是「交替 fail→success 想刷新预算却被累计计数挡住」的信号
 	// （H-B P2「预算重叠」）。
-	metricRecoveryStreakExhausted     = telemetry.NewCounter("agent_recovery_streak_exhausted_total")
-	metricRecoveryCumulativeExhausted = telemetry.NewCounter("agent_recovery_cumulative_exhausted_total")
 
 	// 工作区用户记忆注入规模（M6/M8）：三个累计条数、实际 section rune 分布与发生
 	// 截断的构建次数。omitted ratio 由累计 omitted/total 派生，供容量继续校准。

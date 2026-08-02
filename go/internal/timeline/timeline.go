@@ -104,8 +104,8 @@ func Validate(document Document) ValidationReport {
 		report.Valid = false
 		report.Issues = append(report.Issues, ValidationIssue{Code: code, Message: message})
 	}
-	if document.FPS <= 0 || document.DurationFrames <= 0 || document.Version < 1 {
-		add("invalid_document", "fps、duration_frames、version 必须为正数")
+	if document.FPS <= 0 || document.DurationFrames < 0 || document.Version < 1 {
+		add("invalid_document", "fps、version 必须为正数，duration_frames 必须为非负数")
 	}
 	tracks := map[string]Track{}
 	clipIDs := map[string]struct{}{}
@@ -198,7 +198,10 @@ func Validate(document Document) ValidationReport {
 		}
 	}
 	primary, exists := tracks["visual_base"]
-	if !exists || len(primary.Clips) == 0 {
+	if document.DurationFrames == 0 && exists && len(primary.Clips) == 0 {
+		// A full-range delete produces the canonical empty document. Required
+		// tracks remain present, but the primary track is intentionally empty.
+	} else if !exists || len(primary.Clips) == 0 {
 		add("empty_primary_visual", "主视觉轨没有 clip")
 	} else {
 		sorted := append([]Clip(nil), primary.Clips...)
@@ -630,8 +633,11 @@ func deleteRange(document *Document, operation map[string]any) error {
 	if startErr != nil || endErr != nil {
 		return errors.Join(startErr, endErr)
 	}
-	if start < 0 || end <= start || end > document.DurationFrames || end-start >= document.DurationFrames {
-		return errors.New("delete_range 范围无效")
+	if start < 0 || end <= start || end > document.DurationFrames || end-start > document.DurationFrames {
+		return &SemanticError{
+			Kind: SemanticTimelineRange, ProvidedStartFrame: start, ProvidedEndFrame: end,
+			DurationFrames: document.DurationFrames,
+		}
 	}
 	if err := ensureRippleUnlocked(document, start, ""); err != nil {
 		return err

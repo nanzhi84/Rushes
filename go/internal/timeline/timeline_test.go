@@ -2,6 +2,7 @@ package timeline
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -852,6 +853,46 @@ func TestDeleteRangeHandlesEveryOverlapShape(t *testing.T) {
 		}
 		if !clips[0].Linked || !clips[1].Linked || clips[0].ParentBlockID == clips[1].ParentBlockID {
 			t.Fatalf("A/V 联动分段无效，track=%s clips=%#v", result.Tracks[trackIndex].TrackID, clips)
+		}
+	}
+}
+
+func TestDeleteRangeAllowsCanonicalEmptyTimelineAndReportsPreciseBounds(t *testing.T) {
+	t.Parallel()
+	document := Empty("draft_delete_all", 1)
+	document.DurationFrames = 1440
+	document.Tracks[0].Clips = []Clip{{
+		TimelineClipID: "clip_all", TrackID: "visual_base", AssetID: "asset_all", AssetKind: "video",
+		TimelineStartFrame: 0, TimelineEndFrame: 1440,
+		SourceStartFrame: 0, SourceEndFrame: 1440, PlaybackRate: 1,
+	}}
+
+	for _, operation := range []map[string]any{
+		{"kind": "delete_range", "start_frame": -1, "end_frame": 30},
+		{"kind": "delete_range", "start_frame": 30, "end_frame": 30},
+		{"kind": "delete_range", "start_frame": 0, "end_frame": 1441},
+	} {
+		_, err := ApplyPatch(document, operation)
+		var semantic *SemanticError
+		if !errors.As(err, &semantic) || semantic.Kind != SemanticTimelineRange ||
+			semantic.DurationFrames != 1440 {
+			t.Fatalf("operation=%#v err=%v semantic=%#v", operation, err, semantic)
+		}
+	}
+
+	empty, err := ApplyPatch(document, map[string]any{
+		"kind": "delete_range", "start_frame": 0, "end_frame": 1440,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.Version != 2 || empty.TimelineID != "draft_delete_all:v2" ||
+		empty.DurationFrames != 0 || !Validate(empty).Valid {
+		t.Fatalf("empty=%#v validation=%#v", empty, Validate(empty))
+	}
+	for _, track := range empty.Tracks {
+		if len(track.Clips) != 0 {
+			t.Fatalf("canonical empty track %s still has clips: %#v", track.TrackID, track.Clips)
 		}
 	}
 }

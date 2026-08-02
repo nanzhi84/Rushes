@@ -68,6 +68,8 @@ type terminatingFailureLoopModel struct {
 	terminalErr bool
 }
 
+const repeatedFailureCallsBeforeTerminal = 6
+
 type failingReadToolServiceModel struct {
 	mu    sync.Mutex
 	calls int
@@ -225,7 +227,7 @@ func (modelValue *terminatingFailureLoopModel) Generate(
 	modelValue.mu.Lock()
 	defer modelValue.mu.Unlock()
 	modelValue.calls++
-	if modelValue.calls <= maxModelRepairAttempts+1 {
+	if modelValue.calls <= repeatedFailureCallsBeforeTerminal {
 		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID: agentexec.RandomID("bounded_loop_call"),
 			Function: schema.FunctionCall{
@@ -234,7 +236,7 @@ func (modelValue *terminatingFailureLoopModel) Generate(
 		}}), nil
 	}
 	if modelValue.terminalErr {
-		return nil, errors.New("provider stream failed after recovery exhaustion")
+		return nil, errors.New("provider stream failed after tool failures")
 	}
 	return schema.AssistantMessage("已经全部完成。", nil), nil
 }
@@ -458,7 +460,7 @@ func (modelValue *failingReadToolServiceModel) Generate(
 		!strings.Contains(messages[len(messages)-1].Content, `"retryable":false`) {
 		return nil, errors.New("确定性参数失败没有立即回灌模型")
 	}
-	return schema.AssistantMessage("已经全部完成。", nil), nil
+	return schema.AssistantMessage("拍点分析失败；本轮未修改时间线，你可以更换素材后重试。", nil), nil
 }
 
 func (modelValue *failingReadToolServiceModel) Stream(
@@ -685,7 +687,7 @@ func TestServiceReturnsToolFailureToModelForSelfRepair(t *testing.T) {
 	}
 }
 
-func TestServiceRejectsSuccessClaimAfterUnresolvedToolFailure(t *testing.T) {
+func TestServiceAllowsHonestTerminalReplyAfterIndependentToolFailure(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_retry_trace")
@@ -722,9 +724,9 @@ func TestServiceRejectsSuccessClaimAfterUnresolvedToolFailure(t *testing.T) {
 		}
 	}
 	final := messages[len(messages)-1]
-	if toolRows != 1 || len(messages) != 3 || final.Role != "system" || final.Kind != "turn_failure" ||
-		!strings.Contains(final.Content, "工具调用仍处于失败状态") || strings.Contains(final.Content, "已经全部完成") {
-		t.Fatalf("未解决工具失败必须拒绝伪成功：tool_rows=%d messages=%#v", toolRows, messages)
+	if toolRows != 1 || len(messages) != 3 || final.Role != "assistant" || final.Kind != "reply" ||
+		final.Content != "拍点分析失败；本轮未修改时间线，你可以更换素材后重试。" {
+		t.Fatalf("历史失败不应阻止诚实终态：tool_rows=%d messages=%#v", toolRows, messages)
 	}
 }
 
@@ -1534,7 +1536,7 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 		},
 	})
 	var replayGuardErr *terminalReplyGuardError
-	if replayed != "" || !errors.As(err, &replayGuardErr) || replayGuardErr.kind != "tool_failure_unresolved" {
+	if replayed != "" || !errors.As(err, &replayGuardErr) || replayGuardErr.kind != "tool_policy_unresolved" {
 		t.Fatalf("replayed=%q err=%v", replayed, err)
 	}
 	if cancelled, err := service.replayPendingTool(ctx, QueueItem{DraftID: "draft_full", Payload: map[string]any{
@@ -2115,7 +2117,7 @@ func TestEmptyModelReplyStillProducesVisibleFailure(t *testing.T) {
 	}
 }
 
-func TestExhaustedRecoveryReplyIsVisibleAndMarkedFailed(t *testing.T) {
+func TestRepeatedIdenticalFailuresCanReachAnHonestTerminalReply(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_bounded_recovery")
@@ -2136,12 +2138,11 @@ func TestExhaustedRecoveryReplyIsVisibleAndMarkedFailed(t *testing.T) {
 			switch event["type"] {
 			case "message_completed":
 				completed, _ = event["content"].(string)
-				if event["kind"] != "turn_failure" {
-					t.Fatalf("恢复耗尽必须由 harness 输出确定性失败：%#v", event)
+				if event["kind"] != "reply" {
+					t.Fatalf("相同失败后的模型终态应如实透传：%#v", event)
 				}
 			case "turn_ended":
-				if event["outcome"] != "failed" || !strings.Contains(completed, "工具自修复次数已经用尽") ||
-					strings.Contains(completed, "已经全部完成") {
+				if event["outcome"] != "finished" || completed != "已经全部完成。" {
 					t.Fatalf("completed=%q event=%#v", completed, event)
 				}
 				messages, listErr := storage.ListMessages(t.Context(), database.Read(), "draft_bounded_recovery", 20)
@@ -2154,22 +2155,22 @@ func TestExhaustedRecoveryReplyIsVisibleAndMarkedFailed(t *testing.T) {
 						toolRows++
 					}
 				}
-				if toolRows != 1 {
-					t.Fatalf("重复失败不应污染 UI：tool_rows=%d messages=%#v", toolRows, messages)
+				if toolRows != repeatedFailureCallsBeforeTerminal {
+					t.Fatalf("每次相同失败都应有独立 trace：tool_rows=%d messages=%#v", toolRows, messages)
 				}
 				reply := messages[len(messages)-1]
-				if reply.Role != "system" || reply.Kind != "turn_failure" || reply.Content != completed {
-					t.Fatalf("恢复耗尽的确定性失败应落 system/turn_failure：%#v", reply)
+				if reply.Role != "assistant" || reply.Kind != "reply" || reply.Content != completed {
+					t.Fatalf("诚实终态应落 assistant/reply：%#v", reply)
 				}
 				return
 			}
 		case <-time.After(3 * time.Second):
-			t.Fatal("恢复预算耗尽后没有可见终态")
+			t.Fatal("重复失败后没有可见终态")
 		}
 	}
 }
 
-func TestExhaustedRecoveryOverridesProviderErrorWithoutModelFallback(t *testing.T) {
+func TestProviderErrorAfterIndependentFailuresRemainsObservable(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_bounded_recovery_provider_error"
@@ -2189,14 +2190,14 @@ func TestExhaustedRecoveryOverridesProviderErrorWithoutModelFallback(t *testing.
 		t.Fatal(err)
 	}
 	final := messages[len(messages)-1]
-	if final.Kind != "turn_failure" || !strings.Contains(final.Content, "工具自修复次数已经用尽") ||
-		strings.Contains(final.Content, "provider stream failed") {
-		t.Fatalf("恢复耗尽应覆盖 provider 错误并使用固定正文：%#v", final)
+	if final.Kind != "turn_failure" || !strings.Contains(final.Content, "provider stream failed") ||
+		strings.Contains(final.Content, "工具自修复次数已经用尽") {
+		t.Fatalf("provider 错误不应被历史工具失败覆盖：%#v", final)
 	}
 	modelValue.mu.Lock()
 	calls := modelValue.calls
 	modelValue.mu.Unlock()
-	if calls != maxModelRepairAttempts+2 {
+	if calls != repeatedFailureCallsBeforeTerminal+1 {
 		t.Fatalf("恢复耗尽后不得为失败收尾再次调用模型：calls=%d", calls)
 	}
 }
@@ -2226,7 +2227,7 @@ func TestRepeatedFailedToolLoopStillRepliesAndEndsTurn(t *testing.T) {
 				completed, _ = event["content"].(string)
 			case "turn_ended":
 				if event["outcome"] != "failed" || !strings.Contains(completed, "本轮没有完成") ||
-					!strings.Contains(completed, "模型修复失败次数") {
+					!strings.Contains(completed, "exceeds max steps") {
 					t.Fatalf("completed=%q event=%#v", completed, event)
 				}
 				return

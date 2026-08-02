@@ -24,14 +24,12 @@ type ToolErrorCode string
 
 const (
 	// —— 编排与恢复（agent/tool_recovery.go、interceptor.go、tool_execution.go）——
-	ErrCodeUnknownTool             ToolErrorCode = "unknown_tool"
-	ErrCodeFailureSerialization    ToolErrorCode = "failure_serialization_error"
-	ErrCodeToolExecutionError      ToolErrorCode = "tool_execution_error"
-	ErrCodeToolValidationFailed    ToolErrorCode = "tool_validation_failed"
-	ErrCodeToolCancelled           ToolErrorCode = "tool_cancelled"
-	ErrCodeDuplicateFailedToolCall ToolErrorCode = "duplicate_failed_tool_call"
-	ErrCodeToolRecoveryExhausted   ToolErrorCode = "tool_recovery_exhausted"
-	ErrCodeToolTimeout             ToolErrorCode = "tool_timeout"
+	ErrCodeUnknownTool          ToolErrorCode = "unknown_tool"
+	ErrCodeFailureSerialization ToolErrorCode = "failure_serialization_error"
+	ErrCodeToolExecutionError   ToolErrorCode = "tool_execution_error"
+	ErrCodeToolValidationFailed ToolErrorCode = "tool_validation_failed"
+	ErrCodeToolCancelled        ToolErrorCode = "tool_cancelled"
+	ErrCodeToolTimeout          ToolErrorCode = "tool_timeout"
 	// ErrCodeToolNotInSurface 由 #141 动态工具面拦截器产出。
 	ErrCodeToolNotInSurface ToolErrorCode = "tool_not_in_surface"
 	// ErrCodeConfirmationRequired 由 #128 的破坏性强制确认拦截器产出。
@@ -39,10 +37,11 @@ const (
 	ErrCodeInvalidConfirmationTarget ToolErrorCode = "invalid_confirmation_target"
 
 	// —— 时间线补丁（agentexec/shared_util.go、timeline_op_recovery.go、tool_exec_timeline.go）——
-	ErrCodeTimelineOpSemanticError ToolErrorCode = "timeline_op_semantic_error"
-	ErrCodeTimelineOpFieldError    ToolErrorCode = "timeline_op_field_error"
-	ErrCodeTimelineAbsent          ToolErrorCode = "timeline_absent"
-	ErrCodeStaleTarget             ToolErrorCode = "stale_target"
+	ErrCodeTimelineOpSemanticError  ToolErrorCode = "timeline_op_semantic_error"
+	ErrCodeTimelineOpFieldError     ToolErrorCode = "timeline_op_field_error"
+	ErrCodeTimelineRangeOutOfBounds ToolErrorCode = "timeline_range_out_of_bounds"
+	ErrCodeTimelineAbsent           ToolErrorCode = "timeline_absent"
+	ErrCodeStaleTarget              ToolErrorCode = "stale_target"
 
 	// —— 内容合同校验（agentexec/content_contract.go）——
 	ErrCodeMissingBeatGrid ToolErrorCode = "missing_beat_grid"
@@ -93,14 +92,13 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodeToolExecutionError,
 	ErrCodeToolValidationFailed,
 	ErrCodeToolCancelled,
-	ErrCodeDuplicateFailedToolCall,
-	ErrCodeToolRecoveryExhausted,
 	ErrCodeToolTimeout,
 	ErrCodeToolNotInSurface,
 	ErrCodeConfirmationRequired,
 	ErrCodeInvalidConfirmationTarget,
 	ErrCodeTimelineOpSemanticError,
 	ErrCodeTimelineOpFieldError,
+	ErrCodeTimelineRangeOutOfBounds,
 	ErrCodeTimelineAbsent,
 	ErrCodeStaleTarget,
 	ErrCodeMissingBeatGrid,

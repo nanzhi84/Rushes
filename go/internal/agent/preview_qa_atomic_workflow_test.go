@@ -372,7 +372,7 @@ func TestDynamicPreviewQAReActReturnsToMutationAndRefreshesTimeline(t *testing.T
 	if len(clips) != 1 || clips[0].SourceStartFrame != 15 || clips[0].SourceEndFrame != 60 {
 		t.Fatalf("QA 修正未精确提交: %#v", clips)
 	}
-	if recoveryState.unresolved() || recoveryState.recoveryExhausted() {
+	if recoveryState.unresolved() {
 		t.Fatalf("preview QA 后仍有未解决 recovery: %s", recoveryState.summary())
 	}
 }

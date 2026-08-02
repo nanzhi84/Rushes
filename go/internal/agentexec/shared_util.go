@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -134,9 +135,38 @@ func TimelineOpFailure(
 		}
 	case timeline.SemanticTrackLocked:
 		data["locked_track_id"] = semanticErr.TrackID
+	case timeline.SemanticTimelineRange:
+		data["error_code"] = string(rushestools.ErrCodeTimelineRangeOutOfBounds)
+		constraint := fmt.Sprintf(
+			"0 <= start_frame < end_frame <= %d", semanticErr.DurationFrames,
+		)
+		invalidFields := []map[string]any{}
+		if semanticErr.ProvidedStartFrame < 0 || semanticErr.ProvidedStartFrame >= semanticErr.DurationFrames {
+			invalidFields = append(invalidFields, map[string]any{
+				"field": "start_frame", "actual": semanticErr.ProvidedStartFrame,
+				"constraint": constraint,
+			})
+		}
+		if semanticErr.ProvidedEndFrame <= semanticErr.ProvidedStartFrame ||
+			semanticErr.ProvidedEndFrame > semanticErr.DurationFrames {
+			invalidFields = append(invalidFields, map[string]any{
+				"field": "end_frame", "actual": semanticErr.ProvidedEndFrame,
+				"constraint": constraint,
+			})
+		}
+		data["invalid_fields"] = invalidFields
+		data["current_state"] = map[string]any{
+			"timeline_id":     document.TimelineID,
+			"duration_frames": document.DurationFrames,
+		}
+		data["recovery"] = "修正本次参数后可直接重新调用；之前成功的编辑不受影响。"
+	}
+	status := rushestools.StatusFailed
+	if semanticErr.Kind == timeline.SemanticTimelineRange {
+		status = rushestools.StatusValidationFailed
 	}
 	return rushestools.ToolResult{
-		Status: string(rushestools.StatusFailed), Observation: "时间线补丁语义校验失败：" + semanticErr.Error(), Data: data,
+		Status: string(status), Observation: "时间线补丁语义校验失败：" + semanticErr.Error(), Data: data,
 	}, true
 }
 

@@ -362,11 +362,11 @@ func TestConfirmedToolRejectsStructuredAndMalformedFailures(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := requireConfirmedToolSuccess(test.tool, test.arguments, test.output, "draft")
 			var guardErr *terminalReplyGuardError
-			if !errors.As(err, &guardErr) || guardErr.kind != "tool_failure_unresolved" {
+			if !errors.As(err, &guardErr) || guardErr.kind != "tool_policy_unresolved" {
 				t.Fatalf("err=%#v", err)
 			}
 			failure := terminalFailureReply(t.Context(), err)
-			if !strings.Contains(failure, "本轮没有完成") || !strings.Contains(failure, "拒绝未验收的成功声明") {
+			if !strings.Contains(failure, "本轮没有完成") || !strings.Contains(failure, "拒绝越过确认直接收尾") {
 				t.Fatalf("failure=%q", failure)
 			}
 		})
