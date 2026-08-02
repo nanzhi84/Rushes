@@ -114,6 +114,7 @@ func newServiceWithModels(
 	service.executor = agentexec.New(database, service.analyzer, nil, func(draftID string, event map[string]any) {
 		service.hub.Record(draftID, event)
 	})
+	service.executor.SetAnalysisResourceCoordinator(service.indexedResources)
 	service.executor.SetSameTurnWaitObserver(recordSameTurnToolWait)
 	service.fallbackScaffold = newFallbackScaffold(service)
 	registry, err := rushestools.NewRegistry(database, service)
@@ -480,6 +481,9 @@ func (service *Service) turnContent(ctx context.Context, item QueueItem, message
 	content, _ := item.Payload["content"].(string)
 	if service.react == nil {
 		return service.fallbackTurn(ctx, item.DraftID, messageID, content)
+	}
+	if err := service.ensureExplicitBeatTaskAnalysis(ctx, item.DraftID, content); err != nil {
+		return "", err
 	}
 	messages, err := service.modelMessages(ctx, item.DraftID)
 	if err != nil {

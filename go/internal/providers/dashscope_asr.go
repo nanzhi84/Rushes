@@ -38,6 +38,12 @@ type DashScopeASR struct {
 	client  *http.Client
 }
 
+// AnalysisIdentity is safe to persist and deliberately excludes endpoint and
+// credentials. A model change invalidates the transcript cache by construction.
+func (recognizer *DashScopeASR) AnalysisIdentity() string {
+	return "dashscope/" + recognizer.model
+}
+
 func NewDashScopeASR(config DashScopeASRConfig) (*DashScopeASR, error) {
 	if strings.TrimSpace(config.APIKey) == "" {
 		return nil, errors.New("ASR 缺少 DashScope API 密钥")

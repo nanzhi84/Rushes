@@ -1010,6 +1010,9 @@ func replaceClip(document *Document, operation map[string]any) error {
 		if role := stringValue(operation["role"]); role != "" {
 			clip.Role = role
 		}
+		if metadata, exists := operation["metadata"].(map[string]any); exists {
+			clip.Metadata = metadata
+		}
 		return nil
 	})
 }

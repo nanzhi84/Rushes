@@ -6,9 +6,9 @@ const AudioTrackPlaybook = `【音频分轨】
 把持续音乐与短时点缀视为两种并行职责：前者保持在音乐底轨，后者叠加到音效轨；不能把点缀接在音乐尾部冒充连续配乐。`
 
 const BeatEditingPlaybook = `【卡点工作流】
-先并行取得 audio.analyze_beats 的完整拍点/动态证据与 shot.search 的可核验镜头；拍点强弱只是声音事实，不直接代表高潮或剪法。你必须自主选择镜头顺序、每个 cut frame 和精确 source range，不要求用户审批可逆首剪表。
+先读取 assets.audio_roles 中由 Harness 持久化的完整 beat_analysis，并用 shot.search 取得可核验镜头；拍点强弱只是声音事实，不直接代表高潮或剪法。若多个 BGM 尚未选定，先根据素材目录自主选定一个；可先建立覆盖目标时长的主视觉，再插入所选 BGM，Harness 会自动分析并在刷新后的 CurrentTimelineView 中投影完整证据。不得调用音频分析工具、复制或构造 beat grid。你必须自主选择镜头顺序、每个 cut frame 和精确 source range，不要求用户审批可逆首剪表。
 空时间线先按选定顺序逐次 timeline.insert 主视觉片段，让每段结束帧落在明确选择的 beat frame；已有时间线用单目标 insert/delete/update 收敛，不得要求工具自动重建完整方案。修正多个主视觉切点时必须从左到右：每次波纹编辑后读取 Harness 刷新的 CurrentTimelineView，再用新起点计算下一段的源区间。1x 播放时必须满足 source_end = source_start + target_beat - timeline_start；其他倍速必须满足 round((source_end-source_start)/playback_rate) = target_beat-timeline_start。总时长优先只收敛尾段；尾素材源帧不足时，保留已验收前缀，从最早受影响切点重排剩余后缀并继续从左到右，不得回头破坏已验收切点。
-主视觉总时长确定后，用 timeline.insert 单独插入 bgm，并把本轮 audio.analyze_beats 返回的完整 bpm、beat_frames、strong_beat_frames、downbeat_frames、bar_phase 与 analysis_method 原样放在 metadata 的 beat_grid 字段；SFX 作为另一次 sfx 插入，音量再用一次 timeline.update。不得让 BGM 或 SFX 混入主视觉素材，也不得自动换镜头凑时长。
+主视觉总时长确定后，用 timeline.insert 单独插入 bgm；只提交素材、源区间和放置参数，beat_analysis_id 与完整 beat grid 由 Harness 自动注入。SFX 作为另一次 sfx 插入，音量再用一次 timeline.update。不得让 BGM 或 SFX 混入主视觉素材，也不得自动换镜头凑时长。
 每次编辑后读取 Harness 自动注入的精确版本检查证据，确认 beat_grid_present、切点覆盖与结构合同；失败只修正对应的一个镜头、音轨或参数，不重跑已成功原语。不要调用 timeline.inspect 或 timeline.check，它们由 Harness 独占。`
 
 const TimelineEditingPlaybook = `【时间线编辑】

@@ -279,6 +279,50 @@ func TestContextBuilderShowsPlanHintAndDeduplicatesAudioRoles(t *testing.T) {
 	}
 }
 
+func TestContextBuilderProjectsPersistentBeatAnalysisWithoutWaveform(t *testing.T) {
+	t.Parallel()
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_persistent_beat_context"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO assets(
+			asset_id,storage_mode,reference_path,kind,source,filename,hash,size,
+			probe_json,ingest_status,understanding_status,usable
+		) VALUES('audio_persistent_beat','reference','/tmp/context-bgm.wav','audio',
+			'local_path','context-bgm.wav','persistent_beat_hash',1,
+			'{"duration_sec":30}','ready','none',1);
+		INSERT INTO draft_asset_links(draft_id,asset_id,linked_at)
+		VALUES(?, 'audio_persistent_beat', '2026-08-02T00:00:00Z');
+		INSERT INTO asset_analyses(
+			analysis_id,asset_content_hash,analysis_type,analyzer_version,
+			normalized_options_json,output_schema_version,result_json,created_at
+		) VALUES(
+			'analysis_persistent_beat','persistent_beat_hash','beat_grid','fixture-v1',
+			'{"max_beats":2000}',1,
+			'{"bpm":120,"timeline_fps":30,"duration_frames":900,"beat_frames":[15,30,45],"strong_beat_frames":[15,45],"downbeat_frames":[15],"every_two_beat_frames":[15,45],"every_four_beat_frames":[15],"bar_phase":0,"analysis_method":"fixture","waveform":{"samples":[1,2,3]}}',
+			'2026-08-02T00:00:00Z'
+		)`, draftID); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := NewContextBuilder(database).Snapshot(t.Context(), draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audioRoles := agentexec.WorldStateObjectSlice(
+		snapshot.Sections["assets"].(map[string]any)["audio_roles"],
+	)
+	if len(audioRoles) != 1 {
+		t.Fatalf("audio_roles=%#v", audioRoles)
+	}
+	analysis, ok := audioRoles[0]["beat_analysis"].(map[string]any)
+	if !ok || analysis["analysis_id"] != "analysis_persistent_beat" ||
+		analysis["bpm"] != float64(120) || len(agentexec.EffectFrameValues(analysis["beat_frames"])) != 3 ||
+		analysis["waveform"] != nil {
+		t.Fatalf("beat_analysis=%#v", analysis)
+	}
+}
+
 func TestMaterialCatalogPrioritizesUsedAndTranscriptAssetsWithStableOutput(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)

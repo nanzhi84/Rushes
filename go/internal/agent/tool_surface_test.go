@@ -147,20 +147,19 @@ func TestDynamicModelToolSurfaceUsesStateIntentAndBudgets(t *testing.T) {
 	seedSurfaceAsset(t, service, draftID)
 	assertSurface(
 		"读取口播台词和气口证据",
+		[]string{"speech.search", "media.detect_shots", "shot.search"},
 		[]string{
 			"speech.transcribe", "audio.analyze_speech_pauses",
-			"media.detect_shots", "shot.search",
-		},
-		[]string{
-			"speech.search", "timeline.insert", "timeline.delete", "timeline.update",
+			"timeline.insert", "timeline.delete", "timeline.update",
 			"timeline.split", "preview.generate",
 		},
 	)
 	seedSurfaceTranscript(t, service)
 	assertSurface(
 		"读取口播台词和气口证据",
-		[]string{"speech.transcribe", "speech.search", "audio.analyze_speech_pauses"},
+		[]string{"speech.search"},
 		[]string{
+			"speech.transcribe", "audio.analyze_speech_pauses",
 			"timeline.insert", "timeline.delete", "timeline.update", "timeline.split",
 			"preview.generate",
 		},

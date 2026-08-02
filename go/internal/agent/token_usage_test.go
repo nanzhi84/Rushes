@@ -267,32 +267,30 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 }
 
 const (
-	// Issue #157 PR2 reviewed baseline: moving timeline.inspect/check to the
-	// Harness reduced the LLM catalog from 21 tools / 19,432 runes to 19 / 18,828.
-	modelToolSchemaTotalBaselineRunes = 18828
+	// Issue #157 PR3 reviewed baseline: on-demand beat/pause/transcript analysis
+	// moved to the Harness, reducing the LLM catalog from 19 tools / 18,828 runes
+	// to 16 tools / 16,972 runes.
+	modelToolSchemaTotalBaselineRunes = 16972
 	maxAtomicTimelineToolSchemaRunes  = 4400
 )
 
 var modelToolSchemaBaselineRunes = map[string]int{
-	"asset.list_assets":           435,
-	"audio.analyze_beats":         493,
-	"audio.analyze_speech_pauses": 798,
-	"decision.answer":             566,
-	"interaction.ask_user":        1079,
-	"interaction.confirm_action":  387,
-	"media.detect_shots":          829,
-	"memory.remove":               418,
-	"memory.set":                  929,
-	"plan.update":                 1573,
-	"preview.check":               420,
-	"preview.generate":            443,
-	"shot.search":                 964,
-	"speech.search":               1199,
-	"speech.transcribe":           486,
-	"timeline.delete":             1299,
-	"timeline.insert":             1677,
-	"timeline.split":              495,
-	"timeline.update":             4332,
+	"asset.list_assets":          435,
+	"decision.answer":            566,
+	"interaction.ask_user":       1079,
+	"interaction.confirm_action": 387,
+	"media.detect_shots":         829,
+	"memory.remove":              418,
+	"memory.set":                 929,
+	"plan.update":                1573,
+	"preview.check":              420,
+	"preview.generate":           446,
+	"shot.search":                964,
+	"speech.search":              1138,
+	"timeline.delete":            1299,
+	"timeline.insert":            1662,
+	"timeline.split":             495,
+	"timeline.update":            4332,
 }
 
 func modelToolSchemaRuneLimit(baseline int) int {

@@ -260,6 +260,7 @@ type AudioWaveformEnvelope struct {
 }
 
 type AudioBeatAnalysisResult struct {
+	AnalysisID          string                `json:"analysis_id"`
 	AssetID             string                `json:"asset_id"`
 	BPM                 float64               `json:"bpm"`
 	TimelineFPS         int                   `json:"timeline_fps"`
@@ -275,6 +276,7 @@ type AudioBeatAnalysisResult struct {
 	PhaseNote           string                `json:"phase_note"`
 	WaveformUsageNote   string                `json:"waveform_usage_note"`
 	Waveform            AudioWaveformEnvelope `json:"waveform"`
+	CacheHit            bool                  `json:"cache_hit"`
 }
 
 type SpeechPauseAnalysisInput struct {
@@ -297,6 +299,7 @@ type SpeechPauseCandidate struct {
 }
 
 type SpeechPauseAnalysisResult struct {
+	AnalysisID     string                 `json:"analysis_id"`
 	AssetID        string                 `json:"asset_id"`
 	TimelineClipID string                 `json:"timeline_clip_id,omitempty"`
 	TimelineFPS    int                    `json:"timeline_fps"`
@@ -305,6 +308,7 @@ type SpeechPauseAnalysisResult struct {
 	AnalysisMethod string                 `json:"analysis_method"`
 	Truncated      bool                   `json:"truncated"`
 	UsageNote      string                 `json:"usage_note"`
+	CacheHit       bool                   `json:"cache_hit"`
 }
 
 type SpeechTranscribeInput struct {

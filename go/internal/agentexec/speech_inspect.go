@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -1320,12 +1321,167 @@ func (exec *Executor) toolTranscribeSpeech(
 	if err != nil {
 		return rushestools.SpeechTranscribeResult{}, err
 	}
-	transcript, cacheHit, err := exec.loadOrBuildSpeechTranscript(
-		ctx, draftID, asset, strings.TrimSpace(input.Language), input.ForceRefresh, true,
+	return exec.ensureSpeechTranscriptForAsset(
+		ctx, draftID, asset, strings.TrimSpace(input.Language), input.ForceRefresh,
+	)
+}
+
+// EnsureTranscript is the Harness prerequisite for speech.search. The search
+// itself remains a database-only read; missing ASR/VAD evidence is completed as
+// a separate visible Harness step before the model tool executes.
+func (exec *Executor) EnsureTranscript(
+	ctx context.Context,
+	draftID, assetID, timelineClipID string,
+) (rushestools.SpeechTranscribeResult, error) {
+	asset, _, err := exec.resolveSpeechAsset(ctx, draftID, assetID, timelineClipID)
+	if err != nil {
+		return rushestools.SpeechTranscribeResult{}, err
+	}
+	return exec.ensureSpeechTranscriptForAsset(ctx, draftID, asset, "", false)
+}
+
+func (exec *Executor) ensureSpeechTranscriptForAsset(
+	ctx context.Context,
+	draftID string,
+	asset storage.Asset,
+	language string,
+	forceRefresh bool,
+) (result rushestools.SpeechTranscribeResult, returnedErr error) {
+	if !forceRefresh {
+		if cached, cacheErr := storage.LatestTranscript(ctx, exec.database.Read(), asset.ID); cacheErr == nil &&
+			(TranscriptHasWordSchema(cached.Utterances) || cached.ProviderID == "sidecar-srt" ||
+				exec.speechRecognizer == nil) {
+			return summarizeSpeechTranscript(cached, asset, true)
+		} else if cacheErr != nil && !errors.Is(cacheErr, storage.ErrNotFound) {
+			return rushestools.SpeechTranscribeResult{}, cacheErr
+		}
+	}
+	analyzerVersion, err := exec.speechTranscriptAnalyzerVersion(ctx, asset)
+	if err != nil {
+		return rushestools.SpeechTranscribeResult{}, err
+	}
+	identity, err := newAssetAnalysisIdentity(
+		asset.Hash, TranscriptAnalysisType, analyzerVersion,
+		map[string]any{
+			"language": language, "timeline_fps": timeline.DefaultFPS,
+			"word_schema": true,
+		},
+		assetAnalysisOutputSchema,
 	)
 	if err != nil {
 		return rushestools.SpeechTranscribeResult{}, err
 	}
+	startedAt := time.Now()
+	cacheHit := false
+	defer func() { logAssetAnalysis(identity, cacheHit, startedAt, returnedErr) }()
+	returnedErr = exec.withAnalysisSingleflight(identity, func() error {
+		if !forceRefresh {
+			if analysis, cacheErr := exec.cachedAssetAnalysis(ctx, identity); cacheErr == nil {
+				transcript, materializeErr := exec.materializeCachedTranscript(
+					ctx, asset, identity, analysis,
+				)
+				if materializeErr != nil {
+					return materializeErr
+				}
+				cacheHit = true
+				var resultErr error
+				result, resultErr = summarizeSpeechTranscript(transcript, asset, true)
+				return resultErr
+			} else if !errors.Is(cacheErr, storage.ErrNotFound) {
+				return cacheErr
+			}
+		}
+		transcript, hit, buildErr := exec.loadOrBuildSpeechTranscript(
+			ctx, draftID, asset, language, forceRefresh, true,
+		)
+		if buildErr != nil {
+			return buildErr
+		}
+		payload := map[string]any{
+			"provider_id": transcript.ProviderID, "raw_preserved": transcript.RawPreserved,
+			"utterances": transcript.Utterances, "vad_segments": transcript.VADSegments,
+		}
+		transcriptRows := []reducer.TranscriptRow(nil)
+		if !hit {
+			transcriptRows = append(transcriptRows, reducer.TranscriptRow{
+				ID: transcript.ID, AssetID: transcript.AssetID,
+				ProviderID: transcript.ProviderID, RawPreserved: transcript.RawPreserved,
+				Utterances: transcript.Utterances, VADSegments: transcript.VADSegments,
+			})
+		}
+		if persistErr := exec.persistAssetAnalyses(ctx, []reducer.AssetAnalysisRow{{
+			ID: identity.ID, AssetContentHash: identity.AssetContentHash,
+			AnalysisType: identity.AnalysisType, AnalyzerVersion: identity.AnalyzerVersion,
+			NormalizedOptionsJSON: identity.NormalizedOptionsJSON,
+			OutputSchemaVersion:   identity.OutputSchemaVersion, Result: payload,
+		}}, transcriptRows...); persistErr != nil {
+			return persistErr
+		}
+		cacheHit = hit
+		var resultErr error
+		result, resultErr = summarizeSpeechTranscript(transcript, asset, hit)
+		return resultErr
+	})
+	return result, returnedErr
+}
+
+func (exec *Executor) materializeCachedTranscript(
+	ctx context.Context,
+	asset storage.Asset,
+	identity assetAnalysisIdentity,
+	analysis storage.AssetAnalysis,
+) (storage.Transcript, error) {
+	if current, err := storage.LatestTranscript(ctx, exec.database.Read(), asset.ID); err == nil {
+		return current, nil
+	} else if !errors.Is(err, storage.ErrNotFound) {
+		return storage.Transcript{}, err
+	}
+	providerID := InterfaceString(analysis.Result["provider_id"])
+	utterances, _ := analysis.Result["utterances"].([]any)
+	vadSegments, _ := analysis.Result["vad_segments"].([]any)
+	toMaps := func(values []any) ([]map[string]any, error) {
+		result := make([]map[string]any, 0, len(values))
+		for _, value := range values {
+			item, ok := value.(map[string]any)
+			if !ok {
+				return nil, errors.New("持久化 transcript analysis 结构无效")
+			}
+			result = append(result, item)
+		}
+		return result, nil
+	}
+	utteranceMaps, err := toMaps(utterances)
+	if err != nil {
+		return storage.Transcript{}, err
+	}
+	vadMaps, err := toMaps(vadSegments)
+	if err != nil {
+		return storage.Transcript{}, err
+	}
+	if providerID == "" || len(utteranceMaps) == 0 {
+		return storage.Transcript{}, errors.New("持久化 transcript analysis 缺少 provider 或 utterances")
+	}
+	transcriptID := StableSpeechID(
+		"transcript", asset.ID, 0, assetDurationFrames(asset), identity.ID,
+	)
+	rawPreserved, _ := analysis.Result["raw_preserved"].(bool)
+	if err := exec.persistAssetAnalyses(ctx, nil, reducer.TranscriptRow{
+		ID: transcriptID, AssetID: asset.ID, ProviderID: providerID,
+		RawPreserved: rawPreserved, Utterances: utteranceMaps, VADSegments: vadMaps,
+	}); err != nil {
+		return storage.Transcript{}, err
+	}
+	return storage.Transcript{
+		ID: transcriptID, AssetID: asset.ID, ProviderID: providerID,
+		RawPreserved: rawPreserved, Utterances: utteranceMaps, VADSegments: vadMaps,
+	}, nil
+}
+
+func summarizeSpeechTranscript(
+	transcript storage.Transcript,
+	asset storage.Asset,
+	cacheHit bool,
+) (rushestools.SpeechTranscribeResult, error) {
 	utterances, err := DecodeSpeechUtterances(transcript.Utterances)
 	if err != nil {
 		return rushestools.SpeechTranscribeResult{}, err
@@ -1343,6 +1499,33 @@ func (exec *Executor) toolTranscribeSpeech(
 		ProviderID: transcript.ProviderID, CacheHit: cacheHit,
 		UtteranceTotal: len(utterances), WordTotal: wordTotal, PauseTotal: len(pauses),
 	}, nil
+}
+
+func (exec *Executor) speechTranscriptAnalyzerVersion(
+	ctx context.Context,
+	asset storage.Asset,
+) (string, error) {
+	source, _, err := media.ResolveAssetSource(ctx, exec.database, asset.ID)
+	if err != nil {
+		return "", err
+	}
+	if sidecar := media.FindSidecarSRT(source); sidecar != "" {
+		data, readErr := os.ReadFile(sidecar)
+		if readErr != nil {
+			return "", readErr
+		}
+		digest := sha256.Sum256(data)
+		return "sidecar-srt-v1/" + hex.EncodeToString(digest[:8]), nil
+	}
+	if exec.speechRecognizer == nil {
+		return "unconfigured-asr/transcript-v1", nil
+	}
+	if identified, ok := exec.speechRecognizer.(interface{ AnalysisIdentity() string }); ok {
+		if identity := strings.TrimSpace(identified.AnalysisIdentity()); identity != "" {
+			return identity + "/transcript-v1", nil
+		}
+	}
+	return fmt.Sprintf("%T/transcript-v1", exec.speechRecognizer), nil
 }
 
 func (exec *Executor) toolSearchSpeech(
@@ -1634,7 +1817,7 @@ func (exec *Executor) loadOrBuildSpeechTranscript(
 		return storage.Transcript{}, false, errors.New("speech.transcribe 的素材没有可转写音轨")
 	}
 	durationFrames := max(1, int(math.Round(probe.DurationSec*timeline.DefaultFPS)))
-	pauseAnalysis, err := media.AnalyzeSpeechPauses(ctx, source, timeline.DefaultFPS, media.SpeechPauseOptions{
+	pauseAnalysis, err := exec.ensureSpeechPauseAnalysis(ctx, asset, rushestools.SpeechPauseAnalysisInput{
 		ThresholdDB: -35, MinPauseFrames: 5, KeepEdgeFrames: 2,
 		MaxPauses: 1000, IncludeBoundaries: false,
 	})
@@ -1643,15 +1826,11 @@ func (exec *Executor) loadOrBuildSpeechTranscript(
 	}
 	pauses := make([]SpeechPause, 0, len(pauseAnalysis.Pauses))
 	for _, pause := range pauseAnalysis.Pauses {
-		method := pause.Method
-		if method == "" {
-			method = "rms_silence"
-		}
 		pauses = append(pauses, SpeechPause{
 			ID:         StableSpeechID("pause", asset.ID, pause.SourceStartFrame, pause.SourceEndFrame, ""),
 			StartFrame: pause.SourceStartFrame, EndFrame: pause.SourceEndFrame,
 			DeleteStart: pause.DeleteStartFrame, DeleteEnd: pause.DeleteEndFrame,
-			Method: method,
+			Method: pauseAnalysis.AnalysisMethod,
 		})
 	}
 
@@ -1737,16 +1916,6 @@ func (exec *Executor) loadOrBuildSpeechTranscript(
 	transcriptID := fingerprint
 	if forceRefresh {
 		transcriptID += "_" + RandomID("run")
-	}
-	result, err := reducer.Apply(ctx, exec.database, nil, reducer.Options{
-		Actor: contracts.ActorAgent,
-		ResultRows: reducer.ResultRows{Transcripts: []reducer.TranscriptRow{{
-			ID: transcriptID, AssetID: asset.ID, ProviderID: providerID,
-			RawPreserved: false, Utterances: utteranceMaps, VADSegments: pauseMaps,
-		}}},
-	})
-	if err != nil || result.Status != reducer.StatusApplied {
-		return storage.Transcript{}, false, errors.Join(err, fmt.Errorf("transcript reducer status: %s", result.Status))
 	}
 	return storage.Transcript{
 		ID: transcriptID, AssetID: asset.ID, ProviderID: providerID,

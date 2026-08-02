@@ -773,9 +773,9 @@ func registerAudioBeatAnalysis(registry *Registry) error {
 	return addTool[AudioBeatAnalysisInput, AudioBeatAnalysisResult](
 		registry,
 		"audio.analyze_beats",
-		"读取音频的 BPM、普通拍点、强瞬态、推断小节第一拍和按时间顺序压缩的 RMS 波形。拍点坐标使用整数帧；波形使用固定 0-100 编码并返回采样间隔，不标注高潮、低潮或剪辑好坏",
-		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata(FamilyDetect, CostStandard, SurfaceBeatEdit),
+		"Harness 按需建立并复用音频 BPM、拍点、强瞬态、小节相位与 RMS 波形证据",
+		[]string{"usable_asset_exists"}, ExposureHarness, EffectReversible, false,
+		harnessMetadata(FamilyDetect, CostStandard),
 	)
 }
 
@@ -783,9 +783,9 @@ func registerSpeechPauseAnalysis(registry *Registry) error {
 	return addTool[SpeechPauseAnalysisInput, SpeechPauseAnalysisResult](
 		registry,
 		"audio.analyze_speech_pauses",
-		"分析音频或视频内音轨的停顿/气口，返回源素材整数帧；传 timeline_clip_id 时同时映射为当前时间线帧，可用于剪口播。结果是 RMS 静音候选，不会把语义停顿或口头禅误报成已确认删除项",
-		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata(FamilyDetect, CostStandard, SurfaceTalkingHead),
+		"Harness 按需建立并复用音频或视频内音轨的停顿/气口证据",
+		[]string{"usable_asset_exists"}, ExposureHarness, EffectReversible, false,
+		harnessMetadata(FamilyDetect, CostStandard),
 	)
 }
 
@@ -793,9 +793,9 @@ func registerSpeechTranscribe(registry *Registry) error {
 	return addTool[SpeechTranscribeInput, SpeechTranscribeResult](
 		registry,
 		"speech.transcribe",
-		"为一个音频或视频素材建立或刷新带词级整数帧坐标的 transcript 索引；每次只处理一个 asset_id，多素材必须并行调用；只生成证据，不搜索台词或编辑时间线",
-		[]string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyDetect, CostHigh, SurfaceTalkingHead),
+		"Harness 为明确口播目标按需建立或复用带词级整数帧坐标的 transcript 索引",
+		[]string{"usable_asset_exists"}, ExposureHarness, EffectReversible, false,
+		harnessMetadata(FamilyDetect, CostHigh),
 	)
 }
 
@@ -803,8 +803,8 @@ func registerSpeechSearch(registry *Registry) error {
 	return addTool[SpeechSearchInput, SpeechSearchResult](
 		registry,
 		"speech.search",
-		"只读搜索已有 transcript；按台词语义、稳定 ID 或源帧范围返回逐句、词级、气口和相似台词证据。缺少索引时返回 index_missing，并提示调用 speech.transcribe；绝不触发 ASR、创建 job 或写入 transcript",
-		[]string{"usable_asset_exists", "transcript_index_exists"}, ExposureLLM, EffectReadOnly, false,
+		"只读搜索 Harness 已确保就绪的 transcript；按台词语义、稳定 ID 或源帧范围返回逐句、词级、气口和相似台词证据",
+		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
 		terminalMetadata(FamilyRead, CostStandard, SurfaceTalkingHead),
 	)
 }
@@ -860,7 +860,7 @@ func registerTimelineInsert(registry *Registry) error {
 	return addTool[TimelineInsertInput, ToolResult](
 		registry,
 		"timeline.insert",
-		"插入一个素材 clip 或一条字幕；空时间线先插入一个 visual_base clip 即创建 v1，后续片段逐次追加。原声联动由服务端派生，只维护确定性音画不变量。插入 BGM 时把对应检测结果的完整拍点证据原样放入 metadata.beat_grid；Harness 会自动校验精确写入版本",
+		"插入一个素材 clip 或一条字幕；空时间线先插入一个 visual_base clip 即创建 v1，后续片段逐次追加。原声联动由服务端派生，只维护确定性音画不变量。插入 BGM 时只提交素材与放置参数；Harness 自动确保并投影完整拍点证据，再校验精确写入版本",
 		nil, ExposureLLM, EffectReversible, false,
 		terminalMetadata(FamilyEdit, CostStandard,
 			SurfaceTalkingHead, SurfaceBeatEdit, SurfaceTimelineEdit),

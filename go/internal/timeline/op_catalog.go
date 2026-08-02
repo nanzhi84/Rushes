@@ -203,6 +203,7 @@ var Catalog = []OpSpec{
 			field("asset_id", OpFieldString, true, "替换后的素材 ID", "asset_002"),
 			field("role", OpFieldString, false, "可选的新片段角色", "b_roll"),
 			injectedField("asset_kind", OpFieldString, "由服务端根据 asset_id 注入的素材类型", "video"),
+			injectedField("metadata", OpFieldObject, "由 Harness 为 BGM 替换注入权威分析元数据", map[string]any{}),
 		},
 	},
 	{

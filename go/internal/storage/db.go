@@ -521,6 +521,23 @@ func (database *DB) Migrate(ctx context.Context) error {
 		}
 		version = 21
 	}
+	if version < 22 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err := tx.ExecContext(ctx, schemaV22); err != nil {
+			return fmt.Errorf("应用 schema v22: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 22"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 22
+	}
 	return nil
 }
 
