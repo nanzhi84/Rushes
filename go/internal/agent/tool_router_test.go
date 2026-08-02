@@ -134,6 +134,10 @@ func TestIndexedResourceWildcardMatchesReadToolDomains(t *testing.T) {
 			},
 		},
 		{
+			name: "shot.deep_search",
+			want: []indexedResourceAccess{{domain: "shots", allResources: true, writeResource: true}},
+		},
+		{
 			name: "timeline.check",
 			want: []indexedResourceAccess{{domain: "speech", allResources: true}},
 		},
@@ -783,6 +787,10 @@ func TestToolRouterSerializesDetectorAndDependentReadOnSameResource(t *testing.T
 			Name: "shot.search", Family: rushestools.FamilyRead,
 			Effect: rushestools.EffectReadOnly,
 		},
+		"shot.deep_search": {
+			Name: "shot.deep_search", Family: rushestools.FamilyDetect,
+			Effect: rushestools.EffectReversible,
+		},
 		"speech.search": {
 			Name: "speech.search", Family: rushestools.FamilyRead,
 			Effect: rushestools.EffectReadOnly,
@@ -827,6 +835,21 @@ func TestToolRouterSerializesDetectorAndDependentReadOnSameResource(t *testing.T
 			name: "shots_different_assets",
 			calls: []schema.FunctionCall{
 				{Name: "media.detect_shots", Arguments: `{"asset_id":"asset_a"}`},
+				{Name: "shot.search", Arguments: `{"asset_ids":["asset_b"]}`},
+			},
+			parallel: true,
+		},
+		{
+			name: "deep_search_conflicts_with_same_snapshot_asset_read",
+			calls: []schema.FunctionCall{
+				{Name: "shot.deep_search", Arguments: `{"candidate_shots":[{"asset_id":"asset_a","shot_id":"shot_1"}]}`},
+				{Name: "shot.search", Arguments: `{"asset_ids":["asset_a"]}`},
+			},
+		},
+		{
+			name: "deep_search_different_asset_from_read",
+			calls: []schema.FunctionCall{
+				{Name: "shot.deep_search", Arguments: `{"candidate_shots":[{"asset_id":"asset_a","shot_id":"shot_1"}]}`},
 				{Name: "shot.search", Arguments: `{"asset_ids":["asset_b"]}`},
 			},
 			parallel: true,

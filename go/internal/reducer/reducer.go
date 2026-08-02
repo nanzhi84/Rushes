@@ -105,6 +105,12 @@ type AssetAnalysisRow struct {
 	OutputSchemaVersion   int
 	Result                map[string]any
 	CreatedAt             string
+	Objects               []AnalysisObjectRow
+}
+
+type AnalysisObjectRow struct {
+	Hash string
+	Size int64
 }
 
 type ShotIndexShotRow struct {
@@ -1734,6 +1740,14 @@ func persistResultRows(
 			analysis.NormalizedOptionsJSON == "" || analysis.OutputSchemaVersion < 1 ||
 			analysis.Result == nil {
 			return errors.New("asset analysis 字段不完整")
+		}
+		for _, object := range analysis.Objects {
+			if object.Hash == "" || object.Size <= 0 {
+				return errors.New("asset analysis object 字段不完整")
+			}
+			if err := ensureObject(ctx, &applyState{tx: tx, createdAt: createdAt}, object.Hash, object.Size); err != nil {
+				return err
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO asset_analyses(

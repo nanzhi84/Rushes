@@ -32,6 +32,7 @@ type Executor struct {
 	jobPollInterval   time.Duration
 	jobWaitTimeout    time.Duration
 	analysisResources *IndexedResourceCoordinator
+	deepSearchCache   *shotDeepQueryCache
 }
 
 // New 构造领域执行器。progress 可为 nil（非流式场景，如直接 REST 与测试）。
@@ -49,6 +50,7 @@ func New(
 		jobPollInterval:   100 * time.Millisecond,
 		jobWaitTimeout:    10 * time.Minute,
 		analysisResources: NewIndexedResourceCoordinator(),
+		deepSearchCache:   newShotDeepQueryCache(),
 	}
 }
 
@@ -74,6 +76,8 @@ func (exec *Executor) ExecuteTool(ctx context.Context, name string, input any) (
 		return exec.toolDetectShots(ctx, draftID, input.(rushestools.DetectShotsInput))
 	case "shot.search":
 		return exec.toolSearchShots(ctx, draftID, input.(rushestools.ShotSearchInput))
+	case "shot.deep_search":
+		return exec.toolDeepSearchShots(ctx, draftID, input.(rushestools.ShotDeepSearchInput))
 	case "audio.analyze_beats":
 		return exec.toolAnalyzeAudioBeats(ctx, draftID, input.(rushestools.AudioBeatAnalysisInput))
 	case "audio.analyze_speech_pauses":

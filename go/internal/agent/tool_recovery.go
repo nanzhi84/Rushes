@@ -474,6 +474,17 @@ func decorateToolFailure(
 	if data == nil {
 		data = map[string]any{}
 	}
+	// Typed read tools expose their stable failure fields at the top level.
+	// Preserve those fields when adapting the result to the canonical envelope;
+	// otherwise a useful domain error is silently replaced by tool_execution_error.
+	for _, key := range []string{"error_code", "message", "recovery", "invalid_fields", "current_state"} {
+		if _, exists := data[key]; exists {
+			continue
+		}
+		if value, exists := payload[key]; exists {
+			data[key] = value
+		}
+	}
 	if strings.TrimSpace(agentexec.InterfaceString(data["error_code"])) == "" {
 		switch status {
 		case string(rushestools.StatusValidationFailed):
@@ -997,7 +1008,7 @@ func isConfirmedToolRecoverySuccessWithExecutionProof(
 
 func isTypedToolRecoveryResult(name string) bool {
 	switch name {
-	case "asset.list_assets", "shot.search", "audio.analyze_beats",
+	case "asset.list_assets", "shot.search", "shot.deep_search", "audio.analyze_beats",
 		"audio.analyze_speech_pauses", "speech.transcribe", "preview.check":
 		return true
 	default:
@@ -1063,6 +1074,7 @@ func validTypedToolRecoveryResult(
 	requiredFields := map[string][]string{
 		"asset.list_assets":           {"draft_id", "assets", "total"},
 		"shot.search":                 {"status", "index_snapshot_id", "synonym_version", "frozen_asset_ids", "search_ready", "shots", "total_matches", "returned_candidates", "truncated"},
+		"shot.deep_search":            {"status", "query", "index_snapshot_id", "analyzer_version", "candidates", "total_candidates", "returned_candidates", "new_frame_count", "reused_frame_count", "cache_hit"},
 		"audio.analyze_beats":         {"asset_id", "timeline_fps", "beat_frames"},
 		"audio.analyze_speech_pauses": {"timeline_fps", "pauses"},
 		"speech.transcribe":           {"transcript_id", "asset_id", "timeline_fps"},
@@ -1222,6 +1234,8 @@ func validTypedToolRecoveryResult(
 			}
 		}
 		return !result.Truncated || len(result.Shots) == topK
+	case "shot.deep_search":
+		return fullRequestBound && validShotDeepSearchProof(arguments, raw, payload)
 	case "audio.analyze_beats":
 		if !fullRequestBound {
 			return false
@@ -1278,6 +1292,222 @@ func validJSONBoolean(raw json.RawMessage) bool {
 	}
 	var value bool
 	return json.Unmarshal(raw, &value) == nil
+}
+
+func validShotDeepSearchProof(
+	arguments any,
+	raw string,
+	payload map[string]json.RawMessage,
+) bool {
+	for _, field := range []string{
+		"total_candidates", "returned_candidates", "new_frame_count", "reused_frame_count",
+	} {
+		if !validJSONInteger(payload[field]) {
+			return false
+		}
+	}
+	if !validJSONBoolean(payload["cache_hit"]) {
+		return false
+	}
+	var encodedCandidates []json.RawMessage
+	if json.Unmarshal(payload["candidates"], &encodedCandidates) != nil || encodedCandidates == nil {
+		return false
+	}
+	var result rushestools.ShotDeepSearchResult
+	if json.Unmarshal([]byte(raw), &result) != nil ||
+		result.Status != string(rushestools.StatusSucceeded) || strings.TrimSpace(result.ErrorCode) != "" ||
+		strings.TrimSpace(result.Query) != strings.TrimSpace(agentexec.InterfaceString(toolArgumentsObject(arguments)["query"])) ||
+		strings.TrimSpace(result.IndexSnapshotID) == "" ||
+		result.IndexSnapshotID != strings.TrimSpace(agentexec.InterfaceString(toolArgumentsObject(arguments)["index_snapshot_id"])) ||
+		strings.TrimSpace(result.AnalyzerVersion) == "" || result.TotalCandidates < 1 ||
+		result.ReturnedCandidates != len(result.Candidates) || result.ReturnedCandidates < 1 ||
+		result.ReturnedCandidates > result.TotalCandidates || result.NewFrameCount < 0 ||
+		result.ReusedFrameCount < 0 || result.CacheHit != (result.NewFrameCount == 0) {
+		return false
+	}
+	requestedRefs, refsOK := requestedDeepShotRefs(arguments)
+	if !refsOK || len(requestedRefs) != result.TotalCandidates {
+		return false
+	}
+	topK := int(positiveInteger(toolArgumentsObject(arguments)["return_top_k"]))
+	if topK == 0 {
+		topK = len(requestedRefs)
+	}
+	if topK > len(requestedRefs) || result.ReturnedCandidates != min(topK, len(requestedRefs)) {
+		return false
+	}
+	requirements, requirementsOK := requestedDeepCriteria(arguments, "requirements")
+	exclusions, exclusionsOK := requestedDeepCriteria(arguments, "exclusions")
+	preferences, preferencesOK := requestedDeepCriteria(arguments, "preferences")
+	if !requirementsOK || !exclusionsOK || !preferencesOK {
+		return false
+	}
+	requested := make(map[string]struct{}, len(requestedRefs))
+	for _, ref := range requestedRefs {
+		requested[ref.AssetID+"\x00"+ref.ShotID] = struct{}{}
+	}
+	seen := map[string]struct{}{}
+	newFrames, reusedFrames := 0, 0
+	for index, candidate := range result.Candidates {
+		var candidatePayload map[string]json.RawMessage
+		if index >= len(encodedCandidates) || json.Unmarshal(encodedCandidates[index], &candidatePayload) != nil {
+			return false
+		}
+		for _, field := range []string{
+			"requirements", "exclusions", "preferences", "observations", "frame_evidence", "deep_coverage",
+		} {
+			var values []json.RawMessage
+			if json.Unmarshal(candidatePayload[field], &values) != nil || values == nil {
+				return false
+			}
+		}
+		identity := strings.TrimSpace(candidate.AssetID) + "\x00" + strings.TrimSpace(candidate.ShotID)
+		if _, allowed := requested[identity]; !allowed {
+			return false
+		}
+		if _, duplicate := seen[identity]; duplicate {
+			return false
+		}
+		seen[identity] = struct{}{}
+		if candidate.IndexSnapshotID != result.IndexSnapshotID || candidate.SourceStartFrame < 0 ||
+			candidate.SourceEndFrame <= candidate.SourceStartFrame || candidate.BoundaryVersion < 1 ||
+			candidate.Score < 0 || candidate.Score > 1 || len(candidate.Observations) == 0 ||
+			len(candidate.FrameEvidence) == 0 || len(candidate.DeepCoverage) == 0 {
+			return false
+		}
+		frameIDs := make(map[string]struct{}, len(candidate.FrameEvidence))
+		for _, frame := range candidate.FrameEvidence {
+			if strings.TrimSpace(frame.FrameID) == "" || frame.SourceFrame < candidate.SourceStartFrame ||
+				frame.SourceFrame >= candidate.SourceEndFrame || frame.TimestampMS < 0 ||
+				len(frame.ObjectHash) != 64 || frame.ObjectSize <= 0 {
+				return false
+			}
+			if _, duplicate := frameIDs[frame.FrameID]; duplicate {
+				return false
+			}
+			frameIDs[frame.FrameID] = struct{}{}
+			if frame.NewlyAdded {
+				newFrames++
+			} else {
+				reusedFrames++
+			}
+		}
+		if !validDeepCriterionProof(candidate.Requirements, requirements, frameIDs) ||
+			!validDeepCriterionProof(candidate.Exclusions, exclusions, frameIDs) ||
+			!validDeepCriterionProof(candidate.Preferences, preferences, frameIDs) ||
+			candidate.Verification != expectedDeepVerification(candidate.Requirements, candidate.Exclusions) {
+			return false
+		}
+	}
+	if result.ReturnedCandidates == result.TotalCandidates &&
+		(newFrames != result.NewFrameCount || reusedFrames != result.ReusedFrameCount) {
+		return false
+	}
+	return newFrames <= result.NewFrameCount && reusedFrames <= result.ReusedFrameCount
+}
+
+func requestedDeepShotRefs(arguments any) ([]rushestools.ShotRefInput, bool) {
+	values, ok := toolArgumentsObject(arguments)["candidate_shots"].([]any)
+	if !ok || len(values) < 1 || len(values) > 8 {
+		return nil, false
+	}
+	result := make([]rushestools.ShotRefInput, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, false
+		}
+		var ref rushestools.ShotRefInput
+		if json.Unmarshal(encoded, &ref) != nil {
+			return nil, false
+		}
+		ref.AssetID = strings.TrimSpace(ref.AssetID)
+		ref.ShotID = strings.TrimSpace(ref.ShotID)
+		identity := ref.AssetID + "\x00" + ref.ShotID
+		if ref.AssetID == "" || ref.ShotID == "" {
+			return nil, false
+		}
+		if _, duplicate := seen[identity]; duplicate {
+			return nil, false
+		}
+		seen[identity] = struct{}{}
+		result = append(result, ref)
+	}
+	return result, true
+}
+
+func requestedDeepCriteria(arguments any, field string) ([]string, bool) {
+	value, exists := toolArgumentsObject(arguments)[field]
+	if !exists {
+		return []string{}, true
+	}
+	values, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		text, ok := value.(string)
+		text = strings.TrimSpace(text)
+		if !ok || text == "" {
+			return nil, false
+		}
+		result = append(result, text)
+	}
+	return result, true
+}
+
+func validDeepCriterionProof(
+	values []rushestools.ShotDeepCriterionEvidence,
+	requested []string,
+	frameIDs map[string]struct{},
+) bool {
+	if len(values) != len(requested) {
+		return false
+	}
+	for index, value := range values {
+		if strings.TrimSpace(value.Criterion) != requested[index] ||
+			(value.Status != "observed" && value.Status != "refuted" && value.Status != "uncertain") {
+			return false
+		}
+		if (value.Status == "observed" || value.Status == "refuted") &&
+			(strings.TrimSpace(value.Observation) == "" || len(value.FrameIDs) == 0) {
+			return false
+		}
+		for _, frameID := range value.FrameIDs {
+			if _, exists := frameIDs[frameID]; !exists {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func expectedDeepVerification(
+	requirements, exclusions []rushestools.ShotDeepCriterionEvidence,
+) string {
+	observedRequirements := 0
+	for _, value := range requirements {
+		if value.Status == "refuted" {
+			return "reject"
+		}
+		if value.Status == "observed" {
+			observedRequirements++
+		}
+	}
+	for _, value := range exclusions {
+		if value.Status == "observed" {
+			return "reject"
+		}
+	}
+	if len(requirements) == 0 || observedRequirements == len(requirements) {
+		return "match"
+	}
+	if observedRequirements > 0 {
+		return "partial"
+	}
+	return "uncertain"
 }
 
 func shotMatchesAnyRequestedTag(shot rushestools.ShotCandidate, requested map[string]struct{}) bool {

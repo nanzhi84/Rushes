@@ -221,7 +221,7 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 	}
 	registry := &Registry{database: database, executor: executor, specs: map[string]Spec{}}
 	builders := []func(*Registry) error{
-		registerAssetImport, registerAssetList, registerDetectShots, registerShotSearch, registerAudioBeatAnalysis,
+		registerAssetImport, registerAssetList, registerDetectShots, registerShotSearch, registerShotDeepSearch, registerAudioBeatAnalysis,
 		registerSpeechPauseAnalysis, registerSpeechTranscribe, registerSpeechSearch, registerAskUser,
 		registerDecisionAnswer, registerPlanUpdate, registerMemorySet, registerMemoryRemove,
 		registerTimelineInsert, registerTimelineDelete, registerTimelineUpdate, registerTimelineSplit,
@@ -766,6 +766,17 @@ func registerShotSearch(registry *Registry) error {
 		"在一次调用开始时冻结目标视频素材，等待其基础镜头索引全部 search_ready 后，对固定 index_snapshot_id 执行无 embedding 的只读文字检索；返回稳定 ShotRef、权威源帧、分数与字段证据，绝不返回部分索引或伪候选",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
 		terminalMetadata(FamilyRead, CostStandard, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit),
+	)
+}
+
+func registerShotDeepSearch(registry *Registry) error {
+	return addTool[ShotDeepSearchInput, ShotDeepSearchResult](
+		registry,
+		"shot.deep_search",
+		"对 shot.search 返回的 1 到 8 个精确 ShotRef 做高成本视觉复核；绑定原冻结快照，从权威镜头边界新增有序帧或高分辨率帧，持久化查询无关的通用事实，并确定性返回 requirements、exclusions、preferences 的逐项帧证据。不能传整批素材或源帧范围",
+		[]string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
+		terminalMetadata(FamilyDetect, CostHigh,
+			SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit, SurfaceTimelineEdit),
 	)
 }
 

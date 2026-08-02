@@ -837,6 +837,19 @@ func recentSuccessfulWorkflowSurface(
 			if requestsAssetSearchForTimelineEdit(userText) {
 				return rushestools.SurfaceTimelineEdit
 			}
+		case "shot.deep_search":
+			if requestsTalkingHeadWorkflow(userText) {
+				if successfulToolCallSinceLatestUser(messages, "speech.search") {
+					return rushestools.SurfaceTimelineEdit
+				}
+				return rushestools.SurfaceTalkingHead
+			}
+			if requestsBeatEditWorkflow(userText) {
+				return rushestools.SurfaceBeatEdit
+			}
+			if requestsAssetSearchForTimelineEdit(userText) {
+				return rushestools.SurfaceTimelineEdit
+			}
 		case "timeline.insert", "timeline.delete", "timeline.update", "timeline.split":
 			if requestsBeatEditWorkflow(userText) {
 				return rushestools.SurfaceBeatEdit
@@ -893,6 +906,7 @@ func isWorkflowTransitionTool(name string) bool {
 		"media.detect_shots",
 		"speech.search",
 		"shot.search",
+		"shot.deep_search",
 		"timeline.insert",
 		"timeline.delete",
 		"timeline.update",
@@ -1023,6 +1037,11 @@ func workflowToolCallSucceeded(message *schema.Message) bool {
 			Shots []json.RawMessage `json:"shots"`
 		}
 		return json.Unmarshal([]byte(message.Content), &result) == nil && len(result.Shots) > 0
+	}
+	if message.ToolName == "shot.deep_search" {
+		var result rushestools.ShotDeepSearchResult
+		return json.Unmarshal([]byte(message.Content), &result) == nil &&
+			result.Status == string(rushestools.StatusSucceeded) && len(result.Candidates) > 0
 	}
 	var result struct {
 		Status string `json:"status"`

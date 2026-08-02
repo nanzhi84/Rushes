@@ -149,6 +149,14 @@ func indexedResourceFootprint(name, rawArguments string) ([]indexedResourceAcces
 			{domain: "shots", resources: resources, allResources: !scoped},
 			{domain: "speech", resources: resources, allResources: !scoped},
 		}, true
+	case "shot.deep_search":
+		resources, scoped := shotRefAssetIDsArgument(arguments, "candidate_shots")
+		if !scoped {
+			return nil, false
+		}
+		return []indexedResourceAccess{{
+			domain: "shots", resources: resources, writeResource: true,
+		}}, true
 	case "timeline.check":
 		return []indexedResourceAccess{{domain: "speech", allResources: true}}, true
 	case "preview.check":
@@ -170,6 +178,8 @@ func indexedResourceWildcard(name string) []indexedResourceAccess {
 			{domain: "shots", allResources: true},
 			{domain: "speech", allResources: true},
 		}
+	case "shot.deep_search":
+		return []indexedResourceAccess{{domain: "shots", allResources: true, writeResource: true}}
 	case "timeline.check", "preview.check":
 		return []indexedResourceAccess{{domain: "speech", allResources: true}}
 	default:
@@ -193,6 +203,32 @@ func assetIDsArgument(arguments map[string]any, field string) ([]string, bool) {
 	}
 	sort.Strings(resources)
 	return resources, true
+}
+
+func shotRefAssetIDsArgument(arguments map[string]any, field string) ([]string, bool) {
+	values, ok := arguments[field].([]any)
+	if !ok || len(values) == 0 {
+		return nil, false
+	}
+	seen := map[string]struct{}{}
+	resources := make([]string, 0, len(values))
+	for _, value := range values {
+		shotRef, ok := value.(map[string]any)
+		if !ok || strings.TrimSpace(stringArgument(shotRef, "shot_id")) == "" {
+			return nil, false
+		}
+		assetID := stringArgument(shotRef, "asset_id")
+		if assetID == "" {
+			return nil, false
+		}
+		if _, duplicate := seen[assetID]; duplicate {
+			continue
+		}
+		seen[assetID] = struct{}{}
+		resources = append(resources, assetID)
+	}
+	sort.Strings(resources)
+	return resources, len(resources) > 0
 }
 
 func stringArgument(arguments map[string]any, field string) string {

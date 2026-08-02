@@ -1902,7 +1902,7 @@ func TestDynamicModelRebindsDifferentSurfaceOnEveryModelCall(t *testing.T) {
 		t.Fatalf("talking-head surface=%v", history[0])
 	}
 	if !reflect.DeepEqual(history[1], []string{
-		"timeline.delete", "timeline.insert", "timeline.split", "timeline.update",
+		"shot.deep_search", "timeline.delete", "timeline.insert", "timeline.split", "timeline.update",
 	}) {
 		t.Fatalf("timeline-edit surface=%v", history[1])
 	}
