@@ -74,7 +74,10 @@ const (
 	// —— 素材理解（agentexec/tool_exec_understand.go）——
 	ErrCodeUnderstandingFailed ToolErrorCode = "understanding_failed"
 	// —— 纯检索（agentexec/speech_inspect.go、shot_search.go）——
-	ErrCodeIndexMissing ToolErrorCode = "index_missing"
+	ErrCodeIndexMissing           ToolErrorCode = "index_missing"
+	ErrCodeShotIndexNotReady      ToolErrorCode = "shot_index_not_ready"
+	ErrCodeShotIndexFailed        ToolErrorCode = "shot_index_failed"
+	ErrCodeShotIndexSnapshotStale ToolErrorCode = "shot_index_snapshot_stale"
 
 	// —— 预览质检（media/render.go 因 depguard 保留字面量）——
 	ErrCodePreviewDecodeFailed ToolErrorCode = "preview_decode_failed"
@@ -125,6 +128,9 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodeMemoryInputInvalid,
 	ErrCodeUnderstandingFailed,
 	ErrCodeIndexMissing,
+	ErrCodeShotIndexNotReady,
+	ErrCodeShotIndexFailed,
+	ErrCodeShotIndexSnapshotStale,
 	ErrCodePreviewDecodeFailed,
 	ErrCodeStaleRecoveryExhausted,
 	ErrCodeJobHandlerFailed,

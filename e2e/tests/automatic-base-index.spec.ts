@@ -88,6 +88,19 @@ test("视频导入后自动建立基础镜头索引，不占 timeline lease 且�
   expect(
     assistantReplyIds(await apiGet<MessagesResponse>(request, `/api/drafts/${draftId}/messages?limit=200`))
   ).toEqual(assistantRepliesBefore);
+
+  await page.getByLabel("消息输入").fill("E2E_SHOT_SEARCH");
+  await page.getByRole("button", { name: "发送" }).click();
+  const searchReply = page
+    .locator('[data-message-kind="reply"]')
+    .filter({ hasText: "E2E_SHOT_SEARCH_OK" });
+  await expect(searchReply).toContainText("total=2 returned=2 frozen=2");
+  await expect(searchReply).toContainText("snapshot=shot_search_");
+
+  await page.reload();
+  await expect(
+    page.locator('[data-message-kind="reply"]').filter({ hasText: "E2E_SHOT_SEARCH_OK" })
+  ).toContainText("total=2 returned=2 frozen=2");
 });
 
 async function waitForUnderstandingStarted(

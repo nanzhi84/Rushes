@@ -234,28 +234,15 @@ func TestTalkingHeadRealMaterialAcceptance(t *testing.T) {
 	}
 	var fingerprintShot rushestools.ShotCandidate
 	for _, query := range queries {
-		var discovery rushestools.ShotSearchResult
-		invokeRegisteredTool(t, service, ctx, "shot.search", rushestools.ShotSearchInput{
-			Query: query.query, SemanticRoles: []string{"b_roll"}, MinDurationFrames: 45, Limit: 5,
-		}, &discovery)
-		if len(discovery.DetectionCandidates) == 0 ||
-			!strings.Contains(discovery.DetectionCandidates[0].Filename, query.want) {
-			t.Fatalf("query=%q discovery=%#v", query.query, discovery)
-		}
-		var onDemand rushestools.DetectShotsResult
-		invokeRegisteredTool(t, service, ctx, "media.detect_shots", rushestools.DetectShotsInput{
-			AssetID: discovery.DetectionCandidates[0].AssetID,
-			Depth:   "scan", Focus: query.query, MaxStepsPerAsset: 8,
-		}, &onDemand)
-		if onDemand.Status != "succeeded" || onDemand.Summary == nil {
-			t.Fatalf("query=%q on-demand understanding=%#v", query.query, onDemand)
-		}
 		var search rushestools.ShotSearchResult
 		invokeRegisteredTool(t, service, ctx, "shot.search", rushestools.ShotSearchInput{
-			Query: query.query, SemanticRoles: []string{"b_roll"}, MinDurationFrames: 45, Limit: 5,
+			Query: query.query, SemanticRoles: []string{"b_roll"}, MinDurationFrames: 45, TopK: 5,
 		}, &search)
+		if search.Status != string(rushestools.StatusSucceeded) || !search.SearchReady {
+			t.Fatalf("query=%q automatic base index=%#v", query.query, search)
+		}
 		if len(search.Shots) > 0 {
-			t.Logf("BROLL_QUERY query=%q want=%q top=%q terms=%v", query.query, query.want, search.Shots[0].Filename, search.Shots[0].MatchedQueryTerms)
+			t.Logf("BROLL_QUERY query=%q want=%q top=%q terms=%v", query.query, query.want, search.Shots[0].Filename, search.Shots[0].MatchedTerms)
 		} else {
 			t.Logf("BROLL_QUERY query=%q want=%q top=<none>", query.query, query.want)
 		}

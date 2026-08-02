@@ -763,7 +763,7 @@ func registerShotSearch(registry *Registry) error {
 	return addTool[ShotSearchInput, ShotSearchResult](
 		registry,
 		"shot.search",
-		"只读搜索既有镜头索引；按创作意图返回稳定 shot_id、精确源帧、语义与匹配证据。未建立索引的素材只会列为 detection_candidates；告知用户后台索引尚未完成并稍后重搜，禁止把候选素材臆造为 shot_id",
+		"在一次调用开始时冻结目标视频素材，等待其基础镜头索引全部 search_ready 后，对固定 index_snapshot_id 执行无 embedding 的只读文字检索；返回稳定 ShotRef、权威源帧、分数与字段证据，绝不返回部分索引或伪候选",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
 		terminalMetadata(FamilyRead, CostStandard, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit),
 	)

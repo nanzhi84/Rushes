@@ -74,6 +74,13 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 	); err != nil {
 		t.Fatal(err)
 	}
+	seedAtomicWorkflowShotIndex(
+		t, database, aRollID, "a_roll", "人物正面口播", []string{"口播", "人物"}, 1800,
+	)
+	seedAtomicWorkflowShotIndex(
+		t, database, bRollID, "b_roll", "手指按压键盘右上角指纹键并展示同色键帽",
+		[]string{"键盘", "键帽", "指纹", "产品特写"}, 90,
+	)
 
 	utterances := issue140AtomicUtterances()
 	pauses := []map[string]any{{
@@ -163,7 +170,7 @@ func TestIssue140TalkingHeadFixtureUsesReadEvidenceAndAtomicEdits(t *testing.T) 
 	}
 	searchRaw, err := service.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
 		Query: "键盘 同色键帽 指纹按键", SemanticRoles: []string{"b_roll"},
-		MinDurationFrames: 45, Limit: 5,
+		MinDurationFrames: 45, TopK: 5,
 	})
 	if err != nil {
 		t.Fatal(err)

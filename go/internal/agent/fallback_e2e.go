@@ -5,6 +5,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
@@ -16,6 +17,7 @@ const (
 	e2eFullMainlineMarker     = "E2E_FULL_MAINLINE"
 	e2eMemoryWriteMarker      = "E2E_MEMORY_WRITE"
 	e2eMemoryStatusMarker     = "E2E_MEMORY_STATUS"
+	e2eShotSearchMarker       = "E2E_SHOT_SEARCH"
 )
 
 type e2eFallbackScaffold struct {
@@ -66,6 +68,21 @@ func (scaffold *e2eFallbackScaffold) TryHandle(
 			}
 		}
 		return "E2E_MEMORY_ABSENT", true, nil
+	case strings.Contains(content, e2eShotSearchMarker):
+		result, err := scaffold.service.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
+			Query: "测试画面", TopK: 5,
+		})
+		if err != nil {
+			return "", true, err
+		}
+		search, ok := result.(rushestools.ShotSearchResult)
+		if !ok || search.Status != string(rushestools.StatusSucceeded) || !search.SearchReady {
+			return "", true, fmt.Errorf("E2E shot.search 未在完整快照成功: %#v", result)
+		}
+		return fmt.Sprintf(
+			"E2E_SHOT_SEARCH_OK snapshot=%s total=%d returned=%d frozen=%d",
+			search.IndexSnapshotID, search.TotalMatches, len(search.Shots), len(search.FrozenAssetIDs),
+		), true, nil
 	default:
 		return "", false, nil
 	}

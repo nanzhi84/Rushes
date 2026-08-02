@@ -216,12 +216,14 @@ func TestToolRecoveryShotSearchRoleProofMatchesExecutorSemantics(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			raw, err := json.Marshal(rushestools.ShotSearchResult{
+				Status: string(rushestools.StatusSucceeded), IndexSnapshotID: "snapshot_role",
+				SynonymVersion: "v1", FrozenAssetIDs: []string{"asset_A"}, SearchReady: true,
 				Shots: []rushestools.ShotCandidate{{
-					ShotID: "shot_1", AssetID: "asset_A",
+					IndexSnapshotID: "snapshot_role", ShotID: "shot_1", AssetID: "asset_A",
 					SourceStartFrame: 0, SourceEndFrame: 30, DurationFrames: 30,
-					SemanticRole: test.semanticRole,
+					BoundaryVersion: 1, SemanticRole: test.semanticRole,
 				}},
-				TotalMatches: 1,
+				TotalMatches: 1, ReturnedCandidates: 1,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -405,6 +407,27 @@ func TestTruncateTextUsesRuneBoundaries(t *testing.T) {
 
 func TestToolRecoveryFormattingHelpersCoverMalformedValues(t *testing.T) {
 	t.Parallel()
+	direct := map[string]any{"x": 1}
+	if got := toolArgumentsObject(direct); got["x"] != 1 {
+		t.Fatalf("direct arguments=%#v", got)
+	}
+	if toolArgumentsObject("not-json") != nil || toolArgumentsObject(make(chan int)) != nil ||
+		toolArgumentsObject([]int{1}) != nil {
+		t.Fatal("malformed argument objects should be rejected")
+	}
+	type argumentsFixture struct {
+		Value int `json:"value"`
+	}
+	if got := toolArgumentsObject(argumentsFixture{Value: 7}); got["value"] != float64(7) {
+		t.Fatalf("encoded arguments=%#v", got)
+	}
+	for value, want := range map[any]int64{
+		int(1): 1, int32(2): 2, int64(3): 3, float64(4): 4, float64(4.5): 0, "5": 0,
+	} {
+		if got := positiveInteger(value); got != want {
+			t.Fatalf("positiveInteger(%#v)=%d, want %d", value, got, want)
+		}
+	}
 	if isStructuredToolFailure("not-json") || isStructuredToolFailure(`{"status":"succeeded"}`) ||
 		!isStructuredToolFailure(`{"status":"failed"}`) ||
 		!isStructuredToolFailure(`{"status":"validation_failed"}`) {
@@ -524,26 +547,32 @@ func TestConfirmedToolRecoverySuccessRequiresToolSpecificStatus(t *testing.T) {
 		{"understanding succeeded", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","asset_id":"asset","status":"succeeded","summary":{"asset_id":"asset","timeline_fps":30}}`, true},
 		{"understanding succeeded wrong summary", "media.detect_shots", `{"asset_id":"asset"}`, `{"draft_id":"draft","asset_id":"asset","status":"succeeded","summary":{"asset_id":"other","timeline_fps":30}}`, false},
 		{"understanding generic success", "media.detect_shots", `{}`, `{"status":"succeeded"}`, false},
-		{"typed read result missing pagination proof", "shot.search", `{}`, `{"shots":[],"total_matches":0}`, false},
-		{"shot search rejects missing shots", "shot.search", `{}`, `{"total_matches":0,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
-		{"real empty typed read result", "shot.search", `{}`, `{"shots":null,"total_matches":0,"page_start":0,"remaining_matches":0,"truncated":false}`, true},
-		{"shot search rejects non-array shots", "shot.search", `{}`, `{"shots":{},"total_matches":0,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
-		{"shot search rejects null pagination scalars", "shot.search", `{}`, `{"shots":null,"total_matches":null,"page_start":null,"remaining_matches":null,"truncated":null}`, false},
-		{"terminal page after matches", "shot.search", `{"after_shot_id":"shot_1"}`, `{"shots":null,"total_matches":1,"page_start":1,"remaining_matches":0,"page_after_shot_id":"shot_1","truncated":false}`, true},
-		{"typed read count exceeds total", "shot.search", `{}`, `{"shots":[{}],"total_matches":0,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
-		{"shot search query match", "shot.search", `{"query":"cat","asset_ids":["asset_A"]}`, `{"query":"cat","shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`, true},
-		{"shot search wrong query", "shot.search", `{"query":"cat"}`, `{"query":"dog","shots":[],"total_matches":0,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
-		{"shot search invalid entity", "shot.search", `{"query":"cat"}`, `{"query":"cat","shots":[{}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
-		{"shot search outside asset filter", "shot.search", `{"asset_ids":["asset_A"]}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_B","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`, false},
-		{"shot search truncated page", "shot.search", `{"limit":1}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":2,"page_start":0,"remaining_matches":1,"truncated":true,"next_after_shot_id":"shot_1"}`, true},
-		{"shot search truncated continuation page", "shot.search", `{"after_shot_id":"shot_1","limit":1}`, `{"shots":[{"shot_id":"shot_2","asset_id":"asset_A","source_start_frame":30,"source_end_frame":60,"duration_frames":30}],"total_matches":3,"page_start":1,"remaining_matches":1,"page_after_shot_id":"shot_1","truncated":true,"next_after_shot_id":"shot_2"}`, true},
-		{"shot search missing truncated cursor", "shot.search", `{"limit":1}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":2,"page_start":0,"remaining_matches":1,"truncated":true}`, false},
-		{"shot search contradictory terminal page", "shot.search", `{"limit":1}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":2,"page_start":0,"remaining_matches":1,"truncated":false,"next_after_shot_id":"wrong"}`, false},
-		{"shot search repeats after cursor", "shot.search", `{"after_shot_id":"shot_1"}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":2,"page_start":1,"remaining_matches":0,"page_after_shot_id":"shot_1","truncated":false}`, false},
-		{"shot search continuation missing position proof", "shot.search", `{"after_shot_id":"shot_50","limit":20}`, `{"shots":[{"shot_id":"shot_2","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":100,"page_start":0,"remaining_matches":99,"truncated":true}`, false},
-		{"shot search duplicate page ids", "shot.search", `{"after_shot_id":"shot_0"}`, `{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30},{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30}],"total_matches":3,"page_start":1,"remaining_matches":0,"page_after_shot_id":"shot_0","truncated":false}`, false},
+		{"typed read result missing snapshot proof", "shot.search", `{}`, `{"status":"succeeded","shots":[],"total_matches":0}`, false},
+		{"shot search rejects missing shots", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"real empty frozen snapshot result", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, true},
+		{"shot search rejects null shots", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":null,"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects non-array shots", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":{},"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"typed read count exceeds total", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{}],"total_matches":0,"returned_candidates":1,"truncated":false}`, false},
+		{"shot search query match", "shot.search", `{"query":"cat","asset_ids":["asset_A"]}`, `{"status":"succeeded","query":"cat","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`, true},
+		{"shot search wrong query", "shot.search", `{"query":"cat"}`, `{"status":"succeeded","query":"dog","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search invalid entity", "shot.search", `{"query":"cat"}`, `{"status":"succeeded","query":"cat","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{}],"total_matches":1,"returned_candidates":1,"truncated":false}`, false},
+		{"shot search outside asset filter", "shot.search", `{"asset_ids":["asset_A"]}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_B"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search top k truncation", "shot.search", `{"top_k":1}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":2,"returned_candidates":1,"truncated":true}`, true},
+		{"shot search wrong candidate snapshot", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"other","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`, false},
+		{"shot search duplicate shot refs", "shot.search", `{"top_k":2}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8},{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":2,"returned_candidates":2,"truncated":false}`, false},
+		{"shot search returned count mismatch", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[],"total_matches":1,"returned_candidates":1,"truncated":true}`, false},
+		{"shot search rejects fractional count", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[],"total_matches":0.5,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects non-boolean readiness", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":"yes","shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects oversized top k", "shot.search", `{"top_k":31}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects inconsistent truncation", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[],"total_matches":1,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects blank frozen asset", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":[" "],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects duplicate frozen assets", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A","asset_A"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects frozen asset count drift", "shot.search", `{"asset_ids":["asset_A"]}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A","asset_B"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects frozen asset identity drift", "shot.search", `{"asset_ids":["asset_A","asset_B"]}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A","asset_C"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects candidate outside frozen set", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_B","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`, false},
+		{"shot search rejects duration outside request", "shot.search", `{"max_duration_frames":10}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`, false},
 		{"typed read wrong field type", "shot.search", `{}`, `{"shots":"已完成","total_matches":"全部"}`, false},
-		{"incomplete typed result", "shot.search", `{}`, `{"shots":[],"page_start":0,"remaining_matches":0,"truncated":false}`, false},
+		{"incomplete typed result", "shot.search", `{}`, `{"status":"succeeded","shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
 		{"asset list paginated", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":2,"next_after":"asset_1"}`, true},
 		{"asset list count exceeds total", "asset.list_assets", `{}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":0}`, false},
 		{"asset list missing asset identity", "asset.list_assets", `{}`, `{"draft_id":"draft","assets":[{}],"total":1}`, false},
@@ -583,24 +612,25 @@ func TestConfirmedToolRecoverySuccessRequiresToolSpecificStatus(t *testing.T) {
 			}
 		})
 	}
-	shots := make([]rushestools.ShotCandidate, 100)
+	shots := make([]rushestools.ShotCandidate, 30)
 	for index := range shots {
 		shots[index] = rushestools.ShotCandidate{
-			ShotID:  "shot_" + strconv.Itoa(index+1),
+			IndexSnapshotID: "snapshot_top_30", ShotID: "shot_" + strconv.Itoa(index+1),
 			AssetID: "asset_A", SourceStartFrame: index * 30,
-			SourceEndFrame: index*30 + 30, DurationFrames: 30,
+			SourceEndFrame: index*30 + 30, DurationFrames: 30, BoundaryVersion: 1,
 		}
 	}
-	largePage, err := json.Marshal(rushestools.ShotSearchResult{
-		Shots: shots, TotalMatches: 101, RemainingMatches: 1,
-		Truncated: true, NextAfterShotID: "shot_100",
+	largeTopK, err := json.Marshal(rushestools.ShotSearchResult{
+		Status: string(rushestools.StatusSucceeded), IndexSnapshotID: "snapshot_top_30",
+		SynonymVersion: "v1", FrozenAssetIDs: []string{"asset_A"}, SearchReady: true,
+		Shots: shots, TotalMatches: 31, ReturnedCandidates: 30, Truncated: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	largePageProof := attachToolRequestFingerprint("shot.search", `{"limit":200}`, string(largePage))
-	if !isConfirmedToolRecoverySuccess("shot.search", `{"limit":200}`, largePageProof, "") {
-		t.Fatal("executor clamps limit=200 to a valid 100-shot truncated page")
+	largeTopKProof := attachToolRequestFingerprint("shot.search", `{"top_k":30}`, string(largeTopK))
+	if !isConfirmedToolRecoverySuccess("shot.search", `{"top_k":30}`, largeTopKProof, "") {
+		t.Fatal("top_k=30 的冻结快照结果应通过回执校验")
 	}
 	if isConfirmedToolRecoverySuccess(
 		"asset.list_assets", `{}`, `{"draft_id":"draft_B","assets":[],"total":0}`, "draft_A",
@@ -796,7 +826,7 @@ func TestToolRecoveryProofBindsFullSemanticRequestAndTarget(t *testing.T) {
 
 	wrongRole := attachToolRequestFingerprint(
 		"shot.search", `{"semantic_roles":["a_roll"],"min_duration_frames":60}`,
-		`{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"semantic_role":"b_roll"}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`,
+		`{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"semantic_role":"b_roll","score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`,
 	)
 	if isConfirmedToolRecoverySuccess(
 		"shot.search", `{"semantic_roles":["a_roll"],"min_duration_frames":60}`, wrongRole, "",
@@ -805,7 +835,7 @@ func TestToolRecoveryProofBindsFullSemanticRequestAndTarget(t *testing.T) {
 	}
 	normalizedRole := attachToolRequestFingerprint(
 		"shot.search", `{"semantic_roles":[" B_ROLL "]}`,
-		`{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"semantic_role":"b_roll"}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`,
+		`{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"semantic_role":"b_roll","score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`,
 	)
 	if !isConfirmedToolRecoverySuccess(
 		"shot.search", `{"semantic_roles":[" B_ROLL "]}`, normalizedRole, "",
@@ -815,7 +845,7 @@ func TestToolRecoveryProofBindsFullSemanticRequestAndTarget(t *testing.T) {
 
 	semanticTagMatch := attachToolRequestFingerprint(
 		"shot.search", `{"tags":["city skyline"]}`,
-		`{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"description":"city skyline at night"}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`,
+		`{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"description":"city skyline at night","score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`,
 	)
 	if !isConfirmedToolRecoverySuccess(
 		"shot.search", `{"tags":["city skyline"]}`, semanticTagMatch, "",
@@ -824,7 +854,7 @@ func TestToolRecoveryProofBindsFullSemanticRequestAndTarget(t *testing.T) {
 	}
 	wrongSemanticTag := attachToolRequestFingerprint(
 		"shot.search", `{"tags":["city skyline"]}`,
-		`{"shots":[{"shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"description":"forest trail"}],"total_matches":1,"page_start":0,"remaining_matches":0,"truncated":false}`,
+		`{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"description":"forest trail","score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`,
 	)
 	if isConfirmedToolRecoverySuccess(
 		"shot.search", `{"tags":["city skyline"]}`, wrongSemanticTag, "",

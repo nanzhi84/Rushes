@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +40,7 @@ func TestInitialCompositionFixtureUsesSearchAndAtomicInserts(t *testing.T) {
 		t.Fatalf("assets=%#v", listedRaw)
 	}
 	searchRaw, err := service.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
-		Query: "城市 山峰", SemanticRoles: []string{"b_roll"}, MinDurationFrames: 45, Limit: 8,
+		Query: "城市 山峰", SemanticRoles: []string{"b_roll"}, MinDurationFrames: 45, TopK: 8,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -125,7 +126,7 @@ func TestBeatCompositionFixtureUsesHarnessAnalysisSearchAndAtomicEdits(t *testin
 		t.Fatalf("beats=%#v", beats)
 	}
 	searchRaw, err := service.ExecuteTool(ctx, "shot.search", rushestools.ShotSearchInput{
-		Query: "城市 山峰", SemanticRoles: []string{"b_roll"}, MinDurationFrames: 60, Limit: 8,
+		Query: "城市 山峰", SemanticRoles: []string{"b_roll"}, MinDurationFrames: 60, TopK: 8,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -254,6 +255,50 @@ func seedAtomicWorkflowVideo(
 			summary_id,asset_id,version,status,summary_json,fingerprint,prompt_version,created_at
 		) VALUES(?, ?, 1, 'ready', ?, ?, 'atomic-fixture-v1', ?)`,
 		"summary_"+assetID, assetID, string(summary), "fingerprint_"+assetID, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	seedAtomicWorkflowShotIndex(
+		t, database, assetID, "b_roll", description, []string{tags}, durationFrames,
+	)
+}
+
+func seedAtomicWorkflowShotIndex(
+	t *testing.T,
+	database *storage.DB,
+	assetID, semanticRole, description string,
+	tags []string,
+	durationFrames int,
+) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	snapshotID := "shot_index_fixture_" + assetID
+	summaryJSON, _ := json.Marshal(map[string]any{"semantic_role": semanticRole})
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO shot_index_snapshots(
+			index_snapshot_id,asset_content_hash,generation,analyzer_version,
+			output_schema_version,source_asset_id,status,summary_json,created_at,published_at
+		) VALUES(?,?,1,'atomic-fixture-v1',1,?,'ready',?,?,?)`,
+		snapshotID, assetID, assetID, string(summaryJSON), now, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	encoded := func(values []string) string {
+		raw, _ := json.Marshal(values)
+		return string(raw)
+	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		INSERT INTO shots(
+			index_snapshot_id,shot_id,asset_content_hash,source_start_frame,source_end_frame,
+			boundary_version,boundary_kind,boundary_confidence,lineage_parent_shot_id,
+			representative_frames_json,description,tags_json,subjects_json,actions_json,
+			setting_json,shot_scale,composition,lighting_json,mood_json,edit_hints_json,
+			quality_json,search_text,search_tokens_json,deep_coverage_json,created_at
+		) VALUES(?,?,?,0,?,1,'fixture',1,NULL,'[]',?,?,?,?,?,?,?,?,?,?,?, ?,?,'[]',?)`,
+		snapshotID, "shot_fixture_"+assetID, assetID, durationFrames,
+		description, encoded(tags), encoded([]string{"画面主体"}), encoded([]string{"展示"}),
+		encoded(tags), "中景", "居中构图", "[]", "[]", "[]", `{"label":"usable"}`,
+		description+" "+strings.Join(tags, " "), encoded(tags), now,
 	); err != nil {
 		t.Fatal(err)
 	}
