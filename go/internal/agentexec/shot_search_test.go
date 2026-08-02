@@ -1,7 +1,9 @@
 package agentexec
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -113,6 +115,135 @@ func TestShotSearchReadsPersistentSnapshotAndDoesNotMutateBusinessTruth(t *testi
 	}
 	if vectorTables != 0 {
 		t.Fatalf("无 embedding 检索不应生成向量表: %d", vectorTables)
+	}
+}
+
+func TestShotSearchDeterministicRankingHelperEdges(t *testing.T) {
+	t.Parallel()
+
+	if !overlapsAny(sourceRange{startFrame: 10, endFrame: 20}, []sourceRange{{startFrame: 19, endFrame: 30}}) {
+		t.Fatal("相交的素材区间应被识别")
+	}
+	if overlapsAny(sourceRange{startFrame: 10, endFrame: 20}, []sourceRange{{startFrame: 20, endFrame: 30}}) {
+		t.Fatal("首尾相接的半开区间不应被视为相交")
+	}
+	if got := stringValue(nil); got != "" {
+		t.Fatalf("nil stringValue=%q", got)
+	}
+	if !containsDigit("take-2") || containsDigit("take-two") {
+		t.Fatal("数字检测结果不符合预期")
+	}
+
+	fields := []weightedSearchField{{name: "标签", value: "海边 落日", weight: 1}}
+	if !matchesAnyTagQuery([]shotSearchQuery{buildShotSearchQuery("海滩")}, fields) {
+		t.Fatal("同义词标签查询应命中")
+	}
+	if matchesAnyTagQuery([]shotSearchQuery{buildShotSearchQuery("城市")}, fields) {
+		t.Fatal("无关标签查询不应命中")
+	}
+
+	if got := shotQualityPenalty(map[string]any{
+		"overexposed_ratio": 0.2,
+		"sharpness":         50.0,
+	}); got != 0.065 {
+		t.Fatalf("quality penalty=%v, want 0.065", got)
+	}
+	if got := shotQualityPenalty(map[string]any{}); got != 0 {
+		t.Fatalf("empty quality penalty=%v", got)
+	}
+
+	candidates := []rushestools.ShotCandidate{
+		{AssetID: "asset_b", ShotID: "shot_a", Score: 0.8},
+		{AssetID: "asset_a", ShotID: "shot_b", Score: 0.8},
+		{AssetID: "asset_a", ShotID: "shot_a", Score: 0.8},
+		{AssetID: "asset_z", ShotID: "shot_z", Score: 0.9},
+	}
+	sortShotCandidates(candidates)
+	if got, want := shotIDs(candidates), []string{
+		"asset_z:shot_z", "asset_a:shot_a", "asset_b:shot_a", "asset_a:shot_b",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("stable candidate order=%v, want %v", got, want)
+	}
+	if !shotCandidateLess(
+		rushestools.ShotCandidate{AssetID: "asset_a", ShotID: "same"},
+		rushestools.ShotCandidate{AssetID: "asset_b", ShotID: "same"},
+	) {
+		t.Fatal("同一 shot_id 应以 asset_id 稳定决胜")
+	}
+	if overlap := shotSemanticOverlap(rushestools.ShotCandidate{}, rushestools.ShotCandidate{}); overlap != 0 {
+		t.Fatalf("空语义集合 overlap=%v", overlap)
+	}
+
+	if got, want := compactStringsStable([]string{"", " a ", "a", "b"}, 1), []string{"a"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("compact stable=%v, want %v", got, want)
+	}
+	if got := WeightedSemanticMatchScore(nil, "anything"); got != 0.5 {
+		t.Fatalf("empty weighted tokens score=%v", got)
+	}
+	if got := SemanticMatchScore(nil, "anything"); got != 0.5 {
+		t.Fatalf("empty semantic tokens score=%v", got)
+	}
+	weights := map[string]float64{
+		"v2":   4,
+		"海":    0.15,
+		"海边":   1,
+		"wide": 2,
+		"go":   0.5,
+	}
+	for token, want := range weights {
+		if got := semanticTokenWeight(token); got != want {
+			t.Fatalf("semanticTokenWeight(%q)=%v, want %v", token, got, want)
+		}
+	}
+}
+
+func TestShotSearchRejectsInvalidInputAndPreservesBarrierCancellation(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_search_validation"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	exec, err := newTestExecutor(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	invalidInputs := []rushestools.ShotSearchInput{
+		{MinDurationFrames: -1},
+		{MaxDurationFrames: -1},
+		{MinDurationFrames: 20, MaxDurationFrames: 10},
+		{TopK: -1},
+		{TopK: shotSearchMaximumTopK + 1},
+	}
+	for _, input := range invalidInputs {
+		if _, err := exec.toolSearchShots(t.Context(), draftID, input); err == nil {
+			t.Fatalf("invalid input should fail: %#v", input)
+		}
+	}
+	if _, err := exec.freezeShotAssets(t.Context(), draftID, nil); err == nil {
+		t.Fatal("空素材集不应进入检索")
+	}
+
+	seedSearchAsset(t, database, draftID, "asset_pending_cancel", "hash_pending_cancel", "pending.mp4", "Broll")
+	frozen, err := exec.freezeShotAssets(
+		t.Context(), draftID, []string{"asset_pending_cancel", "asset_pending_cancel"},
+	)
+	if err != nil || len(frozen) != 1 {
+		t.Fatalf("重复 asset_id 应稳定去重: frozen=%#v err=%v", frozen, err)
+	}
+	if _, err := exec.freezeShotAssets(t.Context(), draftID, []string{"asset_missing"}); err == nil {
+		t.Fatal("未知 asset_id 应被拒绝")
+	}
+	used, err := exec.usedShotRanges(t.Context(), draftID, true)
+	if err != nil || len(used) != 0 {
+		t.Fatalf("无时间线时 used ranges=%v err=%v", used, err)
+	}
+
+	seedBaseIndexJob(t, database, "asset_pending_cancel", "hash_pending_cancel", "pending")
+	exec.jobPollInterval = time.Hour
+	exec.jobWaitTimeout = time.Hour
+	ctx, cancel := context.WithCancel(t.Context())
+	exec.progress = func(_ string, _ map[string]any) { cancel() }
+	if _, _, _, _, err := exec.awaitShotSearchReady(ctx, draftID, frozen); !errors.Is(err, context.Canceled) {
+		t.Fatalf("barrier cancellation err=%v, want context.Canceled", err)
 	}
 }
 

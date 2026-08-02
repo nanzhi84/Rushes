@@ -407,6 +407,27 @@ func TestTruncateTextUsesRuneBoundaries(t *testing.T) {
 
 func TestToolRecoveryFormattingHelpersCoverMalformedValues(t *testing.T) {
 	t.Parallel()
+	direct := map[string]any{"x": 1}
+	if got := toolArgumentsObject(direct); got["x"] != 1 {
+		t.Fatalf("direct arguments=%#v", got)
+	}
+	if toolArgumentsObject("not-json") != nil || toolArgumentsObject(make(chan int)) != nil ||
+		toolArgumentsObject([]int{1}) != nil {
+		t.Fatal("malformed argument objects should be rejected")
+	}
+	type argumentsFixture struct {
+		Value int `json:"value"`
+	}
+	if got := toolArgumentsObject(argumentsFixture{Value: 7}); got["value"] != float64(7) {
+		t.Fatalf("encoded arguments=%#v", got)
+	}
+	for value, want := range map[any]int64{
+		int(1): 1, int32(2): 2, int64(3): 3, float64(4): 4, float64(4.5): 0, "5": 0,
+	} {
+		if got := positiveInteger(value); got != want {
+			t.Fatalf("positiveInteger(%#v)=%d, want %d", value, got, want)
+		}
+	}
 	if isStructuredToolFailure("not-json") || isStructuredToolFailure(`{"status":"succeeded"}`) ||
 		!isStructuredToolFailure(`{"status":"failed"}`) ||
 		!isStructuredToolFailure(`{"status":"validation_failed"}`) {
@@ -540,6 +561,16 @@ func TestConfirmedToolRecoverySuccessRequiresToolSpecificStatus(t *testing.T) {
 		{"shot search wrong candidate snapshot", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"other","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`, false},
 		{"shot search duplicate shot refs", "shot.search", `{"top_k":2}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8},{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":2,"returned_candidates":2,"truncated":false}`, false},
 		{"shot search returned count mismatch", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[],"total_matches":1,"returned_candidates":1,"truncated":true}`, false},
+		{"shot search rejects fractional count", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[],"total_matches":0.5,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects non-boolean readiness", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":"yes","shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects oversized top k", "shot.search", `{"top_k":31}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects inconsistent truncation", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[],"total_matches":1,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects blank frozen asset", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":[" "],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects duplicate frozen assets", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A","asset_A"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects frozen asset count drift", "shot.search", `{"asset_ids":["asset_A"]}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A","asset_B"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects frozen asset identity drift", "shot.search", `{"asset_ids":["asset_A","asset_B"]}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A","asset_C"],"search_ready":true,"shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
+		{"shot search rejects candidate outside frozen set", "shot.search", `{}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_B","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`, false},
+		{"shot search rejects duration outside request", "shot.search", `{"max_duration_frames":10}`, `{"status":"succeeded","index_snapshot_id":"snap","synonym_version":"v1","frozen_asset_ids":["asset_A"],"search_ready":true,"shots":[{"index_snapshot_id":"snap","shot_id":"shot_1","asset_id":"asset_A","source_start_frame":0,"source_end_frame":30,"duration_frames":30,"boundary_version":1,"score":0.8}],"total_matches":1,"returned_candidates":1,"truncated":false}`, false},
 		{"typed read wrong field type", "shot.search", `{}`, `{"shots":"已完成","total_matches":"全部"}`, false},
 		{"incomplete typed result", "shot.search", `{}`, `{"status":"succeeded","shots":[],"total_matches":0,"returned_candidates":0,"truncated":false}`, false},
 		{"asset list paginated", "asset.list_assets", `{"limit":1}`, `{"draft_id":"draft","assets":[{"asset_id":"asset_1"}],"total":2,"next_after":"asset_1"}`, true},
