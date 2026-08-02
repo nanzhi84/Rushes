@@ -104,18 +104,12 @@ func (exec *Executor) toolDetectShots(
 	if existing, found, findErr := exec.findUnderstandJob(ctx, idempotencyKey); findErr != nil {
 		return rushestools.DetectShotsResult{}, findErr
 	} else if found {
-		if !input.ForceRefresh && request.CacheHit &&
-			(existing.Status == "failed" || existing.Status == "cancelled") {
-			return exec.runUnderstandInline(ctx, draftID, request)
-		}
 		return exec.existingUnderstandResult(ctx, draftID, existing, request)
 	}
-	if shouldEnqueueUnderstand(request, input.ForceRefresh) {
-		return exec.enqueueUnderstand(
-			ctx, draftID, input, request, idempotencyKey,
-		)
+	if request.CacheHit {
+		return exec.cachedUnderstandResult(ctx, draftID, request)
 	}
-	return exec.runUnderstandInline(ctx, draftID, request)
+	return exec.enqueueUnderstand(ctx, draftID, input, request, idempotencyKey)
 }
 
 type preparedDetectShotsRequest struct {
@@ -165,16 +159,14 @@ func (exec *Executor) prepareDetectShotsRequest(
 	if err := ctx.Err(); err != nil {
 		return preparedDetectShotsRequest{}, err
 	}
-	options := understanding.NormalizeAnalyzeOptions(asset, understanding.AnalyzeOptions{
-		Focus: input.Focus, Depth: input.Depth, MaxStepsPerAsset: input.MaxStepsPerAsset,
-	})
+	options := understanding.NormalizeAnalyzeOptions(asset, understanding.AnalyzeOptions{Depth: "scan"})
 	request := preparedDetectShotsRequest{
 		Asset: asset, Options: options,
-		Fingerprint: understanding.AnalysisFingerprint(asset, options),
+		Fingerprint: understanding.BaseIndexFingerprint(asset),
 	}
 	if !input.ForceRefresh {
-		if _, cacheErr := storage.MaterialSummaryByFingerprint(
-			ctx, exec.database.Read(), assetID, request.Fingerprint,
+		if _, cacheErr := storage.ReadyShotIndexByContentHash(
+			ctx, exec.database.Read(), asset.Hash,
 		); cacheErr == nil {
 			request.CacheHit = true
 		} else if !errors.Is(cacheErr, storage.ErrNotFound) {
@@ -184,14 +176,7 @@ func (exec *Executor) prepareDetectShotsRequest(
 	return request, nil
 }
 
-func shouldEnqueueUnderstand(request preparedDetectShotsRequest, forceRefresh bool) bool {
-	if request.CacheHit {
-		return false
-	}
-	return request.Options.Depth != "scan" || forceRefresh
-}
-
-func (exec *Executor) runUnderstandInline(
+func (exec *Executor) cachedUnderstandResult(
 	ctx context.Context,
 	draftID string,
 	request preparedDetectShotsRequest,
@@ -199,84 +184,13 @@ func (exec *Executor) runUnderstandInline(
 	if err := ctx.Err(); err != nil {
 		return rushestools.DetectShotsResult{}, err
 	}
-	if request.CacheHit {
-		summary, err := exec.bestUnderstandingSummary(ctx, request.Asset)
-		if err != nil {
-			return rushestools.DetectShotsResult{}, err
-		}
-		return rushestools.DetectShotsResult{
-			DraftID: draftID, AssetID: request.Asset.ID, Status: string(rushestools.StatusSucceeded),
-			Summary: &summary, CacheHit: true,
-		}, nil
-	}
-	runID := RandomID("understand_inline")
-	started, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
-		Type: "MaterialUnderstandingStarted",
-		Payload: map[string]any{
-			"asset_id": request.Asset.ID, "job_id": runID,
-		},
-	}}, reducer.Options{Actor: contracts.ActorAgent})
-	if err != nil || started.Status != reducer.StatusApplied {
-		return rushestools.DetectShotsResult{}, errors.Join(
-			err, fmt.Errorf("start reducer status: %s", started.Status),
-		)
-	}
-	summary, analyzeErr := exec.analyzer.AnalyzeWithOptions(
-		ctx, exec.database, request.Asset, request.Options, func(note string) {
-			exec.recordProgress(draftID, map[string]any{
-				"type": contracts.TurnStreamSubagentProgress, "tool": "media.detect_shots",
-				"asset_id": request.Asset.ID, "note": note, "completed": 0, "total": 1,
-			})
-		},
-	)
-	if analyzeErr != nil {
-		cancelled := errors.Is(analyzeErr, context.Canceled)
-		_, _ = reducer.Apply(context.WithoutCancel(ctx), exec.database, []contracts.Event{{
-			Type: "MaterialUnderstandingFailed",
-			Payload: map[string]any{
-				"asset_id": request.Asset.ID, "job_id": runID, "cancelled": cancelled,
-				"failure": map[string]any{
-					"error_code": string(rushestools.ErrCodeUnderstandingFailed),
-					"message":    analyzeErr.Error(),
-				},
-			},
-		}}, reducer.Options{Actor: contracts.ActorAgent})
-		return rushestools.DetectShotsResult{}, analyzeErr
-	}
-	var summaryMap map[string]any
-	encoded, _ := json.Marshal(summary)
-	_ = json.Unmarshal(encoded, &summaryMap)
-	summaryID := RandomID("summary")
-	completed, err := reducer.Apply(ctx, exec.database, []contracts.Event{{
-		Type: "MaterialUnderstandingCompleted",
-		Payload: map[string]any{
-			"asset_id": request.Asset.ID, "job_id": runID, "summary_id": summaryID,
-		},
-	}}, reducer.Options{
-		Actor: contracts.ActorAgent,
-		ResultRows: reducer.ResultRows{MaterialSummaries: []reducer.MaterialSummaryRow{{
-			ID: summaryID, AssetID: request.Asset.ID, Version: 0,
-			Focus: StringPointerValue(request.Options.Focus), Status: "ready", Summary: summaryMap,
-			Model: StringPointerValue(summary.Model), Fingerprint: StringPointerValue(request.Fingerprint),
-			PromptVersion: StringPointerValue(understanding.PromptVersion),
-		}}},
-	})
-	if err != nil || completed.Status != reducer.StatusApplied {
-		return rushestools.DetectShotsResult{}, errors.Join(
-			err, fmt.Errorf("complete reducer status: %s", completed.Status),
-		)
-	}
 	bestSummary, err := exec.bestUnderstandingSummary(ctx, request.Asset)
 	if err != nil {
 		return rushestools.DetectShotsResult{}, err
 	}
-	exec.recordProgress(draftID, map[string]any{
-		"type": contracts.TurnStreamSubagentProgress, "tool": "media.detect_shots",
-		"asset_id": request.Asset.ID, "note": "摘要已完成", "completed": 1, "total": 1,
-	})
 	return rushestools.DetectShotsResult{
-		DraftID: draftID, JobID: runID, AssetID: request.Asset.ID,
-		Status: string(rushestools.StatusSucceeded), Summary: &bestSummary, Analyzed: true,
+		DraftID: draftID, AssetID: request.Asset.ID,
+		Status: string(rushestools.StatusSucceeded), Summary: &bestSummary, CacheHit: true,
 	}, nil
 }
 
@@ -364,7 +278,7 @@ func (exec *Executor) existingUnderstandResult(
 ) (rushestools.DetectShotsResult, error) {
 	switch job.Status {
 	case "pending", "running":
-		return exec.waitForUnderstandJob(ctx, draftID, job.ID, request)
+		return exec.waitForSharedUnderstandJob(ctx, draftID, job.ID, request)
 	case "succeeded":
 		raw, err := exec.materialSummaryForUnderstandJob(
 			ctx, job.ID, request.Asset.ID, request.Fingerprint,
@@ -436,6 +350,23 @@ func (exec *Executor) waitForUnderstandJob(
 	draftID, jobID string,
 	request preparedDetectShotsRequest,
 ) (rushestools.DetectShotsResult, error) {
+	return exec.waitForUnderstandJobAccess(ctx, draftID, jobID, request, false)
+}
+
+func (exec *Executor) waitForSharedUnderstandJob(
+	ctx context.Context,
+	draftID, jobID string,
+	request preparedDetectShotsRequest,
+) (rushestools.DetectShotsResult, error) {
+	return exec.waitForUnderstandJobAccess(ctx, draftID, jobID, request, true)
+}
+
+func (exec *Executor) waitForUnderstandJobAccess(
+	ctx context.Context,
+	draftID, jobID string,
+	request preparedDetectShotsRequest,
+	sharedContentJob bool,
+) (rushestools.DetectShotsResult, error) {
 	waitStarted := time.Now()
 	terminalStatus := "failed"
 	defer func() { exec.observeSameTurnToolWait("understand", terminalStatus, waitStarted) }()
@@ -456,7 +387,13 @@ func (exec *Executor) waitForUnderstandJob(
 	// 而不是把底层仍可继续的 job 误报成普通 context error。
 	lastStatus := "pending"
 	for {
-		job, err := exec.understandJobState(ctx, draftID, jobID, request.Asset.ID)
+		var job understandJobRef
+		var err error
+		if sharedContentJob {
+			job, err = exec.sharedUnderstandJobState(ctx, jobID)
+		} else {
+			job, err = exec.understandJobState(ctx, draftID, jobID, request.Asset.ID)
+		}
 		if err != nil {
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) ||
 				errors.Is(context.Cause(ctx), context.DeadlineExceeded) ||
@@ -495,6 +432,21 @@ func (exec *Executor) waitForUnderstandJob(
 		case <-ticker.C:
 		}
 	}
+}
+
+func (exec *Executor) sharedUnderstandJobState(
+	ctx context.Context,
+	jobID string,
+) (understandJobRef, error) {
+	job := understandJobRef{ID: jobID}
+	err := exec.database.Read().QueryRowContext(ctx, `
+		SELECT status,error_json FROM jobs WHERE job_id=? AND kind='understand'`,
+		jobID,
+	).Scan(&job.Status, &job.ErrorJSON)
+	if errors.Is(err, sql.ErrNoRows) {
+		return understandJobRef{}, errors.New("共享 understand job 不存在")
+	}
+	return job, err
 }
 
 func (exec *Executor) understandJobStatus(
@@ -548,25 +500,14 @@ func understandIdempotencyKey(
 	forceRefresh bool,
 	refreshNonce string,
 ) (string, error) {
-	canonical := struct {
-		DraftID             string `json:"draft_id"`
-		AssetID             string `json:"asset_id"`
-		AnalysisFingerprint string `json:"analysis_fingerprint"`
-		ForceRefresh        bool   `json:"force_refresh"`
-		RefreshNonce        string `json:"refresh_nonce,omitempty"`
-	}{
-		DraftID: draftID, AssetID: request.Asset.ID,
-		AnalysisFingerprint: request.Fingerprint, ForceRefresh: forceRefresh,
+	if !forceRefresh {
+		return understanding.BaseIndexIdempotencyKey(request.Fingerprint), nil
 	}
-	if forceRefresh {
-		canonical.RefreshNonce = strings.TrimSpace(refreshNonce)
-	}
-	raw, err := json.Marshal(canonical)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(raw)
-	return "understand:" + draftID + ":" + hex.EncodeToString(digest[:]), nil
+	canonical := strings.Join([]string{
+		request.Fingerprint, draftID, request.Asset.ID, strings.TrimSpace(refreshNonce),
+	}, "\x00")
+	digest := sha256.Sum256([]byte(canonical))
+	return "shot-base-refresh:" + hex.EncodeToString(digest[:]), nil
 }
 
 func CompactUnderstandingSummary(

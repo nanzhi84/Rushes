@@ -69,13 +69,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	var analyzer = understanding.NewAnalyzer(nil)
+	var analyzer = defaultAnalyzer()
 	switch provider {
 	case config.ProviderDashScope:
 		if key := os.Getenv("RUSHES_DASHSCOPE_API_KEY"); key != "" {
 			vision, modelErr := providers.NewQwen(context.Background(), providers.QwenConfig{
 				APIKey: key, BaseURL: os.Getenv("RUSHES_DASHSCOPE_BASE_URL"),
-				Model: os.Getenv("RUSHES_QWEN_VISION_MODEL"), Timeout: 180 * time.Second,
+				Model:   dashScopeVisionModelName(),
+				Timeout: 180 * time.Second,
 			})
 			if modelErr != nil {
 				return modelErr
@@ -102,6 +103,9 @@ func run() error {
 		return err
 	}
 	if err := registry.ValidateCatalog(); err != nil {
+		return err
+	}
+	if err := worker.EnqueueBaseShotIndexBackfill(context.Background(), database); err != nil {
 		return err
 	}
 	runner, err := worker.NewRunner(worker.RunnerConfig{
@@ -176,4 +180,8 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func dashScopeVisionModelName() string {
+	return firstNonEmpty(os.Getenv("RUSHES_QWEN_VISION_MODEL"), providers.DefaultVisionModel)
 }

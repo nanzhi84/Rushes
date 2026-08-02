@@ -30,7 +30,6 @@ func TestProductionFallbackDoesNotInstallOrRecognizeE2EScaffold(t *testing.T) {
 	const defaultReply = "未配置模型密钥：已记录你的需求，并保持本地编辑链路可用。"
 	for index, marker := range []string{
 		"E2E_BLOCK_UNTIL_CANCEL",
-		"E2E_CANCEL_UNDERSTANDING",
 		"E2E_FULL_MAINLINE",
 		"E2E_MEMORY_WRITE",
 		"E2E_MEMORY_STATUS",

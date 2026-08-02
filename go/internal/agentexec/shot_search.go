@@ -450,7 +450,7 @@ func (exec *Executor) toolSearchShots(
 	}
 	if len(missing) > 0 {
 		result.IndexCoverageNote = fmt.Sprintf(
-			"当前草稿关联的可用视频素材中还有 %d 个尚未理解，未纳入本次检索；若目标画面可能在其中，先用 media.detect_shots 理解后重搜，或明确告知用户当前检索池并不完整。",
+			"当前草稿关联的可用视频素材中还有 %d 个正在等待后台基础镜头索引，未纳入本次检索；若目标画面可能在其中，请明确告知用户当前检索池不完整并稍后重搜。",
 			len(missing),
 		)
 	}

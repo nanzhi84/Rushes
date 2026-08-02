@@ -231,12 +231,13 @@ func TestEnqueueUnderstandHandlesDuplicateAndCommitFailure(t *testing.T) {
 	})
 }
 
-func TestRunUnderstandInlineFailureBoundaries(t *testing.T) {
+func TestCachedUnderstandResultFailureBoundaries(t *testing.T) {
 	t.Run("cancelled_before_start", func(t *testing.T) {
 		_, exec, request := understandWaitFixture(t, "draft_understand_inline_cancelled")
+		request.CacheHit = true
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
-		if _, err := exec.runUnderstandInline(ctx, request.Asset.ID, request); !errors.Is(err, context.Canceled) {
+		if _, err := exec.cachedUnderstandResult(ctx, request.Asset.ID, request); !errors.Is(err, context.Canceled) {
 			t.Fatalf("err=%v", err)
 		}
 	})
@@ -244,51 +245,7 @@ func TestRunUnderstandInlineFailureBoundaries(t *testing.T) {
 	t.Run("cache_claim_without_summary", func(t *testing.T) {
 		_, exec, request := understandWaitFixture(t, "draft_understand_inline_missing_cache")
 		request.CacheHit = true
-		if _, err := exec.runUnderstandInline(t.Context(), request.Asset.ID, request); !errors.Is(err, storage.ErrNotFound) {
-			t.Fatalf("err=%v", err)
-		}
-	})
-
-	t.Run("start_commit_failure", func(t *testing.T) {
-		database, exec, request := understandWaitFixture(t, "draft_understand_inline_start_failure")
-		if _, err := database.Write().ExecContext(t.Context(), `
-			CREATE TRIGGER fail_understand_start BEFORE UPDATE OF understanding_status ON assets
-			WHEN NEW.understanding_status='running'
-			BEGIN SELECT RAISE(ABORT, 'fixture understand start failure'); END`); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := exec.runUnderstandInline(t.Context(), request.Asset.ID, request); err == nil || !strings.Contains(err.Error(), "fixture understand start failure") {
-			t.Fatalf("err=%v", err)
-		}
-	})
-
-	t.Run("analyzer_failure", func(t *testing.T) {
-		_, exec, request := understandWaitFixture(t, "draft_understand_inline_analyzer_failure")
-		if _, err := exec.runUnderstandInline(t.Context(), request.Asset.ID, request); err == nil {
-			t.Fatal("missing media source should fail analysis")
-		}
-	})
-
-	t.Run("completion_commit_failure", func(t *testing.T) {
-		database, exec, request := understandWaitFixture(t, "draft_understand_inline_complete_failure")
-		if _, err := database.Write().ExecContext(t.Context(), `
-			UPDATE assets SET kind='audio', reference_path=?, probe_json='{"duration_sec":1}'
-			WHERE asset_id=?`, database.Paths.DB, request.Asset.ID,
-		); err != nil {
-			t.Fatal(err)
-		}
-		loaded, err := storage.GetAsset(t.Context(), database.Read(), request.Asset.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		request.Asset = loaded
-		if _, err := database.Write().ExecContext(t.Context(), `
-			CREATE TRIGGER fail_understand_complete BEFORE UPDATE OF understanding_status ON assets
-			WHEN NEW.understanding_status='ready'
-			BEGIN SELECT RAISE(ABORT, 'fixture understand complete failure'); END`); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := exec.runUnderstandInline(t.Context(), request.Asset.ID, request); err == nil || !strings.Contains(err.Error(), "fixture understand complete failure") {
+		if _, err := exec.cachedUnderstandResult(t.Context(), request.Asset.ID, request); !errors.Is(err, storage.ErrNotFound) {
 			t.Fatalf("err=%v", err)
 		}
 	})

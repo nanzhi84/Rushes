@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/eino/schema"
@@ -59,10 +60,13 @@ type videoSpan struct {
 }
 
 type sampledSegmentFrame struct {
-	SegmentID string
-	JPEG      []byte
-	Label     string
-	Timestamp float64
+	SegmentID  string
+	JPEG       []byte
+	Label      string
+	Timestamp  float64
+	Position   string
+	ObjectHash string
+	ObjectSize int64
 }
 
 type boundaryVerificationPayload struct {
@@ -162,6 +166,7 @@ func (analyzer *Analyzer) analyzeVideo(
 		result.Degraded = append(result.Degraded, "representative_frame_extract_partial")
 	}
 	applyFrameQualityMetrics(&result, samples)
+	applyRepresentativeFrameManifests(&result, samples)
 	if analyzer.vision == nil || len(samples) == 0 {
 		result.Degraded = append(result.Degraded, "visual_understanding_unavailable")
 		return result, nil
@@ -435,45 +440,102 @@ func extractSegmentFrames(
 	spans []videoSpan,
 	options AnalyzeOptions,
 ) ([]sampledSegmentFrame, bool, error) {
-	samples := make([]sampledSegmentFrame, 0, len(spans)*3)
-	degraded := false
+	type frameTask struct {
+		order      int
+		span       videoSpan
+		index      int
+		timestamps []float64
+	}
+	tasks := []frameTask{}
 	for _, span := range spans {
-		if err := ctx.Err(); err != nil {
-			return nil, degraded, err
-		}
 		timestamps := segmentFrameTimestamps(span, options.Depth)
-		for index, timestamp := range timestamps {
+		for index := range timestamps {
+			tasks = append(tasks, frameTask{
+				order: len(tasks), span: span, index: index, timestamps: timestamps,
+			})
+		}
+	}
+	results := make([]*sampledSegmentFrame, len(tasks))
+	store := media.NewObjectStore(paths)
+	semaphore := make(chan struct{}, min(4, max(1, len(tasks))))
+	var wait sync.WaitGroup
+	var mutex sync.Mutex
+	var terminalErr error
+	degraded := false
+	for _, task := range tasks {
+		task := task
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				mutex.Lock()
+				terminalErr = errors.Join(terminalErr, ctx.Err())
+				mutex.Unlock()
+				return
+			}
+			timestamp := task.timestamps[task.index]
 			jpegBytes, err := extractFrameAt(ctx, paths, source, timestamp)
 			if err != nil {
+				mutex.Lock()
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return nil, degraded, err
+					terminalErr = errors.Join(terminalErr, err)
+				} else {
+					degraded = true
 				}
-				degraded = true
-				continue
+				mutex.Unlock()
+				return
 			}
-			samples = append(samples, sampledSegmentFrame{
-				SegmentID: span.ID, JPEG: jpegBytes, Timestamp: timestamp,
-				Label: segmentFrameLabel(span, timestamps, index, options.Depth),
-			})
+			object, err := store.Put(ctx, bytes.NewReader(jpegBytes))
+			if err != nil {
+				mutex.Lock()
+				terminalErr = errors.Join(terminalErr, err)
+				mutex.Unlock()
+				return
+			}
+			results[task.order] = &sampledSegmentFrame{
+				SegmentID: task.span.ID, JPEG: jpegBytes, Timestamp: timestamp,
+				Position:   segmentFramePosition(task.timestamps, task.index, options.Depth),
+				Label:      segmentFrameLabel(task.span, task.timestamps, task.index, options.Depth),
+				ObjectHash: object.Hash, ObjectSize: object.Size,
+			}
+		}()
+	}
+	wait.Wait()
+	if terminalErr != nil {
+		return nil, degraded, terminalErr
+	}
+	samples := make([]sampledSegmentFrame, 0, len(results))
+	for _, result := range results {
+		if result != nil {
+			samples = append(samples, *result)
 		}
 	}
 	return samples, degraded, nil
 }
 
 func segmentFrameLabel(span videoSpan, timestamps []float64, index int, depth string) string {
-	position := "中帧"
+	position := segmentFramePosition(timestamps, index, depth)
+	position = map[string]string{"start": "首帧", "middle": "中帧", "end": "尾帧"}[position]
+	timestamp := timestamps[index]
+	return fmt.Sprintf("%s %.2f–%.2f 秒，%s %.3f 秒", span.ID, span.StartSec, span.EndSec, position, timestamp)
+}
+
+func segmentFramePosition(timestamps []float64, index int, depth string) string {
+	position := "middle"
 	if strings.EqualFold(strings.TrimSpace(depth), "deep") {
 		switch {
 		case len(timestamps) == 2 && index == 0:
-			position = "首帧"
+			position = "start"
 		case len(timestamps) == 2 && index == 1:
-			position = "尾帧"
+			position = "end"
 		case len(timestamps) >= 3:
-			position = []string{"首帧", "中帧", "尾帧"}[min(index, 2)]
+			position = []string{"start", "middle", "end"}[min(index, 2)]
 		}
 	}
-	timestamp := timestamps[index]
-	return fmt.Sprintf("%s %.2f–%.2f 秒，%s %.3f 秒", span.ID, span.StartSec, span.EndSec, position, timestamp)
+	return position
 }
 
 func segmentFrameTimestamps(span videoSpan, depth string) []float64 {
@@ -529,6 +591,20 @@ func applyFrameQualityMetrics(result *videoAnalysisResult, samples []sampledSegm
 		sharpness := math.Round(value.sharpness/float64(value.count)*100) / 100
 		result.Segments[index].OverexposedRatio = &overexposed
 		result.Segments[index].SharpnessScore = &sharpness
+	}
+}
+
+func applyRepresentativeFrameManifests(result *videoAnalysisResult, samples []sampledSegmentFrame) {
+	bySegment := map[string][]RepresentativeFrame{}
+	for _, sample := range samples {
+		bySegment[sample.SegmentID] = append(bySegment[sample.SegmentID], RepresentativeFrame{
+			SourceFrame: int(math.Round(sample.Timestamp * understandingTimelineFPS)),
+			TimestampMS: int64(math.Round(sample.Timestamp * 1000)), Position: sample.Position,
+			ObjectHash: sample.ObjectHash, ObjectSize: sample.ObjectSize,
+		})
+	}
+	for index := range result.Segments {
+		result.Segments[index].RepresentativeFrames = bySegment[fmt.Sprintf("s%03d", index)]
 	}
 }
 

@@ -12,8 +12,9 @@ import (
 // fallback 主线用它保持与引擎侧完全一致的上报行为(领域只管编排序列,上报仍归引擎)。
 type RunReportedFunc func(ctx context.Context, name string, input any) (any, error)
 
-// FallbackMainline 是无模型密钥兜底下的确定性「混剪主线」:列可用视觉素材 → 逐个理解
-// → 原子插入初版时间线 → 起预览。领域编排归领域包,引擎侧只保留关键词委托与非域兜底。
+// FallbackMainline 是无模型密钥兜底下的确定性「混剪主线」:列可用视觉素材 →
+// 原子插入初版时间线 → 起预览。基础镜头索引由 ingest 后的低优先级 worker
+// 独立建立；兜底编辑不能重复排分析任务或等待 VLM。
 func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runReported RunReportedFunc) (string, error) {
 	listed, err := exec.ToolListAssets(ctx, draftID, rushestools.AssetListInput{OnlyUsable: BoolPointer(true)})
 	if err != nil {
@@ -27,28 +28,6 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 	}
 	if len(visualAssets) == 0 {
 		return "当前草稿还没有可用的视频或图片素材，请先导入素材。", nil
-	}
-	understandIDs := []string{}
-	for _, asset := range visualAssets {
-		if asset.UnderstandingStatus != "ready" {
-			understandIDs = append(understandIDs, asset.AssetID)
-		}
-	}
-	if len(understandIDs) > 0 {
-		for _, assetID := range understandIDs {
-			output, err := runReported(ctx, "media.detect_shots", rushestools.DetectShotsInput{
-				AssetID: assetID, Depth: "scan", Focus: "混剪可用画面",
-			})
-			if err != nil {
-				return "", err
-			}
-			if err := requireFallbackToolStatus(
-				"media.detect_shots", output,
-				string(rushestools.StatusSucceeded),
-			); err != nil {
-				return "", err
-			}
-		}
 	}
 	for _, asset := range visualAssets {
 		endFrame := asset.DurationFrames
@@ -95,7 +74,7 @@ func (exec *Executor) FallbackMainline(ctx context.Context, draftID string, runR
 	); err != nil {
 		return "", err
 	}
-	return "已完成素材理解、初版时间线与预览渲染。", nil
+	return "已完成初版时间线与预览渲染；基础镜头索引由后台独立建立。", nil
 }
 
 func requireFallbackToolStatus(

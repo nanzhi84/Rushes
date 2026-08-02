@@ -105,8 +105,8 @@ function makeFixtures(): void {
   for (const [name, source] of [
     ["path3-fixture.mp4", "testsrc2=size=320x568:rate=30:duration=2"],
     ["path3-fixture-2.mp4", "color=c=blue:size=320x568:rate=30:duration=2"],
-    ["understanding-cancel-a.mp4", "color=c=red:size=320x568:rate=30:duration=2"],
-    ["understanding-cancel-b.mp4", "color=c=green:size=320x568:rate=30:duration=2"]
+    ["auto-index-a.mp4", "color=c=red:size=320x568:rate=30:duration=2"],
+    ["auto-index-b.mp4", "color=c=green:size=320x568:rate=30:duration=2"]
   ] as const) {
     execFileSync(
       "ffmpeg",

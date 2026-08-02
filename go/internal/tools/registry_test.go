@@ -294,7 +294,6 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 
 	typedAdapters := map[string]bool{
 		"asset.list_assets":          true,
-		"media.detect_shots":         false,
 		"shot.search":                true,
 		"speech.search":              false,
 		"interaction.ask_user":       false,
@@ -364,7 +363,7 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 	if _, exists := registry.ModelReceiptPolicy("asset.import_local_file"); exists {
 		t.Fatal("harness 工具不得有模型回执策略")
 	}
-	for _, name := range []string{"timeline.inspect", "timeline.check"} {
+	for _, name := range []string{"media.detect_shots", "timeline.inspect", "timeline.check"} {
 		spec, exists := registry.Spec(name)
 		if !exists || spec.Exposure != ExposureHarness {
 			t.Fatalf("%s exposure=%q exists=%v", name, spec.Exposure, exists)
@@ -831,11 +830,8 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 		"asset.list_assets": {
 			"当前草稿", "可用素材",
 		},
-		"media.detect_shots": {
-			"一个 asset_id", "相同参数默认复用", "force_refresh",
-		},
 		"shot.search": {
-			"detection_candidates", "media.detect_shots", "禁止把候选素材臆造为 shot_id",
+			"detection_candidates", "后台索引尚未完成", "禁止把候选素材臆造为 shot_id",
 		},
 		"plan.update": {
 			"RFC 7396", "reset=true", "跨回合",

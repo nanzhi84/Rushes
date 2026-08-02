@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/contracts"
 	"github.com/nanzhi84/Rushes/go/internal/reducer"
@@ -38,6 +40,7 @@ func RegisterUnderstand(
 		job Job,
 		report ProgressReporter,
 	) (map[string]any, error) {
+		startedAt := time.Now()
 		payload, err := decodeUnderstandPayload(job.Payload)
 		if err != nil {
 			return nil, fmt.Errorf("understand job payload 无效: %w", err)
@@ -49,19 +52,52 @@ func RegisterUnderstand(
 		if job.AssetID == nil || strings.TrimSpace(*job.AssetID) != assetID {
 			return nil, errors.New("understand job 的 payload asset_id 与 job asset_id 不一致")
 		}
-		focus := payload.Focus
-		depth := payload.Depth
-		maxSteps := payload.MaxStepsPerAsset
+		focus := ""
+		depth := "scan"
+		maxSteps := 0
 		forceRefresh := payload.ForceRefresh
 		asset, err := storage.GetAsset(ctx, database.Read(), assetID)
 		if err != nil {
 			return nil, err
+		}
+		fingerprint := understanding.BaseIndexFingerprint(asset)
+		if payload.AnalysisFingerprint != "" && payload.AnalysisFingerprint != fingerprint {
+			return nil, errors.New("understand job 的 analysis_fingerprint 与基础索引契约不一致")
 		}
 		reportCompleted := func(stage string) error {
 			return report(ctx, job, ProgressUpdate{
 				Progress: 1, CurrentAssetID: assetID, Done: 1, Total: 1,
 				Stage: stage, Detail: fmt.Sprintf("理解素材：%s 已完成", asset.Filename),
 			})
+		}
+		if !forceRefresh {
+			if snapshot, cacheErr := storage.ReadyShotIndexByContentHash(
+				ctx, database.Read(), asset.Hash,
+			); cacheErr == nil {
+				if err := materializeReadyBaseIndex(
+					ctx, database, asset, snapshot, claimedJobOptions(job, reducer.Options{}),
+				); err != nil {
+					return nil, err
+				}
+				shots, err := storage.ListShotIndexShots(ctx, database.Read(), snapshot.ID)
+				if err != nil {
+					return nil, err
+				}
+				if err := reportCompleted("cache_hit"); err != nil {
+					return nil, err
+				}
+				slog.Info("基础镜头索引完成", "analysis_type", "shot_base_index",
+					"asset_content_hash", asset.Hash, "index_snapshot_id", snapshot.ID,
+					"cache_hit", true, "shot_count", len(shots), "frame_count", countIndexedFrames(shots),
+					"duration_ms", time.Since(startedAt).Milliseconds(), "status", "succeeded")
+				return map[string]any{
+					"asset_id": assetID, "cache_hit": true, "analyzed": false,
+					"status": "succeeded", "index_snapshot_id": snapshot.ID,
+					"shot_count": len(shots), "frame_count": countIndexedFrames(shots),
+				}, nil
+			} else if !errors.Is(cacheErr, storage.ErrNotFound) {
+				return nil, cacheErr
+			}
 		}
 		summaryID := fmt.Sprintf("summary_%s_%s", assetID, job.ID)
 		var summaryExists int
@@ -82,22 +118,6 @@ func RegisterUnderstand(
 		options := understanding.NormalizeAnalyzeOptions(asset, understanding.AnalyzeOptions{
 			Focus: focus, Depth: depth, MaxStepsPerAsset: maxSteps,
 		})
-		fingerprint := understanding.AnalysisFingerprint(asset, options)
-		if !forceRefresh {
-			if _, cacheErr := storage.MaterialSummaryByFingerprint(
-				ctx, database.Read(), assetID, fingerprint,
-			); cacheErr == nil {
-				if err := reportCompleted("cache_hit"); err != nil {
-					return nil, err
-				}
-				return map[string]any{
-					"asset_id": assetID, "cache_hit": true,
-					"analyzed": false, "status": "succeeded",
-				}, nil
-			} else if !errors.Is(cacheErr, storage.ErrNotFound) {
-				return nil, cacheErr
-			}
-		}
 		if _, err := reducer.Apply(ctx, database, []contracts.Event{{
 			Type: "MaterialUnderstandingStarted", Payload: map[string]any{
 				"asset_id": assetID, "job_id": job.ID, "attempt": job.Attempts,
@@ -135,33 +155,64 @@ func RegisterUnderstand(
 			}}, claimedJobOptions(job, reducer.Options{}))
 			return nil, errors.Join(fmt.Errorf("素材 %s 理解失败: %w", assetID, err), failureErr)
 		}
-		var summaryMap map[string]any
-		data, _ := json.Marshal(summary)
-		_ = json.Unmarshal(data, &summaryMap)
-		result, err := reducer.Apply(ctx, database, []contracts.Event{{
-			Type: "MaterialUnderstandingCompleted", Payload: map[string]any{
-				"asset_id": assetID, "job_id": job.ID, "attempt": job.Attempts,
-				"summary_id": summaryID,
-			},
-		}}, claimedJobOptions(job, reducer.Options{
-			ResultRows: reducer.ResultRows{MaterialSummaries: []reducer.MaterialSummaryRow{{
-				ID: summaryID, AssetID: assetID, Version: 0, Focus: understandStringPointer(options.Focus),
-				Status: "ready", Summary: summaryMap,
-				Model: understandStringPointer(summary.Model), Fingerprint: understandStringPointer(fingerprint),
-				PromptVersion: understandStringPointer(understanding.PromptVersion),
-			}}},
-		}))
-		if err != nil || result.Status != reducer.StatusApplied {
-			return nil, errors.Join(err, fmt.Errorf("understand reducer status: %s", result.Status))
+		if asset.Kind != "video" {
+			var summaryMap map[string]any
+			data, _ := json.Marshal(summary)
+			_ = json.Unmarshal(data, &summaryMap)
+			result, persistErr := reducer.Apply(ctx, database, []contracts.Event{{
+				Type: "MaterialUnderstandingCompleted", Payload: map[string]any{
+					"asset_id": assetID, "job_id": job.ID, "attempt": job.Attempts,
+					"summary_id": summaryID,
+				},
+			}}, claimedJobOptions(job, reducer.Options{ResultRows: reducer.ResultRows{
+				MaterialSummaries: []reducer.MaterialSummaryRow{{
+					ID: summaryID, AssetID: assetID, Status: "ready", Summary: summaryMap,
+					Model:         understandStringPointer(summary.Model),
+					Fingerprint:   understandStringPointer(fingerprint),
+					PromptVersion: understandStringPointer(understanding.PromptVersion),
+				}},
+			}}))
+			if persistErr != nil || result.Status != reducer.StatusApplied {
+				return nil, errors.Join(persistErr, fmt.Errorf("understand reducer status: %s", result.Status))
+			}
+			if err := reportCompleted("completed"); err != nil {
+				return nil, err
+			}
+			return map[string]any{
+				"asset_id": assetID, "cache_hit": false, "analyzed": true, "status": "succeeded",
+			}, nil
+		}
+		snapshot, frameCount, err := publishBaseShotIndex(
+			ctx, database, job, asset, summary, fingerprint, summaryID,
+		)
+		if err != nil {
+			return nil, err
 		}
 		if err := reportCompleted("completed"); err != nil {
 			return nil, err
 		}
+		shots, err := storage.ListShotIndexShots(ctx, database.Read(), snapshot.ID)
+		if err != nil {
+			return nil, err
+		}
+		slog.Info("基础镜头索引完成", "analysis_type", "shot_base_index",
+			"asset_content_hash", asset.Hash, "index_snapshot_id", snapshot.ID,
+			"cache_hit", false, "shot_count", len(shots), "frame_count", frameCount,
+			"duration_ms", time.Since(startedAt).Milliseconds(), "status", "succeeded")
 		return map[string]any{
 			"asset_id": assetID, "cache_hit": false,
-			"analyzed": true, "status": "succeeded",
+			"analyzed": true, "status": "succeeded", "index_snapshot_id": snapshot.ID,
+			"shot_count": len(shots), "frame_count": frameCount,
 		}, nil
 	})
+}
+
+func countIndexedFrames(shots []storage.IndexedShot) int {
+	total := 0
+	for _, shot := range shots {
+		total += len(shot.RepresentativeFrames)
+	}
+	return total
 }
 
 func decodeUnderstandPayload(value map[string]any) (understandPayload, error) {

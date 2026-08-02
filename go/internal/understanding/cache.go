@@ -12,7 +12,7 @@ import (
 
 // PromptVersion participates in the persistent material-understanding cache key.
 // Bump it whenever the stored semantic shape or VLM instructions materially change.
-const PromptVersion = "go-shot-context-v4"
+const PromptVersion = "go-shot-base-index-v5"
 
 // NormalizeAnalyzeOptions keeps long videos from being accidentally reduced to a
 // handful of windows by a shallow model-authored max_steps_per_asset value.

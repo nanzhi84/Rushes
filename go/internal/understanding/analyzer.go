@@ -17,29 +17,38 @@ import (
 
 type ProgressFunc func(note string)
 
+type RepresentativeFrame struct {
+	SourceFrame int    `json:"source_frame"`
+	TimestampMS int64  `json:"timestamp_ms"`
+	Position    string `json:"position"`
+	ObjectHash  string `json:"object_hash"`
+	ObjectSize  int64  `json:"object_size"`
+}
+
 type Segment struct {
-	StartSec         float64  `json:"start_s"`
-	EndSec           float64  `json:"end_s"`
-	SourceStartFrame int      `json:"source_start_frame"`
-	SourceEndFrame   int      `json:"source_end_frame"`
-	Description      string   `json:"description"`
-	Transcript       *string  `json:"transcript"`
-	Tags             []string `json:"tags"`
-	Quality          string   `json:"quality"`
-	Notes            *string  `json:"notes"`
-	BoundaryKind     string   `json:"boundary_kind,omitempty"`
-	BoundaryScore    *float64 `json:"boundary_score,omitempty"`
-	BoundaryVerified bool     `json:"boundary_verified,omitempty"`
-	Subjects         []string `json:"subjects,omitempty"`
-	Actions          []string `json:"actions,omitempty"`
-	Setting          []string `json:"setting,omitempty"`
-	ShotScale        string   `json:"shot_scale,omitempty"`
-	Composition      string   `json:"composition,omitempty"`
-	Lighting         []string `json:"lighting,omitempty"`
-	Mood             []string `json:"mood,omitempty"`
-	EditHints        []string `json:"edit_hints,omitempty"`
-	OverexposedRatio *float64 `json:"overexposed_ratio,omitempty"`
-	SharpnessScore   *float64 `json:"sharpness_score,omitempty"`
+	StartSec             float64               `json:"start_s"`
+	EndSec               float64               `json:"end_s"`
+	SourceStartFrame     int                   `json:"source_start_frame"`
+	SourceEndFrame       int                   `json:"source_end_frame"`
+	Description          string                `json:"description"`
+	Transcript           *string               `json:"transcript"`
+	Tags                 []string              `json:"tags"`
+	Quality              string                `json:"quality"`
+	Notes                *string               `json:"notes"`
+	BoundaryKind         string                `json:"boundary_kind,omitempty"`
+	BoundaryScore        *float64              `json:"boundary_score,omitempty"`
+	BoundaryVerified     bool                  `json:"boundary_verified,omitempty"`
+	Subjects             []string              `json:"subjects,omitempty"`
+	Actions              []string              `json:"actions,omitempty"`
+	Setting              []string              `json:"setting,omitempty"`
+	ShotScale            string                `json:"shot_scale,omitempty"`
+	Composition          string                `json:"composition,omitempty"`
+	Lighting             []string              `json:"lighting,omitempty"`
+	Mood                 []string              `json:"mood,omitempty"`
+	EditHints            []string              `json:"edit_hints,omitempty"`
+	OverexposedRatio     *float64              `json:"overexposed_ratio,omitempty"`
+	SharpnessScore       *float64              `json:"sharpness_score,omitempty"`
+	RepresentativeFrames []RepresentativeFrame `json:"representative_frames,omitempty"`
 }
 
 type Summary struct {

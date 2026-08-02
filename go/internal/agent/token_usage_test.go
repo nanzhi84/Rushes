@@ -267,10 +267,10 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 }
 
 const (
-	// Issue #157 PR3 reviewed baseline: on-demand beat/pause/transcript analysis
-	// moved to the Harness, reducing the LLM catalog from 19 tools / 18,828 runes
-	// to 16 tools / 16,972 runes.
-	modelToolSchemaTotalBaselineRunes = 16972
+	// Issue #157 PR4 reviewed baseline: base shot indexing moved behind ingest
+	// and media.detect_shots left the model surface, reducing the LLM catalog
+	// from 16 tools / 16,972 runes to 15 tools / 16,127 runes.
+	modelToolSchemaTotalBaselineRunes = 16127
 	maxAtomicTimelineToolSchemaRunes  = 4400
 )
 
@@ -279,13 +279,12 @@ var modelToolSchemaBaselineRunes = map[string]int{
 	"decision.answer":            566,
 	"interaction.ask_user":       1079,
 	"interaction.confirm_action": 387,
-	"media.detect_shots":         829,
 	"memory.remove":              418,
 	"memory.set":                 929,
 	"plan.update":                1573,
 	"preview.check":              420,
 	"preview.generate":           446,
-	"shot.search":                964,
+	"shot.search":                948,
 	"speech.search":              1138,
 	"timeline.delete":            1299,
 	"timeline.insert":            1662,
