@@ -267,10 +267,10 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 }
 
 const (
-	// Issue #157 PR4 reviewed baseline: base shot indexing moved behind ingest
-	// and media.detect_shots left the model surface, reducing the LLM catalog
-	// from 16 tools / 16,972 runes to 15 tools / 16,127 runes.
-	modelToolSchemaTotalBaselineRunes = 16127
+	// Issue #157 PR5 reviewed baseline: shot.search replaced partial pagination
+	// with top_k plus a frozen search-ready snapshot contract. The catalog stays
+	// at 15 tools while the schema contracts from 16,127 to 16,100 runes.
+	modelToolSchemaTotalBaselineRunes = 16100
 	maxAtomicTimelineToolSchemaRunes  = 4400
 )
 
@@ -284,7 +284,7 @@ var modelToolSchemaBaselineRunes = map[string]int{
 	"plan.update":                1573,
 	"preview.check":              420,
 	"preview.generate":           446,
-	"shot.search":                948,
+	"shot.search":                921,
 	"speech.search":              1138,
 	"timeline.delete":            1299,
 	"timeline.insert":            1662,

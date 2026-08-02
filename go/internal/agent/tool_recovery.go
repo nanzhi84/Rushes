@@ -1062,7 +1062,7 @@ func validTypedToolRecoveryResult(
 ) bool {
 	requiredFields := map[string][]string{
 		"asset.list_assets":           {"draft_id", "assets", "total"},
-		"shot.search":                 {"shots", "total_matches", "page_start", "remaining_matches", "truncated"},
+		"shot.search":                 {"status", "index_snapshot_id", "synonym_version", "frozen_asset_ids", "search_ready", "shots", "total_matches", "returned_candidates", "truncated"},
 		"audio.analyze_beats":         {"asset_id", "timeline_fps", "beat_frames"},
 		"audio.analyze_speech_pauses": {"timeline_fps", "pauses"},
 		"speech.transcribe":           {"transcript_id", "asset_id", "timeline_fps"},
@@ -1119,19 +1119,24 @@ func validTypedToolRecoveryResult(
 		}
 		rawShots, hasShots := payload["shots"]
 		var encodedShots []json.RawMessage
-		if !hasShots || json.Unmarshal(rawShots, &encodedShots) != nil {
+		if !hasShots || json.Unmarshal(rawShots, &encodedShots) != nil || encodedShots == nil {
 			return false
 		}
-		for _, field := range []string{"total_matches", "page_start", "remaining_matches"} {
+		for _, field := range []string{"total_matches", "returned_candidates"} {
 			if !validJSONInteger(payload[field]) {
 				return false
 			}
 		}
-		if !validJSONBoolean(payload["truncated"]) {
+		if !validJSONBoolean(payload["truncated"]) || !validJSONBoolean(payload["search_ready"]) {
 			return false
 		}
 		var result rushestools.ShotSearchResult
-		if json.Unmarshal([]byte(raw), &result) != nil || result.TotalMatches < 0 ||
+		if json.Unmarshal([]byte(raw), &result) != nil ||
+			result.Status != string(rushestools.StatusSucceeded) || !result.SearchReady ||
+			strings.TrimSpace(result.ErrorCode) != "" || strings.TrimSpace(result.IndexSnapshotID) == "" ||
+			strings.TrimSpace(result.SynonymVersion) == "" || result.FrozenAssetIDs == nil ||
+			result.TotalMatches < 0 || result.ReturnedCandidates < 0 ||
+			result.ReturnedCandidates != len(result.Shots) ||
 			len(result.Shots) > result.TotalMatches ||
 			strings.TrimSpace(result.Query) != strings.TrimSpace(
 				agentexec.InterfaceString(toolArgumentsObject(arguments)["query"]),
@@ -1144,36 +1149,55 @@ func validTypedToolRecoveryResult(
 		argumentMap := toolArgumentsObject(arguments)
 		minDuration := int(positiveInteger(argumentMap["min_duration_frames"]))
 		maxDuration := int(positiveInteger(argumentMap["max_duration_frames"]))
-		limit := int(positiveInteger(argumentMap["limit"]))
-		if limit == 0 {
-			limit = 20
+		topK := int(positiveInteger(argumentMap["top_k"]))
+		if topK == 0 {
+			topK = 12
 		}
-		if limit > 100 {
-			limit = 100
-		}
-		if len(result.Shots) > limit {
+		if topK > 30 {
 			return false
 		}
-		afterShotID := strings.TrimSpace(agentexec.InterfaceString(argumentMap["after_shot_id"]))
-		if result.PageStart < 0 || result.RemainingMatches < 0 ||
-			result.PageStart+len(result.Shots)+result.RemainingMatches != result.TotalMatches ||
-			(afterShotID == "" && (result.PageStart != 0 || result.PageAfterShotID != "")) ||
-			(afterShotID != "" && (result.PageStart <= 0 || result.PageAfterShotID != afterShotID)) ||
-			result.Truncated != (result.RemainingMatches > 0) {
+		if len(result.Shots) > topK || result.Truncated != (len(result.Shots) < result.TotalMatches) {
 			return false
+		}
+		frozenAssets := make(map[string]struct{}, len(result.FrozenAssetIDs))
+		for _, assetID := range result.FrozenAssetIDs {
+			assetID = strings.TrimSpace(assetID)
+			if assetID == "" {
+				return false
+			}
+			if _, duplicate := frozenAssets[assetID]; duplicate {
+				return false
+			}
+			frozenAssets[assetID] = struct{}{}
+		}
+		if len(requestedAssets) > 0 {
+			if len(frozenAssets) != len(requestedAssets) {
+				return false
+			}
+			for assetID := range requestedAssets {
+				if _, frozen := frozenAssets[assetID]; !frozen {
+					return false
+				}
+			}
 		}
 		seenShotIDs := make(map[string]struct{}, len(result.Shots))
 		for _, shot := range result.Shots {
 			shotID := strings.TrimSpace(shot.ShotID)
-			if shotID == "" || strings.TrimSpace(shot.AssetID) == "" || shotID == afterShotID ||
+			identity := strings.TrimSpace(shot.AssetID) + "\x00" + shotID
+			if shotID == "" || strings.TrimSpace(shot.AssetID) == "" ||
+				shot.IndexSnapshotID != result.IndexSnapshotID || shot.BoundaryVersion < 1 ||
 				shot.SourceEndFrame <= shot.SourceStartFrame ||
-				shot.DurationFrames != shot.SourceEndFrame-shot.SourceStartFrame {
+				shot.DurationFrames != shot.SourceEndFrame-shot.SourceStartFrame ||
+				shot.Score < 0 || shot.Score > 1 {
 				return false
 			}
-			if _, duplicate := seenShotIDs[shotID]; duplicate {
+			if _, duplicate := seenShotIDs[identity]; duplicate {
 				return false
 			}
-			seenShotIDs[shotID] = struct{}{}
+			seenShotIDs[identity] = struct{}{}
+			if _, frozen := frozenAssets[shot.AssetID]; !frozen {
+				return false
+			}
 			if len(requestedAssets) != 0 {
 				if _, requested := requestedAssets[shot.AssetID]; !requested {
 					return false
@@ -1197,15 +1221,7 @@ func validTypedToolRecoveryResult(
 				return false
 			}
 		}
-		if result.Truncated {
-			return len(result.Shots) == limit && len(result.Shots) > 0 &&
-				result.NextAfterShotID == result.Shots[len(result.Shots)-1].ShotID &&
-				result.TotalMatches > len(result.Shots)
-		}
-		if result.NextAfterShotID != "" {
-			return false
-		}
-		return result.PageStart+len(result.Shots) == result.TotalMatches
+		return !result.Truncated || len(result.Shots) == topK
 	case "audio.analyze_beats":
 		if !fullRequestBound {
 			return false

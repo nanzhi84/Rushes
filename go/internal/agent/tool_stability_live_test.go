@@ -2118,7 +2118,7 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 			MaxSteps: 8,
 			AllowedTools: []string{
 				"plan.update",
-				"asset.list_assets", "media.detect_shots", "shot.search", "timeline.insert",
+				"asset.list_assets", "shot.search", "timeline.insert",
 			},
 			RequiredEvidence: []string{"asset.list_assets", "shot.search"},
 		},
@@ -2131,7 +2131,7 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 			MaxSteps: 10,
 			AllowedTools: []string{
 				"plan.update",
-				"asset.list_assets", "media.detect_shots", "shot.search",
+				"asset.list_assets", "shot.search",
 				"timeline.insert",
 			},
 			RequiredEvidence: []string{"shot.search"},
@@ -2150,7 +2150,7 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 			MaxSteps: 20,
 			AllowedTools: []string{
 				"plan.update",
-				"asset.list_assets", "media.detect_shots", "speech.search",
+				"asset.list_assets", "speech.search",
 				"shot.search", "timeline.delete", "timeline.insert", "timeline.update",
 			},
 			RequiredEvidence: []string{"speech.search", "shot.search"},
@@ -2170,7 +2170,7 @@ func scriptedLiveWorkflowSteps(
 			{Name: "list_assets", ExpectedTool: "asset.list_assets", ExpectedArguments: map[string]any{}},
 			{Name: "search_shots", ExpectedTool: "shot.search", ExpectedArguments: map[string]any{
 				"query": "城市 山峰", "semantic_roles": []any{"b_roll"},
-				"min_duration_frames": 45, "limit": 8,
+				"min_duration_frames": 45, "top_k": 8,
 			}},
 			{Name: "insert_city", ExpectedTool: "timeline.insert", ExpectedArguments: map[string]any{
 				"kind": "insert_clip", "asset_id": fixture.PrimaryID,
@@ -2185,7 +2185,7 @@ func scriptedLiveWorkflowSteps(
 		return []scriptedWorkflowStep{
 			{Name: "search_shots", ExpectedTool: "shot.search", ExpectedArguments: map[string]any{
 				"query": "城市 山峰", "semantic_roles": []any{"b_roll"},
-				"min_duration_frames": 60, "limit": 8,
+				"min_duration_frames": 60, "top_k": 8,
 			}},
 			{Name: "insert_first_visual", ExpectedTool: "timeline.insert", ExpectedArguments: map[string]any{
 				"kind": "insert_clip", "asset_id": fixture.PrimaryID,
@@ -2206,7 +2206,7 @@ func scriptedLiveWorkflowSteps(
 				"asset_id": fixture.PrimaryID, "include_words": true,
 			}},
 			{Name: "search_broll", ExpectedTool: "shot.search", ExpectedArguments: map[string]any{
-				"query": "键盘 同色键帽 指纹按键", "min_duration_frames": 45, "limit": 5,
+				"query": "键盘 同色键帽 指纹按键", "min_duration_frames": 45, "top_k": 5,
 			}},
 			{Name: "delete_earlier_similarity", ExpectedTool: "timeline.delete", ExpectedArguments: map[string]any{
 				"kind": "delete_source_range", "asset_id": fixture.PrimaryID,
@@ -2435,11 +2435,14 @@ func seedLiveWorkflowVideo(
 	if err := transaction.Commit(); err != nil {
 		return fmt.Errorf("提交 video fixture %s: %w", assetID, err)
 	}
+	semanticRole := "b_roll"
 	if description == "" {
-		return nil
+		description = "人物正面口播镜头"
+		tags = "人物 口播"
+		semanticRole = "a_roll"
 	}
 	summary, err := json.Marshal(map[string]any{
-		"asset_id": assetID, "semantic_role": "b_roll", "overall": description,
+		"asset_id": assetID, "semantic_role": semanticRole, "overall": description,
 		"segments": []map[string]any{{
 			"source_start_frame": 0, "source_end_frame": durationFrames,
 			"description": description, "tags": strings.Fields(tags), "quality": "usable",
@@ -2455,6 +2458,33 @@ func seedLiveWorkflowVideo(
 		"summary_"+assetID, assetID, string(summary), "fingerprint_"+assetID, now,
 	); err != nil {
 		return fmt.Errorf("写入 material summary fixture %s: %w", assetID, err)
+	}
+	snapshotID := "shot_index_live_" + assetID
+	snapshotSummary, _ := json.Marshal(map[string]any{"semantic_role": semanticRole})
+	if _, err := service.database.Write().ExecContext(ctx, `
+		INSERT INTO shot_index_snapshots(
+			index_snapshot_id,asset_content_hash,generation,analyzer_version,
+			output_schema_version,source_asset_id,status,summary_json,created_at,published_at
+		) VALUES(?,?,1,'live-workflow-v1',1,?,'ready',?,?,?)`,
+		snapshotID, assetID, assetID, string(snapshotSummary), now, now,
+	); err != nil {
+		return fmt.Errorf("写入 shot snapshot fixture %s: %w", assetID, err)
+	}
+	encodedTags, _ := json.Marshal(strings.Fields(tags))
+	if _, err := service.database.Write().ExecContext(ctx, `
+		INSERT INTO shots(
+			index_snapshot_id,shot_id,asset_content_hash,source_start_frame,source_end_frame,
+			boundary_version,boundary_kind,boundary_confidence,lineage_parent_shot_id,
+			representative_frames_json,description,tags_json,subjects_json,actions_json,
+			setting_json,shot_scale,composition,lighting_json,mood_json,edit_hints_json,
+			quality_json,search_text,search_tokens_json,deep_coverage_json,created_at
+		) VALUES(?,?,?,0,?,1,'fixture',1,NULL,'[]',?,?,'["画面主体"]','["展示"]',
+			?,'中景','居中构图','[]','[]','[]','{"label":"usable"}',?,?,'[]',?)`,
+		snapshotID, "shot_live_"+assetID, assetID, durationFrames,
+		description, string(encodedTags), string(encodedTags),
+		description+" "+tags, string(encodedTags), now,
+	); err != nil {
+		return fmt.Errorf("写入 shot row fixture %s: %w", assetID, err)
 	}
 	return nil
 }

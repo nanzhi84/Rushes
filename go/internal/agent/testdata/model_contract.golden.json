@@ -380,20 +380,24 @@
     },
     {
       "name": "shot.search",
-      "description": "只读搜索既有镜头索引；按创作意图返回稳定 shot_id、精确源帧、语义与匹配证据。未建立索引的素材只会列为 detection_candidates；告知用户后台索引尚未完成并稍后重搜，禁止把候选素材臆造为 shot_id",
+      "description": "在一次调用开始时冻结目标视频素材，等待其基础镜头索引全部 search_ready 后，对固定 index_snapshot_id 执行无 embedding 的只读文字检索；返回稳定 ShotRef、权威源帧、分数与字段证据，绝不返回部分索引或伪候选",
       "completion_semantics": "terminal_only",
-      "typed_success_adapter": true,
+      "typed_success_adapter": false,
       "parameters": {
         "properties": {
           "query": {
             "description": "创作意图或画面语义，例如 夜晚火焰人物快速动作，适合高潮强拍",
             "type": "string"
           },
+          "top_k": {
+            "description": "返回候选数，默认 12；精确搜索约 5，宽泛探索约 20；范围 1 到 30",
+            "type": "integer"
+          },
           "asset_ids": {
             "items": {
               "type": "string"
             },
-            "description": "可选；只检索这些视频素材",
+            "description": "可选；冻结并只检索这些当前草稿内可用的视频素材；省略时冻结全部可用视频素材",
             "type": "array"
           },
           "semantic_roles": {
@@ -407,28 +411,20 @@
             "items": {
               "type": "string"
             },
-            "description": "可选；主体、动作、场景或氛围标签，任一匹配即可",
+            "description": "可选；主体、动作、场景或氛围标签，至少一项须匹配",
             "type": "array"
           },
           "min_duration_frames": {
-            "description": "镜头源区间最短帧数",
+            "description": "镜头权威源区间的最短帧数",
             "type": "integer"
           },
           "max_duration_frames": {
-            "description": "镜头源区间最长帧数；0 表示不限",
+            "description": "镜头权威源区间的最长帧数；0 表示不限",
             "type": "integer"
           },
           "exclude_used": {
             "description": "排除与当前时间线已使用源区间重叠的镜头",
             "type": "boolean"
-          },
-          "limit": {
-            "description": "返回数量，默认 20，上限 100",
-            "type": "integer"
-          },
-          "after_shot_id": {
-            "description": "继续读取上一页时传入其 next_after_shot_id；必须仍属于同一组查询条件",
-            "type": "string"
           }
         },
         "additionalProperties": false,

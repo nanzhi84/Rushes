@@ -174,74 +174,59 @@ type DetectShotsResult struct {
 
 type ShotSearchInput struct {
 	Query             string   `json:"query,omitempty" jsonschema_description:"创作意图或画面语义，例如 夜晚火焰人物快速动作，适合高潮强拍"`
-	AssetIDs          []string `json:"asset_ids,omitempty" jsonschema_description:"可选；只检索这些视频素材"`
+	TopK              int      `json:"top_k,omitempty" jsonschema_description:"返回候选数，默认 12；精确搜索约 5，宽泛探索约 20；范围 1 到 30"`
+	AssetIDs          []string `json:"asset_ids,omitempty" jsonschema_description:"可选；冻结并只检索这些当前草稿内可用的视频素材；省略时冻结全部可用视频素材"`
 	SemanticRoles     []string `json:"semantic_roles,omitempty" jsonschema_description:"可选；只检索 a_roll 或 b_roll 镜头，可同时传多个"`
-	Tags              []string `json:"tags,omitempty" jsonschema_description:"可选；主体、动作、场景或氛围标签，任一匹配即可"`
-	MinDurationFrames int      `json:"min_duration_frames,omitempty" jsonschema_description:"镜头源区间最短帧数"`
-	MaxDurationFrames int      `json:"max_duration_frames,omitempty" jsonschema_description:"镜头源区间最长帧数；0 表示不限"`
+	Tags              []string `json:"tags,omitempty" jsonschema_description:"可选；主体、动作、场景或氛围标签，至少一项须匹配"`
+	MinDurationFrames int      `json:"min_duration_frames,omitempty" jsonschema_description:"镜头权威源区间的最短帧数"`
+	MaxDurationFrames int      `json:"max_duration_frames,omitempty" jsonschema_description:"镜头权威源区间的最长帧数；0 表示不限"`
 	ExcludeUsed       bool     `json:"exclude_used,omitempty" jsonschema_description:"排除与当前时间线已使用源区间重叠的镜头"`
-	Limit             int      `json:"limit,omitempty" jsonschema_description:"返回数量，默认 20，上限 100"`
-	AfterShotID       string   `json:"after_shot_id,omitempty" jsonschema_description:"继续读取上一页时传入其 next_after_shot_id；必须仍属于同一组查询条件"`
 }
 
 type ShotCandidate struct {
-	ShotID            string   `json:"shot_id"`
-	AssetID           string   `json:"asset_id"`
-	Filename          string   `json:"filename"`
-	SourceStartFrame  int      `json:"source_start_frame"`
-	SourceEndFrame    int      `json:"source_end_frame"`
-	DurationFrames    int      `json:"duration_frames"`
-	SemanticRole      string   `json:"semantic_role,omitempty"`
-	Description       string   `json:"description,omitempty"`
-	Tags              []string `json:"tags,omitempty"`
-	Quality           string   `json:"quality,omitempty"`
-	Subjects          []string `json:"subjects,omitempty"`
-	Actions           []string `json:"actions,omitempty"`
-	Setting           []string `json:"setting,omitempty"`
-	ShotScale         string   `json:"shot_scale,omitempty"`
-	Composition       string   `json:"composition,omitempty"`
-	Lighting          []string `json:"lighting,omitempty"`
-	Mood              []string `json:"mood,omitempty"`
-	EditHints         []string `json:"edit_hints,omitempty"`
-	Transcript        string   `json:"transcript,omitempty"`
-	OverexposedRatio  *float64 `json:"overexposed_ratio,omitempty"`
-	SharpnessScore    *float64 `json:"sharpness_score,omitempty"`
-	BoundaryKind      string   `json:"boundary_kind,omitempty"`
-	BoundaryVerified  bool     `json:"boundary_verified,omitempty"`
-	MatchedQueryTerms []string `json:"matched_query_terms,omitempty"`
-	MatchEvidence     []string `json:"match_evidence,omitempty"`
-	SegmentScore      float64  `json:"segment_score,omitempty"`
-	AssetScore        float64  `json:"asset_score,omitempty"`
-	Score             float64  `json:"score"`
-}
-
-// ShotDetectionCandidate exposes assets whose filename/path matches the
-// current visual intent but which do not have a shot index yet. It is
-// deliberately not a shot: callers must understand the asset and search again
-// before they can obtain a valid shot_id or source range.
-type ShotDetectionCandidate struct {
-	AssetID           string   `json:"asset_id"`
-	Filename          string   `json:"filename"`
-	RelDir            string   `json:"rel_dir,omitempty"`
-	DurationFrames    int      `json:"duration_frames,omitempty"`
-	SemanticRole      string   `json:"semantic_role,omitempty"`
-	MatchedQueryTerms []string `json:"matched_query_terms,omitempty"`
-	MatchEvidence     []string `json:"match_evidence,omitempty"`
-	Score             float64  `json:"score"`
+	IndexSnapshotID  string   `json:"index_snapshot_id"`
+	ShotID           string   `json:"shot_id"`
+	AssetID          string   `json:"asset_id"`
+	Filename         string   `json:"filename"`
+	SourceStartFrame int      `json:"source_start_frame"`
+	SourceEndFrame   int      `json:"source_end_frame"`
+	DurationFrames   int      `json:"duration_frames"`
+	BoundaryVersion  int      `json:"boundary_version"`
+	SemanticRole     string   `json:"semantic_role,omitempty"`
+	Description      string   `json:"description"`
+	Tags             []string `json:"tags,omitempty"`
+	Quality          string   `json:"quality,omitempty"`
+	Subjects         []string `json:"subjects,omitempty"`
+	Actions          []string `json:"actions,omitempty"`
+	Setting          []string `json:"setting,omitempty"`
+	ShotScale        string   `json:"shot_scale,omitempty"`
+	Composition      string   `json:"composition,omitempty"`
+	Lighting         []string `json:"lighting,omitempty"`
+	Mood             []string `json:"mood,omitempty"`
+	EditHints        []string `json:"edit_hints,omitempty"`
+	DeepCoverage     []string `json:"deep_coverage,omitempty"`
+	MatchedTerms     []string `json:"matched_terms,omitempty"`
+	MatchEvidence    []string `json:"match_evidence,omitempty"`
+	Score            float64  `json:"score"`
 }
 
 type ShotSearchResult struct {
-	Query                string                   `json:"query,omitempty"`
-	Shots                []ShotCandidate          `json:"shots"`
-	TotalMatches         int                      `json:"total_matches"`
-	PageStart            int                      `json:"page_start"`
-	RemainingMatches     int                      `json:"remaining_matches"`
-	PageAfterShotID      string                   `json:"page_after_shot_id,omitempty"`
-	Truncated            bool                     `json:"truncated"`
-	NextAfterShotID      string                   `json:"next_after_shot_id,omitempty"`
-	IndexCoverageNote    string                   `json:"index_coverage_note,omitempty"`
-	MissingIndexAssetIDs []string                 `json:"missing_index_asset_ids,omitempty"`
-	DetectionCandidates  []ShotDetectionCandidate `json:"detection_candidates,omitempty"`
+	Status             string          `json:"status"`
+	ErrorCode          string          `json:"error_code,omitempty"`
+	Recovery           string          `json:"recovery,omitempty"`
+	Query              string          `json:"query,omitempty"`
+	IndexSnapshotID    string          `json:"index_snapshot_id,omitempty"`
+	SynonymVersion     string          `json:"synonym_version"`
+	FrozenAssetIDs     []string        `json:"frozen_asset_ids"`
+	ReadyAssetIDs      []string        `json:"ready_asset_ids,omitempty"`
+	PendingAssetIDs    []string        `json:"pending_asset_ids,omitempty"`
+	FailedAssetIDs     []string        `json:"failed_asset_ids,omitempty"`
+	SearchReady        bool            `json:"search_ready"`
+	WaitDurationMS     int64           `json:"wait_duration_ms,omitempty"`
+	Shots              []ShotCandidate `json:"shots"`
+	TotalMatches       int             `json:"total_matches"`
+	ReturnedCandidates int             `json:"returned_candidates"`
+	Truncated          bool            `json:"truncated"`
 }
 
 type AudioBeatAnalysisInput struct {

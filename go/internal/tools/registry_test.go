@@ -294,7 +294,7 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 
 	typedAdapters := map[string]bool{
 		"asset.list_assets":          true,
-		"shot.search":                true,
+		"shot.search":                false,
 		"speech.search":              false,
 		"interaction.ask_user":       false,
 		"decision.answer":            false,
@@ -831,7 +831,7 @@ func TestLLMToolDescriptionsRetainOwnedContracts(t *testing.T) {
 			"当前草稿", "可用素材",
 		},
 		"shot.search": {
-			"detection_candidates", "后台索引尚未完成", "禁止把候选素材臆造为 shot_id",
+			"冻结目标视频素材", "search_ready", "index_snapshot_id", "无 embedding", "绝不返回部分索引",
 		},
 		"plan.update": {
 			"RFC 7396", "reset=true", "跨回合",
