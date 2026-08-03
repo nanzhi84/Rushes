@@ -183,8 +183,10 @@ func selectModelToolSurface(
 	userText := latestUserSurfaceText(messages)
 	positiveUserText := withoutNegatedSurfaceActions(userText)
 	if requestsMaterialCatalogOnly(positiveUserText) {
-		// material_catalog is already injected in WorldState. Listing it again via
-		// a provider tool would duplicate deterministic context and waste a round.
+		// Issue #157 D1 明确让 material_catalog 由 WorldState 注入，并永久移除
+		// LLM asset.list_assets。即使有界目录被截断，也只向模型提供总量、类型、
+		// 基础索引状态和确定性优先子集；语义候选继续通过 shot.search / speech.search
+		// 获取，不能为了“完整列举”恢复会复制整份目录的内部工具。
 		return nil, nil
 	}
 	if requestsPreviewBoundaryOnly(positiveUserText) {

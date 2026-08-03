@@ -35,7 +35,7 @@ func TestAutomaticPreviewQARunsFiveCoreChecksInParallelAndStreamsHarnessSteps(t 
 	}
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", false)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", false)
 	if report.Status != "succeeded" || report.TimelineID != timelineID ||
 		len(report.CoreChecks) != len(automaticPreviewCoreChecks) ||
 		report.VisualAdvisory != nil {
@@ -106,7 +106,7 @@ func TestAutomaticPreviewQAVisualIsAdvisoryAndExactVersionRunsOnce(t *testing.T)
 		t.Fatal("模型修复产生新 timeline_id 后应允许重新进入 Preview QA")
 	}
 
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", true)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", true)
 	if report.Status != "succeeded" || !report.Passed || report.VisualAdvisory == nil ||
 		report.VisualAdvisory.Check != "visual" {
 		t.Fatalf("visual advisory report=%#v", report)
@@ -117,6 +117,28 @@ func TestAutomaticPreviewQAVisualIsAdvisoryAndExactVersionRunsOnce(t *testing.T)
 	latest, err := timeline.Latest(t.Context(), database, draftID)
 	if err != nil || latest.TimelineID != timelineID {
 		t.Fatalf("visual advisory 改写时间线: latest=%#v err=%v", latest, err)
+	}
+}
+
+func TestAutomaticPreviewQAGeneratesRequestedPortraitOrientation(t *testing.T) {
+	installAutomaticPreviewQAMediaFixture(t)
+	database, service, draftID, _, timelineID := prepareAutomaticPreviewQAFixtureWithoutJob(t)
+	t.Cleanup(service.Close)
+
+	const previewID = "preview_auto_qa_portrait"
+	source := filepath.Join(database.Paths.Temporary, "automatic-preview-qa-source.mp4")
+	seedAutomaticPreviewQAArtifact(t, database, draftID, previewID, source)
+	seedAutomaticPreviewQACompletedJobForOrientation(
+		t, database, draftID, previewID, "portrait",
+	)
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
+	report := service.executeAutomaticPreviewQA(
+		ctx, draftID, "explicit_preview_or_qa_request", "portrait", false,
+	)
+	if report.Status != "succeeded" || report.TimelineID != timelineID ||
+		report.PreviewID != previewID || report.Orientation != "portrait" {
+		t.Fatalf("portrait report=%#v", report)
 	}
 }
 
@@ -168,17 +190,23 @@ func (stub *automaticPreviewQAReactModel) Generate(
 		}
 	}
 	stub.userCounts = append(stub.userCounts, users)
+	var response *schema.Message
 	switch stub.calls {
 	case 1:
-		return schema.AssistantMessage("已完成，可交付。", nil), nil
+		response = schema.AssistantMessage("已完成，可交付。", nil)
 	case 2:
 		if !stub.sawReport {
 			return nil, errors.New("Harness 报告未作为 system evidence 回灌同一 ReAct transcript")
 		}
-		return schema.AssistantMessage("Preview QA 已通过，工作预览已就绪；最终导出请在 UI 触发。", nil), nil
+		response = schema.AssistantMessage("Preview QA 已通过，工作预览已就绪；最终导出请在 UI 触发。", nil)
 	default:
 		return nil, fmt.Errorf("unexpected provider call %d", stub.calls)
 	}
+	response.ResponseMeta = &schema.ResponseMeta{Usage: &schema.TokenUsage{
+		PromptTokens: stub.calls * 100, CompletionTokens: stub.calls * 10,
+		TotalTokens: stub.calls * 110,
+	}}
+	return response, nil
 }
 
 func (stub *automaticPreviewQAReactModel) Stream(
@@ -230,6 +258,40 @@ func TestAutomaticPreviewQAReportReturnsToModelWithoutSyntheticUserMessage(t *te
 	}
 }
 
+func TestAutomaticPreviewQAInterceptedStreamUsageIsAccountedOnce(t *testing.T) {
+	installAutomaticPreviewQAMediaFixture(t)
+	provider := &automaticPreviewQAReactModel{}
+	_, service, draftID, _, _ := prepareAutomaticPreviewQAFixture(t, provider)
+	t.Cleanup(service.Close)
+
+	budget := newTurnBudgetState(maxToolRoundsPerTurn)
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx = withAutomaticPreviewQAState(ctx, newAutomaticPreviewQAState())
+	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
+	ctx = withToolRecoveryState(ctx, newToolRecoveryState())
+	ctx = withTurnBudgetState(ctx, budget)
+	ctx = withTestTurnLeaseSession(t, service, ctx, draftID)
+	ctx = withModelToolSurfaceSession(ctx)
+	ctx = agentexec.WithTurnInteractionState(
+		ctx, agentexec.NewTurnInteractionState(service.indexedResources),
+	)
+	ctx = rushestools.WithReporter(ctx, service.toolReporter(ctx, draftID))
+	output, err := service.streamAgent(ctx, draftID, "message_usage", []*schema.Message{
+		schema.UserMessage("请生成预览并检查黑帧。"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, "最终导出请在 UI 触发") {
+		t.Fatalf("output=%q", output)
+	}
+	usage := budget.usageSnapshot()
+	if usage["model_calls"] != 2 || usage["prompt_tokens"] != 300 ||
+		usage["completion_tokens"] != 30 || usage["total_tokens"] != 330 {
+		t.Fatalf("intercepted preview QA usage=%#v", usage)
+	}
+}
+
 func TestAutomaticPreviewQARenderFailureLeavesTimelineUnchanged(t *testing.T) {
 	installAutomaticPreviewQAMediaFixture(t)
 	database, service, draftID, _, timelineID := prepareAutomaticPreviewQAFixtureWithoutJob(t)
@@ -239,7 +301,7 @@ func TestAutomaticPreviewQARenderFailureLeavesTimelineUnchanged(t *testing.T) {
 	ctx = rushestools.WithDraftID(ctx, draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
 
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", false)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", false)
 	if report.Status != "render_failed" || len(report.Errors) == 0 {
 		t.Fatalf("report=%#v", report)
 	}
@@ -262,6 +324,23 @@ func TestAutomaticPreviewQATriggerAndClaimBoundaries(t *testing.T) {
 		schema.AssistantMessage("画面视觉检查已完成。", nil),
 	}) {
 		t.Fatal("模型候选措辞不得把五项核心检查升级成 visual advisory")
+	}
+	for _, test := range []struct {
+		prompt string
+		want   string
+	}{
+		{prompt: "请生成竖屏预览。", want: "portrait"},
+		{prompt: "把横屏素材生成竖屏预览。", want: "portrait"},
+		{prompt: "Render a landscape preview.", want: "landscape"},
+		{prompt: "生成 16:9 预览。", want: "landscape"},
+		{prompt: "请生成预览。", want: "auto"},
+		{prompt: "比较横屏和竖屏素材后生成预览。", want: "auto"},
+	} {
+		if got := automaticPreviewOrientation([]*schema.Message{
+			schema.UserMessage(test.prompt),
+		}); got != test.want {
+			t.Errorf("prompt=%q orientation=%q want=%q", test.prompt, got, test.want)
+		}
 	}
 	if got := automaticPreviewQATrigger(base, []*schema.Message{
 		schema.UserMessage("请生成预览。"),
@@ -389,7 +468,7 @@ func TestAutomaticPreviewQACoreExecutionFailureIsBlocking(t *testing.T) {
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
 
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", false)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", false)
 	if report.Status != "check_failed" || report.Passed ||
 		len(report.CoreChecks) != 0 || len(report.Errors) != len(automaticPreviewCoreChecks) {
 		t.Fatalf("report=%#v", report)
@@ -432,7 +511,7 @@ func TestAutomaticPreviewQAStopsWhenExactTimelineValidationFails(t *testing.T) {
 	}
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "deliverable_declaration", false)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "deliverable_declaration", "auto", false)
 	if report.Status != "validation_failed" || report.Passed || report.PreviewID != "" ||
 		report.TimelineCheck.Status != string(rushestools.StatusValidationFailed) {
 		t.Fatalf("report=%#v", report)
@@ -459,7 +538,7 @@ esac
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", false)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", false)
 	if report.Status != "succeeded" || report.Passed ||
 		len(report.CoreChecks) != len(automaticPreviewCoreChecks) ||
 		!previewQAHasErrorIssue(report.Issues) || !strings.Contains(report.Summary, "阻断错误") {
@@ -498,7 +577,7 @@ JSON
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", true)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", true)
 	if report.Status != "succeeded" || !report.Passed || !report.Degraded ||
 		report.VisualAdvisory != nil {
 		t.Fatalf("report=%#v", report)
@@ -666,14 +745,25 @@ func seedAutomaticPreviewQACompletedJob(
 	draftID, previewID string,
 ) {
 	t.Helper()
-	const jobID = "job_auto_preview_qa"
+	seedAutomaticPreviewQACompletedJobForOrientation(
+		t, database, draftID, previewID, "auto",
+	)
+}
+
+func seedAutomaticPreviewQACompletedJobForOrientation(
+	t *testing.T,
+	database *storage.DB,
+	draftID, previewID, orientation string,
+) {
+	t.Helper()
+	jobID := "job_auto_preview_qa_" + orientation
 	now := time.Now().UTC()
 	enqueued, err := reducer.Apply(t.Context(), database, []contracts.Event{{
 		Type: "JobEnqueued", DraftID: draftID,
 		Payload: map[string]any{
 			"job_id": jobID, "kind": "render_preview", "requested_by_draft_id": draftID,
-			"idempotency_key": "render_preview:" + draftID + ":1:auto",
-			"job_payload":     map[string]any{"timeline_version": 1, "orientation": "auto"},
+			"idempotency_key": "render_preview:" + draftID + ":1:" + orientation,
+			"job_payload":     map[string]any{"timeline_version": 1, "orientation": orientation},
 			"next_run_at":     now.Format(time.RFC3339Nano), "max_retries": 2,
 		},
 	}}, reducer.Options{Actor: contracts.ActorAgent})
@@ -685,7 +775,7 @@ func seedAutomaticPreviewQACompletedJob(
 		Payload: map[string]any{
 			"job_id": jobID, "kind": "render_preview", "requested_by_draft_id": draftID,
 			"result": map[string]any{
-				"artifact_id": previewID, "timeline_version": 1, "orientation": "auto",
+				"artifact_id": previewID, "timeline_version": 1, "orientation": orientation,
 			},
 		},
 	}}, reducer.Options{Actor: contracts.ActorJob})

@@ -636,6 +636,7 @@ func (service *Service) fallbackTurn(
 	if requestsPreviewBoundaryOnly(withoutNegatedSurfaceActions(strings.ToLower(content))) {
 		report := service.executeFallbackPreviewQA(
 			ctx, draftID, "explicit_preview_or_qa_request",
+			automaticPreviewOrientation([]*schema.Message{schema.UserMessage(content)}),
 			automaticPreviewNeedsVisual([]*schema.Message{schema.UserMessage(content)}),
 		)
 		return report.Summary, nil
@@ -1048,7 +1049,7 @@ func (service *Service) fallbackMainline(ctx context.Context, draftID string) (s
 	} else if latestErr != nil {
 		return "", latestErr
 	}
-	report := service.executeFallbackPreviewQA(ctx, draftID, "fallback_deliverable", false)
+	report := service.executeFallbackPreviewQA(ctx, draftID, "fallback_deliverable", "auto", false)
 	if report.Status != "succeeded" {
 		return "", fmt.Errorf("harness Preview QA 未完成: %s", report.Summary)
 	}
@@ -1057,11 +1058,11 @@ func (service *Service) fallbackMainline(ctx context.Context, draftID string) (s
 
 func (service *Service) executeFallbackPreviewQA(
 	ctx context.Context,
-	draftID, trigger string,
+	draftID, trigger, orientation string,
 	includeVisual bool,
 ) PreviewQAReport {
 	if terminalTimelineTruthFromContext(ctx) == nil {
 		ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
 	}
-	return service.executeAutomaticPreviewQA(ctx, draftID, trigger, includeVisual)
+	return service.executeAutomaticPreviewQA(ctx, draftID, trigger, orientation, includeVisual)
 }

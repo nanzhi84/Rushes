@@ -25,6 +25,13 @@ type concurrentReactState struct {
 	Messages []*schema.Message
 }
 
+type concurrentReactStreamContextKey struct{}
+
+func concurrentReactStreamFromContext(ctx context.Context) bool {
+	streaming, _ := ctx.Value(concurrentReactStreamContextKey{}).(bool)
+	return streaming
+}
+
 // concurrentReactAgent 是 eino react 图的 Rushes 复刻(#103 G3b 路线 2a)。唯一实质差异:把单个
 // ToolsNode 换成按 Registry Spec 逐消息路由的 toolRouter——纯读与资源隔离 detector 并行，
 // edit/control 及重复 detector 资源串行保序。模型侧语义全部原样保留:同一 H5 直通包装模型、
@@ -204,6 +211,7 @@ func previewAwareModelBranch(
 ) (string, error) {
 	defer stream.Close()
 	var content strings.Builder
+	var roundUsage *schema.TokenUsage
 	terminalTextSeen := false
 	for {
 		select {
@@ -220,6 +228,9 @@ func previewAwareModelBranch(
 		}
 		if message == nil {
 			continue
+		}
+		if usage := messageTokenUsage(message); usage != nil {
+			roundUsage = usage
 		}
 		if len(message.ToolCalls) > 0 {
 			if terminalTextSeen {
@@ -250,9 +261,18 @@ func previewAwareModelBranch(
 	}
 	shouldRun, err := previewQA.ShouldRun(ctx, history, candidate)
 	if err != nil {
+		if concurrentReactStreamFromContext(ctx) {
+			recordTokenUsage(ctx, roundUsage)
+		}
 		return "", err
 	}
 	if shouldRun {
+		// Stream 终态通常由 service.streamAgent 在读尽后记账；但这个候选会被
+		// Preview QA 节点拦截且不再到达外层消费者，因此在唯一接管边界补记一次。
+		// Invoke/Generate 已由 timeoutRetryChatModel.Generate 记账，不能重复累计。
+		if concurrentReactStreamFromContext(ctx) {
+			recordTokenUsage(ctx, roundUsage)
+		}
 		return concurrentNodePreviewQA, nil
 	}
 	return compose.END, nil
@@ -273,6 +293,7 @@ func (reactAgent *concurrentReactAgent) Stream(
 	messages []*schema.Message,
 	opts ...einoagent.AgentOption,
 ) (*schema.StreamReader[*schema.Message], error) {
+	ctx = context.WithValue(ctx, concurrentReactStreamContextKey{}, true)
 	return reactAgent.runnable.Stream(ctx, messages, einoagent.GetComposeOptions(opts...)...)
 }
 

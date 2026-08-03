@@ -76,6 +76,7 @@ type PreviewQAReport struct {
 	Trigger        string                                `json:"trigger"`
 	TimelineID     string                                `json:"timeline_id,omitempty"`
 	TimelineCheck  rushestools.ToolResult                `json:"timeline_check"`
+	Orientation    string                                `json:"orientation"`
 	PreviewID      string                                `json:"preview_id,omitempty"`
 	JobID          string                                `json:"job_id,omitempty"`
 	CoreChecks     []rushestools.PreviewInspectionResult `json:"core_checks"`
@@ -195,6 +196,7 @@ func (service *Service) runAutomaticPreviewQA(
 	}
 	report := service.executeAutomaticPreviewQA(
 		ctx, draftID, automaticPreviewQATrigger(ctx, messages, candidate),
+		automaticPreviewOrientation(messages),
 		automaticPreviewNeedsVisual(messages),
 	)
 	encoded, err := json.Marshal(report)
@@ -222,14 +224,47 @@ func automaticPreviewNeedsVisual(messages []*schema.Message) bool {
 	)
 }
 
+func automaticPreviewOrientation(messages []*schema.Message) string {
+	text := latestUserSurfaceText(messages)
+	// 先识别明确指向预览/成片的目标短语，避免“把横屏素材生成竖屏预览”
+	// 同时出现两种方向时误把源素材方向当成输出方向。
+	if containsSurfaceKeyword(text,
+		"竖屏预览", "竖版预览", "纵向预览", "竖屏成片", "竖版成片",
+		"portrait preview", "portrait video", "9:16 预览", "9:16预览",
+	) {
+		return "portrait"
+	}
+	if containsSurfaceKeyword(text,
+		"横屏预览", "横版预览", "横向预览", "横屏成片", "横版成片",
+		"landscape preview", "landscape video", "16:9 预览", "16:9预览",
+	) {
+		return "landscape"
+	}
+	portrait := containsSurfaceKeyword(text, "竖屏", "竖版", "纵向", "portrait", "9:16")
+	landscape := containsSurfaceKeyword(text, "横屏", "横版", "横向", "landscape", "16:9")
+	switch {
+	case portrait && !landscape:
+		return "portrait"
+	case landscape && !portrait:
+		return "landscape"
+	default:
+		return "auto"
+	}
+}
+
 func (service *Service) executeAutomaticPreviewQA(
 	ctx context.Context,
-	draftID, trigger string,
+	draftID, trigger, orientation string,
 	includeVisual bool,
 ) PreviewQAReport {
+	switch orientation {
+	case "portrait", "landscape":
+	default:
+		orientation = "auto"
+	}
 	startedAt := time.Now()
 	report := PreviewQAReport{
-		Status: "failed", Trigger: trigger,
+		Status: "failed", Trigger: trigger, Orientation: orientation,
 		CoreChecks: []rushestools.PreviewInspectionResult{},
 		Issues:     []map[string]interface{}{},
 		Errors:     []map[string]string{},
@@ -281,7 +316,9 @@ func (service *Service) executeAutomaticPreviewQA(
 
 	generatedRaw, generateErr := service.executeHarnessOwnedPreviewStep(
 		ctx, draftID, "preview.generate",
-		rushestools.PreviewGenerateInput{TimelineID: document.TimelineID},
+		rushestools.PreviewGenerateInput{
+			TimelineID: document.TimelineID, Orientation: orientation,
+		},
 		"正在为精确时间线版本生成工作预览", "", "",
 	)
 	generated, generatedOK := terminalTruthToolResult(generatedRaw)

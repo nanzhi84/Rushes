@@ -768,6 +768,31 @@ func TestSpecializedSurfaceFallsBackUntilAssetsAreUsable(t *testing.T) {
 	}
 }
 
+func TestTruncatedMaterialCatalogDoesNotRestoreHarnessListTool(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_truncated_material_catalog"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	worldState := schema.SystemMessage(
+		`{"assets":{"material_catalog_available":120,"material_catalog_included":20,"material_catalog_truncated":true}}`,
+	)
+	specs, err := selectModelToolSurface(ctx, service.tools, []*schema.Message{
+		worldState,
+		schema.UserMessage("列出素材"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := surfaceNames(specs); len(names) != 0 {
+		t.Fatalf("Issue #157 D1 禁止因目录截断恢复 asset.list_assets: %v", names)
+	}
+}
+
 func TestExplicitIntentAdvancesAfterSuccessfulWorkflowWrite(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_explicit_surface_advance"
