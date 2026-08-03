@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
@@ -89,7 +90,8 @@ func TestToolRecoveryDoesNotRetrySpeechTranscribe(t *testing.T) {
 		t.Run(arguments, func(t *testing.T) {
 			calls := 0
 			middleware := newToolRecoveryMiddleware(testRetrySafe(t))
-			endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+			endpoint := middleware.Invokable(func(ctx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+				rushestools.MarkExecutionStarted(ctx)
 				calls++
 				return nil, errors.New("temporary commit result unknown")
 			})
@@ -113,7 +115,8 @@ func TestToolRecoveryRetriesSafeErrorsAndReturnsThemToModel(t *testing.T) {
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
 	middleware := newToolRecoveryMiddleware(testRetrySafe(t))
-	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+	endpoint := middleware.Invokable(func(ctx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+		rushestools.MarkExecutionStarted(ctx)
 		calls++
 		return nil, errors.New("temporary read failure")
 	})
@@ -276,7 +279,8 @@ func TestToolRecoverySuppliesStableCodeForEveryFailureStatus(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.status, func(t *testing.T) {
 			endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
-				func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+				func(ctx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+					rushestools.MarkExecutionStarted(ctx)
 					return &compose.ToolOutput{Result: `{"status":"` + test.status + `"}`}, nil
 				},
 			)
@@ -323,7 +327,7 @@ func TestToolRecoveryRejectsModelMutationWithoutDurableReceiptIdentity(t *testin
 			}
 			payload := decodeRecoveryPayload(t, output.Result)
 			data := payload["data"].(map[string]any)
-			if payload["status"] != string(rushestools.StatusFailed) ||
+			if payload["status"] != string(rushestools.StatusRejected) ||
 				data["error_code"] != string(rushestools.ErrCodeToolExecutionError) ||
 				!strings.Contains(payload["observation"].(string), "调用身份") {
 				t.Fatalf("payload=%#v", payload)
@@ -441,6 +445,26 @@ func TestToolRecoveryFormattingHelpersCoverMalformedValues(t *testing.T) {
 	cancel()
 	if !errors.Is(waitForToolRetry(cancelled, 1), context.Canceled) {
 		t.Fatal("cancelled retry should return context.Canceled")
+	}
+}
+
+func TestModelReceiptNoWriteSemanticFailuresBecomeRejectedAfterExecutorEntry(t *testing.T) {
+	for _, code := range []rushestools.ToolErrorCode{
+		rushestools.ErrCodePlanRequired,
+		rushestools.ErrCodeContractInvalid,
+		rushestools.ErrCodePlanConflict,
+		rushestools.ErrCodeMemoryMutationEmpty,
+		rushestools.ErrCodeMemoryEvidenceInvalid,
+	} {
+		raw := fmt.Sprintf(`{"status":"failed","data":{"error_code":%q}}`, code)
+		if !modelReceiptShouldBeRejected(raw, true) {
+			t.Fatalf("no-write code %s was not rejected", code)
+		}
+	}
+	if modelReceiptShouldBeRejected(
+		`{"status":"failed","data":{"error_code":"tool_execution_error"}}`, true,
+	) {
+		t.Fatal("post-entry execution failure must remain failed")
 	}
 }
 
@@ -943,7 +967,8 @@ func TestToolRecoveryReporterUsesNormalizedFailureResult(t *testing.T) {
 func TestToolRecoveryDoesNotBlindlyReplayMutations(t *testing.T) {
 	calls := 0
 	middleware := newToolRecoveryMiddleware(testRetrySafe(t))
-	endpoint := middleware.Invokable(func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+	endpoint := middleware.Invokable(func(ctx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+		rushestools.MarkExecutionStarted(ctx)
 		calls++
 		return nil, errors.New("commit result unknown")
 	})
@@ -988,12 +1013,12 @@ func TestToolRecoveryDoesNotRetryDeterministicSchemaErrors(t *testing.T) {
 	}
 	payload := decodeRecoveryPayload(t, output.Result)
 	data := payload["data"].(map[string]any)
-	if data["retryable"] != false || data["execution_attempts"] != float64(1) ||
-		data["automatic_retries"] != float64(0) {
+	if payload["status"] != string(rushestools.StatusRejected) ||
+		data["error_code"] != string(rushestools.ErrCodeToolValidationFailed) {
 		t.Fatalf("payload=%#v", payload)
 	}
 	if len(events) != 2 || events[0].phase != "started" || events[1].phase != "finished" ||
-		events[1].err == nil {
+		events[1].err != nil {
 		t.Fatalf("schema failure must have one visible terminal trace: events=%#v", events)
 	}
 }
@@ -1001,7 +1026,8 @@ func TestToolRecoveryDoesNotRetryDeterministicSchemaErrors(t *testing.T) {
 func TestToolRecoveryPreservesStructuredBusinessFailureForModel(t *testing.T) {
 	state := newToolRecoveryState()
 	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
-		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+		func(ctx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+			rushestools.MarkExecutionStarted(ctx)
 			return &compose.ToolOutput{Result: `{
 				"status":"validation_failed",
 				"observation":"片段相互重叠",
@@ -1033,7 +1059,8 @@ func TestToolRecoveryPreservesStructuredBusinessFailureForModel(t *testing.T) {
 
 func TestToolRecoveryPreservesTopLevelTypedFailureForModel(t *testing.T) {
 	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
-		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+		func(ctx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+			rushestools.MarkExecutionStarted(ctx)
 			return &compose.ToolOutput{Result: `{
 				"status":"failed",
 				"error_code":"shot_deep_analysis_failed",
@@ -1128,7 +1155,8 @@ func TestToolRecoveryCanonicalizesDuplicateJSONArguments(t *testing.T) {
 	ctx := withToolRecoveryState(t.Context(), state)
 	calls := 0
 	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
-		func(context.Context, *compose.ToolInput) (*compose.ToolOutput, error) {
+		func(ctx context.Context, _ *compose.ToolInput) (*compose.ToolOutput, error) {
+			rushestools.MarkExecutionStarted(ctx)
 			calls++
 			return &compose.ToolOutput{Result: marshalToolFailure("invalid range", nil)}, nil
 		},
@@ -1450,7 +1478,7 @@ func TestUnknownToolBecomesRepairableToolResult(t *testing.T) {
 		t.Fatalf("output=%s err=%v", output, err)
 	}
 	payload := decodeRecoveryPayload(t, output)
-	if payload["status"] != "failed" ||
+	if payload["status"] != "rejected" ||
 		payload["data"].(map[string]any)["error_code"] != "unknown_tool" {
 		t.Fatalf("payload=%#v", payload)
 	}

@@ -269,6 +269,11 @@ func (modelValue *serviceToolModel) Generate(
 	defer modelValue.mu.Unlock()
 	modelValue.calls++
 	if modelValue.calls == 1 {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "load_plan", Function: schema.FunctionCall{Name: "tool.load", Arguments: `{"tool_names":["plan.update"]}`},
+		}}), nil
+	}
+	if modelValue.calls == 2 {
 		found := false
 		for _, info := range modelValue.tools {
 			if info.Name == "plan.update" {
@@ -379,21 +384,27 @@ func (modelValue *selfRepairServiceModel) Generate(
 	switch modelValue.calls {
 	case 1:
 		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID: "bad_call", Function: schema.FunctionCall{Name: "plan.update", Arguments: `{`},
+			ID: "load_plan_repair", Function: schema.FunctionCall{Name: "tool.load", Arguments: `{"tool_names":["plan.update"]}`},
 		}}), nil
 	case 2:
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "bad_call", Function: schema.FunctionCall{Name: "plan.update", Arguments: `{`},
+		}}), nil
+	case 3:
 		if len(messages) == 0 || messages[len(messages)-1].Role != schema.Tool ||
-			!strings.Contains(messages[len(messages)-1].Content, `"status":"failed"`) {
+			!strings.Contains(messages[len(messages)-1].Content, `"status":"rejected"`) {
 			return nil, errors.New("工具参数错误没有回灌模型")
 		}
 		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID: "fixed_call", Function: schema.FunctionCall{Name: "plan.update", Arguments: `{"plan":{"phase":"repaired"}}`},
 		}}), nil
-	default:
+	case 4:
 		if len(messages) == 0 || messages[len(messages)-1].Role != schema.Tool {
 			return nil, errors.New("修复后的工具结果没有回灌模型")
 		}
 		return schema.AssistantMessage("已读取真实工具错误并自行修复。", nil), nil
+	default:
+		return nil, fmt.Errorf("脚本模型收到额外第 %d 次调用", modelValue.calls)
 	}
 }
 
@@ -450,14 +461,19 @@ func (modelValue *failingReadToolServiceModel) Generate(
 	modelValue.calls++
 	if modelValue.calls == 1 {
 		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "load_speech_search", Function: schema.FunctionCall{Name: "tool.load", Arguments: `{"tool_names":["speech.search"]}`},
+		}}), nil
+	}
+	if modelValue.calls == 2 {
+		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID: "missing_audio", Function: schema.FunctionCall{
 				Name: "speech.search", Arguments: `{"asset_id":"asset_missing"}`,
 			},
 		}}), nil
 	}
 	if len(messages) == 0 || messages[len(messages)-1].Role != schema.Tool ||
-		!strings.Contains(messages[len(messages)-1].Content, `"automatic_retries":0`) ||
-		!strings.Contains(messages[len(messages)-1].Content, `"retryable":false`) {
+		!strings.Contains(messages[len(messages)-1].Content, `"status":"failed"`) ||
+		!strings.Contains(messages[len(messages)-1].Content, `"recovery"`) {
 		return nil, errors.New("确定性参数失败没有立即回灌模型")
 	}
 	return schema.AssistantMessage("口播分析失败；本轮未修改时间线，你可以更换素材后重试。", nil), nil
@@ -517,8 +533,8 @@ done:
 		}
 	}
 	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_react", 20)
-	if err != nil || len(messages) != 3 || messages[1].Kind != "tool" ||
-		messages[2].Content != "EINO-SERVICE-OK" {
+	if err != nil || len(messages) != 4 || messages[1].Kind != "tool" ||
+		messages[2].Kind != "tool" || messages[3].Content != "EINO-SERVICE-OK" {
 		t.Fatalf("messages=%#v err=%v", messages, err)
 	}
 	modelMessages, modelErr := service.modelMessages(t.Context(), "draft_react")
@@ -732,7 +748,7 @@ func TestServiceAllowsHonestTerminalReplyAfterIndependentToolFailure(t *testing.
 		}
 	}
 	final := messages[len(messages)-1]
-	if toolRows != 2 || len(messages) != 4 || final.Role != "assistant" || final.Kind != "reply" ||
+	if toolRows != 3 || len(messages) != 5 || final.Role != "assistant" || final.Kind != "reply" ||
 		final.Content != "口播分析失败；本轮未修改时间线，你可以更换素材后重试。" {
 		t.Fatalf("历史失败不应阻止诚实终态：tool_rows=%d messages=%#v", toolRows, messages)
 	}
@@ -1541,7 +1557,7 @@ func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T)
 	}
 	missing := missingRaw.(rushestools.ToolResult)
 	if missing.Status != "validation_failed" || missing.Data["error_code"] != "invalid_confirmation_target" ||
-		!strings.Contains(missing.Observation, "timeline_exists") {
+		!strings.Contains(missing.Observation, "当前尚未创建时间线") {
 		t.Fatalf("missing timeline confirmation=%#v", missing)
 	}
 	var decisionCount int
@@ -1582,7 +1598,7 @@ func TestConfirmationChecksToolPreconditionsWhenCreatedAndReplayed(t *testing.T)
 	if _, err := service.replayPendingTool(ctx, QueueItem{DraftID: draftID, Payload: map[string]any{
 		"pending_tool_call": decision.PendingToolCall,
 		"answer":            map[string]any{"option_id": "confirm"},
-	}}); err == nil || !strings.Contains(err.Error(), "timeline_exists") {
+	}}); err == nil || !strings.Contains(err.Error(), "当前尚未创建时间线") {
 		t.Fatalf("replay must be rejected by registry precondition guard: %v", err)
 	}
 	var timelineVersions int

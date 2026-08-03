@@ -84,7 +84,7 @@ func TestToolEffectMatchesExecutorWriteFootprint(t *testing.T) {
 
 		registered := make([]string, 0, len(cases))
 		for _, spec := range registry.Specs(true) {
-			if spec.Effect == rushestools.EffectReadOnly {
+			if spec.Exposure != rushestools.ExposureMeta && spec.Effect == rushestools.EffectReadOnly {
 				registered = append(registered, spec.Name)
 			}
 		}

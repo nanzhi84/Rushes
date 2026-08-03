@@ -28,6 +28,13 @@ func recordModelToolCatalog(ctx context.Context, registry *rushestools.Registry)
 	}
 	metricModelToolCatalogCount.Set(int64(len(catalog.PerToolRunes)))
 	metricModelToolCatalogSchemaRunes.Set(int64(catalog.TotalRunes))
+	metricModelToolCatalogSchemaBytes.Set(int64(catalog.TotalBytes))
+	if entries, err := registry.ModelActionCatalog(); err == nil {
+		if encoded, marshalErr := json.Marshal(entries); marshalErr == nil {
+			metricModelActionCatalogRunes.Set(int64(len([]rune(string(encoded)))))
+			metricModelActionCatalogBytes.Set(int64(len(encoded)))
+		}
+	}
 	logModelToolCatalogOnce.Do(func() {
 		slog.Info(
 			"模型工具目录已加载",
@@ -38,9 +45,9 @@ func recordModelToolCatalog(ctx context.Context, registry *rushestools.Registry)
 	})
 }
 
-// recordBoundModelToolSurface 只在 ReAct 图成功绑定后记录实际模型工具面；建图失败
-// 不能污染成功观测。后续动态披露会在每个新工具面绑定成功后复用此入口。
-func recordBoundModelToolSurface(ctx context.Context, boundTools []tool.BaseTool) {
+// recordBoundModelActionSchemas 记录每次 provider 实际收到的 schema 并集；
+// 它由 transcript 中成功的 tool.load 回执唯一确定。
+func recordBoundModelActionSchemas(ctx context.Context, boundTools []tool.BaseTool) {
 	bound, err := modelToolSchemaSizeFromTools(ctx, boundTools)
 	if err != nil {
 		slog.Warn("模型实际绑定工具 schema 统计失败", "error", err)
@@ -48,16 +55,19 @@ func recordBoundModelToolSurface(ctx context.Context, boundTools []tool.BaseTool
 	}
 	metricModelToolBoundCount.Observe(int64(len(bound.PerToolRunes)))
 	metricModelToolBoundSchemaRunes.Observe(int64(bound.TotalRunes))
+	metricModelToolBoundSchemaBytes.Observe(int64(bound.TotalBytes))
 	slog.Info(
-		"模型工具面已绑定",
+		"模型 action schema 已绑定",
 		"bound_tool_names", bound.Names,
 		"bound_tool_count", len(bound.PerToolRunes),
 		"bound_schema_runes", bound.TotalRunes,
+		"bound_schema_bytes", bound.TotalBytes,
 	)
 }
 
 type modelToolSchemaMetrics struct {
 	TotalRunes   int
+	TotalBytes   int
 	PerToolRunes map[string]int
 	Names        []string
 }
@@ -106,6 +116,7 @@ func modelToolSchemaSizeFromTools(
 		metrics.PerToolRunes[info.Name] = runes
 		metrics.Names = append(metrics.Names, info.Name)
 		metrics.TotalRunes += runes
+		metrics.TotalBytes += len(encoded)
 	}
 	sort.Strings(metrics.Names)
 	return metrics, nil

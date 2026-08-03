@@ -123,7 +123,6 @@ func newServiceWithModels(
 		return nil, err
 	}
 	service.tools = registry
-	registry.UseAdmission(modelToolSurfaceInterceptor)
 	// G2：破坏性工具（当前为 memory.remove）在模型主路径上必须先经
 	// interaction.confirm_action 确认；确认后的重放走直连路径、绕过本拦截器（#103 G2）。
 	registry.Use(destructiveConfirmationInterceptor)
@@ -134,18 +133,16 @@ func newServiceWithModels(
 		// 模型侧 H5 直通模型 / StreamToolCallChecker / H1b MessageModifier / MaxStep 全部原样保留。
 		service.react, err = newConcurrentReactAgent(
 			ctx,
-			&dynamicToolSurfaceModel{inner: chatModel, registry: registry},
+			&deterministicToolSchemaModel{inner: chatModel, registry: registry},
 			compose.ToolsNodeConfig{
-				// ToolsNode 持有 Registry 全量目录用于实际分发；dynamicToolSurfaceModel
-				// 每次 provider 调用只绑定当前状态/阶段允许的子集，并由 interceptor
-				// 阻止模型绕过未披露能力。
+				// ToolsNode 持有完整静态执行目录；provider 每次只绑定 tool.load 与
+				// 当前有效 transcript 已披露的业务 schema。
 				Tools:               registry.EinoTools(true, false),
 				UnknownToolsHandler: unknownToolRecoveryHandler,
 				ToolCallMiddlewares: []compose.ToolMiddleware{
 					newToolRecoveryMiddleware(
 						retrySafeFromEffect(registry.Effect), registry.ModelReceiptPolicy,
 					),
-					newAutomaticTimelineTruthMiddleware(service),
 				},
 			},
 			registry.Spec,
@@ -225,7 +222,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		ctx = withContextMessageBoundary(ctx, item.ItemID)
 	}
 	ctx = withQueueMemoryEvidence(ctx, item)
-	ctx = withModelToolSurfaceSession(ctx)
+	ctx = withToolDisclosureSession(ctx)
 	ctx, injectedMemory := withInjectedMemoryCollector(ctx)
 	recoveryState := newToolRecoveryState()
 	ctx = withToolRecoveryState(ctx, recoveryState)
@@ -255,6 +252,11 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	ctx = service.withModelRetryReporting(ctx, item.DraftID)
 	ctx = rushestools.WithReporter(ctx, service.toolReporter(ctx, item.DraftID))
 	content, err := service.turnContent(ctx, item, messageID)
+	if err == nil {
+		if override := automaticPreviewQAStateFromContext(ctx).takeFinalOverride(); override != "" {
+			content = override
+		}
+	}
 	leaseCause := context.Cause(ctx)
 	if errors.Is(err, storage.ErrAgentEditLeaseLost) ||
 		errors.Is(leaseCause, storage.ErrAgentEditLeaseLost) {
@@ -277,6 +279,14 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	if truthErr := service.ensureTerminalTimelineTruth(ctx, item.DraftID); truthErr != nil {
 		err = truthErr
 		content = ""
+	}
+	if err == nil {
+		truth := terminalTimelineTruthFromContext(ctx).snapshot()
+		if truth.checkStatus == string(rushestools.StatusValidationFailed) {
+			content = stopGateNotCompletedReply(stopGatePending{
+				Decision: "block", TimelineID: truth.checkTimelineID, Check: truth.checkResult,
+			})
+		}
 	}
 	if guardErr := service.terminalReplyGuard(ctx, item.DraftID); guardErr != nil {
 		// 即便 provider 在成功写入或工具调用之后又返回普通错误，也必须优先暴露
@@ -628,12 +638,12 @@ func (service *Service) fallbackTurn(
 	}
 	if strings.Contains(content, "混剪") {
 		reply, err := service.fallbackMainline(ctx, draftID)
-		if err != nil || !requestsUserFinalExport(content) {
+		if err != nil || !hasUserFinalExportIntent(content) {
 			return reply, err
 		}
 		return reply + " " + userFinalExportGuidance, nil
 	}
-	if requestsPreviewBoundaryOnly(withoutNegatedSurfaceActions(strings.ToLower(content))) {
+	if hasPreviewOnlyIntent(withoutNegatedBoundaryActions(strings.ToLower(content))) {
 		report := service.executeFallbackPreviewQA(
 			ctx, draftID, "explicit_preview_or_qa_request",
 			automaticPreviewOrientation([]*schema.Message{schema.UserMessage(content)}),
@@ -641,7 +651,7 @@ func (service *Service) fallbackTurn(
 		)
 		return report.Summary, nil
 	}
-	if requestsUserFinalExport(content) {
+	if hasUserFinalExportIntent(content) {
 		if _, err := timeline.Latest(ctx, service.database, draftID); errors.Is(err, storage.ErrNotFound) {
 			return "当前草稿还没有可导出的时间线。", nil
 		} else if err != nil {
@@ -794,8 +804,8 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 		observation := compactJSON(output)
 		if err != nil {
 			status, observation = "failed", err.Error()
-		} else if structuredToolOutputFailed(output) {
-			status = "failed"
+		} else if outputStatus := structuredToolOutputStatus(output); outputStatus != "" {
+			status = outputStatus
 		}
 		truthContext := reportCtx
 		if truthContext == nil {
@@ -803,6 +813,9 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 		}
 		if truthState := terminalTimelineTruthFromContext(truthContext); truthState != nil {
 			truthState.recordToolResult(name, status, output)
+		}
+		if name == "plan.update" && status == string(rushestools.StatusSucceeded) {
+			automaticPreviewQAStateFromContext(truthContext).invalidateValidationProofs()
 		}
 		service.hub.Record(draftID, StreamEvent{
 			"type": TurnStreamToolStepFinished, "step_id": stepID, "tool": name,
@@ -816,8 +829,24 @@ func (service *Service) toolReporter(ctx context.Context, draftID string) rushes
 }
 
 func structuredToolOutputFailed(output any) bool {
+	status := structuredToolOutputStatus(output)
+	return status == "failed" || status == "validation_failed" || status == "cancelled" || status == "timeout"
+}
+
+func structuredToolOutputStatus(output any) string {
 	encoded, err := json.Marshal(output)
-	return err == nil && isStructuredToolFailure(string(encoded))
+	if err != nil {
+		return ""
+	}
+	status := toolReceiptStatus(string(encoded))
+	switch status {
+	case "waiting_user":
+		return "requires_user"
+	case "rejected", "failed", "validation_failed", "cancelled", "timeout":
+		return status
+	default:
+		return ""
+	}
 }
 
 func previewIDFromToolReport(name string, input any) string {
@@ -964,20 +993,7 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 		if timelineID == "" {
 			return "", &terminalReplyGuardError{kind: "timeline_check_missing"}
 		}
-		truth := terminalTimelineTruthFromContext(ctx)
-		truth.recordMutationTimelineID(timelineID)
-		check, checkErr := service.executeAutomaticTimelineCheck(ctx, item.DraftID, timelineID)
-		if checkErr != nil {
-			return "", &terminalReplyGuardError{
-				kind: "timeline_check_missing", mutationTimelineID: timelineID,
-			}
-		}
-		truth.recordTimelineCheckResult(
-			agentexec.InterfaceString(check.Data["timeline_id"]), check.Status, check,
-		)
-		if check.Status == string(rushestools.StatusValidationFailed) {
-			return result.Observation + "\n自动检查仍有未通过项：" + check.Observation, nil
-		}
+		terminalTimelineTruthFromContext(ctx).recordMutationTimelineID(timelineID)
 	}
 	if result.Observation != "" {
 		return result.Observation, nil
@@ -1064,5 +1080,11 @@ func (service *Service) executeFallbackPreviewQA(
 	if terminalTimelineTruthFromContext(ctx) == nil {
 		ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
 	}
-	return service.executeAutomaticPreviewQA(ctx, draftID, trigger, orientation, includeVisual)
+	expectedTimelineID := ""
+	if document, err := timeline.Latest(ctx, service.database, draftID); err == nil {
+		expectedTimelineID = document.TimelineID
+	}
+	return service.executeAutomaticPreviewQA(
+		ctx, draftID, expectedTimelineID, trigger, orientation, includeVisual,
+	)
 }

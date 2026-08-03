@@ -4,11 +4,18 @@
 
 1. API 将本地文件登记为 `AssetImported + AssetLinked + JobEnqueued(ingest)`。
 2. worker 原子 claim job，生成 probe、thumbnail、proxy，再经 Reducer 写 `AssetProbed / ProxyGenerated / JobProgress / JobSucceeded`。
-3. 用户消息以 202 入 TurnQueue。Eino ReAct 读取草稿消息，调用理解、时间线、决策或渲染工具；过程通过 turn-stream 实时推送。
-4. `media.detect_shots` 的 deep/force-refresh 与 `preview.generate` 可复用 durable job，但工具调用会在当前 turn 内等待 worker 终态；同批工具全部终态后才允许下一次模型调用。turn 取消只停止 waiter，底层可复用 job 继续运行，迟到完成不会合成消息或唤醒 Agent。
+3. 用户消息以 202 入 TurnQueue。Eino ReAct 每轮常驻 Model Action Catalog，通过 `tool.load` 加载所需 action schema 后调用证据、计划、交互、记忆或原子时间线 action；过程通过 turn-stream 实时推送。
+4. 素材基础索引、ASR、BPM/拍点、完整时间线检查、预览与 Preview QA 都是 Harness Automatic Capabilities，不进入 Catalog 或 `tool.load`。可复用 durable job 在当前 turn 内等待终态；turn 取消只停止 waiter，迟到完成不会合成消息或唤醒 Agent。
 5. 前端领域 SSE 只做 query invalidation；媒体由带 query token 的 Range/HEAD 端点直接播放。
 
-模型工具目录按当前草稿状态和任务阶段动态披露；Agent 只用 `preview.generate` 生成预览并直接取得 `preview_id`，看不到 `render.start`、`job.read` 或 final 导出工具。最终导出必须由用户从产品界面触发。长期记忆写入使用可逆的 `memory.set`，用户明确要求忘记时使用破坏性的 `memory.remove` 并先走确认。
+Registry 生成 13 个 Model Action Catalog 项：素材证据类 `shot.search / shot.deep_search / speech.search`，计划交互记忆类 `plan.update / interaction.ask_user / interaction.confirm_action / decision.answer / memory.set / memory.remove`，时间线编辑类 `timeline.insert / timeline.delete / timeline.update / timeline.split`。初始 provider 只绑定 `tool.load`；加载集合只从当前 transcript 内成功回执的并集确定，不持久、不根据用户文本、WorldState 或 phase 猜测。`tool.load` 和 schema 绑定不抢 edit lease；只有实际 timeline mutation 通过执行准入时才获取。最终导出必须由用户从产品界面触发。
+
+## Stop Gate 与工具生命周期
+
+- schema、precondition 或 policy 在执行前拦下的调用以 `rejected` 收口；已进入 executor 后的异常才是 `failed`。两者都给模型稳定 `error_code / message / invalid_fields / current_state / recovery` 信封。
+- 原子 mutation 回执不携带事后完整检查。Stop Gate 只在编辑/交付终止候选上检查最新精确版本，同版本结果可复用。
+- `blocked` 反馈最多 3 项可操作问题、剩余数和 `result_ref`。同版本同指纹不重复注入，一回合最多 3 次 continuation；耗尽或重复时返回诚实 `not_completed`。
+- 只有 Stop Gate 通过且用户明确要求预览/质检、或任务需要像素/声音验收时，Harness 才生成精确版本预览并运行 Preview QA。
 
 素材理解以 `asset hash + 分析参数 + prompt version` 作为持久化 fingerprint；`media.detect_shots` 每次只为一个可用视频建立或刷新镜头证据，相同输入直接复用 SQLite 结果。Agent 每回合常驻读取精简 `material_catalog`，逐镜头语义与精确源帧由只读的 `shot.search` 按创作意图检索，再以稳定 `shot_id` 交给时间线工具执行。
 
@@ -46,7 +53,7 @@ data: {"event_id":...,"event":{...}}
 
 支持 `Last-Event-ID` header 和 `last_event_id` query。workspace 与 draft 各自使用明确路由谓词。
 
-turn-stream 固定 `event: turn_stream`，data.type 为：`turn_started`、`text_delta`、`message_completed`、`tool_step_started`、`tool_step_progress`、`tool_step_finished`、`subagent_progress`、`turn_ended`、`turn_error`。`message_completed` 带全文，用于修复中间 delta 丢失。
+turn-stream 固定 `event: turn_stream`；Stop Gate 使用独立的 `stop_gate_started / stop_gate_finished`，普通工具继续使用 `tool_step_started / tool_step_progress / tool_step_finished`。`message_completed` 带全文，用于修复中间 delta 丢失。
 
 ## 依赖方向
 

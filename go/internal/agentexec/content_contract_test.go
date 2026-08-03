@@ -87,13 +87,14 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		t.Fatalf("missing anchors report=%#v", report)
 	}
 	persisted, err := seedTimelineVersion(exec, t.Context(), "draft_contract", failing, "contract_fixture", nil)
-	if err != nil || !strings.Contains(persisted.Observation, "验收合同未通过项") || persisted.Data["contract_failures"] == nil {
+	if err != nil || strings.Contains(persisted.Observation, "验收合同未通过项") ||
+		persisted.Data["contract_failures"] != nil {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
 	}
-	assertPersistedContractReport(t, database, "draft_contract", 1, false)
+	assertPersistedStructuralReport(t, database, "draft_contract", 1, true)
 	draft, err = storage.GetDraft(t.Context(), database.Read(), "draft_contract")
-	if err != nil || draft.TimelineValidated {
-		t.Fatalf("contract-invalid timeline must not be validated: draft=%#v err=%v", draft, err)
+	if err != nil || !draft.TimelineValidated {
+		t.Fatalf("结构合法的中间时间线应保持 structural validated: draft=%#v err=%v", draft, err)
 	}
 	rendered, err := exec.enqueuePreviewRender(
 		t.Context(), "draft_contract", "", failing.TimelineID,
@@ -140,7 +141,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertPersistedContractReport(t, database, "draft_contract", 2, true)
+	assertPersistedStructuralReport(t, database, "draft_contract", 2, true)
 	validated, err = exec.toolCheckTimeline(t.Context(), "draft_contract", rushestools.TimelineCheckInput{})
 	if err != nil || validated.Status != "succeeded" ||
 		!strings.Contains(validated.Observation, "验收合同全部通过") ||
@@ -190,12 +191,17 @@ func TestContentContractReportsMissingBeatGrid(t *testing.T) {
 		t.Fatalf("item=%#v", item)
 	}
 	persisted, err := seedTimelineVersion(exec, t.Context(), "draft_missing_beat_grid", document, "missing_beat_grid_fixture", nil)
-	if err != nil || !strings.Contains(persisted.Observation, guidance) {
+	if err != nil || strings.Contains(persisted.Observation, guidance) {
 		t.Fatalf("persisted=%#v err=%v", persisted, err)
+	}
+	checked, err := exec.toolCheckTimeline(t.Context(), "draft_missing_beat_grid", rushestools.TimelineCheckInput{})
+	if err != nil || checked.Status != string(rushestools.StatusValidationFailed) ||
+		!strings.Contains(checked.Observation, guidance) {
+		t.Fatalf("stop check=%#v err=%v", checked, err)
 	}
 }
 
-func assertPersistedContractReport(t *testing.T, database *storage.DB, draftID string, version int, wantPass bool) {
+func assertPersistedStructuralReport(t *testing.T, database *storage.DB, draftID string, version int, wantValid bool) {
 	t.Helper()
 	var raw string
 	if err := database.Read().QueryRowContext(t.Context(), `
@@ -204,10 +210,9 @@ func assertPersistedContractReport(t *testing.T, database *storage.DB, draftID s
 	).Scan(&raw); err != nil {
 		t.Fatal(err)
 	}
-	report := struct {
-		ContentContract ContractVerificationReport `json:"content_contract"`
-	}{}
-	if err := json.Unmarshal([]byte(raw), &report); err != nil || report.ContentContract.Pass != wantPass || len(report.ContentContract.Items) == 0 {
+	report := map[string]any{}
+	if err := json.Unmarshal([]byte(raw), &report); err != nil || report["structural_valid"] != wantValid ||
+		report["content_contract"] != nil || report["content_contract_valid"] != nil {
 		t.Fatalf("validation_report_json=%s report=%#v err=%v", raw, report, err)
 	}
 }

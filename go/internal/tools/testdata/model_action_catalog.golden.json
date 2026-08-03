@@ -1,0 +1,93 @@
+[
+  {
+    "category": "planning_interaction_memory",
+    "name": "decision.answer",
+    "description": "提交用户对结构化决策卡的答案；当待处理决策已获得用户回答时使用。",
+    "cost": "low",
+    "risk": "reversible"
+  },
+  {
+    "category": "planning_interaction_memory",
+    "name": "interaction.ask_user",
+    "description": "创建一张关键决策卡向用户提问；只在缺失无法安全推断且会实质改变成片目标的信息时使用。",
+    "cost": "low",
+    "risk": "reversible"
+  },
+  {
+    "category": "planning_interaction_memory",
+    "name": "interaction.confirm_action",
+    "description": "为破坏性或会影响 Agent 之外的动作创建确认决策；PolicyGate 要求确认且尚无有效用户同意时使用。",
+    "cost": "low",
+    "risk": "reversible"
+  },
+  {
+    "category": "planning_interaction_memory",
+    "name": "memory.remove",
+    "description": "删除指定的长期用户记忆；用户明确要求忘记某项已存记忆时使用。",
+    "cost": "standard",
+    "risk": "destructive"
+  },
+  {
+    "category": "planning_interaction_memory",
+    "name": "memory.set",
+    "description": "写入用户跨项目稳定的偏好、习惯或纠正；用户明确表达会影响未来项目的信息时使用。",
+    "cost": "standard",
+    "risk": "reversible"
+  },
+  {
+    "category": "planning_interaction_memory",
+    "name": "plan.update",
+    "description": "持久化跨回合的创作计划与已确定决策；任务需继续执行或需固化首剪默认时使用。",
+    "cost": "standard",
+    "risk": "reversible"
+  },
+  {
+    "category": "material_evidence",
+    "name": "shot.deep_search",
+    "description": "对 shot.search 返回的精确 ShotRef 做高成本视觉复核；基础证据不足或需确认 OCR、动作和细节时使用。",
+    "cost": "high",
+    "risk": "reversible"
+  },
+  {
+    "category": "material_evidence",
+    "name": "shot.search",
+    "description": "检索基础镜头索引并返回稳定源帧证据；普通选镜或查找候选镜头时使用。",
+    "cost": "standard",
+    "risk": "read_only"
+  },
+  {
+    "category": "material_evidence",
+    "name": "speech.search",
+    "description": "检索已就绪转写并返回台词、词级帧位置和气口证据；口播选句、删改或对齐时使用。",
+    "cost": "standard",
+    "risk": "read_only"
+  },
+  {
+    "category": "timeline_edit",
+    "name": "timeline.delete",
+    "description": "从时间线删除一个片段、连续帧范围或内容集合；需移除一个明确时间线目标时使用。",
+    "cost": "standard",
+    "risk": "reversible"
+  },
+  {
+    "category": "timeline_edit",
+    "name": "timeline.insert",
+    "description": "向时间线插入一个素材片段或一条字幕；创建首个视觉片段、追加镜头、字幕或 BGM 时使用。",
+    "cost": "standard",
+    "risk": "reversible"
+  },
+  {
+    "category": "timeline_edit",
+    "name": "timeline.split",
+    "description": "在一个时间线整数帧位置切分指定 clip；需对子段单独删除、移动或调整前使用。",
+    "cost": "standard",
+    "risk": "reversible"
+  },
+  {
+    "category": "timeline_edit",
+    "name": "timeline.update",
+    "description": "更新一个时间线 clip、track 或 subtitle 目标；需裁剪、移动、替换或调整单个目标时使用。",
+    "cost": "standard",
+    "risk": "reversible"
+  }
+]

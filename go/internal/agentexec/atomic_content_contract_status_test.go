@@ -51,11 +51,12 @@ func TestAtomicEditReportsCommittedWhenOnlyContentContractIsStillOpen(t *testing
 	if result.Status != string(rushestools.StatusSucceeded) ||
 		result.Data["previous_timeline_id"] != draftID+":v1" ||
 		result.Data["timeline_id"] != draftID+":v2" ||
-		result.Data["contract_failures"] == nil {
+		result.Data["contract_failures"] != nil {
 		t.Fatalf("atomic result=%#v", result)
 	}
 	validation := result.Data["validation_summary"].(map[string]any)
-	if validation["structural_valid"] != true || validation["content_contract_valid"] != false {
+	if validation["structural_valid"] != true || validation["content_contract"] != nil ||
+		validation["content_contract_valid"] != nil {
 		t.Fatalf("validation=%#v", validation)
 	}
 	latest, err := timeline.Latest(t.Context(), database, draftID)
@@ -63,8 +64,8 @@ func TestAtomicEditReportsCommittedWhenOnlyContentContractIsStillOpen(t *testing
 		t.Fatalf("latest=%#v err=%v", latest, err)
 	}
 	draft, err := storage.GetDraft(t.Context(), database.Read(), draftID)
-	if err != nil || draft.TimelineValidated {
-		t.Fatalf("合同未完成不得标记 validated: draft=%#v err=%v", draft, err)
+	if err != nil || !draft.TimelineValidated {
+		t.Fatalf("结构合法的原子版本应标记 structural validated: draft=%#v err=%v", draft, err)
 	}
 	checkedRaw, err := exec.ExecuteTool(
 		rushestools.WithDraftID(t.Context(), draftID),

@@ -153,7 +153,7 @@ func (service *Service) ensureExplicitBeatTaskAnalysis(
 	ctx context.Context,
 	draftID, userText string,
 ) error {
-	if !requestsBeatEditWorkflow(userText) {
+	if !hasBeatEditIntent(userText) {
 		return nil
 	}
 	assetID, err := service.unambiguousBeatAsset(ctx, draftID, userText)

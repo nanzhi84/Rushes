@@ -199,6 +199,64 @@ describe("AssistantThread Claude Code 式消息流", () => {
     expect(screen.getByText("73ms")).toBeTruthy();
   });
 
+  it("把 Stop Gate 与普通工具分组展示，并紧凑呈现阻塞摘要", () => {
+    renderThread({
+      isRunning: true,
+      streamItems: [
+        {
+          type: "tool",
+          step_id: "load_1",
+          tool: "tool.load",
+          status: "succeeded",
+          argsSummary: null,
+          observation: null,
+          durationMs: 0
+        },
+        {
+          type: "stop_gate",
+          gate_id: "stop_gate",
+          traceIds: ["stop_trace_1"],
+          timelineId: "draft_1:v3",
+          status: "blocked",
+          issues: [{ code: "gap", message: "时间线存在空洞", recovery: "补齐画面" }],
+          remainingIssueCount: 2,
+          resultRef: "validation:draft_1:v3",
+          observation: null,
+          durationMs: 0
+        }
+      ]
+    });
+
+    expect(screen.getAllByTestId("tool-activity-group")).toHaveLength(1);
+    expect(screen.getAllByTestId("stop-gate-group")).toHaveLength(1);
+    expect(screen.getAllByText("加载 Action Schema")).toHaveLength(2);
+    expect(screen.getByText("终验尚未通过，Agent 将继续修复")).toBeTruthy();
+    expect(screen.getByText("时间线存在空洞")).toBeTruthy();
+    expect(screen.getByText(/另有 2 项；validation:draft_1:v3/)).toBeTruthy();
+    expect(screen.getAllByText("<1ms")).toHaveLength(2);
+  });
+
+  it("把 rejected 显示为未执行而不是红色执行失败", () => {
+    renderThread({
+      streamItems: [{
+        type: "tool",
+        step_id: "rejected_1",
+        tool: "timeline.update",
+        status: "rejected",
+        argsSummary: null,
+        observation: "schema mismatch",
+        durationMs: 0
+      }]
+    });
+
+    const group = screen.getByTestId("tool-activity-group") as HTMLDetailsElement;
+    expect(group.open).toBe(true);
+    expect(screen.getByText("有调用未执行")).toBeTruthy();
+    expect(screen.getByText("未执行").className).toContain("text-warn");
+    expect(screen.queryByText("工具执行失败")).toBeNull();
+    expect(screen.getByText("<1ms")).toBeTruthy();
+  });
+
   it("刷新后把持久化 tool 消息恢复成折叠工具组", () => {
     renderThread({
       messages: [
@@ -221,6 +279,29 @@ describe("AssistantThread Claude Code 式消息流", () => {
     expect(group.open).toBe(false);
     expect(screen.getByText("已使用工具")).toBeTruthy();
     expect(screen.getAllByText("渲染预览")).toHaveLength(2);
+  });
+
+  it("刷新后把 stop.gate 历史 trace 恢复成独立 Stop Gate 卡片", () => {
+    renderThread({
+      messages: [message(
+        "system",
+        "legacy_stop",
+        JSON.stringify({
+          step_id: "legacy_stop",
+          tool: "stop.gate",
+          status: "blocked",
+          duration_ms: 0,
+          observation: "validation failed"
+        }),
+        "tool"
+      )]
+    });
+
+    expect(screen.queryByTestId("tool-activity-group")).toBeNull();
+    expect(screen.getByTestId("stop-gate-group")).toBeTruthy();
+    expect(screen.getByText("终验尚未通过，Agent 将继续修复")).toBeTruthy();
+    expect(screen.getByText("validation failed")).toBeTruthy();
+    expect(screen.getByText("<1ms")).toBeTruthy();
   });
 
   it("把回合失败终态渲染成持久的失败提示行，刷新后仍从 DB 读回", () => {

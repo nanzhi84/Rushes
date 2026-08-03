@@ -51,7 +51,23 @@ func (provider *leaseLossBlockingProvider) Generate(
 ) (*schema.Message, error) {
 	provider.mu.Lock()
 	provider.calls++
+	call := provider.calls
 	provider.mu.Unlock()
+	switch call {
+	case 1:
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID:       "load-timeline-update",
+			Function: schema.FunctionCall{Name: "tool.load", Arguments: `{"tool_names":["timeline.update"]}`},
+		}}), nil
+	case 2:
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "lease-loss-mutation",
+			Function: schema.FunctionCall{
+				Name:      "timeline.update",
+				Arguments: `{"kind":"adjust_gain","timeline_clip_id":"clip_v1_001","gain_db":-6}`,
+			},
+		}}), nil
+	}
 	provider.enterOnce.Do(func() { close(provider.entered) })
 	<-ctx.Done()
 	return nil, context.Cause(ctx)
@@ -289,7 +305,7 @@ func TestRunTurnStopsAfterHeartbeatLeaseLossWithoutReacquire(t *testing.T) {
 	}
 
 	calls, bound := provider.snapshot()
-	if calls != 1 || !containsName(bound, "timeline.update") {
+	if calls != 3 || !containsName(bound, "timeline.update") {
 		t.Fatalf("lease 丢失后发生额外 provider 调用或未进入编辑面: calls=%d bound=%v", calls, bound)
 	}
 	stolen, err := storage.GetAgentEditLease(t.Context(), database.Read(), draftID)
@@ -312,7 +328,7 @@ func TestRunTurnStopsAfterHeartbeatLeaseLossWithoutReacquire(t *testing.T) {
 	).Scan(&versions, &receipts, &toolMessages); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 1 || receipts != 0 || toolMessages != 0 {
+	if versions != 2 || receipts != 1 || toolMessages < 2 {
 		t.Fatalf("lease 丢失后仍执行工具或 mutation: versions=%d receipts=%d tools=%d", versions, receipts, toolMessages)
 	}
 }
@@ -376,8 +392,8 @@ func TestDiscoveryProviderCallsNeverAcquireTimelineEditLease(t *testing.T) {
 			spy := &editLeaseProviderSpy{
 				database: database, draftID: draftID, expectedLive: []bool{false},
 			}
-			surface := &dynamicToolSurfaceModel{inner: spy, registry: service.tools}
-			if _, err := surface.Generate(
+			loader := &deterministicToolSchemaModel{inner: spy, registry: service.tools}
+			if _, err := loader.Generate(
 				turnCtx, []*schema.Message{schema.UserMessage(prompt)},
 			); err != nil {
 				t.Fatal(err)
@@ -435,9 +451,16 @@ func TestReadOnlyBeatAndTranscriptAnalysisNeverAcquireTimelineEditLease(t *testi
 			spy := &editLeaseProviderSpy{
 				database: database, draftID: draftID, expectedLive: []bool{false, false},
 			}
-			surface := &dynamicToolSurfaceModel{inner: spy, registry: service.tools}
+			loader := &deterministicToolSchemaModel{inner: spy, registry: service.tools}
 			user := schema.UserMessage(test.prompt)
-			if _, err := surface.Generate(turnCtx, []*schema.Message{user}); err != nil {
+			messages := []*schema.Message{user}
+			if test.expectedVisible != "" {
+				messages = append(messages, schema.ToolMessage(
+					`{"status":"succeeded","loaded_names":["speech.search"],"already_loaded":[],"not_loadable":[]}`,
+					"load-read", schema.WithToolName("tool.load"),
+				))
+			}
+			if _, err := loader.Generate(turnCtx, messages); err != nil {
 				t.Fatal(err)
 			}
 			firstBound := []string{}
@@ -457,7 +480,7 @@ func TestReadOnlyBeatAndTranscriptAnalysisNeverAcquireTimelineEditLease(t *testi
 			if containsTimelineMutationTool(firstBound) {
 				t.Fatalf("只读分析泄露 mutation: %v", firstBound)
 			}
-			if _, err := surface.Generate(turnCtx, []*schema.Message{user}); err != nil {
+			if _, err := loader.Generate(turnCtx, messages); err != nil {
 				t.Fatal(err)
 			}
 			lastBound := firstBound
@@ -479,7 +502,7 @@ func TestReadOnlyBeatAndTranscriptAnalysisNeverAcquireTimelineEditLease(t *testi
 	}
 }
 
-func TestMixedBeatAnalysisAndTimelineEditBindsMutationUnderLease(t *testing.T) {
+func TestLoadedTimelineSchemaDoesNotAcquireEditLease(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft-mixed-beat-edit-lease"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -499,11 +522,15 @@ func TestMixedBeatAnalysisAndTimelineEditBindsMutationUnderLease(t *testing.T) {
 	turnCtx = rushestools.WithDraftID(turnCtx, draftID)
 	turnCtx = withTimelineEditLeaseSession(turnCtx, session)
 	spy := &editLeaseProviderSpy{
-		database: database, draftID: draftID, expectedLive: []bool{true},
+		database: database, draftID: draftID, expectedLive: []bool{false},
 	}
-	surface := &dynamicToolSurfaceModel{inner: spy, registry: service.tools}
-	if _, err := surface.Generate(turnCtx, []*schema.Message{
+	loader := &deterministicToolSchemaModel{inner: spy, registry: service.tools}
+	if _, err := loader.Generate(turnCtx, []*schema.Message{
 		schema.UserMessage("分析 BGM 拍点并把它加到时间线"),
+		schema.ToolMessage(
+			`{"status":"succeeded","loaded_names":["timeline.insert"],"already_loaded":[],"not_loadable":[]}`,
+			"load-insert", schema.WithToolName("tool.load"),
+		),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -511,15 +538,15 @@ func TestMixedBeatAnalysisAndTimelineEditBindsMutationUnderLease(t *testing.T) {
 		!containsName(spy.bound[0], "timeline.insert") {
 		t.Fatalf("混合分析编辑工具面=%v calls=%d", spy.bound[0], spy.calls)
 	}
-	lease, err := storage.GetLiveAgentEditLease(
+	_, err = storage.GetLiveAgentEditLease(
 		t.Context(), database.Read(), draftID, time.Now().UTC(),
 	)
-	if err != nil || lease.TurnID != "turn-mixed-beat-edit" {
-		t.Fatalf("混合编辑未在 mutation 工具披露前持有 lease: lease=%#v err=%v", lease, err)
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("加载 mutation schema 后意外获取 lease: %v", err)
 	}
 }
 
-func TestBeatAnalysisThenCardEditBindsMutationUnderLease(t *testing.T) {
+func TestUserIntentCannotAcquireLeaseOrDiscloseSchema(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft-beat-analysis-then-card-edit"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -541,23 +568,23 @@ func TestBeatAnalysisThenCardEditBindsMutationUnderLease(t *testing.T) {
 	turnCtx = rushestools.WithDraftID(turnCtx, draftID)
 	turnCtx = withTimelineEditLeaseSession(turnCtx, session)
 	spy := &editLeaseProviderSpy{
-		database: database, draftID: draftID, expectedLive: []bool{true},
+		database: database, draftID: draftID, expectedLive: []bool{false},
 	}
-	surface := &dynamicToolSurfaceModel{inner: spy, registry: service.tools}
-	if _, err := surface.Generate(turnCtx, []*schema.Message{
+	loader := &deterministicToolSchemaModel{inner: spy, registry: service.tools}
+	if _, err := loader.Generate(turnCtx, []*schema.Message{
 		schema.UserMessage("分析 BGM 后做卡点"),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if spy.calls != 1 || containsName(spy.bound[0], "audio.analyze_beats") ||
-		!containsName(spy.bound[0], "timeline.insert") {
+		containsName(spy.bound[0], "timeline.insert") {
 		t.Fatalf("分析后编辑工具面=%v calls=%d", spy.bound[0], spy.calls)
 	}
-	lease, err := storage.GetLiveAgentEditLease(
+	_, err = storage.GetLiveAgentEditLease(
 		t.Context(), database.Read(), draftID, time.Now().UTC(),
 	)
-	if err != nil || lease.TurnID != "turn-beat-analysis-then-card-edit" {
-		t.Fatalf("分析后编辑未在 provider 前持有 lease: lease=%#v err=%v", lease, err)
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("用户意图触发了 edit lease: %v", err)
 	}
 }
 
@@ -640,7 +667,7 @@ func TestTimelineEditLeaseHelpersAndCancelledStorageMutation(t *testing.T) {
 	}
 }
 
-func TestCompositeDiscoveryAcquiresLeaseOnlyWhenMutationSurfaceIsBound(t *testing.T) {
+func TestTranscriptLoadsAreAdditiveAndNeverAcquireLease(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft-composite-lazy-edit-lease"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -662,38 +689,42 @@ func TestCompositeDiscoveryAcquiresLeaseOnlyWhenMutationSurfaceIsBound(t *testin
 	turnCtx = rushestools.WithDraftID(turnCtx, draftID)
 	turnCtx = withTimelineEditLeaseSession(turnCtx, session)
 	spy := &editLeaseProviderSpy{
-		database: database, draftID: draftID, expectedLive: []bool{false, true},
+		database: database, draftID: draftID, expectedLive: []bool{false, false, false},
 	}
-	surface := &dynamicToolSurfaceModel{inner: spy, registry: service.tools}
+	loader := &deterministicToolSchemaModel{inner: spy, registry: service.tools}
 	user := schema.UserMessage("先搜索镜头，再把选中的镜头插入时间线")
-	if _, err := surface.Generate(turnCtx, []*schema.Message{user}); err != nil {
+	if _, err := loader.Generate(turnCtx, []*schema.Message{user}); err != nil {
 		t.Fatal(err)
 	}
-	if containsName(spy.bound[0], "timeline.insert") ||
-		!containsName(spy.bound[0], "shot.search") {
-		t.Fatalf("证据阶段工具面=%v", spy.bound[0])
+	if len(spy.bound[0]) != 1 || spy.bound[0][0] != "tool.load" {
+		t.Fatalf("初始 schema=%v", spy.bound[0])
 	}
-	if _, err := surface.Generate(turnCtx, []*schema.Message{
-		user,
-		schema.ToolMessage(
-			`{"shots":[{"shot_id":"shot-a"}]}`,
-			"call-shot-search",
-			schema.WithToolName("shot.search"),
-		),
-	}); err != nil {
+	shotLoad := schema.ToolMessage(
+		`{"status":"succeeded","loaded_names":["shot.search"],"already_loaded":[],"not_loadable":[]}`,
+		"load-shot", schema.WithToolName("tool.load"),
+	)
+	if _, err := loader.Generate(turnCtx, []*schema.Message{user, shotLoad}); err != nil {
 		t.Fatal(err)
 	}
-	if spy.calls != 2 || len(spy.bound) != 2 {
+	insertLoad := schema.ToolMessage(
+		`{"status":"succeeded","loaded_names":["timeline.insert"],"already_loaded":[],"not_loadable":[]}`,
+		"load-insert", schema.WithToolName("tool.load"),
+	)
+	if _, err := loader.Generate(turnCtx, []*schema.Message{user, shotLoad, insertLoad}); err != nil {
+		t.Fatal(err)
+	}
+	if spy.calls != 3 || len(spy.bound) != 3 {
 		t.Fatalf("provider calls=%d bound=%v", spy.calls, spy.bound)
 	}
-	if !containsName(spy.bound[1], "timeline.insert") {
-		t.Fatalf("证据完成后未绑定 mutation: %v", spy.bound[1])
+	if !containsName(spy.bound[1], "shot.search") || containsName(spy.bound[1], "timeline.insert") ||
+		!containsName(spy.bound[2], "shot.search") || !containsName(spy.bound[2], "timeline.insert") {
+		t.Fatalf("转录加载非累加: %v", spy.bound)
 	}
-	lease, err := storage.GetLiveAgentEditLease(
+	_, err = storage.GetLiveAgentEditLease(
 		t.Context(), database.Read(), draftID, time.Now().UTC(),
 	)
-	if err != nil || lease.TurnID != "turn-composite-lazy-lease" {
-		t.Fatalf("mutation provider 未持有预期 edit lease: lease=%#v err=%v", lease, err)
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("schema 加载获取了 edit lease: %v", err)
 	}
 }
 

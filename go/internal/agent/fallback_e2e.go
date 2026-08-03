@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
@@ -18,6 +19,7 @@ const (
 	e2eMemoryWriteMarker      = "E2E_MEMORY_WRITE"
 	e2eMemoryStatusMarker     = "E2E_MEMORY_STATUS"
 	e2eShotSearchMarker       = "E2E_SHOT_SEARCH"
+	e2eStopGateMarker         = "E2E_STOP_GATE_LIFECYCLE"
 )
 
 type e2eFallbackScaffold struct {
@@ -83,7 +85,64 @@ func (scaffold *e2eFallbackScaffold) TryHandle(
 			"E2E_SHOT_SEARCH_OK snapshot=%s total=%d returned=%d frozen=%d",
 			search.IndexSnapshotID, search.TotalMatches, len(search.Shots), len(search.FrozenAssetIDs),
 		), true, nil
+	case strings.Contains(content, e2eStopGateMarker):
+		if err := scaffold.emitStopGateLifecycle(ctx, draftID); err != nil {
+			return "", true, err
+		}
+		return "E2E_STOP_GATE_PASSED", true, nil
 	default:
 		return "", false, nil
 	}
+}
+
+// emitStopGateLifecycle uses the real SSE hub and UI reducer while keeping the
+// no-provider Playwright stack deterministic. Go integration tests separately
+// exercise the actual Registry, mutations and Stop Gate controller.
+func (scaffold *e2eFallbackScaffold) emitStopGateLifecycle(ctx context.Context, draftID string) error {
+	record := func(event StreamEvent) { scaffold.service.Hub().Record(draftID, event) }
+	for index := 1; index <= 2; index++ {
+		stepID := fmt.Sprintf("e2e_edit_%d", index)
+		record(StreamEvent{
+			"type": TurnStreamToolStepStarted, "step_id": stepID, "tool": "timeline.update",
+		})
+		record(StreamEvent{
+			"type": TurnStreamToolStepFinished, "step_id": stepID, "tool": "timeline.update",
+			"status": string(rushestools.StatusSucceeded), "duration_ms": 0,
+		})
+	}
+	record(StreamEvent{
+		"type": TurnStreamToolStepStarted, "step_id": "e2e_rejected", "tool": "timeline.delete",
+	})
+	record(StreamEvent{
+		"type": TurnStreamToolStepFinished, "step_id": "e2e_rejected", "tool": "timeline.delete",
+		"status": string(rushestools.StatusRejected), "duration_ms": 0,
+		"observation": "当前尚未创建时间线；加载并使用 timeline.insert 插入首个 visual_base clip",
+	})
+	record(StreamEvent{
+		"type": TurnStreamStopGateStarted, "gate_id": "stop_gate", "timeline_id": "draft_e2e:v1",
+	})
+	record(StreamEvent{
+		"type": TurnStreamStopGateFinished, "gate_id": "stop_gate", "timeline_id": "draft_e2e:v1",
+		"status": "blocked", "duration_ms": 0,
+		"issues": []map[string]any{{
+			"code": "duration_contract_unmet", "message": "主视觉时长尚未满足目标",
+			"recovery": "加载并使用 timeline.insert 插入剩余镜头",
+		}},
+		"remaining_issue_count": 1, "result_ref": "validation:draft_e2e:v1",
+	})
+	timer := time.NewTimer(750 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+	record(StreamEvent{
+		"type": TurnStreamStopGateStarted, "gate_id": "stop_gate", "timeline_id": "draft_e2e:v2",
+	})
+	record(StreamEvent{
+		"type": TurnStreamStopGateFinished, "gate_id": "stop_gate", "timeline_id": "draft_e2e:v2",
+		"status": "passed", "duration_ms": 0,
+	})
+	return nil
 }

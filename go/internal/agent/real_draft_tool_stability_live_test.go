@@ -219,7 +219,7 @@ func runRealDraftToolAttempt(
 	ctx = rushestools.WithTimelineWriteAdmission(
 		ctx, turnID, leaseSession.token, leaseSession.markLost,
 	)
-	ctx = withModelToolSurfaceSession(ctx)
+	ctx = withToolDisclosureSession(ctx)
 	ctx = withToolRecoveryState(ctx, newToolRecoveryState())
 	ctx = agentexec.WithTurnInteractionState(
 		ctx, agentexec.NewTurnInteractionState(service.indexedResources),
@@ -244,32 +244,77 @@ func runRealDraftToolAttempt(
 		return 0, fmt.Errorf("读取调用前时间线: %w", err)
 	}
 	prompt := workflow.Prompt(facts)
-	history := []*schema.Message{schema.UserMessage(prompt)}
-	selected, err := selectModelToolSurface(ctx, service.tools, history)
+	catalogPrompt, err := modelActionCatalogPrompt(service.tools)
 	if err != nil {
-		return 0, fmt.Errorf("动态工具面选择: %w", err)
+		return 0, fmt.Errorf("构造 Model Action Catalog: %w", err)
 	}
-	if _, ok := liveWorkflowSpecByName(selected, workflow.ExpectedTool); !ok {
-		return 0, fmt.Errorf(
-			"动态工具面未绑定期望工具 %s，实际=%s",
-			workflow.ExpectedTool, strings.Join(liveWorkflowSpecNames(selected), ","),
-		)
+	catalogMessage := schema.SystemMessage(catalogPrompt)
+	catalogMessage.Extra = map[string]any{"context_phase": "model_action_catalog"}
+	history := []*schema.Message{catalogMessage, schema.UserMessage(prompt)}
+	expectedSpec, ok := service.tools.Spec(workflow.ExpectedTool)
+	if !ok || expectedSpec.Exposure != rushestools.ExposureLLM {
+		return 0, fmt.Errorf("期望 action 不在 Model Action Catalog: %s", workflow.ExpectedTool)
 	}
-	modelToolSurfaceSessionFromContext(ctx).set(liveWorkflowSpecNames(selected))
-	// 与正式 dynamicToolSurfaceModel 一致：mutation/preview 能力在 provider
-	// 看见之前取得 lease，纯搜索/分析则不提前锁住时间线。
-	if specsRequireTimelineEditLease(selected) {
-		if err := leaseSession.ensure(ctx); err != nil {
-			return 0, fmt.Errorf("取得真实 Agent edit lease: %w", err)
-		}
-	}
-	bound, err := bindLiveWorkflowTools(ctx, chat, selected)
-	if err != nil {
-		return 0, fmt.Errorf("绑定真实工具面: %w", err)
+	loadSpec, ok := service.tools.Spec("tool.load")
+	if !ok || loadSpec.Exposure != rushestools.ExposureMeta {
+		return 0, errors.New("Registry 缺少 tool.load meta action")
 	}
 	snapshot, err := NewContextBuilder(database).Snapshot(ctx, facts.DraftID)
 	if err != nil {
 		return 0, fmt.Errorf("构造真实 WorldState: %w", err)
+	}
+	receiptMiddleware := newToolRecoveryMiddleware(
+		func(string) bool { return false }, service.tools.ModelReceiptPolicy,
+	)
+	loadBound, err := bindLiveWorkflowTools(ctx, chat, []rushestools.Spec{loadSpec})
+	if err != nil {
+		return 0, fmt.Errorf("绑定 tool.load: %w", err)
+	}
+	loadCalls, err := liveGenerateWorkflowToolCalls(ctx, loadBound, snapshot, history)
+	if err != nil {
+		return 0, fmt.Errorf("模型选择待加载 action: %w", err)
+	}
+	if len(loadCalls) != 1 || loadCalls[0].Function.Name != "tool.load" {
+		return len(loadCalls), fmt.Errorf(
+			"首次必须只调用 tool.load，实际=%s",
+			toolCallNames(&schema.Message{ToolCalls: loadCalls}),
+		)
+	}
+	loadArguments := map[string]any{}
+	if err := json.Unmarshal([]byte(loadCalls[0].Function.Arguments), &loadArguments); err != nil {
+		return 0, fmt.Errorf("tool.load 参数无效: %w", err)
+	}
+	decodedLoad, err := service.tools.DecodeInput("tool.load", loadArguments)
+	if err != nil {
+		return 0, fmt.Errorf("tool.load 参数不符合固定 schema: %w", err)
+	}
+	loadInput := decodedLoad.(rushestools.ToolLoadInput)
+	if !reflect.DeepEqual(loadInput.ToolNames, []string{workflow.ExpectedTool}) {
+		return 0, fmt.Errorf(
+			"真实草稿 Catalog action 选择错误: loaded=%v expected=[%s]",
+			loadInput.ToolNames, workflow.ExpectedTool,
+		)
+	}
+	loadMessages, err := invokeLiveWorkflowTools(
+		ctx, service, []rushestools.Spec{loadSpec}, loadCalls, receiptMiddleware,
+	)
+	if err != nil || len(loadMessages) != 1 ||
+		!validToolLoadProof(loadCalls[0].Function.Arguments, loadMessages[0].Content) {
+		return 0, fmt.Errorf("真实 tool.load 执行/回执异常: messages=%v err=%v", loadMessages, err)
+	}
+	history = append(history, schema.AssistantMessage("", loadCalls))
+	history = append(history, loadMessages...)
+	selected, err := loadedModelActionSpecs(ctx, service.tools, history)
+	if err != nil || len(selected) != 1 || selected[0].Name != workflow.ExpectedTool {
+		return 0, fmt.Errorf(
+			"真实 transcript 未确定性披露期望 schema: selected=%v err=%v",
+			liveWorkflowSpecNames(selected), err,
+		)
+	}
+	boundSpecs := append([]rushestools.Spec{loadSpec}, selected...)
+	bound, err := bindLiveWorkflowTools(ctx, chat, boundSpecs)
+	if err != nil {
+		return 0, fmt.Errorf("绑定真实已披露工具面: %w", err)
 	}
 	calls, err := liveGenerateWorkflowToolCalls(ctx, bound, snapshot, history)
 	if err != nil {
@@ -309,8 +354,7 @@ func runRealDraftToolAttempt(
 	// 真实 gate 必须经过与生产 ReAct 相同的 identity/receipt 中间件；关闭
 	// 工具内部重试，保持“一次模型选择、一次工具执行”的稳定性计分口径。
 	messages, err := invokeLiveWorkflowTools(
-		ctx, service, selected, calls,
-		newToolRecoveryMiddleware(func(string) bool { return false }, service.tools.ModelReceiptPolicy),
+		ctx, service, selected, calls, receiptMiddleware,
 	)
 	if err != nil {
 		return callCount, fmt.Errorf("实际执行工具: %w", err)
@@ -853,20 +897,28 @@ func TestRealDraftAttemptRunsMutationWithAgentLeaseAndDurableReceipt(t *testing.
 		DeleteStartFrame: 1, DeleteEndFrame: 2,
 		LinkedAssetIDs: map[string]bool{"asset_real_gate_harness": true},
 	}
-	stub := &scriptedWorkflowModel{calls: []schema.ToolCall{{
-		ID: "call_real_gate_delete",
-		Function: schema.FunctionCall{
-			Name:      "timeline.delete",
-			Arguments: `{"kind":"delete_range","start_frame":1,"end_frame":2}`,
+	stub := &scriptedWorkflowModel{calls: []schema.ToolCall{
+		{
+			ID: "call_real_gate_load",
+			Function: schema.FunctionCall{
+				Name: "tool.load", Arguments: `{"tool_names":["timeline.delete"]}`,
+			},
 		},
-	}}}
+		{
+			ID: "call_real_gate_delete",
+			Function: schema.FunctionCall{
+				Name:      "timeline.delete",
+				Arguments: `{"kind":"delete_range","start_frame":1,"end_frame":2}`,
+			},
+		},
+	}}
 	attemptWorkspace := filepath.Join(t.TempDir(), "attempt")
 	toolCalls, err := runRealDraftToolAttempt(
 		t.Context(), attemptWorkspace, goldenDB,
 		facts,
 		workflow, stub, stub,
 	)
-	if err != nil || toolCalls != 1 || stub.next != 1 {
+	if err != nil || toolCalls != 1 || stub.next != 2 {
 		t.Fatalf("attempt calls=%d model=%d err=%v", toolCalls, stub.next, err)
 	}
 
@@ -903,18 +955,26 @@ func TestRealDraftAttemptRunsMutationWithAgentLeaseAndDurableReceipt(t *testing.
 		)
 	}
 
-	missingIDStub := &scriptedWorkflowModel{calls: []schema.ToolCall{{
-		Function: schema.FunctionCall{
-			Name:      "timeline.delete",
-			Arguments: `{"kind":"delete_range","start_frame":1,"end_frame":2}`,
+	missingIDStub := &scriptedWorkflowModel{calls: []schema.ToolCall{
+		{
+			ID: "call_real_gate_load_missing_action_id",
+			Function: schema.FunctionCall{
+				Name: "tool.load", Arguments: `{"tool_names":["timeline.delete"]}`,
+			},
 		},
-	}}}
+		{
+			Function: schema.FunctionCall{
+				Name:      "timeline.delete",
+				Arguments: `{"kind":"delete_range","start_frame":1,"end_frame":2}`,
+			},
+		},
+	}}
 	missingIDWorkspace := filepath.Join(t.TempDir(), "attempt-missing-id")
 	toolCalls, err = runRealDraftToolAttempt(
 		t.Context(), missingIDWorkspace, goldenDB, facts,
 		workflow, missingIDStub, missingIDStub,
 	)
-	if err == nil || toolCalls != 1 || missingIDStub.next != 1 ||
+	if err == nil || toolCalls != 1 || missingIDStub.next != 2 ||
 		!strings.Contains(err.Error(), "缺少 provider tool_call_id") {
 		t.Fatalf(
 			"missing-id attempt calls=%d model=%d err=%v",

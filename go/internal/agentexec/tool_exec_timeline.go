@@ -609,8 +609,8 @@ func (exec *Executor) persistTimelineFromSnapshotWithPreservedAudioAndResultData
 	if err != nil {
 		return rushestools.ToolResult{}, err
 	}
-	reportMap, valid, err := exec.timelineValidationReportWithPreservedAudio(
-		ctx, draftID, document, preservedAudio,
+	reportMap, valid, err := timelineStructuralValidationReportWithPreservedAudio(
+		document, preservedAudio,
 	)
 	if err != nil {
 		return rushestools.ToolResult{}, err
@@ -666,14 +666,6 @@ func (exec *Executor) persistTimelineFromSnapshotWithPreservedAudioAndResultData
 		}
 		toolResult.Data["validation_summary"] = reportMap
 	}
-	if contractReport, hasContract := reportMap["content_contract"].(ContractVerificationReport); hasContract {
-		failures := ContractFailureItems(contractReport)
-		if len(failures) > 0 {
-			encoded, _ := json.Marshal(failures)
-			toolResult.Observation += " 验收合同未通过项：" + string(encoded)
-			toolResult.Data["contract_failures"] = failures
-		}
-	}
 	receipt, err := timelineMutationReceipt(ctx, draftID, base, document, toolResult)
 	if err != nil {
 		return rushestools.ToolResult{}, err
@@ -713,11 +705,26 @@ func (exec *Executor) persistTimelineFromSnapshotWithPreservedAudioAndResultData
 	if result.Status != reducer.StatusApplied {
 		return rushestools.ToolResult{}, fmt.Errorf("timeline reducer status: %s", result.Status)
 	}
-	// 原子编辑已经在同一事务内提交。内容合同描述整条成片距离目标的差距，不能把
-	// 一次结构合法、已落库的原子写入伪装成工具执行失败，否则 ReAct 会重试并重复
-	// 修改时间线。draft 的 TimelineValidated 仍由上面的整体 valid 决定，最终
-	// Harness 后续的 timeline.check / Preview QA 也仍会因合同未通过而拒绝成功。
+	// 原子编辑只提交并回灌结构不变量。整条成片的内容合同由 Stop Gate 的
+	// timeline.check 统一执行；中间版本不得重复跑完整终验或伪装成工具失败。
 	return toolResult, nil
+}
+
+func timelineStructuralValidationReportWithPreservedAudio(
+	document timeline.Document,
+	preservedAudio map[string]timeline.Track,
+) (map[string]any, bool, error) {
+	report := validateWithPreservedIndependentAudio(document, preservedAudio)
+	reportMap := map[string]any{
+		"valid": report.Valid, "structural_valid": report.Valid,
+		"checks": report.Checks, "issues": report.Issues,
+	}
+	if report.Valid {
+		if err := addIndependentAudioPreservationProofs(reportMap, document, preservedAudio); err != nil {
+			return nil, false, err
+		}
+	}
+	return reportMap, report.Valid, nil
 }
 
 func (exec *Executor) timelineVersionConflictResult(
@@ -744,7 +751,7 @@ func (exec *Executor) timelineVersionConflictResult(
 		data["timeline_version"] = latest.Version
 	}
 	return rushestools.ToolFailure(
-		rushestools.StatusFailed,
+		rushestools.StatusRejected,
 		"时间线在本次原子编辑提交前已被其它请求更新；本次结果未写入。",
 		rushestools.ErrCodeStaleTarget,
 		"读取下一次 provider 调用前刷新的 CurrentTimelineView，再基于其中的最新 timeline_id 与稳定 clip ID 重试这一项原子编辑。",

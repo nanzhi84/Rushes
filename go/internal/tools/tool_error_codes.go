@@ -12,6 +12,7 @@ type ToolStatus string
 
 const (
 	StatusSucceeded        ToolStatus = "succeeded"
+	StatusRejected         ToolStatus = "rejected"
 	StatusFailed           ToolStatus = "failed"
 	StatusValidationFailed ToolStatus = "validation_failed"
 	StatusCancelled        ToolStatus = "cancelled"
@@ -30,11 +31,13 @@ const (
 	ErrCodeToolValidationFailed ToolErrorCode = "tool_validation_failed"
 	ErrCodeToolCancelled        ToolErrorCode = "tool_cancelled"
 	ErrCodeToolTimeout          ToolErrorCode = "tool_timeout"
-	// ErrCodeToolNotInSurface 由 #141 动态工具面拦截器产出。
-	ErrCodeToolNotInSurface ToolErrorCode = "tool_not_in_surface"
 	// ErrCodeConfirmationRequired 由 #128 的破坏性强制确认拦截器产出。
 	ErrCodeConfirmationRequired      ToolErrorCode = "confirmation_required"
 	ErrCodeInvalidConfirmationTarget ToolErrorCode = "invalid_confirmation_target"
+	ErrCodeUsableAssetNotExists      ToolErrorCode = "usable_asset_not_exists"
+	ErrCodeTranscriptIndexNotExists  ToolErrorCode = "transcript_index_not_exists"
+	ErrCodeTimelineNotExists         ToolErrorCode = "timeline_not_exists"
+	ErrCodePreviewNotExists          ToolErrorCode = "preview_not_exists"
 
 	// —— 时间线补丁（agentexec/shared_util.go、timeline_op_recovery.go、tool_exec_timeline.go）——
 	ErrCodeTimelineOpSemanticError  ToolErrorCode = "timeline_op_semantic_error"
@@ -108,9 +111,12 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodeToolValidationFailed,
 	ErrCodeToolCancelled,
 	ErrCodeToolTimeout,
-	ErrCodeToolNotInSurface,
 	ErrCodeConfirmationRequired,
 	ErrCodeInvalidConfirmationTarget,
+	ErrCodeUsableAssetNotExists,
+	ErrCodeTranscriptIndexNotExists,
+	ErrCodeTimelineNotExists,
+	ErrCodePreviewNotExists,
 	ErrCodeTimelineOpSemanticError,
 	ErrCodeTimelineOpFieldError,
 	ErrCodeTimelineRangeOutOfBounds,
@@ -169,7 +175,7 @@ var registeredToolErrorCodes = func() map[ToolErrorCode]struct{} {
 }()
 
 var allToolStatuses = []ToolStatus{
-	StatusSucceeded, StatusFailed, StatusValidationFailed, StatusCancelled, StatusTimeout, StatusWaiting,
+	StatusSucceeded, StatusRejected, StatusFailed, StatusValidationFailed, StatusCancelled, StatusTimeout, StatusWaiting,
 }
 
 var registeredToolStatuses = func() map[ToolStatus]struct{} {

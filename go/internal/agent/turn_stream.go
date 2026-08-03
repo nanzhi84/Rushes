@@ -25,6 +25,8 @@ const (
 	TurnStreamToolStepStarted         = "tool_step_started"
 	TurnStreamToolStepProgress        = "tool_step_progress"
 	TurnStreamToolStepFinished        = "tool_step_finished"
+	TurnStreamStopGateStarted         = "stop_gate_started"
+	TurnStreamStopGateFinished        = "stop_gate_finished"
 	TurnStreamModelRetry              = "model_retry"
 	TurnStreamContextCompactionFailed = "context_compaction_failed"
 	TurnStreamSnapshotTruncated       = "stream_snapshot_truncated"
@@ -40,6 +42,8 @@ var knownTurnStreamTypes = []string{
 	TurnStreamToolStepStarted,
 	TurnStreamToolStepProgress,
 	TurnStreamToolStepFinished,
+	TurnStreamStopGateStarted,
+	TurnStreamStopGateFinished,
 	TurnStreamModelRetry,
 	contracts.TurnStreamSubagentProgress,
 	TurnStreamContextCompactionFailed,
