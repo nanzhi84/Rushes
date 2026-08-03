@@ -1,86 +1,11 @@
 package agentexec
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
-	"github.com/nanzhi84/Rushes/go/internal/agenttest"
-	"github.com/nanzhi84/Rushes/go/internal/contracts"
-	"github.com/nanzhi84/Rushes/go/internal/reducer"
-	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 )
-
-func TestPreviewAlreadyInspectedRequiresLatestSuccessForEveryCheck(t *testing.T) {
-	database := agenttest.AgentTestDatabase(t)
-	const draftID = "draft_preview_already_inspected"
-	const previewID = "preview_complete"
-	agenttest.CreateAgentDraft(t, database, draftID)
-	exec, err := newTestExecutor(t.Context(), database, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if exec.PreviewAlreadyInspected(t.Context(), draftID, nil) ||
-		exec.PreviewAlreadyInspected(t.Context(), draftID, map[string]any{}) {
-		t.Fatal("missing preview id must not count as inspected")
-	}
-	insertPreviewTraceMessage(t, database, draftID, "trace_reply", "reply", "not a tool trace")
-	insertPreviewTraceMessage(t, database, draftID, "trace_malformed", "tool", "{")
-	insertPreviewTraceMessage(t, database, draftID, "trace_other_tool", "tool", previewTraceJSON(t, map[string]any{
-		"tool": "timeline.check", "preview_id": previewID, "preview_check": "decode", "status": "succeeded",
-	}))
-	insertPreviewTraceMessage(t, database, draftID, "trace_other_preview", "tool", previewTraceJSON(t, map[string]any{
-		"tool": "preview.check", "preview_id": "preview_other", "preview_check": "decode", "status": "succeeded",
-	}))
-	insertPreviewTraceMessage(t, database, draftID, "trace_empty_check", "tool", previewTraceJSON(t, map[string]any{
-		"tool": "preview.check", "preview_id": previewID, "status": "succeeded",
-	}))
-
-	checks := []string{"decode", "black", "freeze", "silence", "loudness"}
-	for index, check := range checks {
-		record := map[string]any{"tool": "preview.check", "status": "succeeded"}
-		if index%2 == 0 {
-			record["preview_id"] = previewID
-			record["preview_check"] = check
-		} else {
-			args, marshalErr := json.Marshal(map[string]any{"preview_id": previewID, "check": check})
-			if marshalErr != nil {
-				t.Fatal(marshalErr)
-			}
-			record["args_summary"] = string(args)
-		}
-		insertPreviewTraceMessage(
-			t, database, draftID, "trace_success_"+check, "tool", previewTraceJSON(t, record),
-		)
-	}
-	if !exec.PreviewAlreadyInspected(
-		t.Context(), draftID, map[string]any{"preview_id": previewID},
-	) {
-		t.Fatal("five successful atomic checks should complete preview inspection")
-	}
-
-	// The scan is newest-first and only the latest trace for each check counts.
-	insertPreviewTraceMessage(t, database, draftID, "trace_decode_failed_latest", "tool", previewTraceJSON(t, map[string]any{
-		"tool": "preview.check", "preview_id": previewID,
-		"preview_check": "decode", "status": "failed",
-	}))
-	if exec.PreviewAlreadyInspected(
-		t.Context(), draftID, map[string]any{"artifact_id": previewID},
-	) {
-		t.Fatal("a newer failed check must supersede the older successful trace")
-	}
-
-	if err := database.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if exec.PreviewAlreadyInspected(
-		t.Context(), draftID, map[string]any{"artifact_id": previewID},
-	) {
-		t.Fatal("message storage failures must fail closed")
-	}
-}
 
 func TestDerivedAndUniqueSourceAncestorResolution(t *testing.T) {
 	base := timeline.Clip{
@@ -212,30 +137,4 @@ func TestBeginIndexedToolCallLocksOnlyTheDeclaredResource(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("same-resource reader remained blocked after release")
 	}
-}
-
-func insertPreviewTraceMessage(
-	t *testing.T,
-	database *storage.DB,
-	draftID, messageID, kind, content string,
-) {
-	t.Helper()
-	result, err := reducer.Apply(t.Context(), database, nil, reducer.Options{
-		Actor: contracts.ActorAgent,
-		ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
-			ID: messageID, DraftID: draftID, Role: "system", Kind: kind, Content: content,
-		}},
-	})
-	if err != nil || result.Status != reducer.StatusApplied {
-		t.Fatalf("insert trace status=%s err=%v", result.Status, err)
-	}
-}
-
-func previewTraceJSON(t *testing.T, record map[string]any) string {
-	t.Helper()
-	encoded, err := json.Marshal(record)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(encoded)
 }

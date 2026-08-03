@@ -154,6 +154,7 @@ func newServiceWithModels(
 			maxReActStepsPerTurn,
 			FullStreamToolCallChecker,
 			turnBudgetMessageModifier,
+			service.automaticPreviewQAController(),
 		)
 		if err != nil {
 			cancel()
@@ -229,6 +230,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	recoveryState := newToolRecoveryState()
 	ctx = withToolRecoveryState(ctx, recoveryState)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
+	ctx = withAutomaticPreviewQAState(ctx, newAutomaticPreviewQAState())
 	ctx = agentexec.WithTurnInteractionState(
 		ctx,
 		agentexec.NewTurnInteractionState(service.indexedResources),
@@ -631,6 +633,14 @@ func (service *Service) fallbackTurn(
 		}
 		return reply + " " + userFinalExportGuidance, nil
 	}
+	if requestsPreviewBoundaryOnly(withoutNegatedSurfaceActions(strings.ToLower(content))) {
+		report := service.executeFallbackPreviewQA(
+			ctx, draftID, "explicit_preview_or_qa_request",
+			automaticPreviewOrientation([]*schema.Message{schema.UserMessage(content)}),
+			automaticPreviewNeedsVisual([]*schema.Message{schema.UserMessage(content)}),
+		)
+		return report.Summary, nil
+	}
 	if requestsUserFinalExport(content) {
 		if _, err := timeline.Latest(ctx, service.database, draftID); errors.Is(err, storage.ErrNotFound) {
 			return "当前草稿还没有可导出的时间线。", nil
@@ -962,7 +972,9 @@ func (service *Service) replayPendingTool(ctx context.Context, item QueueItem) (
 				kind: "timeline_check_missing", mutationTimelineID: timelineID,
 			}
 		}
-		truth.recordTimelineCheckResult(agentexec.InterfaceString(check.Data["timeline_id"]), check.Status)
+		truth.recordTimelineCheckResult(
+			agentexec.InterfaceString(check.Data["timeline_id"]), check.Status, check,
+		)
 		if check.Status == string(rushestools.StatusValidationFailed) {
 			return result.Observation + "\n自动检查仍有未通过项：" + check.Observation, nil
 		}
@@ -1026,7 +1038,31 @@ var _ rushestools.Executor = (*Service)(nil)
 // fallbackMainline 是引擎侧对领域「混剪主线」的薄委托:注入 executeReported 上报器,
 // 编排序列本体在 agentexec.Executor.FallbackMainline。
 func (service *Service) fallbackMainline(ctx context.Context, draftID string) (string, error) {
-	return service.executor.FallbackMainline(ctx, draftID, func(c context.Context, name string, input any) (any, error) {
+	reply, err := service.executor.FallbackMainline(ctx, draftID, func(c context.Context, name string, input any) (any, error) {
 		return service.executeReported(c, draftID, name, input)
 	})
+	if err != nil {
+		return "", err
+	}
+	if _, latestErr := timeline.Latest(ctx, service.database, draftID); errors.Is(latestErr, storage.ErrNotFound) {
+		return reply, nil
+	} else if latestErr != nil {
+		return "", latestErr
+	}
+	report := service.executeFallbackPreviewQA(ctx, draftID, "fallback_deliverable", "auto", false)
+	if report.Status != "succeeded" {
+		return "", fmt.Errorf("harness Preview QA 未完成: %s", report.Summary)
+	}
+	return reply + " " + report.Summary, nil
+}
+
+func (service *Service) executeFallbackPreviewQA(
+	ctx context.Context,
+	draftID, trigger, orientation string,
+	includeVisual bool,
+) PreviewQAReport {
+	if terminalTimelineTruthFromContext(ctx) == nil {
+		ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
+	}
+	return service.executeAutomaticPreviewQA(ctx, draftID, trigger, orientation, includeVisual)
 }

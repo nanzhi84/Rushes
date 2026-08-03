@@ -107,7 +107,7 @@ type AssetListResult struct {
 }
 
 type DetectShotsInput struct {
-	AssetID          string `json:"asset_id" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的单个 video 素材 ID；多素材必须由模型并行调用本工具"`
+	AssetID          string `json:"asset_id" jsonschema:"required" jsonschema_description:"WorldState material_catalog 或素材检索证据中的单个 video 素材 ID；多素材必须分别调用"`
 	Depth            string `json:"depth,omitempty" jsonschema_description:"scan 做低成本镜头检测，deep 做逐镜头深度理解；默认 scan；调用会在当前 turn 内等待终态"`
 	Focus            string `json:"focus,omitempty" jsonschema_description:"可选创作关注点，例如产品特写、人物动作或可用于高潮的镜头；会进入视觉分析提示与缓存键"`
 	MaxStepsPerAsset int    `json:"max_steps_per_asset,omitempty" jsonschema_description:"每个素材的最大分析步骤数；0 使用服务端默认值，数值越大成本和延迟越高"`
@@ -296,7 +296,7 @@ type ShotDeepSearchResult struct {
 }
 
 type AudioBeatAnalysisInput struct {
-	AssetID        string `json:"asset_id" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的 audio 素材 ID；带原声的视频不作为 BGM 节拍源"`
+	AssetID        string `json:"asset_id" jsonschema:"required" jsonschema_description:"WorldState material_catalog 中的 audio 素材 ID；带原声的视频不作为 BGM 节拍源"`
 	MaxBeats       int    `json:"max_beats,omitempty" jsonschema_description:"最多返回的节拍点，默认 512，上限 2000"`
 	WaveformPoints int    `json:"waveform_points,omitempty" jsonschema_description:"压缩 RMS 波形的最大采样点数，默认 96，可选范围 [16,256]"`
 }
@@ -363,7 +363,7 @@ type SpeechPauseAnalysisResult struct {
 }
 
 type SpeechTranscribeInput struct {
-	AssetID      string `json:"asset_id" jsonschema:"required" jsonschema_description:"asset.list_assets 返回的单个 video 或 audio 素材 ID；多素材必须由模型并行调用本工具"`
+	AssetID      string `json:"asset_id" jsonschema:"required" jsonschema_description:"WorldState material_catalog 或当前时间线中的单个 video 或 audio 素材 ID；多素材必须分别调用"`
 	Language     string `json:"language,omitempty" jsonschema_description:"可选 ASR 语言，例如 zh、en；混合语言时省略"`
 	ForceRefresh bool   `json:"force_refresh,omitempty" jsonschema_description:"默认复用持久化转写；只有用户明确要求重新转写时设为 true"`
 }

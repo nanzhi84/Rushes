@@ -150,6 +150,55 @@ describe("AssistantThread Claude Code 式消息流", () => {
     expect(screen.getAllByText("结果")).toHaveLength(2);
   });
 
+  it("展示 Harness 自动 Preview QA 的步骤、进度与耗时", () => {
+    renderThread({
+      isRunning: true,
+      streamItems: [
+        {
+          type: "tool",
+          step_id: "preview_generate",
+          tool: "preview.generate",
+          status: "succeeded",
+          argsSummary: null,
+          observation: null,
+          progress: 1,
+          durationMs: 41,
+          harnessOwned: true
+        },
+        {
+          type: "tool",
+          step_id: "preview_check",
+          tool: "preview.check",
+          status: "running",
+          argsSummary: null,
+          observation: null,
+          progress: 0.5,
+          durationMs: null,
+          harnessOwned: true
+        },
+        {
+          type: "tool",
+          step_id: "preview_report",
+          tool: "preview.qa_report",
+          status: "succeeded",
+          argsSummary: null,
+          observation: null,
+          progress: 1,
+          durationMs: 73,
+          harnessOwned: true
+        }
+      ]
+    });
+
+    expect(screen.getByText("生成工作预览")).toBeTruthy();
+    expect(screen.getByText("检查预览")).toBeTruthy();
+    expect(screen.getByText("汇总预览质检")).toBeTruthy();
+    expect(screen.getAllByText("Harness")).toHaveLength(3);
+    expect(screen.getByText("50%")).toBeTruthy();
+    expect(screen.getByText("41ms")).toBeTruthy();
+    expect(screen.getByText("73ms")).toBeTruthy();
+  });
+
   it("刷新后把持久化 tool 消息恢复成折叠工具组", () => {
     renderThread({
       messages: [

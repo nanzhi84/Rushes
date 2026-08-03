@@ -77,6 +77,7 @@ func TestConcurrentReactAgentDefaultsNilCheckerAndForwardsRuntimeToolOptions(t *
 		5,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -107,13 +108,13 @@ func (scriptModel *g3bWireModel) Generate(
 	switch scriptModel.round {
 	case 1:
 		return schema.AssistantMessage("", []schema.ToolCall{
-			{ID: "c_list", Function: schema.FunctionCall{Name: "asset.list_assets", Arguments: "{}"}},
-			{ID: "c_inspect", Function: schema.FunctionCall{Name: "timeline.inspect", Arguments: "{}"}},
+			{ID: "c_search", Function: schema.FunctionCall{Name: "shot.search", Arguments: `{"query":"测试镜头"}`}},
+			{ID: "c_speech", Function: schema.FunctionCall{Name: "speech.search", Arguments: `{"asset_id":"asset_surface"}`}},
 		}), nil
 	case 2:
 		scriptModel.round1ToolOrder = trailingToolCallIDs(messages, 2)
 		return schema.AssistantMessage("", []schema.ToolCall{
-			{ID: "c_inspect2", Function: schema.FunctionCall{Name: "timeline.inspect", Arguments: "{}"}},
+			{ID: "c_speech2", Function: schema.FunctionCall{Name: "speech.search", Arguments: `{"asset_id":"asset_surface","query":"测试"}`}},
 			{ID: "c_plan", Function: schema.FunctionCall{Name: "plan.update", Arguments: `{"plan":{"pacing":"fast"}}`}},
 		}), nil
 	case 3:
@@ -159,6 +160,8 @@ func TestConcurrentReactAgentRoutesAndPreservesOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
+	seedSurfaceAsset(t, service, "draft_g3b_wire")
+	seedSurfaceTranscript(t, service)
 
 	var eventsMu sync.Mutex
 	events := map[string]int{}
@@ -176,7 +179,7 @@ func TestConcurrentReactAgentRoutesAndPreservesOrder(t *testing.T) {
 	ctx = withTestTurnLeaseSession(t, service, ctx, "draft_g3b_wire")
 
 	response, err := service.react.Generate(ctx, []*schema.Message{
-		schema.UserMessage("列素材、看时间线并记录计划。"),
+		schema.UserMessage("读取口播与镜头证据并记录计划。"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -186,10 +189,10 @@ func TestConcurrentReactAgentRoutesAndPreservesOrder(t *testing.T) {
 	}
 
 	// 两种路由都按 tool_calls 原下标保序回灌结果。
-	if !reflect.DeepEqual(scriptModel.round1ToolOrder, []string{"c_list", "c_inspect"}) {
+	if !reflect.DeepEqual(scriptModel.round1ToolOrder, []string{"c_search", "c_speech"}) {
 		t.Fatalf("只读并行轮结果未保序: %v", scriptModel.round1ToolOrder)
 	}
-	if !reflect.DeepEqual(scriptModel.round2ToolOrder, []string{"c_inspect2", "c_plan"}) {
+	if !reflect.DeepEqual(scriptModel.round2ToolOrder, []string{"c_speech2", "c_plan"}) {
 		t.Fatalf("混合串行轮结果未保序: %v", scriptModel.round2ToolOrder)
 	}
 
@@ -197,8 +200,8 @@ func TestConcurrentReactAgentRoutesAndPreservesOrder(t *testing.T) {
 	eventsMu.Lock()
 	defer eventsMu.Unlock()
 	for _, pair := range []string{
-		"asset.list_assets:started", "asset.list_assets:finished",
-		"timeline.inspect:started", "timeline.inspect:finished",
+		"shot.search:started", "shot.search:finished",
+		"speech.search:started", "speech.search:finished",
 		"plan.update:started", "plan.update:finished",
 	} {
 		if events[pair] < 1 {

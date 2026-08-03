@@ -638,8 +638,6 @@ func confirmedToolResultSuccessWithExecutionProof(
 				validSuccessfulTimelineCheck(result)
 		case name == "timeline.inspect":
 			return validRequestedTimelineProof(arguments, result, false, draftID)
-		case name == "preview.generate":
-			return validPreviewGenerateProof(arguments, result)
 		case name == "memory.set":
 			return matchesRequestedMemoryKeys(arguments, result, "entries", "written_keys")
 		case name == "memory.remove":
@@ -885,27 +883,6 @@ func recoveryStringSet(value any) (map[string]struct{}, bool) {
 	return result, true
 }
 
-func validPreviewGenerateProof(arguments any, result rushestools.ToolResult) bool {
-	if strings.TrimSpace(agentexec.InterfaceString(result.Data["preview_id"])) == "" ||
-		strings.TrimSpace(agentexec.InterfaceString(result.Data["job_id"])) == "" ||
-		agentexec.InterfaceString(result.Data["job_status"]) != "succeeded" ||
-		positiveInteger(result.Data["timeline_version"]) <= 0 {
-		return false
-	}
-	argumentMap := toolArgumentsObject(arguments)
-	timelineID := strings.TrimSpace(agentexec.InterfaceString(argumentMap["timeline_id"]))
-	_, requestedVersion, validTimelineID := splitTimelineID(timelineID)
-	requestedOrientation := strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(argumentMap["orientation"])))
-	if requestedOrientation == "" {
-		requestedOrientation = "auto"
-	}
-	return validTimelineID &&
-		int64(requestedVersion) == positiveInteger(result.Data["timeline_version"]) &&
-		strings.TrimSpace(agentexec.InterfaceString(result.Data["timeline_id"])) == timelineID &&
-		(requestedOrientation == "auto" || requestedOrientation == "portrait" || requestedOrientation == "landscape") &&
-		strings.ToLower(strings.TrimSpace(agentexec.InterfaceString(result.Data["orientation"]))) == requestedOrientation
-}
-
 func validDecisionProof(result rushestools.ToolResult, shouldEnd bool) bool {
 	if strings.TrimSpace(agentexec.InterfaceString(result.Data["decision_id"])) == "" {
 		return false
@@ -1008,8 +985,8 @@ func isConfirmedToolRecoverySuccessWithExecutionProof(
 
 func isTypedToolRecoveryResult(name string) bool {
 	switch name {
-	case "asset.list_assets", "shot.search", "shot.deep_search", "audio.analyze_beats",
-		"audio.analyze_speech_pauses", "speech.transcribe", "preview.check":
+	case "shot.search", "shot.deep_search", "audio.analyze_beats",
+		"audio.analyze_speech_pauses", "speech.transcribe":
 		return true
 	default:
 		return false
@@ -1072,13 +1049,11 @@ func validTypedToolRecoveryResult(
 	fullRequestBound bool,
 ) bool {
 	requiredFields := map[string][]string{
-		"asset.list_assets":           {"draft_id", "assets", "total"},
 		"shot.search":                 {"status", "index_snapshot_id", "synonym_version", "frozen_asset_ids", "search_ready", "shots", "total_matches", "returned_candidates", "truncated"},
 		"shot.deep_search":            {"status", "query", "index_snapshot_id", "analyzer_version", "candidates", "total_candidates", "returned_candidates", "new_frame_count", "reused_frame_count", "cache_hit"},
 		"audio.analyze_beats":         {"asset_id", "timeline_fps", "beat_frames"},
 		"audio.analyze_speech_pauses": {"timeline_fps", "pauses"},
 		"speech.transcribe":           {"transcript_id", "asset_id", "timeline_fps"},
-		"preview.check":               {"preview_id", "check", "issues"},
 	}
 	for _, field := range requiredFields[name] {
 		if _, exists := payload[field]; !exists {
@@ -1086,45 +1061,6 @@ func validTypedToolRecoveryResult(
 		}
 	}
 	switch name {
-	case "asset.list_assets":
-		var result rushestools.AssetListResult
-		if json.Unmarshal([]byte(raw), &result) != nil || strings.TrimSpace(result.DraftID) == "" ||
-			result.Assets == nil || result.Total < 0 || len(result.Assets) > result.Total {
-			return false
-		}
-		if draftID != "" && strings.TrimSpace(result.DraftID) != draftID {
-			return false
-		}
-		argumentMap := toolArgumentsObject(arguments)
-		requestedKind := agentexec.InterfaceString(argumentMap["kind"])
-		after := agentexec.InterfaceString(argumentMap["after"])
-		requestedLimit := int(positiveInteger(argumentMap["limit"]))
-		if requestedLimit == 0 || requestedLimit > 200 {
-			requestedLimit = 200
-		}
-		onlyUsable, hasOnlyUsable := argumentMap["only_usable"]
-		requestedUsable, usableIsBool := onlyUsable.(bool)
-		if hasOnlyUsable && !usableIsBool {
-			return false
-		}
-		for _, asset := range result.Assets {
-			if strings.TrimSpace(asset.AssetID) == "" {
-				return false
-			}
-			if requestedKind != "" && asset.Kind != requestedKind ||
-				hasOnlyUsable && asset.Usable != requestedUsable ||
-				after != "" && asset.AssetID <= after {
-				return false
-			}
-		}
-		if len(result.Assets) > requestedLimit {
-			return false
-		}
-		if result.NextAfter != "" {
-			return len(result.Assets) == requestedLimit && result.Total > len(result.Assets) &&
-				result.NextAfter == result.Assets[len(result.Assets)-1].AssetID
-		}
-		return result.Total == len(result.Assets)
 	case "shot.search":
 		if !fullRequestBound {
 			return false
@@ -1268,11 +1204,6 @@ func validTypedToolRecoveryResult(
 			strings.TrimSpace(result.TranscriptID) != "" &&
 			matchesRequestedString(arguments, "asset_id", result.AssetID) &&
 			result.TimelineFPS > 0
-	case "preview.check":
-		var result rushestools.PreviewInspectionResult
-		return json.Unmarshal([]byte(raw), &result) == nil &&
-			matchesRequestedString(arguments, "preview_id", result.PreviewID) &&
-			matchesRequestedPreviewCheck(arguments, result.Check) && result.Issues != nil
 	default:
 		return false
 	}
@@ -1561,23 +1492,6 @@ func explicitShotSemanticRole(value string) string {
 		return "b_roll"
 	default:
 		return ""
-	}
-}
-
-func matchesRequestedPreviewCheck(arguments any, resultCheck string) bool {
-	requested := strings.TrimSpace(agentexec.InterfaceString(
-		toolArgumentsObject(arguments)["check"],
-	))
-	resultCheck = strings.TrimSpace(resultCheck)
-	return validPreviewCheck(requested) && resultCheck == requested
-}
-
-func validPreviewCheck(check string) bool {
-	switch strings.TrimSpace(check) {
-	case "decode", "black", "freeze", "silence", "loudness", "visual":
-		return true
-	default:
-		return false
 	}
 }
 

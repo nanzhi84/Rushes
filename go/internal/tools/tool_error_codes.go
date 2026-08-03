@@ -85,7 +85,14 @@ const (
 	ErrCodeShotDeepAnalysisFailed ToolErrorCode = "shot_deep_analysis_failed"
 
 	// —— 预览质检（media/render.go 因 depguard 保留字面量）——
-	ErrCodePreviewDecodeFailed ToolErrorCode = "preview_decode_failed"
+	ErrCodePreviewDecodeFailed      ToolErrorCode = "preview_decode_failed"
+	ErrCodePreviewQATimelineMissing ToolErrorCode = "preview_qa_timeline_missing"
+	ErrCodePreviewQATimelineRead    ToolErrorCode = "preview_qa_timeline_read_failed"
+	ErrCodePreviewQATimelineCheck   ToolErrorCode = "preview_qa_timeline_check_failed"
+	ErrCodePreviewQARender          ToolErrorCode = "preview_qa_render_failed"
+	ErrCodePreviewQACheck           ToolErrorCode = "preview_qa_check_failed"
+	ErrCodePreviewQAVisual          ToolErrorCode = "preview_qa_visual_failed"
+	ErrCodePreviewQAVisualInvalid   ToolErrorCode = "preview_qa_visual_invalid"
 
 	// —— 后台 job（worker/job.go、worker/runner.go；worker 因 depguard 保留字面量）——
 	ErrCodeStaleRecoveryExhausted ToolErrorCode = "stale_recovery_exhausted"
@@ -142,6 +149,13 @@ var allToolErrorCodes = []ToolErrorCode{
 	ErrCodeShotDeepVisionMissing,
 	ErrCodeShotDeepAnalysisFailed,
 	ErrCodePreviewDecodeFailed,
+	ErrCodePreviewQATimelineMissing,
+	ErrCodePreviewQATimelineRead,
+	ErrCodePreviewQATimelineCheck,
+	ErrCodePreviewQARender,
+	ErrCodePreviewQACheck,
+	ErrCodePreviewQAVisual,
+	ErrCodePreviewQAVisualInvalid,
 	ErrCodeStaleRecoveryExhausted,
 	ErrCodeJobHandlerFailed,
 }

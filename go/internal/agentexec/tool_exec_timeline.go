@@ -215,7 +215,7 @@ func (exec *Executor) validateAtomicTimelineAsset(
 			fmt.Errorf("素材 %s 不属于当前草稿", assetID),
 		)
 		result.Data["error_code"] = string(rushestools.ErrCodeStaleTarget)
-		result.Data["recovery"] = "先调用 asset.list_assets 读取当前草稿的稳定 asset_id，再重试这一个操作。"
+		result.Data["recovery"] = "从 WorldState material_catalog 或镜头检索证据读取稳定 asset_id，再重试这一个操作。"
 		return &result
 	}
 
@@ -716,7 +716,7 @@ func (exec *Executor) persistTimelineFromSnapshotWithPreservedAudioAndResultData
 	// 原子编辑已经在同一事务内提交。内容合同描述整条成片距离目标的差距，不能把
 	// 一次结构合法、已落库的原子写入伪装成工具执行失败，否则 ReAct 会重试并重复
 	// 修改时间线。draft 的 TimelineValidated 仍由上面的整体 valid 决定，最终
-	// timeline.check / preview.generate 也仍会因合同未通过而拒绝成功。
+	// Harness 后续的 timeline.check / Preview QA 也仍会因合同未通过而拒绝成功。
 	return toolResult, nil
 }
 

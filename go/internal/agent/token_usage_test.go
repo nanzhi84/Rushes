@@ -36,7 +36,7 @@ func (stub *usageServiceModel) Generate(
 	var response *schema.Message
 	if stub.calls == 1 {
 		response = schema.AssistantMessage("", []schema.ToolCall{{
-			ID: "usage_list", Function: schema.FunctionCall{Name: "asset.list_assets", Arguments: `{}`},
+			ID: "usage_plan", Function: schema.FunctionCall{Name: "plan.update", Arguments: `{"plan":{"phase":"usage"}}`},
 		}})
 	} else {
 		response = schema.AssistantMessage("已完成用量统计。", nil)
@@ -73,7 +73,7 @@ func TestTurnEndedReportsAccumulatedTokenUsage(t *testing.T) {
 	t.Cleanup(service.Close)
 	_, stream, unsubscribe := service.Hub().Subscribe("draft_token_usage")
 	defer unsubscribe()
-	if !service.Queue().EnqueueUserMessage("draft_token_usage", "user_token_usage", "列出素材") {
+	if !service.Queue().EnqueueUserMessage("draft_token_usage", "user_token_usage", "更新用量测试计划") {
 		t.Fatal("enqueue failed")
 	}
 	service.Queue().JoinDraft("draft_token_usage")
@@ -205,7 +205,7 @@ func (stub *cancelAfterUsageModel) Generate(ctx context.Context, _ []*schema.Mes
 	stub.mu.Unlock()
 	if call == 1 {
 		response := schema.AssistantMessage("", []schema.ToolCall{{
-			ID: "usage_then_cancel", Function: schema.FunctionCall{Name: "asset.list_assets", Arguments: `{}`},
+			ID: "usage_then_cancel", Function: schema.FunctionCall{Name: "plan.update", Arguments: `{"plan":{"phase":"cancel"}}`},
 		}})
 		response.ResponseMeta = &schema.ResponseMeta{Usage: &schema.TokenUsage{
 			PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12,
@@ -237,7 +237,7 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 	t.Cleanup(service.Close)
 	_, stream, unsubscribe := service.Hub().Subscribe("draft_cancelled_usage")
 	defer unsubscribe()
-	if !service.Queue().EnqueueUserMessage("draft_cancelled_usage", "user_cancelled_usage", "列出素材后等待") {
+	if !service.Queue().EnqueueUserMessage("draft_cancelled_usage", "user_cancelled_usage", "更新计划后等待") {
 		t.Fatal("enqueue failed")
 	}
 	select {
@@ -267,23 +267,19 @@ func TestCancelledTurnReportsUsageAlreadyProduced(t *testing.T) {
 }
 
 const (
-	// Issue #157 PR6 reviewed baseline: the model-visible high-cost
-	// shot.deep_search contract adds exact ShotRef inputs and frame-bound truth
-	// evidence without expanding the atomic timeline schemas.
-	modelToolSchemaTotalBaselineRunes = 17307
+	// Issue #157 PR7 reviewed baseline after asset.list_assets and preview.*
+	// became Harness-only. The model surface intentionally shrank to 13 tools.
+	modelToolSchemaTotalBaselineRunes = 16006
 	maxAtomicTimelineToolSchemaRunes  = 4400
 )
 
 var modelToolSchemaBaselineRunes = map[string]int{
-	"asset.list_assets":          435,
 	"decision.answer":            566,
 	"interaction.ask_user":       1079,
 	"interaction.confirm_action": 387,
 	"memory.remove":              418,
 	"memory.set":                 929,
 	"plan.update":                1573,
-	"preview.check":              420,
-	"preview.generate":           446,
 	"shot.search":                921,
 	"shot.deep_search":           1207,
 	"speech.search":              1138,
@@ -437,7 +433,7 @@ func TestModelToolSurfaceMetricsFollowSuccessfulGraphBinding(t *testing.T) {
 	t.Cleanup(failingService.Close)
 	failingCtx := rushestools.WithDraftID(t.Context(), "draft_surface_failure")
 	if _, err := failingService.react.Generate(failingCtx, []*schema.Message{
-		schema.UserMessage("列出素材"),
+		schema.UserMessage("更新计划"),
 	}); err == nil {
 		t.Fatal("动态模型工具绑定失败时 Generate 应返回错误")
 	}

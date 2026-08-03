@@ -33,14 +33,14 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 		if json.Unmarshal(encoded, &retiredInput) == nil && retiredInput.Kind == "final" {
 			metricLLMFinalExportAttempt.Inc()
 		}
-		return nil, errors.New("render.start 不属于 Agent 能力；预览使用 preview.generate，最终导出由用户在 UI 触发")
+		return nil, errors.New("render.start 不属于 Agent 能力；工作预览与 Preview QA 由 Harness 自动完成，最终导出由用户在 UI 触发")
 	}
 	if name == "job.read" {
 		return nil, errors.New("job.read 不属于 Agent 能力；长工具由 harness 在当前 turn 等待终态")
 	}
 	if toolRequiresTimelineEditLease(name) {
 		// REST timeline patches are explicitly marked manual and are fenced in the
-		// reducer transaction. Every Agent mutation/preview must instead belong to
+		// reducer transaction. Every Agent timeline mutation must instead belong to
 		// a live turn lease session; direct callers cannot bypass the harness.
 		if rushestools.TimelineMutationOrigin(ctx) != "manual" {
 			session := timelineEditLeaseSessionFromContext(ctx)

@@ -336,8 +336,8 @@ func TestDecisionAnswerReplaysPendingToolCall(t *testing.T) {
 	createDraftThroughAPI(t, handler, "draft_decision")
 	ctx := tools.WithDraftID(t.Context(), "draft_decision")
 	result, err := server.agent.ExecuteTool(ctx, "interaction.confirm_action", tools.ConfirmActionInput{
-		Question: "确认读取素材？", ToolName: "asset.list_assets",
-		Arguments: map[string]any{"only_usable": true},
+		Question: "确认删除记忆？", ToolName: "memory.remove",
+		Arguments: map[string]any{"keys": []any{"unused_preference"}},
 	})
 	if err != nil || result == nil {
 		t.Fatalf("confirm result=%#v err=%v", result, err)
@@ -349,7 +349,7 @@ func TestDecisionAnswerReplaysPendingToolCall(t *testing.T) {
 	current := httptest.NewRecorder()
 	handler.ServeHTTP(current, apiRequest(t, http.MethodGet,
 		"/api/drafts/draft_decision/decisions/current", nil))
-	if current.Code != http.StatusOK || !strings.Contains(current.Body.String(), "确认读取素材") {
+	if current.Code != http.StatusOK || !strings.Contains(current.Body.String(), "确认删除记忆") {
 		t.Fatalf("current status=%d body=%s", current.Code, current.Body.String())
 	}
 	answer := httptest.NewRecorder()

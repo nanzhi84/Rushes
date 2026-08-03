@@ -271,16 +271,16 @@ func (modelValue *serviceToolModel) Generate(
 	if modelValue.calls == 1 {
 		found := false
 		for _, info := range modelValue.tools {
-			if info.Name == "asset.list_assets" {
+			if info.Name == "plan.update" {
 				found = true
 				break
 			}
 		}
 		if !found {
-			return nil, errors.New("asset.list_assets 未绑定")
+			return nil, errors.New("plan.update 未绑定")
 		}
 		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID: "call_list", Function: schema.FunctionCall{Name: "asset.list_assets", Arguments: `{}`},
+			ID: "call_plan", Function: schema.FunctionCall{Name: "plan.update", Arguments: `{"plan":{"phase":"test"}}`},
 		}}), nil
 	}
 	if len(messages) == 0 || messages[len(messages)-1].Role != schema.Tool {
@@ -339,7 +339,7 @@ func (modelValue *toolRoundBudgetModel) Generate(
 		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID: agentexec.RandomID("budget_round_call"),
 			Function: schema.FunctionCall{
-				Name: "asset.list_assets", Arguments: `{}`,
+				Name: "plan.update", Arguments: `{"plan":{"phase":"budget"}}`,
 			},
 		}}), nil
 	}
@@ -379,7 +379,7 @@ func (modelValue *selfRepairServiceModel) Generate(
 	switch modelValue.calls {
 	case 1:
 		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID: "bad_call", Function: schema.FunctionCall{Name: "asset.list_assets", Arguments: `{`},
+			ID: "bad_call", Function: schema.FunctionCall{Name: "plan.update", Arguments: `{`},
 		}}), nil
 	case 2:
 		if len(messages) == 0 || messages[len(messages)-1].Role != schema.Tool ||
@@ -387,7 +387,7 @@ func (modelValue *selfRepairServiceModel) Generate(
 			return nil, errors.New("工具参数错误没有回灌模型")
 		}
 		return schema.AssistantMessage("", []schema.ToolCall{{
-			ID: "fixed_call", Function: schema.FunctionCall{Name: "asset.list_assets", Arguments: `{}`},
+			ID: "fixed_call", Function: schema.FunctionCall{Name: "plan.update", Arguments: `{"plan":{"phase":"repaired"}}`},
 		}}), nil
 	default:
 		if len(messages) == 0 || messages[len(messages)-1].Role != schema.Tool {
@@ -479,7 +479,7 @@ func TestServiceRunsProductionReactAgentAndPersistsStreamedReply(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_react")
-	agenttest.InsertAgentMessage(t, database, "draft_react", "user_msg", "列出素材")
+	agenttest.InsertAgentMessage(t, database, "draft_react", "user_msg", "更新执行计划")
 	service, err := NewService(t.Context(), database, &serviceToolModel{})
 	if err != nil {
 		t.Fatal(err)
@@ -490,7 +490,7 @@ func TestServiceRunsProductionReactAgentAndPersistsStreamedReply(t *testing.T) {
 	}
 	_, stream, unsubscribe := service.Hub().Subscribe("draft_react")
 	defer unsubscribe()
-	if !service.Queue().EnqueueUserMessage("draft_react", "user_msg", "列出素材") {
+	if !service.Queue().EnqueueUserMessage("draft_react", "user_msg", "更新执行计划") {
 		t.Fatal("enqueue 失败")
 	}
 	service.Queue().JoinDraft("draft_react")
@@ -522,15 +522,23 @@ done:
 		t.Fatalf("messages=%#v err=%v", messages, err)
 	}
 	modelMessages, modelErr := service.modelMessages(t.Context(), "draft_react")
-	if modelErr != nil || len(modelMessages) != 3 || modelMessages[0].Role != schema.System ||
-		modelMessages[1].Role != schema.User || modelMessages[2].Role != schema.Assistant ||
-		!strings.Contains(modelMessages[2].Content, "EINO-SERVICE-OK") {
+	if modelErr != nil || len(modelMessages) < 3 || modelMessages[0].Role != schema.System {
 		t.Fatalf("tool trace 不应进入模型上下文: messages=%#v err=%v", modelMessages, modelErr)
 	}
+	foundUser, foundAssistant := false, false
 	for _, message := range modelMessages {
+		if message.Role == schema.Tool {
+			t.Fatalf("工具 trace 不得作为 Tool message 进入跨回合上下文: %#v", message)
+		}
+		foundUser = foundUser || message.Role == schema.User && message.Content == "更新执行计划"
+		foundAssistant = foundAssistant || message.Role == schema.Assistant &&
+			strings.Contains(message.Content, "EINO-SERVICE-OK")
 		if strings.Contains(message.Content, `"step_id"`) || strings.Contains(message.Content, `"args_summary"`) {
 			t.Fatalf("UI tool trace 泄漏进模型上下文: %#v", message)
 		}
+	}
+	if !foundUser || !foundAssistant {
+		t.Fatalf("模型上下文缺少用户或助手正文: messages=%#v", modelMessages)
 	}
 }
 
@@ -549,7 +557,7 @@ func TestReactAgentMakesBudgetVisibleAndAllowsFortyToolRounds(t *testing.T) {
 	}
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_tool_round_budget")
-	agenttest.InsertAgentMessage(t, database, "draft_tool_round_budget", "user_tool_round_budget", "连续执行多轮工具")
+	agenttest.InsertAgentMessage(t, database, "draft_tool_round_budget", "user_tool_round_budget", "连续更新多轮计划")
 	modelValue := &toolRoundBudgetModel{}
 	service, err := NewService(t.Context(), database, modelValue)
 	if err != nil {
@@ -559,7 +567,7 @@ func TestReactAgentMakesBudgetVisibleAndAllowsFortyToolRounds(t *testing.T) {
 	_, stream, unsubscribe := service.Hub().Subscribe("draft_tool_round_budget")
 	defer unsubscribe()
 	if !service.Queue().EnqueueUserMessage(
-		"draft_tool_round_budget", "user_tool_round_budget", "连续执行多轮工具",
+		"draft_tool_round_budget", "user_tool_round_budget", "连续更新多轮计划",
 	) {
 		t.Fatal("enqueue 失败")
 	}
@@ -621,7 +629,7 @@ func TestReactAgentThirtyRoundFixtureWarnsOnCallsTwentySixAndThirtyOne(t *testin
 	ctx := withTurnBudgetState(t.Context(), newTurnBudgetState(fixtureRounds))
 	ctx = withTestTurnLeaseSession(t, service, ctx, draftID)
 	response, err := service.react.Generate(ctx, []*schema.Message{
-		schema.UserMessage("执行三十轮工具后收敛"),
+		schema.UserMessage("更新三十轮计划后收敛"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1210,18 +1218,9 @@ func TestRewoundTimelineIsSynchronouslyRevalidatedBeforePreviewWait(t *testing.T
 		t.Fatalf("rewound draft=%#v err=%v", rewound, err)
 	}
 	ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
-	allowed, err := service.Tools().Allowed(ctx, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, toolName := range []string{"preview.generate"} {
-		found := false
-		for _, spec := range allowed {
-			found = found || spec.Name == toolName
-		}
-		if !found {
-			t.Fatalf("回退后工具面未放行 %s: %#v", toolName, allowed)
-		}
+	previewSpec, exists := service.Tools().Spec("preview.generate")
+	if !exists || previewSpec.Exposure != rushestools.ExposureHarness {
+		t.Fatalf("preview.generate 必须仅由 Harness 调用: spec=%#v exists=%v", previewSpec, exists)
 	}
 	currentTimeline, err := timeline.Latest(t.Context(), database, draftID)
 	if err != nil {
@@ -1346,7 +1345,8 @@ func TestFallbackMainlineDecisionReplayStatusAndPreviewInspection(t *testing.T) 
 	if err != nil || content == "" {
 		t.Fatalf("content=%q err=%v", content, err)
 	}
-	if !strings.Contains(content, "初版时间线与预览渲染") ||
+	if !strings.Contains(content, "已完成初版时间线") ||
+		!strings.Contains(content, "工作预览通过五项并行信号检查") ||
 		!strings.Contains(content, "只能由你明确触发") ||
 		!strings.Contains(content, "导出视频") {
 		t.Fatalf("混剪并导出 fallback 未在完成编辑后引导 UI: %q", content)

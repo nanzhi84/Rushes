@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"io"
+	"strings"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/compose"
@@ -11,14 +14,22 @@ import (
 )
 
 const (
-	concurrentNodeModel = "model"
-	concurrentNodeTools = "tools"
+	concurrentNodeModel     = "model"
+	concurrentNodeTools     = "tools"
+	concurrentNodePreviewQA = "preview_qa"
 )
 
 // concurrentReactState 累积本回合消息,供 modelPreHandle/toolsPreHandle 逐轮追加。不做 eino
 // 中断/检查点序列化(Rushes 用自有 WorldState checkpoint,不用 eino 图中断)。
 type concurrentReactState struct {
 	Messages []*schema.Message
+}
+
+type concurrentReactStreamContextKey struct{}
+
+func concurrentReactStreamFromContext(ctx context.Context) bool {
+	streaming, _ := ctx.Value(concurrentReactStreamContextKey{}).(bool)
+	return streaming
 }
 
 // concurrentReactAgent 是 eino react 图的 Rushes 复刻(#103 G3b 路线 2a)。唯一实质差异:把单个
@@ -42,6 +53,7 @@ func newConcurrentReactAgent(
 	maxStep int,
 	toolCallChecker func(context.Context, *schema.StreamReader[*schema.Message]) (bool, error),
 	messageModifier func(context.Context, []*schema.Message) []*schema.Message,
+	previewQA *automaticPreviewQAController,
 ) (*concurrentReactAgent, error) {
 	if toolCallChecker == nil {
 		toolCallChecker = defaultStreamToolCallChecker
@@ -100,9 +112,57 @@ func newConcurrentReactAgent(
 	if err := graph.AddLambdaNode(concurrentNodeTools, routerLambda, compose.WithStatePreHandler(toolsPreHandle)); err != nil {
 		return nil, err
 	}
+	if previewQA != nil {
+		previewPreHandle := func(
+			_ context.Context,
+			input *schema.Message,
+			state *concurrentReactState,
+		) (*schema.Message, error) {
+			if input == nil {
+				return nil, errors.New("preview QA 缺少模型终态候选")
+			}
+			state.Messages = append(state.Messages, input)
+			return input, nil
+		}
+		previewLambda := compose.InvokableLambda(func(
+			ctx context.Context,
+			candidate *schema.Message,
+		) ([]*schema.Message, error) {
+			var history []*schema.Message
+			if err := compose.ProcessState[*concurrentReactState](ctx, func(
+				_ context.Context,
+				state *concurrentReactState,
+			) error {
+				history = append([]*schema.Message(nil), state.Messages...)
+				return nil
+			}); err != nil {
+				return nil, err
+			}
+			report, err := previewQA.Run(ctx, history, candidate)
+			if err != nil {
+				return nil, err
+			}
+			if report == nil {
+				return nil, errors.New("preview QA 未返回报告消息")
+			}
+			return []*schema.Message{report}, nil
+		})
+		if err := graph.AddLambdaNode(
+			concurrentNodePreviewQA,
+			previewLambda,
+			compose.WithStatePreHandler(previewPreHandle),
+		); err != nil {
+			return nil, err
+		}
+	}
 
-	// model → branch(StreamToolCallChecker,含 H5 早退)→ {tools, END}。
+	// model → branch → {tools, preview_qa, END}。工具轮继续沿用 H5 早退；
+	// 终态文本在启用自动 Preview QA 时会读完分支副本，以便只在真实交付声明边界
+	// 插入 Harness 节点。候选正文不会提前流向用户。
 	modelBranch := func(ctx context.Context, stream *schema.StreamReader[*schema.Message]) (string, error) {
+		if previewQA != nil {
+			return previewAwareModelBranch(ctx, stream, previewQA)
+		}
 		isToolCall, err := toolCallChecker(ctx, stream)
 		if err != nil {
 			return "", err
@@ -112,23 +172,110 @@ func newConcurrentReactAgent(
 		}
 		return compose.END, nil
 	}
+	branchTargets := map[string]bool{concurrentNodeTools: true, compose.END: true}
+	if previewQA != nil {
+		branchTargets[concurrentNodePreviewQA] = true
+	}
 	if err := graph.AddBranch(concurrentNodeModel,
-		compose.NewStreamGraphBranch(modelBranch, map[string]bool{concurrentNodeTools: true, compose.END: true})); err != nil {
+		compose.NewStreamGraphBranch(modelBranch, branchTargets)); err != nil {
 		return nil, err
 	}
 	// Rushes 不设 ToolReturnDirectly:工具轮恒回到模型(省略 react 的 return-directly 分支)。
 	if err := graph.AddEdge(concurrentNodeTools, concurrentNodeModel); err != nil {
 		return nil, err
 	}
+	if previewQA != nil {
+		if err := graph.AddEdge(concurrentNodePreviewQA, concurrentNodeModel); err != nil {
+			return nil, err
+		}
+	}
 
+	compiledMaxStep := maxStep
+	if previewQA != nil {
+		compiledMaxStep += 2 * maxAutomaticPreviewQAPassesPerTurn
+	}
 	runnable, err := graph.Compile(ctx,
-		compose.WithMaxRunSteps(maxStep),
+		compose.WithMaxRunSteps(compiledMaxStep),
 		compose.WithNodeTriggerMode(compose.AnyPredecessor),
 	)
 	if err != nil {
 		return nil, err
 	}
 	return &concurrentReactAgent{runnable: runnable}, nil
+}
+
+func previewAwareModelBranch(
+	ctx context.Context,
+	stream *schema.StreamReader[*schema.Message],
+	previewQA *automaticPreviewQAController,
+) (string, error) {
+	defer stream.Close()
+	var content strings.Builder
+	var roundUsage *schema.TokenUsage
+	terminalTextSeen := false
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
+		message, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		if message == nil {
+			continue
+		}
+		if usage := messageTokenUsage(message); usage != nil {
+			roundUsage = usage
+		}
+		if len(message.ToolCalls) > 0 {
+			if terminalTextSeen {
+				passthroughLateToolCallCount.Add(1)
+				metricPassthroughLateToolCalls.Inc()
+				return "", &terminalReplyGuardError{kind: "terminal_late_tool_call"}
+			}
+			return concurrentNodeTools, nil
+		}
+		if message.Content != "" {
+			terminalTextSeen = true
+			content.WriteString(message.Content)
+		}
+	}
+	if !terminalTextSeen {
+		return compose.END, nil
+	}
+	candidate := schema.AssistantMessage(content.String(), nil)
+	var history []*schema.Message
+	if err := compose.ProcessState[*concurrentReactState](ctx, func(
+		_ context.Context,
+		state *concurrentReactState,
+	) error {
+		history = append([]*schema.Message(nil), state.Messages...)
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	shouldRun, err := previewQA.ShouldRun(ctx, history, candidate)
+	if err != nil {
+		if concurrentReactStreamFromContext(ctx) {
+			recordTokenUsage(ctx, roundUsage)
+		}
+		return "", err
+	}
+	if shouldRun {
+		// Stream 终态通常由 service.streamAgent 在读尽后记账；但这个候选会被
+		// Preview QA 节点拦截且不再到达外层消费者，因此在唯一接管边界补记一次。
+		// Invoke/Generate 已由 timeoutRetryChatModel.Generate 记账，不能重复累计。
+		if concurrentReactStreamFromContext(ctx) {
+			recordTokenUsage(ctx, roundUsage)
+		}
+		return concurrentNodePreviewQA, nil
+	}
+	return compose.END, nil
 }
 
 // Generate 与 Stream 与 react.Agent 对齐:分别走底层 runnable 的 Invoke/Stream。生产 turn 流走
@@ -146,6 +293,7 @@ func (reactAgent *concurrentReactAgent) Stream(
 	messages []*schema.Message,
 	opts ...einoagent.AgentOption,
 ) (*schema.StreamReader[*schema.Message], error) {
+	ctx = context.WithValue(ctx, concurrentReactStreamContextKey{}, true)
 	return reactAgent.runnable.Stream(ctx, messages, einoagent.GetComposeOptions(opts...)...)
 }
 
