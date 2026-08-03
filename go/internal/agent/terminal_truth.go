@@ -102,6 +102,8 @@ func (state *terminalTimelineTruthState) recordToolResult(name, status string, o
 	}
 	timelineID := agentexec.InterfaceString(result.Data["timeline_id"])
 	switch {
+	case name == "plan.update" && result.Status == string(rushestools.StatusSucceeded):
+		state.invalidateTimelineCheck()
 	case isTerminalTimelineMutation(name):
 		if result.Status == string(rushestools.StatusSucceeded) {
 			state.recordMutationTimelineID(timelineID)
@@ -109,6 +111,22 @@ func (state *terminalTimelineTruthState) recordToolResult(name, status string, o
 	case name == "timeline.check":
 		state.recordTimelineCheckResult(timelineID, result.Status, result)
 	}
+}
+
+// timeline.check validates both the timeline document and the current content plan.
+// A successful plan.update can therefore invalidate a cached check without changing
+// timeline_id; the next Stop Gate must run the contract against the same version again.
+func (state *terminalTimelineTruthState) invalidateTimelineCheck() {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.checkSequence = 0
+	state.checkTimelineID = ""
+	state.checkStatus = ""
+	state.checkProofInvalid = false
+	state.checkResult = rushestools.ToolResult{}
+	state.mu.Unlock()
 }
 
 // recordMutationTimelineID is deliberately idempotent. The automatic truth middleware

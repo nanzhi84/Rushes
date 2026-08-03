@@ -404,7 +404,7 @@ func TestPersistTimelineStaleSnapshotReturnsStructuredConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != string(rushestools.StatusFailed) ||
+	if result.Status != string(rushestools.StatusRejected) ||
 		result.Data["error_code"] != string(rushestools.ErrCodeStaleTarget) ||
 		result.Data["current_timeline_unchanged"] != true ||
 		result.Data["previous_timeline_id"] != draftID+":v1" ||
@@ -489,7 +489,7 @@ func TestPersistTimelineCompetingInitialVersionsHaveSingleWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != string(rushestools.StatusFailed) ||
+	if result.Status != string(rushestools.StatusRejected) ||
 		result.Data["error_code"] != string(rushestools.ErrCodeStaleTarget) ||
 		result.Data["expected_timeline_version"] != 0 ||
 		result.Data["timeline_id"] != draftID+":v1" {

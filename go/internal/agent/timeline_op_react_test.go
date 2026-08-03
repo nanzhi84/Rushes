@@ -48,6 +48,11 @@ func (modelValue *timelineOpReactRepairModel) Generate(
 	modelValue.calls++
 	switch modelValue.calls {
 	case 1:
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID:       "load-timeline-update",
+			Function: schema.FunctionCall{Name: "tool.load", Arguments: `{"tool_names":["timeline.update"]}`},
+		}}), nil
+	case 2:
 		if !modelValue.updateBound {
 			return nil, errors.New("timeline.update 未绑定")
 		}
@@ -58,13 +63,13 @@ func (modelValue *timelineOpReactRepairModel) Generate(
 				Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_v1_001","edge":"end","target_frame":45}`,
 			},
 		}}), nil
-	case 2:
+	case 3:
 		payload, err := timelineOpReactToolPayload(messages)
 		if err != nil {
 			return nil, err
 		}
-		if payload["status"] != "failed" {
-			return nil, fmt.Errorf("错误字段调用未返回 structured failure: %#v", payload)
+		if payload["status"] != "rejected" {
+			return nil, fmt.Errorf("错误字段调用未返回 structured rejection: %#v", payload)
 		}
 		data, ok := payload["data"].(map[string]any)
 		if !ok {
@@ -96,7 +101,7 @@ func (modelValue *timelineOpReactRepairModel) Generate(
 				Arguments: `{"kind":"trim_clip_edge","timeline_clip_id":"clip_v1_001","edge":"end","timeline_frame":45}`,
 			},
 		}}), nil
-	case 3:
+	case 4:
 		payload, err := timelineOpReactToolPayload(messages)
 		if err != nil {
 			return nil, err
@@ -168,7 +173,7 @@ func TestReactAgentRepairsTimelineOpFromJITFieldFailure(t *testing.T) {
 		t.Fatalf("response=%#v", response)
 	}
 	calls, sawSchema, sawExample, sawHarness, sawSuccess := modelValue.snapshot()
-	if calls != 3 || !sawSchema || !sawExample || !sawHarness || !sawSuccess {
+	if calls != 4 || !sawSchema || !sawExample || !sawHarness || !sawSuccess {
 		t.Fatalf(
 			"calls=%d schema=%v example=%v harness=%v success=%v",
 			calls, sawSchema, sawExample, sawHarness, sawSuccess,

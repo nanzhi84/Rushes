@@ -86,6 +86,8 @@
     "tool_step_started",
 	"tool_step_progress",
     "tool_step_finished",
+	"stop_gate_started",
+	"stop_gate_finished",
     "model_retry",
     "subagent_progress",
     "context_compaction_failed",

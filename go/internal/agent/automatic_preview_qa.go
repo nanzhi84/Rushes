@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +19,7 @@ import (
 
 const (
 	automaticPreviewQAContextPhase     = "automatic_preview_qa"
-	maxAutomaticPreviewQAPassesPerTurn = 4
+	maxAutomaticPreviewQAPassesPerTurn = 3
 )
 
 var automaticPreviewCoreChecks = []string{
@@ -28,12 +29,21 @@ var automaticPreviewCoreChecks = []string{
 type automaticPreviewQAContextKey struct{}
 
 type automaticPreviewQAState struct {
-	mu        sync.Mutex
-	attempted map[string]struct{}
+	mu               sync.Mutex
+	previewAttempted map[string]struct{}
+	seenBlockers     map[string]struct{}
+	continuations    int
+	pending          stopGatePending
+	previewBlocker   stopGatePending
+	finalOverride    string
+	validationGen    uint64
 }
 
 func newAutomaticPreviewQAState() *automaticPreviewQAState {
-	return &automaticPreviewQAState{attempted: map[string]struct{}{}}
+	return &automaticPreviewQAState{
+		previewAttempted: map[string]struct{}{},
+		seenBlockers:     map[string]struct{}{},
+	}
 }
 
 func withAutomaticPreviewQAState(
@@ -48,18 +58,153 @@ func automaticPreviewQAStateFromContext(ctx context.Context) *automaticPreviewQA
 	return state
 }
 
-func (state *automaticPreviewQAState) claim(target string) bool {
+type previewQAClaim int
+
+const (
+	previewQAClaimed previewQAClaim = iota
+	previewQAAlreadyClaimed
+	previewQAExhausted
+	previewQAInvalid
+)
+
+func (state *automaticPreviewQAState) claimResult(target string) previewQAClaim {
 	if state == nil || strings.TrimSpace(target) == "" {
-		return false
+		return previewQAInvalid
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if _, exists := state.attempted[target]; exists ||
-		len(state.attempted) >= maxAutomaticPreviewQAPassesPerTurn {
-		return false
+	claimKey := fmt.Sprintf("%s#%d", target, state.validationGen)
+	if _, exists := state.previewAttempted[claimKey]; exists {
+		return previewQAAlreadyClaimed
 	}
-	state.attempted[target] = struct{}{}
-	return true
+	if len(state.previewAttempted) >= maxAutomaticPreviewQAPassesPerTurn {
+		return previewQAExhausted
+	}
+	state.previewAttempted[claimKey] = struct{}{}
+	return previewQAClaimed
+}
+
+func (state *automaticPreviewQAState) claim(target string) bool {
+	return state.claimResult(target) == previewQAClaimed
+}
+
+func (state *automaticPreviewQAState) invalidateValidationProofs() {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.validationGen++
+	state.previewBlocker = stopGatePending{}
+	state.mu.Unlock()
+}
+
+type stopGatePending struct {
+	Decision        string
+	TimelineID      string
+	Trigger         string
+	Check           rushestools.ToolResult
+	Fingerprint     string
+	Duplicate       bool
+	Exhausted       bool
+	PreviewRequired bool
+	HookError       string
+	Issues          []map[string]any
+	RemainingIssues int
+	ResultRef       string
+	Run             stopGateRun
+}
+
+func (state *automaticPreviewQAState) setPending(pending stopGatePending) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.pending = pending
+	state.mu.Unlock()
+}
+
+func (state *automaticPreviewQAState) takePending() stopGatePending {
+	if state == nil {
+		return stopGatePending{}
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	pending := state.pending
+	state.pending = stopGatePending{}
+	return pending
+}
+
+func (state *automaticPreviewQAState) setPreviewBlocker(pending stopGatePending) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	state.previewBlocker = pending
+	state.mu.Unlock()
+}
+
+func (state *automaticPreviewQAState) previewBlockerFor(timelineID string) stopGatePending {
+	if state == nil {
+		return stopGatePending{}
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.previewBlocker.TimelineID != timelineID {
+		return stopGatePending{}
+	}
+	return state.previewBlocker
+}
+
+func (state *automaticPreviewQAState) clearPreviewBlocker(timelineID string) {
+	if state == nil {
+		return
+	}
+	state.mu.Lock()
+	if state.previewBlocker.TimelineID == timelineID {
+		state.previewBlocker = stopGatePending{}
+	}
+	state.mu.Unlock()
+}
+
+func (state *automaticPreviewQAState) setFinalOverride(content string) {
+	if state == nil || strings.TrimSpace(content) == "" {
+		return
+	}
+	state.mu.Lock()
+	state.finalOverride = content
+	state.mu.Unlock()
+}
+
+func (state *automaticPreviewQAState) takeFinalOverride() string {
+	if state == nil {
+		return ""
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	content := state.finalOverride
+	state.finalOverride = ""
+	return content
+}
+
+func (state *automaticPreviewQAState) registerBlocker(fingerprint string) (duplicate, exhausted bool) {
+	if state == nil {
+		return false, false
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	_, duplicate = state.seenBlockers[fingerprint]
+	if duplicate {
+		metricStopGateDeduplicated.Inc()
+		return true, false
+	}
+	state.seenBlockers[fingerprint] = struct{}{}
+	if state.continuations >= maxAutomaticPreviewQAPassesPerTurn {
+		metricStopGateExhausted.Inc()
+		return false, true
+	}
+	state.continuations++
+	metricStopGateContinuation.Inc()
+	return false, false
 }
 
 type automaticPreviewQAController struct {
@@ -114,12 +259,155 @@ func (service *Service) shouldRunAutomaticPreviewQA(
 	}
 	document, err := timeline.Latest(ctx, service.database, draftID)
 	if errors.Is(err, storage.ErrNotFound) {
-		return state.claim("missing_timeline"), nil
+		pending := stopGatePending{
+			Decision: "block", Trigger: trigger,
+			Issues: []map[string]any{{
+				"code": "timeline_not_exists", "message": "当前草稿没有可终验的时间线",
+				"recovery": "加载并使用 timeline.insert 插入首个 visual_base clip。",
+			}},
+		}
+		pending.Fingerprint = stopGatePendingFingerprint(pending)
+		if terminalCandidateAdmitsNotCompleted(candidate) {
+			return false, nil
+		}
+		pending.Duplicate, pending.Exhausted = state.registerBlocker(pending.Fingerprint)
+		if pending.Duplicate || pending.Exhausted {
+			state.setFinalOverride(stopGateNotCompletedReply(pending))
+			return false, nil
+		}
+		finalStatus, finishErr := service.finishStopGate(
+			ctx, draftID, "", "blocked", "当前草稿没有可终验的时间线",
+			"validation:timeline_missing", pending.Issues, stopGateRun{},
+		)
+		if finishErr != nil {
+			pending.Decision, pending.HookError = finalStatus, finishErr.Error()
+			pending.Issues = stopGateTracePersistenceIssues(finishErr)
+		}
+		state.setPending(pending)
+		return true, nil
 	}
 	if err != nil {
-		return false, err
+		pending := stopGatePending{
+			Decision: "hook_error", Trigger: trigger, HookError: err.Error(),
+			Issues: []map[string]any{{
+				"code": "stop_gate_hook_error", "message": "读取最新时间线失败: " + err.Error(),
+				"recovery": "保留已完成事实并说明终验程序未完成；安全重试或等待存储恢复。",
+			}},
+			ResultRef: "validation:timeline_unavailable",
+		}
+		pending.Fingerprint = stopGatePendingFingerprint(pending)
+		pending.Duplicate, pending.Exhausted = state.registerBlocker(pending.Fingerprint)
+		if pending.Duplicate || pending.Exhausted {
+			state.setFinalOverride(stopGateNotCompletedReply(pending))
+			return false, nil
+		}
+		_, finishErr := service.finishStopGate(
+			ctx, draftID, "", "hook_error", err.Error(), pending.ResultRef,
+			pending.Issues, stopGateRun{},
+		)
+		if finishErr != nil {
+			pending.HookError = errors.Join(err, finishErr).Error()
+			pending.Issues = append(pending.Issues, stopGateTracePersistenceIssues(finishErr)...)
+		}
+		state.setPending(pending)
+		return true, nil
 	}
-	return state.claim(document.TimelineID), nil
+	truth := terminalTimelineTruthFromContext(ctx)
+	snapshot := truth.snapshot()
+	check := snapshot.checkResult
+	previewRequired := automaticPreviewQARequired(ctx, messages, candidate)
+	gateRun := stopGateRun{}
+	if snapshot.checkTimelineID != document.TimelineID ||
+		(check.Status != string(rushestools.StatusSucceeded) &&
+			check.Status != string(rushestools.StatusValidationFailed)) {
+		check, gateRun, err = service.executeAutomaticTimelineCheck(
+			ctx, draftID, document.TimelineID, previewRequired,
+		)
+		if err == nil {
+			truth.recordTimelineCheckResult(
+				agentexec.InterfaceString(check.Data["timeline_id"]), check.Status, check,
+			)
+		}
+	}
+	if err != nil {
+		pending := stopGatePending{
+			Decision: "hook_error", TimelineID: document.TimelineID, Trigger: trigger,
+			HookError: err.Error(),
+			Issues: []map[string]any{{
+				"code": "stop_gate_hook_error", "message": err.Error(),
+				"recovery": "保留已完成事实并说明终验程序未完成；安全重试或等待 Harness 恢复。",
+			}},
+		}
+		pending.Fingerprint = stopGatePendingFingerprint(pending)
+		pending.Duplicate, pending.Exhausted = state.registerBlocker(pending.Fingerprint)
+		if pending.Duplicate || pending.Exhausted {
+			state.setFinalOverride(stopGateNotCompletedReply(pending))
+			return false, nil
+		}
+		state.setPending(pending)
+		return true, nil
+	}
+	if check.Status != string(rushestools.StatusSucceeded) {
+		fingerprint := stopGateIssueFingerprint(document.TimelineID, check)
+		pending := stopGatePending{
+			Decision: "block", TimelineID: document.TimelineID, Trigger: trigger,
+			Check: check, Fingerprint: fingerprint,
+		}
+		if terminalCandidateAdmitsNotCompleted(candidate) {
+			return false, nil
+		}
+		pending.Duplicate, pending.Exhausted = state.registerBlocker(fingerprint)
+		if pending.Duplicate || pending.Exhausted {
+			state.setFinalOverride(stopGateNotCompletedReply(pending))
+			return false, nil
+		}
+		state.setPending(pending)
+		return true, nil
+	}
+	if blocker := state.previewBlockerFor(document.TimelineID); blocker.Decision != "" {
+		if terminalCandidateAdmitsNotCompleted(candidate) {
+			return false, nil
+		}
+		blocker.Duplicate, blocker.Exhausted = state.registerBlocker(blocker.Fingerprint)
+		state.setFinalOverride(stopGateNotCompletedReply(blocker))
+		return false, nil
+	}
+	if previewRequired {
+		switch state.claimResult(document.TimelineID) {
+		case previewQAClaimed:
+			if gateRun.stepID == "" {
+				gateRun = service.startStopGate(draftID, document.TimelineID)
+			}
+			state.setPending(stopGatePending{
+				Decision: "preview", TimelineID: document.TimelineID, Trigger: trigger,
+				Check: check, PreviewRequired: true, Run: gateRun,
+			})
+			return true, nil
+		case previewQAExhausted:
+			pending := stopGatePending{
+				Decision: "block", TimelineID: document.TimelineID, Trigger: trigger,
+				Exhausted: true, ResultRef: "validation:" + document.TimelineID,
+				Issues: []map[string]any{{
+					"code":     "preview_qa_budget_exhausted",
+					"message":  "本回合已验收 3 个精确时间线版本，不能继续接受新的可交付声明",
+					"recovery": "如实结束本回合并说明尚未完成；下一回合再对最新版本重新终验。",
+				}},
+			}
+			finalStatus, finishErr := service.finishStopGate(
+				ctx, draftID, document.TimelineID, "blocked", "Preview QA 版本预算已耗尽",
+				pending.ResultRef, pending.Issues, gateRun,
+			)
+			if finishErr != nil {
+				pending.Decision, pending.HookError = finalStatus, finishErr.Error()
+				pending.Issues = stopGateTracePersistenceIssues(finishErr)
+			}
+			state.setFinalOverride(stopGateNotCompletedReply(pending))
+			return false, nil
+		case previewQAAlreadyClaimed, previewQAInvalid:
+			return false, nil
+		}
+	}
+	return false, nil
 }
 
 func automaticPreviewQATrigger(
@@ -127,45 +415,50 @@ func automaticPreviewQATrigger(
 	messages []*schema.Message,
 	candidate *schema.Message,
 ) string {
-	userText := withoutNegatedSurfaceActions(latestUserSurfaceText(messages))
-	if requestsExplicitPreviewWorkflow(userText) || requestsExplicitPreviewQA(userText) {
+	userText := withoutNegatedBoundaryActions(latestUserIntentText(messages))
+	if hasExplicitPreviewIntent(userText) || requestsExplicitPreviewQA(userText) {
 		return "explicit_preview_or_qa_request"
 	}
-	truth := terminalTimelineTruthFromContext(ctx).snapshot()
-	if truth.mutationSequence == 0 {
-		return ""
-	}
-	if playbookRequiresPreviewQA(messages) && terminalCandidateClaimsDeliverable(candidate) {
-		return "playbook_required"
-	}
-	if terminalCandidateClaimsDeliverable(candidate) {
+	if terminalCandidateClaimsDeliverable(candidate) && hasMediaDeliveryBoundaryIntent(userText) {
 		return "deliverable_declaration"
+	}
+	truth := terminalTimelineTruthFromContext(ctx).snapshot()
+	if truth.mutationSequence > 0 {
+		return "editing_or_delivery_turn"
 	}
 	return ""
 }
 
+func hasMediaDeliveryBoundaryIntent(text string) bool {
+	return hasTimelineMutationIntent(text) || hasBeatEditIntent(text) ||
+		hasExplicitPreviewIntent(text) || hasPreviewCheckIntent(text) ||
+		hasUserFinalExportIntent(text) || containsBoundaryKeyword(
+		text,
+		"交付", "就绪", "完成成片", "成片完成", "视频完成", "剪完", "做完",
+		"可以了吗", "可以了没", "好了没", "ready", "deliverable",
+	)
+}
+
+func automaticPreviewQARequired(
+	_ context.Context,
+	messages []*schema.Message,
+	candidate *schema.Message,
+) bool {
+	userText := withoutNegatedBoundaryActions(latestUserIntentText(messages))
+	return hasExplicitPreviewIntent(userText) || requestsExplicitPreviewQA(userText) ||
+		terminalCandidateClaimsDeliverable(candidate)
+}
+
 func requestsExplicitPreviewQA(text string) bool {
-	if !requestsPreviewCheck(text) {
+	if !hasPreviewCheckIntent(text) {
 		return false
 	}
 	// “质检”本身也可能描述正在回复、代码检查或其他非媒体语境。只有用户明确
 	// 指向预览/成片/视频，或点名一项可执行的信号检查时，才进入 Preview QA。
-	return containsSurfaceKeyword(text,
+	return containsBoundaryKeyword(text,
 		"预览", "成片", "视频", "preview_", "render_preview",
 		"黑帧", "静帧", "静音", "响度", "解码",
 	)
-}
-
-func playbookRequiresPreviewQA(messages []*schema.Message) bool {
-	for _, message := range messages {
-		if message == nil || message.Role != schema.System {
-			continue
-		}
-		if required, _ := message.Extra["preview_qa_required"].(bool); required {
-			return true
-		}
-	}
-	return false
 }
 
 func terminalCandidateClaimsDeliverable(candidate *schema.Message) bool {
@@ -173,15 +466,25 @@ func terminalCandidateClaimsDeliverable(candidate *schema.Message) bool {
 		return false
 	}
 	text := strings.ToLower(strings.TrimSpace(candidate.Content))
-	if text == "" || containsSurfaceKeyword(text,
+	if text == "" || containsBoundaryKeyword(text,
 		"未完成", "尚未完成", "无法完成", "不能完成", "执行失败", "仍需处理",
 		"还需要处理", "等待用户", "需要你提供", "not complete", "incomplete", "failed",
 	) {
 		return false
 	}
-	return containsSurfaceKeyword(text,
+	return containsBoundaryKeyword(text,
 		"已完成", "完成了", "处理好了", "已处理", "已准备好", "可交付", "已经就绪",
 		"done", "ready", "completed", "finished",
+	)
+}
+
+func terminalCandidateAdmitsNotCompleted(candidate *schema.Message) bool {
+	if candidate == nil {
+		return false
+	}
+	return containsBoundaryKeyword(strings.ToLower(candidate.Content),
+		"未完成", "尚未完成", "未达到可交付", "尚未达到可交付",
+		"终验未通过", "stop gate 未通过", "not_completed", "not completed", "incomplete",
 	)
 }
 
@@ -194,11 +497,54 @@ func (service *Service) runAutomaticPreviewQA(
 	if err != nil {
 		return nil, err
 	}
+	state := automaticPreviewQAStateFromContext(ctx)
+	pending := state.takePending()
+	if pending.Decision != "preview" {
+		return stopGateFeedbackMessage(pending), nil
+	}
+	previewRequest := pending
 	report := service.executeAutomaticPreviewQA(
-		ctx, draftID, automaticPreviewQATrigger(ctx, messages, candidate),
+		ctx, draftID, previewRequest.TimelineID, previewRequest.Trigger,
 		automaticPreviewOrientation(messages),
 		automaticPreviewNeedsVisual(messages),
 	)
+	gateStatus := "passed"
+	resultRef := "preview:" + report.PreviewID
+	if report.PreviewID == "" {
+		resultRef = "preview:" + report.TimelineID
+	}
+	issues := previewReportActionableIssues(report)
+	decision := ""
+	switch {
+	case report.Status == "timeline_changed", report.Status == "validation_failed":
+		gateStatus, decision = "blocked", "block"
+	case report.Status != "succeeded":
+		gateStatus, decision = "hook_error", "hook_error"
+	case !report.Passed:
+		gateStatus, decision = "blocked", "block"
+	}
+	finalStatus, finishErr := service.recordStopGatePreviewOutcome(
+		ctx, draftID, report, gateStatus, issues, resultRef, previewRequest.Run,
+	)
+	if finishErr != nil {
+		decision = finalStatus
+		issues = stopGateTracePersistenceIssues(finishErr)
+		report.Summary = "Stop Gate trace 持久化失败: " + finishErr.Error()
+	}
+	if decision != "" {
+		pending = stopGatePending{
+			Decision: decision, TimelineID: report.TimelineID, Trigger: previewRequest.Trigger,
+			Issues: issues, RemainingIssues: max(0, len(issues)-3), ResultRef: resultRef,
+		}
+		if decision == "hook_error" {
+			pending.HookError = report.Summary
+		}
+		pending.Fingerprint = stopGatePreviewFingerprint(pending, report.Status)
+		pending.Duplicate, pending.Exhausted = state.registerBlocker(pending.Fingerprint)
+		state.setPreviewBlocker(pending)
+		return stopGateFeedbackMessage(pending), nil
+	}
+	state.clearPreviewBlocker(report.TimelineID)
 	encoded, err := json.Marshal(report)
 	if err != nil {
 		return nil, err
@@ -213,35 +559,235 @@ func (service *Service) runAutomaticPreviewQA(
 	return message, nil
 }
 
+func stopGateIssueFingerprint(timelineID string, check rushestools.ToolResult) string {
+	encoded, _ := json.Marshal(map[string]any{
+		"timeline_id": timelineID,
+		"status":      check.Status,
+		"issues":      stopGateActionableIssues(check),
+	})
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
+}
+
+func stopGateFeedbackMessage(pending stopGatePending) *schema.Message {
+	payload := map[string]any{
+		"gate": "stop", "decision": pending.Decision, "timeline_id": pending.TimelineID,
+		"issues": []map[string]any{}, "remaining_issue_count": 0,
+	}
+	if pending.HookError != "" {
+		payload["error_code"] = "stop_gate_hook_error"
+		payload["message"] = agentexec.TruncateText(pending.HookError, 500)
+		payload["recovery"] = "不要声明可交付；保留已完成事实并诚实说明终验程序未完成。"
+	}
+	if pending.Decision == "block" || pending.Decision == "hook_error" {
+		issues := pending.Issues
+		if len(issues) == 0 && pending.Decision == "block" {
+			issues = stopGateActionableIssues(pending.Check)
+		}
+		payload["issues"] = issues[:min(3, len(issues))]
+		remaining := max(0, len(issues)-3)
+		if pending.RemainingIssues > remaining {
+			remaining = pending.RemainingIssues
+		}
+		payload["remaining_issue_count"] = remaining
+		resultRef := pending.ResultRef
+		if resultRef == "" {
+			resultRef = "validation:" + pending.TimelineID
+		}
+		payload["result_ref"] = resultRef
+		payload["deduplicated"] = pending.Duplicate
+		payload["exhausted"] = pending.Exhausted
+		if pending.Exhausted {
+			payload["recovery"] = "Stop continuation 已耗尽；下一次回复必须诚实使用 not_completed，列出未通过项和已完成事实。"
+		} else if pending.Duplicate {
+			payload["recovery"] = "时间线版本与阻塞原因未变化；必须调用 action 修改时间线，不能重复提交完成声明。"
+		}
+	}
+	encoded, _ := json.Marshal(payload)
+	message := schema.SystemMessage(
+		"【StopGateFeedback｜Harness 终验反馈】\n" + string(encoded) +
+			"\nblocked 不是执行失败。按 recovery 加载或调用原子 action 修复；只有 passed 后才可声明可交付。",
+	)
+	message.Extra = map[string]any{"context_phase": "stop_gate_feedback"}
+	return message
+}
+
+func stopGateNotCompletedReply(pending stopGatePending) string {
+	issues := pending.Issues
+	if len(issues) == 0 {
+		issues = stopGateActionableIssues(pending.Check)
+	}
+	parts := make([]string, 0, min(3, len(issues)))
+	for _, issue := range issues[:min(3, len(issues))] {
+		if message := strings.TrimSpace(agentexec.InterfaceString(issue["message"])); message != "" {
+			parts = append(parts, message)
+		}
+	}
+	detail := "Stop Gate 终验尚未通过"
+	if pending.Decision == "hook_error" {
+		detail = "Stop Gate 终验程序未能完成"
+		if pending.HookError != "" {
+			parts = append(parts, agentexec.TruncateText(pending.HookError, 240))
+		}
+	}
+	if len(parts) > 0 {
+		detail += "：" + strings.Join(parts, "；")
+	}
+	return "本回合未达到可交付状态。已成功提交的时间线修改均已保留；" + detail + "。"
+}
+
+func previewReportActionableIssues(report PreviewQAReport) []map[string]any {
+	issues := make([]map[string]any, 0, len(report.Issues)+len(report.Errors))
+	for _, issue := range report.Issues {
+		copy := map[string]any{}
+		for key, value := range issue {
+			copy[key] = value
+		}
+		if strings.TrimSpace(agentexec.InterfaceString(copy["message"])) != "" {
+			if strings.TrimSpace(agentexec.InterfaceString(copy["recovery"])) == "" {
+				copy["recovery"] = "加载并使用合适的时间线原子 action 修复后重新终验。"
+			}
+			issues = append(issues, copy)
+		}
+	}
+	for _, reportErr := range report.Errors {
+		recovery := "保留已完成事实并说明终验程序未完成；安全重试或等待 Harness 恢复。"
+		if reportErr["error_code"] == string(rushestools.ErrCodeStaleTarget) {
+			recovery = "重新读取最新 timeline_id，并由 Stop Gate 对该精确版本重新终验。"
+		}
+		issues = append(issues, map[string]any{
+			"code": reportErr["error_code"], "message": reportErr["message"],
+			"recovery": recovery,
+		})
+	}
+	if len(issues) == 0 && strings.TrimSpace(report.Summary) != "" {
+		issues = append(issues, map[string]any{"code": "preview_qa_unmet", "message": report.Summary})
+	}
+	return issues
+}
+
+func stopGatePreviewFingerprint(pending stopGatePending, reportStatus string) string {
+	encoded, _ := json.Marshal(map[string]any{
+		"timeline_id": pending.TimelineID, "decision": pending.Decision,
+		"status": reportStatus, "issues": pending.Issues,
+	})
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
+}
+
+func stopGatePendingFingerprint(pending stopGatePending) string {
+	encoded, _ := json.Marshal(map[string]any{
+		"timeline_id": pending.TimelineID, "decision": pending.Decision,
+		"issues": pending.Issues, "hook_error": pending.HookError,
+	})
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
+}
+
+func (service *Service) recordStopGatePreviewOutcome(
+	ctx context.Context,
+	draftID string,
+	report PreviewQAReport,
+	status string,
+	issues []map[string]any,
+	resultRef string,
+	run stopGateRun,
+) (string, error) {
+	return service.finishStopGate(
+		ctx, draftID, report.TimelineID, status, previewQAEvidenceJSON(report), resultRef, issues, run,
+	)
+}
+
+func stopGateTracePersistenceIssues(err error) []map[string]any {
+	return []map[string]any{{
+		"code":     "stop_gate_trace_persist_failed",
+		"message":  "Stop Gate trace 持久化失败: " + err.Error(),
+		"recovery": "不得声明可交付；等待存储恢复后对最新版本重新终验。",
+	}}
+}
+
+func stopGateActionableIssues(check rushestools.ToolResult) []map[string]any {
+	issues := make([]map[string]any, 0)
+	appendIssue := func(value any) {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return
+		}
+		item := map[string]any{}
+		if json.Unmarshal(encoded, &item) != nil {
+			return
+		}
+		code := agentexec.InterfaceString(item["error_code"])
+		if code == "" {
+			code = agentexec.InterfaceString(item["code"])
+		}
+		if code == "" {
+			code = agentexec.InterfaceString(item["check"])
+		}
+		message := agentexec.InterfaceString(item["message"])
+		if message == "" {
+			return
+		}
+		recovery := agentexec.InterfaceString(item["recovery"])
+		if recovery == "" {
+			recovery = "加载并使用合适的时间线原子 action 修复此项。"
+		}
+		issues = append(issues, map[string]any{"code": code, "message": message, "recovery": recovery})
+	}
+	// Structural invalidity makes later content-contract findings unreliable, so it
+	// always occupies the highest-priority slots in the compact Stop Gate summary.
+	if encoded, err := json.Marshal(check.Data["validation_report"]); err == nil {
+		var report map[string]any
+		if json.Unmarshal(encoded, &report) == nil {
+			values, _ := report["issues"].([]any)
+			for _, issue := range values {
+				appendIssue(issue)
+			}
+		}
+	}
+	if encoded, err := json.Marshal(check.Data["contract_failures"]); err == nil {
+		var failures []any
+		if json.Unmarshal(encoded, &failures) == nil {
+			for _, failure := range failures {
+				appendIssue(failure)
+			}
+		}
+	}
+	if len(issues) == 0 && strings.TrimSpace(check.Observation) != "" {
+		issues = append(issues, map[string]any{
+			"code": "timeline_contract_unmet", "message": check.Observation,
+			"recovery": "读取 CurrentTimelineView，并加载合适的时间线原子 action 修复。",
+		})
+	}
+	return issues
+}
+
 func automaticPreviewNeedsVisual(messages []*schema.Message) bool {
 	// visual 是高成本、按任务需要执行的 advisory。终态候选只是模型准备提交的
 	// 文本，不能反向扩大用户任务范围；否则模型随口提到“画面”就会把明确的
 	// 五项信号检查升级成视觉模型调用。
-	text := latestUserSurfaceText(messages)
-	return containsSurfaceKeyword(text,
+	text := latestUserIntentText(messages)
+	return containsBoundaryKeyword(text,
 		"视觉", "画面", "字幕", "文字", "水印", "裁切", "裁边", "构图", "调色",
 		"颜色", "转场", "遮挡", "黑边", "主体", "b-roll", "broll", "visual",
 	)
 }
 
 func automaticPreviewOrientation(messages []*schema.Message) string {
-	text := latestUserSurfaceText(messages)
+	text := latestUserIntentText(messages)
 	// 先识别明确指向预览/成片的目标短语，避免“把横屏素材生成竖屏预览”
 	// 同时出现两种方向时误把源素材方向当成输出方向。
-	if containsSurfaceKeyword(text,
+	if containsBoundaryKeyword(text,
 		"竖屏预览", "竖版预览", "纵向预览", "竖屏成片", "竖版成片",
 		"portrait preview", "portrait video", "9:16 预览", "9:16预览",
 	) {
 		return "portrait"
 	}
-	if containsSurfaceKeyword(text,
+	if containsBoundaryKeyword(text,
 		"横屏预览", "横版预览", "横向预览", "横屏成片", "横版成片",
 		"landscape preview", "landscape video", "16:9 预览", "16:9预览",
 	) {
 		return "landscape"
 	}
-	portrait := containsSurfaceKeyword(text, "竖屏", "竖版", "纵向", "portrait", "9:16")
-	landscape := containsSurfaceKeyword(text, "横屏", "横版", "横向", "landscape", "16:9")
+	portrait := containsBoundaryKeyword(text, "竖屏", "竖版", "纵向", "portrait", "9:16")
+	landscape := containsBoundaryKeyword(text, "横屏", "横版", "横向", "landscape", "16:9")
 	switch {
 	case portrait && !landscape:
 		return "portrait"
@@ -254,7 +800,7 @@ func automaticPreviewOrientation(messages []*schema.Message) string {
 
 func (service *Service) executeAutomaticPreviewQA(
 	ctx context.Context,
-	draftID, trigger, orientation string,
+	draftID, expectedTimelineID, trigger, orientation string,
 	includeVisual bool,
 ) PreviewQAReport {
 	switch orientation {
@@ -264,7 +810,7 @@ func (service *Service) executeAutomaticPreviewQA(
 	}
 	startedAt := time.Now()
 	report := PreviewQAReport{
-		Status: "failed", Trigger: trigger, Orientation: orientation,
+		Status: "failed", Trigger: trigger, TimelineID: expectedTimelineID, Orientation: orientation,
 		CoreChecks: []rushestools.PreviewInspectionResult{},
 		Issues:     []map[string]interface{}{},
 		Errors:     []map[string]string{},
@@ -283,15 +829,31 @@ func (service *Service) executeAutomaticPreviewQA(
 		service.recordAutomaticPreviewQAReportStep(ctx, draftID, startedAt, report)
 		return report
 	}
-	report.TimelineID = document.TimelineID
+	report.TimelineID = expectedTimelineID
+	if report.TimelineID == "" {
+		report.TimelineID = document.TimelineID
+	}
+	if document.TimelineID != report.TimelineID {
+		report.Status = "timeline_changed"
+		report.Errors = append(report.Errors, map[string]string{
+			"error_code": string(rushestools.ErrCodeStaleTarget),
+			"message": fmt.Sprintf(
+				"Preview QA 目标版本已变化: expected=%s latest=%s",
+				report.TimelineID, document.TimelineID,
+			),
+		})
+		report.Summary = "终验期间时间线版本已变化；旧版本预览不得验收新版本。"
+		service.recordAutomaticPreviewQAReportStep(ctx, draftID, startedAt, report)
+		return report
+	}
 
 	truth := terminalTimelineTruthFromContext(ctx)
 	snapshot := truth.snapshot()
 	check := snapshot.checkResult
-	if snapshot.checkTimelineID != document.TimelineID ||
+	if snapshot.checkTimelineID != report.TimelineID ||
 		(check.Status != string(rushestools.StatusSucceeded) &&
 			check.Status != string(rushestools.StatusValidationFailed)) {
-		check, err = service.executeAutomaticTimelineCheck(ctx, draftID, document.TimelineID)
+		check, err = service.executeHarnessTimelineCheck(ctx, report.TimelineID)
 		if err == nil {
 			truth.recordTimelineCheckResult(
 				agentexec.InterfaceString(check.Data["timeline_id"]), check.Status, check,

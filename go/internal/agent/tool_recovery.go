@@ -186,43 +186,49 @@ func newToolRecoveryMiddleware(
 				var reportErr error
 				reportStarted := false
 				reportFinished := false
-				if hasReporter {
-					ctx = rushestools.WithReporter(ctx, func(
-						reportCtx context.Context, name, phase string, reportedInput, output any, err error,
-					) {
-						reportContext = reportCtx
-						switch phase {
-						case "started":
-							reportName, reportInput = name, reportedInput
-							if reportStarted {
-								return
-							}
-							reportStarted = true
-							originalReporter(reportCtx, name, phase, reportedInput, nil, nil)
-						case "finished":
-							reportFinished = true
-							reportName, reportInput = name, reportedInput
-							reportOutput, reportErr = output, err
-						}
-					})
-					defer func() {
-						if !reportStarted {
+				// Registry marks the exact executor boundary after decoding, guards and
+				// interceptors pass. This stays independent of UI reporter availability.
+				executionStarted := false
+				ctx = rushestools.WithExecutionStartObserver(ctx, func() {
+					executionStarted = true
+				})
+				ctx = rushestools.WithReporter(ctx, func(
+					reportCtx context.Context, name, phase string, reportedInput, output any, err error,
+				) {
+					reportContext = reportCtx
+					switch phase {
+					case "started":
+						reportName, reportInput = name, reportedInput
+						if reportStarted {
 							return
 						}
-						if !reportFinished && reportErr == nil {
-							reportErr = errors.New("工具没有返回完成状态")
+						reportStarted = true
+						if hasReporter {
+							originalReporter(reportCtx, name, phase, reportedInput, nil, nil)
 						}
-						originalReporter(reportContext, reportName, "finished", reportInput, reportOutput, reportErr)
-					}()
-					// JSON/schema 解码和前置条件检查发生在注册工具的 reporter 之前。
-					// 这里先发 started，实际工具若也上报 started 会被上面的包装器合并；
-					// 因此任何失败路径都能在 UI 里形成唯一、完整的 started/finished。
-					if reporter, ok := rushestools.ReporterFromContext(ctx); ok {
-						reporter(ctx, input.Name, "started", toolArgumentsForReport(input.Arguments), nil, nil)
+					case "finished":
+						reportFinished = true
+						reportName, reportInput = name, reportedInput
+						reportOutput, reportErr = output, err
 					}
+				})
+				defer func() {
+					if !hasReporter || !reportStarted {
+						return
+					}
+					if !reportFinished && reportErr == nil {
+						reportErr = errors.New("工具没有返回完成状态")
+					}
+					originalReporter(reportContext, reportName, "finished", reportInput, reportOutput, reportErr)
+				}()
+				// JSON/schema 解码和前置条件检查发生在注册工具的 reporter 之前。
+				// 这里先发 started，实际工具若也上报 started 会被上面的包装器合并；
+				// 因此任何失败路径都能在 UI 里形成唯一、完整的 started/finished。
+				if reporter, ok := rushestools.ReporterFromContext(ctx); ok {
+					reporter(ctx, input.Name, "started", toolArgumentsForReport(input.Arguments), nil, nil)
 				}
 				if missingMutationReceiptIdentity {
-					raw := marshalToolFailure(
+					raw := marshalToolRejection(
 						"模型时间线写入缺少完整调用身份，已在执行前拒绝。",
 						map[string]any{
 							"error_code": string(rushestools.ErrCodeToolExecutionError),
@@ -258,6 +264,19 @@ func newToolRecoveryMiddleware(
 					}
 				}
 				if err != nil {
+					// Registry precondition failures are deterministic admission rejections.
+					// Preserve their stable state/recovery payload and never count them as an
+					// executor failure or retry them.
+					var precondition *rushestools.PreconditionRejection
+					if errors.As(err, &precondition) {
+						raw := decorateToolFailure(ctx, input, marshalPreconditionRejection(precondition), 0)
+						if !reportFinished {
+							reportFinished = true
+							reportOutput, reportErr = toolResultForReport(raw), nil
+						}
+						metricPreToolRejected.Inc()
+						return &compose.ToolOutput{Result: raw}, nil
+					}
 					// 拦截器策略拒绝（如破坏性工具缺确认）：回灌模型结构化提示，但不算工具执行
 					// 失败——不记恢复账、不触发重试、不消耗修复预算（#103 G2）。
 					var rejection *rushestools.InterceptorRejection
@@ -269,11 +288,13 @@ func newToolRecoveryMiddleware(
 								Observation: rejection.Observation,
 							})
 						}
+						raw := decorateToolFailure(ctx, input, marshalInterceptorRejection(rejection), 0)
 						if !reportFinished {
 							reportFinished = true
-							reportOutput, reportErr = rejectionToolResult(rejection), nil
+							reportOutput, reportErr = toolResultForReport(raw), nil
 						}
-						return &compose.ToolOutput{Result: marshalInterceptorRejection(rejection)}, nil
+						metricPreToolRejected.Inc()
+						return &compose.ToolOutput{Result: raw}, nil
 					}
 					if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 						if !reportFinished {
@@ -281,6 +302,14 @@ func newToolRecoveryMiddleware(
 						}
 						return nil, err
 					}
+					if !executionStarted {
+						raw := rejectionErrorOutput(input.Name, err)
+						result := decorateToolFailure(ctx, input, raw, 0)
+						reportFinished, reportOutput, reportErr = true, toolResultForReport(result), nil
+						metricPreToolRejected.Inc()
+						return &compose.ToolOutput{Result: result}, nil
+					}
+					metricToolExecutionFailed.Inc()
 					if !reportFinished {
 						reportFinished, reportErr = true, err
 					}
@@ -293,6 +322,7 @@ func newToolRecoveryMiddleware(
 						reportFinished, reportErr = true, missingResultErr
 					}
 					raw := executionErrorOutput(input.Name, missingResultErr, attempts, false)
+					metricToolExecutionFailed.Inc()
 					return &compose.ToolOutput{Result: decorateToolFailure(ctx, input, raw, attempts)}, nil
 				}
 				policy, policyExists := policyLookup(input.Name)
@@ -311,15 +341,20 @@ func newToolRecoveryMiddleware(
 						map[string]any{
 							"error_code":      string(rushestools.ErrCodeToolExecutionError),
 							"returned_status": status,
-							"recovery":        "修正工具返回合同；只允许 succeeded、failed、validation_failed、cancelled、timeout 或 waiting_user。",
+							"recovery":        "修正工具返回合同；只允许 succeeded、rejected、failed、validation_failed、cancelled、timeout 或 waiting_user。",
 						},
 					)
 					output.Result = decorateToolFailure(ctx, input, raw, attempts)
+					metricToolExecutionFailed.Inc()
 					reportFinished, reportOutput, reportErr = true, toolResultForReport(output.Result), nil
 					observeToolResultSize(input.Name, output.Result)
 					return output, nil
 				}
 				output.Result = normalizedResult
+				if modelReceiptShouldBeRejected(output.Result, executionStarted) {
+					output.Result = withToolReceiptStatus(output.Result, string(rushestools.StatusRejected))
+					metricPreToolRejected.Inc()
+				}
 				if !isStructuredToolFailure(output.Result) {
 					output.Result = attachToolRequestFingerprint(input.Name, input.Arguments, output.Result)
 				}
@@ -327,6 +362,9 @@ func newToolRecoveryMiddleware(
 				if isStructuredToolFailure(output.Result) {
 					output.Result = decorateToolFailure(ctx, input, output.Result, attempts)
 					reportFinished, reportOutput, reportErr = true, toolResultForReport(output.Result), nil
+					if toolReceiptStatus(output.Result) == string(rushestools.StatusFailed) {
+						metricToolExecutionFailed.Inc()
+					}
 				} else if !isConfirmedToolRecoverySuccessWithExecutionProof(
 					input.Name, input.Arguments, output.Result, draftID,
 					validToolRequestFingerprint(input.Name, input.Arguments, output.Result),
@@ -340,6 +378,7 @@ func newToolRecoveryMiddleware(
 						},
 					)
 					output.Result = decorateToolFailure(ctx, input, raw, attempts)
+					metricToolExecutionFailed.Inc()
 					reportFinished, reportOutput, reportErr = true, toolResultForReport(output.Result), nil
 				} else if state != nil {
 					if input.Name == "interaction.confirm_action" {
@@ -437,7 +476,7 @@ func observeToolResultSize(name, result string) {
 
 func unknownToolRecoveryHandler(ctx context.Context, name, arguments string) (string, error) {
 	input := &compose.ToolInput{Name: name, Arguments: arguments}
-	raw := marshalToolFailure(
+	raw := marshalToolRejection(
 		"模型调用了不存在的工具："+name,
 		map[string]any{
 			"error_code": string(rushestools.ErrCodeUnknownTool),
@@ -445,6 +484,7 @@ func unknownToolRecoveryHandler(ctx context.Context, name, arguments string) (st
 		},
 	)
 	output := decorateToolFailure(ctx, input, raw, 0)
+	metricPreToolRejected.Inc()
 	reportSyntheticToolFailure(ctx, name, arguments, output)
 	return output, nil
 }
@@ -461,7 +501,8 @@ func decorateToolFailure(
 	}
 	status := agentexec.InterfaceString(payload["status"])
 	switch status {
-	case string(rushestools.StatusFailed),
+	case string(rushestools.StatusRejected),
+		string(rushestools.StatusFailed),
 		string(rushestools.StatusValidationFailed),
 		string(rushestools.StatusCancelled),
 		string(rushestools.StatusTimeout):
@@ -487,6 +528,8 @@ func decorateToolFailure(
 	}
 	if strings.TrimSpace(agentexec.InterfaceString(data["error_code"])) == "" {
 		switch status {
+		case string(rushestools.StatusRejected):
+			data["error_code"] = string(rushestools.ErrCodeToolValidationFailed)
 		case string(rushestools.StatusValidationFailed):
 			data["error_code"] = string(rushestools.ErrCodeToolValidationFailed)
 		case string(rushestools.StatusCancelled):
@@ -549,11 +592,106 @@ func executionErrorOutput(name string, err error, attempts int, retryable bool) 
 	})
 }
 
+func rejectionErrorOutput(name string, err error) string {
+	message := "工具 " + name + " 在执行前被拒绝：" + agentexec.TruncateText(err.Error(), 800)
+	return marshalToolRejection(message, map[string]any{
+		"error_code":    string(rushestools.ErrCodeToolValidationFailed),
+		"message":       message,
+		"current_state": map[string]any{},
+		"recovery":      "按当前 schema、precondition 和 recovery 修正参数或前置状态后重试。",
+	})
+}
+
 func marshalToolFailure(observation string, data map[string]any) string {
 	encoded, _ := json.Marshal(map[string]any{
 		"status": string(rushestools.StatusFailed), "observation": observation, "data": data,
 	})
 	return string(encoded)
+}
+
+func marshalToolRejection(observation string, data map[string]any) string {
+	encoded, _ := json.Marshal(map[string]any{
+		"status": string(rushestools.StatusRejected), "observation": observation, "data": data,
+	})
+	return string(encoded)
+}
+
+func toolReceiptStatus(raw string) string {
+	var payload struct {
+		Status string `json:"status"`
+	}
+	if json.Unmarshal([]byte(raw), &payload) != nil {
+		return ""
+	}
+	return payload.Status
+}
+
+func withToolReceiptStatus(raw, status string) string {
+	var payload map[string]any
+	if json.Unmarshal([]byte(raw), &payload) != nil || payload == nil {
+		return raw
+	}
+	payload["status"] = status
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
+}
+
+func modelReceiptShouldBeRejected(raw string, executionStarted bool) bool {
+	status := toolReceiptStatus(raw)
+	if status == string(rushestools.StatusRejected) {
+		return true
+	}
+	return !executionStarted && (status == string(rushestools.StatusFailed) ||
+		status == string(rushestools.StatusValidationFailed)) ||
+		modelReceiptIsExpectedNoWriteRejection(raw)
+}
+
+func modelReceiptIsExpectedNoWriteRejection(raw string) bool {
+	var payload map[string]any
+	if json.Unmarshal([]byte(raw), &payload) != nil {
+		return false
+	}
+	data, _ := payload["data"].(map[string]any)
+	code := agentexec.InterfaceString(payload["error_code"])
+	if code == "" {
+		code = agentexec.InterfaceString(data["error_code"])
+	}
+	switch rushestools.ToolErrorCode(code) {
+	case rushestools.ErrCodeTimelineAbsent,
+		rushestools.ErrCodeStaleTarget,
+		rushestools.ErrCodeTimelineOpSemanticError,
+		rushestools.ErrCodeTimelineOpFieldError,
+		rushestools.ErrCodeTimelineRangeOutOfBounds,
+		rushestools.ErrCodeConfirmationRequired,
+		rushestools.ErrCodeInvalidConfirmationTarget,
+		rushestools.ErrCodePlanRequired,
+		rushestools.ErrCodePlanNotJSON,
+		rushestools.ErrCodeContractInvalid,
+		rushestools.ErrCodeContractNotJSON,
+		rushestools.ErrCodeReservedKey,
+		rushestools.ErrCodeStoredReservedKey,
+		rushestools.ErrCodePlanTooLarge,
+		rushestools.ErrCodePlanConflict,
+		rushestools.ErrCodeMemoryEvidenceUnavailable,
+		rushestools.ErrCodeMemoryMutationEmpty,
+		rushestools.ErrCodeMemoryEntriesLimit,
+		rushestools.ErrCodeMemoryRemoveLimit,
+		rushestools.ErrCodeMemoryKeyInvalid,
+		rushestools.ErrCodeMemoryKeyDuplicate,
+		rushestools.ErrCodeMemoryKindInvalid,
+		rushestools.ErrCodeMemoryStatementInvalid,
+		rushestools.ErrCodeMemoryEvidenceQuoteInvalid,
+		rushestools.ErrCodeMemoryRemoveKeyInvalid,
+		rushestools.ErrCodeMemoryRemoveKeyDuplicate,
+		rushestools.ErrCodeMemoryEvidenceInvalid,
+		rushestools.ErrCodeMemoryInputInvalid:
+		return true
+	default:
+		return false
+	}
 }
 
 func isStructuredToolFailure(raw string) bool {
@@ -564,6 +702,7 @@ func isStructuredToolFailure(raw string) bool {
 		return false
 	}
 	return payload.Status == string(rushestools.StatusFailed) ||
+		payload.Status == string(rushestools.StatusRejected) ||
 		payload.Status == string(rushestools.StatusValidationFailed) ||
 		payload.Status == string(rushestools.StatusCancelled) ||
 		payload.Status == string(rushestools.StatusTimeout)
@@ -957,6 +1096,9 @@ func isConfirmedToolRecoverySuccessWithExecutionProof(
 	if json.Unmarshal([]byte(raw), &payload) != nil || payload == nil {
 		return false
 	}
+	if name == "tool.load" {
+		return fullRequestBound && validToolLoadProof(arguments, raw)
+	}
 	if isTypedToolRecoveryResult(name) {
 		var status string
 		if json.Unmarshal(payload["status"], &status) != nil ||
@@ -981,6 +1123,46 @@ func isConfirmedToolRecoverySuccessWithExecutionProof(
 			confirmedToolResultSuccessWithExecutionProof(name, arguments, result, draftID, fullRequestBound)
 	}
 	return false
+}
+
+func validToolLoadProof(arguments any, raw string) bool {
+	argumentMap := toolArgumentsObject(arguments)
+	requestedValues, ok := argumentMap["tool_names"].([]any)
+	if !ok || len(requestedValues) < 1 || len(requestedValues) > 5 {
+		return false
+	}
+	requested := make(map[string]struct{}, len(requestedValues))
+	for _, value := range requestedValues {
+		name, ok := value.(string)
+		name = strings.TrimSpace(name)
+		if !ok || name == "" {
+			return false
+		}
+		if _, duplicate := requested[name]; duplicate {
+			return false
+		}
+		requested[name] = struct{}{}
+	}
+	var result rushestools.ToolLoadResult
+	if json.Unmarshal([]byte(raw), &result) != nil ||
+		result.Status != string(rushestools.StatusSucceeded) ||
+		result.LoadedNames == nil || result.AlreadyLoaded == nil || result.NotLoadable == nil {
+		return false
+	}
+	observed := make(map[string]struct{}, len(requested))
+	for _, names := range [][]string{result.LoadedNames, result.AlreadyLoaded, result.NotLoadable} {
+		for _, name := range names {
+			name = strings.TrimSpace(name)
+			if _, expected := requested[name]; !expected || name == "" {
+				return false
+			}
+			if _, duplicate := observed[name]; duplicate {
+				return false
+			}
+			observed[name] = struct{}{}
+		}
+	}
+	return len(observed) == len(requested)
 }
 
 func isTypedToolRecoveryResult(name string) bool {

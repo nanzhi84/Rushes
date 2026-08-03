@@ -41,23 +41,22 @@ func isInterceptorRejection(err error) bool {
 	return errors.As(err, &rejection)
 }
 
-// marshalInterceptorRejection 把策略拒绝渲染成模型可读的结构化工具结果；状态用 failed，让
+// marshalInterceptorRejection 把策略拒绝渲染成模型可读的结构化工具结果；状态用 rejected，让
 // 模型据 observation/next_action 改走 confirm_action，但它不进恢复账（中间件不记失败）。
 func marshalInterceptorRejection(rejection *rushestools.InterceptorRejection) string {
 	encoded, _ := json.Marshal(map[string]any{
-		"status":      string(rushestools.StatusFailed),
+		"status":      string(rushestools.StatusRejected),
 		"observation": rejection.Observation,
 		"data":        rejection.Data,
 	})
 	return string(encoded)
 }
 
-// rejectionToolResult 供 reporter 记录被拦调用的终态；以结果而非错误上报，因为策略拒绝不是
-// 工具执行失败。
-func rejectionToolResult(rejection *rushestools.InterceptorRejection) rushestools.ToolResult {
-	return rushestools.ToolResult{
-		Status:      string(rushestools.StatusFailed),
-		Observation: rejection.Observation,
-		Data:        rejection.Data,
-	}
+func marshalPreconditionRejection(rejection *rushestools.PreconditionRejection) string {
+	encoded, _ := json.Marshal(map[string]any{
+		"status":      string(rushestools.StatusRejected),
+		"observation": rejection.Observation,
+		"data":        rejection.Data,
+	})
+	return string(encoded)
 }

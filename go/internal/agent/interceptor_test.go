@@ -13,6 +13,56 @@ import (
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
+type preconditionProbeExecutor struct{ calls int }
+
+func (executor *preconditionProbeExecutor) ExecuteTool(context.Context, string, any) (any, error) {
+	executor.calls++
+	return rushestools.ToolResult{Status: string(rushestools.StatusSucceeded)}, nil
+}
+
+func TestRegistryPreconditionRejectionKeepsStableRecoveryEnvelope(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	agenttest.CreateAgentDraft(t, database, "draft_precondition_rejection")
+	executor := &preconditionProbeExecutor{}
+	registry, err := rushestools.NewRegistry(database, executor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, exists := registry.Spec("timeline.delete")
+	if !exists {
+		t.Fatal("timeline.delete missing from registry")
+	}
+	invokable := spec.Implementation.(einotool.InvokableTool)
+	endpoint := newToolRecoveryMiddleware(testRetrySafe(t)).Invokable(
+		func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+			result, runErr := invokable.InvokableRun(ctx, input.Arguments)
+			if runErr != nil {
+				return nil, runErr
+			}
+			return &compose.ToolOutput{Result: result}, nil
+		},
+	)
+	output, err := endpoint(
+		rushestools.WithDraftID(t.Context(), "draft_precondition_rejection"),
+		&compose.ToolInput{Name: "timeline.delete", CallID: "call_precondition", Arguments: `{"kind":"delete_clip","timeline_clip_id":"clip_missing"}`},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("precondition rejection entered executor %d times", executor.calls)
+	}
+	payload := decodeRecoveryPayload(t, output.Result)
+	data := payload["data"].(map[string]any)
+	currentState := data["current_state"].(map[string]any)
+	if payload["status"] != string(rushestools.StatusRejected) ||
+		payload["error_code"] != string(rushestools.ErrCodeTimelineNotExists) ||
+		data["message"] != "当前尚未创建时间线" || currentState["timeline_exists"] != false ||
+		data["recovery"] != "加载并使用 timeline.insert 插入首个 visual_base clip" {
+		t.Fatalf("unexpected precondition rejection: %#v", payload)
+	}
+}
+
 func TestDestructiveConfirmationInterceptor(t *testing.T) {
 	t.Parallel()
 	destructive := rushestools.Spec{Name: "memory.remove", Effect: rushestools.EffectDestructive}
@@ -71,7 +121,8 @@ func TestInterceptorRejectionMiddlewareSkipsRecoveryBudget(t *testing.T) {
 	}
 	payload := decodeRecoveryPayload(t, output.Result)
 	data := payload["data"].(map[string]any)
-	if payload["status"] != "failed" || data["error_code"] != "confirmation_required" {
+	if payload["status"] != "rejected" || data["error_code"] != "confirmation_required" ||
+		payload["recovery"] == "" || payload["current_state"] == nil {
 		t.Fatalf("拒绝未回灌结构化提示: %#v", payload)
 	}
 	// 策略拒绝不消耗修复预算，但必须留在终态门禁中，防止模型直接声称成功。
@@ -96,7 +147,7 @@ func TestInterceptorRejectionNotRetriedOnTransientText(t *testing.T) {
 			calls++
 			return nil, &rushestools.InterceptorRejection{
 				Observation: "confirmation required (request timed out)",
-				Data:        map[string]any{"error_code": "tool_not_in_surface"},
+				Data:        map[string]any{"error_code": "tool_validation_failed"},
 			}
 		},
 	)
@@ -104,7 +155,7 @@ func TestInterceptorRejectionNotRetriedOnTransientText(t *testing.T) {
 	if err != nil || calls != 1 {
 		t.Fatalf("含 transient 词的策略拒绝也不得重试: calls=%d err=%v", calls, err)
 	}
-	if decodeRecoveryPayload(t, output.Result)["status"] != "failed" || state.unresolved() {
+	if decodeRecoveryPayload(t, output.Result)["status"] != "rejected" || state.unresolved() {
 		t.Fatal("非确认类拒绝应回灌结构化提示、不触发重试且不污染确认门禁")
 	}
 }

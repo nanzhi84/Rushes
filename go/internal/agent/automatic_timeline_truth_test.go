@@ -1,187 +1,81 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"testing"
 
-	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
-	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
-func TestCommittedTimelineMutationResultBoundaries(t *testing.T) {
-	tests := []struct {
-		name      string
-		raw       string
-		committed bool
-	}{
-		{name: "malformed", raw: "{"},
-		{name: "invalid timeline id", raw: `{"status":"succeeded","data":{"timeline_id":"draft"}}`},
-		{name: "succeeded", raw: `{"status":"succeeded","data":{"timeline_id":"draft:v2"}}`, committed: true},
-		{name: "validation unchanged", raw: `{"status":"validation_failed","data":{"timeline_id":"draft:v2","current_timeline_unchanged":true}}`},
-		{name: "validation advanced", raw: `{"status":"validation_failed","data":{"timeline_id":"draft:v2","before_version":1,"after_version":2}}`, committed: true},
-		{name: "validation not advanced", raw: `{"status":"validation_failed","data":{"timeline_id":"draft:v2","before_version":2,"after_version":2}}`},
-		{name: "failed", raw: `{"status":"failed","data":{"timeline_id":"draft:v2"}}`},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			_, _, committed := committedTimelineMutationResult(test.raw)
-			if committed != test.committed {
-				t.Fatalf("committed=%v want=%v raw=%s", committed, test.committed, test.raw)
-			}
-		})
-	}
-}
-
-func TestAttachAutomaticTimelineCheckEvidenceOnHarnessFailure(t *testing.T) {
-	encoded := attachAutomaticTimelineCheckEvidence(
-		rushestools.ToolResult{Status: string(rushestools.StatusSucceeded)},
-		rushestools.ToolResult{},
-		errors.New("timeline check unavailable"),
-	)
-	var mutation rushestools.ToolResult
-	if err := json.Unmarshal([]byte(encoded), &mutation); err != nil {
-		t.Fatal(err)
-	}
-	if mutation.Observation == "" || mutation.Data == nil {
-		t.Fatalf("mutation=%#v", mutation)
-	}
-	checkBytes, err := json.Marshal(mutation.Data[automaticTimelineCheckDataKey])
-	if err != nil {
-		t.Fatal(err)
-	}
-	var check rushestools.ToolResult
-	if err := json.Unmarshal(checkBytes, &check); err != nil {
-		t.Fatal(err)
-	}
-	if check.Status != string(rushestools.StatusFailed) ||
-		check.Data["error_code"] != string(rushestools.ErrCodeToolExecutionError) ||
-		!strings.Contains(check.Observation, "timeline check unavailable") {
-		t.Fatalf("check=%#v", check)
-	}
-}
-
-type automaticValidationFailureModel struct {
-	mu      sync.Mutex
-	calls   int
-	draftID string
-}
-
-func (stub *automaticValidationFailureModel) WithTools(
-	[]*schema.ToolInfo,
-) (model.ToolCallingChatModel, error) {
-	return stub, nil
-}
-
-func (stub *automaticValidationFailureModel) Generate(
-	_ context.Context,
-	messages []*schema.Message,
-	_ ...model.Option,
-) (*schema.Message, error) {
-	view, err := dynamicPreviewQACurrentView(messages)
-	if err != nil {
-		return nil, err
-	}
-	version, _ := agentexec.NumericValue(view["version"])
-
-	stub.mu.Lock()
-	defer stub.mu.Unlock()
-	stub.calls++
-	switch stub.calls {
-	case 1:
-		return automaticTrackMuteCall("auto_truth_mutation_1", true), nil
-	case 2, 3:
-		wantTimelineID := fmt.Sprintf("%s:v%d", stub.draftID, stub.calls)
-		if int(version) != stub.calls {
-			return nil, fmt.Errorf("CurrentTimelineView version=%v want=%d", version, stub.calls)
-		}
-		check, checkErr := latestAutomaticTimelineCheck(messages)
-		if checkErr != nil || check.Status != string(rushestools.StatusValidationFailed) ||
-			agentexec.InterfaceString(check.Data["timeline_id"]) != wantTimelineID {
-			return nil, fmt.Errorf("automatic check=%#v err=%v want=%s", check, checkErr, wantTimelineID)
-		}
-		if stub.calls == 2 {
-			return automaticTrackMuteCall("auto_truth_mutation_2", false), nil
-		}
-		return schema.AssistantMessage("时间线写入已保留，但内容合同仍未通过；没有把校验失败说成完成。", nil), nil
-	default:
-		return nil, fmt.Errorf("unexpected provider call %d", stub.calls)
-	}
-}
-
-func (stub *automaticValidationFailureModel) Stream(
-	ctx context.Context,
-	messages []*schema.Message,
-	options ...model.Option,
-) (*schema.StreamReader[*schema.Message], error) {
-	message, err := stub.Generate(ctx, messages, options...)
-	if err != nil {
-		return nil, err
-	}
-	return schema.StreamReaderFromArray([]*schema.Message{message}), nil
-}
-
-func automaticTrackMuteCall(callID string, muted bool) *schema.Message {
-	return schema.AssistantMessage("", []schema.ToolCall{{
-		ID: callID,
-		Function: schema.FunctionCall{
-			Name: "timeline.update",
-			Arguments: fmt.Sprintf(
-				`{"kind":"set_track_state","track_id":"bgm","muted":%t}`, muted,
-			),
-		},
-	}})
-}
-
-func latestAutomaticTimelineCheck(messages []*schema.Message) (rushestools.ToolResult, error) {
-	for index := len(messages) - 1; index >= 0; index-- {
-		message := messages[index]
-		if message == nil || message.Role != schema.Tool || message.ToolName != "timeline.update" {
-			continue
-		}
-		var mutation rushestools.ToolResult
-		if err := json.Unmarshal([]byte(message.Content), &mutation); err != nil {
-			return rushestools.ToolResult{}, err
-		}
-		encoded, _ := json.Marshal(mutation.Data[automaticTimelineCheckDataKey])
-		var check rushestools.ToolResult
-		if err := json.Unmarshal(encoded, &check); err != nil {
-			return rushestools.ToolResult{}, err
-		}
-		return check, nil
-	}
-	return rushestools.ToolResult{}, fmt.Errorf("missing automatic timeline check evidence")
-}
-
-func TestAutomaticValidationFailurePreservesMutationAndDoesNotPoisonNextEdit(t *testing.T) {
+// A successful atomic edit must reach the model unchanged. Full content validation
+// belongs to the Stop Gate, not the post-tool middleware path.
+func TestAtomicMutationReceiptDoesNotContainAutomaticTimelineCheck(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
-	const draftID = "draft_auto_truth_validation_failure"
+	const draftID = "draft_no_post_mutation_check"
 	agenttest.CreateAgentDraft(t, database, draftID)
-	provider := &automaticValidationFailureModel{draftID: draftID}
-	service, err := NewService(t.Context(), database, provider)
+	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
 
-	toolCtx := rushestools.WithDraftID(t.Context(), draftID)
-	planned, err := service.ExecuteTool(toolCtx, "plan.update", rushestools.PlanUpdateInput{
-		Plan: map[string]any{"goal": "补足到 120 帧"},
-		Contract: &rushestools.ContentPlanContract{
-			TargetDurationFrames: 120,
-		},
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+		AssetID: "visual", AssetKind: "video", SourceEndFrame: 60,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = seedTimelineVersion(service, t.Context(), draftID, document, "fixture", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
+	ctx = rushestools.WithDraftID(ctx, draftID)
+	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
+	result, err := service.ExecuteTool(ctx, "timeline.update", rushestools.TimelineUpdateInput{
+		"kind": "set_track_state", "track_id": "visual_base", "muted": false,
 	})
-	if err != nil || planned.(rushestools.ToolResult).Status != string(rushestools.StatusSucceeded) {
-		t.Fatalf("plan=%#v err=%v", planned, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err = json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := payload["data"].(map[string]any)
+	if _, exists := data["automatic_timeline_check"]; exists {
+		t.Fatalf("atomic receipt leaked final validation: %s", encoded)
+	}
+}
+
+func TestStopGateChecksLatestVersionOnceAndReturnsCompactBlock(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_stop_gate_block"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	if _, err = service.ExecuteTool(
+		rushestools.WithDraftID(t.Context(), draftID),
+		"plan.update",
+		rushestools.PlanUpdateInput{
+			Plan:     map[string]any{"goal": "120 frames"},
+			Contract: &rushestools.ContentPlanContract{TargetDurationFrames: 120},
+		},
+	); err != nil {
+		t.Fatal(err)
 	}
 	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
 		AssetID: "visual", AssetKind: "video", SourceEndFrame: 60,
@@ -189,94 +83,298 @@ func TestAutomaticValidationFailurePreservesMutationAndDoesNotPoisonNextEdit(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seeded, seedErr := seedTimelineVersion(
-		service, t.Context(), draftID, document, "auto_truth_fixture", nil,
-	); seedErr != nil || seeded.Status != string(rushestools.StatusSucceeded) {
-		t.Fatalf("seed=%#v err=%v", seeded, seedErr)
-	}
-
-	recovery := newToolRecoveryState()
-	truth := newTerminalTimelineTruthState()
-	ctx := withToolRecoveryState(t.Context(), recovery)
-	ctx = withTurnBudgetState(ctx, newTurnBudgetState(maxToolRoundsPerTurn))
-	ctx = withTestTurnLeaseSession(t, service, ctx, draftID)
-	ctx = withModelToolSurfaceSession(ctx)
-	ctx = withTerminalTimelineTruthState(ctx, truth)
-	ctx = agentexec.WithTurnInteractionState(ctx, agentexec.NewTurnInteractionState(service.indexedResources))
-	ctx = rushestools.WithReporter(ctx, service.toolReporter(ctx, draftID))
-	response, err := service.react.Generate(ctx, []*schema.Message{
-		schema.UserMessage("切换主视觉轨状态，并根据自动检查证据继续处理。"),
-	})
-	if err != nil {
+	if _, err = seedTimelineVersion(service, t.Context(), draftID, document, "fixture", nil); err != nil {
 		t.Fatal(err)
-	}
-	if response == nil || response.Content == "" || recovery.unresolved() {
-		t.Fatalf("response=%#v recovery=%s", response, recovery.summary())
 	}
 	latest, err := timeline.Latest(t.Context(), database, draftID)
-	if err != nil || latest.TimelineID != draftID+":v3" {
-		t.Fatalf("latest=%#v err=%v", latest, err)
-	}
-	snapshot := truth.snapshot()
-	if snapshot.mutationTimelineID != draftID+":v3" ||
-		snapshot.checkTimelineID != draftID+":v3" ||
-		snapshot.checkStatus != string(rushestools.StatusValidationFailed) ||
-		snapshot.checkSequence != snapshot.mutationSequence {
-		t.Fatalf("truth=%#v", snapshot)
-	}
-	messages, err := storage.ListMessages(t.Context(), database.Read(), draftID, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	harnessTraces := 0
-	for _, message := range messages {
-		if message.Kind != "tool" {
-			continue
-		}
-		var trace map[string]any
-		if json.Unmarshal([]byte(message.Content), &trace) == nil &&
-			trace["tool"] == "timeline.check" && trace["harness_owned"] == true &&
-			trace["duration_ms"] != nil && trace["progress"] != nil {
-			harnessTraces++
-		}
+
+	truth := newTerminalTimelineTruthState()
+	truth.recordMutationTimelineID(latest.TimelineID)
+	state := newAutomaticPreviewQAState()
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx = withTerminalTimelineTruthState(ctx, truth)
+	ctx = withAutomaticPreviewQAState(ctx, state)
+	candidate := schema.AssistantMessage("已完成，可交付。", nil)
+	messages := []*schema.Message{schema.UserMessage("剪辑到 120 帧")}
+
+	shouldRun, err := service.shouldRunAutomaticPreviewQA(ctx, messages, candidate)
+	if err != nil || !shouldRun {
+		t.Fatalf("first stop should_run=%v err=%v", shouldRun, err)
 	}
-	if harnessTraces != 2 {
-		t.Fatalf("persisted harness traces=%d messages=%#v", harnessTraces, messages)
+	feedback, err := service.runAutomaticPreviewQA(ctx, messages, candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if feedback.Extra["context_phase"] != "stop_gate_feedback" {
+		t.Fatalf("feedback=%#v", feedback)
+	}
+	var envelope map[string]any
+	if err = json.Unmarshal([]byte(stopGateJSON(feedback.Content)), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["decision"] != "block" || envelope["result_ref"] != "validation:"+latest.TimelineID {
+		t.Fatalf("envelope=%#v", envelope)
+	}
+	if issues, _ := envelope["issues"].([]any); len(issues) == 0 || len(issues) > 3 {
+		t.Fatalf("issues=%#v", issues)
+	}
+
+	// The same version and fingerprint is not injected again. The candidate is
+	// replaced at the service boundary with an honest not_completed summary.
+	shouldRun, err = service.shouldRunAutomaticPreviewQA(ctx, messages, candidate)
+	if err != nil || shouldRun {
+		t.Fatalf("duplicate stop should_run=%v err=%v", shouldRun, err)
+	}
+	if override := state.takeFinalOverride(); override == "" {
+		t.Fatal("duplicate blocker must produce honest not_completed override")
 	}
 }
 
-func TestTerminalFallbackAutomaticallyChecksLatestUnverifiedMutation(t *testing.T) {
+func TestStopGateContinuationBudgetIsThreeAndDuplicateDoesNotReinject(t *testing.T) {
+	state := newAutomaticPreviewQAState()
+	for index := 1; index <= maxAutomaticPreviewQAPassesPerTurn; index++ {
+		duplicate, exhausted := state.registerBlocker(fmt.Sprintf("fingerprint-%d", index))
+		if duplicate || exhausted {
+			t.Fatalf("continuation %d duplicate=%v exhausted=%v", index, duplicate, exhausted)
+		}
+	}
+	if duplicate, exhausted := state.registerBlocker("fingerprint-1"); !duplicate || exhausted {
+		t.Fatalf("duplicate=%v exhausted=%v", duplicate, exhausted)
+	}
+	if duplicate, exhausted := state.registerBlocker("fingerprint-4"); duplicate || !exhausted {
+		t.Fatalf("fourth unique duplicate=%v exhausted=%v", duplicate, exhausted)
+	}
+}
+
+func TestStopGateLatestTimelineReadErrorBecomesHookError(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
-	const draftID = "draft_terminal_auto_truth_fallback"
+	const draftID = "draft_stop_gate_read_error"
 	agenttest.CreateAgentDraft(t, database, draftID)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(service.Close)
-	document, composeErr := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+	if err = database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	state := newAutomaticPreviewQAState()
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx = withAutomaticPreviewQAState(ctx, state)
+	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
+	messages := []*schema.Message{schema.UserMessage("请生成预览并质检。")}
+	candidate := schema.AssistantMessage("已完成，可交付。", nil)
+	shouldRun, err := service.shouldRunAutomaticPreviewQA(ctx, messages, candidate)
+	if err != nil || !shouldRun {
+		t.Fatalf("storage failure should_run=%v err=%v", shouldRun, err)
+	}
+	feedback, err := service.runAutomaticPreviewQA(ctx, messages, candidate)
+	if err != nil || feedback == nil || !strings.Contains(feedback.Content, "stop_gate_hook_error") {
+		t.Fatalf("hook feedback=%#v err=%v", feedback, err)
+	}
+	started, hookError := 0, 0
+	for _, event := range service.Hub().Snapshot(draftID) {
+		if event["type"] == TurnStreamStopGateStarted {
+			started++
+		}
+		if event["type"] == TurnStreamStopGateFinished && event["status"] == "hook_error" {
+			hookError++
+		}
+	}
+	if started != 1 || hookError != 1 {
+		t.Fatalf("storage failure gate started=%d hook_error=%d", started, hookError)
+	}
+}
+
+func TestStopGateTracePersistenceFailureCannotEmitPassed(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_stop_gate_persist_error"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
+		AssetID: "visual", AssetKind: "video", SourceEndFrame: 60,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = seedTimelineVersion(service, t.Context(), draftID, document, "fixture", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = database.Write().Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	_, _, err = service.executeAutomaticTimelineCheck(ctx, draftID, document.TimelineID, false)
+	if err == nil {
+		t.Fatal("Stop Gate trace persistence failure must fail closed")
+	}
+	passed, hookError := 0, 0
+	for _, event := range service.Hub().Snapshot(draftID) {
+		if event["type"] != TurnStreamStopGateFinished {
+			continue
+		}
+		if event["status"] == "passed" {
+			passed++
+		}
+		if event["status"] == "hook_error" {
+			hookError++
+		}
+	}
+	if passed != 0 || hookError != 1 {
+		t.Fatalf("persist failure passed=%d hook_error=%d", passed, hookError)
+	}
+}
+
+func TestStopGatePrioritizesStructuralIssuesBeforeContractFailures(t *testing.T) {
+	issues := stopGateActionableIssues(rushestools.ToolResult{Data: map[string]any{
+		"contract_failures": []map[string]any{
+			{"check": "duration", "message": "时长不符"},
+			{"check": "must_keep", "message": "缺少必保留内容"},
+			{"check": "beat", "message": "节拍不符"},
+		},
+		"validation_report": map[string]any{"issues": []map[string]any{
+			{"code": "invalid_document", "message": "时间线结构无效"},
+		}},
+	}})
+	if len(issues) != 4 || issues[0]["code"] != "invalid_document" {
+		t.Fatalf("prioritized issues=%#v", issues)
+	}
+}
+
+func TestStopGateStateAndFeedbackHelpers(t *testing.T) {
+	var nilState *automaticPreviewQAState
+	nilState.setPending(stopGatePending{Decision: "block"})
+	nilState.setPreviewBlocker(stopGatePending{Decision: "block"})
+	nilState.clearPreviewBlocker("draft:v1")
+	nilState.setFinalOverride("ignored")
+	if pending := nilState.takePending(); pending.Decision != "" {
+		t.Fatalf("nil pending=%#v", pending)
+	}
+	if blocker := nilState.previewBlockerFor("draft:v1"); blocker.Decision != "" {
+		t.Fatalf("nil blocker=%#v", blocker)
+	}
+	if override := nilState.takeFinalOverride(); override != "" {
+		t.Fatalf("nil override=%q", override)
+	}
+	if duplicate, exhausted := nilState.registerBlocker("fingerprint"); duplicate || exhausted {
+		t.Fatalf("nil blocker registration duplicate=%v exhausted=%v", duplicate, exhausted)
+	}
+
+	state := newAutomaticPreviewQAState()
+	pending := stopGatePending{
+		Decision: "hook_error", TimelineID: "draft:v1", HookError: "checker unavailable",
+		Issues:          []map[string]any{{"code": "gap", "message": "时间线存在空洞"}},
+		RemainingIssues: 2, ResultRef: "validation:draft:v1", Duplicate: true,
+	}
+	state.setPending(pending)
+	if got := state.takePending(); got.TimelineID != pending.TimelineID || state.takePending().Decision != "" {
+		t.Fatalf("pending lifecycle=%#v", got)
+	}
+	state.setPreviewBlocker(pending)
+	if got := state.previewBlockerFor("draft:v2"); got.Decision != "" {
+		t.Fatalf("mismatched preview blocker=%#v", got)
+	}
+	if got := state.previewBlockerFor("draft:v1"); got.Decision != "hook_error" {
+		t.Fatalf("preview blocker=%#v", got)
+	}
+	state.clearPreviewBlocker("draft:v2")
+	if got := state.previewBlockerFor("draft:v1"); got.Decision == "" {
+		t.Fatal("mismatched clear removed preview blocker")
+	}
+	state.clearPreviewBlocker("draft:v1")
+	if got := state.previewBlockerFor("draft:v1"); got.Decision != "" {
+		t.Fatalf("preview blocker not cleared: %#v", got)
+	}
+	state.setFinalOverride("   ")
+	state.setFinalOverride("not_completed")
+	if got := state.takeFinalOverride(); got != "not_completed" || state.takeFinalOverride() != "" {
+		t.Fatalf("final override=%q", got)
+	}
+
+	first := stopGatePreviewFingerprint(pending, "validation_failed")
+	if first == "" || first != stopGatePreviewFingerprint(pending, "validation_failed") ||
+		first == stopGatePreviewFingerprint(pending, "failed") {
+		t.Fatalf("preview fingerprints are not stable: %q", first)
+	}
+	feedback := stopGateFeedbackMessage(pending)
+	if !strings.Contains(feedback.Content, `"error_code":"stop_gate_hook_error"`) ||
+		!strings.Contains(feedback.Content, `"deduplicated":true`) {
+		t.Fatalf("hook feedback=%s", feedback.Content)
+	}
+	pending.Exhausted = true
+	if exhausted := stopGateFeedbackMessage(pending); !strings.Contains(exhausted.Content, "continuation 已耗尽") {
+		t.Fatalf("exhausted feedback=%s", exhausted.Content)
+	}
+	if reply := stopGateNotCompletedReply(pending); !strings.Contains(reply, "终验程序未能完成") ||
+		!strings.Contains(reply, "checker unavailable") {
+		t.Fatalf("not_completed reply=%q", reply)
+	}
+
+	issues := previewReportActionableIssues(PreviewQAReport{
+		Issues: []map[string]any{{"code": "black", "message": "存在黑帧"}},
+		Errors: []map[string]string{{"error_code": "preview_error", "message": "decode failed"}},
+	})
+	if len(issues) != 2 || issues[0]["recovery"] == "" {
+		t.Fatalf("preview issues=%#v", issues)
+	}
+	if summary := previewReportActionableIssues(PreviewQAReport{Summary: "预览未通过"}); len(summary) != 1 {
+		t.Fatalf("summary issues=%#v", summary)
+	}
+
+	if terminalCandidateClaimsDeliverable(nil) ||
+		terminalCandidateClaimsDeliverable(schema.AssistantMessage("尚未完成", nil)) ||
+		!terminalCandidateClaimsDeliverable(schema.AssistantMessage("READY", nil)) ||
+		terminalCandidateAdmitsNotCompleted(nil) ||
+		!terminalCandidateAdmitsNotCompleted(schema.AssistantMessage("not_completed", nil)) {
+		t.Fatal("terminal boundary helper mismatch")
+	}
+}
+
+func TestTerminalFallbackChecksLatestUnverifiedMutation(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_terminal_stop_fallback"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	document, err := agenttest.ComposeTimeline(draftID, 1, []agenttest.TimelineSelection{{
 		AssetID: "visual", AssetKind: "video", SourceEndFrame: 30,
 	}})
-	if composeErr != nil {
-		t.Fatal(composeErr)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if seeded, seedErr := seedTimelineVersion(
-		service, t.Context(), draftID, document, "auto_truth_fallback", nil,
-	); seedErr != nil || seeded.Status != string(rushestools.StatusSucceeded) {
-		t.Fatalf("seed=%#v err=%v", seeded, seedErr)
+	if _, err = seedTimelineVersion(service, t.Context(), draftID, document, "fixture", nil); err != nil {
+		t.Fatal(err)
 	}
 	truth := newTerminalTimelineTruthState()
 	truth.recordMutationTimelineID(draftID + ":v1")
-	ctx := withTerminalTimelineTruthState(
-		rushestools.WithDraftID(t.Context(), draftID), truth,
-	)
-	if err := service.ensureTerminalTimelineTruth(ctx, draftID); err != nil {
+	ctx := withTerminalTimelineTruthState(rushestools.WithDraftID(t.Context(), draftID), truth)
+	if err = service.ensureTerminalTimelineTruth(ctx, draftID); err != nil {
 		t.Fatal(err)
 	}
-	snapshot := truth.snapshot()
-	if snapshot.checkTimelineID != draftID+":v1" ||
-		snapshot.checkSequence != snapshot.mutationSequence ||
-		snapshot.checkStatus != string(rushestools.StatusSucceeded) {
-		t.Fatalf("truth=%#v", snapshot)
+	got := truth.snapshot()
+	if got.checkTimelineID != draftID+":v1" || got.checkSequence != got.mutationSequence ||
+		got.checkStatus != string(rushestools.StatusSucceeded) {
+		t.Fatalf("truth=%#v", got)
 	}
+}
+
+func stopGateJSON(content string) string {
+	const marker = "【StopGateFeedback｜Harness 终验反馈】\n"
+	content = content[len(marker):]
+	for index, character := range content {
+		if character == '\n' {
+			return content[:index]
+		}
+	}
+	return content
 }

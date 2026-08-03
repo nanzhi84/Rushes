@@ -12,7 +12,6 @@ import (
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
@@ -42,6 +41,13 @@ func (script *terminalTruthScriptModel) Generate(
 	switch script.round {
 	case 1:
 		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "load-mutation",
+			Function: schema.FunctionCall{
+				Name: "tool.load", Arguments: `{"tool_names":["timeline.update"]}`,
+			},
+		}}), nil
+	case 2:
+		return schema.AssistantMessage("", []schema.ToolCall{{
 			ID: "mutation",
 			Function: schema.FunctionCall{
 				Name: "timeline.update",
@@ -49,7 +55,7 @@ func (script *terminalTruthScriptModel) Generate(
 					`"edge":"end","timeline_frame":45}`,
 			},
 		}}), nil
-	case 2:
+	case 3:
 		result, err := latestTerminalTruthToolResult(messages)
 		if err != nil {
 			return nil, err
@@ -57,18 +63,13 @@ func (script *terminalTruthScriptModel) Generate(
 		if result.Status != string(rushestools.StatusSucceeded) {
 			return nil, fmt.Errorf("mutation result=%#v", result)
 		}
-		timelineID := agentexec.InterfaceString(result.Data["timeline_id"])
-		encoded, _ := json.Marshal(result.Data[automaticTimelineCheckDataKey])
-		var check rushestools.ToolResult
-		if json.Unmarshal(encoded, &check) != nil ||
-			check.Status != string(rushestools.StatusSucceeded) ||
-			agentexec.InterfaceString(check.Data["timeline_id"]) != timelineID {
-			return nil, fmt.Errorf("automatic check result=%s mutation=%#v", encoded, result)
+		if _, leaked := result.Data["automatic_timeline_check"]; leaked {
+			return nil, fmt.Errorf("mutation receipt leaked final validation: %#v", result)
 		}
 		if script.mode == "provider_error" {
 			return nil, errors.New("provider failed after timeline mutation")
 		}
-		return schema.AssistantMessage("已经全部完成。", nil), nil
+		return schema.AssistantMessage("已按要求裁到 45 帧。", nil), nil
 	default:
 		return nil, fmt.Errorf("unexpected model round %d", script.round)
 	}
@@ -107,7 +108,7 @@ func TestTerminalTimelineTruthUsesAutomaticExactVersionCheckBeforeReply(t *testi
 		wantContent string
 		wantKind    string
 	}{
-		{mode: "passing", wantOutcome: "finished", wantContent: "已经全部完成。", wantKind: "reply"},
+		{mode: "passing", wantOutcome: "finished", wantContent: "已按要求裁到 45 帧。", wantKind: "reply"},
 		{mode: "provider_error", wantOutcome: "failed", wantContent: "provider failed after timeline mutation", wantKind: "turn_failure"},
 	} {
 		t.Run(test.mode, func(t *testing.T) {
@@ -166,7 +167,7 @@ func TestTerminalTimelineTruthUsesAutomaticExactVersionCheckBeforeReply(t *testi
 					outcome, kind, deltas.String(), completed,
 				)
 			}
-			if test.mode == "provider_error" && strings.Contains(completed, "已经全部完成") {
+			if test.mode == "provider_error" && strings.Contains(completed, "已按要求") {
 				t.Fatalf("unverified success text leaked: %q", completed)
 			}
 			latest, err := timeline.Latest(t.Context(), database, draftID)
@@ -195,6 +196,27 @@ func TestTerminalTruthTrackerInvalidatesEarlierCheckAfterAnotherMutation(t *test
 	if snapshot.mutationTimelineID != "draft:v3" || snapshot.mutationSequence != 2 ||
 		snapshot.checkTimelineID != "draft:v2" || snapshot.checkSequence != 1 {
 		t.Fatalf("snapshot=%#v", snapshot)
+	}
+}
+
+func TestTerminalTruthTrackerInvalidatesCheckAfterPlanUpdate(t *testing.T) {
+	state := newTerminalTimelineTruthState()
+	checked := rushestools.ToolResult{
+		Status: string(rushestools.StatusSucceeded),
+		Data:   map[string]any{"timeline_id": "draft:v2"},
+	}
+	state.recordToolResult("timeline.update", "succeeded", checked)
+	state.recordToolResult("timeline.check", "succeeded", checked)
+	state.recordToolResult("plan.update", "succeeded", rushestools.ToolResult{
+		Status: string(rushestools.StatusSucceeded), Data: map[string]any{},
+	})
+	snapshot := state.snapshot()
+	if snapshot.checkTimelineID != "" || snapshot.checkSequence != 0 ||
+		snapshot.checkStatus != "" || snapshot.checkResult.Status != "" {
+		t.Fatalf("plan.update retained stale timeline.check proof: %#v", snapshot)
+	}
+	if snapshot.mutationTimelineID != "draft:v2" || snapshot.mutationSequence != 1 {
+		t.Fatalf("plan.update changed timeline mutation proof: %#v", snapshot)
 	}
 }
 
@@ -241,7 +263,7 @@ func TestTerminalTruthRejectsCheckSuccessWithoutVersionProof(t *testing.T) {
 	}
 }
 
-func TestConfirmedTimelineMutationAutomaticallyChecksCommittedVersion(t *testing.T) {
+func TestConfirmedTimelineMutationDefersCheckToTerminalStopBoundary(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft_confirmed_mutation_truth"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -276,9 +298,16 @@ func TestConfirmedTimelineMutationAutomaticallyChecksCommittedVersion(t *testing
 		t.Fatalf("replay content=%q err=%v", content, err)
 	}
 	snapshot := truthState.snapshot()
-	if snapshot.mutationTimelineID == "" || snapshot.checkTimelineID != snapshot.mutationTimelineID ||
+	if snapshot.mutationTimelineID == "" || snapshot.checkTimelineID != "" {
+		t.Fatalf("确认重放不得在 mutation 后立即重复终验：%#v", snapshot)
+	}
+	if err := service.ensureTerminalTimelineTruth(ctx, draftID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot = truthState.snapshot()
+	if snapshot.checkTimelineID != snapshot.mutationTimelineID ||
 		snapshot.checkSequence != snapshot.mutationSequence {
-		t.Fatalf("确认重放后必须自动检查同一版本：%#v", snapshot)
+		t.Fatalf("terminal Stop boundary 未检查同一版本：%#v", snapshot)
 	}
 }
 

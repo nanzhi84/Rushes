@@ -292,6 +292,92 @@ describe("reduceTurnStream · subagent_progress", () => {
   });
 });
 
+describe("reduceTurnStream · Stop Gate", () => {
+  it("同一 gate 从 checking 原位更新为 blocked 并保留紧凑摘要", () => {
+    const state = apply([
+      { type: "turn_started", turn_id: "turn_stop" },
+      {
+        type: "stop_gate_started",
+        gate_id: "stop_gate",
+        trace_id: "stop_trace_1",
+        timeline_id: "draft_1:v2",
+        status: "checking"
+      },
+      {
+        type: "stop_gate_finished",
+        gate_id: "stop_gate",
+        trace_id: "stop_trace_1",
+        timeline_id: "draft_1:v2",
+        status: "blocked",
+        issues: [{ code: "gap", message: "时间线存在空洞", recovery: "修复空洞" }],
+        remaining_issue_count: 4,
+        result_ref: "validation:draft_1:v2",
+        duration_ms: 0
+      }
+    ]);
+
+    expect(state.items).toEqual([{
+      type: "stop_gate",
+      gate_id: "stop_gate",
+      traceIds: ["stop_trace_1"],
+      timelineId: "draft_1:v2",
+      status: "blocked",
+      issues: [{ code: "gap", message: "时间线存在空洞", recovery: "修复空洞" }],
+      remainingIssueCount: 4,
+      resultRef: "validation:draft_1:v2",
+      observation: null,
+      durationMs: 0
+    }]);
+  });
+
+  it.each(["passed", "hook_error"] as const)("保留 %s 终态", (status) => {
+    const state = apply([{
+      type: "stop_gate_finished",
+      gate_id: "stop_gate",
+      status,
+      observation: status === "hook_error" ? "check unavailable" : "ok"
+    }]);
+    expect(state.items).toEqual([
+      expect.objectContaining({ type: "stop_gate", status })
+    ]);
+  });
+
+  it("新 timeline checking 原位替换并清空旧终态字段，同时保留 trace 去重集合", () => {
+    const state = apply([
+      {
+        type: "stop_gate_finished",
+        gate_id: "stop_gate",
+        trace_id: "stop_trace_v1",
+        timeline_id: "draft_1:v1",
+        status: "blocked",
+        issues: [{ code: "gap", message: "旧问题" }],
+        remaining_issue_count: 2,
+        result_ref: "validation:draft_1:v1",
+        observation: "old",
+        duration_ms: 9
+      },
+      {
+        type: "stop_gate_started",
+        gate_id: "stop_gate",
+        trace_id: "stop_trace_v2",
+        timeline_id: "draft_1:v2"
+      }
+    ]);
+    expect(state.items).toEqual([{
+      type: "stop_gate",
+      gate_id: "stop_gate",
+      traceIds: ["stop_trace_v1", "stop_trace_v2"],
+      timelineId: "draft_1:v2",
+      status: "checking",
+      issues: [],
+      remainingIssueCount: 0,
+      resultRef: null,
+      observation: null,
+      durationMs: null
+    }]);
+  });
+});
+
 describe("reduceTurnStream · memory_updated", () => {
   it("写入成功追加一张记忆卡片项，id 稳定且 replay 可重建", () => {
     const events: TurnStreamEvent[] = [

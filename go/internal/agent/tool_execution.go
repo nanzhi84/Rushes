@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
@@ -23,6 +25,16 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 	if err != nil {
 		return nil, err
 	}
+	if name == "tool.load" {
+		inputValue, ok := input.(rushestools.ToolLoadInput)
+		if !ok {
+			return nil, fmt.Errorf("tool.load 输入类型异常: %T", input)
+		}
+		return executeToolLoad(ctx, service.tools, inputValue)
+	}
+	if elapsed, ok := toolDisclosureSessionFromContext(ctx).takeFirstActionRoundtrip(time.Now()); ok {
+		metricToolLoadFirstActionRoundtripMS.Observe(elapsed.Milliseconds())
+	}
 	// 旧客户端或异常 provider 即使绕过 Registry，也不能重新打开 Agent 的最终
 	// 导出或 job 轮询能力。用户导出只走独立 HTTP/UI 服务。
 	if name == "render.start" {
@@ -37,23 +49,6 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 	}
 	if name == "job.read" {
 		return nil, errors.New("job.read 不属于 Agent 能力；长工具由 harness 在当前 turn 等待终态")
-	}
-	if toolRequiresTimelineEditLease(name) {
-		// REST timeline patches are explicitly marked manual and are fenced in the
-		// reducer transaction. Every Agent timeline mutation must instead belong to
-		// a live turn lease session; direct callers cannot bypass the harness.
-		if rushestools.TimelineMutationOrigin(ctx) != "manual" {
-			session := timelineEditLeaseSessionFromContext(ctx)
-			if session == nil {
-				return nil, storage.ErrAgentEditLeaseLost
-			}
-			if err := session.ensure(ctx); err != nil {
-				return nil, err
-			}
-		}
-	}
-	if err := service.prepareOnDemandAudioAnalysis(ctx, draftID, name, input); err != nil {
-		return nil, err
 	}
 	preparedContext, receiptResult, reused, err := service.prepareTimelineMutationReceipt(ctx, name, input)
 	if err != nil {
@@ -97,6 +92,24 @@ func (service *Service) ExecuteTool(ctx context.Context, name string, input any)
 				},
 			}, nil
 		}
+	}
+	if toolRequiresTimelineEditLease(name) {
+		// REST timeline patches are explicitly marked manual and fenced in the
+		// reducer transaction. Agent mutations acquire the lease only after typed
+		// input, preconditions, policy, receipt/idempotency and turn admission pass.
+		if rushestools.TimelineMutationOrigin(ctx) != "manual" {
+			session := timelineEditLeaseSessionFromContext(ctx)
+			if session == nil {
+				return nil, storage.ErrAgentEditLeaseLost
+			}
+			if err := session.ensure(ctx); err != nil {
+				return nil, err
+			}
+		}
+	}
+	rushestools.MarkExecutionStarted(ctx)
+	if err := service.prepareOnDemandAudioAnalysis(ctx, draftID, name, input); err != nil {
+		return nil, err
 	}
 	return service.executor.ExecuteTool(ctx, name, input)
 }

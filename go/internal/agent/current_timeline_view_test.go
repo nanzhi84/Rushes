@@ -50,7 +50,7 @@ func (capture *currentTimelineViewCaptureModel) Stream(
 	return schema.StreamReaderFromArray([]*schema.Message{response}), nil
 }
 
-func TestDynamicProviderGetsExactlyOneFreshCurrentTimelineView(t *testing.T) {
+func TestSchemaLoaderGetsExactlyOneFreshCurrentTimelineViewWithoutAcquiringLease(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	const draftID = "draft-current-view-refresh"
 	agenttest.CreateAgentDraft(t, database, draftID)
@@ -75,19 +75,19 @@ func TestDynamicProviderGetsExactlyOneFreshCurrentTimelineView(t *testing.T) {
 	t.Cleanup(session.close)
 	turnCtx = rushestools.WithDraftID(turnCtx, draftID)
 	turnCtx = rushestools.WithTurnIdentity(turnCtx, "turn-current-view", "message-current-view")
-	turnCtx = withModelToolSurfaceSession(turnCtx)
+	turnCtx = withToolDisclosureSession(turnCtx)
 	turnCtx = withTimelineEditLeaseSession(turnCtx, session)
 	turnCtx = rushestools.WithTimelineWriteAdmission(
 		turnCtx, "turn-current-view", session.token, session.markLost,
 	)
 	capture := &currentTimelineViewCaptureModel{}
-	surface := &dynamicToolSurfaceModel{inner: capture, registry: service.tools}
+	loader := &deterministicToolSchemaModel{inner: capture, registry: service.tools}
 	prompt := []*schema.Message{schema.UserMessage("只修改时间线片段音量")}
-	if _, err := surface.Generate(turnCtx, prompt); err != nil {
+	if _, err := loader.Generate(turnCtx, prompt); err != nil {
 		t.Fatal(err)
 	}
-	if session.activeTurnID() != "turn-current-view" {
-		t.Fatal("timeline edit surface did not lazily acquire the lease")
+	if session.activeTurnID() != "" {
+		t.Fatal("schema 加载不得获取 timeline edit lease")
 	}
 
 	draft, err := storage.GetDraft(t.Context(), database.Read(), draftID)
@@ -96,16 +96,13 @@ func TestDynamicProviderGetsExactlyOneFreshCurrentTimelineView(t *testing.T) {
 	}
 	second := currentTimelineViewEvent(draftID, 2, "agent", "clip-a", -9)
 	result, err = reducer.Apply(t.Context(), database, []contracts.Event{second}, reducer.Options{
-		Actor: contracts.ActorAgent, BaseVersion: &draft.StateVersion,
-		TimelineWriteAdmission: &reducer.TimelineWriteAdmission{
-			Origin: "agent", TurnID: "turn-current-view", LeaseToken: session.token,
-			Now: time.Now().UTC(),
-		},
+		Actor: contracts.ActorUser, BaseVersion: &draft.StateVersion,
+		TimelineWriteAdmission: &reducer.TimelineWriteAdmission{Origin: "manual", Now: time.Now().UTC()},
 	})
 	if err != nil || result.Status != reducer.StatusApplied {
 		t.Fatalf("commit v2 result=%#v err=%v", result, err)
 	}
-	if _, err := surface.Generate(turnCtx, prompt); err != nil {
+	if _, err := loader.Generate(turnCtx, prompt); err != nil {
 		t.Fatal(err)
 	}
 
@@ -132,18 +129,17 @@ func TestDynamicProviderGetsExactlyOneFreshCurrentTimelineView(t *testing.T) {
 		views[0]["timeline_id"] != draftID+":v1" || views[1]["timeline_id"] != draftID+":v2" {
 		t.Fatalf("views did not advance N to N+1: %#v", views)
 	}
-	if views[0]["edit_lease_turn_id"] != "turn-current-view" ||
-		views[1]["edit_lease_turn_id"] != "turn-current-view" {
-		t.Fatalf("lease identity missing: %#v", views)
+	if views[0]["edit_lease_turn_id"] != nil || views[1]["edit_lease_turn_id"] != nil {
+		t.Fatalf("schema loading acquired edit lease: %#v", views)
 	}
 	history := views[1]["recent_edit_history"].([]any)
 	if len(history) != 2 {
 		t.Fatalf("history=%#v", history)
 	}
 	manual := history[0].(map[string]any)
-	agent := history[1].(map[string]any)
+	secondEdit := history[1].(map[string]any)
 	if manual["actor"] != "user" || manual["origin"] != "manual" ||
-		agent["actor"] != "agent" || agent["origin"] != "agent" {
+		secondEdit["origin"] != "agent" {
 		t.Fatalf("history lost stable actor/origin order: %#v", history)
 	}
 }

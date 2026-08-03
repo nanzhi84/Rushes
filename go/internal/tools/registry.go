@@ -13,6 +13,8 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
+	"github.com/cloudwego/eino/schema"
+	"github.com/eino-contrib/jsonschema"
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
 
@@ -20,8 +22,26 @@ type Exposure string
 
 const (
 	ExposureLLM     Exposure = "llm"
+	ExposureMeta    Exposure = "model_meta"
 	ExposureHarness Exposure = "harness_only"
 )
+
+type ActionCategory string
+
+const (
+	ActionCategoryMaterialEvidence ActionCategory = "material_evidence"
+	ActionCategoryPlanning         ActionCategory = "planning_interaction_memory"
+	ActionCategoryTimelineEdit     ActionCategory = "timeline_edit"
+)
+
+func (category ActionCategory) Valid() bool {
+	switch category {
+	case ActionCategoryMaterialEvidence, ActionCategoryPlanning, ActionCategoryTimelineEdit:
+		return true
+	default:
+		return false
+	}
+}
 
 // Family 描述模型看到的能力原语：检测生成一种证据，读取/检索不写状态，编辑提交
 // 一个可回滚写入，检查只返回报告，控制面维护 Harness 状态。它与 Effect 正交：
@@ -45,7 +65,7 @@ func (family Family) Valid() bool {
 	}
 }
 
-// Cost 是工具单次调用的相对成本，只用于动态披露和可观测性，不进入模型 schema。
+// Cost 是工具单次调用的相对成本，只用于 Harness 治理和可观测性，不进入模型 schema。
 type Cost string
 
 const (
@@ -62,36 +82,6 @@ func (cost Cost) Valid() bool {
 		return false
 	}
 }
-
-// Surface 是模型工具面的阶段标签。一个工具可属于多个阶段，但阶段清单只保存在
-// Registry Spec 中；agent 只选择阶段，不维护第二份工具目录。
-type Surface uint32
-
-const (
-	SurfaceDiscovery Surface = 1 << iota
-	SurfaceTalkingHead
-	SurfaceBeatEdit
-	SurfaceTimelineEdit
-	SurfaceControl
-)
-
-const allSurfaces = SurfaceDiscovery |
-	SurfaceTalkingHead |
-	SurfaceBeatEdit |
-	SurfaceTimelineEdit |
-	SurfaceControl
-
-func Surfaces(values ...Surface) Surface {
-	var result Surface
-	for _, value := range values {
-		result |= value
-	}
-	return result
-}
-
-func (surface Surface) Includes(value Surface) bool { return surface&value != 0 }
-func (surface Surface) Valid() bool                 { return surface != 0 && surface&^allSurfaces == 0 }
-func (surface Surface) Single() bool                { return surface.Valid() && surface&(surface-1) == 0 }
 
 // Effect 是工具副作用风险的显式分级，注册期必填（缺省与 PolicyGate 同为注册期
 // 强约束）。它是「只读并发调度 / 破坏性强制确认 / 瞬时失败可重试」等治理策略的
@@ -121,12 +111,12 @@ func (effect Effect) Valid() bool {
 type Spec struct {
 	Name                string
 	Description         string
+	CatalogDescription  string
 	Requires            []string
 	Exposure            Exposure
 	Family              Family
 	Cost                Cost
-	PrimarySurface      Surface
-	Surfaces            Surface
+	ActionCategory      ActionCategory
 	Effect              Effect
 	CompletionSemantics CompletionSemantics
 	TypedSuccessAdapter bool
@@ -141,8 +131,8 @@ func (spec Spec) Parallelizable() bool { return spec.Effect == EffectReadOnly }
 type specMetadata struct {
 	family     Family
 	cost       Cost
-	primary    Surface
-	surfaces   Surface
+	category   ActionCategory
+	catalog    string
 	completion CompletionSemantics
 }
 
@@ -150,24 +140,21 @@ func modelMetadata(
 	family Family,
 	cost Cost,
 	completion CompletionSemantics,
-	surfaces ...Surface,
+	category ActionCategory,
+	catalog string,
 ) specMetadata {
-	var primary Surface
-	if len(surfaces) > 0 {
-		primary = surfaces[0]
-	}
 	return specMetadata{
-		family: family, cost: cost, primary: primary, surfaces: Surfaces(surfaces...),
+		family: family, cost: cost, category: category, catalog: catalog,
 		completion: completion,
 	}
 }
 
-func terminalMetadata(family Family, cost Cost, surfaces ...Surface) specMetadata {
-	return modelMetadata(family, cost, CompletionTerminalOnly, surfaces...)
+func terminalMetadata(family Family, cost Cost, category ActionCategory, catalog string) specMetadata {
+	return modelMetadata(family, cost, CompletionTerminalOnly, category, catalog)
 }
 
-func waitingUserMetadata(family Family, cost Cost, surfaces ...Surface) specMetadata {
-	return modelMetadata(family, cost, CompletionTerminalOrWaitingUser, surfaces...)
+func waitingUserMetadata(family Family, cost Cost, category ActionCategory, catalog string) specMetadata {
+	return modelMetadata(family, cost, CompletionTerminalOrWaitingUser, category, catalog)
 }
 
 func harnessMetadata(family Family, cost Cost) specMetadata {
@@ -175,14 +162,13 @@ func harnessMetadata(family Family, cost Cost) specMetadata {
 }
 
 type Registry struct {
-	database              *storage.DB
-	executor              Executor
-	specs                 map[string]Spec
-	admissionInterceptors []Interceptor
-	interceptors          []Interceptor
+	database     *storage.DB
+	executor     Executor
+	specs        map[string]Spec
+	interceptors []Interceptor
 }
 
-// Interceptor 可用于 guard 前的执行准入或 guard 后的策略检查。返回非 nil error 时该调用
+// Interceptor 用于 guard 通过后的策略检查。返回非 nil error 时该调用
 // 不进入 executor。返回 *InterceptorRejection 表示策略拒绝：回灌模型一条结构化提示，
 // 不算工具执行失败、不触发自动重试、不消耗恢复预算。
 type Interceptor func(ctx context.Context, spec Spec, input any) error
@@ -196,18 +182,21 @@ type InterceptorRejection struct {
 
 func (rejection *InterceptorRejection) Error() string { return rejection.Observation }
 
+// PreconditionRejection 表示 Registry 在进入策略拦截器与 Executor 前发现的确定性状态拒绝。
+// 它保留 errPreconditionNotMet 的 errors.Is 兼容性，同时给 Agent loop 一份无需解析文案的
+// 稳定自修复信封。
+type PreconditionRejection struct {
+	Observation string
+	Data        map[string]any
+}
+
+func (rejection *PreconditionRejection) Error() string { return rejection.Observation }
+func (rejection *PreconditionRejection) Unwrap() error { return errPreconditionNotMet }
+
 // Use 追加一个执行拦截器；多个拦截器按注册序在执行链中运行。
 func (registry *Registry) Use(interceptor Interceptor) {
 	if interceptor != nil {
 		registry.interceptors = append(registry.interceptors, interceptor)
-	}
-}
-
-// UseAdmission 追加 guard 前的执行准入拦截器。它只适合不依赖工具前置条件的能力边界，
-// 例如拒绝模型调用本轮未披露的工具；普通策略拦截仍应使用 Use 保持 guard 后语义。
-func (registry *Registry) UseAdmission(interceptor Interceptor) {
-	if interceptor != nil {
-		registry.admissionInterceptors = append(registry.admissionInterceptors, interceptor)
 	}
 }
 
@@ -229,7 +218,47 @@ func NewRegistry(database *storage.DB, executor Executor) (*Registry, error) {
 			return nil, err
 		}
 	}
+	if err := registerToolLoad(registry); err != nil {
+		return nil, err
+	}
 	return registry, nil
+}
+
+type ModelActionCatalogEntry struct {
+	Category    ActionCategory `json:"category"`
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Cost        Cost           `json:"cost"`
+	Risk        Effect         `json:"risk"`
+}
+
+func (registry *Registry) ModelActionCatalog() ([]ModelActionCatalogEntry, error) {
+	entries := make([]ModelActionCatalogEntry, 0, 13)
+	for _, spec := range registry.Specs(true) {
+		if spec.Exposure != ExposureLLM {
+			continue
+		}
+		if !spec.ActionCategory.Valid() || strings.TrimSpace(spec.CatalogDescription) == "" {
+			return nil, fmt.Errorf("模型 action %s 缺少 Catalog 分类或说明", spec.Name)
+		}
+		entries = append(entries, ModelActionCatalogEntry{
+			Category: spec.ActionCategory, Name: spec.Name, Description: spec.CatalogDescription,
+			Cost: spec.Cost, Risk: spec.Effect,
+		})
+	}
+	return entries, nil
+}
+
+func (registry *Registry) ModelActionNames() []string {
+	entries, err := registry.ModelActionCatalog()
+	if err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name)
+	}
+	return names
 }
 
 func (registry *Registry) Specs(includeOptional bool) []Spec {
@@ -446,14 +475,15 @@ func addTool[I, O any](
 	if !classification.cost.Valid() {
 		return fmt.Errorf("工具 %s 缺少合法 Cost 分类: %q", name, classification.cost)
 	}
-	if exposure == ExposureLLM && !classification.surfaces.Valid() {
-		return fmt.Errorf("模型工具 %s 缺少动态 Surface 阶段", name)
+	if exposure == ExposureLLM && !classification.category.Valid() {
+		return fmt.Errorf("模型工具 %s 缺少 Model Action Catalog 分类", name)
 	}
-	if exposure == ExposureLLM && !classification.primary.Single() {
-		return fmt.Errorf("模型工具 %s 的 PrimarySurface 必须是单个合法阶段", name)
+	if exposure == ExposureLLM && (strings.TrimSpace(classification.catalog) == "" ||
+		strings.ContainsAny(classification.catalog, "\r\n")) {
+		return fmt.Errorf("模型工具 %s 缺少单行 Catalog 说明", name)
 	}
-	if exposure == ExposureLLM && !classification.surfaces.Includes(classification.primary) {
-		return fmt.Errorf("模型工具 %s 的 PrimarySurface 不属于 Surfaces", name)
+	if exposure != ExposureLLM && classification.catalog != "" {
+		return fmt.Errorf("非模型工具 %s 不得声明 Catalog 说明", name)
 	}
 	if exposure == ExposureLLM && !classification.completion.Valid() {
 		return fmt.Errorf("模型工具 %s 缺少合法 CompletionSemantics: %q", name, classification.completion)
@@ -479,12 +509,6 @@ func addTool[I, O any](
 		spec := registry.specs[name]
 		if failure, failed := atomicTimelinePreflightFailure(name, input); failed {
 			return convertResult[O](failure)
-		}
-		for _, interceptor := range registry.admissionInterceptors {
-			if err := interceptor(ctx, spec, input); err != nil {
-				var zero O
-				return zero, err
-			}
 		}
 		if err := registry.guard(ctx, spec); err != nil {
 			var zero O
@@ -516,9 +540,10 @@ func addTool[I, O any](
 	}
 	registry.specs[name] = Spec{
 		Name: name, Description: description, Requires: append([]string(nil), requires...),
-		Exposure: exposure, Family: classification.family, Cost: classification.cost,
-		PrimarySurface: classification.primary, Surfaces: classification.surfaces,
-		Effect: effect, CompletionSemantics: classification.completion,
+		CatalogDescription: classification.catalog,
+		Exposure:           exposure, Family: classification.family, Cost: classification.cost,
+		ActionCategory: classification.category,
+		Effect:         effect, CompletionSemantics: classification.completion,
 		TypedSuccessAdapter: exposure == ExposureLLM && !jsonTypeHasField(outputType, "status"),
 		Optional:            optional,
 		InputType:           inputType, Implementation: implementation,
@@ -558,13 +583,74 @@ func (registry *Registry) Effect(name string) (Effect, bool) {
 // 刻意不提供模型回执策略。
 func (registry *Registry) ModelReceiptPolicy(name string) (ModelReceiptPolicy, bool) {
 	spec, exists := registry.specs[name]
-	if !exists || spec.Exposure != ExposureLLM || !spec.CompletionSemantics.Valid() {
+	if !exists || (spec.Exposure != ExposureLLM && spec.Exposure != ExposureMeta) ||
+		!spec.CompletionSemantics.Valid() {
 		return ModelReceiptPolicy{}, false
 	}
 	return ModelReceiptPolicy{
 		Completion:          spec.CompletionSemantics,
 		TypedSuccessAdapter: spec.TypedSuccessAdapter,
 	}, true
+}
+
+const toolLoadDescription = "加载一个或多个已在 Model Action Catalog 中列出的 action 完整参数定义；首次需要这些能力或当前已加载工具不足时使用。"
+
+func registerToolLoad(registry *Registry) error {
+	if _, exists := registry.specs["tool.load"]; exists {
+		return errors.New("工具重复注册: tool.load")
+	}
+	names := registry.ModelActionNames()
+	items := &jsonschema.Schema{Type: "string", Description: "Model Action Catalog 中的准确 action 名称"}
+	for _, name := range names {
+		items.Enum = append(items.Enum, name)
+	}
+	properties := jsonschema.NewProperties()
+	properties.Set("tool_names", &jsonschema.Schema{
+		Type: "array", Items: items, MinItems: uint64Pointer(1), MaxItems: uint64Pointer(5),
+		UniqueItems: true, Description: "本轮要加载完整 schema 的准确 action 名称；不得提交自然语言任务",
+	})
+	info := &schema.ToolInfo{
+		Name: "tool.load", Desc: toolLoadDescription,
+		ParamsOneOf: schema.NewParamsOneOfByJSONSchema(&jsonschema.Schema{
+			Type: "object", Properties: properties, Required: []string{"tool_names"},
+			AdditionalProperties: jsonschema.FalseSchema,
+		}),
+	}
+	implementation := utils.NewTool[ToolLoadInput, ToolLoadResult](
+		info,
+		func(ctx context.Context, input ToolLoadInput) (ToolLoadResult, error) {
+			if reporter, ok := ReporterFromContext(ctx); ok {
+				reporter(ctx, "tool.load", "started", input, nil, nil)
+			}
+			raw, err := registry.executor.ExecuteTool(ctx, "tool.load", input)
+			result, convertErr := convertResult[ToolLoadResult](raw)
+			if err == nil {
+				err = convertErr
+			}
+			if reporter, ok := ReporterFromContext(ctx); ok {
+				reporter(ctx, "tool.load", "finished", input, result, err)
+			}
+			return result, err
+		},
+		utils.WithUnmarshalArguments(func(ctx context.Context, arguments string) (any, error) {
+			decoded, err := strictUnmarshalToolArguments[ToolLoadInput](ctx, "tool.load", arguments)
+			if err != nil {
+				return nil, err
+			}
+			input := decoded.(ToolLoadInput)
+			if err := ValidateToolLoadInput(input); err != nil {
+				return nil, err
+			}
+			return input, nil
+		}),
+	)
+	registry.specs["tool.load"] = Spec{
+		Name: "tool.load", Description: toolLoadDescription, Exposure: ExposureMeta,
+		Family: FamilyRead, Cost: CostLow, Effect: EffectReadOnly,
+		CompletionSemantics: CompletionTerminalOnly, InputType: reflect.TypeFor[ToolLoadInput](),
+		Implementation: implementation,
+	}
+	return nil
 }
 
 // Spec 返回指定工具的完整分类元数据；执行路由据此组合 Family 与 Effect，
@@ -592,6 +678,40 @@ func strictUnmarshalToolArguments[I any](_ context.Context, name, arguments stri
 
 var errPreconditionNotMet = errors.New("工具前置条件不满足")
 
+func preconditionRejection(toolName, predicate string) *PreconditionRejection {
+	message := "工具 " + toolName + " 的前置状态尚未满足"
+	errorCode := ErrCodeToolValidationFailed
+	recovery := "满足前置条件 " + predicate + " 后重试。"
+	currentState := map[string]any{predicate: false}
+	switch predicate {
+	case "usable_asset_exists":
+		message = "当前没有可用素材"
+		errorCode = ErrCodeUsableAssetNotExists
+		recovery = "请用户先导入并等待至少一个素材变为可用状态"
+	case "transcript_index_exists":
+		message = "当前尚未建立可用的 transcript 索引"
+		errorCode = ErrCodeTranscriptIndexNotExists
+		recovery = "等待 Harness 为可用口播素材建立 transcript 索引后重试"
+	case "timeline_exists":
+		message = "当前尚未创建时间线"
+		errorCode = ErrCodeTimelineNotExists
+		recovery = "加载并使用 timeline.insert 插入首个 visual_base clip"
+	case "any_preview_exists":
+		message = "当前尚未生成可检查的预览"
+		errorCode = ErrCodePreviewNotExists
+		recovery = "先让 Stop Gate 对已通过 timeline.check 的精确版本生成预览"
+	}
+	return &PreconditionRejection{
+		Observation: message,
+		Data: map[string]any{
+			"error_code":    string(errorCode),
+			"message":       message,
+			"current_state": currentState,
+			"recovery":      recovery,
+		},
+	}
+}
+
 func (registry *Registry) guard(ctx context.Context, spec Spec) error {
 	draftID, err := DraftID(ctx)
 	if err != nil {
@@ -603,7 +723,7 @@ func (registry *Registry) guard(ctx context.Context, spec Spec) error {
 			return evaluateErr
 		}
 		if !passed {
-			return fmt.Errorf("%w: 工具 %s 未满足 %s", errPreconditionNotMet, spec.Name, predicate)
+			return preconditionRejection(spec.Name, predicate)
 		}
 	}
 	return nil
@@ -761,7 +881,8 @@ func registerShotSearch(registry *Registry) error {
 		"shot.search",
 		"在一次调用开始时冻结目标视频素材，等待其基础镜头索引全部 search_ready 后，对固定 index_snapshot_id 执行无 embedding 的只读文字检索；返回稳定 ShotRef、权威源帧、分数与字段证据，绝不返回部分索引或伪候选",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata(FamilyRead, CostStandard, SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit),
+		terminalMetadata(FamilyRead, CostStandard, ActionCategoryMaterialEvidence,
+			"检索基础镜头索引并返回稳定源帧证据；普通选镜或查找候选镜头时使用。"),
 	)
 }
 
@@ -771,8 +892,8 @@ func registerShotDeepSearch(registry *Registry) error {
 		"shot.deep_search",
 		"对 shot.search 返回的 1 到 8 个精确 ShotRef 做高成本视觉复核；绑定原冻结快照，从权威镜头边界新增有序帧或高分辨率帧，持久化查询无关的通用事实，并确定性返回 requirements、exclusions、preferences 的逐项帧证据。不能传整批素材或源帧范围",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyDetect, CostHigh,
-			SurfaceDiscovery, SurfaceTalkingHead, SurfaceBeatEdit, SurfaceTimelineEdit),
+		terminalMetadata(FamilyDetect, CostHigh, ActionCategoryMaterialEvidence,
+			"对 shot.search 返回的精确 ShotRef 做高成本视觉复核；基础证据不足或需确认 OCR、动作和细节时使用。"),
 	)
 }
 
@@ -812,18 +933,21 @@ func registerSpeechSearch(registry *Registry) error {
 		"speech.search",
 		"只读搜索 Harness 已确保就绪的 transcript；按台词语义、稳定 ID 或源帧范围返回逐句、词级、气口和相似台词证据",
 		[]string{"usable_asset_exists"}, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata(FamilyRead, CostStandard, SurfaceTalkingHead),
+		terminalMetadata(FamilyRead, CostStandard, ActionCategoryMaterialEvidence,
+			"检索已就绪转写并返回台词、词级帧位置和气口证据；口播选句、删改或对齐时使用。"),
 	)
 }
 
 func registerAskUser(registry *Registry) error {
 	return addTool[AskUserInput, ToolResult](registry, "interaction.ask_user", "仅在缺少会实质改变成片目标、且无法从素材或上下文安全推断的关键决策时，通过简短结构化决策卡向用户提问；已有可用素材时，成片类型、时长、风格和节奏等可逆首剪细节必须结合 user_memory 与安全默认值自主决定，不得用此工具追问", nil, ExposureLLM, EffectReversible, false,
-		waitingUserMetadata(FamilyControl, CostLow, SurfaceControl, SurfaceDiscovery))
+		waitingUserMetadata(FamilyControl, CostLow, ActionCategoryPlanning,
+			"创建一张关键决策卡向用户提问；只在缺失无法安全推断且会实质改变成片目标的信息时使用。"))
 }
 
 func registerDecisionAnswer(registry *Registry) error {
 	return addTool[DecisionAnswerInput, ToolResult](registry, "decision.answer", "提交结构化决策答案", nil, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyControl, CostLow, SurfaceControl))
+		terminalMetadata(FamilyControl, CostLow, ActionCategoryPlanning,
+			"提交用户对结构化决策卡的答案；当待处理决策已获得用户回答时使用。"))
 }
 
 func registerPlanUpdate(registry *Registry) error {
@@ -832,12 +956,8 @@ func registerPlanUpdate(registry *Registry) error {
 		"plan.update",
 		"以 RFC 7396 语义增量合并 plan；reset=true 时先清空旧计划再应用该对象，用于在跨回合继续工作前保存已确定的计划结构；素材可用但请求宽泛时，用此工具记录基于长期画像作出的首剪默认决定并继续执行，不要转去追问可回滚细节",
 		nil, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyControl, CostStandard,
-			SurfaceControl,
-			SurfaceDiscovery,
-			SurfaceTalkingHead,
-			SurfaceBeatEdit,
-		),
+		terminalMetadata(FamilyControl, CostStandard, ActionCategoryPlanning,
+			"持久化跨回合的创作计划与已确定决策；任务需继续执行或需固化首剪默认时使用。"),
 	)
 }
 
@@ -847,7 +967,8 @@ func registerMemorySet(registry *Registry) error {
 		"memory.set",
 		"仅当当前用户明确表达跨项目稳定的偏好、习惯或纠正时写入用户画像；一次性草稿要求和模型自己的创作判断不得写入",
 		nil, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyControl, CostStandard, SurfaceControl),
+		terminalMetadata(FamilyControl, CostStandard, ActionCategoryPlanning,
+			"写入用户跨项目稳定的偏好、习惯或纠正；用户明确表达会影响未来项目的信息时使用。"),
 	)
 }
 
@@ -857,7 +978,8 @@ func registerMemoryRemove(registry *Registry) error {
 		"memory.remove",
 		"仅当当前用户明确要求忘记已有长期记忆时删除指定键；此操作必须先获得破坏性确认",
 		nil, ExposureLLM, EffectDestructive, false,
-		terminalMetadata(FamilyControl, CostStandard, SurfaceControl),
+		terminalMetadata(FamilyControl, CostStandard, ActionCategoryPlanning,
+			"删除指定的长期用户记忆；用户明确要求忘记某项已存记忆时使用。"),
 	)
 }
 
@@ -867,8 +989,8 @@ func registerTimelineInsert(registry *Registry) error {
 		"timeline.insert",
 		"插入一个素材 clip 或一条字幕；空时间线先插入一个 visual_base clip 即创建 v1，后续片段逐次追加。原声联动由服务端派生，只维护确定性音画不变量。插入 BGM 时只提交素材与放置参数；Harness 自动确保并投影完整拍点证据，再校验精确写入版本",
 		nil, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyEdit, CostStandard,
-			SurfaceTalkingHead, SurfaceBeatEdit, SurfaceTimelineEdit),
+		terminalMetadata(FamilyEdit, CostStandard, ActionCategoryTimelineEdit,
+			"向时间线插入一个素材片段或一条字幕；创建首个视觉片段、追加镜头、字幕或 BGM 时使用。"),
 	)
 }
 
@@ -878,7 +1000,8 @@ func registerTimelineDelete(registry *Registry) error {
 		"timeline.delete",
 		"只删除一个 clip、一个连续帧范围、一个素材的连续源帧范围或一个非主视觉轨内容集合；多个目标必须分成多次调用",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyEdit, CostStandard, SurfaceBeatEdit, SurfaceTimelineEdit),
+		terminalMetadata(FamilyEdit, CostStandard, ActionCategoryTimelineEdit,
+			"从时间线删除一个片段、连续帧范围或内容集合；需移除一个明确时间线目标时使用。"),
 	)
 }
 
@@ -888,7 +1011,8 @@ func registerTimelineUpdate(registry *Registry) error {
 		"timeline.update",
 		"只更新一个 clip、track 或 subtitle 目标；kind 选择裁剪、移动、重排、替换、速率、音量、淡入淡出、联动、轨道状态或字幕内容",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyEdit, CostStandard, SurfaceBeatEdit, SurfaceTimelineEdit),
+		terminalMetadata(FamilyEdit, CostStandard, ActionCategoryTimelineEdit,
+			"更新一个时间线 clip、track 或 subtitle 目标；需裁剪、移动、替换或调整单个目标时使用。"),
 	)
 }
 
@@ -898,7 +1022,8 @@ func registerTimelineSplit(registry *Registry) error {
 		"timeline.split",
 		"只在一个 timeline_clip_id 的一个时间线整数帧位置切分片段",
 		[]string{"timeline_exists"}, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyEdit, CostStandard, SurfaceTimelineEdit),
+		terminalMetadata(FamilyEdit, CostStandard, ActionCategoryTimelineEdit,
+			"在一个时间线整数帧位置切分指定 clip；需对子段单独删除、移动或调整前使用。"),
 	)
 }
 
@@ -931,5 +1056,6 @@ func registerConfirmAction(registry *Registry) error {
 	// 创建确认决策是一次可逆写入（决策行）；G2 的强制确认拦截器读 EffectDestructive，
 	// confirm_action 本身不是被拦截对象，故按其写行为归可逆。
 	return addTool[ConfirmActionInput, ToolResult](registry, "interaction.confirm_action", "为破坏性动作创建确认决策", nil, ExposureLLM, EffectReversible, true,
-		waitingUserMetadata(FamilyControl, CostLow, SurfaceControl))
+		waitingUserMetadata(FamilyControl, CostLow, ActionCategoryPlanning,
+			"为破坏性或会影响 Agent 之外的动作创建确认决策；PolicyGate 要求确认且尚无有效用户同意时使用。"))
 }

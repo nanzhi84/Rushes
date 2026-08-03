@@ -29,7 +29,7 @@ func (policy ModelReceiptPolicy) Valid() bool { return policy.Completion.Valid()
 
 func (policy ModelReceiptPolicy) Allows(status ToolStatus) bool {
 	switch status {
-	case StatusSucceeded, StatusFailed, StatusValidationFailed, StatusCancelled, StatusTimeout:
+	case StatusSucceeded, StatusRejected, StatusFailed, StatusValidationFailed, StatusCancelled, StatusTimeout:
 		return true
 	case StatusWaiting:
 		return policy.Completion == CompletionTerminalOrWaitingUser

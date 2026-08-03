@@ -48,6 +48,11 @@ func (value *blankMutationCallIDModel) Generate(
 	defer value.mu.Unlock()
 	value.calls++
 	if value.calls == 1 {
+		return schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "load-insert", Function: schema.FunctionCall{Name: "tool.load", Arguments: `{"tool_names":["timeline.insert"]}`},
+		}}), nil
+	}
+	if value.calls == 2 {
 		if !value.insertBound {
 			return nil, errors.New("timeline.insert 未绑定")
 		}
@@ -60,7 +65,7 @@ func (value *blankMutationCallIDModel) Generate(
 		}}), nil
 	}
 	if len(messages) == 0 || messages[len(messages)-1].Role != schema.Tool ||
-		!strings.Contains(messages[len(messages)-1].Content, `"status":"failed"`) ||
+		!strings.Contains(messages[len(messages)-1].Content, `"status":"rejected"`) ||
 		!strings.Contains(messages[len(messages)-1].Content, "调用身份") {
 		return nil, errors.New("空 tool_call_id 没有在执行前回灌结构化失败")
 	}
@@ -314,7 +319,7 @@ func TestModelMutationWithoutToolCallIDCannotCommitTimelineOrReceipt(t *testing.
 		t.Fatal("enqueue failed")
 	}
 	service.Queue().JoinDraft(draftID)
-	if calls, sawFailure := provider.snapshot(); calls != 2 || !sawFailure {
+	if calls, sawFailure := provider.snapshot(); calls != 3 || !sawFailure {
 		t.Fatalf("provider calls=%d saw_failure=%t", calls, sawFailure)
 	}
 	var versions, receipts int

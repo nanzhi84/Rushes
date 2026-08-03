@@ -460,7 +460,7 @@ func renderContextMessages(
 	}
 	playbookSnapshot := current
 	// Timeline and edit history are intentionally excluded from the cacheable
-	// WorldState reference/patch. dynamicToolSurfaceModel injects one fresh
+	// WorldState reference/patch. deterministicToolSchemaModel injects one fresh
 	// CurrentTimelineView immediately before every provider call; retaining them
 	// here would leave a second, potentially stale authority after a tool write.
 	base = stableProviderWorldState(base)

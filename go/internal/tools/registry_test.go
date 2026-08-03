@@ -1,9 +1,12 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -43,6 +46,99 @@ func (fakeExecutor) ExecuteTool(ctx context.Context, name string, _ any) (any, e
 		return PreviewInspectionResult{Summary: "ok", Issues: []map[string]interface{}{}}, nil
 	default:
 		return ToolResult{Status: "succeeded", Observation: name}, nil
+	}
+}
+
+func TestModelActionCatalogGolden(t *testing.T) {
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := registry.ModelActionCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedNames := []string{
+		"decision.answer", "interaction.ask_user", "interaction.confirm_action",
+		"memory.remove", "memory.set", "plan.update", "shot.deep_search", "shot.search",
+		"speech.search", "timeline.delete", "timeline.insert", "timeline.split", "timeline.update",
+	}
+	if len(entries) != 13 || !reflect.DeepEqual(registry.ModelActionNames(), expectedNames) {
+		t.Fatalf("catalog names=%v entries=%d", registry.ModelActionNames(), len(entries))
+	}
+	for _, entry := range entries {
+		if strings.ContainsAny(entry.Description, "\r\n") || !strings.Contains(entry.Description, "；") ||
+			!strings.HasSuffix(entry.Description, "。") {
+			t.Fatalf("catalog %s 不是单行 what+when 说明: %q", entry.Name, entry.Description)
+		}
+	}
+	actual, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual = append(actual, '\n')
+	path := filepath.Join("testdata", "model_action_catalog.golden.json")
+	if os.Getenv("UPDATE_GOLDEN") == "1" {
+		if err := os.WriteFile(path, actual, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 %s: %v；需重录时运行 UPDATE_GOLDEN=1 go test ./internal/tools -run TestModelActionCatalogGolden", path, err)
+	}
+	if !bytes.Equal(actual, want) {
+		t.Fatalf("Model Action Catalog golden 漂移；确认 13 个 action 的分类、说明、成本和风险后重录")
+	}
+}
+
+func TestToolLoadSchemaHasExactCatalogEnumAndBounds(t *testing.T) {
+	database, err := storage.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	registry, err := NewRegistry(database, fakeExecutor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, ok := registry.Spec("tool.load")
+	if !ok || spec.Exposure != ExposureMeta {
+		t.Fatalf("tool.load spec=%#v exists=%v", spec, ok)
+	}
+	info, err := spec.Implementation.Info(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemaValue, err := info.ToJSONSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(schemaValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]any
+	if json.Unmarshal(encoded, &object) != nil {
+		t.Fatalf("schema=%s", encoded)
+	}
+	properties, _ := object["properties"].(map[string]any)
+	names, _ := properties["tool_names"].(map[string]any)
+	items, _ := names["items"].(map[string]any)
+	enumValues, _ := items["enum"].([]any)
+	gotEnum := make([]string, 0, len(enumValues))
+	for _, value := range enumValues {
+		gotEnum = append(gotEnum, value.(string))
+	}
+	if len(properties) != 1 || object["additionalProperties"] != false ||
+		names["minItems"] != float64(1) || names["maxItems"] != float64(5) ||
+		names["uniqueItems"] != true || !reflect.DeepEqual(gotEnum, registry.ModelActionNames()) {
+		t.Fatalf("tool.load schema=%s", encoded)
 	}
 }
 
@@ -297,6 +393,7 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 	}
 
 	typedAdapters := map[string]bool{
+		"tool.load":                  false,
 		"shot.search":                false,
 		"shot.deep_search":           false,
 		"speech.search":              false,
@@ -355,7 +452,7 @@ func TestModelReceiptPoliciesAreRegistryOwned(t *testing.T) {
 	}
 	modelToolCount := 0
 	for _, spec := range registry.Specs(true) {
-		if spec.Exposure == ExposureLLM {
+		if spec.Exposure == ExposureLLM || spec.Exposure == ExposureMeta {
 			modelToolCount++
 		}
 	}
@@ -421,6 +518,7 @@ func TestToolEffectClassificationTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	expected := map[string]Effect{
+		"tool.load":                   EffectReadOnly,
 		"asset.import_local_file":     EffectReversible, // harness-only
 		"asset.list_assets":           EffectReadOnly,
 		"shot.search":                 EffectReadOnly,
@@ -472,6 +570,7 @@ func TestToolPrimitiveClassificationMatchesEffectAndSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	expectedFamily := map[string]Family{
+		"tool.load":                   FamilyRead,
 		"asset.import_local_file":     FamilyEdit,
 		"asset.list_assets":           FamilyRead,
 		"media.detect_shots":          FamilyDetect,
@@ -511,9 +610,8 @@ func TestToolPrimitiveClassificationMatchesEffectAndSurface(t *testing.T) {
 			t.Errorf("%s parallelizable drifted from Effect", spec.Name)
 		}
 		if spec.Exposure == ExposureLLM {
-			if spec.Surfaces == 0 || !spec.Surfaces.Includes(spec.PrimarySurface) {
-				t.Errorf("%s surface metadata invalid: primary=%d surfaces=%d",
-					spec.Name, spec.PrimarySurface, spec.Surfaces)
+			if !spec.ActionCategory.Valid() {
+				t.Errorf("%s action category invalid: %q", spec.Name, spec.ActionCategory)
 			}
 		}
 		families[spec.Family] = true
@@ -575,35 +673,6 @@ func TestInterceptorChainRunsInOrderAndCanReject(t *testing.T) {
 	}
 	if len(order) != 2 || order[0] != "a:timeline.inspect" || order[1] != "b:timeline.inspect" {
 		t.Fatalf("放行路径拦截器未按序运行: %v", order)
-	}
-}
-
-func TestAdmissionInterceptorRunsBeforePreconditionGuard(t *testing.T) {
-	database, err := storage.Open(t.Context(), t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	insertToolDraft(t, database, "draft_admission")
-	registry, err := NewRegistry(database, fakeExecutor{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry.UseAdmission(func(_ context.Context, spec Spec, _ any) error {
-		return &InterceptorRejection{
-			Observation: "not admitted",
-			Data:        map[string]any{"tool": spec.Name},
-		}
-	})
-
-	deleteClip := registry.specs["timeline.delete"].Implementation.(einotool.InvokableTool)
-	_, err = deleteClip.InvokableRun(
-		WithDraftID(t.Context(), "draft_admission"),
-		`{"kind":"delete_clip","timeline_clip_id":"missing"}`,
-	)
-	var rejection *InterceptorRejection
-	if !errors.As(err, &rejection) || rejection.Data["tool"] != "timeline.delete" {
-		t.Fatalf("准入拦截器应先于 timeline_exists guard 拒绝: %v", err)
 	}
 }
 
@@ -1240,7 +1309,7 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 	}
 
 	registry := &Registry{database: database, executor: failingExecutor{}, specs: map[string]Spec{}}
-	readMetadata := terminalMetadata(FamilyRead, CostLow, SurfaceDiscovery)
+	readMetadata := terminalMetadata(FamilyRead, CostLow, ActionCategoryMaterialEvidence, "read evidence when needed")
 	if err := addTool[cleanInput, ToolResult](registry, "clean", "clean", nil, ExposureLLM, EffectReadOnly, false, readMetadata); err != nil {
 		t.Fatal(err)
 	}
@@ -1261,43 +1330,39 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 		t.Fatal("invalid Effect should fail registration")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "no_family", "missing family", nil, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata("", CostLow, SurfaceDiscovery)); err == nil {
+		terminalMetadata("", CostLow, ActionCategoryMaterialEvidence, "catalog")); err == nil {
 		t.Fatal("missing Family should fail registration")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "no_cost", "missing cost", nil, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata(FamilyRead, "", SurfaceDiscovery)); err == nil {
+		terminalMetadata(FamilyRead, "", ActionCategoryMaterialEvidence, "catalog")); err == nil {
 		t.Fatal("missing Cost should fail registration")
 	}
-	if err := addTool[cleanInput, ToolResult](registry, "no_surface", "missing surface", nil, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata(FamilyRead, CostLow)); err == nil {
-		t.Fatal("missing LLM Surface should fail registration")
+	if err := addTool[cleanInput, ToolResult](registry, "no_category", "missing category", nil, ExposureLLM, EffectReadOnly, false,
+		terminalMetadata(FamilyRead, CostLow, "", "catalog")); err == nil {
+		t.Fatal("missing Model Action Catalog category should fail registration")
 	}
-	if err := addTool[cleanInput, ToolResult](registry, "unknown_surface", "unknown surface", nil, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata(FamilyRead, CostLow, Surface(1<<20))); err == nil {
-		t.Fatal("unknown LLM Surface should fail registration")
-	}
-	if err := addTool[cleanInput, ToolResult](registry, "compound_primary", "compound primary", nil, ExposureLLM, EffectReadOnly, false,
-		terminalMetadata(FamilyRead, CostLow, Surfaces(SurfaceDiscovery, SurfaceTalkingHead))); err == nil {
-		t.Fatal("compound PrimarySurface should fail registration")
+	if err := addTool[cleanInput, ToolResult](registry, "no_catalog", "missing catalog", nil, ExposureLLM, EffectReadOnly, false,
+		terminalMetadata(FamilyRead, CostLow, ActionCategoryMaterialEvidence, "")); err == nil {
+		t.Fatal("missing Model Action Catalog description should fail registration")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "bad_family_effect", "bad classification", nil, ExposureLLM, EffectReversible, false,
-		terminalMetadata(FamilyRead, CostLow, SurfaceDiscovery)); err == nil {
+		terminalMetadata(FamilyRead, CostLow, ActionCategoryMaterialEvidence, "catalog")); err == nil {
 		t.Fatal("inconsistent Family and Effect should fail registration")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "no_completion", "missing completion", nil, ExposureLLM, EffectReadOnly, false,
-		modelMetadata(FamilyRead, CostLow, "", SurfaceDiscovery)); err == nil {
+		modelMetadata(FamilyRead, CostLow, "", ActionCategoryMaterialEvidence, "catalog")); err == nil {
 		t.Fatal("LLM 工具缺少 CompletionSemantics 应注册失败")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "bad_completion", "bad completion", nil, ExposureLLM, EffectReadOnly, false,
-		modelMetadata(FamilyRead, CostLow, CompletionSemantics("queued_allowed"), SurfaceDiscovery)); err == nil {
+		modelMetadata(FamilyRead, CostLow, CompletionSemantics("queued_allowed"), ActionCategoryMaterialEvidence, "catalog")); err == nil {
 		t.Fatal("LLM 工具声明非法 CompletionSemantics 应注册失败")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "read.waiting", "unexpected waiting", nil, ExposureLLM, EffectReadOnly, false,
-		waitingUserMetadata(FamilyRead, CostLow, SurfaceDiscovery)); err == nil {
+		waitingUserMetadata(FamilyRead, CostLow, ActionCategoryMaterialEvidence, "catalog")); err == nil {
 		t.Fatal("非交互模型工具不得允许 waiting_user")
 	}
 	if err := addTool[cleanInput, ToolResult](registry, "harness_with_completion", "unexpected model policy", nil, ExposureHarness, EffectReadOnly, false,
-		terminalMetadata(FamilyRead, CostLow)); err == nil {
+		terminalMetadata(FamilyRead, CostLow, ActionCategoryMaterialEvidence, "catalog")); err == nil {
 		t.Fatal("harness 工具不得声明 CompletionSemantics")
 	}
 	if _, exists := registry.specs["no_effect"]; exists {
@@ -1343,6 +1408,23 @@ func TestRegistryValidationConversionReporterAndMissingContext(t *testing.T) {
 	}
 	if passed, err := EvaluatePrecondition(t.Context(), database, "missing", "timeline_exists"); err != nil || passed {
 		t.Fatalf("missing draft passed=%v err=%v", passed, err)
+	}
+	for _, test := range []struct {
+		predicate string
+		code      ToolErrorCode
+	}{
+		{"usable_asset_exists", ErrCodeUsableAssetNotExists},
+		{"transcript_index_exists", ErrCodeTranscriptIndexNotExists},
+		{"timeline_exists", ErrCodeTimelineNotExists},
+		{"any_preview_exists", ErrCodePreviewNotExists},
+		{"future_predicate", ErrCodeToolValidationFailed},
+	} {
+		rejection := preconditionRejection("timeline.delete", test.predicate)
+		if !errors.Is(rejection, errPreconditionNotMet) ||
+			rejection.Data["error_code"] != string(test.code) || rejection.Data["message"] == "" ||
+			rejection.Data["recovery"] == "" {
+			t.Fatalf("predicate=%s precondition rejection=%#v", test.predicate, rejection)
+		}
 	}
 }
 

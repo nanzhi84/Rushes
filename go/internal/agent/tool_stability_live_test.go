@@ -14,8 +14,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cloudwego/eino/components/model"
+	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
@@ -75,6 +77,9 @@ type liveToolEvalMetric struct {
 type liveToolEvalReport struct {
 	GeneratedAt     string                        `json:"generated_at"`
 	Model           string                        `json:"model"`
+	CatalogLoad     liveToolEvalMetric            `json:"catalog_tool_load"`
+	CatalogCases    map[string]liveToolEvalMetric `json:"catalog_tool_load_cases,omitempty"`
+	CatalogCompare  *liveCatalogComparison        `json:"catalog_prompt_comparison,omitempty"`
 	Schema          liveToolEvalMetric            `json:"schema"`
 	SchemaCases     map[string]liveToolEvalMetric `json:"schema_cases,omitempty"`
 	Routing         liveToolEvalMetric            `json:"routing"`
@@ -85,6 +90,414 @@ type liveToolEvalReport struct {
 	Workflows       map[string]liveToolEvalMetric `json:"workflows,omitempty"`
 	WorkflowRuns    []liveWorkflowRunReport       `json:"workflow_runs,omitempty"`
 	Failures        []liveToolEvalFailure         `json:"failures,omitempty"`
+}
+
+type liveCatalogComparison struct {
+	FullSchemaRunes                 int     `json:"full_13_schema_runes"`
+	CatalogPromptRunes              int     `json:"catalog_prompt_runes"`
+	InitialBoundSchemaRunes         int     `json:"initial_tool_load_schema_runes"`
+	AverageLoadedBoundSchemaRunes   float64 `json:"average_loaded_bound_schema_runes"`
+	AverageFullPromptTokens         float64 `json:"average_full_13_prompt_tokens"`
+	AverageInitialPromptTokens      float64 `json:"average_initial_prompt_tokens"`
+	AverageLoadedPromptTokens       float64 `json:"average_loaded_prompt_tokens"`
+	AverageFullProviderLatencyMS    float64 `json:"average_full_13_provider_latency_ms"`
+	AverageInitialProviderLatencyMS float64 `json:"average_initial_provider_latency_ms"`
+	AverageLoadedProviderLatencyMS  float64 `json:"average_loaded_provider_latency_ms"`
+	AdditionalProviderRoundTrips    int     `json:"additional_provider_round_trips"`
+	ObservedAttempts                int     `json:"observed_attempts"`
+	FullSamples                     int     `json:"full_13_samples"`
+	LoadedSamples                   int     `json:"loaded_samples"`
+}
+
+type liveCatalogComparisonAccumulator struct {
+	liveCatalogComparison
+	loadedBoundSchemaRunesTotal int
+	loadedSchemaSamples         int
+	fullPromptTokensTotal       int
+	fullPromptTokenSamples      int
+	initialPromptTokensTotal    int
+	initialPromptTokenSamples   int
+	loadedPromptTokensTotal     int
+	loadedPromptTokenSamples    int
+	initialLatencyMSTotal       int64
+	fullLatencyMSTotal          int64
+	loadedLatencyMSTotal        int64
+}
+
+func TestLiveCatalogToolLoadStability(t *testing.T) {
+	service, chat, modelName := newLiveToolEvalHarness(t)
+	report := liveToolEvalReport{
+		GeneratedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		Model:        modelName,
+		CatalogCases: map[string]liveToolEvalMetric{},
+	}
+	runLiveCatalogToolLoadEvaluation(t, &report, service, chat)
+	writeLiveToolEvalReport(t, report)
+	failed := []string{}
+	for _, evalCase := range liveCatalogToolLoadCases() {
+		metric := report.CatalogCases[evalCase.Name]
+		t.Logf(
+			"CATALOG_TOOL_LOAD_RESULT model=%s case=%s expected=%s succeeded=%d/%d rate=%.2f%%",
+			modelName, evalCase.Name, evalCase.Expected[0], metric.Succeeded, metric.Total,
+			metric.Rate*100,
+		)
+		if metric.Rate < liveToolStabilityTarget {
+			failed = append(failed, evalCase.Name)
+		}
+	}
+	if len(failed) > 0 {
+		encoded, _ := json.Marshal(report.Failures)
+		t.Fatalf(
+			"真实 Catalog/tool.load 稳定性低于 %.0f%%（cases=%s）: %s",
+			liveToolStabilityTarget*100, strings.Join(failed, ","), encoded,
+		)
+	}
+}
+
+func runLiveCatalogToolLoadEvaluation(
+	t *testing.T,
+	report *liveToolEvalReport,
+	service *Service,
+	chat model.ToolCallingChatModel,
+) {
+	t.Helper()
+	const draftID = "draft_live_catalog_tool_load"
+	agenttest.CreateAgentDraft(t, service.database, draftID)
+	comparison := newLiveCatalogComparisonAccumulator(t, service)
+	runs := liveEvalRuns()
+	for _, evalCase := range liveCatalogToolLoadCases() {
+		expected := evalCase.Expected[0]
+		metric := liveToolEvalMetric{}
+		for run := 1; run <= runs; run++ {
+			metric.Total++
+			report.CatalogLoad.Total++
+			actual, evalErr := liveCatalogToolLoadAttempt(
+				t.Context(), service, chat, draftID, evalCase, comparison,
+			)
+			if evalErr == nil {
+				metric.Succeeded++
+				report.CatalogLoad.Succeeded++
+				continue
+			}
+			report.Failures = append(report.Failures, liveToolEvalFailure{
+				Suite: "catalog_tool_load", Case: evalCase.Name, Run: run,
+				Expected: expected, Actual: actual, Error: evalErr.Error(),
+			})
+		}
+		metric.Rate = ratio(metric.Succeeded, metric.Total)
+		report.CatalogCases[evalCase.Name] = metric
+	}
+	report.CatalogLoad.Rate = ratio(report.CatalogLoad.Succeeded, report.CatalogLoad.Total)
+	report.CatalogCompare = comparison.result()
+}
+
+func liveCatalogToolLoadAttempt(
+	parent context.Context,
+	service *Service,
+	chat model.ToolCallingChatModel,
+	draftID string,
+	evalCase liveToolEvalCase,
+	comparison *liveCatalogComparisonAccumulator,
+) (string, error) {
+	expected := evalCase.Expected[0]
+	loadSpec, exists := service.tools.Spec("tool.load")
+	if !exists || loadSpec.Exposure != rushestools.ExposureMeta {
+		return "", errors.New("Registry 缺少 tool.load meta action")
+	}
+	loadInfo, err := loadSpec.Implementation.Info(parent)
+	if err != nil {
+		return "", err
+	}
+	loadOnly, err := chat.WithTools([]*schema.ToolInfo{loadInfo})
+	if err != nil {
+		return "", err
+	}
+	catalogPrompt, err := modelActionCatalogPrompt(service.tools)
+	if err != nil {
+		return "", err
+	}
+	snapshot, err := json.Marshal(evalCase.Snapshot)
+	if err != nil {
+		return "", err
+	}
+	baselineMessages := []*schema.Message{
+		schema.SystemMessage(coreSystemPrompt),
+		schema.SystemMessage("【WorldState 参考快照】\n" + string(snapshot)),
+	}
+	if playbook := taskPlaybookMessage(evalCase.Snapshot); playbook != nil {
+		baselineMessages = append(baselineMessages, playbook)
+	}
+	baselineMessages = append(baselineMessages, schema.UserMessage(evalCase.Prompt))
+	fullSpecs := liveAllModelActionSpecs(service.tools)
+	fullBound, err := bindLiveWorkflowTools(parent, chat, fullSpecs)
+	if err != nil {
+		return "", err
+	}
+	fullStartedAt := time.Now()
+	fullResponse, err := liveGenerateResponse(parent, fullBound, baselineMessages,
+		model.WithToolChoice(schema.ToolChoiceForced, expected))
+	comparison.observeFull(fullResponse, time.Since(fullStartedAt))
+	if err != nil {
+		return "", err
+	}
+	if len(fullResponse.ToolCalls) != 1 || fullResponse.ToolCalls[0].Function.Name != expected {
+		return toolCallNames(fullResponse), fmt.Errorf(
+			"全量 13 schema 基线 action 调用错误: actual=%s expected=%s",
+			toolCallNames(fullResponse), expected,
+		)
+	}
+	messages := append([]*schema.Message{baselineMessages[0], schema.SystemMessage(catalogPrompt)}, baselineMessages[1:]...)
+	initialStartedAt := time.Now()
+	response, err := liveGenerateResponse(parent, loadOnly, messages,
+		model.WithToolChoice(schema.ToolChoiceForced, "tool.load"))
+	comparison.observeInitial(response, time.Since(initialStartedAt))
+	if err != nil {
+		return "", err
+	}
+	if len(response.ToolCalls) != 1 || response.ToolCalls[0].Function.Name != "tool.load" {
+		return toolCallNames(response), fmt.Errorf("首次应只调用 tool.load，实际=%s", toolCallNames(response))
+	}
+	call := response.ToolCalls[0]
+	argumentObject := map[string]any{}
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &argumentObject); err != nil {
+		return call.Function.Arguments, fmt.Errorf("tool.load 参数不是 JSON 对象: %w", err)
+	}
+	decoded, err := service.tools.DecodeInput("tool.load", argumentObject)
+	if err != nil {
+		return call.Function.Arguments, fmt.Errorf("tool.load 参数不符合固定 schema: %w", err)
+	}
+	input, ok := decoded.(rushestools.ToolLoadInput)
+	if !ok {
+		return call.Function.Arguments, fmt.Errorf("tool.load 解码类型=%T", decoded)
+	}
+	if !reflect.DeepEqual(input.ToolNames, []string{expected}) {
+		return strings.Join(input.ToolNames, ","), fmt.Errorf(
+			"Catalog action 选择错误: loaded=%v expected=[%s]", input.ToolNames, expected,
+		)
+	}
+	ctx := rushestools.WithDraftID(withToolDisclosureSession(parent), draftID)
+	rawResult, err := service.ExecuteTool(ctx, "tool.load", input)
+	if err != nil {
+		return strings.Join(input.ToolNames, ","), err
+	}
+	result, ok := rawResult.(rushestools.ToolLoadResult)
+	if !ok || result.Status != string(rushestools.StatusSucceeded) ||
+		!reflect.DeepEqual(result.LoadedNames, []string{expected}) || len(result.NotLoadable) != 0 {
+		return strings.Join(input.ToolNames, ","), fmt.Errorf("tool.load 回执异常: %#v", rawResult)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return expected, err
+	}
+	messages = append(messages, response, schema.ToolMessage(
+		string(encoded), call.ID, schema.WithToolName("tool.load"),
+	))
+	loadedSpecs, err := loadedModelActionSpecs(ctx, service.tools, messages)
+	if err != nil || len(loadedSpecs) != 1 || loadedSpecs[0].Name != expected {
+		return expected, fmt.Errorf("transcript 未确定性披露期望 schema: specs=%v err=%v", liveWorkflowSpecNames(loadedSpecs), err)
+	}
+	actionInfo, err := loadedSpecs[0].Implementation.Info(parent)
+	if err != nil {
+		return expected, err
+	}
+	loaded, err := chat.WithTools([]*schema.ToolInfo{loadInfo, actionInfo})
+	if err != nil {
+		return expected, err
+	}
+	boundMetrics, err := modelToolSchemaSizeFromTools(parent, []tool.BaseTool{
+		loadSpec.Implementation, loadedSpecs[0].Implementation,
+	})
+	if err != nil {
+		return expected, err
+	}
+	comparison.observeLoadedSchema(boundMetrics.TotalRunes)
+	actionStartedAt := time.Now()
+	actionResponse, err := liveGenerateResponse(parent, loaded, messages,
+		model.WithToolChoice(schema.ToolChoiceForced, expected))
+	comparison.observeLoaded(actionResponse, time.Since(actionStartedAt))
+	if err != nil {
+		return expected, err
+	}
+	if len(actionResponse.ToolCalls) != 1 || actionResponse.ToolCalls[0].Function.Name != expected {
+		return toolCallNames(actionResponse), fmt.Errorf(
+			"加载 schema 后 action 调用错误: actual=%s expected=%s",
+			toolCallNames(actionResponse), expected,
+		)
+	}
+	if err := validateLiveToolArguments(loadedSpecs[0], actionResponse.ToolCalls[0].Function.Arguments); err != nil {
+		return expected, fmt.Errorf("加载 schema 后参数无效: %w", err)
+	}
+	if evalCase.ValidateArguments != nil {
+		if err := evalCase.ValidateArguments(actionResponse.ToolCalls[0].Function.Arguments); err != nil {
+			return expected, err
+		}
+	}
+	return expected, nil
+}
+
+func newLiveCatalogComparisonAccumulator(
+	t *testing.T,
+	service *Service,
+) *liveCatalogComparisonAccumulator {
+	t.Helper()
+	full, err := modelToolSchemaSize(t.Context(), service.tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loadSpec, exists := service.tools.Spec("tool.load")
+	if !exists {
+		t.Fatal("tool.load missing")
+	}
+	initial, err := modelToolSchemaSizeFromTools(t.Context(), []tool.BaseTool{loadSpec.Implementation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogPrompt, err := modelActionCatalogPrompt(service.tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &liveCatalogComparisonAccumulator{liveCatalogComparison: liveCatalogComparison{
+		FullSchemaRunes: full.TotalRunes, CatalogPromptRunes: utf8.RuneCountInString(catalogPrompt),
+		InitialBoundSchemaRunes: initial.TotalRunes, AdditionalProviderRoundTrips: 1,
+	}}
+}
+
+func (comparison *liveCatalogComparisonAccumulator) observeInitial(
+	response *schema.Message,
+	latency time.Duration,
+) {
+	comparison.ObservedAttempts++
+	comparison.initialLatencyMSTotal += latency.Milliseconds()
+	if usage := messageTokenUsage(response); usage != nil {
+		comparison.initialPromptTokensTotal += usage.PromptTokens
+		comparison.initialPromptTokenSamples++
+	}
+}
+
+func (comparison *liveCatalogComparisonAccumulator) observeFull(
+	response *schema.Message,
+	latency time.Duration,
+) {
+	comparison.FullSamples++
+	comparison.fullLatencyMSTotal += latency.Milliseconds()
+	if usage := messageTokenUsage(response); usage != nil {
+		comparison.fullPromptTokensTotal += usage.PromptTokens
+		comparison.fullPromptTokenSamples++
+	}
+}
+
+func (comparison *liveCatalogComparisonAccumulator) observeLoadedSchema(runes int) {
+	comparison.loadedBoundSchemaRunesTotal += runes
+	comparison.loadedSchemaSamples++
+}
+
+func (comparison *liveCatalogComparisonAccumulator) observeLoaded(
+	response *schema.Message,
+	latency time.Duration,
+) {
+	comparison.LoadedSamples++
+	comparison.loadedLatencyMSTotal += latency.Milliseconds()
+	if usage := messageTokenUsage(response); usage != nil {
+		comparison.loadedPromptTokensTotal += usage.PromptTokens
+		comparison.loadedPromptTokenSamples++
+	}
+}
+
+func (comparison *liveCatalogComparisonAccumulator) result() *liveCatalogComparison {
+	result := comparison.liveCatalogComparison
+	if comparison.loadedSchemaSamples > 0 {
+		result.AverageLoadedBoundSchemaRunes = float64(comparison.loadedBoundSchemaRunesTotal) /
+			float64(comparison.loadedSchemaSamples)
+	}
+	if result.ObservedAttempts > 0 {
+		result.AverageInitialProviderLatencyMS = float64(comparison.initialLatencyMSTotal) /
+			float64(result.ObservedAttempts)
+	}
+	if result.FullSamples > 0 {
+		result.AverageFullProviderLatencyMS = float64(comparison.fullLatencyMSTotal) /
+			float64(result.FullSamples)
+	}
+	if result.LoadedSamples > 0 {
+		result.AverageLoadedProviderLatencyMS = float64(comparison.loadedLatencyMSTotal) /
+			float64(result.LoadedSamples)
+	}
+	if comparison.fullPromptTokenSamples > 0 {
+		result.AverageFullPromptTokens = float64(comparison.fullPromptTokensTotal) /
+			float64(comparison.fullPromptTokenSamples)
+	}
+	if comparison.initialPromptTokenSamples > 0 {
+		result.AverageInitialPromptTokens = float64(comparison.initialPromptTokensTotal) /
+			float64(comparison.initialPromptTokenSamples)
+	}
+	if comparison.loadedPromptTokenSamples > 0 {
+		result.AverageLoadedPromptTokens = float64(comparison.loadedPromptTokensTotal) /
+			float64(comparison.loadedPromptTokenSamples)
+	}
+	return &result
+}
+
+func liveAllModelActionSpecs(registry *rushestools.Registry) []rushestools.Spec {
+	result := make([]rushestools.Spec, 0, len(registry.ModelActionNames()))
+	for _, spec := range registry.Specs(true) {
+		if spec.Exposure == rushestools.ExposureLLM {
+			result = append(result, spec)
+		}
+	}
+	return result
+}
+
+func TestLiveCatalogComparisonUsesIndependentSampleCounts(t *testing.T) {
+	comparison := &liveCatalogComparisonAccumulator{
+		liveCatalogComparison:       liveCatalogComparison{ObservedAttempts: 4, FullSamples: 4, LoadedSamples: 2},
+		loadedBoundSchemaRunesTotal: 600, loadedSchemaSamples: 2,
+		fullLatencyMSTotal:    400,
+		initialLatencyMSTotal: 200,
+		loadedLatencyMSTotal:  80,
+	}
+	result := comparison.result()
+	if result.AverageLoadedBoundSchemaRunes != 300 ||
+		result.AverageFullProviderLatencyMS != 100 ||
+		result.AverageInitialProviderLatencyMS != 50 ||
+		result.AverageLoadedProviderLatencyMS != 40 {
+		t.Fatalf("independent sample averages=%#v", result)
+	}
+}
+
+func liveGenerateResponse(
+	parent context.Context,
+	chat model.ToolCallingChatModel,
+	messages []*schema.Message,
+	options ...model.Option,
+) (*schema.Message, error) {
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		ctx, cancel := context.WithTimeout(parent, 90*time.Second)
+		response, err := chat.Generate(ctx, messages, options...)
+		cancel()
+		if err == nil && response != nil {
+			return response, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = errors.New("模型返回 nil")
+		}
+		if attempt < 3 {
+			time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
+		}
+	}
+	return nil, lastErr
+}
+
+func toolCallNames(response *schema.Message) string {
+	if response == nil || len(response.ToolCalls) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(response.ToolCalls))
+	for _, call := range response.ToolCalls {
+		names = append(names, call.Function.Name)
+	}
+	return strings.Join(names, ",")
 }
 
 type liveRoutingVariant struct {
@@ -970,13 +1383,15 @@ func TestLiveWorkflowRunnerUsesProductionLeaseAndReceiptBoundary(t *testing.T) {
 	}
 
 	var turnID, sourceMessageID string
-	sawMutationSurface := false
+	sawInitialMutationSchema := false
 	if passed := t.Run("attempt", func(t *testing.T) {
 		runContext := withTestTurnLeaseSession(t, service, t.Context(), fixture.DraftID)
 		leaseSession := timelineEditLeaseSessionFromContext(runContext)
 		turnID, sourceMessageID = rushestools.TurnIdentity(runContext)
 		stub := &scriptedWorkflowModel{calls: calls}
+		generation := 0
 		stub.beforeGenerate = func(boundTools []string) error {
+			generation++
 			requiresLease := false
 			for _, name := range boundTools {
 				if toolRequiresTimelineEditLease(name) {
@@ -987,15 +1402,17 @@ func TestLiveWorkflowRunnerUsesProductionLeaseAndReceiptBoundary(t *testing.T) {
 			if !requiresLease {
 				return nil
 			}
-			sawMutationSurface = true
-			var leaseTurnID string
-			if err := database.Read().QueryRowContext(t.Context(), `
-				SELECT turn_id FROM agent_edit_leases WHERE draft_id=?`, fixture.DraftID,
-			).Scan(&leaseTurnID); err != nil {
-				return fmt.Errorf("provider 看见 mutation surface 前没有 live lease: %w", err)
-			}
-			if leaseTurnID != turnID {
-				return fmt.Errorf("provider lease turn=%s want=%s", leaseTurnID, turnID)
+			if generation == 1 {
+				sawInitialMutationSchema = true
+				var leases int
+				if err := database.Read().QueryRowContext(t.Context(), `
+					SELECT COUNT(*) FROM agent_edit_leases WHERE draft_id=?`, fixture.DraftID,
+				).Scan(&leases); err != nil {
+					return err
+				}
+				if leases != 0 {
+					return fmt.Errorf("provider 首次看见已加载 mutation schema 时提前持有 %d 个 lease", leases)
+				}
 			}
 			return nil
 		}
@@ -1008,8 +1425,8 @@ func TestLiveWorkflowRunnerUsesProductionLeaseAndReceiptBoundary(t *testing.T) {
 	}); !passed {
 		return
 	}
-	if !sawMutationSurface {
-		t.Fatal("provider 未观察到 mutation surface")
+	if !sawInitialMutationSchema {
+		t.Fatal("provider 未观察到预加载的 mutation schema")
 	}
 
 	var liveLeases int
@@ -1122,7 +1539,7 @@ func TestLiveWorkflowRunnerAcceptsParallelReadTurn(t *testing.T) {
 	}
 }
 
-func TestLiveWorkflowRunnerRejectsMutationBeforeRequiredEvidence(t *testing.T) {
+func TestLiveWorkflowRunnerDoesNotGateMutationOnWorkflowEvidence(t *testing.T) {
 	database := agenttest.AgentTestDatabase(t)
 	service, err := NewService(t.Context(), database, nil)
 	if err != nil {
@@ -1142,15 +1559,15 @@ func TestLiveWorkflowRunnerRejectsMutationBeforeRequiredEvidence(t *testing.T) {
 	stub := &scriptedWorkflowModel{calls: calls}
 	runContext := withTestTurnLeaseSession(t, service, t.Context(), fixture.DraftID)
 	report := runLiveWorkflowSuite(runContext, service, stub, fixture, suite, 205)
-	if report.Succeeded || report.FinalStateValid ||
+	if report.Succeeded || !report.FinalStateValid ||
 		!reflect.DeepEqual(
 			report.MissingEvidence,
 			[]string{"shot.search"},
 		) {
 		t.Fatalf("missing evidence gate report=%#v", report)
 	}
-	if !strings.Contains(report.Error, "已绑定工具面缺少模型选择的 spec: timeline.insert") {
-		t.Fatalf("pre-evidence mutation error=%q", report.Error)
+	if !strings.Contains(report.Error, "missing=[shot.search]") {
+		t.Fatalf("missing-evidence terminal error=%q", report.Error)
 	}
 }
 
@@ -1326,7 +1743,7 @@ func runLiveWorkflowSuite(
 		Steps:              make([]liveWorkflowStepReport, 0, suite.MaxSteps),
 	}
 	ctx := rushestools.WithDraftID(parent, fixture.DraftID)
-	ctx = withModelToolSurfaceSession(ctx)
+	ctx = withToolDisclosureSession(ctx)
 	ctx = withToolRecoveryState(ctx, newToolRecoveryState())
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
 	ctx = agentexec.WithTurnInteractionState(
@@ -1334,6 +1751,16 @@ func runLiveWorkflowSuite(
 		agentexec.NewTurnInteractionState(service.indexedResources),
 	)
 	history := []*schema.Message{schema.UserMessage(suite.Goal)}
+	for start := 0; start < len(suite.AllowedTools); start += 5 {
+		end := min(start+5, len(suite.AllowedTools))
+		encoded, _ := json.Marshal(rushestools.ToolLoadResult{
+			Status: string(rushestools.StatusSucceeded), LoadedNames: suite.AllowedTools[start:end],
+			AlreadyLoaded: []string{}, NotLoadable: []string{},
+		})
+		history = append(history, schema.ToolMessage(
+			string(encoded), fmt.Sprintf("fixture-load-%d", start/5), schema.WithToolName("tool.load"),
+		))
+	}
 	observedEvidence := map[string]bool{}
 	talkingHeadEvidence := newLiveTalkingHeadEvidenceChain(fixture)
 	receiptMiddleware := newToolRecoveryMiddleware(
@@ -1344,9 +1771,9 @@ func runLiveWorkflowSuite(
 			Step: fmt.Sprintf("step_%02d", stepIndex+1),
 		}
 		selectionMessages := append([]*schema.Message{}, history...)
-		selected, err := selectModelToolSurface(ctx, service.tools, selectionMessages)
+		selected, err := loadedModelActionSpecs(ctx, service.tools, selectionMessages)
 		if err != nil {
-			stepReport.Error = "动态工具面选择失败: " + err.Error()
+			stepReport.Error = "已加载 action schema 解析失败: " + err.Error()
 			report.Steps = append(report.Steps, stepReport)
 			report.Error = stepReport.Error
 			return report
@@ -1354,30 +1781,14 @@ func runLiveWorkflowSuite(
 		stepReport.BoundTools = liveWorkflowSpecNames(selected)
 		if legacyBound := retiredToolsIn(stepReport.BoundTools); len(legacyBound) > 0 {
 			report.LegacyBoundTools = append(report.LegacyBoundTools, legacyBound...)
-			stepReport.Error = "动态工具面仍绑定旧复合工具: " + strings.Join(legacyBound, ",")
+			stepReport.Error = "已加载 action schema 仍包含旧复合工具: " + strings.Join(legacyBound, ",")
 			report.Steps = append(report.Steps, stepReport)
 			report.Error = stepReport.Error
 			return report
 		}
-		modelToolSurfaceSessionFromContext(ctx).set(stepReport.BoundTools)
-		if specsRequireTimelineEditLease(selected) {
-			leaseSession := timelineEditLeaseSessionFromContext(ctx)
-			if leaseSession == nil {
-				stepReport.Error = "动态编辑工具面缺少 edit lease session"
-				report.Steps = append(report.Steps, stepReport)
-				report.Error = stepReport.Error
-				return report
-			}
-			if err := leaseSession.ensure(ctx); err != nil {
-				stepReport.Error = "取得 Agent edit lease 失败: " + err.Error()
-				report.Steps = append(report.Steps, stepReport)
-				report.Error = stepReport.Error
-				return report
-			}
-		}
 		bound, err := bindLiveWorkflowTools(ctx, chat, selected)
 		if err != nil {
-			stepReport.Error = "绑定动态工具面失败: " + err.Error()
+			stepReport.Error = "绑定已加载 action schema 失败: " + err.Error()
 			report.Steps = append(report.Steps, stepReport)
 			report.Error = stepReport.Error
 			return report
@@ -1455,7 +1866,6 @@ func runLiveWorkflowSuite(
 		if err == nil {
 			toolMessages, err = invokeLiveWorkflowTools(
 				ctx, service, selected, calls, receiptMiddleware,
-				newAutomaticTimelineTruthMiddleware(service),
 			)
 		}
 		if err != nil {
@@ -1563,12 +1973,6 @@ func liveGenerateWorkflowToolCalls(
 		return nil, errors.New("模型返回 nil")
 	case len(response.ToolCalls) == 0:
 		return nil, nil
-	case len(response.ToolCalls) > maxBoundModelTools:
-		return nil, fmt.Errorf(
-			"单次 assistant message 工具调用过多，实际=%d 上限=%d 文本=%q",
-			len(response.ToolCalls), maxBoundModelTools,
-			agentexec.TruncateText(response.Content, 240),
-		)
 	default:
 		return response.ToolCalls, nil
 	}
@@ -1676,6 +2080,7 @@ func validateLiveWorkflowToolOutput(toolName, output string) error {
 		}
 		switch result.Status {
 		case string(rushestools.StatusSucceeded),
+			string(rushestools.StatusRejected),
 			string(rushestools.StatusFailed),
 			string(rushestools.StatusValidationFailed):
 			return nil
@@ -2096,7 +2501,7 @@ func liveWorkflowSuites() []liveWorkflowSuite {
 				"编辑前必须实际检索逐词口播证据和可用镜头证据，不得只凭 WorldState 中的摘要直接写入；" +
 				"放置特写时必须用检索到的该句 source range；删除后从 Harness 刷新的 CurrentTimelineView 找到覆盖它的当前 A-roll clip ID，再以该 clip ID 重查原句并直接使用返回的当前时间线起点，不得自行估算或拿较晚键盘重讲的起点代替。" +
 				"三处删除决定必须分别有成功的时间线写入结果；完成前逐项对照原始目标与真实 ToolResult，任何一处尚未成功就继续执行，不能用计划更新或最终文字代替。" +
-				"每次编辑后读取 Harness 自动检查的结构、内容、口播质量和 B-roll 最短时长证据；检查成功只证明不变量通过，不代表创作决定已自动落实。" +
+				"中间编辑只依据真实回执和刷新后的 CurrentTimelineView 推进；完成前让 Stop Gate 对最新版本统一检查结构、内容、口播质量和 B-roll 最短时长。" +
 				"请从初始目标、WorldState 与每一步真实 observation 自主选择下一原语；独立只读可以在同一消息并行，每个写调用只做一个可观察动作。",
 			MaxSteps: 20,
 			AllowedTools: []string{
@@ -2727,6 +3132,64 @@ func liveSchemaCases() []liveToolEvalCase {
 		cases[index].Snapshot = liveSnapshotForSchemaCase(cases[index].Name)
 	}
 	return cases
+}
+
+func liveCatalogToolLoadCases() []liveToolEvalCase {
+	// Keep a fixed, auditable ten-prompt sample spanning evidence, interaction,
+	// planning, memory and every atomic timeline action family.
+	byName := map[string]liveToolEvalCase{}
+	for _, evalCase := range liveSchemaCases() {
+		byName[evalCase.Name] = evalCase
+	}
+	result := make([]liveToolEvalCase, 0, 10)
+	for _, name := range []string{
+		"shot_search", "speech_search", "ask_user", "plan_update",
+		"initial_first_insert", "timeline_delete", "timeline_update", "timeline_split",
+	} {
+		result = append(result, byName[name])
+	}
+	result = append(result,
+		liveToolEvalCase{
+			Name: "memory_set", Expected: []string{"memory.set"},
+			Prompt:   "用户明确说：‘我以后所有项目都偏好克制的电影感节奏。’请把这条跨项目稳定偏好写入长期记忆。",
+			Snapshot: liveSnapshotForSchemaCase("memory_set"),
+		},
+		liveToolEvalCase{
+			Name: "memory_remove", Expected: []string{"memory.remove"},
+			Prompt:   "用户明确要求忘记已经保存的 pacing 长期偏好；请只提交删除该记忆键的 action，确认由 PolicyGate 处理。",
+			Snapshot: liveSnapshotForSchemaCase("memory_remove"),
+		},
+	)
+	return result
+}
+
+func TestLiveCatalogToolLoadCasesAreAuditable(t *testing.T) {
+	cases := liveCatalogToolLoadCases()
+	if len(cases) != 10 {
+		t.Fatalf("Catalog/tool.load live cases=%d want=10", len(cases))
+	}
+	wantActions := map[string]bool{
+		"shot.search": false, "speech.search": false,
+		"interaction.ask_user": false, "plan.update": false,
+		"memory.set": false, "memory.remove": false,
+		"timeline.insert": false, "timeline.delete": false,
+		"timeline.update": false, "timeline.split": false,
+	}
+	for _, evalCase := range cases {
+		if strings.TrimSpace(evalCase.Name) == "" || strings.TrimSpace(evalCase.Prompt) == "" ||
+			len(evalCase.Expected) != 1 {
+			t.Fatalf("不可审计的 Catalog/tool.load case: %#v", evalCase)
+		}
+		if _, expected := wantActions[evalCase.Expected[0]]; !expected {
+			t.Fatalf("意外 action: %s", evalCase.Expected[0])
+		}
+		wantActions[evalCase.Expected[0]] = true
+	}
+	for name, covered := range wantActions {
+		if !covered {
+			t.Errorf("Catalog/tool.load live eval 未覆盖 %s", name)
+		}
+	}
 }
 
 func liveRoutingCases() []liveToolEvalCase {

@@ -99,16 +99,43 @@ var (
 	metricSameTurnUnderstandCancelled = telemetry.NewCounter("agent_same_turn_tool_wait_understand_cancelled_total")
 	metricSameTurnUnderstandTimeout   = telemetry.NewCounter("agent_same_turn_tool_wait_understand_timeout_total")
 
-	// 模型工具目录与实际绑定面的规模基线（#141 PR1）。目录是 Registry 的全量 LLM
-	// Catalog；bound 是实际传给某次 ReAct 图的工具面。当前二者仍相同，后续动态披露
-	// 会让 bound 直方图下降，而 Catalog gauge 保持全量事实源规模。
+	// Registry 全量 action schema 基线与每次 tool.load 后实际绑定的 schema 并集。
 	metricModelToolCatalogCount       = telemetry.NewGauge("agent_model_tool_catalog_count")
 	metricModelToolCatalogSchemaRunes = telemetry.NewGauge("agent_model_tool_catalog_schema_runes")
-	metricModelToolBoundCount         = telemetry.NewHistogram(
+	metricModelToolCatalogSchemaBytes = telemetry.NewGauge("agent_model_tool_catalog_schema_bytes")
+	metricModelActionCatalogRunes     = telemetry.NewGauge("agent_model_action_catalog_runes")
+	metricModelActionCatalogBytes     = telemetry.NewGauge("agent_model_action_catalog_bytes")
+	metricToolLoadTotal               = telemetry.NewCounter("agent_tool_load_total")
+	metricToolLoadDurationMS          = telemetry.NewHistogram(
+		"agent_tool_load_duration_ms", []int64{1, 5, 10, 25, 50, 100},
+	)
+	metricToolLoadedCount = telemetry.NewHistogram(
+		"agent_tool_loaded_count", []int64{1, 3, 5, 8, 13},
+	)
+	metricToolLoadFirstActionRoundtripMS = telemetry.NewHistogram(
+		"agent_tool_load_first_action_roundtrip_ms",
+		[]int64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000},
+	)
+	metricStopGateTotal      = telemetry.NewCounter("agent_stop_gate_total")
+	metricStopGatePassed     = telemetry.NewCounter("agent_stop_gate_passed_total")
+	metricStopGateBlocked    = telemetry.NewCounter("agent_stop_gate_blocked_total")
+	metricStopGateHookError  = telemetry.NewCounter("agent_stop_gate_hook_error_total")
+	metricStopGateDurationMS = telemetry.NewHistogram(
+		"agent_stop_gate_duration_ms", []int64{1, 5, 10, 25, 50, 100, 500, 1000, 5000},
+	)
+	metricStopGateContinuation = telemetry.NewCounter("agent_stop_gate_continuation_total")
+	metricStopGateDeduplicated = telemetry.NewCounter("agent_stop_gate_deduplicated_total")
+	metricStopGateExhausted    = telemetry.NewCounter("agent_stop_gate_exhausted_total")
+	metricPreToolRejected      = telemetry.NewCounter("agent_pre_tool_rejected_total")
+	metricToolExecutionFailed  = telemetry.NewCounter("agent_tool_execution_failed_total")
+	metricModelToolBoundCount  = telemetry.NewHistogram(
 		"agent_model_tool_bound_count", []int64{5, 10, 15, 20, 25},
 	)
 	metricModelToolBoundSchemaRunes = telemetry.NewHistogram(
 		"agent_model_tool_bound_schema_runes", []int64{4000, 8000, 16000, 24000, 32000, 40000},
+	)
+	metricModelToolBoundSchemaBytes = telemetry.NewHistogram(
+		"agent_model_tool_bound_schema_bytes", []int64{4000, 8000, 16000, 24000, 32000, 40000, 64000},
 	)
 )
 
@@ -185,6 +212,18 @@ func recordTurnOutcome(outcome string) {
 		metricTurnFailed.Inc()
 	case "cancelled":
 		metricTurnCancelled.Inc()
+	}
+}
+
+func recordStopGateStatus(status string) {
+	metricStopGateTotal.Inc()
+	switch status {
+	case "passed":
+		metricStopGatePassed.Inc()
+	case "blocked":
+		metricStopGateBlocked.Inc()
+	case "hook_error":
+		metricStopGateHookError.Inc()
 	}
 }
 

@@ -34,12 +34,19 @@ func (stub *usageServiceModel) Generate(
 	defer stub.mu.Unlock()
 	stub.calls++
 	var response *schema.Message
-	if stub.calls == 1 {
+	switch stub.calls {
+	case 1:
+		response = schema.AssistantMessage("", []schema.ToolCall{{
+			ID: "usage_load", Function: schema.FunctionCall{
+				Name: "tool.load", Arguments: `{"tool_names":["plan.update"]}`,
+			},
+		}})
+	case 2:
 		response = schema.AssistantMessage("", []schema.ToolCall{{
 			ID: "usage_plan", Function: schema.FunctionCall{Name: "plan.update", Arguments: `{"plan":{"phase":"usage"}}`},
 		}})
-	} else {
-		response = schema.AssistantMessage("已完成用量统计。", nil)
+	default:
+		response = schema.AssistantMessage("用量统计已记录。", nil)
 	}
 	response.ResponseMeta = &schema.ResponseMeta{Usage: &schema.TokenUsage{
 		PromptTokens:       stub.calls * 100,
@@ -90,9 +97,9 @@ func TestTurnEndedReportsAccumulatedTokenUsage(t *testing.T) {
 		}
 	}
 	usage, _ := turnEnded["token_usage"].(map[string]any)
-	if usage["model_calls"] != 2 || usage["prompt_tokens"] != 300 ||
-		usage["cached_prompt_tokens"] != 120 || usage["completion_tokens"] != 30 ||
-		usage["total_tokens"] != 330 {
+	if usage["model_calls"] != 3 || usage["prompt_tokens"] != 600 ||
+		usage["cached_prompt_tokens"] != 240 || usage["completion_tokens"] != 60 ||
+		usage["total_tokens"] != 660 {
 		t.Fatalf("turn_ended=%#v", turnEnded)
 	}
 }
@@ -394,6 +401,7 @@ func TestModelToolSurfaceMetricsFollowSuccessfulGraphBinding(t *testing.T) {
 	// 留下的进程级 gauge 值。一次性约束仅用于目录日志，不阻止 gauge 刷新。
 	metricModelToolCatalogCount.Set(-1)
 	metricModelToolCatalogSchemaRunes.Set(-1)
+	metricModelActionCatalogRunes.Set(-1)
 
 	boundCountBefore, boundCountSumBefore, _, _ := metricModelToolBoundCount.Snapshot()
 	boundRunesBefore, boundRunesSumBefore, _, _ := metricModelToolBoundSchemaRunes.Snapshot()
@@ -413,6 +421,9 @@ func TestModelToolSurfaceMetricsFollowSuccessfulGraphBinding(t *testing.T) {
 	}
 	if got := metricModelToolCatalogSchemaRunes.Value(); got != int64(nilModelCatalog.TotalRunes) {
 		t.Fatalf("无模型模式 catalog schema runes gauge=%d want=%d", got, nilModelCatalog.TotalRunes)
+	}
+	if got := metricModelActionCatalogRunes.Value(); got <= 0 || got >= int64(nilModelCatalog.TotalRunes) {
+		t.Fatalf("Model Action Catalog runes=%d full_schema_runes=%d", got, nilModelCatalog.TotalRunes)
 	}
 	if count, sum, _, _ := metricModelToolBoundCount.Snapshot(); count != boundCountBefore || sum != boundCountSumBefore {
 		t.Fatalf("无模型模式不应记录 bound count: before=(%d,%d) after=(%d,%d)",
@@ -461,10 +472,15 @@ func TestModelToolSurfaceMetricsFollowSuccessfulGraphBinding(t *testing.T) {
 	}
 	messages := []*schema.Message{schema.UserMessage("列出素材")}
 	successCtx := withTestTurnLeaseSession(t, service, t.Context(), "draft_surface_success")
-	specs, err := selectModelToolSurface(successCtx, service.tools, messages)
+	specs, err := loadedModelActionSpecs(successCtx, service.tools, messages)
 	if err != nil {
 		t.Fatal(err)
 	}
+	loadSpec, ok := service.tools.Spec("tool.load")
+	if !ok {
+		t.Fatal("Registry 缺少 tool.load")
+	}
+	specs = append([]rushestools.Spec{loadSpec}, specs...)
 	bound, err := modelToolSchemaSizeFromTools(t.Context(), implementationsForSpecs(specs))
 	if err != nil {
 		t.Fatal(err)

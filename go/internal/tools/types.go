@@ -10,6 +10,7 @@ type contextKey string
 const (
 	draftIDKey                contextKey = "rushes_draft_id"
 	reporterKey               contextKey = "rushes_tool_reporter"
+	executionStartObserverKey contextKey = "rushes_tool_execution_start_observer"
 	timelineMutationOriginKey contextKey = "rushes_timeline_mutation_origin"
 	toolCallIDKey             contextKey = "rushes_tool_call_id"
 )
@@ -63,6 +64,20 @@ func WithReporter(ctx context.Context, reporter Reporter) context.Context {
 func ReporterFromContext(ctx context.Context) (Reporter, bool) {
 	reporter, ok := ctx.Value(reporterKey).(Reporter)
 	return reporter, ok && reporter != nil
+}
+
+// WithExecutionStartObserver lets lifecycle middleware distinguish validation
+// and policy rejection from failures after the real executor boundary.
+func WithExecutionStartObserver(ctx context.Context, observer func()) context.Context {
+	return context.WithValue(ctx, executionStartObserverKey, observer)
+}
+
+// MarkExecutionStarted must be called immediately before entering an Executor.
+func MarkExecutionStarted(ctx context.Context) {
+	observer, _ := ctx.Value(executionStartObserverKey).(func())
+	if observer != nil {
+		observer()
+	}
 }
 
 type ToolResult struct {

@@ -15,7 +15,8 @@ import (
 
 // isStructuredFailureStatus 判定一个工具结果状态是否属于「结构化失败」域（应当携带 recovery）。
 func isStructuredFailureStatus(status string) bool {
-	return status == string(rushestools.StatusFailed) || status == string(rushestools.StatusValidationFailed)
+	return status == string(rushestools.StatusRejected) || status == string(rushestools.StatusFailed) ||
+		status == string(rushestools.StatusValidationFailed)
 }
 
 func assertFailureDataHasRecovery(t *testing.T, label string, data map[string]any) {

@@ -35,7 +35,7 @@ func TestAutomaticPreviewQARunsFiveCoreChecksInParallelAndStreamsHarnessSteps(t 
 	}
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", false)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "", "explicit_preview_or_qa_request", "auto", false)
 	if report.Status != "succeeded" || report.TimelineID != timelineID ||
 		len(report.CoreChecks) != len(automaticPreviewCoreChecks) ||
 		report.VisualAdvisory != nil {
@@ -106,7 +106,7 @@ func TestAutomaticPreviewQAVisualIsAdvisoryAndExactVersionRunsOnce(t *testing.T)
 		t.Fatal("模型修复产生新 timeline_id 后应允许重新进入 Preview QA")
 	}
 
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", true)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "", "explicit_preview_or_qa_request", "auto", true)
 	if report.Status != "succeeded" || !report.Passed || report.VisualAdvisory == nil ||
 		report.VisualAdvisory.Check != "visual" {
 		t.Fatalf("visual advisory report=%#v", report)
@@ -134,7 +134,7 @@ func TestAutomaticPreviewQAGeneratesRequestedPortraitOrientation(t *testing.T) {
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
 	report := service.executeAutomaticPreviewQA(
-		ctx, draftID, "explicit_preview_or_qa_request", "portrait", false,
+		ctx, draftID, timelineID, "explicit_preview_or_qa_request", "portrait", false,
 	)
 	if report.Status != "succeeded" || report.TimelineID != timelineID ||
 		report.PreviewID != previewID || report.Orientation != "portrait" {
@@ -224,7 +224,7 @@ func (stub *automaticPreviewQAReactModel) Stream(
 func TestAutomaticPreviewQAReportReturnsToModelWithoutSyntheticUserMessage(t *testing.T) {
 	installAutomaticPreviewQAMediaFixture(t)
 	provider := &automaticPreviewQAReactModel{}
-	_, service, draftID, _, _ := prepareAutomaticPreviewQAFixture(t, provider)
+	database, service, draftID, _, _ := prepareAutomaticPreviewQAFixture(t, provider)
 	t.Cleanup(service.Close)
 
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
@@ -233,7 +233,7 @@ func TestAutomaticPreviewQAReportReturnsToModelWithoutSyntheticUserMessage(t *te
 	ctx = withToolRecoveryState(ctx, newToolRecoveryState())
 	ctx = withTurnBudgetState(ctx, newTurnBudgetState(maxToolRoundsPerTurn))
 	ctx = withTestTurnLeaseSession(t, service, ctx, draftID)
-	ctx = withModelToolSurfaceSession(ctx)
+	ctx = withToolDisclosureSession(ctx)
 	ctx = agentexec.WithTurnInteractionState(
 		ctx, agentexec.NewTurnInteractionState(service.indexedResources),
 	)
@@ -247,6 +247,52 @@ func TestAutomaticPreviewQAReportReturnsToModelWithoutSyntheticUserMessage(t *te
 	if response == nil || !strings.Contains(response.Content, "最终导出请在 UI 触发") {
 		t.Fatalf("response=%#v", response)
 	}
+	started, finished := 0, 0
+	for _, event := range service.Hub().Snapshot(draftID) {
+		switch event["type"] {
+		case TurnStreamStopGateStarted:
+			started++
+		case TurnStreamStopGateFinished:
+			finished++
+		}
+	}
+	if started != 1 || finished != 1 {
+		t.Fatalf("preview-required Stop Gate events started=%d finished=%d", started, finished)
+	}
+	stored, err := storage.ListMessages(t.Context(), database.Read(), draftID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopCount, stopDuration, reportDuration := 0, int64(-1), int64(-1)
+	for _, message := range stored {
+		if message.Kind != "tool" {
+			continue
+		}
+		var trace struct {
+			Tool       string `json:"tool"`
+			Status     string `json:"status"`
+			DurationMS int64  `json:"duration_ms"`
+		}
+		if json.Unmarshal([]byte(message.Content), &trace) != nil {
+			continue
+		}
+		switch trace.Tool {
+		case "stop.gate":
+			stopCount++
+			stopDuration = trace.DurationMS
+			if trace.Status != "passed" {
+				t.Fatalf("persisted Stop Gate status=%s", trace.Status)
+			}
+		case "preview.qa_report":
+			reportDuration = trace.DurationMS
+		}
+	}
+	if stopCount != 1 || reportDuration < 0 || stopDuration < reportDuration {
+		t.Fatalf(
+			"persisted Stop Gate count=%d duration=%d preview_report_duration=%d",
+			stopCount, stopDuration, reportDuration,
+		)
+	}
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
 	if provider.calls != 2 || !provider.sawReport ||
@@ -255,6 +301,97 @@ func TestAutomaticPreviewQAReportReturnsToModelWithoutSyntheticUserMessage(t *te
 			"calls=%d saw_report=%v user_counts=%v",
 			provider.calls, provider.sawReport, provider.userCounts,
 		)
+	}
+}
+
+func TestAutomaticPreviewQAFourthVersionBudgetBlocksWithoutDanglingGate(t *testing.T) {
+	_, service, draftID, _, _ := prepareAutomaticPreviewQAFixture(t, nil)
+	t.Cleanup(service.Close)
+	state := newAutomaticPreviewQAState()
+	for _, prior := range []string{"prior:v1", "prior:v2", "prior:v3"} {
+		if !state.claim(prior) {
+			t.Fatalf("failed to seed prior preview claim %s", prior)
+		}
+	}
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx = withAutomaticPreviewQAState(ctx, state)
+	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
+	shouldRun, err := service.shouldRunAutomaticPreviewQA(
+		ctx,
+		[]*schema.Message{schema.UserMessage("请生成预览并质检。")},
+		schema.AssistantMessage("已完成，可交付。", nil),
+	)
+	if err != nil || shouldRun {
+		t.Fatalf("fourth preview should_run=%v err=%v", shouldRun, err)
+	}
+	if override := state.takeFinalOverride(); !strings.Contains(override, "未达到可交付") {
+		t.Fatalf("fourth preview override=%q", override)
+	}
+	started, blocked := 0, 0
+	for _, event := range service.Hub().Snapshot(draftID) {
+		if event["type"] == TurnStreamStopGateStarted {
+			started++
+		}
+		if event["type"] == TurnStreamStopGateFinished && event["status"] == "blocked" {
+			blocked++
+		}
+	}
+	if started != 1 || blocked != 1 {
+		t.Fatalf("fourth preview gate started=%d blocked=%d", started, blocked)
+	}
+}
+
+func TestAutomaticPreviewQATimelineDriftBlocksWithoutSecondGateOrPreview(t *testing.T) {
+	database, service, draftID, _, timelineID := prepareAutomaticPreviewQAFixture(t, nil)
+	t.Cleanup(service.Close)
+	state := newAutomaticPreviewQAState()
+	ctx := rushestools.WithDraftID(t.Context(), draftID)
+	ctx = withAutomaticPreviewQAState(ctx, state)
+	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
+	messages := []*schema.Message{schema.UserMessage("请生成预览并质检。")}
+	candidate := schema.AssistantMessage("已完成，可交付。", nil)
+	shouldRun, err := service.shouldRunAutomaticPreviewQA(ctx, messages, candidate)
+	if err != nil || !shouldRun {
+		t.Fatalf("initial should_run=%v err=%v", shouldRun, err)
+	}
+	document, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.Version++
+	document.TimelineID = draftID + ":v2"
+	if result, seedErr := seedTimelineVersion(
+		service, t.Context(), draftID, document, "preview_drift", nil,
+	); seedErr != nil || result.Status != string(rushestools.StatusSucceeded) {
+		t.Fatalf("seed drift=%#v err=%v", result, seedErr)
+	}
+	feedback, err := service.runAutomaticPreviewQA(ctx, messages, candidate)
+	if err != nil || feedback == nil || !strings.Contains(feedback.Content, string(rushestools.ErrCodeStaleTarget)) {
+		t.Fatalf("drift feedback=%#v err=%v", feedback, err)
+	}
+	started, finished := 0, 0
+	for _, event := range service.Hub().Snapshot(draftID) {
+		if event["type"] == TurnStreamStopGateStarted {
+			started++
+		}
+		if event["type"] == TurnStreamStopGateFinished {
+			finished++
+			if event["status"] != "blocked" || event["timeline_id"] != timelineID {
+				t.Fatalf("drift Stop Gate event=%#v", event)
+			}
+		}
+	}
+	if started != 1 || finished != 1 {
+		t.Fatalf("drift gate started=%d finished=%d", started, finished)
+	}
+	stored, err := storage.ListMessages(t.Context(), database.Read(), draftID, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range stored {
+		if message.Kind == "tool" && strings.Contains(message.Content, `"tool":"preview.generate"`) {
+			t.Fatalf("timeline drift generated preview: %s", message.Content)
+		}
 	}
 }
 
@@ -271,7 +408,7 @@ func TestAutomaticPreviewQAInterceptedStreamUsageIsAccountedOnce(t *testing.T) {
 	ctx = withToolRecoveryState(ctx, newToolRecoveryState())
 	ctx = withTurnBudgetState(ctx, budget)
 	ctx = withTestTurnLeaseSession(t, service, ctx, draftID)
-	ctx = withModelToolSurfaceSession(ctx)
+	ctx = withToolDisclosureSession(ctx)
 	ctx = agentexec.WithTurnInteractionState(
 		ctx, agentexec.NewTurnInteractionState(service.indexedResources),
 	)
@@ -301,7 +438,7 @@ func TestAutomaticPreviewQARenderFailureLeavesTimelineUnchanged(t *testing.T) {
 	ctx = rushestools.WithDraftID(ctx, draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
 
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", false)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "", "explicit_preview_or_qa_request", "auto", false)
 	if report.Status != "render_failed" || len(report.Errors) == 0 {
 		t.Fatalf("report=%#v", report)
 	}
@@ -349,17 +486,36 @@ func TestAutomaticPreviewQATriggerAndClaimBoundaries(t *testing.T) {
 	}
 	if got := automaticPreviewQATrigger(base, []*schema.Message{
 		schema.UserMessage("请质检这段代码。"),
-	}, completed); got != "" {
+	}, schema.AssistantMessage("代码解释如下。", nil)); got != "" {
 		t.Fatalf("非媒体质检不应触发 Preview QA: %q", got)
+	}
+	if got := automaticPreviewQATrigger(base, []*schema.Message{
+		schema.UserMessage("确认当前成片是否就绪。"),
+	}, completed); got != "deliverable_declaration" {
+		t.Fatalf("无本回合编辑的可交付声明 trigger=%q", got)
+	}
+	if got := automaticPreviewQATrigger(base, []*schema.Message{
+		schema.UserMessage("这版可以交付了吗？"),
+	}, completed); got != "deliverable_declaration" {
+		t.Fatalf("明确交付确认 trigger=%q", got)
+	}
+	if got := automaticPreviewQATrigger(base, []*schema.Message{
+		schema.UserMessage("分析当前视频结构。"),
+	}, schema.AssistantMessage("已完成分析。", nil)); got != "" {
+		t.Fatalf("纯只读视频分析不应触发 Stop Gate: %q", got)
+	}
+	if got := automaticPreviewQATrigger(base, []*schema.Message{
+		schema.UserMessage("解释一下当前结构。"),
+	}, schema.AssistantMessage("当前结构分为三段。", nil)); got != "" {
+		t.Fatalf("纯问答不应被通用 playbook 触发: %q", got)
 	}
 
 	truth := terminalTimelineTruthFromContext(base)
 	truth.recordMutationTimelineID("draft_trigger:v1")
 	playbook := schema.SystemMessage("talking-head playbook")
-	playbook.Extra = map[string]any{"preview_qa_required": true}
 	if got := automaticPreviewQATrigger(base, []*schema.Message{
 		playbook, schema.UserMessage("完成剪辑。"),
-	}, completed); got != "playbook_required" {
+	}, completed); got != "deliverable_declaration" {
 		t.Fatalf("playbook trigger=%q", got)
 	}
 	if got := automaticPreviewQATrigger(base, []*schema.Message{
@@ -374,8 +530,8 @@ func TestAutomaticPreviewQATriggerAndClaimBoundaries(t *testing.T) {
 	} {
 		if got := automaticPreviewQATrigger(base, []*schema.Message{
 			schema.UserMessage("完成剪辑。"),
-		}, candidate); got != "" {
-			t.Fatalf("非终态 candidate=%#v trigger=%q", candidate, got)
+		}, candidate); got != "editing_or_delivery_turn" {
+			t.Fatalf("编辑回合 candidate=%#v trigger=%q", candidate, got)
 		}
 	}
 
@@ -394,6 +550,14 @@ func TestAutomaticPreviewQATriggerAndClaimBoundaries(t *testing.T) {
 	}
 	if state.claim("draft:v1") || state.claim("draft:v5") {
 		t.Fatal("同版本重复或超过单回合上限不得再次验收")
+	}
+	refreshed := newAutomaticPreviewQAState()
+	if !refreshed.claim("draft:v1") {
+		t.Fatal("初次 Preview claim 失败")
+	}
+	refreshed.invalidateValidationProofs()
+	if !refreshed.claim("draft:v1") {
+		t.Fatal("合同变化后同 timeline_id 必须允许重新 Preview")
 	}
 	if got := previewQAEvidenceJSON(make(chan int)); got != "" {
 		t.Fatalf("不可序列化证据应为空: %q", got)
@@ -427,14 +591,11 @@ func TestAutomaticPreviewQAMissingTimelineReturnsSystemEvidenceOnce(t *testing.T
 
 	evidence, err := service.runAutomaticPreviewQA(ctx, messages, candidate)
 	if err != nil || evidence == nil || evidence.Role != schema.System ||
-		evidence.Extra["context_phase"] != automaticPreviewQAContextPhase {
+		evidence.Extra["context_phase"] != "stop_gate_feedback" {
 		t.Fatalf("evidence=%#v err=%v", evidence, err)
 	}
-	report := decodePreviewQAReport(t, evidence)
-	if report.Status != "not_available" || report.Passed ||
-		len(report.Errors) != 1 || report.Errors[0]["error_code"] !=
-		string(rushestools.ErrCodePreviewQATimelineMissing) {
-		t.Fatalf("report=%#v", report)
+	if !strings.Contains(evidence.Content, "timeline_not_exists") {
+		t.Fatalf("evidence=%s", evidence.Content)
 	}
 
 	noState, err := service.shouldRunAutomaticPreviewQA(
@@ -468,7 +629,7 @@ func TestAutomaticPreviewQACoreExecutionFailureIsBlocking(t *testing.T) {
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
 
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", false)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "", "explicit_preview_or_qa_request", "auto", false)
 	if report.Status != "check_failed" || report.Passed ||
 		len(report.CoreChecks) != 0 || len(report.Errors) != len(automaticPreviewCoreChecks) {
 		t.Fatalf("report=%#v", report)
@@ -511,7 +672,7 @@ func TestAutomaticPreviewQAStopsWhenExactTimelineValidationFails(t *testing.T) {
 	}
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "deliverable_declaration", "auto", false)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "", "deliverable_declaration", "auto", false)
 	if report.Status != "validation_failed" || report.Passed || report.PreviewID != "" ||
 		report.TimelineCheck.Status != string(rushestools.StatusValidationFailed) {
 		t.Fatalf("report=%#v", report)
@@ -538,7 +699,7 @@ esac
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", false)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "", "explicit_preview_or_qa_request", "auto", false)
 	if report.Status != "succeeded" || report.Passed ||
 		len(report.CoreChecks) != len(automaticPreviewCoreChecks) ||
 		!previewQAHasErrorIssue(report.Issues) || !strings.Contains(report.Summary, "阻断错误") {
@@ -577,7 +738,7 @@ JSON
 	t.Cleanup(service.Close)
 	ctx := rushestools.WithDraftID(t.Context(), draftID)
 	ctx = withTerminalTimelineTruthState(ctx, newTerminalTimelineTruthState())
-	report := service.executeAutomaticPreviewQA(ctx, draftID, "explicit_preview_or_qa_request", "auto", true)
+	report := service.executeAutomaticPreviewQA(ctx, draftID, "", "explicit_preview_or_qa_request", "auto", true)
 	if report.Status != "succeeded" || !report.Passed || !report.Degraded ||
 		report.VisualAdvisory != nil {
 		t.Fatalf("report=%#v", report)
@@ -830,44 +991,4 @@ func automaticPreviewQABarrierEntrants(t *testing.T) int {
 		t.Fatal(err)
 	}
 	return len(entrants)
-}
-
-func decodePreviewQAReport(t *testing.T, message *schema.Message) PreviewQAReport {
-	t.Helper()
-	start := strings.IndexByte(message.Content, '{')
-	end := strings.LastIndexByte(message.Content, '}')
-	if start < 0 || end <= start {
-		t.Fatalf("invalid PreviewQAReport message: %q", message.Content)
-	}
-	var report PreviewQAReport
-	if err := json.Unmarshal([]byte(message.Content[start:end+1]), &report); err != nil {
-		t.Fatal(err)
-	}
-	return report
-}
-
-func dynamicPreviewQACurrentView(messages []*schema.Message) (map[string]any, error) {
-	var current *schema.Message
-	for _, message := range messages {
-		if message == nil || message.Extra["context_phase"] != currentTimelineViewContextPhase {
-			continue
-		}
-		if current != nil {
-			return nil, errors.New("provider 同时收到多份 CurrentTimelineView")
-		}
-		current = message
-	}
-	if current == nil {
-		return nil, errors.New("provider 缺少 CurrentTimelineView")
-	}
-	start := strings.IndexByte(current.Content, '{')
-	end := strings.LastIndex(current.Content, "\n这是当前时间线")
-	if start < 0 || end <= start {
-		return nil, fmt.Errorf("CurrentTimelineView 格式无效: %s", current.Content)
-	}
-	var view map[string]any
-	if err := json.Unmarshal([]byte(current.Content[start:end]), &view); err != nil {
-		return nil, err
-	}
-	return view, nil
 }

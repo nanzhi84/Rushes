@@ -51,7 +51,7 @@ RUSHES_ARK_VISION_MODEL=...          # 视觉档 Model ID / 接入点 ID
 React / Vite
    │ REST + domain SSE + turn-stream
    ▼
-chi API ───────────────► Eino ReAct Agent ─────► 22 个模型工具
+chi API ───────────────► Eino ReAct Agent ─────► Catalog + tool.load + 13 个 Action
    │                         │                         │
    │                         └── TurnQueue / Hub ─────┘
    │
@@ -87,7 +87,7 @@ worker 使用单写连接、WAL、busy timeout 与 `_txlock=immediate`。任务�
 
 ### 3. Eino ReAct 与自研 turn-stream
 
-Agent 使用 `flow/agent/react` 和 `utils.InferTool`，注册期检查工具入参是否撞到 PolicyGate 禁止字段，执行前再验证 artifact precondition；22 个模型工具按当前任务阶段动态绑定，每轮不超过 10 个。长期记忆写入与删除分别由可逆的 `memory.set` 和破坏性的 `memory.remove` 承担，只有删除进入确认流程。HTTP 消息端点只负责 202 入队；每个草稿由 TurnQueue 保序、不同草稿并行。TurnStreamHub 支持当前回合快照重放、8 种帧、慢订阅者淘汰和 context 协作取消，前端断线重连不会丢掉正在生成的回复。
+Agent 使用 `flow/agent/react` 和 `utils.InferTool`。每次 provider 调用常驻一份不含参数 schema 的 Model Action Catalog；初始只绑定 `tool.load`，后续仅根据当前 transcript 中成功的加载回执累加绑定完整 action schema，不读用户文本、WorldState 或阶段猜测工具面。注册期检查 PolicyGate 禁止字段，执行前再验证 artifact precondition；`rejected` 表示未执行，`failed` 表示已进入执行后失败。长期记忆写入与删除分别由可逆的 `memory.set` 和破坏性的 `memory.remove` 承担，只有删除进入确认流程。HTTP 消息端点只负责 202 入队；每个草稿由 TurnQueue 保序、不同草稿并行。
 
 ### 4. 自定义 Transport 解决真实网络问题
 
@@ -131,17 +131,20 @@ CI 在 Ubuntu 与 macOS 上执行 Go `-race`，并运行契约对拍、90% 覆�
 
 初版组装与卡点混剪也使用同一组原子编辑。空时间线先通过 `asset.list_assets` / `shot.search` 取得素材事实，再逐段 `timeline.insert`；卡点流程可并行读取 `audio.analyze_beats` 与镜头检索结果，由模型明确选择切点、镜头顺序和 source range。BGM 作为单独一次 insert 写入 `bgm` 轨，并携带检测所得的完整 `metadata.beat_grid`；可选 SFX 再单独插入和调节增益。领域流程不再拥有绕过这些原子操作的高层写入入口。
 
-Agent 只通过 `preview.generate(timeline_id=...)` 生成预览，并在同一次工具调用内等待终态；成功后，decode/black/freeze/silence/loudness/visual 各自通过一次 `preview.check` 调用，可并行执行。最终成片不属于模型工具面：用户在编辑器中显式选择画幅并触发导出，REST API 将当前 `timeline_id` 与版本固定到持久任务；进度、失败重试和 MP4 下载均由用户界面读取，显式重试继续使用原任务锁定的版本，不经过 Tool Registry、模型回合或 `job.read`。
+中间原子编辑只返回该次操作回执，不重复运行完整验收。模型准备结束编辑/交付回合时，Harness Stop Gate 只对最新精确 `timeline_id` 运行一次 `timeline.check`；阻塞时回灌最多 3 项问题、剩余数与 `result_ref`，通过后再按任务需要由 Harness 运行 `preview.generate` 及并行 Preview QA。模型不能直接调用这些 Harness capability。最终成片同样不属于模型能力：用户在编辑器中显式选择画幅并触发导出，REST API 将当前 `timeline_id` 与版本固定到持久任务。
 
 ### 口播工具验收
 
-口播工作流不把完整 ASR 塞进每轮上下文。`speech.transcribe` 负责复用同名 SRT 或把单声道 16 kHz 短音频块交给 `fun-asr-flash-2026-06-15`，再将句/词时间戳换算为源帧并持久化逐句、气口与稳定 ID；严格只读的 `speech.search` 随后按台词、稳定 ID 或源帧范围检索，缺少索引时只返回 `index_missing`。模型并行读取 `timeline.inspect`、`speech.search` 与 `shot.search` 证据，自主选择相似台词、句内重说与气口的保留侧，再按最新时间线用 `timeline.delete` 逐个删除连续范围；清理后重新观察状态，用 `timeline.insert` 放置一段 B-roll、`timeline.update` 设置淡化，最后运行 `timeline.check`。
+口播工作流不把完整 ASR 塞进每轮上下文。Harness 在 `speech.search` 前负责复用同名 SRT 或调用 `fun-asr-flash-2026-06-15`，再将句/词时间戳换算为源帧并持久化逐句、气口与稳定 ID；严格只读的 `speech.search` 按台词、稳定 ID 或源帧范围检索。模型结合 WorldState 时间线事实、`speech.search` 与 `shot.search` 证据自主选择保留侧，再用 `timeline.delete`、`timeline.insert`、`timeline.update` 执行；最后由 Stop Gate 统一终验。
 
 真实模型工具路由与练习素材验收默认跳过，显式运行：
 
 ```bash
 cd go
 set -a; source ../.env; set +a
+RUSHES_LIVE_TOOL_EVAL=1 RUSHES_TOOL_EVAL_RUNS=5 \
+  ../scripts/run_go_test_exact.sh ./internal/agent TestLiveCatalogToolLoadStability \
+  -timeout=30m
 RUSHES_LIVE_TOOL_EVAL=1 RUSHES_TOOL_EVAL_RUNS=5 \
   ../scripts/run_go_test_exact.sh ./internal/agent TestLiveToolCallingStability \
   -timeout=30m

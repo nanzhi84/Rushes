@@ -45,3 +45,30 @@ test("流式控制台：开始创作后发消息，对话流出现助手回复�
   // turn-stream 终态后输入框恢复可用。
   await expect(page.getByLabel("消息输入")).toBeEnabled();
 });
+
+test("Stop Gate UI 生命周期：rejected 可区分，blocked→passed 原位更新", async ({ page }) => {
+  await page.goto(`/#t=${TOKEN}`);
+  await page.getByRole("button", { name: "开始创作", exact: true }).click();
+  await expect(page).toHaveURL(/\/drafts\//);
+
+  await page.getByLabel("消息输入").fill("E2E_STOP_GATE_LIFECYCLE");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  const tools = page.getByTestId("tool-activity-group");
+  await expect(tools).toContainText("有调用未执行");
+  await expect(tools.getByText("未执行", { exact: true })).toBeVisible();
+  await expect(tools).not.toContainText("工具执行失败");
+  await expect(page.getByText("检查时间线", { exact: true })).toHaveCount(0);
+
+  const gate = page.getByTestId("stop-gate-group");
+  await expect(gate).toHaveAttribute("data-stop-gate-status", "blocked");
+  await expect(gate).toContainText("主视觉时长尚未满足目标");
+  await expect(gate).toContainText("validation:draft_e2e:v1");
+  await expect(gate).toContainText("<1ms");
+
+  await expect(gate).toHaveAttribute("data-stop-gate-status", "passed");
+  await expect(gate).toHaveAttribute("data-timeline-id", "draft_e2e:v2");
+  await expect(gate).toContainText("终验通过");
+  await expect(gate).toHaveCount(1);
+  await expect(page.locator('[data-message-kind="reply"]')).toContainText("E2E_STOP_GATE_PASSED");
+});

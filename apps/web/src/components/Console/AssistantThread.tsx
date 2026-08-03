@@ -29,6 +29,7 @@ import type {
   StreamMemoryEntry,
   StreamMemoryItem,
   StreamMessageItem,
+  StreamStopGateItem,
   StreamToolItem,
   SubagentProgressEntry,
   TurnStreamItem
@@ -47,11 +48,13 @@ export type MemoryRetractionResult = "retracted" | "stale";
 type HistoryBlock =
   | { type: "message"; message: ConsoleAssistantMessage }
   | { type: "activity"; id: string; messages: ConsoleAssistantMessage[] }
-  | { type: "tools"; id: string; steps: StreamToolItem[] };
+  | { type: "tools"; id: string; steps: StreamToolItem[] }
+  | { type: "stop_gate"; id: string; item: StreamStopGateItem };
 
 type StreamBlock =
   | { type: "message"; message: StreamMessageItem }
   | { type: "tools"; id: string; steps: StreamToolItem[] }
+  | { type: "stop_gate"; id: string; item: StreamStopGateItem }
   | { type: "memory"; item: StreamMemoryItem };
 
 // 把历史块 / 流式块 / 活动指示 / 结构化交互拍平成统一行序列，供虚拟化按 index 取用。
@@ -133,6 +136,9 @@ export function AssistantThread({
           }
           if (item.type === "memory") {
             return `mem:${item.id}:${item.written_keys.length}:${item.removed_keys.length}:${item.entries.length}`;
+          }
+          if (item.type === "stop_gate") {
+            return `stop:${item.gate_id}:${item.status}:${item.observation?.length ?? 0}`;
           }
           return `${item.step_id}:${item.status}:${item.observation?.length ?? 0}`;
         })
@@ -218,6 +224,9 @@ export function AssistantThread({
     }
     if (row.kind === "history") {
       const block = row.block;
+      if (block.type === "stop_gate") {
+        return <StopGateGroup item={block.item} />;
+      }
       if (block.type === "activity") {
         return <BackgroundActivityGroup messages={block.messages} />;
       }
@@ -259,6 +268,9 @@ export function AssistantThread({
             latestReceiptByKey={latestMemoryReceiptByKey}
           />
         );
+      }
+      if (block.type === "stop_gate") {
+        return <StopGateGroup item={block.item} />;
       }
       return (
         <MessageRow
@@ -371,6 +383,7 @@ const TurnFailureRow = memo(TurnFailureRowImpl);
 const BackgroundActivityGroup = memo(BackgroundActivityGroupImpl);
 const ToolActivityGroup = memo(ToolActivityGroupImpl);
 const ToolStepRow = memo(ToolStepRowImpl);
+const StopGateGroup = memo(StopGateGroupImpl);
 const MemoryCardRow = memo(MemoryCardRowImpl);
 
 // 稳定空引用：非活跃工具步不传新数组，避免击穿 ToolStepRow/ToolActivityGroup 的 memo。
@@ -841,18 +854,21 @@ function ToolActivityGroupImpl({
   progress: SubagentProgressEntry[];
 }): ReactElement {
   const isActive = steps.some((step) => step.status === "running");
-  const hasIssue = steps.some((step) => ["failed", "deny", "ask", "requires_user"].includes(step.status));
+  const hasFailure = steps.some((step) => ["failed", "deny"].includes(step.status));
+  const hasRejected = steps.some((step) => ["rejected", "validation_failed"].includes(step.status));
+  const needsInput = steps.some((step) => ["ask", "requires_user"].includes(step.status));
+  const needsAttention = hasFailure || hasRejected || needsInput;
   const wasActiveRef = useRef(isActive);
-  const [expanded, setExpanded] = useState(isActive || hasIssue);
+  const [expanded, setExpanded] = useState(isActive || needsAttention);
 
   useEffect(() => {
-    if (isActive || hasIssue) {
+    if (isActive || needsAttention) {
       setExpanded(true);
     } else if (wasActiveRef.current) {
       setExpanded(false);
     }
     wasActiveRef.current = isActive;
-  }, [hasIssue, isActive]);
+  }, [isActive, needsAttention]);
 
   return (
     <details
@@ -863,9 +879,19 @@ function ToolActivityGroupImpl({
       className="group w-full text-xs text-fg-muted"
     >
       <summary className="-ml-1 flex min-h-5 cursor-pointer list-none items-start gap-1.5 rounded-sm px-1 py-0.5 transition-colors duration-fast hover:bg-hover [&::-webkit-details-marker]:hidden">
-        <StatusDot status={hasIssue ? "failed" : isActive ? "running" : "succeeded"} />
+        <StatusDot
+          status={hasFailure ? "failed" : hasRejected || needsInput ? "rejected" : isActive ? "running" : "succeeded"}
+        />
         <span className="shrink-0 font-medium text-fg-muted">
-          {isActive ? "正在使用工具" : hasIssue ? "工具调用需要处理" : "已使用工具"}
+          {isActive
+            ? "正在使用工具"
+            : hasFailure
+              ? "工具执行失败"
+              : hasRejected
+                ? "有调用未执行"
+                : needsInput
+                  ? "工具调用需要处理"
+                  : "已使用工具"}
         </span>
         <span className="min-w-0 flex-1 truncate text-fg-faint" title={toolGroupSummary(steps)}>
           {toolGroupSummary(steps)}
@@ -891,6 +917,79 @@ function ToolActivityGroupImpl({
   );
 }
 
+function StopGateGroupImpl({ item }: { item: StreamStopGateItem }): ReactElement {
+  const label =
+    item.status === "checking"
+      ? "正在终验"
+      : item.status === "blocked"
+        ? "终验尚未通过，Agent 将继续修复"
+        : item.status === "passed"
+          ? "终验通过"
+          : "终验程序异常";
+  const tone =
+    item.status === "passed"
+      ? "border-ok/25 bg-ok/5"
+      : item.status === "blocked"
+        ? "border-warn/30 bg-warn/5"
+        : item.status === "hook_error"
+          ? "border-danger/25 bg-danger/5"
+          : "border-line bg-raised";
+  return (
+    <section
+      data-testid="stop-gate-group"
+      data-stop-gate-status={item.status}
+      data-timeline-id={item.timelineId ?? undefined}
+      className={`w-full rounded-md border px-3 py-2 text-xs text-fg-muted ${tone}`}
+    >
+      <div className="flex min-w-0 items-center gap-2">
+        <StatusDot
+          status={
+            item.status === "passed"
+              ? "succeeded"
+              : item.status === "hook_error"
+                ? "failed"
+                : item.status === "blocked"
+                  ? "rejected"
+                  : "running"
+          }
+        />
+        <span className="font-medium text-fg">{label}</span>
+        {item.timelineId ? (
+          <span className="min-w-0 flex-1 truncate font-mono text-2xs text-fg-faint">
+            {item.timelineId}
+          </span>
+        ) : null}
+        {item.durationMs !== null ? (
+          <span className="shrink-0 font-mono text-2xs text-fg-faint">
+            {item.durationMs === 0 ? "<1ms" : `${item.durationMs}ms`}
+          </span>
+        ) : null}
+      </div>
+      {item.issues.length > 0 ? (
+        <ul className="mt-2 space-y-1 border-l border-warn/40 pl-3">
+          {item.issues.map((issue, index) => (
+            <li key={`${issue.code ?? "issue"}:${index}`}>
+              <span>{issue.message ?? issue.code ?? "未满足内容合同"}</span>
+              {issue.recovery ? <span className="ml-1 text-fg-faint">{issue.recovery}</span> : null}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {item.issues.length === 0 &&
+      item.observation &&
+      (item.status === "blocked" || item.status === "hook_error") ? (
+        <p className="mt-2 border-l border-danger/30 pl-3 text-fg-muted">{item.observation}</p>
+      ) : null}
+      {item.remainingIssueCount > 0 || item.resultRef ? (
+        <p className="mt-1.5 font-mono text-2xs text-fg-faint">
+          {item.remainingIssueCount > 0 ? `另有 ${item.remainingIssueCount} 项；` : ""}
+          {item.resultRef ?? ""}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
 function ToolStepRowImpl({
   step,
   progress = []
@@ -911,7 +1010,9 @@ function ToolStepRowImpl({
         <span className="shrink-0 text-2xs text-fg-faint">{Math.round(step.progress * 100)}%</span>
       ) : null}
       {step.status !== "running" && typeof step.durationMs === "number" ? (
-        <span className="shrink-0 text-2xs text-fg-faint">{step.durationMs}ms</span>
+        <span className="shrink-0 text-2xs text-fg-faint">
+          {step.durationMs === 0 ? "<1ms" : `${step.durationMs}ms`}
+        </span>
       ) : null}
       <span className={`shrink-0 text-2xs ${toolStatusToneClass(step.status)}`}>
         {toolStatusLabel(step.status)}
@@ -1013,8 +1114,18 @@ function groupHistoryMessages(messages: ConsoleAssistantMessage[]): HistoryBlock
   };
   for (const message of messages) {
     if (message.metadata.messageKind === "tool") {
-      const parsed = parsePersistedTool(message);
+      const stopGate = parsePersistedStopGate(message);
       flushActivity();
+      if (stopGate) {
+        flushTools();
+        blocks.push({
+          type: "stop_gate",
+          id: `history-stop:${stopGate.traceIds[0] ?? message.id}`,
+          item: stopGate
+        });
+        continue;
+      }
+      const parsed = parsePersistedTool(message);
       if (parsed) {
         tools.push(parsed);
         continue;
@@ -1055,6 +1166,10 @@ function groupStreamItems(items: TurnStreamItem[]): StreamBlock[] {
     flushTools();
     if (item.type === "memory") {
       blocks.push({ type: "memory", item });
+      continue;
+    }
+    if (item.type === "stop_gate") {
+      blocks.push({ type: "stop_gate", id: `stop-gate:${item.gate_id}`, item });
       continue;
     }
     blocks.push({ type: "message", message: item });
@@ -1102,6 +1217,9 @@ function findActiveToolStepId(items: TurnStreamItem[]): string | null {
     if (item.type === "tool" && item.status === "running") {
       return item.step_id;
     }
+    if (item.type === "stop_gate" && item.status === "checking") {
+      return "正在执行终验";
+    }
   }
   return null;
 }
@@ -1125,6 +1243,9 @@ function turnActivityLabel(items: TurnStreamItem[], modelRetry: ModelRetryState 
   }
   if (latest?.type === "tool") {
     return "正在整理工具结果";
+  }
+  if (latest?.type === "stop_gate") {
+    return latest.status === "blocked" ? "正在根据终验反馈继续修复" : "正在整理终验结果";
   }
   return "正在读取上下文";
 }
@@ -1164,6 +1285,46 @@ function parsePersistedTool(message: ConsoleAssistantMessage): StreamToolItem | 
   }
 }
 
+function parsePersistedStopGate(message: ConsoleAssistantMessage): StreamStopGateItem | null {
+  try {
+    const raw = JSON.parse(messageText(message)) as Record<string, unknown>;
+    if (
+      raw.tool !== "stop.gate" ||
+      !["checking", "blocked", "passed", "hook_error"].includes(String(raw.status))
+    ) {
+      return null;
+    }
+    const issues = Array.isArray(raw.issues)
+      ? raw.issues.flatMap((issue) => {
+          if (typeof issue !== "object" || issue === null) {
+            return [];
+          }
+          const value = issue as Record<string, unknown>;
+          return [{
+            code: typeof value.code === "string" ? value.code : undefined,
+            message: typeof value.message === "string" ? value.message : undefined,
+            recovery: typeof value.recovery === "string" ? value.recovery : undefined
+          }];
+        })
+      : [];
+    return {
+      type: "stop_gate",
+      gate_id: typeof raw.gate_id === "string" && raw.gate_id ? raw.gate_id : "stop_gate",
+      traceIds: [message.id],
+      timelineId: typeof raw.timeline_id === "string" && raw.timeline_id ? raw.timeline_id : null,
+      status: String(raw.status) as StreamStopGateItem["status"],
+      issues,
+      remainingIssueCount:
+        typeof raw.remaining_issue_count === "number" ? raw.remaining_issue_count : 0,
+      resultRef: typeof raw.result_ref === "string" && raw.result_ref ? raw.result_ref : null,
+      observation: typeof raw.observation === "string" && raw.observation ? raw.observation : null,
+      durationMs: typeof raw.duration_ms === "number" ? raw.duration_ms : null
+    };
+  } catch {
+    return null;
+  }
+}
+
 function toolGroupSummary(steps: StreamToolItem[]): string {
   const counts = new Map<string, number>();
   for (const step of steps) {
@@ -1182,6 +1343,8 @@ function statusDotClass(status: string): string {
     case "failed":
     case "deny":
       return "bg-danger";
+    case "rejected":
+    case "validation_failed":
     case "ask":
     case "requires_user":
       return "bg-warn";
@@ -1197,6 +1360,8 @@ function toolStatusToneClass(status: string): string {
     case "failed":
     case "deny":
       return "text-danger";
+    case "rejected":
+    case "validation_failed":
     case "ask":
     case "requires_user":
       return "text-warn";
@@ -1217,12 +1382,15 @@ const TOOL_STATUS_LABELS: Record<string, string> = {
   running: "进行中",
   succeeded: "完成",
   failed: "失败",
+  rejected: "未执行",
+  validation_failed: "未执行",
   deny: "已拒绝",
   ask: "待确认",
   requires_user: "待回答"
 };
 
 const TOOL_STEP_LABELS: Record<string, string> = {
+  "tool.load": "加载 Action Schema",
   "asset.list_assets": "清点素材",
   "asset.import_local_file": "导入本地素材",
   "media.detect_shots": "检测镜头",
@@ -1250,6 +1418,7 @@ const TOOL_STEP_LABELS: Record<string, string> = {
   "preview.check": "检查预览",
   "preview.generate": "生成工作预览",
   "preview.qa_report": "汇总预览质检",
+  "stop.gate": "终验（历史记录）",
   "interaction.ask_user": "向你提问",
   "interaction.confirm_action": "请求确认"
 };

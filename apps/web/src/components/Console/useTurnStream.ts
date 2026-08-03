@@ -25,6 +25,19 @@ export type StreamToolItem = {
   harnessOwned?: boolean;
 };
 
+export type StreamStopGateItem = {
+  type: "stop_gate";
+  gate_id: string;
+  traceIds: string[];
+  timelineId: string | null;
+  status: "checking" | "blocked" | "passed" | "hook_error";
+  issues: Array<{ code?: string; message?: string; recovery?: string }>;
+  remainingIssueCount: number;
+  resultRef: string | null;
+  observation: string | null;
+  durationMs: number | null;
+};
+
 // 长期记忆写入成功的可见卡片：列出已记住/已更新/已移除的记忆键并直链设置面板。
 export type StreamMemoryItem = {
   type: "memory";
@@ -43,7 +56,7 @@ export type StreamMemoryEntry = {
 
 // 消息、工具步与记忆卡片合并成按到达顺序排列的单一列表：前端据此把工具行内嵌在
 // 叙述之间（对齐 Claude Code 的呈现方式），而不是把工具堆在消息流末尾。
-export type TurnStreamItem = StreamMessageItem | StreamToolItem | StreamMemoryItem;
+export type TurnStreamItem = StreamMessageItem | StreamToolItem | StreamStopGateItem | StreamMemoryItem;
 
 // 素材理解等子代理执行期间的实时动态：按素材粒度只保留最近一条 note。
 export type SubagentProgressEntry = {
@@ -89,6 +102,8 @@ export const KNOWN_TURN_STREAM_TYPES = [
   "tool_step_started",
   "tool_step_progress",
   "tool_step_finished",
+  "stop_gate_started",
+  "stop_gate_finished",
   "model_retry",
   "subagent_progress",
   "context_compaction_failed",
@@ -112,6 +127,19 @@ export type TurnStreamEvent =
   | { type: "tool_step_started"; step_id: string; tool: string; args_summary?: string; progress?: number; harness_owned?: boolean }
   | { type: "tool_step_progress"; step_id: string; tool: string; progress?: number; note?: string; harness_owned?: boolean }
   | { type: "tool_step_finished"; step_id: string; tool: string; status: string; observation?: string; progress?: number; duration_ms?: number; harness_owned?: boolean }
+  | { type: "stop_gate_started"; gate_id: string; trace_id?: string; timeline_id?: string; status?: "checking" }
+  | {
+      type: "stop_gate_finished";
+      gate_id: string;
+      trace_id?: string;
+      timeline_id?: string;
+      status: "blocked" | "passed" | "hook_error";
+      issues?: Array<{ code?: string; message?: string; recovery?: string }>;
+      remaining_issue_count?: number;
+      result_ref?: string;
+      observation?: string;
+      duration_ms?: number;
+    }
   | {
       type: "model_retry";
       attempt?: number;
@@ -276,6 +304,52 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
         }),
         // 工具收尾即清空其子代理进度，避免残留串到下一个进行中工具行上。
         subagentProgress: []
+      };
+    }
+    case "stop_gate_started": {
+      if (typeof event.gate_id !== "string") {
+        return state;
+      }
+      return {
+        ...state,
+        turnActive: true,
+        modelRetry: null,
+        items: upsertStopGate(state.items, {
+          type: "stop_gate",
+          gate_id: event.gate_id,
+          traceIds: typeof event.trace_id === "string" ? [event.trace_id] : [],
+          timelineId: typeof event.timeline_id === "string" ? event.timeline_id : null,
+          status: "checking",
+          issues: [],
+          remainingIssueCount: 0,
+          resultRef: null,
+          observation: null,
+          durationMs: null
+        })
+      };
+    }
+    case "stop_gate_finished": {
+      if (typeof event.gate_id !== "string") {
+        return state;
+      }
+      return {
+        ...state,
+        items: upsertStopGate(state.items, {
+          type: "stop_gate",
+          gate_id: event.gate_id,
+          traceIds: typeof event.trace_id === "string" ? [event.trace_id] : [],
+          timelineId: typeof event.timeline_id === "string" ? event.timeline_id : null,
+          status: event.status,
+          issues: Array.isArray(event.issues) ? event.issues : [],
+          remainingIssueCount:
+            typeof event.remaining_issue_count === "number" ? event.remaining_issue_count : 0,
+          resultRef: typeof event.result_ref === "string" ? event.result_ref : null,
+          observation: typeof event.observation === "string" ? event.observation : null,
+          durationMs:
+            typeof event.duration_ms === "number" && event.duration_ms >= 0
+              ? event.duration_ms
+              : null
+        })
       };
     }
     case "memory_updated": {
@@ -483,6 +557,23 @@ function upsertToolStep(items: TurnStreamItem[], next: StreamToolItem): TurnStre
           progressNote: next.progressNote ?? item.progressNote,
           durationMs: next.durationMs ?? item.durationMs,
           harnessOwned: next.harnessOwned || item.harnessOwned
+        }
+      : item
+  );
+}
+
+function upsertStopGate(items: TurnStreamItem[], next: StreamStopGateItem): TurnStreamItem[] {
+  const index = items.findIndex(
+    (item) => item.type === "stop_gate" && item.gate_id === next.gate_id
+  );
+  if (index < 0) {
+    return [...items, next];
+  }
+  return items.map((item, current) =>
+    current === index && item.type === "stop_gate"
+      ? {
+          ...next,
+          traceIds: [...new Set([...item.traceIds, ...next.traceIds])]
         }
       : item
   );
