@@ -1700,12 +1700,78 @@
         "title": "MaterialsResponse",
         "type": "object"
       },
+      "MessageContextRefRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "timeline_clip",
+            "title": "Kind",
+            "type": "string"
+          },
+          "timeline_clip_id": {
+            "title": "Timeline Clip Id",
+            "type": "string"
+          },
+          "timeline_id": {
+            "title": "Timeline Id",
+            "type": "string"
+          },
+          "timeline_version": {
+            "minimum": 1,
+            "title": "Timeline Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "timeline_clip_id",
+          "timeline_id",
+          "timeline_version"
+        ],
+        "title": "MessageContextRefRequest",
+        "type": "object"
+      },
+      "MessageContextRef": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": { "const": "timeline_clip", "title": "Kind", "type": "string" },
+          "timeline_clip_id": { "title": "Timeline Clip Id", "type": "string" },
+          "timeline_id": { "title": "Timeline Id", "type": "string" },
+          "timeline_version": { "title": "Timeline Version", "type": "integer" },
+          "timeline_fps": { "title": "Timeline Fps", "type": "integer" },
+          "track_id": { "title": "Track Id", "type": "string" },
+          "timeline_start_frame": { "title": "Timeline Start Frame", "type": "integer" },
+          "timeline_end_frame": { "title": "Timeline End Frame", "type": "integer" },
+          "asset_id": { "title": "Asset Id", "type": "string" },
+          "asset_filename": { "title": "Asset Filename", "type": "string" },
+          "shot_id": { "title": "Shot Id", "type": "string" },
+          "semantic_name": { "title": "Semantic Name", "type": "string" },
+          "source_start_frame": { "title": "Source Start Frame", "type": "integer" },
+          "source_end_frame": { "title": "Source End Frame", "type": "integer" }
+        },
+        "required": [
+          "kind", "timeline_clip_id", "timeline_id", "timeline_version", "timeline_fps", "track_id",
+          "timeline_start_frame", "timeline_end_frame", "asset_id", "asset_filename",
+          "shot_id", "semantic_name", "source_start_frame", "source_end_frame"
+        ],
+        "title": "MessageContextRef",
+        "type": "object"
+      },
       "MessageCreateRequest": {
         "additionalProperties": false,
         "properties": {
           "content": {
             "title": "Content",
             "type": "string"
+          },
+          "context_refs": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MessageContextRefRequest"
+            },
+            "maxItems": 3,
+            "title": "Context Refs",
+            "type": "array"
           },
           "message_id": {
             "anyOf": [
@@ -1763,6 +1829,13 @@
             "title": "Content",
             "type": "string"
           },
+          "context_refs": {
+            "items": {
+              "$ref": "#/components/schemas/MessageContextRef"
+            },
+            "title": "Context Refs",
+            "type": "array"
+          },
           "created_at": {
             "title": "Created At",
             "type": "string"
@@ -1785,6 +1858,7 @@
           "role",
           "kind",
           "content",
+          "context_refs",
           "created_at"
         ],
         "title": "MessageRecord",

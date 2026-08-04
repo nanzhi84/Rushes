@@ -76,6 +76,9 @@ func ContentPlanContract(plan map[string]any) (map[string]any, error) {
 	if contract.MinOnBeatRatio != nil && (*contract.MinOnBeatRatio < 0 || *contract.MinOnBeatRatio > 1) {
 		return nil, fmt.Errorf("验收合同的 min_on_beat_ratio 必须在 0 到 1 之间")
 	}
+	if contract.MinOnAccentRatio != nil && (*contract.MinOnAccentRatio < 0 || *contract.MinOnAccentRatio > 1) {
+		return nil, fmt.Errorf("验收合同的 min_on_accent_ratio 必须在 0 到 1 之间")
+	}
 	if contract.MinCutDensityPerMinute != nil && *contract.MinCutDensityPerMinute < 0 ||
 		contract.MaxCutDensityPerMinute != nil && *contract.MaxCutDensityPerMinute < 0 {
 		return nil, fmt.Errorf("验收合同的切点密度不能为负数")
@@ -307,6 +310,21 @@ func (exec *Executor) VerifyContentContract(
 			item.Pass = false
 			item.ErrorCode = string(rushestools.ErrCodeMissingBeatGrid)
 			item.Message = "无法核对卡拍比例：当前 BGM 缺少 Harness 持久化的完整节拍证据；重新插入或修复对应 BGM analysis 后重试"
+		}
+		report.Items = append(report.Items, item)
+	}
+	if contract.MinOnAccentRatio != nil {
+		ratio, _ := NumericValue(beatAlignment["accent_alignment_ratio"])
+		offAccent, _ := beatAlignment["off_accent_cut_frames"].([]int)
+		item := ContractVerificationItem{
+			Check: "on_accent_ratio", Pass: ratio >= *contract.MinOnAccentRatio,
+			Message: fmt.Sprintf("切点重拍比例 %.3f，合同下限 %.3f。", ratio, *contract.MinOnAccentRatio),
+			Frames:  offAccent,
+		}
+		if beatAlignment["beat_grid_present"] != true {
+			item.Pass = false
+			item.ErrorCode = string(rushestools.ErrCodeMissingBeatGrid)
+			item.Message = "无法核对重拍比例：当前 BGM 缺少 Harness 持久化的完整节拍证据；重新插入或修复对应 BGM analysis 后重试"
 		}
 		report.Items = append(report.Items, item)
 	}

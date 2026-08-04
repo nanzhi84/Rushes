@@ -418,6 +418,7 @@ func normalizeContextHistory(rows []storage.Message) []contextHistoryItem {
 		var message *schema.Message
 		switch row.Role {
 		case "user":
+			content = userMessageContentWithContext(content, row.ContextRefs)
 			message = schema.UserMessage(content)
 			message.Extra = map[string]any{"context_phase": "user_instruction"}
 		case "assistant":
@@ -443,6 +444,45 @@ func normalizeContextHistory(rows []storage.Message) []contextHistoryItem {
 		items = append(items, contextHistoryItem{row: row, message: message})
 	}
 	return items
+}
+
+func userMessageContentWithContext(content string, refs []map[string]any) string {
+	if len(refs) == 0 {
+		return content
+	}
+	lines := []string{"【用户明确引用的时间线对象；必须以稳定 ID 精确定位，不要猜测“这段”】"}
+	for _, ref := range refs {
+		if agentexec.InterfaceString(ref["kind"]) != "timeline_clip" {
+			continue
+		}
+		label := agentexec.InterfaceString(ref["semantic_name"])
+		if label == "" {
+			label = agentexec.InterfaceString(ref["asset_filename"])
+		}
+		lines = append(lines, fmt.Sprintf(
+			"- %s｜timeline_clip_id=%s｜timeline_id=%s｜timeline_version=%d｜track_id=%s｜timeline=%d-%d 帧｜asset_id=%s｜shot_id=%s｜source=%d-%d 帧",
+			label,
+			agentexec.InterfaceString(ref["timeline_clip_id"]),
+			agentexec.InterfaceString(ref["timeline_id"]),
+			contextRefInt(ref["timeline_version"]),
+			agentexec.InterfaceString(ref["track_id"]),
+			contextRefInt(ref["timeline_start_frame"]),
+			contextRefInt(ref["timeline_end_frame"]),
+			agentexec.InterfaceString(ref["asset_id"]),
+			agentexec.InterfaceString(ref["shot_id"]),
+			contextRefInt(ref["source_start_frame"]),
+			contextRefInt(ref["source_end_frame"]),
+		))
+	}
+	if len(lines) == 1 {
+		return content
+	}
+	return strings.Join(lines, "\n") + "\n【用户指令】\n" + content
+}
+
+func contextRefInt(value any) int {
+	number, _ := agentexec.NumericValue(value)
+	return int(number)
 }
 
 func renderContextMessages(

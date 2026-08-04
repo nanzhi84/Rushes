@@ -40,7 +40,17 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 	if err != nil || result.Status != "failed" || !strings.Contains(result.Observation, "0 到 1") {
 		t.Fatalf("invalid result=%#v err=%v", result, err)
 	}
+	invalidAccentRatio := -0.1
+	result, err = exec.toolPlanUpdate(t.Context(), "draft_contract", rushestools.PlanUpdateInput{
+		Plan: map[string]any{}, Contract: &rushestools.ContentPlanContract{
+			MinOnAccentRatio: &invalidAccentRatio,
+		},
+	})
+	if err != nil || result.Status != "failed" || !strings.Contains(result.Observation, "min_on_accent_ratio") {
+		t.Fatalf("invalid accent result=%#v err=%v", result, err)
+	}
 	minRatio := 0.9
+	minAccentRatio := 0.5
 	tolerance := 2
 	minDensity, maxDensity := 10.0, 19.0
 	result, err = exec.toolPlanUpdate(t.Context(), "draft_contract", rushestools.PlanUpdateInput{
@@ -49,7 +59,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 			TargetDurationFrames: 120, DurationToleranceFrames: &tolerance,
 			MustKeepUtteranceIDs: []string{"utt_keep"},
 			BrollCoverageRanges:  []rushestools.ContentPlanFrameRange{{StartFrame: 10, EndFrame: 30}},
-			MinOnBeatRatio:       &minRatio, Rhythm: "紧凑",
+			MinOnBeatRatio:       &minRatio, MinOnAccentRatio: &minAccentRatio, Rhythm: "紧凑",
 			MinCutDensityPerMinute: &minDensity, MaxCutDensityPerMinute: &maxDensity,
 		},
 	})
@@ -74,7 +84,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 		Effects: []map[string]any{{"kind": "beat_grid", "beat_frames": []int{30, 60}}},
 	}}
 	report, configured, err := exec.VerifyContentContract(t.Context(), "draft_contract", failing)
-	if err != nil || !configured || report.Pass || len(ContractFailureItems(report)) != 5 {
+	if err != nil || !configured || report.Pass || len(ContractFailureItems(report)) != 6 {
 		t.Fatalf("failing report=%#v configured=%v err=%v", report, configured, err)
 	}
 	byCheck := map[string]ContractVerificationItem{}
@@ -83,7 +93,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 	}
 	if len(byCheck["target_duration"].Frames) != 2 ||
 		len(byCheck["must_keep_utterances"].IDs) != 1 || len(byCheck["must_keep_utterances"].Frames) != 2 ||
-		len(byCheck["on_beat_ratio"].Frames) != 1 {
+		len(byCheck["on_beat_ratio"].Frames) != 1 || len(byCheck["on_accent_ratio"].Frames) != 1 {
 		t.Fatalf("missing anchors report=%#v", report)
 	}
 	persisted, err := seedTimelineVersion(exec, t.Context(), "draft_contract", failing, "contract_fixture", nil)
@@ -111,7 +121,7 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 	validated, err := exec.toolCheckTimeline(t.Context(), "draft_contract", rushestools.TimelineCheckInput{})
 	if err != nil || validated.Status != "validation_failed" ||
 		!strings.Contains(validated.Observation, "验收合同未通过项") ||
-		len(validated.Data["contract_failures"].([]ContractVerificationItem)) != 5 ||
+		len(validated.Data["contract_failures"].([]ContractVerificationItem)) != 6 ||
 		validated.Data["content_contract"].(ContractVerificationReport).Pass ||
 		validated.Data["validation_report"].(map[string]any)["valid"] != false {
 		t.Fatalf("validated failing contract=%#v err=%v", validated, err)
@@ -131,7 +141,9 @@ func TestContentContractSchemaValidationAndDeterministicVerification(t *testing.
 	compliant.Tracks[4].Clips = []timeline.Clip{{
 		TimelineClipID: "bgm_contract_ok", TrackID: "bgm", AssetID: "bgm",
 		TimelineStartFrame: 0, TimelineEndFrame: 120, SourceStartFrame: 0, SourceEndFrame: 120,
-		Effects: []map[string]any{{"kind": "beat_grid", "beat_frames": []int{30}}},
+		Effects: []map[string]any{{
+			"kind": "beat_grid", "beat_frames": []int{30}, "downbeat_frames": []int{30},
+		}},
 	}}
 	report, configured, err = exec.VerifyContentContract(t.Context(), "draft_contract", compliant)
 	if err != nil || !configured || !report.Pass || len(ContractFailureItems(report)) != 0 {

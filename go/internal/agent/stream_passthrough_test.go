@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,25 +13,25 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
 
-// delayedFinalReplyModel 的终态文本轮按 delay 逐块推送，用于验证终态门禁先缓冲完整正文，
-// 再统一输出通过真值检查的内容。
-type delayedFinalReplyModel struct {
-	chunks []string
-	delay  time.Duration
-	usage  *schema.TokenUsage
+// gatedFinalReplyModel 在每个后续分片前等待测试放行，用于无墙钟地证明首个 text_delta
+// 到达时 provider 消息尚未结束。
+type gatedFinalReplyModel struct {
+	chunks  []string
+	advance chan struct{}
+	usage   *schema.TokenUsage
 }
 
-func (stub *delayedFinalReplyModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+func (stub *gatedFinalReplyModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
 	return stub, nil
 }
 
-func (stub *delayedFinalReplyModel) Generate(
+func (stub *gatedFinalReplyModel) Generate(
 	context.Context, []*schema.Message, ...model.Option,
 ) (*schema.Message, error) {
 	return schema.AssistantMessage(strings.Join(stub.chunks, ""), nil), nil
 }
 
-func (stub *delayedFinalReplyModel) Stream(
+func (stub *gatedFinalReplyModel) Stream(
 	ctx context.Context, _ []*schema.Message, _ ...model.Option,
 ) (*schema.StreamReader[*schema.Message], error) {
 	reader, writer := schema.Pipe[*schema.Message](len(stub.chunks) + 1)
@@ -39,7 +40,7 @@ func (stub *delayedFinalReplyModel) Stream(
 		for index, chunk := range stub.chunks {
 			if index > 0 {
 				select {
-				case <-time.After(stub.delay):
+				case <-stub.advance:
 				case <-ctx.Done():
 					return
 				}
@@ -56,15 +57,15 @@ func (stub *delayedFinalReplyModel) Stream(
 	return reader, nil
 }
 
-func TestFinalReplyStreamsOnlyAfterTerminalBufferCompletes(t *testing.T) {
+func TestFinalReplyStreamsBeforeTerminalMessageCompletes(t *testing.T) {
 	t.Parallel()
-	// 普通回复不触发反思重述；text_delta 与 message_completed 必须严格一致。
+	// 普通回复不触发反思重述；provider text_delta 实时到达，最终全文仍由门禁后
+	// message_completed 权威收口。
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_passthrough")
-	chunkDelay := 250 * time.Millisecond
 	chunks := []string{"你好，", "我已经", "帮你把", "气口剪掉了。"}
-	stub := &delayedFinalReplyModel{
-		chunks: chunks, delay: chunkDelay,
+	stub := &gatedFinalReplyModel{
+		chunks: chunks, advance: make(chan struct{}),
 		usage: &schema.TokenUsage{PromptTokens: 120, CompletionTokens: 30, TotalTokens: 150},
 	}
 	service, err := NewService(t.Context(), database, stub)
@@ -75,7 +76,6 @@ func TestFinalReplyStreamsOnlyAfterTerminalBufferCompletes(t *testing.T) {
 	_, stream, unsubscribe := service.Hub().Subscribe("draft_passthrough")
 	defer unsubscribe()
 
-	start := time.Now()
 	if !service.Queue().EnqueueUserMessage("draft_passthrough", "user_passthrough", "把气口剪掉") {
 		t.Fatal("enqueue failed")
 	}
@@ -83,9 +83,9 @@ func TestFinalReplyStreamsOnlyAfterTerminalBufferCompletes(t *testing.T) {
 	// 时刻全部挤到回合末尾、时间戳失真。这里实时消费订阅流，delta 的到达时刻才反映真实流式节奏。
 
 	var deltaTexts []string
-	var firstDeltaAt, lastDeltaAt time.Time
 	var completedContent string
 	var sawCompleted bool
+	deltaIndex := 0
 	deadline := time.After(10 * time.Second)
 collect:
 	for {
@@ -93,11 +93,16 @@ collect:
 		case event := <-stream:
 			switch event["type"] {
 			case TurnStreamTextDelta:
-				if firstDeltaAt.IsZero() {
-					firstDeltaAt = time.Now()
+				if deltaIndex >= len(chunks) || event["delta"] != chunks[deltaIndex] {
+					t.Fatalf("第 %d 个实时分片=%q want=%q", deltaIndex, event["delta"], chunks[deltaIndex])
 				}
-				lastDeltaAt = time.Now()
 				deltaTexts = append(deltaTexts, event["delta"].(string))
+				deltaIndex++
+				if deltaIndex < len(chunks) {
+					// 此时 provider 正阻塞在下一个分片前；能先收到当前 delta 就证明不是
+					// 回合结束后的伪流式重放。
+					stub.advance <- struct{}{}
+				}
 			case TurnStreamMessageCompleted:
 				completedContent, _ = event["content"].(string)
 				sawCompleted = true
@@ -116,50 +121,52 @@ collect:
 	if !sawCompleted || completedContent != want || joined != want {
 		t.Fatalf("门禁后 delta 序列与 message_completed 不一致：deltas=%q completed=%q want=%q", joined, completedContent, want)
 	}
-	// 终态正文必须先完整缓冲；放行后的 delta 会紧邻发出，不能在模型生成过程中提前泄漏。
-	spread := lastDeltaAt.Sub(firstDeltaAt)
-	if spread >= 100*time.Millisecond {
-		t.Fatalf("门禁放行后的 delta 不应继续按模型生成延迟分散：%s", spread)
-	}
-	// 首 delta 只能在最后一个模型 chunk 到达后出现（3×delay）。
-	ttft := firstDeltaAt.Sub(start)
-	if ttft < 3*chunkDelay-100*time.Millisecond {
-		t.Fatalf("终态正文在完整缓冲前泄漏：first_delta=%s want>=%s", ttft, 3*chunkDelay-100*time.Millisecond)
-	}
-	t.Logf("终态缓冲：first_delta=%s，放行后 delta spread=%s", ttft, spread)
 }
 
-// lateToolCallReplyModel 在终态文本轮里先吐成功正文、再吐一个 timeline.update 分片，
-// 用于验证未执行的晚到工具调用会使整条缓冲回复失败。
-type lateToolCallReplyModel struct{}
-
-func (lateToolCallReplyModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
-	return lateToolCallReplyModel{}, nil
+// textThenToolModel 首轮先吐叙述正文，再发 asset.list_assets；第二轮在真实工具结果后
+// 生成最终回复，精确覆盖 Claude Code 的 text → tool_use → tool_result → text 形态。
+type textThenToolModel struct {
+	mu    sync.Mutex
+	calls int
 }
 
-func (lateToolCallReplyModel) Generate(
+func (stub *textThenToolModel) WithTools([]*schema.ToolInfo) (model.ToolCallingChatModel, error) {
+	return stub, nil
+}
+
+func (stub *textThenToolModel) Generate(
 	context.Context, []*schema.Message, ...model.Option,
 ) (*schema.Message, error) {
-	return schema.AssistantMessage("先给你个结论", nil), nil
+	return schema.AssistantMessage("素材已经检查完毕。", nil), nil
 }
 
-func (lateToolCallReplyModel) Stream(
+func (stub *textThenToolModel) Stream(
 	context.Context, []*schema.Message, ...model.Option,
 ) (*schema.StreamReader[*schema.Message], error) {
+	stub.mu.Lock()
+	stub.calls++
+	round := stub.calls
+	stub.mu.Unlock()
+	if round > 1 {
+		return schema.StreamReaderFromArray([]*schema.Message{
+			schema.AssistantMessage("素材已经检查完毕。", nil),
+		}), nil
+	}
 	reader, writer := schema.Pipe[*schema.Message](3)
-	writer.Send(schema.AssistantMessage("先给你个结论", nil), nil)
+	writer.Send(schema.AssistantMessage("我先检查一下素材。", nil), nil)
 	writer.Send(schema.AssistantMessage("", []schema.ToolCall{{
-		ID: "late_call", Function: schema.FunctionCall{Name: "timeline.update", Arguments: "{}"},
+		ID: "call_list", Function: schema.FunctionCall{Name: "asset.list_assets", Arguments: "{}"},
 	}}), nil)
 	writer.Close()
 	return reader, nil
 }
 
-func TestBufferedFinalReplyWithLateToolCallFailsWithoutLeakingSuccess(t *testing.T) {
-	// 不并行：passthroughLateToolCallCount 是包级计数器，串行才能对增量做精确断言。
+func TestTextBeforeToolCallStreamsAndStillExecutesTool(t *testing.T) {
+	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_late_toolcall")
-	service, err := NewService(t.Context(), database, lateToolCallReplyModel{})
+	stub := &textThenToolModel{}
+	service, err := NewService(t.Context(), database, stub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,30 +174,34 @@ func TestBufferedFinalReplyWithLateToolCallFailsWithoutLeakingSuccess(t *testing
 	_, stream, unsubscribe := service.Hub().Subscribe("draft_late_toolcall")
 	defer unsubscribe()
 
-	before := passthroughLateToolCallCount.Load()
 	if !service.Queue().EnqueueUserMessage("draft_late_toolcall", "user_late", "剪一下") {
 		t.Fatal("enqueue failed")
 	}
 	service.Queue().JoinDraft("draft_late_toolcall")
 
-	var completedContent string
-	var completedKind string
-	var leakedSuccess bool
-	var toolStarted bool
+	sequence := make([]string, 0, 8)
+	var finalContent string
+	var finalReplacement string
+	var sawDiscard bool
 	var outcome any
 	deadline := time.After(5 * time.Second)
 	for outcome == nil {
 		select {
 		case event := <-stream:
-			if event["type"] == TurnStreamTextDelta && strings.Contains(event["delta"].(string), "先给你个结论") {
-				leakedSuccess = true
-			}
-			if event["type"] == TurnStreamToolStepStarted && event["tool"] == "timeline.update" {
-				toolStarted = true
-			}
-			if event["type"] == TurnStreamMessageCompleted {
-				completedContent, _ = event["content"].(string)
-				completedKind, _ = event["kind"].(string)
+			switch event["type"] {
+			case TurnStreamTextDelta:
+				sequence = append(sequence, "text:"+event["delta"].(string))
+			case TurnStreamMessageDiscarded:
+				sawDiscard = true
+			case TurnStreamMessageCompleted:
+				kind, _ := event["kind"].(string)
+				sequence = append(sequence, "complete:"+kind)
+				if kind == "reply" {
+					finalContent, _ = event["content"].(string)
+					finalReplacement, _ = event["replaces_message_id"].(string)
+				}
+			case TurnStreamToolStepStarted:
+				sequence = append(sequence, "tool:"+event["tool"].(string))
 			}
 			if event["type"] == TurnStreamTurnEnded {
 				outcome = event["outcome"]
@@ -200,22 +211,44 @@ func TestBufferedFinalReplyWithLateToolCallFailsWithoutLeakingSuccess(t *testing
 		}
 	}
 
-	if outcome != "failed" || completedKind != "turn_failure" ||
-		!strings.Contains(completedContent, "该调用未被执行") {
-		t.Fatalf("晚到 tool_call 必须确定性失败：outcome=%v kind=%q content=%q", outcome, completedKind, completedContent)
+	joined := strings.Join(sequence, "|")
+	for _, ordered := range []string{
+		"text:我先检查一下素材。", "complete:narration", "tool:asset.list_assets",
+		"text:素材已经检查完毕。", "complete:reply",
+	} {
+		if !strings.Contains(joined, ordered) {
+			t.Fatalf("缺少 Claude Code 流式阶段 %q：%s", ordered, joined)
+		}
 	}
-	if leakedSuccess || toolStarted || strings.Contains(completedContent, "先给你个结论") {
-		t.Fatalf("不得泄漏成功正文或伪装执行工具：leaked=%t tool_started=%t content=%q", leakedSuccess, toolStarted, completedContent)
+	if strings.Index(joined, "text:我先检查一下素材。") >= strings.Index(joined, "complete:narration") ||
+		strings.Index(joined, "complete:narration") >= strings.Index(joined, "tool:asset.list_assets") ||
+		strings.Index(joined, "tool:asset.list_assets") >= strings.LastIndex(joined, "text:素材已经检查完毕。") ||
+		strings.LastIndex(joined, "text:素材已经检查完毕。") >= strings.LastIndex(joined, "complete:reply") {
+		t.Fatalf("事件顺序不是 text→tool→text：%s", joined)
 	}
-	if after := passthroughLateToolCallCount.Load(); after != before+1 {
-		t.Fatalf("晚到 tool_call 应被检测计数一次：before=%d after=%d", before, after)
+	if outcome != "finished" || finalContent != "素材已经检查完毕。" ||
+		finalReplacement == "" || sawDiscard || stub.calls != 2 {
+		t.Fatalf("outcome=%v final=%q replacement=%q discarded=%t calls=%d sequence=%s",
+			outcome, finalContent, finalReplacement, sawDiscard, stub.calls, joined)
 	}
 	messages, err := storage.ListMessages(t.Context(), database.Read(), "draft_late_toolcall", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	final := messages[len(messages)-1]
-	if final.Role != "system" || final.Kind != "turn_failure" || final.Content != completedContent {
-		t.Fatalf("只能持久化确定性终态失败：%#v", final)
+	var narrationIndex, toolIndex, replyIndex = -1, -1, -1
+	for index, message := range messages {
+		switch message.Kind {
+		case "narration":
+			narrationIndex = index
+		case "tool":
+			toolIndex = index
+		case "reply":
+			replyIndex = index
+		}
+	}
+	if narrationIndex < 0 || toolIndex <= narrationIndex || replyIndex <= toolIndex ||
+		messages[narrationIndex].Content != "我先检查一下素材。" ||
+		messages[replyIndex].Content != finalContent {
+		t.Fatalf("刷新后的持久化顺序不是 narration→tool→reply：%#v", messages)
 	}
 }

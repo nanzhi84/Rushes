@@ -673,6 +673,9 @@ func strictUnmarshalToolArguments[I any](_ context.Context, name, arguments stri
 		}
 		return nil, err
 	}
+	if normalized, ok := normalizeTimelineAtomicFrameStrings(name, input).(I); ok {
+		input = normalized
+	}
 	return input, nil
 }
 

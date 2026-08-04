@@ -162,11 +162,9 @@ test("Go 主线：导入、理解、时间线、预览与用户最终导出", as
     .toBeGreaterThan(previewStart + 0.1);
   await page.getByRole("button", { name: "暂停", exact: true }).click();
 
-  // 最终导出不再是 Agent tool/确认卡：用户在专用控件中固定当前 vN 与画幅并显式触发。
-  await page.getByLabel("导出画幅").selectOption("portrait");
-  await page
-    .getByRole("button", { name: `导出 v${trimmedTimeline.timeline_version}` })
-    .click();
+  // 最终导出不再是 Agent tool/确认卡：用户只需显式触发，画幅由系统自动决定。
+  await expect(page.getByLabel("导出画幅")).toHaveCount(0);
+  await page.getByRole("button", { name: "导出", exact: true }).click();
   await expect(
     page.getByRole("link", { name: `下载 v${trimmedTimeline.timeline_version}` })
   ).toBeVisible({ timeout: 60_000 });

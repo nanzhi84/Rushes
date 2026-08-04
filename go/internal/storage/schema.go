@@ -1,6 +1,6 @@
 package storage
 
-const schemaVersion = 23
+const schemaVersion = 24
 
 const schemaV1 = `
 CREATE TABLE IF NOT EXISTS drafts (

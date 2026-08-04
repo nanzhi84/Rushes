@@ -21,6 +21,7 @@ const (
 const (
 	TurnStreamTurnStarted             = "turn_started"
 	TurnStreamTextDelta               = "text_delta"
+	TurnStreamMessageDiscarded        = "message_discarded"
 	TurnStreamMessageCompleted        = "message_completed"
 	TurnStreamToolStepStarted         = "tool_step_started"
 	TurnStreamToolStepProgress        = "tool_step_progress"
@@ -38,6 +39,7 @@ const (
 var knownTurnStreamTypes = []string{
 	TurnStreamTurnStarted,
 	TurnStreamTextDelta,
+	TurnStreamMessageDiscarded,
 	TurnStreamMessageCompleted,
 	TurnStreamToolStepStarted,
 	TurnStreamToolStepProgress,

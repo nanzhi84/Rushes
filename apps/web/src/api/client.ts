@@ -53,6 +53,9 @@ export type TimelineClipJson = {
   timeline_start_frame?: number;
   timeline_end_frame?: number;
   asset_id?: string;
+  asset_filename?: string;
+  shot_id?: string;
+  semantic_name?: string;
   role?: string;
   text?: string;
   source_start_frame?: number;
@@ -65,6 +68,7 @@ export type TimelineClipJson = {
   asset_kind?: string;
   parent_block_id?: string;
   linked?: boolean;
+  metadata?: Record<string, unknown>;
   effects?: Array<Record<string, unknown>>;
   [key: string]: unknown;
 };
@@ -110,8 +114,9 @@ export type DraftListResponse = Schemas["DraftListResponse"];
 export type DraftBatchDeleteResponse = Schemas["DraftBatchDeleteResponse"];
 export type DraftResponse = Schemas["DraftResponse"];
 export type DraftMutationResponse = Schemas["DraftMutationResponse"];
-export type DraftCostsResponse = Schemas["DraftCostsResponse"];
 export type MessageRecord = Schemas["MessageRecord"];
+export type MessageContextRef = Schemas["MessageContextRef"];
+export type MessageContextRefRequest = Schemas["MessageContextRefRequest"];
 export type MessagesResponse = Schemas["MessagesResponse"];
 export type MessageQueuedResponse = Schemas["MessageQueuedResponse"];
 export type TurnCancelResponse = Schemas["TurnCancelResponse"];
@@ -346,10 +351,6 @@ export const api = {
   applyTimelinePatch,
 
   postPreviewViewed,
-
-  draftCosts(draftId: string): Promise<DraftCostsResponse> {
-    return apiFetch<DraftCostsResponse>(`${draftPath(draftId)}/costs`);
-  },
 
   // ---- 素材（挂当前草稿） ----
   listMaterials(draftId: string): Promise<MaterialsResponse> {

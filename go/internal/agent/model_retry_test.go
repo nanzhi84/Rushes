@@ -197,9 +197,7 @@ func TestTimeoutRetryChatModelStreamRetriesOnlyBeforeFirstChunk(t *testing.T) {
 	}
 }
 
-// scriptedStreamModel 按脚本逐次返回 Stream 结果，用于精确复现终态回复直通流式的重试边界
-// （#95 H5）：工具调用轮与「前导阶段」失败仍缓冲后重试，一旦越过首个可见正文的直通承诺点就
-// 不再重试。
+// scriptedStreamModel 按脚本逐次返回 Stream 结果，用于精确复现完整消息边界的流式重试。
 type scriptedStreamModel struct {
 	mu      sync.Mutex
 	calls   int
@@ -307,13 +305,13 @@ func TestStreamRetriesOnPreambleFailureBeforeVisibleContent(t *testing.T) {
 	}
 }
 
-func TestStreamFinalRoundStreamsThroughWithoutRetryAfterContent(t *testing.T) {
+func TestStreamRetriesAndRevokesPartialTextBeforeMessageBoundary(t *testing.T) {
 	t.Parallel()
 	stub := &scriptedStreamModel{scripts: []func() (*schema.StreamReader[*schema.Message], error){
-		// 终态文本轮：首个可见正文后 provider 断流 → 已直通、不再重试，错误原样直达消费端。
+		// 可见正文只是 preview；provider 在 message_stop 前断流时，完整响应尚未交给 ReAct，
+		// 因而可以安全撤销并重试。
 		streamChunksThenError([]*schema.Message{schema.AssistantMessage("开始回答", nil)}, context.DeadlineExceeded),
-		// 若错误地重试就会取到这条，断言不应到达。
-		streamChunksThenError([]*schema.Message{schema.AssistantMessage("不应重试", nil)}, nil),
+		streamChunksThenError([]*schema.Message{schema.AssistantMessage("重试后完成", nil)}, nil),
 	}}
 	retry := newTestStreamRetry(stub)
 	notices := 0
@@ -324,14 +322,14 @@ func TestStreamFinalRoundStreamsThroughWithoutRetryAfterContent(t *testing.T) {
 	}
 	defer stream.Close()
 	message, err := stream.Recv()
-	if err != nil || message.Content != "开始回答" {
-		t.Fatalf("终态轮首个正文应直通：message=%#v err=%v", message, err)
+	if err != nil || message.Content != "重试后完成" {
+		t.Fatalf("断流预览应撤销并重试到完整消息：message=%#v err=%v", message, err)
 	}
-	if _, err := stream.Recv(); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("直通后 provider 断流应原样透出、不重试：err=%v", err)
+	if _, err := stream.Recv(); !errors.Is(err, io.EOF) {
+		t.Fatalf("重试后的完整消息应正常结束：err=%v", err)
 	}
-	if stub.calls != 1 || notices != 0 {
-		t.Fatalf("直通轮不得重试：calls=%d notices=%d", stub.calls, notices)
+	if stub.calls != 2 || notices != 1 {
+		t.Fatalf("message_stop 前断流应重试一次：calls=%d notices=%d", stub.calls, notices)
 	}
 }
 

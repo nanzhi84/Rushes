@@ -98,6 +98,7 @@ export type TurnStreamState = {
 export const KNOWN_TURN_STREAM_TYPES = [
   "turn_started",
   "text_delta",
+  "message_discarded",
   "message_completed",
   "tool_step_started",
   "tool_step_progress",
@@ -118,11 +119,13 @@ export type TurnStreamEvent =
   | { type: "local_reset" }
   | { type: "turn_started"; turn_id?: string }
   | { type: "text_delta"; message_id: string; kind?: string; delta?: string }
+  | { type: "message_discarded"; message_id: string }
   | {
       type: "message_completed";
       message_id: string;
       kind: "narration" | "reply" | "observation" | "turn_failure";
       content: string;
+      replaces_message_id?: string;
     }
   | { type: "tool_step_started"; step_id: string; tool: string; args_summary?: string; progress?: number; harness_owned?: boolean }
   | { type: "tool_step_progress"; step_id: string; tool: string; progress?: number; note?: string; harness_owned?: boolean }
@@ -220,10 +223,18 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
         items: appendDelta(
           state.items,
           event.message_id,
-          typeof event.delta === "string" ? event.delta : ""
+          typeof event.delta === "string" ? event.delta : "",
+          normalizeDeltaKind(event.kind)
         )
       };
     }
+    case "message_discarded":
+      return {
+        ...state,
+        items: state.items.filter(
+          (item) => item.type !== "message" || item.message_id !== event.message_id
+        )
+      };
     case "message_completed": {
       if (typeof event.message_id !== "string") {
         return state;
@@ -233,7 +244,7 @@ export function reduceTurnStream(state: TurnStreamState, event: TurnStreamEvent)
         ...state,
         turnActive: true,
         modelRetry: null,
-        items: upsertMessage(state.items, {
+        items: upsertMessage(removeMessage(state.items, event.replaces_message_id), {
           type: "message",
           message_id: event.message_id,
           kind: normalizeCompletedKind(event.kind),
@@ -517,17 +528,25 @@ function isTokenUsage(value: unknown): value is TokenUsage {
 function appendDelta(
   items: TurnStreamItem[],
   messageId: string,
-  delta: string
+  delta: string,
+  kind: TurnStreamMessageKind
 ): TurnStreamItem[] {
   const index = items.findIndex(
     (item) => item.type === "message" && item.message_id === messageId
   );
   if (index < 0) {
-    return [...items, { type: "message", message_id: messageId, kind: "assistant", text: delta }];
+    return [...items, { type: "message", message_id: messageId, kind, text: delta }];
   }
   return items.map((item, current) =>
     current === index && item.type === "message" ? { ...item, text: item.text + delta } : item
   );
+}
+
+function removeMessage(items: TurnStreamItem[], messageId: unknown): TurnStreamItem[] {
+  if (typeof messageId !== "string" || !messageId) {
+    return items;
+  }
+  return items.filter((item) => item.type !== "message" || item.message_id !== messageId);
 }
 
 function upsertMessage(items: TurnStreamItem[], next: StreamMessageItem): TurnStreamItem[] {
@@ -600,4 +619,8 @@ function normalizeCompletedKind(kind: unknown): TurnStreamMessageKind {
     return kind;
   }
   return "reply";
+}
+
+function normalizeDeltaKind(kind: unknown): TurnStreamMessageKind {
+  return kind === "narration" ? "narration" : "assistant";
 }

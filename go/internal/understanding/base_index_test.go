@@ -61,8 +61,31 @@ func TestBuildBaseIndexShotsPreservesIdentityAcrossBoundaryRevision(t *testing.T
 		t.Fatalf("shots=%#v", shots)
 	}
 	if shots[0].BoundaryKind != "analysis_window" || len(shots[0].SearchTokens) == 0 ||
-		!strings.Contains(shots[0].SearchText, "person") {
+		!strings.Contains(shots[0].SearchText, "person") ||
+		shots[0].SemanticName != "office·person·walk" {
 		t.Fatalf("search projection=%#v", shots[0])
+	}
+}
+
+func TestBuildBaseIndexShotsKeepsCompactProviderSemanticName(t *testing.T) {
+	segment := baseIndexTestSegment()
+	segment.SemanticName = "  海边日落人物站立的超长语义名称应该被截断  "
+	shots, err := BuildBaseIndexShots("content", 1, Summary{Segments: []Segment{segment}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(shots) != 1 || shots[0].SemanticName != "海边日落人物站立的超长语义名称应该被" ||
+		!strings.Contains(shots[0].SearchText, shots[0].SemanticName) {
+		t.Fatalf("semantic projection=%#v", shots)
+	}
+}
+
+func TestWithSemanticNamesUpgradesLegacySummary(t *testing.T) {
+	legacy := Summary{Segments: []Segment{baseIndexTestSegment()}}
+	upgraded := WithSemanticNames(legacy)
+	if upgraded.Segments[0].SemanticName != "office·person·walk" ||
+		legacy.Segments[0].SemanticName != "" {
+		t.Fatalf("legacy=%#v upgraded=%#v", legacy.Segments[0], upgraded.Segments[0])
 	}
 }
 

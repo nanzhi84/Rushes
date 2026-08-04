@@ -40,6 +40,19 @@ describe("TimelineViewer", () => {
     expect(onClipClick).toHaveBeenCalledWith("tc_a");
   });
 
+  it("用基础标注语义名展示片段，避免把内部 asset_id 当作用户名称", () => {
+    const timeline = timelineFixture();
+    const clip = timeline.tracks[0]?.clips?.[0];
+    if (!clip) throw new Error("missing fixture clip");
+    clip.asset_filename = "海边混剪-05.mov";
+    clip.semantic_name = "海边日落人物";
+
+    render(<TimelineViewer timeline={timeline} />);
+
+    expect(screen.getByRole("button", { name: "主视频片段 海边日落人物" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /asset_a/ })).toBeNull();
+  });
+
   it("按 playheadSec 渲染播放头竖线", () => {
     render(<TimelineViewer timeline={timelineFixture()} pxPerSec={60} playheadSec={1.5} />);
 
@@ -303,7 +316,7 @@ describe("TimelineViewer", () => {
     expect(screen.getByTestId("timeline-track-stack").className).toContain("items-center");
   });
 
-  it("从 BGM 元数据绘制普通拍点、强拍和小节强拍标记", () => {
+  it("从 Harness 持久化的 BGM metadata 绘制普通拍点、强拍和小节强拍标记", () => {
     const timeline = timelineFixture();
     timeline.tracks.push({
       track_id: "bgm",
@@ -314,14 +327,14 @@ describe("TimelineViewer", () => {
           asset_id: "music",
           timeline_start_frame: 0,
           timeline_end_frame: 90,
-          effects: [
-            {
+          metadata: {
+            beat_grid: {
               kind: "beat_grid",
               beat_frames: [15, 30, 45],
               strong_beat_frames: [30],
               downbeat_frames: [45]
             }
-          ]
+          }
         }
       ]
     });
@@ -331,6 +344,57 @@ describe("TimelineViewer", () => {
     const markers = screen.getByTestId("timeline-beat-markers");
     expect(markers.querySelectorAll(":scope > g")).toHaveLength(3);
     expect(screen.getByText(/小节强拍/)).toBeTruthy();
+  });
+
+  it("兼容旧 effects beat_grid，并让 metadata 拍点进入吸附候选", () => {
+    const timeline = multitrackFixture();
+    timeline.tracks.push({
+      track_id: "bgm",
+      clips: [
+        {
+          timeline_clip_id: "bgm_metadata_snap",
+          track_id: "bgm",
+          asset_id: "music",
+          asset_kind: "audio",
+          timeline_start_frame: 0,
+          timeline_end_frame: 120,
+          metadata: { beat_grid: { beat_frames: [37] } }
+        },
+        {
+          timeline_clip_id: "bgm_legacy_effect",
+          track_id: "bgm",
+          asset_id: "legacy_music",
+          asset_kind: "audio",
+          timeline_start_frame: 0,
+          timeline_end_frame: 120,
+          effects: [{ kind: "beat_grid", beat_frames: [75] }]
+        }
+      ]
+    });
+    const onMoveClip = vi.fn();
+    render(
+      <TimelineViewer
+        timeline={timeline}
+        pxPerSec={60}
+        snapEnabled
+        dropMode="overwrite"
+        onMoveClip={onMoveClip}
+      />
+    );
+    expect(screen.getAllByTestId("timeline-beat-markers")).toHaveLength(2);
+    const svg = screen.getByRole("img", { name: "时间线轨道图" });
+    vi.spyOn(svg, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 240, bottom: 250,
+      width: 240, height: 250, toJSON: () => ({})
+    });
+    const audioClip = screen.getByRole("button", { name: /原声片段/ });
+
+    // 原始目标为 35 帧；37 帧拍点距离 4px，其他刻度/边缘均超过 8px 阈值。
+    fireEvent.pointerDown(audioClip, { pointerId: 9, clientX: 0, clientY: 86 });
+    fireEvent.pointerMove(audioClip, { pointerId: 9, clientX: 70, clientY: 150 });
+    fireEvent.pointerUp(audioClip, { pointerId: 9, clientX: 70, clientY: 150 });
+
+    expect(onMoveClip).toHaveBeenCalledWith("audio_1", "voiceover", 37, "overwrite");
   });
 
   it("后端旧数据缺少音轨节点时也会补齐音乐和音效轨", () => {

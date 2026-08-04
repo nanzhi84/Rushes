@@ -66,12 +66,13 @@ type Result struct {
 }
 
 type MessageRow struct {
-	ID        string
-	DraftID   string
-	Role      string
-	Kind      string
-	Content   string
-	CreatedAt string
+	ID          string
+	DraftID     string
+	Role        string
+	Kind        string
+	Content     string
+	ContextRefs []map[string]any
+	CreatedAt   string
 }
 
 type MaterialSummaryRow struct {
@@ -123,6 +124,7 @@ type ShotIndexShotRow struct {
 	BoundaryConfidence   *float64
 	LineageParentShotID  *string
 	RepresentativeFrames []map[string]any
+	SemanticName         string
 	Description          string
 	Tags                 []string
 	Subjects             []string
@@ -1294,6 +1296,10 @@ func timelineEditAffectedRefs(operations []any) []string {
 					if ref, ok := item.(string); ok && strings.TrimSpace(ref) != "" {
 						set[key+":"+ref] = struct{}{}
 					}
+				case "kept_timeline_clip_id", "removed_timeline_clip_id":
+					if ref, ok := item.(string); ok && strings.TrimSpace(ref) != "" {
+						set["timeline_clip_id:"+ref] = struct{}{}
+					}
 				default:
 					collect(item)
 				}
@@ -1650,9 +1656,10 @@ func persistResultRows(
 			createdAt = defaultCreatedAt
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO messages(message_id, draft_id, role, kind, content, created_at)
-			VALUES(?, ?, ?, ?, ?, ?)`, rows.Message.ID, rows.Message.DraftID,
-			rows.Message.Role, stringFrom(rows.Message.Kind, "reply"), rows.Message.Content, createdAt,
+			INSERT INTO messages(message_id, draft_id, role, kind, content, context_refs_json, created_at)
+			VALUES(?, ?, ?, ?, ?, ?, ?)`, rows.Message.ID, rows.Message.DraftID,
+			rows.Message.Role, stringFrom(rows.Message.Kind, "reply"), rows.Message.Content,
+			mustJSON(rows.Message.ContextRefs), createdAt,
 		); err != nil {
 			return err
 		}
@@ -1800,7 +1807,7 @@ func persistResultRows(
 			if shot.ID == "" || shot.AssetContentHash != snapshot.AssetContentHash ||
 				shot.SourceStartFrame < 0 || shot.SourceEndFrame <= shot.SourceStartFrame ||
 				shot.BoundaryVersion < 1 || shot.BoundaryKind == "" ||
-				len(shot.RepresentativeFrames) == 0 || shot.Description == "" ||
+				len(shot.RepresentativeFrames) == 0 || shot.SemanticName == "" || shot.Description == "" ||
 				shot.Quality == nil || shot.SearchText == "" || len(shot.SearchTokens) == 0 {
 				return fmt.Errorf("shot index %s 的 shot %s 字段不完整", snapshot.ID, shot.ID)
 			}
@@ -1818,15 +1825,15 @@ func persistResultRows(
 				INSERT INTO shots(
 					index_snapshot_id,shot_id,asset_content_hash,source_start_frame,
 					source_end_frame,boundary_version,boundary_kind,boundary_confidence,
-					lineage_parent_shot_id,representative_frames_json,description,tags_json,
+					lineage_parent_shot_id,representative_frames_json,semantic_name,description,tags_json,
 					subjects_json,actions_json,setting_json,shot_scale,composition,
 					lighting_json,mood_json,edit_hints_json,quality_json,search_text,
 					search_tokens_json,deep_coverage_json,created_at
-				) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 				snapshot.ID, shot.ID, shot.AssetContentHash, shot.SourceStartFrame,
 				shot.SourceEndFrame, shot.BoundaryVersion, shot.BoundaryKind,
 				shot.BoundaryConfidence, shot.LineageParentShotID,
-				mustJSON(shot.RepresentativeFrames), shot.Description, mustJSON(shot.Tags),
+				mustJSON(shot.RepresentativeFrames), shot.SemanticName, shot.Description, mustJSON(shot.Tags),
 				mustJSON(shot.Subjects), mustJSON(shot.Actions), mustJSON(shot.Setting),
 				shot.ShotScale, shot.Composition, mustJSON(shot.Lighting),
 				mustJSON(shot.Mood), mustJSON(shot.EditHints), mustJSON(shot.Quality),

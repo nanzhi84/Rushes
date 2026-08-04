@@ -106,6 +106,15 @@ input:disabled {
   background: transparent;
 }
 
+/* 紧凑工具条仍可横向滚动，但不让原生滚动条挤占按钮的垂直空间。 */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
 :focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 1px;

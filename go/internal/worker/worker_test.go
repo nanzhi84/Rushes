@@ -1264,6 +1264,28 @@ func TestUnderstandHandlerCompletesSingleAssetAndRejectsBatchShape(t *testing.T)
 		t.Fatalf("ready=%d superseded=%d distinct_shots=%d boundary_version=%d",
 			readySnapshots, supersededSnapshots, distinctShotIDs, maxBoundaryVersion)
 	}
+	if _, err := database.Write().ExecContext(t.Context(), `
+		UPDATE shot_index_snapshots
+		SET analyzer_version='legacy-base-index',output_schema_version=1
+		WHERE asset_content_hash=? AND status='ready'`, assetID); err != nil {
+		t.Fatal(err)
+	}
+	upgradeResult, err := handler(t.Context(), Job{
+		ID: "schema_upgrade", AssetID: understandStringPointer(assetID),
+		Payload: map[string]any{"asset_id": assetID, "focus": "人物"},
+	}, func(context.Context, Job, ProgressUpdate) error { return nil })
+	if err != nil || upgradeResult["analyzed"] != false || upgradeResult["cache_hit"] != true ||
+		upgradeResult["upgraded"] != true {
+		t.Fatalf("upgrade result=%#v err=%v", upgradeResult, err)
+	}
+	upgraded, err := storage.ReadyShotIndexByContentHash(t.Context(), database.Read(), assetID)
+	if err != nil || !isCurrentBaseShotIndex(upgraded) {
+		t.Fatalf("upgraded snapshot=%#v err=%v", upgraded, err)
+	}
+	upgradedShots, err := storage.ListShotIndexShots(t.Context(), database.Read(), upgraded.ID)
+	if err != nil || len(upgradedShots) == 0 || upgradedShots[0].SemanticName == "" {
+		t.Fatalf("upgraded shots=%#v err=%v", upgradedShots, err)
+	}
 	if _, err := handler(t.Context(), Job{ID: "missing", Payload: map[string]any{}}, func(context.Context, Job, ProgressUpdate) error { return nil }); err == nil {
 		t.Fatal("missing asset should fail")
 	}

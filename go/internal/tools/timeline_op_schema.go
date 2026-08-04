@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/eino-contrib/jsonschema"
@@ -40,6 +41,59 @@ var timelineAtomicKinds = map[string][]string{
 		"edit_subtitle_text",
 	},
 	"timeline.split": {"split_clip"},
+}
+
+var canonicalTimelineIntegerString = regexp.MustCompile(`^-?(?:0|[1-9][0-9]*)$`)
+
+// normalizeTimelineAtomicFrameStrings 兼容部分 OpenAI-compatible provider 把 JSON Schema
+// integer 工具参数序列化成字符串的已知形态。只对原子时间线工具、当前 kind 的整数帧字段，
+// 且仅在值是无空白、无前导零、int64 可表示的十进制整数时转换；小数、指数、空白、溢出和
+// 普通字符串字段继续交给严格 preflight 拒绝，不能借此绕过 Catalog 类型合同。
+func normalizeTimelineAtomicFrameStrings(toolName string, input any) any {
+	operation, err := timelineAtomicInputMap(toolName, input)
+	if err != nil {
+		return input
+	}
+	kind, _ := operation["kind"].(string)
+	spec, exists := timeline.LookupOpSpec(kind)
+	if !exists {
+		return input
+	}
+	normalized := make(map[string]any, len(operation))
+	for name, value := range operation {
+		normalized[name] = value
+	}
+	changed := false
+	for _, field := range spec.Fields {
+		if field.Type != timeline.OpFieldInteger {
+			continue
+		}
+		raw, ok := normalized[field.Name].(string)
+		if !ok || !canonicalTimelineIntegerString.MatchString(raw) {
+			continue
+		}
+		value, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil {
+			continue
+		}
+		normalized[field.Name] = value
+		changed = true
+	}
+	if !changed {
+		return input
+	}
+	switch input.(type) {
+	case TimelineInsertInput:
+		return TimelineInsertInput(normalized)
+	case TimelineDeleteInput:
+		return TimelineDeleteInput(normalized)
+	case TimelineUpdateInput:
+		return TimelineUpdateInput(normalized)
+	case TimelineSplitInput:
+		return TimelineSplitInput(normalized)
+	default:
+		return input
+	}
 }
 
 func (TimelineInsertInput) JSONSchema() *jsonschema.Schema {

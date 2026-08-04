@@ -70,36 +70,64 @@ func RegisterUnderstand(
 				Stage: stage, Detail: fmt.Sprintf("理解素材：%s 已完成", asset.Filename),
 			})
 		}
+		summaryID := fmt.Sprintf("summary_%s_%s", assetID, job.ID)
 		if !forceRefresh {
 			if snapshot, cacheErr := storage.ReadyShotIndexByContentHash(
 				ctx, database.Read(), asset.Hash,
 			); cacheErr == nil {
-				if err := materializeReadyBaseIndex(
-					ctx, database, asset, snapshot, claimedJobOptions(job, reducer.Options{}),
-				); err != nil {
-					return nil, err
+				if isCurrentBaseShotIndex(snapshot) {
+					if err := materializeReadyBaseIndex(
+						ctx, database, asset, snapshot, claimedJobOptions(job, reducer.Options{}),
+					); err != nil {
+						return nil, err
+					}
+					shots, err := storage.ListShotIndexShots(ctx, database.Read(), snapshot.ID)
+					if err != nil {
+						return nil, err
+					}
+					if err := reportCompleted("cache_hit"); err != nil {
+						return nil, err
+					}
+					slog.Info("基础镜头索引完成", "analysis_type", "shot_base_index",
+						"asset_content_hash", asset.Hash, "index_snapshot_id", snapshot.ID,
+						"cache_hit", true, "shot_count", len(shots), "frame_count", countIndexedFrames(shots),
+						"duration_ms", time.Since(startedAt).Milliseconds(), "status", "succeeded")
+					return map[string]any{
+						"asset_id": assetID, "cache_hit": true, "analyzed": false,
+						"status": "succeeded", "index_snapshot_id": snapshot.ID,
+						"shot_count": len(shots), "frame_count": countIndexedFrames(shots),
+					}, nil
 				}
-				shots, err := storage.ListShotIndexShots(ctx, database.Read(), snapshot.ID)
-				if err != nil {
-					return nil, err
+				legacySummary, decodeErr := summaryFromMap(snapshot.Summary)
+				if decodeErr == nil {
+					upgraded, frameCount, upgradeErr := publishBaseShotIndex(
+						ctx, database, job, asset, legacySummary, fingerprint, summaryID,
+					)
+					if upgradeErr != nil {
+						return nil, upgradeErr
+					}
+					shots, listErr := storage.ListShotIndexShots(ctx, database.Read(), upgraded.ID)
+					if listErr != nil {
+						return nil, listErr
+					}
+					if err := reportCompleted("upgraded"); err != nil {
+						return nil, err
+					}
+					slog.Info("基础镜头索引完成", "analysis_type", "shot_base_index",
+						"asset_content_hash", asset.Hash, "index_snapshot_id", upgraded.ID,
+						"cache_hit", true, "upgraded", true, "shot_count", len(shots),
+						"frame_count", frameCount, "duration_ms", time.Since(startedAt).Milliseconds(),
+						"status", "succeeded")
+					return map[string]any{
+						"asset_id": assetID, "cache_hit": true, "analyzed": false,
+						"upgraded": true, "status": "succeeded", "index_snapshot_id": upgraded.ID,
+						"shot_count": len(shots), "frame_count": frameCount,
+					}, nil
 				}
-				if err := reportCompleted("cache_hit"); err != nil {
-					return nil, err
-				}
-				slog.Info("基础镜头索引完成", "analysis_type", "shot_base_index",
-					"asset_content_hash", asset.Hash, "index_snapshot_id", snapshot.ID,
-					"cache_hit", true, "shot_count", len(shots), "frame_count", countIndexedFrames(shots),
-					"duration_ms", time.Since(startedAt).Milliseconds(), "status", "succeeded")
-				return map[string]any{
-					"asset_id": assetID, "cache_hit": true, "analyzed": false,
-					"status": "succeeded", "index_snapshot_id": snapshot.ID,
-					"shot_count": len(shots), "frame_count": countIndexedFrames(shots),
-				}, nil
 			} else if !errors.Is(cacheErr, storage.ErrNotFound) {
 				return nil, cacheErr
 			}
 		}
-		summaryID := fmt.Sprintf("summary_%s_%s", assetID, job.ID)
 		var summaryExists int
 		if err := database.Read().QueryRowContext(ctx,
 			"SELECT COUNT(*) FROM material_summaries WHERE summary_id=?", summaryID,
@@ -213,6 +241,21 @@ func countIndexedFrames(shots []storage.IndexedShot) int {
 		total += len(shot.RepresentativeFrames)
 	}
 	return total
+}
+
+func summaryFromMap(value map[string]any) (understanding.Summary, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return understanding.Summary{}, err
+	}
+	var summary understanding.Summary
+	if err := json.Unmarshal(data, &summary); err != nil {
+		return understanding.Summary{}, err
+	}
+	if len(summary.Segments) == 0 {
+		return understanding.Summary{}, errors.New("legacy 基础索引没有镜头摘要")
+	}
+	return summary, nil
 }
 
 func decodeUnderstandPayload(value map[string]any) (understandPayload, error) {

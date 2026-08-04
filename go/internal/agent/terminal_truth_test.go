@@ -142,6 +142,7 @@ func TestTerminalTimelineTruthUsesAutomaticExactVersionCheckBeforeReply(t *testi
 			var deltas strings.Builder
 			completed := ""
 			kind := ""
+			replacesMessageID := ""
 			outcome := ""
 			deadline := time.After(5 * time.Second)
 			for outcome == "" {
@@ -153,6 +154,7 @@ func TestTerminalTimelineTruthUsesAutomaticExactVersionCheckBeforeReply(t *testi
 					case TurnStreamMessageCompleted:
 						completed, _ = event["content"].(string)
 						kind, _ = event["kind"].(string)
+						replacesMessageID, _ = event["replaces_message_id"].(string)
 					case TurnStreamTurnEnded:
 						outcome, _ = event["outcome"].(string)
 					}
@@ -161,11 +163,21 @@ func TestTerminalTimelineTruthUsesAutomaticExactVersionCheckBeforeReply(t *testi
 				}
 			}
 			if outcome != test.wantOutcome || kind != test.wantKind ||
-				!strings.Contains(completed, test.wantContent) || deltas.String() != completed {
+				!strings.Contains(completed, test.wantContent) {
 				t.Fatalf(
-					"outcome=%q kind=%q deltas=%q completed=%q",
-					outcome, kind, deltas.String(), completed,
+					"outcome=%q kind=%q deltas=%q completed=%q replaces=%q",
+					outcome, kind, deltas.String(), completed, replacesMessageID,
 				)
+			}
+			// 完全流式下 provider 正文是 assistant preview；通过门禁时原子晋升。
+			// provider 在终态回复前失败时尚无 preview，turn_failure 因此不携带替换 ID。
+			providerFailedBeforeTerminalReply := test.mode == "provider_error"
+			if (providerFailedBeforeTerminalReply &&
+				(replacesMessageID != "" || deltas.String() != completed)) ||
+				(!providerFailedBeforeTerminalReply && replacesMessageID == "") ||
+				(test.mode == "passing" && deltas.String() != completed) {
+				t.Fatalf("preview 晋升/撤销契约错误：deltas=%q completed=%q replaces=%q",
+					deltas.String(), completed, replacesMessageID)
 			}
 			if test.mode == "provider_error" && strings.Contains(completed, "已按要求") {
 				t.Fatalf("unverified success text leaked: %q", completed)

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/nanzhi84/Rushes/go/internal/agentexec"
+	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -71,8 +72,35 @@ func (service *Service) executeAutomaticTimelineCheck(
 	draftID, timelineID string,
 	deferPassed bool,
 ) (rushestools.ToolResult, stopGateRun, error) {
-	run := service.startStopGate(draftID, timelineID)
-	result, err := service.executeHarnessTimelineCheck(ctx, timelineID)
+	normalization, err := service.executeHarnessTimelineNormalization(ctx, draftID, timelineID)
+	checkedTimelineID := timelineID
+	if err == nil && normalization.Status == string(rushestools.StatusSucceeded) {
+		if normalizedID := agentexec.InterfaceString(normalization.Data["timeline_id"]); normalizedID != "" {
+			checkedTimelineID = normalizedID
+		}
+		if changed, _ := normalization.Data["changed"].(bool); changed {
+			terminalTimelineTruthFromContext(ctx).recordMutationTimelineID(checkedTimelineID)
+		}
+	}
+	run := service.startStopGate(draftID, checkedTimelineID)
+	result := rushestools.ToolResult{}
+	if err == nil {
+		result, err = service.executeHarnessTimelineCheck(ctx, checkedTimelineID)
+		if changed, _ := normalization.Data["changed"].(bool); changed && result.Data != nil {
+			result.Data["harness_normalization"] = normalization.Data["normalization"]
+			result.Data["previous_timeline_id"] = timelineID
+		}
+	}
+	if result.Data == nil {
+		result.Data = map[string]any{}
+	}
+	// Normalization may already have committed a newer immutable version before
+	// the read-only checker encounters an infrastructure error. Preserve that
+	// exact ID in the return value so caller feedback and terminal truth never
+	// fall back to the stale pre-normalization version.
+	if agentexec.InterfaceString(result.Data["timeline_id"]) == "" {
+		result.Data["timeline_id"] = checkedTimelineID
+	}
 	status := "passed"
 	observation := compactJSON(result)
 	issues := stopGateActionableIssues(result)
@@ -87,7 +115,8 @@ func (service *Service) executeAutomaticTimelineCheck(
 	}
 	if status != "passed" || !deferPassed {
 		_, finishErr := service.finishStopGate(
-			ctx, draftID, timelineID, status, observation, "validation:"+timelineID, issues, run,
+			ctx, draftID, checkedTimelineID, status, observation,
+			"validation:"+checkedTimelineID, issues, run,
 		)
 		if finishErr != nil {
 			err = errors.Join(err, finishErr)
@@ -95,6 +124,43 @@ func (service *Service) executeAutomaticTimelineCheck(
 		run = stopGateRun{}
 	}
 	return result, run, err
+}
+
+func (service *Service) executeHarnessTimelineNormalization(
+	ctx context.Context,
+	draftID, timelineID string,
+) (rushestools.ToolResult, error) {
+	document, err := timeline.GetByID(ctx, service.database, draftID, timelineID)
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	normalizationNeeded, err := service.executor.StopGateTimelineNormalizationNeeded(
+		ctx, draftID, document,
+	)
+	if err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	if !normalizationNeeded {
+		return rushestools.ToolResult{
+			Status:      string(rushestools.StatusSucceeded),
+			Observation: "Stop Gate 未发现可安全合并的相邻主视频片段",
+			Data: map[string]any{
+				"timeline_id": timelineID, "timeline_version": document.Version,
+				"changed": false, "merged_clip_count": 0,
+			},
+		}, nil
+	}
+	leaseSession := timelineEditLeaseSessionFromContext(ctx)
+	if leaseSession == nil {
+		return rushestools.ToolResult{}, fmt.Errorf("stop gate 时间线归一化缺少当前 Agent edit lease")
+	}
+	if err = leaseSession.ensure(ctx); err != nil {
+		return rushestools.ToolResult{}, err
+	}
+	normalizationCtx := rushestools.WithTimelineMutationOrigin(ctx, "harness")
+	return service.executor.NormalizeTimelineForStopGate(
+		normalizationCtx, draftID, timelineID,
+	)
 }
 
 func (service *Service) executeHarnessTimelineCheck(

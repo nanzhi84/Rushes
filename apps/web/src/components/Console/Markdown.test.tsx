@@ -1,22 +1,23 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-
-// 模拟 chunk 加载失败（网络抖动 / 重新构建后旧 hash 404）：动态 import 会 reject。
-// Suspense 只接管加载中、接不住 rejection，lazy 还会缓存失败——Markdown 的 loader
-// 必须自行 catch 并退回纯文本渲染，否则错误冒泡到裸 createRoot 根导致整应用白屏。
-vi.mock("react-markdown", () => {
-  throw new Error("chunk load failed");
-});
-
 import { Markdown } from "./Markdown";
 
-describe("Markdown 懒加载失败兜底", () => {
-  it("react-markdown chunk 加载失败时退回纯文本渲染而非抛错白屏", async () => {
-    render(<Markdown text="**加粗** 原文" />);
-    await waitFor(() => {
-      expect(screen.getByText("**加粗** 原文")).toBeTruthy();
-    });
-    expect(document.querySelector(".md-body p.whitespace-pre-wrap")).not.toBeNull();
-    expect(document.querySelector("strong")).toBeNull();
+describe("Markdown 时间线引用", () => {
+  it("点击 Agent 回复中的语义片段链接会回选精确时间线 clip", async () => {
+    const listener = vi.fn();
+    window.addEventListener("rushes:select-timeline-clip", listener);
+    try {
+      render(<Markdown text={'已调整[「海边日落人物」0.00–3.00 秒](#timeline-clip=clip_v1_001)'} />);
+
+      fireEvent.click(await screen.findByRole("link", { name: "「海边日落人物」0.00–3.00 秒" }));
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect((listener.mock.calls[0]?.[0] as CustomEvent).detail).toEqual({
+        clipId: "clip_v1_001"
+      });
+      expect(window.location.hash).toBe("");
+    } finally {
+      window.removeEventListener("rushes:select-timeline-clip", listener);
+    }
   });
 });

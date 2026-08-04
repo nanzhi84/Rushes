@@ -69,7 +69,9 @@ func ensureBaseShotIndexForAsset(
 	if snapshot, readyErr := storage.ReadyShotIndexByContentHash(
 		ctx, database.Read(), asset.Hash,
 	); readyErr == nil {
-		return materializeReadyBaseIndex(ctx, database, asset, snapshot, options)
+		if isCurrentBaseShotIndex(snapshot) {
+			return materializeReadyBaseIndex(ctx, database, asset, snapshot, options)
+		}
 	} else if !errors.Is(readyErr, storage.ErrNotFound) {
 		return readyErr
 	}
@@ -115,6 +117,11 @@ func ensureBaseShotIndexForAsset(
 		return nil
 	}
 	return errors.Join(applyErr, fmt.Errorf("基础镜头索引入队状态: %s", result.Status))
+}
+
+func isCurrentBaseShotIndex(snapshot storage.ShotIndexSnapshot) bool {
+	return snapshot.OutputSchemaVersion >= understanding.BaseShotIndexSchemaVersion &&
+		snapshot.AnalyzerVersion == understanding.PromptVersion
 }
 
 func materializeReadyBaseIndex(
@@ -168,6 +175,7 @@ func publishBaseShotIndex(
 	fingerprint string,
 	summaryID string,
 ) (storage.ShotIndexSnapshot, int, error) {
+	summary = understanding.WithSemanticNames(summary)
 	generation := 1
 	previous := []storage.IndexedShot{}
 	if ready, err := storage.ReadyShotIndexByContentHash(ctx, database.Read(), asset.Hash); err == nil {
@@ -209,7 +217,8 @@ func publishBaseShotIndex(
 			BoundaryVersion: shot.BoundaryVersion, BoundaryKind: shot.BoundaryKind,
 			BoundaryConfidence:  shot.BoundaryConfidence,
 			LineageParentShotID: shot.LineageParentShotID, RepresentativeFrames: frames,
-			Description: shot.Description, Tags: shot.Tags, Subjects: shot.Subjects,
+			SemanticName: shot.SemanticName, Description: shot.Description,
+			Tags: shot.Tags, Subjects: shot.Subjects,
 			Actions: shot.Actions, Setting: shot.Setting, ShotScale: shot.ShotScale,
 			Composition: shot.Composition, Lighting: shot.Lighting, Mood: shot.Mood,
 			EditHints: shot.EditHints, Quality: shot.Quality, SearchText: shot.SearchText,

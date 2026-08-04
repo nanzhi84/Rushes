@@ -74,7 +74,7 @@ func TestAnalysisFingerprintInvalidatesPreThreeFrameCache(t *testing.T) {
 	options := NormalizeAnalyzeOptions(asset, AnalyzeOptions{Depth: "deep"})
 	current := AnalysisFingerprint(asset, options)
 	legacy := analysisFingerprint(asset, options, "go-shot-context-v3")
-	if PromptVersion != "go-shot-base-index-v5" || current == legacy {
+	if PromptVersion != "go-shot-base-index-v7" || current == legacy {
 		t.Fatalf("prompt=%q current=%q legacy=%q", PromptVersion, current, legacy)
 	}
 }

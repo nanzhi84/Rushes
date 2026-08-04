@@ -208,6 +208,7 @@ type ShotCandidate struct {
 	DurationFrames   int      `json:"duration_frames"`
 	BoundaryVersion  int      `json:"boundary_version"`
 	SemanticRole     string   `json:"semantic_role,omitempty"`
+	SemanticName     string   `json:"semantic_name"`
 	Description      string   `json:"description"`
 	Tags             []string `json:"tags,omitempty"`
 	Quality          string   `json:"quality,omitempty"`
@@ -576,6 +577,7 @@ type ContentPlanContract struct {
 	MustKeepUtteranceIDs    []string                `json:"must_keep_utterance_ids,omitempty" jsonschema_description:"speech.search 返回、成片必须完整保留的 utterance_id"`
 	BrollCoverageRanges     []ContentPlanFrameRange `json:"broll_coverage_ranges,omitempty" jsonschema_description:"必须由 visual_overlay B-roll 完整覆盖的时间线帧区间"`
 	MinOnBeatRatio          *float64                `json:"min_on_beat_ratio,omitempty" jsonschema_description:"画面切点落在真实 beat_grid 的最低比例，范围 0 到 1"`
+	MinOnAccentRatio        *float64                `json:"min_on_accent_ratio,omitempty" jsonschema_description:"画面切点同时落在真实 beat_grid 且命中 strong_beat 或 downbeat 的最低比例，范围 0 到 1；卡点混剪应与切点密度一起约束，不能只满足普通拍点"`
 	Rhythm                  string                  `json:"rhythm,omitempty" jsonschema_description:"创作节奏意图，例如舒缓、均衡、紧凑；作为计划语义保留，数值验收使用切点密度字段"`
 	MinCutDensityPerMinute  *float64                `json:"min_cut_density_per_minute,omitempty" jsonschema_description:"每分钟画面切点数下限"`
 	MaxCutDensityPerMinute  *float64                `json:"max_cut_density_per_minute,omitempty" jsonschema_description:"每分钟画面切点数上限"`

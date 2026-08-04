@@ -46,6 +46,8 @@ type TimelineClipJson = {
   timeline_start_frame?: number;
   timeline_end_frame?: number;
   asset_id?: string;
+  asset_filename?: string;
+  semantic_name?: string;
   asset_kind?: string;
   role?: string;
   text?: string;
@@ -57,6 +59,7 @@ type TimelineClipJson = {
   fade_out_frames?: number;
   parent_block_id?: string;
   linked?: boolean;
+  metadata?: Record<string, unknown>;
   effects?: Array<Record<string, unknown>>;
 };
 
@@ -1961,8 +1964,12 @@ function normalizeClip(trackId: string, clip: TimelineClipJson): DrawableClip | 
   const label =
     trackId === "subtitles"
       ? `${clip.text ?? clip.timeline_clip_id}`.trim()
-      : `${clip.asset_id ?? clip.timeline_clip_id}`.trim();
-  const beatGrid = (clip.effects ?? []).find((effect) => effect.kind === "beat_grid");
+      : `${clip.semantic_name ?? clip.asset_filename ?? clip.asset_id ?? clip.timeline_clip_id}`.trim();
+  // Harness 当前把权威拍点证据持久化在 metadata.beat_grid；effects 是
+  // #160 之前的时间线形态。两者都读，保证新草稿显示/吸附拍点，同时兼容旧版本。
+  const metadataBeatGrid = objectValue(clip.metadata?.beat_grid);
+  const beatGrid = metadataBeatGrid ??
+    (clip.effects ?? []).find((effect) => effect.kind === "beat_grid");
   const timelineStartFrame = clip.timeline_start_frame;
   const sourceStartFrame = typeof clip.source_start_frame === "number" ? clip.source_start_frame : 0;
   const sourceEndFrame = typeof clip.source_end_frame === "number"
@@ -2014,6 +2021,12 @@ function effectFrameArray(value: unknown): number[] {
   return value.flatMap((frame) =>
     typeof frame === "number" && Number.isInteger(frame) && frame >= 0 ? [frame] : []
   );
+}
+
+function objectValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function trackKind(trackId: string): TrackKind {

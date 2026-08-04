@@ -220,6 +220,11 @@ func (server *Server) draftTimelineResponse(
 	if err != nil {
 		return DraftTimelineResponse{}, err
 	}
+	labelLookup, err := loadTimelineLabelLookup(ctx, server.database, draftID)
+	if err != nil {
+		return DraftTimelineResponse{}, err
+	}
+	annotateTimelineClipLabels(documentMap, labelLookup)
 	previewID, err := timeline.LatestPreviewID(ctx, server.database, draftID, document.Version)
 	if err != nil {
 		return DraftTimelineResponse{}, err

@@ -555,6 +555,26 @@ func (database *DB) Migrate(ctx context.Context) error {
 		}
 		version = 23
 	}
+	if version < 24 {
+		tx, err := database.write.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if err := addColumnIfMissing(ctx, tx, "shots", "semantic_name"); err != nil {
+			return fmt.Errorf("应用 schema v24 shot semantic_name: %w", err)
+		}
+		if err := addColumnIfMissing(ctx, tx, "messages", "context_refs_json"); err != nil {
+			return fmt.Errorf("应用 schema v24 message context refs: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 24"); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		version = 24
+	}
 	return nil
 }
 
@@ -585,6 +605,8 @@ func addColumnIfMissing(
 		"timeline_edit_batches.before_version":           "ALTER TABLE timeline_edit_batches ADD COLUMN before_version INTEGER",
 		"timeline_edit_batches.after_version":            "ALTER TABLE timeline_edit_batches ADD COLUMN after_version INTEGER",
 		"timeline_edit_batches.affected_refs_json":       "ALTER TABLE timeline_edit_batches ADD COLUMN affected_refs_json TEXT NOT NULL DEFAULT '[]'",
+		"shots.semantic_name":                            "ALTER TABLE shots ADD COLUMN semantic_name TEXT NOT NULL DEFAULT ''",
+		"messages.context_refs_json":                     "ALTER TABLE messages ADD COLUMN context_refs_json TEXT NOT NULL DEFAULT '[]'",
 	}
 	statement, ok := allowed[table+"."+column]
 	if !ok {

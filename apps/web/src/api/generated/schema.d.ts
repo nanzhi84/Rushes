@@ -1194,10 +1194,63 @@ export interface components {
              */
             invalidated_asset_ids: string[];
         };
+        /** MessageContextRefRequest */
+        MessageContextRefRequest: {
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "timeline_clip";
+            /** Timeline Clip Id */
+            timeline_clip_id: string;
+            /** Timeline Id */
+            timeline_id: string;
+            /** Timeline Version */
+            timeline_version: number;
+        };
+        /** MessageContextRef */
+        MessageContextRef: {
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "timeline_clip";
+            /** Timeline Clip Id */
+            timeline_clip_id: string;
+            /** Timeline Id */
+            timeline_id: string;
+            /** Timeline Version */
+            timeline_version: number;
+            /** Timeline Fps */
+            timeline_fps: number;
+            /** Track Id */
+            track_id: string;
+            /** Timeline Start Frame */
+            timeline_start_frame: number;
+            /** Timeline End Frame */
+            timeline_end_frame: number;
+            /** Asset Id */
+            asset_id: string;
+            /** Asset Filename */
+            asset_filename: string;
+            /** Shot Id */
+            shot_id: string;
+            /** Semantic Name */
+            semantic_name: string;
+            /** Source Start Frame */
+            source_start_frame: number;
+            /** Source End Frame */
+            source_end_frame: number;
+        };
         /** MessageCreateRequest */
         MessageCreateRequest: {
             /** Content */
             content: string;
+            /**
+             * Context Refs
+             * @default []
+             */
+            context_refs: components["schemas"]["MessageContextRefRequest"][];
             /** Message Id */
             message_id?: string | null;
         };
@@ -1222,6 +1275,8 @@ export interface components {
         MessageRecord: {
             /** Content */
             content: string;
+            /** Context Refs */
+            context_refs: components["schemas"]["MessageContextRef"][];
             /** Created At */
             created_at: string;
             /** Kind */

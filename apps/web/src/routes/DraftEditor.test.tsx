@@ -220,6 +220,7 @@ describe("刷新后从 DB 读回：turn_failure 系统消息透传到 UI 失败�
       role: "system",
       kind: "turn_failure",
       content: "本轮没有完成：模型响应超时，系统已停止重试。",
+      context_refs: [],
       created_at: "2026-07-18T00:00:00Z"
     };
 
@@ -304,6 +305,48 @@ describe("DraftEditorView", () => {
     ).toBe(false);
   });
 
+  it("清空对话成功后同时移除上一轮仍保留的流式消息", async () => {
+    const fetchMock = mockFetch({ decision: null });
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    renderEditor(fetchMock);
+    const stream = turnStreamSource();
+    emitTurnStream(stream, { type: "turn_started", turn_id: "turn_before_clear" });
+    emitTurnStream(stream, {
+      type: "message_completed",
+      message_id: "assistant_before_clear",
+      kind: "reply",
+      content: "这条上一轮流式消息应被清空"
+    });
+    emitTurnStream(stream, { type: "turn_ended", outcome: "finished", reason: null });
+    expect(await screen.findByText("这条上一轮流式消息应被清空")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "清空对话上下文" }));
+
+    await waitFor(() => expect(screen.queryByText("这条上一轮流式消息应被清空")).toBeNull());
+  });
+
+  it("清空后的内部 context_reset 锚点不作为聊天消息展示", async () => {
+    const fetchMock = mockFetch({
+      decision: null,
+      messages: [
+        {
+          message_id: "context_reset_1",
+          role: "system_observation",
+          kind: "context_reset",
+          content: "对话上下文已清空；素材、素材理解、时间线和预览均已保留。",
+          created_at: "2026-08-02T00:00:00Z"
+        }
+      ]
+    });
+    renderEditor(fetchMock);
+
+    expect(
+      await screen.findByText("描述成片目标、节奏或要删除的内容。剪辑过程和工具调用会持续显示在这里。")
+    ).toBeTruthy();
+    expect(screen.queryByText("对话上下文已清空；素材、素材理解、时间线和预览均已保留。")).toBeNull();
+    expect(screen.queryByText("后台活动")).toBeNull();
+  });
+
   it("从用户消息就地编辑并重发，撤销在途流式回复", async () => {
     const resent: Array<{ url: string; body: unknown }> = [];
     const fetchMock = mockFetch({
@@ -354,11 +397,15 @@ describe("DraftEditorView", () => {
     await waitFor(() => expect(screen.queryByText("即将撤销的流式回复")).toBeNull());
   });
 
-  it("顶栏成本小计渲染估算金额，且编辑器隐藏设置按钮", async () => {
-    const fetchMock = mockFetch({ decision: null, costs: 1.2345 });
+  it("编辑器顶栏不显示成本小计，且不请求成本端点", async () => {
+    const fetchMock = mockFetch({ decision: null });
     renderEditor(fetchMock);
 
-    expect(await screen.findByText("¥1.2345")).toBeTruthy();
+    expect(await screen.findByText("7月7日")).toBeTruthy();
+    expect(screen.queryByLabelText("本草稿成本小计")).toBeNull();
+    expect(
+      vi.mocked(fetchMock).mock.calls.some(([input]) => String(input).endsWith("/costs"))
+    ).toBe(false);
     expect(screen.queryByText("设置")).toBeNull();
   });
 
@@ -508,6 +555,78 @@ describe("DraftEditorView", () => {
     expect(await screen.findByText("这是与草稿完全不同的最终全文")).toBeTruthy();
     // 全文替换而非追加：旧的流式片段不应残留
     expect(screen.queryByText("半截草稿")).toBeNull();
+  });
+
+  it("按 Claude Code 形态渲染 text → tool → text，并原子晋升最终 preview", async () => {
+    const fetchMock = mockFetch({ decision: null });
+    renderEditor(fetchMock);
+
+    const stream = turnStreamSource();
+    emitTurnStream(stream, { type: "turn_started", turn_id: "turn_claude_shape" });
+    emitTurnStream(stream, {
+      type: "text_delta",
+      message_id: "preview_narration",
+      kind: "assistant",
+      delta: "我先检查素材。"
+    });
+    expect(await screen.findByText("我先检查素材。")).toBeTruthy();
+    emitTurnStream(stream, {
+      type: "message_completed",
+      message_id: "preview_narration",
+      kind: "narration",
+      content: "我先检查素材。"
+    });
+    emitTurnStream(stream, {
+      type: "tool_step_started",
+      step_id: "step_list",
+      tool: "asset.list_assets"
+    });
+    emitTurnStream(stream, {
+      type: "text_delta",
+      message_id: "preview_final",
+      kind: "assistant",
+      delta: "素材检查完毕。"
+    });
+
+    const narration = await screen.findByText("我先检查素材。");
+    const finalPreview = await screen.findByText("素材检查完毕。");
+    const tool = document.querySelector('[data-tool-step-id="step_list"]') as HTMLElement;
+    expect(tool).toBeTruthy();
+    expect(narration.closest("[data-message-kind]")?.getAttribute("data-message-kind")).toBe(
+      "narration"
+    );
+    expect(narration.compareDocumentPosition(tool) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(tool.compareDocumentPosition(finalPreview) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    emitTurnStream(stream, {
+      type: "message_completed",
+      message_id: "reply_final",
+      replaces_message_id: "preview_final",
+      kind: "reply",
+      content: "素材检查完毕。"
+    });
+    await waitFor(() => {
+      const reply = screen.getByText("素材检查完毕。");
+      expect(reply.closest("[data-message-kind]")?.getAttribute("data-message-kind")).toBe("reply");
+    });
+    expect(document.querySelectorAll('[data-message-kind="assistant"]')).toHaveLength(0);
+  });
+
+  it("message_discarded 会撤销断流重试留下的 preview", async () => {
+    const fetchMock = mockFetch({ decision: null });
+    renderEditor(fetchMock);
+
+    const stream = turnStreamSource();
+    emitTurnStream(stream, { type: "turn_started", turn_id: "turn_retry" });
+    emitTurnStream(stream, {
+      type: "text_delta",
+      message_id: "preview_failed",
+      kind: "assistant",
+      delta: "未完成的半截回复"
+    });
+    expect(await screen.findByText("未完成的半截回复")).toBeTruthy();
+    emitTurnStream(stream, { type: "message_discarded", message_id: "preview_failed" });
+    await waitFor(() => expect(screen.queryByText("未完成的半截回复")).toBeNull());
   });
 
   it("tool_step 过程条目从进行中流转到完成/失败，未映射工具显示工具名", async () => {
@@ -1180,6 +1299,38 @@ describe("DraftEditorView", () => {
     });
   });
 
+  it("把选中的语义片段作为精确 context 引用给 Agent", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true });
+    renderEditor(fetchMock);
+
+    fireEvent.click(await screen.findByTestId("mock-select-video"));
+    expect(await screen.findByText("海边日落人物")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "引用给 AI" }));
+    expect(await screen.findByText("已引用")).toBeTruthy();
+    expect(screen.getByText("海边日落人物 · 0.00–3.00 秒")).toBeTruthy();
+    expect(screen.queryByText("已选：")).toBeNull();
+
+    const composer = screen.getByPlaceholderText("描述你想怎样剪辑…");
+    fireEvent.change(composer, { target: { value: "把这段放到高潮" } });
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      const call = vi.mocked(fetchMock).mock.calls.find(
+        ([input, init]) => String(input).endsWith("/messages") && init?.method === "POST"
+      );
+      expect(call).toBeTruthy();
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+        content: "把这段放到高潮",
+        context_refs: [{
+          kind: "timeline_clip",
+          timeline_clip_id: "tc_a",
+          timeline_id: "draft_1:v1",
+          timeline_version: 1
+        }]
+      });
+    });
+  });
+
   it("服务端 Agent 编辑租约会禁用人工编辑与最终导出", async () => {
     const fetchMock = mockFetch({ decision: null, timeline: true, editLease: true });
     renderEditor(fetchMock);
@@ -1187,7 +1338,7 @@ describe("DraftEditorView", () => {
     await screen.findByTestId("mock-timeline-seek");
     expect(consoleComponentMocks.timelineProps.at(-1)?.editing).toBe(true);
     expect(screen.getByText("Agent 正在编辑")).toBeTruthy();
-    expect((screen.getByRole("button", { name: "导出 v1" }) as HTMLButtonElement).disabled).toBe(
+    expect((screen.getByRole("button", { name: "导出" }) as HTMLButtonElement).disabled).toBe(
       true
     );
   });
@@ -1217,6 +1368,46 @@ describe("DraftEditorView", () => {
     expect(screen.queryByRole("button", { name: "撤销 (⌘Z)" })).toBeNull();
     expect(screen.queryByRole("button", { name: "重做 (⇧⌘Z)" })).toBeNull();
     expect(screen.queryByLabelText("时间线版本")).toBeNull();
+  });
+
+  it("紧凑时间线工具栏不让横向滚动条裁切按钮", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true });
+    renderEditor(fetchMock);
+
+    await screen.findByTestId("mock-timeline-move");
+    const timeline = screen.getByRole("region", { name: "时间线" });
+    expect(timeline.firstElementChild?.classList.contains("scrollbar-none")).toBe(true);
+    expect(
+      screen
+        .getByRole("slider", { name: "时间线缩放" })
+        .parentElement?.classList.contains("xl:inline-flex")
+    ).toBe(true);
+  });
+
+  it("时间线图标悬浮或聚焦时显示名称、快捷键和具体作用", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true });
+    renderEditor(fetchMock);
+
+    await screen.findByTestId("mock-timeline-move");
+    const selectButton = screen.getByRole("button", { name: "选择 (V)" });
+    expect(selectButton.getAttribute("aria-describedby")).toBeTruthy();
+    fireEvent.mouseEnter(selectButton.parentElement!);
+    expect(screen.getByRole("tooltip").textContent).toContain("选择V");
+    expect(screen.getByRole("tooltip").textContent).toContain("选择片段");
+    fireEvent.mouseLeave(selectButton.parentElement!);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+
+    const disabledSplit = screen.getByRole("button", { name: "分割" });
+    expect(disabledSplit.hasAttribute("disabled")).toBe(true);
+    fireEvent.mouseEnter(disabledSplit.parentElement!);
+    expect(screen.getByRole("tooltip").textContent).toContain("当前播放头位置");
+    fireEvent.mouseLeave(disabledSplit.parentElement!);
+
+    const zoomIn = screen.getByRole("button", { name: "放大时间线" });
+    fireEvent.focus(zoomIn);
+    expect(screen.getByRole("tooltip").textContent).toContain("更精细的剪辑");
+    fireEvent.blur(zoomIn);
+    expect(screen.queryByRole("tooltip")).toBeNull();
   });
 
   it("在播放头位置新增可编辑字幕片段", async () => {
@@ -1265,12 +1456,12 @@ describe("DraftEditorView", () => {
     });
   });
 
-  it("选中联动片段可取消音画联动，选中字幕可直接保存文字", async () => {
+  it("选中已绑定片段可取消视频与原声绑定，选中字幕可直接保存文字", async () => {
     const fetchMock = mockFetch({ decision: null, timeline: true });
     renderEditor(fetchMock);
 
     fireEvent.click(await screen.findByTestId("mock-select-video"));
-    fireEvent.click(screen.getAllByRole("button", { name: "取消联动" })[0]!);
+    fireEvent.click(screen.getAllByRole("button", { name: "取消视频与原声绑定" })[0]!);
     await waitFor(() => {
       expect(manualPatchOperations(fetchMock)).toContainEqual({
         kind: "set_clip_linked", timeline_clip_id: "tc_a", linked: false
@@ -1297,6 +1488,21 @@ describe("DraftEditorView", () => {
 
     fireEvent.click(screen.getByTestId("mock-timeline-deselect"));
 
+    await waitFor(() => expect(screen.queryByText("已选：")).toBeNull());
+  });
+
+  it("选中片段后点击时间线外或按 Esc 会收起详情栏", async () => {
+    const fetchMock = mockFetch({ decision: null, timeline: true });
+    renderEditor(fetchMock);
+
+    fireEvent.click(await screen.findByTestId("mock-select-video"));
+    expect(await screen.findByText("已选：")).toBeTruthy();
+    fireEvent.pointerDown(screen.getByPlaceholderText("描述你想怎样剪辑…"));
+    await waitFor(() => expect(screen.queryByText("已选：")).toBeNull());
+
+    fireEvent.click(screen.getByTestId("mock-select-video"));
+    expect(await screen.findByText("已选：")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
     await waitFor(() => expect(screen.queryByText("已选：")).toBeNull());
   });
 
@@ -1414,7 +1620,6 @@ function mockFetch({
   messages = [],
   materials = [],
   onAnswer,
-  costs,
   cancelFailure,
   rewoundMessageCount = 0,
   onResend,
@@ -1425,7 +1630,6 @@ function mockFetch({
   messages?: DraftMessageFixture[] | (() => DraftMessageFixture[]);
   materials?: Array<Record<string, unknown>>;
   onAnswer?: (url: string, init: RequestInit | undefined) => void;
-  costs?: number;
   cancelFailure?: "conflict" | "network";
   rewoundMessageCount?: number;
   onResend?: (url: string, body: unknown) => void;
@@ -1433,16 +1637,6 @@ function mockFetch({
 }): FetchMock {
   return vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url.endsWith("/costs")) {
-      return jsonResponse({
-        costs: {
-          total_cost_estimate: costs ?? 0,
-          provider_call_count: 0,
-          by_provider: {},
-          by_capability: {}
-        }
-      });
-    }
     if (url === "/api/drafts/draft_1") {
       return jsonResponse({
         draft: {
@@ -1584,6 +1778,9 @@ function timelineResponseFixture(editLease = false) {
               source_start_frame: 0,
               source_end_frame: 90,
               asset_id: "asset_a",
+              asset_filename: "海边混剪-05.mov",
+              shot_id: "shot_sunset_person",
+              semantic_name: "海边日落人物",
               asset_kind: "video",
               linked: true,
               parent_block_id: "block_a"

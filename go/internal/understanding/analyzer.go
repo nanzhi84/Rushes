@@ -30,6 +30,7 @@ type Segment struct {
 	EndSec               float64               `json:"end_s"`
 	SourceStartFrame     int                   `json:"source_start_frame"`
 	SourceEndFrame       int                   `json:"source_end_frame"`
+	SemanticName         string                `json:"semantic_name"`
 	Description          string                `json:"description"`
 	Transcript           *string               `json:"transcript"`
 	Tags                 []string              `json:"tags"`

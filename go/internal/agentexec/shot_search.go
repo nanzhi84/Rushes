@@ -468,7 +468,8 @@ func (exec *Executor) loadFrozenShotIndex(
 					Filename: item.asset.Filename, SourceStartFrame: row.SourceStartFrame,
 					SourceEndFrame: row.SourceEndFrame, DurationFrames: row.SourceEndFrame - row.SourceStartFrame,
 					BoundaryVersion: row.BoundaryVersion, SemanticRole: role,
-					Description: description, Tags: append([]string(nil), row.Tags...),
+					SemanticName: row.SemanticName,
+					Description:  description, Tags: append([]string(nil), row.Tags...),
 					Quality: qualityLabel, Subjects: append([]string(nil), row.Subjects...),
 					Actions: append([]string(nil), row.Actions...), Setting: append([]string(nil), row.Setting...),
 					ShotScale: row.ShotScale, Composition: row.Composition,
@@ -631,6 +632,7 @@ func containsDigit(value string) bool {
 
 func shotCandidateSearchFields(candidate rushestools.ShotCandidate) []weightedSearchField {
 	return []weightedSearchField{
+		{name: "语义名称", value: candidate.SemanticName, weight: 1},
 		{name: "主体", value: strings.Join(candidate.Subjects, " "), weight: 1},
 		{name: "动作", value: strings.Join(candidate.Actions, " "), weight: 1},
 		{name: "场景", value: strings.Join(candidate.Setting, " "), weight: 1},

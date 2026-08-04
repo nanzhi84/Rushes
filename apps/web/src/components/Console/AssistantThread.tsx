@@ -152,47 +152,6 @@ export function AssistantThread({
     ? `${modelRetry.attempt}:${modelRetry.maxRetries}:${modelRetry.reason}`
     : "";
 
-  // Claude Code 式 follow mode：用户停留在底部时持续追随增量；手动上滚后不抢滚动位置。
-  useEffect(() => {
-    const scroller = scrollerRef.current;
-    if (!scroller) {
-      return;
-    }
-    if (followLatestRef.current) {
-      scroller.scrollTop = scroller.scrollHeight;
-      setHasNewOutput(false);
-    } else if (runtime.isRunning) {
-      setHasNewOutput(true);
-    }
-  }, [
-    historyBlocks.length,
-    progressFingerprint,
-    retryFingerprint,
-    runtime.isRunning,
-    streamFingerprint,
-    structuredMessage
-  ]);
-
-  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
-    const scroller = event.currentTarget;
-    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-    const followsLatest = distance <= FOLLOW_THRESHOLD_PX;
-    followLatestRef.current = followsLatest;
-    if (followsLatest) {
-      setHasNewOutput(false);
-    }
-  };
-
-  const jumpToLatest = () => {
-    const scroller = scrollerRef.current;
-    if (!scroller) {
-      return;
-    }
-    followLatestRef.current = true;
-    scroller.scrollTop = scroller.scrollHeight;
-    setHasNewOutput(false);
-  };
-
   const rows = useMemo<ThreadRow[]>(() => {
     const list: ThreadRow[] = [];
     for (const block of historyBlocks) {
@@ -316,6 +275,51 @@ export function AssistantThread({
     // 尺寸修正。也让无布局的 jsdom 能确定性地完成一次窗口化用于回归测试。
     initialRect: { width: 0, height: 1200 }
   });
+  const virtualTotalSize = shouldVirtualize ? virtualizer.getTotalSize() : 0;
+
+  // Claude Code 式 follow mode：用户停留在底部时持续追随增量；手动上滚后不抢滚动位置。
+  // 长会话逐行测量后占位层高度会继续变化，因此把虚拟总高度也作为依赖；否则刷新首屏
+  // 可能停在基于估算高度计算出的旧位置，看不到已经落库的最后几条消息。
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (!scroller) {
+      return;
+    }
+    if (followLatestRef.current) {
+      scroller.scrollTop = scroller.scrollHeight;
+      setHasNewOutput(false);
+    } else if (runtime.isRunning) {
+      setHasNewOutput(true);
+    }
+  }, [
+    historyBlocks.length,
+    progressFingerprint,
+    retryFingerprint,
+    runtime.isRunning,
+    streamFingerprint,
+    structuredMessage,
+    virtualTotalSize
+  ]);
+
+  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
+    const scroller = event.currentTarget;
+    const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    const followsLatest = distance <= FOLLOW_THRESHOLD_PX;
+    followLatestRef.current = followsLatest;
+    if (followsLatest) {
+      setHasNewOutput(false);
+    }
+  };
+
+  const jumpToLatest = () => {
+    const scroller = scrollerRef.current;
+    if (!scroller) {
+      return;
+    }
+    followLatestRef.current = true;
+    scroller.scrollTop = scroller.scrollHeight;
+    setHasNewOutput(false);
+  };
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -565,6 +569,7 @@ function UserMessageRowImpl({
   resendPending?: boolean;
 }): ReactElement {
   const originalText = userMessageText(message);
+  const contextRefs = message.metadata.contextRefs ?? [];
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(originalText);
   // 乐观插入的本地消息尚未落库，没有可回退到的检查点，不能编辑重发。
@@ -647,6 +652,21 @@ function UserMessageRowImpl({
         data-user-message=""
         className={`${highlightClass(highlighted)} w-fit max-w-[85%] rounded-sm bg-user-bubble px-3 py-1.5 text-[13px] leading-5 text-fg`}
       >
+        {contextRefs.length > 0 ? (
+          <div className="mb-1.5 flex flex-wrap gap-1 border-b border-line/70 pb-1.5">
+            {contextRefs.map((ref) => (
+              <button
+                key={`${ref.timeline_id}:${ref.timeline_clip_id}`}
+                type="button"
+                className="rounded-sm bg-panel/80 px-1.5 py-0.5 text-2xs text-accent-strong hover:bg-hover"
+                title="在时间线中定位这个片段"
+                onClick={() => selectTimelineContextRef(ref.timeline_clip_id)}
+              >
+                引用 · {timelineContextRefLabel(ref)}
+              </button>
+            ))}
+          </div>
+        ) : null}
         {message.content.map((part, index) =>
           part.type === "text" ? (
             <p key={`${message.id}:${index}`} className="break-words whitespace-pre-wrap">
@@ -656,6 +676,20 @@ function UserMessageRowImpl({
         )}
       </div>
     </article>
+  );
+}
+
+function timelineContextRefLabel(ref: NonNullable<ConsoleAssistantMessage["metadata"]["contextRefs"]>[number]): string {
+  const name = ref.semantic_name || ref.asset_filename || ref.timeline_clip_id;
+  const fps = ref.timeline_fps > 0 ? ref.timeline_fps : 30;
+  return `${name} ${(ref.timeline_start_frame / fps).toFixed(2)}–${(
+    ref.timeline_end_frame / fps
+  ).toFixed(2)} 秒`;
+}
+
+function selectTimelineContextRef(clipId: string): void {
+  window.dispatchEvent(
+    new CustomEvent("rushes:select-timeline-clip", { detail: { clipId } })
   );
 }
 
@@ -753,7 +787,7 @@ function MessageRowImpl({
             <div key={`${message.id}:${index}`} className={narration ? "leading-5" : "leading-[1.55]"}>
               {/* 流式期间用纯文本轻量渲染，避免每个 delta 全量重跑 react-markdown/micromark
                   （O(N²)）；message_completed 落库后（streaming=false）再一次性 Markdown 化。 */}
-              {narration || streaming ? (
+              {streaming ? (
                 <p className="whitespace-pre-wrap">{part.text}</p>
               ) : (
                 <Markdown text={part.text} />

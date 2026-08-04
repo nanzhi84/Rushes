@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"regexp"
 	"sort"
@@ -500,6 +501,45 @@ func TestAtomicTimelineToolRejectsInvalidCatalogCombinationBeforeExecutor(t *tes
 	}
 	if executor.calls != 0 {
 		t.Fatalf("invalid atomic inputs reached executor %d times", executor.calls)
+	}
+}
+
+func TestStrictUnmarshalNormalizesOnlyCanonicalAtomicFrameStrings(t *testing.T) {
+	t.Parallel()
+
+	decoded, err := strictUnmarshalToolArguments[TimelineInsertInput](
+		t.Context(),
+		"timeline.insert",
+		`{"kind":"insert_clip","asset_id":"asset_bgm","track_id":"bgm","source_start_frame":"0","source_end_frame":"1440","timeline_start_frame":"0"}`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := decoded.(TimelineInsertInput)
+	if input["source_start_frame"] != int64(0) || input["source_end_frame"] != int64(1440) ||
+		input["timeline_start_frame"] != int64(0) {
+		t.Fatalf("canonical frame strings not normalized: %#v", input)
+	}
+	if _, err := TimelineAtomicOperation("timeline.insert", input); err != nil {
+		t.Fatalf("normalized provider arguments should pass atomic preflight: %v", err)
+	}
+
+	for _, invalid := range []string{"01", " 1", "1.5", "1e3", "9223372036854775808"} {
+		raw := fmt.Sprintf(
+			`{"kind":"insert_clip","asset_id":"asset_bgm","track_id":"bgm","source_start_frame":%q,"source_end_frame":%q}`,
+			invalid, "1440",
+		)
+		decoded, decodeErr := strictUnmarshalToolArguments[TimelineInsertInput](
+			t.Context(), "timeline.insert", raw,
+		)
+		if decodeErr != nil {
+			t.Fatalf("map transport should remain decodable for %q: %v", invalid, decodeErr)
+		}
+		if _, preflightErr := TimelineAtomicOperation(
+			"timeline.insert", decoded.(TimelineInsertInput),
+		); preflightErr == nil || !strings.Contains(preflightErr.Error(), "类型必须是整数帧") {
+			t.Errorf("non-canonical %q must remain rejected: %v", invalid, preflightErr)
+		}
 	}
 }
 

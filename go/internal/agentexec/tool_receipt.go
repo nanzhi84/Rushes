@@ -19,6 +19,12 @@ func timelineMutationReceipt(
 	after timeline.Document,
 	result rushestools.ToolResult,
 ) (*reducer.AgentToolReceiptRow, error) {
+	// Harness-owned normalization is durably audited as its own timeline edit
+	// batch. It must never inherit the surrounding provider invocation and be
+	// misreported as a model-authored tool receipt.
+	if rushestools.TimelineMutationOrigin(ctx) == "harness" {
+		return nil, nil
+	}
 	turnID, sourceMessageID := rushestools.TurnIdentity(ctx)
 	toolCallID := strings.TrimSpace(rushestools.ToolCallID(ctx))
 	toolName, fingerprint := rushestools.InvocationFingerprint(ctx)

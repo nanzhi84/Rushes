@@ -12,7 +12,32 @@ const MarkdownBody = lazy(async () => {
     ]);
     return {
       default: function MarkdownBody({ text }: { text: string }): ReactElement {
-        return <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>;
+        return (
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            components={{
+              a: ({ href, children }) => (
+                <a
+                  href={href}
+                  onClick={(event) => {
+                    const prefix = "#timeline-clip=";
+                    if (!href?.startsWith(prefix)) return;
+                    event.preventDefault();
+                    window.dispatchEvent(
+                      new CustomEvent("rushes:select-timeline-clip", {
+                        detail: { clipId: decodeURIComponent(href.slice(prefix.length)) }
+                      })
+                    );
+                  }}
+                >
+                  {children}
+                </a>
+              )
+            }}
+          >
+            {text}
+          </ReactMarkdown>
+        );
       }
     };
   } catch {

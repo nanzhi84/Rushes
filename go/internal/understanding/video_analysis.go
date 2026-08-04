@@ -82,18 +82,19 @@ type segmentDescriptionPayload struct {
 	Overall      string `json:"overall"`
 	SemanticRole string `json:"semantic_role"`
 	Segments     []struct {
-		ID          string   `json:"id"`
-		Description string   `json:"description"`
-		Tags        []string `json:"tags"`
-		Quality     string   `json:"quality"`
-		Subjects    []string `json:"subjects"`
-		Actions     []string `json:"actions"`
-		Setting     []string `json:"setting"`
-		ShotScale   string   `json:"shot_scale"`
-		Composition string   `json:"composition"`
-		Lighting    []string `json:"lighting"`
-		Mood        []string `json:"mood"`
-		EditHints   []string `json:"edit_hints"`
+		ID           string   `json:"id"`
+		SemanticName string   `json:"semantic_name"`
+		Description  string   `json:"description"`
+		Tags         []string `json:"tags"`
+		Quality      string   `json:"quality"`
+		Subjects     []string `json:"subjects"`
+		Actions      []string `json:"actions"`
+		Setting      []string `json:"setting"`
+		ShotScale    string   `json:"shot_scale"`
+		Composition  string   `json:"composition"`
+		Lighting     []string `json:"lighting"`
+		Mood         []string `json:"mood"`
+		EditHints    []string `json:"edit_hints"`
 	} `json:"segments"`
 }
 
@@ -731,8 +732,9 @@ func (analyzer *Analyzer) describeSegmentFrameBatch(
 ) (string, error) {
 	prompt := `你正在为视频剪辑 Agent 建立可检索的逐镜头语义索引。后续每张图都附带 segment id 和确切源时间。
 只描述画面可见事实，但要尽量具体：主体身份或外观、场景、正在发生的动作、景别、构图、光线与色调、情绪氛围，以及适合怎样剪辑。description 必须是一句信息密集的中文检索文本，避免“画面很好看”之类空泛评价。一个 segment 有首/中/尾多帧时，可依据帧间构图变化描述段内动作趋势、推近、拉远或横移方向；只有单帧时不要猜测运动。edit_hints 写可执行用途，例如“适合高潮强拍切入”“适合作为环境建立镜头”。
+semantic_name 是用户和 Agent 共同引用该镜头的短名称：使用 4 到 18 个中文字符，优先“场景/主体 + 动作或显著视觉特征”，例如“洞穴远望火把舞者”“日落岩石海滩全景”；不要出现“画面”“镜头”“素材”、编号、文件名、标点或剪辑建议。同一批相似镜头应加入可见差异，避免重名。
 同时判断整段素材在口播工作流中的客观角色：人物直接面对镜头讲解、采访或连续表达为 a_roll；产品展示、操作演示、环境、细节、对比等用于覆盖讲述内容的画面为 b_roll。只依据可见证据，无法判断时返回空字符串。
-严格只返回 JSON：{"overall":"整体内容、视觉风格与可剪用途摘要","semantic_role":"a_roll|b_roll|","segments":[{"id":"s000","description":"夜晚海滩上红衣女性举起火把，橙色火光照亮人物，中景居中构图，适合高潮切入","tags":["人物","海滩","火光","夜景"],"quality":"usable|soft|dark|blurred","subjects":["红衣女性"],"actions":["举起火把"],"setting":["夜晚海滩"],"shot_scale":"中景","composition":"主体居中","lighting":["橙色火光","低照度"],"mood":["神秘","高能"],"edit_hints":["高潮强拍切入"]}]}。每个 id 必须出现一次。`
+严格只返回 JSON：{"overall":"整体内容、视觉风格与可剪用途摘要","semantic_role":"a_roll|b_roll|","segments":[{"id":"s000","semantic_name":"夜滩举火舞者","description":"夜晚海滩上红衣女性举起火把，橙色火光照亮人物，中景居中构图，适合高潮切入","tags":["人物","海滩","火光","夜景"],"quality":"usable|soft|dark|blurred","subjects":["红衣女性"],"actions":["举起火把"],"setting":["夜晚海滩"],"shot_scale":"中景","composition":"主体居中","lighting":["橙色火光","低照度"],"mood":["神秘","高能"],"edit_hints":["高潮强拍切入"]}]}。每个 id 必须出现一次。`
 	if strings.TrimSpace(focus) != "" {
 		prompt += "\n剪辑重点：" + focus
 	}
@@ -841,43 +843,46 @@ func applySegmentDescriptions(result *videoAnalysisResult, raw string) {
 	}
 	result.SemanticRole = normalizeVisualRole(payload.SemanticRole)
 	byID := make(map[string]struct {
-		description string
-		tags        []string
-		quality     string
-		subjects    []string
-		actions     []string
-		setting     []string
-		shotScale   string
-		composition string
-		lighting    []string
-		mood        []string
-		editHints   []string
+		semanticName string
+		description  string
+		tags         []string
+		quality      string
+		subjects     []string
+		actions      []string
+		setting      []string
+		shotScale    string
+		composition  string
+		lighting     []string
+		mood         []string
+		editHints    []string
 	}, len(payload.Segments))
 	for _, segment := range payload.Segments {
 		byID[segment.ID] = struct {
-			description string
-			tags        []string
-			quality     string
-			subjects    []string
-			actions     []string
-			setting     []string
-			shotScale   string
-			composition string
-			lighting    []string
-			mood        []string
-			editHints   []string
+			semanticName string
+			description  string
+			tags         []string
+			quality      string
+			subjects     []string
+			actions      []string
+			setting      []string
+			shotScale    string
+			composition  string
+			lighting     []string
+			mood         []string
+			editHints    []string
 		}{
-			description: strings.TrimSpace(segment.Description),
-			tags:        uniqueNonEmptyStrings(append([]string{"video"}, segment.Tags...)),
-			quality:     normalizeVisualQuality(segment.Quality),
-			subjects:    uniqueNonEmptyStrings(segment.Subjects),
-			actions:     uniqueNonEmptyStrings(segment.Actions),
-			setting:     uniqueNonEmptyStrings(segment.Setting),
-			shotScale:   strings.TrimSpace(segment.ShotScale),
-			composition: strings.TrimSpace(segment.Composition),
-			lighting:    uniqueNonEmptyStrings(segment.Lighting),
-			mood:        uniqueNonEmptyStrings(segment.Mood),
-			editHints:   uniqueNonEmptyStrings(segment.EditHints),
+			semanticName: compactSemanticName(segment.SemanticName),
+			description:  strings.TrimSpace(segment.Description),
+			tags:         uniqueNonEmptyStrings(append([]string{"video"}, segment.Tags...)),
+			quality:      normalizeVisualQuality(segment.Quality),
+			subjects:     uniqueNonEmptyStrings(segment.Subjects),
+			actions:      uniqueNonEmptyStrings(segment.Actions),
+			setting:      uniqueNonEmptyStrings(segment.Setting),
+			shotScale:    strings.TrimSpace(segment.ShotScale),
+			composition:  strings.TrimSpace(segment.Composition),
+			lighting:     uniqueNonEmptyStrings(segment.Lighting),
+			mood:         uniqueNonEmptyStrings(segment.Mood),
+			editHints:    uniqueNonEmptyStrings(segment.EditHints),
 		}
 	}
 	for index := range result.Segments {
@@ -889,6 +894,7 @@ func applySegmentDescriptions(result *videoAnalysisResult, raw string) {
 		if description.description != "" {
 			result.Segments[index].Description = description.description
 		}
+		result.Segments[index].SemanticName = description.semanticName
 		if len(description.tags) > 0 {
 			result.Segments[index].Tags = description.tags
 		}
@@ -901,6 +907,9 @@ func applySegmentDescriptions(result *videoAnalysisResult, raw string) {
 		result.Segments[index].Lighting = description.lighting
 		result.Segments[index].Mood = description.mood
 		result.Segments[index].EditHints = description.editHints
+		if result.Segments[index].SemanticName == "" {
+			result.Segments[index].SemanticName = semanticName(result.Segments[index])
+		}
 	}
 }
 

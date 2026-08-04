@@ -65,6 +65,22 @@ describe("AssistantThread 流式渲染降级与虚拟化", () => {
     expect(screen.queryByText("**加粗** 收尾")).toBeNull();
   });
 
+  it("落库后的过程 narration 也一次性 Markdown 化", async () => {
+    const narration: ConsoleAssistantMessage = {
+      id: "n1",
+      role: "assistant",
+      createdAt: "2026-07-18T00:00:00Z",
+      metadata: { consoleRole: "assistant", messageKind: "narration" },
+      content: [{ type: "text", text: "**重剪方案（精确帧）**：\n- 第一段" }]
+    };
+    const { container } = renderThread([narration]);
+
+    await waitFor(() =>
+      expect(container.querySelector(".md-body strong")?.textContent).toBe("重剪方案（精确帧）")
+    );
+    expect(container.querySelector(".md-body li")?.textContent).toBe("第一段");
+  });
+
   // react-virtual 的逐行测量依赖真实布局，jsdom 无布局、其内部调度也不在 RTL act 内 flush，
   // 因此这里断言「已切到虚拟化容器、未把全部行铺进扁平列表」这一结构契约；真实窗口化（视口内
   // 少量行、滚动增删行）由真实浏览器 e2e / Playwright 验证。

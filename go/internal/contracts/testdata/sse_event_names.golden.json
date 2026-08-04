@@ -82,6 +82,7 @@
   "turn_stream_types": [
     "turn_started",
     "text_delta",
+    "message_discarded",
     "message_completed",
     "tool_step_started",
 	"tool_step_progress",

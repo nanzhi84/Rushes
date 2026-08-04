@@ -42,6 +42,11 @@ func (server *Server) EnqueueMessageApiDraftsDraftIdMessagesPost(
 		})
 		return
 	}
+	contextRefs, contextErr := server.resolveMessageContextRefs(request.Context(), draftID, payload.ContextRefs)
+	if contextErr != nil {
+		writeConflict(writer, "message_context_stale")
+		return
+	}
 	messageID := newID("msg")
 	if payload.MessageId != nil && *payload.MessageId != "" {
 		messageID = *payload.MessageId
@@ -50,6 +55,7 @@ func (server *Server) EnqueueMessageApiDraftsDraftIdMessagesPost(
 		Actor: contracts.ActorUser,
 		ResultRows: reducer.ResultRows{Message: &reducer.MessageRow{
 			ID: messageID, DraftID: draftID, Role: "user", Kind: "user", Content: content,
+			ContextRefs: contextRefs,
 		}},
 	})
 	if err != nil || result.Status != reducer.StatusApplied {
@@ -154,9 +160,15 @@ func (server *Server) ListDraftMessagesApiDraftsDraftIdMessagesGet(
 	}
 	messages := make([]MessageRecord, 0, len(rows))
 	for _, row := range rows {
+		contextRefs := make([]MessageContextRef, 0, len(row.ContextRefs))
+		for _, ref := range row.ContextRefs {
+			if value, ok := messageContextRefRecord(ref); ok {
+				contextRefs = append(contextRefs, value)
+			}
+		}
 		messages = append(messages, MessageRecord{
 			MessageId: row.ID, Role: row.Role, Kind: row.Kind,
-			Content: row.Content, CreatedAt: row.CreatedAt,
+			Content: row.Content, ContextRefs: contextRefs, CreatedAt: row.CreatedAt,
 		})
 	}
 	rewoundCount, err := storage.CountRewoundMessages(request.Context(), server.database.Read(), draftID)
@@ -167,6 +179,63 @@ func (server *Server) ListDraftMessagesApiDraftsDraftIdMessagesGet(
 	writeJSON(writer, http.StatusOK, MessagesResponse{
 		DraftId: draftID, Messages: messages, RewoundMessageCount: rewoundCount,
 	})
+}
+
+func (server *Server) resolveMessageContextRefs(
+	ctx context.Context,
+	draftID string,
+	requests *[]MessageContextRefRequest,
+) ([]map[string]any, error) {
+	if requests == nil || len(*requests) == 0 {
+		return []map[string]any{}, nil
+	}
+	if len(*requests) > 3 {
+		return nil, errors.New("一次最多引用三个时间线对象")
+	}
+	result := make([]map[string]any, 0, len(*requests))
+	seen := map[string]struct{}{}
+	for _, ref := range *requests {
+		if string(ref.Kind) != "timeline_clip" || strings.TrimSpace(ref.TimelineClipId) == "" ||
+			strings.TrimSpace(ref.TimelineId) == "" || ref.TimelineVersion < 1 {
+			return nil, errors.New("消息引用字段不完整")
+		}
+		if _, duplicate := seen[ref.TimelineClipId]; duplicate {
+			continue
+		}
+		resolved, err := resolveTimelineClipContext(
+			ctx, server.database, draftID, ref.TimelineId, ref.TimelineVersion, ref.TimelineClipId,
+		)
+		if err != nil {
+			return nil, err
+		}
+		seen[ref.TimelineClipId] = struct{}{}
+		result = append(result, resolved)
+	}
+	return result, nil
+}
+
+func messageContextRefRecord(ref map[string]any) (MessageContextRef, bool) {
+	if stringValue, _ := ref["kind"].(string); stringValue != "timeline_clip" {
+		return MessageContextRef{}, false
+	}
+	stringField := func(key string) string {
+		value, _ := ref[key].(string)
+		return value
+	}
+	intField := func(key string) int {
+		value, _ := intFromJSONNumber(ref[key])
+		return value
+	}
+	return MessageContextRef{
+		Kind: MessageContextRefKind("timeline_clip"), TimelineClipId: stringField("timeline_clip_id"),
+		TimelineId: stringField("timeline_id"), TimelineVersion: intField("timeline_version"),
+		TimelineFps: intField("timeline_fps"),
+		TrackId:     stringField("track_id"), TimelineStartFrame: intField("timeline_start_frame"),
+		TimelineEndFrame: intField("timeline_end_frame"), AssetId: stringField("asset_id"),
+		AssetFilename: stringField("asset_filename"), ShotId: stringField("shot_id"),
+		SemanticName: stringField("semantic_name"), SourceStartFrame: intField("source_start_frame"),
+		SourceEndFrame: intField("source_end_frame"),
+	}, true
 }
 
 func (server *Server) CancelCurrentTurnApiDraftsDraftIdTurnCancelPost(

@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cloudwego/eino/schema"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
 
@@ -86,23 +85,6 @@ func TestHarnessBoundaryTerminalGuardRejectsMissingAndStaleChecks(t *testing.T) 
 }
 
 func TestHarnessBoundaryTraceMetadataInputs(t *testing.T) {
-	index := 7
-	for _, test := range []struct {
-		name string
-		call schema.ToolCall
-		want string
-	}{
-		{name: "id", call: schema.ToolCall{ID: "call-1", Index: &index}, want: "call-1"},
-		{name: "index", call: schema.ToolCall{Index: &index}, want: "idx:7"},
-		{name: "name", call: schema.ToolCall{Function: schema.FunctionCall{Name: "timeline.update"}}, want: "name:timeline.update"},
-	} {
-		t.Run("dedup "+test.name, func(t *testing.T) {
-			if got := lateToolCallDedupKey(test.call); got != test.want {
-				t.Fatalf("got=%q want=%q", got, test.want)
-			}
-		})
-	}
-
 	value := rushestools.PreviewCheckInput{PreviewID: " preview-1 ", Check: " black "}
 	for _, test := range []struct {
 		name        string

@@ -8,12 +8,13 @@ import (
 )
 
 type Message struct {
-	ID        string
-	DraftID   string
-	Role      string
-	Kind      string
-	Content   string
-	CreatedAt string
+	ID          string
+	DraftID     string
+	Role        string
+	Kind        string
+	Content     string
+	ContextRefs []map[string]any
+	CreatedAt   string
 }
 
 var ErrInvalidAgentContextCheckpoint = errors.New("agent context checkpoint 无效")
@@ -36,8 +37,8 @@ func ListMessages(ctx context.Context, query Querier, draftID string, limit int)
 		limit = 200
 	}
 	rows, err := query.QueryContext(ctx, `
-		SELECT message_id,draft_id,role,kind,content,created_at FROM (
-			SELECT m.message_id,m.draft_id,m.role,m.kind,m.content,m.created_at,m.rowid
+		SELECT message_id,draft_id,role,kind,content,context_refs_json,created_at FROM (
+			SELECT m.message_id,m.draft_id,m.role,m.kind,m.content,m.context_refs_json,m.created_at,m.rowid
 			FROM messages m
 			WHERE m.draft_id=? AND m.rewound_at IS NULL AND m.rowid >= COALESCE((
 				SELECT anchor.rowid
@@ -53,7 +54,12 @@ func ListMessages(ctx context.Context, query Querier, draftID string, limit int)
 	messages := []Message{}
 	for rows.Next() {
 		var message Message
-		if err := rows.Scan(&message.ID, &message.DraftID, &message.Role, &message.Kind, &message.Content, &message.CreatedAt); err != nil {
+		var contextRefsJSON string
+		if err := rows.Scan(&message.ID, &message.DraftID, &message.Role, &message.Kind,
+			&message.Content, &contextRefsJSON, &message.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(contextRefsJSON), &message.ContextRefs); err != nil {
 			return nil, err
 		}
 		messages = append(messages, message)
@@ -80,7 +86,7 @@ func ListMessagesAfter(
 		after = *afterMessageID
 	}
 	rows, err := query.QueryContext(ctx, `
-		SELECT m.message_id,m.draft_id,m.role,m.kind,m.content,m.created_at
+		SELECT m.message_id,m.draft_id,m.role,m.kind,m.content,m.context_refs_json,m.created_at
 		FROM messages m
 		WHERE m.draft_id=? AND m.rewound_at IS NULL
 		AND m.rowid >= COALESCE((
@@ -100,10 +106,14 @@ func ListMessagesAfter(
 	messages := []Message{}
 	for rows.Next() {
 		var message Message
+		var contextRefsJSON string
 		if err := rows.Scan(
 			&message.ID, &message.DraftID, &message.Role, &message.Kind,
-			&message.Content, &message.CreatedAt,
+			&message.Content, &contextRefsJSON, &message.CreatedAt,
 		); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(contextRefsJSON), &message.ContextRefs); err != nil {
 			return nil, err
 		}
 		messages = append(messages, message)

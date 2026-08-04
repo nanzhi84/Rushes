@@ -1116,14 +1116,20 @@ func TestCancellationDuringReflectionStillEndsCancelledWithoutTerminalEvents(t *
 	}
 	service.Queue().JoinDraft(draftID)
 
+	previewMessageID := ""
+	discardedPreviewID := ""
 	for {
 		select {
 		case event := <-stream:
 			switch event["type"] {
 			case TurnStreamTurnError:
 				t.Fatalf("反思窗口取消不应发 turn_error：%#v", event)
-			case TurnStreamTextDelta, TurnStreamMessageCompleted:
-				t.Fatalf("反思窗口取消不应泄漏终态正文：%#v", event)
+			case TurnStreamTextDelta:
+				previewMessageID, _ = event["message_id"].(string)
+			case TurnStreamMessageDiscarded:
+				discardedPreviewID, _ = event["message_id"].(string)
+			case TurnStreamMessageCompleted:
+				t.Fatalf("取消后 preview 不得晋升为终态：%#v", event)
 			case TurnStreamTurnEnded:
 				if event["outcome"] != "cancelled" {
 					t.Fatalf("取消终态错误：%#v", event)
@@ -1134,6 +1140,10 @@ func TestCancellationDuringReflectionStillEndsCancelledWithoutTerminalEvents(t *
 				}
 				if len(messages) != 1 || messages[0].Role != "user" {
 					t.Fatalf("取消后不得持久化回复或失败：%#v", messages)
+				}
+				if previewMessageID == "" || discardedPreviewID != previewMessageID {
+					t.Fatalf("取消必须撤销已流出的 preview：preview=%q discarded=%q",
+						previewMessageID, discardedPreviewID)
 				}
 				return
 			}

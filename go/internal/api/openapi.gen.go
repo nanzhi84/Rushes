@@ -244,6 +244,36 @@ func (e MemoryRecordKind) Valid() bool {
 	}
 }
 
+// Defines values for MessageContextRefKind.
+const (
+	MessageContextRefKindTimelineClip MessageContextRefKind = "timeline_clip"
+)
+
+// Valid indicates whether the value is a known member of the MessageContextRefKind enum.
+func (e MessageContextRefKind) Valid() bool {
+	switch e {
+	case MessageContextRefKindTimelineClip:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for MessageContextRefRequestKind.
+const (
+	MessageContextRefRequestKindTimelineClip MessageContextRefRequestKind = "timeline_clip"
+)
+
+// Valid indicates whether the value is a known member of the MessageContextRefRequestKind enum.
+func (e MessageContextRefRequestKind) Valid() bool {
+	switch e {
+	case MessageContextRefRequestKindTimelineClip:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for MessageQueuedResponseKind.
 const (
 	UserMessage MessageQueuedResponseKind = "user_message"
@@ -824,10 +854,43 @@ type MemoryStatementUpdateRequest struct {
 	Statement string `json:"statement"`
 }
 
+// MessageContextRef defines model for MessageContextRef.
+type MessageContextRef struct {
+	AssetFilename      string                `json:"asset_filename"`
+	AssetId            string                `json:"asset_id"`
+	Kind               MessageContextRefKind `json:"kind"`
+	SemanticName       string                `json:"semantic_name"`
+	ShotId             string                `json:"shot_id"`
+	SourceEndFrame     int                   `json:"source_end_frame"`
+	SourceStartFrame   int                   `json:"source_start_frame"`
+	TimelineClipId     string                `json:"timeline_clip_id"`
+	TimelineEndFrame   int                   `json:"timeline_end_frame"`
+	TimelineFps        int                   `json:"timeline_fps"`
+	TimelineId         string                `json:"timeline_id"`
+	TimelineStartFrame int                   `json:"timeline_start_frame"`
+	TimelineVersion    int                   `json:"timeline_version"`
+	TrackId            string                `json:"track_id"`
+}
+
+// MessageContextRefKind defines model for MessageContextRef.Kind.
+type MessageContextRefKind string
+
+// MessageContextRefRequest defines model for MessageContextRefRequest.
+type MessageContextRefRequest struct {
+	Kind            MessageContextRefRequestKind `json:"kind"`
+	TimelineClipId  string                       `json:"timeline_clip_id"`
+	TimelineId      string                       `json:"timeline_id"`
+	TimelineVersion int                          `json:"timeline_version"`
+}
+
+// MessageContextRefRequestKind defines model for MessageContextRefRequest.Kind.
+type MessageContextRefRequestKind string
+
 // MessageCreateRequest defines model for MessageCreateRequest.
 type MessageCreateRequest struct {
-	Content   string  `json:"content"`
-	MessageId *string `json:"message_id,omitempty"`
+	Content     string                      `json:"content"`
+	ContextRefs *[]MessageContextRefRequest `json:"context_refs,omitempty"`
+	MessageId   *string                     `json:"message_id,omitempty"`
 }
 
 // MessageQueuedResponse defines model for MessageQueuedResponse.
@@ -846,11 +909,12 @@ type MessageQueuedResponseStatus string
 
 // MessageRecord defines model for MessageRecord.
 type MessageRecord struct {
-	Content   string `json:"content"`
-	CreatedAt string `json:"created_at"`
-	Kind      string `json:"kind"`
-	MessageId string `json:"message_id"`
-	Role      string `json:"role"`
+	Content     string              `json:"content"`
+	ContextRefs []MessageContextRef `json:"context_refs"`
+	CreatedAt   string              `json:"created_at"`
+	Kind        string              `json:"kind"`
+	MessageId   string              `json:"message_id"`
+	Role        string              `json:"role"`
 }
 
 // MessageResendRequest defines model for MessageResendRequest.

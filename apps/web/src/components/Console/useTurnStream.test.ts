@@ -145,6 +145,64 @@ describe("reduceTurnStream · subagent_progress", () => {
     ]);
   });
 
+  it("工具轮把实时 preview 固化为 narration，并保留在工具行之前", () => {
+    const state = apply([
+      { type: "turn_started", turn_id: "turn_claude_shape" },
+      { type: "text_delta", message_id: "preview_1", kind: "assistant", delta: "我先检查素材。" },
+      {
+        type: "message_completed",
+        message_id: "preview_1",
+        kind: "narration",
+        content: "我先检查素材。"
+      },
+      { type: "tool_step_started", step_id: "step_1", tool: "asset.list_assets" }
+    ]);
+    expect(state.items).toEqual([
+      {
+        type: "message",
+        message_id: "preview_1",
+        kind: "narration",
+        text: "我先检查素材。"
+      },
+      {
+        type: "tool",
+        step_id: "step_1",
+        tool: "asset.list_assets",
+        status: "running",
+        argsSummary: null,
+        observation: null,
+        durationMs: null,
+        progress: null,
+        progressNote: null,
+        harnessOwned: false
+      }
+    ]);
+  });
+
+  it("重试撤销旧 preview，终态用 replaces_message_id 原子晋升新 preview", () => {
+    const state = apply([
+      { type: "turn_started", turn_id: "turn_replace" },
+      { type: "text_delta", message_id: "preview_old", delta: "半截回复" },
+      { type: "message_discarded", message_id: "preview_old" },
+      { type: "text_delta", message_id: "preview_final", delta: "完整回复" },
+      {
+        type: "message_completed",
+        message_id: "message_final",
+        replaces_message_id: "preview_final",
+        kind: "reply",
+        content: "完整回复"
+      }
+    ]);
+    expect(state.items).toEqual([
+      {
+        type: "message",
+        message_id: "message_final",
+        kind: "reply",
+        text: "完整回复"
+      }
+    ]);
+  });
+
   it("不为无素材详情的批次进度创建额外 UI 状态", () => {
     const state = apply([
       { type: "turn_started", turn_id: "turn_1" },

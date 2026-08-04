@@ -409,6 +409,8 @@ func TestAutomaticPreviewQAInterceptedStreamUsageIsAccountedOnce(t *testing.T) {
 	ctx = withTurnBudgetState(ctx, budget)
 	ctx = withTestTurnLeaseSession(t, service, ctx, draftID)
 	ctx = withToolDisclosureSession(ctx)
+	previewSession := newModelStreamPreviewSession(service, draftID, "message_usage")
+	ctx = withModelStreamPreviewSession(ctx, previewSession)
 	ctx = agentexec.WithTurnInteractionState(
 		ctx, agentexec.NewTurnInteractionState(service.indexedResources),
 	)
@@ -426,6 +428,27 @@ func TestAutomaticPreviewQAInterceptedStreamUsageIsAccountedOnce(t *testing.T) {
 	if usage["model_calls"] != 2 || usage["prompt_tokens"] != 300 ||
 		usage["completion_tokens"] != 30 || usage["total_tokens"] != 330 {
 		t.Fatalf("intercepted preview QA usage=%#v", usage)
+	}
+	var previewIDs []string
+	var discardedIDs []string
+	for _, event := range service.Hub().Snapshot(draftID) {
+		switch event["type"] {
+		case TurnStreamTextDelta:
+			messageID, _ := event["message_id"].(string)
+			if len(previewIDs) == 0 || previewIDs[len(previewIDs)-1] != messageID {
+				previewIDs = append(previewIDs, messageID)
+			}
+		case TurnStreamMessageDiscarded:
+			messageID, _ := event["message_id"].(string)
+			discardedIDs = append(discardedIDs, messageID)
+		}
+	}
+	if len(previewIDs) != 2 || len(discardedIDs) != 1 ||
+		discardedIDs[0] != previewIDs[0] || previewSession.candidate() != previewIDs[1] {
+		t.Fatalf(
+			"Stop Gate 继续前未撤销旧 preview：previews=%v discarded=%v current=%q",
+			previewIDs, discardedIDs, previewSession.candidate(),
+		)
 	}
 }
 

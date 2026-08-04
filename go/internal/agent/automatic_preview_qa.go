@@ -323,6 +323,17 @@ func (service *Service) shouldRunAutomaticPreviewQA(
 		check, gateRun, err = service.executeAutomaticTimelineCheck(
 			ctx, draftID, document.TimelineID, previewRequired,
 		)
+		checkedTimelineID := agentexec.InterfaceString(check.Data["timeline_id"])
+		if checkedTimelineID != "" && checkedTimelineID != document.TimelineID {
+			refreshed, refreshErr := timeline.GetByID(
+				ctx, service.database, draftID, checkedTimelineID,
+			)
+			if refreshErr != nil {
+				err = errors.Join(err, refreshErr)
+			} else {
+				document = refreshed
+			}
+		}
 		if err == nil {
 			truth.recordTimelineCheckResult(
 				agentexec.InterfaceString(check.Data["timeline_id"]), check.Status, check,

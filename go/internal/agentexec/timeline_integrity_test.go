@@ -1816,7 +1816,9 @@ func TestBeatAlignmentDataDistinguishesStructureFromBeatSync(t *testing.T) {
 	}}
 	aligned := BeatAlignmentData(document)
 	if aligned["beat_grid_present"] != true || aligned["on_beat_cut_count"] != 2 ||
-		aligned["on_accent_cut_count"] != 2 || aligned["all_cuts_on_beat_grid"] != true {
+		aligned["on_accent_cut_count"] != 2 || aligned["alignment_ratio"] != 1.0 ||
+		aligned["accent_alignment_ratio"] != 1.0 || aligned["all_cuts_on_beat_grid"] != true ||
+		len(aligned["off_accent_cut_frames"].([]int)) != 0 {
 		t.Fatalf("aligned=%#v", aligned)
 	}
 	document.Tracks[4].Clips[0].Effects = nil
@@ -1831,6 +1833,7 @@ func TestBeatAlignmentDataDistinguishesStructureFromBeatSync(t *testing.T) {
 	if metadataAligned["beat_grid_present"] != true ||
 		metadataAligned["on_beat_cut_count"] != 2 ||
 		metadataAligned["on_accent_cut_count"] != 2 ||
+		metadataAligned["accent_alignment_ratio"] != 1.0 ||
 		metadataAligned["all_cuts_on_beat_grid"] != true {
 		t.Fatalf("metadata aligned=%#v", metadataAligned)
 	}
@@ -1848,16 +1851,25 @@ func TestBeatAlignmentDataUsesToleranceAndExcludesContinuousSourceSplits(t *test
 	}
 	document.Tracks[4].Clips = []timeline.Clip{{
 		TrackID: "bgm", AssetID: "music", TimelineEndFrame: 90, SourceEndFrame: 90, PlaybackRate: 1,
-		Effects: []map[string]any{{"kind": "beat_grid", "beat_frames": []int{30, 60}}},
+		Effects: []map[string]any{{
+			"kind": "beat_grid", "beat_frames": []int{30, 60},
+			// 62 is a strong spectral onset but is outside the one-frame beat
+			// tolerance.  It must not independently satisfy the accent contract.
+			"strong_beat_frames": []int{62},
+		}},
 	}}
 
 	alignment := BeatAlignmentData(document)
 	if alignment["cut_count"] != 2 || alignment["on_beat_cut_count"] != 1 ||
-		alignment["alignment_ratio"] != 0.5 {
+		alignment["alignment_ratio"] != 0.5 || alignment["accent_alignment_ratio"] != 0.0 {
 		t.Fatalf("alignment=%#v", alignment)
 	}
 	offBeat, ok := alignment["off_beat_cut_frames"].([]int)
 	if !ok || len(offBeat) != 1 || offBeat[0] != 62 {
 		t.Fatalf("off-beat cuts=%#v alignment=%#v", offBeat, alignment)
+	}
+	offAccent, ok := alignment["off_accent_cut_frames"].([]int)
+	if !ok || len(offAccent) != 2 || offAccent[0] != 31 || offAccent[1] != 62 {
+		t.Fatalf("off-accent cuts=%#v alignment=%#v", offAccent, alignment)
 	}
 }

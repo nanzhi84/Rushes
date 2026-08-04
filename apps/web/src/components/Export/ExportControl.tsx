@@ -1,10 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Download, RotateCcw } from "lucide-react";
-import { useMemo, useState, type ReactElement } from "react";
+import { useMemo, type ReactElement } from "react";
 import { api, type UserExportRecord, type UserExportsResponse } from "../../api/client";
 import { queryKeys } from "../../app/query_client";
-
-type ExportOrientation = "auto" | "portrait" | "landscape";
 
 type ExportControlProps = {
   draftId: string;
@@ -22,7 +20,6 @@ export function ExportControl({
   disabledReason
 }: ExportControlProps): ReactElement {
   const queryClient = useQueryClient();
-  const [orientation, setOrientation] = useState<ExportOrientation>("auto");
   const exportsQuery = useQuery({
     queryKey: queryKeys.exports(draftId),
     queryFn: () => api.listUserExports(draftId),
@@ -33,9 +30,9 @@ export function ExportControl({
   const matchingRecord = useMemo(
     () =>
       records.find(
-        (record) => record.timeline_id === timelineId && record.orientation === orientation
+        (record) => record.timeline_id === timelineId && record.orientation === "auto"
       ) ?? null,
-    [orientation, records, timelineId]
+    [records, timelineId]
   );
   const activeRecord = records.find(isActiveExport) ?? null;
   const historicalSucceeded =
@@ -43,7 +40,7 @@ export function ExportControl({
       (record) =>
         record.status === "succeeded" &&
         record.export_id !== null &&
-      record.timeline_id !== timelineId
+        record.timeline_id !== timelineId
     ) ?? null;
   const historicalRetryable =
     records.find((record) => record.retryable && record.timeline_id !== timelineId) ?? null;
@@ -67,7 +64,7 @@ export function ExportControl({
     mutationFn: () =>
       api.createUserExport(draftId, {
         timeline_id: timelineId ?? "",
-        orientation
+        orientation: "auto"
       }),
     onSuccess: updateRecord
   });
@@ -83,22 +80,6 @@ export function ExportControl({
 
   return (
     <div className="flex min-w-0 items-center gap-1.5" aria-label="最终导出">
-      <label className="sr-only" htmlFor={`export-orientation-${draftId}`}>
-        导出画幅
-      </label>
-      <select
-        id={`export-orientation-${draftId}`}
-        aria-label="导出画幅"
-        className="h-7 rounded-sm border border-line-strong bg-panel px-1.5 text-2xs text-fg outline-none focus:border-accent disabled:opacity-40"
-        value={orientation}
-        disabled={disabled || mutationPending || active}
-        onChange={(event) => setOrientation(event.target.value as ExportOrientation)}
-      >
-        <option value="auto">自动画幅</option>
-        <option value="portrait">竖屏</option>
-        <option value="landscape">横屏</option>
-      </select>
-
       {historicalSucceeded && displayedRecord === historicalSucceeded && timelineVersion ? (
         <span
           className="max-w-44 truncate text-2xs text-fg-muted"
@@ -145,7 +126,7 @@ export function ExportControl({
           title={actionDisabled ? disabledReason : undefined}
           onClick={() => createMutation.mutate()}
         >
-          {mutationPending ? "提交中" : timelineVersion ? `导出 v${timelineVersion}` : "导出"}
+          {mutationPending ? "提交中" : "导出"}
         </button>
       )}
     </div>

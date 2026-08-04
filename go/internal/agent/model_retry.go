@@ -144,8 +144,14 @@ func (retry *timeoutRetryChatModel) Stream(
 	messages := input
 	for completedRetries := 0; ; {
 		callStart := time.Now()
+		preview := modelStreamPreviewFromContext(ctx)
+		previewMessageID := ""
+		if preview != nil {
+			previewMessageID = preview.begin()
+		}
 		stream, err := retry.inner.Stream(ctx, messages, options...)
 		if err != nil {
+			preview.discard(previewMessageID)
 			completedRetries, messages, err = retry.nextAttempt(ctx, input, completedRetries, err)
 			if err != nil {
 				return nil, err
@@ -153,65 +159,32 @@ func (retry *timeoutRetryChatModel) Stream(
 			continue
 		}
 
-		// 责任分界（#95 H5）：用一个流副本探测本轮类别，另一副本留给下游消费。
-		// 工具调用轮必须完整缓冲——供应商常先发空增量、思考增量或未闭合 tool_call 再超时，
-		// 把这些前导当副作用会让超时绕过重试，正是长 ASR 结果后任务静止的原因；完整缓冲后
-		// 中途失败的响应尚未离开此边界，可以安全丢弃、压缩输入并重试。终态文本轮则一旦出现
-		// 可见正文即交给下游终态消费者；已交付的 provider 流无法在此层重放，
-		// 故越过该点不再重试（按
-		// 现有 turn_error 处理）。分类规则与 stream_checker.go 的 FullStreamToolCallChecker
-		// 同源（classifyModelChunk），保证 Stream 直通与 checker 路由逐块一致。
-		copies := stream.Copy(2)
-		probe, downstream := copies[0], copies[1]
-		signal, probeErr := probeModelRound(probe)
-		if probeErr != nil {
-			// 只有在越过直通承诺点之前（仍在前导分片）才会到这：安全丢弃、压缩后重试。
-			downstream.Close()
-			completedRetries, messages, probeErr = retry.nextAttempt(ctx, input, completedRetries, probeErr)
-			if probeErr != nil {
-				return nil, probeErr
+		// provider 分片一边进入可撤销 UI preview，一边在模型边界完整缓冲。只有读到 EOF 后
+		// 才能可靠判断同一消息最终是 tool_use 还是 end_turn；这样兼容 Claude/Qwen 合法的
+		// “先正文、后 tool_call”流式形态。中途断流时 preview 会撤销，完整响应尚未交给图，
+		// 因而仍可安全压缩输入并重试，不会重复执行工具。
+		buffered, bufferErr := bufferCompleteModelStream(stream, func(message *schema.Message) {
+			if preview != nil && message != nil && message.Content != "" {
+				preview.delta(previewMessageID, message.Content)
+			}
+		})
+		if bufferErr != nil {
+			preview.discard(previewMessageID)
+			completedRetries, messages, bufferErr = retry.nextAttempt(ctx, input, completedRetries, bufferErr)
+			if bufferErr != nil {
+				return nil, bufferErr
 			}
 			continue
 		}
-		if signal == modelRoundSignalToolCall {
-			buffered, bufferErr := bufferCompleteModelStream(downstream)
-			if bufferErr != nil {
-				completedRetries, messages, bufferErr = retry.nextAttempt(ctx, input, completedRetries, bufferErr)
-				if bufferErr != nil {
-					return nil, bufferErr
-				}
-				continue
-			}
-			observeModelCall(ctx, time.Since(callStart).Milliseconds())
-			if response, concatErr := schema.ConcatMessages(buffered); concatErr == nil {
-				recordModelResponseUsage(ctx, response)
-			}
-			return schema.StreamReaderFromArray(buffered), nil
-		}
-		// 终态文本轮交给 downstream：副本仍从流首开始（含已 peek 的前导与首个正文，后续为
-		// live 流），用量随末片抵达、由消费端 streamAgent 统计，故此处不缓冲、不记账、不再重试。
 		observeModelCall(ctx, time.Since(callStart).Milliseconds())
-		return downstream, nil
-	}
-}
-
-// probeModelRound 消费一个模型流副本，直到能判定本轮是工具调用轮还是终态文本轮：命中首个
-// tool_call 或首个可见正文即返回；整流读尽（EOF）仍未见二者时按终态文本轮处理（空回复）。
-// 返回错误只会发生在前导分片阶段——判定一旦确定即返回、不再往后读——因此调用方可据此安全
-// 重试。分类与 stream_checker.go 同源（classifyModelChunk）。
-func probeModelRound(stream *schema.StreamReader[*schema.Message]) (modelRoundSignal, error) {
-	defer stream.Close()
-	for {
-		message, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return modelRoundSignalText, nil
+		response, concatErr := schema.ConcatMessages(buffered)
+		if concatErr != nil {
+			preview.discard(previewMessageID)
+			return nil, concatErr
 		}
-		if err != nil {
-			return modelRoundSignalNone, err
-		}
-		if signal := classifyModelChunk(message); signal != modelRoundSignalNone {
-			return signal, nil
-		}
+		recordModelResponseUsage(ctx, response)
+		preview.complete(ctx, previewMessageID, response)
+		return schema.StreamReaderFromArray(buffered), nil
 	}
 }
 
@@ -227,9 +200,8 @@ func messageTokenUsage(message *schema.Message) *schema.TokenUsage {
 	return message.ResponseMeta.Usage
 }
 
-// recordTokenUsage 把一次模型响应的 token 用量计入回合预算。工具调用轮由 Stream 内的
-// recordModelResponseUsage 记账，终态文本轮则由完整读取并缓冲它的消费端
-// streamAgent 在读到末片后调用本函数记账，二者各对本轮记一次、互不重复。
+// recordTokenUsage 把一次完整模型响应的 token 用量计入回合预算。Generate 与 Stream 都在
+// timeoutRetryChatModel 的成功消息边界各记一次；下游消费者不得重复记账。
 func recordTokenUsage(ctx context.Context, usage *schema.TokenUsage) {
 	if usage == nil {
 		return
@@ -241,6 +213,7 @@ func recordTokenUsage(ctx context.Context, usage *schema.TokenUsage) {
 
 func bufferCompleteModelStream(
 	stream *schema.StreamReader[*schema.Message],
+	onMessage func(*schema.Message),
 ) ([]*schema.Message, error) {
 	if stream == nil {
 		return nil, errors.New("模型返回了空流")
@@ -257,6 +230,9 @@ func bufferCompleteModelStream(
 		}
 		if message != nil {
 			buffered = append(buffered, message)
+			if onMessage != nil {
+				onMessage(message)
+			}
 		}
 	}
 }

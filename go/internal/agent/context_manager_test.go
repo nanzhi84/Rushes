@@ -93,6 +93,28 @@ func TestContextManagerKeepsReferenceSnapshotAndInjectsObjectiveMergePatch(t *te
 	}
 }
 
+func TestUserMessageContentInjectsCanonicalTimelineClipContext(t *testing.T) {
+	content := userMessageContentWithContext("把这段放到高潮", []map[string]any{{
+		"kind": "timeline_clip", "timeline_clip_id": "clip_v12_007",
+		"timeline_id": "draft_context:v12", "timeline_version": float64(12),
+		"track_id": "visual_base", "timeline_start_frame": float64(615),
+		"timeline_end_frame": float64(705), "asset_id": "asset_internal",
+		"asset_filename": "海边混剪-05.mov", "shot_id": "shot_stable_5",
+		"semantic_name": "海边日落人物", "source_start_frame": float64(90),
+		"source_end_frame": float64(180),
+	}})
+
+	for _, expected := range []string{
+		"海边日落人物", "timeline_clip_id=clip_v12_007", "timeline_id=draft_context:v12",
+		"timeline_version=12", "timeline=615-705 帧", "asset_id=asset_internal",
+		"shot_id=shot_stable_5", "source=90-180 帧", "【用户指令】\n把这段放到高潮",
+	} {
+		if !strings.Contains(content, expected) {
+			t.Fatalf("context missing %q: %s", expected, content)
+		}
+	}
+}
+
 func TestContextManagerRebasesOversizedWorldStatePatch(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)

@@ -10,11 +10,13 @@ import {
   useState
 } from "react";
 import type { ReactElement } from "react";
-import { ArrowUp, MessageSquareX, Square } from "lucide-react";
+import { ArrowUp, MessageSquareX, Square, X } from "lucide-react";
 import {
   api,
   type AffectedMemory,
   type DecisionAnswer,
+  type MessageContextRef,
+  type MessageContextRefRequest,
   type MessageRecord
 } from "../../api/client";
 import { DRAFT_EVENT_TYPES } from "../../api/event_types";
@@ -60,6 +62,14 @@ export type ConsolePanelProps = {
   highlightedMessageId: string | null;
   onConnectionStateChange: (state: ConsoleConnectionState) => void;
   onTurnBusyChange: (busy: boolean) => void;
+  selectedContext?: MessageContextRef | null;
+  onContextDismiss?: () => void;
+  onContextConsumed?: () => void;
+};
+
+type PostMessageVariables = {
+  content: string;
+  contextRefs: MessageContextRef[];
 };
 
 type ConversationHistory = {
@@ -74,7 +84,16 @@ type ConversationHistory = {
  */
 export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
   function ConsolePanel(
-    { draftId, chatPanelWidth, highlightedMessageId, onConnectionStateChange, onTurnBusyChange },
+    {
+      draftId,
+      chatPanelWidth,
+      highlightedMessageId,
+      onConnectionStateChange,
+      onTurnBusyChange,
+      selectedContext = null,
+      onContextDismiss,
+      onContextConsumed
+    },
     ref
   ): ReactElement {
     const queryClient = useQueryClient();
@@ -95,7 +114,9 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
       queryFn: async () => {
         const response = await api.getDraftMessages(draftId);
         return {
-          messages: response.messages.map(toConsoleMessage),
+          messages: response.messages
+            .filter((message) => message.kind !== "context_reset")
+            .map(toConsoleMessage),
           rewoundMessageCount: response.rewound_message_count
         };
       },
@@ -153,7 +174,6 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
             queryClient.invalidateQueries({ queryKey: ["timeline", draftId] }),
             queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
             queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
-            queryClient.invalidateQueries({ queryKey: queryKeys.costs(draftId) }),
             queryClient.invalidateQueries({ queryKey: queryKeys.materials(draftId) })
           ]);
         }, 80);
@@ -251,8 +271,12 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
     }, [historyMessages, liveItemIdsKey]);
 
     const postMessage = useMutation({
-      mutationFn: (content: string) => api.postMessage(draftId, { content }),
-      onMutate: async (content) => {
+      mutationFn: ({ content, contextRefs }: PostMessageVariables) =>
+        api.postMessage(draftId, {
+          content,
+          context_refs: contextRefs.map(messageContextRequest)
+        }),
+      onMutate: async ({ content, contextRefs }) => {
         setAwaitingTurnEnd(true);
         await queryClient.cancelQueries({ queryKey: queryKeys.messages(draftId) });
         optimisticMessageSequenceRef.current += 1;
@@ -260,6 +284,7 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
           id: `local_${Date.now()}_${optimisticMessageSequenceRef.current}`,
           role: "user",
           content,
+          contextRefs,
           createdAt: new Date().toISOString()
         };
         queryClient.setQueryData<ConversationHistory>(queryKeys.messages(draftId), (current) => ({
@@ -267,6 +292,7 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
           rewoundMessageCount: current?.rewoundMessageCount ?? 0
         }));
       },
+      onSuccess: () => onContextConsumed?.(),
       onError: () => setAwaitingTurnEnd(false)
     });
 
@@ -392,7 +418,9 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
       onMutate: () => setConversationError(null),
       onSuccess: async () => {
         setDraft("");
+        resetTurnStream();
         setStructuredItems([]);
+        setAffectedMemories([]);
         await Promise.all([
           queryClient.invalidateQueries({ queryKey: queryKeys.messages(draftId) }),
           queryClient.invalidateQueries({ queryKey: queryKeys.currentDecision(draftId) }),
@@ -422,8 +450,12 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
     const turnBusy = awaitingTurnEnd || turnActive;
     const submitMessage = useCallback(
       (content: string) => {
-        postMessage.mutate(content);
+        postMessage.mutate({ content, contextRefs: selectedContext ? [selectedContext] : [] });
       },
+      [postMessage, selectedContext]
+    );
+    const submitWithoutContext = useCallback(
+      (content: string) => postMessage.mutate({ content, contextRefs: [] }),
       [postMessage]
     );
     const handleAnswerDecision = useCallback(
@@ -487,7 +519,7 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
     useEffect(() => {
       onTurnBusyChange(turnBusy);
     }, [onTurnBusyChange, turnBusy]);
-    useImperativeHandle(ref, () => ({ submit: submitMessage }), [submitMessage]);
+    useImperativeHandle(ref, () => ({ submit: submitWithoutContext }), [submitWithoutContext]);
 
     const [memorySettingsOpen, setMemorySettingsOpen] = useState(false);
     const openMemorySettings = useCallback(() => setMemorySettingsOpen(true), []);
@@ -509,14 +541,18 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
           <div className="flex items-center gap-2">
             <button
               type="button"
-              className="inline-flex h-6 items-center gap-1 rounded-sm px-1.5 text-2xs text-fg-faint hover:bg-hover hover:text-fg disabled:opacity-35"
+              className="inline-flex h-6 items-center gap-1 rounded-sm border border-line px-2 text-2xs text-fg-muted hover:border-line-strong hover:bg-hover hover:text-fg disabled:cursor-not-allowed disabled:border-transparent disabled:text-fg-faint disabled:opacity-35"
               aria-label="清空对话上下文"
-              title="清空对话；保留素材与时间线"
+              title={
+                turnBusy
+                  ? "当前任务结束后可清空聊天"
+                  : "清空聊天记录；保留素材、时间线和预览"
+              }
               disabled={turnBusy || clearConversation.isPending}
               onClick={handleClearConversation}
             >
               <MessageSquareX size={12} strokeWidth={1.7} aria-hidden />
-              清空
+              清空聊天
             </button>
             <span className="inline-flex items-center gap-1.5 text-2xs text-fg-faint">
               <span
@@ -601,6 +637,22 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
             submitComposer();
           }}
         >
+          {selectedContext ? (
+            <div className="mb-2 flex items-center gap-2 rounded-md border border-accent/35 bg-accent/8 px-2.5 py-1.5 text-2xs text-fg-muted">
+              <span className="shrink-0 font-medium text-accent-strong">已引用</span>
+              <span className="min-w-0 flex-1 truncate" title={messageContextLabel(selectedContext)}>
+                {messageContextLabel(selectedContext)}
+              </span>
+              <button
+                type="button"
+                className="grid size-5 shrink-0 place-items-center rounded-sm text-fg-faint hover:bg-hover hover:text-fg"
+                aria-label="移除片段引用"
+                onClick={onContextDismiss}
+              >
+                <X size={12} aria-hidden />
+              </button>
+            </div>
+          ) : null}
           <div className="overflow-hidden rounded-md border border-line-strong bg-raised focus-within:border-accent">
             <textarea
               aria-label="消息输入"
@@ -665,12 +717,30 @@ export const ConsolePanel = forwardRef<ConsolePanelHandle, ConsolePanelProps>(
   }
 );
 
+function messageContextRequest(context: MessageContextRef): MessageContextRefRequest {
+  return {
+    kind: "timeline_clip",
+    timeline_clip_id: context.timeline_clip_id,
+    timeline_id: context.timeline_id,
+    timeline_version: context.timeline_version
+  };
+}
+
+function messageContextLabel(context: MessageContextRef): string {
+  const name = context.semantic_name || context.asset_filename || context.timeline_clip_id;
+  const fps = context.timeline_fps > 0 ? context.timeline_fps : 30;
+  const start = (context.timeline_start_frame / fps).toFixed(2);
+  const end = (context.timeline_end_frame / fps).toFixed(2);
+  return `${name} · ${start}–${end} 秒`;
+}
+
 export function toConsoleMessage(message: MessageRecord): ConsoleMessage {
   return {
     id: message.message_id,
     role: normalizeConsoleRole(message.role),
     kind: message.kind,
     content: message.content,
+    contextRefs: message.context_refs,
     createdAt: message.created_at
   };
 }

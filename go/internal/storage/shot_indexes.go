@@ -32,6 +32,7 @@ type IndexedShot struct {
 	BoundaryConfidence   *float64
 	LineageParentShotID  *string
 	RepresentativeFrames []map[string]any
+	SemanticName         string
 	Description          string
 	Tags                 []string
 	Subjects             []string
@@ -105,7 +106,7 @@ func ListShotIndexShots(
 	rows, err := query.QueryContext(ctx, `
 		SELECT index_snapshot_id,shot_id,asset_content_hash,source_start_frame,
 			source_end_frame,boundary_version,boundary_kind,boundary_confidence,
-			lineage_parent_shot_id,representative_frames_json,description,tags_json,
+			lineage_parent_shot_id,representative_frames_json,semantic_name,description,tags_json,
 			subjects_json,actions_json,setting_json,shot_scale,composition,lighting_json,
 			mood_json,edit_hints_json,quality_json,search_text,search_tokens_json,
 			deep_coverage_json
@@ -125,7 +126,7 @@ func ListShotIndexShots(
 		if err := rows.Scan(
 			&shot.SnapshotID, &shot.ShotID, &shot.AssetContentHash,
 			&shot.SourceStartFrame, &shot.SourceEndFrame, &shot.BoundaryVersion,
-			&shot.BoundaryKind, &confidence, &parent, &framesJSON, &shot.Description,
+			&shot.BoundaryKind, &confidence, &parent, &framesJSON, &shot.SemanticName, &shot.Description,
 			&tagsJSON, &subjectsJSON, &actionsJSON, &settingJSON, &shot.ShotScale,
 			&shot.Composition, &lightingJSON, &moodJSON, &hintsJSON, &qualityJSON,
 			&shot.SearchText, &tokensJSON, &coverageJSON,
@@ -158,6 +159,86 @@ func ListShotIndexShots(
 			return nil, err
 		}
 		result = append(result, shot)
+	}
+	return result, rows.Err()
+}
+
+type DraftIndexedShot struct {
+	AssetID  string
+	Filename string
+	Shot     IndexedShot
+}
+
+// ListReadyIndexedShotsForDraft returns every ready base-index shot in one query
+// so the timeline polling endpoint can annotate clips without an N+1 query loop.
+func ListReadyIndexedShotsForDraft(
+	ctx context.Context,
+	query Querier,
+	draftID string,
+) ([]DraftIndexedShot, error) {
+	rows, err := query.QueryContext(ctx, `
+		SELECT a.asset_id,a.filename,s.index_snapshot_id,s.shot_id,s.asset_content_hash,
+			s.source_start_frame,s.source_end_frame,s.boundary_version,s.boundary_kind,
+			s.boundary_confidence,s.lineage_parent_shot_id,s.representative_frames_json,
+			s.semantic_name,s.description,s.tags_json,s.subjects_json,s.actions_json,
+			s.setting_json,s.shot_scale,s.composition,s.lighting_json,s.mood_json,
+			s.edit_hints_json,s.quality_json,s.search_text,s.search_tokens_json,
+			s.deep_coverage_json
+		FROM draft_asset_links l
+		JOIN assets a ON a.asset_id=l.asset_id
+		JOIN shot_index_snapshots i ON i.asset_content_hash=a.hash AND i.status='ready'
+		JOIN shots s ON s.index_snapshot_id=i.index_snapshot_id
+		WHERE l.draft_id=?
+		ORDER BY a.asset_id,s.source_start_frame,s.source_end_frame,s.shot_id`, draftID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	result := []DraftIndexedShot{}
+	for rows.Next() {
+		var item DraftIndexedShot
+		var shot IndexedShot
+		var confidence sql.NullFloat64
+		var parent sql.NullString
+		var framesJSON, tagsJSON, subjectsJSON, actionsJSON, settingJSON string
+		var lightingJSON, moodJSON, hintsJSON, qualityJSON, tokensJSON, coverageJSON string
+		if err := rows.Scan(
+			&item.AssetID, &item.Filename, &shot.SnapshotID, &shot.ShotID,
+			&shot.AssetContentHash, &shot.SourceStartFrame, &shot.SourceEndFrame,
+			&shot.BoundaryVersion, &shot.BoundaryKind, &confidence, &parent, &framesJSON,
+			&shot.SemanticName, &shot.Description, &tagsJSON, &subjectsJSON, &actionsJSON,
+			&settingJSON, &shot.ShotScale, &shot.Composition, &lightingJSON, &moodJSON,
+			&hintsJSON, &qualityJSON, &shot.SearchText, &tokensJSON, &coverageJSON,
+		); err != nil {
+			return nil, err
+		}
+		if confidence.Valid {
+			value := confidence.Float64
+			shot.BoundaryConfidence = &value
+		}
+		shot.LineageParentShotID = stringPointer(parent)
+		if err := decodeShotJSON(framesJSON, &shot.RepresentativeFrames); err != nil {
+			return nil, err
+		}
+		for _, value := range []struct {
+			raw         string
+			destination *[]string
+		}{
+			{tagsJSON, &shot.Tags}, {subjectsJSON, &shot.Subjects},
+			{actionsJSON, &shot.Actions}, {settingJSON, &shot.Setting},
+			{lightingJSON, &shot.Lighting}, {moodJSON, &shot.Mood},
+			{hintsJSON, &shot.EditHints}, {tokensJSON, &shot.SearchTokens},
+			{coverageJSON, &shot.DeepCoverage},
+		} {
+			if err := decodeShotJSON(value.raw, value.destination); err != nil {
+				return nil, err
+			}
+		}
+		if err := decodeShotJSON(qualityJSON, &shot.Quality); err != nil {
+			return nil, err
+		}
+		item.Shot = shot
+		result = append(result, item)
 	}
 	return result, rows.Err()
 }

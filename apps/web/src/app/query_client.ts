@@ -30,6 +30,5 @@ export const queryKeys = {
   exports: (draftId: string) => ["exports", draftId] as const,
   messages: (draftId: string) => ["messages", draftId] as const,
   currentDecision: (draftId: string) => ["current-decision", draftId] as const,
-  pendingDecisions: (draftId: string) => ["pending-decisions", draftId] as const,
-  costs: (draftId: string) => ["costs", draftId] as const
+  pendingDecisions: (draftId: string) => ["pending-decisions", draftId] as const
 };

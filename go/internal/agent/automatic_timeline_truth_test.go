@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -8,9 +9,204 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 	"github.com/nanzhi84/Rushes/go/internal/agenttest"
+	"github.com/nanzhi84/Rushes/go/internal/contracts"
+	"github.com/nanzhi84/Rushes/go/internal/reducer"
 	"github.com/nanzhi84/Rushes/go/internal/timeline"
 	rushestools "github.com/nanzhi84/Rushes/go/internal/tools"
 )
+
+func TestStopGateAutomaticallyCoalescesRenderEquivalentSplitResidue(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const draftID = "draft_stop_gate_coalesce"
+	agenttest.CreateAgentDraft(t, database, draftID)
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+
+	document := timeline.Empty(draftID, 1)
+	document.DurationFrames = 60
+	document.Tracks[0].Clips = []timeline.Clip{
+		{
+			TimelineClipID: "clip_continuous", TrackID: "visual_base",
+			AssetID: "asset_video", AssetKind: "video", Role: "b_roll",
+			TimelineStartFrame: 0, TimelineEndFrame: 30,
+			SourceStartFrame: 200, SourceEndFrame: 230, PlaybackRate: 1,
+		},
+		{
+			TimelineClipID: "clip_continuous_split_30", TrackID: "visual_base",
+			AssetID: "asset_video", AssetKind: "video", Role: "b_roll",
+			TimelineStartFrame: 30, TimelineEndFrame: 60,
+			SourceStartFrame: 230, SourceEndFrame: 260, PlaybackRate: 1,
+		},
+	}
+	if _, err = seedTimelineVersion(service, t.Context(), draftID, document, "fixture", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	truth := newTerminalTimelineTruthState()
+	truth.recordMutationTimelineID(document.TimelineID)
+	state := newAutomaticPreviewQAState()
+	ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
+	ctx = withTerminalTimelineTruthState(ctx, truth)
+	ctx = withAutomaticPreviewQAState(ctx, state)
+	shouldRun, err := service.shouldRunAutomaticPreviewQA(
+		ctx,
+		[]*schema.Message{schema.UserMessage("整理当前时间线结构")},
+		schema.AssistantMessage("结构检查结果如下。", nil),
+	)
+	if err != nil || shouldRun {
+		t.Fatalf("should_run=%v err=%v", shouldRun, err)
+	}
+
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.Version != 2 || len(latest.Tracks[0].Clips) != 1 {
+		t.Fatalf("latest=%s clips=%#v", latest.TimelineID, latest.Tracks[0].Clips)
+	}
+	merged := latest.Tracks[0].Clips[0]
+	if merged.TimelineClipID != "clip_continuous" || merged.TimelineEndFrame != 60 ||
+		merged.SourceEndFrame != 260 {
+		t.Fatalf("merged=%#v", merged)
+	}
+	snapshot := truth.snapshot()
+	if snapshot.mutationTimelineID != latest.TimelineID ||
+		snapshot.checkTimelineID != latest.TimelineID ||
+		snapshot.checkStatus != string(rushestools.StatusSucceeded) {
+		t.Fatalf("truth=%#v", snapshot)
+	}
+
+	var origin, operationsJSON, affectedRefsJSON string
+	var beforeVersion, afterVersion int
+	err = database.Read().QueryRowContext(t.Context(), `
+		SELECT origin,operations_json,before_version,after_version,affected_refs_json
+		FROM timeline_edit_batches WHERE draft_id=? ORDER BY rowid DESC LIMIT 1`, draftID,
+	).Scan(&origin, &operationsJSON, &beforeVersion, &afterVersion, &affectedRefsJSON)
+	if err != nil && err != sql.ErrNoRows {
+		t.Fatal(err)
+	}
+	if err == sql.ErrNoRows || origin != "harness" || beforeVersion != 1 || afterVersion != 2 ||
+		!strings.Contains(operationsJSON, "merge_redundant_adjacent_clips") ||
+		!strings.Contains(operationsJSON, "clip_continuous_split_30") ||
+		!strings.Contains(affectedRefsJSON, "timeline_clip_id:clip_continuous") ||
+		!strings.Contains(affectedRefsJSON, "timeline_clip_id:clip_continuous_split_30") {
+		t.Fatalf("audit origin=%q before=%d after=%d operations=%s affected=%s err=%v",
+			origin, beforeVersion, afterVersion, operationsJSON, affectedRefsJSON, err)
+	}
+}
+
+func TestStopGateRepairsShortSameShotSourceOverlap(t *testing.T) {
+	database := agenttest.AgentTestDatabase(t)
+	const (
+		draftID = "draft_stop_gate_overlap"
+		assetID = "asset_wet_sand"
+		shotID  = "shot_wet_sand"
+	)
+	agenttest.CreateAgentDraft(t, database, draftID)
+	result, err := reducer.Apply(t.Context(), database, []contracts.Event{
+		{Type: "AssetImported", Payload: map[string]any{
+			"asset_id": assetID, "job_id": "job_wet_sand", "storage_mode": "reference",
+			"reference_path": "/tmp/wet-sand.mov", "kind": "video", "source": "local_path",
+			"filename": "海岸线.mov", "hash": "wet-sand-content", "size": 1,
+			"probe": map[string]any{"duration_sec": 22.0}, "ingest_status": "ready",
+		}},
+		{Type: "AssetLinked", DraftID: draftID, Payload: map[string]any{"asset_id": assetID}},
+	}, reducer.Options{Actor: contracts.ActorUser})
+	if err != nil || result.Status != reducer.StatusApplied {
+		t.Fatalf("asset result=%#v err=%v", result, err)
+	}
+	if _, err = database.Write().ExecContext(t.Context(), `
+		INSERT INTO shot_index_snapshots(
+			index_snapshot_id,asset_content_hash,generation,analyzer_version,
+			output_schema_version,source_asset_id,status,summary_json,created_at,published_at
+		) VALUES('snapshot_wet_sand','wet-sand-content',1,'test-v6',2,?,'ready','{}',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, assetID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = database.Write().ExecContext(t.Context(), `
+		INSERT INTO shots(
+			index_snapshot_id,shot_id,asset_content_hash,source_start_frame,source_end_frame,
+			boundary_version,boundary_kind,representative_frames_json,description,tags_json,
+			subjects_json,actions_json,setting_json,shot_scale,composition,lighting_json,
+			mood_json,edit_hints_json,quality_json,search_text,search_tokens_json,
+			deep_coverage_json,created_at,semantic_name
+		) VALUES(
+			'snapshot_wet_sand',?,'wet-sand-content',165,331,1,'visual_cut','[]',
+			'海水退去露出湿沙滩','[]','[]','[]','[]','全景','居中','[]','[]','[]','{}',
+			'海岸线 湿沙滩 潮水退去','["海岸线","湿沙滩"]','[]',CURRENT_TIMESTAMP,
+			'海岸线·湿沙滩·潮水退去'
+		)`, shotID); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(t.Context(), database, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(service.Close)
+	document := timeline.Empty(draftID, 1)
+	document.DurationFrames = 190
+	document.Tracks[0].Clips = []timeline.Clip{
+		{
+			TimelineClipID: "clip_wet_sand_left", TrackID: "visual_base",
+			AssetID: assetID, AssetKind: "video", Role: "b_roll",
+			TimelineStartFrame: 0, TimelineEndFrame: 67,
+			SourceStartFrame: 159, SourceEndFrame: 226, PlaybackRate: 1,
+		},
+		{
+			TimelineClipID: "clip_wet_sand_right", TrackID: "visual_base",
+			AssetID: assetID, AssetKind: "video", Role: "b_roll",
+			TimelineStartFrame: 67, TimelineEndFrame: 190,
+			SourceStartFrame: 200, SourceEndFrame: 323, PlaybackRate: 1,
+		},
+	}
+	if _, err = seedTimelineVersion(service, t.Context(), draftID, document, "overlap_fixture", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	truth := newTerminalTimelineTruthState()
+	truth.recordMutationTimelineID(document.TimelineID)
+	state := newAutomaticPreviewQAState()
+	ctx := withTestTurnLeaseSession(t, service, t.Context(), draftID)
+	ctx = withTerminalTimelineTruthState(ctx, truth)
+	ctx = withAutomaticPreviewQAState(ctx, state)
+	shouldRun, err := service.shouldRunAutomaticPreviewQA(
+		ctx,
+		[]*schema.Message{schema.UserMessage("整理同一镜头的重复源帧")},
+		schema.AssistantMessage("结构检查结果如下。", nil),
+	)
+	if err != nil || shouldRun {
+		t.Fatalf("should_run=%v err=%v", shouldRun, err)
+	}
+	latest, err := timeline.Latest(t.Context(), database, draftID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.Version != 2 || len(latest.Tracks[0].Clips) != 1 {
+		t.Fatalf("latest=%s clips=%#v", latest.TimelineID, latest.Tracks[0].Clips)
+	}
+	merged := latest.Tracks[0].Clips[0]
+	if merged.SourceStartFrame != 159 || merged.SourceEndFrame != 349 ||
+		merged.TimelineStartFrame != 0 || merged.TimelineEndFrame != 190 {
+		t.Fatalf("merged=%#v", merged)
+	}
+	var operationsJSON string
+	if err = database.Read().QueryRowContext(t.Context(), `
+		SELECT operations_json FROM timeline_edit_batches
+		WHERE draft_id=? ORDER BY rowid DESC LIMIT 1`, draftID,
+	).Scan(&operationsJSON); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"same_shot_overlap_repair", `"source_overlap_frames":26`,
+		`"normalized_source_end_frame":349`, shotID,
+	} {
+		if !strings.Contains(operationsJSON, expected) {
+			t.Fatalf("audit missing %q: %s", expected, operationsJSON)
+		}
+	}
+}
 
 // A successful atomic edit must reach the model unchanged. Full content validation
 // belongs to the Stop Gate, not the post-tool middleware path.

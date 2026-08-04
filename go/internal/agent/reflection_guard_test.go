@@ -157,9 +157,9 @@ func (stub *reflectionLeakTurnModel) Stream(
 	return schema.StreamReaderFromArray([]*schema.Message{stub.reply(messages)}), nil
 }
 
-// 终态正文先缓冲并完成真值/反思门禁，因此 text_delta、message_completed 与持久化正文
-// 都只能出现重述后的干净版本。
-func TestReflectionLeakTurnStreamsOnlyRestatedReply(t *testing.T) {
+// provider 正文实时作为可撤销 preview；反思门禁重述后，message_completed 用
+// replaces_message_id 原子替换 preview，持久化仍只有干净终态。
+func TestReflectionLeakTurnReplacesStreamedPreviewWithRestatedReply(t *testing.T) {
 	t.Parallel()
 	database := agenttest.AgentTestDatabase(t)
 	agenttest.CreateAgentDraft(t, database, "draft_reflect")
@@ -178,6 +178,7 @@ func TestReflectionLeakTurnStreamsOnlyRestatedReply(t *testing.T) {
 
 	var deltas strings.Builder
 	completedContent := ""
+	replacesMessageID := ""
 	reflectionRestated := false
 	for {
 		select {
@@ -189,6 +190,7 @@ func TestReflectionLeakTurnStreamsOnlyRestatedReply(t *testing.T) {
 				}
 			case "message_completed":
 				completedContent, _ = event["content"].(string)
+				replacesMessageID, _ = event["replaces_message_id"].(string)
 			case "turn_ended":
 				if value, ok := event["reflection_restated"].(bool); ok {
 					reflectionRestated = value
@@ -200,8 +202,9 @@ func TestReflectionLeakTurnStreamsOnlyRestatedReply(t *testing.T) {
 		}
 	}
 done:
-	if deltas.String() != completedContent || strings.Contains(deltas.String(), "但等等") {
-		t.Fatalf("text_delta 只能流出重述版: deltas=%q completed=%q", deltas.String(), completedContent)
+	if !strings.Contains(deltas.String(), "但等等") || replacesMessageID == "" {
+		t.Fatalf("原始 preview 应实时出现并被终态替换: deltas=%q completed=%q replaces=%q",
+			deltas.String(), completedContent, replacesMessageID)
 	}
 	if completedContent == "" || strings.Contains(completedContent, "但等等") {
 		t.Fatalf("message_completed 应为重述版(无反思): %q", completedContent)

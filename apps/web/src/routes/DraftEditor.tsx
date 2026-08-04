@@ -1,7 +1,17 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { startTransition, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import {
+  startTransition,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState
+} from "react";
 import type { ReactElement } from "react";
+import { createPortal } from "react-dom";
 import {
   Captions,
   Crop,
@@ -9,6 +19,7 @@ import {
   Link2,
   ListPlus,
   Magnet,
+  MessageSquarePlus,
   MousePointer2,
   Pencil,
   Replace,
@@ -23,6 +34,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   api,
   type MaterialAsset,
+  type MessageContextRef,
   type TimelineClipJson,
   type TimelineJson
 } from "../api/client";
@@ -76,6 +88,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   } = useUiStore();
   const [previewingAssetId, setPreviewingAssetId] = useState<string | null>(null);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [messageContext, setMessageContext] = useState<MessageContextRef | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [playheadSec, setPlayheadSec] = useState<number | null>(null);
   const [seekSec, setSeekSec] = useState<number | null>(null);
@@ -88,6 +101,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
   // 但每个 text_delta 不会流经这里，故不会重渲染右侧工作区。
   const [consoleConnection, setConsoleConnection] = useState<ConsoleConnectionState>("connecting");
   const [consoleBusy, setConsoleBusy] = useState(false);
+  const timelineSectionRef = useRef<HTMLElement | null>(null);
   const timelineBodyRef = useRef<HTMLDivElement | null>(null);
   const timelineViewerRef = useRef<TimelineViewerHandle | null>(null);
   const playheadSecRef = useRef<number | null>(null);
@@ -102,12 +116,6 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     queryKey: queryKeys.draft(draftId),
     queryFn: () => api.getDraft(draftId)
   });
-
-  const costsQuery = useQuery({
-    queryKey: queryKeys.costs(draftId),
-    queryFn: () => api.draftCosts(draftId)
-  });
-  const totalCost = costsQuery.data?.costs.total_cost_estimate ?? null;
 
   // 与 AssetsPanel 共享同一条 materials 查询缓存（同 queryKey，react-query 去重），
   // 从最新列表按 id 反查试看素材，保证 proxy_ready 等字段跟随后台任务刷新。
@@ -306,6 +314,38 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
     []
   );
   const handleTimelineDeselect = useCallback(() => setSelectedClipId(null), []);
+
+  useEffect(() => {
+    if (!selectedClipId) {
+      return;
+    }
+    const handleOutsidePointerDown = (event: PointerEvent): void => {
+      const target = event.target;
+      if (target instanceof Node && !timelineSectionRef.current?.contains(target)) {
+        setSelectedClipId(null);
+      }
+    };
+    document.addEventListener("pointerdown", handleOutsidePointerDown, true);
+    return () => document.removeEventListener("pointerdown", handleOutsidePointerDown, true);
+  }, [selectedClipId]);
+
+  useEffect(() => {
+    const handleReferenceSelection = (event: Event): void => {
+      const detail = (event as CustomEvent<{ clipId?: string }>).detail;
+      const clipId = detail?.clipId;
+      if (!clipId || !editorTimeline) {
+        return;
+      }
+      const clip = findTimelineClip(editorTimeline, clipId);
+      if (!clip) {
+        return;
+      }
+      setSelectedClipId(clipId);
+      handleTimelineSeek(clip.startSec);
+    };
+    window.addEventListener("rushes:select-timeline-clip", handleReferenceSelection);
+    return () => window.removeEventListener("rushes:select-timeline-clip", handleReferenceSelection);
+  }, [editorTimeline, handleTimelineSeek]);
   const applyTimelinePatch = useCallback(
     (op: TimelineOperation) => {
       if (editLeaseActive) {
@@ -491,6 +531,8 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         setEditMode("trim");
       } else if (key === "b") {
         setEditMode("blade");
+      } else if (event.key === "Escape" && selectedClipId) {
+        setSelectedClipId(null);
       } else if ((event.key === "Delete" || event.key === "Backspace") && selectedClipId) {
         event.preventDefault();
         handleDeleteSelected();
@@ -515,6 +557,37 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         : null,
     [editorTimeline, selectedClipId]
   );
+  const referenceSelectedClip = useCallback(() => {
+    if (!selectedClipDetail || !persistedTimelineId || !timelinePayload) {
+      return;
+    }
+    setMessageContext({
+      kind: "timeline_clip",
+      timeline_clip_id: selectedClipDetail.clipId,
+      timeline_id: persistedTimelineId,
+      timeline_version: timelinePayload.timeline_version,
+      timeline_fps: selectedClipDetail.fps,
+      track_id: selectedClipDetail.trackId,
+      timeline_start_frame: selectedClipDetail.startFrame,
+      timeline_end_frame: selectedClipDetail.endFrame,
+      asset_id: selectedClipDetail.assetId ?? "",
+      asset_filename: selectedClipDetail.assetFilename ?? "",
+      shot_id: selectedClipDetail.shotId ?? "",
+      semantic_name: selectedClipDetail.semanticName ?? "",
+      source_start_frame: selectedClipDetail.sourceStartFrame,
+      source_end_frame: selectedClipDetail.sourceEndFrame
+    });
+    setSelectedClipId(null);
+  }, [persistedTimelineId, selectedClipDetail, timelinePayload]);
+  useEffect(() => {
+    if (
+      messageContext &&
+      (messageContext.timeline_id !== persistedTimelineId ||
+        messageContext.timeline_version !== timelinePayload?.timeline_version)
+    ) {
+      setMessageContext(null);
+    }
+  }, [messageContext, persistedTimelineId, timelinePayload?.timeline_version]);
   const timelineEditingDisabled = editorTimeline === null || editLeaseActive;
   const exportDisabled =
     editLeaseActive ||
@@ -556,13 +629,6 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
         }
         trailing={
           <div className="flex items-center gap-2">
-            <span
-              className="px-1.5 text-xs tabular-nums text-fg-muted"
-              aria-label="本草稿成本小计"
-              title="本草稿累计成本估算（人民币）"
-            >
-              {formatCost(totalCost)}
-            </span>
             {editLeaseActive ? (
               <span className="whitespace-nowrap text-2xs text-accent" role="status">
                 Agent 正在编辑
@@ -587,6 +653,9 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
           highlightedMessageId={highlightedMessageId}
           onConnectionStateChange={handleConsoleConnectionChange}
           onTurnBusyChange={handleConsoleTurnBusyChange}
+          selectedContext={messageContext}
+          onContextDismiss={() => setMessageContext(null)}
+          onContextConsumed={() => setMessageContext(null)}
         />
 
         <ResizeHandle
@@ -663,15 +732,17 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
           />
 
           <section
+            ref={timelineSectionRef}
             className="flex min-h-0 shrink-0 flex-col bg-panel"
             style={{ height: timelinePanelHeight }}
             aria-label="时间线"
           >
-            <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-line px-2">
+            <div className="scrollbar-none flex h-9 shrink-0 items-center gap-1 overflow-x-auto overflow-y-hidden border-b border-line px-2">
               <TimelineToolButton
                 icon={MousePointer2}
                 label="选择"
                 shortcut="V"
+                description="选择片段，并在时间线上移动或调整它。"
                 active={editMode === "select"}
                 onClick={() => setEditMode("select")}
               />
@@ -679,6 +750,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
                 icon={Crop}
                 label="裁剪"
                 shortcut="N"
+                description="拖动片段左右边缘，调整素材的开始和结束位置。"
                 active={editMode === "trim"}
                 onClick={() => setEditMode("trim")}
               />
@@ -686,31 +758,40 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
                 icon={Scissors}
                 label="刀片"
                 shortcut="B"
+                description="点击片段中的位置，把它切成前后两段。"
                 active={editMode === "blade"}
                 onClick={() => setEditMode("blade")}
               />
-              <span aria-hidden className="mx-1 h-4 w-px bg-line-strong" />
+              <span aria-hidden className="mx-1 h-4 w-px shrink-0 bg-line-strong" />
               <TimelineToolButton
                 icon={Scissors}
                 label="分割"
+                description="在当前播放头位置分割选中的片段。"
                 disabled={timelineEditingDisabled || !selectedClipId}
                 onClick={handleSplitSelected}
               />
               <TimelineToolButton
                 icon={Trash2}
                 label="删除"
+                description="从时间线中删除当前选中的片段。"
                 disabled={timelineEditingDisabled || !selectedClipId}
                 onClick={handleDeleteSelected}
               />
               <TimelineToolButton
                 icon={Captions}
                 label="添加字幕"
+                description="在当前播放头位置添加一段可编辑字幕。"
                 disabled={timelineEditingDisabled}
                 onClick={handleAddSubtitle}
               />
               <TimelineToolButton
                 icon={selectedClipDetail?.linked ? Unlink2 : Link2}
-                label={selectedClipDetail?.linked ? "取消联动" : "音画联动"}
+                label={selectedClipDetail?.linked ? "取消视频与原声绑定" : "绑定视频与原声"}
+                description={
+                  selectedClipDetail?.linked
+                    ? "取消后，视频和同源原声可以分别编辑。"
+                    : "绑定后，视频和同源原声会一起移动、分割、裁剪和删除。"
+                }
                 active={selectedClipDetail?.linked === true}
                 disabled={
                   timelineEditingDisabled ||
@@ -726,6 +807,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
               <TimelineToolButton
                 icon={Magnet}
                 label="吸附"
+                description="拖动或裁剪时，自动对齐播放头、片段边界和音乐拍点。"
                 active={snapEnabled}
                 onClick={() => setSnapEnabled((current) => !current)}
               />
@@ -733,16 +815,18 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
               <TimelineToolButton
                 icon={ListPlus}
                 label="插入"
+                description="放入素材时推开后方片段，保留已有内容。"
                 active={dropMode === "insert"}
                 onClick={() => setDropMode("insert")}
               />
               <TimelineToolButton
                 icon={Replace}
                 label="覆盖"
+                description="放入素材时覆盖目标位置原有的时间线内容。"
                 active={dropMode === "overwrite"}
                 onClick={() => setDropMode("overwrite")}
               />
-              <span className="mx-auto font-mono text-2xs tabular-nums text-fg-muted">
+              <span className="mx-auto shrink-0 font-mono text-2xs tabular-nums text-fg-muted">
                 <span ref={playheadTimecodeRef}>{formatTimecode(playheadSec ?? 0)}</span> / {formatTimecode(timelineDurationSec)}
               </span>
 
@@ -756,48 +840,81 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
                 {editorSaveLabel(editorSnapshot?.saveState ?? "saved")}
               </span>
 
-              <div className="flex items-center gap-0.5">
-                <button
-                  type="button"
-                  className="grid size-7 place-items-center rounded-sm text-fg-muted hover:bg-hover disabled:opacity-35"
-                  aria-label="缩小时间线"
+              <div className="flex shrink-0 items-center gap-0.5">
+                <TimelineToolbarTooltip
                   title="缩小时间线"
-                  onClick={zoomOutTimeline}
-                  disabled={pxPerSec <= TIMELINE_ZOOM_LEVELS[0]}
+                  description="显示更长的时间范围。"
                 >
-                  <ZoomOut size={14} strokeWidth={1.75} aria-hidden />
-                </button>
-                <input
-                  type="range"
-                  aria-label="时间线缩放"
-                  title="拖动缩放；也可在时间线上按住 ⌘/Ctrl 滚轮"
-                  className="h-1 w-20 accent-accent"
-                  min={TIMELINE_ZOOM_LEVELS[0]}
-                  max={TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1]}
-                  step={1}
-                  value={pxPerSec}
-                  onChange={(event) => commitZoom(Number(event.target.value))}
-                />
-                <span className="w-12 text-center text-2xs tabular-nums text-fg-faint">
+                  {(tooltipId) => (
+                    <button
+                      type="button"
+                      className="grid size-7 place-items-center rounded-sm text-fg-muted hover:bg-hover disabled:opacity-35"
+                      aria-label="缩小时间线"
+                      aria-describedby={tooltipId}
+                      onClick={zoomOutTimeline}
+                      disabled={pxPerSec <= TIMELINE_ZOOM_LEVELS[0]}
+                    >
+                      <ZoomOut size={14} strokeWidth={1.75} aria-hidden />
+                    </button>
+                  )}
+                </TimelineToolbarTooltip>
+                <TimelineToolbarTooltip
+                  className="hidden xl:inline-flex"
+                  title="时间线缩放"
+                  description="拖动调节每秒像素密度；也可以按住 ⌘/Ctrl 滚动。"
+                >
+                  {(tooltipId) => (
+                    <input
+                      type="range"
+                      aria-label="时间线缩放"
+                      aria-describedby={tooltipId}
+                      className="h-1 w-20 accent-accent"
+                      min={TIMELINE_ZOOM_LEVELS[0]}
+                      max={TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1]}
+                      step={1}
+                      value={pxPerSec}
+                      onChange={(event) => commitZoom(Number(event.target.value))}
+                    />
+                  )}
+                </TimelineToolbarTooltip>
+                <span className="hidden w-12 text-center text-2xs tabular-nums text-fg-faint xl:inline">
                   {pxPerSec} px/s
                 </span>
-                <button
-                  type="button"
-                  className="grid size-7 place-items-center rounded-sm text-fg-muted hover:bg-hover disabled:opacity-35"
-                  aria-label="放大时间线"
+                <TimelineToolbarTooltip
                   title="放大时间线"
-                  onClick={zoomInTimeline}
-                  disabled={pxPerSec >= TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1]}
+                  description="放大时间刻度，进行更精细的剪辑。"
                 >
-                  <ZoomIn size={14} strokeWidth={1.75} aria-hidden />
-                </button>
-                <button
-                  type="button"
-                  className="rounded-sm px-2 py-1 text-2xs text-fg-muted hover:bg-hover"
-                  onClick={fitTimeline}
+                  {(tooltipId) => (
+                    <button
+                      type="button"
+                      className="grid size-7 place-items-center rounded-sm text-fg-muted hover:bg-hover disabled:opacity-35"
+                      aria-label="放大时间线"
+                      aria-describedby={tooltipId}
+                      onClick={zoomInTimeline}
+                      disabled={
+                        pxPerSec >= TIMELINE_ZOOM_LEVELS[TIMELINE_ZOOM_LEVELS.length - 1]
+                      }
+                    >
+                      <ZoomIn size={14} strokeWidth={1.75} aria-hidden />
+                    </button>
+                  )}
+                </TimelineToolbarTooltip>
+                <TimelineToolbarTooltip
+                  title="适应完整时间线"
+                  description="自动缩放，让整条时间线完整显示在当前窗口中。"
                 >
-                  适应
-                </button>
+                  {(tooltipId) => (
+                    <button
+                      type="button"
+                      className="rounded-sm px-2 py-1 text-2xs text-fg-muted hover:bg-hover"
+                      aria-label="适应完整时间线"
+                      aria-describedby={tooltipId}
+                      onClick={fitTimeline}
+                    >
+                      适应
+                    </button>
+                  )}
+                </TimelineToolbarTooltip>
               </div>
             </div>
 
@@ -845,6 +962,7 @@ export function DraftEditorView({ draftId }: { draftId: string }): ReactElement 
               <ClipDetailBar
                 detail={selectedClipDetail}
                 editing={timelineEditingDisabled}
+                onReference={referenceSelectedClip}
                 onToggleLinked={handleToggleLinked}
                 onClipGainChange={handleClipGainChange}
                 onClipFadeChange={handleClipFadeChange}
@@ -879,6 +997,7 @@ function TimelineToolButton({
   icon: Icon,
   label,
   shortcut,
+  description,
   active,
   disabled = false,
   onClick
@@ -886,26 +1005,100 @@ function TimelineToolButton({
   icon: LucideIcon;
   label: string;
   shortcut?: string;
+  description: string;
   active?: boolean;
   disabled?: boolean;
   onClick: () => void;
 }): ReactElement {
-  const title = shortcut ? `${label} (${shortcut})` : label;
+  const accessibleLabel = shortcut ? `${label} (${shortcut})` : label;
   return (
-    <button
-      type="button"
-      className={`inline-flex h-7 items-center gap-1 rounded-sm px-1.5 text-2xs transition-colors ease-standard disabled:opacity-35 ${
-        active === true ? "bg-active text-fg" : "text-fg-muted hover:bg-hover hover:text-fg"
-      }`}
-      aria-label={title}
-      aria-pressed={active === undefined ? undefined : active}
-      title={title}
-      disabled={disabled}
-      onClick={onClick}
+    <TimelineToolbarTooltip
+      title={label}
+      shortcut={shortcut}
+      description={description}
     >
-      <Icon size={14} strokeWidth={1.75} aria-hidden />
-      <span className="hidden 2xl:inline">{label}</span>
-    </button>
+      {(tooltipId) => (
+        <button
+          type="button"
+          className={`inline-flex h-7 shrink-0 items-center gap-1 rounded-sm px-1.5 text-2xs transition-colors ease-standard disabled:opacity-35 ${
+            active === true ? "bg-active text-fg" : "text-fg-muted hover:bg-hover hover:text-fg"
+          }`}
+          aria-label={accessibleLabel}
+          aria-describedby={tooltipId}
+          aria-pressed={active === undefined ? undefined : active}
+          disabled={disabled}
+          onClick={onClick}
+        >
+          <Icon size={14} strokeWidth={1.75} aria-hidden />
+          <span className="hidden 2xl:inline">{label}</span>
+        </button>
+      )}
+    </TimelineToolbarTooltip>
+  );
+}
+
+function TimelineToolbarTooltip({
+  title,
+  shortcut,
+  description,
+  className = "inline-flex",
+  children
+}: {
+  title: string;
+  shortcut?: string;
+  description: string;
+  className?: string;
+  children: (tooltipId: string) => ReactElement;
+}): ReactElement {
+  const tooltipId = useId();
+  const anchorRef = useRef<HTMLSpanElement | null>(null);
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+  const show = (): void => {
+    const rect = anchorRef.current?.getBoundingClientRect();
+    if (!rect) {
+      return;
+    }
+    const halfWidth = 120;
+    setPosition({
+      left: Math.min(
+        window.innerWidth - halfWidth - 8,
+        Math.max(halfWidth + 8, rect.left + rect.width / 2)
+      ),
+      top: rect.bottom + 6
+    });
+  };
+  const hide = (): void => setPosition(null);
+
+  return (
+    <>
+      <span
+        ref={anchorRef}
+        className={className}
+        onMouseEnter={show}
+        onMouseLeave={hide}
+        onFocusCapture={show}
+        onBlurCapture={hide}
+      >
+        {children(tooltipId)}
+      </span>
+      {position && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              id={tooltipId}
+              role="tooltip"
+              className="pointer-events-none fixed z-50 w-max max-w-60 -translate-x-1/2 rounded-md border border-line-strong bg-fg px-2.5 py-2 text-left text-2xs leading-4 text-white shadow-pop"
+              style={{ left: position.left, top: position.top }}
+            >
+              <div className="font-semibold">
+                {title}
+                {shortcut ? <span className="ml-1.5 font-mono text-white/65">{shortcut}</span> : null}
+              </div>
+              <div className="mt-0.5 text-white/80">{description}</div>
+            </div>,
+            document.body
+          )
+        : null}
+    </>
   );
 }
 
@@ -959,6 +1152,11 @@ type ClipDetail = {
   endSec: number;
   label: string | null;
   assetId: string | null;
+  assetFilename: string | null;
+  shotId: string | null;
+  semanticName: string | null;
+  sourceStartFrame: number;
+  sourceEndFrame: number;
   assetKind: string | null;
   text: string;
   gainDb: number;
@@ -975,6 +1173,7 @@ type ClipDetail = {
 function ClipDetailBar({
   detail,
   editing,
+  onReference,
   onToggleLinked,
   onClipGainChange,
   onClipFadeChange,
@@ -983,6 +1182,7 @@ function ClipDetailBar({
 }: {
   detail: ClipDetail;
   editing: boolean;
+  onReference: () => void;
   onToggleLinked: (clipId: string, linked: boolean) => void;
   onClipGainChange: (clipId: string, gainDb: number) => void;
   onClipFadeChange: (clipId: string, fadeInFrames: number, fadeOutFrames: number) => void;
@@ -1049,15 +1249,24 @@ function ClipDetailBar({
   };
 
   return (
-    <div className="flex min-h-10 shrink-0 items-center gap-3 overflow-x-auto border-t border-line bg-raised px-3 py-1 text-2xs text-fg-muted">
+    <div className="scrollbar-none flex min-h-10 shrink-0 items-center gap-3 overflow-x-auto overflow-y-hidden border-t border-line bg-raised px-3 py-1 text-2xs text-fg-muted">
       <div className="min-w-0 shrink overflow-hidden text-ellipsis whitespace-nowrap">
         <span className="font-semibold text-fg">已选：</span>
-        <span className="font-mono">{detail.clipId}</span>
+        <span title={detail.clipId}>{detail.semanticName || detail.assetFilename || detail.label || detail.clipId}</span>
         <span className="mx-2 text-fg-faint">|</span>
         <span>{trackDisplayLabel(detail.trackId)}</span>
         <span className="mx-2 text-fg-faint">|</span>
         <span>{formatSeconds(detail.startSec)}-{formatSeconds(detail.endSec)}</span>
       </div>
+
+      <button
+        type="button"
+        className="inline-flex h-7 shrink-0 items-center gap-1 rounded-sm border border-accent/50 bg-accent/10 px-2 font-semibold text-accent-strong hover:bg-accent/15"
+        onClick={onReference}
+      >
+        <MessageSquarePlus size={12} aria-hidden />
+        引用给 AI
+      </button>
 
       {isLinkableTrack(detail.trackId) ? (
         <button
@@ -1069,10 +1278,11 @@ function ClipDetailBar({
           }`}
           disabled={editing || detail.trackLocked}
           aria-pressed={detail.linked}
+          title="绑定后，视频和同源原声会一起移动、分割、裁剪和删除"
           onClick={() => onToggleLinked(detail.clipId, !detail.linked)}
         >
           {detail.linked ? <Unlink2 size={12} aria-hidden /> : <Link2 size={12} aria-hidden />}
-          {detail.linked ? "取消音画联动" : "建立音画联动"}
+          {detail.linked ? "取消视频与原声绑定" : "绑定视频与原声"}
         </button>
       ) : null}
 
@@ -1209,6 +1419,11 @@ function findTimelineClip(timeline: TimelineJson, clipId: string): ClipDetail | 
         endSec: clip.timeline_end_frame / fps,
         label: clipLabel(clip),
         assetId: typeof clip.asset_id === "string" ? clip.asset_id : null,
+        assetFilename: typeof clip.asset_filename === "string" ? clip.asset_filename : null,
+        shotId: typeof clip.shot_id === "string" ? clip.shot_id : null,
+        semanticName: typeof clip.semantic_name === "string" ? clip.semantic_name : null,
+        sourceStartFrame: typeof clip.source_start_frame === "number" ? clip.source_start_frame : 0,
+        sourceEndFrame: typeof clip.source_end_frame === "number" ? clip.source_end_frame : 0,
         assetKind: typeof clip.asset_kind === "string" ? clip.asset_kind : null,
         text: typeof clip.text === "string" ? clip.text : "",
         gainDb: typeof clip.gain_db === "number" ? clip.gain_db : 0,
@@ -1233,7 +1448,7 @@ function clipLabel(clip: TimelineClipJson): string | null {
     return clip.text;
   }
   if (typeof clip.asset_id === "string" && clip.asset_id.trim()) {
-    return clip.asset_id;
+    return clip.semantic_name || clip.asset_filename || clip.asset_id;
   }
   return null;
 }
@@ -1286,14 +1501,6 @@ function editorSaveLabel(state: EditorSessionSnapshot["saveState"]): string {
     default:
       return "已保存";
   }
-}
-
-/** 成本小计：估算金额以人民币四位小数显示；未加载时占位。 */
-function formatCost(total: number | null): string {
-  if (total === null) {
-    return "¥--";
-  }
-  return `¥${total.toFixed(4)}`;
 }
 
 const TIMELINE_ZOOM_LEVELS = [8, 12, 24, 48, 96, 192, 320];

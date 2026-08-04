@@ -13,7 +13,7 @@ import (
 	"github.com/nanzhi84/Rushes/go/internal/storage"
 )
 
-const BaseShotIndexSchemaVersion = 1
+const BaseShotIndexSchemaVersion = 2
 
 type BaseIndexShot struct {
 	ShotID               string
@@ -24,6 +24,7 @@ type BaseIndexShot struct {
 	BoundaryConfidence   *float64
 	LineageParentShotID  *string
 	RepresentativeFrames []RepresentativeFrame
+	SemanticName         string
 	Description          string
 	Tags                 []string
 	Subjects             []string
@@ -121,7 +122,8 @@ func BuildBaseIndexShots(
 			BoundaryKind:        nonEmpty(segment.BoundaryKind, "analysis_window"),
 			BoundaryConfidence:  normalizedBoundaryConfidence(segment),
 			LineageParentShotID: parent, RepresentativeFrames: segment.RepresentativeFrames,
-			Description: strings.TrimSpace(segment.Description), Tags: compactStrings(segment.Tags),
+			SemanticName: semanticName(segment),
+			Description:  strings.TrimSpace(segment.Description), Tags: compactStrings(segment.Tags),
 			Subjects: compactStrings(segment.Subjects), Actions: compactStrings(segment.Actions),
 			Setting: compactStrings(segment.Setting), ShotScale: strings.TrimSpace(segment.ShotScale),
 			Composition: strings.TrimSpace(segment.Composition), Lighting: compactStrings(segment.Lighting),
@@ -130,6 +132,17 @@ func BuildBaseIndexShots(
 		})
 	}
 	return result, nil
+}
+
+// WithSemanticNames upgrades legacy structured summaries without another VLM
+// call. New analyses already provide the field; this fallback keeps existing
+// workspaces immediately addressable while preserving all prior evidence.
+func WithSemanticNames(summary Summary) Summary {
+	summary.Segments = append([]Segment(nil), summary.Segments...)
+	for index := range summary.Segments {
+		summary.Segments[index].SemanticName = semanticName(summary.Segments[index])
+	}
+	return summary
 }
 
 func validateBaseIndexSegment(segment Segment) error {
@@ -157,7 +170,43 @@ func validateBaseIndexSegment(segment Segment) error {
 		strings.TrimSpace(segment.Composition) == "" {
 		return errors.New("结构化标签不完整")
 	}
+	if semanticName(segment) == "" {
+		return errors.New("缺少短语义名称")
+	}
 	return nil
+}
+
+// semanticName keeps the user-facing label stable even when an older provider
+// omits the new field. New analyses generate SemanticName in the same VLM call;
+// the structured fallback is only for legacy summaries and deterministic tests.
+func semanticName(segment Segment) string {
+	if value := compactSemanticName(segment.SemanticName); value != "" {
+		return value
+	}
+	parts := make([]string, 0, 4)
+	for _, values := range [][]string{segment.Setting, segment.Subjects, segment.Actions} {
+		for _, value := range compactStrings(values) {
+			parts = append(parts, value)
+			break
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, segment.ShotScale)
+	}
+	return compactSemanticName(strings.Join(parts, "·"))
+}
+
+func compactSemanticName(value string) string {
+	value = strings.Join(strings.Fields(strings.TrimSpace(value)), "")
+	value = strings.Trim(value, "，。；：、,.!?！？《》「」[]【】()（）")
+	if value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) > 18 {
+		return string(runes[:18])
+	}
+	return value
 }
 
 func bestPreviousShot(
@@ -217,7 +266,7 @@ func normalizedBoundaryConfidence(segment Segment) *float64 {
 }
 
 func baseSearchProjection(segment Segment) (string, []string) {
-	values := []string{segment.Description}
+	values := []string{semanticName(segment), segment.Description}
 	values = append(values, segment.Subjects...)
 	values = append(values, segment.Actions...)
 	values = append(values, segment.Setting...)

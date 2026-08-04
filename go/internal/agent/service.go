@@ -236,8 +236,12 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		return service.queue.CommitCurrentDurableTerminal(item, commit)
 	})
 	ctx = withTurnBudgetState(ctx, turnBudget)
+	previewSession := newModelStreamPreviewSession(service, item.DraftID, messageID)
+	ctx = withModelStreamPreviewSession(ctx, previewSession)
+	defer previewSession.discardPending()
 	finishCancelled := func(turnErr error) error {
 		turnRunStatus = "cancelled"
+		previewSession.discardPending()
 		service.recordTurnEnded(
 			item.DraftID, turnID, startedAt, "cancelled", "user_cancelled", turnBudget, false,
 		)
@@ -264,6 +268,7 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 		if leaseCause == nil {
 			leaseCause = storage.ErrAgentEditLeaseLost
 		}
+		previewSession.discardPending()
 		service.recordTurnEnded(
 			item.DraftID, turnID, startedAt, "failed", "agent_edit_lease_lost", turnBudget, false,
 		)
@@ -297,11 +302,15 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 	// H7:终态回复质检——夹带自我怀疑/中途推翻等过程性语句时,要求模型重述一次(最多 1 次)。
 	reflectionRestated := false
 	if err == nil && content != "" {
+		content = service.humanizeFinalReplyReferences(ctx, item.DraftID, content)
 		content, reflectionRestated = service.qualityCheckedFinalReply(ctx, item.DraftID, messageID, content)
+		// 反思重述是第二次模型生成，也必须经过同一条用户可读名称门禁。
+		content = service.humanizeFinalReplyReferences(ctx, item.DraftID, content)
 	}
 	if ctx.Err() != nil {
 		if errors.Is(context.Cause(ctx), storage.ErrAgentEditLeaseLost) {
 			turnRunStatus = "lease_lost"
+			previewSession.discardPending()
 			service.recordTurnEnded(
 				item.DraftID, turnID, startedAt, "failed", "agent_edit_lease_lost", turnBudget, false,
 			)
@@ -358,14 +367,23 @@ func (service *Service) runTurn(ctx context.Context, item QueueItem) error {
 			if errors.Is(applyErr, context.Canceled) || ctx.Err() != nil {
 				return finishCancelled(applyErr)
 			}
+			previewSession.discardPending()
 			service.hub.Record(item.DraftID, StreamEvent{"type": TurnStreamTurnError, "message": applyErr.Error()})
 			return applyErr
 		}
-		service.emitAssistantReply(item.DraftID, messageID, content)
-		service.hub.Record(item.DraftID, StreamEvent{
+		previewMessageID := previewSession.candidate()
+		if previewMessageID == "" {
+			service.emitAssistantReply(item.DraftID, messageID, content)
+		}
+		completedEvent := StreamEvent{
 			"type": TurnStreamMessageCompleted, "message_id": messageID,
 			"kind": messageKind, "content": content,
-		})
+		}
+		if previewMessageID != "" {
+			completedEvent["replaces_message_id"] = previewMessageID
+		}
+		service.hub.Record(item.DraftID, completedEvent)
+		previewSession.finalize()
 	}
 	if outcome == "finished" {
 		service.touchInjectedMemories(ctx, item.DraftID, injectedMemory.snapshot())
@@ -403,18 +421,6 @@ func (service *Service) commitFinalReply(
 		return fmt.Errorf("assistant message reducer status: %s", result.Status)
 	}
 	return nil
-}
-
-// lateToolCallDedupKey 为「终态直通后晚到的 tool_call」生成去重键：优先用 call ID，缺失时
-// 退回流式分片索引，再退回函数名，保证同一 call 的多个流片只计一次（#95 H5，H-B P2）。
-func lateToolCallDedupKey(call schema.ToolCall) string {
-	if call.ID != "" {
-		return call.ID
-	}
-	if call.Index != nil {
-		return fmt.Sprintf("idx:%d", *call.Index)
-	}
-	return "name:" + call.Function.Name
 }
 
 func (service *Service) recordTurnEnded(
@@ -515,8 +521,6 @@ func (service *Service) streamAgent(
 	}
 	defer stream.Close()
 	var output strings.Builder
-	var roundUsage *schema.TokenUsage
-	seenLateToolCalls := map[string]struct{}{}
 	for {
 		message, receiveErr := stream.Recv()
 		if errors.Is(receiveErr, io.EOF) {
@@ -528,39 +532,21 @@ func (service *Service) streamAgent(
 		if message == nil {
 			continue
 		}
-		// 模型正文之后若又出现 tool_call 分片，说明供应商流违反了「工具轮不在
-		// tool_call 前吐正文」的假设（见 stream_checker.go classifyModelChunk）。此调用不会被
-		// 执行，但回复仍在本地缓冲区，终态门禁通过前不会暴露给用户；同时保留告警与计数，
-		// 让该假设在真实模型上可证伪、坏了能经 H3 聚合发现（#95 H5，决策 2 观测保护）。
+		// 正常情况下 ReAct 图只会把无工具的最终 assistant 消息送到这里；若图分支异常地
+		// 泄漏 tool_call，保持确定性失败，绝不把它伪装成已执行。
 		if len(message.ToolCalls) > 0 {
-			// 按 tool-call 去重计数：流式里同一个 call 会分多片抵达，只应计一次（H-B P2）；
-			// ID 缺失时退回 index/函数名做去重键。
 			for _, call := range message.ToolCalls {
-				key := lateToolCallDedupKey(call)
-				if _, seen := seenLateToolCalls[key]; seen {
-					continue
-				}
-				seenLateToolCalls[key] = struct{}{}
-				passthroughLateToolCallCount.Add(1)
 				metricPassthroughLateToolCalls.Inc()
-				slog.Warn("终态轮直通后出现未执行的 tool_call，模型可能在正文之后才发起工具调用",
+				slog.Warn("ReAct 终态输出意外包含未执行 tool_call",
 					"draft_id", draftID, "message_id", messageID,
 					"tool_name", call.Function.Name, "tool_call_id", call.ID)
 			}
-		}
-		// 末片携带的 Usage 随流抵达，取最新一份（供应商通常在末片给全量），
-		// 回合读尽后记一次账。正文只写入本地缓冲区，由 runTurn 通过终态门禁后统一发送。
-		if usage := messageTokenUsage(message); usage != nil {
-			roundUsage = usage
+			return "", &terminalReplyGuardError{kind: "terminal_late_tool_call"}
 		}
 		if message.Content == "" {
 			continue
 		}
 		output.WriteString(message.Content)
-	}
-	recordTokenUsage(ctx, roundUsage)
-	if len(seenLateToolCalls) > 0 {
-		return "", &terminalReplyGuardError{kind: "terminal_late_tool_call"}
 	}
 	return output.String(), nil
 }

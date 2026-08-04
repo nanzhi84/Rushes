@@ -899,31 +899,44 @@ func BeatAlignmentData(document timeline.Document) map[string]any {
 	onBeat := 0
 	onAccent := 0
 	offBeat := []int{}
+	offAccent := []int{}
 	for _, frame := range cutFrames {
-		if ContainsFrame(beatFrames, frame) {
+		onBeatGrid := ContainsFrame(beatFrames, frame)
+		if onBeatGrid {
 			onBeat++
 		} else {
 			offBeat = append(offBeat, frame)
 		}
-		if ContainsFrame(strongFrames, frame) || ContainsFrame(downbeatFrames, frame) {
+		// strong_beat_frames comes from independent spectral-onset evidence and can
+		// contain transients between musical beats.  An accent only counts when the
+		// cut first belongs to the canonical beat grid, then also matches a strong
+		// onset or downbeat.  This keeps the two contract ratios semantically nested.
+		isAccent := onBeatGrid && (ContainsFrame(strongFrames, frame) || ContainsFrame(downbeatFrames, frame))
+		if isAccent {
 			onAccent++
+		} else {
+			offAccent = append(offAccent, frame)
 		}
 	}
 	ratio := 0.0
+	accentRatio := 0.0
 	if len(cutFrames) > 0 {
 		ratio = math.Round(float64(onBeat)/float64(len(cutFrames))*1000) / 1000
+		accentRatio = math.Round(float64(onAccent)/float64(len(cutFrames))*1000) / 1000
 	}
 	result := map[string]any{
-		"beat_grid_present":     len(beatFrames) > 0,
-		"cut_count":             len(cutFrames),
-		"on_beat_cut_count":     onBeat,
-		"on_accent_cut_count":   onAccent,
-		"alignment_ratio":       ratio,
-		"off_beat_cut_frames":   offBeat,
-		"all_cuts_on_beat_grid": len(cutFrames) > 0 && onBeat == len(cutFrames),
-		"beat_marker_count":     len(beatFrames),
-		"strong_marker_count":   len(strongFrames),
-		"downbeat_marker_count": len(downbeatFrames),
+		"beat_grid_present":      len(beatFrames) > 0,
+		"cut_count":              len(cutFrames),
+		"on_beat_cut_count":      onBeat,
+		"on_accent_cut_count":    onAccent,
+		"alignment_ratio":        ratio,
+		"accent_alignment_ratio": accentRatio,
+		"off_beat_cut_frames":    offBeat,
+		"off_accent_cut_frames":  offAccent,
+		"all_cuts_on_beat_grid":  len(cutFrames) > 0 && onBeat == len(cutFrames),
+		"beat_marker_count":      len(beatFrames),
+		"strong_marker_count":    len(strongFrames),
+		"downbeat_marker_count":  len(downbeatFrames),
 	}
 	if len(beatFrames) == 0 {
 		result["warning"] = "BGM 缺少 beat_grid 元数据；结构校验不能证明画面切点已卡音乐节拍"

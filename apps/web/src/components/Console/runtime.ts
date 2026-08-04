@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import type { StructuredInteractionItem } from "./StructuredInteractionRenderer";
+import type { MessageContextRef } from "../../api/client";
 
 export type ConsoleMessageRole = "user" | "assistant" | "system" | "system_observation";
 
@@ -10,6 +11,7 @@ export type ConsoleMessage = {
   createdAt: string;
   // 持久化消息的 kind（narration/reply/user...），用于叙述弱化样式；乐观消息可省略。
   kind?: string | null;
+  contextRefs?: MessageContextRef[];
 };
 
 type ConsoleTextPart = {
@@ -30,6 +32,7 @@ export type ConsoleAssistantMessage = {
   metadata: {
     consoleRole: ConsoleMessageRole;
     messageKind?: string | null;
+    contextRefs?: MessageContextRef[];
   };
 };
 
@@ -93,7 +96,11 @@ function toAssistantUiMessage(message: ConsoleMessage): ConsoleAssistantMessage 
     id: message.id,
     role: assistantRole(message.role),
     createdAt: message.createdAt,
-    metadata: { consoleRole: message.role, messageKind: message.kind ?? null },
+    metadata: {
+      consoleRole: message.role,
+      messageKind: message.kind ?? null,
+      contextRefs: message.contextRefs
+    },
     content: [{ type: "text", text: message.content }]
   };
 }
